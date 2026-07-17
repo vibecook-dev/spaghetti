@@ -198,6 +198,8 @@ class IngestServiceImpl implements IngestService {
   // returns Changes with `seq: 0` as a placeholder; the live-updates
   // writer loop passes them to `store.emit()`, which overwrites.
 
+  private readonly safeBulk: boolean;
+
   constructor(sqliteServiceFactory: () => SqliteService, options?: CreateIngestServiceOptions) {
     this.db = sqliteServiceFactory();
     this.engine = options?.engine ?? 'ts';
@@ -205,6 +207,7 @@ class IngestServiceImpl implements IngestService {
     this.messageExtractor = options?.messages ?? claudeCodeMessageExtractor;
     this.sourceId = options?.sourceId ?? 'claude-code';
     this.hooks = options?.hooks ?? {};
+    this.safeBulk = options?.safeBulk ?? false;
   }
 
   /** Token write API passed into {@link IngestHooks} callbacks. */
@@ -668,10 +671,17 @@ class IngestServiceImpl implements IngestService {
       /* ignore */
     }
 
-    // Aggressive PRAGMAs for bulk write performance
+    // Fast path: aggressive PRAGMAs. Safe path (desktop / live:true): keep
+    // durable defaults so a kill mid-ingest is less likely to corrupt the cache.
     try {
-      this.db.exec('PRAGMA synchronous = OFF');
-      this.db.exec('PRAGMA cache_size = -64000'); // 64MB cache
+      if (!this.safeBulk) {
+        this.db.exec('PRAGMA synchronous = OFF');
+        this.db.exec('PRAGMA cache_size = -64000'); // 64MB cache
+      } else {
+        this.db.exec('PRAGMA synchronous = NORMAL');
+        this.db.exec('PRAGMA journal_mode = WAL');
+        this.db.exec('PRAGMA cache_size = -64000');
+      }
     } catch {
       /* ignore */
     }
@@ -928,6 +938,11 @@ export interface CreateIngestServiceOptions {
    * the Rust writer (which still relies on the DEFAULT) stay byte-identical.
    */
   sourceId?: string;
+  /**
+   * Prefer crash-safer bulk PRAGMAs (WAL + synchronous=NORMAL) during
+   * `beginBulkIngest`. Defaults to false.
+   */
+  safeBulk?: boolean;
   /**
    * Optional product hooks (token attribution, etc.). Defaults to no-op.
    * Codex passes {@link createCodexIngestHooks}.

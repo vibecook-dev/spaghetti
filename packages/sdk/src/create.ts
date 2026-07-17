@@ -64,8 +64,17 @@ export interface SpaghettiServiceOptions {
    *
    * Defaults to `false`: CLI one-shots and cold-start-only consumers
    * pay zero watcher/queue/parser overhead.
+   *
+   * When `true` (and {@link safeBulk} is not overridden), bulk cold/warm
+   * ingest uses crash-safer SQLite settings (WAL + `synchronous=NORMAL`)
+   * so a kill mid-ingest is less likely to leave a corrupt cache.
    */
   live?: boolean;
+  /**
+   * Prefer crash-safer bulk SQLite settings during cold/warm ingest.
+   * Defaults to `true` when {@link live} is true, otherwise `false`.
+   */
+  safeBulk?: boolean;
   /**
    * Override the unified error sink (RFC 005). Every internal live
    * component routes through this sink. Defaults to a console.warn
@@ -125,6 +134,9 @@ export function createSpaghettiService(options?: SpaghettiServiceOptions): Spagh
   // Claude live pipeline only when primary is Claude Code and live is on.
   // Codex/Grok own their LiveWatch implementations inside their owners.
   const live = options?.live ?? false;
+  // Long-lived surfaces (`live: true`) default to safer bulk so a crash
+  // mid-cold-ingest is less likely to leave SQLITE_CORRUPT for next launch.
+  const safeBulk = options?.safeBulk ?? live;
   const claudeLive =
     live && primary.id === 'claude-code'
       ? createClaudeCodeLiveDiskIngest({
@@ -146,6 +158,7 @@ export function createSpaghettiService(options?: SpaghettiServiceOptions): Spagh
       dbPath,
       errorSink,
       live,
+      safeBulk,
       engine: resolvedEngine,
       native: nativeAddon,
       claudeLive: i === 0 ? claudeLive : undefined,

@@ -48,6 +48,7 @@ export class GrokLifecycleOwner extends EventEmitter implements LifecycleOwner {
   private ready = false;
   private liveWatch: GrokLiveWatch | undefined;
   private readonly engine: IngestEngine;
+  private readonly safeBulk: boolean;
 
   constructor(
     private readonly fileService: FileService,
@@ -58,9 +59,15 @@ export class GrokLifecycleOwner extends EventEmitter implements LifecycleOwner {
     private readonly errorSink: ErrorSink,
     private readonly live: boolean = false,
     engine?: IngestEngine,
+    safeBulk?: boolean,
   ) {
     super();
     this.engine = engine ?? resolveEngine();
+    this.safeBulk = safeBulk ?? false;
+  }
+
+  getCacheDbPath(): string {
+    return this.dbPath;
   }
 
   /** Solo composition of the three multi-source phases. */
@@ -181,6 +188,7 @@ export class GrokLifecycleOwner extends EventEmitter implements LifecycleOwner {
         dbPath: this.dbPath,
         mode: 'warm',
         sourceId: 'grok',
+        ...(this.safeBulk ? { safeBulk: true } : {}),
       },
       (progress) => {
         this.emit('progress', {

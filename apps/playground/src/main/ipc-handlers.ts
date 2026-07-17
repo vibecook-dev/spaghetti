@@ -1,14 +1,10 @@
 /**
  * Wires the shared IPC contract to the SDK instance.
- *
- * Every channel in IPC_CHANNELS gets an ipcMain.handle registration that
- * forwards its args to the corresponding SpaghettiAPI method. Event channels
- * (progress/ready/change) are broadcast to all renderer WebContents.
  */
 
 import { BrowserWindow, ipcMain } from 'electron';
 import { EVENT_CHANNELS, IPC_CHANNELS } from '../shared/ipc.js';
-import { getEngine, getSdk, initSdk, type InitSdkOptions } from './sdk.js';
+import { createSdk, getEngine, getSdk, retrySdkInit, startSdk, type InitSdkOptions } from './sdk.js';
 
 function broadcast(channel: string, payload: unknown): void {
   for (const win of BrowserWindow.getAllWindows()) {
@@ -16,6 +12,12 @@ function broadcast(channel: string, payload: unknown): void {
       win.webContents.send(channel, payload);
     }
   }
+}
+
+function attachLifecycleBroadcast(sdk: ReturnType<typeof createSdk>): void {
+  sdk.onProgress((progress) => broadcast(EVENT_CHANNELS.progress, progress));
+  sdk.onReady((info) => broadcast(EVENT_CHANNELS.ready, info));
+  sdk.onChange((batch) => broadcast(EVENT_CHANNELS.change, batch));
 }
 
 export function registerIpcHandlers(): void {
@@ -28,6 +30,12 @@ export function registerIpcHandlers(): void {
     }
   });
   ipcMain.handle(IPC_CHANNELS.rebuildIndex, () => getSdk().rebuildIndex());
+  ipcMain.handle(IPC_CHANNELS.retryInit, async () => {
+    await retrySdkInit((service) => {
+      attachLifecycleBroadcast(service);
+    });
+    return { ok: true as const };
+  });
   ipcMain.handle(IPC_CHANNELS.getEngine, () => getEngine());
 
   // Projects ----------------------------------------------------------------
@@ -35,11 +43,13 @@ export function registerIpcHandlers(): void {
   ipcMain.handle(IPC_CHANNELS.getProjectMemory, (_e, projectSlug: string) => getSdk().getProjectMemory(projectSlug));
 
   // Sessions ----------------------------------------------------------------
-  ipcMain.handle(IPC_CHANNELS.getSessionList, (_e, projectSlug: string) => getSdk().getSessionList(projectSlug));
+  ipcMain.handle(IPC_CHANNELS.getSessionList, (_e, projectSlug: string, options?: { sourceId?: string }) =>
+    getSdk().getSessionList(projectSlug, options),
+  );
   ipcMain.handle(
     IPC_CHANNELS.getSessionMessages,
-    (_e, projectSlug: string, sessionId: string, limit?: number, offset?: number) =>
-      getSdk().getSessionMessages(projectSlug, sessionId, limit, offset),
+    (_e, projectSlug: string, sessionId: string, limit?: number, offset?: number, options?: { sourceId?: string }) =>
+      getSdk().getSessionMessages(projectSlug, sessionId, limit, offset, options),
   );
   ipcMain.handle(IPC_CHANNELS.getSessionTodos, (_e, projectSlug: string, sessionId: string) =>
     getSdk().getSessionTodos(projectSlug, sessionId),
@@ -70,14 +80,10 @@ export function registerIpcHandlers(): void {
 }
 
 /**
- * Forward SDK lifecycle/change events to all renderer windows. Call after
- * initSdk() has resolved — or before, since SDK events are subscribed on the
- * SDK object returned from initSdk().
+ * Create the SDK, attach progress/ready/change listeners, then initialize.
  */
 export async function wireEventForwarding(options: InitSdkOptions): Promise<void> {
-  const sdk = await initSdk(options);
-
-  sdk.onProgress((progress) => broadcast(EVENT_CHANNELS.progress, progress));
-  sdk.onReady((info) => broadcast(EVENT_CHANNELS.ready, info));
-  sdk.onChange((batch) => broadcast(EVENT_CHANNELS.change, batch));
+  const sdk = createSdk(options);
+  attachLifecycleBroadcast(sdk);
+  await startSdk();
 }

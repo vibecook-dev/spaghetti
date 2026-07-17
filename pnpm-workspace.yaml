@@ -11,3 +11,7 @@ onlyBuiltDependencies:
   - better-sqlite3
   - esbuild
   - electron
+# Pin older electron-to-chromium so minimumReleaseAge supply-chain checks pass
+# (browserslist sometimes pulls a too-fresh e2c release).
+overrides:
+  electron-to-chromium: 1.5.321

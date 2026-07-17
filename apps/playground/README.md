@@ -14,6 +14,45 @@ pnpm -F @vibecook/spaghetti-playground build   # produce out/{main,preload,rende
 pnpm -F @vibecook/spaghetti-playground start   # preview a built bundle
 ```
 
+## Where the index lives
+
+SQLite cache (not `~/.spaghetti`):
+
+```text
+macOS:  ~/Library/Application Support/@vibecook/spaghetti-playground/cache/spaghetti-{rs,ts}.db
+Windows: %APPDATA%/@vibecook/spaghetti-playground/cache/spaghetti-{rs,ts}.db
+Linux:  ~/.config/@vibecook/spaghetti-playground/cache/spaghetti-{rs,ts}.db
+```
+
+Engine preference: `<userData>/settings.json` (`"engine": "rs" | "ts"`, default `rs`).
+
+## Operational notes (cache health)
+
+1. **Prefer graceful quit** — close the window or Cmd+Q. The app awaits `api.dispose()` so live pipelines drain and SQLite closes cleanly. Avoid `kill -9` during first cold ingest; native bulk can leave a half-written cache if terminated mid-write.
+2. **Do not run `PRAGMA integrity_check`** (or other long exclusive SQLite tools) against the live playground DB while it is ingesting.
+3. **On `SQLITE_CORRUPT` / “database disk image is malformed”**: the SDK
+   **self-recovers** once — it deletes the shared cache and re-ingests from
+   `~/.claude` / `~/.codex` / `~/.grok`. The loading screen shows
+   `SQLite cache malformed — deleting and re-ingesting from disk…`.
+
+   Manual wipe (if recovery still fails, or you want a clean slate):
+
+```bash
+# Native engine cache
+rm -f ~/Library/Application\ Support/@vibecook/spaghetti-playground/cache/spaghetti-rs.db*
+
+# Or TypeScript engine cache
+rm -f ~/Library/Application\ Support/@vibecook/spaghetti-playground/cache/spaghetti-ts.db*
+
+# Optional: force engine in settings.json
+# { "engine": "rs" }
+```
+
+Preflight: `PRAGMA quick_check` before multi-source ingest also auto-wipes a
+corrupt file before exclusive native starts.
+
+4. **Single instance** — a second `dev` / `start` focuses the existing window instead of opening a second process on the same cache.
+
 ## Native module (`better-sqlite3`) ABI note
 
 `better-sqlite3` is a native module and only has **one** copy in the pnpm
@@ -23,18 +62,24 @@ can't satisfy both at once.
 
 The workflow:
 
-- `pnpm install` builds the binary for **Node** (via prebuild-install).
-  `pnpm test:packages` works out of the box.
-- `pnpm -F @vibecook/spaghetti-playground dev` (or `start`) has a `predev`
-  hook that runs `electron-rebuild`, which recompiles the binary for
-  **Electron**'s ABI. The app then launches.
-- After running the app, the binary is Electron-ABI. To run SDK tests
-  again, rebuild for Node:
-  ```bash
-  pnpm -F @vibecook/spaghetti-playground rebuild:node
-  # or from anywhere:
-  pnpm rebuild better-sqlite3
-  ```
+| Step | ABI | Who |
+|---|---|---|
+| `pnpm install` | **Node** (prebuild) | monorepo default |
+| `pnpm -F @vibecook/spaghetti-playground dev` | builds **SDK dist**, then **Electron** ABI for better-sqlite3 | playground |
+| After playground, before SDK tests / CLI | rebuild for **Node** | you |
+
+`predev` / `prestart` run `pnpm -F @vibecook/spaghetti-sdk build` so Electron always
+loads recovery and other SDK fixes from `packages/sdk/dist` (not a stale build).
+
+```bash
+# After running the playground, restore Node ABI for tests / spag CLI:
+pnpm -F @vibecook/spaghetti-playground rebuild:node
+# or from repo root:
+pnpm rebuild better-sqlite3
+```
+
+Symptom if you forget: Node fails with
+`NODE_MODULE_VERSION 145` vs `137` (Electron vs Node) when opening better-sqlite3.
 
 Requires Xcode CLT (macOS) / Python 3 / node-gyp prerequisites to compile
 from source if the prebuild isn't available.
@@ -42,37 +87,26 @@ from source if the prebuild isn't available.
 ## Architecture
 
 ```
-┌──────────────┐   ipcMain.handle   ┌─────────────────────────┐
-│   renderer   │ ─────────────────▶ │         main            │
-│  React 19    │  window.spaghetti  │   SpaghettiService      │
-│  SDK /react  │ ◀───── events ──── │   source: ~/.claude     │
-└──────────────┘                    │   db: <userData>/cache  │
-        ▲           contextBridge   └────────────┬────────────┘
-        │                                        │
-        └─ preload (typed) ──────────────────────┘
+┌──────────────┐   ipcMain.handle   ┌──────────────────────────────────┐
+│   renderer   │ ─────────────────▶ │              main                 │
+│  React 19    │  window.spaghetti  │   SpaghettiService               │
+│  SDK /react  │ ◀───── events ──── │   sources: ~/.claude (+ codex/   │
+└──────────────┘                    │            grok when present)    │
+        ▲           contextBridge   │   db: <userData>/cache           │
+        │                           │   live: true → safeBulk bulk    │
+        └─ preload (typed) ─────────┴──────────────────────────────────┘
 ```
 
-- **main** owns a single `SpaghettiService`. Source data is read from
-  `~/.claude`; the SQLite index lives inside Electron's platform-specific
-  `userData` folder (`app.getPath('userData')/cache/spaghetti-<engine>.db`)
-  rather than the SDK's home-relative default, so the desktop app keeps
-  its data in the OS-sanctioned app-data location. The ingest engine is
-  read from the app's own `<userData>/settings.json` (default: `rs`) and
-  passed as an explicit `engine` option to `createSpaghettiService`, so
-  the user's CLI-level `~/.spaghetti/config.json` does not affect the
-  desktop app and vice versa. Progress/ready/change events are forwarded
-  to all renderer windows.
-- **preload** exposes `window.spaghetti`, a typed surface defined in
-  `src/shared/ipc.ts` (one method per SDK query + lifecycle/event helpers).
-- **renderer** uses `SpaghettiProvider` from `@vibecook/spaghetti-sdk/react`
-  fed by an IPC adapter (`src/renderer/src/ipc-api.ts`). The shell
-  subscribes to `onChange` to live-update when `~/.claude` changes, shows
-  the active ingest engine (`rs` native vs `ts`) in the header, and
-  surfaces the SDK's `rebuildIndex()` via a toolbar button.
+- **main** owns a single `SpaghettiService` with `live: true` (and thus
+  crash-safer bulk SQLite settings). Primary source is Claude Code;
+  Codex / Grok are auto-detected. Progress/ready/change events go to all
+  renderer windows. Quit uses `dispose()`.
+- **preload** exposes `window.spaghetti` (`src/shared/ipc.ts`).
+- **renderer** shows a dedicated loading screen during ingest, then a
+  multi-source project/session browser with `sourceId` badges.
 
 ## Notes
 
 The renderer does **not** mount `<AgentDataPlayground />` directly — that
 component assumes synchronous SDK calls, but over IPC every call is a
-Promise. The shell in `App.tsx` is a minimal read-only project/session
-browser built on the provider.
+Promise. The shell in `App.tsx` is a read-only project/session browser.

@@ -207,6 +207,12 @@ export interface LifecycleOwner extends LifecycleInternal {
   wipeCache?(): void;
 
   /**
+   * Optional: absolute path of the shared SQLite cache this owner writes.
+   * Used by the multi-source coordinator for preflight health checks.
+   */
+  getCacheDbPath?(): string;
+
+  /**
    * Solo convenience: exclusiveIngest → attachShared → startLivePipeline.
    * Multi-source coordinators should call the three phases instead so every
    * agent gets a turn at exclusive native access.
@@ -244,6 +250,13 @@ export interface AgentDataServiceOptions {
    * user-level config.
    */
   engine?: IngestEngine;
+  /**
+   * Prefer crash-safer bulk SQLite settings (WAL + synchronous=NORMAL)
+   * during cold/warm ingest. Default false for CLI one-shots; long-lived
+   * surfaces with `{ live: true }` enable this so a kill mid-ingest is
+   * less likely to leave a corrupt cache.
+   */
+  safeBulk?: boolean;
 }
 
 /** @deprecated Use {@link AgentDataService}. */

@@ -1,0 +1,94 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/*
+ * Design tokens for timeline chat UI (ported from ui-v2 globals).
+ * Dark-only for the playground shell.
+ */
+:root,
+.dark {
+  --background: #0a0a0a;
+  --foreground: #f4f4f5;
+  --card: #141414;
+  --card-foreground: #f4f4f5;
+  --primary: #ea580c;
+  --primary-foreground: #fafafa;
+  --secondary: #27272a;
+  --secondary-foreground: #f4f4f5;
+  --muted: #27272a;
+  --muted-foreground: #a1a1aa;
+  --accent: #ea580c;
+  --accent-foreground: #fafafa;
+  --destructive: #ef4444;
+  --border: rgba(255, 255, 255, 0.1);
+  --input: rgba(255, 255, 255, 0.1);
+  --ring: #ea580c;
+  --radius: 0.5rem;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+  background: var(--background);
+  color: var(--foreground);
+}
+
+/* Tailwind v3 theme extensions for border-border / bg-background etc. */
+@layer utilities {
+  .bg-background {
+    background-color: var(--background);
+  }
+  .bg-card {
+    background-color: var(--card);
+  }
+  .bg-muted {
+    background-color: var(--muted);
+  }
+  .bg-primary {
+    background-color: var(--primary);
+  }
+  .bg-destructive {
+    background-color: var(--destructive);
+  }
+  .text-foreground {
+    color: var(--foreground);
+  }
+  .text-muted-foreground {
+    color: var(--muted-foreground);
+  }
+  .text-card-foreground {
+    color: var(--card-foreground);
+  }
+  .text-primary {
+    color: var(--primary);
+  }
+  .text-destructive {
+    color: var(--destructive);
+  }
+  .border-border {
+    border-color: var(--border);
+  }
+  .border-destructive {
+    border-color: var(--destructive);
+  }
+  .chat-card-shadow {
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.4);
+  }
+  .animate-fadeInUp {
+    animation: fadeInUp 0.35s ease-out both;
+  }
+}
+
+@keyframes fadeInUp {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}

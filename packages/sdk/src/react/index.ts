@@ -1,5 +1,5 @@
 /**
- * @spaghetti/ui — React components for browsing Claude Code agent data
+ * @spaghetti/ui — React components for browsing multi-agent history
  */
 
 // Context
@@ -8,7 +8,7 @@ export { SpaghettiProvider, useSpaghettiAPI, type SpaghettiProviderProps } from 
 // Main playground component
 export { AgentDataPlayground } from './AgentDataPlayground.js';
 
-// Individual components
+// Individual components (legacy AgentDataPlayground pieces)
 export { ProjectCard } from './components/ProjectCard.js';
 export { SessionCard } from './components/SessionCard.js';
 export { MessageEntry, buildMessageContext, isToolResultOnlyMessage } from './components/MessageEntry.js';
@@ -28,3 +28,20 @@ export {
   useLiveSettings,
   useLiveChanges,
 } from './live/index.js';
+
+// Timeline chat UI (ported from ui-v2/common/chat)
+export {
+  TimelineMessageRenderer,
+  isTimelineType,
+  TimeGroupSeparator,
+  shouldShowTimestamp,
+  formatChatTime,
+  transformRawMessagesToTimeline,
+  timeline,
+  type SessionMessage as ChatSessionMessage,
+  type ToolUseInfo,
+  type ToolResultInfo,
+  type ConnectorInfo,
+} from './chat/index.js';
+
+export { cn } from './lib/utils.js';

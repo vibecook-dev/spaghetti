@@ -31,6 +31,11 @@ export interface LifecycleOwnerFactoryDeps {
   errorSink: ErrorSink;
   /** Plane 2 requested for this service (owners decide how to watch). */
   live: boolean;
+  /**
+   * Crash-safer bulk SQLite settings for cold/warm exclusive ingest.
+   * Defaulted by createSpaghettiService when `live` is true.
+   */
+  safeBulk?: boolean;
   engine: IngestEngine;
   native: NativeAddon | null;
   /**
@@ -57,6 +62,7 @@ const REGISTRY: Record<AgentSourceId, LifecycleOwnerFactory> = {
         source: deps.source,
         engine: deps.engine,
         dbPath: deps.dbPath,
+        safeBulk: deps.safeBulk,
       }),
       deps.claudeLive,
     );
@@ -70,6 +76,7 @@ const REGISTRY: Record<AgentSourceId, LifecycleOwnerFactory> = {
       messages: deps.source.messages,
       hooks: createCodexIngestHooks(),
       engine: 'ts',
+      safeBulk: deps.safeBulk,
     });
     return new CodexLifecycleOwner(
       deps.fileService,
@@ -80,6 +87,7 @@ const REGISTRY: Record<AgentSourceId, LifecycleOwnerFactory> = {
       deps.errorSink,
       deps.live,
       deps.engine,
+      deps.safeBulk,
     );
   },
 
@@ -92,6 +100,7 @@ const REGISTRY: Record<AgentSourceId, LifecycleOwnerFactory> = {
       sourceId: 'grok',
       messages: deps.source.messages,
       engine: 'ts',
+      safeBulk: deps.safeBulk,
     });
     return new GrokLifecycleOwner(
       deps.fileService,
@@ -102,6 +111,7 @@ const REGISTRY: Record<AgentSourceId, LifecycleOwnerFactory> = {
       deps.errorSink,
       deps.live,
       deps.engine,
+      deps.safeBulk,
     );
   },
 };

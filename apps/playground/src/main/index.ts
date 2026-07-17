@@ -1,36 +1,59 @@
 /**
  * Electron main entrypoint.
  *
- * - Creates a single BrowserWindow with context isolation + preload.
- * - Initializes the SpaghettiService (parses ~/.claude into SQLite).
- * - Registers IPC handlers and forwards SDK lifecycle events.
- * - Cleans up on quit.
+ * - Single-instance lock so two playgrounds cannot share the same cache.
+ * - Creates a BrowserWindow with context isolation + preload.
+ * - Initializes SpaghettiService (multi-source ingest into userData SQLite).
+ * - Awaitable dispose on quit (prefer over kill -9 mid-ingest).
  */
 
 import { app, BrowserWindow, shell } from 'electron';
+import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import type { IngestEngine } from '@vibecook/spaghetti-sdk';
 import { registerIpcHandlers, wireEventForwarding } from './ipc-handlers.js';
 import { resolveAppEngine } from './settings.js';
-import { shutdownSdk } from './sdk.js';
+import { disposeSdk, shutdownSdk } from './sdk.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
+// ── Single instance ─────────────────────────────────────────────────────────
+// Prevent two playground processes from exclusive-ingesting the same cache
+// (journal_mode flip races / SQLITE_CORRUPT risk).
+const gotTheLock = app.requestSingleInstanceLock();
+if (!gotTheLock) {
+  app.quit();
+} else {
+  app.on('second-instance', () => {
+    const win = BrowserWindow.getAllWindows()[0];
+    if (win) {
+      if (win.isMinimized()) win.restore();
+      win.focus();
+    }
+  });
+}
+
 /**
- * Resolve the SQLite index path inside Electron's per-app `userData` folder,
- * following the platform's conventions (macOS: `~/Library/Application
- * Support/<app>`, Windows: `%APPDATA%/<app>`, Linux: `~/.config/<app>`).
+ * Resolve the SQLite index path inside Electron's per-app `userData` folder.
  *
- * The filename includes the active ingest engine (rs|ts) so switching
- * engines does not force a re-ingest. The engine itself is read once from
- * the app's own settings file and threaded through both the DB path and
- * the SpaghettiService options; we deliberately do not call the SDK's
- * `resolveEngine()` here so the user's shell / CLI config cannot leak
- * into the desktop app.
+ * Filename includes the active ingest engine (rs|ts). Engine is read from the
+ * app's own settings file — not `~/.spaghetti/config.json`.
  */
 function resolvePlaygroundDbPath(engine: IngestEngine): string {
   return join(app.getPath('userData'), 'cache', `spaghetti-${engine}.db`);
+}
+
+/**
+ * electron-vite emits ESM preloads as `index.mjs` (and historically as
+ * `index.js`). Pick whichever exists so contextBridge always loads.
+ */
+function resolvePreloadPath(): string {
+  const mjs = join(__dirname, '../preload/index.mjs');
+  const js = join(__dirname, '../preload/index.js');
+  if (existsSync(mjs)) return mjs;
+  if (existsSync(js)) return js;
+  return mjs;
 }
 
 function createWindow(): BrowserWindow {
@@ -39,11 +62,13 @@ function createWindow(): BrowserWindow {
     height: 900,
     minWidth: 900,
     minHeight: 600,
-    backgroundColor: '#0a0a0a',
-    show: false,
+    backgroundColor: '#050505',
+    // Show immediately so the loading screen is visible during cold ingest.
+    show: true,
+    title: 'Spaghetti Playground',
     autoHideMenuBar: true,
     webPreferences: {
-      preload: join(__dirname, '../preload/index.js'),
+      preload: resolvePreloadPath(),
       nodeIntegration: false,
       contextIsolation: true,
       sandbox: false,
@@ -51,17 +76,15 @@ function createWindow(): BrowserWindow {
   });
 
   win.once('ready-to-show', () => {
-    win.show();
+    if (!win.isVisible()) win.show();
+    win.focus();
   });
 
-  // Open external links in the default browser rather than a new BrowserWindow.
   win.webContents.setWindowOpenHandler(({ url }) => {
     void shell.openExternal(url);
     return { action: 'deny' };
   });
 
-  // Dev vs. production: electron-vite injects ELECTRON_RENDERER_URL when
-  // running `electron-vite dev`.
   const devUrl = process.env['ELECTRON_RENDERER_URL'];
   if (devUrl) {
     void win.loadURL(devUrl);
@@ -73,20 +96,22 @@ function createWindow(): BrowserWindow {
 }
 
 void app.whenReady().then(async () => {
-  // Resolve engine once from app-scoped settings; use it for both the DB
-  // filename and the explicit `engine` option on the SDK so nothing in
-  // the pipeline falls back to the SDK's global resolution chain.
+  if (!gotTheLock) return;
+
   const engine = resolveAppEngine();
   const dbPath = resolvePlaygroundDbPath(engine);
   registerIpcHandlers();
 
-  // Fire-and-forget: the renderer subscribes to progress/ready events on
-  // load, so there's no reason to block window creation on SDK init.
+  createWindow();
+
   void wireEventForwarding({ dbPath, engine }).catch((err) => {
     console.error('[main] SDK initialization failed', err);
+    for (const win of BrowserWindow.getAllWindows()) {
+      if (!win.isDestroyed()) {
+        win.webContents.send('spaghetti:event:init-error', String(err));
+      }
+    }
   });
-
-  createWindow();
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {
@@ -101,6 +126,20 @@ app.on('window-all-closed', () => {
   }
 });
 
-app.on('before-quit', () => {
-  shutdownSdk();
+// Graceful teardown: await live pipeline drain + SQLite close.
+// Prefer this over kill -9 during cold ingest (native bulk can leave a
+// half-written cache if terminated mid-write).
+let isQuitting = false;
+app.on('before-quit', (event) => {
+  if (isQuitting) return;
+  event.preventDefault();
+  isQuitting = true;
+  void disposeSdk()
+    .catch((err) => {
+      console.error('[main] dispose failed', err);
+      shutdownSdk();
+    })
+    .finally(() => {
+      app.exit(0);
+    });
 });

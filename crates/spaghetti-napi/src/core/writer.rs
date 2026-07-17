@@ -71,6 +71,20 @@ pub enum WriterError {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// Bulk mode
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Durability profile for [`Writer::open_for_bulk_ingest_with_mode`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BulkMode {
+    /// MEMORY journal + synchronous=OFF — max throughput (CLI default).
+    #[default]
+    Fast,
+    /// Stay on WAL + synchronous=NORMAL — safer for long-lived desktop.
+    Safe,
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // Stats
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -409,40 +423,52 @@ impl Writer {
         &self.source_id
     }
 
-    /// Enter bulk-ingest mode.
-    ///
-    /// Applies aggressive PRAGMAs suitable for a single-writer, high-
-    /// volume INSERT session:
-    /// - `synchronous = OFF` — skip fsync per transaction (WAL durability
-    ///   is still provided by the journal file; we trade a crash-window
-    ///   for throughput, matching TS `beginBulkIngest`).
-    /// - `journal_mode = MEMORY` — keep the rollback journal in RAM.
-    ///   Combined with `synchronous = OFF` this means a crash mid-ingest
-    ///   leaves a half-written DB, which is acceptable because the DB is
-    ///   a rebuild-from-source cache: the next warm-start detects
-    ///   corruption via schema/version checks and re-ingests.
-    /// - `temp_store = MEMORY` — keep sort/index scratch off disk.
-    /// - `cache_size = -256000` — 256MB page cache, large enough that a
-    ///   ~1GB-sized SQLite output doesn't thrash the page cache mid-bulk.
-    /// - `mmap_size = 30_000_000_000` — allow SQLite to memory-map up to
-    ///   ~30GB of the DB file so reads served from the page cache bypass
-    ///   the POSIX I/O stack.
-    ///
-    /// Also drops the three FTS auto-sync triggers so the hot-path
-    /// INSERT into `messages` does not synchronously update `search_fts`
-    /// for every row. [`finish`] rebuilds the FTS index, recreates the
-    /// triggers, and restores `journal_mode = WAL` before closing.
+    /// Enter bulk-ingest mode (fast defaults). See
+    /// [`open_for_bulk_ingest_with_mode`].
     pub fn open_for_bulk_ingest(&mut self) -> Result<(), WriterError> {
+        self.open_for_bulk_ingest_with_mode(BulkMode::Fast)
+    }
+
+    /// Enter bulk-ingest mode with an explicit durability profile.
+    ///
+    /// # [`BulkMode::Fast`] (CLI one-shots)
+    /// - `synchronous = OFF` — trade a crash-window for throughput.
+    /// - `journal_mode = MEMORY` — rollback journal in RAM. A crash
+    ///   mid-ingest can leave a half-written DB; the cache is rebuildable
+    ///   from agent roots (`ensureSqliteCacheHealthy` / `quick_check` + wipe).
+    /// - `temp_store = MEMORY`, large `cache_size` / `mmap_size`.
+    ///
+    /// # [`BulkMode::Safe`] (desktop / `live: true`)
+    /// - Stay on `journal_mode = WAL` + `synchronous = NORMAL` so a kill
+    ///   mid-ingest is much less likely to leave SQLITE_CORRUPT.
+    /// - Still drops FTS triggers for the bulk window (rebuilt in
+    ///   [`finish`]); still enlarges the page cache.
+    ///
+    /// Both modes drop the three FTS auto-sync triggers so the hot-path
+    /// INSERT into `messages` does not update `search_fts` per row.
+    /// [`finish`] rebuilds FTS, recreates triggers, and restores durable
+    /// PRAGMAs before closing.
+    pub fn open_for_bulk_ingest_with_mode(&mut self, mode: BulkMode) -> Result<(), WriterError> {
         if self.bulk_mode {
             return Ok(());
         }
         self.bulk_mode = true;
-        self.conn.pragma_update(None, "synchronous", "OFF")?;
-        self.conn.pragma_update(None, "journal_mode", "MEMORY")?;
-        self.conn.pragma_update(None, "temp_store", "MEMORY")?;
-        self.conn.pragma_update(None, "cache_size", -256_000i64)?;
-        self.conn
-            .pragma_update(None, "mmap_size", 30_000_000_000i64)?;
+        match mode {
+            BulkMode::Fast => {
+                self.conn.pragma_update(None, "synchronous", "OFF")?;
+                self.conn.pragma_update(None, "journal_mode", "MEMORY")?;
+                self.conn.pragma_update(None, "temp_store", "MEMORY")?;
+                self.conn.pragma_update(None, "cache_size", -256_000i64)?;
+                self.conn
+                    .pragma_update(None, "mmap_size", 30_000_000_000i64)?;
+            }
+            BulkMode::Safe => {
+                self.conn.pragma_update(None, "synchronous", "NORMAL")?;
+                self.conn.pragma_update(None, "journal_mode", "WAL")?;
+                self.conn.pragma_update(None, "temp_store", "MEMORY")?;
+                self.conn.pragma_update(None, "cache_size", -256_000i64)?;
+            }
+        }
         schema::drop_fts_triggers(&self.conn)?;
         Ok(())
     }

@@ -18,6 +18,7 @@ import type {
   MessagePage,
   ProjectListItem,
   SessionListItem,
+  SourceFilter,
   SubagentListItem,
   SubagentMessagePage,
 } from '@vibecook/spaghetti-sdk';
@@ -38,6 +39,11 @@ export interface SpaghettiIPC {
   isReady(): Promise<boolean>;
   /** Force a full cold rebuild of the index. */
   rebuildIndex(): Promise<{ durationMs: number }>;
+  /**
+   * Wipe the SQLite cache and re-run initialize from disk.
+   * Used after corrupt/malformed DB errors so the UI is not stuck.
+   */
+  retryInit(): Promise<{ ok: true }>;
   /** Resolved ingest engine: `'rs'` (native Rust) or `'ts'` (TypeScript). */
   getEngine(): Promise<'rs' | 'ts'>;
 
@@ -46,8 +52,18 @@ export interface SpaghettiIPC {
   getProjectMemory(projectSlug: string): Promise<string | null>;
 
   // Sessions ----------------------------------------------------------------
-  getSessionList(projectSlug: string): Promise<SessionListItem[]>;
-  getSessionMessages(projectSlug: string, sessionId: string, limit?: number, offset?: number): Promise<MessagePage>;
+  /**
+   * List sessions for a project. Pass `{ sourceId }` when the project came
+   * from a multi-source index so agents sharing the same slug stay distinct.
+   */
+  getSessionList(projectSlug: string, options?: SourceFilter): Promise<SessionListItem[]>;
+  getSessionMessages(
+    projectSlug: string,
+    sessionId: string,
+    limit?: number,
+    offset?: number,
+    options?: SourceFilter,
+  ): Promise<MessagePage>;
   getSessionTodos(projectSlug: string, sessionId: string): Promise<unknown[]>;
   getSessionPlan(projectSlug: string, sessionId: string): Promise<unknown | null>;
   getSessionTask(projectSlug: string, sessionId: string): Promise<unknown | null>;
@@ -76,6 +92,8 @@ export interface SpaghettiEvents {
   onProgress(cb: (progress: InitProgress) => void): () => void;
   onReady(cb: (info: ReadyInfo) => void): () => void;
   onChange(cb: (batch: SegmentChangeBatch) => void): () => void;
+  /** Fired when main-process SDK initialize() rejects. */
+  onInitError(cb: (message: string) => void): () => void;
 }
 
 export type SpaghettiBridge = SpaghettiIPC & SpaghettiEvents;
@@ -84,6 +102,7 @@ export type SpaghettiBridge = SpaghettiIPC & SpaghettiEvents;
 export const IPC_CHANNELS = {
   isReady: 'spaghetti:isReady',
   rebuildIndex: 'spaghetti:rebuildIndex',
+  retryInit: 'spaghetti:retryInit',
   getEngine: 'spaghetti:getEngine',
   getProjectList: 'spaghetti:getProjectList',
   getProjectMemory: 'spaghetti:getProjectMemory',
@@ -103,4 +122,5 @@ export const EVENT_CHANNELS = {
   progress: 'spaghetti:event:progress',
   ready: 'spaghetti:event:ready',
   change: 'spaghetti:event:change',
+  initError: 'spaghetti:event:init-error',
 } as const;

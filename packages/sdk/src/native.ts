@@ -29,6 +29,12 @@ export interface NativeIngestOptions {
    * Pass explicitly for multi-source native ingest (e.g. `codex`).
    */
   sourceId?: string;
+  /**
+   * Crash-safer bulk SQLite settings (WAL + synchronous=NORMAL) instead of
+   * MEMORY + OFF. Prefer for long-lived desktop apps. Requires a native
+   * addon that understands this field (ignored by older builds).
+   */
+  safeBulk?: boolean;
 }
 
 export interface NativeIngestStats {

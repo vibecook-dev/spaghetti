@@ -43,6 +43,13 @@ export {
   createSqliteService,
 } from './sqlite-service.js';
 
+export {
+  type CacheHealthResult,
+  wipeSqliteCacheFiles,
+  ensureSqliteCacheHealthy,
+  isSqliteCorruptError,
+} from './sqlite-health.js';
+
 export { type ChannelRegistryOptions, type ChannelRegistry, createChannelRegistry } from './channel-registry.js';
 
 export { type ChannelClientOptions, type ChannelClient, createChannelClient } from './channel-client.js';

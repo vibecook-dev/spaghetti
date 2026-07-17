@@ -237,6 +237,10 @@ export class ClaudeCodeLifecycleOwner extends EventEmitter implements AgentDataS
     }
   }
 
+  getCacheDbPath(): string {
+    return this.dbPath;
+  }
+
   /**
    * Native-ingest path: exclusive Rust connection only — does **not** open
    * better-sqlite3. {@link attachShared} opens the shared handle afterwards.
@@ -250,6 +254,7 @@ export class ClaudeCodeLifecycleOwner extends EventEmitter implements AgentDataS
         dbPath: this.dbPath,
         mode: 'warm',
         sourceId: 'claude-code',
+        ...(this.options.safeBulk ? { safeBulk: true } : {}),
       },
       (progress) => {
         switch (progress.phase) {

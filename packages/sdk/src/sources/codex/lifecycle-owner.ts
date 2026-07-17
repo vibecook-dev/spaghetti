@@ -45,6 +45,7 @@ export class CodexLifecycleOwner extends EventEmitter implements LifecycleOwner 
   private ready = false;
   private liveWatch: CodexLiveWatch | undefined;
   private readonly engine: IngestEngine;
+  private readonly safeBulk: boolean;
 
   constructor(
     private readonly fileService: FileService,
@@ -55,9 +56,15 @@ export class CodexLifecycleOwner extends EventEmitter implements LifecycleOwner 
     private readonly errorSink: ErrorSink,
     private readonly live: boolean = false,
     engine?: IngestEngine,
+    safeBulk?: boolean,
   ) {
     super();
     this.engine = engine ?? resolveEngine();
+    this.safeBulk = safeBulk ?? false;
+  }
+
+  getCacheDbPath(): string {
+    return this.dbPath;
   }
 
   /** Solo composition of the three multi-source phases. */
@@ -177,6 +184,7 @@ export class CodexLifecycleOwner extends EventEmitter implements LifecycleOwner 
         dbPath: this.dbPath,
         mode: 'warm',
         sourceId: 'codex',
+        ...(this.safeBulk ? { safeBulk: true } : {}),
       },
       (progress) => {
         this.emit('progress', {

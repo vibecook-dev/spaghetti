@@ -50,9 +50,15 @@ export function createIpcApi(): SpaghettiAPI {
     rebuildIndex: () => bridge.rebuildIndex() as unknown,
 
     getProjectList: () => bridge.getProjectList() as unknown,
-    getSessionList: (projectSlug: string) => bridge.getSessionList(projectSlug) as unknown,
-    getSessionMessages: (projectSlug: string, sessionId: string, limit?: number, offset?: number) =>
-      bridge.getSessionMessages(projectSlug, sessionId, limit, offset) as unknown,
+    getSessionList: (projectSlug: string, options?: { sourceId?: string }) =>
+      bridge.getSessionList(projectSlug, options) as unknown,
+    getSessionMessages: (
+      projectSlug: string,
+      sessionId: string,
+      limit?: number,
+      offset?: number,
+      options?: { sourceId?: string },
+    ) => bridge.getSessionMessages(projectSlug, sessionId, limit, offset, options) as unknown,
     getProjectMemory: (projectSlug: string) => bridge.getProjectMemory(projectSlug) as unknown,
     getSessionTodos: (projectSlug: string, sessionId: string) =>
       bridge.getSessionTodos(projectSlug, sessionId) as unknown,

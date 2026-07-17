@@ -9,20 +9,23 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Spaghetti Playground</title>
     <style>
+      /* Base shell; Tailwind utilities (MessageEntry) load via styles.css */
       html,
       body,
       #root {
         margin: 0;
         padding: 0;
         height: 100%;
-        background: #0a0a0a;
-        color: #ffffff;
         font-family:
-          -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+          'SF Pro Text', 'Segoe UI', system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
         font-size: 13px;
+        -webkit-font-smoothing: antialiased;
       }
       * {
         box-sizing: border-box;
+      }
+      button {
+        font-family: inherit;
       }
     </style>
   </head>

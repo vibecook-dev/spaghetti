@@ -42,6 +42,11 @@ export interface IngestOptions {
    * Optional so existing TS callers that omit it keep working.
    */
   sourceId?: string
+  /**
+   * When true, bulk ingest stays on WAL + synchronous=NORMAL (desktop-safe).
+   * Default / omitted = fast MEMORY + OFF path.
+   */
+  safeBulk?: boolean
 }
 
 /**

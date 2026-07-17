@@ -29,6 +29,7 @@ import type { Project, Session, SessionMessage, AgentConfig, AgentAnalytic } fro
 import type { AgentDataStore } from './agent-data-store.js';
 import type { LiveWatch } from '../live/live-watch.js';
 import type { AgentDataService, LifecycleInternal, LifecycleOwner } from './lifecycle-owner.js';
+import { ensureSqliteCacheHealthy, isSqliteCorruptError, wipeSqliteCacheFiles } from '../io/sqlite-health.js';
 
 export class SpaghettiDataService extends EventEmitter implements AgentDataService, LifecycleInternal {
   private ready = false;
@@ -59,7 +60,7 @@ export class SpaghettiDataService extends EventEmitter implements AgentDataServi
   async initialize(): Promise<void> {
     this.ready = false;
     const start = Date.now();
-    await this.runPhasedIngest();
+    await this.runPhasedIngestWithCorruptRecovery();
     this.ready = true;
     this.emit('ready', { durationMs: Date.now() - start });
   }
@@ -69,6 +70,7 @@ export class SpaghettiDataService extends EventEmitter implements AgentDataServi
    * rebuildIndex so multi-source always prefers native rs for every owner.
    */
   private async runPhasedIngest(): Promise<void> {
+    this.preflightCacheHealth();
     // Phase 1 — each owner gets the file alone (native MEMORY journal OK).
     for (const owner of this.owners) {
       await owner.exclusiveIngest();
@@ -81,6 +83,69 @@ export class SpaghettiDataService extends EventEmitter implements AgentDataServi
     for (const owner of this.owners) {
       await owner.startLivePipeline();
     }
+  }
+
+  /**
+   * Run phased ingest; on SQLITE_CORRUPT / "database disk image is malformed"
+   * wipe the shared cache once and retry cold ingest from disk.
+   */
+  private async runPhasedIngestWithCorruptRecovery(): Promise<void> {
+    try {
+      await this.runPhasedIngest();
+    } catch (err) {
+      if (!isSqliteCorruptError(err)) throw err;
+      await this.recoverCorruptCache(err);
+      // Second attempt — if this also fails, surface that error.
+      await this.runPhasedIngest();
+    }
+  }
+
+  /**
+   * Before exclusive ingest: if the shared cache is structurally corrupt,
+   * wipe it so cold re-ingest can proceed. Emits progress when wiped.
+   */
+  private preflightCacheHealth(): void {
+    const dbPath = this.resolveCacheDbPath();
+    if (!dbPath) return;
+    const result = ensureSqliteCacheHealthy(dbPath);
+    if (result.wiped) {
+      this.emit('progress', {
+        phase: 'parsing',
+        message: `Cache corrupted — wiped for re-ingest${result.detail ? ` (${result.detail})` : ''}`,
+      });
+    }
+  }
+
+  private resolveCacheDbPath(): string | undefined {
+    return this.owners.map((o) => o.getCacheDbPath?.()).find((p) => !!p);
+  }
+
+  /**
+   * Stop live, close handles, delete the shared cache file. Emits progress
+   * so the playground loading screen can show recovery.
+   */
+  private async recoverCorruptCache(err: unknown): Promise<void> {
+    const detail = err instanceof Error ? err.message : String(err);
+    this.emit('progress', {
+      phase: 'parsing',
+      message: 'SQLite cache malformed — deleting and re-ingesting from disk…',
+    });
+    this.emit('error', {
+      error: `Recovering from corrupt cache: ${detail}`,
+    });
+    try {
+      await this.stopAllLive();
+    } catch {
+      /* best-effort */
+    }
+    this.releaseAllShared();
+    const dbPath = this.resolveCacheDbPath();
+    if (dbPath) {
+      wipeSqliteCacheFiles(dbPath);
+    }
+    // Owner wipe also closes + deletes (primary owns path); idempotent.
+    const wiper = this.owners.find((o) => typeof o.wipeCache === 'function');
+    wiper?.wipeCache?.();
   }
 
   private async stopAllLive(): Promise<void> {
@@ -126,7 +191,7 @@ export class SpaghettiDataService extends EventEmitter implements AgentDataServi
     this.ready = false;
     await this.stopAllLive();
     this.releaseAllShared();
-    await this.runPhasedIngest();
+    await this.runPhasedIngestWithCorruptRecovery();
     this.ready = true;
     this.emit('change', { changes: [], timestamp: Date.now() });
   }
@@ -140,7 +205,7 @@ export class SpaghettiDataService extends EventEmitter implements AgentDataServi
     // every source through exclusive native ingest.
     const wiper = this.owners.find((o) => typeof o.wipeCache === 'function');
     wiper?.wipeCache?.();
-    await this.runPhasedIngest();
+    await this.runPhasedIngestWithCorruptRecovery();
     this.ready = true;
     return { durationMs: Date.now() - start };
   }

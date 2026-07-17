@@ -32,12 +32,13 @@ export interface StaticIngestDeps {
  * Map plane deps into LifecycleOwner constructor options.
  */
 export function toLifecycleOptions(
-  deps: Pick<StaticIngestDeps, 'source' | 'engine' | 'dbPath'>,
+  deps: Pick<StaticIngestDeps, 'source' | 'engine' | 'dbPath'> & { safeBulk?: boolean },
 ): AgentDataServiceOptions {
   const options: AgentDataServiceOptions = {
     rootDir: deps.source.rootDir,
   };
   if (deps.dbPath !== undefined) options.dbPath = deps.dbPath;
   if (deps.engine !== undefined) options.engine = deps.engine;
+  if (deps.safeBulk !== undefined) options.safeBulk = deps.safeBulk;
   return options;
 }

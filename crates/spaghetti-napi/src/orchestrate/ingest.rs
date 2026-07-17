@@ -75,6 +75,9 @@ pub struct IngestOptions {
     /// Agent product id stamped on every core row (default `claude-code`).
     /// Optional so existing TS callers that omit it keep working.
     pub source_id: Option<String>,
+    /// When `true`, bulk ingest stays on WAL + `synchronous=NORMAL`
+    /// (desktop-safe). Default / omitted = fast MEMORY + OFF path.
+    pub safe_bulk: Option<bool>,
 }
 
 /// Stats returned on successful ingest.
@@ -248,6 +251,8 @@ struct ResolvedOptions {
     mode: Mode,
     /// Bound into every core row via the writer.
     source_id: String,
+    /// Desktop-safe bulk PRAGMAs when true.
+    safe_bulk: bool,
 }
 
 impl ResolvedOptions {
@@ -272,7 +277,16 @@ impl ResolvedOptions {
             db_path: PathBuf::from(&opts.db_path),
             mode,
             source_id,
+            safe_bulk: opts.safe_bulk.unwrap_or(false),
         })
+    }
+
+    fn bulk_mode(&self) -> crate::core::writer::BulkMode {
+        if self.safe_bulk {
+            crate::core::writer::BulkMode::Safe
+        } else {
+            crate::core::writer::BulkMode::Fast
+        }
     }
 }
 
@@ -338,13 +352,14 @@ pub(crate) fn run_ingest(
     let (sender, receiver) = bounded::<IngestEvent>(capacity);
     let db_path = resolved.db_path.clone();
     let source_id = resolved.source_id.clone();
+    let bulk_mode = resolved.bulk_mode();
 
     let writer_handle = std::thread::Builder::new()
         .name("spaghetti-writer".into())
         .spawn(
             move || -> std::result::Result<WriterStats, crate::core::writer::WriterError> {
                 let mut writer = Writer::with_source_id(&db_path, source_id)?;
-                writer.open_for_bulk_ingest()?;
+                writer.open_for_bulk_ingest_with_mode(bulk_mode)?;
                 let stats = writer.run(receiver)?;
                 writer.finish()?;
                 Ok(stats)
@@ -595,13 +610,14 @@ fn run_codex_ingest(
     let (sender, receiver) = bounded::<IngestEvent>(CHANNEL_CAPACITY_PER_WORKER * 4);
     let db_path = resolved.db_path.clone();
     let source_id = resolved.source_id.clone();
+    let bulk_mode = resolved.bulk_mode();
 
     let writer_handle = std::thread::Builder::new()
         .name("spaghetti-writer-codex".into())
         .spawn(
             move || -> std::result::Result<WriterStats, crate::core::writer::WriterError> {
                 let mut writer = Writer::with_source_id(&db_path, source_id)?;
-                writer.open_for_bulk_ingest()?;
+                writer.open_for_bulk_ingest_with_mode(bulk_mode)?;
                 let stats = writer.run(receiver)?;
                 writer.finish()?;
                 Ok(stats)
@@ -681,13 +697,14 @@ fn run_grok_ingest(
     let (sender, receiver) = bounded::<IngestEvent>(CHANNEL_CAPACITY_PER_WORKER * 4);
     let db_path = resolved.db_path.clone();
     let source_id = resolved.source_id.clone();
+    let bulk_mode = resolved.bulk_mode();
 
     let writer_handle = std::thread::Builder::new()
         .name("spaghetti-writer-grok".into())
         .spawn(
             move || -> std::result::Result<WriterStats, crate::core::writer::WriterError> {
                 let mut writer = Writer::with_source_id(&db_path, source_id)?;
-                writer.open_for_bulk_ingest()?;
+                writer.open_for_bulk_ingest_with_mode(bulk_mode)?;
                 let stats = writer.run(receiver)?;
                 writer.finish()?;
                 Ok(stats)
