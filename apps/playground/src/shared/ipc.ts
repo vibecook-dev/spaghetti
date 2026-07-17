@@ -49,7 +49,7 @@ export interface SpaghettiIPC {
 
   // Projects ----------------------------------------------------------------
   getProjectList(): Promise<ProjectListItem[]>;
-  getProjectMemory(projectSlug: string): Promise<string | null>;
+  getProjectMemory(projectSlug: string, options?: SourceFilter): Promise<string | null>;
 
   // Sessions ----------------------------------------------------------------
   /**

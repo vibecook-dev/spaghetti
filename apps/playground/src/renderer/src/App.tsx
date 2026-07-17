@@ -1,14 +1,24 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { SpaghettiProvider, type SpaghettiProviderProps } from '@vibecook/spaghetti-sdk/react';
-import type { ProjectListItem, SessionListItem } from '@vibecook/spaghetti-sdk';
+import type { ProjectListItem, SessionListItem, StoreStats } from '@vibecook/spaghetti-sdk';
 import { createIpcApi } from './ipc-api.js';
 import { LoadingScreen } from './components/LoadingScreen.js';
 import { SourceBadge } from './components/SourceBadge.js';
 import { SessionMessagesView } from './components/SessionMessagesView.js';
-import { flattenPrompt, formatDuration, formatNumber, formatRelativeTime, formatTokenUsage } from './lib/format.js';
+import { SearchOverlay, type SearchNavigateTarget } from './components/SearchOverlay.js';
+import { Btn, Chip, Dot, EmptyState, Kbd, SectionLabel } from './components/ui.js';
+import {
+  flattenPrompt,
+  formatBytes,
+  formatDuration,
+  formatNumber,
+  formatRelativeTime,
+  formatTokenUsage,
+} from './lib/format.js';
 import {
   applyProgressEvent,
   initialSourceStates,
+  sourceLabel,
   type ProgressSnapshot,
   type SourceProgressState,
 } from './lib/source-progress.js';
@@ -36,29 +46,11 @@ export function App() {
     api = createIpcApi();
   } catch (err) {
     return (
-      <div
-        style={{
-          padding: 24,
-          color: '#f2f2f2',
-          fontFamily: 'ui-monospace, monospace',
-          fontSize: 12,
-          background: '#050505',
-          height: '100%',
-        }}
-      >
-        <div
-          style={{
-            fontWeight: 500,
-            marginBottom: 8,
-            letterSpacing: '0.12em',
-            textTransform: 'uppercase',
-            fontSize: 10,
-            opacity: 0.5,
-          }}
-        >
+      <div className="p-6 text-[#f2f2f2] font-mono text-xs bg-[#050505] h-full">
+        <div className="font-medium mb-2 tracking-[0.12em] uppercase text-[10px] opacity-50">
           Preload bridge missing
         </div>
-        <div style={{ opacity: 0.8 }}>{String(err)}</div>
+        <div className="opacity-80">{String(err)}</div>
       </div>
     );
   }
@@ -77,15 +69,18 @@ function PlaygroundShell() {
   const [projects, setProjects] = useState<ProjectListItem[]>([]);
   const [selected, setSelected] = useState<ProjectKey | null>(null);
   const [sessions, setSessions] = useState<SessionListItem[]>([]);
-  /** Open session for message view (null = session list). */
   const [selectedSession, setSelectedSession] = useState<{
     session: SessionListItem;
     index: number;
   } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [changeNonce, setChangeNonce] = useState(0);
-  /** Latest session firstPrompt per project key — mirrors TUI project card line 2. */
   const [projectPrompts, setProjectPrompts] = useState<Record<string, string>>({});
+  const [stats, setStats] = useState<StoreStats | null>(null);
+  const [sourceFilter, setSourceFilter] = useState<string | null>(null);
+  const [searchOpen, setSearchOpen] = useState(false);
+  /** Open this session after sessions list loads (search navigation). */
+  const pendingSessionId = useRef<string | null>(null);
 
   const [sources, setSources] = useState<SourceProgressState[]>(() => initialSourceStates());
   const [progress, setProgress] = useState<ProgressSnapshot | null>(null);
@@ -102,6 +97,19 @@ function PlaygroundShell() {
     return () => window.clearInterval(id);
   }, [ready, rebuilding, retrying]);
 
+  // Global Cmd/Ctrl+K → search
+  useEffect(() => {
+    if (!ready) return;
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
+        e.preventDefault();
+        setSearchOpen(true);
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [ready]);
+
   useEffect(() => {
     const bridge = window.spaghetti;
 
@@ -112,7 +120,6 @@ function PlaygroundShell() {
         current: p.current,
         total: p.total,
       };
-      // SDK self-recovery (or manual retry) — clear error UI and reset source rows.
       const msg = p.message.toLowerCase();
       if (
         msg.includes('malformed') ||
@@ -194,6 +201,10 @@ function PlaygroundShell() {
       .getProjectList()
       .then(setProjects)
       .catch((e: unknown) => setError(String(e)));
+    window.spaghetti
+      .getStats()
+      .then(setStats)
+      .catch(() => setStats(null));
   }, [ready, changeNonce]);
 
   // TUI project cards show the latest session's firstPrompt — hydrate lazily.
@@ -202,7 +213,6 @@ function PlaygroundShell() {
     let cancelled = false;
     const run = async () => {
       const next: Record<string, string> = {};
-      // Limit concurrency so IPC doesn't flood the main process.
       const queue = [...projects];
       const workers = Array.from({ length: Math.min(6, queue.length) }, async () => {
         while (queue.length > 0 && !cancelled) {
@@ -210,7 +220,6 @@ function PlaygroundShell() {
           const key = projectKey(p);
           try {
             const sess = await window.spaghetti.getSessionList(p.slug, { sourceId: p.sourceId });
-            // Sessions are sorted by last update desc in the SDK.
             next[key] = sess[0]?.firstPrompt || sess[0]?.summary || '';
           } catch {
             next[key] = '';
@@ -233,7 +242,17 @@ function PlaygroundShell() {
     }
     window.spaghetti
       .getSessionList(selected.slug, { sourceId: selected.sourceId })
-      .then(setSessions)
+      .then((list) => {
+        setSessions(list);
+        const want = pendingSessionId.current;
+        if (want) {
+          pendingSessionId.current = null;
+          const idx = list.findIndex((s) => s.sessionId === want);
+          if (idx >= 0) {
+            setSelectedSession({ session: list[idx], index: idx });
+          }
+        }
+      })
       .catch((e: unknown) => setError(String(e)));
   }, [selected, changeNonce]);
 
@@ -259,7 +278,6 @@ function PlaygroundShell() {
     }
   };
 
-  /** Wipe corrupt cache + full re-init (from error screen). */
   const onRetryInit = async () => {
     if (retrying || rebuilding) return;
     setRetrying(true);
@@ -272,7 +290,6 @@ function PlaygroundShell() {
     setProgress({ phase: 'parsing', message: 'Deleting cache and re-ingesting from disk…' });
     try {
       await window.spaghetti.retryInit();
-      // ready event may have already fired; poll as safety net
       if (await window.spaghetti.isReady()) {
         setReady(true);
         setRetrying(false);
@@ -283,6 +300,28 @@ function PlaygroundShell() {
       setRetrying(false);
     }
   };
+
+  const onSearchNavigate = useCallback((target: SearchNavigateTarget) => {
+    setSelected({ slug: target.projectSlug, sourceId: target.sourceId });
+    setSelectedSession(null);
+    pendingSessionId.current = target.sessionId ?? null;
+  }, []);
+
+  const sourceIds = useMemo(() => [...new Set(projects.map((p) => p.sourceId))].sort(), [projects]);
+
+  const filteredProjects = useMemo(() => {
+    if (!sourceFilter) return projects;
+    return projects.filter((p) => p.sourceId === sourceFilter);
+  }, [projects, sourceFilter]);
+
+  const selectedKey = selected ? projectKey(selected) : null;
+  const selectedProject = selected ? projects.find((p) => projectKey(p) === selectedKey) : null;
+
+  const scopeProject = selectedProject
+    ? { slug: selectedProject.slug, sourceId: selectedProject.sourceId, folderName: selectedProject.folderName }
+    : null;
+
+  const modKey = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform) ? '⌘' : 'Ctrl+';
 
   if (!ready || rebuilding || retrying || error) {
     return (
@@ -299,264 +338,170 @@ function PlaygroundShell() {
     );
   }
 
-  const sourceIds = [...new Set(projects.map((p) => p.sourceId))].sort();
-  const selectedKey = selected ? projectKey(selected) : null;
-
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', height: '100%', background: '#0a0a0a' }}>
-      <header
-        style={{
-          padding: '10px 18px',
-          borderBottom: '1px solid rgba(255,255,255,0.08)',
-          background: 'rgba(255,255,255,0.015)',
-          display: 'flex',
-          alignItems: 'center',
-          gap: 12,
-          flexWrap: 'wrap',
-        }}
-      >
-        <strong
-          style={{
-            fontSize: 12,
-            fontWeight: 500,
-            letterSpacing: '0.16em',
-            textTransform: 'lowercase',
-            opacity: 0.85,
-          }}
-        >
-          spaghetti
-        </strong>
+    <div className="flex flex-col h-full bg-[#0a0a0a] text-[#f2f2f2]">
+      <header className="px-4 py-2.5 border-b border-white/10 bg-white/[0.015] flex items-center gap-3 flex-wrap shrink-0">
+        <strong className="text-xs font-medium tracking-[0.16em] lowercase opacity-85">spaghetti</strong>
         {engine && (
           <span
-            style={{
-              fontSize: 9,
-              padding: '2px 7px',
-              borderRadius: 2,
-              border: '1px solid rgba(255,255,255,0.12)',
-              color: 'rgba(255,255,255,0.5)',
-              fontFamily: 'ui-monospace, Menlo, monospace',
-              letterSpacing: 0.8,
-              textTransform: 'uppercase',
-            }}
+            className="text-[9px] px-1.5 py-0.5 rounded border border-white/12 text-white/50 font-mono tracking-wide uppercase"
             title={engine === 'rs' ? 'Native Rust ingest engine' : 'TypeScript ingest engine'}
           >
             {engine === 'rs' ? 'native' : 'typescript'}
           </span>
         )}
         {sourceIds.length > 0 && (
-          <span
-            style={{
-              display: 'inline-flex',
-              alignItems: 'center',
-              gap: 5,
-              fontSize: 10,
-              color: 'rgba(255,255,255,0.4)',
-            }}
-          >
+          <span className="inline-flex items-center gap-1.5">
             {sourceIds.map((id) => (
               <SourceBadge key={id} sourceId={id} />
             ))}
           </span>
         )}
-        <span style={{ flex: 1 }} />
-        <button
-          type="button"
-          onClick={() => void onRebuild()}
-          disabled={rebuilding}
-          style={{
-            fontSize: 11,
-            padding: '4px 12px',
-            borderRadius: 2,
-            border: '1px solid rgba(255,255,255,0.14)',
-            background: 'transparent',
-            color: 'rgba(255,255,255,0.75)',
-            cursor: 'pointer',
-            letterSpacing: 0.3,
-          }}
-          title="Force a full cold rebuild of the SQLite index"
-        >
-          Rebuild index
-        </button>
-        {error && (
-          <span style={{ fontSize: 11, color: 'rgba(255,180,180,0.9)' }} title={error}>
-            error: {error.slice(0, 80)}
+        {stats && (
+          <span className="text-[10px] text-white/30 font-mono hidden sm:inline">
+            {formatNumber(stats.totalSegments)} segs
+            <Dot />
+            {formatBytes(stats.dbSizeBytes)}
+            <Dot />
+            {formatNumber(stats.searchIndexed)} indexed
           </span>
         )}
+        <span className="flex-1" />
+        <Btn onClick={() => setSearchOpen(true)} title={`Search (${modKey}K)`}>
+          Search
+          <Kbd>{modKey}K</Kbd>
+        </Btn>
+        <Btn
+          onClick={() => void onRebuild()}
+          disabled={rebuilding}
+          title="Force a full cold rebuild of the SQLite index"
+        >
+          Rebuild
+        </Btn>
       </header>
 
-      <main style={{ flex: 1, display: 'flex', minHeight: 0 }}>
-        {/* Projects — TUI ProjectCard parity */}
-        <section
-          style={{
-            width: 380,
-            borderRight: '1px solid rgba(255,255,255,0.08)',
-            overflowY: 'auto',
-          }}
-        >
-          <div
-            style={{
-              padding: '8px 14px',
-              fontSize: 10,
-              letterSpacing: '0.12em',
-              textTransform: 'uppercase',
-              color: 'rgba(255,255,255,0.35)',
-              borderBottom: '1px solid rgba(255,255,255,0.05)',
-            }}
+      <main className="flex flex-1 min-h-0">
+        {/* Projects */}
+        <section className="w-[360px] shrink-0 border-r border-white/10 flex flex-col min-h-0">
+          <SectionLabel
+            trailing={
+              sourceIds.length > 1 ? (
+                <span className="flex items-center gap-1 normal-case tracking-normal">
+                  <Chip active={sourceFilter === null} onClick={() => setSourceFilter(null)}>
+                    all
+                  </Chip>
+                  {sourceIds.map((id) => (
+                    <Chip key={id} active={sourceFilter === id} onClick={() => setSourceFilter(id)} title={id}>
+                      {sourceLabel(id)}
+                    </Chip>
+                  ))}
+                </span>
+              ) : null
+            }
           >
-            Projects · {projects.length}
-          </div>
-          {projects.map((p) => {
-            const key = projectKey(p);
-            const isSelected = selectedKey === key;
-            const prompt = flattenPrompt(projectPrompts[key], 64);
-            const tok = formatTokenUsage(p.tokenUsage, p.sourceId, p.tokensEstimated);
-            return (
-              <button
-                key={key}
-                type="button"
-                onClick={() => {
-                  setSelected({ slug: p.slug, sourceId: p.sourceId });
-                  setSelectedSession(null);
-                }}
-                style={{
-                  display: 'block',
-                  width: '100%',
-                  textAlign: 'left',
-                  padding: '12px 14px',
-                  background: isSelected ? 'rgba(255,255,255,0.06)' : 'transparent',
-                  color: 'inherit',
-                  border: 'none',
-                  borderLeft: isSelected ? '2px solid rgba(255,255,255,0.55)' : '2px solid transparent',
-                  borderBottom: '1px solid rgba(255,255,255,0.04)',
-                  cursor: 'pointer',
-                  fontSize: 12,
-                }}
-              >
-                {/* Line 1: name · branch · badge */}
-                <div
-                  style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: 8,
-                    marginBottom: 4,
-                  }}
-                >
-                  <span
-                    style={{
-                      fontWeight: isSelected ? 560 : 450,
-                      flex: 1,
-                      minWidth: 0,
-                      overflow: 'hidden',
-                      textOverflow: 'ellipsis',
-                      whiteSpace: 'nowrap',
-                      letterSpacing: '-0.01em',
+            Projects · {filteredProjects.length}
+            {sourceFilter ? ` / ${projects.length}` : ''}
+          </SectionLabel>
+
+          <div className="flex-1 overflow-y-auto">
+            {filteredProjects.length === 0 ? (
+              <EmptyState
+                title="No projects"
+                detail={sourceFilter ? `No ${sourceLabel(sourceFilter)} projects in the index.` : 'Index is empty.'}
+              />
+            ) : (
+              filteredProjects.map((p) => {
+                const key = projectKey(p);
+                const isSelected = selectedKey === key;
+                const prompt = flattenPrompt(projectPrompts[key], 64);
+                const tok = formatTokenUsage(p.tokenUsage, p.sourceId, p.tokensEstimated);
+                return (
+                  <button
+                    key={key}
+                    type="button"
+                    onClick={() => {
+                      setSelected({ slug: p.slug, sourceId: p.sourceId });
+                      setSelectedSession(null);
                     }}
+                    className={`block w-full text-left px-3.5 py-3 cursor-pointer text-xs transition-colors border-0 border-b border-solid border-b-white/[0.04] ${
+                      isSelected
+                        ? 'bg-white/[0.06] border-l-2 border-l-solid border-l-white/55'
+                        : 'bg-transparent border-l-2 border-l-solid border-l-transparent hover:bg-white/[0.03]'
+                    }`}
                   >
-                    {p.folderName}
-                  </span>
-                  {p.latestGitBranch ? (
-                    <span
-                      style={{
-                        fontSize: 10,
-                        color: isSelected ? 'rgba(200,230,255,0.75)' : 'rgba(255,255,255,0.35)',
-                        fontFamily: 'ui-monospace, Menlo, monospace',
-                        flexShrink: 0,
-                        maxWidth: 100,
-                        overflow: 'hidden',
-                        textOverflow: 'ellipsis',
-                      }}
-                      title={p.latestGitBranch}
-                    >
-                      {p.latestGitBranch}
-                    </span>
-                  ) : null}
-                  <SourceBadge sourceId={p.sourceId} />
-                </div>
-                {/* Line 2: first prompt (TUI italic quote) */}
-                <div
-                  style={{
-                    fontSize: 11,
-                    fontStyle: 'italic',
-                    color: 'rgba(255,255,255,0.38)',
-                    marginBottom: 5,
-                    overflow: 'hidden',
-                    textOverflow: 'ellipsis',
-                    whiteSpace: 'nowrap',
-                    minHeight: 15,
-                  }}
-                >
-                  {prompt ? `"${prompt}"` : '\u00A0'}
-                </div>
-                {/* Line 3: sessions · msgs · tokens · relative time */}
-                <div
-                  style={{
-                    fontSize: 10,
-                    color: 'rgba(255,255,255,0.38)',
-                    fontVariantNumeric: 'tabular-nums',
-                    letterSpacing: 0.1,
-                  }}
-                >
-                  {formatNumber(p.sessionCount)} sessions
-                  <Dot />
-                  {formatNumber(p.messageCount)} msgs
-                  <Dot />
-                  {tok} tokens
-                  <Dot />
-                  {formatRelativeTime(p.lastActiveAt)}
-                  {p.hasMemory ? (
-                    <>
+                    <div className="flex items-center gap-2 mb-1">
+                      <span
+                        className={`flex-1 min-w-0 truncate tracking-tight ${isSelected ? 'font-medium' : 'font-normal'}`}
+                      >
+                        {p.folderName}
+                      </span>
+                      {p.latestGitBranch ? (
+                        <span
+                          className={`text-[10px] font-mono shrink-0 max-w-[100px] truncate ${
+                            isSelected ? 'text-sky-200/75' : 'text-white/35'
+                          }`}
+                          title={p.latestGitBranch}
+                        >
+                          {p.latestGitBranch}
+                        </span>
+                      ) : null}
+                      <SourceBadge sourceId={p.sourceId} />
+                    </div>
+                    <div className="text-[11px] italic text-white/38 mb-1 truncate min-h-[15px]">
+                      {prompt ? `"${prompt}"` : '\u00A0'}
+                    </div>
+                    <div className="text-[10px] text-white/38 tabular-nums">
+                      {formatNumber(p.sessionCount)} sessions
                       <Dot />
-                      memory
-                    </>
-                  ) : null}
-                </div>
-              </button>
-            );
-          })}
+                      {formatNumber(p.messageCount)} msgs
+                      <Dot />
+                      {tok} tokens
+                      <Dot />
+                      {formatRelativeTime(p.lastActiveAt)}
+                      {p.hasMemory ? (
+                        <>
+                          <Dot />
+                          memory
+                        </>
+                      ) : null}
+                    </div>
+                  </button>
+                );
+              })
+            )}
+          </div>
         </section>
 
         {/* Sessions list or message view */}
-        <section style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
+        <section className="flex-1 min-w-0 flex flex-col min-h-0">
           {selected && selectedSession ? (
             <SessionMessagesView
               projectSlug={selected.slug}
               sourceId={selected.sourceId}
               session={selectedSession.session}
               sessionIndex={selectedSession.index}
+              hasMemory={selectedProject?.hasMemory}
               onBack={() => setSelectedSession(null)}
             />
           ) : (
             <>
-              <div
-                style={{
-                  padding: '8px 14px',
-                  fontSize: 10,
-                  letterSpacing: '0.12em',
-                  textTransform: 'uppercase',
-                  color: 'rgba(255,255,255,0.35)',
-                  borderBottom: '1px solid rgba(255,255,255,0.05)',
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: 8,
-                }}
-              >
-                {selected ? (
-                  <>
-                    <span>Sessions · {sessions.length}</span>
-                    <SourceBadge sourceId={selected.sourceId} />
-                  </>
-                ) : (
-                  'Select a project'
-                )}
-              </div>
-              <div style={{ flex: 1, overflowY: 'auto' }}>
+              <SectionLabel trailing={selected ? <SourceBadge sourceId={selected.sourceId} /> : null}>
+                {selected ? `Sessions · ${sessions.length}` : 'Select a project'}
+              </SectionLabel>
+              <div className="flex-1 overflow-y-auto">
                 {!selected && (
-                  <div style={{ padding: 24, color: 'rgba(255,255,255,0.3)', fontSize: 12 }}>
-                    Select a project to browse sessions.
-                  </div>
+                  <EmptyState
+                    title="Select a project"
+                    detail={`Browse sessions, open a transcript, or press ${modKey}K to search.`}
+                    action={
+                      <Btn onClick={() => setSearchOpen(true)}>
+                        Open search <Kbd>{modKey}K</Kbd>
+                      </Btn>
+                    }
+                  />
                 )}
                 {selected && sessions.length === 0 && (
-                  <div style={{ padding: 24, color: 'rgba(255,255,255,0.3)', fontSize: 12 }}>No sessions found.</div>
+                  <EmptyState title="No sessions" detail="This project has no indexed sessions yet." />
                 )}
                 {sessions.map((s, index) => {
                   const prompt = flattenPrompt(s.firstPrompt || s.summary, 96);
@@ -566,85 +511,23 @@ function PlaygroundShell() {
                       key={`${s.sourceId}:${s.sessionId}`}
                       type="button"
                       onClick={() => setSelectedSession({ session: s, index })}
-                      style={{
-                        display: 'block',
-                        width: '100%',
-                        textAlign: 'left',
-                        padding: '12px 16px',
-                        borderBottom: '1px solid rgba(255,255,255,0.04)',
-                        fontSize: 12,
-                        background: 'transparent',
-                        color: 'inherit',
-                        border: 'none',
-                        borderBottomWidth: 1,
-                        borderBottomStyle: 'solid',
-                        borderBottomColor: 'rgba(255,255,255,0.04)',
-                        cursor: 'pointer',
-                      }}
+                      className="block w-full text-left px-4 py-3 border-0 border-b border-solid border-b-white/[0.04] bg-transparent text-inherit cursor-pointer text-xs hover:bg-white/[0.03] transition-colors"
                     >
-                      <div
-                        style={{
-                          display: 'flex',
-                          alignItems: 'center',
-                          gap: 10,
-                          marginBottom: 4,
-                        }}
-                      >
-                        <span
-                          style={{
-                            fontWeight: 500,
-                            color: 'rgba(255,255,255,0.75)',
-                            fontVariantNumeric: 'tabular-nums',
-                            minWidth: 28,
-                          }}
-                        >
-                          #{index + 1}
-                        </span>
+                      <div className="flex items-center gap-2.5 mb-1">
+                        <span className="font-medium text-white/75 tabular-nums min-w-[28px]">#{index + 1}</span>
                         {s.gitBranch ? (
-                          <span
-                            style={{
-                              fontSize: 11,
-                              color: 'rgba(255, 210, 120, 0.75)',
-                              fontFamily: 'ui-monospace, Menlo, monospace',
-                            }}
-                          >
-                            {s.gitBranch}
-                          </span>
+                          <span className="text-[11px] text-amber-200/75 font-mono">{s.gitBranch}</span>
                         ) : (
-                          <span style={{ fontSize: 11, color: 'rgba(255,255,255,0.25)' }}>no branch</span>
+                          <span className="text-[11px] text-white/25">no branch</span>
                         )}
-                        <span style={{ flex: 1 }} />
-                        <span
-                          style={{
-                            fontFamily: 'ui-monospace, Menlo, monospace',
-                            fontSize: 10,
-                            opacity: 0.4,
-                          }}
-                        >
-                          {s.sessionId.slice(0, 8)}
-                        </span>
+                        <span className="flex-1" />
+                        <span className="font-mono text-[10px] opacity-40">{s.sessionId.slice(0, 8)}</span>
                         <SourceBadge sourceId={s.sourceId} />
                       </div>
-                      <div
-                        style={{
-                          fontSize: 12,
-                          fontStyle: 'italic',
-                          color: 'rgba(255,255,255,0.45)',
-                          marginBottom: 5,
-                          overflow: 'hidden',
-                          textOverflow: 'ellipsis',
-                          whiteSpace: 'nowrap',
-                        }}
-                      >
+                      <div className="text-xs italic text-white/45 mb-1 truncate">
                         {prompt ? `"${prompt}"` : '(no prompt)'}
                       </div>
-                      <div
-                        style={{
-                          fontSize: 10,
-                          color: 'rgba(255,255,255,0.38)',
-                          fontVariantNumeric: 'tabular-nums',
-                        }}
-                      >
+                      <div className="text-[10px] text-white/38 tabular-nums">
                         {formatNumber(s.messageCount)} msgs
                         <Dot />
                         {tok} tokens
@@ -685,10 +568,14 @@ function PlaygroundShell() {
           )}
         </section>
       </main>
+
+      <SearchOverlay
+        open={searchOpen}
+        onClose={() => setSearchOpen(false)}
+        sourceIds={sourceIds}
+        scopeProject={scopeProject}
+        onNavigate={onSearchNavigate}
+      />
     </div>
   );
-}
-
-function Dot() {
-  return <span style={{ opacity: 0.35 }}> · </span>;
 }

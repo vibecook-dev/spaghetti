@@ -103,7 +103,20 @@ from source if the prebuild isn't available.
   renderer windows. Quit uses `dispose()`.
 - **preload** exposes `window.spaghetti` (`src/shared/ipc.ts`).
 - **renderer** shows a dedicated loading screen during ingest, then a
-  multi-source project/session browser with `sourceId` badges.
+  multi-source project/session browser with `sourceId` badges, full-text
+  search (`⌘K`), live session tails, and an artifact drawer
+  (plan / todos / task / subagents / memory).
+
+## Renderer features
+
+| Surface | How |
+|---|---|
+| Search | `⌘K` / header **Search** → `api.search` overlay; Enter opens project/session |
+| Live chat | `onChange` → append new messages at the tail; “N new” pill when scrolled up |
+| Message filters | Session bar: type/tool solo (pin) + mute (eye) + text filter (ProjectPage parity) |
+| Artifacts | Session **Artifacts** drawer: plan, todos, task, subagents, MEMORY.md |
+| Source filter | Project list chips when multiple agents are indexed |
+| Stats | Header: segment count, DB size, FTS index size |
 
 ## Notes
 

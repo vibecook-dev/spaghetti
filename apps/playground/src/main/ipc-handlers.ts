@@ -40,7 +40,9 @@ export function registerIpcHandlers(): void {
 
   // Projects ----------------------------------------------------------------
   ipcMain.handle(IPC_CHANNELS.getProjectList, () => getSdk().getProjectList());
-  ipcMain.handle(IPC_CHANNELS.getProjectMemory, (_e, projectSlug: string) => getSdk().getProjectMemory(projectSlug));
+  ipcMain.handle(IPC_CHANNELS.getProjectMemory, (_e, projectSlug: string, options?: { sourceId?: string }) =>
+    getSdk().getProjectMemory(projectSlug, options),
+  );
 
   // Sessions ----------------------------------------------------------------
   ipcMain.handle(IPC_CHANNELS.getSessionList, (_e, projectSlug: string, options?: { sourceId?: string }) =>
