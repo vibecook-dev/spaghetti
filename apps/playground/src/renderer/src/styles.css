@@ -339,10 +339,10 @@ input:focus-visible {
  * spaghetti-ui-design TranscriptEntry roles while keeping Prism.
  *
  * Design roles (App.tsx):
- *   user:         text-[14px] font-serif italic leading-relaxed
+ *   user:         text-[14px] font-serif leading-relaxed
  *   assistant:    text-[14px] font-serif leading-relaxed text-justify
- *   thought:      text-[13px] font-serif italic leading-relaxed opacity-70
- *   branch_start: text-[12px] font-serif italic leading-relaxed
+ *   thought:      text-[13px] font-serif leading-relaxed opacity-70
+ *   branch_start: text-[12px] font-serif leading-relaxed
  *   tool_use cmd: font-mono text-[11px] leading-relaxed
  *   tool_result:  font-mono text-[11px] leading-relaxed
  *
@@ -361,10 +361,10 @@ input:focus-visible {
   line-height: 1.625; /* Tailwind leading-relaxed */
 }
 
-/* user — 14px italic */
+/* user — 14px roman */
 .archive-md--user {
   font-size: 14px;
-  font-style: italic;
+  font-style: normal;
 }
 
 /* assistant — 14px roman, justified */
@@ -374,17 +374,17 @@ input:focus-visible {
   text-align: justify;
 }
 
-/* thought — 13px italic, faded */
+/* thought — 13px roman, faded */
 .archive-md--thought {
   font-size: 13px;
-  font-style: italic;
+  font-style: normal;
   opacity: 0.7;
 }
 
-/* branch_start — 12px italic */
+/* branch_start — 12px roman */
 .archive-md--branch {
   font-size: 12px;
-  font-style: italic;
+  font-style: normal;
 }
 
 /* Beat SDK utility sizes on block children */
@@ -482,11 +482,17 @@ input:focus-visible {
 .archive-md blockquote {
   border-left: 1px solid var(--archive-ink-line) !important;
   padding-left: 0.75em !important;
-  font-style: italic;
+  font-style: normal;
   opacity: 0.85;
   font-family: inherit !important;
   font-size: inherit !important;
   line-height: inherit !important;
+}
+
+/* The archive design uses roman type throughout, including Markdown emphasis. */
+.archive-md em {
+  font-style: normal !important;
+  font-weight: 500;
 }
 
 .archive-md a {

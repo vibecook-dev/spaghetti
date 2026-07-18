@@ -90,8 +90,13 @@ contextBridge.exposeInMainWorld('mille', {
 
 contextBridge.exposeInMainWorld('windowControls', {
   minimize: (): Promise<void> => ipcRenderer.invoke('window:minimize'),
-  maximize: (): Promise<void> => ipcRenderer.invoke('window:maximize'),
+  toggleFullScreen: (): Promise<void> => ipcRenderer.invoke('window:toggle-full-screen'),
   close: (): Promise<void> => ipcRenderer.invoke('window:close'),
+});
+
+contextBridge.exposeInMainWorld('fileViewer', {
+  openHtmlInBrowser: (path: string, browser: 'default' | 'safari' | 'chrome' | 'firefox'): Promise<{ ok: true }> =>
+    ipcRenderer.invoke('file-viewer:open-html', path, browser),
 });
 
 // Make the bridge type available globally for the renderer's consumers.
@@ -105,8 +110,11 @@ declare global {
     };
     windowControls?: {
       minimize(): Promise<void>;
-      maximize(): Promise<void>;
+      toggleFullScreen(): Promise<void>;
       close(): Promise<void>;
+    };
+    fileViewer?: {
+      openHtmlInBrowser(path: string, browser: 'default' | 'safari' | 'chrome' | 'firefox'): Promise<{ ok: true }>;
     };
   }
 }

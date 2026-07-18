@@ -262,7 +262,7 @@ export function SearchOverlay({
                         ) : null}
                       </div>
                       {/* Design prose snippets: serif ~13–14px relaxed */}
-                      <div className="font-serif text-[13px] italic text-ink/75 leading-relaxed line-clamp-2">
+                      <div className="line-clamp-2 font-serif text-[13px] leading-relaxed text-ink/75">
                         {flattenPrompt(r.snippet, 180) || '(empty snippet)'}
                       </div>
                     </button>

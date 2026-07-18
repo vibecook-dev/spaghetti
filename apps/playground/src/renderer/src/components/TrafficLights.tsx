@@ -1,5 +1,5 @@
 /**
- * macOS-style traffic light window controls (close / minimize / zoom).
+ * macOS-style traffic light window controls (close / minimize / fullscreen).
  * Placed top-left of the custom title bar; icons appear on hover.
  */
 
@@ -27,9 +27,9 @@ export function TrafficLights({ className = '' }: { className?: string }) {
       <button
         type="button"
         className="traffic-light traffic-light--max"
-        title="Maximize"
-        aria-label="Maximize window"
-        onClick={() => void window.windowControls?.maximize()}
+        title="Toggle full screen"
+        aria-label="Toggle full screen"
+        onClick={() => void window.windowControls?.toggleFullScreen()}
       />
     </div>
   );

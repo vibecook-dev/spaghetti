@@ -1,0 +1,1013 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Spaghetti Playground · Typography Index</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=EB+Garamond:ital,wght@0,400;0,500;0,600;1,400&amp;display=swap"
+      rel="stylesheet"
+    />
+    <style>
+      :root {
+        --ink: #2b2623;
+        --paper: #f1ede4;
+        --paper-deep: #e9e5da;
+        --paper-bright: #fcfaf6;
+        --sanguine: #9a3b28;
+        --indigo: #3f5c6b;
+        --faded: #736958;
+        --verdigris: #4f6b4a;
+        --line: rgba(43, 38, 35, 0.2);
+        --line-soft: rgba(43, 38, 35, 0.1);
+        --line-mid: rgba(43, 38, 35, 0.15);
+        --line-header: rgba(43, 38, 35, 0.4);
+        --outer: rgba(43, 38, 35, 0.8);
+        --serif: 'EB Garamond', Georgia, 'Times New Roman', serif;
+        --mono: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+      }
+
+      html.dark {
+        --ink: #d4cbbd;
+        --paper: #141312;
+        --paper-deep: #11100f;
+        --paper-bright: #171615;
+        --sanguine: #d98d78;
+        --indigo: #7fa6b5;
+        --faded: #a89a86;
+        --verdigris: #8ba888;
+        --line: rgba(212, 203, 189, 0.2);
+        --line-soft: rgba(212, 203, 189, 0.1);
+        --line-mid: rgba(212, 203, 189, 0.15);
+        --line-header: rgba(212, 203, 189, 0.3);
+        --outer: rgba(212, 203, 189, 0.6);
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html {
+        min-height: 100%;
+        background: var(--paper-deep);
+        color: var(--ink);
+      }
+
+      body {
+        margin: 0;
+        min-height: 100vh;
+        padding: 18px;
+        font-family:
+          system-ui,
+          -apple-system,
+          BlinkMacSystemFont,
+          'Segoe UI',
+          sans-serif;
+        -webkit-font-smoothing: antialiased;
+        text-rendering: optimizeLegibility;
+      }
+
+      button,
+      input {
+        color: inherit;
+      }
+
+      .sheet {
+        min-height: calc(100vh - 36px);
+        border: 1px solid var(--outer);
+        background: var(--paper);
+      }
+
+      .masthead {
+        position: sticky;
+        top: 0;
+        z-index: 10;
+        display: flex;
+        align-items: center;
+        gap: 24px;
+        min-height: 64px;
+        padding: 12px 22px;
+        border-bottom: 1px solid var(--line-header);
+        background: color-mix(in srgb, var(--paper) 94%, transparent);
+        backdrop-filter: blur(10px);
+      }
+
+      .masthead-title {
+        margin: 0;
+        font: 500 13px/1 var(--serif);
+        letter-spacing: 0.2em;
+        text-transform: lowercase;
+      }
+
+      .masthead-note {
+        margin: 0;
+        max-width: 650px;
+        font: 9px/1.45 var(--mono);
+        letter-spacing: 0.1em;
+        text-transform: uppercase;
+        opacity: 0.55;
+      }
+
+      .theme-toggle {
+        margin-left: auto;
+        flex: none;
+        border: 1px solid var(--line);
+        background: transparent;
+        padding: 6px 9px;
+        font: 9px/1 var(--mono);
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+        cursor: pointer;
+      }
+
+      .theme-toggle:hover {
+        background: var(--ink);
+        color: var(--paper);
+      }
+
+      .intro {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) minmax(260px, 0.55fr);
+        gap: 32px;
+        padding: 34px 28px 30px;
+        border-bottom: 1px solid var(--line);
+      }
+
+      .intro h1 {
+        margin: 0;
+        font: 500 clamp(32px, 5vw, 54px) / 0.92 var(--serif);
+        letter-spacing: -0.02em;
+      }
+
+      .intro p {
+        margin: 15px 0 0;
+        max-width: 700px;
+        font: 15px/1.625 var(--serif);
+        opacity: 0.7;
+      }
+
+      .instructions {
+        align-self: end;
+        border-left: 1px solid var(--line);
+        padding-left: 20px;
+        font: 9px/1.65 var(--mono);
+        letter-spacing: 0.1em;
+        text-transform: uppercase;
+        opacity: 0.58;
+      }
+
+      .group {
+        padding: 28px;
+        border-bottom: 1px solid var(--line);
+      }
+
+      .group:last-child {
+        border-bottom: 0;
+      }
+
+      .group-header {
+        display: flex;
+        align-items: baseline;
+        gap: 14px;
+        margin-bottom: 14px;
+      }
+
+      .group-header h2 {
+        margin: 0;
+        font: 10px/1 var(--serif);
+        letter-spacing: 0.15em;
+        text-transform: uppercase;
+      }
+
+      .group-header span {
+        font: 8px/1 var(--mono);
+        letter-spacing: 0.12em;
+        opacity: 0.4;
+      }
+
+      .specimens {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        border-top: 1px solid var(--line-mid);
+        border-left: 1px solid var(--line-mid);
+      }
+
+      .specimen {
+        min-width: 0;
+        min-height: 190px;
+        display: grid;
+        grid-template-rows: minmax(95px, 1fr) auto;
+        border-right: 1px solid var(--line-mid);
+        border-bottom: 1px solid var(--line-mid);
+        background: color-mix(in srgb, var(--paper-bright) 34%, transparent);
+      }
+
+      .sample {
+        min-width: 0;
+        display: flex;
+        align-items: center;
+        padding: 24px 22px;
+        overflow: hidden;
+      }
+
+      .sample > * {
+        min-width: 0;
+        max-width: 100%;
+        margin: 0;
+      }
+
+      .definition {
+        position: relative;
+        display: grid;
+        grid-template-columns: 58px minmax(0, 1fr);
+        min-height: 78px;
+        border-top: 1px solid var(--line-soft);
+      }
+
+      .index {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        border: 0;
+        border-right: 1px solid var(--line-soft);
+        background: transparent;
+        font: 600 10px/1 var(--mono);
+        letter-spacing: 0.12em;
+        color: var(--sanguine);
+        cursor: copy;
+      }
+
+      .index:hover,
+      .index.copied {
+        background: var(--sanguine);
+        color: var(--paper-bright);
+      }
+
+      .details {
+        min-width: 0;
+        padding: 10px 12px 11px;
+      }
+
+      .details h3 {
+        margin: 0 0 5px;
+        font: 500 12px/1.2 var(--serif);
+      }
+
+      .recipe,
+      .used-in {
+        margin: 0;
+        font: 8px/1.5 var(--mono);
+        letter-spacing: 0.035em;
+        overflow-wrap: anywhere;
+      }
+
+      .recipe {
+        color: var(--indigo);
+      }
+
+      .used-in {
+        margin-top: 3px;
+        opacity: 0.45;
+      }
+
+      .serif {
+        font-family: var(--serif);
+      }
+
+      .mono {
+        font-family: var(--mono);
+      }
+
+      .truncate {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .justify {
+        text-align: justify;
+      }
+
+      .sanguine {
+        color: var(--sanguine);
+      }
+
+      .indigo {
+        color: var(--indigo);
+      }
+
+      .verdigris {
+        color: var(--verdigris);
+      }
+
+      .sample-code {
+        width: 100%;
+        padding: 10px 12px;
+        border: 1px solid var(--line-mid);
+        background: color-mix(in srgb, var(--ink) 4%, transparent);
+        white-space: pre-wrap;
+      }
+
+      .sample-table {
+        width: 100%;
+        border-collapse: collapse;
+      }
+
+      .sample-table th,
+      .sample-table td {
+        padding: 5px 7px;
+        border: 1px solid var(--line-soft);
+        text-align: left;
+      }
+
+      .sample-quote {
+        border-left: 1px solid var(--line);
+        padding-left: 0.75em;
+      }
+
+      @media (max-width: 800px) {
+        body {
+          padding: 0;
+        }
+
+        .sheet {
+          border: 0;
+        }
+
+        .masthead {
+          align-items: flex-start;
+          flex-wrap: wrap;
+        }
+
+        .masthead-note {
+          order: 3;
+          width: 100%;
+        }
+
+        .intro {
+          grid-template-columns: 1fr;
+        }
+
+        .specimens {
+          grid-template-columns: 1fr;
+        }
+
+        .group {
+          padding: 24px 16px;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main class="sheet">
+      <header class="masthead">
+        <h1 class="masthead-title">spaghetti · typography index</h1>
+        <p class="masthead-note">65 unique text treatments · indexed by semantic role · light and dark reference</p>
+        <button class="theme-toggle" id="theme-toggle" type="button">Dark paper</button>
+      </header>
+
+      <section class="intro">
+        <div>
+          <h1>Playground text styles,<br />catalogued for review.</h1>
+          <p>
+            Each specimen below reproduces a distinct typography treatment used by the playground. Exact duplicates are
+            consolidated under one index; usage notes identify every major surface sharing that treatment.
+          </p>
+        </div>
+        <div class="instructions">
+          Refer to a style by its stable index—for example, “T31 should be smaller.” Click an index to copy it. Use the
+          paper toggle to inspect both archive palettes.
+        </div>
+      </section>
+
+      <div id="catalogue"></div>
+    </main>
+
+    <script>
+      const groups = [
+        {
+          title: 'Chrome and controls',
+          note: 'Global header · shared primitives · settings',
+          items: [
+            [
+              'T01',
+              'Application brand',
+              'serif · 11px · tracking .20em',
+              'Global header; loading header',
+              'spaghetti',
+              'font-family:var(--serif);font-size:11px;letter-spacing:.2em',
+            ],
+            [
+              'T02',
+              'Header command',
+              'mono · 9px · uppercase · widest',
+              'Search command; compact header actions',
+              '⌕  SEARCH',
+              'font-family:var(--mono);font-size:9px;text-transform:uppercase;letter-spacing:.1em',
+            ],
+            [
+              'T03',
+              'Header statistics',
+              'mono · 9px · uppercase · widest · 60%',
+              'Global index statistics',
+              '45 SEGS · 12.4 MB · 120 INDEXED',
+              'font-family:var(--mono);font-size:9px;text-transform:uppercase;letter-spacing:.1em;opacity:.6',
+            ],
+            [
+              'T04',
+              'Section heading',
+              'serif · 10px · uppercase · tracking .15em · 80%',
+              'Projects; Sessions; Structure; shared SectionLabel',
+              'PROJECTS',
+              'font-family:var(--serif);font-size:10px;text-transform:uppercase;letter-spacing:.15em;opacity:.8',
+            ],
+            [
+              'T05',
+              'Section count',
+              'mono · 8px · widest · 45%',
+              'Project list count',
+              '17',
+              'font-family:var(--mono);font-size:8px;letter-spacing:.1em;opacity:.45',
+            ],
+            [
+              'T06',
+              'Filter chip',
+              'mono · 9px · uppercase · tracking .04em',
+              'Source chips; search scope chips',
+              'ALL AGENTS',
+              'font-family:var(--mono);font-size:9px;text-transform:uppercase;letter-spacing:.04em',
+            ],
+            [
+              'T07',
+              'Standard button',
+              'mono · 9px · uppercase · widest',
+              'Shared buttons; retry; rebuild',
+              'REBUILD',
+              'font-family:var(--mono);font-size:9px;text-transform:uppercase;letter-spacing:.1em',
+            ],
+            [
+              'T08',
+              'Keyboard hint',
+              'mono · 8px · normal tracking',
+              'Shortcut hints',
+              '⌘K',
+              'font-family:var(--mono);font-size:8px;line-height:1',
+            ],
+            [
+              'T09',
+              'Live status',
+              'mono · 9px · tracking .10em',
+              'Transcript live indicator',
+              '●  LIVE',
+              'font-family:var(--mono);font-size:9px;letter-spacing:.1em;color:var(--verdigris)',
+            ],
+            [
+              'T10',
+              'Dialog eyebrow',
+              'mono · 9px · tracking .18em · 55%',
+              'Search; Settings; File Viewer headers',
+              'SPAGHETTI ARCHIVE · SETTINGS',
+              'font-family:var(--mono);font-size:9px;letter-spacing:.18em;opacity:.55',
+            ],
+            [
+              'T11',
+              'Dialog close',
+              'mono · 9px · tracking .14em · 60%',
+              'Popup close controls',
+              'CLOSE  ×',
+              'font-family:var(--mono);font-size:9px;letter-spacing:.14em;opacity:.6',
+            ],
+            [
+              'T12',
+              'Settings title',
+              'serif · 25px · medium · tight',
+              'Settings popup title',
+              'Archive settings',
+              'font-family:var(--serif);font-size:25px;font-weight:500;line-height:1;letter-spacing:-.01em',
+            ],
+            [
+              'T13',
+              'Settings description',
+              'serif · 13px · relaxed · 65%',
+              'Settings popup introduction',
+              'Inspect the local index and manage its on-disk catalogue.',
+              'font-family:var(--serif);font-size:13px;line-height:1.625;opacity:.65',
+            ],
+            [
+              'T14',
+              'Settings section label',
+              'mono · 9px · uppercase · tracking .16em · 45%',
+              'Index; Maintenance labels',
+              'MAINTENANCE',
+              'font-family:var(--mono);font-size:9px;text-transform:uppercase;letter-spacing:.16em;opacity:.45',
+            ],
+            [
+              'T15',
+              'Settings property row',
+              'mono · 9px · uppercase · tracking .10em',
+              'Engine/status/stat rows',
+              'DATABASE SIZE                              12.4 MB',
+              'font-family:var(--mono);font-size:9px;text-transform:uppercase;letter-spacing:.1em',
+            ],
+            [
+              'T16',
+              'Maintenance title',
+              'serif · 14px · compact',
+              'Rebuild setting name',
+              'Rebuild local index',
+              'font-family:var(--serif);font-size:14px;line-height:1',
+            ],
+            [
+              'T17',
+              'Maintenance description',
+              'serif · 12px · relaxed · 60%',
+              'Rebuild setting explanation',
+              'Discard the current catalogue and ingest agent history again from disk.',
+              'font-family:var(--serif);font-size:12px;line-height:1.625;opacity:.6',
+            ],
+          ],
+        },
+        {
+          title: 'Lists and navigation',
+          note: 'Projects · sessions · structure tree',
+          items: [
+            [
+              'T18',
+              'Project name',
+              'mono · 10px · tight tracking',
+              'Project list primary label',
+              'spaghetti-ui-design',
+              'font-family:var(--mono);font-size:10px;letter-spacing:-.025em',
+            ],
+            [
+              'T19',
+              'Source badge · small',
+              'mono · 8px · bold · tracking .12em',
+              'Project list model/source badge',
+              '[ CLAUDE ]',
+              'font-family:var(--mono);font-size:8px;font-weight:700;letter-spacing:.12em;color:var(--sanguine)',
+            ],
+            [
+              'T20',
+              'Source badge · medium',
+              'mono · 10px · bold · tracking .10em',
+              'Transcript reading header badge',
+              '[ CLAUDE ]',
+              'font-family:var(--mono);font-size:10px;font-weight:700;letter-spacing:.1em;color:var(--sanguine)',
+            ],
+            [
+              'T21',
+              'Project summary',
+              'serif · 11px · leading 1.35 · 65%',
+              'Project list secondary prose',
+              'Refine the archive transcript and align every detail with the reference design.',
+              'font-family:var(--serif);font-size:11px;line-height:1.35;opacity:.65',
+            ],
+            [
+              'T22',
+              'Project metadata',
+              'mono · 8px · uppercase · tracking .08em · 60%',
+              'Project metrics and recency',
+              '12 SESS · 184 MSG · 48K TOK                         3M AGO',
+              'font-family:var(--mono);font-size:8px;text-transform:uppercase;letter-spacing:.08em;opacity:.6',
+            ],
+            [
+              'T23',
+              'Session index / branch',
+              'mono · 10px · tracking .10em · 70%',
+              'Session number and reading header ID',
+              '#12   UI/MESSAGE-GALLERY',
+              'font-family:var(--mono);font-size:10px;letter-spacing:.1em;opacity:.7',
+            ],
+            [
+              'T24',
+              'Session prompt quote',
+              'serif · 13px · roman · relaxed · 70%',
+              'Session list prompt preview',
+              '“Render the complete message gallery for visual QA.”',
+              'font-family:var(--serif);font-size:13px;font-style:normal;line-height:1.625;opacity:.7',
+            ],
+            [
+              'T25',
+              'Session short ID',
+              'mono · 9px · 40%',
+              'Session list identifier',
+              '7F23C18A',
+              'font-family:var(--mono);font-size:9px;opacity:.4',
+            ],
+            [
+              'T26',
+              'Structure file',
+              'mono · 10px · tight tracking',
+              'File tree leaf nodes',
+              'ArchiveTranscript.tsx',
+              'font-family:var(--mono);font-size:10px;letter-spacing:-.025em',
+            ],
+            [
+              'T27',
+              'Structure folder',
+              'mono · 9px · uppercase · widest',
+              'File tree folder nodes',
+              'COMPONENTS',
+              'font-family:var(--mono);font-size:9px;text-transform:uppercase;letter-spacing:.1em',
+            ],
+            [
+              'T28',
+              'Structure empty hint',
+              'mono · 9px · wide · 40%',
+              'Empty tree and unopened session hints',
+              '— empty —',
+              'font-family:var(--mono);font-size:9px;letter-spacing:.025em;opacity:.4',
+            ],
+          ],
+        },
+        {
+          title: 'Filters, search, loading, and empty states',
+          note: 'Utility surfaces and transient feedback',
+          items: [
+            [
+              'T29',
+              'Transcript filter pill',
+              'mono · 11px · tracking .04em',
+              'Type/tool filters and filter input',
+              'ASSISTANT   12',
+              'font-family:var(--mono);font-size:11px;letter-spacing:.04em;color:var(--sanguine)',
+            ],
+            [
+              'T30',
+              'Filter count',
+              'mono · 10px · compact · 65%',
+              'Count inside filter pills',
+              '12',
+              'font-family:var(--mono);font-size:10px;line-height:1;opacity:.65',
+            ],
+            [
+              'T31',
+              'Transcript tally',
+              'mono · 10px · tracking .12em · 50%',
+              'Filtered/total message tally',
+              '45/63',
+              'font-family:var(--mono);font-size:10px;letter-spacing:.12em;opacity:.5',
+            ],
+            [
+              'T32',
+              'Search input',
+              'serif · 15px',
+              'Search popup query input',
+              'Search messages, plans, todos…',
+              'font-family:var(--serif);font-size:15px;opacity:.65',
+            ],
+            [
+              'T33',
+              'Search result type',
+              'mono · 9px · uppercase · widest · sanguine',
+              'Search result category',
+              'ASSISTANT',
+              'font-family:var(--mono);font-size:9px;text-transform:uppercase;letter-spacing:.1em;color:var(--sanguine)',
+            ],
+            [
+              'T34',
+              'Search result project',
+              'mono · 10px · tight · 50%',
+              'Search result project slug',
+              'project100/spaghetti',
+              'font-family:var(--mono);font-size:10px;letter-spacing:-.025em;opacity:.5',
+            ],
+            [
+              'T35',
+              'Search result excerpt',
+              'serif · 13px · roman · relaxed · 75%',
+              'Search result body excerpt',
+              'The archive rail should stay quiet while the message prose remains primary.',
+              'font-family:var(--serif);font-size:13px;font-style:normal;line-height:1.625;opacity:.75',
+            ],
+            [
+              'T36',
+              'Empty-state title',
+              'serif · 14px · relaxed · 50%',
+              'No projects/messages/results',
+              'No messages match filters',
+              'font-family:var(--serif);font-size:14px;line-height:1.625;opacity:.5',
+            ],
+            [
+              'T37',
+              'Empty-state detail',
+              'mono · 10px · uppercase · tracking .08em · 35%',
+              'Empty-state guidance',
+              'UNPIN SOLOS, UNMUTE TYPES, OR CLEAR THE FILTER',
+              'font-family:var(--mono);font-size:10px;text-transform:uppercase;letter-spacing:.08em;line-height:1.625;opacity:.35',
+            ],
+            [
+              'T38',
+              'Loading eyebrow',
+              'mono · 9px · uppercase · tracking .20em · 50%',
+              'Cold-start archive label',
+              'ARCHIVE',
+              'font-family:var(--mono);font-size:9px;text-transform:uppercase;letter-spacing:.2em;opacity:.5',
+            ],
+            [
+              'T39',
+              'Loading headline',
+              'serif · 24px · tight tracking',
+              'Cold-start/rebuild headline',
+              'Indexing agent history',
+              'font-family:var(--serif);font-size:24px;letter-spacing:-.025em',
+            ],
+            [
+              'T40',
+              'Loading description',
+              'serif · 13px · relaxed · 60%',
+              'Cold-start status prose',
+              'Reading local sessions and preparing the searchable catalogue.',
+              'font-family:var(--serif);font-size:13px;line-height:1.625;opacity:.6',
+            ],
+            [
+              'T41',
+              'Loading stage',
+              'mono · 10px · uppercase · wide',
+              'Per-source progress labels',
+              'CLAUDE CODE   INDEXING',
+              'font-family:var(--mono);font-size:10px;text-transform:uppercase;letter-spacing:.025em;opacity:.8',
+            ],
+            [
+              'T42',
+              'Error label',
+              'mono · 9px · uppercase · widest · sanguine',
+              'Loading and initialization errors',
+              'ERROR',
+              'font-family:var(--mono);font-size:9px;text-transform:uppercase;letter-spacing:.1em;color:var(--sanguine)',
+            ],
+            [
+              'T43',
+              'Error body',
+              'mono · 10px · 80%',
+              'Error stack/message body',
+              'SQLITE_CORRUPT: malformed database schema near index_segments',
+              'font-family:var(--mono);font-size:10px;opacity:.8;overflow-wrap:anywhere',
+            ],
+          ],
+        },
+        {
+          title: 'Transcript and Markdown',
+          note: 'Timeline labels · prose roles · tool output',
+          items: [
+            [
+              'T44',
+              'Transcript type label',
+              'mono · 9px · bold · uppercase · tracking .20em · 85%',
+              'Participant; Scribe; Thought; System labels',
+              'SCRIBE ⌄',
+              'font-family:var(--mono);font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:.2em;opacity:.85;color:var(--sanguine)',
+            ],
+            [
+              'T45',
+              'Branch / tool chip',
+              'mono · 9px · widest',
+              'Branch description chip and tool name',
+              'AUDIT TRANSCRIPT BRANCH STYLING',
+              'font-family:var(--mono);font-size:9px;letter-spacing:.1em;color:var(--indigo)',
+            ],
+            [
+              'T46',
+              'Message timestamp',
+              'mono · 8px · uppercase · widest · 40%',
+              'Timeline row timestamps',
+              '16:04:12',
+              'font-family:var(--mono);font-size:8px;text-transform:uppercase;letter-spacing:.1em;opacity:.4',
+            ],
+            [
+              'T47',
+              'Tool-card heading',
+              'mono · 10px · uppercase · widest',
+              'Tool call title',
+              'ARCHIVETRANSCRIPT.TSX',
+              'font-family:var(--mono);font-size:10px;text-transform:uppercase;letter-spacing:.1em;color:var(--indigo)',
+            ],
+            [
+              'T48',
+              'Tool-result status',
+              'mono · 9px · uppercase · widest · 70%',
+              'OP_SUCCESS / OP_ERROR state',
+              '✓  OP_SUCCESS',
+              'font-family:var(--mono);font-size:9px;text-transform:uppercase;letter-spacing:.1em;opacity:.7;color:var(--verdigris)',
+            ],
+            [
+              'T49',
+              'Participant prose',
+              'serif · 14px · roman · leading 1.625',
+              'User transcript body',
+              'Please make the message hierarchy quieter, but preserve enough contrast for long archival reading.',
+              'font-family:var(--serif);font-size:14px;font-style:normal;line-height:1.625',
+            ],
+            [
+              'T50',
+              'Scribe prose',
+              'serif · 14px · roman · justified · leading 1.625',
+              'Assistant transcript body',
+              'The transcript uses a continuous hairline rail, compact catalogue labels, and a measured serif column so the response reads like an annotated archival record rather than a conventional chat bubble.',
+              'font-family:var(--serif);font-size:14px;line-height:1.625;text-align:justify',
+            ],
+            [
+              'T51',
+              'Thought prose',
+              'serif · 13px · roman · leading 1.625 · 70%',
+              'Thinking transcript body',
+              'I should compare the visual weight of the type label against the prose before adjusting the surrounding rhythm.',
+              'font-family:var(--serif);font-size:13px;font-style:normal;line-height:1.625;opacity:.7',
+            ],
+            [
+              'T52',
+              'Branch prose',
+              'serif · 12px · roman · leading 1.625',
+              'Task delegation and sidechain introduction',
+              'Delegating to Explore to inspect branch rails, nested tool cards, and return curves…',
+              'font-family:var(--serif);font-size:12px;font-style:normal;line-height:1.625;color:var(--indigo)',
+            ],
+            [
+              'T53',
+              'Tool command / result',
+              'mono · 11px · leading 1.625',
+              'Tool input and output bodies',
+              '$ pnpm typecheck && pnpm test\n42 tests passed in 3.81s',
+              'font-family:var(--mono);font-size:11px;line-height:1.625',
+              'code',
+            ],
+            [
+              'T54',
+              'Markdown heading 1',
+              'serif · 20px · medium · leading 1.3',
+              'Transcript Markdown h1',
+              'Message gallery',
+              'font-family:var(--serif);font-size:20px;font-weight:500;line-height:1.3',
+            ],
+            [
+              'T55',
+              'Markdown heading 2',
+              'serif · 17.6px · medium · leading 1.3',
+              'Transcript Markdown h2',
+              'Rich assistant response',
+              'font-family:var(--serif);font-size:17.6px;font-weight:500;line-height:1.3',
+            ],
+            [
+              'T56',
+              'Markdown heading 3',
+              'serif · 16px · medium · leading 1.35',
+              'Transcript Markdown h3',
+              'Archive details',
+              'font-family:var(--serif);font-size:16px;font-weight:500;line-height:1.35',
+            ],
+            [
+              'T57',
+              'Inline code',
+              'mono · .85em · roman',
+              'Inline code inside serif prose',
+              'const compact = true',
+              'font-family:var(--mono);font-size:11.9px;font-style:normal;background:color-mix(in srgb,var(--ink) 8%,transparent);padding:2px 4px',
+            ],
+            [
+              'T58',
+              'Markdown blockquote',
+              'inherits prose · roman · 85%',
+              'Transcript quote blocks',
+              'This fixture is synthetic and available only in development.',
+              'font-family:var(--serif);font-size:14px;font-style:normal;line-height:1.625;opacity:.85',
+              'quote',
+            ],
+            [
+              'T59',
+              'Markdown table',
+              'mono · 11px · leading 1.45',
+              'Transcript GFM tables',
+              '<table class="sample-table"><tr><th>State</th><th>Treatment</th></tr><tr><td>Hover</td><td>5% ink wash</td></tr></table>',
+              'font-family:var(--mono);font-size:11px;line-height:1.45',
+              'html',
+            ],
+          ],
+        },
+        {
+          title: 'File viewer catalogue',
+          note: 'Large editorial title · catalogue metadata · file body',
+          items: [
+            [
+              'T60',
+              'Catalogue title',
+              'serif · clamp 32–53.6px · medium · leading .92',
+              'File viewer document title',
+              'ArchiveTranscript.tsx',
+              'font-family:var(--serif);font-size:clamp(32px,5vw,53.6px);font-weight:500;line-height:.92;letter-spacing:-.02em',
+            ],
+            [
+              'T61',
+              'Catalogue description',
+              'serif · 15px · relaxed · 70%',
+              'File viewer summary',
+              'A preserved source document from the indexed session archive.',
+              'font-family:var(--serif);font-size:15px;line-height:1.625;opacity:.7',
+            ],
+            [
+              'T62',
+              'Catalogue field label',
+              'mono · 9px · tracking .12em · 50%',
+              'Collection/reference/format terms',
+              'CATALOGUE ENTRY',
+              'font-family:var(--mono);font-size:9px;letter-spacing:.12em;opacity:.5',
+            ],
+            [
+              'T63',
+              'Catalogue field value',
+              'mono · 10px · tracking .06em',
+              'Collection/reference/format values',
+              'SESSION ARCHIVE / INDEXED',
+              'font-family:var(--mono);font-size:10px;letter-spacing:.06em',
+            ],
+            [
+              'T64',
+              'File content',
+              'mono · 12px · 24px leading',
+              'File viewer preformatted document',
+              'export function ArchiveTranscript() {\n  return <div className="archive-transcript" />;\n}',
+              'font-family:var(--mono);font-size:12px;line-height:24px',
+              'code',
+            ],
+            [
+              'T65',
+              'Catalogue footer',
+              'mono · 9px · tracking .12em · 50%',
+              'File viewer line count / encoding footer',
+              '42 LINES                                      UTF-8 · READ ONLY',
+              'font-family:var(--mono);font-size:9px;letter-spacing:.12em;opacity:.5',
+            ],
+          ],
+        },
+      ];
+
+      const catalogue = document.querySelector('#catalogue');
+
+      for (const group of groups) {
+        const section = document.createElement('section');
+        section.className = 'group';
+        const items = group.items
+          .map(([id, name, recipe, usedIn, sample, style, mode]) => {
+            let specimen = sample;
+            if (mode === 'code') specimen = `<pre class="sample-code">${escapeHtml(sample)}</pre>`;
+            else if (mode === 'quote') specimen = `<blockquote class="sample-quote">${escapeHtml(sample)}</blockquote>`;
+            else if (mode !== 'html') specimen = `<div class="truncate">${escapeHtml(sample)}</div>`;
+            return `
+              <article class="specimen" id="${id}">
+                <div class="sample"><div style="${style};width:100%">${specimen}</div></div>
+                <div class="definition">
+                  <button class="index" type="button" data-copy="${id}" title="Copy ${id}">${id}</button>
+                  <div class="details">
+                    <h3>${name}</h3>
+                    <p class="recipe">${recipe}</p>
+                    <p class="used-in">${usedIn}</p>
+                  </div>
+                </div>
+              </article>`;
+          })
+          .join('');
+        section.innerHTML = `
+          <header class="group-header"><h2>${group.title}</h2><span>${group.note}</span></header>
+          <div class="specimens">${items}</div>`;
+        catalogue.append(section);
+      }
+
+      function escapeHtml(value) {
+        return String(value)
+          .replaceAll('&', '&amp;')
+          .replaceAll('<', '&lt;')
+          .replaceAll('>', '&gt;')
+          .replaceAll('"', '&quot;');
+      }
+
+      document.addEventListener('click', async (event) => {
+        const button = event.target.closest('[data-copy]');
+        if (!button) return;
+        const value = button.dataset.copy;
+        try {
+          await navigator.clipboard.writeText(value);
+        } catch {
+          const input = document.createElement('textarea');
+          input.value = value;
+          document.body.append(input);
+          input.select();
+          document.execCommand('copy');
+          input.remove();
+        }
+        button.classList.add('copied');
+        button.textContent = 'COPIED';
+        window.setTimeout(() => {
+          button.classList.remove('copied');
+          button.textContent = value;
+        }, 900);
+      });
+
+      document.querySelector('#theme-toggle').addEventListener('click', (event) => {
+        const dark = document.documentElement.classList.toggle('dark');
+        event.currentTarget.textContent = dark ? 'Light paper' : 'Dark paper';
+      });
+    </script>
+  </body>
+</html>

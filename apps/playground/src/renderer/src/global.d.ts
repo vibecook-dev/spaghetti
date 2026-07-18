@@ -9,8 +9,11 @@ declare global {
     };
     windowControls?: {
       minimize(): Promise<void>;
-      maximize(): Promise<void>;
+      toggleFullScreen(): Promise<void>;
       close(): Promise<void>;
+    };
+    fileViewer?: {
+      openHtmlInBrowser(path: string, browser: 'default' | 'safari' | 'chrome' | 'firefox'): Promise<{ ok: true }>;
     };
   }
 }

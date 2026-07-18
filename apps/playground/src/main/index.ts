@@ -9,14 +9,16 @@
  */
 
 import { app, BrowserWindow, ipcMain, shell } from 'electron';
+import { execFile } from 'node:child_process';
 import { existsSync } from 'node:fs';
+import { realpath } from 'node:fs/promises';
+import { basename, dirname, extname, isAbsolute, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { dirname, join } from 'node:path';
 import type { IngestEngine } from '@vibecook/spaghetti-sdk';
 import { registerIpcHandlers, wireEventForwarding } from './ipc-handlers.js';
 import { resolveAppEngine } from './settings.js';
 import { disposeSdk, shutdownSdk } from './sdk.js';
-import { closeMilleWorkspace, openMilleWorkspace } from './mille-host.js';
+import { closeMilleWorkspace, getMilleActiveRoot, openMilleWorkspace } from './mille-host.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -108,6 +110,7 @@ function createWindow(): BrowserWindow {
   const devUrl = process.env['ELECTRON_RENDERER_URL'];
   if (devUrl) {
     void win.loadURL(devUrl);
+    win.webContents.openDevTools({ mode: 'detach' });
   } else {
     void win.loadFile(join(__dirname, '../renderer/index.html'));
   }
@@ -138,15 +141,64 @@ void app.whenReady().then(async () => {
     return { ok: true as const };
   });
 
+  ipcMain.handle('file-viewer:open-html', async (_evt, rawPath: unknown, rawBrowser: unknown) => {
+    if (typeof rawPath !== 'string' || rawPath.length === 0) {
+      throw new Error('file-viewer: path must be a non-empty string');
+    }
+    if (!isBrowserTarget(rawBrowser)) {
+      throw new Error('file-viewer: unsupported browser target');
+    }
+
+    const activeRoot = getMilleActiveRoot();
+    if (!activeRoot) throw new Error('The project workspace is no longer open.');
+
+    const [rootPath, targetPath] = await Promise.all([
+      realpath(activeRoot),
+      resolveViewerTargetPath(activeRoot, rawPath),
+    ]);
+    const projectRelativePath = relative(rootPath, targetPath);
+    if (
+      projectRelativePath === '' ||
+      projectRelativePath === '..' ||
+      projectRelativePath.startsWith(`..${process.platform === 'win32' ? '\\' : '/'}`) ||
+      isAbsolute(projectRelativePath)
+    ) {
+      throw new Error('The file must be inside the active project.');
+    }
+    if (!['.html', '.htm'].includes(extname(targetPath).toLowerCase())) {
+      throw new Error('Only HTML files can be opened from the file viewer.');
+    }
+
+    if (rawBrowser === 'default') {
+      if (process.platform === 'darwin') {
+        await executeFile('/usr/bin/open', [targetPath]);
+      } else {
+        const message = await shell.openPath(targetPath);
+        if (message) throw new Error(message);
+      }
+      return { ok: true as const };
+    }
+    if (process.platform !== 'darwin') {
+      throw new Error('Named browser selection is currently available on macOS only.');
+    }
+
+    const appName = {
+      safari: 'Safari',
+      chrome: 'Google Chrome',
+      firefox: 'Firefox',
+    }[rawBrowser];
+    await executeFile('/usr/bin/open', ['-a', appName, targetPath]);
+    return { ok: true as const };
+  });
+
   // Window chrome controls (fallback when traffic lights are missing / hard to hit).
   ipcMain.handle('window:minimize', (evt) => {
     BrowserWindow.fromWebContents(evt.sender)?.minimize();
   });
-  ipcMain.handle('window:maximize', (evt) => {
+  ipcMain.handle('window:toggle-full-screen', (evt) => {
     const win = BrowserWindow.fromWebContents(evt.sender);
     if (!win) return;
-    if (win.isMaximized()) win.unmaximize();
-    else win.maximize();
+    win.setFullScreen(!win.isFullScreen());
   });
   ipcMain.handle('window:close', (evt) => {
     BrowserWindow.fromWebContents(evt.sender)?.close();
@@ -194,3 +246,39 @@ app.on('before-quit', (event) => {
       app.exit(0);
     });
 });
+
+type BrowserTarget = 'default' | 'safari' | 'chrome' | 'firefox';
+
+function isBrowserTarget(value: unknown): value is BrowserTarget {
+  return value === 'default' || value === 'safari' || value === 'chrome' || value === 'firefox';
+}
+
+function executeFile(file: string, args: string[]): Promise<void> {
+  return new Promise((resolve, reject) => {
+    execFile(file, args, (error) => {
+      if (error) reject(error);
+      else resolve();
+    });
+  });
+}
+
+async function resolveViewerTargetPath(activeRoot: string, rawPath: string): Promise<string> {
+  try {
+    return await realpath(rawPath);
+  } catch (initialError: unknown) {
+    // Compatibility guard for previews opened before the renderer path fix:
+    // `/project/project/file` becomes `/project/file`, but only after the
+    // original path fails and only for the active root's repeated basename.
+    const repeatedRoot = join(activeRoot, basename(activeRoot));
+    const repeatedRelativePath = relative(repeatedRoot, rawPath);
+    if (
+      repeatedRelativePath === '' ||
+      repeatedRelativePath === '..' ||
+      repeatedRelativePath.startsWith(`..${process.platform === 'win32' ? '\\' : '/'}`) ||
+      isAbsolute(repeatedRelativePath)
+    ) {
+      throw initialError;
+    }
+    return realpath(join(activeRoot, repeatedRelativePath));
+  }
+}

@@ -1,12 +1,11 @@
 /**
- * Right Structure panel — design mock layout:
- *   Project Files | Plans | Todos | Tasks | Memory
- * each a collapsible section with a file tree (no tool chrome under Project Files).
+ * Right Structure panel — Project Files is permanently visible while the
+ * session-artifact switches stay docked to the bottom edge.
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ChevronDown, ChevronRight, TerminalSquare, X } from 'lucide-react';
-import type { FileExplorer } from '@vibecook/mille';
+import type { Entry, FileExplorer } from '@vibecook/mille';
 import { connectFileExplorer, type PortFileExplorer } from '@vibecook/mille/port';
 import { FileTreeProvider, FileTree, useFileTreeRef } from '@vibecook/mille-ui';
 import { minimalIconTheme } from '@vibecook/mille-ui/icons/minimal';
@@ -16,7 +15,8 @@ import '@vibecook/mille-ui/tokens.css';
 import '@vibecook/mille-ui/theme/minimal.css';
 import { onFxPort } from '../lib/fx-port.js';
 import { EmptyState, Spinner } from './ui.js';
-import { StructureFilePreview, StructureTree, type StructureNode } from './StructureTree.js';
+import { FileViewerDialog } from './FileViewerDialog.js';
+import { StructureTree, type StructureNode } from './StructureTree.js';
 
 export interface SessionArtifactsProps {
   projectSlug: string;
@@ -39,9 +39,7 @@ export interface FileExplorerPanelProps {
   sessionArtifacts?: SessionArtifactsProps | null;
 }
 
-type StructureSectionId = 'project-files' | 'plans' | 'todos' | 'tasks' | 'memory' | 'subagents';
-
-type ArtifactSectionId = Exclude<StructureSectionId, 'project-files'>;
+type ArtifactSectionId = 'plans' | 'todos' | 'tasks' | 'memory' | 'subagents';
 
 const ARTIFACT_SECTIONS: { id: ArtifactSectionId; label: string }[] = [
   { id: 'plans', label: 'Plans' },
@@ -70,6 +68,16 @@ interface TodoItemShape {
   activeForm?: string;
 }
 
+interface ProjectFilePreview {
+  title: string;
+  absolutePath: string;
+  content: string | null;
+  loading: boolean;
+  error: string | null;
+}
+
+const MAX_PREVIEW_BYTES = 5 * 1024 * 1024;
+
 export function FileExplorerPanel({
   open,
   onClose,
@@ -81,7 +89,7 @@ export function FileExplorerPanel({
   const [root, setRoot] = useState<string | null>(null);
   const [status, setStatus] = useState<'idle' | 'opening' | 'ready' | 'error'>('idle');
   const [error, setError] = useState<string | null>(null);
-  const [openSections, setOpenSections] = useState<Set<StructureSectionId>>(() => new Set(['project-files']));
+  const [openSections, setOpenSections] = useState<Set<ArtifactSectionId>>(() => new Set());
   const currentFxRef = useRef<PortFileExplorer | null>(null);
   const openSeq = useRef(0);
 
@@ -92,7 +100,8 @@ export function FileExplorerPanel({
   const [memory, setMemory] = useState<string | null>(null);
   const [subagents, setSubagents] = useState<SubagentListItem[]>([]);
   const [artifactLoading, setArtifactLoading] = useState(false);
-  const [preview, setPreview] = useState<{ section: StructureSectionId; node: StructureNode } | null>(null);
+  const [preview, setPreview] = useState<{ section: ArtifactSectionId; node: StructureNode } | null>(null);
+  const [projectPreview, setProjectPreview] = useState<ProjectFilePreview | null>(null);
 
   useEffect(() => {
     if (!open) return;
@@ -103,6 +112,10 @@ export function FileExplorerPanel({
       }
       if (e.key === 'Escape') {
         e.preventDefault();
+        if (projectPreview) {
+          setProjectPreview(null);
+          return;
+        }
         if (preview) {
           setPreview(null);
           return;
@@ -112,7 +125,7 @@ export function FileExplorerPanel({
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [open, onClose, preview]);
+  }, [open, onClose, preview, projectPreview]);
 
   // Load artifact trees when a session is selected
   useEffect(() => {
@@ -169,6 +182,7 @@ export function FileExplorerPanel({
       setRoot(null);
       setStatus('idle');
       setError(null);
+      setProjectPreview(null);
       void window.mille?.closeWorkspace().catch(() => {});
       return;
     }
@@ -180,6 +194,7 @@ export function FileExplorerPanel({
       setRoot(null);
       setStatus('idle');
       setError(null);
+      setProjectPreview(null);
       void window.mille?.closeWorkspace().catch(() => {});
       return;
     }
@@ -193,6 +208,7 @@ export function FileExplorerPanel({
     const seq = ++openSeq.current;
     setStatus('opening');
     setError(null);
+    setProjectPreview(null);
 
     const attach = async (port: MessagePort, workspaceRoot: string) => {
       if (seq !== openSeq.current) {
@@ -248,7 +264,7 @@ export function FileExplorerPanel({
     };
   }, []);
 
-  const toggleSection = useCallback((id: StructureSectionId) => {
+  const toggleSection = useCallback((id: ArtifactSectionId) => {
     setOpenSections((prev) => {
       const next = new Set(prev);
       if (next.has(id)) next.delete(id);
@@ -256,6 +272,33 @@ export function FileExplorerPanel({
       return next;
     });
   }, []);
+
+  const openProjectFile = useCallback(
+    async (entry: Entry) => {
+      if (!fx || !root || entry.kind === 1 || (entry.kind === 2 && entry.symlinkTargetIsDir)) return;
+
+      const absolutePath = resolveEntryPath(fx, root, entry);
+      setProjectPreview({ title: entry.name, absolutePath, content: null, loading: true, error: null });
+
+      try {
+        if (entry.size > MAX_PREVIEW_BYTES) {
+          throw new Error(`This file is larger than the ${MAX_PREVIEW_BYTES / 1024 / 1024} MB preview limit.`);
+        }
+        const content = await fx.readText(entry.id, 'utf-8');
+        if (typeof content !== 'string') throw new Error('The file explorer returned an unreadable response.');
+        if (content.includes('\0')) throw new Error('Binary files cannot be shown in the text viewer.');
+        setProjectPreview((current) =>
+          current?.absolutePath === absolutePath ? { ...current, content, loading: false } : current,
+        );
+      } catch (e: unknown) {
+        const message = e instanceof Error ? e.message : String(e);
+        setProjectPreview((current) =>
+          current?.absolutePath === absolutePath ? { ...current, loading: false, error: message } : current,
+        );
+      }
+    },
+    [fx, root],
+  );
 
   const plansTree = useMemo((): StructureNode[] => {
     if (!plan) return [];
@@ -382,15 +425,14 @@ export function FileExplorerPanel({
         </button>
       </div>
 
-      <div className="flex-1 overflow-y-auto scrollbar-hide min-h-0">
-        {/* Project Files — mille tree only, no toolbar */}
-        <StructureSection
-          id="project-files"
-          label="Project Files"
-          open={openSections.has('project-files')}
-          onToggle={() => toggleSection('project-files')}
-        >
-          <div className="min-h-[180px] h-[min(36vh,280px)] flex flex-col">
+      <div className="flex min-h-0 flex-1 flex-col">
+        {/* Project Files is the permanent primary region. */}
+        <section className="flex min-h-[180px] flex-1 flex-col border-b border-[color:var(--archive-ink-line-soft)]">
+          <div className="flex shrink-0 items-center gap-2 px-4 py-2 font-mono text-[9px] uppercase tracking-widest opacity-70">
+            <TerminalSquare size={10} />
+            <span>Project Files</span>
+          </div>
+          <div className="min-h-0 flex-1">
             {!projectPath ? (
               <EmptyState title="Select a project" detail="Opens the project folder on disk." />
             ) : status === 'opening' || (status === 'ready' && !fx) ? (
@@ -401,85 +443,84 @@ export function FileExplorerPanel({
             ) : status === 'error' ? (
               <EmptyState title="Could not open folder" detail={error ?? 'Unknown error'} />
             ) : fx && root ? (
-              <ExplorerTree fx={fx} />
+              <ExplorerTree fx={fx} onOpenFile={(entry) => void openProjectFile(entry)} />
             ) : (
               <EmptyState title="Waiting for host" detail="Connecting to the file explorer…" />
             )}
           </div>
-        </StructureSection>
+        </section>
 
-        {/* Plans / Todos / Tasks / Memory / Subagents — each its own tree */}
-        {ARTIFACT_SECTIONS.map(({ id, label }) => {
-          const nodes = trees[id];
-          const hasSession = Boolean(sessionArtifacts);
-          return (
-            <StructureSection
-              key={id}
-              id={id}
-              label={label}
-              open={openSections.has(id)}
-              onToggle={() => toggleSection(id)}
-            >
-              {!hasSession ? (
-                <p className="px-3 py-2 font-mono text-[9px] tracking-wide opacity-40">Open a session</p>
-              ) : artifactLoading ? (
-                <div className="flex items-center gap-2 px-3 py-3 font-mono text-[9px] tracking-widest uppercase opacity-50">
-                  <Spinner /> Loading…
-                </div>
-              ) : (
-                <>
-                  <StructureTree nodes={nodes} onOpenFile={(node) => setPreview({ section: id, node })} />
-                  {preview?.section === id && preview.node.content != null ? (
-                    <StructureFilePreview
-                      title={preview.node.name}
-                      content={preview.node.content}
-                      onClose={() => setPreview(null)}
-                    />
-                  ) : null}
-                </>
-              )}
-            </StructureSection>
-          );
-        })}
+        {/* Bottom-anchored accordion: every tree opens directly below its own switch. */}
+        <div className="max-h-[calc(100%-180px)] shrink-0 overflow-y-auto border-t border-[color:var(--archive-ink-line-soft)] bg-[color:var(--archive-paper)] scrollbar-hide">
+          {ARTIFACT_SECTIONS.map(({ id, label }) => {
+            const nodes = trees[id];
+            const hasSession = Boolean(sessionArtifacts);
+            const isOpen = openSections.has(id);
+            return (
+              <section key={id} className="border-b border-[color:var(--archive-ink-line-soft)]" data-section={id}>
+                <ArtifactToggle label={label} open={isOpen} onToggle={() => toggleSection(id)} />
+                {isOpen ? (
+                  <div className="border-t border-[color:var(--archive-ink-line-soft)] pb-1">
+                    {!hasSession ? (
+                      <p className="px-3 py-2 font-mono text-[9px] tracking-wide opacity-40">Open a session</p>
+                    ) : artifactLoading ? (
+                      <div className="flex items-center gap-2 px-3 py-3 font-mono text-[9px] uppercase tracking-widest opacity-50">
+                        <Spinner /> Loading…
+                      </div>
+                    ) : (
+                      <StructureTree nodes={nodes} onOpenFile={(node) => setPreview({ section: id, node })} />
+                    )}
+                  </div>
+                ) : null}
+              </section>
+            );
+          })}
+        </div>
       </div>
+
+      {projectPreview ? (
+        <FileViewerDialog
+          title={projectPreview.title}
+          absolutePath={projectPreview.absolutePath}
+          content={projectPreview.content}
+          loading={projectPreview.loading}
+          error={projectPreview.error}
+          onClose={() => setProjectPreview(null)}
+        />
+      ) : null}
+
+      {preview?.node.content != null ? (
+        <FileViewerDialog
+          title={preview.node.name}
+          content={preview.node.content}
+          collection="Session Archive / Indexed"
+          description="A preserved working artifact indexed for this local archive session."
+          onClose={() => setPreview(null)}
+        />
+      ) : null}
     </aside>
   );
 }
 
-function StructureSection({
-  id,
-  label,
-  open,
-  onToggle,
-  children,
-}: {
-  id: string;
-  label: string;
-  open: boolean;
-  onToggle: () => void;
-  children: React.ReactNode;
-}) {
+function ArtifactToggle({ label, open, onToggle }: { label: string; open: boolean; onToggle: () => void }) {
   return (
-    <section className="border-b border-[color:var(--archive-ink-line-soft)]" data-section={id}>
-      <button
-        type="button"
-        onClick={onToggle}
-        aria-expanded={open}
-        className="flex w-full items-center justify-between px-4 py-2 font-mono text-[9px] tracking-widest opacity-70 transition-opacity hover:opacity-100 bg-transparent border-0 text-ink cursor-pointer"
-      >
-        <span className="flex min-w-0 items-center gap-2 uppercase">
-          <TerminalSquare size={10} />
-          <span className="truncate">{label}</span>
-        </span>
-        {open ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
-      </button>
-      {open ? <div className="pb-1">{children}</div> : null}
-    </section>
+    <button
+      type="button"
+      onClick={onToggle}
+      aria-expanded={open}
+      className="flex w-full cursor-pointer items-center justify-between border-0 bg-transparent px-4 py-2 font-mono text-[9px] tracking-widest text-ink opacity-70 transition-[opacity,background-color] hover:bg-ink/[0.04] hover:opacity-100"
+    >
+      <span className="flex min-w-0 items-center gap-2 uppercase">
+        <TerminalSquare size={10} />
+        <span className="truncate">{label}</span>
+      </span>
+      {open ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+    </button>
   );
 }
 
 /** Mille tree only — no filter/collapse chrome or project name strip. */
-function ExplorerTree({ fx }: { fx: PortFileExplorer }) {
+function ExplorerTree({ fx, onOpenFile }: { fx: PortFileExplorer; onOpenFile: (entry: Entry) => void }) {
   const commands = useMemo(() => createCommandRegistry(defaultCommands), []);
   const treeRef = useFileTreeRef();
   const expandedRootsRef = useRef(false);
@@ -502,11 +543,35 @@ function ExplorerTree({ fx }: { fx: PortFileExplorer }) {
     <FileTreeProvider fx={fx as unknown as FileExplorer} commands={commands}>
       <div className="flex flex-col h-full min-h-0 mille-panel" data-mille-theme="minimal">
         <div className="flex-1 min-h-0 overflow-hidden">
-          <FileTree ref={treeRef} ariaLabel="Project files" iconTheme={minimalIconTheme} rowHeight={26} overscan={24} />
+          <FileTree
+            ref={treeRef}
+            ariaLabel="Project files"
+            iconTheme={minimalIconTheme}
+            rowHeight={26}
+            overscan={24}
+            onOpen={onOpenFile}
+          />
         </div>
       </div>
     </FileTreeProvider>
   );
+}
+
+function resolveEntryPath(fx: PortFileExplorer, root: string, entry: Entry): string {
+  const snapshot = fx.getSnapshot();
+  const segments: string[] = [];
+  const seen = new Set<number>();
+  let current: Entry | null = entry;
+
+  // Mille's native bridge may represent a root's absent parent as
+  // `undefined` at runtime even though the public type says `null`.
+  while (current && current.parentId !== null && current.parentId !== undefined && !seen.has(current.id)) {
+    seen.add(current.id);
+    segments.unshift(...(current.pathSegments?.length ? current.pathSegments : [current.name]));
+    current = snapshot.getById(current.parentId) ?? null;
+  }
+
+  return `${root.replace(/\/+$/, '')}/${segments.join('/')}`;
 }
 
 function flattenTodos(raw: unknown[]): TodoItemShape[] {

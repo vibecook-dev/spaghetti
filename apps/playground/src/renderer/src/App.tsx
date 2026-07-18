@@ -28,6 +28,9 @@ import {
 } from './lib/source-progress.js';
 import { paperStyle } from './lib/archive-theme.js';
 
+const DEBUG_MODE = (import.meta as ImportMeta & { env: { DEV: boolean } }).env.DEV;
+type DebugSessionModule = typeof import('./dev/debug-session.js');
+
 /**
  * Electron playground shell — archive / paper design (spaghetti-ui-design).
  *
@@ -70,6 +73,7 @@ function PlaygroundShell() {
   const [ready, setReady] = useState(false);
   const [engine, setEngine] = useState<'rs' | 'ts' | null>(null);
   const [rebuilding, setRebuilding] = useState(false);
+  const [debugSession, setDebugSession] = useState<DebugSessionModule | null>(null);
   const [projects, setProjects] = useState<ProjectListItem[]>([]);
   const [selected, setSelected] = useState<ProjectKey | null>(null);
   const [sessions, setSessions] = useState<SessionListItem[]>([]);
@@ -96,6 +100,30 @@ function PlaygroundShell() {
   const [loadHeadline, setLoadHeadline] = useState('Indexing agent history');
   const [retrying, setRetrying] = useState(false);
   const loadStartedAt = useRef(Date.now());
+
+  // Keep the large synthetic gallery out of production bundles entirely.
+  useEffect(() => {
+    if (!DEBUG_MODE) return;
+    let cancelled = false;
+    void import('./dev/debug-session.js').then((gallery) => {
+      if (cancelled) return;
+      setDebugSession(gallery);
+      setProjects((current) => [
+        gallery.DEBUG_PROJECT,
+        ...current.filter((project) => projectKey(project) !== projectKey(gallery.DEBUG_PROJECT)),
+      ]);
+      setSelected({ ...gallery.DEBUG_PROJECT_KEY });
+      setSessions([gallery.DEBUG_SESSION]);
+      setSelectedSession({ session: gallery.DEBUG_SESSION, index: 0 });
+      setProjectPrompts((current) => ({
+        ...current,
+        [projectKey(gallery.DEBUG_PROJECT)]: gallery.DEBUG_SESSION.firstPrompt,
+      }));
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   // Persist theme class on <html>
   useEffect(() => {
@@ -219,13 +247,22 @@ function PlaygroundShell() {
     if (!ready) return;
     window.spaghetti
       .getProjectList()
-      .then(setProjects)
+      .then((list) =>
+        setProjects(
+          debugSession
+            ? [
+                debugSession.DEBUG_PROJECT,
+                ...list.filter((project) => projectKey(project) !== projectKey(debugSession.DEBUG_PROJECT)),
+              ]
+            : list,
+        ),
+      )
       .catch((e: unknown) => setError(String(e)));
     window.spaghetti
       .getStats()
       .then(setStats)
       .catch(() => setStats(null));
-  }, [ready, changeNonce]);
+  }, [ready, changeNonce, debugSession]);
 
   useEffect(() => {
     if (!ready || projects.length === 0) return;
@@ -237,6 +274,10 @@ function PlaygroundShell() {
         while (queue.length > 0 && !cancelled) {
           const p = queue.shift()!;
           const key = projectKey(p);
+          if (debugSession && key === projectKey(debugSession.DEBUG_PROJECT)) {
+            next[key] = debugSession.DEBUG_SESSION.firstPrompt;
+            continue;
+          }
           try {
             const sess = await window.spaghetti.getSessionList(p.slug, { sourceId: p.sourceId });
             next[key] = sess[0]?.firstPrompt || sess[0]?.summary || '';
@@ -252,11 +293,15 @@ function PlaygroundShell() {
     return () => {
       cancelled = true;
     };
-  }, [ready, projects, changeNonce]);
+  }, [ready, projects, changeNonce, debugSession]);
 
   useEffect(() => {
     if (!selected) {
       setSessions([]);
+      return;
+    }
+    if (debugSession && projectKey(selected) === projectKey(debugSession.DEBUG_PROJECT)) {
+      setSessions([debugSession.DEBUG_SESSION]);
       return;
     }
     window.spaghetti
@@ -273,7 +318,7 @@ function PlaygroundShell() {
         }
       })
       .catch((e: unknown) => setError(String(e)));
-  }, [selected, changeNonce]);
+  }, [selected, changeNonce, debugSession]);
 
   const onRebuild = async () => {
     if (rebuilding || retrying) return;
@@ -342,7 +387,7 @@ function PlaygroundShell() {
 
   const modKey = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform) ? '⌘' : 'Ctrl+';
 
-  if (!ready || rebuilding || retrying || error) {
+  if (rebuilding || retrying || (!DEBUG_MODE && (!ready || error))) {
     return (
       <LoadingScreen
         sources={sources}
@@ -506,6 +551,11 @@ function PlaygroundShell() {
               filesOpen={filesOpen}
               onToggleFiles={() => setFilesOpen(true)}
               onBack={() => setSelectedSession(null)}
+              debugMessages={
+                debugSession && selectedSession.session.sessionId === debugSession.DEBUG_SESSION.sessionId
+                  ? debugSession.DEBUG_SESSION_MESSAGES
+                  : undefined
+              }
             />
           ) : (
             <>
@@ -561,8 +611,8 @@ function PlaygroundShell() {
                         <span className="font-mono text-[9px] opacity-40">{s.sessionId.slice(0, 8)}</span>
                         <SourceBadge sourceId={s.sourceId} isDark={isDark} />
                       </div>
-                      {/* Session prompt quote — design thought scale: 13px serif italic */}
-                      <div className="font-serif text-[13px] italic leading-relaxed opacity-70 mb-1.5 truncate">
+                      {/* Session prompt quote — design thought scale: 13px serif */}
+                      <div className="mb-1.5 truncate font-serif text-[13px] leading-relaxed opacity-70">
                         {prompt ? `"${prompt}"` : '(no prompt)'}
                       </div>
                       <div className="font-mono text-[8px] uppercase tracking-[0.08em] opacity-55">
