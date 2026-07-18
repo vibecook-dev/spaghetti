@@ -23,6 +23,12 @@ export { createCodexIngestHooks } from './ingest-hooks.js';
 export { buildCodexPaths, defaultCodexDir } from './paths.js';
 export { parseCodexTokenCount, type CodexTokenUsage, type ParsedCodexTokenCount } from './token-usage.js';
 export { countTextTokens, estimateTokensFromMessageRows, type EstimatedMessageTokens } from './estimate-tokens.js';
+export {
+  isCodexInjectedUserText,
+  considerCodexFirstPromptLine,
+  codexContentText,
+  CODEX_FIRST_PROMPT_MAX,
+} from './first-prompt.js';
 
 const UUID = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
 

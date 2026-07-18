@@ -817,6 +817,7 @@ mod tests {
             progress_interval_ms: None,
             parallelism: None,
             source_id: None,
+            safe_bulk: None,
         };
         let err = run_ingest(&opts, None).expect_err("unknown mode must be rejected");
         assert!(matches!(err, IngestInternalError::UnsupportedMode(_)));
@@ -835,6 +836,7 @@ mod tests {
             progress_interval_ms: None,
             parallelism: None,
             source_id: None,
+            safe_bulk: None,
         };
 
         // DB doesn't exist yet — warm mode should fall through to a cold
@@ -858,6 +860,7 @@ mod tests {
             progress_interval_ms: None,
             parallelism: None,
             source_id: None,
+            safe_bulk: None,
         };
         let first = run_ingest(&first_opts, None).expect("cold ingest should succeed");
         assert_eq!(first.messages_written, 2);
@@ -871,6 +874,7 @@ mod tests {
             progress_interval_ms: None,
             parallelism: None,
             source_id: None,
+            safe_bulk: None,
         };
         let second = run_ingest(&warm_opts, None).expect("warm ingest should succeed");
         assert_eq!(second.projects_processed, 0);
@@ -888,6 +892,7 @@ mod tests {
             progress_interval_ms: None,
             parallelism: None,
             source_id: None,
+            safe_bulk: None,
         };
         let err = run_ingest(&opts, None).expect_err("missing dir must error");
         assert!(matches!(err, IngestInternalError::RootDirMissing(_)));
@@ -904,6 +909,7 @@ mod tests {
             progress_interval_ms: None,
             parallelism: None,
             source_id: None,
+            safe_bulk: None,
         };
         let stats = run_ingest(&opts, None).unwrap();
         assert_eq!(stats.projects_processed, 0);
@@ -937,6 +943,7 @@ mod tests {
             progress_interval_ms: None,
             parallelism: None,
             source_id: Some("codex".into()),
+            safe_bulk: None,
         };
         let stats = run_ingest(&opts, None).expect("codex ingest");
         // Writer may count ClearSourceFiles + ProjectComplete as project boundaries.
@@ -1011,6 +1018,7 @@ mod tests {
             progress_interval_ms: None,
             parallelism: None,
             source_id: Some("grok".into()),
+            safe_bulk: None,
         };
         let stats = run_ingest(&opts, None).expect("grok ingest");
         assert!(stats.projects_processed >= 1);
@@ -1075,6 +1083,7 @@ mod tests {
             progress_interval_ms: None,
             parallelism: None,
             source_id: None,
+            safe_bulk: None,
         };
 
         let stats = run_ingest(&opts, None).expect("ingest should succeed");

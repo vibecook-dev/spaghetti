@@ -28,6 +28,7 @@ import type { AgentDataStore } from '../../data/agent-data-store.js';
 import type { ParsedRow } from '../../live/parsed-row.js';
 import type { SessionIndexEntry, SessionsIndex } from '../../types/index.js';
 import { createParcelWatcher, createChokidarWatcher, type Watcher, type Unsubscribe } from '../../live/watcher.js';
+import { considerCodexFirstPromptLine } from './first-prompt.js';
 import type { LiveWatch } from '../../live/live-watch.js';
 
 const ROLLOUT_FILE = /rollout-.*\.jsonl$/;
@@ -79,11 +80,15 @@ export function createCodexLiveWatch(deps: CodexLiveWatchDeps): CodexLiveWatch {
     }, DEBOUNCE_MS);
   }
 
-  /** Read a rollout's session_meta (first line) → slug + sessionId + entry. */
+  /**
+   * Read a rollout's session_meta + first human prompt → slug + sessionId + entry.
+   * Same first-prompt rules as cold {@link CodexReader} (skip injected context).
+   */
   function peekMeta(file: string): { slug: string; sessionId: string; entry: SessionIndexEntry; cwd: string } | null {
     let cwd: string | null = null;
     let sid: string | null = null;
     let ts: string | null = null;
+    let firstPrompt = '';
     try {
       deps.fileService.readJsonlStreaming<Record<string, unknown>>(file, (line, idx) => {
         const payload = line.payload as Record<string, unknown> | undefined;
@@ -91,8 +96,11 @@ export function createCodexLiveWatch(deps: CodexLiveWatchDeps): CodexLiveWatch {
           if (typeof payload.cwd === 'string') cwd = payload.cwd;
           if (typeof payload.id === 'string') sid = payload.id;
           if (typeof line.timestamp === 'string') ts = line.timestamp;
+        } else {
+          firstPrompt = considerCodexFirstPromptLine(firstPrompt, line);
         }
-        if (cwd || idx >= 5) throw STOP_PEEK;
+        // Need cwd always; keep scanning until we have a real prompt or hit the cap.
+        if ((cwd && firstPrompt) || idx >= 100) throw STOP_PEEK;
       });
     } catch (e) {
       if (e !== STOP_PEEK) return null;
@@ -105,7 +113,7 @@ export function createCodexLiveWatch(deps: CodexLiveWatchDeps): CodexLiveWatch {
       sessionId,
       fullPath: file,
       fileMtime: stats?.mtimeMs ?? 0,
-      firstPrompt: 'No prompt',
+      firstPrompt: firstPrompt || 'No prompt',
       summary: '',
       messageCount: 0,
       created: ts ?? iso,

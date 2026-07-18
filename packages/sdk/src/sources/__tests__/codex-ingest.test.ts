@@ -30,6 +30,7 @@ import type { SqliteService } from '../../io/index.js';
 
 const SESSION_A = '019cf46d-0924-7523-b3f5-f6f5cc0fcd16';
 const SESSION_B = '019d1808-f808-7143-99e4-f3d04a4750d2';
+const SESSION_C = '019d7fd6-f6dc-7093-a4e9-10b03ce406d9';
 
 /** One rollout file = session_meta + the given response/event lines. */
 function rolloutLines(sessionId: string, cwd: string, body: object[]): string {
@@ -139,6 +140,26 @@ describe('Codex source — end-to-end ingest', () => {
       ]),
     );
 
+    // proj-c: real Codex layout — injected user turns before the human prompt.
+    writeFileSync(
+      path.join(dayDir, `rollout-2026-07-13T00-10-00-${SESSION_C}.jsonl`),
+      rolloutLines(SESSION_C, '/tmp/proj-c', [
+        msg('user', '<environment_context>\n  <cwd>/tmp/proj-c</cwd>\n  <shell>zsh</shell>\n</environment_context>'),
+        msg('user', '# AGENTS.md instructions for /tmp/proj-c\n\nBe helpful.'),
+        msg('user', 'please do a thorough code review of this lib'),
+        {
+          type: 'event_msg',
+          payload: {
+            type: 'user_message',
+            message: 'please do a thorough code review of this lib',
+            images: [],
+            local_images: [],
+          },
+        },
+        msg('assistant', 'I will map the repo first.'),
+      ]),
+    );
+
     const dbPath = path.join(tempDir, 'codex.db');
     sqlite = createSqliteService();
     sqlite.open({ path: dbPath });
@@ -183,13 +204,18 @@ describe('Codex source — end-to-end ingest', () => {
     );
   });
 
-  test('two projects and two sessions were discovered from the rollout tree', () => {
+  test('three projects and three sessions were discovered from the rollout tree', () => {
     const projects = sqlite
       .all<{ slug: string; original_path: string }>('SELECT slug, original_path FROM projects ORDER BY original_path')
       .map((r) => r.original_path);
-    assert.deepEqual(projects, ['/tmp/proj-a', '/tmp/proj-b']);
+    assert.deepEqual(projects, ['/tmp/proj-a', '/tmp/proj-b', '/tmp/proj-c']);
     const sessions = sqlite.all<{ id: string }>('SELECT id FROM sessions');
-    assert.equal(sessions.length, 2);
+    assert.equal(sessions.length, 3);
+  });
+
+  test('first_prompt skips environment_context / AGENTS.md and uses the human prompt', () => {
+    const row = sqlite.get<{ first_prompt: string }>('SELECT first_prompt FROM sessions WHERE id = ?', SESSION_C);
+    assert.equal(row?.first_prompt, 'please do a thorough code review of this lib');
   });
 
   test('chat turns are extracted; session_meta and event_msg are not message rows', () => {

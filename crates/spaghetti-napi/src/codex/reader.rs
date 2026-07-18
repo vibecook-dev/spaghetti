@@ -26,6 +26,65 @@ static UUID_RE: Lazy<Regex> = Lazy::new(|| {
 const FIRST_PROMPT_MAX: usize = 200;
 const PEEK_LINE_LIMIT: u32 = 100;
 
+/// True when a Codex user-turn body is injected scaffolding, not the human prompt.
+/// Mirrors `packages/sdk/src/sources/codex/first-prompt.ts`.
+fn is_injected_user_text(text: &str) -> bool {
+    let t = text.trim_start();
+    if t.is_empty() {
+        return true;
+    }
+    if t.starts_with("<environment_context>")
+        || t.starts_with("<recommended_plugins>")
+        || t.starts_with("<permissions instructions>")
+        || t.starts_with("<collaboration_mode>")
+        || t.starts_with("<INSTRUCTIONS>")
+        || t.starts_with("# AGENTS.md instructions")
+    {
+        return true;
+    }
+    if t.starts_with('<') && (t.contains("</cwd>") || t.contains("<shell>")) && t.contains("<cwd>")
+    {
+        return true;
+    }
+    false
+}
+
+/// Prefer `event_msg/user_message`, else first non-injected user response_item.
+fn consider_first_prompt(current: &str, line: &str) -> Option<String> {
+    if !current.is_empty() {
+        return None;
+    }
+    let v: serde_json::Value = serde_json::from_str(line).ok()?;
+    let ty = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
+    if ty == "event_msg" {
+        let payload = v.get("payload")?;
+        if payload.get("type").and_then(|t| t.as_str()) != Some("user_message") {
+            return None;
+        }
+        let msg = payload.get("message").and_then(|m| m.as_str())?;
+        if msg.trim().is_empty() || is_injected_user_text(msg) {
+            return None;
+        }
+        return Some(
+            crate::core::text::truncate_utf16(msg, FIRST_PROMPT_MAX).to_owned(),
+        );
+    }
+    if ty == "response_item" {
+        if let Ok(Some(proj)) = message_extractor::project_jsonl_line(line) {
+            if proj.msg_type == "user" {
+                if let Some(t) = proj.fts_text.as_deref() {
+                    if !is_injected_user_text(t) {
+                        return Some(
+                            crate::core::text::truncate_utf16(t, FIRST_PROMPT_MAX).to_owned(),
+                        );
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum CodexReadError {
     #[error("event channel closed")]
@@ -216,7 +275,8 @@ fn peek(path: &Path) -> Option<PeekMeta> {
     let mut first_prompt = String::new();
 
     let _ = read_jsonl_streaming(path, 0, |line, index, _| {
-        if index >= PEEK_LINE_LIMIT {
+        // Keep scanning until we have cwd + a real (non-injected) prompt, or hit the cap.
+        if index >= PEEK_LINE_LIMIT || (cwd.is_some() && !first_prompt.is_empty()) {
             return;
         }
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
@@ -239,16 +299,8 @@ fn peek(path: &Path) -> Option<PeekMeta> {
                         timestamp = Some(ts.to_owned());
                     }
                 }
-            } else if first_prompt.is_empty() {
-                if let Ok(Some(proj)) = message_extractor::project_jsonl_line(line) {
-                    if proj.msg_type == "user" {
-                        if let Some(t) = proj.fts_text {
-                            // 200 UTF-16 code units, matching TS `.slice(0, 200)`.
-                            first_prompt =
-                                crate::core::text::truncate_utf16(&t, FIRST_PROMPT_MAX).to_owned();
-                        }
-                    }
-                }
+            } else if let Some(p) = consider_first_prompt(&first_prompt, line) {
+                first_prompt = p;
             }
         }
     });
@@ -431,6 +483,73 @@ mod tests {
     fn encode_slug_replaces_slashes() {
         assert_eq!(encode_slug("/Users/me/proj"), "-Users-me-proj");
         assert_eq!(encode_slug(r"C:\Users\me\proj"), "C:-Users-me-proj");
+    }
+
+    #[test]
+    fn first_prompt_skips_injected_environment_context() {
+        // Real Codex rollouts open with environment_context / AGENTS.md user
+        // turns before the human prompt; peek must not treat those as the title.
+        let tmp = TempDir::new().unwrap();
+        let day = tmp.path().join("sessions/2026/01/01");
+        std::fs::create_dir_all(&day).unwrap();
+        let file = day.join("rollout-2026-01-01T00-00-00-019bbbbbbbbbbbbbbbbbbbbbbbb.jsonl");
+        let mut f = std::fs::File::create(&file).unwrap();
+        writeln!(
+            f,
+            r#"{{"timestamp":"2026-01-01T00:00:00.000Z","type":"session_meta","payload":{{"id":"sess-fp","cwd":"/tmp/demo"}}}}"#
+        )
+        .unwrap();
+        writeln!(
+            f,
+            r#"{{"type":"response_item","payload":{{"type":"message","role":"user","content":[{{"type":"input_text","text":"<environment_context>\n  <cwd>/tmp/demo</cwd>\n  <shell>zsh</shell>\n</environment_context>"}}]}}}}"#
+        )
+        .unwrap();
+        writeln!(
+            f,
+            r##"{{"type":"response_item","payload":{{"type":"message","role":"user","content":[{{"type":"input_text","text":"# AGENTS.md instructions for /tmp/demo\n\nDo stuff"}}]}}}}"##
+        )
+        .unwrap();
+        writeln!(
+            f,
+            r#"{{"type":"response_item","payload":{{"type":"message","role":"user","content":[{{"type":"input_text","text":"do a full code audit of this project"}}]}}}}"#
+        )
+        .unwrap();
+        writeln!(
+            f,
+            r#"{{"type":"event_msg","payload":{{"type":"user_message","message":"do a full code audit of this project","images":[],"local_images":[]}}}}"#
+        )
+        .unwrap();
+
+        let meta = peek(&file).expect("peek");
+        assert_eq!(meta.first_prompt, "do a full code audit of this project");
+    }
+
+    #[test]
+    fn first_prompt_prefers_event_msg_user_message() {
+        let tmp = TempDir::new().unwrap();
+        let day = tmp.path().join("sessions/2026/01/01");
+        std::fs::create_dir_all(&day).unwrap();
+        let file = day.join("rollout-2026-01-01T00-00-00-019dddddddddddddddddddddddd.jsonl");
+        let mut f = std::fs::File::create(&file).unwrap();
+        writeln!(
+            f,
+            r#"{{"type":"session_meta","payload":{{"id":"sess-ev","cwd":"/tmp/x"}}}}"#
+        )
+        .unwrap();
+        writeln!(
+            f,
+            r#"{{"type":"response_item","payload":{{"type":"message","role":"user","content":[{{"type":"input_text","text":"<environment_context><cwd>/tmp/x</cwd></environment_context>"}}]}}}}"#
+        )
+        .unwrap();
+        // No non-injected response_item user — only event_msg carries the human text.
+        writeln!(
+            f,
+            r#"{{"type":"event_msg","payload":{{"type":"user_message","message":"help me find iframe code"}}}}"#
+        )
+        .unwrap();
+
+        let meta = peek(&file).expect("peek");
+        assert_eq!(meta.first_prompt, "help me find iframe code");
     }
 
     #[test]

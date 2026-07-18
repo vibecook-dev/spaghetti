@@ -32,12 +32,12 @@ import * as path from 'node:path';
 import type { FileService } from '../../io/file-service.js';
 import type { ProjectParseSink } from '../../data/parse-sink.js';
 import type { SessionIndexEntry, SessionsIndex } from '../../types/index.js';
+import { considerCodexFirstPromptLine } from './first-prompt.js';
 
 const ROLLOUT_FILE = /^rollout-.*\.jsonl$/;
 const UUID = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
-const FIRST_PROMPT_MAX = 200;
 // Bound the metadata peek so we never read a large rollout fully just to find
-// the first user prompt.
+// the first *real* user prompt (injected context often occupies the first N lines).
 const PEEK_LINE_LIMIT = 100;
 const STOP_PEEK = Symbol('codex-peek-stop');
 
@@ -54,21 +54,6 @@ interface CodexSessionMeta {
  */
 function encodeSlug(cwd: string): string {
   return cwd.replace(/[/\\]/g, '-');
-}
-
-function textOfContent(content: unknown): string {
-  if (typeof content === 'string') return content;
-  if (!Array.isArray(content)) return '';
-  const parts: string[] = [];
-  for (const block of content) {
-    if (block && typeof block === 'object') {
-      const b = block as Record<string, unknown>;
-      if ((b.type === 'input_text' || b.type === 'output_text' || b.type === 'text') && typeof b.text === 'string') {
-        parts.push(b.text);
-      }
-    }
-  }
-  return parts.join('\n');
 }
 
 /** Warm-start hooks (RFC 006). Let a caller skip unchanged files + track them. */
@@ -173,7 +158,12 @@ export class CodexReader {
     }
   }
 
-  /** Read a rollout's `session_meta` + first user prompt without full scan. */
+  /**
+   * Read a rollout's `session_meta` + first *human* user prompt without a full scan.
+   *
+   * Skips Codex-injected user turns (`environment_context`, AGENTS.md, plugins, …)
+   * and prefers `event_msg`/`user_message` when present — see `first-prompt.ts`.
+   */
   private peek(file: string): CodexSessionMeta | null {
     let cwd: string | null = null;
     let sessionId: string | null = null;
@@ -188,10 +178,10 @@ export class CodexReader {
           if (typeof payload.cwd === 'string') cwd = payload.cwd;
           if (typeof payload.id === 'string') sessionId = payload.id;
           if (typeof line.timestamp === 'string') timestamp = line.timestamp;
-        } else if (!firstPrompt && type === 'response_item' && payload?.type === 'message' && payload.role === 'user') {
-          firstPrompt = textOfContent(payload.content).slice(0, FIRST_PROMPT_MAX);
+        } else {
+          firstPrompt = considerCodexFirstPromptLine(firstPrompt, line);
         }
-        // Stop once we have the project cwd and a user prompt, or hit the cap.
+        // Stop once we have the project cwd and a real user prompt, or hit the cap.
         if ((cwd && firstPrompt) || index >= PEEK_LINE_LIMIT) throw STOP_PEEK;
       });
     } catch (e) {
