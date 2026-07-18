@@ -28,6 +28,7 @@
  */
 :root {
   --archive-ink: #2b2623;
+  --archive-ink-rgb: 43 38 35;
   --archive-ink-muted: rgba(43, 38, 35, 0.65);
   --archive-ink-faint: rgba(43, 38, 35, 0.4);
   /* columns / tree rails — design /20 */
@@ -43,15 +44,24 @@
   /* outer paper frame — design /80 */
   --archive-ink-line-outer: rgba(43, 38, 35, 0.8);
   --archive-paper: #f1ede4;
+  --archive-paper-rgb: 241 237 228;
   --archive-paper-deep: #e9e5da;
+  --archive-paper-deep-rgb: 233 229 218;
   --archive-paper-bright: #fcfaf6;
+  --archive-paper-bright-rgb: 252 250 246;
   --archive-chrome: #d1ccc0;
+  --archive-chrome-rgb: 209 204 192;
   /* assistant rail / filters (light); CSS var used for solid buttons */
   --archive-sanguine: #9a3b28;
+  --archive-sanguine-rgb: 154 59 40;
   --archive-verdigris: #4f6b4a;
+  --archive-verdigris-rgb: 79 107 74;
   --archive-indigo: #3f5c6b;
+  --archive-indigo-rgb: 63 92 107;
   --archive-faded: #736958;
+  --archive-faded-rgb: 115 105 88;
   --archive-ochre: #786037;
+  --archive-ochre-rgb: 120 96 55;
 
   --background: #f8f6f0;
   --foreground: #2b2623;
@@ -78,6 +88,7 @@
 
 .dark {
   --archive-ink: #d4cbbd;
+  --archive-ink-rgb: 212 203 189;
   --archive-ink-muted: rgba(212, 203, 189, 0.65);
   --archive-ink-faint: rgba(212, 203, 189, 0.4);
   --archive-ink-line: rgba(212, 203, 189, 0.2);
@@ -89,16 +100,25 @@
   /* outer frame — design /60 */
   --archive-ink-line-outer: rgba(212, 203, 189, 0.6);
   --archive-paper: #141312;
+  --archive-paper-rgb: 20 19 18;
   --archive-paper-deep: #11100f;
+  --archive-paper-deep-rgb: 17 16 15;
   --archive-paper-bright: #141312;
+  --archive-paper-bright-rgb: 20 19 18;
   --archive-chrome: #0a0908;
+  --archive-chrome-rgb: 10 9 8;
   /* CSS solid accents: badge-friendly darks (d98d78) for chrome;
      rail accentHex uses c9755f via JS for assistant nodes */
   --archive-sanguine: #d98d78;
+  --archive-sanguine-rgb: 217 141 120;
   --archive-verdigris: #8ba888;
+  --archive-verdigris-rgb: 139 168 136;
   --archive-indigo: #7fa6b5;
+  --archive-indigo-rgb: 127 166 181;
   --archive-faded: #a89a86;
+  --archive-faded-rgb: 168 154 134;
   --archive-ochre: #c4a96a;
+  --archive-ochre-rgb: 196 169 106;
 
   --background: #171615;
   --foreground: #d4cbbd;

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Library, Moon, PanelLeft, Search, Sun } from 'lucide-react';
+import { Library, Moon, PanelLeft, Search, Settings, Sun } from 'lucide-react';
 import { TrafficLights } from './components/TrafficLights.js';
 import { SpaghettiProvider, type SpaghettiProviderProps } from '@vibecook/spaghetti-sdk/react';
 import type { ProjectListItem, SessionListItem, StoreStats } from '@vibecook/spaghetti-sdk';
@@ -9,6 +9,7 @@ import { SourceBadge } from './components/SourceBadge.js';
 import { SessionMessagesView } from './components/SessionMessagesView.js';
 import { SearchOverlay, type SearchNavigateTarget } from './components/SearchOverlay.js';
 import { FileExplorerPanel } from './components/FileExplorerPanel.js';
+import { SettingsDialog } from './components/SettingsDialog.js';
 import { Btn, Chip, Dot, EmptyState, Kbd } from './components/ui.js';
 import {
   flattenPrompt,
@@ -82,6 +83,7 @@ function PlaygroundShell() {
   const [stats, setStats] = useState<StoreStats | null>(null);
   const [sourceFilter, setSourceFilter] = useState<string | null>(null);
   const [searchOpen, setSearchOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const [filesOpen, setFilesOpen] = useState(true);
   const [leftOpen, setLeftOpen] = useState(true);
   // The reference opens on warm paper; dark parchment is the alternate illumination.
@@ -373,13 +375,14 @@ function PlaygroundShell() {
             <Library size={14} className="opacity-80" />
             spaghetti
           </h1>
-          <div className="hidden md:flex gap-4 text-[9px] font-mono tracking-widest uppercase opacity-70">
-            <span className="flex items-center gap-1">
-              <span className="w-1.5 h-1.5 bg-ink inline-block" />
-              {engine === 'ts' ? 'TypeScript' : 'Native'}
-            </span>
-            <span>Ref: Local</span>
-          </div>
+          <button
+            type="button"
+            onClick={() => setSearchOpen(true)}
+            className="flex cursor-pointer items-center gap-2 border-0 bg-transparent px-2 py-0.5 font-mono text-[9px] uppercase tracking-widest text-ink transition-colors hover:bg-ink hover:text-paper"
+            title={`Search (${modKey}K)`}
+          >
+            <Search size={10} /> Search
+          </button>
         </div>
 
         <div className="titlebar-no-drag flex items-center gap-4 font-mono text-[9px] uppercase tracking-widest min-w-0">
@@ -402,20 +405,12 @@ function PlaygroundShell() {
             <span className="opacity-30">|</span>
             <button
               type="button"
-              onClick={() => setSearchOpen(true)}
-              className="flex items-center gap-2 hover:bg-ink hover:text-paper transition-colors px-2 py-0.5 bg-transparent text-ink cursor-pointer border-0 font-mono text-[9px] tracking-widest uppercase"
-              title={`Search (${modKey}K)`}
+              onClick={() => setSettingsOpen(true)}
+              className="inline-flex cursor-pointer items-center justify-center border-0 bg-transparent p-1 text-ink opacity-50 transition-opacity hover:opacity-100"
+              title="Open settings"
+              aria-label="Open settings"
             >
-              <Search size={10} /> Search
-            </button>
-            <button
-              type="button"
-              onClick={() => void onRebuild()}
-              disabled={rebuilding}
-              className="hidden lg:inline-flex items-center hover:bg-ink hover:text-paper transition-colors px-2 py-0.5 bg-transparent text-ink border-0 font-mono text-[9px] tracking-widest uppercase cursor-pointer disabled:opacity-30"
-              title="Force full rebuild"
-            >
-              Rebuild
+              <Settings size={12} />
             </button>
           </div>
         </div>
@@ -467,7 +462,7 @@ function PlaygroundShell() {
                         setSelected({ slug: p.slug, sourceId: p.sourceId });
                         setSelectedSession(null);
                       }}
-                      className={`w-full text-left px-4 py-3 cursor-pointer transition-colors border-0 border-l-2 ${
+                      className={`w-full text-left px-4 py-3 cursor-pointer transition-colors border-0 border-l-2 font-normal text-inherit ${
                         isSelected
                           ? 'bg-ink/[0.05] border-l-ink'
                           : 'bg-transparent border-l-transparent hover:bg-ink/[0.05]'
@@ -631,6 +626,14 @@ function PlaygroundShell() {
         scopeProject={scopeProject}
         onNavigate={onSearchNavigate}
         isDark={isDark}
+      />
+      <SettingsDialog
+        open={settingsOpen}
+        onOpenChange={setSettingsOpen}
+        onRebuild={() => void onRebuild()}
+        rebuilding={rebuilding}
+        engine={engine}
+        stats={stats}
       />
     </div>
   );

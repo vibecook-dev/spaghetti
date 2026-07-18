@@ -33,22 +33,24 @@ export default {
         },
         // Archive palette (spaghetti-ui-design)
         ink: {
-          DEFAULT: 'var(--archive-ink)',
+          // The alpha placeholder is required for utilities such as
+          // `bg-ink/[0.05]` and `text-ink/45` to emit any CSS.
+          DEFAULT: 'rgb(var(--archive-ink-rgb) / <alpha-value>)',
           muted: 'var(--archive-ink-muted)',
           faint: 'var(--archive-ink-faint)',
           line: 'var(--archive-ink-line)',
         },
         paper: {
-          DEFAULT: 'var(--archive-paper)',
-          deep: 'var(--archive-paper-deep)',
-          bright: 'var(--archive-paper-bright)',
+          DEFAULT: 'rgb(var(--archive-paper-rgb) / <alpha-value>)',
+          deep: 'rgb(var(--archive-paper-deep-rgb) / <alpha-value>)',
+          bright: 'rgb(var(--archive-paper-bright-rgb) / <alpha-value>)',
         },
-        chrome: 'var(--archive-chrome)',
-        sanguine: 'var(--archive-sanguine)',
-        verdigris: 'var(--archive-verdigris)',
-        indigo: 'var(--archive-indigo)',
-        faded: 'var(--archive-faded)',
-        ochre: 'var(--archive-ochre)',
+        chrome: 'rgb(var(--archive-chrome-rgb) / <alpha-value>)',
+        sanguine: 'rgb(var(--archive-sanguine-rgb) / <alpha-value>)',
+        verdigris: 'rgb(var(--archive-verdigris-rgb) / <alpha-value>)',
+        indigo: 'rgb(var(--archive-indigo-rgb) / <alpha-value>)',
+        faded: 'rgb(var(--archive-faded-rgb) / <alpha-value>)',
+        ochre: 'rgb(var(--archive-ochre-rgb) / <alpha-value>)',
       },
       fontFamily: {
         serif: ['"EB Garamond"', 'Georgia', 'Times New Roman', 'serif'],
