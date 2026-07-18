@@ -117,11 +117,11 @@ export const MessageFilterBar = memo(function MessageFilterBar({
 }: MessageFilterBarProps) {
   return (
     <div
-      className="shrink-0 border-b border-[color:var(--archive-ink-line-mid)] px-2 py-2 md:px-4 lg:px-8 bg-transparent"
+      className="shrink-0 border-b border-[color:var(--archive-ink-line-mid)] px-6 py-2 bg-transparent"
       role="toolbar"
       aria-label="Message filters"
     >
-      <div className="mx-auto flex max-w-3xl flex-wrap items-center gap-x-2 gap-y-1.5">
+      <div className="flex w-full flex-wrap items-center gap-x-2 gap-y-1.5">
         <label className="flex h-8 w-40 items-center gap-2 border-b border-[color:var(--archive-ink-line-strong)] px-1 font-mono text-[11px]">
           <Search size={14} className="shrink-0 opacity-45" />
           <input
@@ -166,7 +166,6 @@ export const MessageFilterBar = memo(function MessageFilterBar({
 
         {Object.entries(toolCounts)
           .sort((a, b) => b[1] - a[1])
-          .slice(0, 8)
           .map(([toolName, count]) => {
             const state = toolFilters[toolName] || { solo: false, mute: false };
             return (
