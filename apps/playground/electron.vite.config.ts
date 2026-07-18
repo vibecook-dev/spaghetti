@@ -56,9 +56,12 @@ export default defineConfig({
         '@': resolve(__dirname, 'src/renderer/src'),
       },
     },
-    // Don't pull Node natives into the renderer bundle
+    // Don't pull Node natives into the renderer bundle. Also keep
+    // file:-linked @vibecook/mille-ui out of the prebundle cache so local
+    // mille rebuilds (e.g. single-click folder expand) are picked up
+    // without a stale .vite/deps snapshot of double-click expand.
     optimizeDeps: {
-      exclude: ['@vibecook/mille', 'better-sqlite3'],
+      exclude: ['@vibecook/mille', '@vibecook/mille-ui', 'better-sqlite3'],
     },
   },
 });

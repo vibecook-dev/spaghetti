@@ -8,16 +8,10 @@
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { ArrowLeft, PanelLeft, PanelRight } from 'lucide-react';
-import {
-  TimelineMessageRenderer,
-  TimeGroupSeparator,
-  shouldShowTimestamp,
-  isTimelineType,
-  transformRawMessagesToTimeline,
-  type ChatSessionMessage,
-} from '@vibecook/spaghetti-sdk/react';
+import { transformRawMessagesToTimeline, type ChatSessionMessage } from '@vibecook/spaghetti-sdk/react';
 import type { MessagePage, SegmentChangeBatch, SessionListItem } from '@vibecook/spaghetti-sdk';
 import { SourceBadge } from './SourceBadge.js';
+import { ArchiveTranscript } from './ArchiveTranscript.js';
 import { MessageFilterBar, useMessageFilters, countTimelineMessages, filterTimelineMessages } from './filters/index.js';
 import { Btn, LiveDot, Spinner } from './ui.js';
 
@@ -337,9 +331,9 @@ export function SessionMessagesView({
 
   return (
     <div className="flex flex-col h-full min-h-0 bg-transparent text-ink">
-      {/* Reading header — design mock parity */}
-      <div className="h-10 border-b border-ink/20 flex items-center px-5 justify-between shrink-0 bg-transparent gap-3">
-        <div className="flex items-center gap-3 min-w-0 font-mono text-[10px] tracking-[0.1em]">
+      {/* Reading header — design: serif tray + mono meta (App.tsx ~748–763) */}
+      <div className="h-10 border-b border-[color:var(--archive-ink-line)] flex items-center px-5 justify-between shrink-0 bg-transparent gap-3">
+        <div className="flex items-center gap-4 min-w-0 text-[10px] font-serif tracking-[0.15em]">
           {!leftOpen && onToggleLeft ? (
             <button
               type="button"
@@ -358,18 +352,18 @@ export function SessionMessagesView({
           >
             <ArrowLeft size={14} />
           </button>
-          <span className="opacity-70">#{sessionIndex + 1}</span>
-          <span className="opacity-70">{session.sessionId.slice(0, 8)}</span>
-          <SourceBadge sourceId={session.sourceId} isDark={isDark} />
+          <span className="font-mono text-[10px] tracking-[0.1em] opacity-70">#{sessionIndex + 1}</span>
+          <span className="font-mono text-[10px] tracking-[0.1em] opacity-70">{session.sessionId.slice(0, 8)}</span>
+          <SourceBadge sourceId={session.sourceId} isDark={isDark} size="md" />
           <LiveDot active={livePulse || pendingNew > 0} />
           {pageMeta && (
-            <span className="opacity-55 truncate">
+            <span className="font-mono text-[9px] tracking-[0.08em] opacity-60 truncate">
               {rawMessages.length}/{pageMeta.total} msgs
               {filtersActive ? ` · ${chatMessages.length} shown` : ''}
             </span>
           )}
         </div>
-        <div className="flex items-center gap-3 shrink-0 font-mono text-[9px] uppercase tracking-widest opacity-70">
+        <div className="flex items-center gap-4 shrink-0 font-mono text-[9px] uppercase tracking-widest opacity-70">
           {session.gitBranch ? (
             <span className="text-sanguine normal-case tracking-normal">{session.gitBranch}</span>
           ) : null}
@@ -387,7 +381,7 @@ export function SessionMessagesView({
       </div>
 
       {error && (
-        <div className="shrink-0 px-5 py-2 font-mono text-[10px] text-sanguine border-b border-sanguine/25 bg-sanguine/5">
+        <div className="shrink-0 px-5 py-2 font-mono text-[10px] text-sanguine border-b border-sanguine/20 bg-sanguine/[0.04]">
           {error}
         </div>
       )}
@@ -423,13 +417,15 @@ export function SessionMessagesView({
             </div>
           ) : timeline.length === 0 ? (
             <div className="flex flex-col items-center justify-center h-full opacity-50 py-12">
-              <p className="font-serif text-sm">No messages in this session</p>
-              <p className="font-mono text-[10px] opacity-60 mt-1">New turns will appear here live.</p>
+              <p className="font-serif text-[14px] leading-relaxed">No messages in this session</p>
+              <p className="font-mono text-[10px] tracking-[0.08em] uppercase opacity-60 mt-1">
+                New turns will appear here live.
+              </p>
             </div>
           ) : chatMessages.length === 0 ? (
             <div className="flex flex-col items-center justify-center h-full py-12 gap-2">
-              <p className="font-serif text-sm opacity-50">No messages match filters</p>
-              <p className="font-mono text-[10px] opacity-40 max-w-xs text-center">
+              <p className="font-serif text-[14px] leading-relaxed opacity-50">No messages match filters</p>
+              <p className="font-mono text-[10px] tracking-[0.08em] uppercase opacity-40 max-w-xs text-center">
                 Unpin solos, unmute types/tools, or clear the filter text.
               </p>
               {anySoloActive ? (
@@ -443,7 +439,7 @@ export function SessionMessagesView({
               ) : null}
             </div>
           ) : (
-            <div className="py-4 max-w-3xl mx-auto w-full px-4 md:px-8 lg:px-12">
+            <div className="py-4 max-w-3xl mx-auto w-full px-4 md:px-8 lg:px-16">
               {loadingMore && (
                 <div className="flex items-center justify-center py-6 gap-3">
                   <Spinner className="h-5 w-5" />
@@ -465,35 +461,7 @@ export function SessionMessagesView({
                 </div>
               )}
 
-              {chatMessages.map((msg, i) => {
-                const prev = i > 0 ? chatMessages[i - 1] : undefined;
-                const next = i < chatMessages.length - 1 ? chatMessages[i + 1] : undefined;
-                const isLast = i === chatMessages.length - 1;
-                const connectToNext = !!(next && isTimelineType(next.type));
-                const showSep = shouldShowTimestamp(msg.timestamp, prev?.timestamp ?? null);
-
-                const taskSpawnedAgent =
-                  msg.type === 'tool_use' &&
-                  msg.toolUse?.toolName === 'Task' &&
-                  Boolean((msg.toolUse as { result?: { content?: string } })?.result);
-
-                const nextIsSidechain = taskSpawnedAgent ? true : next?.isSidechain;
-
-                return (
-                  <div key={msg.uuid} className="px-1">
-                    {showSep && <TimeGroupSeparator timestamp={msg.timestamp} />}
-                    <TimelineMessageRenderer
-                      message={msg}
-                      isLast={isLast}
-                      connectToNext={connectToNext}
-                      prevTimestamp={prev?.timestamp}
-                      prevAgentId={prev?.agentId}
-                      nextAgentId={next?.agentId}
-                      nextIsSidechain={nextIsSidechain}
-                    />
-                  </div>
-                );
-              })}
+              <ArchiveTranscript messages={chatMessages} isDark={isDark} />
             </div>
           )}
         </div>
@@ -503,7 +471,7 @@ export function SessionMessagesView({
             <button
               type="button"
               onClick={jumpToLatest}
-              className="font-mono text-[10px] uppercase tracking-widest px-3 py-1.5 border border-ink/40 bg-paper text-ink shadow-lg cursor-pointer hover:bg-ink hover:text-paper transition-colors"
+              className="font-mono text-[10px] uppercase tracking-widest px-3 py-1.5 border border-[color:var(--archive-ink-line)] bg-paper text-ink shadow-lg cursor-pointer hover:bg-ink hover:text-paper transition-colors"
             >
               ↓ {pendingNew} new message{pendingNew === 1 ? '' : 's'}
             </button>

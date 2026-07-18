@@ -130,6 +130,11 @@ with `WORKSPACE_ROOT`, waits for `ready`, then transfers a `MessagePort`.
 Opening the panel against a project path (or switching projects) restarts
 the host for that folder.
 
+UI theme: **`minimal`** (`@vibecook/mille-ui/icons/minimal` +
+`@vibecook/mille-ui/theme/minimal.css`) under `data-mille-theme="minimal"`,
+matching the archive Structure panel. Packages are linked from the local
+`mille` monorepo (`file:../../../../mille/packages/...`).
+
 ## Notes
 
 The renderer does **not** mount `<AgentDataPlayground />` directly — that

@@ -52,7 +52,7 @@ const FilterPill = memo(function FilterPill({
       type="button"
       onClick={onToggleMute}
       aria-pressed={active}
-      className="flex h-8 min-w-0 items-center justify-between gap-2 border-0 border-b border-ink/25 px-1 bg-transparent font-mono text-[11px] tracking-[0.04em] transition-colors cursor-pointer"
+      className="flex h-8 min-w-0 items-center justify-between gap-2 border-0 border-b border-[color:var(--archive-ink-line)] px-1 bg-transparent font-mono text-[11px] tracking-[0.04em] transition-colors cursor-pointer"
       style={{
         color: active ? color : undefined,
         borderBottomColor: active ? `${color}aa` : undefined,
@@ -117,12 +117,12 @@ export const MessageFilterBar = memo(function MessageFilterBar({
 
   return (
     <div
-      className="shrink-0 border-b border-ink/15 px-2 py-2 md:px-4 lg:px-6 bg-transparent"
+      className="shrink-0 border-b border-[color:var(--archive-ink-line-mid)] px-2 py-2 md:px-4 lg:px-6 bg-transparent"
       role="toolbar"
       aria-label="Message filters"
     >
       <div className="mx-auto flex max-w-3xl flex-wrap items-center gap-x-2 gap-y-1.5">
-        <label className="flex h-8 w-36 items-center gap-2 border-b border-ink/25 px-1 font-mono text-[11px]">
+        <label className="flex h-8 w-40 items-center gap-2 border-b border-[color:var(--archive-ink-line)] px-1 font-mono text-[11px]">
           <Search size={14} className="shrink-0 opacity-45" />
           <input
             type="search"

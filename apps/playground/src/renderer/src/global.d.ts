@@ -7,6 +7,11 @@ declare global {
       openWorkspace(path: string): Promise<{ ok: true; root: string }>;
       closeWorkspace(): Promise<{ ok: true }>;
     };
+    windowControls?: {
+      minimize(): Promise<void>;
+      maximize(): Promise<void>;
+      close(): Promise<void>;
+    };
   }
 }
 

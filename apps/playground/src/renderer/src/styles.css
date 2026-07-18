@@ -7,12 +7,25 @@
  * Light: warm cream paper · Dark: ink-black paper.
  */
 
+/*
+ * Border hierarchy from spaghetti-ui-design:
+ *   outer frame  light /80  dark /60
+ *   header       light /40  dark /30
+ *   columns      light /20  dark /20
+ *   section      light /10  dark /10
+ *   filter tray  light /15  dark /15
+ *   hairlines    light /10–15
+ */
 :root {
   --archive-ink: #2b2623;
   --archive-ink-muted: rgba(43, 38, 35, 0.65);
   --archive-ink-faint: rgba(43, 38, 35, 0.4);
+  /* Default column line — matches design border at 20% opacity */
   --archive-ink-line: rgba(43, 38, 35, 0.2);
-  --archive-ink-line-strong: rgba(43, 38, 35, 0.4);
+  --archive-ink-line-soft: rgba(43, 38, 35, 0.1);
+  --archive-ink-line-mid: rgba(43, 38, 35, 0.15);
+  --archive-ink-line-header: rgba(43, 38, 35, 0.4);
+  --archive-ink-line-outer: rgba(43, 38, 35, 0.55);
   --archive-paper: #f1ede4;
   --archive-paper-deep: #e9e5da;
   --archive-chrome: #d1ccc0;
@@ -34,8 +47,8 @@
   --accent: #9a3b28;
   --accent-foreground: #f8f6f0;
   --destructive: #9a3b28;
-  --border: rgba(43, 38, 35, 0.2);
-  --input: rgba(43, 38, 35, 0.15);
+  --border: rgba(43, 38, 35, 0.15);
+  --input: rgba(43, 38, 35, 0.12);
   --ring: #9a3b28;
   --radius: 0;
 
@@ -49,7 +62,10 @@
   --archive-ink-muted: rgba(212, 203, 189, 0.65);
   --archive-ink-faint: rgba(212, 203, 189, 0.4);
   --archive-ink-line: rgba(212, 203, 189, 0.2);
-  --archive-ink-line-strong: rgba(212, 203, 189, 0.35);
+  --archive-ink-line-soft: rgba(212, 203, 189, 0.1);
+  --archive-ink-line-mid: rgba(212, 203, 189, 0.15);
+  --archive-ink-line-header: rgba(212, 203, 189, 0.3);
+  --archive-ink-line-outer: rgba(212, 203, 189, 0.4);
   --archive-paper: #141312;
   --archive-paper-deep: #11100f;
   --archive-chrome: #0a0908;
@@ -71,8 +87,8 @@
   --accent: #d98d78;
   --accent-foreground: #11100f;
   --destructive: #d98d78;
-  --border: rgba(212, 203, 189, 0.2);
-  --input: rgba(212, 203, 189, 0.15);
+  --border: rgba(212, 203, 189, 0.15);
+  --input: rgba(212, 203, 189, 0.12);
   --ring: #d98d78;
 
   --chat-bg: transparent;
@@ -84,8 +100,16 @@ body,
 #root {
   height: 100%;
   margin: 0;
-  background: var(--archive-chrome);
+  /* App fills the window; paper border sits on the window edge (no chrome margin). */
+  background: var(--archive-paper-deep);
   color: var(--archive-ink);
+  overflow: hidden;
+  /* Square corners — pair with Electron roundedCorners: false on macOS. */
+  border-radius: 0 !important;
+  /*
+   * Base stack: system UI (design body default). Archival roles opt into
+   * EB Garamond (serif) or mono via .font-serif / .font-mono utilities.
+   */
   font-family:
     ui-sans-serif,
     system-ui,
@@ -93,7 +117,80 @@ body,
     BlinkMacSystemFont,
     'Segoe UI',
     sans-serif;
+  font-size: 16px;
+  line-height: 1.5;
   -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+}
+
+/* Frameless window drag region (macOS titleBarStyle: hidden). */
+.titlebar-drag {
+  -webkit-app-region: drag;
+  app-region: drag;
+}
+.titlebar-no-drag,
+.titlebar-drag button,
+.titlebar-drag a,
+.titlebar-drag input {
+  -webkit-app-region: no-drag;
+  app-region: no-drag;
+}
+
+/* macOS-style traffic lights (custom, always visible) */
+.traffic-lights {
+  height: 12px;
+}
+.traffic-light {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  border: none;
+  padding: 0;
+  cursor: default;
+  position: relative;
+  box-shadow: inset 0 0 0 0.5px rgba(0, 0, 0, 0.18);
+  flex-shrink: 0;
+}
+.traffic-light:active {
+  filter: brightness(0.92);
+}
+.traffic-light--close {
+  background: #ff5f57;
+}
+.traffic-light--min {
+  background: #febc2e;
+}
+.traffic-light--max {
+  background: #28c840;
+}
+/* Glyphs on group hover (macOS Big Sur+ behavior) */
+.traffic-lights:hover .traffic-light::after {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 8px;
+  font-weight: 700;
+  line-height: 1;
+  color: rgba(0, 0, 0, 0.55);
+  pointer-events: none;
+}
+.traffic-lights:hover .traffic-light--close::after {
+  content: '×';
+  font-size: 9px;
+  margin-top: -0.5px;
+}
+.traffic-lights:hover .traffic-light--min::after {
+  content: '−';
+  font-size: 10px;
+  margin-top: -1px;
+}
+.traffic-lights:hover .traffic-light--max::after {
+  content: '+';
+  font-size: 9px;
+  margin-top: -0.5px;
 }
 
 .font-serif {
@@ -191,22 +288,235 @@ input:focus-visible {
   /* leave as-is; panel provides paper */
 }
 
-/* Mille tree inside Structure panel */
-.mille-panel {
-  color: var(--archive-ink);
-  font-size: 11px;
-  font-family: ui-monospace, 'SF Mono', Menlo, monospace;
-  --mille-row-height: 22px;
-  --mille-indent-size: 10px;
-  --mille-accent-bg: var(--archive-sanguine);
-  --mille-accent-fg: var(--archive-paper);
-  --mille-row-bg-hover: color-mix(in srgb, var(--archive-ink) 5%, transparent);
-  --mille-row-bg-selected: color-mix(in srgb, var(--archive-ink) 8%, transparent);
-  --mille-row-bg-selected-focused: color-mix(in srgb, var(--archive-sanguine) 18%, transparent);
-  --mille-indent-guide: var(--archive-ink-line);
-  --mille-chevron-color: var(--archive-ink-faint);
+/*
+ * Archive markdown — wrap SDK MarkdownContent so prose matches
+ * spaghetti-ui-design TranscriptEntry roles while keeping Prism.
+ *
+ * Design roles (App.tsx):
+ *   user:         text-[14px] font-serif italic leading-relaxed
+ *   assistant:    text-[14px] font-serif leading-relaxed text-justify
+ *   thought:      text-[13px] font-serif italic leading-relaxed opacity-70
+ *   branch_start: text-[12px] font-serif italic leading-relaxed
+ *   tool_use cmd: font-mono text-[11px] leading-relaxed
+ *   tool_result:  font-mono text-[11px] leading-relaxed
+ *
+ * SDK MarkdownContent hardcodes text-[11px]/leading-tight — override.
+ */
+.archive-md {
+  color: inherit;
 }
 
+/* Shared serif stack for prose roles */
+.archive-md--user,
+.archive-md--assistant,
+.archive-md--thought,
+.archive-md--branch {
+  font-family: 'EB Garamond', Georgia, 'Times New Roman', serif;
+  line-height: 1.625; /* Tailwind leading-relaxed */
+}
+
+/* user — 14px italic */
+.archive-md--user {
+  font-size: 14px;
+  font-style: italic;
+}
+
+/* assistant — 14px roman, justified */
+.archive-md--assistant {
+  font-size: 14px;
+  font-style: normal;
+  text-align: justify;
+}
+
+/* thought — 13px italic, faded */
+.archive-md--thought {
+  font-size: 13px;
+  font-style: italic;
+  opacity: 0.7;
+}
+
+/* branch_start — 12px italic */
+.archive-md--branch {
+  font-size: 12px;
+  font-style: italic;
+}
+
+/* Beat SDK utility sizes on block children */
+.archive-md--user p,
+.archive-md--user ul,
+.archive-md--user ol,
+.archive-md--user li,
+.archive-md--user blockquote,
+.archive-md--assistant p,
+.archive-md--assistant ul,
+.archive-md--assistant ol,
+.archive-md--assistant li,
+.archive-md--assistant blockquote {
+  font-size: 14px !important;
+  line-height: 1.625 !important;
+  margin-bottom: 0.55em !important;
+  font-family: inherit !important;
+  font-style: inherit !important;
+}
+
+.archive-md--thought p,
+.archive-md--thought ul,
+.archive-md--thought ol,
+.archive-md--thought li,
+.archive-md--thought blockquote {
+  font-size: 13px !important;
+  line-height: 1.625 !important;
+  margin-bottom: 0.55em !important;
+  font-family: inherit !important;
+  font-style: inherit !important;
+  opacity: 1; /* opacity lives on container */
+}
+
+.archive-md--branch p,
+.archive-md--branch ul,
+.archive-md--branch ol,
+.archive-md--branch li,
+.archive-md--branch blockquote {
+  font-size: 12px !important;
+  line-height: 1.625 !important;
+  margin-bottom: 0.45em !important;
+  font-family: inherit !important;
+  font-style: inherit !important;
+}
+
+.archive-md--user p:last-child,
+.archive-md--assistant p:last-child,
+.archive-md--thought p:last-child,
+.archive-md--branch p:last-child {
+  margin-bottom: 0 !important;
+}
+
+.archive-md--assistant p {
+  text-align: justify;
+}
+
+/* Headings stay EB Garamond medium (design theme weight) */
+.archive-md h1 {
+  font-size: 1.25rem !important;
+  font-family: 'EB Garamond', Georgia, serif !important;
+  font-weight: 500 !important;
+  font-style: normal !important;
+  line-height: 1.3 !important;
+  margin: 0.75em 0 0.35em !important;
+}
+.archive-md h2 {
+  font-size: 1.1rem !important;
+  font-family: 'EB Garamond', Georgia, serif !important;
+  font-weight: 500 !important;
+  font-style: normal !important;
+  line-height: 1.3 !important;
+  margin: 0.65em 0 0.3em !important;
+}
+.archive-md h3 {
+  font-size: 1rem !important;
+  font-family: 'EB Garamond', Georgia, serif !important;
+  font-weight: 500 !important;
+  font-style: normal !important;
+  line-height: 1.35 !important;
+  margin: 0.55em 0 0.25em !important;
+}
+
+.archive-md ul,
+.archive-md ol {
+  padding-left: 1.25em !important;
+  margin-bottom: 0.5em !important;
+}
+
+.archive-md li {
+  font-size: inherit !important;
+  line-height: inherit !important;
+  margin-bottom: 0.2em;
+}
+
+.archive-md blockquote {
+  border-left: 1px solid var(--archive-ink-line) !important;
+  padding-left: 0.75em !important;
+  font-style: italic;
+  opacity: 0.85;
+  font-family: inherit !important;
+  font-size: inherit !important;
+  line-height: inherit !important;
+}
+
+.archive-md a {
+  color: var(--archive-sanguine) !important;
+  text-underline-offset: 2px;
+}
+
+/* Inline code inside serif prose — mono, slightly smaller than body */
+.archive-md--user code,
+.archive-md--assistant code,
+.archive-md--thought code,
+.archive-md--branch code {
+  font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace !important;
+  font-size: 0.85em !important;
+  font-style: normal !important;
+}
+
+/*
+ * Tool command / tool result — design: font-mono text-[11px] leading-relaxed.
+ * Override SDK TextRenderer text-[10px] and MarkdownContent text-[11px]/tight.
+ */
+.archive-md--code,
+.archive-md--result {
+  font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.625;
+  font-style: normal;
+}
+
+.archive-md--code p,
+.archive-md--code pre,
+.archive-md--code code,
+.archive-md--code li,
+.archive-md--code div,
+.archive-md--result p,
+.archive-md--result pre,
+.archive-md--result code,
+.archive-md--result li,
+.archive-md--result div {
+  font-size: 11px !important;
+  font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace !important;
+  line-height: 1.625 !important;
+  font-style: normal !important;
+}
+
+/* Fenced / Prism blocks — square corners, soft archive border */
+.archive-md pre,
+.archive-md--code pre,
+.archive-md--result pre,
+.archive-md--code [class*='language-'],
+.archive-md--result [class*='language-'] {
+  border-radius: 0 !important;
+  border-color: var(--archive-ink-line-mid) !important;
+  font-size: 11px !important;
+  line-height: 1.5 !important;
+  margin: 0.35em 0 !important;
+}
+
+/* Prism injects inline fontSize: 11px already; keep mono stack */
+.archive-md--code code,
+.archive-md--result code,
+.archive-md code {
+  font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace !important;
+}
+
+.archive-md table {
+  font-size: 11px !important;
+  font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace !important;
+  line-height: 1.45 !important;
+}
+.archive-md th,
+.archive-md td {
+  border-color: var(--archive-ink-line-soft) !important;
+}
+
+/* Mille tree layout only — visual tokens come from @vibecook/mille-ui/theme/minimal.css */
 .mille-panel .mille-tree,
 .mille-panel [role='tree'] {
   height: 100%;

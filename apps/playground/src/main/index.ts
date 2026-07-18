@@ -59,16 +59,26 @@ function resolvePreloadPath(): string {
 }
 
 function createWindow(): BrowserWindow {
+  const isMac = process.platform === 'darwin';
   const win = new BrowserWindow({
     width: 1400,
     height: 900,
     minWidth: 900,
     minHeight: 600,
-    backgroundColor: '#050505',
+    // Match archive paper so no native chrome peeks through.
+    backgroundColor: '#11100f',
     // Show immediately so the loading screen is visible during cold ingest.
     show: true,
     title: 'Spaghetti Playground',
     autoHideMenuBar: true,
+    // Custom chrome: no native title bar. We draw macOS-style traffic lights
+    // in the renderer (top-left) so they always match the archive UI.
+    ...(isMac
+      ? {
+          titleBarStyle: 'hidden' as const,
+          roundedCorners: false,
+        }
+      : {}),
     webPreferences: {
       preload: resolvePreloadPath(),
       nodeIntegration: false,
@@ -77,9 +87,17 @@ function createWindow(): BrowserWindow {
     },
   });
 
+  // Prefer our in-app lights — hide native buttons when available.
+  if (isMac && typeof win.setWindowButtonVisibility === 'function') {
+    win.setWindowButtonVisibility(false);
+  }
+
   win.once('ready-to-show', () => {
     if (!win.isVisible()) win.show();
     win.focus();
+    if (isMac && typeof win.setWindowButtonVisibility === 'function') {
+      win.setWindowButtonVisibility(false);
+    }
   });
 
   win.webContents.setWindowOpenHandler(({ url }) => {
@@ -118,6 +136,20 @@ void app.whenReady().then(async () => {
   ipcMain.handle('mille:close-workspace', () => {
     closeMilleWorkspace();
     return { ok: true as const };
+  });
+
+  // Window chrome controls (fallback when traffic lights are missing / hard to hit).
+  ipcMain.handle('window:minimize', (evt) => {
+    BrowserWindow.fromWebContents(evt.sender)?.minimize();
+  });
+  ipcMain.handle('window:maximize', (evt) => {
+    const win = BrowserWindow.fromWebContents(evt.sender);
+    if (!win) return;
+    if (win.isMaximized()) win.unmaximize();
+    else win.maximize();
+  });
+  ipcMain.handle('window:close', (evt) => {
+    BrowserWindow.fromWebContents(evt.sender)?.close();
   });
 
   createWindow();

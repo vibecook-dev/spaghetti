@@ -38,6 +38,11 @@ export {
   formatChatTime,
   transformRawMessagesToTimeline,
   timeline,
+  // Content renderers (markdown + syntax highlight + tool results)
+  MarkdownContent,
+  CodeBlock,
+  ToolResultRenderer,
+  RawJsonViewer,
   type SessionMessage as ChatSessionMessage,
   type ToolUseInfo,
   type ToolResultInfo,

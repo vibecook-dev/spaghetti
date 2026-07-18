@@ -16,9 +16,12 @@ export function Spinner({ className = '' }: { className?: string }) {
 export function EmptyState({ title, detail, action }: { title: string; detail?: string; action?: ReactNode }) {
   return (
     <div className="flex flex-col items-center justify-center gap-2 py-12 px-6 text-center">
-      <p className="font-serif text-sm text-ink/50">{title}</p>
+      {/* Design empty prose: serif ~14px; mono caption for detail */}
+      <p className="font-serif text-[14px] leading-relaxed text-ink/50">{title}</p>
       {detail ? (
-        <p className="font-mono text-[10px] tracking-wide text-ink/35 max-w-xs leading-relaxed">{detail}</p>
+        <p className="font-mono text-[10px] tracking-[0.08em] uppercase text-ink/35 max-w-xs leading-relaxed">
+          {detail}
+        </p>
       ) : null}
       {action ? <div className="mt-2">{action}</div> : null}
     </div>
@@ -32,9 +35,10 @@ export function Dot() {
 type BtnVariant = 'ghost' | 'solid' | 'danger';
 
 const BTN: Record<BtnVariant, string> = {
-  ghost: 'bg-transparent border-ink/25 text-ink/75 hover:border-ink/50 hover:text-ink',
-  solid: 'bg-ink text-paper border-ink hover:opacity-90 dark:bg-ink dark:text-[#11100f]',
-  danger: 'bg-transparent border-sanguine/40 text-sanguine hover:bg-sanguine/10',
+  ghost:
+    'bg-transparent border-[color:var(--archive-ink-line-mid)] text-ink/75 hover:border-[color:var(--archive-ink-line)] hover:text-ink',
+  solid: 'bg-ink text-paper border-transparent hover:opacity-90 dark:bg-ink dark:text-[#11100f]',
+  danger: 'bg-transparent border-sanguine/25 text-sanguine hover:bg-sanguine/10',
 };
 
 export function Btn({
@@ -73,8 +77,10 @@ export function Chip({
       type={onClick ? 'button' : undefined}
       title={title}
       onClick={onClick}
-      className={`inline-flex items-center font-mono text-[9px] px-1.5 py-0.5 tracking-wide transition-colors border-b ${
-        active ? 'border-ink text-ink opacity-100' : 'border-ink/20 text-ink/45 hover:text-ink/70 hover:border-ink/40'
+      className={`inline-flex items-center font-mono text-[9px] px-1 py-0.5 tracking-[0.04em] uppercase transition-colors border-b ${
+        active
+          ? 'border-[color:var(--archive-ink-line-header)] text-ink opacity-100'
+          : 'border-[color:var(--archive-ink-line-soft)] text-ink/45 hover:text-ink/70 hover:border-[color:var(--archive-ink-line-mid)]'
       } ${onClick ? 'cursor-pointer bg-transparent' : ''} ${className}`}
     >
       {children}
@@ -84,7 +90,7 @@ export function Chip({
 
 export function SectionLabel({ children, trailing }: { children: ReactNode; trailing?: ReactNode }) {
   return (
-    <div className="h-10 px-4 border-b border-ink/10 flex items-center gap-2 shrink-0">
+    <div className="h-10 px-4 border-b border-[color:var(--archive-ink-line-soft)] flex items-center gap-2 shrink-0">
       <span className="flex-1 min-w-0 truncate font-serif text-[10px] uppercase tracking-[0.15em] opacity-80">
         {children}
       </span>
@@ -109,7 +115,7 @@ export function LiveDot({ active, label = 'Live' }: { active: boolean; label?: s
 
 export function Kbd({ children }: { children: ReactNode }) {
   return (
-    <kbd className="inline-flex items-center px-1 py-0.5 border border-ink/20 font-mono text-[8px] text-ink/40 leading-none tracking-normal normal-case">
+    <kbd className="inline-flex items-center px-1 py-0.5 border border-[color:var(--archive-ink-line-soft)] font-mono text-[8px] text-ink/40 leading-none tracking-normal normal-case">
       {children}
     </kbd>
   );
@@ -125,7 +131,7 @@ export function PanelShell({
   style?: CSSProperties;
 }) {
   return (
-    <div className={`border border-ink/40 bg-paper shadow-2xl ${className}`} style={style}>
+    <div className={`border border-[color:var(--archive-ink-line)] bg-paper shadow-2xl ${className}`} style={style}>
       {children}
     </div>
   );

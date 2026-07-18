@@ -163,16 +163,16 @@ export function SearchOverlay({
     >
       <div
         className={`w-full max-w-xl border shadow-2xl overflow-hidden flex flex-col max-h-[70vh] ${
-          isDark ? 'border-ink/45 bg-[#171615] text-ink' : 'border-ink/60 bg-[#f8f6f0] text-ink'
+          isDark ? 'border-[#d4cbbd]/45 bg-[#171615] text-ink' : 'border-[#2b2623]/50 bg-[#f8f6f0] text-ink'
         }`}
       >
-        <div className="flex items-center gap-2 px-4 py-3 border-b border-ink/20">
+        <div className="flex items-center gap-2 px-4 py-3 border-b border-[color:var(--archive-ink-line)]">
           <span className="font-mono text-[9px] tracking-[0.18em] opacity-55">SPAGHETTI ARCHIVE · SEARCH</span>
           <span className="flex-1" />
           <Kbd>esc</Kbd>
         </div>
 
-        <div className="flex items-center gap-2 px-4 py-2.5 border-b border-ink/15">
+        <div className="flex items-center gap-2 px-4 py-2.5 border-b border-[color:var(--archive-ink-line-mid)]">
           <span className="opacity-40 text-sm select-none" aria-hidden>
             ⌕
           </span>
@@ -190,7 +190,7 @@ export function SearchOverlay({
           {loading ? <Spinner /> : null}
         </div>
 
-        <div className="flex items-center gap-1.5 px-3 py-2 border-b border-ink/10 flex-wrap">
+        <div className="flex items-center gap-1.5 px-3 py-2 border-b border-[color:var(--archive-ink-line-soft)] flex-wrap">
           <Chip active={sourceFilter === null} onClick={() => setSourceFilter(null)}>
             All agents
           </Chip>
@@ -244,22 +244,23 @@ export function SearchOverlay({
                       }`}
                     >
                       <div className="flex items-center gap-2 mb-1">
-                        <span className="text-[10px] font-mono text-sanguine/80 uppercase tracking-wide shrink-0">
+                        <span className="text-[9px] font-mono text-sanguine/80 uppercase tracking-widest shrink-0">
                           {r.type}
                         </span>
                         {r.sourceId ? <SourceBadge sourceId={r.sourceId} isDark={isDark} /> : null}
                         {r.projectSlug ? (
-                          <span className="text-[11px] font-mono text-ink/50 truncate min-w-0">
+                          <span className="text-[10px] font-mono tracking-tight text-ink/50 truncate min-w-0">
                             {shortSlug(r.projectSlug)}
                           </span>
                         ) : null}
                         {r.sessionId ? (
-                          <span className="text-[10px] font-mono text-ink/30 ml-auto shrink-0">
+                          <span className="text-[9px] font-mono tracking-[0.08em] text-ink/30 ml-auto shrink-0">
                             {r.sessionId.slice(0, 8)}
                           </span>
                         ) : null}
                       </div>
-                      <div className="font-serif text-[13px] text-ink/75 leading-snug line-clamp-2">
+                      {/* Design prose snippets: serif ~13–14px relaxed */}
+                      <div className="font-serif text-[13px] italic text-ink/75 leading-relaxed line-clamp-2">
                         {flattenPrompt(r.snippet, 180) || '(empty snippet)'}
                       </div>
                     </button>
@@ -270,7 +271,7 @@ export function SearchOverlay({
           )}
         </div>
 
-        <div className="flex items-center gap-3 px-4 py-2 border-t border-ink/15 font-mono text-[9px] tracking-widest uppercase opacity-50">
+        <div className="flex items-center gap-3 px-4 py-2 border-t border-[color:var(--archive-ink-line-mid)] font-mono text-[9px] tracking-widest uppercase opacity-50">
           <span>
             {results ? (
               <>

@@ -1,20 +1,22 @@
 /**
- * Right Structure panel (design mock).
- * - Project Files: mille tree for selected project's absolutePath
- * - Session artifacts (plan / todos / task / subagents / memory) when a session is open
+ * Right Structure panel — design mock layout:
+ *   Project Files | Plans | Todos | Tasks | Memory
+ * each a collapsible section with a file tree (no tool chrome under Project Files).
  */
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ChevronDown, ChevronRight, TerminalSquare, X } from 'lucide-react';
 import type { FileExplorer } from '@vibecook/mille';
 import { connectFileExplorer, type PortFileExplorer } from '@vibecook/mille/port';
 import { FileTreeProvider, FileTree, useFileTreeRef } from '@vibecook/mille-ui';
-import { duotoneIconTheme } from '@vibecook/mille-ui/icons';
+import { minimalIconTheme } from '@vibecook/mille-ui/icons/minimal';
 import { createCommandRegistry, defaultCommands } from '@vibecook/mille-ui/commands';
+import type { SubagentListItem } from '@vibecook/spaghetti-sdk';
 import '@vibecook/mille-ui/tokens.css';
+import '@vibecook/mille-ui/theme/minimal.css';
 import { onFxPort } from '../lib/fx-port.js';
 import { EmptyState, Spinner } from './ui.js';
-import { ArtifactPanel, type ArtifactTab } from './ArtifactPanel.js';
+import { StructureFilePreview, StructureTree, type StructureNode } from './StructureTree.js';
 
 export interface SessionArtifactsProps {
   projectSlug: string;
@@ -37,13 +39,41 @@ export interface FileExplorerPanelProps {
   sessionArtifacts?: SessionArtifactsProps | null;
 }
 
-type StructureSection = 'project-files' | 'artifacts';
+type StructureSectionId = 'project-files' | 'plans' | 'todos' | 'tasks' | 'memory' | 'subagents';
+
+type ArtifactSectionId = Exclude<StructureSectionId, 'project-files'>;
+
+const ARTIFACT_SECTIONS: { id: ArtifactSectionId; label: string }[] = [
+  { id: 'plans', label: 'Plans' },
+  { id: 'todos', label: 'Todos' },
+  { id: 'tasks', label: 'Tasks' },
+  { id: 'memory', label: 'Memory' },
+  { id: 'subagents', label: 'Subagents' },
+];
+
+interface PlanShape {
+  slug?: string;
+  title?: string;
+  content?: string;
+}
+
+interface TaskShape {
+  taskId?: string;
+  hasHighwatermark?: boolean;
+  highwatermark?: string | null;
+  lockExists?: boolean;
+}
+
+interface TodoItemShape {
+  content?: string;
+  status?: string;
+  activeForm?: string;
+}
 
 export function FileExplorerPanel({
   open,
   onClose,
   projectPath,
-  projectLabel,
   isDark = true,
   sessionArtifacts = null,
 }: FileExplorerPanelProps) {
@@ -51,10 +81,18 @@ export function FileExplorerPanel({
   const [root, setRoot] = useState<string | null>(null);
   const [status, setStatus] = useState<'idle' | 'opening' | 'ready' | 'error'>('idle');
   const [error, setError] = useState<string | null>(null);
-  const [openSections, setOpenSections] = useState<Set<StructureSection>>(() => new Set(['project-files']));
-  const [artifactTab, setArtifactTab] = useState<ArtifactTab>('plan');
+  const [openSections, setOpenSections] = useState<Set<StructureSectionId>>(() => new Set(['project-files']));
   const currentFxRef = useRef<PortFileExplorer | null>(null);
   const openSeq = useRef(0);
+
+  // Artifact data (lazy per session)
+  const [plan, setPlan] = useState<PlanShape | null>(null);
+  const [todos, setTodos] = useState<TodoItemShape[]>([]);
+  const [task, setTask] = useState<TaskShape | null>(null);
+  const [memory, setMemory] = useState<string | null>(null);
+  const [subagents, setSubagents] = useState<SubagentListItem[]>([]);
+  const [artifactLoading, setArtifactLoading] = useState(false);
+  const [preview, setPreview] = useState<{ section: StructureSectionId; node: StructureNode } | null>(null);
 
   useEffect(() => {
     if (!open) return;
@@ -65,19 +103,63 @@ export function FileExplorerPanel({
       }
       if (e.key === 'Escape') {
         e.preventDefault();
+        if (preview) {
+          setPreview(null);
+          return;
+        }
         onClose();
       }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [open, onClose]);
+  }, [open, onClose, preview]);
 
-  // Auto-open artifacts section when session selected
+  // Load artifact trees when a session is selected
   useEffect(() => {
-    if (sessionArtifacts) {
-      setOpenSections((prev) => new Set([...prev, 'artifacts']));
+    if (!sessionArtifacts) {
+      setPlan(null);
+      setTodos([]);
+      setTask(null);
+      setMemory(null);
+      setSubagents([]);
+      setPreview(null);
+      return;
     }
-  }, [sessionArtifacts?.sessionId]);
+    let cancelled = false;
+    setArtifactLoading(true);
+    setPreview(null);
+    const { projectSlug, sessionId, sourceId } = sessionArtifacts;
+    void (async () => {
+      try {
+        const [p, t, tsk, mem, agents] = await Promise.all([
+          window.spaghetti.getSessionPlan(projectSlug, sessionId),
+          window.spaghetti.getSessionTodos(projectSlug, sessionId),
+          window.spaghetti.getSessionTask(projectSlug, sessionId),
+          window.spaghetti.getProjectMemory(projectSlug, { sourceId }),
+          window.spaghetti.getSessionSubagents(projectSlug, sessionId),
+        ]);
+        if (cancelled) return;
+        setPlan((p as PlanShape | null) ?? null);
+        setTodos(flattenTodos(t));
+        setTask((tsk as TaskShape | null) ?? null);
+        setMemory(mem);
+        setSubagents(agents);
+      } catch {
+        if (!cancelled) {
+          setPlan(null);
+          setTodos([]);
+          setTask(null);
+          setMemory(null);
+          setSubagents([]);
+        }
+      } finally {
+        if (!cancelled) setArtifactLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [sessionArtifacts?.projectSlug, sessionArtifacts?.sessionId, sessionArtifacts?.sourceId]);
 
   useEffect(() => {
     if (!open) {
@@ -166,24 +248,129 @@ export function FileExplorerPanel({
     };
   }, []);
 
-  const toggleSection = (id: StructureSection) => {
+  const toggleSection = useCallback((id: StructureSectionId) => {
     setOpenSections((prev) => {
       const next = new Set(prev);
       if (next.has(id)) next.delete(id);
       else next.add(id);
       return next;
     });
+  }, []);
+
+  const plansTree = useMemo((): StructureNode[] => {
+    if (!plan) return [];
+    const name = plan.title || plan.slug || 'plan.md';
+    const fileName = name.endsWith('.md') ? name : `${slugify(name)}.md`;
+    return [
+      {
+        name: 'plans',
+        type: 'folder',
+        isOpen: true,
+        children: [{ name: fileName, type: 'file', content: plan.content || '' }],
+      },
+    ];
+  }, [plan]);
+
+  const todosTree = useMemo((): StructureNode[] => {
+    if (todos.length === 0) return [];
+    return [
+      {
+        name: 'todo',
+        type: 'folder',
+        isOpen: true,
+        children: todos.map((t, i) => {
+          const label = (t.content || t.activeForm || `item-${i + 1}`).slice(0, 48);
+          const status = (t.status || 'pending').replace(/_/g, '-');
+          return {
+            name: `${status} · ${label}${label.length >= 48 ? '…' : ''}.md`,
+            type: 'file' as const,
+            content: [
+              `# ${t.content || t.activeForm || 'Todo'}`,
+              '',
+              `Status: ${t.status || 'pending'}`,
+              t.activeForm ? `Active form: ${t.activeForm}` : '',
+            ]
+              .filter(Boolean)
+              .join('\n'),
+          };
+        }),
+      },
+    ];
+  }, [todos]);
+
+  const tasksTree = useMemo((): StructureNode[] => {
+    if (!task) return [];
+    const id = task.taskId || 'task';
+    return [
+      {
+        name: 'task-queue',
+        type: 'folder',
+        isOpen: true,
+        children: [
+          {
+            name: `${id.slice(0, 8)}.md`,
+            type: 'file',
+            content: [
+              `# Task ${id}`,
+              '',
+              `Lock: ${task.lockExists ? 'held' : 'none'}`,
+              `Highwatermark: ${task.hasHighwatermark ? 'yes' : 'no'}`,
+              task.highwatermark ? `\n\`\`\`\n${task.highwatermark}\n\`\`\`` : '',
+            ].join('\n'),
+          },
+        ],
+      },
+    ];
+  }, [task]);
+
+  const memoryTree = useMemo((): StructureNode[] => {
+    if (!memory) return [];
+    return [
+      {
+        name: 'memory',
+        type: 'folder',
+        isOpen: true,
+        children: [{ name: 'MEMORY.md', type: 'file', content: memory }],
+      },
+    ];
+  }, [memory]);
+
+  const subagentsTree = useMemo((): StructureNode[] => {
+    if (subagents.length === 0) return [];
+    return [
+      {
+        name: 'subagents',
+        type: 'folder',
+        isOpen: true,
+        children: subagents.map((s) => ({
+          name: `${s.agentType || 'agent'} · ${s.agentId.slice(0, 8)}.md`,
+          type: 'file' as const,
+          content: [`# ${s.agentType || 'agent'}`, '', `Agent id: ${s.agentId}`, `Messages: ${s.messageCount}`].join(
+            '\n',
+          ),
+        })),
+      },
+    ];
+  }, [subagents]);
+
+  const trees: Record<ArtifactSectionId, StructureNode[]> = {
+    plans: plansTree,
+    todos: todosTree,
+    tasks: tasksTree,
+    memory: memoryTree,
+    subagents: subagentsTree,
   };
 
   if (!open) return null;
 
   return (
     <aside
-      className="w-64 border-l border-ink/20 flex flex-col shrink-0 bg-transparent min-h-0 z-20"
+      className="w-64 border-l border-[color:var(--archive-ink-line)] flex flex-col shrink-0 bg-transparent min-h-0 z-20"
       data-theme={isDark ? 'dark' : 'light'}
+      data-mille-theme="minimal"
       aria-label="Structure"
     >
-      <div className="h-10 border-b border-ink/10 flex items-center justify-between px-4 shrink-0">
+      <div className="h-10 border-b border-[color:var(--archive-ink-line-soft)] flex items-center justify-between px-4 shrink-0">
         <span className="font-serif text-[10px] uppercase tracking-[0.15em] opacity-80">Structure</span>
         <button
           type="button"
@@ -196,102 +383,103 @@ export function FileExplorerPanel({
       </div>
 
       <div className="flex-1 overflow-y-auto scrollbar-hide min-h-0">
-        {/* Project Files */}
-        <section className="border-b border-ink/10">
-          <button
-            type="button"
-            onClick={() => toggleSection('project-files')}
-            aria-expanded={openSections.has('project-files')}
-            className="flex w-full items-center justify-between px-4 py-2 font-mono text-[9px] tracking-widest opacity-70 transition-opacity hover:opacity-100 bg-transparent border-0 text-ink cursor-pointer"
-          >
-            <span className="flex min-w-0 items-center gap-2 uppercase">
-              <TerminalSquare size={10} />
-              <span className="truncate">Project Files</span>
-            </span>
-            {openSections.has('project-files') ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
-          </button>
-          {openSections.has('project-files') && (
-            <div className="min-h-[200px] h-[min(40vh,320px)] flex flex-col border-t border-ink/5">
-              {!projectPath ? (
-                <EmptyState title="Select a project" detail="Opens the project folder on disk." />
-              ) : status === 'opening' || (status === 'ready' && !fx) ? (
-                <div className="flex items-center justify-center gap-2 py-10 font-mono text-[10px] tracking-widest uppercase opacity-50">
-                  <Spinner />
-                  Opening…
-                </div>
-              ) : status === 'error' ? (
-                <EmptyState title="Could not open folder" detail={error ?? 'Unknown error'} />
-              ) : fx && root ? (
-                <ExplorerTree fx={fx} root={root} label={projectLabel} />
-              ) : (
-                <EmptyState title="Waiting for host" detail="Connecting to the file explorer…" />
-              )}
-            </div>
-          )}
-        </section>
-
-        {/* Session artifacts */}
-        {sessionArtifacts ? (
-          <section className="border-b border-ink/10 flex flex-col min-h-0">
-            <button
-              type="button"
-              onClick={() => toggleSection('artifacts')}
-              aria-expanded={openSections.has('artifacts')}
-              className="flex w-full items-center justify-between px-4 py-2 font-mono text-[9px] tracking-widest opacity-70 transition-opacity hover:opacity-100 bg-transparent border-0 text-ink cursor-pointer"
-            >
-              <span className="flex min-w-0 items-center gap-2 uppercase">
-                <TerminalSquare size={10} />
-                <span className="truncate">Session artifacts</span>
-              </span>
-              {openSections.has('artifacts') ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
-            </button>
-            {openSections.has('artifacts') && (
-              <div className="min-h-[240px] max-h-[45vh] flex flex-col border-t border-ink/5">
-                <div className="flex gap-0.5 px-2 py-1.5 flex-wrap border-b border-ink/5">
-                  {(
-                    [
-                      ['plan', 'Plan', !!sessionArtifacts.hints.planSlug],
-                      ['todos', 'Todos', sessionArtifacts.hints.todoCount > 0],
-                      ['task', 'Task', sessionArtifacts.hints.hasTask],
-                      ['subagents', 'Agents', false],
-                      ['memory', 'Memory', !!sessionArtifacts.hints.hasMemory],
-                    ] as const
-                  ).map(([id, label, hint]) => (
-                    <button
-                      key={id}
-                      type="button"
-                      onClick={() => setArtifactTab(id)}
-                      className={`font-mono text-[9px] tracking-wide px-1.5 py-0.5 border-b cursor-pointer bg-transparent transition-colors ${
-                        artifactTab === id ? 'border-ink text-ink' : 'border-transparent text-ink/40 hover:text-ink/70'
-                      }`}
-                    >
-                      {label}
-                      {hint ? <span className="ml-1 text-sanguine">·</span> : null}
-                    </button>
-                  ))}
-                </div>
-                <div className="flex-1 min-h-0 overflow-hidden">
-                  <ArtifactPanel
-                    open
-                    embedded
-                    onClose={() => {}}
-                    projectSlug={sessionArtifacts.projectSlug}
-                    sourceId={sessionArtifacts.sourceId}
-                    sessionId={sessionArtifacts.sessionId}
-                    hints={sessionArtifacts.hints}
-                    initialTab={artifactTab}
-                  />
-                </div>
+        {/* Project Files — mille tree only, no toolbar */}
+        <StructureSection
+          id="project-files"
+          label="Project Files"
+          open={openSections.has('project-files')}
+          onToggle={() => toggleSection('project-files')}
+        >
+          <div className="min-h-[180px] h-[min(36vh,280px)] flex flex-col">
+            {!projectPath ? (
+              <EmptyState title="Select a project" detail="Opens the project folder on disk." />
+            ) : status === 'opening' || (status === 'ready' && !fx) ? (
+              <div className="flex items-center justify-center gap-2 py-10 font-mono text-[10px] tracking-widest uppercase opacity-50">
+                <Spinner />
+                Opening…
               </div>
+            ) : status === 'error' ? (
+              <EmptyState title="Could not open folder" detail={error ?? 'Unknown error'} />
+            ) : fx && root ? (
+              <ExplorerTree fx={fx} />
+            ) : (
+              <EmptyState title="Waiting for host" detail="Connecting to the file explorer…" />
             )}
-          </section>
-        ) : null}
+          </div>
+        </StructureSection>
+
+        {/* Plans / Todos / Tasks / Memory / Subagents — each its own tree */}
+        {ARTIFACT_SECTIONS.map(({ id, label }) => {
+          const nodes = trees[id];
+          const hasSession = Boolean(sessionArtifacts);
+          return (
+            <StructureSection
+              key={id}
+              id={id}
+              label={label}
+              open={openSections.has(id)}
+              onToggle={() => toggleSection(id)}
+            >
+              {!hasSession ? (
+                <p className="px-3 py-2 font-mono text-[9px] tracking-wide opacity-40">Open a session</p>
+              ) : artifactLoading ? (
+                <div className="flex items-center gap-2 px-3 py-3 font-mono text-[9px] tracking-widest uppercase opacity-50">
+                  <Spinner /> Loading…
+                </div>
+              ) : (
+                <>
+                  <StructureTree nodes={nodes} onOpenFile={(node) => setPreview({ section: id, node })} />
+                  {preview?.section === id && preview.node.content != null ? (
+                    <StructureFilePreview
+                      title={preview.node.name}
+                      content={preview.node.content}
+                      onClose={() => setPreview(null)}
+                    />
+                  ) : null}
+                </>
+              )}
+            </StructureSection>
+          );
+        })}
       </div>
     </aside>
   );
 }
 
-function ExplorerTree({ fx, root, label }: { fx: PortFileExplorer; root: string; label?: string | null }) {
+function StructureSection({
+  id,
+  label,
+  open,
+  onToggle,
+  children,
+}: {
+  id: string;
+  label: string;
+  open: boolean;
+  onToggle: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <section className="border-b border-[color:var(--archive-ink-line-soft)]" data-section={id}>
+      <button
+        type="button"
+        onClick={onToggle}
+        aria-expanded={open}
+        className="flex w-full items-center justify-between px-4 py-2 font-mono text-[9px] tracking-widest opacity-70 transition-opacity hover:opacity-100 bg-transparent border-0 text-ink cursor-pointer"
+      >
+        <span className="flex min-w-0 items-center gap-2 uppercase">
+          <TerminalSquare size={10} />
+          <span className="truncate">{label}</span>
+        </span>
+        {open ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+      </button>
+      {open ? <div className="pb-1">{children}</div> : null}
+    </section>
+  );
+}
+
+/** Mille tree only — no filter/collapse chrome or project name strip. */
+function ExplorerTree({ fx }: { fx: PortFileExplorer }) {
   const commands = useMemo(() => createCommandRegistry(defaultCommands), []);
   const treeRef = useFileTreeRef();
   const expandedRootsRef = useRef(false);
@@ -312,37 +500,42 @@ function ExplorerTree({ fx, root, label }: { fx: PortFileExplorer; root: string;
 
   return (
     <FileTreeProvider fx={fx as unknown as FileExplorer} commands={commands}>
-      <div className="flex flex-col h-full min-h-0 mille-panel">
-        <div className="px-2 py-1 border-b border-ink/5 flex items-center gap-1 shrink-0">
-          <button
-            type="button"
-            className="font-mono text-[9px] tracking-widest uppercase px-1 py-0.5 text-ink/45 hover:text-ink/80 cursor-pointer bg-transparent border-0"
-            title="Filter tree"
-            onClick={() => treeRef.current?.focusFilter()}
-          >
-            ⌕
-          </button>
-          <button
-            type="button"
-            className="font-mono text-[9px] tracking-widest uppercase px-1 py-0.5 text-ink/45 hover:text-ink/80 cursor-pointer bg-transparent border-0"
-            title="Collapse all"
-            onClick={() => treeRef.current?.reset()}
-          >
-            ⊟
-          </button>
-          <span className="font-mono text-[8px] text-ink/30 ml-auto truncate max-w-[140px]" title={root}>
-            {label || basename(root)}
-          </span>
-        </div>
+      <div className="flex flex-col h-full min-h-0 mille-panel" data-mille-theme="minimal">
         <div className="flex-1 min-h-0 overflow-hidden">
-          <FileTree ref={treeRef} ariaLabel="Project files" iconTheme={duotoneIconTheme} rowHeight={20} overscan={24} />
+          <FileTree ref={treeRef} ariaLabel="Project files" iconTheme={minimalIconTheme} rowHeight={26} overscan={24} />
         </div>
       </div>
     </FileTreeProvider>
   );
 }
 
-function basename(path: string): string {
-  const parts = path.replace(/\\/g, '/').split('/').filter(Boolean);
-  return parts[parts.length - 1] ?? path;
+function flattenTodos(raw: unknown[]): TodoItemShape[] {
+  const out: TodoItemShape[] = [];
+  for (const entry of raw) {
+    if (Array.isArray(entry)) {
+      for (const item of entry) {
+        if (item && typeof item === 'object') out.push(item as TodoItemShape);
+      }
+    } else if (entry && typeof entry === 'object') {
+      const obj = entry as { items?: unknown[]; content?: string; status?: string };
+      if (Array.isArray(obj.items)) {
+        for (const item of obj.items) {
+          if (item && typeof item === 'object') out.push(item as TodoItemShape);
+        }
+      } else if ('content' in obj || 'status' in obj) {
+        out.push(obj as TodoItemShape);
+      }
+    }
+  }
+  return out;
+}
+
+function slugify(s: string): string {
+  return (
+    s
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-|-$/g, '')
+      .slice(0, 48) || 'plan'
+  );
 }

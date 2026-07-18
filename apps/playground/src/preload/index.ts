@@ -88,6 +88,12 @@ contextBridge.exposeInMainWorld('mille', {
   closeWorkspace: (): Promise<{ ok: true }> => ipcRenderer.invoke('mille:close-workspace'),
 });
 
+contextBridge.exposeInMainWorld('windowControls', {
+  minimize: (): Promise<void> => ipcRenderer.invoke('window:minimize'),
+  maximize: (): Promise<void> => ipcRenderer.invoke('window:maximize'),
+  close: (): Promise<void> => ipcRenderer.invoke('window:close'),
+});
+
 // Make the bridge type available globally for the renderer's consumers.
 declare global {
   var spaghetti: SpaghettiBridge;
@@ -96,6 +102,11 @@ declare global {
     mille?: {
       openWorkspace(path: string): Promise<{ ok: true; root: string }>;
       closeWorkspace(): Promise<{ ok: true }>;
+    };
+    windowControls?: {
+      minimize(): Promise<void>;
+      maximize(): Promise<void>;
+      close(): Promise<void>;
     };
   }
 }
