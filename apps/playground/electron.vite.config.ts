@@ -12,14 +12,20 @@ const mainExternals = [
   '@parcel/watcher',
   '@vibecook/spaghetti-sdk',
   '@vibecook/spaghetti-sdk-native',
+  '@vibecook/mille',
+  '@vibecook/mille/host',
 ];
 
 export default defineConfig({
   main: {
     plugins: [externalizeDepsPlugin()],
     build: {
-      lib: { entry: resolve(__dirname, 'src/main/index.ts') },
+      // Multi-entry: main window process + mille UtilityProcess host
       rollupOptions: {
+        input: {
+          index: resolve(__dirname, 'src/main/index.ts'),
+          'fx-host': resolve(__dirname, 'src/utility/fx-host.ts'),
+        },
         external: mainExternals,
       },
     },
@@ -49,6 +55,10 @@ export default defineConfig({
         '@shared': resolve(__dirname, 'src/shared'),
         '@': resolve(__dirname, 'src/renderer/src'),
       },
+    },
+    // Don't pull Node natives into the renderer bundle
+    optimizeDeps: {
+      exclude: ['@vibecook/mille', 'better-sqlite3'],
     },
   },
 });

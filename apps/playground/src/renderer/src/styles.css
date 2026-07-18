@@ -126,3 +126,28 @@ input:focus-visible {
   background: rgba(255, 255, 255, 0.2);
 }
 
+/* ── Mille file tree (right panel) ─────────────────────────────────────── */
+.mille-panel {
+  color: rgba(242, 242, 242, 0.88);
+  font-size: 12px;
+}
+
+.mille-panel .mille-tree,
+.mille-panel [role='tree'] {
+  height: 100%;
+  outline: none;
+}
+
+/* Keep row density tight against near-black chrome */
+.mille-panel {
+  --mille-row-height: 20px;
+  --mille-indent-size: 10px;
+  --mille-accent-bg: #ea580c;
+  --mille-accent-fg: #fafafa;
+  --mille-row-bg-hover: rgba(255, 255, 255, 0.04);
+  --mille-row-bg-selected: rgba(255, 255, 255, 0.08);
+  --mille-row-bg-selected-focused: rgba(234, 88, 12, 0.22);
+  --mille-indent-guide: rgba(255, 255, 255, 0.08);
+  --mille-chevron-color: rgba(255, 255, 255, 0.4);
+}
+

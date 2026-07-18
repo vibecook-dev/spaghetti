@@ -91,9 +91,11 @@ from source if the prebuild isn't available.
 │   renderer   │ ─────────────────▶ │              main                 │
 │  React 19    │  window.spaghetti  │   SpaghettiService               │
 │  SDK /react  │ ◀───── events ──── │   sources: ~/.claude (+ codex/   │
-└──────────────┘                    │            grok when present)    │
-        ▲           contextBridge   │   db: <userData>/cache           │
-        │                           │   live: true → safeBulk bulk    │
+│  mille-ui    │  window.mille      │   db: <userData>/cache           │
+└──────────────┘                    │   live: true → safeBulk bulk    │
+        ▲           contextBridge   │                                  │
+        │                           │   utilityProcess → fx-host       │
+        │ MessagePort (fx-port)     │     @vibecook/mille FileExplorer │
         └─ preload (typed) ─────────┴──────────────────────────────────┘
 ```
 
@@ -115,8 +117,17 @@ from source if the prebuild isn't available.
 | Live chat | `onChange` → append new messages at the tail; “N new” pill when scrolled up |
 | Message filters | Session bar: type/tool solo (pin) + mute (eye) + text filter (ProjectPage parity) |
 | Artifacts | Session **Artifacts** drawer: plan, todos, task, subagents, MEMORY.md |
+| Files panel | `⌘B` / **Files** — rightmost [@vibecook/mille](https://www.npmjs.com/package/@vibecook/mille) tree for the selected project's `absolutePath` |
 | Source filter | Project list chips when multiple agents are indexed |
 | Stats | Header: segment count, DB size, FTS index size |
+
+### Mille file explorer
+
+Native file tree runs in an Electron **UtilityProcess** (`src/utility/fx-host.ts`)
+so the NAPI `.node` binary never loads in the renderer. Main forks the host
+with `WORKSPACE_ROOT`, waits for `ready`, then transfers a `MessagePort`.
+Opening the panel against a project path (or switching projects) restarts
+the host for that folder.
 
 ## Notes
 

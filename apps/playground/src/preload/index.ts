@@ -65,10 +65,37 @@ const bridge: SpaghettiBridge = {
 
 contextBridge.exposeInMainWorld('spaghetti', bridge);
 
+// ── Mille file explorer ────────────────────────────────────────────────────
+// MessagePort cannot cross contextBridge — forward via window.postMessage
+// with the port in the transfer list. Fires on every workspace open/swap.
+// (preload has Node types only; cast for the DOM postMessage surface.)
+ipcRenderer.on('fx-port', (event, payload: { workspaceRoot: string }) => {
+  const win = globalThis as unknown as {
+    postMessage: (message: unknown, targetOrigin: string, transfer?: unknown[]) => void;
+  };
+  win.postMessage(
+    { type: 'fx-port', workspaceRoot: payload?.workspaceRoot ?? '' },
+    '*',
+    event.ports as unknown as unknown[],
+  );
+});
+
+contextBridge.exposeInMainWorld('mille', {
+  /** Open (or re-attach) the file explorer UtilityProcess against an absolute folder. */
+  openWorkspace: (path: string): Promise<{ ok: true; root: string }> =>
+    ipcRenderer.invoke('mille:open-workspace', path),
+  /** Kill the UtilityProcess (panel closed). */
+  closeWorkspace: (): Promise<{ ok: true }> => ipcRenderer.invoke('mille:close-workspace'),
+});
+
 // Make the bridge type available globally for the renderer's consumers.
 declare global {
   var spaghetti: SpaghettiBridge;
   interface Window {
     spaghetti: SpaghettiBridge;
+    mille?: {
+      openWorkspace(path: string): Promise<{ ok: true; root: string }>;
+      closeWorkspace(): Promise<{ ok: true }>;
+    };
   }
 }

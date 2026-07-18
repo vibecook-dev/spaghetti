@@ -17,6 +17,12 @@
     "rebuild:node": "pnpm -w rebuild better-sqlite3"
   },
   "dependencies": {
+    "@radix-ui/react-context-menu": "^2.3.3",
+    "@radix-ui/react-dialog": "^1.1.19",
+    "@radix-ui/react-tooltip": "^1.2.12",
+    "@tanstack/react-virtual": "^3.14.6",
+    "@vibecook/mille": "0.2.1",
+    "@vibecook/mille-ui": "0.2.1",
     "@vibecook/spaghetti-sdk": "workspace:*",
     "better-sqlite3": "^12.0.0",
     "react": "^19.0.0",

@@ -6,6 +6,7 @@ import { LoadingScreen } from './components/LoadingScreen.js';
 import { SourceBadge } from './components/SourceBadge.js';
 import { SessionMessagesView } from './components/SessionMessagesView.js';
 import { SearchOverlay, type SearchNavigateTarget } from './components/SearchOverlay.js';
+import { FileExplorerPanel } from './components/FileExplorerPanel.js';
 import { Btn, Chip, Dot, EmptyState, Kbd, SectionLabel } from './components/ui.js';
 import {
   flattenPrompt,
@@ -79,6 +80,8 @@ function PlaygroundShell() {
   const [stats, setStats] = useState<StoreStats | null>(null);
   const [sourceFilter, setSourceFilter] = useState<string | null>(null);
   const [searchOpen, setSearchOpen] = useState(false);
+  /** Rightmost mille file explorer panel. */
+  const [filesOpen, setFilesOpen] = useState(false);
   /** Open this session after sessions list loads (search navigation). */
   const pendingSessionId = useRef<string | null>(null);
 
@@ -97,13 +100,18 @@ function PlaygroundShell() {
     return () => window.clearInterval(id);
   }, [ready, rebuilding, retrying]);
 
-  // Global Cmd/Ctrl+K → search
+  // Global shortcuts: ⌘K search, ⌘B files panel
   useEffect(() => {
     if (!ready) return;
     const onKey = (e: KeyboardEvent) => {
-      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
+      if (!(e.metaKey || e.ctrlKey)) return;
+      const k = e.key.toLowerCase();
+      if (k === 'k') {
         e.preventDefault();
         setSearchOpen(true);
+      } else if (k === 'b') {
+        e.preventDefault();
+        setFilesOpen((v) => !v);
       }
     };
     window.addEventListener('keydown', onKey);
@@ -372,6 +380,14 @@ function PlaygroundShell() {
           <Kbd>{modKey}K</Kbd>
         </Btn>
         <Btn
+          variant={filesOpen ? 'solid' : 'ghost'}
+          onClick={() => setFilesOpen((v) => !v)}
+          title={`Project files (${modKey}B)`}
+        >
+          Files
+          <Kbd>{modKey}B</Kbd>
+        </Btn>
+        <Btn
           onClick={() => void onRebuild()}
           disabled={rebuilding}
           title="Force a full cold rebuild of the SQLite index"
@@ -567,6 +583,14 @@ function PlaygroundShell() {
             </>
           )}
         </section>
+
+        {/* Rightmost: mille file explorer for selected project folder */}
+        <FileExplorerPanel
+          open={filesOpen}
+          onClose={() => setFilesOpen(false)}
+          projectPath={selectedProject?.absolutePath ?? null}
+          projectLabel={selectedProject?.folderName ?? null}
+        />
       </main>
 
       <SearchOverlay

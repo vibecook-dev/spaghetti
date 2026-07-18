@@ -4,10 +4,11 @@
  * - Single-instance lock so two playgrounds cannot share the same cache.
  * - Creates a BrowserWindow with context isolation + preload.
  * - Initializes SpaghettiService (multi-source ingest into userData SQLite).
+ * - Mille file explorer UtilityProcess (right panel) via MessagePort.
  * - Awaitable dispose on quit (prefer over kill -9 mid-ingest).
  */
 
-import { app, BrowserWindow, shell } from 'electron';
+import { app, BrowserWindow, ipcMain, shell } from 'electron';
 import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
@@ -15,6 +16,7 @@ import type { IngestEngine } from '@vibecook/spaghetti-sdk';
 import { registerIpcHandlers, wireEventForwarding } from './ipc-handlers.js';
 import { resolveAppEngine } from './settings.js';
 import { disposeSdk, shutdownSdk } from './sdk.js';
+import { closeMilleWorkspace, openMilleWorkspace } from './mille-host.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -102,6 +104,22 @@ void app.whenReady().then(async () => {
   const dbPath = resolvePlaygroundDbPath(engine);
   registerIpcHandlers();
 
+  // Mille file explorer — open/close workspace from the Files panel.
+  // open-workspace forks UtilityProcess + transfers MessagePort to renderer.
+  ipcMain.handle('mille:open-workspace', (evt, raw: unknown) => {
+    if (typeof raw !== 'string' || raw.length === 0) {
+      throw new Error('mille:open-workspace: path must be a non-empty string');
+    }
+    const win = BrowserWindow.fromWebContents(evt.sender);
+    if (!win) throw new Error('mille:open-workspace: no window');
+    openMilleWorkspace(win, raw);
+    return { ok: true as const, root: raw };
+  });
+  ipcMain.handle('mille:close-workspace', () => {
+    closeMilleWorkspace();
+    return { ok: true as const };
+  });
+
   createWindow();
 
   void wireEventForwarding({ dbPath, engine }).catch((err) => {
@@ -134,6 +152,7 @@ app.on('before-quit', (event) => {
   if (isQuitting) return;
   event.preventDefault();
   isQuitting = true;
+  closeMilleWorkspace();
   void disposeSdk()
     .catch((err) => {
       console.error('[main] dispose failed', err);
