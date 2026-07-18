@@ -36,8 +36,13 @@ import { createCodexLiveWatch, type CodexLiveWatch } from './live-watch.js';
  * Bump when Codex message/token extraction changes in a way that requires
  * re-reading rollouts even if mtime is unchanged. Absent or mismatched →
  * force a full Codex re-read once, then stamp the new version.
+ *
+ * History:
+ * - token_count_v2_estimate — token attribution / tiktoken fallback
+ * - first_prompt_v2_skip_injected — session list title skips environment_context /
+ *   AGENTS.md / plugins; prefers event_msg user_message
  */
-const CODEX_EXTRACT_VERSION = 'token_count_v2_estimate';
+const CODEX_EXTRACT_VERSION = 'first_prompt_v2_skip_injected';
 const CODEX_EXTRACT_META_KEY = 'codex_extract_version';
 
 export class CodexLifecycleOwner extends EventEmitter implements LifecycleOwner {
