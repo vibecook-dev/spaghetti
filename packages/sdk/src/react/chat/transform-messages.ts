@@ -3,11 +3,21 @@
  * chat UI SessionMessage format (split thinking / tool_use, merge tool results).
  *
  * Ported from ui-v2 RawJsonLineViewer parseJsonlEntry + sequential tool-result merge.
+ *
+ * Pass `sourceId` when the raw rows are non-Claude (Codex RolloutLine, Grok
+ * chat_history) so they are adapted to the Claude envelope first. Without it,
+ * Codex/Grok lines are silently dropped and the session view looks empty.
  */
 
 import type { SessionMessage, ToolResultInfo } from './types.js';
+import { adaptMessagesForDisplay } from '../../sources/adapt-display-messages.js';
 
 type AnyMsg = Record<string, any>;
+
+export interface TransformRawMessagesOptions {
+  /** Agent source that produced the rows (`codex`, `grok`, `claude-code`, …). */
+  sourceId?: string;
+}
 
 function toolResultContent(content: unknown): string {
   if (typeof content === 'string') return content;
@@ -23,14 +33,23 @@ function toolResultContent(content: unknown): string {
  * Convert a batch of raw transcript messages (SDK `SessionMessage` / JSONL shape)
  * into timeline display messages for {@link TimelineMessageRenderer}.
  */
-export function transformRawMessagesToTimeline(rawMessages: AnyMsg[]): SessionMessage[] {
+export function transformRawMessagesToTimeline(
+  rawMessages: AnyMsg[],
+  options?: TransformRawMessagesOptions,
+): SessionMessage[] {
+  const sourceId = options?.sourceId;
+  const input: AnyMsg[] =
+    sourceId && sourceId !== 'claude-code'
+      ? (adaptMessagesForDisplay(rawMessages, sourceId) as unknown as AnyMsg[])
+      : rawMessages;
+
   const out: SessionMessage[] = [];
   /** tool_use_id → result, filled as we scan user tool_result blocks */
   const pendingResults = new Map<string, ToolResultInfo>();
   /** tool_use messages waiting for a result */
   const openTools = new Map<string, SessionMessage>();
 
-  for (const entry of rawMessages) {
+  for (const entry of input) {
     if (!entry || typeof entry !== 'object') continue;
     const type = String(entry.type ?? '');
 
@@ -209,6 +228,30 @@ export function transformRawMessagesToTimeline(rawMessages: AnyMsg[]): SessionMe
         });
       }
       out.push(...toolMsgs);
+      continue;
+    }
+
+    // Some sources and development fixtures expose an already-normalized
+    // standalone result. Claude tool_result blocks still take the merge path
+    // above, while this preserves orphaned/streamed results as visible rows.
+    if (type === 'tool_result') {
+      const rawResult = (entry.toolResult ?? entry.tool_result ?? entry) as AnyMsg;
+      out.push({
+        uuid: String(entry.uuid ?? cryptoRandom()),
+        parentUuid: (entry.parentUuid as string) ?? null,
+        type: 'tool_result',
+        timestamp: String(entry.timestamp ?? ''),
+        sessionId: String(entry.sessionId ?? ''),
+        toolResult: {
+          toolId: String(rawResult.toolId ?? rawResult.tool_use_id ?? ''),
+          isError: rawResult.isError === true || rawResult.is_error === true,
+          content: toolResultContent(rawResult.content),
+          rawJson: rawResult.rawJson ?? entry,
+        },
+        agentId: entry.agentId as string | undefined,
+        isSidechain: entry.isSidechain === true || undefined,
+        rawJson: entry,
+      });
       continue;
     }
 

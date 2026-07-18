@@ -89,4 +89,4 @@ export {
 } from './utils/index.js';
 
 // Raw spaghetti messages → timeline SessionMessage[]
-export { transformRawMessagesToTimeline } from './transform-messages.js';
+export { transformRawMessagesToTimeline, type TransformRawMessagesOptions } from './transform-messages.js';

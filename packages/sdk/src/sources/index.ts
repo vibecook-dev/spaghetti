@@ -61,6 +61,7 @@ export {
   type GrokLiveWatch,
 } from './grok/index.js';
 export { sourceReportsPerMessageTokens, sourceDisplayName, sourceDisplayRoot } from './capabilities.js';
+export { adaptMessageForDisplay, adaptMessagesForDisplay } from './adapt-display-messages.js';
 export {
   createLifecycleOwnerForSource,
   isLifecycleOwnerRegistered,

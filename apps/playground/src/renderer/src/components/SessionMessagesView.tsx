@@ -36,6 +36,8 @@ export interface SessionMessagesViewProps {
   filesOpen?: boolean;
   onToggleFiles?: () => void;
   onBack: () => void;
+  /** Development gallery records; bypasses IPC/pagination when supplied. */
+  debugMessages?: readonly AnyMsg[];
 }
 
 export function SessionMessagesView({
@@ -50,6 +52,7 @@ export function SessionMessagesView({
   filesOpen = true,
   onToggleFiles,
   onBack,
+  debugMessages,
 }: SessionMessagesViewProps) {
   const [rawMessages, setRawMessages] = useState<AnyMsg[]>([]);
   const [pageMeta, setPageMeta] = useState<Pick<MessagePage, 'total' | 'hasMore'> | null>(null);
@@ -71,8 +74,12 @@ export function SessionMessagesView({
   const liveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pulseTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Full timeline (pre-filter) — filters apply after transform
-  const timeline: ChatSessionMessage[] = useMemo(() => transformRawMessagesToTimeline(rawMessages), [rawMessages]);
+  // Full timeline (pre-filter) — filters apply after transform.
+  // Codex/Grok rows are RolloutLine / chat_history JSON; adapt via sourceId.
+  const timeline: ChatSessionMessage[] = useMemo(
+    () => transformRawMessagesToTimeline(rawMessages, { sourceId }),
+    [rawMessages, sourceId],
+  );
 
   const { messageCounts, toolCounts } = useMemo(() => countTimelineMessages(timeline), [timeline]);
   const toolNames = useMemo(() => Object.keys(toolCounts), [toolCounts]);
@@ -133,6 +140,14 @@ export function SessionMessagesView({
     setRawMessages([]);
     setPageMeta(null);
     offsetRef.current = 0;
+    if (debugMessages) {
+      const messages = [...debugMessages];
+      setRawMessages(messages);
+      setPageMeta({ total: messages.length, hasMore: false });
+      totalRef.current = messages.length;
+      setLoading(false);
+      return;
+    }
     const scope = { sourceId };
 
     void (async () => {
@@ -168,10 +183,11 @@ export function SessionMessagesView({
     return () => {
       cancelled = true;
     };
-  }, [projectSlug, session.sessionId, sourceId]);
+  }, [projectSlug, session.sessionId, sourceId, debugMessages]);
 
   // ── Live tail: append new messages when the index reports changes ─────
   const appendLiveTail = useCallback(async () => {
+    if (debugMessages) return;
     const scope = { sourceId };
     try {
       const probe = await window.spaghetti.getSessionMessages(projectSlug, session.sessionId, 1, 0, scope);
@@ -211,9 +227,10 @@ export function SessionMessagesView({
     } catch {
       /* live refresh is best-effort */
     }
-  }, [projectSlug, session.sessionId, sourceId]);
+  }, [projectSlug, session.sessionId, sourceId, debugMessages]);
 
   useEffect(() => {
+    if (debugMessages) return;
     const unsub = window.spaghetti.onChange((batch: SegmentChangeBatch) => {
       const relevant =
         !batch.changes?.length ||
@@ -231,7 +248,7 @@ export function SessionMessagesView({
       if (liveTimerRef.current) clearTimeout(liveTimerRef.current);
       if (pulseTimerRef.current) clearTimeout(pulseTimerRef.current);
     };
-  }, [session.sessionId, projectSlug, appendLiveTail]);
+  }, [session.sessionId, projectSlug, appendLiveTail, debugMessages]);
 
   // ── Scroll restoration ────────────────────────────────────────────────
   useLayoutEffect(() => {

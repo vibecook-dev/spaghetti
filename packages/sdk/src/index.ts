@@ -84,6 +84,8 @@ export {
   sourceReportsPerMessageTokens,
   sourceDisplayName,
   sourceDisplayRoot,
+  adaptMessageForDisplay,
+  adaptMessagesForDisplay,
 } from './sources/index.js';
 
 // Durable store + plane façades (composition helpers; prefer createSpaghettiService)
