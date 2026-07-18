@@ -43,8 +43,8 @@ export interface IngestOptions {
    */
   sourceId?: string
   /**
-   * When true, bulk ingest stays on WAL + synchronous=NORMAL (desktop-safe).
-   * Default / omitted = fast MEMORY + OFF path.
+   * When `true`, bulk ingest stays on WAL + `synchronous=NORMAL`
+   * (desktop-safe). Default / omitted = fast MEMORY + OFF path.
    */
   safeBulk?: boolean
 }
