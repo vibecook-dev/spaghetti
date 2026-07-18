@@ -13,6 +13,17 @@
 
 import type { SessionMessage } from '../types/index.js';
 import { isCodexInjectedUserText } from './codex/first-prompt.js';
+import {
+  codexCallId,
+  codexReasoningSummary,
+  codexResponseItemPayload,
+  codexToolInput,
+  codexToolName,
+  codexToolOutput,
+  codexToolOutputIsError,
+  isCodexToolCallType,
+  isCodexToolResultType,
+} from './codex/response-items.js';
 
 /** Collect readable text from a string, or a `[{ type, text }]` block array. */
 function collectContentText(content: unknown): string {
@@ -93,12 +104,84 @@ export function adaptMessageForDisplay(raw: unknown, sourceId: string): SessionM
   }
 
   const line = raw as Record<string, unknown>;
-  // Codex chat turns only. Non-message rollout lines (session_meta, event_msg,
-  // function_call, …) are not displayable as transcript rows — skip them.
-  if (line.type !== 'response_item') return null;
+  const payload = codexResponseItemPayload(line);
+  if (!payload) return null;
+  const payloadType = typeof payload.type === 'string' ? payload.type : '';
+  const timestamp = typeof line.timestamp === 'string' ? line.timestamp : '';
 
-  const payload = line.payload as Record<string, unknown> | undefined;
-  if (!payload || payload.type !== 'message') return null;
+  if (isCodexToolResultType(payloadType)) {
+    const callId = codexCallId(payload);
+    return {
+      type: 'user',
+      uuid: typeof payload.id === 'string' ? payload.id : `result-${callId}`,
+      parentUuid: null,
+      timestamp,
+      sessionId: '',
+      cwd: '',
+      version: '',
+      gitBranch: '',
+      isSidechain: false,
+      userType: 'external',
+      message: {
+        role: 'user',
+        content: [
+          {
+            type: 'tool_result',
+            tool_use_id: callId,
+            content: codexToolOutput(payload),
+            is_error: codexToolOutputIsError(payload),
+          },
+        ],
+      },
+    } as unknown as SessionMessage;
+  }
+
+  if (isCodexToolCallType(payloadType)) {
+    const callId = codexCallId(payload);
+    return {
+      type: 'assistant',
+      uuid: typeof payload.id === 'string' ? payload.id : callId,
+      parentUuid: null,
+      timestamp,
+      sessionId: '',
+      cwd: '',
+      version: '',
+      gitBranch: '',
+      isSidechain: false,
+      userType: 'external',
+      message: {
+        role: 'assistant',
+        content: [
+          {
+            type: 'tool_use',
+            id: callId,
+            name: codexToolName(payload),
+            input: codexToolInput(payload),
+          },
+        ],
+      },
+    } as unknown as SessionMessage;
+  }
+
+  if (payloadType === 'reasoning') {
+    const summary = codexReasoningSummary(payload);
+    if (!summary) return null;
+    return {
+      type: 'assistant',
+      uuid: typeof payload.id === 'string' ? payload.id : '',
+      parentUuid: null,
+      timestamp,
+      sessionId: '',
+      cwd: '',
+      version: '',
+      gitBranch: '',
+      isSidechain: false,
+      userType: 'external',
+      message: { role: 'assistant', content: [{ type: 'thinking', thinking: summary }] },
+    } as unknown as SessionMessage;
+  }
+
+  if (payloadType !== 'message') return null;
   const role = typeof payload.role === 'string' ? payload.role : 'unknown';
   const text = collectContentText(payload.content);
   if (role === 'user') {
@@ -110,7 +193,7 @@ export function adaptMessageForDisplay(raw: unknown, sourceId: string): SessionM
       type: 'user',
       uuid: typeof payload.id === 'string' ? payload.id : '',
       parentUuid: null,
-      timestamp: typeof line.timestamp === 'string' ? line.timestamp : '',
+      timestamp,
       sessionId: '',
       cwd: '',
       version: '',
@@ -125,7 +208,7 @@ export function adaptMessageForDisplay(raw: unknown, sourceId: string): SessionM
       type: 'assistant',
       uuid: typeof payload.id === 'string' ? payload.id : '',
       parentUuid: null,
-      timestamp: typeof line.timestamp === 'string' ? line.timestamp : '',
+      timestamp,
       sessionId: '',
       cwd: '',
       version: '',

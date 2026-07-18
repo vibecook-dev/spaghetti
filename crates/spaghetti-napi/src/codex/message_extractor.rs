@@ -1,8 +1,8 @@
 //! Codex MessageExtractor — thin projection of one RolloutLine.
 //!
 //! Behaviour-aligned with `packages/sdk/src/sources/codex/message-extractor.ts`:
-//! only `response_item` / `message` turns produce a projection; everything
-//! else returns `None` (including token_count, which the reader handles).
+//! canonical `response_item` chat, tool-call/result, and readable reasoning
+//! records produce projections. Telemetry/event records remain skipped.
 
 use serde_json::Value;
 
@@ -50,7 +50,7 @@ fn extract_text(content: &Value) -> String {
             continue;
         };
         let ty = obj.get("type").and_then(Value::as_str).unwrap_or("");
-        if matches!(ty, "input_text" | "output_text" | "text") {
+        if matches!(ty, "input_text" | "output_text" | "text" | "summary_text") {
             if let Some(t) = obj.get("text").and_then(Value::as_str) {
                 parts.push(t);
             }
@@ -73,15 +73,34 @@ pub fn project_jsonl_line(line: &str) -> Result<Option<MessageProjection>, serde
         Some(p) => p,
         None => return Ok(None),
     };
-    if payload.get("type").and_then(Value::as_str) != Some("message") {
+    let payload_type = payload.get("type").and_then(Value::as_str).unwrap_or("");
+    let (msg_type, text) = if payload_type == "message" {
+        (
+            payload
+                .get("role")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown")
+                .to_owned(),
+            payload.get("content").map(extract_text).unwrap_or_default(),
+        )
+    } else if payload_type == "reasoning" {
+        (
+            "reasoning".to_owned(),
+            payload.get("summary").map(extract_text).unwrap_or_default(),
+        )
+    } else if payload_type.ends_with("_call_output") || payload_type == "tool_search_output" {
+        ("tool_result".to_owned(), String::new())
+    } else if payload_type.ends_with("_call") {
+        let name = payload
+            .get("name")
+            .and_then(Value::as_str)
+            .or_else(|| payload_type.strip_suffix("_call"))
+            .unwrap_or("Unknown Tool")
+            .to_owned();
+        ("tool_use".to_owned(), name)
+    } else {
         return Ok(None);
-    }
-    let role = payload
-        .get("role")
-        .and_then(Value::as_str)
-        .unwrap_or("unknown")
-        .to_owned();
-    let text = payload.get("content").map(extract_text).unwrap_or_default();
+    };
     let fts = {
         let t = truncate(&text);
         if t.is_empty() {
@@ -91,8 +110,12 @@ pub fn project_jsonl_line(line: &str) -> Result<Option<MessageProjection>, serde
         }
     };
     Ok(Some(MessageProjection {
-        msg_type: role,
-        uuid: payload.get("id").and_then(Value::as_str).map(str::to_owned),
+        msg_type,
+        uuid: payload
+            .get("id")
+            .and_then(Value::as_str)
+            .or_else(|| payload.get("call_id").and_then(Value::as_str))
+            .map(str::to_owned),
         timestamp: obj
             .get("timestamp")
             .and_then(Value::as_str)
@@ -164,9 +187,37 @@ mod tests {
     }
 
     #[test]
-    fn skips_function_call() {
-        let line = r#"{"type":"response_item","payload":{"type":"function_call","name":"shell"}}"#;
-        assert!(project_jsonl_line(line).unwrap().is_none());
+    fn extracts_function_call_and_output() {
+        let call = r#"{"type":"response_item","payload":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"shell","arguments":"{\"cmd\":\"pwd\"}"}}"#;
+        let p = project_jsonl_line(call).unwrap().expect("tool call");
+        assert_eq!(p.msg_type, "tool_use");
+        assert_eq!(p.uuid.as_deref(), Some("fc_1"));
+        assert_eq!(p.fts_text.as_deref(), Some("shell"));
+
+        let output = r#"{"type":"response_item","payload":{"type":"function_call_output","call_id":"call_1","output":"ok"}}"#;
+        let p = project_jsonl_line(output).unwrap().expect("tool result");
+        assert_eq!(p.msg_type, "tool_result");
+        assert_eq!(p.uuid.as_deref(), Some("call_1"));
+        assert_eq!(p.fts_text, None);
+    }
+
+    #[test]
+    fn extracts_tool_search_output_exception() {
+        let output = r#"{"type":"response_item","payload":{"type":"tool_search_output","call_id":"call_search","tools":[{"type":"function","name":"spawn_agent"}]}}"#;
+        let p = project_jsonl_line(output)
+            .unwrap()
+            .expect("tool search result");
+        assert_eq!(p.msg_type, "tool_result");
+        assert_eq!(p.uuid.as_deref(), Some("call_search"));
+        assert_eq!(p.fts_text, None);
+    }
+
+    #[test]
+    fn extracts_readable_reasoning_summary() {
+        let line = r#"{"type":"response_item","payload":{"type":"reasoning","id":"rs_1","summary":[{"type":"summary_text","text":"I checked the files."}],"encrypted_content":"opaque"}}"#;
+        let p = project_jsonl_line(line).unwrap().expect("reasoning");
+        assert_eq!(p.msg_type, "reasoning");
+        assert_eq!(p.fts_text.as_deref(), Some("I checked the files."));
     }
 
     #[test]

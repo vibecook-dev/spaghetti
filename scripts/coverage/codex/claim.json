@@ -1,9 +1,9 @@
 {
   "schemaVersion": 1,
   "agentId": "codex",
-  "updated": "2026-07-14",
+  "updated": "2026-07-18",
   "rootDefault": "~/.codex",
-  "description": "Honest coverage claim for OpenAI Codex CLI. v1 is a thin multi-agent slice: projects/sessions/chat messages/search/tokens/live rollouts. Most rollout record kinds and side artifacts are deliberately not productized yet — but they must stay documented.",
+  "description": "Coverage claim for OpenAI Codex CLI. Canonical response_item chat, tool calls/results, and readable reasoning are retained and normalized into the database-backed timeline; duplicate event projections and side artifacts remain deliberately unproductized.",
   "engines": {
     "ts": "packages/sdk sources/codex + CodexLifecycleOwner (fallback)",
     "rs": "crates/spaghetti-napi codex reader (cold/warm); live still TS"
@@ -23,7 +23,7 @@
       "match": { "recordType": "response_item/message" },
       "engines": { "ts": true, "rs": true },
       "product": ["messages", "search", "fts"],
-      "notes": "Only chat turns written to messages (role→msgType, content text flatten)."
+      "notes": "Chat turns retained verbatim; role and readable content are projected for facets, search, and timeline display."
     },
     {
       "id": "rollout.record_type.event_msg/token_count",
@@ -43,55 +43,67 @@
     },
     {
       "id": "rollout.record_type.response_item/function_call",
-      "status": "ignored",
+      "status": "ingested",
       "match": { "recordType": "response_item/function_call" },
-      "engines": { "ts": false, "rs": false },
-      "notes": "Largest volume class on real installs. extract()→null. Candidate for tool timeline."
+      "engines": { "ts": true, "rs": true },
+      "product": ["messages", "timeline", "tools", "fts"],
+      "notes": "Retained verbatim and normalized as tool_use; arguments are parsed for display and call_id pairs the result."
     },
     {
       "id": "rollout.record_type.response_item/function_call_output",
-      "status": "ignored",
+      "status": "ingested",
       "match": { "recordType": "response_item/function_call_output" },
-      "engines": { "ts": false, "rs": false },
-      "notes": "Paired with function_call via call_id; not stored."
+      "engines": { "ts": true, "rs": true },
+      "product": ["messages", "timeline", "tools"],
+      "notes": "Retained verbatim and paired with function_call via call_id."
     },
     {
       "id": "rollout.record_type.response_item/custom_tool_call",
-      "status": "ignored",
+      "status": "ingested",
       "match": { "recordType": "response_item/custom_tool_call" },
-      "engines": { "ts": false, "rs": false }
+      "engines": { "ts": true, "rs": true },
+      "product": ["messages", "timeline", "tools", "fts"],
+      "notes": "Retained verbatim and normalized as tool_use; non-JSON input remains readable source text."
     },
     {
       "id": "rollout.record_type.response_item/custom_tool_call_output",
-      "status": "ignored",
+      "status": "ingested",
       "match": { "recordType": "response_item/custom_tool_call_output" },
-      "engines": { "ts": false, "rs": false }
+      "engines": { "ts": true, "rs": true },
+      "product": ["messages", "timeline", "tools"],
+      "notes": "Retained verbatim and paired with custom_tool_call via call_id."
     },
     {
       "id": "rollout.record_type.response_item/reasoning",
-      "status": "ignored",
+      "status": "partial",
       "match": { "recordType": "response_item/reasoning" },
-      "engines": { "ts": false, "rs": false },
-      "notes": "Summary legible; encrypted_content opaque. Not indexed."
+      "engines": { "ts": true, "rs": true },
+      "product": ["messages", "timeline", "fts"],
+      "notes": "Every raw record is retained. Readable summary blocks are indexed/rendered as thinking; encrypted_content is opaque and produces no blank UI row."
     },
     {
       "id": "rollout.record_type.response_item/web_search_call",
-      "status": "ignored",
+      "status": "ingested",
       "match": { "recordType": "response_item/web_search_call" },
-      "engines": { "ts": false, "rs": false }
+      "engines": { "ts": true, "rs": true },
+      "product": ["messages", "timeline", "tools"],
+      "notes": "Normalized generically as tool_use from the *_call record."
     },
     {
       "id": "rollout.record_type.response_item/tool_search_call",
-      "status": "ignored",
+      "status": "ingested",
       "match": { "recordType": "response_item/tool_search_call" },
-      "engines": { "ts": false, "rs": false },
-      "notes": "Rare tool-catalog search items; same treatment as other non-message response_items."
+      "engines": { "ts": true, "rs": true },
+      "product": ["messages", "timeline", "tools"],
+      "notes": "Normalized as tool_use and paired with tool_search_output by call_id."
     },
     {
       "id": "rollout.record_type.response_item/tool_search_output",
-      "status": "ignored",
+      "status": "ingested",
       "match": { "recordType": "response_item/tool_search_output" },
-      "engines": { "ts": false, "rs": false }
+      "engines": { "ts": true, "rs": true },
+      "product": ["messages", "timeline", "tools"],
+      "notes": "Known naming exception to *_call_output; tools catalog is rendered as the paired result."
     },
     {
       "id": "rollout.record_type.turn_context",
@@ -110,6 +122,20 @@
       "status": "ignored",
       "match": { "recordType": "world_state" },
       "engines": { "ts": false, "rs": false }
+    },
+    {
+      "id": "rollout.record_type.inter_agent_communication_metadata",
+      "status": "ignored",
+      "match": { "recordType": "inter_agent_communication_metadata" },
+      "engines": { "ts": false, "rs": false },
+      "notes": "Internal collaboration control metadata, not a transcript event."
+    },
+    {
+      "id": "rollout.record_type.response_item/agent_message",
+      "status": "ignored",
+      "match": { "recordType": "response_item/agent_message" },
+      "engines": { "ts": false, "rs": false },
+      "notes": "Internal sub-agent coordination payload; guardian/sub-agent rollouts are excluded from the user session list."
     },
     {
       "id": "rollout.record_type.event_msg/*",

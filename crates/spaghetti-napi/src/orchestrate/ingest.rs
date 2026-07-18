@@ -963,7 +963,15 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(msg_count, 2, "function_call must not create a message row");
+        assert_eq!(msg_count, 3, "function_call must create a tool_use row");
+        let tool_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM messages WHERE source_id = 'codex' AND msg_type = 'tool_use'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(tool_count, 1);
         let tokens: (i64, i64, i64) = conn
             .query_row(
                 "SELECT input_tokens, output_tokens, cache_read_tokens FROM messages WHERE msg_type = 'assistant'",

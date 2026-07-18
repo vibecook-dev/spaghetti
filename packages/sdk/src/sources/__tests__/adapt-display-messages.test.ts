@@ -229,6 +229,98 @@ describe('transformRawMessagesToTimeline + sourceId', () => {
     );
   });
 
+  test('Codex tool calls/results are paired and readable reasoning becomes thinking', () => {
+    const raw = [
+      {
+        timestamp: '2026-07-13T00:00:01.000Z',
+        type: 'response_item',
+        payload: {
+          type: 'function_call',
+          id: 'fc-1',
+          call_id: 'call-1',
+          name: 'wait',
+          arguments: '{"cell_id":"42","yield_time_ms":1000}',
+        },
+      },
+      {
+        timestamp: '2026-07-13T00:00:02.000Z',
+        type: 'response_item',
+        payload: {
+          type: 'function_call_output',
+          call_id: 'call-1',
+          output: [
+            { type: 'input_text', text: 'Script completed\n' },
+            { type: 'input_text', text: 'done' },
+          ],
+        },
+      },
+      {
+        timestamp: '2026-07-13T00:00:03.000Z',
+        type: 'response_item',
+        payload: {
+          type: 'custom_tool_call',
+          id: 'ctc-1',
+          call_id: 'call-2',
+          name: 'exec',
+          input: 'await tools.exec_command({ cmd: "pwd" })',
+        },
+      },
+      {
+        timestamp: '2026-07-13T00:00:04.000Z',
+        type: 'response_item',
+        payload: { type: 'custom_tool_call_output', call_id: 'call-2', output: 'workspace' },
+      },
+      {
+        timestamp: '2026-07-13T00:00:05.000Z',
+        type: 'response_item',
+        payload: {
+          type: 'tool_search_call',
+          id: 'tsc-1',
+          call_id: 'call-3',
+          arguments: { query: 'browser tool', limit: 4 },
+        },
+      },
+      {
+        timestamp: '2026-07-13T00:00:06.000Z',
+        type: 'response_item',
+        payload: {
+          type: 'tool_search_output',
+          call_id: 'call-3',
+          tools: [{ type: 'function', name: 'browser_open' }],
+        },
+      },
+      {
+        timestamp: '2026-07-13T00:00:07.000Z',
+        type: 'response_item',
+        payload: {
+          type: 'reasoning',
+          id: 'rs-1',
+          summary: [{ type: 'summary_text', text: 'I checked the process state.' }],
+          encrypted_content: 'opaque',
+        },
+      },
+      {
+        timestamp: '2026-07-13T00:00:08.000Z',
+        type: 'response_item',
+        payload: { type: 'reasoning', id: 'rs-2', summary: [], encrypted_content: 'opaque' },
+      },
+    ];
+
+    const timeline = transformRawMessagesToTimeline(raw, { sourceId: 'codex' });
+    assert.deepEqual(
+      timeline.map((message) => message.type),
+      ['tool_use', 'tool_use', 'tool_use', 'thinking'],
+    );
+    assert.deepEqual(timeline[0]?.toolUse?.input, { cell_id: '42', yield_time_ms: 1000 });
+    assert.equal(timeline[0]?.toolUse?.result?.content, 'Script completed\ndone');
+    assert.deepEqual(timeline[1]?.toolUse?.input, { input: 'await tools.exec_command({ cmd: "pwd" })' });
+    assert.equal(timeline[1]?.toolUse?.result?.content, 'workspace');
+    assert.deepEqual(timeline[2]?.toolUse?.input, { query: 'browser tool', limit: 4 });
+    assert.match(timeline[2]?.toolUse?.result?.content ?? '', /browser_open/);
+    assert.equal(timeline[3]?.content, 'I checked the process state.');
+    assert.equal(timeline[0]?.toolUse?.result?.rawJson, undefined);
+  });
+
   test('with sourceId=grok, Grok user/assistant rows appear in the timeline', () => {
     const raw = [
       { type: 'user', content: [{ type: 'text', text: 'grok hi' }], timestamp: '2026-04-01T10:00:00.000Z' },

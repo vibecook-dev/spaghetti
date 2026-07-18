@@ -3,18 +3,18 @@
  *
  * Codex stores one JSON object (`RolloutLine`) per line in
  * `~/.codex/sessions/YYYY/MM/DD/rollout-<ts>-<uuid7>.jsonl`. A line is
- * `{ timestamp, type, payload }`. Only `type === 'response_item'` whose
- * `payload.type === 'message'` is a chat turn; everything else
- * (`session_meta`, `event_msg`, `turn_context`, and non-message response
- * items like `function_call` / `reasoning`) is skipped — this is the first
- * source to actually use the `extract() → null` contract.
+ * `{ timestamp, type, payload }`. Canonical `response_item` records for prose,
+ * tool calls/results, and reasoning are retained. Telemetry/UI projections
+ * (`event_msg`, `turn_context`, etc.) are skipped; token_count is consumed by
+ * the Codex ingest hook without becoming a transcript row.
  *
  * Differences from Claude Code that this extractor normalizes away:
  *  - the discriminator is `payload.role` (`developer`/`user`/`assistant`), an
  *    open string, mapped straight to `msgType` (a source-defined value, the
  *    same way Claude's `msgType` is its raw `type`).
  *  - text is a `content[]` of typed blocks (`input_text`/`output_text`/
- *    `input_image`); we concatenate the text blocks and drop images.
+ *    `input_image`); we concatenate prose, index reasoning summaries and tool
+ *    names, and keep tool payloads only in the verbatim raw record.
  *  - chat lines themselves carry no tokens. Codex emits periodic
  *    `event_msg` / `token_count` events; IngestService attributes
  *    `last_token_usage` onto the preceding assistant row (ccusage style).
@@ -24,6 +24,14 @@
  */
 
 import type { ExtractedMessage, MessageExtractor } from '../types.js';
+import {
+  codexCallId,
+  codexReasoningSummary,
+  codexResponseItemPayload,
+  codexToolName,
+  isCodexToolCallType,
+  isCodexToolResultType,
+} from './response-items.js';
 
 /** FTS/preview text cap — matches the claude-code extractor's convention. */
 const MAX_TEXT_LENGTH = 2_000;
@@ -60,16 +68,31 @@ export const codexMessageExtractor: MessageExtractor = {
   extract(raw: unknown): ExtractedMessage | null {
     if (!raw || typeof raw !== 'object') return null;
     const line = raw as Record<string, unknown>;
-    if (line.type !== 'response_item') return null;
+    const payload = codexResponseItemPayload(line);
+    if (!payload) return null;
 
-    const payload = line.payload as Record<string, unknown> | undefined;
-    if (!payload || payload.type !== 'message') return null;
+    const type = typeof payload.type === 'string' ? payload.type : '';
+    let msgType: string;
+    let text = '';
+    if (type === 'message') {
+      msgType = typeof payload.role === 'string' ? payload.role : 'unknown';
+      text = extractText(payload.content);
+    } else if (type === 'reasoning') {
+      msgType = 'reasoning';
+      text = codexReasoningSummary(payload);
+    } else if (isCodexToolResultType(type)) {
+      msgType = 'tool_result';
+    } else if (isCodexToolCallType(type)) {
+      msgType = 'tool_use';
+      text = codexToolName(payload);
+    } else {
+      return null;
+    }
 
-    const role = typeof payload.role === 'string' ? payload.role : 'unknown';
     return {
-      msgType: role,
-      text: truncate(extractText(payload.content)),
-      uuid: typeof payload.id === 'string' ? payload.id : null,
+      msgType,
+      text: truncate(text),
+      uuid: typeof payload.id === 'string' ? payload.id : codexCallId(payload) || null,
       timestamp: typeof line.timestamp === 'string' ? line.timestamp : null,
       tokens: { ...ZERO_TOKENS },
     };

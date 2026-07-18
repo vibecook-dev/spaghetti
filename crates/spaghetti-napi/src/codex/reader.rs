@@ -689,7 +689,7 @@ mod tests {
 
         assert_eq!(stats.projects, 1);
         assert_eq!(stats.sessions, 1);
-        assert_eq!(stats.messages, 2); // user + assistant (token re-upsert not counted as new)
+        assert_eq!(stats.messages, 3); // user + assistant + tool call (token re-upsert is not new)
 
         let msgs: Vec<_> = events
             .iter()
@@ -709,7 +709,7 @@ mod tests {
                 _ => None,
             })
             .collect();
-        // user, assistant (0 tokens), assistant re-upsert with tokens
+        // user, assistant (0 tokens), assistant re-upsert with tokens, tool call
         assert!(msgs.iter().any(|(t, _, _, _)| *t == "user"));
         assert!(msgs
             .iter()
@@ -717,6 +717,7 @@ mod tests {
         assert!(msgs
             .iter()
             .any(|(_, _, _, f)| f.as_deref() == Some("hello")));
+        assert!(msgs.iter().any(|(t, _, _, _)| *t == "tool_use"));
     }
 
     #[test]

@@ -43,8 +43,10 @@ import { createCodexLiveWatch, type CodexLiveWatch } from './live-watch.js';
  *   AGENTS.md / plugins; prefers event_msg user_message
  * - root_sessions_v3_human_timeline — hides child rollouts and excludes Codex
  *   developer/injected-user context from the materialized display timeline
+ * - rich_records_v4_tools_reasoning — retains canonical tool call/result and
+ *   readable reasoning response_items for full-session timeline projection
  */
-const CODEX_EXTRACT_VERSION = 'root_sessions_v3_human_timeline';
+const CODEX_EXTRACT_VERSION = 'rich_records_v4_tools_reasoning';
 const CODEX_EXTRACT_META_KEY = 'codex_extract_version';
 
 export class CodexLifecycleOwner extends EventEmitter implements LifecycleOwner {

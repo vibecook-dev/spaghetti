@@ -90,7 +90,7 @@ describe('Codex live disk ingest (Plane 2)', () => {
     assert.equal(codexMessageCount(), 1);
   });
 
-  test('an appended turn is streamed into the store live', async () => {
+  test('appended prose and tool records are streamed into the store live', async () => {
     // Append an assistant turn (plus a token_count event the extractor skips).
     appendFileSync(
       rolloutPath,
@@ -121,5 +121,32 @@ describe('Codex live disk ingest (Plane 2)', () => {
     );
     // The skipped event_msg did not become a message row.
     assert.equal(codexMessageCount(), 2);
+
+    appendFileSync(
+      rolloutPath,
+      line({
+        timestamp: '2026-07-13T00:00:04.000Z',
+        type: 'response_item',
+        payload: {
+          type: 'function_call',
+          id: 'fc-live',
+          call_id: 'call-live',
+          name: 'wait',
+          arguments: '{"cell_id":"live"}',
+        },
+      }) +
+        line({
+          timestamp: '2026-07-13T00:00:05.000Z',
+          type: 'response_item',
+          payload: { type: 'function_call_output', call_id: 'call-live', output: 'live tool result' },
+        }),
+    );
+
+    const toolArrived = await waitFor(() => codexMessageCount() === 4);
+    assert.ok(toolArrived, 'the tool call and result should be ingested live within the timeout');
+    const timeline = spaghetti.getSessionTimeline(CODEX_SLUG, CODEX_SESSION, { limit: 20 });
+    const tool = timeline.messages.find((message) => message.type === 'tool_use');
+    assert.equal(tool?.toolUse?.toolName, 'wait');
+    assert.equal(tool?.toolUse?.result?.content, 'live tool result');
   });
 });

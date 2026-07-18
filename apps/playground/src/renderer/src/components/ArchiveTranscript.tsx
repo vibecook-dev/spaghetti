@@ -87,6 +87,7 @@ function toolCommand(msg: ChatSessionMessage): string {
   const tu = msg.toolUse;
   if (!tu) return '';
   const input = tu.input ?? {};
+  if (typeof input.input === 'string') return input.input;
   if (typeof input.command === 'string') return input.command;
   if (typeof input.file_path === 'string') return `file_path: ${input.file_path}`;
   if (typeof input.path === 'string') return `path: ${input.path}`;
@@ -319,6 +320,10 @@ function toolLang(toolName: string): string {
     case 'Shell':
     case 'bash':
       return 'bash';
+    case 'exec':
+      return 'javascript';
+    case 'wait':
+      return 'json';
     case 'Read':
     case 'Write':
     case 'Edit':

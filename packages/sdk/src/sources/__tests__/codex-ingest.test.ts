@@ -188,6 +188,57 @@ describe('Codex source — end-to-end ingest', () => {
           },
         },
         msg('assistant', 'I will map the repo first.'),
+        {
+          timestamp: '2026-07-13T00:00:02.000Z',
+          type: 'response_item',
+          payload: {
+            type: 'function_call',
+            id: 'fc-1',
+            call_id: 'call-1',
+            name: 'wait',
+            arguments: '{"cell_id":"42"}',
+          },
+        },
+        {
+          timestamp: '2026-07-13T00:00:03.000Z',
+          type: 'response_item',
+          payload: { type: 'function_call_output', call_id: 'call-1', output: 'finished' },
+        },
+        {
+          timestamp: '2026-07-13T00:00:04.000Z',
+          type: 'response_item',
+          payload: {
+            type: 'custom_tool_call',
+            id: 'ctc-1',
+            call_id: 'call-2',
+            name: 'exec',
+            input: 'await tools.exec_command({ cmd: "rg --files" })',
+          },
+        },
+        {
+          timestamp: '2026-07-13T00:00:05.000Z',
+          type: 'response_item',
+          payload: {
+            type: 'custom_tool_call_output',
+            call_id: 'call-2',
+            output: [{ type: 'input_text', text: 'package.json' }],
+          },
+        },
+        {
+          timestamp: '2026-07-13T00:00:06.000Z',
+          type: 'response_item',
+          payload: {
+            type: 'reasoning',
+            id: 'rs-1',
+            summary: [{ type: 'summary_text', text: 'I inspected the repository structure.' }],
+            encrypted_content: 'opaque',
+          },
+        },
+        {
+          timestamp: '2026-07-13T00:00:07.000Z',
+          type: 'response_item',
+          payload: { type: 'reasoning', id: 'rs-2', summary: [], encrypted_content: 'opaque' },
+        },
       ]),
     );
 
@@ -258,7 +309,7 @@ describe('Codex source — end-to-end ingest', () => {
     assert.equal(row?.first_prompt, 'please do a thorough code review of this lib');
   });
 
-  test('materialized DB timeline excludes developer and injected user context', () => {
+  test('materialized DB timeline keeps rich Codex records and excludes injected context', () => {
     ensureTimelineProjection(sqlite, SESSION_C);
     const facets = sqlite.all<{ display_type: string; count: number }>(
       `SELECT display_type, COUNT(*) AS count
@@ -270,6 +321,8 @@ describe('Codex source — end-to-end ingest', () => {
     );
     assert.deepEqual(facets, [
       { display_type: 'assistant', count: 1 },
+      { display_type: 'thinking', count: 1 },
+      { display_type: 'tool_use', count: 2 },
       { display_type: 'user', count: 1 },
     ]);
     assert.equal(
@@ -281,6 +334,19 @@ describe('Codex source — end-to-end ingest', () => {
       )?.search_text,
       'please do a thorough code review of this lib',
     );
+    const tools = sqlite.all<{ tool_name: string; data: string }>(
+      `SELECT tool_name, data
+         FROM timeline_messages
+        WHERE session_id = ? AND display_type = 'tool_use'
+        ORDER BY timeline_index`,
+      SESSION_C,
+    );
+    assert.deepEqual(
+      tools.map((tool) => tool.tool_name),
+      ['wait', 'exec'],
+    );
+    const wait = JSON.parse(tools[0]!.data) as { toolUse: { result?: { content: string } } };
+    assert.equal(wait.toolUse.result?.content, 'finished');
   });
 
   test('chat turns are extracted; session_meta and event_msg are not message rows', () => {
@@ -360,13 +426,27 @@ describe('Codex source — end-to-end ingest', () => {
     assert.match(hits[0].text_content, /explore the repo/);
   });
 
-  test('codexMessageExtractor skips non-message lines directly', () => {
+  test('codexMessageExtractor keeps canonical rich records and skips telemetry', () => {
     assert.equal(codexMessageExtractor.extract({ type: 'session_meta', payload: { cwd: '/x' } }), null);
     assert.equal(codexMessageExtractor.extract({ type: 'event_msg', payload: { type: 'token_count' } }), null);
-    assert.equal(
-      codexMessageExtractor.extract({ type: 'response_item', payload: { type: 'function_call', name: 'ls' } }),
-      null,
-    );
+    const tool = codexMessageExtractor.extract({
+      type: 'response_item',
+      payload: { type: 'function_call', id: 'fc-1', call_id: 'call-1', name: 'ls' },
+    });
+    assert.equal(tool?.msgType, 'tool_use');
+    assert.equal(tool?.text, 'ls');
+    const result = codexMessageExtractor.extract({
+      type: 'response_item',
+      payload: { type: 'function_call_output', call_id: 'call-1', output: 'done' },
+    });
+    assert.equal(result?.msgType, 'tool_result');
+    assert.equal(result?.uuid, 'call-1');
+    const reasoning = codexMessageExtractor.extract({
+      type: 'response_item',
+      payload: { type: 'reasoning', id: 'rs-1', summary: [{ type: 'summary_text', text: 'Checked.' }] },
+    });
+    assert.equal(reasoning?.msgType, 'reasoning');
+    assert.equal(reasoning?.text, 'Checked.');
     const out = codexMessageExtractor.extract({
       timestamp: '2026-07-13T00:00:01.000Z',
       type: 'response_item',
