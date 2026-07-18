@@ -853,6 +853,8 @@ class IngestServiceImpl implements IngestService {
     // Order: messages first so FTS DELETE triggers run while the connection
     // is healthy; then sessions/projects; fingerprints last.
     this.db.run('DELETE FROM messages WHERE source_id = ?', this.sourceId);
+    this.db.run('DELETE FROM timeline_messages WHERE source_id = ?', this.sourceId);
+    this.db.run('DELETE FROM timeline_dirty_sessions WHERE source_id = ?', this.sourceId);
     this.db.run('DELETE FROM sessions WHERE source_id = ?', this.sourceId);
     this.db.run('DELETE FROM projects WHERE source_id = ?', this.sourceId);
     this.db.run('DELETE FROM source_files WHERE source_id = ?', this.sourceId);
@@ -861,6 +863,8 @@ class IngestServiceImpl implements IngestService {
   deleteAllData(): void {
     const tables = [
       'messages',
+      'timeline_messages',
+      'timeline_dirty_sessions',
       'subagents',
       'workflows',
       'tool_results',

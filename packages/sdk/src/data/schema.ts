@@ -24,7 +24,13 @@ import type { SqliteService } from '../io/index.js';
 // v7: `sessions.tokens_estimated` — Codex (and future sources) may fill token
 // columns via tiktoken when official usage events are missing. The flag lets
 // the UI show "~" / "est" so estimates are never mistaken for API truth.
-export const SCHEMA_VERSION = 7;
+//
+// v8: materialized `timeline_messages` projection. Raw agent rows are not a
+// 1:1 match for visible transcript rows (assistant envelopes split into text,
+// thinking and tool calls; tool results merge into calls). SQLite triggers
+// mark changed sessions dirty and the query layer rebuilds the normalized
+// projection atomically before serving facets or filtered cursor pages.
+export const SCHEMA_VERSION = 8;
 
 export const SCHEMA_SQL = `
 -- Meta
@@ -95,6 +101,25 @@ CREATE TABLE IF NOT EXISTS messages (
   text_content TEXT DEFAULT '',
   byte_offset INTEGER,
   UNIQUE(session_id, msg_index)
+);
+
+CREATE TABLE IF NOT EXISTS timeline_messages (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  source_id TEXT NOT NULL,
+  project_slug TEXT NOT NULL,
+  session_id TEXT NOT NULL,
+  timeline_index INTEGER NOT NULL,
+  display_type TEXT NOT NULL,
+  tool_name TEXT,
+  search_text TEXT NOT NULL DEFAULT '',
+  data TEXT NOT NULL,
+  UNIQUE(session_id, timeline_index)
+);
+
+CREATE TABLE IF NOT EXISTS timeline_dirty_sessions (
+  session_id TEXT PRIMARY KEY,
+  source_id TEXT NOT NULL,
+  project_slug TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS subagents (
@@ -186,6 +211,9 @@ CREATE TABLE IF NOT EXISTS file_history (
 CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project_slug);
 CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(project_slug, session_id);
 CREATE INDEX IF NOT EXISTS idx_messages_session_idx ON messages(session_id, msg_index);
+CREATE INDEX IF NOT EXISTS idx_timeline_session_idx ON timeline_messages(session_id, timeline_index);
+CREATE INDEX IF NOT EXISTS idx_timeline_session_type ON timeline_messages(session_id, display_type, timeline_index);
+CREATE INDEX IF NOT EXISTS idx_timeline_session_tool ON timeline_messages(session_id, tool_name, timeline_index);
 CREATE INDEX IF NOT EXISTS idx_subagents_session ON subagents(project_slug, session_id);
 CREATE INDEX IF NOT EXISTS idx_tool_results_session ON tool_results(project_slug, session_id);
 CREATE INDEX IF NOT EXISTS idx_todos_session ON todos(session_id);
@@ -204,6 +232,30 @@ CREATE TRIGGER IF NOT EXISTS messages_au AFTER UPDATE ON messages BEGIN
   INSERT INTO search_fts(search_fts, rowid, text_content) VALUES ('delete', old.id, old.text_content);
   INSERT INTO search_fts(rowid, text_content) VALUES (new.id, new.text_content);
 END;
+
+-- Raw rows are canonical. Any mutation invalidates the materialized display
+-- projection for that session; QueryService refreshes it on the next read.
+CREATE TRIGGER IF NOT EXISTS timeline_dirty_ai AFTER INSERT ON messages BEGIN
+  INSERT INTO timeline_dirty_sessions(session_id, source_id, project_slug)
+  VALUES (new.session_id, new.source_id, new.project_slug)
+  ON CONFLICT(session_id) DO UPDATE SET
+    source_id = excluded.source_id,
+    project_slug = excluded.project_slug;
+END;
+CREATE TRIGGER IF NOT EXISTS timeline_dirty_ad AFTER DELETE ON messages BEGIN
+  INSERT INTO timeline_dirty_sessions(session_id, source_id, project_slug)
+  VALUES (old.session_id, old.source_id, old.project_slug)
+  ON CONFLICT(session_id) DO UPDATE SET
+    source_id = excluded.source_id,
+    project_slug = excluded.project_slug;
+END;
+CREATE TRIGGER IF NOT EXISTS timeline_dirty_au AFTER UPDATE ON messages BEGIN
+  INSERT INTO timeline_dirty_sessions(session_id, source_id, project_slug)
+  VALUES (new.session_id, new.source_id, new.project_slug)
+  ON CONFLICT(session_id) DO UPDATE SET
+    source_id = excluded.source_id,
+    project_slug = excluded.project_slug;
+END;
 `;
 
 /**
@@ -221,6 +273,8 @@ const CURRENT_TABLES = [
   'project_memories',
   'sessions',
   'messages',
+  'timeline_messages',
+  'timeline_dirty_sessions',
   'subagents',
   'workflows',
   'tool_results',
@@ -281,6 +335,13 @@ export function initializeSchema(db: SqliteService): void {
       db.exec('DROP TRIGGER IF EXISTS messages_au');
     } catch {
       /* ignore */
+    }
+    for (const trigger of ['timeline_dirty_ai', 'timeline_dirty_ad', 'timeline_dirty_au']) {
+      try {
+        db.exec(`DROP TRIGGER IF EXISTS ${trigger}`);
+      } catch {
+        /* ignore */
+      }
     }
 
     // Recreate schema_meta

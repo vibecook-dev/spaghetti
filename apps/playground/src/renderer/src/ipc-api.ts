@@ -59,6 +59,13 @@ export function createIpcApi(): SpaghettiAPI {
       offset?: number,
       options?: { sourceId?: string },
     ) => bridge.getSessionMessages(projectSlug, sessionId, limit, offset, options) as unknown,
+    getSessionTimelineFacets: (projectSlug: string, sessionId: string, options?: { sourceId?: string }) =>
+      bridge.getSessionTimelineFacets(projectSlug, sessionId, options) as unknown,
+    getSessionTimeline: (
+      projectSlug: string,
+      sessionId: string,
+      request?: Parameters<SpaghettiAPI['getSessionTimeline']>[2],
+    ) => bridge.getSessionTimeline(projectSlug, sessionId, request) as unknown,
     getProjectMemory: (projectSlug: string, options?: { sourceId?: string }) =>
       bridge.getProjectMemory(projectSlug, options) as unknown,
     getSessionTodos: (projectSlug: string, sessionId: string) =>

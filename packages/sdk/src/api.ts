@@ -13,6 +13,7 @@ import type { TokenUsageSummary } from './data/summary-types.js';
 import type { SessionMessage, TeamDirectory } from './types/index.js';
 import type { SpaghettiLive } from './live/spaghetti-live.js';
 import type { SpaghettiRuntime } from './runtime/spaghetti-runtime.js';
+import type { TimelineFacets, TimelinePage, TimelinePageRequest } from './data/timeline-query.js';
 
 // ═══════════════════════════════════════════════════════════════════════════
 // RESPONSE TYPES
@@ -152,6 +153,12 @@ export interface SpaghettiAPI {
     offset?: number,
     options?: SourceFilter,
   ): MessagePage;
+
+  /** Full-session normalized display counts, independent of loaded pages. */
+  getSessionTimelineFacets(projectSlug: string, sessionId: string, options?: SourceFilter): TimelineFacets;
+
+  /** Database-filtered normalized display messages, newest page first. */
+  getSessionTimeline(projectSlug: string, sessionId: string, request?: TimelinePageRequest): TimelinePage;
 
   /**
    * Get project MEMORY.md content.

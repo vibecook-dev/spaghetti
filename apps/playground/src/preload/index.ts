@@ -24,6 +24,10 @@ const bridge: SpaghettiBridge = {
   getSessionList: (projectSlug, options) => ipcRenderer.invoke(IPC_CHANNELS.getSessionList, projectSlug, options),
   getSessionMessages: (projectSlug, sessionId, limit, offset, options) =>
     ipcRenderer.invoke(IPC_CHANNELS.getSessionMessages, projectSlug, sessionId, limit, offset, options),
+  getSessionTimelineFacets: (projectSlug, sessionId, options) =>
+    ipcRenderer.invoke(IPC_CHANNELS.getSessionTimelineFacets, projectSlug, sessionId, options),
+  getSessionTimeline: (projectSlug, sessionId, request) =>
+    ipcRenderer.invoke(IPC_CHANNELS.getSessionTimeline, projectSlug, sessionId, request),
   getSessionTodos: (projectSlug, sessionId) => ipcRenderer.invoke(IPC_CHANNELS.getSessionTodos, projectSlug, sessionId),
   getSessionPlan: (projectSlug, sessionId) => ipcRenderer.invoke(IPC_CHANNELS.getSessionPlan, projectSlug, sessionId),
   getSessionTask: (projectSlug, sessionId) => ipcRenderer.invoke(IPC_CHANNELS.getSessionTask, projectSlug, sessionId),

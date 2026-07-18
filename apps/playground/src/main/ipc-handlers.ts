@@ -53,6 +53,14 @@ export function registerIpcHandlers(): void {
     (_e, projectSlug: string, sessionId: string, limit?: number, offset?: number, options?: { sourceId?: string }) =>
       getSdk().getSessionMessages(projectSlug, sessionId, limit, offset, options),
   );
+  ipcMain.handle(
+    IPC_CHANNELS.getSessionTimelineFacets,
+    (_e, projectSlug: string, sessionId: string, options?: { sourceId?: string }) =>
+      getSdk().getSessionTimelineFacets(projectSlug, sessionId, options),
+  );
+  ipcMain.handle(IPC_CHANNELS.getSessionTimeline, (_e, projectSlug: string, sessionId: string, request) =>
+    getSdk().getSessionTimeline(projectSlug, sessionId, request),
+  );
   ipcMain.handle(IPC_CHANNELS.getSessionTodos, (_e, projectSlug: string, sessionId: string) =>
     getSdk().getSessionTodos(projectSlug, sessionId),
   );

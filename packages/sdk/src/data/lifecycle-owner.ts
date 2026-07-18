@@ -27,6 +27,7 @@ import type { Project, Session, SessionMessage, AgentConfig, AgentAnalytic } fro
 import type { AgentDataStore } from './agent-data-store.js';
 import type { LiveWatch } from '../live/live-watch.js';
 import type { IngestEngine } from '../settings.js';
+import type { TimelineFacets, TimelinePage, TimelinePageRequest } from './timeline-query.js';
 
 // Re-export types used by app-service / agent-data-service shim
 export {
@@ -90,6 +91,8 @@ export interface AgentDataService extends EventEmitter {
     offset: number,
     options?: { sourceId?: string },
   ): PaginatedSegmentResult<SessionMessage>;
+  getSessionTimelineFacets(slug: string, sessionId: string, options?: { sourceId?: string }): TimelineFacets;
+  getSessionTimeline(slug: string, sessionId: string, request?: TimelinePageRequest): TimelinePage;
   getConfig(): AgentConfig;
   getAnalytics(): AgentAnalytic;
 

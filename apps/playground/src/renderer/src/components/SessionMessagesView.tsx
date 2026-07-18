@@ -9,7 +9,13 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { ArrowLeft, PanelLeft, PanelRight } from 'lucide-react';
 import { transformRawMessagesToTimeline, type ChatSessionMessage } from '@vibecook/spaghetti-sdk/react';
-import type { MessagePage, SegmentChangeBatch, SessionListItem } from '@vibecook/spaghetti-sdk';
+import type {
+  SegmentChangeBatch,
+  SessionListItem,
+  TimelineFacets,
+  TimelinePage,
+  TimelinePageRequest,
+} from '@vibecook/spaghetti-sdk';
 import { SourceBadge } from './SourceBadge.js';
 import { ArchiveTranscript } from './ArchiveTranscript.js';
 import { MessageFilterBar, useMessageFilters, countTimelineMessages, filterTimelineMessages } from './filters/index.js';
@@ -54,15 +60,16 @@ export function SessionMessagesView({
   onBack,
   debugMessages,
 }: SessionMessagesViewProps) {
-  const [rawMessages, setRawMessages] = useState<AnyMsg[]>([]);
-  const [pageMeta, setPageMeta] = useState<Pick<MessagePage, 'total' | 'hasMore'> | null>(null);
+  const [timeline, setTimeline] = useState<ChatSessionMessage[]>([]);
+  const [facets, setFacets] = useState<TimelineFacets | null>(null);
+  const [pageMeta, setPageMeta] = useState<Pick<TimelinePage, 'total' | 'hasMore'> | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [livePulse, setLivePulse] = useState(false);
   const [pendingNew, setPendingNew] = useState(0);
 
-  const offsetRef = useRef(0);
+  const cursorRef = useRef<number | undefined>(undefined);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const prevScrollHeightRef = useRef(0);
   const isPrependingRef = useRef(false);
@@ -73,15 +80,28 @@ export function SessionMessagesView({
   const totalRef = useRef(0);
   const liveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pulseTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  // Full timeline (pre-filter) — filters apply after transform.
-  // Codex/Grok rows are RolloutLine / chat_history JSON; adapt via sourceId.
-  const timeline: ChatSessionMessage[] = useMemo(
-    () => transformRawMessagesToTimeline(rawMessages, { sourceId }),
-    [rawMessages, sourceId],
+  const [debouncedSearch, setDebouncedSearch] = useState('');
+  const cacheRef = useRef(
+    new Map<
+      string,
+      {
+        messages: ChatSessionMessage[];
+        pageMeta: Pick<TimelinePage, 'total' | 'hasMore'>;
+        cursor?: number;
+        scrollTop: number;
+      }
+    >(),
   );
+  const activeQueryKeyRef = useRef('');
+  const restoreScrollTopRef = useRef<number | null>(null);
 
-  const { messageCounts, toolCounts } = useMemo(() => countTimelineMessages(timeline), [timeline]);
+  const debugTimeline = useMemo(
+    () => (debugMessages ? transformRawMessagesToTimeline([...debugMessages], { sourceId }) : []),
+    [debugMessages, sourceId],
+  );
+  const debugCounts = useMemo(() => countTimelineMessages(debugTimeline), [debugTimeline]);
+  const messageCounts = facets?.messageCounts ?? debugCounts.messageCounts;
+  const toolCounts = facets?.toolCounts ?? debugCounts.toolCounts;
   const toolNames = useMemo(() => Object.keys(toolCounts), [toolCounts]);
 
   const {
@@ -100,23 +120,57 @@ export function SessionMessagesView({
     resetFilters,
   } = useMessageFilters({ toolNames });
 
-  const chatMessages = useMemo(
-    () =>
-      filterTimelineMessages({
-        messages: timeline,
-        visibleTypes,
-        visibleTools,
-        typeFilters,
-        toolFilters,
-        anySoloActive,
-        searchQuery,
-      }),
-    [timeline, visibleTypes, visibleTools, typeFilters, toolFilters, anySoloActive, searchQuery],
-  );
+  useEffect(() => {
+    const timer = setTimeout(() => setDebouncedSearch(searchQuery.trim()), 180);
+    return () => clearTimeout(timer);
+  }, [searchQuery]);
 
-  // The reference tray reports visible transcript rows, not pill-count totals
-  // (tool-use rows already have a per-tool pill and must not be double-counted).
-  const filterTotalCount = timeline.length;
+  const timelineRequest = useMemo<TimelinePageRequest>(() => {
+    const request: TimelinePageRequest = { sourceId, limit: PAGE_SIZE };
+    if (anySoloActive) {
+      request.includeTypes = Object.entries(typeFilters)
+        .filter(([, state]) => state.solo)
+        .map(([type]) => type);
+      request.includeTools = Object.entries(toolFilters)
+        .filter(([, state]) => state.solo)
+        .map(([tool]) => tool);
+    } else {
+      request.excludeTypes = Object.entries(typeFilters)
+        .filter(([, state]) => state.mute)
+        .map(([type]) => type);
+      request.excludeTools = Object.entries(toolFilters)
+        .filter(([, state]) => state.mute)
+        .map(([tool]) => tool);
+    }
+    if (debouncedSearch) request.search = debouncedSearch;
+    return request;
+  }, [sourceId, anySoloActive, typeFilters, toolFilters, debouncedSearch]);
+  const queryKey = useMemo(() => JSON.stringify(timelineRequest), [timelineRequest]);
+
+  const chatMessages = useMemo(() => {
+    if (!debugMessages) return timeline;
+    return filterTimelineMessages({
+      messages: debugTimeline,
+      visibleTypes,
+      visibleTools,
+      typeFilters,
+      toolFilters,
+      anySoloActive,
+      searchQuery,
+    });
+  }, [
+    debugMessages,
+    timeline,
+    debugTimeline,
+    visibleTypes,
+    visibleTools,
+    typeFilters,
+    toolFilters,
+    anySoloActive,
+    searchQuery,
+  ]);
+
+  const filterTotalCount = facets?.total ?? debugTimeline.length;
 
   // Reset when session changes
   useEffect(() => {
@@ -125,53 +179,81 @@ export function SessionMessagesView({
     prevScrollHeightRef.current = 0;
     loadMoreInFlightRef.current = false;
     nearBottomRef.current = true;
-    offsetRef.current = 0;
+    cursorRef.current = undefined;
     totalRef.current = 0;
+    cacheRef.current.clear();
+    activeQueryKeyRef.current = '';
+    setFacets(null);
     setPendingNew(0);
     setError(null);
     resetFilters();
   }, [session.sessionId, resetFilters]);
 
-  // ── Initial load: last PAGE_SIZE messages ─────────────────────────────
+  // Session-wide facets come from normalized DB rows, never the loaded page.
   useEffect(() => {
     let cancelled = false;
-    setLoading(true);
-    setError(null);
-    setRawMessages([]);
-    setPageMeta(null);
-    offsetRef.current = 0;
     if (debugMessages) {
-      const messages = [...debugMessages];
-      setRawMessages(messages);
-      setPageMeta({ total: messages.length, hasMore: false });
-      totalRef.current = messages.length;
+      return;
+    }
+    void (async () => {
+      try {
+        const next = await window.spaghetti.getSessionTimelineFacets(projectSlug, session.sessionId, { sourceId });
+        if (!cancelled) setFacets(next);
+      } catch (e: unknown) {
+        if (!cancelled) setError(String(e));
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [projectSlug, session.sessionId, sourceId, debugMessages]);
+
+  // Query-keyed pages: changing solo/mute/search starts a DB query across the
+  // entire session. Returning to a prior key restores its page and scroll.
+  useEffect(() => {
+    if (debugMessages) {
+      setTimeline(debugTimeline);
+      setPageMeta({ total: debugTimeline.length, hasMore: false });
+      totalRef.current = debugTimeline.length;
       setLoading(false);
       return;
     }
-    const scope = { sourceId };
+    const previousKey = activeQueryKeyRef.current;
+    if (previousKey && previousKey !== queryKey && pageMeta) {
+      cacheRef.current.set(previousKey, {
+        messages: timeline,
+        pageMeta,
+        cursor: cursorRef.current,
+        scrollTop: scrollContainerRef.current?.scrollTop ?? 0,
+      });
+    }
+    activeQueryKeyRef.current = queryKey;
+    const cached = cacheRef.current.get(queryKey);
+    if (cached) {
+      setTimeline(cached.messages);
+      setPageMeta(cached.pageMeta);
+      cursorRef.current = cached.cursor;
+      totalRef.current = cached.pageMeta.total;
+      restoreScrollTopRef.current = cached.scrollTop;
+      setLoading(false);
+      return;
+    }
 
+    let cancelled = false;
+    setLoading(true);
+    setError(null);
+    setTimeline([]);
+    setPageMeta(null);
+    cursorRef.current = undefined;
     void (async () => {
       try {
         await delay(LOADING_DELAY_MS);
+        const page = await window.spaghetti.getSessionTimeline(projectSlug, session.sessionId, timelineRequest);
         if (cancelled) return;
-
-        const probe = await window.spaghetti.getSessionMessages(projectSlug, session.sessionId, 1, 0, scope);
-        if (cancelled) return;
-        const total = probe.total;
-        const startOffset = Math.max(0, total - PAGE_SIZE);
-        const page = await window.spaghetti.getSessionMessages(
-          projectSlug,
-          session.sessionId,
-          PAGE_SIZE,
-          startOffset,
-          scope,
-        );
-        if (cancelled) return;
-
         shouldScrollToBottomRef.current = true;
-        setRawMessages(page.messages as unknown as AnyMsg[]);
-        setPageMeta({ total: page.total, hasMore: startOffset > 0 });
-        offsetRef.current = startOffset;
+        setTimeline(page.messages as ChatSessionMessage[]);
+        setPageMeta({ total: page.total, hasMore: page.hasMore });
+        cursorRef.current = page.nextCursor;
         totalRef.current = page.total;
       } catch (e: unknown) {
         if (!cancelled) setError(String(e));
@@ -179,55 +261,40 @@ export function SessionMessagesView({
         if (!cancelled) setLoading(false);
       }
     })();
-
     return () => {
       cancelled = true;
     };
-  }, [projectSlug, session.sessionId, sourceId, debugMessages]);
+    // pageMeta/timeline are intentionally snapshots saved when queryKey changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [projectSlug, session.sessionId, queryKey, debugMessages, debugTimeline]);
 
-  // ── Live tail: append new messages when the index reports changes ─────
   const appendLiveTail = useCallback(async () => {
     if (debugMessages) return;
-    const scope = { sourceId };
     try {
-      const probe = await window.spaghetti.getSessionMessages(projectSlug, session.sessionId, 1, 0, scope);
-      const newTotal = probe.total;
-      const oldTotal = totalRef.current;
-
-      if (newTotal <= oldTotal) {
-        // Content may have been rewritten in place — soft-refresh the visible tail.
-        if (newTotal === 0 || oldTotal === 0) return;
-        return;
-      }
-
-      const delta = newTotal - oldTotal;
-      const page = await window.spaghetti.getSessionMessages(projectSlug, session.sessionId, delta, oldTotal, scope);
-      const fresh = page.messages as unknown as AnyMsg[];
-      if (fresh.length === 0) {
-        totalRef.current = newTotal;
-        setPageMeta((m) => (m ? { ...m, total: newTotal } : { total: newTotal, hasMore: false }));
-        return;
-      }
-
+      cacheRef.current.clear();
+      const [nextFacets, page] = await Promise.all([
+        window.spaghetti.getSessionTimelineFacets(projectSlug, session.sessionId, { sourceId }),
+        window.spaghetti.getSessionTimeline(projectSlug, session.sessionId, timelineRequest),
+      ]);
+      setFacets(nextFacets);
+      const delta = Math.max(0, page.total - totalRef.current);
+      totalRef.current = page.total;
       if (nearBottomRef.current) {
         shouldScrollToBottomRef.current = true;
-        setRawMessages((prev) => [...prev, ...fresh]);
+        setTimeline(page.messages as ChatSessionMessage[]);
+        setPageMeta({ total: page.total, hasMore: page.hasMore });
+        cursorRef.current = page.nextCursor;
         setPendingNew(0);
-      } else {
-        setRawMessages((prev) => [...prev, ...fresh]);
-        setPendingNew((n) => n + fresh.length);
+      } else if (delta > 0) {
+        setPendingNew((count) => count + delta);
       }
-
-      totalRef.current = newTotal;
-      setPageMeta((m) => (m ? { ...m, total: newTotal } : { total: newTotal, hasMore: offsetRef.current > 0 }));
-
       setLivePulse(true);
       if (pulseTimerRef.current) clearTimeout(pulseTimerRef.current);
       pulseTimerRef.current = setTimeout(() => setLivePulse(false), 1200);
     } catch {
       /* live refresh is best-effort */
     }
-  }, [projectSlug, session.sessionId, sourceId, debugMessages]);
+  }, [projectSlug, session.sessionId, sourceId, timelineRequest, debugMessages]);
 
   useEffect(() => {
     if (debugMessages) return;
@@ -265,14 +332,18 @@ export function SessionMessagesView({
       shouldScrollToBottomRef.current = false;
       nearBottomRef.current = true;
     }
-  }, [rawMessages]);
+    if (restoreScrollTopRef.current != null) {
+      container.scrollTop = restoreScrollTopRef.current;
+      restoreScrollTopRef.current = null;
+    }
+  }, [timeline]);
 
   // ── Auto-load older messages when near top ────────────────────────────
   const loadMoreMessages = useCallback(async () => {
     if (loadMoreInFlightRef.current) return;
     if (loadingMore) return;
     if (!pageMeta?.hasMore) return;
-    if (offsetRef.current <= 0) return;
+    if (cursorRef.current == null) return;
 
     const container = scrollContainerRef.current;
     if (container) {
@@ -284,19 +355,16 @@ export function SessionMessagesView({
     try {
       await delay(LOADING_DELAY_MS);
 
-      const newOffset = Math.max(0, offsetRef.current - PAGE_SIZE);
-      const limit = offsetRef.current - newOffset;
-      if (limit <= 0) return;
-
-      const page = await window.spaghetti.getSessionMessages(projectSlug, session.sessionId, limit, newOffset, {
-        sourceId,
+      const page = await window.spaghetti.getSessionTimeline(projectSlug, session.sessionId, {
+        ...timelineRequest,
+        before: cursorRef.current,
       });
 
       if (page.messages.length > 0) {
         isPrependingRef.current = true;
-        setRawMessages((prev) => [...(page.messages as unknown as AnyMsg[]), ...prev]);
-        setPageMeta({ total: page.total, hasMore: newOffset > 0 });
-        offsetRef.current = newOffset;
+        setTimeline((prev) => [...(page.messages as ChatSessionMessage[]), ...prev]);
+        setPageMeta({ total: page.total, hasMore: page.hasMore });
+        cursorRef.current = page.nextCursor;
         totalRef.current = page.total;
       } else {
         setPageMeta((m) => (m ? { ...m, hasMore: false } : m));
@@ -308,7 +376,7 @@ export function SessionMessagesView({
       setLoadingMore(false);
       loadMoreInFlightRef.current = false;
     }
-  }, [projectSlug, session.sessionId, sourceId, loadingMore, pageMeta?.hasMore]);
+  }, [projectSlug, session.sessionId, timelineRequest, loadingMore, pageMeta?.hasMore]);
 
   const handleScroll = useCallback(
     (e: React.UIEvent<HTMLDivElement>) => {
@@ -320,21 +388,18 @@ export function SessionMessagesView({
         setPendingNew(0);
       }
 
-      if (scrollTop < NEAR_TOP_PX && !loadingMore && pageMeta?.hasMore && rawMessages.length > 0) {
+      if (scrollTop < NEAR_TOP_PX && !loadingMore && pageMeta?.hasMore && timeline.length > 0) {
         void loadMoreMessages();
       }
     },
-    [loadingMore, pageMeta?.hasMore, rawMessages.length, loadMoreMessages, pendingNew],
+    [loadingMore, pageMeta?.hasMore, timeline.length, loadMoreMessages, pendingNew],
   );
 
   const jumpToLatest = useCallback(() => {
-    const container = scrollContainerRef.current;
-    if (container) {
-      container.scrollTop = container.scrollHeight;
-    }
     nearBottomRef.current = true;
     setPendingNew(0);
-  }, []);
+    void appendLiveTail();
+  }, [appendLiveTail]);
 
   void hasMemory; // artifacts live in Structure panel
   const hasMore = pageMeta?.hasMore ?? false;
@@ -373,8 +438,8 @@ export function SessionMessagesView({
           <LiveDot active={livePulse || pendingNew > 0} />
           {pageMeta && (
             <span className="font-mono text-[9px] tracking-[0.08em] opacity-60 truncate">
-              {rawMessages.length}/{pageMeta.total} msgs
-              {filtersActive ? ` · ${chatMessages.length} shown` : ''}
+              {timeline.length}/{pageMeta.total} loaded
+              {filtersActive && facets ? ` · ${pageMeta.total}/${facets.total} match` : ''}
             </span>
           )}
         </div>
@@ -401,7 +466,7 @@ export function SessionMessagesView({
         </div>
       )}
 
-      {timeline.length > 0 && !loading ? (
+      {filterTotalCount > 0 && !loading ? (
         <MessageFilterBar
           typeFilters={typeFilters}
           toolFilters={toolFilters}
@@ -411,7 +476,7 @@ export function SessionMessagesView({
           anySoloActive={anySoloActive}
           messageCounts={messageCounts}
           toolCounts={toolCounts}
-          filteredCount={chatMessages.length}
+          filteredCount={debugMessages ? chatMessages.length : (pageMeta?.total ?? 0)}
           totalCount={filterTotalCount}
           toggleTypeSolo={toggleTypeSolo}
           toggleTypeMute={toggleTypeMute}
@@ -425,12 +490,12 @@ export function SessionMessagesView({
 
       <div className="relative flex-1 min-h-0 archive-transcript">
         <div ref={scrollContainerRef} onScroll={handleScroll} className="h-full overflow-y-auto scrollbar-hide">
-          {loading && rawMessages.length === 0 ? (
+          {loading && timeline.length === 0 ? (
             <div className="flex items-center justify-center h-full gap-3 py-12">
               <Spinner className="h-5 w-5" />
               <span className="font-mono text-[10px] tracking-widest uppercase opacity-50">Transcribing…</span>
             </div>
-          ) : timeline.length === 0 ? (
+          ) : filterTotalCount === 0 ? (
             <div className="flex flex-col items-center justify-center h-full opacity-50 py-12">
               <p className="font-serif text-[14px] leading-relaxed">No messages in this session</p>
               <p className="font-mono text-[10px] tracking-[0.08em] uppercase opacity-60 mt-1">

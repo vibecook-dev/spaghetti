@@ -8,6 +8,8 @@ import type { SqliteService } from '../io/index.js';
 import type { ProjectSummaryData, SessionSummaryData, TokenUsageSummary } from './summary-types.js';
 import type { SearchQuery, SearchResultSet, StoreStats } from './segment-types.js';
 import { initializeSchema } from './schema.js';
+import { ensureTimelineProjection } from './timeline-projection.js';
+import type { TimelineFacets, TimelinePage, TimelinePageRequest } from './timeline-query.js';
 
 // ═══════════════════════════════════════════════════════════════════════════
 // INTERFACE
@@ -40,6 +42,10 @@ export interface QueryService {
     offset: number,
     options?: { sourceId?: string },
   ): { messages: unknown[]; total: number; offset: number; hasMore: boolean };
+  /** Full-session counts from the normalized display projection. */
+  getSessionTimelineFacets(slug: string, sessionId: string, options?: { sourceId?: string }): TimelineFacets;
+  /** Cursor-paginated normalized display messages, filtered in SQLite. */
+  getSessionTimeline(slug: string, sessionId: string, request?: TimelinePageRequest): TimelinePage;
 
   // Subagents
   getSessionSubagents(
@@ -145,6 +151,16 @@ interface MessageDataRow {
   data: string;
   /** Column timestamp (sidecars may fill this when raw JSON has none). */
   timestamp: string | null;
+}
+
+interface TimelineDataRow {
+  timeline_index: number;
+  data: string;
+}
+
+interface FacetRow {
+  name: string;
+  count: number;
 }
 
 interface SubagentRow {
@@ -382,6 +398,81 @@ class QueryServiceImpl implements QueryService {
       total,
       offset,
       hasMore: offset + rows.length < total,
+    };
+  }
+
+  getSessionTimelineFacets(slug: string, sessionId: string, options?: { sourceId?: string }): TimelineFacets {
+    ensureTimelineProjection(this.db, sessionId);
+    const sourceClause = options?.sourceId ? ' AND source_id = ?' : '';
+    const params: unknown[] = options?.sourceId ? [slug, sessionId, options.sourceId] : [slug, sessionId];
+
+    const messageRows = this.db.all<FacetRow>(
+      `SELECT display_type AS name, COUNT(*) AS count
+         FROM timeline_messages
+        WHERE project_slug = ? AND session_id = ?${sourceClause}
+        GROUP BY display_type`,
+      ...params,
+    );
+    const toolRows = this.db.all<FacetRow>(
+      `SELECT tool_name AS name, COUNT(*) AS count
+         FROM timeline_messages
+        WHERE project_slug = ? AND session_id = ?${sourceClause} AND tool_name IS NOT NULL
+        GROUP BY tool_name
+        ORDER BY count DESC, tool_name`,
+      ...params,
+    );
+    const messageCounts = Object.fromEntries(messageRows.map((row) => [row.name, row.count]));
+    const toolCounts = Object.fromEntries(toolRows.map((row) => [row.name, row.count]));
+    return {
+      total: messageRows.reduce((sum, row) => sum + row.count, 0),
+      messageCounts,
+      toolCounts,
+    };
+  }
+
+  getSessionTimeline(slug: string, sessionId: string, request: TimelinePageRequest = {}): TimelinePage {
+    ensureTimelineProjection(this.db, sessionId);
+    const { sql: filterSql, params: filterParams } = buildTimelineFilter(request);
+    const sourceSql = request.sourceId ? ' AND source_id = ?' : '';
+    const baseParams: unknown[] = request.sourceId
+      ? [slug, sessionId, request.sourceId, ...filterParams]
+      : [slug, sessionId, ...filterParams];
+    const where = `project_slug = ? AND session_id = ?${sourceSql}${filterSql}`;
+    const total =
+      this.db.get<CountRow>(`SELECT COUNT(*) AS count FROM timeline_messages WHERE ${where}`, ...baseParams)?.count ??
+      0;
+
+    const limit = Math.max(1, Math.min(500, Math.floor(request.limit ?? 30)));
+    const cursorSql = request.before == null ? '' : ' AND timeline_index < ?';
+    const cursorParams = request.before == null ? [] : [request.before];
+    const rows = this.db.all<TimelineDataRow>(
+      `SELECT timeline_index, data
+         FROM timeline_messages
+        WHERE ${where}${cursorSql}
+        ORDER BY timeline_index DESC
+        LIMIT ?`,
+      ...baseParams,
+      ...cursorParams,
+      limit + 1,
+    );
+    const hasMore = rows.length > limit;
+    const pageRows = rows.slice(0, limit);
+    const messages = pageRows
+      .map((row) => {
+        try {
+          return JSON.parse(row.data) as TimelinePage['messages'][number];
+        } catch {
+          return null;
+        }
+      })
+      .filter((message): message is TimelinePage['messages'][number] => message !== null)
+      .reverse();
+
+    return {
+      messages,
+      total,
+      nextCursor: hasMore ? pageRows[pageRows.length - 1]?.timeline_index : undefined,
+      hasMore,
     };
   }
 
@@ -763,6 +854,41 @@ class QueryServiceImpl implements QueryService {
       isSidechain: !!row.is_sidechain,
     };
   }
+}
+
+function placeholders(values: readonly unknown[]): string {
+  return values.map(() => '?').join(', ');
+}
+
+function buildTimelineFilter(request: TimelinePageRequest): { sql: string; params: unknown[] } {
+  const clauses: string[] = [];
+  const params: unknown[] = [];
+  const includes: string[] = [];
+
+  if (request.includeTypes?.length) {
+    includes.push(`display_type IN (${placeholders(request.includeTypes)})`);
+    params.push(...request.includeTypes);
+  }
+  if (request.includeTools?.length) {
+    includes.push(`tool_name IN (${placeholders(request.includeTools)})`);
+    params.push(...request.includeTools);
+  }
+  if (includes.length) clauses.push(`(${includes.join(' OR ')})`);
+
+  if (request.excludeTypes?.length) {
+    clauses.push(`display_type NOT IN (${placeholders(request.excludeTypes)})`);
+    params.push(...request.excludeTypes);
+  }
+  if (request.excludeTools?.length) {
+    clauses.push(`(tool_name IS NULL OR tool_name NOT IN (${placeholders(request.excludeTools)}))`);
+    params.push(...request.excludeTools);
+  }
+  const search = request.search?.trim();
+  if (search) {
+    clauses.push('instr(lower(search_text), lower(?)) > 0');
+    params.push(search);
+  }
+  return { sql: clauses.length ? ` AND ${clauses.join(' AND ')}` : '', params };
 }
 
 function escapeFts5(text: string): string {

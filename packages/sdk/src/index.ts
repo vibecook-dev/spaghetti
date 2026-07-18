@@ -15,6 +15,7 @@ export * from './parser/index.js';
 // Data layer (segments, search, summaries)
 export * from './data/segment-types.js';
 export * from './data/summary-types.js';
+export * from './data/timeline-query.js';
 export { createSearchIndexer, type SearchIndexer, type SearchIndexEntry } from './data/search-indexer.js';
 export { createSegmentStore, type SegmentStore } from './data/segment-store.js';
 // Public data-service interface + options. The concrete impl

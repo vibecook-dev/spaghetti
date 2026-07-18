@@ -29,6 +29,7 @@ import type { Project, Session, SessionMessage, AgentConfig, AgentAnalytic } fro
 import type { AgentDataStore } from './agent-data-store.js';
 import type { LiveWatch } from '../live/live-watch.js';
 import type { AgentDataService, LifecycleInternal, LifecycleOwner } from './lifecycle-owner.js';
+import type { TimelineFacets, TimelinePage, TimelinePageRequest } from './timeline-query.js';
 import { ensureSqliteCacheHealthy, isSqliteCorruptError, wipeSqliteCacheFiles } from '../io/sqlite-health.js';
 
 export class SpaghettiDataService extends EventEmitter implements AgentDataService, LifecycleInternal {
@@ -274,6 +275,14 @@ export class SpaghettiDataService extends EventEmitter implements AgentDataServi
       updatedAt: Date.now(),
     }));
     return { segments, total: result.total, offset: result.offset, hasMore: result.hasMore };
+  }
+
+  getSessionTimelineFacets(slug: string, sessionId: string, options?: { sourceId?: string }): TimelineFacets {
+    return this.store.getSessionTimelineFacets(slug, sessionId, options);
+  }
+
+  getSessionTimeline(slug: string, sessionId: string, request?: TimelinePageRequest): TimelinePage {
+    return this.store.getSessionTimeline(slug, sessionId, request);
   }
 
   getConfig(): AgentConfig {

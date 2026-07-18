@@ -20,6 +20,7 @@ import type { PaginatedSegmentResult, SearchQuery, SearchResultSet, StoreStats }
 import type { ProjectSummaryData, SessionSummaryData } from './summary-types.js';
 import type { AgentAnalytic, AgentConfig, SessionMessage } from '../types/index.js';
 import type { QueryService } from './query-service.js';
+import type { TimelineFacets, TimelinePage, TimelinePageRequest } from './timeline-query.js';
 import type {
   Change,
   ChangeTopic,
@@ -57,6 +58,8 @@ export interface AgentDataStore {
     offset: number,
     options?: { sourceId?: string },
   ): { messages: unknown[]; total: number; offset: number; hasMore: boolean };
+  getSessionTimelineFacets(slug: string, sessionId: string, options?: { sourceId?: string }): TimelineFacets;
+  getSessionTimeline(slug: string, sessionId: string, request?: TimelinePageRequest): TimelinePage;
 
   // ── Subagents ────────────────────────────────────────────────────────────
   getSessionSubagents(
@@ -247,6 +250,14 @@ export class AgentDataStoreImpl implements AgentDataStore {
     options?: { sourceId?: string },
   ): { messages: unknown[]; total: number; offset: number; hasMore: boolean } {
     return this.queryService.getSessionMessages(slug, sessionId, limit, offset, options);
+  }
+
+  getSessionTimelineFacets(slug: string, sessionId: string, options?: { sourceId?: string }): TimelineFacets {
+    return this.queryService.getSessionTimelineFacets(slug, sessionId, options);
+  }
+
+  getSessionTimeline(slug: string, sessionId: string, request?: TimelinePageRequest): TimelinePage {
+    return this.queryService.getSessionTimeline(slug, sessionId, request);
   }
 
   // ── Subagents ──────────────────────────────────────────────────────────

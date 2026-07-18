@@ -15,6 +15,7 @@ import type {
   SubagentMessagePage,
   SourceFilter,
 } from './api.js';
+import type { TimelineFacets, TimelinePage, TimelinePageRequest } from './data/timeline-query.js';
 import type { AgentDataService } from './data/agent-data-service.js';
 import type { LifecycleInternal } from './data/lifecycle-owner.js';
 import type { AgentDataStore } from './data/agent-data-store.js';
@@ -151,6 +152,14 @@ class SpaghettiAppService extends EventEmitter implements SpaghettiAPI {
       offset: result.offset,
       hasMore: result.hasMore,
     };
+  }
+
+  getSessionTimelineFacets(projectSlug: string, sessionId: string, options?: SourceFilter): TimelineFacets {
+    return this.dataService.getSessionTimelineFacets(projectSlug, sessionId, options);
+  }
+
+  getSessionTimeline(projectSlug: string, sessionId: string, request?: TimelinePageRequest): TimelinePage {
+    return this.dataService.getSessionTimeline(projectSlug, sessionId, request);
   }
 
   getProjectMemory(projectSlug: string, options?: SourceFilter): string | null {

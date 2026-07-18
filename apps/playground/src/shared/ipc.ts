@@ -16,6 +16,9 @@
 
 import type {
   MessagePage,
+  TimelineFacets,
+  TimelinePage,
+  TimelinePageRequest,
   ProjectListItem,
   SessionListItem,
   SourceFilter,
@@ -64,6 +67,8 @@ export interface SpaghettiIPC {
     offset?: number,
     options?: SourceFilter,
   ): Promise<MessagePage>;
+  getSessionTimelineFacets(projectSlug: string, sessionId: string, options?: SourceFilter): Promise<TimelineFacets>;
+  getSessionTimeline(projectSlug: string, sessionId: string, request?: TimelinePageRequest): Promise<TimelinePage>;
   getSessionTodos(projectSlug: string, sessionId: string): Promise<unknown[]>;
   getSessionPlan(projectSlug: string, sessionId: string): Promise<unknown | null>;
   getSessionTask(projectSlug: string, sessionId: string): Promise<unknown | null>;
@@ -108,6 +113,8 @@ export const IPC_CHANNELS = {
   getProjectMemory: 'spaghetti:getProjectMemory',
   getSessionList: 'spaghetti:getSessionList',
   getSessionMessages: 'spaghetti:getSessionMessages',
+  getSessionTimelineFacets: 'spaghetti:getSessionTimelineFacets',
+  getSessionTimeline: 'spaghetti:getSessionTimeline',
   getSessionTodos: 'spaghetti:getSessionTodos',
   getSessionPlan: 'spaghetti:getSessionPlan',
   getSessionTask: 'spaghetti:getSessionTask',

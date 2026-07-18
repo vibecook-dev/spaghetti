@@ -47,6 +47,7 @@ import type { QueryService } from '../../data/query-service.js';
 import type { IngestService } from '../../data/ingest-service.js';
 import type { AgentDataStore } from '../../data/agent-data-store.js';
 import type { AgentDataService, AgentDataServiceOptions, LifecycleOwner } from '../../data/lifecycle-owner.js';
+import type { TimelineFacets, TimelinePage, TimelinePageRequest } from '../../data/timeline-query.js';
 import type { ClaudeCodeParser } from './parser/claude-code-parser.js';
 import type { FileService } from '../../io/index.js';
 import type { ClaudeCodeLiveUpdates } from './live/live-updates.js';
@@ -1144,6 +1145,14 @@ export class ClaudeCodeLifecycleOwner extends EventEmitter implements AgentDataS
       offset: result.offset,
       hasMore: result.hasMore,
     };
+  }
+
+  getSessionTimelineFacets(slug: string, sessionId: string, options?: { sourceId?: string }): TimelineFacets {
+    return this.store.getSessionTimelineFacets(slug, sessionId, options);
+  }
+
+  getSessionTimeline(slug: string, sessionId: string, request?: TimelinePageRequest): TimelinePage {
+    return this.store.getSessionTimeline(slug, sessionId, request);
   }
 
   getConfig(): AgentConfig {
