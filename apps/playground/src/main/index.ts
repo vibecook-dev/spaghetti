@@ -65,8 +65,8 @@ function createWindow(): BrowserWindow {
     height: 900,
     minWidth: 900,
     minHeight: 600,
-    // Match archive paper so no native chrome peeks through.
-    backgroundColor: '#11100f',
+    // Match the light paper frame before React paints.
+    backgroundColor: '#e9e5da',
     // Show immediately so the loading screen is visible during cold ingest.
     show: true,
     title: 'Spaghetti Playground',

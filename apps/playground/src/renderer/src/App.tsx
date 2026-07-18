@@ -84,7 +84,8 @@ function PlaygroundShell() {
   const [searchOpen, setSearchOpen] = useState(false);
   const [filesOpen, setFilesOpen] = useState(true);
   const [leftOpen, setLeftOpen] = useState(true);
-  const [isDark, setIsDark] = useState(true);
+  // The reference opens on warm paper; dark parchment is the alternate illumination.
+  const [isDark, setIsDark] = useState(false);
   const pendingSessionId = useRef<string | null>(null);
 
   const [sources, setSources] = useState<SourceProgressState[]>(() => initialSourceStates());
@@ -355,7 +356,6 @@ function PlaygroundShell() {
     );
   }
 
-  // Paper fills the window: the ink border is the app edge (no outer chrome margin).
   return (
     <div
       className={`h-full w-full flex flex-col overflow-hidden relative rounded-none border border-[color:var(--archive-ink-line-outer)] transition-colors duration-500 ${
@@ -365,14 +365,21 @@ function PlaygroundShell() {
       }`}
       style={paperStyle(isDark)}
     >
-      {/* GLOBAL HEADER — drag region; macOS-style lights on the left. */}
-      <header className="titlebar-drag h-12 border-b border-[color:var(--archive-ink-line-header)] flex items-center justify-between px-4 shrink-0 bg-transparent gap-4">
+      {/* GLOBAL HEADER — drag region; preserve Electron controls without changing the archive rhythm. */}
+      <header className="titlebar-drag h-12 border-b border-[color:var(--archive-ink-line-header)] flex items-center justify-between px-6 shrink-0 bg-transparent gap-4">
         <div className="flex items-center gap-6 min-w-0">
           <TrafficLights />
           <h1 className="text-[11px] font-serif tracking-[0.2em] flex items-center gap-3 shrink-0">
             <Library size={14} className="opacity-80" />
             spaghetti
           </h1>
+          <div className="hidden md:flex gap-4 text-[9px] font-mono tracking-widest uppercase opacity-70">
+            <span className="flex items-center gap-1">
+              <span className="w-1.5 h-1.5 bg-ink inline-block" />
+              {engine === 'ts' ? 'TypeScript' : 'Native'}
+            </span>
+            <span>Ref: Local</span>
+          </div>
         </div>
 
         <div className="titlebar-no-drag flex items-center gap-4 font-mono text-[9px] uppercase tracking-widest min-w-0">
@@ -405,7 +412,7 @@ function PlaygroundShell() {
               type="button"
               onClick={() => void onRebuild()}
               disabled={rebuilding}
-              className="hidden lg:inline-flex items-center px-2 py-1 border border-[color:var(--archive-ink-line)] bg-transparent text-ink font-mono text-[9px] tracking-widest uppercase cursor-pointer hover:bg-ink hover:text-paper transition-colors disabled:opacity-30"
+              className="hidden lg:inline-flex items-center hover:bg-ink hover:text-paper transition-colors px-2 py-0.5 bg-transparent text-ink border-0 font-mono text-[9px] tracking-widest uppercase cursor-pointer disabled:opacity-30"
               title="Force full rebuild"
             >
               Rebuild
@@ -421,8 +428,9 @@ function PlaygroundShell() {
             {/* Title row, then filters on the next line (design: quiet section headers). */}
             <div className="shrink-0 border-b border-[color:var(--archive-ink-line-soft)]">
               <div className="h-10 px-4 flex items-center">
-                <span className="font-serif text-[10px] uppercase tracking-[0.15em] opacity-80">
-                  Projects · {filteredProjects.length}
+                <span className="font-serif text-[10px] uppercase tracking-[0.15em] opacity-80">Projects</span>
+                <span className="ml-auto font-mono text-[8px] tracking-widest opacity-45">
+                  {filteredProjects.length}
                 </span>
               </div>
               {sourceIds.length > 1 ? (
@@ -506,7 +514,7 @@ function PlaygroundShell() {
             />
           ) : (
             <>
-              <div className="h-10 border-b border-[color:var(--archive-ink-line)] flex items-center px-5 justify-between shrink-0">
+              <div className="h-10 border-b border-[color:var(--archive-ink-line)] flex items-center px-6 justify-between shrink-0">
                 <div className="flex items-center gap-3 font-serif text-[10px] tracking-[0.15em]">
                   {!leftOpen && (
                     <button
@@ -545,7 +553,7 @@ function PlaygroundShell() {
                       key={`${s.sourceId}:${s.sessionId}`}
                       type="button"
                       onClick={() => setSelectedSession({ session: s, index })}
-                      className="block w-full text-left px-5 py-3.5 border-0 bg-transparent text-inherit cursor-pointer hover:bg-ink/[0.05] transition-colors"
+                      className="block w-full text-left px-6 py-3.5 border-0 bg-transparent text-inherit cursor-pointer hover:bg-ink/[0.05] transition-colors"
                     >
                       <div className="flex items-center gap-2.5 mb-1.5">
                         <span className="font-mono text-[10px] tracking-[0.1em] opacity-70">#{index + 1}</span>

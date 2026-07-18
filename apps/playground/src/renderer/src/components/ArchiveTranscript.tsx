@@ -156,7 +156,7 @@ export function ArchiveTranscript({ messages, isDark }: ArchiveTranscriptProps) 
   const branchAccent = accentHex('branch_start', isDark);
 
   return (
-    <div className="flex flex-col pt-2 pb-8">
+    <div className="flex flex-col">
       {visible.map((msg, i) => {
         const next = visible[i + 1];
         const depth = depthOf(msg);
@@ -221,7 +221,7 @@ export function ArchiveTranscript({ messages, isDark }: ArchiveTranscriptProps) 
                   color: accent,
                 }}
               >
-                <Icon size={12} strokeWidth={1.5} />
+                <Icon size={12} />
               </button>
 
               {/* Dashed cubic fork into sub-thread */}

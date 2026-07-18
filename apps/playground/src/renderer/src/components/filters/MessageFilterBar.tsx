@@ -117,7 +117,7 @@ export const MessageFilterBar = memo(function MessageFilterBar({
 }: MessageFilterBarProps) {
   return (
     <div
-      className="shrink-0 border-b border-[color:var(--archive-ink-line-mid)] px-2 py-2 md:px-4 lg:px-6 bg-transparent"
+      className="shrink-0 border-b border-[color:var(--archive-ink-line-mid)] px-2 py-2 md:px-4 lg:px-8 bg-transparent"
       role="toolbar"
       aria-label="Message filters"
     >

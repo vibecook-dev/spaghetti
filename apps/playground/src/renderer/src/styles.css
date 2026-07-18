@@ -126,7 +126,7 @@ body,
 #root {
   height: 100%;
   margin: 0;
-  /* App fills the window; paper border sits on the window edge (no chrome margin). */
+  /* Paper reaches the Electron window edge; the frame border is the app edge. */
   background: var(--archive-paper-deep);
   color: var(--archive-ink);
   overflow: hidden;

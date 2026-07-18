@@ -107,11 +107,9 @@ export function SessionMessagesView({
     [timeline, visibleTypes, visibleTools, typeFilters, toolFilters, anySoloActive, searchQuery],
   );
 
-  const filterTotalCount = useMemo(() => {
-    const types = Object.values(messageCounts).reduce((a, b) => a + b, 0);
-    const tools = Object.values(toolCounts).reduce((a, b) => a + b, 0);
-    return types + tools;
-  }, [messageCounts, toolCounts]);
+  // The reference tray reports visible transcript rows, not pill-count totals
+  // (tool-use rows already have a per-tool pill and must not be double-counted).
+  const filterTotalCount = timeline.length;
 
   // Reset when session changes
   useEffect(() => {
@@ -332,7 +330,7 @@ export function SessionMessagesView({
   return (
     <div className="flex flex-col h-full min-h-0 bg-transparent text-ink">
       {/* Reading header — design: serif tray + mono meta (App.tsx ~748–763) */}
-      <div className="h-10 border-b border-[color:var(--archive-ink-line)] flex items-center px-5 justify-between shrink-0 bg-transparent gap-3">
+      <div className="h-10 border-b border-[color:var(--archive-ink-line)] flex items-center px-6 justify-between shrink-0 bg-transparent gap-3">
         <div className="flex items-center gap-4 min-w-0 text-[10px] font-serif tracking-[0.15em]">
           {!leftOpen && onToggleLeft ? (
             <button
@@ -381,7 +379,7 @@ export function SessionMessagesView({
       </div>
 
       {error && (
-        <div className="shrink-0 px-5 py-2 font-mono text-[10px] text-sanguine border-b border-sanguine/20 bg-sanguine/[0.04]">
+        <div className="shrink-0 px-6 py-2 font-mono text-[10px] text-sanguine border-b border-sanguine/20 bg-sanguine/[0.04]">
           {error}
         </div>
       )}
@@ -439,29 +437,31 @@ export function SessionMessagesView({
               ) : null}
             </div>
           ) : (
-            <div className="py-4 max-w-3xl mx-auto w-full px-4 md:px-8 lg:px-16">
-              {loadingMore && (
-                <div className="flex items-center justify-center py-6 gap-3">
-                  <Spinner className="h-5 w-5" />
-                  <span className="font-mono text-[10px] uppercase tracking-widest opacity-50">
-                    Loading older messages…
-                  </span>
-                </div>
-              )}
+            <div className="px-4 pb-4 pt-0 md:px-8 md:pb-8 lg:px-16">
+              <div className="max-w-3xl mx-auto flex flex-col pt-4 pb-8">
+                {loadingMore && (
+                  <div className="flex items-center justify-center py-6 gap-3">
+                    <Spinner className="h-5 w-5" />
+                    <span className="font-mono text-[10px] uppercase tracking-widest opacity-50">
+                      Loading older messages…
+                    </span>
+                  </div>
+                )}
 
-              {!hasMore && chatMessages.length > 0 && (
-                <div className="flex items-center justify-center py-4 font-mono text-[9px] tracking-widest uppercase opacity-30">
-                  — Beginning of conversation —
-                </div>
-              )}
+                {!hasMore && chatMessages.length > 0 && (
+                  <div className="flex items-center justify-center py-4 font-mono text-[9px] tracking-widest uppercase opacity-30">
+                    — Beginning of conversation —
+                  </div>
+                )}
 
-              {hasMore && !loadingMore && (
-                <div className="flex items-center justify-center py-3 font-mono text-[9px] tracking-widest uppercase opacity-40">
-                  ↑ Scroll up for older messages
-                </div>
-              )}
+                {hasMore && !loadingMore && (
+                  <div className="flex items-center justify-center py-3 font-mono text-[9px] tracking-widest uppercase opacity-40">
+                    ↑ Scroll up for older messages
+                  </div>
+                )}
 
-              <ArchiveTranscript messages={chatMessages} isDark={isDark} />
+                <ArchiveTranscript messages={chatMessages} isDark={isDark} />
+              </div>
             </div>
           )}
         </div>

@@ -26,16 +26,17 @@ export function LoadingScreen({
   headline = 'Indexing agent history',
   onRetry,
   retrying = false,
-  isDark = true,
+  isDark = false,
 }: LoadingScreenProps) {
   const active = sources.find((s) => s.stage === 'active');
   const hasDeterminate = progress?.total != null && progress.total > 0 && progress.current != null;
   const busy = !error || retrying;
 
-  // Full-window paper (border = app edge); loading card centered inside.
+  // Match the reference composition even during cold ingest: matte outside,
+  // constrained paper frame inside, then the quiet centered archive ledger.
   return (
     <div
-      className={`h-full w-full flex flex-col border border-[color:var(--archive-ink-line-outer)] transition-colors ${
+      className={`h-full w-full flex flex-col overflow-hidden border border-[color:var(--archive-ink-line-outer)] transition-colors duration-500 ${
         isDark ? 'dark text-[#d4cbbd]' : 'text-[#2b2623]'
       }`}
       style={paperStyle(isDark)}
@@ -43,8 +44,8 @@ export function LoadingScreen({
       aria-live="polite"
       aria-busy={busy}
     >
-      {/* Drag strip + macOS-style lights (same as main shell) */}
-      <div className="titlebar-drag h-12 shrink-0 flex items-center px-4">
+      {/* Drag strip + macOS-style lights (same inset rhythm as the main shell). */}
+      <div className="titlebar-drag h-12 shrink-0 flex items-center px-6">
         <TrafficLights />
       </div>
       <div className="flex-1 flex items-center justify-center min-h-0">
