@@ -24,6 +24,7 @@ import {
   ListTodo,
 } from 'lucide-react';
 import { MarkdownContent, ToolResultRenderer, type ChatSessionMessage } from '@vibecook/spaghetti-sdk/react';
+import { accentHex, inkHex, paperFill } from '../lib/archive-theme.js';
 
 const RAIL_W = 28;
 const NODE_SIZE = 24;
@@ -41,25 +42,6 @@ const TYPE_META: Record<RailKind, { label: string; Icon: ComponentType<{ size?: 
   system: { label: 'System', Icon: Layers },
   summary: { label: 'Summary', Icon: ListTodo },
 };
-
-function accentHex(kind: RailKind, isDark: boolean): string {
-  switch (kind) {
-    case 'assistant':
-      return isDark ? '#c9755f' : '#9a3b28';
-    case 'branch_start':
-      return isDark ? '#7fa6b5' : '#3f5c6b';
-    case 'thought':
-    case 'system':
-      return isDark ? '#a89a86' : '#736958';
-    case 'tool_result':
-    case 'summary':
-      return isDark ? '#8ba888' : '#4f6b4a';
-    case 'tool_use':
-    case 'user':
-    default:
-      return isDark ? '#d4cbbd' : '#2b2623';
-  }
-}
 
 function mapKind(msg: ChatSessionMessage): RailKind {
   switch (msg.type) {
@@ -168,9 +150,9 @@ export function ArchiveTranscript({ messages, isDark }: ArchiveTranscriptProps) 
     });
   }, [messages, collapsed]);
 
-  const ink = isDark ? '#d4cbbd' : '#2b2623';
-  const line = ink + '2b'; // hairline ~17%
-  const paper = isDark ? '#141312' : '#f1ede4';
+  const ink = inkHex(isDark);
+  const line = ink + '2b'; // hairline ~17% (design rail)
+  const paper = paperFill(isDark);
   const branchAccent = accentHex('branch_start', isDark);
 
   return (
@@ -396,7 +378,7 @@ function MessageBody({
     const cmd = toolCommand(msg);
     const hasResult = Boolean(msg.toolUse.result);
     const isError = msg.toolUse.result?.isError;
-    const resultAccent = isError ? (isDark ? '#d98d78' : '#9a3b28') : accentHex('tool_result', isDark);
+    const resultAccent = isError ? accentHex('assistant', isDark) : accentHex('tool_result', isDark);
     const lang = toolLang(msg.toolUse.toolName);
     return (
       <div className="border border-[color:var(--archive-ink-line-mid)] bg-ink/[0.04] px-4 py-3 rounded-none">

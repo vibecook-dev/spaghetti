@@ -152,7 +152,8 @@ export function SearchOverlay({
   return (
     <div
       className={`fixed inset-0 z-50 flex items-start justify-center pt-[12vh] px-4 backdrop-blur-[3px] ${
-        isDark ? 'bg-[#11100f]/72' : 'bg-[#2b2623]/40'
+        // Design Dialog.Overlay: always deep ink veil
+        'bg-[#11100f]/72'
       }`}
       role="dialog"
       aria-modal="true"
@@ -163,6 +164,7 @@ export function SearchOverlay({
     >
       <div
         className={`w-full max-w-xl border shadow-2xl overflow-hidden flex flex-col max-h-[70vh] ${
+          // Design file-viewer panel: paper gradient surface + ink frame
           isDark ? 'border-[#d4cbbd]/45 bg-[#171615] text-ink' : 'border-[#2b2623]/50 bg-[#f8f6f0] text-ink'
         }`}
       >
@@ -240,7 +242,7 @@ export function SearchOverlay({
                       onMouseEnter={() => setActiveIndex(i)}
                       onClick={() => navigateTo(r)}
                       className={`w-full text-left px-4 py-2.5 border-none cursor-pointer transition-colors ${
-                        active ? 'bg-ink/10' : 'bg-transparent hover:bg-ink/5'
+                        active ? 'bg-ink/[0.05]' : 'bg-transparent hover:bg-ink/[0.05]'
                       }`}
                     >
                       <div className="flex items-center gap-2 mb-1">

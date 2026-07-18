@@ -9,6 +9,8 @@ export interface StructureNode {
   name: string;
   type: 'folder' | 'file';
   isOpen?: boolean;
+  /** Selected / active file — inverted ink selection like design FileTreeNode. */
+  active?: boolean;
   /** Optional body shown when file is opened. */
   content?: string;
   children?: StructureNode[];
@@ -48,8 +50,9 @@ function StructureTreeNode({
   return (
     <div className="font-mono text-[10px] tracking-tight">
       <div
-        className="flex items-center py-1 px-2 cursor-pointer hover:bg-ink/[0.05] transition-colors"
+        className="flex items-center py-1 px-2 cursor-pointer hover:bg-ink/[0.05] transition-colors data-[active=true]:bg-ink data-[active=true]:text-paper-bright"
         style={{ paddingLeft: `${depth * 12 + 8}px` }}
+        data-active={node.active ? 'true' : undefined}
         onClick={() => {
           if (isFolder) setIsOpen((v) => !v);
         }}

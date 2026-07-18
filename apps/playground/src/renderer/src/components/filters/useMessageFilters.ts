@@ -19,21 +19,24 @@ export type FilterStates = Record<string, FilterState>;
 export interface TypeFilterConfig {
   key: string;
   label: string;
-  /** CSS color for the pill accent */
-  color: string;
+  /**
+   * Message kind key for `accentHex(kind, isDark)` — archival inks from
+   * spaghetti-ui-design (not neon Tailwind palette).
+   */
+  kind: string;
 }
 
 /** Type pills shown in the filter bar (tool_use appears as per-tool pills). */
 export const DEFAULT_TYPE_FILTERS: TypeFilterConfig[] = [
-  { key: 'user', label: 'User', color: '#ea580c' },
-  { key: 'assistant', label: 'Assistant', color: '#34d399' },
-  { key: 'thinking', label: 'Thinking', color: '#a855f7' },
-  { key: 'tool_result', label: 'Result', color: '#f59e0b' },
-  { key: 'compact_summary', label: 'Summary', color: '#a1a1aa' },
-  { key: 'checkpoint', label: 'Checkpoint', color: '#6366f1' },
-  { key: 'system', label: 'System', color: '#64748b' },
-  { key: 'summary', label: 'Chat Summary', color: '#8b5cf6' },
-  { key: 'queue-operation', label: 'Tasks', color: '#22c55e' },
+  { key: 'user', label: 'User', kind: 'user' },
+  { key: 'assistant', label: 'Assistant', kind: 'assistant' },
+  { key: 'thinking', label: 'Thought', kind: 'thought' },
+  { key: 'tool_result', label: 'Result', kind: 'tool_result' },
+  { key: 'compact_summary', label: 'Summary', kind: 'summary' },
+  { key: 'checkpoint', label: 'Checkpoint', kind: 'checkpoint' },
+  { key: 'system', label: 'System', kind: 'system' },
+  { key: 'summary', label: 'Chat Summary', kind: 'summary' },
+  { key: 'queue-operation', label: 'Tasks', kind: 'queue-operation' },
 ];
 
 export interface UseMessageFiltersProps {

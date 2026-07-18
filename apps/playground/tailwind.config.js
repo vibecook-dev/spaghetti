@@ -1,10 +1,7 @@
 /** @type {import('tailwindcss').Config} */
 export default {
   darkMode: 'class',
-  content: [
-    './src/renderer/**/*.{html,ts,tsx}',
-    '../../packages/sdk/src/react/**/*.{ts,tsx}',
-  ],
+  content: ['./src/renderer/**/*.{html,ts,tsx}', '../../packages/sdk/src/react/**/*.{ts,tsx}'],
   theme: {
     extend: {
       colors: {
@@ -34,7 +31,7 @@ export default {
         destructive: {
           DEFAULT: 'var(--destructive)',
         },
-        // Archive palette (design mock)
+        // Archive palette (spaghetti-ui-design)
         ink: {
           DEFAULT: 'var(--archive-ink)',
           muted: 'var(--archive-ink-muted)',
@@ -44,10 +41,14 @@ export default {
         paper: {
           DEFAULT: 'var(--archive-paper)',
           deep: 'var(--archive-paper-deep)',
+          bright: 'var(--archive-paper-bright)',
         },
         chrome: 'var(--archive-chrome)',
         sanguine: 'var(--archive-sanguine)',
         verdigris: 'var(--archive-verdigris)',
+        indigo: 'var(--archive-indigo)',
+        faded: 'var(--archive-faded)',
+        ochre: 'var(--archive-ochre)',
       },
       fontFamily: {
         serif: ['"EB Garamond"', 'Georgia', 'Times New Roman', 'serif'],
