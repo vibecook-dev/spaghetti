@@ -31,6 +31,8 @@ export interface ArtifactPanelProps {
     hasMemory?: boolean;
   };
   initialTab?: ArtifactTab;
+  /** When true, render body only (tabs owned by Structure panel). */
+  embedded?: boolean;
 }
 
 interface PlanShape {
@@ -69,6 +71,7 @@ export function ArtifactPanel({
   sessionId,
   hints,
   initialTab = 'plan',
+  embedded = false,
 }: ArtifactPanelProps) {
   const [tab, setTab] = useState<ArtifactTab>(initialTab);
   const [loading, setLoading] = useState(false);
@@ -89,9 +92,9 @@ export function ArtifactPanel({
     if (open) setTab(initialTab);
   }, [open, initialTab, sessionId]);
 
-  // Escape closes
+  // Escape closes (standalone drawer only)
   useEffect(() => {
-    if (!open) return;
+    if (!open || embedded) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         e.preventDefault();
@@ -100,7 +103,12 @@ export function ArtifactPanel({
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [open, onClose]);
+  }, [open, onClose, embedded]);
+
+  // Parent Structure panel drives tab via initialTab when embedded
+  useEffect(() => {
+    if (embedded) setTab(initialTab);
+  }, [embedded, initialTab]);
 
   const loadTab = useCallback(
     async (t: ArtifactTab) => {
@@ -168,19 +176,58 @@ export function ArtifactPanel({
     return null;
   };
 
+  const body = (
+    <div className="flex-1 overflow-y-auto min-h-0 scrollbar-hide">
+      {error ? (
+        <div className="px-3 py-2 font-mono text-[10px] text-sanguine border-b border-sanguine/20">{error}</div>
+      ) : null}
+
+      {loading ? (
+        <div className="flex items-center justify-center gap-2 py-12 font-mono text-[10px] tracking-widest uppercase opacity-50">
+          <Spinner />
+          Loading…
+        </div>
+      ) : tab === 'plan' ? (
+        <PlanBody plan={plan} />
+      ) : tab === 'todos' ? (
+        <TodosBody todos={todos} />
+      ) : tab === 'task' ? (
+        <TaskBody task={task} />
+      ) : tab === 'subagents' ? (
+        <SubagentsBody
+          subagents={subagents}
+          expandedAgent={expandedAgent}
+          agentMsgs={agentMsgs}
+          agentLoading={agentLoading}
+          onToggle={openSubagent}
+        />
+      ) : (
+        <MemoryBody memory={memory} sourceId={sourceId} />
+      )}
+    </div>
+  );
+
+  if (embedded) {
+    return (
+      <div className="flex flex-col h-full min-h-0 text-ink" aria-label="Session artifacts">
+        {body}
+      </div>
+    );
+  }
+
   return (
     <aside
-      className="w-[340px] shrink-0 border-l border-white/10 bg-[#0b0b0b] flex flex-col min-h-0 animate-fadeInUp"
+      className="w-[300px] shrink-0 border-l border-ink/20 bg-transparent flex flex-col min-h-0 text-ink"
       aria-label="Session artifacts"
     >
-      <header className="flex items-center gap-2 px-3 py-2 border-b border-white/10 shrink-0">
-        <h2 className="text-[11px] font-medium tracking-[0.14em] uppercase text-white/55 flex-1">Artifacts</h2>
+      <header className="flex items-center gap-2 px-3 py-2 border-b border-ink/10 shrink-0">
+        <h2 className="font-serif text-[10px] tracking-[0.14em] uppercase opacity-70 flex-1">Artifacts</h2>
         <Btn onClick={onClose} className="!px-2" title="Close artifacts (Esc)">
           Close
         </Btn>
       </header>
 
-      <nav className="flex gap-0.5 px-2 py-1.5 border-b border-white/6 overflow-x-auto shrink-0" role="tablist">
+      <nav className="flex gap-0.5 px-2 py-1.5 border-b border-ink/10 overflow-x-auto shrink-0" role="tablist">
         {TABS.map((t) => {
           const hint = tabHint(t.id);
           const active = tab === t.id;
@@ -191,47 +238,18 @@ export function ArtifactPanel({
               role="tab"
               aria-selected={active}
               onClick={() => setTab(t.id)}
-              className={`text-[10px] px-2 py-1 rounded border cursor-pointer transition-colors whitespace-nowrap ${
-                active
-                  ? 'bg-white/10 border-white/20 text-white/90'
-                  : 'bg-transparent border-transparent text-white/40 hover:text-white/70 hover:bg-white/[0.04]'
+              className={`font-mono text-[9px] px-2 py-1 border-b cursor-pointer transition-colors whitespace-nowrap bg-transparent ${
+                active ? 'border-ink text-ink' : 'border-transparent text-ink/40 hover:text-ink/70'
               }`}
             >
               {t.label}
-              {hint ? (
-                <span className={`ml-1 font-mono ${active ? 'text-orange-300/80' : 'text-white/30'}`}>{hint}</span>
-              ) : null}
+              {hint ? <span className={`ml-1 ${active ? 'text-sanguine' : 'text-ink/30'}`}>{hint}</span> : null}
             </button>
           );
         })}
       </nav>
 
-      <div className="flex-1 overflow-y-auto min-h-0">
-        {error ? <div className="px-3 py-2 text-[11px] text-red-300/90 border-b border-red-500/15">{error}</div> : null}
-
-        {loading ? (
-          <div className="flex items-center justify-center gap-2 py-12 text-xs text-white/40">
-            <Spinner />
-            Loading…
-          </div>
-        ) : tab === 'plan' ? (
-          <PlanBody plan={plan} />
-        ) : tab === 'todos' ? (
-          <TodosBody todos={todos} />
-        ) : tab === 'task' ? (
-          <TaskBody task={task} />
-        ) : tab === 'subagents' ? (
-          <SubagentsBody
-            subagents={subagents}
-            expandedAgent={expandedAgent}
-            agentMsgs={agentMsgs}
-            agentLoading={agentLoading}
-            onToggle={openSubagent}
-          />
-        ) : (
-          <MemoryBody memory={memory} sourceId={sourceId} />
-        )}
-      </div>
+      {body}
     </aside>
   );
 }
@@ -242,9 +260,9 @@ function PlanBody({ plan }: { plan: PlanShape | null }) {
   }
   return (
     <div className="p-3 space-y-2">
-      {plan.title ? <h3 className="text-sm text-white/85 font-medium">{plan.title}</h3> : null}
-      {plan.slug ? <p className="text-[10px] font-mono text-white/30 truncate">{plan.slug}</p> : null}
-      <pre className="text-[11px] text-white/65 whitespace-pre-wrap font-mono leading-relaxed">
+      {plan.title ? <h3 className="font-serif text-sm text-ink/90">{plan.title}</h3> : null}
+      {plan.slug ? <p className="text-[10px] font-mono text-ink/30 truncate">{plan.slug}</p> : null}
+      <pre className="text-[11px] text-ink/70 whitespace-pre-wrap font-mono leading-relaxed">
         {plan.content || '(empty plan)'}
       </pre>
     </div>
@@ -260,20 +278,18 @@ function TodosBody({ todos }: { todos: TodoItemShape[] }) {
       {todos.map((t, i) => {
         const status = (t.status || 'pending').toLowerCase();
         const color =
-          status === 'completed'
-            ? 'text-emerald-300/80'
-            : status === 'in_progress'
-              ? 'text-amber-300/80'
-              : 'text-white/40';
+          status === 'completed' ? 'text-verdigris' : status === 'in_progress' ? 'text-sanguine' : 'text-ink/40';
         return (
-          <li key={i} className="px-3 py-2 border-b border-white/[0.04] flex gap-2.5 items-start">
+          <li key={i} className="px-3 py-2 border-b border-ink/5 flex gap-2.5 items-start">
             <span className={`text-[10px] font-mono uppercase tracking-wide mt-0.5 shrink-0 w-16 ${color}`}>
               {status.replace('_', ' ')}
             </span>
             <div className="min-w-0">
-              <p className="text-[12px] text-white/80 leading-snug">{t.content || t.activeForm || '(empty)'}</p>
+              <p className="text-[12px] font-serif text-ink/80 leading-snug">
+                {t.content || t.activeForm || '(empty)'}
+              </p>
               {t.activeForm && t.content ? (
-                <p className="text-[10px] text-white/35 mt-0.5 italic">{t.activeForm}</p>
+                <p className="text-[10px] text-ink/35 mt-0.5 italic">{t.activeForm}</p>
               ) : null}
             </div>
           </li>

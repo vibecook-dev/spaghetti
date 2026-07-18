@@ -1,10 +1,10 @@
 /**
- * MessageFilterBar — type + tool filter pills with solo (pin) / mute (eye).
- * Ported from p008-claude-on-the-go; styled for playground dark chrome.
- * Icons are inline SVG (no lucide dependency).
+ * MessageFilterBar — archive-styled type + tool filter tray.
+ * Solo (pin) / mute (eye) + text filter — ProjectPage logic, design-mock chrome.
  */
 
 import { memo } from 'react';
+import { Eye, EyeOff, Pin, Search, X } from 'lucide-react';
 import { DEFAULT_TYPE_FILTERS, type FilterStates } from './useMessageFilters.js';
 
 export interface MessageFilterBarProps {
@@ -24,64 +24,8 @@ export interface MessageFilterBarProps {
   toggleToolMute: (toolName: string) => void;
   clearAllSolos: () => void;
   setSearchQuery: (query: string) => void;
+  isDark?: boolean;
 }
-
-// ── Icons ───────────────────────────────────────────────────────────────────
-
-function IconSearch({ size = 10 }: { size?: number }) {
-  return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>
-      <circle cx="11" cy="11" r="7" />
-      <path d="M20 20l-3.5-3.5" strokeLinecap="round" />
-    </svg>
-  );
-}
-
-function IconX({ size = 8 }: { size?: number }) {
-  return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" aria-hidden>
-      <path d="M6 6l12 12M18 6L6 18" strokeLinecap="round" />
-    </svg>
-  );
-}
-
-function IconPin({ size = 10, filled }: { size?: number; filled?: boolean }) {
-  return (
-    <svg
-      width={size}
-      height={size}
-      viewBox="0 0 24 24"
-      fill={filled ? 'currentColor' : 'none'}
-      stroke="currentColor"
-      strokeWidth="2"
-      aria-hidden
-    >
-      <path d="M12 17v5M9 3h6l-1 7h3l-5 5-5-5h3L9 3z" strokeLinejoin="round" strokeLinecap="round" />
-    </svg>
-  );
-}
-
-function IconEye({ size = 10 }: { size?: number }) {
-  return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>
-      <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z" />
-      <circle cx="12" cy="12" r="3" />
-    </svg>
-  );
-}
-
-function IconEyeOff({ size = 10 }: { size?: number }) {
-  return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>
-      <path
-        d="M3 3l18 18M10.6 10.6a3 3 0 004.2 4.2M9.5 5.2A10.5 10.5 0 0112 5c6.5 0 10 7 10 7a18.4 18.4 0 01-4.2 4.7M6.1 6.1A18 18 0 002 12s3.5 7 10 7c1.4 0 2.7-.3 3.9-.8"
-        strokeLinecap="round"
-      />
-    </svg>
-  );
-}
-
-// ── Pills ───────────────────────────────────────────────────────────────────
 
 interface FilterPillProps {
   label: string;
@@ -102,123 +46,53 @@ const FilterPill = memo(function FilterPill({
   onToggleSolo,
   onToggleMute,
 }: FilterPillProps) {
+  const active = isVisible && !state.mute;
   return (
-    <div
-      className="flex items-center gap-1.5 px-2 py-1 rounded text-[10px] font-mono transition-all shrink-0 border"
+    <button
+      type="button"
+      onClick={onToggleMute}
+      aria-pressed={active}
+      className="flex h-8 min-w-0 items-center justify-between gap-2 border-0 border-b border-ink/25 px-1 bg-transparent font-mono text-[11px] tracking-[0.04em] transition-colors cursor-pointer"
       style={{
-        backgroundColor: state.solo ? withAlpha(color, 0.14) : 'transparent',
-        borderColor: state.solo ? color : 'rgba(255,255,255,0.1)',
-        color: state.mute ? 'rgba(255,255,255,0.35)' : isVisible ? color : 'rgba(255,255,255,0.4)',
-        opacity: state.mute ? 0.45 : isVisible ? 1 : 0.55,
+        color: active ? color : undefined,
+        borderBottomColor: active ? `${color}aa` : undefined,
+        opacity: active ? 1 : 0.38,
+        textDecoration: state.mute ? 'line-through' : undefined,
       }}
+      title={state.mute ? 'Show this type' : 'Hide this type'}
     >
-      <span className={state.mute ? 'line-through' : ''}>{label}</span>
-      <span
-        className="px-1 py-0.5 rounded text-[9px] tabular-nums"
-        style={{
-          backgroundColor: isVisible ? withAlpha(color, 0.18) : 'rgba(255,255,255,0.06)',
-        }}
-      >
-        {count}
+      <span className="flex min-w-0 items-center gap-2">
+        <span className="truncate">{label}</span>
+        <span className="text-[10px] leading-none opacity-65">{count}</span>
       </span>
-      <button
-        type="button"
-        onClick={(e) => {
-          e.stopPropagation();
-          onToggleSolo();
-        }}
-        className="p-0.5 rounded hover:bg-white/10 border-0 bg-transparent cursor-pointer"
-        style={{ color: state.solo ? color : 'rgba(255,255,255,0.4)', opacity: state.solo ? 1 : 0.55 }}
-        title={state.solo ? 'Unpin (show all)' : 'Pin (solo this type)'}
-        aria-pressed={state.solo}
-      >
-        <IconPin filled={state.solo} />
-      </button>
-      <button
-        type="button"
-        onClick={(e) => {
-          e.stopPropagation();
-          onToggleMute();
-        }}
-        className="p-0.5 rounded hover:bg-white/10 border-0 bg-transparent cursor-pointer"
-        style={{ color: state.mute ? '#ef4444' : 'rgba(255,255,255,0.4)', opacity: state.mute ? 1 : 0.55 }}
-        title={state.mute ? 'Show this type' : 'Hide this type'}
-        aria-pressed={state.mute}
-      >
-        {state.mute ? <IconEyeOff /> : <IconEye />}
-      </button>
-    </div>
+      <span className="flex shrink-0 items-center gap-1.5 opacity-45">
+        <span
+          role="button"
+          tabIndex={0}
+          onClick={(e) => {
+            e.stopPropagation();
+            onToggleSolo();
+          }}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' || e.key === ' ') {
+              e.preventDefault();
+              e.stopPropagation();
+              onToggleSolo();
+            }
+          }}
+          className="p-0.5"
+          style={{ color: state.solo ? color : undefined, opacity: state.solo ? 1 : 0.55 }}
+          title={state.solo ? 'Unpin' : 'Pin (solo)'}
+        >
+          <Pin size={10} strokeWidth={1.5} className={state.solo ? 'fill-current' : ''} />
+        </span>
+        <span className="p-0.5" style={{ color: state.mute ? '#ef4444' : undefined }}>
+          {state.mute ? <EyeOff size={11} strokeWidth={1.5} /> : <Eye size={11} strokeWidth={1.5} />}
+        </span>
+      </span>
+    </button>
   );
 });
-
-interface ToolFilterPillProps {
-  toolName: string;
-  count: number;
-  state: { solo: boolean; mute: boolean };
-  isVisible: boolean;
-  onToggleSolo: () => void;
-  onToggleMute: () => void;
-}
-
-const ToolFilterPill = memo(function ToolFilterPill({
-  toolName,
-  count,
-  state,
-  isVisible,
-  onToggleSolo,
-  onToggleMute,
-}: ToolFilterPillProps) {
-  const color = 'rgba(242,242,242,0.85)';
-  return (
-    <div
-      className="flex items-center gap-1.5 px-2 py-1 rounded text-[10px] font-mono transition-all shrink-0 border"
-      style={{
-        backgroundColor: state.solo ? 'rgba(255,255,255,0.08)' : 'transparent',
-        borderColor: state.solo ? 'rgba(255,255,255,0.35)' : 'rgba(255,255,255,0.1)',
-        color: state.mute ? 'rgba(255,255,255,0.35)' : isVisible ? color : 'rgba(255,255,255,0.4)',
-        opacity: state.mute ? 0.45 : isVisible ? 1 : 0.55,
-      }}
-    >
-      <span className={state.mute ? 'line-through' : ''}>{toolName}</span>
-      <span
-        className="px-1 py-0.5 rounded text-[9px] tabular-nums"
-        style={{
-          backgroundColor: isVisible ? 'rgba(255,255,255,0.1)' : 'rgba(255,255,255,0.05)',
-        }}
-      >
-        {count}
-      </span>
-      <button
-        type="button"
-        onClick={(e) => {
-          e.stopPropagation();
-          onToggleSolo();
-        }}
-        className="p-0.5 rounded hover:bg-white/10 border-0 bg-transparent cursor-pointer"
-        style={{ color: state.solo ? '#ea580c' : 'rgba(255,255,255,0.4)', opacity: state.solo ? 1 : 0.55 }}
-        title={state.solo ? 'Unpin (show all)' : 'Pin (solo this tool)'}
-        aria-pressed={state.solo}
-      >
-        <IconPin filled={state.solo} />
-      </button>
-      <button
-        type="button"
-        onClick={(e) => {
-          e.stopPropagation();
-          onToggleMute();
-        }}
-        className="p-0.5 rounded hover:bg-white/10 border-0 bg-transparent cursor-pointer"
-        style={{ color: state.mute ? '#ef4444' : 'rgba(255,255,255,0.4)', opacity: state.mute ? 1 : 0.55 }}
-        title={state.mute ? 'Show this tool' : 'Hide this tool'}
-        aria-pressed={state.mute}
-      >
-        {state.mute ? <IconEyeOff /> : <IconEye />}
-      </button>
-    </div>
-  );
-});
-
-// ── Bar ─────────────────────────────────────────────────────────────────────
 
 export const MessageFilterBar = memo(function MessageFilterBar({
   typeFilters,
@@ -237,25 +111,26 @@ export const MessageFilterBar = memo(function MessageFilterBar({
   toggleToolMute,
   clearAllSolos,
   setSearchQuery,
+  isDark = true,
 }: MessageFilterBarProps) {
+  void isDark;
+
   return (
     <div
-      className="shrink-0 flex flex-col border-b border-white/10 bg-white/[0.02]"
+      className="shrink-0 border-b border-ink/15 px-2 py-2 md:px-4 lg:px-6 bg-transparent"
       role="toolbar"
       aria-label="Message filters"
     >
-      <div className="flex items-center gap-1.5 px-3 py-1.5 flex-wrap">
-        {/* In-transcript search */}
-        <div className="flex items-center gap-1 px-1.5 py-0.5 rounded shrink-0 bg-black/40 border border-white/10">
-          <span className="text-white/35">
-            <IconSearch />
-          </span>
+      <div className="mx-auto flex max-w-3xl flex-wrap items-center gap-x-2 gap-y-1.5">
+        <label className="flex h-8 w-36 items-center gap-2 border-b border-ink/25 px-1 font-mono text-[11px]">
+          <Search size={14} className="shrink-0 opacity-45" />
           <input
             type="search"
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
             placeholder="Filter…"
-            className="bg-transparent border-none outline-none text-[10px] font-mono w-24 text-white/85 placeholder:text-white/30"
+            className="min-w-0 flex-1 bg-transparent font-mono text-[11px] outline-none placeholder:opacity-45 text-ink"
+            aria-label="Filter transcript messages"
             spellCheck={false}
             autoComplete="off"
           />
@@ -263,17 +138,14 @@ export const MessageFilterBar = memo(function MessageFilterBar({
             <button
               type="button"
               onClick={() => setSearchQuery('')}
-              className="p-0.5 rounded hover:bg-white/10 border-0 bg-transparent cursor-pointer text-white/40"
-              title="Clear filter text"
+              className="p-0.5 opacity-50 hover:opacity-100 bg-transparent border-0 text-ink cursor-pointer"
+              title="Clear"
             >
-              <IconX />
+              <X size={10} />
             </button>
           ) : null}
-        </div>
+        </label>
 
-        <div className="w-px h-3 shrink-0 bg-white/10" aria-hidden />
-
-        {/* Type filters — only when present in the loaded window */}
         {DEFAULT_TYPE_FILTERS.map(({ key, label, color }) => {
           const count = messageCounts[key] || 0;
           if (count === 0) return null;
@@ -292,15 +164,16 @@ export const MessageFilterBar = memo(function MessageFilterBar({
           );
         })}
 
-        {/* Per-tool filters, highest count first */}
         {Object.entries(toolCounts)
           .sort((a, b) => b[1] - a[1])
+          .slice(0, 8)
           .map(([toolName, count]) => {
             const state = toolFilters[toolName] || { solo: false, mute: false };
             return (
-              <ToolFilterPill
+              <FilterPill
                 key={toolName}
-                toolName={toolName}
+                label={toolName}
+                color="var(--archive-ink)"
                 count={count}
                 state={state}
                 isVisible={visibleTools.has(toolName)}
@@ -311,42 +184,19 @@ export const MessageFilterBar = memo(function MessageFilterBar({
           })}
 
         {anySoloActive ? (
-          <>
-            <div className="w-px h-3 shrink-0 bg-white/10" aria-hidden />
-            <button
-              type="button"
-              onClick={clearAllSolos}
-              className="text-[9px] font-medium px-1.5 py-0.5 rounded shrink-0 text-orange-400/90 hover:text-orange-300 cursor-pointer bg-transparent border-0"
-            >
-              Clear solos
-            </button>
-          </>
+          <button
+            type="button"
+            onClick={clearAllSolos}
+            className="font-mono text-[9px] tracking-widest uppercase text-sanguine hover:opacity-80 bg-transparent border-0 cursor-pointer px-1"
+          >
+            Clear solos
+          </button>
         ) : null}
 
-        <span className="text-[9px] font-mono ml-auto shrink-0 text-white/30 tabular-nums">
+        <div className="ml-auto flex h-8 items-center justify-end px-1 font-mono text-[10px] tracking-[0.12em] opacity-50">
           {filteredCount}/{totalCount}
-        </span>
+        </div>
       </div>
     </div>
   );
 });
-
-/** #rrggbb → rgba */
-function withAlpha(hex: string, alpha: number): string {
-  if (!hex.startsWith('#') || (hex.length !== 7 && hex.length !== 4)) {
-    return hex;
-  }
-  let r: number;
-  let g: number;
-  let b: number;
-  if (hex.length === 4) {
-    r = parseInt(hex[1] + hex[1], 16);
-    g = parseInt(hex[2] + hex[2], 16);
-    b = parseInt(hex[3] + hex[3], 16);
-  } else {
-    r = parseInt(hex.slice(1, 3), 16);
-    g = parseInt(hex.slice(3, 5), 16);
-    b = parseInt(hex.slice(5, 7), 16);
-  }
-  return `rgba(${r},${g},${b},${alpha})`;
-}

@@ -7,6 +7,7 @@
  */
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { ArrowLeft, PanelLeft, PanelRight } from 'lucide-react';
 import {
   TimelineMessageRenderer,
   TimeGroupSeparator,
@@ -17,10 +18,8 @@ import {
 } from '@vibecook/spaghetti-sdk/react';
 import type { MessagePage, SegmentChangeBatch, SessionListItem } from '@vibecook/spaghetti-sdk';
 import { SourceBadge } from './SourceBadge.js';
-import { ArtifactPanel, type ArtifactTab } from './ArtifactPanel.js';
 import { MessageFilterBar, useMessageFilters, countTimelineMessages, filterTimelineMessages } from './filters/index.js';
-import { Btn, Dot, LiveDot, Spinner } from './ui.js';
-import { flattenPrompt, formatDuration, formatNumber, formatRelativeTime, formatTokenUsage } from '../lib/format.js';
+import { Btn, LiveDot, Spinner } from './ui.js';
 
 type AnyMsg = Record<string, unknown>;
 
@@ -37,6 +36,11 @@ export interface SessionMessagesViewProps {
   sessionIndex: number;
   /** Project has MEMORY.md (from ProjectListItem). */
   hasMemory?: boolean;
+  isDark?: boolean;
+  leftOpen?: boolean;
+  onToggleLeft?: () => void;
+  filesOpen?: boolean;
+  onToggleFiles?: () => void;
   onBack: () => void;
 }
 
@@ -46,6 +50,11 @@ export function SessionMessagesView({
   session,
   sessionIndex,
   hasMemory = false,
+  isDark = true,
+  leftOpen = true,
+  onToggleLeft,
+  filesOpen = true,
+  onToggleFiles,
   onBack,
 }: SessionMessagesViewProps) {
   const [rawMessages, setRawMessages] = useState<AnyMsg[]>([]);
@@ -55,8 +64,6 @@ export function SessionMessagesView({
   const [error, setError] = useState<string | null>(null);
   const [livePulse, setLivePulse] = useState(false);
   const [pendingNew, setPendingNew] = useState(0);
-  const [artifactsOpen, setArtifactsOpen] = useState(false);
-  const [artifactTab, setArtifactTab] = useState<ArtifactTab>('plan');
 
   const offsetRef = useRef(0);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
@@ -122,7 +129,6 @@ export function SessionMessagesView({
     offsetRef.current = 0;
     totalRef.current = 0;
     setPendingNew(0);
-    setArtifactsOpen(false);
     setError(null);
     resetFilters();
   }, [session.sessionId, resetFilters]);
@@ -321,13 +327,7 @@ export function SessionMessagesView({
     setPendingNew(0);
   }, []);
 
-  const openArtifacts = (tab: ArtifactTab) => {
-    setArtifactTab(tab);
-    setArtifactsOpen(true);
-  };
-
-  const prompt = flattenPrompt(session.firstPrompt || session.summary, 80);
-  const tok = formatTokenUsage(session.tokenUsage, session.sourceId, session.tokensEstimated);
+  void hasMemory; // artifacts live in Structure panel
   const hasMore = pageMeta?.hasMore ?? false;
   const filtersActive =
     anySoloActive ||
@@ -335,213 +335,181 @@ export function SessionMessagesView({
     Object.values(typeFilters).some((f) => f.mute) ||
     Object.values(toolFilters).some((f) => f.mute);
 
-  const artifactHints = {
-    todoCount: session.todoCount,
-    planSlug: session.planSlug,
-    hasTask: session.hasTask,
-    hasMemory,
-  };
-
   return (
-    <div className="flex h-full min-h-0 bg-[#0a0a0a] text-[#f2f2f2]">
-      <div className="flex flex-col flex-1 min-w-0 min-h-0">
-        {/* Header */}
-        <div className="shrink-0 px-4 py-2.5 border-b border-white/10 bg-white/[0.02] flex items-start gap-3">
-          <Btn onClick={onBack} className="mt-0.5">
-            ← Sessions
-          </Btn>
-          <div className="min-w-0 flex-1">
-            <div className="flex items-center gap-2 flex-wrap">
-              <span className="text-xs font-medium text-white/85">#{sessionIndex + 1}</span>
-              {session.gitBranch ? (
-                <span className="text-[11px] font-mono text-amber-200/70">{session.gitBranch}</span>
-              ) : null}
-              <span className="text-[10px] font-mono text-white/30">{session.sessionId.slice(0, 8)}</span>
-              <SourceBadge sourceId={session.sourceId} />
-              <LiveDot active={livePulse || pendingNew > 0} />
-              {pageMeta && (
-                <span className="text-[10px] text-white/35 font-mono ml-auto">
-                  {rawMessages.length}/{pageMeta.total} msgs
-                  {filtersActive ? ` · ${chatMessages.length} shown` : ''}
-                </span>
-              )}
-            </div>
-            <div className="text-[11px] italic text-white/40 truncate mt-0.5">
-              {prompt ? `"${prompt}"` : '(no prompt)'}
-            </div>
-            <div className="text-[10px] text-white/35 font-mono mt-1">
-              {formatNumber(session.messageCount)} msgs
-              <Dot />
-              {tok} tokens
-              <Dot />
-              {formatDuration(session.lifespanMs)}
-              <Dot />
-              {formatRelativeTime(session.lastUpdate)}
-            </div>
-          </div>
-
-          {/* Artifact shortcuts */}
-          <div className="flex items-center gap-1.5 shrink-0 flex-wrap justify-end max-w-[220px]">
-            <Btn
-              variant={artifactsOpen ? 'solid' : 'ghost'}
-              onClick={() => (artifactsOpen ? setArtifactsOpen(false) : openArtifacts('plan'))}
-              title="Session artifacts"
+    <div className="flex flex-col h-full min-h-0 bg-transparent text-ink">
+      {/* Reading header — design mock parity */}
+      <div className="h-10 border-b border-ink/20 flex items-center px-5 justify-between shrink-0 bg-transparent gap-3">
+        <div className="flex items-center gap-3 min-w-0 font-mono text-[10px] tracking-[0.1em]">
+          {!leftOpen && onToggleLeft ? (
+            <button
+              type="button"
+              onClick={onToggleLeft}
+              className="opacity-50 hover:opacity-100 bg-transparent border-0 text-ink cursor-pointer p-0"
+              title="Show projects"
             >
-              Artifacts
-            </Btn>
-            {session.planSlug ? (
-              <Btn className="!px-1.5" onClick={() => openArtifacts('plan')} title="Plan">
-                Plan
-              </Btn>
-            ) : null}
-            {session.todoCount > 0 ? (
-              <Btn className="!px-1.5" onClick={() => openArtifacts('todos')} title="Todos">
-                {session.todoCount} todos
-              </Btn>
-            ) : null}
-            {session.hasTask ? (
-              <Btn className="!px-1.5" onClick={() => openArtifacts('task')} title="Task">
-                Task
-              </Btn>
-            ) : null}
-          </div>
+              <PanelLeft size={14} />
+            </button>
+          ) : null}
+          <button
+            type="button"
+            onClick={onBack}
+            className="opacity-70 hover:opacity-100 bg-transparent border-0 text-ink cursor-pointer p-0"
+            aria-label="Back to sessions"
+          >
+            <ArrowLeft size={14} />
+          </button>
+          <span className="opacity-70">#{sessionIndex + 1}</span>
+          <span className="opacity-70">{session.sessionId.slice(0, 8)}</span>
+          <SourceBadge sourceId={session.sourceId} isDark={isDark} />
+          <LiveDot active={livePulse || pendingNew > 0} />
+          {pageMeta && (
+            <span className="opacity-55 truncate">
+              {rawMessages.length}/{pageMeta.total} msgs
+              {filtersActive ? ` · ${chatMessages.length} shown` : ''}
+            </span>
+          )}
         </div>
-
-        {error && (
-          <div className="shrink-0 px-4 py-2 text-[11px] text-red-300/90 border-b border-red-500/20 bg-red-500/[0.04]">
-            {error}
-          </div>
-        )}
-
-        {/* Solo/mute type + tool filters (ProjectPage parity) */}
-        {timeline.length > 0 && !loading ? (
-          <MessageFilterBar
-            typeFilters={typeFilters}
-            toolFilters={toolFilters}
-            searchQuery={searchQuery}
-            visibleTypes={visibleTypes}
-            visibleTools={visibleTools}
-            anySoloActive={anySoloActive}
-            messageCounts={messageCounts}
-            toolCounts={toolCounts}
-            filteredCount={chatMessages.length}
-            totalCount={filterTotalCount}
-            toggleTypeSolo={toggleTypeSolo}
-            toggleTypeMute={toggleTypeMute}
-            toggleToolSolo={toggleToolSolo}
-            toggleToolMute={toggleToolMute}
-            clearAllSolos={clearAllSolos}
-            setSearchQuery={setSearchQuery}
-          />
-        ) : null}
-
-        {/* Timeline scroll container */}
-        <div className="relative flex-1 min-h-0">
-          <div ref={scrollContainerRef} onScroll={handleScroll} className="h-full overflow-y-auto">
-            {loading && rawMessages.length === 0 ? (
-              <div className="flex items-center justify-center h-full gap-3 py-12">
-                <Spinner className="h-5 w-5" />
-                <span className="text-xs text-white/40">Loading messages…</span>
-              </div>
-            ) : timeline.length === 0 ? (
-              <div className="flex flex-col items-center justify-center h-full opacity-50 py-12">
-                <p className="text-sm">No messages in this session</p>
-                <p className="text-[11px] text-white/40 mt-1">New turns will appear here live.</p>
-              </div>
-            ) : chatMessages.length === 0 ? (
-              <div className="flex flex-col items-center justify-center h-full py-12 gap-2">
-                <p className="text-sm text-white/45">No messages match filters</p>
-                <p className="text-[11px] text-white/30 max-w-xs text-center">
-                  Unpin solos, unmute types/tools, or clear the filter text.
-                </p>
-                {anySoloActive ? (
-                  <Btn onClick={clearAllSolos} className="mt-2">
-                    Clear solos
-                  </Btn>
-                ) : searchQuery ? (
-                  <Btn onClick={() => setSearchQuery('')} className="mt-2">
-                    Clear text filter
-                  </Btn>
-                ) : null}
-              </div>
-            ) : (
-              <div className="py-3 max-w-3xl mx-auto w-full">
-                {loadingMore && (
-                  <div className="flex items-center justify-center py-6 gap-3">
-                    <Spinner className="h-5 w-5" />
-                    <span className="text-sm text-white/50">Loading older messages…</span>
-                  </div>
-                )}
-
-                {!hasMore && chatMessages.length > 0 && (
-                  <div className="flex items-center justify-center py-4 text-xs text-white/25">
-                    — Beginning of conversation —
-                  </div>
-                )}
-
-                {hasMore && !loadingMore && (
-                  <div className="flex items-center justify-center py-3 text-xs text-white/35">
-                    ↑ Scroll up for older messages
-                  </div>
-                )}
-
-                {chatMessages.map((msg, i) => {
-                  const prev = i > 0 ? chatMessages[i - 1] : undefined;
-                  const next = i < chatMessages.length - 1 ? chatMessages[i + 1] : undefined;
-                  const isLast = i === chatMessages.length - 1;
-                  const connectToNext = !!(next && isTimelineType(next.type));
-                  const showSep = shouldShowTimestamp(msg.timestamp, prev?.timestamp ?? null);
-
-                  const taskSpawnedAgent =
-                    msg.type === 'tool_use' &&
-                    msg.toolUse?.toolName === 'Task' &&
-                    Boolean((msg.toolUse as { result?: { content?: string } })?.result);
-
-                  const nextIsSidechain = taskSpawnedAgent ? true : next?.isSidechain;
-
-                  return (
-                    <div key={msg.uuid} className="px-4">
-                      {showSep && <TimeGroupSeparator timestamp={msg.timestamp} />}
-                      <TimelineMessageRenderer
-                        message={msg}
-                        isLast={isLast}
-                        connectToNext={connectToNext}
-                        prevTimestamp={prev?.timestamp}
-                        prevAgentId={prev?.agentId}
-                        nextAgentId={next?.agentId}
-                        nextIsSidechain={nextIsSidechain}
-                      />
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-          </div>
-
-          {/* Jump to latest pill when scrolled up during live appends */}
-          {pendingNew > 0 ? (
-            <div className="absolute bottom-4 left-1/2 -translate-x-1/2 z-10">
-              <button
-                type="button"
-                onClick={jumpToLatest}
-                className="text-[11px] px-3 py-1.5 rounded-full border border-orange-400/40 bg-[#141414]/95 text-orange-200/90 shadow-lg cursor-pointer hover:bg-[#1a1a1a] transition-colors"
-              >
-                ↓ {pendingNew} new message{pendingNew === 1 ? '' : 's'}
-              </button>
-            </div>
+        <div className="flex items-center gap-3 shrink-0 font-mono text-[9px] uppercase tracking-widest opacity-70">
+          {session.gitBranch ? (
+            <span className="text-sanguine normal-case tracking-normal">{session.gitBranch}</span>
+          ) : null}
+          {!filesOpen && onToggleFiles ? (
+            <button
+              type="button"
+              onClick={onToggleFiles}
+              className="opacity-50 hover:opacity-100 bg-transparent border-0 text-ink cursor-pointer p-0"
+              title="Show structure"
+            >
+              <PanelRight size={14} />
+            </button>
           ) : null}
         </div>
       </div>
 
-      <ArtifactPanel
-        open={artifactsOpen}
-        onClose={() => setArtifactsOpen(false)}
-        projectSlug={projectSlug}
-        sourceId={sourceId}
-        sessionId={session.sessionId}
-        hints={artifactHints}
-        initialTab={artifactTab}
-      />
+      {error && (
+        <div className="shrink-0 px-5 py-2 font-mono text-[10px] text-sanguine border-b border-sanguine/25 bg-sanguine/5">
+          {error}
+        </div>
+      )}
+
+      {timeline.length > 0 && !loading ? (
+        <MessageFilterBar
+          typeFilters={typeFilters}
+          toolFilters={toolFilters}
+          searchQuery={searchQuery}
+          visibleTypes={visibleTypes}
+          visibleTools={visibleTools}
+          anySoloActive={anySoloActive}
+          messageCounts={messageCounts}
+          toolCounts={toolCounts}
+          filteredCount={chatMessages.length}
+          totalCount={filterTotalCount}
+          toggleTypeSolo={toggleTypeSolo}
+          toggleTypeMute={toggleTypeMute}
+          toggleToolSolo={toggleToolSolo}
+          toggleToolMute={toggleToolMute}
+          clearAllSolos={clearAllSolos}
+          setSearchQuery={setSearchQuery}
+          isDark={isDark}
+        />
+      ) : null}
+
+      <div className="relative flex-1 min-h-0 archive-transcript">
+        <div ref={scrollContainerRef} onScroll={handleScroll} className="h-full overflow-y-auto scrollbar-hide">
+          {loading && rawMessages.length === 0 ? (
+            <div className="flex items-center justify-center h-full gap-3 py-12">
+              <Spinner className="h-5 w-5" />
+              <span className="font-mono text-[10px] tracking-widest uppercase opacity-50">Transcribing…</span>
+            </div>
+          ) : timeline.length === 0 ? (
+            <div className="flex flex-col items-center justify-center h-full opacity-50 py-12">
+              <p className="font-serif text-sm">No messages in this session</p>
+              <p className="font-mono text-[10px] opacity-60 mt-1">New turns will appear here live.</p>
+            </div>
+          ) : chatMessages.length === 0 ? (
+            <div className="flex flex-col items-center justify-center h-full py-12 gap-2">
+              <p className="font-serif text-sm opacity-50">No messages match filters</p>
+              <p className="font-mono text-[10px] opacity-40 max-w-xs text-center">
+                Unpin solos, unmute types/tools, or clear the filter text.
+              </p>
+              {anySoloActive ? (
+                <Btn onClick={clearAllSolos} className="mt-2">
+                  Clear solos
+                </Btn>
+              ) : searchQuery ? (
+                <Btn onClick={() => setSearchQuery('')} className="mt-2">
+                  Clear text filter
+                </Btn>
+              ) : null}
+            </div>
+          ) : (
+            <div className="py-4 max-w-3xl mx-auto w-full px-4 md:px-8 lg:px-12">
+              {loadingMore && (
+                <div className="flex items-center justify-center py-6 gap-3">
+                  <Spinner className="h-5 w-5" />
+                  <span className="font-mono text-[10px] uppercase tracking-widest opacity-50">
+                    Loading older messages…
+                  </span>
+                </div>
+              )}
+
+              {!hasMore && chatMessages.length > 0 && (
+                <div className="flex items-center justify-center py-4 font-mono text-[9px] tracking-widest uppercase opacity-30">
+                  — Beginning of conversation —
+                </div>
+              )}
+
+              {hasMore && !loadingMore && (
+                <div className="flex items-center justify-center py-3 font-mono text-[9px] tracking-widest uppercase opacity-40">
+                  ↑ Scroll up for older messages
+                </div>
+              )}
+
+              {chatMessages.map((msg, i) => {
+                const prev = i > 0 ? chatMessages[i - 1] : undefined;
+                const next = i < chatMessages.length - 1 ? chatMessages[i + 1] : undefined;
+                const isLast = i === chatMessages.length - 1;
+                const connectToNext = !!(next && isTimelineType(next.type));
+                const showSep = shouldShowTimestamp(msg.timestamp, prev?.timestamp ?? null);
+
+                const taskSpawnedAgent =
+                  msg.type === 'tool_use' &&
+                  msg.toolUse?.toolName === 'Task' &&
+                  Boolean((msg.toolUse as { result?: { content?: string } })?.result);
+
+                const nextIsSidechain = taskSpawnedAgent ? true : next?.isSidechain;
+
+                return (
+                  <div key={msg.uuid} className="px-1">
+                    {showSep && <TimeGroupSeparator timestamp={msg.timestamp} />}
+                    <TimelineMessageRenderer
+                      message={msg}
+                      isLast={isLast}
+                      connectToNext={connectToNext}
+                      prevTimestamp={prev?.timestamp}
+                      prevAgentId={prev?.agentId}
+                      nextAgentId={next?.agentId}
+                      nextIsSidechain={nextIsSidechain}
+                    />
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+
+        {pendingNew > 0 ? (
+          <div className="absolute bottom-4 left-1/2 -translate-x-1/2 z-10">
+            <button
+              type="button"
+              onClick={jumpToLatest}
+              className="font-mono text-[10px] uppercase tracking-widest px-3 py-1.5 border border-ink/40 bg-paper text-ink shadow-lg cursor-pointer hover:bg-ink hover:text-paper transition-colors"
+            >
+              ↓ {pendingNew} new message{pendingNew === 1 ? '' : 's'}
+            </button>
+          </div>
+        ) : null}
+      </div>
     </div>
   );
 }

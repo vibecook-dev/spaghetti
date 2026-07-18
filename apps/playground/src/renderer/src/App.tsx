@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Library, Moon, PanelLeft, Search, Sun } from 'lucide-react';
 import { SpaghettiProvider, type SpaghettiProviderProps } from '@vibecook/spaghetti-sdk/react';
 import type { ProjectListItem, SessionListItem, StoreStats } from '@vibecook/spaghetti-sdk';
 import { createIpcApi } from './ipc-api.js';
@@ -23,15 +24,15 @@ import {
   type ProgressSnapshot,
   type SourceProgressState,
 } from './lib/source-progress.js';
+import { paperStyle } from './lib/archive-theme.js';
 
 /**
- * Electron playground shell.
+ * Electron playground shell — archive / paper design (spaghetti-ui-design).
  *
  * Never import runtime values from `@vibecook/spaghetti-sdk` (main entry) in
  * the renderer — that package pulls Node natives and will blank the window.
  */
 
-/** Project identity is (sourceId, slug) after multi-source schema v6. */
 interface ProjectKey {
   slug: string;
   sourceId: string;
@@ -47,7 +48,7 @@ export function App() {
     api = createIpcApi();
   } catch (err) {
     return (
-      <div className="p-6 text-[#f2f2f2] font-mono text-xs bg-[#050505] h-full">
+      <div className="p-6 font-mono text-xs h-full bg-chrome text-ink">
         <div className="font-medium mb-2 tracking-[0.12em] uppercase text-[10px] opacity-50">
           Preload bridge missing
         </div>
@@ -80,9 +81,9 @@ function PlaygroundShell() {
   const [stats, setStats] = useState<StoreStats | null>(null);
   const [sourceFilter, setSourceFilter] = useState<string | null>(null);
   const [searchOpen, setSearchOpen] = useState(false);
-  /** Rightmost mille file explorer panel. */
-  const [filesOpen, setFilesOpen] = useState(false);
-  /** Open this session after sessions list loads (search navigation). */
+  const [filesOpen, setFilesOpen] = useState(true);
+  const [leftOpen, setLeftOpen] = useState(true);
+  const [isDark, setIsDark] = useState(true);
   const pendingSessionId = useRef<string | null>(null);
 
   const [sources, setSources] = useState<SourceProgressState[]>(() => initialSourceStates());
@@ -92,6 +93,11 @@ function PlaygroundShell() {
   const [retrying, setRetrying] = useState(false);
   const loadStartedAt = useRef(Date.now());
 
+  // Persist theme class on <html>
+  useEffect(() => {
+    document.documentElement.classList.toggle('dark', isDark);
+  }, [isDark]);
+
   useEffect(() => {
     if (ready && !rebuilding && !retrying) return;
     const id = window.setInterval(() => {
@@ -100,7 +106,6 @@ function PlaygroundShell() {
     return () => window.clearInterval(id);
   }, [ready, rebuilding, retrying]);
 
-  // Global shortcuts: ⌘K search, ⌘B files panel
   useEffect(() => {
     if (!ready) return;
     const onKey = (e: KeyboardEvent) => {
@@ -112,6 +117,9 @@ function PlaygroundShell() {
       } else if (k === 'b') {
         e.preventDefault();
         setFilesOpen((v) => !v);
+      } else if (k === '\\') {
+        e.preventDefault();
+        setLeftOpen((v) => !v);
       }
     };
     window.addEventListener('keydown', onKey);
@@ -215,7 +223,6 @@ function PlaygroundShell() {
       .catch(() => setStats(null));
   }, [ready, changeNonce]);
 
-  // TUI project cards show the latest session's firstPrompt — hydrate lazily.
   useEffect(() => {
     if (!ready || projects.length === 0) return;
     let cancelled = false;
@@ -342,256 +349,292 @@ function PlaygroundShell() {
         headline={loadHeadline}
         onRetry={error && !retrying ? () => void onRetryInit() : undefined}
         retrying={retrying}
+        isDark={isDark}
       />
     );
   }
 
   return (
-    <div className="flex flex-col h-full bg-[#0a0a0a] text-[#f2f2f2]">
-      <header className="px-4 py-2.5 border-b border-white/10 bg-white/[0.015] flex items-center gap-3 flex-wrap shrink-0">
-        <strong className="text-xs font-medium tracking-[0.16em] lowercase opacity-85">spaghetti</strong>
-        {engine && (
-          <span
-            className="text-[9px] px-1.5 py-0.5 rounded border border-white/12 text-white/50 font-mono tracking-wide uppercase"
-            title={engine === 'rs' ? 'Native Rust ingest engine' : 'TypeScript ingest engine'}
-          >
-            {engine === 'rs' ? 'native' : 'typescript'}
-          </span>
-        )}
-        {sourceIds.length > 0 && (
-          <span className="inline-flex items-center gap-1.5">
-            {sourceIds.map((id) => (
-              <SourceBadge key={id} sourceId={id} />
-            ))}
-          </span>
-        )}
-        {stats && (
-          <span className="text-[10px] text-white/30 font-mono hidden sm:inline">
-            {formatNumber(stats.totalSegments)} segs
-            <Dot />
-            {formatBytes(stats.dbSizeBytes)}
-            <Dot />
-            {formatNumber(stats.searchIndexed)} indexed
-          </span>
-        )}
-        <span className="flex-1" />
-        <Btn onClick={() => setSearchOpen(true)} title={`Search (${modKey}K)`}>
-          Search
-          <Kbd>{modKey}K</Kbd>
-        </Btn>
-        <Btn
-          variant={filesOpen ? 'solid' : 'ghost'}
-          onClick={() => setFilesOpen((v) => !v)}
-          title={`Project files (${modKey}B)`}
-        >
-          Files
-          <Kbd>{modKey}B</Kbd>
-        </Btn>
-        <Btn
-          onClick={() => void onRebuild()}
-          disabled={rebuilding}
-          title="Force a full cold rebuild of the SQLite index"
-        >
-          Rebuild
-        </Btn>
-      </header>
-
-      <main className="flex flex-1 min-h-0">
-        {/* Projects */}
-        <section className="w-[360px] shrink-0 border-r border-white/10 flex flex-col min-h-0">
-          <SectionLabel
-            trailing={
-              sourceIds.length > 1 ? (
-                <span className="flex items-center gap-1 normal-case tracking-normal">
-                  <Chip active={sourceFilter === null} onClick={() => setSourceFilter(null)}>
-                    all
-                  </Chip>
-                  {sourceIds.map((id) => (
-                    <Chip key={id} active={sourceFilter === id} onClick={() => setSourceFilter(id)} title={id}>
-                      {sourceLabel(id)}
-                    </Chip>
-                  ))}
+    <div
+      className={`h-full w-full p-2 md:p-4 flex flex-col overflow-hidden transition-colors duration-500 ${
+        isDark
+          ? 'bg-[#0a0908] dark text-[#d4cbbd] selection:bg-[#d4cbbd] selection:text-[#0a0908]'
+          : 'bg-[#d1ccc0] text-[#2b2623] selection:bg-[#2b2623] selection:text-[#d1ccc0]'
+      }`}
+    >
+      {/* Paper frame */}
+      <div
+        className="flex-1 flex flex-col overflow-hidden border border-ink/60 shadow-2xl relative rounded-none"
+        style={paperStyle(isDark)}
+      >
+        {/* GLOBAL HEADER */}
+        <header className="h-12 border-b border-ink/30 flex items-center justify-between px-5 shrink-0 bg-transparent">
+          <div className="flex items-center gap-5 min-w-0">
+            <h1 className="font-serif text-[11px] tracking-[0.2em] flex items-center gap-2.5 shrink-0">
+              <Library size={14} className="opacity-80" />
+              spaghetti
+            </h1>
+            <div className="hidden md:flex gap-4 font-mono text-[9px] tracking-widest uppercase opacity-70">
+              {engine && (
+                <span className="flex items-center gap-1.5">
+                  <span className="w-1.5 h-1.5 bg-ink inline-block" />
+                  {engine === 'rs' ? 'Native' : 'TypeScript'}
                 </span>
-              ) : null
-            }
-          >
-            Projects · {filteredProjects.length}
-            {sourceFilter ? ` / ${projects.length}` : ''}
-          </SectionLabel>
+              )}
+              {sourceIds.map((id) => (
+                <SourceBadge key={id} sourceId={id} isDark={isDark} />
+              ))}
+            </div>
+          </div>
 
-          <div className="flex-1 overflow-y-auto">
-            {filteredProjects.length === 0 ? (
-              <EmptyState
-                title="No projects"
-                detail={sourceFilter ? `No ${sourceLabel(sourceFilter)} projects in the index.` : 'Index is empty.'}
+          <div className="flex items-center gap-3 font-mono text-[9px] uppercase tracking-widest min-w-0">
+            {stats && (
+              <span className="hidden sm:inline-block opacity-60 truncate">
+                {formatNumber(stats.totalSegments)} segs · {formatBytes(stats.dbSizeBytes)} ·{' '}
+                {formatNumber(stats.searchIndexed)} indexed
+              </span>
+            )}
+
+            <div className="flex items-center gap-1.5 ml-1 shrink-0">
+              <button
+                type="button"
+                onClick={() => setIsDark((v) => !v)}
+                className="p-1.5 border border-transparent hover:border-ink/40 transition-colors rounded-none bg-transparent text-ink cursor-pointer"
+                title="Toggle illumination"
+              >
+                {isDark ? <Sun size={12} /> : <Moon size={12} />}
+              </button>
+              <span className="opacity-30 px-0.5">|</span>
+              <button
+                type="button"
+                onClick={() => setSearchOpen(true)}
+                className="flex items-center gap-1.5 hover:bg-ink hover:text-paper transition-colors px-2 py-1 bg-transparent text-ink cursor-pointer border-0 font-mono text-[9px] tracking-widest uppercase"
+                title={`Search (${modKey}K)`}
+              >
+                <Search size={10} /> Search
+              </button>
+              <button
+                type="button"
+                onClick={() => setFilesOpen((v) => !v)}
+                className={`flex items-center gap-1.5 px-2 py-1 border-0 font-mono text-[9px] tracking-widest uppercase cursor-pointer transition-colors ${
+                  filesOpen ? 'bg-ink text-paper' : 'bg-transparent text-ink hover:bg-ink/10'
+                }`}
+                title={`Structure (${modKey}B)`}
+              >
+                Files
+              </button>
+              <button
+                type="button"
+                onClick={() => void onRebuild()}
+                disabled={rebuilding}
+                className="hidden lg:inline-flex items-center px-2 py-1 border border-ink/30 bg-transparent text-ink font-mono text-[9px] tracking-widest uppercase cursor-pointer hover:bg-ink hover:text-paper transition-colors disabled:opacity-30"
+                title="Force full rebuild"
+              >
+                Rebuild
+              </button>
+            </div>
+          </div>
+        </header>
+
+        <div className="flex-1 flex overflow-hidden relative min-h-0">
+          {/* LEFT: Projects */}
+          {leftOpen ? (
+            <aside className="w-64 border-r border-ink/20 flex flex-col shrink-0 bg-transparent min-h-0">
+              <SectionLabel
+                trailing={
+                  sourceIds.length > 1 ? (
+                    <span className="flex items-center gap-1 normal-case tracking-normal">
+                      <Chip active={sourceFilter === null} onClick={() => setSourceFilter(null)}>
+                        all
+                      </Chip>
+                      {sourceIds.map((id) => (
+                        <Chip key={id} active={sourceFilter === id} onClick={() => setSourceFilter(id)} title={id}>
+                          {sourceLabel(id).slice(0, 6)}
+                        </Chip>
+                      ))}
+                    </span>
+                  ) : null
+                }
+              >
+                Projects · {filteredProjects.length}
+              </SectionLabel>
+
+              <div className="flex-1 overflow-y-auto scrollbar-hide py-1 space-y-px">
+                {filteredProjects.length === 0 ? (
+                  <EmptyState
+                    title="No projects"
+                    detail={sourceFilter ? `No ${sourceLabel(sourceFilter)} projects.` : 'Index is empty.'}
+                  />
+                ) : (
+                  filteredProjects.map((p) => {
+                    const key = projectKey(p);
+                    const isSelected = selectedKey === key;
+                    const prompt = flattenPrompt(projectPrompts[key], 72);
+                    const tok = formatTokenUsage(p.tokenUsage, p.sourceId, p.tokensEstimated);
+                    return (
+                      <button
+                        key={key}
+                        type="button"
+                        onClick={() => {
+                          setSelected({ slug: p.slug, sourceId: p.sourceId });
+                          setSelectedSession(null);
+                        }}
+                        className={`w-full text-left px-4 py-3 cursor-pointer transition-colors border-0 border-l-2 ${
+                          isSelected ? 'bg-ink/5 border-l-ink' : 'bg-transparent border-l-transparent hover:bg-ink/5'
+                        }`}
+                      >
+                        <div className="mb-1.5 flex items-start justify-between gap-2">
+                          <span className="min-w-0 truncate font-mono text-[10px] tracking-tight text-ink">
+                            {p.folderName}
+                          </span>
+                          <SourceBadge sourceId={p.sourceId} isDark={isDark} />
+                        </div>
+                        <p className="mb-2 line-clamp-2 font-serif text-[11px] leading-[1.35] opacity-65">
+                          {prompt || '\u00A0'}
+                        </p>
+                        <div className="flex items-center justify-between gap-2 font-mono text-[8px] uppercase tracking-[0.08em] opacity-60">
+                          <span className="truncate">
+                            {formatNumber(p.sessionCount)} sess · {formatNumber(p.messageCount)} msg · {tok} tok
+                          </span>
+                          <span className="shrink-0">{formatRelativeTime(p.lastActiveAt)}</span>
+                        </div>
+                      </button>
+                    );
+                  })
+                )}
+              </div>
+            </aside>
+          ) : null}
+
+          {/* MAIN */}
+          <main className="flex-1 flex flex-col min-w-0 bg-transparent relative min-h-0">
+            {selected && selectedSession ? (
+              <SessionMessagesView
+                projectSlug={selected.slug}
+                sourceId={selected.sourceId}
+                session={selectedSession.session}
+                sessionIndex={selectedSession.index}
+                hasMemory={selectedProject?.hasMemory}
+                isDark={isDark}
+                leftOpen={leftOpen}
+                onToggleLeft={() => setLeftOpen(true)}
+                filesOpen={filesOpen}
+                onToggleFiles={() => setFilesOpen(true)}
+                onBack={() => setSelectedSession(null)}
               />
             ) : (
-              filteredProjects.map((p) => {
-                const key = projectKey(p);
-                const isSelected = selectedKey === key;
-                const prompt = flattenPrompt(projectPrompts[key], 64);
-                const tok = formatTokenUsage(p.tokenUsage, p.sourceId, p.tokensEstimated);
-                return (
-                  <button
-                    key={key}
-                    type="button"
-                    onClick={() => {
-                      setSelected({ slug: p.slug, sourceId: p.sourceId });
-                      setSelectedSession(null);
-                    }}
-                    className={`block w-full text-left px-3.5 py-3 cursor-pointer text-xs transition-colors border-0 border-b border-solid border-b-white/[0.04] ${
-                      isSelected
-                        ? 'bg-white/[0.06] border-l-2 border-l-solid border-l-white/55'
-                        : 'bg-transparent border-l-2 border-l-solid border-l-transparent hover:bg-white/[0.03]'
-                    }`}
-                  >
-                    <div className="flex items-center gap-2 mb-1">
-                      <span
-                        className={`flex-1 min-w-0 truncate tracking-tight ${isSelected ? 'font-medium' : 'font-normal'}`}
+              <>
+                <div className="h-10 border-b border-ink/20 flex items-center px-5 justify-between shrink-0">
+                  <div className="flex items-center gap-3 font-serif text-[10px] tracking-[0.15em]">
+                    {!leftOpen && (
+                      <button
+                        type="button"
+                        onClick={() => setLeftOpen(true)}
+                        className="opacity-50 hover:opacity-100 bg-transparent border-0 text-ink cursor-pointer p-0"
+                        title="Show projects"
                       >
-                        {p.folderName}
-                      </span>
-                      {p.latestGitBranch ? (
-                        <span
-                          className={`text-[10px] font-mono shrink-0 max-w-[100px] truncate ${
-                            isSelected ? 'text-sky-200/75' : 'text-white/35'
-                          }`}
-                          title={p.latestGitBranch}
-                        >
-                          {p.latestGitBranch}
-                        </span>
-                      ) : null}
-                      <SourceBadge sourceId={p.sourceId} />
-                    </div>
-                    <div className="text-[11px] italic text-white/38 mb-1 truncate min-h-[15px]">
-                      {prompt ? `"${prompt}"` : '\u00A0'}
-                    </div>
-                    <div className="text-[10px] text-white/38 tabular-nums">
-                      {formatNumber(p.sessionCount)} sessions
-                      <Dot />
-                      {formatNumber(p.messageCount)} msgs
-                      <Dot />
-                      {tok} tokens
-                      <Dot />
-                      {formatRelativeTime(p.lastActiveAt)}
-                      {p.hasMemory ? (
-                        <>
+                        <PanelLeft size={14} />
+                      </button>
+                    )}
+                    <span className="opacity-80">
+                      {selected ? `Sessions · ${sessions.length}` : 'Select a project'}
+                    </span>
+                    {selected ? <SourceBadge sourceId={selected.sourceId} isDark={isDark} /> : null}
+                  </div>
+                </div>
+                <div className="flex-1 overflow-y-auto scrollbar-hide">
+                  {!selected && (
+                    <EmptyState
+                      title="Select a project"
+                      detail={`Browse sessions, open a transcript, or press ${modKey}K to search.`}
+                      action={
+                        <Btn onClick={() => setSearchOpen(true)}>
+                          Search <Kbd>{modKey}K</Kbd>
+                        </Btn>
+                      }
+                    />
+                  )}
+                  {selected && sessions.length === 0 && (
+                    <EmptyState title="No sessions" detail="This project has no indexed sessions yet." />
+                  )}
+                  {sessions.map((s, index) => {
+                    const prompt = flattenPrompt(s.firstPrompt || s.summary, 96);
+                    const tok = formatTokenUsage(s.tokenUsage, s.sourceId, s.tokensEstimated);
+                    return (
+                      <button
+                        key={`${s.sourceId}:${s.sessionId}`}
+                        type="button"
+                        onClick={() => setSelectedSession({ session: s, index })}
+                        className="block w-full text-left px-5 py-3.5 border-0 border-b border-solid border-b-ink/10 bg-transparent text-inherit cursor-pointer hover:bg-ink/5 transition-colors"
+                      >
+                        <div className="flex items-center gap-2.5 mb-1.5">
+                          <span className="font-mono text-[10px] tracking-[0.1em] opacity-70">#{index + 1}</span>
+                          {s.gitBranch ? (
+                            <span className="font-mono text-[10px] text-sanguine/90">{s.gitBranch}</span>
+                          ) : (
+                            <span className="font-mono text-[10px] opacity-30">no branch</span>
+                          )}
+                          <span className="flex-1" />
+                          <span className="font-mono text-[9px] opacity-40">{s.sessionId.slice(0, 8)}</span>
+                          <SourceBadge sourceId={s.sourceId} isDark={isDark} />
+                        </div>
+                        <div className="font-serif text-[13px] italic opacity-70 mb-1.5 truncate">
+                          {prompt ? `"${prompt}"` : '(no prompt)'}
+                        </div>
+                        <div className="font-mono text-[8px] uppercase tracking-[0.08em] opacity-55">
+                          {formatNumber(s.messageCount)} msgs
                           <Dot />
-                          memory
-                        </>
-                      ) : null}
-                    </div>
-                  </button>
-                );
-              })
+                          {tok} tokens
+                          <Dot />
+                          {formatDuration(s.lifespanMs)}
+                          <Dot />
+                          {formatRelativeTime(s.lastUpdate)}
+                          {s.todoCount > 0 ? (
+                            <>
+                              <Dot />
+                              {s.todoCount} todos
+                            </>
+                          ) : null}
+                          {s.planSlug ? (
+                            <>
+                              <Dot />
+                              plan
+                            </>
+                          ) : null}
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+              </>
             )}
-          </div>
-        </section>
+          </main>
 
-        {/* Sessions list or message view */}
-        <section className="flex-1 min-w-0 flex flex-col min-h-0">
-          {selected && selectedSession ? (
-            <SessionMessagesView
-              projectSlug={selected.slug}
-              sourceId={selected.sourceId}
-              session={selectedSession.session}
-              sessionIndex={selectedSession.index}
-              hasMemory={selectedProject?.hasMemory}
-              onBack={() => setSelectedSession(null)}
-            />
-          ) : (
-            <>
-              <SectionLabel trailing={selected ? <SourceBadge sourceId={selected.sourceId} /> : null}>
-                {selected ? `Sessions · ${sessions.length}` : 'Select a project'}
-              </SectionLabel>
-              <div className="flex-1 overflow-y-auto">
-                {!selected && (
-                  <EmptyState
-                    title="Select a project"
-                    detail={`Browse sessions, open a transcript, or press ${modKey}K to search.`}
-                    action={
-                      <Btn onClick={() => setSearchOpen(true)}>
-                        Open search <Kbd>{modKey}K</Kbd>
-                      </Btn>
-                    }
-                  />
-                )}
-                {selected && sessions.length === 0 && (
-                  <EmptyState title="No sessions" detail="This project has no indexed sessions yet." />
-                )}
-                {sessions.map((s, index) => {
-                  const prompt = flattenPrompt(s.firstPrompt || s.summary, 96);
-                  const tok = formatTokenUsage(s.tokenUsage, s.sourceId, s.tokensEstimated);
-                  return (
-                    <button
-                      key={`${s.sourceId}:${s.sessionId}`}
-                      type="button"
-                      onClick={() => setSelectedSession({ session: s, index })}
-                      className="block w-full text-left px-4 py-3 border-0 border-b border-solid border-b-white/[0.04] bg-transparent text-inherit cursor-pointer text-xs hover:bg-white/[0.03] transition-colors"
-                    >
-                      <div className="flex items-center gap-2.5 mb-1">
-                        <span className="font-medium text-white/75 tabular-nums min-w-[28px]">#{index + 1}</span>
-                        {s.gitBranch ? (
-                          <span className="text-[11px] text-amber-200/75 font-mono">{s.gitBranch}</span>
-                        ) : (
-                          <span className="text-[11px] text-white/25">no branch</span>
-                        )}
-                        <span className="flex-1" />
-                        <span className="font-mono text-[10px] opacity-40">{s.sessionId.slice(0, 8)}</span>
-                        <SourceBadge sourceId={s.sourceId} />
-                      </div>
-                      <div className="text-xs italic text-white/45 mb-1 truncate">
-                        {prompt ? `"${prompt}"` : '(no prompt)'}
-                      </div>
-                      <div className="text-[10px] text-white/38 tabular-nums">
-                        {formatNumber(s.messageCount)} msgs
-                        <Dot />
-                        {tok} tokens
-                        <Dot />
-                        {formatDuration(s.lifespanMs)}
-                        <Dot />
-                        {formatRelativeTime(s.lastUpdate)}
-                        {s.todoCount > 0 ? (
-                          <>
-                            <Dot />
-                            {s.todoCount} todos
-                          </>
-                        ) : null}
-                        {s.planSlug ? (
-                          <>
-                            <Dot />
-                            plan
-                          </>
-                        ) : null}
-                        {s.hasTask ? (
-                          <>
-                            <Dot />
-                            task
-                          </>
-                        ) : null}
-                        {s.isSidechain ? (
-                          <>
-                            <Dot />
-                            sidechain
-                          </>
-                        ) : null}
-                      </div>
-                    </button>
-                  );
-                })}
-              </div>
-            </>
-          )}
-        </section>
-
-        {/* Rightmost: mille file explorer for selected project folder */}
-        <FileExplorerPanel
-          open={filesOpen}
-          onClose={() => setFilesOpen(false)}
-          projectPath={selectedProject?.absolutePath ?? null}
-          projectLabel={selectedProject?.folderName ?? null}
-        />
-      </main>
+          {/* RIGHT: Structure / Files */}
+          <FileExplorerPanel
+            open={filesOpen}
+            onClose={() => setFilesOpen(false)}
+            projectPath={selectedProject?.absolutePath ?? null}
+            projectLabel={selectedProject?.folderName ?? null}
+            isDark={isDark}
+            sessionArtifacts={
+              selected && selectedSession
+                ? {
+                    projectSlug: selected.slug,
+                    sourceId: selected.sourceId,
+                    sessionId: selectedSession.session.sessionId,
+                    hints: {
+                      todoCount: selectedSession.session.todoCount,
+                      planSlug: selectedSession.session.planSlug,
+                      hasTask: selectedSession.session.hasTask,
+                      hasMemory: selectedProject?.hasMemory,
+                    },
+                  }
+                : null
+            }
+          />
+        </div>
+      </div>
 
       <SearchOverlay
         open={searchOpen}
@@ -599,6 +642,7 @@ function PlaygroundShell() {
         sourceIds={sourceIds}
         scopeProject={scopeProject}
         onNavigate={onSearchNavigate}
+        isDark={isDark}
       />
     </div>
   );

@@ -1,5 +1,5 @@
 /**
- * Shared playground UI primitives — monochrome, quiet, matches LoadingScreen.
+ * Shared playground UI primitives — archive / paper design language.
  */
 
 import type { ButtonHTMLAttributes, CSSProperties, ReactNode } from 'react';
@@ -7,7 +7,7 @@ import type { ButtonHTMLAttributes, CSSProperties, ReactNode } from 'react';
 export function Spinner({ className = '' }: { className?: string }) {
   return (
     <div
-      className={`animate-spin rounded-full h-4 w-4 border-2 border-white/20 border-t-orange-400 ${className}`}
+      className={`animate-spin rounded-full h-4 w-4 border border-ink/20 border-t-sanguine ${className}`}
       aria-hidden
     />
   );
@@ -16,23 +16,25 @@ export function Spinner({ className = '' }: { className?: string }) {
 export function EmptyState({ title, detail, action }: { title: string; detail?: string; action?: ReactNode }) {
   return (
     <div className="flex flex-col items-center justify-center gap-2 py-12 px-6 text-center">
-      <p className="text-sm text-white/45">{title}</p>
-      {detail ? <p className="text-[11px] text-white/30 max-w-xs leading-relaxed">{detail}</p> : null}
+      <p className="font-serif text-sm text-ink/50">{title}</p>
+      {detail ? (
+        <p className="font-mono text-[10px] tracking-wide text-ink/35 max-w-xs leading-relaxed">{detail}</p>
+      ) : null}
       {action ? <div className="mt-2">{action}</div> : null}
     </div>
   );
 }
 
 export function Dot() {
-  return <span className="opacity-35"> · </span>;
+  return <span className="opacity-40"> · </span>;
 }
 
 type BtnVariant = 'ghost' | 'solid' | 'danger';
 
 const BTN: Record<BtnVariant, string> = {
-  ghost: 'bg-transparent border-white/14 text-white/75 hover:bg-white/5 hover:text-white/90 hover:border-white/22',
-  solid: 'bg-white/10 border-white/16 text-white/90 hover:bg-white/14',
-  danger: 'bg-red-500/10 border-red-500/25 text-red-200/90 hover:bg-red-500/15',
+  ghost: 'bg-transparent border-ink/25 text-ink/75 hover:border-ink/50 hover:text-ink',
+  solid: 'bg-ink text-paper border-ink hover:opacity-90 dark:bg-ink dark:text-[#11100f]',
+  danger: 'bg-transparent border-sanguine/40 text-sanguine hover:bg-sanguine/10',
 };
 
 export function Btn({
@@ -44,7 +46,7 @@ export function Btn({
   return (
     <button
       type="button"
-      className={`inline-flex items-center justify-center gap-1.5 text-[11px] px-2.5 py-1 rounded border cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed transition-colors ${BTN[variant]} ${className}`}
+      className={`inline-flex items-center justify-center gap-1.5 font-mono text-[9px] uppercase tracking-widest px-2.5 py-1 border cursor-pointer disabled:opacity-30 disabled:cursor-not-allowed transition-colors rounded-none ${BTN[variant]} ${className}`}
       {...rest}
     >
       {children}
@@ -71,11 +73,9 @@ export function Chip({
       type={onClick ? 'button' : undefined}
       title={title}
       onClick={onClick}
-      className={`inline-flex items-center text-[10px] px-2 py-0.5 rounded border font-mono tracking-wide transition-colors ${
-        active
-          ? 'bg-white/12 border-white/25 text-white/90'
-          : 'bg-transparent border-white/10 text-white/45 hover:text-white/70 hover:border-white/18'
-      } ${onClick ? 'cursor-pointer' : ''} ${className}`}
+      className={`inline-flex items-center font-mono text-[9px] px-1.5 py-0.5 tracking-wide transition-colors border-b ${
+        active ? 'border-ink text-ink opacity-100' : 'border-ink/20 text-ink/45 hover:text-ink/70 hover:border-ink/40'
+      } ${onClick ? 'cursor-pointer bg-transparent' : ''} ${className}`}
     >
       {children}
     </Tag>
@@ -84,8 +84,10 @@ export function Chip({
 
 export function SectionLabel({ children, trailing }: { children: ReactNode; trailing?: ReactNode }) {
   return (
-    <div className="px-3.5 py-2 text-[10px] tracking-[0.12em] uppercase text-white/35 border-b border-white/5 flex items-center gap-2 shrink-0">
-      <span className="flex-1 min-w-0 truncate">{children}</span>
+    <div className="h-10 px-4 border-b border-ink/10 flex items-center gap-2 shrink-0">
+      <span className="flex-1 min-w-0 truncate font-serif text-[10px] uppercase tracking-[0.15em] opacity-80">
+        {children}
+      </span>
       {trailing}
     </div>
   );
@@ -94,15 +96,12 @@ export function SectionLabel({ children, trailing }: { children: ReactNode; trai
 export function LiveDot({ active, label = 'Live' }: { active: boolean; label?: string }) {
   return (
     <span
-      className={`inline-flex items-center gap-1.5 text-[10px] font-mono tracking-wide ${
-        active ? 'text-emerald-300/80' : 'text-white/30'
+      className={`inline-flex items-center gap-1.5 font-mono text-[9px] tracking-[0.1em] ${
+        active ? 'text-verdigris' : 'text-ink/30'
       }`}
       title={active ? 'Receiving live index updates' : 'Waiting for changes'}
     >
-      <span
-        className={`inline-block h-1.5 w-1.5 rounded-full ${active ? 'bg-emerald-400 animate-pulse' : 'bg-white/25'}`}
-        aria-hidden
-      />
+      <span className={`inline-block h-1.5 w-1.5 ${active ? 'bg-current animate-pulse' : 'bg-ink/25'}`} aria-hidden />
       {label}
     </span>
   );
@@ -110,13 +109,12 @@ export function LiveDot({ active, label = 'Live' }: { active: boolean; label?: s
 
 export function Kbd({ children }: { children: ReactNode }) {
   return (
-    <kbd className="inline-flex items-center px-1 py-0.5 rounded border border-white/12 bg-white/[0.04] text-[9px] font-mono text-white/40 leading-none">
+    <kbd className="inline-flex items-center px-1 py-0.5 border border-ink/20 font-mono text-[8px] text-ink/40 leading-none tracking-normal normal-case">
       {children}
     </kbd>
   );
 }
 
-/** Soft panel surface used by overlays / drawers */
 export function PanelShell({
   children,
   className = '',
@@ -127,7 +125,7 @@ export function PanelShell({
   style?: CSSProperties;
 }) {
   return (
-    <div className={`bg-[#0c0c0c] border border-white/10 rounded-md shadow-2xl ${className}`} style={style}>
+    <div className={`border border-ink/40 bg-paper shadow-2xl ${className}`} style={style}>
       {children}
     </div>
   );

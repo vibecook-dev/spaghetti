@@ -3,28 +3,80 @@
 @tailwind utilities;
 
 /*
- * Design tokens for timeline chat UI (ported from ui-v2 globals).
- * Dark-only for the playground shell.
+ * Archive / paper design system (spaghetti-ui-design).
+ * Light: warm cream paper · Dark: ink-black paper.
  */
-:root,
+
+:root {
+  --archive-ink: #2b2623;
+  --archive-ink-muted: rgba(43, 38, 35, 0.65);
+  --archive-ink-faint: rgba(43, 38, 35, 0.4);
+  --archive-ink-line: rgba(43, 38, 35, 0.2);
+  --archive-ink-line-strong: rgba(43, 38, 35, 0.4);
+  --archive-paper: #f1ede4;
+  --archive-paper-deep: #e9e5da;
+  --archive-chrome: #d1ccc0;
+  --archive-sanguine: #9a3b28;
+  --archive-verdigris: #4f6b4a;
+  --archive-indigo: #3f5c6b;
+  --archive-faded: #736958;
+
+  --background: #f8f6f0;
+  --foreground: #2b2623;
+  --card: #f1ede4;
+  --card-foreground: #2b2623;
+  --primary: #2b2623;
+  --primary-foreground: #f8f6f0;
+  --secondary: rgba(43, 38, 35, 0.06);
+  --secondary-foreground: #2b2623;
+  --muted: rgba(43, 38, 35, 0.08);
+  --muted-foreground: rgba(43, 38, 35, 0.6);
+  --accent: #9a3b28;
+  --accent-foreground: #f8f6f0;
+  --destructive: #9a3b28;
+  --border: rgba(43, 38, 35, 0.2);
+  --input: rgba(43, 38, 35, 0.15);
+  --ring: #9a3b28;
+  --radius: 0;
+
+  /* Timeline chat SDK tokens */
+  --chat-bg: transparent;
+  --chat-fg: #2b2623;
+}
+
 .dark {
-  --background: #0a0a0a;
-  --foreground: #f4f4f5;
-  --card: #141414;
-  --card-foreground: #f4f4f5;
-  --primary: #ea580c;
-  --primary-foreground: #fafafa;
-  --secondary: #27272a;
-  --secondary-foreground: #f4f4f5;
-  --muted: #27272a;
-  --muted-foreground: #a1a1aa;
-  --accent: #ea580c;
-  --accent-foreground: #fafafa;
-  --destructive: #ef4444;
-  --border: rgba(255, 255, 255, 0.1);
-  --input: rgba(255, 255, 255, 0.1);
-  --ring: #ea580c;
-  --radius: 0.5rem;
+  --archive-ink: #d4cbbd;
+  --archive-ink-muted: rgba(212, 203, 189, 0.65);
+  --archive-ink-faint: rgba(212, 203, 189, 0.4);
+  --archive-ink-line: rgba(212, 203, 189, 0.2);
+  --archive-ink-line-strong: rgba(212, 203, 189, 0.35);
+  --archive-paper: #141312;
+  --archive-paper-deep: #11100f;
+  --archive-chrome: #0a0908;
+  --archive-sanguine: #d98d78;
+  --archive-verdigris: #8ba888;
+  --archive-indigo: #7fa6b5;
+  --archive-faded: #a89a86;
+
+  --background: #171615;
+  --foreground: #d4cbbd;
+  --card: #141312;
+  --card-foreground: #d4cbbd;
+  --primary: #d4cbbd;
+  --primary-foreground: #11100f;
+  --secondary: rgba(212, 203, 189, 0.08);
+  --secondary-foreground: #d4cbbd;
+  --muted: rgba(212, 203, 189, 0.1);
+  --muted-foreground: rgba(212, 203, 189, 0.55);
+  --accent: #d98d78;
+  --accent-foreground: #11100f;
+  --destructive: #d98d78;
+  --border: rgba(212, 203, 189, 0.2);
+  --input: rgba(212, 203, 189, 0.15);
+  --ring: #d98d78;
+
+  --chat-bg: transparent;
+  --chat-fg: #d4cbbd;
 }
 
 html,
@@ -32,11 +84,63 @@ body,
 #root {
   height: 100%;
   margin: 0;
-  background: var(--background);
-  color: var(--foreground);
+  background: var(--archive-chrome);
+  color: var(--archive-ink);
+  font-family:
+    ui-sans-serif,
+    system-ui,
+    -apple-system,
+    BlinkMacSystemFont,
+    'Segoe UI',
+    sans-serif;
+  -webkit-font-smoothing: antialiased;
 }
 
-/* Tailwind v3 theme extensions for border-border / bg-background etc. */
+.font-serif {
+  font-family: 'EB Garamond', Georgia, 'Times New Roman', serif;
+}
+
+.font-mono {
+  font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+}
+
+/* Hide scrollbars in archive panes (design: scrollbar-hide) */
+.scrollbar-hide {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+.scrollbar-hide::-webkit-scrollbar {
+  display: none;
+}
+
+/* Quiet focus */
+button:focus-visible,
+input:focus-visible {
+  outline: 1px solid var(--ring);
+  outline-offset: 1px;
+}
+
+/* Thin scrollbars when not hidden */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--archive-ink-faint) transparent;
+}
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+*::-webkit-scrollbar-thumb {
+  background: var(--archive-ink-faint);
+  border-radius: 0;
+}
+
+.line-clamp-2 {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
 @layer utilities {
   .bg-background {
     background-color: var(--background);
@@ -50,32 +154,20 @@ body,
   .bg-primary {
     background-color: var(--primary);
   }
-  .bg-destructive {
-    background-color: var(--destructive);
-  }
   .text-foreground {
     color: var(--foreground);
   }
   .text-muted-foreground {
     color: var(--muted-foreground);
   }
-  .text-card-foreground {
-    color: var(--card-foreground);
-  }
   .text-primary {
     color: var(--primary);
-  }
-  .text-destructive {
-    color: var(--destructive);
   }
   .border-border {
     border-color: var(--border);
   }
-  .border-destructive {
-    border-color: var(--destructive);
-  }
   .chat-card-shadow {
-    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.4);
+    box-shadow: none;
   }
   .animate-fadeInUp {
     animation: fadeInUp 0.35s ease-out both;
@@ -93,43 +185,26 @@ body,
   }
 }
 
-/* Search / overlay helpers */
-.line-clamp-2 {
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
+/* Soften SDK timeline cards inside archive paper */
+.archive-transcript .bg-card,
+.archive-transcript [class*='bg-\[#'] {
+  /* leave as-is; panel provides paper */
 }
 
-/* Quiet focus rings for keyboard users */
-button:focus-visible,
-input:focus-visible {
-  outline: 1px solid rgba(234, 88, 12, 0.55);
-  outline-offset: 1px;
-}
-
-/* Thin scrollbars in dark chrome */
-* {
-  scrollbar-width: thin;
-  scrollbar-color: rgba(255, 255, 255, 0.15) transparent;
-}
-
-*::-webkit-scrollbar {
-  width: 8px;
-  height: 8px;
-}
-*::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.12);
-  border-radius: 4px;
-}
-*::-webkit-scrollbar-thumb:hover {
-  background: rgba(255, 255, 255, 0.2);
-}
-
-/* ── Mille file tree (right panel) ─────────────────────────────────────── */
+/* Mille tree inside Structure panel */
 .mille-panel {
-  color: rgba(242, 242, 242, 0.88);
-  font-size: 12px;
+  color: var(--archive-ink);
+  font-size: 11px;
+  font-family: ui-monospace, 'SF Mono', Menlo, monospace;
+  --mille-row-height: 22px;
+  --mille-indent-size: 10px;
+  --mille-accent-bg: var(--archive-sanguine);
+  --mille-accent-fg: var(--archive-paper);
+  --mille-row-bg-hover: color-mix(in srgb, var(--archive-ink) 5%, transparent);
+  --mille-row-bg-selected: color-mix(in srgb, var(--archive-ink) 8%, transparent);
+  --mille-row-bg-selected-focused: color-mix(in srgb, var(--archive-sanguine) 18%, transparent);
+  --mille-indent-guide: var(--archive-ink-line);
+  --mille-chevron-color: var(--archive-ink-faint);
 }
 
 .mille-panel .mille-tree,
@@ -137,17 +212,3 @@ input:focus-visible {
   height: 100%;
   outline: none;
 }
-
-/* Keep row density tight against near-black chrome */
-.mille-panel {
-  --mille-row-height: 20px;
-  --mille-indent-size: 10px;
-  --mille-accent-bg: #ea580c;
-  --mille-accent-fg: #fafafa;
-  --mille-row-bg-hover: rgba(255, 255, 255, 0.04);
-  --mille-row-bg-selected: rgba(255, 255, 255, 0.08);
-  --mille-row-bg-selected-focused: rgba(234, 88, 12, 0.22);
-  --mille-indent-guide: rgba(255, 255, 255, 0.08);
-  --mille-chevron-color: rgba(255, 255, 255, 0.4);
-}
-

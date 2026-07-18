@@ -3,7 +3,6 @@ export default {
   darkMode: 'class',
   content: [
     './src/renderer/**/*.{html,ts,tsx}',
-    // MessageEntry + timeline chat UI
     '../../packages/sdk/src/react/**/*.{ts,tsx}',
   ],
   theme: {
@@ -35,22 +34,39 @@ export default {
         destructive: {
           DEFAULT: 'var(--destructive)',
         },
+        // Archive palette (design mock)
+        ink: {
+          DEFAULT: 'var(--archive-ink)',
+          muted: 'var(--archive-ink-muted)',
+          faint: 'var(--archive-ink-faint)',
+          line: 'var(--archive-ink-line)',
+        },
+        paper: {
+          DEFAULT: 'var(--archive-paper)',
+          deep: 'var(--archive-paper-deep)',
+        },
+        chrome: 'var(--archive-chrome)',
+        sanguine: 'var(--archive-sanguine)',
+        verdigris: 'var(--archive-verdigris)',
+      },
+      fontFamily: {
+        serif: ['"EB Garamond"', 'Georgia', 'Times New Roman', 'serif'],
+        mono: ['ui-monospace', 'SF Mono', 'Menlo', 'Consolas', 'monospace'],
       },
       borderRadius: {
-        lg: 'var(--radius)',
-        md: 'calc(var(--radius) - 2px)',
-        sm: 'calc(var(--radius) - 4px)',
+        lg: '0',
+        md: '0',
+        sm: '0',
+        none: '0',
       },
     },
   },
   plugins: [],
-  // Badge builds `bg-${color}` dynamically; safelist common MessageEntry accents.
   safelist: [
     {
       pattern:
-        /^(bg|text|border|border-l)-(green|yellow|cyan|blue|red|purple|indigo|amber|gray|white)(-(50|100|200|300|400|500|600|700))?(\/\d+)?$/,
+        /^(bg|text|border|border-l)-(green|yellow|cyan|blue|red|purple|indigo|amber|gray|white|orange)(-(50|100|200|300|400|500|600|700))?(\/\d+)?$/,
     },
-    // Arbitrary opacity backgrounds used by MessageEntry
     'bg-green-500/[0.04]',
     'bg-blue-500/[0.04]',
     'bg-red-500/[0.04]',

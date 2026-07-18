@@ -24,11 +24,19 @@ export interface SearchOverlayProps {
   /** Optional scope: limit search to selected project. */
   scopeProject?: { slug: string; sourceId: string; folderName?: string } | null;
   onNavigate: (target: SearchNavigateTarget) => void;
+  isDark?: boolean;
 }
 
 const LIMIT = 40;
 
-export function SearchOverlay({ open, onClose, sourceIds, scopeProject, onNavigate }: SearchOverlayProps) {
+export function SearchOverlay({
+  open,
+  onClose,
+  sourceIds,
+  scopeProject,
+  onNavigate,
+  isDark = true,
+}: SearchOverlayProps) {
   const inputRef = useRef<HTMLInputElement>(null);
   const [text, setText] = useState('');
   const [sourceFilter, setSourceFilter] = useState<string | null>(null);
@@ -143,7 +151,9 @@ export function SearchOverlay({ open, onClose, sourceIds, scopeProject, onNaviga
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-start justify-center pt-[12vh] px-4 bg-black/70 backdrop-blur-[2px]"
+      className={`fixed inset-0 z-50 flex items-start justify-center pt-[12vh] px-4 backdrop-blur-[3px] ${
+        isDark ? 'bg-[#11100f]/72' : 'bg-[#2b2623]/40'
+      }`}
       role="dialog"
       aria-modal="true"
       aria-label="Search agent history"
@@ -151,10 +161,19 @@ export function SearchOverlay({ open, onClose, sourceIds, scopeProject, onNaviga
         if (e.target === e.currentTarget) onClose();
       }}
     >
-      <div className="w-full max-w-xl bg-[#101010] border border-white/12 rounded-lg shadow-2xl overflow-hidden flex flex-col max-h-[70vh]">
-        {/* Search input */}
-        <div className="flex items-center gap-2 px-3 py-2.5 border-b border-white/10">
-          <span className="text-white/30 text-sm select-none" aria-hidden>
+      <div
+        className={`w-full max-w-xl border shadow-2xl overflow-hidden flex flex-col max-h-[70vh] ${
+          isDark ? 'border-ink/45 bg-[#171615] text-ink' : 'border-ink/60 bg-[#f8f6f0] text-ink'
+        }`}
+      >
+        <div className="flex items-center gap-2 px-4 py-3 border-b border-ink/20">
+          <span className="font-mono text-[9px] tracking-[0.18em] opacity-55">SPAGHETTI ARCHIVE · SEARCH</span>
+          <span className="flex-1" />
+          <Kbd>esc</Kbd>
+        </div>
+
+        <div className="flex items-center gap-2 px-4 py-2.5 border-b border-ink/15">
+          <span className="opacity-40 text-sm select-none" aria-hidden>
             ⌕
           </span>
           <input
@@ -164,16 +183,14 @@ export function SearchOverlay({ open, onClose, sourceIds, scopeProject, onNaviga
             onChange={(e) => setText(e.target.value)}
             onKeyDown={onKeyDown}
             placeholder="Search messages, plans, todos…"
-            className="flex-1 bg-transparent text-[13px] text-white/90 outline-none placeholder:text-white/30 min-w-0"
+            className="flex-1 bg-transparent font-serif text-[15px] text-ink outline-none placeholder:opacity-35 min-w-0"
             autoComplete="off"
             spellCheck={false}
           />
           {loading ? <Spinner /> : null}
-          <Kbd>esc</Kbd>
         </div>
 
-        {/* Filters */}
-        <div className="flex items-center gap-1.5 px-3 py-2 border-b border-white/6 flex-wrap">
+        <div className="flex items-center gap-1.5 px-3 py-2 border-b border-ink/10 flex-wrap">
           <Chip active={sourceFilter === null} onClick={() => setSourceFilter(null)}>
             All agents
           </Chip>
@@ -194,17 +211,16 @@ export function SearchOverlay({ open, onClose, sourceIds, scopeProject, onNaviga
           ) : null}
         </div>
 
-        {/* Results */}
-        <div className="flex-1 overflow-y-auto min-h-0">
+        <div className="flex-1 overflow-y-auto min-h-0 scrollbar-hide">
           {error ? (
-            <div className="px-4 py-3 text-[12px] text-red-300/90">{error}</div>
+            <div className="px-4 py-3 font-mono text-[11px] text-sanguine">{error}</div>
           ) : !text.trim() ? (
             <EmptyState
               title="Search local agent history"
               detail="Full-text over indexed messages and artifacts. Use ↑↓ to move, Enter to open."
             />
           ) : loading && hits.length === 0 ? (
-            <div className="flex items-center justify-center gap-2 py-10 text-xs text-white/40">
+            <div className="flex items-center justify-center gap-2 py-10 font-mono text-[10px] tracking-widest uppercase opacity-50">
               <Spinner />
               Searching…
             </div>
@@ -223,25 +239,27 @@ export function SearchOverlay({ open, onClose, sourceIds, scopeProject, onNaviga
                       type="button"
                       onMouseEnter={() => setActiveIndex(i)}
                       onClick={() => navigateTo(r)}
-                      className={`w-full text-left px-3 py-2.5 border-none cursor-pointer transition-colors ${
-                        active ? 'bg-white/[0.07]' : 'bg-transparent hover:bg-white/[0.04]'
+                      className={`w-full text-left px-4 py-2.5 border-none cursor-pointer transition-colors ${
+                        active ? 'bg-ink/10' : 'bg-transparent hover:bg-ink/5'
                       }`}
                     >
                       <div className="flex items-center gap-2 mb-1">
-                        <span className="text-[10px] font-mono text-violet-300/80 uppercase tracking-wide shrink-0">
+                        <span className="text-[10px] font-mono text-sanguine/80 uppercase tracking-wide shrink-0">
                           {r.type}
                         </span>
-                        {r.sourceId ? <SourceBadge sourceId={r.sourceId} /> : null}
+                        {r.sourceId ? <SourceBadge sourceId={r.sourceId} isDark={isDark} /> : null}
                         {r.projectSlug ? (
-                          <span className="text-[11px] text-white/50 truncate min-w-0">{shortSlug(r.projectSlug)}</span>
+                          <span className="text-[11px] font-mono text-ink/50 truncate min-w-0">
+                            {shortSlug(r.projectSlug)}
+                          </span>
                         ) : null}
                         {r.sessionId ? (
-                          <span className="text-[10px] font-mono text-white/25 ml-auto shrink-0">
+                          <span className="text-[10px] font-mono text-ink/30 ml-auto shrink-0">
                             {r.sessionId.slice(0, 8)}
                           </span>
                         ) : null}
                       </div>
-                      <div className="text-[12px] text-white/70 leading-snug line-clamp-2">
+                      <div className="font-serif text-[13px] text-ink/75 leading-snug line-clamp-2">
                         {flattenPrompt(r.snippet, 180) || '(empty snippet)'}
                       </div>
                     </button>
@@ -252,8 +270,7 @@ export function SearchOverlay({ open, onClose, sourceIds, scopeProject, onNaviga
           )}
         </div>
 
-        {/* Footer */}
-        <div className="flex items-center gap-3 px-3 py-2 border-t border-white/8 text-[10px] text-white/30">
+        <div className="flex items-center gap-3 px-4 py-2 border-t border-ink/15 font-mono text-[9px] tracking-widest uppercase opacity-50">
           <span>
             {results ? (
               <>
@@ -265,15 +282,6 @@ export function SearchOverlay({ open, onClose, sourceIds, scopeProject, onNaviga
             )}
           </span>
           <span className="flex-1" />
-          <span className="inline-flex items-center gap-1">
-            <Kbd>↑</Kbd>
-            <Kbd>↓</Kbd>
-            navigate
-          </span>
-          <span className="inline-flex items-center gap-1">
-            <Kbd>↵</Kbd>
-            open
-          </span>
           <Btn variant="ghost" className="!py-0.5 !px-2" onClick={onClose}>
             Close
           </Btn>

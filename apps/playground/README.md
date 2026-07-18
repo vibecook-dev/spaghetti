@@ -104,10 +104,11 @@ from source if the prebuild isn't available.
   Codex / Grok are auto-detected. Progress/ready/change events go to all
   renderer windows. Quit uses `dispose()`.
 - **preload** exposes `window.spaghetti` (`src/shared/ipc.ts`).
-- **renderer** shows a dedicated loading screen during ingest, then a
-  multi-source project/session browser with `sourceId` badges, full-text
-  search (`⌘K`), live session tails, and an artifact drawer
-  (plan / todos / task / subagents / memory).
+- **renderer** uses the **archive / paper** design (EB Garamond, ink on
+  cream or ink-black paper, light/dark toggle). Multi-source project
+  browser with `sourceId` badges, full-text search (`⌘K`), live session
+  tails, Structure panel (mille files + session artifacts), and
+  ProjectPage-style message filters.
 
 ## Renderer features
 
