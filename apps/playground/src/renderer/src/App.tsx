@@ -387,7 +387,7 @@ function PlaygroundShell() {
 
   const modKey = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform) ? '⌘' : 'Ctrl+';
 
-  if (rebuilding || retrying || (!DEBUG_MODE && (!ready || error))) {
+  if (!ready || rebuilding || retrying || error) {
     return (
       <LoadingScreen
         sources={sources}
