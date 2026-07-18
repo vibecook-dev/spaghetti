@@ -51,6 +51,11 @@ export interface HookInfo {
  * - Token usage is normalized to camelCase
  */
 export interface SessionMessage {
+  /**
+   * Stable identity of this normalized timeline row. Unlike source `uuid`,
+   * this is guaranteed unique within a session and is safe for UI keys.
+   */
+  timelineId?: string;
   uuid: string;
   parentUuid: string | null;
   /** Message type: 'user' | 'assistant' | 'tool_use' | 'thinking' | 'compact_summary' | 'system' */

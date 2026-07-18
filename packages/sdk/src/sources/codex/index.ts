@@ -29,6 +29,7 @@ export {
   codexContentText,
   CODEX_FIRST_PROMPT_MAX,
 } from './first-prompt.js';
+export { isCodexInternalSessionPayload } from './session-meta.js';
 
 const UUID = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
 

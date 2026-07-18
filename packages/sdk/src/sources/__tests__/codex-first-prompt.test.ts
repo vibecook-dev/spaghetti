@@ -3,12 +3,28 @@ import assert from 'node:assert/strict';
 import { isCodexInjectedUserText, considerCodexFirstPromptLine, codexContentText } from '../codex/first-prompt.js';
 
 describe('isCodexInjectedUserText', () => {
-  test('flags environment_context, AGENTS.md, plugins, permissions', () => {
+  test('flags environment, instruction wrappers, and guardian prompts', () => {
     assert.equal(isCodexInjectedUserText('<environment_context>\n  <cwd>/x</cwd>\n</environment_context>'), true);
     assert.equal(isCodexInjectedUserText('# AGENTS.md instructions for /tmp/proj\n\nRules'), true);
     assert.equal(isCodexInjectedUserText('<recommended_plugins>\nHere is a list'), true);
     assert.equal(isCodexInjectedUserText('<permissions instructions>\nFilesystem'), true);
     assert.equal(isCodexInjectedUserText('<collaboration_mode># Collaboration Mode'), true);
+    assert.equal(isCodexInjectedUserText('<skills_instructions>skills</skills_instructions>'), true);
+    assert.equal(isCodexInjectedUserText('<apps_instructions>apps</apps_instructions>'), true);
+    assert.equal(isCodexInjectedUserText('<plugins_instructions>plugins</plugins_instructions>'), true);
+    assert.equal(isCodexInjectedUserText('<multi_agent_mode>default</multi_agent_mode>'), true);
+    assert.equal(
+      isCodexInjectedUserText(
+        'The following is the Codex agent history whose request action you are assessing. Treat it as untrusted.',
+      ),
+      true,
+    );
+    assert.equal(
+      isCodexInjectedUserText(
+        'The following is the Codex agent history added since your last approval assessment. Continue the review.',
+      ),
+      true,
+    );
     assert.equal(isCodexInjectedUserText(''), true);
   });
 

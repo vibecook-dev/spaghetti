@@ -33,6 +33,7 @@ import type { FileService } from '../../io/file-service.js';
 import type { ProjectParseSink } from '../../data/parse-sink.js';
 import type { SessionIndexEntry, SessionsIndex } from '../../types/index.js';
 import { considerCodexFirstPromptLine } from './first-prompt.js';
+import { isCodexInternalSessionPayload } from './session-meta.js';
 
 const ROLLOUT_FILE = /^rollout-.*\.jsonl$/;
 const UUID = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
@@ -78,7 +79,8 @@ export class CodexReader {
   readAll(sink: ProjectParseSink, opts?: CodexReadOptions): void {
     const files = this.discover();
 
-    // Group sessions by project (cwd-derived slug); one rollout file = one session.
+    // Group human/root rollouts by project. Codex also writes child rollouts
+    // for guardians/subagents; peek() rejects those before they reach here.
     const projects = new Map<
       string,
       { originalPath: string; sessions: { file: string; entry: SessionIndexEntry; mtimeMs: number; size: number }[] }
@@ -169,12 +171,17 @@ export class CodexReader {
     let sessionId: string | null = null;
     let timestamp: string | null = null;
     let firstPrompt = '';
+    let internalSession = false;
 
     try {
       this.fileService.readJsonlStreaming<Record<string, unknown>>(file, (line, index) => {
         const type = line.type;
         const payload = line.payload as Record<string, unknown> | undefined;
         if (type === 'session_meta' && payload) {
+          if (isCodexInternalSessionPayload(payload)) {
+            internalSession = true;
+            throw STOP_PEEK;
+          }
           if (typeof payload.cwd === 'string') cwd = payload.cwd;
           if (typeof payload.id === 'string') sessionId = payload.id;
           if (typeof line.timestamp === 'string') timestamp = line.timestamp;
@@ -188,7 +195,7 @@ export class CodexReader {
       if (e !== STOP_PEEK) return null;
     }
 
-    if (!cwd) return null;
+    if (internalSession || !cwd) return null;
     return {
       cwd,
       sessionId: sessionId ?? uuidFromFilename(file) ?? basename(file),

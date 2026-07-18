@@ -12,6 +12,7 @@
  */
 
 import type { SessionMessage } from '../types/index.js';
+import { isCodexInjectedUserText } from './codex/first-prompt.js';
 
 /** Collect readable text from a string, or a `[{ type, text }]` block array. */
 function collectContentText(content: unknown): string {
@@ -100,7 +101,11 @@ export function adaptMessageForDisplay(raw: unknown, sourceId: string): SessionM
   if (!payload || payload.type !== 'message') return null;
   const role = typeof payload.role === 'string' ? payload.role : 'unknown';
   const text = collectContentText(payload.content);
-  if (role === 'user' || role === 'developer') {
+  if (role === 'user') {
+    // Codex records environment/permission/plugin scaffolding with role=user.
+    // It is model input, but not a human transcript turn and must not affect
+    // the UI's user rows or database-backed message facets.
+    if (isCodexInjectedUserText(text)) return null;
     return {
       type: 'user',
       uuid: typeof payload.id === 'string' ? payload.id : '',
@@ -133,21 +138,9 @@ export function adaptMessageForDisplay(raw: unknown, sourceId: string): SessionM
       },
     } as SessionMessage;
   }
-  // system / other → thin system line
-  return {
-    type: 'system',
-    uuid: typeof payload.id === 'string' ? payload.id : '',
-    parentUuid: null,
-    timestamp: typeof line.timestamp === 'string' ? line.timestamp : '',
-    sessionId: '',
-    cwd: '',
-    version: '',
-    gitBranch: '',
-    isSidechain: false,
-    userType: 'external',
-    content: text || role,
-    level: 'info',
-  } as SessionMessage;
+  // Developer/system scaffolding is internal model context. Keep it in the
+  // raw message store, but do not surface it as a human transcript row.
+  return null;
 }
 
 export function adaptMessagesForDisplay(raw: unknown[], sourceId: string): SessionMessage[] {

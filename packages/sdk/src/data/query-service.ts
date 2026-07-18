@@ -460,7 +460,12 @@ class QueryServiceImpl implements QueryService {
     const messages = pageRows
       .map((row) => {
         try {
-          return JSON.parse(row.data) as TimelinePage['messages'][number];
+          const message = JSON.parse(row.data) as TimelinePage['messages'][number];
+          // Source UUIDs are domain references, not row identities: Codex may
+          // omit them, checkpoints reuse their referenced messageId, and some
+          // system events repeat UUIDs. The normalized row index is unique.
+          message.timelineId = `${sessionId}:${row.timeline_index}`;
+          return message;
         } catch {
           return null;
         }

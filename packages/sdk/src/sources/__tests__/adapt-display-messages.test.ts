@@ -49,6 +49,41 @@ describe('adaptMessageForDisplay', () => {
     assert.equal(blocks[0].text, 'codex reply');
   });
 
+  test('skips Codex developer and injected user context', () => {
+    const developer = {
+      type: 'response_item',
+      payload: {
+        type: 'message',
+        role: 'developer',
+        content: [{ type: 'input_text', text: 'internal instructions' }],
+      },
+    };
+    const environment = {
+      type: 'response_item',
+      payload: {
+        type: 'message',
+        role: 'user',
+        content: [{ type: 'input_text', text: '<environment_context><cwd>/tmp/x</cwd></environment_context>' }],
+      },
+    };
+    const guardian = {
+      type: 'response_item',
+      payload: {
+        type: 'message',
+        role: 'user',
+        content: [
+          {
+            type: 'input_text',
+            text: 'The following is the Codex agent history added since your last approval assessment. Continue.',
+          },
+        ],
+      },
+    };
+    assert.equal(adaptMessageForDisplay(developer, 'codex'), null);
+    assert.equal(adaptMessageForDisplay(environment, 'codex'), null);
+    assert.equal(adaptMessageForDisplay(guardian, 'codex'), null);
+  });
+
   test('skips non-message Codex lines', () => {
     const raw = { type: 'session_meta', payload: { id: 'x' } };
     assert.equal(adaptMessageForDisplay(raw, 'codex'), null);
@@ -158,6 +193,40 @@ describe('transformRawMessagesToTimeline + sourceId', () => {
     assert.equal(timeline[0].content, 'codex hello');
     assert.equal(timeline[1].type, 'assistant');
     assert.equal(timeline[1].content, 'codex reply');
+  });
+
+  test('Codex timeline only receives genuine human turns', () => {
+    const raw = [
+      {
+        type: 'response_item',
+        payload: { type: 'message', role: 'developer', content: [{ type: 'input_text', text: 'system rules' }] },
+      },
+      {
+        type: 'response_item',
+        payload: {
+          type: 'message',
+          role: 'user',
+          content: [{ type: 'input_text', text: '<permissions instructions>private context' }],
+        },
+      },
+      {
+        type: 'response_item',
+        payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'human prompt' }] },
+      },
+      {
+        type: 'response_item',
+        payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'answer' }] },
+      },
+    ];
+
+    const timeline = transformRawMessagesToTimeline(raw, { sourceId: 'codex' });
+    assert.deepEqual(
+      timeline.map((message) => [message.type, message.content]),
+      [
+        ['user', 'human prompt'],
+        ['assistant', 'answer'],
+      ],
+    );
   });
 
   test('with sourceId=grok, Grok user/assistant rows appear in the timeline', () => {

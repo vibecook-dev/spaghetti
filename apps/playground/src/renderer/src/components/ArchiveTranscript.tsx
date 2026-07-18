@@ -113,6 +113,14 @@ function branchLabel(msg: ChatSessionMessage): string | undefined {
   return raw.length > 40 ? raw.slice(0, 40) + '…' : raw;
 }
 
+function messageIdentity(msg: ChatSessionMessage, index: number): string {
+  if (msg.timelineId) return msg.timelineId;
+  // Development fixtures and legacy callers may not come from the normalized
+  // DB query. Keep their fallback unique without treating source UUID as a
+  // uniqueness guarantee.
+  return `${msg.sessionId}:${msg.type}:${msg.uuid || 'missing'}:${msg.timestamp}:${index}`;
+}
+
 export interface ArchiveTranscriptProps {
   messages: ChatSessionMessage[];
   isDark: boolean;
@@ -136,18 +144,20 @@ export function ArchiveTranscript({ messages, isDark }: ArchiveTranscriptProps) 
    */
   const visible = useMemo(() => {
     const hideBelow: number[] = [];
-    return messages.filter((msg) => {
-      const depth = depthOf(msg);
-      while (hideBelow.length > 0 && depth <= hideBelow[hideBelow.length - 1]!) {
-        hideBelow.pop();
-      }
-      if (hideBelow.length > 0) return false;
-      const kind = mapKind(msg);
-      if (kind === 'branch_start' && collapsed.has(msg.uuid)) {
-        hideBelow.push(depth);
-      }
-      return true;
-    });
+    return messages
+      .map((msg, index) => ({ msg, identity: messageIdentity(msg, index) }))
+      .filter(({ msg, identity }) => {
+        const depth = depthOf(msg);
+        while (hideBelow.length > 0 && depth <= hideBelow[hideBelow.length - 1]!) {
+          hideBelow.pop();
+        }
+        if (hideBelow.length > 0) return false;
+        const kind = mapKind(msg);
+        if (kind === 'branch_start' && collapsed.has(identity)) {
+          hideBelow.push(depth);
+        }
+        return true;
+      });
   }, [messages, collapsed]);
 
   const ink = inkHex(isDark);
@@ -157,15 +167,15 @@ export function ArchiveTranscript({ messages, isDark }: ArchiveTranscriptProps) 
 
   return (
     <div className="flex flex-col">
-      {visible.map((msg, i) => {
+      {visible.map(({ msg, identity }, i) => {
         const next = visible[i + 1];
         const depth = depthOf(msg);
-        const nextDepth = next ? depthOf(next) : 0;
+        const nextDepth = next ? depthOf(next.msg) : 0;
         const kind = mapKind(msg);
         const meta = TYPE_META[kind];
         const Icon = meta.Icon;
         const accent = accentHex(kind, isDark);
-        const isCollapsed = collapsed.has(msg.uuid);
+        const isCollapsed = collapsed.has(identity);
         const ToggleIcon = isCollapsed ? ChevronRight : ChevronDown;
         const isLast = i === visible.length - 1;
         const returnsToMain = depth > 0 && nextDepth < depth;
@@ -175,7 +185,7 @@ export function ArchiveTranscript({ messages, isDark }: ArchiveTranscriptProps) 
         const labelChip = branchLabel(msg);
 
         return (
-          <div key={msg.uuid} className="relative flex" style={{ marginLeft: depth * INDENT }}>
+          <div key={identity} className="relative flex" style={{ marginLeft: depth * INDENT }}>
             {/* Rail column */}
             <div className="relative shrink-0 flex justify-start" style={{ width: RAIL_W }}>
               {/* Continuous main rail behind branched entries */}
@@ -209,7 +219,7 @@ export function ArchiveTranscript({ messages, isDark }: ArchiveTranscriptProps) 
               {/* Square node — left accent rule, paper fill cuts the line */}
               <button
                 type="button"
-                onClick={() => toggle(msg.uuid)}
+                onClick={() => toggle(identity)}
                 aria-expanded={!isCollapsed}
                 aria-label={`${isCollapsed ? 'Expand' : 'Collapse'} ${meta.label} message`}
                 className="relative z-10 mt-1 flex items-center justify-center rounded-none"

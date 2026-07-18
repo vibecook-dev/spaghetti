@@ -41,8 +41,10 @@ import { createCodexLiveWatch, type CodexLiveWatch } from './live-watch.js';
  * - token_count_v2_estimate — token attribution / tiktoken fallback
  * - first_prompt_v2_skip_injected — session list title skips environment_context /
  *   AGENTS.md / plugins; prefers event_msg user_message
+ * - root_sessions_v3_human_timeline — hides child rollouts and excludes Codex
+ *   developer/injected-user context from the materialized display timeline
  */
-const CODEX_EXTRACT_VERSION = 'first_prompt_v2_skip_injected';
+const CODEX_EXTRACT_VERSION = 'root_sessions_v3_human_timeline';
 const CODEX_EXTRACT_META_KEY = 'codex_extract_version';
 
 export class CodexLifecycleOwner extends EventEmitter implements LifecycleOwner {

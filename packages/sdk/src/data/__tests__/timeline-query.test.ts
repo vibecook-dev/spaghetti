@@ -71,6 +71,13 @@ describe('normalized timeline DB queries', () => {
         sessionId: SESSION,
         message: { role: 'assistant', content: [{ type: 'text', text: 'newest assistant response' }] },
       },
+      {
+        type: 'file-history-snapshot',
+        messageId: 'user-1',
+        timestamp: '2026-01-01T00:00:04Z',
+        sessionId: SESSION,
+        snapshot: { timestamp: '2026-01-01T00:00:04Z', trackedFileBackups: {} },
+      },
     ];
     rows.forEach((data, index) => {
       sqlite.run(
@@ -97,8 +104,8 @@ describe('normalized timeline DB queries', () => {
 
   test('facets count the full normalized session, including split assistant parts', () => {
     const facets = query.getSessionTimelineFacets(SLUG, SESSION, { sourceId: 'claude-code' });
-    assert.equal(facets.total, 5);
-    assert.deepEqual(facets.messageCounts, { assistant: 2, thinking: 1, tool_use: 1, user: 1 });
+    assert.equal(facets.total, 6);
+    assert.deepEqual(facets.messageCounts, { assistant: 2, checkpoint: 1, thinking: 1, tool_use: 1, user: 1 });
     assert.deepEqual(facets.toolCounts, { Bash: 1 });
   });
 
@@ -128,6 +135,16 @@ describe('normalized timeline DB queries', () => {
     assert.equal(tools.messages[0]?.toolUse?.result?.content, '/tmp/timeline-project');
   });
 
+  test('timeline identity stays unique when source UUIDs collide', () => {
+    const page = query.getSessionTimeline(SLUG, SESSION, { limit: 20 });
+    const sourceIds = page.messages.map((message) => message.uuid);
+    assert.equal(sourceIds.filter((uuid) => uuid === 'user-1').length, 2, 'fixture must contain the collision');
+
+    const timelineIds = page.messages.map((message) => message.timelineId);
+    assert.equal(timelineIds.every(Boolean), true);
+    assert.equal(new Set(timelineIds).size, page.messages.length);
+  });
+
   test('search and cursor pagination operate on normalized display rows', () => {
     const search = query.getSessionTimeline(SLUG, SESSION, { search: 'NEWEST ASSISTANT' });
     assert.equal(search.total, 1);
@@ -140,7 +157,7 @@ describe('normalized timeline DB queries', () => {
     const second = query.getSessionTimeline(SLUG, SESSION, { limit: 2, before: first.nextCursor });
     assert.equal(second.messages.length, 2);
     assert.equal(second.hasMore, true);
-    assert.equal(new Set([...first.messages, ...second.messages].map((message) => message.uuid)).size, 4);
+    assert.equal(new Set([...first.messages, ...second.messages].map((message) => message.timelineId)).size, 4);
   });
 
   test('raw updates mark the projection dirty and refresh the next query', () => {

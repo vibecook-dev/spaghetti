@@ -27,8 +27,14 @@ export function isCodexInjectedUserText(text: string): boolean {
   if (t.startsWith('<recommended_plugins>')) return true;
   if (t.startsWith('<permissions instructions>')) return true;
   if (t.startsWith('<collaboration_mode>')) return true;
+  if (t.startsWith('<skills_instructions>')) return true;
+  if (t.startsWith('<apps_instructions>')) return true;
+  if (t.startsWith('<plugins_instructions>')) return true;
+  if (t.startsWith('<multi_agent_mode>')) return true;
   if (t.startsWith('<INSTRUCTIONS>')) return true;
   if (t.startsWith('# AGENTS.md instructions')) return true;
+  if (t.startsWith('The following is the Codex agent history whose request action you are assessing.')) return true;
+  if (t.startsWith('The following is the Codex agent history added since your last approval assessment.')) return true;
   // environment_context without the exact open tag (rare / truncated peeks)
   if (t.startsWith('<') && (t.includes('</cwd>') || t.includes('<shell>')) && t.includes('<cwd>')) {
     return true;

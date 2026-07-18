@@ -29,6 +29,7 @@ import type { ParsedRow } from '../../live/parsed-row.js';
 import type { SessionIndexEntry, SessionsIndex } from '../../types/index.js';
 import { createParcelWatcher, createChokidarWatcher, type Watcher, type Unsubscribe } from '../../live/watcher.js';
 import { considerCodexFirstPromptLine } from './first-prompt.js';
+import { isCodexInternalSessionPayload } from './session-meta.js';
 import type { LiveWatch } from '../../live/live-watch.js';
 
 const ROLLOUT_FILE = /rollout-.*\.jsonl$/;
@@ -89,10 +90,15 @@ export function createCodexLiveWatch(deps: CodexLiveWatchDeps): CodexLiveWatch {
     let sid: string | null = null;
     let ts: string | null = null;
     let firstPrompt = '';
+    let internalSession = false;
     try {
       deps.fileService.readJsonlStreaming<Record<string, unknown>>(file, (line, idx) => {
         const payload = line.payload as Record<string, unknown> | undefined;
         if (line.type === 'session_meta' && payload) {
+          if (isCodexInternalSessionPayload(payload)) {
+            internalSession = true;
+            throw STOP_PEEK;
+          }
           if (typeof payload.cwd === 'string') cwd = payload.cwd;
           if (typeof payload.id === 'string') sid = payload.id;
           if (typeof line.timestamp === 'string') ts = line.timestamp;
@@ -105,7 +111,7 @@ export function createCodexLiveWatch(deps: CodexLiveWatchDeps): CodexLiveWatch {
     } catch (e) {
       if (e !== STOP_PEEK) return null;
     }
-    if (!cwd) return null;
+    if (internalSession || !cwd) return null;
     const sessionId = sid ?? path.basename(file).match(UUID)?.[0] ?? path.basename(file);
     const stats = deps.fileService.getStats(file);
     const iso = stats ? new Date(stats.mtimeMs).toISOString() : (ts ?? '');

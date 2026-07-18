@@ -5,6 +5,7 @@
 //! assistant). Tiktoken estimate for missing token_count is TS-only for now.
 
 use std::collections::BTreeMap;
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
@@ -37,8 +38,18 @@ fn is_injected_user_text(text: &str) -> bool {
         || t.starts_with("<recommended_plugins>")
         || t.starts_with("<permissions instructions>")
         || t.starts_with("<collaboration_mode>")
+        || t.starts_with("<skills_instructions>")
+        || t.starts_with("<apps_instructions>")
+        || t.starts_with("<plugins_instructions>")
+        || t.starts_with("<multi_agent_mode>")
         || t.starts_with("<INSTRUCTIONS>")
         || t.starts_with("# AGENTS.md instructions")
+        || t.starts_with(
+            "The following is the Codex agent history whose request action you are assessing.",
+        )
+        || t.starts_with(
+            "The following is the Codex agent history added since your last approval assessment.",
+        )
     {
         return true;
     }
@@ -65,9 +76,7 @@ fn consider_first_prompt(current: &str, line: &str) -> Option<String> {
         if msg.trim().is_empty() || is_injected_user_text(msg) {
             return None;
         }
-        return Some(
-            crate::core::text::truncate_utf16(msg, FIRST_PROMPT_MAX).to_owned(),
-        );
+        return Some(crate::core::text::truncate_utf16(msg, FIRST_PROMPT_MAX).to_owned());
     }
     if ty == "response_item" {
         if let Ok(Some(proj)) = message_extractor::project_jsonl_line(line) {
@@ -132,7 +141,7 @@ impl CodexReader {
         sessions_dir: &Path,
         events: &Sender<IngestEvent>,
     ) -> Result<CodexReadStats, CodexReadError> {
-        let files = discover(sessions_dir);
+        let files = discover_root_sessions(sessions_dir);
         let mut by_project: BTreeMap<String, (String, Vec<SessionFile>)> = BTreeMap::new();
 
         for path in files {
@@ -214,7 +223,7 @@ impl CodexReader {
         sessions_dir: &Path,
         stored: &std::collections::HashMap<String, crate::claude::fingerprint::SourceFingerprint>,
     ) -> bool {
-        let files = discover(sessions_dir);
+        let files = discover_root_sessions(sessions_dir);
         if files.is_empty() && stored.is_empty() {
             return true;
         }
@@ -266,6 +275,57 @@ fn discover(sessions_dir: &Path) -> Vec<PathBuf> {
     }
     out.sort();
     out
+}
+
+/// Return only human/root rollouts. `session_meta` is the first line in Codex
+/// files, so this avoids scanning large guardian rollouts merely to reject
+/// them and keeps warm fingerprints scoped to files that can affect the UI.
+fn discover_root_sessions(sessions_dir: &Path) -> Vec<PathBuf> {
+    discover(sessions_dir)
+        .into_iter()
+        .filter(|path| !is_internal_rollout(path))
+        .collect()
+}
+
+fn is_internal_rollout(path: &Path) -> bool {
+    let Ok(file) = std::fs::File::open(path) else {
+        return false;
+    };
+    let mut line = String::new();
+    if BufReader::new(file).read_line(&mut line).is_err() {
+        return false;
+    }
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) else {
+        return false;
+    };
+    if value.get("type").and_then(|v| v.as_str()) != Some("session_meta") {
+        return false;
+    }
+    let Some(payload) = value.get("payload") else {
+        return false;
+    };
+
+    if payload.get("thread_source").and_then(|v| v.as_str()) == Some("subagent") {
+        return true;
+    }
+    if payload
+        .get("source")
+        .and_then(|v| v.as_object())
+        .is_some_and(|source| source.contains_key("subagent"))
+    {
+        return true;
+    }
+
+    let id = payload.get("id").and_then(|v| v.as_str()).unwrap_or("");
+    let logical_id = payload
+        .get("session_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let has_parent = payload
+        .get("parent_thread_id")
+        .and_then(|v| v.as_str())
+        .is_some_and(|parent| !parent.is_empty());
+    has_parent && !id.is_empty() && !logical_id.is_empty() && logical_id != id
 }
 
 fn peek(path: &Path) -> Option<PeekMeta> {
@@ -550,6 +610,43 @@ mod tests {
 
         let meta = peek(&file).expect("peek");
         assert_eq!(meta.first_prompt, "help me find iframe code");
+    }
+
+    #[test]
+    fn read_all_skips_internal_subagent_rollouts() {
+        let tmp = TempDir::new().unwrap();
+        let day = tmp.path().join("sessions/2026/01/01");
+        std::fs::create_dir_all(&day).unwrap();
+
+        let root = day.join("rollout-2026-01-01T00-00-00-019aaaaaaaaaaaaaaaaaaaaaaaa.jsonl");
+        std::fs::write(
+            root,
+            r#"{"timestamp":"2026-01-01T00:00:00.000Z","type":"session_meta","payload":{"id":"root-session","session_id":"root-session","thread_source":"user","source":"cli","cwd":"/tmp/demo"}}
+{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"real prompt"}]}}
+"#,
+        )
+        .unwrap();
+
+        let child = day.join("rollout-2026-01-01T00-00-00-019bbbbbbbbbbbbbbbbbbbbbbbb.jsonl");
+        std::fs::write(
+            child,
+            r#"{"timestamp":"2026-01-01T00:00:00.000Z","type":"session_meta","payload":{"id":"guardian-session","session_id":"root-session","parent_thread_id":"root-session","thread_source":"subagent","source":{"subagent":{"other":"guardian"}},"cwd":"/tmp/demo"}}
+{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"The following is the Codex agent history whose request action you are assessing."}]}}
+"#,
+        )
+        .unwrap();
+
+        let (tx, rx) = unbounded();
+        let stats = CodexReader::read_all(tmp.path().join("sessions").as_path(), &tx).unwrap();
+        drop(tx);
+        let events: Vec<_> = rx.iter().collect();
+
+        assert_eq!(stats.sessions, 1);
+        assert!(events.iter().all(|event| match event {
+            IngestEvent::Session { entry, .. } => entry.session_id != "guardian-session",
+            IngestEvent::Message { session_id, .. } => session_id != "guardian-session",
+            _ => true,
+        }));
     }
 
     #[test]
