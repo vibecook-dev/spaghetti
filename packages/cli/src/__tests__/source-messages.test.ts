@@ -75,20 +75,30 @@ describe('adaptMessageForDisplay', () => {
     assert.equal((out as any).message.content[0].text, 'grok reply');
   });
 
-  test('maps Grok reasoning summary to a thin system line', () => {
+  test('maps Grok reasoning summary to assistant thinking', () => {
     const out = adaptMessageForDisplay(
       { type: 'reasoning', id: 'rs_1', summary: [{ type: 'summary_text', text: 'thinking' }] },
       'grok',
     );
     assert.ok(out);
-    assert.equal(out!.type, 'system');
-    assert.equal((out as any).content, 'thinking');
+    assert.equal(out!.type, 'assistant');
+    assert.deepEqual((out as any).message.content, [{ type: 'thinking', thinking: 'thinking' }]);
     assert.equal(out!.uuid, 'rs_1');
   });
 
-  test('skips Grok tool I/O records (no displayable row)', () => {
-    assert.equal(adaptMessageForDisplay({ type: 'tool_result', tool_call_id: 'c', content: 'x' }, 'grok'), null);
-    assert.equal(adaptMessageForDisplay({ type: 'backend_tool_call', kind: {} }, 'grok'), null);
+  test('maps Grok tool I/O into pairable display blocks', () => {
+    const result = adaptMessageForDisplay({ type: 'tool_result', tool_call_id: 'c', content: 'x' }, 'grok');
+    assert.deepEqual((result as any).message.content, [{ type: 'tool_result', tool_use_id: 'c', content: 'x' }]);
+    const backend = adaptMessageForDisplay(
+      {
+        type: 'backend_tool_call',
+        kind: { id: 'ws-1', tool_type: 'web_search', action: { type: 'search', query: 'tokens' } },
+      },
+      'grok',
+    );
+    assert.deepEqual((backend as any).message.content, [
+      { type: 'tool_use', id: 'ws-1', name: 'web_search', input: { type: 'search', query: 'tokens' } },
+    ]);
   });
 
   test('adaptMessagesForDisplay filters nulls', () => {

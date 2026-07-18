@@ -5,9 +5,8 @@
  * session dir carrying `chat_history.jsonl` + `summary.json`), then drives
  * `GrokReader.readAll` into a real `IngestService` (configured with
  * `sourceId: 'grok'` + `grokMessageExtractor`) over a real SQLite schema, and
- * asserts the rows land: tagged `source_id = 'grok'`, conversational turns
- * (system/user/assistant/reasoning) extracted, and tool I/O (`tool_result`,
- * `backend_tool_call`) skipped.
+ * asserts the rows land: tagged `source_id = 'grok'`, all canonical record
+ * types retained, synthetic users classified, and rich timeline rows produced.
  *
  * Exercises the RFC 006 seams for the third source — record production (reader),
  * extraction (extractor), and the `source_id` write path — without the
@@ -26,6 +25,7 @@ import { createSqliteService } from '../../io/sqlite-service.js';
 import { createFileService } from '../../io/file-service.js';
 import { createIngestService } from '../../data/ingest-service.js';
 import { initializeSchema } from '../../data/schema.js';
+import { ensureTimelineProjection } from '../../data/timeline-projection.js';
 import { createGrokSource, createGrokReader, grokMessageExtractor } from '../grok/index.js';
 import type { SqliteService } from '../../io/index.js';
 
@@ -67,10 +67,23 @@ describe('Grok source — end-to-end ingest', () => {
     tempDir = mkdtempSync(path.join(os.tmpdir(), 'spaghetti-grok-'));
     grokRoot = path.join(tempDir, '.grok');
 
-    // proj-a: system + user + assistant + reasoning kept; tool_result skipped.
+    // proj-a exercises internal context, a wrapped human query and local tools.
     writeSession(grokRoot, '/tmp/proj-a', SESSION_A, 'Codebase Onboarding', [
       { type: 'system', content: 'You are Grok, a coding assistant.' },
-      { type: 'user', content: [{ type: 'text', text: 'how are text rendered?' }] },
+      {
+        type: 'user',
+        synthetic_reason: 'project_instructions',
+        content: [{ type: 'text', text: '<system-reminder>internal rules</system-reminder>' }],
+      },
+      {
+        type: 'user',
+        content: [
+          {
+            type: 'text',
+            text: '<user_query>how are text rendered?</user_query>\n<system-reminder>later context</system-reminder>',
+          },
+        ],
+      },
       {
         type: 'assistant',
         content: "I'll explore the repo.",
@@ -86,10 +99,13 @@ describe('Grok source — end-to-end ingest', () => {
       { type: 'tool_result', tool_call_id: 'call-1', content: 'a/\nb/\nc.ts' },
     ]);
 
-    // proj-b: user + assistant kept; backend_tool_call skipped.
+    // proj-b exercises a standalone backend web-search call.
     writeSession(grokRoot, '/tmp/proj-b', SESSION_B, 'Token Research', [
       { type: 'user', content: [{ type: 'text', text: 'second project prompt' }] },
-      { type: 'backend_tool_call', kind: { tool_type: 'web_search', action: { type: 'search', query: 'tokens' } } },
+      {
+        type: 'backend_tool_call',
+        kind: { tool_type: 'web_search', id: 'ws-1', action: { type: 'search', query: 'tokens' } },
+      },
       { type: 'assistant', content: 'here is the answer' },
     ]);
 
@@ -135,43 +151,42 @@ describe('Grok source — end-to-end ingest', () => {
     assert.equal(sqlite.all<{ id: string }>('SELECT id FROM sessions').length, 2);
   });
 
-  test('conversational turns extracted; tool_result / backend_tool_call are not rows', () => {
+  test('all canonical records are retained with useful projections', () => {
     const rows = sqlite.all<MsgRow>(
       'SELECT msg_type, text_content, source_id, msg_index FROM messages WHERE session_id = ? ORDER BY msg_index',
       SESSION_A,
     );
-    // system + user + assistant + reasoning = 4; tool_result skipped.
     assert.deepEqual(
       rows.map((r) => r.msg_type),
-      ['system', 'user', 'assistant', 'reasoning'],
+      ['system', 'context', 'user', 'assistant', 'reasoning', 'tool_result'],
     );
     assert.deepEqual(
       rows.map((r) => r.text_content),
       [
-        'You are Grok, a coding assistant.',
+        '',
+        '',
         'how are text rendered?',
-        "I'll explore the repo.",
+        "I'll explore the repo.\nlist_dir {}",
         'The user wants onboarding.',
+        'a/\nb/\nc.ts',
       ],
     );
-    // msg_index preserves file position: tool_result at index 4 is skipped.
     assert.deepEqual(
       rows.map((r) => r.msg_index),
-      [0, 1, 2, 3],
+      [0, 1, 2, 3, 4, 5],
     );
 
     const bRows = sqlite.all<MsgRow>(
       'SELECT msg_type, msg_index FROM messages WHERE session_id = ? ORDER BY msg_index',
       SESSION_B,
     );
-    // user(0) + assistant(2); backend_tool_call(1) skipped.
     assert.deepEqual(
       bRows.map((r) => r.msg_type),
-      ['user', 'assistant'],
+      ['user', 'tool_use', 'assistant'],
     );
     assert.deepEqual(
       bRows.map((r) => r.msg_index),
-      [0, 2],
+      [0, 1, 2],
     );
   });
 
@@ -188,13 +203,30 @@ describe('Grok source — end-to-end ingest', () => {
     assert.equal(row?.first_prompt, 'Codebase Onboarding');
   });
 
-  test('grokMessageExtractor: turns kept, tool I/O skipped, no per-message tokens/time', () => {
-    assert.equal(grokMessageExtractor.extract({ type: 'tool_result', tool_call_id: 'c', content: 'x' }), null);
-    assert.equal(grokMessageExtractor.extract({ type: 'backend_tool_call', kind: {} }), null);
+  test('grokMessageExtractor: context and tool I/O are retained without per-message tokens/time', () => {
+    const result = grokMessageExtractor.extract({ type: 'tool_result', tool_call_id: 'c', content: 'x' });
+    assert.equal(result?.msgType, 'tool_result');
+    assert.equal(result?.uuid, 'c');
+    assert.equal(result?.text, 'x');
+
+    const backend = grokMessageExtractor.extract({
+      type: 'backend_tool_call',
+      kind: { tool_type: 'web_search', id: 'ws', action: { query: 'tokens' } },
+    });
+    assert.equal(backend?.msgType, 'tool_use');
+    assert.equal(backend?.uuid, 'ws');
 
     const user = grokMessageExtractor.extract({ type: 'user', content: [{ type: 'text', text: 'hi' }] });
     assert.equal(user?.msgType, 'user');
     assert.equal(user?.text, 'hi');
+
+    const context = grokMessageExtractor.extract({
+      type: 'user',
+      synthetic_reason: 'system_reminder',
+      content: [{ type: 'text', text: 'internal' }],
+    });
+    assert.equal(context?.msgType, 'context');
+    assert.equal(context?.text, '');
 
     const reasoning = grokMessageExtractor.extract({
       type: 'reasoning',
@@ -212,5 +244,35 @@ describe('Grok source — end-to-end ingest', () => {
       cacheCreationTokens: 0,
       cacheReadTokens: 0,
     });
+  });
+
+  test('materialized timeline exposes human, assistant, thinking and paired tool rows', () => {
+    ensureTimelineProjection(sqlite, SESSION_A);
+    const rows = sqlite.all<{ display_type: string; tool_name: string | null; data: string }>(
+      `SELECT display_type, tool_name, data
+         FROM timeline_messages
+        WHERE session_id = ?
+        ORDER BY timeline_index`,
+      SESSION_A,
+    );
+    assert.deepEqual(
+      rows.map((row) => row.display_type),
+      ['user', 'assistant', 'tool_use', 'thinking'],
+    );
+    assert.equal(rows[2]?.tool_name, 'list_dir');
+    const tool = JSON.parse(rows[2]!.data) as { toolUse?: { result?: { content?: string; rawJson?: unknown } } };
+    assert.equal(tool.toolUse?.result?.content, 'a/\nb/\nc.ts');
+    assert.equal(tool.toolUse?.result?.rawJson, undefined);
+
+    ensureTimelineProjection(sqlite, SESSION_B);
+    const backendRows = sqlite.all<{ display_type: string; tool_name: string | null }>(
+      'SELECT display_type, tool_name FROM timeline_messages WHERE session_id = ? ORDER BY timeline_index',
+      SESSION_B,
+    );
+    assert.deepEqual(backendRows, [
+      { display_type: 'user', tool_name: null },
+      { display_type: 'tool_use', tool_name: 'web_search' },
+      { display_type: 'assistant', tool_name: null },
+    ]);
   });
 });

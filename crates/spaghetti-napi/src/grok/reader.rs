@@ -408,7 +408,7 @@ fn stream_session(
                 message_count = message_count.saturating_add(1);
             }
             Ok(None) | Err(_) => {
-                // tool I/O / bad JSON — skip (TS extract returns null / swallows)
+                // Unknown record / bad JSON — skip (TS behaves identically).
             }
         }
     });

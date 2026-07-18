@@ -72,7 +72,7 @@ export function transformRawMessagesToTimeline(
               // Codex keeps the verbatim output in messages.data. Avoid
               // embedding that potentially huge payload a second time inside
               // the materialized timeline row.
-              rawJson: sourceId === 'codex' ? undefined : item,
+              rawJson: sourceId === 'codex' || sourceId === 'grok' ? undefined : item,
             };
             pendingResults.set(toolId, result);
             const open = openTools.get(toolId);

@@ -40,7 +40,7 @@ import { createGrokLiveWatch, type GrokLiveWatch } from './live-watch.js';
  * full Grok re-read once, then stamp the new version.
  */
 /** Bump when Grok extract/sidecar behaviour changes (forces cold re-read). */
-const GROK_EXTRACT_VERSION = 'grok_v3_turn_join';
+const GROK_EXTRACT_VERSION = 'grok_v4_rich_human_timeline';
 const GROK_EXTRACT_META_KEY = 'grok_extract_version';
 
 export class GrokLifecycleOwner extends EventEmitter implements LifecycleOwner {

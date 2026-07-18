@@ -165,7 +165,7 @@ writeSession(PROJ_A, SESS_A2, {
   ],
 });
 
-// ─── Project B: backend_tool_call skip + multi-block user ───────────────────
+// ─── Project B: backend_tool_call + multi-block user ────────────────────────
 const PROJ_B = '/tmp/grok-proj-b';
 const SESS_B1 = '019f54c0-0dd3-7482-a3ee-e73ca610e8a3';
 

@@ -5,7 +5,7 @@
  * Uses the committed small-grok fixture. Skips when the native addon is not
  * loadable (unsupported platform / missing prebuild) so CI hosts without a
  * rebuilt binary still pass; when native is present, asserts the full product
- * surface (source ids, projects, messages, tool-skip, FTS truncate).
+ * surface (source ids, projects, rich messages, timeline tools, FTS truncate).
  *
  * Pair with `pnpm test:ingest-diff:grok` for RS↔TS row parity.
  *
@@ -94,7 +94,7 @@ describe('Grok native cold ingest smoke', { skip: !native }, () => {
     }
   });
 
-  test('session A1 has title, conversational turns, and skips tool_result', () => {
+  test('session A1 has title and retains rich transcript records', () => {
     const sessions = spaghetti.getSessionList(SLUG_A, { sourceId: 'grok' });
     const a1 = sessions.find((s) => s.sessionId === SESS_A1);
     assert.ok(a1, 'session A1 present');
@@ -106,9 +106,11 @@ describe('Grok native cold ingest smoke', { skip: !native }, () => {
     assert.ok(blob.includes('how is text rendered?'), 'user turn present');
     assert.ok(blob.includes("I'll explore the repo."), 'assistant turn present');
     assert.ok(blob.includes('The user wants onboarding help.'), 'reasoning summary present');
-    assert.ok(!blob.includes('a/\nb/\nc.ts'), 'tool_result content was not stored as a message');
+    const rawToolResult = messages.find((message) => (message as { type?: string }).type === 'tool_result') as
+      | { content?: string }
+      | undefined;
+    assert.equal(rawToolResult?.content, 'a/\nb/\nc.ts', 'tool_result content is retained');
 
-    // Absolute line indices: tool_result at index 4 is skipped → second assistant at 5
     const types = messages.map((m) => {
       const rec = m as { type?: string };
       return rec.type;
@@ -118,7 +120,14 @@ describe('Grok native cold ingest smoke', { skip: !native }, () => {
     assert.ok(types.includes('user'));
     assert.ok(types.includes('assistant'));
     assert.ok(types.includes('reasoning'));
-    assert.ok(!types.includes('tool_result'));
+    assert.ok(types.includes('tool_result'));
+
+    const timeline = spaghetti.getSessionTimeline(SLUG_A, SESS_A1, { limit: 50 });
+    const tool = timeline.messages.find((message) => message.type === 'tool_use');
+    assert.equal(tool?.toolUse?.toolName, 'list_dir');
+    assert.equal(tool?.toolUse?.result?.content, 'a/\nb/\nc.ts');
+    assert.ok(timeline.messages.some((message) => message.type === 'thinking'));
+    assert.ok(!timeline.messages.some((message) => message.type === 'system'));
   });
 
   test('long assistant keeps full raw content; user turn is searchable', () => {
@@ -140,8 +149,8 @@ describe('Grok native cold ingest smoke', { skip: !native }, () => {
 
   test('stats report grok messages', () => {
     const stats = spaghetti.getStats();
-    // 13 conversational lines across the fixture (see ingest-diff:grok)
+    // 16 canonical lines across the fixture (see ingest-diff:grok)
     const msgCount = stats.segmentsByType.messages ?? stats.searchIndexed;
-    assert.ok(msgCount >= 13, `expected >=13 messages, got ${msgCount}`);
+    assert.ok(msgCount >= 16, `expected >=16 messages, got ${msgCount}`);
   });
 });

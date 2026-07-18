@@ -467,15 +467,15 @@ describe('IngestService.writeBatch (RFC 005 C2.6)', () => {
   // BULK INGEST INTEROP (unchanged from C2.6 scaffold)
   // ─────────────────────────────────────────────────────────────────────────
 
-  test('extractor null (Grok tool_result) skips DB write and change event', async () => {
-    // Source-scoped ingest with an extractor that rejects tool I/O — mirrors
-    // Grok/Codex extract()→null. Must not write rows or emit message.added.
+  test('extractor null skips DB write and change event', async () => {
+    // Source-scoped ingest with an extractor that rejects an unknown record.
+    // Must not write rows or emit message.added.
     const grokIngest = createIngestService(() => sqlite, {
       sourceId: 'grok',
       messages: {
         extract: (raw) => {
           const t = (raw as { type?: string })?.type;
-          if (t === 'tool_result' || t === 'backend_tool_call') return null;
+          if (t === 'unknown_event') return null;
           return {
             msgType: t ?? 'unknown',
             uuid: null,
@@ -492,7 +492,7 @@ describe('IngestService.writeBatch (RFC 005 C2.6)', () => {
       category: 'message',
       slug: SLUG,
       sessionId: SESSION_ID,
-      message: { type: 'tool_result', content: 'noise' } as unknown as SessionMessage,
+      message: { type: 'unknown_event', content: 'noise' } as unknown as SessionMessage,
       msgIndex: 99,
       byteOffset: 0,
     };
@@ -649,7 +649,7 @@ describe('IngestService.writeBatch engine=rs routing (RFC 005 C4.3)', () => {
       native: mockNative,
       messages: {
         extract: (raw) => {
-          if ((raw as { type?: string })?.type === 'tool_result') return null;
+          if ((raw as { type?: string })?.type === 'unknown_event') return null;
           return {
             msgType: 'user',
             uuid: null,
@@ -667,7 +667,7 @@ describe('IngestService.writeBatch engine=rs routing (RFC 005 C4.3)', () => {
         category: 'message',
         slug: SLUG,
         sessionId: SESSION_ID,
-        message: { type: 'tool_result' } as unknown as SessionMessage,
+        message: { type: 'unknown_event' } as unknown as SessionMessage,
         msgIndex: 0,
         byteOffset: 0,
       },

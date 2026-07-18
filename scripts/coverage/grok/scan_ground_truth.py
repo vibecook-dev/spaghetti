@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from collections import Counter
 from pathlib import Path
@@ -54,7 +55,13 @@ def inventory_toplevel(root: Path) -> dict:
     return out
 
 
-def scan_chat_history(path: Path, counter: Counter) -> dict:
+def scan_chat_history(
+    path: Path,
+    counter: Counter,
+    embedded_tools: Counter,
+    user_kinds: Counter,
+    content_blocks: Counter,
+) -> dict:
     stats = {
         "path": str(path),
         "bytes": 0,
@@ -81,6 +88,37 @@ def scan_chat_history(path: Path, counter: Counter) -> dict:
                     if isinstance(obj, dict):
                         t = obj.get("type", "unknown")
                         counter[str(t)] += 1
+                        if t == "assistant" and isinstance(obj.get("tool_calls"), list):
+                            for call in obj["tool_calls"]:
+                                if isinstance(call, dict):
+                                    embedded_tools[str(call.get("name") or "unknown")] += 1
+                        if t == "user":
+                            blocks = obj.get("content") if isinstance(obj.get("content"), list) else []
+                            texts = []
+                            image_count = 0
+                            for block in blocks:
+                                if not isinstance(block, dict):
+                                    continue
+                                block_type = str(block.get("type") or "unknown")
+                                content_blocks[block_type] += 1
+                                if block_type == "text" and isinstance(block.get("text"), str):
+                                    texts.append(block["text"])
+                                elif block_type == "image":
+                                    image_count += 1
+                            text = "\n".join(texts)
+                            reason = obj.get("synthetic_reason")
+                            if isinstance(reason, str) and reason:
+                                user_kinds[f"context.synthetic.{reason}"] += 1
+                            elif "<user_query>" in text:
+                                user_kinds["human.query"] += 1
+                            elif image_count:
+                                user_kinds["human.image"] += 1
+                            elif "<user_info" in text:
+                                user_kinds["context.user_info"] += 1
+                            elif "<system-reminder" in text:
+                                user_kinds["context.system_reminder"] += 1
+                            else:
+                                user_kinds["human.plain"] += 1
                     else:
                         counter["non_object"] += 1
                 except json.JSONDecodeError:
@@ -90,9 +128,42 @@ def scan_chat_history(path: Path, counter: Counter) -> dict:
     return stats
 
 
+def scan_updates(path: Path, update_types: Counter) -> int:
+    valid = 0
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                try:
+                    obj = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                valid += 1
+                update = obj.get("params", {}).get("update", {}) if isinstance(obj, dict) else {}
+                session_update = update.get("sessionUpdate") if isinstance(update, dict) else None
+                update_types[str(session_update or "unknown")] += 1
+    except OSError:
+        pass
+    return valid
+
+
+def scan_compaction_segment(path: Path) -> tuple[int, int, int]:
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+        size = path.stat().st_size
+    except OSError:
+        return (0, 0, 0)
+    declared = re.search(r"^- Turn count:\s*(\d+)\s*$", text, re.MULTILINE)
+    rendered = len(re.findall(r"^### Turn \d+ \([^)]+\)\s*$", text, re.MULTILINE))
+    return (size, int(declared.group(1)) if declared else 0, rendered)
+
+
 def scan(root: Path, *, max_sessions: int | None = None) -> dict:
     sessions_dir = root / "sessions"
     record_types: Counter = Counter()
+    embedded_tools: Counter = Counter()
+    user_kinds: Counter = Counter()
+    content_blocks: Counter = Counter()
+    update_types: Counter = Counter()
     chat_files: list[Path] = []
     if sessions_dir.is_dir():
         chat_files = sorted(sessions_dir.rglob(CHAT_HISTORY))
@@ -105,9 +176,14 @@ def scan(root: Path, *, max_sessions: int | None = None) -> dict:
     total_lines = 0
     total_valid = 0
     per_file = []
+    updates_valid = 0
+    compaction_files = 0
+    compaction_bytes = 0
+    compaction_declared_turns = 0
+    compaction_rendered_turns = 0
 
     for cf in chat_files:
-        st = scan_chat_history(cf, record_types)
+        st = scan_chat_history(cf, record_types, embedded_tools, user_kinds, content_blocks)
         per_file.append(
             {
                 "path": st["path"],
@@ -127,6 +203,16 @@ def scan(root: Path, *, max_sessions: int | None = None) -> dict:
             p = session_dir / name
             if p.is_file():
                 sibling_counts[name] += 1
+                if name == "updates.jsonl":
+                    updates_valid += scan_updates(p, update_types)
+        compaction_dir = session_dir / "compaction"
+        if compaction_dir.is_dir():
+            for segment in sorted(compaction_dir.glob("segment_*.md")):
+                size, declared, rendered = scan_compaction_segment(segment)
+                compaction_files += 1
+                compaction_bytes += size
+                compaction_declared_turns += declared
+                compaction_rendered_turns += rendered
 
     conversational = sum(
         record_types.get(t, 0) for t in ("system", "user", "assistant", "reasoning")
@@ -154,12 +240,28 @@ def scan(root: Path, *, max_sessions: int | None = None) -> dict:
                 "valid_json": total_valid,
             },
             "chat_history.record_type": dict(record_types),
+            "chat_history.embedded_tool_call": {
+                "count": sum(embedded_tools.values()),
+                "names": dict(embedded_tools),
+            },
+            "chat_history.user_kind": dict(user_kinds),
+            "chat_history.content_block_type": dict(content_blocks),
             "chat_history.conversational": {"count": conversational},
             "chat_history.tool_ish": {"count": tool_ish},
             "sibling.summary.json": {"count": sibling_counts.get("summary.json", 0)},
             "sibling.events.jsonl": {"count": sibling_counts.get("events.jsonl", 0)},
             "sibling.signals.json": {"count": sibling_counts.get("signals.json", 0)},
-            "sibling.updates.jsonl": {"count": sibling_counts.get("updates.jsonl", 0)},
+            "sibling.updates.jsonl": {
+                "count": sibling_counts.get("updates.jsonl", 0),
+                "valid_json": updates_valid,
+                "session_update_types": dict(update_types),
+            },
+            "compaction.segment.file": {
+                "count": compaction_files,
+                "bytes": compaction_bytes,
+                "declared_turns": compaction_declared_turns,
+                "rendered_turns": compaction_rendered_turns,
+            },
             "primary.records": {
                 "count": total_valid,
                 "unit": "chat_history_jsonl_line",
@@ -168,8 +270,8 @@ def scan(root: Path, *, max_sessions: int | None = None) -> dict:
         "sessionsSample": per_file[:30],
         "notes": (
             "chat_history.record_type keys are the `type` field on each JSONL line. "
-            "Spaghetti Grok v1 stores system/user/assistant/reasoning as messages; "
-            "tool_result/backend_tool_call are skipped. "
+            "Spaghetti Grok v4 retains all canonical records, classifies injected users, "
+            "expands embedded calls and pairs tool results in the product timeline. "
             "events.jsonl → timestamps; signals.json → session token aggregate; "
             "updates.jsonl is UI stream (ignored). "
             "projectCount = unique encoded-cwd session parents; sessionCount = chat_history files."
@@ -200,12 +302,16 @@ def main() -> int:
             "buckets": {
                 "chat_history.file": {"count": 0, "bytes": 0, "lines": 0, "valid_json": 0},
                 "chat_history.record_type": {},
+                "chat_history.embedded_tool_call": {"count": 0, "names": {}},
+                "chat_history.user_kind": {},
+                "chat_history.content_block_type": {},
                 "chat_history.conversational": {"count": 0},
                 "chat_history.tool_ish": {"count": 0},
                 "sibling.summary.json": {"count": 0},
                 "sibling.events.jsonl": {"count": 0},
                 "sibling.signals.json": {"count": 0},
-                "sibling.updates.jsonl": {"count": 0},
+                "sibling.updates.jsonl": {"count": 0, "valid_json": 0, "session_update_types": {}},
+                "compaction.segment.file": {"count": 0, "bytes": 0, "declared_turns": 0, "rendered_turns": 0},
                 "primary.records": {"count": 0, "unit": "chat_history_jsonl_line"},
             },
             "sessionsSample": [],
@@ -226,6 +332,8 @@ def main() -> int:
     print(f"  record kinds:    {len(b['chat_history.record_type'])}")
     print(f"  conversational:  {b['chat_history.conversational']['count']}")
     print(f"  tool-ish:        {b['chat_history.tool_ish']['count']}")
+    print(f"  embedded tools:  {b['chat_history.embedded_tool_call']['count']}")
+    print(f"  compaction segs: {b['compaction.segment.file']['count']}")
     print(f"  events siblings: {b['sibling.events.jsonl']['count']}")
     print(f"  signals siblings:{b['sibling.signals.json']['count']}")
     print(f"Wrote {out}")

@@ -183,7 +183,9 @@ export function createGrokLiveWatch(deps: GrokLiveWatchDeps): GrokLiveWatch {
       // Rewrite / truncate detection: if the file shrank past our offset,
       // re-read from 0 so we don't permanently miss compacted history.
       const stats = deps.fileService.getStats(file);
+      let rewritten = false;
       if (stats && stats.size < st.byteOffset) {
+        rewritten = true;
         st.byteOffset = 0;
         st.nextIndex = 0;
       }
@@ -211,7 +213,20 @@ export function createGrokLiveWatch(deps: GrokLiveWatchDeps): GrokLiveWatch {
       st.byteOffset = res.lastTerminatedPosition;
       st.nextIndex += res.terminatedLineCount;
 
-      if (rows.length > 0) {
+      if (rewritten) {
+        // Replace atomically: queries must never observe new compacted rows
+        // alongside a stale tail from the pre-compaction transcript.
+        deps.ingestService.beginTransaction();
+        try {
+          deps.ingestService.clearSessionMessages(st.sessionId);
+          const result = await deps.ingestService.writeBatch(rows);
+          deps.ingestService.commitTransaction();
+          for (const change of result.changes) deps.store.emit(change);
+        } catch (error) {
+          deps.ingestService.rollbackTransaction();
+          throw error;
+        }
+      } else if (rows.length > 0) {
         const result = await deps.ingestService.writeBatch(rows);
         for (const change of result.changes) deps.store.emit(change);
       }

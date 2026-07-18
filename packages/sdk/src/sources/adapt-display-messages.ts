@@ -24,6 +24,15 @@ import {
   isCodexToolCallType,
   isCodexToolResultType,
 } from './codex/response-items.js';
+import {
+  grokAssistantToolCalls,
+  grokBackendToolCall,
+  grokHumanUserText,
+  grokReadableText,
+  grokReasoningSummary,
+  grokToolResultId,
+  grokToolResultText,
+} from './grok/records.js';
 
 /** Collect readable text from a string, or a `[{ type, text }]` block array. */
 function collectContentText(content: unknown): string {
@@ -44,9 +53,9 @@ function collectContentText(content: unknown): string {
 }
 
 /**
- * Adapt one raw Grok chat_history record (system/user/assistant/reasoning; tool
- * I/O was already skipped at ingest so it never reaches here) into a Claude-shaped
- * SessionMessage.
+ * Adapt one raw Grok chat_history record into a Claude-shaped SessionMessage.
+ * Internal model context returns null; assistant records retain prose and expand
+ * embedded tool calls; standalone results pair through the shared transformer.
  */
 function adaptGrokMessage(line: Record<string, unknown>): SessionMessage | null {
   const type = typeof line.type === 'string' ? line.type : '';
@@ -65,26 +74,64 @@ function adaptGrokMessage(line: Record<string, unknown>): SessionMessage | null 
     userType: 'external' as const,
   };
   if (type === 'user') {
+    const text = grokHumanUserText(line);
+    if (!text) return null;
     return {
       ...base,
       type: 'user',
-      message: { role: 'user', content: collectContentText(line.content) },
-    } as SessionMessage;
+      message: { role: 'user', content: text },
+    } as unknown as SessionMessage;
   }
   if (type === 'assistant') {
+    const content: Record<string, unknown>[] = [];
+    const text = grokReadableText(line.content);
+    if (text) content.push({ type: 'text', text });
+    for (const call of grokAssistantToolCalls(line)) {
+      content.push({ type: 'tool_use', id: call.id, name: call.name, input: call.input });
+    }
+    if (content.length === 0) return null;
     return {
       ...base,
       type: 'assistant',
-      message: { role: 'assistant', content: [{ type: 'text', text: collectContentText(line.content) }] },
-    } as SessionMessage;
+      message: { role: 'assistant', content },
+    } as unknown as SessionMessage;
   }
   if (type === 'reasoning') {
-    // Grok's plaintext reasoning summary → a thin system line (dim thinking).
-    return { ...base, type: 'system', content: collectContentText(line.summary), level: 'info' } as SessionMessage;
+    const summary = grokReasoningSummary(line);
+    if (!summary) return null;
+    return {
+      ...base,
+      type: 'assistant',
+      message: { role: 'assistant', content: [{ type: 'thinking', thinking: summary }] },
+    } as unknown as SessionMessage;
   }
-  if (type === 'system') {
-    return { ...base, type: 'system', content: collectContentText(line.content), level: 'info' } as SessionMessage;
+  if (type === 'tool_result') {
+    const callId = grokToolResultId(line);
+    return {
+      ...base,
+      type: 'user',
+      uuid: callId ? `result-${callId}` : '',
+      message: {
+        role: 'user',
+        content: [{ type: 'tool_result', tool_use_id: callId, content: grokToolResultText(line) }],
+      },
+    } as unknown as SessionMessage;
   }
+  if (type === 'backend_tool_call') {
+    const call = grokBackendToolCall(line);
+    if (!call) return null;
+    return {
+      ...base,
+      type: 'assistant',
+      uuid: call.id,
+      message: {
+        role: 'assistant',
+        content: [{ type: 'tool_use', id: call.id, name: call.name, input: call.input }],
+      },
+    } as unknown as SessionMessage;
+  }
+  // Grok system prompts and synthetic context remain available in raw storage,
+  // but are not product transcript events.
   return null;
 }
 

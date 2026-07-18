@@ -8,10 +8,11 @@
  * reliable structure:
  *
  * 1. **`turn_started.conversation_message_count`** is the absolute
- *    chat_history line index of that turn's primary user message (exact match
- *    on every observed turn).
+ *    chat_history line index of that turn's primary user message. Compaction
+ *    resets this counter while events.jsonl retains older epochs, so only the
+ *    latest epoch whose counters point at current user rows is joined.
  * 2. Turn ranges are `[count_i, count_{i+1})` (last turn → EOF).
- * 3. Within a turn's time window `[turn_started.ts, turn_ended.ts]`:
+ * 3. Within a turn's time window `[turn_started.ts, next turn_started.ts)`:
  *    - `loop_started[]` and `first_token[]` are 1:1 with **assistant** cycles
  *      (not with reasoning — a loop may emit multiple reasoning records before
  *      one assistant).
@@ -67,17 +68,28 @@ export function buildTimestampMap(
   const n = lineTypes.length;
   if (n === 0) return map;
 
-  const turns = events
-    .filter((e) => e.type === 'turn_started' && e.ts)
-    .slice()
-    .sort((a, b) => {
-      const ta = a.turn_number ?? -1;
-      const tb = b.turn_number ?? -1;
-      if (ta >= 0 && tb >= 0 && ta !== tb) return ta - tb;
-      return a.ts < b.ts ? -1 : a.ts > b.ts ? 1 : 0;
+  const candidates = events.filter(
+    (e) => e.type === 'turn_started' && e.ts && Number.isFinite(e.conversation_message_count),
+  );
+  const epochs: GrokEventLine[][] = [];
+  for (const turn of candidates) {
+    const epoch = epochs[epochs.length - 1];
+    const previous = epoch?.[epoch.length - 1]?.conversation_message_count;
+    const current = turn.conversation_message_count!;
+    if (!epoch || (previous != null && current < previous)) epochs.push([turn]);
+    else epoch.push(turn);
+  }
+  let turns: GrokEventLine[] = [];
+  for (let i = epochs.length - 1; i >= 0; i--) {
+    const valid = epochs[i]!.filter((turn) => {
+      const index = turn.conversation_message_count!;
+      return index >= 0 && index < n && lineTypes[index] === 'user';
     });
-
-  const turnEnds = events.filter((e) => e.type === 'turn_ended' && e.ts).map((e) => e.ts);
+    if (valid.length > 0) {
+      turns = valid;
+      break;
+    }
+  }
 
   // ── Pre-turn bootstrap (system + context users before first turn) ────────
   const firstTurnStart = turns.length > 0 ? (turns[0].conversation_message_count ?? 0) : n;
@@ -110,15 +122,15 @@ export function buildTimestampMap(
     const end = ti + 1 < turns.length ? clampIndex(turns[ti + 1].conversation_message_count ?? n, start, n) : n;
 
     const windowStart = turn.ts;
-    // Prefer matching turn_ended by order; else next turn_started; else open-ended.
-    const windowEnd = ti < turnEnds.length ? turnEnds[ti] : ti + 1 < turns.length ? turns[ti + 1].ts : '\uffff';
+    const windowEnd = ti + 1 < turns.length ? turns[ti + 1]!.ts : '\uffff';
 
-    const loops = events.filter((e) => e.type === 'loop_started' && e.ts && e.ts >= windowStart && e.ts <= windowEnd);
+    const loops = events.filter((e) => e.type === 'loop_started' && e.ts && e.ts >= windowStart && e.ts < windowEnd);
     const firstTokens = events.filter(
-      (e) => e.type === 'first_token' && e.ts && e.ts >= windowStart && e.ts <= windowEnd,
+      (e) => e.type === 'first_token' && e.ts && e.ts >= windowStart && e.ts < windowEnd,
     );
 
     let loopI = 0;
+    let lastAgentTimestamp = turn.ts;
     for (let i = start; i < end; i++) {
       const t = lineTypes[i];
       if (t === 'user' || t === 'system') {
@@ -134,17 +146,23 @@ export function buildTimestampMap(
           map.set(i, turn.ts);
         }
       } else if (t === 'assistant') {
+        let assistantTimestamp: string;
         if (loopI < firstTokens.length) {
-          map.set(i, firstTokens[loopI].ts);
+          assistantTimestamp = firstTokens[loopI]!.ts;
         } else if (loopI < loops.length) {
-          map.set(i, loops[loopI].ts);
+          assistantTimestamp = loops[loopI]!.ts;
         } else {
-          map.set(i, turn.ts);
+          assistantTimestamp = turn.ts;
         }
+        map.set(i, assistantTimestamp);
+        lastAgentTimestamp = assistantTimestamp;
         // Advance the agent loop after the assistant (1:1 with loop/first_token).
         loopI++;
+      } else if (t === 'tool_result') {
+        map.set(i, lastAgentTimestamp);
+      } else if (t === 'backend_tool_call') {
+        map.set(i, loopI < loops.length ? loops[loopI]!.ts : lastAgentTimestamp);
       }
-      // tool_result / backend_tool_call: not stored as message rows; skip.
     }
   }
 
@@ -253,7 +271,14 @@ export function applyGrokSidecars(
   const tsMap = buildTimestampMap(lineTypes, events, fallback);
   for (const [msgIndex, ts] of tsMap) {
     const t = lineTypes[msgIndex];
-    if (t === 'system' || t === 'user' || t === 'assistant' || t === 'reasoning') {
+    if (
+      t === 'system' ||
+      t === 'user' ||
+      t === 'assistant' ||
+      t === 'reasoning' ||
+      t === 'tool_result' ||
+      t === 'backend_tool_call'
+    ) {
       api.updateMessageTimestamp?.(sessionId, msgIndex, ts);
     }
   }

@@ -18,8 +18,8 @@
  *   2. reads each session dir's `summary.json` for cwd / id / title / times
  *      (falling back to the URL-encoded dir name + uuid dir if it is missing),
  *   3. groups sessions by project (cwd-derived slug),
- *   4. streams every chat_history line through `onMessage` — the Grok
- *      `MessageExtractor` returns `null` for tool I/O lines.
+ *   4. streams every chat_history line through `onMessage`; all known Grok
+ *      transcript and tool records are retained losslessly.
  *
  * Emits the same sink-event shape as the Claude/Codex cold starts
  * (`onProject → onSession → onMessage* → onSessionComplete → onProjectComplete`),
@@ -205,8 +205,8 @@ export class GrokReader {
         if (read) {
           try {
             const res = this.fileService.readJsonlStreaming<unknown>(file, (line, index, byteOffset) => {
-              // Every line goes to onMessage; the Grok extractor skips tool I/O
-              // (tool_result / backend_tool_call) by returning null.
+              // Every line goes to onMessage; the extractor retains all known
+              // Grok transcript and tool record shapes.
               sink.onMessage(slug, entry.sessionId, line as never, index, byteOffset);
               lineCount++;
               lastByte = byteOffset;

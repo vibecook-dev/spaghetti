@@ -45,7 +45,7 @@ describe('Grok sidecars (turn-scoped join)', () => {
     assert.equal(map.get(3), '2026-04-01T10:00:01.000Z');
     assert.equal(map.get(4), '2026-04-01T10:00:01.000Z');
     assert.equal(map.get(5), '2026-04-01T10:00:02.000Z'); // first_token 0
-    assert.equal(map.has(6), false); // tool_result not kept
+    assert.equal(map.get(6), '2026-04-01T10:00:02.000Z'); // result shares its call timestamp
     assert.equal(map.get(7), '2026-04-01T10:00:10.000Z');
     assert.equal(map.get(8), '2026-04-01T10:00:11.000Z');
     assert.equal(map.get(9), '2026-04-01T11:00:00.000Z'); // turn1 user
@@ -66,6 +66,27 @@ describe('Grok sidecars (turn-scoped join)', () => {
     assert.equal(map.get(1), '2026-04-01T10:00:00.000Z');
     assert.equal(map.get(2), '2026-04-01T10:00:01.000Z');
     assert.equal(map.get(3), '2026-04-01T10:00:02.000Z');
+  });
+
+  test('compaction selects the latest valid counter epoch', () => {
+    const types = ['system', 'user', 'reasoning', 'assistant', 'user', 'assistant'];
+    const events = parseGrokEvents(`
+{"ts":"2026-04-01T08:00:00.000Z","type":"turn_started","turn_number":20,"conversation_message_count":10}
+{"ts":"2026-04-01T08:10:00.000Z","type":"turn_started","turn_number":21,"conversation_message_count":20}
+{"ts":"2026-04-01T10:00:00.000Z","type":"turn_started","turn_number":0,"conversation_message_count":1}
+{"ts":"2026-04-01T10:00:01.000Z","type":"loop_started"}
+{"ts":"2026-04-01T10:00:02.000Z","type":"first_token"}
+{"ts":"2026-04-01T11:00:00.000Z","type":"turn_started","turn_number":1,"conversation_message_count":4}
+{"ts":"2026-04-01T11:00:01.000Z","type":"loop_started"}
+{"ts":"2026-04-01T11:00:02.000Z","type":"first_token"}
+`);
+    const map = buildTimestampMap(types, events, '2026-04-01T09:00:00.000Z');
+    assert.equal(map.get(0), '2026-04-01T09:00:00.000Z');
+    assert.equal(map.get(1), '2026-04-01T10:00:00.000Z');
+    assert.equal(map.get(2), '2026-04-01T10:00:01.000Z');
+    assert.equal(map.get(3), '2026-04-01T10:00:02.000Z');
+    assert.equal(map.get(4), '2026-04-01T11:00:00.000Z');
+    assert.equal(map.get(5), '2026-04-01T11:00:02.000Z');
   });
 
   test('no events → only fallback on system/user', () => {

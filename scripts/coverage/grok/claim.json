@@ -1,9 +1,9 @@
 {
   "schemaVersion": 1,
   "agentId": "grok",
-  "updated": "2026-07-15",
+  "updated": "2026-07-18",
   "rootDefault": "~/.grok",
-  "description": "Honest coverage claim for Grok CLI (xAI). Thin multi-agent core: projects/sessions/conversational messages/search/session-token aggregates/live chat_history. Tool I/O and UI streams deliberately not productized.",
+  "description": "Honest coverage claim for Grok CLI (xAI). Rich canonical chat-history ingestion with human/context classification, reasoning, embedded/local/backend tools, paired results, search, timestamps, tokens, and live rewrites.",
   "engines": {
     "ts": "packages/sdk sources/grok + GrokLifecycleOwner (fallback)",
     "rs": "crates/spaghetti-napi grok reader (cold/warm) + liveIngestBatch via writeBatch when engine=rs"
@@ -22,43 +22,56 @@
       "status": "ingested",
       "match": { "recordType": "system" },
       "engines": { "ts": true, "rs": true },
-      "product": ["messages", "search", "fts"]
+      "product": ["messages"],
+      "notes": "Retained losslessly as raw model context; excluded from transcript and FTS."
     },
     {
       "id": "chat_history.record_type.user",
       "status": "ingested",
       "match": { "recordType": "user" },
       "engines": { "ts": true, "rs": true },
-      "product": ["messages", "search", "fts"]
+      "product": ["messages", "timeline", "search", "fts"],
+      "notes": "synthetic_reason, user_info and reminders are classified as context; user_query is unwrapped; image-only human rows get a readable attachment label."
     },
     {
       "id": "chat_history.record_type.assistant",
       "status": "ingested",
       "match": { "recordType": "assistant" },
       "engines": { "ts": true, "rs": true },
-      "product": ["messages", "search", "fts", "tokens"]
+      "product": ["messages", "timeline", "tools", "search", "fts", "tokens"],
+      "notes": "Prose and every embedded tool_calls[] entry expand into independently filterable timeline rows."
     },
     {
       "id": "chat_history.record_type.reasoning",
       "status": "ingested",
       "match": { "recordType": "reasoning" },
       "engines": { "ts": true, "rs": true },
-      "product": ["messages", "search", "fts"],
-      "notes": "Plaintext summary[] only; encrypted_content ignored for FTS."
+      "product": ["messages", "timeline", "search", "fts"],
+      "notes": "Readable summary[] becomes thinking; empty/opaque reasoning stays raw but is hidden. encrypted_content is not decoded."
     },
     {
       "id": "chat_history.record_type.tool_result",
-      "status": "ignored",
+      "status": "ingested",
       "match": { "recordType": "tool_result" },
-      "engines": { "ts": false, "rs": false },
-      "notes": "High volume tool I/O. extract()→null. Candidate for tool timeline."
+      "engines": { "ts": true, "rs": true },
+      "product": ["messages", "timeline", "tools", "search", "fts"],
+      "notes": "Retained losslessly and paired to embedded calls by tool_call_id during timeline materialization."
     },
     {
       "id": "chat_history.record_type.backend_tool_call",
-      "status": "ignored",
+      "status": "ingested",
       "match": { "recordType": "backend_tool_call" },
-      "engines": { "ts": false, "rs": false },
-      "notes": "Backend tool envelopes; extract()→null."
+      "engines": { "ts": true, "rs": true },
+      "product": ["messages", "timeline", "tools", "search", "fts"],
+      "notes": "Standalone backend calls (currently web_search) become tool timeline rows."
+    },
+    {
+      "id": "chat_history.embedded_tool_call",
+      "status": "ingested",
+      "match": { "bucket": "chat_history.embedded_tool_call" },
+      "engines": { "ts": true, "rs": true },
+      "product": ["timeline", "tools", "search"],
+      "notes": "Every assistant.tool_calls[] item expands independently; no top-N cap."
     },
     {
       "id": "sibling.summary.json",
@@ -74,7 +87,7 @@
       "match": { "bucket": "sibling.events.jsonl" },
       "engines": { "ts": true, "rs": true },
       "product": ["messages"],
-      "notes": "Turn-scoped timestamp join onto message columns; events themselves not stored as rows."
+      "notes": "Turn-scoped timestamp join onto message columns; compaction counter resets select the latest valid epoch. Events themselves are not stored as rows."
     },
     {
       "id": "sibling.signals.json",
@@ -90,6 +103,13 @@
       "match": { "bucket": "sibling.updates.jsonl" },
       "engines": { "ts": false, "rs": false },
       "notes": "ACP/UI stream, often ~10× chat_history. Not transcript SoT."
+    },
+    {
+      "id": "compaction.segment.file",
+      "status": "ignored",
+      "match": { "bucket": "compaction.segment.file" },
+      "engines": { "ts": false, "rs": false },
+      "notes": "Historical Markdown snapshots are often truncated relative to their declared turn counts and overlap canonical chat history. They are inventoried but not merged into the transcript because chronology and deduplication cannot be losslessly established."
     },
     {
       "id": "toplevel.sessions",

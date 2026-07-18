@@ -1031,8 +1031,8 @@ mod tests {
         let stats = run_ingest(&opts, None).expect("grok ingest");
         assert!(stats.projects_processed >= 1);
         assert!(stats.sessions_processed >= 1);
-        // system + user + assistant + reasoning; tool_result skipped
-        assert!(stats.messages_written >= 4);
+        // Every canonical Grok chat-history record is retained.
+        assert!(stats.messages_written >= 5);
 
         let conn = Connection::open(&db).unwrap();
         let sid: String = conn
@@ -1050,7 +1050,7 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(msg_count, 4, "tool_result must not create a message row");
+        assert_eq!(msg_count, 5, "tool_result must create a message row");
         let types: Vec<String> = {
             let mut stmt = conn
                 .prepare("SELECT msg_type FROM messages ORDER BY msg_index")
@@ -1060,8 +1060,10 @@ mod tests {
                 .map(|r| r.unwrap())
                 .collect()
         };
-        assert_eq!(types, vec!["system", "user", "assistant", "reasoning"]);
-        // Absolute line indices: tool_result at index 3 is skipped → reasoning at 4
+        assert_eq!(
+            types,
+            vec!["system", "user", "assistant", "tool_result", "reasoning"]
+        );
         let reasoning_idx: i64 = conn
             .query_row(
                 "SELECT msg_index FROM messages WHERE msg_type = 'reasoning'",

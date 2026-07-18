@@ -34,8 +34,8 @@ function writeGrokFixture(grokRoot: string): void {
     { type: 'system', content: 'You are Grok.' },
     { type: 'user', content: [{ type: 'text', text: 'grok hello' }] },
     { type: 'reasoning', id: 'rs_1', summary: [{ type: 'summary_text', text: 'thinking about it' }] },
-    { type: 'assistant', content: 'grok reply' },
-    { type: 'tool_result', tool_call_id: 'c1', content: 'noise that should be skipped' },
+    { type: 'assistant', content: 'grok reply', tool_calls: [{ id: 'c1', name: 'read_file', arguments: '{}' }] },
+    { type: 'tool_result', tool_call_id: 'c1', content: 'tool output' },
   ];
   writeFileSync(path.join(sessionDir, 'chat_history.jsonl'), lines.map((l) => JSON.stringify(l)).join('\n') + '\n');
   writeFileSync(
@@ -86,7 +86,7 @@ describe('multi-source ingest (claude + grok)', () => {
     assert.equal(grokProject.slug, GROK_SLUG);
   });
 
-  test('the grok session is queryable with its title, tool I/O skipped', () => {
+  test('the grok session is queryable with its title and rich tool I/O', () => {
     const sessions = spaghetti.getSessionList(GROK_SLUG, { sourceId: 'grok' });
     assert.equal(sessions.length, 1);
     assert.equal(sessions[0].sessionId, GROK_SESSION);
@@ -97,7 +97,11 @@ describe('multi-source ingest (claude + grok)', () => {
     assert.ok(blob.includes('grok hello'), 'user turn present');
     assert.ok(blob.includes('grok reply'), 'assistant turn present');
     assert.ok(blob.includes('thinking about it'), 'reasoning summary present');
-    assert.ok(!blob.includes('should be skipped'), 'tool_result was skipped');
+    assert.ok(blob.includes('tool output'), 'tool_result was retained');
+    const timeline = spaghetti.getSessionTimeline(GROK_SLUG, GROK_SESSION, { limit: 20 });
+    const tool = timeline.messages.find((message) => message.type === 'tool_use');
+    assert.equal(tool?.toolUse?.toolName, 'read_file');
+    assert.equal(tool?.toolUse?.result?.content, 'tool output');
   });
 
   test('getProjectList filters to the grok source only', () => {

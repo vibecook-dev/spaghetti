@@ -11,13 +11,10 @@
  *   - `reasoning` → `{ summary: [{ type:'summary_text', text }], id, encrypted_content }`
  *   - `tool_result` / `backend_tool_call` → tool I/O
  *
- * We keep the conversational turns (system/user/assistant) and the reasoning
- * SUMMARIES (small, human-readable, the transparency Claude's thinking blocks
- * give) as message rows. `tool_result` and `backend_tool_call` are tool I/O —
- * high-volume and noisy for list/FTS (one session had 385 tool_results) — so
- * they are skipped via the `extract() → null` contract, mirroring how the Codex
- * extractor skips its function_call/non-message lines. The verbatim line is
- * still preserved in `messages.data` for the rows we DO keep.
+ * Every known chat-history record is retained. The raw row stays lossless while
+ * this projection supplies useful FTS text and stable source message types.
+ * Display-time normalization filters model context, expands embedded calls and
+ * pairs `tool_result` rows with their calls.
  *
  * Differences from Codex/Claude this normalizes away:
  *  - text lives in different fields per type (`content` string, `content[]`
@@ -29,6 +26,16 @@
  */
 
 import type { ExtractedMessage, MessageExtractor } from '../types.js';
+import {
+  grokAssistantSearchText,
+  grokBackendToolCall,
+  grokHumanUserText,
+  grokReadableText,
+  grokReasoningSummary,
+  grokSearchInput,
+  grokToolResultId,
+  grokToolResultText,
+} from './records.js';
 
 /** FTS/preview text cap — matches the other extractors' convention. */
 const MAX_TEXT_LENGTH = 2_000;
@@ -44,23 +51,6 @@ const ZERO_TOKENS = {
   cacheReadTokens: 0,
 } as const;
 
-/**
- * Collect readable text from any Grok content shape: a bare string, or an array
- * of blocks each carrying a `text` field (`{type:'text'|'summary_text', text}`).
- */
-function collectText(value: unknown): string {
-  if (typeof value === 'string') return value;
-  if (!Array.isArray(value)) return '';
-  const parts: string[] = [];
-  for (const block of value) {
-    if (block && typeof block === 'object') {
-      const b = block as Record<string, unknown>;
-      if (typeof b.text === 'string') parts.push(b.text);
-    }
-  }
-  return parts.join('\n');
-}
-
 export const grokMessageExtractor: MessageExtractor = {
   extract(raw: unknown): ExtractedMessage | null {
     if (!raw || typeof raw !== 'object') return null;
@@ -68,26 +58,44 @@ export const grokMessageExtractor: MessageExtractor = {
     const type = typeof rec.type === 'string' ? rec.type : '';
 
     let text: string;
+    let msgType = type;
     let uuid: string | null = null;
     switch (type) {
       case 'system':
-      case 'user':
+        // Keep the raw prompt, but do not pollute transcript FTS with model rules.
+        text = '';
+        break;
+      case 'user': {
+        const human = grokHumanUserText(rec);
+        msgType = human == null ? 'context' : 'user';
+        text = human ?? '';
+        break;
+      }
       case 'assistant':
-        // system/assistant carry a `content` string, user a `content[]` array.
-        text = collectText(rec.content);
+        text = grokAssistantSearchText(rec);
         break;
       case 'reasoning':
-        // Reasoning text is the plaintext `summary[]`; `encrypted_content` is opaque.
-        text = collectText(rec.summary);
+        text = grokReasoningSummary(rec);
         uuid = typeof rec.id === 'string' ? rec.id : null;
         break;
+      case 'tool_result':
+        text = grokToolResultText(rec);
+        uuid = grokToolResultId(rec) || null;
+        break;
+      case 'backend_tool_call': {
+        const call = grokBackendToolCall(rec);
+        if (!call) return null;
+        msgType = 'tool_use';
+        uuid = call.id || null;
+        text = `${call.name} ${grokReadableText(call.input) || grokSearchInput(call.input)}`.trim();
+        break;
+      }
       default:
-        // tool_result / backend_tool_call / unknown — not a conversational row.
         return null;
     }
 
     return {
-      msgType: type,
+      msgType,
       text: truncate(text),
       uuid,
       timestamp: null, // per-message time is not in chat_history.jsonl (see events.jsonl)

@@ -167,10 +167,12 @@ def validate(claim: dict[str, Any], gt: dict[str, Any]) -> list[CheckResult]:
         "workflow.file",
         "rollout.file",
         "chat_history.file",
+        "chat_history.embedded_tool_call",
         "sibling.summary.json",
         "sibling.events.jsonl",
         "sibling.signals.json",
         "sibling.updates.jsonl",
+        "compaction.segment.file",
     ]
     for key in named_bucket_keys:
         if key not in buckets:

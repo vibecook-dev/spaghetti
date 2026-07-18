@@ -5,9 +5,10 @@
 //! # Timestamp join (turn-scoped)
 //!
 //! 1. `turn_started.conversation_message_count` = absolute chat_history index
-//!    of that turn's primary user message (exact on real installs).
+//!    of that turn's primary user message. Compaction resets the counter while
+//!    retaining old events, so only the latest valid counter epoch is joined.
 //! 2. Turn ranges: `[count_i, count_{i+1})`.
-//! 3. Within `[turn_started.ts, turn_ended.ts]`, pair `loop_started` /
+//! 3. Within `[turn_started.ts, next turn_started.ts)`, pair `loop_started` /
 //!    `first_token` with assistant cycles; multiple `reasoning` rows may
 //!    share the current loop before the assistant advances it.
 //! 4. Pre-turn lines get `fallback_created` (summary.created_at).
@@ -30,7 +31,6 @@ struct EventLine {
     ty: String,
     ts: String,
     conversation_message_count: Option<u32>,
-    turn_number: Option<i64>,
 }
 
 fn parse_events(text: &str) -> Vec<EventLine> {
@@ -59,7 +59,6 @@ fn parse_events(text: &str) -> Vec<EventLine> {
                 .get("conversation_message_count")
                 .and_then(Value::as_u64)
                 .map(|n| n as u32),
-            turn_number: v.get("turn_number").and_then(Value::as_i64),
         });
     }
     out
@@ -111,16 +110,39 @@ pub fn build_timestamp_map(
     }
 
     let events = parse_events(events_text);
-    let mut turns: Vec<&EventLine> = events.iter().filter(|e| e.ty == "turn_started").collect();
-    turns.sort_by(|a, b| match (a.turn_number, b.turn_number) {
-        (Some(ta), Some(tb)) if ta != tb => ta.cmp(&tb),
-        _ => a.ts.cmp(&b.ts),
-    });
-    let turn_ends: Vec<&str> = events
+    let candidates: Vec<&EventLine> = events
         .iter()
-        .filter(|e| e.ty == "turn_ended")
-        .map(|e| e.ts.as_str())
+        .filter(|event| event.ty == "turn_started" && event.conversation_message_count.is_some())
         .collect();
+    let mut epochs: Vec<Vec<&EventLine>> = Vec::new();
+    for turn in candidates {
+        let current = turn.conversation_message_count.unwrap_or(0);
+        let starts_new = epochs
+            .last()
+            .and_then(|epoch| epoch.last())
+            .and_then(|previous| previous.conversation_message_count)
+            .is_some_and(|previous| current < previous);
+        if epochs.is_empty() || starts_new {
+            epochs.push(vec![turn]);
+        } else if let Some(epoch) = epochs.last_mut() {
+            epoch.push(turn);
+        }
+    }
+    let turns: Vec<&EventLine> = epochs
+        .iter()
+        .rev()
+        .find_map(|epoch| {
+            let valid: Vec<&EventLine> = epoch
+                .iter()
+                .copied()
+                .filter(|turn| {
+                    let index = turn.conversation_message_count.unwrap_or(u32::MAX) as usize;
+                    index < n && line_types[index] == "user"
+                })
+                .collect();
+            (!valid.is_empty()).then_some(valid)
+        })
+        .unwrap_or_default();
 
     let first_turn_start = turns
         .first()
@@ -160,9 +182,7 @@ pub fn build_timestamp_map(
         };
 
         let window_start = turn.ts.as_str();
-        let window_end: &str = if ti < turn_ends.len() {
-            turn_ends[ti]
-        } else if ti + 1 < turns.len() {
+        let window_end: &str = if ti + 1 < turns.len() {
             turns[ti + 1].ts.as_str()
         } else {
             "\u{ffff}"
@@ -173,21 +193,20 @@ pub fn build_timestamp_map(
             .filter(|e| {
                 e.ty == "loop_started"
                     && e.ts.as_str() >= window_start
-                    && e.ts.as_str() <= window_end
+                    && e.ts.as_str() < window_end
             })
             .map(|e| e.ts.as_str())
             .collect();
         let first_tokens: Vec<&str> = events
             .iter()
             .filter(|e| {
-                e.ty == "first_token"
-                    && e.ts.as_str() >= window_start
-                    && e.ts.as_str() <= window_end
+                e.ty == "first_token" && e.ts.as_str() >= window_start && e.ts.as_str() < window_end
             })
             .map(|e| e.ts.as_str())
             .collect();
 
         let mut loop_i: usize = 0;
+        let mut last_agent_timestamp = turn.ts.clone();
         for (i, line_ty) in line_types.iter().enumerate().take(end).skip(start) {
             let t = line_ty.as_str();
             let idx = i as u32;
@@ -205,14 +224,26 @@ pub fn build_timestamp_map(
                     }
                 }
                 "assistant" => {
-                    if loop_i < first_tokens.len() {
-                        map.insert(idx, first_tokens[loop_i].to_owned());
+                    let assistant_timestamp = if loop_i < first_tokens.len() {
+                        first_tokens[loop_i].to_owned()
                     } else if loop_i < loops.len() {
-                        map.insert(idx, loops[loop_i].to_owned());
+                        loops[loop_i].to_owned()
                     } else {
-                        map.insert(idx, turn.ts.clone());
-                    }
+                        turn.ts.clone()
+                    };
+                    map.insert(idx, assistant_timestamp.clone());
+                    last_agent_timestamp = assistant_timestamp;
                     loop_i = loop_i.saturating_add(1);
+                }
+                "tool_result" => {
+                    map.insert(idx, last_agent_timestamp.clone());
+                }
+                "backend_tool_call" => {
+                    let timestamp = loops
+                        .get(loop_i)
+                        .map(|timestamp| (*timestamp).to_owned())
+                        .unwrap_or_else(|| last_agent_timestamp.clone());
+                    map.insert(idx, timestamp);
                 }
                 _ => {}
             }
@@ -324,7 +355,10 @@ mod tests {
             map.get(&5).map(String::as_str),
             Some("2026-04-01T10:00:02.000Z")
         );
-        assert!(!map.contains_key(&6)); // tool_result
+        assert_eq!(
+            map.get(&6).map(String::as_str),
+            Some("2026-04-01T10:00:02.000Z")
+        ); // result shares call timestamp
         assert_eq!(
             map.get(&7).map(String::as_str),
             Some("2026-04-01T10:00:10.000Z")
@@ -344,6 +378,49 @@ mod tests {
         );
         assert_eq!(
             map.get(&11).map(String::as_str),
+            Some("2026-04-01T11:00:02.000Z")
+        );
+    }
+
+    #[test]
+    fn compaction_uses_latest_valid_counter_epoch() {
+        let types = vec![
+            "system".into(),
+            "user".into(),
+            "reasoning".into(),
+            "assistant".into(),
+            "user".into(),
+            "assistant".into(),
+        ];
+        let events = r#"
+{"ts":"2026-04-01T08:00:00.000Z","type":"turn_started","turn_number":20,"conversation_message_count":10}
+{"ts":"2026-04-01T08:10:00.000Z","type":"turn_started","turn_number":21,"conversation_message_count":20}
+{"ts":"2026-04-01T10:00:00.000Z","type":"turn_started","turn_number":0,"conversation_message_count":1}
+{"ts":"2026-04-01T10:00:01.000Z","type":"loop_started"}
+{"ts":"2026-04-01T10:00:02.000Z","type":"first_token"}
+{"ts":"2026-04-01T11:00:00.000Z","type":"turn_started","turn_number":1,"conversation_message_count":4}
+{"ts":"2026-04-01T11:00:01.000Z","type":"loop_started"}
+{"ts":"2026-04-01T11:00:02.000Z","type":"first_token"}
+"#;
+        let map = build_timestamp_map(&types, events, Some("2026-04-01T09:00:00.000Z"));
+        assert_eq!(
+            map.get(&0).map(String::as_str),
+            Some("2026-04-01T09:00:00.000Z")
+        );
+        assert_eq!(
+            map.get(&1).map(String::as_str),
+            Some("2026-04-01T10:00:00.000Z")
+        );
+        assert_eq!(
+            map.get(&3).map(String::as_str),
+            Some("2026-04-01T10:00:02.000Z")
+        );
+        assert_eq!(
+            map.get(&4).map(String::as_str),
+            Some("2026-04-01T11:00:00.000Z")
+        );
+        assert_eq!(
+            map.get(&5).map(String::as_str),
             Some("2026-04-01T11:00:02.000Z")
         );
     }

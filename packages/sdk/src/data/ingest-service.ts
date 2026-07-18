@@ -54,6 +54,9 @@ export interface IngestService extends ProjectParseSink {
    */
   getNextMessageIndex(sessionId: string): number;
 
+  /** Replace-on-rewrite sources use this before replaying a truncated session. */
+  clearSessionMessages(sessionId: string): void;
+
   /**
    * Write surface for product sidecars (token attribution, timestamps).
    * Same API passed into {@link IngestHooks}.
@@ -858,6 +861,12 @@ class IngestServiceImpl implements IngestService {
     this.db.run('DELETE FROM sessions WHERE source_id = ?', this.sourceId);
     this.db.run('DELETE FROM projects WHERE source_id = ?', this.sourceId);
     this.db.run('DELETE FROM source_files WHERE source_id = ?', this.sourceId);
+  }
+
+  clearSessionMessages(sessionId: string): void {
+    this.db.run('DELETE FROM timeline_messages WHERE session_id = ? AND source_id = ?', sessionId, this.sourceId);
+    this.db.run('DELETE FROM messages WHERE session_id = ? AND source_id = ?', sessionId, this.sourceId);
+    this.db.run('UPDATE sessions SET tokens_estimated = 0 WHERE id = ? AND source_id = ?', sessionId, this.sourceId);
   }
 
   deleteAllData(): void {
