@@ -70,6 +70,8 @@ export interface ProjectListItem extends ProjectLocator {
   lastActiveAt: string;
   firstActiveAt: string;
   latestGitBranch: string;
+  /** Prompt/summary of the most recently active member session. */
+  latestPrompt: string;
   hasMemory: boolean;
 }
 

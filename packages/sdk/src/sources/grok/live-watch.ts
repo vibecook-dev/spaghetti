@@ -156,9 +156,16 @@ export function createGrokLiveWatch(deps: GrokLiveWatchDeps): GrokLiveWatch {
       if (!deps.fileService.exists(chatFile)) return;
       const meta = readGrokSessionMeta(deps.fileService, chatFile);
       if (!meta) return;
-      applyGrokSidecars(deps.fileService, chatFile, meta.sessionId, deps.ingestService.getSessionWriteApi(), {
-        fallbackCreated: meta.created ?? null,
-      });
+      deps.ingestService.beginTransaction();
+      try {
+        applyGrokSidecars(deps.fileService, chatFile, meta.sessionId, deps.ingestService.getSessionWriteApi(), {
+          fallbackCreated: meta.created ?? null,
+        });
+        deps.ingestService.commitTransaction();
+      } catch (error) {
+        deps.ingestService.rollbackTransaction();
+        throw error;
+      }
     } catch (err) {
       deps.errorSink.error(err instanceof Error ? err : new Error(String(err)));
     }
@@ -252,9 +259,16 @@ export function createGrokLiveWatch(deps: GrokLiveWatchDeps): GrokLiveWatch {
 
       try {
         const meta = readGrokSessionMeta(deps.fileService, file);
-        applyGrokSidecars(deps.fileService, file, st.sessionId, deps.ingestService.getSessionWriteApi(), {
-          fallbackCreated: meta?.created ?? null,
-        });
+        deps.ingestService.beginTransaction();
+        try {
+          applyGrokSidecars(deps.fileService, file, st.sessionId, deps.ingestService.getSessionWriteApi(), {
+            fallbackCreated: meta?.created ?? null,
+          });
+          deps.ingestService.commitTransaction();
+        } catch (error) {
+          deps.ingestService.rollbackTransaction();
+          throw error;
+        }
       } catch {
         /* sidecar best-effort */
       }

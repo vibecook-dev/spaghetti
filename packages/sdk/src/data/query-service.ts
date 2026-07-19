@@ -26,7 +26,7 @@ import type { SubagentListItem } from '../api.js';
 import {
   normalizedTokenTotal,
   readTokenActivity,
-  rebuildDirtyTokenActivity,
+  ensureTokenActivityMaterialized,
   type TokenActivityBucketData,
 } from './token-activity.js';
 
@@ -42,7 +42,7 @@ export interface QueryService {
   prepareTimelineProjections(
     onProgress?: (progress: { kind: 'session' | 'subagent'; current: number; total: number }) => void,
   ): { sessions: number; subagents: number };
-  /** Materialize or refresh source-normalized daily token buckets. */
+  /** Reconcile crash-left dirty token buckets during boot; reads never call this. */
   prepareTokenActivity(): number;
 
   // Projects
@@ -159,6 +159,7 @@ interface ProjectSummaryRow {
   last_active_at: string;
   first_active_at: string;
   latest_git_branch: string | null;
+  latest_prompt: string;
   has_memory: number;
 }
 
@@ -320,7 +321,7 @@ class QueryServiceImpl implements QueryService {
   }
 
   prepareTokenActivity(): number {
-    return rebuildDirtyTokenActivity(this.db);
+    return ensureTokenActivityMaterialized(this.db);
   }
 
   // ─────────────────────────────────────────────────────────────────────────
@@ -359,34 +360,59 @@ class QueryServiceImpl implements QueryService {
     const params = options?.sourceId ? [options.sourceId] : [];
     const rows = this.db.all<ProjectSummaryRow>(
       `
+      WITH ranked_sessions AS (
+        SELECT project_slug, source_id, project_path, first_prompt, summary, git_branch,
+               created_at, modified_at, tokens_estimated,
+               ROW_NUMBER() OVER (
+                 PARTITION BY project_slug, source_id
+                 ORDER BY modified_at DESC, id DESC
+               ) AS recent_rank
+          FROM sessions
+      ),
+      session_stats AS (
+        SELECT project_slug, source_id,
+               COUNT(*) AS session_count,
+               MAX(tokens_estimated) AS tokens_estimated,
+               MAX(modified_at) AS last_active_at,
+               MIN(created_at) AS first_active_at,
+               MAX(CASE WHEN recent_rank = 1 THEN NULLIF(project_path, '') END) AS latest_project_path,
+               MAX(CASE WHEN recent_rank = 1 THEN git_branch END) AS latest_git_branch,
+               MAX(CASE WHEN recent_rank = 1
+                        THEN COALESCE(NULLIF(first_prompt, ''), NULLIF(summary, ''), '') END) AS latest_prompt
+          FROM ranked_sessions
+         GROUP BY project_slug, source_id
+      ),
+      token_totals AS (
+        SELECT source_id, project_slug,
+               SUM(input_tokens) AS input_tokens,
+               SUM(output_tokens) AS output_tokens,
+               SUM(cache_creation_tokens) AS cache_creation_tokens,
+               SUM(cache_read_tokens) AS cache_read_tokens,
+               SUM(parent_message_count) AS parent_message_count
+          FROM session_summary_totals
+         GROUP BY source_id, project_slug
+      )
       SELECT p.slug, p.source_id,
-        COALESCE(
-          (SELECT NULLIF(project_path, '') FROM sessions
-            WHERE project_slug = p.slug AND source_id = p.source_id
-            ORDER BY modified_at DESC LIMIT 1),
-          p.original_path,
-          ''
-        ) AS original_path,
-        (SELECT COUNT(*) FROM sessions WHERE project_slug = p.slug AND source_id = p.source_id) as session_count,
-        COALESCE((SELECT SUM(mc.cnt) FROM (SELECT COUNT(*) as cnt FROM messages WHERE project_slug = p.slug AND source_id = p.source_id GROUP BY session_id) mc), 0) as message_count,
-        COALESCE((SELECT SUM(input_tokens) FROM messages WHERE project_slug = p.slug AND source_id = p.source_id), 0)
-          + COALESCE((SELECT SUM(input_tokens) FROM subagent_messages WHERE project_slug = p.slug AND source_id = p.source_id), 0) as input_tokens,
-        COALESCE((SELECT SUM(output_tokens) FROM messages WHERE project_slug = p.slug AND source_id = p.source_id), 0)
-          + COALESCE((SELECT SUM(output_tokens) FROM subagent_messages WHERE project_slug = p.slug AND source_id = p.source_id), 0) as output_tokens,
-        COALESCE((SELECT SUM(cache_creation_tokens) FROM messages WHERE project_slug = p.slug AND source_id = p.source_id), 0)
-          + COALESCE((SELECT SUM(cache_creation_tokens) FROM subagent_messages WHERE project_slug = p.slug AND source_id = p.source_id), 0) as cache_creation_tokens,
-        COALESCE((SELECT SUM(cache_read_tokens) FROM messages WHERE project_slug = p.slug AND source_id = p.source_id), 0)
-          + COALESCE((SELECT SUM(cache_read_tokens) FROM subagent_messages WHERE project_slug = p.slug AND source_id = p.source_id), 0) as cache_read_tokens,
-        COALESCE((SELECT MAX(tokens_estimated) FROM sessions WHERE project_slug = p.slug AND source_id = p.source_id), 0) as tokens_estimated,
-        COALESCE((SELECT MAX(modified_at) FROM sessions WHERE project_slug = p.slug AND source_id = p.source_id), '1970-01-01') as last_active_at,
-        COALESCE((SELECT MIN(created_at) FROM sessions WHERE project_slug = p.slug AND source_id = p.source_id), '1970-01-01') as first_active_at,
-        (SELECT git_branch FROM sessions WHERE project_slug = p.slug AND source_id = p.source_id ORDER BY modified_at DESC LIMIT 1) as latest_git_branch,
+        COALESCE(ss.latest_project_path, p.original_path, '') AS original_path,
+        COALESCE(ss.session_count, 0) as session_count,
+        COALESCE(tt.parent_message_count, 0) as message_count,
+        COALESCE(tt.input_tokens, 0) as input_tokens,
+        COALESCE(tt.output_tokens, 0) as output_tokens,
+        COALESCE(tt.cache_creation_tokens, 0) as cache_creation_tokens,
+        COALESCE(tt.cache_read_tokens, 0) as cache_read_tokens,
+        COALESCE(ss.tokens_estimated, 0) as tokens_estimated,
+        COALESCE(ss.last_active_at, '1970-01-01') as last_active_at,
+        COALESCE(ss.first_active_at, '1970-01-01') as first_active_at,
+        COALESCE(ss.latest_git_branch, '') as latest_git_branch,
+        COALESCE(ss.latest_prompt, '') as latest_prompt,
         CASE
           WHEN p.source_id = 'claude-code'
           THEN EXISTS(SELECT 1 FROM project_memories WHERE project_slug = p.slug)
           ELSE 0
         END as has_memory
       FROM projects p
+      LEFT JOIN session_stats ss ON ss.source_id = p.source_id AND ss.project_slug = p.slug
+      LEFT JOIN token_totals tt ON tt.source_id = p.source_id AND tt.project_slug = p.slug
       ${where}
     `,
       ...params,
@@ -419,20 +445,18 @@ class QueryServiceImpl implements QueryService {
         COALESCE(s.is_sidechain, 0) as is_sidechain,
         COALESCE(s.created_at, '1970-01-01') as created_at,
         COALESCE(s.modified_at, '1970-01-01') as modified_at,
-        COALESCE((SELECT COUNT(*) FROM messages WHERE session_id = s.id AND project_slug = s.project_slug AND source_id = s.source_id), 0) as message_count,
-        COALESCE((SELECT SUM(input_tokens) FROM messages WHERE session_id = s.id AND project_slug = s.project_slug AND source_id = s.source_id), 0)
-          + COALESCE((SELECT SUM(input_tokens) FROM subagent_messages WHERE session_id = s.id AND project_slug = s.project_slug AND source_id = s.source_id), 0) as input_tokens,
-        COALESCE((SELECT SUM(output_tokens) FROM messages WHERE session_id = s.id AND project_slug = s.project_slug AND source_id = s.source_id), 0)
-          + COALESCE((SELECT SUM(output_tokens) FROM subagent_messages WHERE session_id = s.id AND project_slug = s.project_slug AND source_id = s.source_id), 0) as output_tokens,
-        COALESCE((SELECT SUM(cache_creation_tokens) FROM messages WHERE session_id = s.id AND project_slug = s.project_slug AND source_id = s.source_id), 0)
-          + COALESCE((SELECT SUM(cache_creation_tokens) FROM subagent_messages WHERE session_id = s.id AND project_slug = s.project_slug AND source_id = s.source_id), 0) as cache_creation_tokens,
-        COALESCE((SELECT SUM(cache_read_tokens) FROM messages WHERE session_id = s.id AND project_slug = s.project_slug AND source_id = s.source_id), 0)
-          + COALESCE((SELECT SUM(cache_read_tokens) FROM subagent_messages WHERE session_id = s.id AND project_slug = s.project_slug AND source_id = s.source_id), 0) as cache_read_tokens,
+        COALESCE(tt.parent_message_count, 0) as message_count,
+        COALESCE(tt.input_tokens, 0) as input_tokens,
+        COALESCE(tt.output_tokens, 0) as output_tokens,
+        COALESCE(tt.cache_creation_tokens, 0) as cache_creation_tokens,
+        COALESCE(tt.cache_read_tokens, 0) as cache_read_tokens,
         COALESCE(s.tokens_estimated, 0) as tokens_estimated,
         COALESCE((SELECT COUNT(*) FROM todos WHERE session_id = s.id), 0) as todo_count,
         s.plan_slug,
         COALESCE(s.has_task, 0) as has_task
       FROM sessions s
+      LEFT JOIN session_summary_totals tt
+        ON tt.source_id = s.source_id AND tt.project_slug = s.project_slug AND tt.session_id = s.id
       WHERE s.project_slug = ?${sourceClause}
     `,
       ...params,
@@ -1194,6 +1218,7 @@ class QueryServiceImpl implements QueryService {
       lastActiveAt: row.last_active_at,
       firstActiveAt: row.first_active_at,
       latestGitBranch: row.latest_git_branch ?? '',
+      latestPrompt: row.latest_prompt ?? '',
       hasMemory: !!row.has_memory,
     };
   }

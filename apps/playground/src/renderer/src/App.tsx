@@ -104,7 +104,6 @@ function PlaygroundShell() {
   const [error, setError] = useState<string | null>(null);
   const [projectChangeNonce, setProjectChangeNonce] = useState(0);
   const [sessionChangeNonce, setSessionChangeNonce] = useState(0);
-  const [projectPrompts, setProjectPrompts] = useState<Record<string, string>>({});
   const [stats, setStats] = useState<StoreStats | null>(null);
   const [sessionSourceFilter, setSessionSourceFilter] = useState<string | null>(null);
   const [searchOpen, setSearchOpen] = useState(false);
@@ -120,6 +119,7 @@ function PlaygroundShell() {
   const [liveSessions, setLiveSessions] = useState<Record<string, LiveSessionState>>({});
   const [liveClock, setLiveClock] = useState(Date.now());
   const selectedSessionRef = useRef<typeof selectedSession>(null);
+  const selectedProjectMembersRef = useRef<Set<string>>(new Set());
 
   const [sources, setSources] = useState<SourceProgressState[]>(() => initialSourceStates());
   const [progress, setProgress] = useState<ProgressSnapshot | null>(null);
@@ -142,10 +142,6 @@ function PlaygroundShell() {
       setSelected({ ...gallery.DEBUG_PROJECT_KEY });
       setSessions([gallery.DEBUG_SESSION]);
       setSelectedSession({ session: gallery.DEBUG_SESSION, index: 0 });
-      setProjectPrompts((current) => ({
-        ...current,
-        [projectKey(gallery.DEBUG_PROJECT)]: gallery.DEBUG_SESSION.firstPrompt,
-      }));
     });
     return () => {
       cancelled = true;
@@ -283,7 +279,13 @@ function PlaygroundShell() {
       // Session-list metadata is cheap and useful while browsing one project.
       // Whole-library counts are much broader, so refresh those on a slower
       // lane. The visible transcript has its own exact, session-scoped lane.
-      if (!sessionChangeTimerRef.current) {
+      const touchesSelectedProject = (batch.changes ?? []).some(
+        (change) =>
+          !!change.sourceId &&
+          !!change.projectSlug &&
+          selectedProjectMembersRef.current.has(liveProjectMemberKey(change.sourceId, change.projectSlug)),
+      );
+      if (touchesSelectedProject && !sessionChangeTimerRef.current) {
         sessionChangeTimerRef.current = setTimeout(() => {
           sessionChangeTimerRef.current = null;
           setSessionChangeNonce((n) => n + 1);
@@ -356,43 +358,6 @@ function PlaygroundShell() {
       .then(setStats)
       .catch(() => setStats(null));
   }, [ready, projectChangeNonce, debugSession]);
-
-  useEffect(() => {
-    if (!ready || projects.length === 0) return;
-    let cancelled = false;
-    const run = async () => {
-      const next: Record<string, string> = {};
-      // Project prompts do not change when an existing session appends. Only
-      // query projects that have not been resolved yet instead of re-reading
-      // every project's session list after each live summary refresh.
-      const queue = projects.filter(
-        (project) => !Object.prototype.hasOwnProperty.call(projectPrompts, projectKey(project)),
-      );
-      if (queue.length === 0) return;
-      const workers = Array.from({ length: Math.min(6, queue.length) }, async () => {
-        while (queue.length > 0 && !cancelled) {
-          const p = queue.shift()!;
-          const key = projectKey(p);
-          if (debugSession && key === projectKey(debugSession.DEBUG_PROJECT)) {
-            next[key] = debugSession.DEBUG_SESSION.firstPrompt;
-            continue;
-          }
-          try {
-            const sess = await window.spaghetti.getSessionList(p);
-            next[key] = sess[0]?.firstPrompt || sess[0]?.summary || '';
-          } catch {
-            next[key] = '';
-          }
-        }
-      });
-      await Promise.all(workers);
-      if (!cancelled) setProjectPrompts((prev) => ({ ...prev, ...next }));
-    };
-    void run();
-    return () => {
-      cancelled = true;
-    };
-  }, [ready, projects, projectPrompts, debugSession]);
 
   useEffect(() => {
     if (!selected) {
@@ -543,6 +508,12 @@ function PlaygroundShell() {
     [selectedProject],
   );
 
+  useEffect(() => {
+    selectedProjectMembersRef.current = new Set(
+      selectedProject?.members.map((member) => liveProjectMemberKey(member.sourceId, member.slug)) ?? [],
+    );
+  }, [selectedProject]);
+
   const modKey = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform) ? '⌘' : 'Ctrl+';
 
   if (!ready || rebuilding || retrying || error) {
@@ -641,7 +612,7 @@ function PlaygroundShell() {
                   const isLive = p.members.some((member) =>
                     liveProjectMembers.has(liveProjectMemberKey(member.sourceId, member.slug)),
                   );
-                  const prompt = flattenPrompt(projectPrompts[key], 72);
+                  const prompt = flattenPrompt(p.latestPrompt, 72);
                   const tok = formatTokenUsage(p.tokenUsage, undefined, p.tokensEstimated);
                   return (
                     <button

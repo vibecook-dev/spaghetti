@@ -610,10 +610,76 @@ describe('IngestService.writeBatch (RFC 005 C2.6)', () => {
     );
     assert.equal(
       sqlite.get<{ count: number }>(
-        `SELECT COUNT(*) AS count FROM token_activity_dirty WHERE project_slug = ? AND activity_day = '2026-04-20'`,
+        `SELECT COUNT(*) AS count FROM token_activity_daily WHERE project_slug = ? AND activity_day = '2026-04-20'`,
         SLUG,
       )?.count,
       1,
+    );
+    assert.equal(
+      sqlite.get<{ count: number }>(
+        `SELECT COUNT(*) AS count FROM token_activity_session_daily WHERE project_slug = ? AND activity_day = '2026-04-20'`,
+        SLUG,
+      )?.count,
+      1,
+    );
+    assert.equal(
+      sqlite.get<{ count: number }>(
+        `SELECT COUNT(*) AS count FROM token_activity_dirty WHERE project_slug = ? AND activity_day = '2026-04-20'`,
+        SLUG,
+      )?.count,
+      0,
+    );
+    assert.equal(
+      sqlite.get<{ count: number }>(
+        `SELECT parent_message_count AS count FROM session_summary_totals
+          WHERE source_id = 'claude-code' AND session_id = ?`,
+        SESSION_ID,
+      )?.count,
+      sqlite.get<{ count: number }>(
+        `SELECT COUNT(*) AS count FROM messages WHERE source_id = 'claude-code' AND session_id = ?`,
+        SESSION_ID,
+      )?.count,
+    );
+    assert.equal(
+      sqlite.get<{ count: number }>(
+        `SELECT COUNT(*) AS count FROM source_materializations
+          WHERE source_id = 'claude-code' AND projection = 'token-activity'`,
+      )?.count,
+      1,
+    );
+  });
+
+  test('clearSourceData rolls back the canonical, derived, fingerprint, and marker wipe as one unit', () => {
+    const beforeMessages = sqlite.get<{ count: number }>(
+      `SELECT COUNT(*) AS count FROM messages WHERE source_id = 'claude-code'`,
+    )?.count;
+    const beforeMarker = sqlite.get<{ count: number }>(
+      `SELECT COUNT(*) AS count FROM source_materializations WHERE source_id = 'claude-code'`,
+    )?.count;
+    sqlite.exec(`
+      CREATE TRIGGER abort_test_source_clear BEFORE DELETE ON projects
+      WHEN old.source_id = 'claude-code' BEGIN
+        SELECT RAISE(ABORT, 'test source-clear rollback');
+      END;
+    `);
+
+    assert.throws(() => ingest.clearSourceData(), /test source-clear rollback/);
+    sqlite.exec('DROP TRIGGER abort_test_source_clear');
+
+    assert.equal(
+      sqlite.get<{ count: number }>(`SELECT COUNT(*) AS count FROM messages WHERE source_id = 'claude-code'`)?.count,
+      beforeMessages,
+    );
+    assert.equal(
+      sqlite.get<{ count: number }>(
+        `SELECT COUNT(*) AS count FROM source_materializations WHERE source_id = 'claude-code'`,
+      )?.count,
+      beforeMarker,
+    );
+    assert.ok(
+      (sqlite.get<{ count: number }>(
+        `SELECT COUNT(*) AS count FROM session_summary_totals WHERE source_id = 'claude-code'`,
+      )?.count ?? 0) > 0,
     );
   });
 });

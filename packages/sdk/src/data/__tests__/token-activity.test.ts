@@ -6,7 +6,15 @@ import path from 'node:path';
 
 import { createSqliteService, type SqliteService } from '../../io/index.js';
 import { initializeSchema } from '../schema.js';
-import { readTokenActivity, rebuildDirtyTokenActivity } from '../token-activity.js';
+import { createQueryService } from '../query-service.js';
+import {
+  ensureTokenActivityMaterialized,
+  invalidateTokenActivityMaterialization,
+  isTokenActivityMaterialized,
+  readTokenActivity,
+  rebuildDirtyTokenActivity,
+  rebuildSourceTokenActivity,
+} from '../token-activity.js';
 
 const SLUG = 'activity-project';
 
@@ -26,6 +34,12 @@ describe('daily token activity', () => {
       ['grok', 'grok-session', 1],
     ] as const) {
       db.run(
+        'INSERT INTO projects(slug, source_id, original_path) VALUES (?, ?, ?)',
+        SLUG,
+        sourceId,
+        `/tmp/${sourceId}`,
+      );
+      db.run(
         'INSERT INTO sessions(id, source_id, project_slug, tokens_estimated) VALUES (?, ?, ?, ?)',
         sessionId,
         sourceId,
@@ -39,6 +53,12 @@ describe('daily token activity', () => {
         (source_id, project_slug, session_id, msg_index, timestamp, input_tokens, output_tokens,
          cache_creation_tokens, cache_read_tokens, data)
        VALUES ('claude-code', ?, 'claude-session', 0, '2026-07-18T12:00:00Z', 10, 2, 3, 5, '{}')`,
+      SLUG,
+    );
+    db.run(
+      `INSERT INTO messages
+        (source_id, project_slug, session_id, msg_index, timestamp, input_tokens, data)
+       VALUES ('claude-code', ?, 'claude-session', 1, NULL, 7, '{}')`,
       SLUG,
     );
     db.run(
@@ -81,6 +101,45 @@ describe('daily token activity', () => {
     assert.equal(codex?.tokenUsage.cacheReadTokens, 40, 'the cache breakdown remains available');
     assert.equal(grok?.estimatedTokens, 50);
     assert.equal(grok?.exactTokens, 0);
+    assert.equal(db.get<{ count: number }>('SELECT COUNT(*) AS count FROM token_activity_session_daily')?.count, 3);
+    assert.deepEqual(
+      db.get<{ input_tokens: number; parent_message_count: number }>(
+        `SELECT input_tokens, parent_message_count FROM session_summary_totals
+          WHERE source_id = 'claude-code' AND session_id = 'claude-session'`,
+      ),
+      { input_tokens: 21, parent_message_count: 2 },
+      'timestamp-less parent rows remain present in list-summary totals',
+    );
+    assert.equal(
+      isTokenActivityMaterialized(db, 'claude-code'),
+      false,
+      'dirty-only rebuild does not certify a bulk cache',
+    );
+  });
+
+  test('missing completion markers force a boot repair even when no dirty keys exist', () => {
+    rebuildSourceTokenActivity(db, 'claude-code');
+    assert.equal(isTokenActivityMaterialized(db, 'claude-code'), true);
+    invalidateTokenActivityMaterialization(db, 'claude-code');
+    db.run('DELETE FROM token_activity_dirty WHERE source_id = ?', 'claude-code');
+    db.run('DELETE FROM session_summary_dirty WHERE source_id = ?', 'claude-code');
+    db.run('DELETE FROM session_summary_totals WHERE source_id = ?', 'claude-code');
+
+    assert.ok(ensureTokenActivityMaterialized(db) > 0);
+    assert.equal(isTokenActivityMaterialized(db, 'claude-code'), true);
+    assert.equal(
+      db.get<{ count: number }>(
+        `SELECT parent_message_count AS count FROM session_summary_totals
+          WHERE source_id = 'claude-code' AND session_id = 'claude-session'`,
+      )?.count,
+      2,
+    );
+    const summaries = createQueryService(() => db).getSessionSummaries(SLUG, { sourceId: 'claude-code' });
+    assert.equal(summaries[0]?.messageCount, 2);
+    assert.equal(summaries[0]?.tokenUsage.totalTokens, 40);
+    const projects = createQueryService(() => db).getProjectSummaries({ sourceId: 'claude-code' });
+    assert.equal(projects[0]?.messageCount, 2);
+    assert.equal(projects[0]?.tokenUsage.totalTokens, 40);
   });
 
   test('year-range reads use the compact rollup index instead of canonical messages', () => {
@@ -116,8 +175,12 @@ describe('daily token activity', () => {
 
   test('same-version schema attach refreshes corrected activity trigger bodies', () => {
     db.exec('DROP TRIGGER token_activity_messages_ai');
+    db.exec('DROP TRIGGER session_summary_messages_ai');
     db.exec(`
       CREATE TRIGGER token_activity_messages_ai AFTER INSERT ON messages BEGIN
+        SELECT 1;
+      END;
+      CREATE TRIGGER session_summary_messages_ai AFTER INSERT ON messages BEGIN
         SELECT 1;
       END;
     `);
@@ -128,9 +191,13 @@ describe('daily token activity', () => {
       `SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = 'token_activity_messages_ai'`,
     )?.sql;
     assert.match(sql ?? '', /ON CONFLICT\(source_id, project_slug, activity_day\) DO NOTHING/);
+    const summarySql = db.get<{ sql: string }>(
+      `SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = 'session_summary_messages_ai'`,
+    )?.sql;
+    assert.match(summarySql ?? '', /session_summary_dirty/);
   });
 
-  test('a project read leaves unrelated live-update buckets deferred', () => {
+  test('reads are side-effect free and leave dirty live-update buckets deferred', () => {
     db.run(
       `INSERT INTO sessions(id, source_id, project_slug) VALUES ('other-session', 'claude-code', 'other-project')`,
     );
@@ -148,6 +215,12 @@ describe('daily token activity', () => {
       )?.count,
       1,
     );
+    assert.equal(
+      db.get<{ count: number }>(
+        `SELECT COUNT(*) AS count FROM token_activity_daily WHERE project_slug = 'other-project'`,
+      )?.count,
+      0,
+    );
   });
 
   test('token and timestamp changes rebuild both affected days without cumulative drift', () => {
@@ -155,6 +228,7 @@ describe('daily token activity', () => {
       `UPDATE messages SET input_tokens = 20, timestamp = '2026-07-19T12:00:00Z'
         WHERE source_id = 'claude-code' AND session_id = 'claude-session' AND msg_index = 0`,
     );
+    rebuildDirtyTokenActivity(db, { projectSlug: SLUG, sourceId: 'claude-code' });
     const rows = readTokenActivity(db, SLUG, {
       sourceId: 'claude-code',
       from: '2026-07-18',
@@ -168,19 +242,36 @@ describe('daily token activity', () => {
       ],
     );
     assert.equal(
-      db.get<{ count: number }>('SELECT COUNT(*) AS count FROM token_activity_dirty WHERE project_slug = ?', SLUG)
-        ?.count,
+      db.get<{ count: number }>(
+        'SELECT COUNT(*) AS count FROM token_activity_dirty WHERE project_slug = ? AND source_id = ?',
+        SLUG,
+        'claude-code',
+      )?.count,
       0,
     );
   });
 
-  test('self-heals an empty derived table even when no dirty markers remain', () => {
+  test('read does not self-heal; boot source materialization repairs an empty derived table', () => {
     db.run('DELETE FROM token_activity_daily');
+    db.run('DELETE FROM token_activity_session_daily');
     db.run('DELETE FROM token_activity_dirty');
 
-    const rows = readTokenActivity(db, SLUG, { from: '2026-07-18', to: '2026-07-19' });
+    const emptyRows = readTokenActivity(db, SLUG, { from: '2026-07-18', to: '2026-07-19' });
 
-    assert.ok(rows.length > 0);
+    assert.deepEqual(emptyRows, []);
+    assert.equal(db.get<{ count: number }>('SELECT COUNT(*) AS count FROM token_activity_daily')?.count, 0);
+
+    rebuildSourceTokenActivity(db, 'claude-code');
+    const repairedRows = readTokenActivity(db, SLUG, {
+      sourceId: 'claude-code',
+      from: '2026-07-18',
+      to: '2026-07-19',
+    });
+
+    assert.ok(repairedRows.length > 0);
     assert.ok((db.get<{ count: number }>('SELECT COUNT(*) AS count FROM token_activity_daily')?.count ?? 0) > 0);
+    assert.ok(
+      (db.get<{ count: number }>('SELECT COUNT(*) AS count FROM token_activity_session_daily')?.count ?? 0) > 0,
+    );
   });
 });

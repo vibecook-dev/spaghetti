@@ -43,9 +43,13 @@ import type { SqliteService } from '../io/index.js';
 // invalidating and rebuilding the entire session.
 //
 // v11: subagent token columns plus source-normalized daily token activity.
-// Canonical message triggers mark affected project-days dirty; the shared
-// query layer rebuilds only those buckets and cold ingest materializes all.
-export const SCHEMA_VERSION = 11;
+//
+// v12: session/day token rollups. Native/TS ingestion owns materialization;
+// query APIs are read-only and never scan canonical message tables.
+//
+// v13: timestamp-independent session summary totals, dirty-session tracking,
+// and source-scoped materialization completion markers.
+export const SCHEMA_VERSION = 13;
 
 export const TOKEN_ACTIVITY_TRIGGER_NAMES = [
   'token_activity_messages_ai',
@@ -56,6 +60,79 @@ export const TOKEN_ACTIVITY_TRIGGER_NAMES = [
   'token_activity_subagents_au',
   'token_activity_session_quality_au',
 ] as const;
+
+export const SESSION_SUMMARY_TRIGGER_NAMES = [
+  'session_summary_messages_ai',
+  'session_summary_messages_ad',
+  'session_summary_messages_au',
+  'session_summary_subagents_ai',
+  'session_summary_subagents_ad',
+  'session_summary_subagents_au',
+] as const;
+
+/** Timestamp-independent invalidation for session/project list totals. */
+export const SESSION_SUMMARY_TRIGGERS_SQL = `
+CREATE TRIGGER IF NOT EXISTS session_summary_messages_ai AFTER INSERT ON messages
+WHEN new.session_id IS NOT NULL AND new.project_slug IS NOT NULL BEGIN
+  INSERT INTO session_summary_dirty(source_id, project_slug, session_id)
+  VALUES (new.source_id, new.project_slug, new.session_id)
+  ON CONFLICT(source_id, session_id) DO UPDATE SET project_slug = excluded.project_slug;
+END;
+CREATE TRIGGER IF NOT EXISTS session_summary_messages_ad AFTER DELETE ON messages
+WHEN old.session_id IS NOT NULL AND old.project_slug IS NOT NULL BEGIN
+  INSERT INTO session_summary_dirty(source_id, project_slug, session_id)
+  VALUES (old.source_id, old.project_slug, old.session_id)
+  ON CONFLICT(source_id, session_id) DO UPDATE SET project_slug = excluded.project_slug;
+END;
+CREATE TRIGGER IF NOT EXISTS session_summary_messages_au
+AFTER UPDATE OF input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, source_id, project_slug, session_id ON messages
+WHEN old.input_tokens IS NOT new.input_tokens
+  OR old.output_tokens IS NOT new.output_tokens
+  OR old.cache_creation_tokens IS NOT new.cache_creation_tokens
+  OR old.cache_read_tokens IS NOT new.cache_read_tokens
+  OR old.source_id IS NOT new.source_id
+  OR old.project_slug IS NOT new.project_slug
+  OR old.session_id IS NOT new.session_id BEGIN
+  INSERT INTO session_summary_dirty(source_id, project_slug, session_id)
+  SELECT old.source_id, old.project_slug, old.session_id
+   WHERE old.session_id IS NOT NULL AND old.project_slug IS NOT NULL
+  ON CONFLICT(source_id, session_id) DO UPDATE SET project_slug = excluded.project_slug;
+  INSERT INTO session_summary_dirty(source_id, project_slug, session_id)
+  SELECT new.source_id, new.project_slug, new.session_id
+   WHERE new.session_id IS NOT NULL AND new.project_slug IS NOT NULL
+  ON CONFLICT(source_id, session_id) DO UPDATE SET project_slug = excluded.project_slug;
+END;
+CREATE TRIGGER IF NOT EXISTS session_summary_subagents_ai AFTER INSERT ON subagent_messages
+WHEN new.session_id IS NOT NULL AND new.project_slug IS NOT NULL BEGIN
+  INSERT INTO session_summary_dirty(source_id, project_slug, session_id)
+  VALUES (new.source_id, new.project_slug, new.session_id)
+  ON CONFLICT(source_id, session_id) DO UPDATE SET project_slug = excluded.project_slug;
+END;
+CREATE TRIGGER IF NOT EXISTS session_summary_subagents_ad AFTER DELETE ON subagent_messages
+WHEN old.session_id IS NOT NULL AND old.project_slug IS NOT NULL BEGIN
+  INSERT INTO session_summary_dirty(source_id, project_slug, session_id)
+  VALUES (old.source_id, old.project_slug, old.session_id)
+  ON CONFLICT(source_id, session_id) DO UPDATE SET project_slug = excluded.project_slug;
+END;
+CREATE TRIGGER IF NOT EXISTS session_summary_subagents_au
+AFTER UPDATE OF input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, source_id, project_slug, session_id ON subagent_messages
+WHEN old.input_tokens IS NOT new.input_tokens
+  OR old.output_tokens IS NOT new.output_tokens
+  OR old.cache_creation_tokens IS NOT new.cache_creation_tokens
+  OR old.cache_read_tokens IS NOT new.cache_read_tokens
+  OR old.source_id IS NOT new.source_id
+  OR old.project_slug IS NOT new.project_slug
+  OR old.session_id IS NOT new.session_id BEGIN
+  INSERT INTO session_summary_dirty(source_id, project_slug, session_id)
+  SELECT old.source_id, old.project_slug, old.session_id
+   WHERE old.session_id IS NOT NULL AND old.project_slug IS NOT NULL
+  ON CONFLICT(source_id, session_id) DO UPDATE SET project_slug = excluded.project_slug;
+  INSERT INTO session_summary_dirty(source_id, project_slug, session_id)
+  SELECT new.source_id, new.project_slug, new.session_id
+   WHERE new.session_id IS NOT NULL AND new.project_slug IS NOT NULL
+  ON CONFLICT(source_id, session_id) DO UPDATE SET project_slug = excluded.project_slug;
+END;
+`;
 
 /** Reused after bulk ingest temporarily suppresses per-row dirty markers. */
 export const TOKEN_ACTIVITY_TRIGGERS_SQL = `
@@ -72,7 +149,14 @@ WHEN old.timestamp IS NOT NULL AND length(old.timestamp) >= 10 BEGIN
   ON CONFLICT(source_id, project_slug, activity_day) DO NOTHING;
 END;
 CREATE TRIGGER IF NOT EXISTS token_activity_messages_au
-AFTER UPDATE OF timestamp, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, source_id, project_slug ON messages BEGIN
+AFTER UPDATE OF timestamp, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, source_id, project_slug ON messages
+WHEN old.timestamp IS NOT new.timestamp
+  OR old.input_tokens IS NOT new.input_tokens
+  OR old.output_tokens IS NOT new.output_tokens
+  OR old.cache_creation_tokens IS NOT new.cache_creation_tokens
+  OR old.cache_read_tokens IS NOT new.cache_read_tokens
+  OR old.source_id IS NOT new.source_id
+  OR old.project_slug IS NOT new.project_slug BEGIN
   INSERT INTO token_activity_dirty(source_id, project_slug, activity_day)
   SELECT old.source_id, old.project_slug, substr(old.timestamp, 1, 10)
    WHERE old.timestamp IS NOT NULL AND length(old.timestamp) >= 10
@@ -95,7 +179,14 @@ WHEN old.timestamp IS NOT NULL AND length(old.timestamp) >= 10 BEGIN
   ON CONFLICT(source_id, project_slug, activity_day) DO NOTHING;
 END;
 CREATE TRIGGER IF NOT EXISTS token_activity_subagents_au
-AFTER UPDATE OF timestamp, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, source_id, project_slug ON subagent_messages BEGIN
+AFTER UPDATE OF timestamp, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, source_id, project_slug ON subagent_messages
+WHEN old.timestamp IS NOT new.timestamp
+  OR old.input_tokens IS NOT new.input_tokens
+  OR old.output_tokens IS NOT new.output_tokens
+  OR old.cache_creation_tokens IS NOT new.cache_creation_tokens
+  OR old.cache_read_tokens IS NOT new.cache_read_tokens
+  OR old.source_id IS NOT new.source_id
+  OR old.project_slug IS NOT new.project_slug BEGIN
   INSERT INTO token_activity_dirty(source_id, project_slug, activity_day)
   SELECT old.source_id, old.project_slug, substr(old.timestamp, 1, 10)
    WHERE old.timestamp IS NOT NULL AND length(old.timestamp) >= 10
@@ -105,7 +196,8 @@ AFTER UPDATE OF timestamp, input_tokens, output_tokens, cache_creation_tokens, c
    WHERE new.timestamp IS NOT NULL AND length(new.timestamp) >= 10
   ON CONFLICT(source_id, project_slug, activity_day) DO NOTHING;
 END;
-CREATE TRIGGER IF NOT EXISTS token_activity_session_quality_au AFTER UPDATE OF tokens_estimated ON sessions BEGIN
+CREATE TRIGGER IF NOT EXISTS token_activity_session_quality_au AFTER UPDATE OF tokens_estimated ON sessions
+WHEN old.tokens_estimated IS NOT new.tokens_estimated BEGIN
   INSERT INTO token_activity_dirty(source_id, project_slug, activity_day)
   SELECT source_id, project_slug, substr(timestamp, 1, 10) FROM messages
    WHERE session_id = new.id AND source_id = new.source_id AND timestamp IS NOT NULL AND length(timestamp) >= 10
@@ -287,8 +379,26 @@ CREATE TABLE IF NOT EXISTS token_activity_daily (
   exact_tokens INTEGER NOT NULL DEFAULT 0,
   estimated_tokens INTEGER NOT NULL DEFAULT 0,
   message_count INTEGER NOT NULL DEFAULT 0,
+  parent_message_count INTEGER NOT NULL DEFAULT 0,
   session_count INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (source_id, project_slug, activity_day)
+);
+
+CREATE TABLE IF NOT EXISTS token_activity_session_daily (
+  source_id TEXT NOT NULL,
+  project_slug TEXT NOT NULL,
+  session_id TEXT NOT NULL,
+  activity_day TEXT NOT NULL,
+  input_tokens INTEGER NOT NULL DEFAULT 0,
+  output_tokens INTEGER NOT NULL DEFAULT 0,
+  cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
+  cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+  total_tokens INTEGER NOT NULL DEFAULT 0,
+  exact_tokens INTEGER NOT NULL DEFAULT 0,
+  estimated_tokens INTEGER NOT NULL DEFAULT 0,
+  message_count INTEGER NOT NULL DEFAULT 0,
+  parent_message_count INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (source_id, session_id, activity_day)
 );
 
 CREATE TABLE IF NOT EXISTS token_activity_dirty (
@@ -296,6 +406,33 @@ CREATE TABLE IF NOT EXISTS token_activity_dirty (
   project_slug TEXT NOT NULL,
   activity_day TEXT NOT NULL,
   PRIMARY KEY (source_id, project_slug, activity_day)
+);
+
+CREATE TABLE IF NOT EXISTS session_summary_totals (
+  source_id TEXT NOT NULL,
+  project_slug TEXT NOT NULL,
+  session_id TEXT NOT NULL,
+  input_tokens INTEGER NOT NULL DEFAULT 0,
+  output_tokens INTEGER NOT NULL DEFAULT 0,
+  cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
+  cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+  parent_message_count INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (source_id, session_id)
+);
+
+CREATE TABLE IF NOT EXISTS session_summary_dirty (
+  source_id TEXT NOT NULL,
+  project_slug TEXT NOT NULL,
+  session_id TEXT NOT NULL,
+  PRIMARY KEY (source_id, session_id)
+);
+
+CREATE TABLE IF NOT EXISTS source_materializations (
+  source_id TEXT NOT NULL,
+  projection TEXT NOT NULL,
+  version INTEGER NOT NULL,
+  completed_at INTEGER NOT NULL,
+  PRIMARY KEY (source_id, projection)
 );
 
 CREATE TABLE IF NOT EXISTS workflows (
@@ -371,6 +508,7 @@ CREATE TABLE IF NOT EXISTS file_history (
 
 -- Indexes for common queries
 CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project_slug);
+CREATE INDEX IF NOT EXISTS idx_sessions_project_source_modified ON sessions(project_slug, source_id, modified_at DESC);
 CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(project_slug, session_id);
 CREATE INDEX IF NOT EXISTS idx_messages_session_idx ON messages(session_id, msg_index);
 CREATE INDEX IF NOT EXISTS idx_messages_activity_day ON messages(source_id, project_slug, substr(timestamp, 1, 10));
@@ -384,6 +522,8 @@ CREATE INDEX IF NOT EXISTS idx_subagents_session ON subagents(source_id, project
 CREATE INDEX IF NOT EXISTS idx_subagent_messages_thread ON subagent_messages(source_id, session_id, workflow_id, agent_id, msg_index);
 CREATE INDEX IF NOT EXISTS idx_subagent_messages_activity_day ON subagent_messages(source_id, project_slug, substr(timestamp, 1, 10));
 CREATE INDEX IF NOT EXISTS idx_token_activity_project_day ON token_activity_daily(project_slug, activity_day, source_id);
+CREATE INDEX IF NOT EXISTS idx_token_activity_session_project ON token_activity_session_daily(project_slug, source_id, session_id, activity_day);
+CREATE INDEX IF NOT EXISTS idx_session_summary_project ON session_summary_totals(project_slug, source_id, session_id);
 CREATE INDEX IF NOT EXISTS idx_subagent_timeline_thread ON subagent_timeline_messages(source_id, session_id, workflow_id, agent_id, timeline_index);
 CREATE INDEX IF NOT EXISTS idx_subagent_timeline_type ON subagent_timeline_messages(source_id, session_id, display_type);
 CREATE INDEX IF NOT EXISTS idx_subagent_timeline_tool ON subagent_timeline_messages(source_id, session_id, tool_name);
@@ -462,6 +602,7 @@ END;
 -- days dirty; recomputation avoids fragile arithmetic when rows are upserted
 -- or sidecars later change token/timestamp attribution.
 ${TOKEN_ACTIVITY_TRIGGERS_SQL}
+${SESSION_SUMMARY_TRIGGERS_SQL}
 `;
 
 /**
@@ -488,7 +629,11 @@ const CURRENT_TABLES = [
   'subagent_timeline_messages',
   'subagent_dirty_threads',
   'token_activity_daily',
+  'token_activity_session_daily',
   'token_activity_dirty',
+  'session_summary_totals',
+  'session_summary_dirty',
+  'source_materializations',
   'workflows',
   'tool_results',
   'todos',
@@ -566,6 +711,7 @@ export function initializeSchema(db: SqliteService): void {
       'token_activity_subagents_ad',
       'token_activity_subagents_au',
       'token_activity_session_quality_au',
+      ...SESSION_SUMMARY_TRIGGER_NAMES,
     ]) {
       try {
         db.exec(`DROP TRIGGER IF EXISTS ${trigger}`);
@@ -591,7 +737,10 @@ export function initializeSchema(db: SqliteService): void {
     // Trigger bodies can receive correctness fixes without changing stored
     // data. CREATE TRIGGER IF NOT EXISTS cannot replace an older body, so
     // refresh this derived-index trigger family explicitly on every attach.
-    for (const trigger of TOKEN_ACTIVITY_TRIGGER_NAMES) db.exec(`DROP TRIGGER IF EXISTS ${trigger}`);
+    for (const trigger of [...TOKEN_ACTIVITY_TRIGGER_NAMES, ...SESSION_SUMMARY_TRIGGER_NAMES]) {
+      db.exec(`DROP TRIGGER IF EXISTS ${trigger}`);
+    }
     db.exec(TOKEN_ACTIVITY_TRIGGERS_SQL);
+    db.exec(SESSION_SUMMARY_TRIGGERS_SQL);
   }
 }

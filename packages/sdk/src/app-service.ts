@@ -387,6 +387,7 @@ function aggregateProjectSummaries(summaries: ProjectSummaryData[]): ProjectList
         lastActiveAt: data.lastActiveAt,
         firstActiveAt: data.firstActiveAt,
         latestGitBranch: data.latestGitBranch,
+        latestPrompt: data.latestPrompt,
         hasMemory: data.hasMemory,
       });
       continue;
@@ -410,6 +411,7 @@ function aggregateProjectSummaries(summaries: ProjectSummaryData[]): ProjectList
     if (data.lastActiveAt > current.lastActiveAt) {
       current.lastActiveAt = data.lastActiveAt;
       current.latestGitBranch = data.latestGitBranch;
+      current.latestPrompt = data.latestPrompt;
       current.slug = data.slug;
     }
   }

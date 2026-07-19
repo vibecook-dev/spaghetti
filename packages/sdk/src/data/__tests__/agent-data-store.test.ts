@@ -168,6 +168,9 @@ describe('AgentDataStore (C1.1 skeleton)', () => {
     // QueryService.open() is a no-op when the shared SqliteService is
     // already open; it just runs `initializeSchema` again (idempotent).
     queryService.open(dbPath);
+    // Production boot materializes ingestion-owned summaries before exposing
+    // query APIs; this raw-SQL fixture mirrors that lifecycle boundary.
+    queryService.prepareTokenActivity();
 
     store = createAgentDataStore(queryService);
   });

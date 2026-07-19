@@ -343,6 +343,27 @@ const FINGERPRINT_TX_SLUG: &str = "<fingerprints>";
 
 /// Scoped entity wipe for Codex/Grok full re-read (orphans + extract bumps).
 const SQL_CLEAR_SOURCE_MESSAGES: &str = "DELETE FROM messages WHERE source_id = ?";
+const SQL_CLEAR_SOURCE_TIMELINE_MESSAGES: &str =
+    "DELETE FROM timeline_messages WHERE source_id = ?";
+const SQL_CLEAR_SOURCE_TIMELINE_RESULTS: &str =
+    "DELETE FROM timeline_tool_results WHERE session_id IN (SELECT id FROM sessions WHERE source_id = ?)";
+const SQL_CLEAR_SOURCE_TIMELINE_DIRTY: &str =
+    "DELETE FROM timeline_dirty_sessions WHERE source_id = ?";
+const SQL_CLEAR_SOURCE_SUBAGENT_TIMELINE: &str =
+    "DELETE FROM subagent_timeline_messages WHERE source_id = ?";
+const SQL_CLEAR_SOURCE_SUBAGENT_MESSAGES: &str =
+    "DELETE FROM subagent_messages WHERE source_id = ?";
+const SQL_CLEAR_SOURCE_SUBAGENT_DIRTY: &str =
+    "DELETE FROM subagent_dirty_threads WHERE source_id = ?";
+const SQL_CLEAR_SOURCE_SUBAGENTS: &str = "DELETE FROM subagents WHERE source_id = ?";
+const SQL_CLEAR_SOURCE_TOKEN_DAILY: &str = "DELETE FROM token_activity_daily WHERE source_id = ?";
+const SQL_CLEAR_SOURCE_TOKEN_SESSION_DAILY: &str =
+    "DELETE FROM token_activity_session_daily WHERE source_id = ?";
+const SQL_CLEAR_SOURCE_TOKEN_DIRTY: &str = "DELETE FROM token_activity_dirty WHERE source_id = ?";
+const SQL_CLEAR_SOURCE_SESSION_SUMMARIES: &str =
+    "DELETE FROM session_summary_totals WHERE source_id = ?";
+const SQL_CLEAR_SOURCE_SESSION_SUMMARY_DIRTY: &str =
+    "DELETE FROM session_summary_dirty WHERE source_id = ?";
 const SQL_CLEAR_SOURCE_SESSIONS: &str = "DELETE FROM sessions WHERE source_id = ?";
 const SQL_CLEAR_SOURCE_PROJECTS: &str = "DELETE FROM projects WHERE source_id = ?";
 
@@ -467,6 +488,9 @@ impl Writer {
             return Ok(());
         }
         self.bulk_mode = true;
+        // Invalidate before canonical writes. If finalization fails, a warm
+        // restart must rebuild projections even when fingerprints now match.
+        super::token_activity::invalidate_materialization(&self.conn, &self.source_id)?;
         match mode {
             BulkMode::Fast => {
                 self.conn.pragma_update(None, "synchronous", "OFF")?;
@@ -532,12 +556,22 @@ impl Writer {
         if self.bulk_mode {
             // FTS rebuild is large but single-pass; done inside an
             // implicit transaction so the index flips atomically.
-            schema::rebuild_fts_and_recreate_triggers(&self.conn)?;
-            // Restore safe defaults; mirrors TS `endBulkIngest`.
-            self.conn.pragma_update(None, "synchronous", "NORMAL")?;
-            self.conn.pragma_update(None, "journal_mode", "WAL")?;
-            self.conn.pragma_update(None, "cache_size", -2_000i64)?;
+            let rebuild_result = (|| -> Result<(), WriterError> {
+                schema::rebuild_fts_and_recreate_triggers(&self.conn)?;
+                super::token_activity::rebuild_source(&self.conn, &self.source_id)?;
+                Ok(())
+            })();
+            // Restore safe defaults even when a derived-index rebuild fails;
+            // the cache can then be retried or health-recovered safely.
+            let restore_result = (|| -> Result<(), WriterError> {
+                self.conn.pragma_update(None, "synchronous", "NORMAL")?;
+                self.conn.pragma_update(None, "journal_mode", "WAL")?;
+                self.conn.pragma_update(None, "cache_size", -2_000i64)?;
+                Ok(())
+            })();
             self.bulk_mode = false;
+            rebuild_result?;
+            restore_result?;
         }
         // `self` drops here, closing the connection.
         Ok(())
@@ -671,15 +705,56 @@ impl Writer {
                 }
                 // Full source-scoped wipe before Codex/Grok full re-read so
                 // deleted-on-disk sessions do not leave permanent orphans.
-                // Order: messages (FTS triggers) → sessions → projects → files.
-                self.conn
-                    .execute(SQL_CLEAR_SOURCE_MESSAGES, params![self.source_id])?;
-                self.conn
-                    .execute(SQL_CLEAR_SOURCE_SESSIONS, params![self.source_id])?;
-                self.conn
-                    .execute(SQL_CLEAR_SOURCE_PROJECTS, params![self.source_id])?;
-                self.conn
-                    .execute(SQL_CLEAR_SOURCE_FILES, params![self.source_id])?;
+                // Clear canonical rows and all source-derived projections so
+                // a full re-read cannot retain stale subagents or rollups.
+                self.conn.execute_batch("BEGIN IMMEDIATE")?;
+                let clear_result = (|| -> Result<(), WriterError> {
+                    self.conn
+                        .execute(SQL_CLEAR_SOURCE_MESSAGES, params![self.source_id])?;
+                    self.conn
+                        .execute(SQL_CLEAR_SOURCE_TIMELINE_RESULTS, params![self.source_id])?;
+                    self.conn
+                        .execute(SQL_CLEAR_SOURCE_TIMELINE_MESSAGES, params![self.source_id])?;
+                    self.conn
+                        .execute(SQL_CLEAR_SOURCE_TIMELINE_DIRTY, params![self.source_id])?;
+                    self.conn
+                        .execute(SQL_CLEAR_SOURCE_SUBAGENT_TIMELINE, params![self.source_id])?;
+                    self.conn
+                        .execute(SQL_CLEAR_SOURCE_SUBAGENT_MESSAGES, params![self.source_id])?;
+                    self.conn
+                        .execute(SQL_CLEAR_SOURCE_SUBAGENT_DIRTY, params![self.source_id])?;
+                    self.conn
+                        .execute(SQL_CLEAR_SOURCE_SUBAGENTS, params![self.source_id])?;
+                    self.conn
+                        .execute(SQL_CLEAR_SOURCE_TOKEN_DAILY, params![self.source_id])?;
+                    self.conn.execute(
+                        SQL_CLEAR_SOURCE_TOKEN_SESSION_DAILY,
+                        params![self.source_id],
+                    )?;
+                    self.conn
+                        .execute(SQL_CLEAR_SOURCE_TOKEN_DIRTY, params![self.source_id])?;
+                    self.conn
+                        .execute(SQL_CLEAR_SOURCE_SESSION_SUMMARIES, params![self.source_id])?;
+                    self.conn.execute(
+                        SQL_CLEAR_SOURCE_SESSION_SUMMARY_DIRTY,
+                        params![self.source_id],
+                    )?;
+                    super::token_activity::invalidate_materialization(&self.conn, &self.source_id)?;
+                    self.conn
+                        .execute(SQL_CLEAR_SOURCE_SESSIONS, params![self.source_id])?;
+                    self.conn
+                        .execute(SQL_CLEAR_SOURCE_PROJECTS, params![self.source_id])?;
+                    self.conn
+                        .execute(SQL_CLEAR_SOURCE_FILES, params![self.source_id])?;
+                    Ok(())
+                })();
+                match clear_result {
+                    Ok(()) => self.conn.execute_batch("COMMIT")?,
+                    Err(error) => {
+                        let _ = self.conn.execute_batch("ROLLBACK");
+                        return Err(error);
+                    }
+                }
             }
 
             IngestEvent::Fingerprint { .. } => {
@@ -1160,6 +1235,7 @@ pub fn write_batch_with_tx(
             let c = dispatch_event(conn, ev, source_id)?;
             totals.add(c);
         }
+        super::token_activity::rebuild_dirty_in_transaction(conn, source_id)?;
         Ok(())
     })();
 
@@ -1217,6 +1293,47 @@ mod tests {
     fn fresh_writer() -> Writer {
         let conn = Connection::open_in_memory().expect("open in-memory db");
         Writer::from_connection(conn).expect("new writer")
+    }
+
+    #[test]
+    fn clear_source_data_rolls_back_every_layer_as_one_unit() {
+        let mut writer = fresh_writer();
+        writer
+            .conn
+            .execute_batch(
+                r#"
+                INSERT INTO projects(slug, source_id) VALUES ('p', 'claude-code');
+                INSERT INTO sessions(id, source_id, project_slug) VALUES ('s', 'claude-code', 'p');
+                INSERT INTO messages(source_id, project_slug, session_id, msg_index, data)
+                VALUES ('claude-code', 'p', 's', 0, '{}');
+                INSERT INTO session_summary_totals(source_id, project_slug, session_id, parent_message_count)
+                VALUES ('claude-code', 'p', 's', 1);
+                INSERT INTO source_files(path, source_id) VALUES ('/tmp/session.jsonl', 'claude-code');
+                INSERT INTO source_materializations(source_id, projection, version, completed_at)
+                VALUES ('claude-code', 'token-activity', 1, 0);
+                CREATE TRIGGER abort_test_source_clear BEFORE DELETE ON projects
+                WHEN old.source_id = 'claude-code' BEGIN
+                  SELECT RAISE(ABORT, 'test source-clear rollback');
+                END;
+                "#,
+            )
+            .unwrap();
+
+        assert!(writer.handle_event(IngestEvent::ClearSourceData).is_err());
+        for table in [
+            "messages",
+            "session_summary_totals",
+            "source_files",
+            "source_materializations",
+        ] {
+            let count: i64 = writer
+                .conn
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(count, 1, "{table} must survive the rolled-back clear");
+        }
     }
 
     #[test]
@@ -1739,10 +1856,21 @@ mod tests {
                 r.get(0)
             })
             .unwrap();
-        assert!(
-            dirty_days > 0,
-            "bulk rows must be marked for one-shot rollup"
-        );
+        assert_eq!(dirty_days, 0, "finish must consume all activity dirtiness");
+        let activity_days: i64 = conn
+            .query_row("SELECT COUNT(*) FROM token_activity_daily", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        let session_days: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM token_activity_session_daily",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(activity_days > 0, "finish must build project/day rollups");
+        assert!(session_days > 0, "finish must build session/day rollups");
     }
 
     /// `open_for_bulk_ingest` sets synchronous=OFF; `finish` restores

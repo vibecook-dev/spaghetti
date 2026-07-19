@@ -85,6 +85,9 @@ describe('composite (source_id, slug) projects PK (schema v6)', () => {
     const codex = createIngestService(() => sqlite, { sourceId: 'codex' });
     codex.open(dbPath);
     ingestSource(codex, 'codex', 'codex-sess', 1);
+
+    // Production boot drains dirty aggregate buckets before enabling reads.
+    createQueryService(() => sqlite).prepareTokenActivity();
   });
 
   after(() => {

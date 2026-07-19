@@ -120,6 +120,7 @@ export const DEBUG_PROJECT: ProjectListItem = {
   lastActiveAt: timestamp(900),
   firstActiveAt: timestamp(0),
   latestGitBranch: 'ui/message-gallery',
+  latestPrompt: 'Render the complete message gallery for visual QA.',
   hasMemory: false,
 };
 

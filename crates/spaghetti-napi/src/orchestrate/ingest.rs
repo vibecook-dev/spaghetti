@@ -538,6 +538,10 @@ fn warm_has_no_changes(
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )?;
 
+    if !crate::core::token_activity::is_materialized(&conn, &resolved.source_id).unwrap_or(false) {
+        return Ok(false);
+    }
+
     let store = FingerprintStore::new(&conn);
     let stored = match store.load_all() {
         Ok(s) if s.is_empty() => return Ok(false), // nothing persisted yet
@@ -583,13 +587,18 @@ fn run_codex_ingest(
             &resolved.db_path,
             OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
         ) {
-            let store = FingerprintStore::new(&conn);
-            if let Ok(stored) = store.load_all() {
-                if !stored.is_empty() && CodexReader::warm_unchanged(&sessions_dir, &stored) {
-                    return Ok(IngestStats {
-                        duration_ms: u32::try_from(start.elapsed().as_millis()).unwrap_or(u32::MAX),
-                        ..IngestStats::default()
-                    });
+            if crate::core::token_activity::is_materialized(&conn, &resolved.source_id)
+                .unwrap_or(false)
+            {
+                let store = FingerprintStore::new(&conn);
+                if let Ok(stored) = store.load_all() {
+                    if !stored.is_empty() && CodexReader::warm_unchanged(&sessions_dir, &stored) {
+                        return Ok(IngestStats {
+                            duration_ms: u32::try_from(start.elapsed().as_millis())
+                                .unwrap_or(u32::MAX),
+                            ..IngestStats::default()
+                        });
+                    }
                 }
             }
         }
@@ -670,13 +679,18 @@ fn run_grok_ingest(
             &resolved.db_path,
             OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
         ) {
-            let store = FingerprintStore::new(&conn);
-            if let Ok(stored) = store.load_all() {
-                if !stored.is_empty() && GrokReader::warm_unchanged(&sessions_dir, &stored) {
-                    return Ok(IngestStats {
-                        duration_ms: u32::try_from(start.elapsed().as_millis()).unwrap_or(u32::MAX),
-                        ..IngestStats::default()
-                    });
+            if crate::core::token_activity::is_materialized(&conn, &resolved.source_id)
+                .unwrap_or(false)
+            {
+                let store = FingerprintStore::new(&conn);
+                if let Ok(stored) = store.load_all() {
+                    if !stored.is_empty() && GrokReader::warm_unchanged(&sessions_dir, &stored) {
+                        return Ok(IngestStats {
+                            duration_ms: u32::try_from(start.elapsed().as_millis())
+                                .unwrap_or(u32::MAX),
+                            ..IngestStats::default()
+                        });
+                    }
                 }
             }
         }
@@ -881,6 +895,50 @@ mod tests {
         assert_eq!(second.sessions_processed, 0);
         assert_eq!(second.messages_written, 0);
         assert!(second.errors.is_empty());
+    }
+
+    #[test]
+    fn warm_mode_repairs_an_incomplete_materialization_even_when_files_match() {
+        let claude = fake_claude_fixture();
+        let db_dir = TempDir::new().unwrap();
+        let db = db_dir.path().join("spaghetti.db");
+        let opts = IngestOptions {
+            agent_dir: claude.path().to_string_lossy().into(),
+            db_path: db.to_string_lossy().into(),
+            mode: "warm".into(),
+            progress_interval_ms: None,
+            parallelism: None,
+            source_id: None,
+            safe_bulk: None,
+        };
+
+        run_ingest(&opts, None).expect("initial ingest");
+        {
+            let conn = Connection::open(&db).unwrap();
+            conn.execute(
+                "DELETE FROM source_materializations WHERE source_id = 'claude-code'",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "DELETE FROM session_summary_totals WHERE source_id = 'claude-code'",
+                [],
+            )
+            .unwrap();
+        }
+
+        let repaired = run_ingest(&opts, None).expect("warm repair");
+        assert!(repaired.projects_processed > 0);
+        let conn = Connection::open(&db).unwrap();
+        assert!(crate::core::token_activity::is_materialized(&conn, "claude-code").unwrap());
+        let count: i64 = conn
+            .query_row(
+                "SELECT SUM(parent_message_count) FROM session_summary_totals WHERE source_id = 'claude-code'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 2);
     }
 
     #[test]

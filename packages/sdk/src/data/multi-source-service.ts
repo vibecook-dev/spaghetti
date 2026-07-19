@@ -101,7 +101,10 @@ export class SpaghettiDataService extends EventEmitter implements AgentDataServi
         total,
       });
     });
-    this.emit('progress', { phase: 'storing', message: 'Aggregating token activity…' });
+    // Native/TS source ingestion already built its compact rollups. This
+    // validates source completion markers, repairs an interrupted finalization
+    // when necessary, then drains bounded crash-left dirty keys.
+    this.emit('progress', { phase: 'storing', message: 'Verifying token activity…' });
     this.store.prepareTokenActivity();
     // Phase 3 — Plane 2 only after every source and projection is warm.
     for (const owner of this.owners) {

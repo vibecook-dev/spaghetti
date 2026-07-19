@@ -26,8 +26,19 @@ import type { IngestEngine } from '../settings.js';
 import type { IngestHooks, MessageExtractor, SessionTokenApi } from '../sources/types.js';
 import { claudeCodeMessageExtractor } from '../sources/claude-code/message-extractor.js';
 import type { SourceFingerprint } from './segment-types.js';
-import { initializeSchema, TOKEN_ACTIVITY_TRIGGER_NAMES, TOKEN_ACTIVITY_TRIGGERS_SQL } from './schema.js';
+import {
+  initializeSchema,
+  SESSION_SUMMARY_TRIGGER_NAMES,
+  SESSION_SUMMARY_TRIGGERS_SQL,
+  TOKEN_ACTIVITY_TRIGGER_NAMES,
+  TOKEN_ACTIVITY_TRIGGERS_SQL,
+} from './schema.js';
 import { projectTimelineRawMessage } from './timeline-projection.js';
+import {
+  invalidateTokenActivityMaterialization,
+  rebuildDirtyTokenActivity,
+  rebuildSourceTokenActivity,
+} from './token-activity.js';
 
 // ═══════════════════════════════════════════════════════════════════════════
 // INTERFACE
@@ -728,8 +739,21 @@ class IngestServiceImpl implements IngestService {
 
   commitTransaction(): void {
     if (this.inTransaction) {
-      this.db.exec('COMMIT');
-      this.inTransaction = false;
+      try {
+        // Canonical mutations and both list/chart projections become visible
+        // together. Bulk imports have their triggers disabled, so this is a
+        // cheap no-op there and full materialization still happens at finish.
+        rebuildDirtyTokenActivity(this.db, { sourceId: this.sourceId });
+        this.db.exec('COMMIT');
+        this.inTransaction = false;
+      } catch (error) {
+        try {
+          this.db.exec('ROLLBACK');
+        } finally {
+          this.inTransaction = false;
+        }
+        throw error;
+      }
     }
   }
 
@@ -755,6 +779,10 @@ class IngestServiceImpl implements IngestService {
     if (this.inBulkMode) return;
     this.inBulkMode = true;
 
+    // A crash after canonical writes but before finalization must force the
+    // next warm boot through materialization rather than trusting fingerprints.
+    invalidateTokenActivityMaterialization(this.db, this.sourceId);
+
     // Drop FTS auto-sync triggers to avoid per-row overhead during bulk insert
     try {
       this.db.exec('DROP TRIGGER IF EXISTS messages_ai');
@@ -772,6 +800,13 @@ class IngestServiceImpl implements IngestService {
       /* ignore */
     }
     for (const trigger of TOKEN_ACTIVITY_TRIGGER_NAMES) {
+      try {
+        this.db.exec(`DROP TRIGGER IF EXISTS ${trigger}`);
+      } catch {
+        /* ignore */
+      }
+    }
+    for (const trigger of SESSION_SUMMARY_TRIGGER_NAMES) {
       try {
         this.db.exec(`DROP TRIGGER IF EXISTS ${trigger}`);
       } catch {
@@ -824,28 +859,22 @@ class IngestServiceImpl implements IngestService {
       /* ignore */
     }
 
-    // Restore live dirty tracking, then mark each imported day once. The
-    // materializer will collapse a broad cold import into one full scan.
+    // Materialize source-scoped token summaries before restoring live dirty
+    // tracking. This is part of the boot-ingest contract: do not report the
+    // source as ready with empty/stale summaries if materialization fails.
     try {
+      rebuildSourceTokenActivity(this.db, this.sourceId);
+    } finally {
+      // Even a failed derived-index build must leave the connection safe for
+      // retry/recovery rather than silently disabling live invalidation.
       this.db.exec(TOKEN_ACTIVITY_TRIGGERS_SQL);
-      this.db.exec(`
-        INSERT OR IGNORE INTO token_activity_dirty(source_id, project_slug, activity_day)
-        SELECT DISTINCT source_id, project_slug, substr(timestamp, 1, 10)
-          FROM messages WHERE timestamp IS NOT NULL AND length(timestamp) >= 10;
-        INSERT OR IGNORE INTO token_activity_dirty(source_id, project_slug, activity_day)
-        SELECT DISTINCT source_id, project_slug, substr(timestamp, 1, 10)
-          FROM subagent_messages WHERE timestamp IS NOT NULL AND length(timestamp) >= 10;
-      `);
-    } catch {
-      /* ignore — schema recovery can rebuild the derived table on demand */
-    }
-
-    // Restore safe PRAGMAs
-    try {
-      this.db.exec('PRAGMA synchronous = NORMAL');
-      this.db.exec('PRAGMA cache_size = -2000'); // default ~2MB
-    } catch {
-      /* ignore */
+      this.db.exec(SESSION_SUMMARY_TRIGGERS_SQL);
+      try {
+        this.db.exec('PRAGMA synchronous = NORMAL');
+        this.db.exec('PRAGMA cache_size = -2000'); // default ~2MB
+      } catch {
+        /* ignore */
+      }
     }
   }
 
@@ -940,6 +969,10 @@ class IngestServiceImpl implements IngestService {
       }
 
       if (weOpenedTx) {
+        // better-sqlite3 nests transaction helpers as a savepoint, so the
+        // canonical rows and their affected aggregate buckets become visible
+        // atomically. An aggregation failure rolls the whole live batch back.
+        rebuildDirtyTokenActivity(this.db, { sourceId: this.sourceId });
         this.db.exec('COMMIT');
         this.inTransaction = false;
       }
@@ -975,24 +1008,31 @@ class IngestServiceImpl implements IngestService {
   }
 
   clearSourceData(): void {
-    // Order: messages first so FTS DELETE triggers run while the connection
-    // is healthy; then sessions/projects; fingerprints last.
-    this.db.run('DELETE FROM messages WHERE source_id = ?', this.sourceId);
-    this.db.run('DELETE FROM timeline_messages WHERE source_id = ?', this.sourceId);
-    this.db.run(
-      'DELETE FROM timeline_tool_results WHERE session_id IN (SELECT id FROM sessions WHERE source_id = ?)',
-      this.sourceId,
-    );
-    this.db.run('DELETE FROM timeline_dirty_sessions WHERE source_id = ?', this.sourceId);
-    this.db.run('DELETE FROM subagent_timeline_messages WHERE source_id = ?', this.sourceId);
-    this.db.run('DELETE FROM subagent_messages WHERE source_id = ?', this.sourceId);
-    this.db.run('DELETE FROM subagent_dirty_threads WHERE source_id = ?', this.sourceId);
-    this.db.run('DELETE FROM subagents WHERE source_id = ?', this.sourceId);
-    this.db.run('DELETE FROM token_activity_daily WHERE source_id = ?', this.sourceId);
-    this.db.run('DELETE FROM token_activity_dirty WHERE source_id = ?', this.sourceId);
-    this.db.run('DELETE FROM sessions WHERE source_id = ?', this.sourceId);
-    this.db.run('DELETE FROM projects WHERE source_id = ?', this.sourceId);
-    this.db.run('DELETE FROM source_files WHERE source_id = ?', this.sourceId);
+    this.db.transaction(() => {
+      // Keep fingerprints and the completion marker in the same atomic wipe as
+      // canonical/derived rows. A restart can never mistake a partial clear for
+      // a valid warm cache.
+      this.db.run('DELETE FROM messages WHERE source_id = ?', this.sourceId);
+      this.db.run('DELETE FROM timeline_messages WHERE source_id = ?', this.sourceId);
+      this.db.run(
+        'DELETE FROM timeline_tool_results WHERE session_id IN (SELECT id FROM sessions WHERE source_id = ?)',
+        this.sourceId,
+      );
+      this.db.run('DELETE FROM timeline_dirty_sessions WHERE source_id = ?', this.sourceId);
+      this.db.run('DELETE FROM subagent_timeline_messages WHERE source_id = ?', this.sourceId);
+      this.db.run('DELETE FROM subagent_messages WHERE source_id = ?', this.sourceId);
+      this.db.run('DELETE FROM subagent_dirty_threads WHERE source_id = ?', this.sourceId);
+      this.db.run('DELETE FROM subagents WHERE source_id = ?', this.sourceId);
+      this.db.run('DELETE FROM token_activity_daily WHERE source_id = ?', this.sourceId);
+      this.db.run('DELETE FROM token_activity_session_daily WHERE source_id = ?', this.sourceId);
+      this.db.run('DELETE FROM token_activity_dirty WHERE source_id = ?', this.sourceId);
+      this.db.run('DELETE FROM session_summary_totals WHERE source_id = ?', this.sourceId);
+      this.db.run('DELETE FROM session_summary_dirty WHERE source_id = ?', this.sourceId);
+      invalidateTokenActivityMaterialization(this.db, this.sourceId);
+      this.db.run('DELETE FROM sessions WHERE source_id = ?', this.sourceId);
+      this.db.run('DELETE FROM projects WHERE source_id = ?', this.sourceId);
+      this.db.run('DELETE FROM source_files WHERE source_id = ?', this.sourceId);
+    });
   }
 
   clearSessionMessages(sessionId: string): void {
@@ -1013,7 +1053,11 @@ class IngestServiceImpl implements IngestService {
       'subagent_timeline_messages',
       'subagent_dirty_threads',
       'token_activity_daily',
+      'token_activity_session_daily',
       'token_activity_dirty',
+      'session_summary_totals',
+      'session_summary_dirty',
+      'source_materializations',
       'workflows',
       'tool_results',
       'todos',

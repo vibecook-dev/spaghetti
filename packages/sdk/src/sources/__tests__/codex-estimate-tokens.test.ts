@@ -176,6 +176,7 @@ describe('Codex tiktoken fallback when token_count is missing', () => {
 
   test('query summaries surface tokensEstimated', () => {
     const query = createQueryService(() => sqlite);
+    query.prepareTokenActivity();
     const est = query.getSessionSummaries('-tmp-est-proj', { sourceId: 'codex' });
     assert.equal(est.length, 1);
     assert.equal(est[0]!.tokensEstimated, true);

@@ -53,5 +53,7 @@ export interface ProjectSummaryData {
   lastActiveAt: string;
   firstActiveAt: string;
   latestGitBranch: string;
+  /** Prompt/summary of the most recently active session, for project-list preview. */
+  latestPrompt: string;
   hasMemory: boolean;
 }
