@@ -103,7 +103,7 @@ export function LiveDot({ active, label = 'Live' }: { active: boolean; label?: s
   return (
     <span
       className={`inline-flex items-center gap-1.5 font-mono text-[9px] tracking-[0.1em] ${
-        active ? 'text-verdigris' : 'text-ink/30'
+        active ? 'text-[color:var(--archive-live)]' : 'text-ink/30'
       }`}
       title={active ? 'Receiving live index updates' : 'Waiting for changes'}
     >

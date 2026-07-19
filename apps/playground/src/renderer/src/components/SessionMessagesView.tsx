@@ -90,6 +90,7 @@ export interface SessionMessagesViewProps {
   sourceId: string;
   session: SessionListItem;
   sessionIndex: number;
+  isLive?: boolean;
   /** Project has MEMORY.md (from ProjectListItem). */
   hasMemory?: boolean;
   isDark?: boolean;
@@ -109,6 +110,7 @@ export function SessionMessagesView({
   sourceId,
   session,
   sessionIndex,
+  isLive = false,
   hasMemory = false,
   isDark = true,
   leftOpen = true,
@@ -126,7 +128,6 @@ export function SessionMessagesView({
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [livePulse, setLivePulse] = useState(false);
   const [pendingNew, setPendingNew] = useState(0);
   const [subagents, setSubagents] = useState<SubagentListItem[]>([]);
   const [expandedBranchToolIds, setExpandedBranchToolIds] = useState<Set<string>>(() => new Set());
@@ -143,7 +144,6 @@ export function SessionMessagesView({
   const nearBottomRef = useRef(true);
   const totalRef = useRef(0);
   const liveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const pulseTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   /** Invalidates overlapping live refreshes and refreshes from a prior session. */
   const liveRefreshSeqRef = useRef(0);
   const liveNeedsSubagentRefreshRef = useRef(false);
@@ -720,9 +720,6 @@ export function SessionMessagesView({
           setPageMeta((current) => ({ total: page.total, hasMore: current?.hasMore ?? page.hasMore }));
           if (delta > 0) setPendingNew((count) => count + delta);
         }
-        setLivePulse(true);
-        if (pulseTimerRef.current) clearTimeout(pulseTimerRef.current);
-        pulseTimerRef.current = setTimeout(() => setLivePulse(false), 1200);
         setError((current) => (current?.startsWith('Live refresh failed:') ? null : current));
 
         if (!refreshSubagents) return;
@@ -790,7 +787,6 @@ export function SessionMessagesView({
       liveResetPendingRef.current = false;
       preOpenActiveChangeRef.current = null;
       if (liveTimerRef.current) clearTimeout(liveTimerRef.current);
-      if (pulseTimerRef.current) clearTimeout(pulseTimerRef.current);
     };
   }, [debugMessages, projectSlug, session.sessionId, sourceId]);
 
@@ -914,7 +910,6 @@ export function SessionMessagesView({
           <span className="font-mono text-[10px] tracking-[0.1em] opacity-70">#{sessionIndex + 1}</span>
           <span className="font-mono text-[10px] tracking-[0.1em] opacity-70">{session.sessionId.slice(0, 8)}</span>
           <SourceBadge sourceId={session.sourceId} isDark={isDark} size="md" />
-          <LiveDot active={livePulse || pendingNew > 0} />
           {pageMeta && (
             <span className="font-mono text-[9px] tracking-[0.08em] opacity-60 truncate">
               {timeline.length}/{pageMeta.total} loaded
@@ -936,6 +931,7 @@ export function SessionMessagesView({
               <PanelRight size={14} />
             </button>
           ) : null}
+          <LiveDot active={isLive} />
         </div>
       </div>
 

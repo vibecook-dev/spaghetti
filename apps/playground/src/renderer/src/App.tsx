@@ -43,15 +43,23 @@ interface ProjectKey {
 }
 
 interface LiveSessionState {
+  sourceId: string;
+  projectSlug: string;
+  sessionId: string;
   revision: number;
   lastActivityAt: number;
   unreadCount: number;
 }
 
-const SESSION_LIVE_TTL_MS = 6_000;
+/** A session stays live until a full minute passes without another update. */
+const SESSION_LIVE_TTL_MS = 60_000;
 
 function liveSessionKey(sourceId: string, projectSlug: string, sessionId: string): string {
   return JSON.stringify([sourceId, projectSlug, sessionId]);
+}
+
+function liveProjectMemberKey(sourceId: string, projectSlug: string): string {
+  return JSON.stringify([sourceId, projectSlug]);
 }
 
 function projectKey(p: ProjectKey): string {
@@ -241,12 +249,20 @@ function PlaygroundShell() {
 
     const unsubChange = bridge.onChange((batch: SegmentChangeBatch) => {
       const selectedNow = selectedSessionRef.current?.session;
+      const receivedAt = Date.now();
       setLiveSessions((current) => {
         let next = current;
         for (const change of batch.changes ?? []) {
           if (!change.sourceId || !change.projectSlug || !change.sessionId) continue;
           const key = liveSessionKey(change.sourceId, change.projectSlug, change.sessionId);
-          const previous = current[key] ?? { revision: 0, lastActivityAt: 0, unreadCount: 0 };
+          const previous = current[key] ?? {
+            sourceId: change.sourceId,
+            projectSlug: change.projectSlug,
+            sessionId: change.sessionId,
+            revision: 0,
+            lastActivityAt: 0,
+            unreadCount: 0,
+          };
           const isSelected =
             selectedNow?.sourceId === change.sourceId &&
             selectedNow.projectSlug === change.projectSlug &&
@@ -254,14 +270,15 @@ function PlaygroundShell() {
           const added = change.type === 'message' && !isSelected ? 1 : 0;
           if (next === current) next = { ...current };
           next[key] = {
+            ...previous,
             revision: Math.max(previous.revision, change.revision ?? batch.timestamp),
-            lastActivityAt: batch.timestamp,
+            lastActivityAt: receivedAt,
             unreadCount: isSelected ? 0 : previous.unreadCount + added,
           };
         }
         return next;
       });
-      setLiveClock(Date.now());
+      setLiveClock(receivedAt);
       // Session-list metadata is cheap and useful while browsing one project.
       // Whole-library counts are much broader, so refresh those on a slower
       // lane. The visible transcript has its own exact, session-scoped lane.
@@ -485,6 +502,16 @@ function PlaygroundShell() {
 
   const sourceIds = useMemo(() => [...new Set(projects.flatMap((p) => p.sourceIds))].sort(), [projects]);
 
+  const liveProjectMembers = useMemo(
+    () =>
+      new Set(
+        Object.values(liveSessions)
+          .filter((activity) => liveClock - activity.lastActivityAt < SESSION_LIVE_TTL_MS)
+          .map((activity) => liveProjectMemberKey(activity.sourceId, activity.projectSlug)),
+      ),
+    [liveClock, liveSessions],
+  );
+
   const filteredSessions = useMemo(
     () => (sessionSourceFilter ? sessions.filter((session) => session.sourceId === sessionSourceFilter) : sessions),
     [sessions, sessionSourceFilter],
@@ -492,6 +519,16 @@ function PlaygroundShell() {
 
   const selectedKey = selected ? projectKey(selected) : null;
   const selectedProject = selected ? projects.find((p) => projectKey(p) === selectedKey) : null;
+  const selectedActivity = selectedSession
+    ? liveSessions[
+        liveSessionKey(
+          selectedSession.session.sourceId,
+          selectedSession.session.projectSlug,
+          selectedSession.session.sessionId,
+        )
+      ]
+    : undefined;
+  const selectedSessionIsLive = !!selectedActivity && liveClock - selectedActivity.lastActivityAt < SESSION_LIVE_TTL_MS;
 
   const scopeProject = selectedProject
     ? {
@@ -596,6 +633,9 @@ function PlaygroundShell() {
                 projects.map((p) => {
                   const key = projectKey(p);
                   const isSelected = selectedKey === key;
+                  const isLive = p.members.some((member) =>
+                    liveProjectMembers.has(liveProjectMemberKey(member.sourceId, member.slug)),
+                  );
                   const prompt = flattenPrompt(projectPrompts[key], 72);
                   const tok = formatTokenUsage(p.tokenUsage, undefined, p.tokensEstimated);
                   return (
@@ -614,9 +654,12 @@ function PlaygroundShell() {
                       }`}
                     >
                       <div className="mb-1.5 flex items-start justify-between gap-2">
-                        <span className="min-w-0 truncate font-mono text-[10px] tracking-tight text-ink">
-                          {p.folderName}
-                        </span>
+                        <div className="flex min-w-0 flex-1 items-center gap-2">
+                          <span className="min-w-0 truncate font-mono text-[10px] tracking-tight text-ink">
+                            {p.folderName}
+                          </span>
+                          {isLive ? <LiveDot active /> : null}
+                        </div>
                         <SourceBadges sourceIds={p.sourceIds} isDark={isDark} />
                       </div>
                       <p className="mb-2 line-clamp-2 font-serif text-[11px] leading-[1.35] opacity-65">
@@ -644,6 +687,7 @@ function PlaygroundShell() {
               sourceId={selectedSession.session.sourceId}
               session={selectedSession.session}
               sessionIndex={selectedSession.index}
+              isLive={selectedSessionIsLive}
               hasMemory={selectedProject?.hasMemory}
               isDark={isDark}
               leftOpen={leftOpen}
@@ -758,6 +802,7 @@ function PlaygroundShell() {
                     >
                       <div className="flex items-center gap-2.5 mb-1.5">
                         <span className="font-mono text-[10px] tracking-[0.1em] opacity-70">#{index + 1}</span>
+                        {isLive ? <LiveDot active /> : null}
                         {s.gitBranch ? (
                           <span className="font-mono text-[10px] text-sanguine/90">{s.gitBranch}</span>
                         ) : (
@@ -766,7 +811,6 @@ function PlaygroundShell() {
                         <span className="flex-1" />
                         <span className="font-mono text-[9px] opacity-40">{s.sessionId.slice(0, 8)}</span>
                         <SourceBadge sourceId={s.sourceId} isDark={isDark} />
-                        <LiveDot active={isLive} />
                         {activity?.unreadCount ? (
                           <span className="font-mono text-[8px] tabular-nums text-sanguine">
                             +{activity.unreadCount}
