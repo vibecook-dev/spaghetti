@@ -61,49 +61,59 @@ export const TOKEN_ACTIVITY_TRIGGER_NAMES = [
 export const TOKEN_ACTIVITY_TRIGGERS_SQL = `
 CREATE TRIGGER IF NOT EXISTS token_activity_messages_ai AFTER INSERT ON messages
 WHEN new.timestamp IS NOT NULL AND length(new.timestamp) >= 10 BEGIN
-  INSERT OR IGNORE INTO token_activity_dirty(source_id, project_slug, activity_day)
-  VALUES (new.source_id, new.project_slug, substr(new.timestamp, 1, 10));
+  INSERT INTO token_activity_dirty(source_id, project_slug, activity_day)
+  VALUES (new.source_id, new.project_slug, substr(new.timestamp, 1, 10))
+  ON CONFLICT(source_id, project_slug, activity_day) DO NOTHING;
 END;
 CREATE TRIGGER IF NOT EXISTS token_activity_messages_ad AFTER DELETE ON messages
 WHEN old.timestamp IS NOT NULL AND length(old.timestamp) >= 10 BEGIN
-  INSERT OR IGNORE INTO token_activity_dirty(source_id, project_slug, activity_day)
-  VALUES (old.source_id, old.project_slug, substr(old.timestamp, 1, 10));
+  INSERT INTO token_activity_dirty(source_id, project_slug, activity_day)
+  VALUES (old.source_id, old.project_slug, substr(old.timestamp, 1, 10))
+  ON CONFLICT(source_id, project_slug, activity_day) DO NOTHING;
 END;
 CREATE TRIGGER IF NOT EXISTS token_activity_messages_au
 AFTER UPDATE OF timestamp, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, source_id, project_slug ON messages BEGIN
-  INSERT OR IGNORE INTO token_activity_dirty(source_id, project_slug, activity_day)
+  INSERT INTO token_activity_dirty(source_id, project_slug, activity_day)
   SELECT old.source_id, old.project_slug, substr(old.timestamp, 1, 10)
-   WHERE old.timestamp IS NOT NULL AND length(old.timestamp) >= 10;
-  INSERT OR IGNORE INTO token_activity_dirty(source_id, project_slug, activity_day)
+   WHERE old.timestamp IS NOT NULL AND length(old.timestamp) >= 10
+  ON CONFLICT(source_id, project_slug, activity_day) DO NOTHING;
+  INSERT INTO token_activity_dirty(source_id, project_slug, activity_day)
   SELECT new.source_id, new.project_slug, substr(new.timestamp, 1, 10)
-   WHERE new.timestamp IS NOT NULL AND length(new.timestamp) >= 10;
+   WHERE new.timestamp IS NOT NULL AND length(new.timestamp) >= 10
+  ON CONFLICT(source_id, project_slug, activity_day) DO NOTHING;
 END;
 CREATE TRIGGER IF NOT EXISTS token_activity_subagents_ai AFTER INSERT ON subagent_messages
 WHEN new.timestamp IS NOT NULL AND length(new.timestamp) >= 10 BEGIN
-  INSERT OR IGNORE INTO token_activity_dirty(source_id, project_slug, activity_day)
-  VALUES (new.source_id, new.project_slug, substr(new.timestamp, 1, 10));
+  INSERT INTO token_activity_dirty(source_id, project_slug, activity_day)
+  VALUES (new.source_id, new.project_slug, substr(new.timestamp, 1, 10))
+  ON CONFLICT(source_id, project_slug, activity_day) DO NOTHING;
 END;
 CREATE TRIGGER IF NOT EXISTS token_activity_subagents_ad AFTER DELETE ON subagent_messages
 WHEN old.timestamp IS NOT NULL AND length(old.timestamp) >= 10 BEGIN
-  INSERT OR IGNORE INTO token_activity_dirty(source_id, project_slug, activity_day)
-  VALUES (old.source_id, old.project_slug, substr(old.timestamp, 1, 10));
+  INSERT INTO token_activity_dirty(source_id, project_slug, activity_day)
+  VALUES (old.source_id, old.project_slug, substr(old.timestamp, 1, 10))
+  ON CONFLICT(source_id, project_slug, activity_day) DO NOTHING;
 END;
 CREATE TRIGGER IF NOT EXISTS token_activity_subagents_au
 AFTER UPDATE OF timestamp, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, source_id, project_slug ON subagent_messages BEGIN
-  INSERT OR IGNORE INTO token_activity_dirty(source_id, project_slug, activity_day)
+  INSERT INTO token_activity_dirty(source_id, project_slug, activity_day)
   SELECT old.source_id, old.project_slug, substr(old.timestamp, 1, 10)
-   WHERE old.timestamp IS NOT NULL AND length(old.timestamp) >= 10;
-  INSERT OR IGNORE INTO token_activity_dirty(source_id, project_slug, activity_day)
+   WHERE old.timestamp IS NOT NULL AND length(old.timestamp) >= 10
+  ON CONFLICT(source_id, project_slug, activity_day) DO NOTHING;
+  INSERT INTO token_activity_dirty(source_id, project_slug, activity_day)
   SELECT new.source_id, new.project_slug, substr(new.timestamp, 1, 10)
-   WHERE new.timestamp IS NOT NULL AND length(new.timestamp) >= 10;
+   WHERE new.timestamp IS NOT NULL AND length(new.timestamp) >= 10
+  ON CONFLICT(source_id, project_slug, activity_day) DO NOTHING;
 END;
 CREATE TRIGGER IF NOT EXISTS token_activity_session_quality_au AFTER UPDATE OF tokens_estimated ON sessions BEGIN
-  INSERT OR IGNORE INTO token_activity_dirty(source_id, project_slug, activity_day)
+  INSERT INTO token_activity_dirty(source_id, project_slug, activity_day)
   SELECT source_id, project_slug, substr(timestamp, 1, 10) FROM messages
-   WHERE session_id = new.id AND source_id = new.source_id AND timestamp IS NOT NULL AND length(timestamp) >= 10;
-  INSERT OR IGNORE INTO token_activity_dirty(source_id, project_slug, activity_day)
+   WHERE session_id = new.id AND source_id = new.source_id AND timestamp IS NOT NULL AND length(timestamp) >= 10
+  ON CONFLICT(source_id, project_slug, activity_day) DO NOTHING;
+  INSERT INTO token_activity_dirty(source_id, project_slug, activity_day)
   SELECT source_id, project_slug, substr(timestamp, 1, 10) FROM subagent_messages
-   WHERE session_id = new.id AND source_id = new.source_id AND timestamp IS NOT NULL AND length(timestamp) >= 10;
+   WHERE session_id = new.id AND source_id = new.source_id AND timestamp IS NOT NULL AND length(timestamp) >= 10
+  ON CONFLICT(source_id, project_slug, activity_day) DO NOTHING;
 END;
 `;
 
@@ -578,5 +588,10 @@ export function initializeSchema(db: SqliteService): void {
   } else {
     // Version matches — ensure all tables exist (IF NOT EXISTS makes this safe)
     db.exec(SCHEMA_SQL);
+    // Trigger bodies can receive correctness fixes without changing stored
+    // data. CREATE TRIGGER IF NOT EXISTS cannot replace an older body, so
+    // refresh this derived-index trigger family explicitly on every attach.
+    for (const trigger of TOKEN_ACTIVITY_TRIGGER_NAMES) db.exec(`DROP TRIGGER IF EXISTS ${trigger}`);
+    db.exec(TOKEN_ACTIVITY_TRIGGERS_SQL);
   }
 }

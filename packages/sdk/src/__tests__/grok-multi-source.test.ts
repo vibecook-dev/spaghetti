@@ -15,11 +15,12 @@ import assert from 'node:assert/strict';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { appendFileSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 
 import { createSpaghettiService } from '../index.js';
 import { createGrokSource } from '../sources/index.js';
 import type { SpaghettiAPI } from '../index.js';
+import type { Change } from '../live/change-events.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const FIXTURE_ROOT_DIR = path.resolve(here, '../../../../crates/spaghetti-napi/fixtures/small/.claude');
@@ -27,7 +28,7 @@ const GROK_SESSION = '019f5d61-da35-7b60-a1b5-02055fd8fcdd';
 const GROK_CWD = '/tmp/grok-proj';
 const GROK_SLUG = '-tmp-grok-proj';
 
-function writeGrokFixture(grokRoot: string): void {
+function writeGrokFixture(grokRoot: string): string {
   const sessionDir = path.join(grokRoot, 'sessions', encodeURIComponent(GROK_CWD), GROK_SESSION);
   mkdirSync(sessionDir, { recursive: true });
   const lines = [
@@ -37,7 +38,8 @@ function writeGrokFixture(grokRoot: string): void {
     { type: 'assistant', content: 'grok reply', tool_calls: [{ id: 'c1', name: 'read_file', arguments: '{}' }] },
     { type: 'tool_result', tool_call_id: 'c1', content: 'tool output' },
   ];
-  writeFileSync(path.join(sessionDir, 'chat_history.jsonl'), lines.map((l) => JSON.stringify(l)).join('\n') + '\n');
+  const chatPath = path.join(sessionDir, 'chat_history.jsonl');
+  writeFileSync(chatPath, lines.map((l) => JSON.stringify(l)).join('\n') + '\n');
   writeFileSync(
     path.join(sessionDir, 'summary.json'),
     JSON.stringify({
@@ -48,22 +50,34 @@ function writeGrokFixture(grokRoot: string): void {
       head_branch: 'main',
     }),
   );
+  return chatPath;
+}
+
+async function waitFor(predicate: () => boolean, timeoutMs = 5_000): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (predicate()) return true;
+    await new Promise((resolve) => setTimeout(resolve, 40));
+  }
+  return false;
 }
 
 describe('multi-source ingest (claude + grok)', () => {
   let spaghetti: SpaghettiAPI;
   let tempDir: string;
   let grokRoot: string;
+  let chatPath: string;
 
   before(async () => {
     tempDir = mkdtempSync(path.join(os.tmpdir(), 'spaghetti-grok-ms-'));
     grokRoot = path.join(tempDir, '.grok');
-    writeGrokFixture(grokRoot);
+    chatPath = writeGrokFixture(grokRoot);
 
     spaghetti = createSpaghettiService({
       rootDir: FIXTURE_ROOT_DIR,
       additionalSources: [createGrokSource({ rootDir: grokRoot })],
       dbPath: path.join(tempDir, 'spaghetti.db'),
+      live: true,
     });
     await spaghetti.initialize();
   });
@@ -109,5 +123,23 @@ describe('multi-source ingest (claude + grok)', () => {
     assert.equal(grokOnly.length, 1);
     assert.equal(grokOnly[0].slug, GROK_SLUG);
     assert.deepEqual(grokOnly[0].sourceIds, ['grok']);
+  });
+
+  test('Grok appends survive native watcher failure through reconciliation polling', async () => {
+    const changes: Change[] = [];
+    const dispose = spaghetti.live?.onChange((change) => changes.push(change));
+    appendFileSync(chatPath, `${JSON.stringify({ type: 'assistant', content: 'grok live reply' })}\n`);
+
+    const arrived = await waitFor(
+      () => spaghetti.getSessionMessages(GROK_SLUG, GROK_SESSION, 50, 0, { sourceId: 'grok' }).total === 6,
+    );
+    assert.ok(arrived, 'the Grok append should be ingested by the resilient watcher');
+    assert.ok(
+      changes.some(
+        (change) =>
+          change.type === 'session.message.added' && change.sourceId === 'grok' && change.sessionId === GROK_SESSION,
+      ),
+    );
+    dispose?.();
   });
 });

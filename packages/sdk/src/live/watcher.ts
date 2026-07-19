@@ -24,6 +24,8 @@
 
 import parcelWatcher from '@parcel/watcher';
 import chokidar from 'chokidar';
+import { readdir, stat } from 'node:fs/promises';
+import * as path from 'node:path';
 
 // ═══════════════════════════════════════════════════════════════════════════
 // PUBLIC TYPES
@@ -75,6 +77,241 @@ export interface Watcher {
   writeSnapshot(rootPath: string, snapshotFile: string): Promise<void>;
 
   getEventsSince(rootPath: string, snapshotFile: string): Promise<WatchEvent[]>;
+}
+
+export interface PollingWatcherOptions {
+  /** Fast cadence for files that changed recently. Default 500 ms. */
+  pollIntervalMs?: number;
+  /** Full discovery cadence for new or resumed files. Default 5 seconds. */
+  discoveryIntervalMs?: number;
+  /** Optional shallow scan depth for cheap, fast new-session discovery. */
+  quickDiscoveryDepth?: number;
+  /** Cadence for the optional shallow scan. Defaults to pollIntervalMs. */
+  quickDiscoveryIntervalMs?: number;
+  /** Keep a recently-changing file on the fast lane. Default 5 minutes. */
+  activeWindowMs?: number;
+  /** Reconcile recent writes that raced watcher startup. Default 2 minutes. */
+  initialLookbackMs?: number;
+  /** Source-specific filter applied before stat calls. */
+  shouldInclude?: (filePath: string) => boolean;
+  onError?: (error: Error) => void;
+}
+
+interface FileStamp {
+  mtimeMs: number;
+  size: number;
+}
+
+function sameStamp(a: FileStamp | undefined, b: FileStamp): boolean {
+  return !!a && a.mtimeMs === b.mtimeMs && a.size === b.size;
+}
+
+function globRegex(glob: string): RegExp {
+  const directoryMarker = '\u0000';
+  const globstarMarker = '\u0001';
+  const escaped = glob
+    .replaceAll('**/', directoryMarker)
+    .replaceAll('**', globstarMarker)
+    .replace(/[.+^${}()|[\]\\]/g, '\\$&')
+    .replaceAll('*', '[^/]*')
+    .replaceAll(directoryMarker, '(?:.*/)?')
+    .replaceAll(globstarMarker, '.*');
+  return new RegExp(`^(?:${escaped})$`);
+}
+
+/**
+ * Descriptor-free reconciliation watcher. It polls only recently-active files
+ * each second and performs a bounded discovery scan less frequently, so it
+ * remains reliable when FSEvents/inotify handles are exhausted.
+ */
+export function createPollingWatcher(options: PollingWatcherOptions = {}): Watcher {
+  const pollIntervalMs = options.pollIntervalMs ?? 500;
+  const discoveryIntervalMs = Math.max(pollIntervalMs, options.discoveryIntervalMs ?? 5_000);
+  const activeWindowMs = options.activeWindowMs ?? 5 * 60_000;
+  const initialLookbackMs = options.initialLookbackMs ?? 2 * 60_000;
+  const report = options.onError ?? (() => {});
+
+  return {
+    async subscribe(rootPath, onEvents, watchOptions) {
+      const ignored = watchOptions.ignore.map(globRegex);
+      const known = new Map<string, FileStamp>();
+      const activeUntil = new Map<string, number>();
+      let stopped = false;
+      let running: Promise<void> | null = null;
+      let lastDiscoveryAt = 0;
+      let lastQuickDiscoveryAt = 0;
+
+      const include = (filePath: string): boolean => {
+        const relative = path.relative(rootPath, filePath).split(path.sep).join('/');
+        if (ignored.some((pattern) => pattern.test(relative) || pattern.test(`/${relative}`))) return false;
+        return options.shouldInclude?.(filePath) ?? true;
+      };
+
+      const readStamp = async (filePath: string): Promise<FileStamp | null> => {
+        try {
+          const info = await stat(filePath);
+          return info.isFile() ? { mtimeMs: info.mtimeMs, size: info.size } : null;
+        } catch (error) {
+          const code = (error as NodeJS.ErrnoException).code;
+          if (code !== 'ENOENT') report(error instanceof Error ? error : new Error(String(error)));
+          return null;
+        }
+      };
+
+      const scanDirectory = async (
+        directory: string,
+        output: Map<string, FileStamp>,
+        depth = 0,
+        maxDepth?: number,
+      ): Promise<void> => {
+        let entries;
+        try {
+          entries = await readdir(directory, { withFileTypes: true });
+        } catch (error) {
+          const code = (error as NodeJS.ErrnoException).code;
+          if (code !== 'ENOENT') report(error instanceof Error ? error : new Error(String(error)));
+          return;
+        }
+        await Promise.all(
+          entries.map(async (entry) => {
+            const fullPath = path.join(directory, entry.name);
+            if (entry.isDirectory()) {
+              if (watchOptions.recursive && (maxDepth === undefined || depth < maxDepth)) {
+                await scanDirectory(fullPath, output, depth + 1, maxDepth);
+              }
+              return;
+            }
+            if (!entry.isFile() || !include(fullPath)) return;
+            const stamp = await readStamp(fullPath);
+            if (stamp) output.set(fullPath, stamp);
+          }),
+        );
+      };
+
+      const discover = async (initial: boolean, maxDepth?: number, partial = false): Promise<void> => {
+        const now = Date.now();
+        const next = new Map<string, FileStamp>();
+        await scanDirectory(rootPath, next, 0, maxDepth);
+        const events: WatchEvent[] = [];
+        for (const [filePath, stamp] of next) {
+          const previous = known.get(filePath);
+          if (!previous) {
+            if (!initial || stamp.mtimeMs >= now - initialLookbackMs) {
+              events.push({ type: initial ? 'update' : 'create', path: filePath });
+              activeUntil.set(filePath, now + activeWindowMs);
+            }
+          } else if (!sameStamp(previous, stamp)) {
+            events.push({ type: 'update', path: filePath });
+            activeUntil.set(filePath, now + activeWindowMs);
+          }
+        }
+        if (!initial && !partial) {
+          for (const filePath of known.keys()) {
+            if (!next.has(filePath)) {
+              events.push({ type: 'delete', path: filePath });
+              activeUntil.delete(filePath);
+            }
+          }
+        }
+        if (!partial) known.clear();
+        for (const [filePath, stamp] of next) known.set(filePath, stamp);
+        if (partial) lastQuickDiscoveryAt = now;
+        else lastDiscoveryAt = now;
+        if (!stopped && events.length > 0) onEvents(events);
+      };
+
+      const pollActive = async (): Promise<void> => {
+        const now = Date.now();
+        const events: WatchEvent[] = [];
+        await Promise.all(
+          [...activeUntil].map(async ([filePath, until]) => {
+            if (until < now) {
+              activeUntil.delete(filePath);
+              return;
+            }
+            const next = await readStamp(filePath);
+            const previous = known.get(filePath);
+            if (!next) {
+              if (previous) events.push({ type: 'delete', path: filePath });
+              known.delete(filePath);
+              activeUntil.delete(filePath);
+            } else if (!sameStamp(previous, next)) {
+              known.set(filePath, next);
+              activeUntil.set(filePath, now + activeWindowMs);
+              events.push({ type: 'update', path: filePath });
+            }
+          }),
+        );
+        if (!stopped && events.length > 0) onEvents(events);
+      };
+
+      const tick = (): void => {
+        if (stopped || running) return;
+        const work = (async () => {
+          await pollActive();
+          if (
+            options.quickDiscoveryDepth !== undefined &&
+            Date.now() - lastQuickDiscoveryAt >= (options.quickDiscoveryIntervalMs ?? pollIntervalMs)
+          ) {
+            await discover(false, options.quickDiscoveryDepth, true);
+          }
+          if (Date.now() - lastDiscoveryAt >= discoveryIntervalMs) await discover(false);
+        })()
+          .catch((error: unknown) => report(error instanceof Error ? error : new Error(String(error))))
+          .finally(() => {
+            if (running === work) running = null;
+          });
+        running = work;
+      };
+
+      await discover(true);
+      const timer = setInterval(tick, pollIntervalMs);
+      return async () => {
+        stopped = true;
+        clearInterval(timer);
+        await running;
+      };
+    },
+
+    async writeSnapshot() {
+      throw new Error('Polling watcher does not use persisted snapshots');
+    },
+
+    async getEventsSince() {
+      throw new Error('Polling watcher does not use persisted snapshots');
+    },
+  };
+}
+
+export interface ResilientWatcherOptions extends PollingWatcherOptions {
+  primary?: Watcher;
+  onPrimaryUnavailable?: (error: Error) => void;
+}
+
+/** Native events for latency plus polling reconciliation for guaranteed recovery. */
+export function createResilientWatcher(options: ResilientWatcherOptions = {}): Watcher {
+  const primary = options.primary ?? createParcelWatcher();
+  const polling = createPollingWatcher(options);
+  return {
+    async subscribe(rootPath, onEvents, watchOptions) {
+      const stopPolling = await polling.subscribe(rootPath, onEvents, watchOptions);
+      let stopPrimary: Unsubscribe | null = null;
+      try {
+        stopPrimary = await primary.subscribe(rootPath, onEvents, watchOptions);
+      } catch (error) {
+        options.onPrimaryUnavailable?.(error instanceof Error ? error : new Error(String(error)));
+      }
+      return async () => {
+        try {
+          await stopPrimary?.();
+        } finally {
+          await stopPolling();
+        }
+      };
+    },
+    writeSnapshot: (rootPath, snapshotFile) => primary.writeSnapshot(rootPath, snapshotFile),
+    getEventsSince: (rootPath, snapshotFile) => primary.getEventsSince(rootPath, snapshotFile),
+  };
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

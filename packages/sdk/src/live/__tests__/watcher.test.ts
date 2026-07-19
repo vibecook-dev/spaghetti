@@ -17,9 +17,16 @@ import { test, describe, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import os from 'node:os';
 import path from 'node:path';
-import { mkdtempSync, rmSync, writeFileSync, appendFileSync, unlinkSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, appendFileSync, unlinkSync } from 'node:fs';
 
-import { createParcelWatcher, type WatchEvent, type Unsubscribe } from '../watcher.js';
+import {
+  createParcelWatcher,
+  createPollingWatcher,
+  createResilientWatcher,
+  type Watcher,
+  type WatchEvent,
+  type Unsubscribe,
+} from '../watcher.js';
 
 // ═══════════════════════════════════════════════════════════════════════════
 // HELPERS
@@ -294,5 +301,114 @@ describe('createParcelWatcher (RFC 005 C2.1)', () => {
     assert.ok(hit, `Expected getEventsSince to report the new file, got: ${JSON.stringify(events)}`);
     // The event type for a created-after-snapshot file is `create`.
     assert.strictEqual(hit?.type, 'create');
+  });
+});
+
+describe('resource-bounded polling reconciliation', () => {
+  let tempDir: string;
+
+  before(() => {
+    tempDir = mkdtempSync(path.join(os.tmpdir(), 'spaghetti-polling-watcher-'));
+  });
+
+  after(() => {
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  test('reconciles a recent startup write and follows subsequent appends', async () => {
+    const target = path.join(tempDir, 'rollout-live.jsonl');
+    const ignored = path.join(tempDir, 'noise.txt');
+    writeFileSync(target, '{"first":true}\n');
+    writeFileSync(ignored, 'noise');
+    const collector = createCollector();
+    const watcher = createPollingWatcher({
+      pollIntervalMs: 20,
+      discoveryIntervalMs: 40,
+      activeWindowMs: 1_000,
+      initialLookbackMs: 5_000,
+      shouldInclude: (filePath) => filePath.endsWith('.jsonl'),
+    });
+
+    const unsubscribe = await watcher.subscribe(tempDir, collector.onEvents, { ignore: [], recursive: true });
+    await collector.waitForMatch((event) => event.type === 'update' && samePath(event.path, target));
+    assert.equal(
+      collector.events.some((event) => samePath(event.path, ignored)),
+      false,
+    );
+
+    const countBeforeAppend = collector.events.length;
+    appendFileSync(target, '{"second":true}\n');
+    const deadline = Date.now() + 1_000;
+    while (collector.events.length === countBeforeAppend && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    assert.ok(collector.events.length > countBeforeAppend);
+    assert.ok(collector.events.slice(countBeforeAppend).some((event) => samePath(event.path, target)));
+    await unsubscribe();
+  });
+
+  test('discovers new files without allocating filesystem watch handles', async () => {
+    const collector = createCollector();
+    const watcher = createPollingWatcher({ pollIntervalMs: 20, discoveryIntervalMs: 40, initialLookbackMs: 0 });
+    const unsubscribe = await watcher.subscribe(tempDir, collector.onEvents, { ignore: [], recursive: true });
+    const target = path.join(tempDir, 'created-after-start.jsonl');
+    writeFileSync(target, '{}\n');
+
+    await collector.waitForMatch((event) => event.type === 'create' && samePath(event.path, target), 1_000);
+    await unsubscribe();
+  });
+
+  test('honours root-level and nested glob ignores during reconciliation', async () => {
+    const root = path.join(tempDir, 'ignored-paths');
+    const debugDir = path.join(root, 'debug');
+    mkdirSync(debugDir, { recursive: true });
+    const rootIgnored = path.join(root, '.DS_Store');
+    const nestedIgnored = path.join(debugDir, 'trace.jsonl');
+    const included = path.join(root, 'session.jsonl');
+    writeFileSync(rootIgnored, 'metadata');
+    writeFileSync(nestedIgnored, '{}\n');
+    writeFileSync(included, '{}\n');
+    const collector = createCollector();
+    const watcher = createPollingWatcher({ pollIntervalMs: 20, discoveryIntervalMs: 40 });
+
+    const unsubscribe = await watcher.subscribe(root, collector.onEvents, {
+      ignore: ['**/.DS_Store', '**/debug/**'],
+      recursive: true,
+    });
+    await collector.waitForMatch((event) => samePath(event.path, included), 1_000);
+    assert.equal(
+      collector.events.some((event) => samePath(event.path, rootIgnored) || samePath(event.path, nestedIgnored)),
+      false,
+    );
+    await unsubscribe();
+  });
+
+  test('continues through polling when the native backend cannot start', async () => {
+    const failure = new Error('simulated FSEvents exhaustion');
+    const primary: Watcher = {
+      async subscribe() {
+        throw failure;
+      },
+      async writeSnapshot() {},
+      async getEventsSince() {
+        return [];
+      },
+    };
+    const unavailable: Error[] = [];
+    const collector = createCollector();
+    const watcher = createResilientWatcher({
+      primary,
+      pollIntervalMs: 20,
+      discoveryIntervalMs: 40,
+      initialLookbackMs: 0,
+      onPrimaryUnavailable: (error) => unavailable.push(error),
+    });
+    const unsubscribe = await watcher.subscribe(tempDir, collector.onEvents, { ignore: [], recursive: true });
+    assert.deepEqual(unavailable, [failure]);
+
+    const target = path.join(tempDir, 'fallback-live.jsonl');
+    writeFileSync(target, '{}\n');
+    await collector.waitForMatch((event) => event.type === 'create' && samePath(event.path, target), 1_000);
+    await unsubscribe();
   });
 });

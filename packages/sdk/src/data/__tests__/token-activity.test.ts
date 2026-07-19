@@ -96,6 +96,40 @@ describe('daily token activity', () => {
     assert.ok(plan.every((step) => !step.detail.includes('messages')));
   });
 
+  test('an outer message upsert cannot turn a duplicate dirty marker into a live-ingest failure', () => {
+    db.run(
+      `INSERT INTO token_activity_dirty(source_id, project_slug, activity_day)
+       VALUES ('codex', ?, '2026-07-18')
+       ON CONFLICT(source_id, project_slug, activity_day) DO NOTHING`,
+      SLUG,
+    );
+    assert.doesNotThrow(() =>
+      db.run(
+        `INSERT INTO messages
+          (source_id, project_slug, session_id, msg_index, timestamp, input_tokens, output_tokens, data)
+         VALUES ('codex', ?, 'codex-session', 0, '2026-07-18T13:00:00Z', 101, 25, '{}')
+         ON CONFLICT(session_id, msg_index) DO UPDATE SET input_tokens = excluded.input_tokens`,
+        SLUG,
+      ),
+    );
+  });
+
+  test('same-version schema attach refreshes corrected activity trigger bodies', () => {
+    db.exec('DROP TRIGGER token_activity_messages_ai');
+    db.exec(`
+      CREATE TRIGGER token_activity_messages_ai AFTER INSERT ON messages BEGIN
+        SELECT 1;
+      END;
+    `);
+
+    initializeSchema(db);
+
+    const sql = db.get<{ sql: string }>(
+      `SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = 'token_activity_messages_ai'`,
+    )?.sql;
+    assert.match(sql ?? '', /ON CONFLICT\(source_id, project_slug, activity_day\) DO NOTHING/);
+  });
+
   test('a project read leaves unrelated live-update buckets deferred', () => {
     db.run(
       `INSERT INTO sessions(id, source_id, project_slug) VALUES ('other-session', 'claude-code', 'other-project')`,

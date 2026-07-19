@@ -27,7 +27,7 @@ import type { IngestService } from '../../data/ingest-service.js';
 import type { AgentDataStore } from '../../data/agent-data-store.js';
 import type { ParsedRow } from '../../live/parsed-row.js';
 import type { SessionIndexEntry, SessionsIndex } from '../../types/index.js';
-import { createParcelWatcher, createChokidarWatcher, type Watcher, type Unsubscribe } from '../../live/watcher.js';
+import { createResilientWatcher, type Watcher, type Unsubscribe } from '../../live/watcher.js';
 import { considerCodexFirstPromptLine } from './first-prompt.js';
 import { isCodexInternalSessionPayload } from './session-meta.js';
 import type { LiveWatch } from '../../live/live-watch.js';
@@ -231,34 +231,25 @@ export function createCodexLiveWatch(deps: CodexLiveWatchDeps): CodexLiveWatch {
     async start(): Promise<void> {
       if (watcher) return;
       stopping = false;
-      watcher = createParcelWatcher();
-      try {
-        unsubscribe = await watcher.subscribe(
-          deps.sessionsDir,
-          (events) => {
-            for (const e of events) {
-              if ((e.type === 'create' || e.type === 'update') && ROLLOUT_FILE.test(path.basename(e.path))) {
-                schedule(e.path);
-              }
+      watcher = createResilientWatcher({
+        shouldInclude: (filePath) => ROLLOUT_FILE.test(path.basename(filePath)),
+        // sessions/YYYY/MM/DD/rollout-*.jsonl
+        quickDiscoveryDepth: 3,
+        onError: (error) => deps.errorSink.error(error, { component: 'CodexPollingWatcher' }),
+        onPrimaryUnavailable: (error) =>
+          deps.errorSink.error(error, { component: 'CodexParcelWatcher', fallback: 'polling' }),
+      });
+      unsubscribe = await watcher.subscribe(
+        deps.sessionsDir,
+        (events) => {
+          for (const e of events) {
+            if ((e.type === 'create' || e.type === 'update') && ROLLOUT_FILE.test(path.basename(e.path))) {
+              schedule(e.path);
             }
-          },
-          { ignore: [], recursive: true },
-        );
-      } catch {
-        // Fall back to chokidar if parcel's native watcher is unavailable.
-        watcher = createChokidarWatcher();
-        unsubscribe = await watcher.subscribe(
-          deps.sessionsDir,
-          (events) => {
-            for (const e of events) {
-              if ((e.type === 'create' || e.type === 'update') && ROLLOUT_FILE.test(path.basename(e.path))) {
-                schedule(e.path);
-              }
-            }
-          },
-          { ignore: [], recursive: true },
-        );
-      }
+          }
+        },
+        { ignore: [], recursive: true },
+      );
     },
 
     async stop(): Promise<void> {

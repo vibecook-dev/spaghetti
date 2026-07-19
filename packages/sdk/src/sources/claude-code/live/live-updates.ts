@@ -35,7 +35,7 @@ import {
 } from './incremental-parser.js';
 import { classify, type Category, type RouteResult } from '../../../live/router.js';
 import type { LiveWatch } from '../../../live/live-watch.js';
-import { createParcelWatcher, createChokidarWatcher, type Watcher, type WatchEvent } from '../../../live/watcher.js';
+import { createChokidarWatcher, createResilientWatcher, type Watcher, type WatchEvent } from '../../../live/watcher.js';
 import { createSettingsHandler, type SettingsHandler } from './settings-handler.js';
 import { createScopeAttacher, topicToScopes, type ScopeAttacher } from './scope-attacher.js';
 
@@ -661,7 +661,14 @@ export function createClaudeCodeLiveUpdates(
       } else if (options.useChokidarFallback) {
         watcher = createChokidarWatcher();
       } else {
-        watcher = createParcelWatcher();
+        watcher = createResilientWatcher({
+          shouldInclude: (filePath) => classifyPath(filePath).category !== 'ignored',
+          // projects/<slug>/<session>.jsonl: catch new parent sessions on the
+          // fast lane without repeatedly walking historical subagent trees.
+          quickDiscoveryDepth: 1,
+          onError: (error) => errorSink.error(error, { component: 'PollingWatcher' }),
+          onPrimaryUnavailable: (error) => errorSink.error(error, { component: 'ParcelWatcher', fallback: 'polling' }),
+        });
       }
 
       // 5. Flip running BEFORE spawning the writer loop so the event

@@ -25,7 +25,7 @@ import type { IngestService } from '../../data/ingest-service.js';
 import type { AgentDataStore } from '../../data/agent-data-store.js';
 import type { ParsedRow } from '../../live/parsed-row.js';
 import type { SessionIndexEntry, SessionsIndex } from '../../types/index.js';
-import { createParcelWatcher, createChokidarWatcher, type Watcher, type Unsubscribe } from '../../live/watcher.js';
+import { createResilientWatcher, type Watcher, type Unsubscribe } from '../../live/watcher.js';
 import type { LiveWatch } from '../../live/live-watch.js';
 import { readGrokSessionMeta, encodeGrokSlug } from './reader.js';
 import { applyGrokSidecars } from './sidecars.js';
@@ -288,13 +288,15 @@ export function createGrokLiveWatch(deps: GrokLiveWatchDeps): GrokLiveWatch {
     async start(): Promise<void> {
       if (watcher) return;
       stopping = false;
-      watcher = createParcelWatcher();
-      try {
-        unsubscribe = await watcher.subscribe(deps.sessionsDir, onEvents, { ignore: [], recursive: true });
-      } catch {
-        watcher = createChokidarWatcher();
-        unsubscribe = await watcher.subscribe(deps.sessionsDir, onEvents, { ignore: [], recursive: true });
-      }
+      watcher = createResilientWatcher({
+        shouldInclude: (filePath) => isChatHistory(filePath) || isSidecar(filePath),
+        // sessions/<encoded-project>/<session>/<tracked-file>
+        quickDiscoveryDepth: 2,
+        onError: (error) => deps.errorSink.error(error, { component: 'GrokPollingWatcher' }),
+        onPrimaryUnavailable: (error) =>
+          deps.errorSink.error(error, { component: 'GrokParcelWatcher', fallback: 'polling' }),
+      });
+      unsubscribe = await watcher.subscribe(deps.sessionsDir, onEvents, { ignore: [], recursive: true });
     },
 
     async stop(): Promise<void> {
