@@ -101,8 +101,10 @@ const previewImage = btoa(`
 
 /** A development-only project row that keeps the gallery easy to reopen. */
 export const DEBUG_PROJECT: ProjectListItem = {
+  projectId: 'debug:message-gallery',
+  members: [{ sourceId: 'claude-code', slug: PROJECT_SLUG }],
   slug: PROJECT_SLUG,
-  sourceId: 'claude-code',
+  sourceIds: ['claude-code'],
   folderName: '[ debug ] message gallery',
   absolutePath: '',
   sessionCount: 1,
@@ -123,6 +125,7 @@ export const DEBUG_PROJECT: ProjectListItem = {
 export const DEBUG_SESSION: SessionListItem = {
   sessionId: SESSION_ID,
   sourceId: 'claude-code',
+  projectSlug: PROJECT_SLUG,
   startTime: timestamp(0),
   lastUpdate: timestamp(900),
   lifespanMs: 15 * 60 * 1000,
@@ -551,6 +554,5 @@ export const DEBUG_SESSION_MESSAGES: readonly RawMessage[] = [
 ];
 
 export const DEBUG_PROJECT_KEY = {
-  slug: DEBUG_PROJECT.slug,
-  sourceId: DEBUG_PROJECT.sourceId,
+  projectId: DEBUG_PROJECT.projectId,
 } as const;

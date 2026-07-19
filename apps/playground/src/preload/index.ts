@@ -18,10 +18,10 @@ const bridge: SpaghettiBridge = {
 
   // Projects ----------------------------------------------------------------
   getProjectList: () => ipcRenderer.invoke(IPC_CHANNELS.getProjectList),
-  getProjectMemory: (projectSlug, options) => ipcRenderer.invoke(IPC_CHANNELS.getProjectMemory, projectSlug, options),
+  getProjectMemory: (project, options) => ipcRenderer.invoke(IPC_CHANNELS.getProjectMemory, project, options),
 
   // Sessions ----------------------------------------------------------------
-  getSessionList: (projectSlug, options) => ipcRenderer.invoke(IPC_CHANNELS.getSessionList, projectSlug, options),
+  getSessionList: (project, options) => ipcRenderer.invoke(IPC_CHANNELS.getSessionList, project, options),
   getSessionMessages: (projectSlug, sessionId, limit, offset, options) =>
     ipcRenderer.invoke(IPC_CHANNELS.getSessionMessages, projectSlug, sessionId, limit, offset, options),
   getSessionTimelineFacets: (projectSlug, sessionId, options) =>
@@ -35,10 +35,21 @@ const bridge: SpaghettiBridge = {
     ipcRenderer.invoke(IPC_CHANNELS.getToolResult, projectSlug, sessionId, toolUseId),
 
   // Subagents ---------------------------------------------------------------
-  getSessionSubagents: (projectSlug, sessionId) =>
-    ipcRenderer.invoke(IPC_CHANNELS.getSessionSubagents, projectSlug, sessionId),
-  getSubagentMessages: (projectSlug, sessionId, agentId, limit, offset) =>
-    ipcRenderer.invoke(IPC_CHANNELS.getSubagentMessages, projectSlug, sessionId, agentId, limit, offset),
+  getSessionSubagents: (projectSlug, sessionId, options) =>
+    ipcRenderer.invoke(IPC_CHANNELS.getSessionSubagents, projectSlug, sessionId, options),
+  getSubagentMessages: (projectSlug, sessionId, agentId, limit, offset, workflowId, options) =>
+    ipcRenderer.invoke(
+      IPC_CHANNELS.getSubagentMessages,
+      projectSlug,
+      sessionId,
+      agentId,
+      limit,
+      offset,
+      workflowId,
+      options,
+    ),
+  getSubagentTimeline: (projectSlug, sessionId, agentId, request) =>
+    ipcRenderer.invoke(IPC_CHANNELS.getSubagentTimeline, projectSlug, sessionId, agentId, request),
 
   // Search / stats ----------------------------------------------------------
   search: (query) => ipcRenderer.invoke(IPC_CHANNELS.search, query),

@@ -13,7 +13,7 @@ interface RawRow {
   timestamp: string | null;
 }
 
-function searchText(message: SessionMessage): string {
+export function timelineSearchText(message: SessionMessage): string {
   if (message.content) return message.content;
   if (message.toolUse) {
     try {
@@ -73,8 +73,8 @@ export function ensureTimelineProjection(db: SqliteService, sessionId: string): 
     db.run('DELETE FROM timeline_messages WHERE session_id = ?', sessionId);
     const insert = db.prepare(
       `INSERT INTO timeline_messages
-         (source_id, project_slug, session_id, timeline_index, display_type, tool_name, search_text, data)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+         (source_id, project_slug, session_id, timeline_index, display_type, tool_name, tool_use_id, search_text, data)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );
     for (let index = 0; index < timeline.length; index++) {
       const message = timeline[index];
@@ -85,7 +85,8 @@ export function ensureTimelineProjection(db: SqliteService, sessionId: string): 
         index,
         message.type,
         message.toolUse?.toolName ?? null,
-        searchText(message),
+        message.toolUse?.toolId ?? message.toolResult?.toolId ?? null,
+        timelineSearchText(message),
         JSON.stringify(message),
       );
     }

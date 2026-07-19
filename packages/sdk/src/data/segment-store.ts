@@ -372,7 +372,12 @@ class SegmentStoreImpl implements SegmentStore {
     const matchParts: string[] = [];
     matchParts.push(`text_content : ${escapeFts5(query.text)}`);
     if (query.type) matchParts.push(`type : ${escapeFts5(query.type)}`);
-    if (query.projectSlug) matchParts.push(`project_slug : ${escapeFts5(query.projectSlug)}`);
+    if (query.projectMembers && query.projectMembers.length > 0) {
+      const slugs = [...new Set(query.projectMembers.map((member) => member.slug))];
+      matchParts.push(`(${slugs.map((slug) => `project_slug : ${escapeFts5(slug)}`).join(' OR ')})`);
+    } else if (query.projectSlug) {
+      matchParts.push(`project_slug : ${escapeFts5(query.projectSlug)}`);
+    }
     if (query.sessionId) matchParts.push(`session_id : ${escapeFts5(query.sessionId)}`);
     if (query.tags && query.tags.length > 0)
       matchParts.push(`tags : ${query.tags.map((t) => escapeFts5(t)).join(' ')}`);

@@ -92,7 +92,7 @@ export function MenuView(): React.ReactElement {
     for (const p of projects) {
       sessions += p.sessionCount;
       messages += p.messageCount;
-      if (sourceReportsPerMessageTokens(p.sourceId)) {
+      if (p.sourceIds.some(sourceReportsPerMessageTokens)) {
         anyTokenSource = true;
         tokens += totalTokens(p.tokenUsage);
       }

@@ -29,7 +29,13 @@ import type { Project, Session, SessionMessage, AgentConfig, AgentAnalytic } fro
 import type { AgentDataStore } from './agent-data-store.js';
 import type { LiveWatch } from '../live/live-watch.js';
 import type { AgentDataService, LifecycleInternal, LifecycleOwner } from './lifecycle-owner.js';
-import type { TimelineFacets, TimelinePage, TimelinePageRequest } from './timeline-query.js';
+import type {
+  SubagentTimelinePage,
+  SubagentTimelinePageRequest,
+  TimelineFacets,
+  TimelinePage,
+  TimelinePageRequest,
+} from './timeline-query.js';
 import { ensureSqliteCacheHealthy, isSqliteCorruptError, wipeSqliteCacheFiles } from '../io/sqlite-health.js';
 
 export class SpaghettiDataService extends EventEmitter implements AgentDataService, LifecycleInternal {
@@ -331,8 +337,9 @@ export class SpaghettiDataService extends EventEmitter implements AgentDataServi
   getSessionSubagents(
     slug: string,
     sessionId: string,
-  ): Array<{ agentId: string; agentType: string; messageCount: number }> {
-    return this.store.getSessionSubagents(slug, sessionId);
+    options?: { sourceId?: string; includeNested?: boolean },
+  ): ReturnType<AgentDataStore['getSessionSubagents']> {
+    return this.store.getSessionSubagents(slug, sessionId, options);
   }
 
   getSessionWorkflows(slug: string, sessionId: string): ReturnType<AgentDataStore['getSessionWorkflows']> {
@@ -343,8 +350,9 @@ export class SpaghettiDataService extends EventEmitter implements AgentDataServi
     slug: string,
     sessionId: string,
     workflowId: string,
-  ): Array<{ agentId: string; agentType: string; messageCount: number }> {
-    return this.store.getWorkflowSubagents(slug, sessionId, workflowId);
+    options?: { sourceId?: string },
+  ): ReturnType<AgentDataStore['getWorkflowSubagents']> {
+    return this.store.getWorkflowSubagents(slug, sessionId, workflowId, options);
   }
 
   getSubagentMessages(
@@ -354,8 +362,9 @@ export class SpaghettiDataService extends EventEmitter implements AgentDataServi
     limit: number,
     offset: number,
     workflowId?: string,
+    options?: { sourceId?: string },
   ): PaginatedSegmentResult<SessionMessage> {
-    const result = this.store.getSubagentMessages(slug, sessionId, agentId, limit, offset, workflowId);
+    const result = this.store.getSubagentMessages(slug, sessionId, agentId, limit, offset, workflowId, options);
     const segments: Segment<SessionMessage>[] = result.messages.map((msg, i) => ({
       key: `subagent:${slug}/${sessionId}/${agentId}/${offset + i}`,
       type: 'subagent' as SegmentType,
@@ -364,6 +373,15 @@ export class SpaghettiDataService extends EventEmitter implements AgentDataServi
       updatedAt: Date.now(),
     }));
     return { segments, total: result.total, offset: result.offset, hasMore: result.hasMore };
+  }
+
+  getSubagentTimeline(
+    slug: string,
+    sessionId: string,
+    agentId: string,
+    request: SubagentTimelinePageRequest,
+  ): SubagentTimelinePage {
+    return this.store.getSubagentTimeline(slug, sessionId, agentId, request);
   }
 
   search(query: SearchQuery): SearchResultSet {

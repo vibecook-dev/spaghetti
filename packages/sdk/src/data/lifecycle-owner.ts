@@ -27,7 +27,13 @@ import type { Project, Session, SessionMessage, AgentConfig, AgentAnalytic } fro
 import type { AgentDataStore } from './agent-data-store.js';
 import type { LiveWatch } from '../live/live-watch.js';
 import type { IngestEngine } from '../settings.js';
-import type { TimelineFacets, TimelinePage, TimelinePageRequest } from './timeline-query.js';
+import type {
+  SubagentTimelinePage,
+  SubagentTimelinePageRequest,
+  TimelineFacets,
+  TimelinePage,
+  TimelinePageRequest,
+} from './timeline-query.js';
 
 // Re-export types used by app-service / agent-data-service shim
 export {
@@ -108,13 +114,15 @@ export interface AgentDataService extends EventEmitter {
   getSessionSubagents(
     slug: string,
     sessionId: string,
-  ): Array<{ agentId: string; agentType: string; messageCount: number }>;
+    options?: { sourceId?: string; includeNested?: boolean },
+  ): ReturnType<AgentDataStore['getSessionSubagents']>;
   getSessionWorkflows(slug: string, sessionId: string): ReturnType<AgentDataStore['getSessionWorkflows']>;
   getWorkflowSubagents(
     slug: string,
     sessionId: string,
     workflowId: string,
-  ): Array<{ agentId: string; agentType: string; messageCount: number }>;
+    options?: { sourceId?: string },
+  ): ReturnType<AgentDataStore['getWorkflowSubagents']>;
   getSubagentMessages(
     slug: string,
     sessionId: string,
@@ -122,7 +130,14 @@ export interface AgentDataService extends EventEmitter {
     limit: number,
     offset: number,
     workflowId?: string,
+    options?: { sourceId?: string },
   ): PaginatedSegmentResult<SessionMessage>;
+  getSubagentTimeline(
+    slug: string,
+    sessionId: string,
+    agentId: string,
+    request: SubagentTimelinePageRequest,
+  ): SubagentTimelinePage;
 
   search(query: SearchQuery): SearchResultSet;
   rebuild(): Promise<void>;

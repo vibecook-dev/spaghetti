@@ -63,7 +63,10 @@ export async function memoryCommand(
   }
 
   // Get memory content
-  const memory = api.getProjectMemory(project.slug, { sourceId: project.sourceId });
+  const memory = api.getProjectMemory(
+    project,
+    project.sourceIds.includes('claude-code') ? { sourceId: 'claude-code' } : undefined,
+  );
 
   if (opts.json) {
     process.stdout.write(

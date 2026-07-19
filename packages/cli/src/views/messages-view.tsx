@@ -426,7 +426,7 @@ export interface MessagesViewProps {
 }
 
 export function MessagesView({
-  project,
+  project: _project,
   session,
   sessionIndex: _sessionIndex,
   initialIndex,
@@ -442,19 +442,19 @@ export function MessagesView({
   const [loadedOffsetLow, setLoadedOffsetLow] = useState(0);
   const [totalCount, setTotalCount] = useState(0);
 
-  const sourceScope = useMemo(() => ({ sourceId: project.sourceId }), [project.sourceId]);
+  const sourceScope = useMemo(() => ({ sourceId: session.sourceId }), [session.sourceId]);
 
   // Initial load
   useEffect(() => {
-    const probe = api.getSessionMessages(project.slug, session.sessionId, 1, 0, sourceScope);
+    const probe = api.getSessionMessages(session.projectSlug, session.sessionId, 1, 0, sourceScope);
     const total = probe.total;
     setTotalCount(total);
 
     const startOffset = Math.max(0, total - PAGE_SIZE);
-    const page = api.getSessionMessages(project.slug, session.sessionId, PAGE_SIZE, startOffset, sourceScope);
-    setAllMessages(adaptMessagesForDisplay(page.messages, project.sourceId));
+    const page = api.getSessionMessages(session.projectSlug, session.sessionId, PAGE_SIZE, startOffset, sourceScope);
+    setAllMessages(adaptMessagesForDisplay(page.messages, session.sourceId));
     setLoadedOffsetLow(startOffset);
-  }, [api, project.slug, project.sourceId, session.sessionId, sourceScope]);
+  }, [api, session.projectSlug, session.sessionId, session.sourceId, sourceScope]);
 
   const allDisplayItems = useMemo(() => buildDisplayItems(allMessages), [allMessages]);
   const displayItems = useMemo(() => applyDisplayFilters(allDisplayItems, filters), [allDisplayItems, filters]);
@@ -493,7 +493,7 @@ export function MessagesView({
 
   // Flattened line stream (selection-independent). Selected item's lines are
   // patched in at render time so selection changes are cheap.
-  const sourceId = project.sourceId;
+  const sourceId = session.sourceId;
 
   const allLinesUnselected = useMemo<string[]>(() => {
     const out: string[] = [];
@@ -583,16 +583,22 @@ export function MessagesView({
     const fetchSize = loadedOffsetLow - nextOffset;
     if (fetchSize <= 0) return;
 
-    const olderPage = api.getSessionMessages(project.slug, session.sessionId, fetchSize, nextOffset, sourceScope);
+    const olderPage = api.getSessionMessages(
+      session.projectSlug,
+      session.sessionId,
+      fetchSize,
+      nextOffset,
+      sourceScope,
+    );
     setLoadedOffsetLow(nextOffset);
-    setAllMessages((prev) => [...adaptMessagesForDisplay(olderPage.messages, project.sourceId), ...prev]);
-  }, [api, project.slug, project.sourceId, session.sessionId, loadedOffsetLow, sourceScope]);
+    setAllMessages((prev) => [...adaptMessagesForDisplay(olderPage.messages, session.sourceId), ...prev]);
+  }, [api, session.projectSlug, session.sessionId, session.sourceId, loadedOffsetLow, sourceScope]);
 
   // Build filter chips + count label for display within this view
   const total = allDisplayItems.length;
   const shown = displayItems.length;
   const countLabel = total === shown ? `(${total})` : `(${shown}/${total})`;
-  const filterChipsLine = `${buildFilterChips(filters, project.sourceId)}  ${countLabel}`;
+  const filterChipsLine = `${buildFilterChips(filters, session.sourceId)}  ${countLabel}`;
 
   // Key handling
   useInput(

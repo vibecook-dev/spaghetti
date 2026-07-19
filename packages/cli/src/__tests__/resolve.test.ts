@@ -94,6 +94,16 @@ describe('resolveProject', () => {
     const r = resolveProject('anything', []);
     assert.strictEqual(r, null);
   });
+
+  test('does not guess when lossy slugs and folder names are ambiguous', () => {
+    const collisions = [
+      { ...mockProjects[0], projectId: 'path:/tmp/foo/bar', slug: '-tmp-foo-bar', folderName: 'bar' },
+      { ...mockProjects[1], projectId: 'path:/tmp/foo-bar', slug: '-tmp-foo-bar', folderName: 'bar' },
+    ];
+    assert.strictEqual(resolveProject('bar', collisions), null);
+    assert.strictEqual(resolveProject('-tmp-foo-bar', collisions), null);
+    assert.strictEqual(resolveProject('path:/tmp/foo/bar', collisions)?.projectId, 'path:/tmp/foo/bar');
+  });
 });
 
 describe('resolveSession', () => {

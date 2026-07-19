@@ -103,7 +103,7 @@ export async function sessionsCommand(
     throw noProjectMatch(input, suggestProjects(input, projects));
   }
 
-  let sessions = api.getSessionList(project.slug, { sourceId: project.sourceId });
+  let sessions = api.getSessionList(project);
 
   // Filter by --since
   if (opts.since) {
@@ -138,8 +138,8 @@ export async function sessionsCommand(
   }
 
   // Header
-  const totalSessions = api.getSessionList(project.slug, { sourceId: project.sourceId }).length;
-  const header = `  ${theme.project(project.folderName)} ${theme.agent(project.sourceId)} ${theme.muted(`(${totalSessions} sessions)`)}`;
+  const totalSessions = api.getSessionList(project).length;
+  const header = `  ${theme.project(project.folderName)} ${project.sourceIds.map((id) => theme.agent(id)).join(' ')} ${theme.muted(`(${totalSessions} sessions)`)}`;
 
   const columns: Column[] = [
     {
@@ -204,7 +204,7 @@ export async function sessionsCommand(
   // Footer
   let totalTok = 0;
   let totalMsgs = 0;
-  const tokensKnown = sourceReportsPerMessageTokens(project.sourceId);
+  const tokensKnown = project.sourceIds.some(sourceReportsPerMessageTokens);
   for (const s of sessions) {
     if (tokensKnown) totalTok += totalTokens(s.tokenUsage);
     totalMsgs += s.messageCount;

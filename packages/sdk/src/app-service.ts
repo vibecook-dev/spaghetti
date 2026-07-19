@@ -8,14 +8,23 @@ import { EventEmitter } from 'events';
 import type {
   SpaghettiAPI,
   ProjectListItem,
+  ProjectMember,
+  ProjectReference,
   SessionListItem,
   MessagePage,
   SubagentListItem,
   WorkflowListItem,
   SubagentMessagePage,
   SourceFilter,
+  SubagentFilter,
 } from './api.js';
-import type { TimelineFacets, TimelinePage, TimelinePageRequest } from './data/timeline-query.js';
+import type {
+  SubagentTimelinePage,
+  SubagentTimelinePageRequest,
+  TimelineFacets,
+  TimelinePage,
+  TimelinePageRequest,
+} from './data/timeline-query.js';
 import type { AgentDataService } from './data/agent-data-service.js';
 import type { LifecycleInternal } from './data/lifecycle-owner.js';
 import type { AgentDataStore } from './data/agent-data-store.js';
@@ -128,14 +137,25 @@ class SpaghettiAppService extends EventEmitter implements SpaghettiAPI {
 
   getProjectList(options?: SourceFilter): ProjectListItem[] {
     const summaries = this.dataService.getProjectSummaries(options);
-    summaries.sort((a, b) => (a.lastActiveAt > b.lastActiveAt ? -1 : 1));
-    return summaries.map(toProjectListItem);
+    return aggregateProjectSummaries(summaries).sort((a, b) =>
+      a.lastActiveAt === b.lastActiveAt ? 0 : a.lastActiveAt > b.lastActiveAt ? -1 : 1,
+    );
   }
 
-  getSessionList(projectSlug: string, options?: SourceFilter): SessionListItem[] {
-    const summaries = this.dataService.getSessionSummaries(projectSlug, options);
-    summaries.sort((a, b) => (a.lastUpdate > b.lastUpdate ? -1 : 1));
-    return summaries.map(toSessionListItem);
+  getSessionList(project: ProjectReference, options?: SourceFilter): SessionListItem[] {
+    const summaries =
+      typeof project === 'string'
+        ? this.dataService.getSessionSummaries(project, options)
+        : project.members
+            .filter((member) => !options?.sourceId || member.sourceId === options.sourceId)
+            .flatMap((member) => this.dataService.getSessionSummaries(member.slug, { sourceId: member.sourceId }));
+    const uniqueSummaries = new Map<string, SessionSummaryData>();
+    for (const summary of summaries) {
+      uniqueSummaries.set(sessionKey(summary), summary);
+    }
+    return [...uniqueSummaries.values()]
+      .sort((a, b) => (a.lastUpdate === b.lastUpdate ? 0 : a.lastUpdate > b.lastUpdate ? -1 : 1))
+      .map(toSessionListItem);
   }
 
   getSessionMessages(
@@ -162,8 +182,12 @@ class SpaghettiAppService extends EventEmitter implements SpaghettiAPI {
     return this.dataService.getSessionTimeline(projectSlug, sessionId, request);
   }
 
-  getProjectMemory(projectSlug: string, options?: SourceFilter): string | null {
-    return this.dataService.getProjectMemory(projectSlug, options);
+  getProjectMemory(project: ProjectReference, options?: SourceFilter): string | null {
+    if (typeof project === 'string') return this.dataService.getProjectMemory(project, options);
+
+    const sourceId = options?.sourceId ?? 'claude-code';
+    const member = project.members.find((candidate) => candidate.sourceId === sourceId);
+    return member ? this.dataService.getProjectMemory(member.slug, { sourceId: member.sourceId }) : null;
   }
 
   getSessionTodos(projectSlug: string, sessionId: string): unknown[] {
@@ -182,16 +206,21 @@ class SpaghettiAppService extends EventEmitter implements SpaghettiAPI {
     return this.dataService.getPersistedToolResult(projectSlug, sessionId, toolUseId);
   }
 
-  getSessionSubagents(projectSlug: string, sessionId: string): SubagentListItem[] {
-    return this.dataService.getSessionSubagents(projectSlug, sessionId);
+  getSessionSubagents(projectSlug: string, sessionId: string, options?: SubagentFilter): SubagentListItem[] {
+    return this.dataService.getSessionSubagents(projectSlug, sessionId, options);
   }
 
   getSessionWorkflows(projectSlug: string, sessionId: string): WorkflowListItem[] {
     return this.dataService.getSessionWorkflows(projectSlug, sessionId);
   }
 
-  getWorkflowSubagents(projectSlug: string, sessionId: string, workflowId: string): SubagentListItem[] {
-    return this.dataService.getWorkflowSubagents(projectSlug, sessionId, workflowId);
+  getWorkflowSubagents(
+    projectSlug: string,
+    sessionId: string,
+    workflowId: string,
+    options?: SourceFilter,
+  ): SubagentListItem[] {
+    return this.dataService.getWorkflowSubagents(projectSlug, sessionId, workflowId, options);
   }
 
   getSubagentMessages(
@@ -201,14 +230,32 @@ class SpaghettiAppService extends EventEmitter implements SpaghettiAPI {
     limit = 30,
     offset = 0,
     workflowId?: string,
+    options?: SourceFilter,
   ): SubagentMessagePage {
-    const result = this.dataService.getSubagentMessages(projectSlug, sessionId, agentId, limit, offset, workflowId);
+    const result = this.dataService.getSubagentMessages(
+      projectSlug,
+      sessionId,
+      agentId,
+      limit,
+      offset,
+      workflowId,
+      options,
+    );
     return {
       messages: result.segments.map((s) => s.data),
       total: result.total,
       offset: result.offset,
       hasMore: result.hasMore,
     };
+  }
+
+  getSubagentTimeline(
+    projectSlug: string,
+    sessionId: string,
+    agentId: string,
+    request: SubagentTimelinePageRequest,
+  ): SubagentTimelinePage {
+    return this.dataService.getSubagentTimeline(projectSlug, sessionId, agentId, request);
   }
 
   search(query: SearchQuery): SearchResultSet {
@@ -239,27 +286,86 @@ class SpaghettiAppService extends EventEmitter implements SpaghettiAPI {
   }
 }
 
-function toProjectListItem(data: ProjectSummaryData): ProjectListItem {
-  return {
-    slug: data.slug,
-    sourceId: data.sourceId,
-    folderName: data.folderName,
-    absolutePath: data.absolutePath,
-    sessionCount: data.sessionCount,
-    messageCount: data.messageCount,
-    tokenUsage: data.tokenUsage,
-    tokensEstimated: data.tokensEstimated,
-    lastActiveAt: data.lastActiveAt,
-    firstActiveAt: data.firstActiveAt,
-    latestGitBranch: data.latestGitBranch,
-    hasMemory: data.hasMemory,
-  };
+function canonicalProjectPath(data: ProjectSummaryData): string {
+  const normalizedPath = data.absolutePath.trim().replace(/\\/g, '/');
+  return normalizedPath.length > 1 ? normalizedPath.replace(/\/+$/, '') : normalizedPath;
+}
+
+function memberKey(member: ProjectMember): string {
+  return JSON.stringify([member.sourceId, member.slug]);
+}
+
+function sessionKey(session: Pick<SessionSummaryData, 'sourceId' | 'sessionId'>): string {
+  return JSON.stringify([session.sourceId, session.sessionId]);
+}
+
+function projectGroupKey(data: ProjectSummaryData): string {
+  const normalizedPath = canonicalProjectPath(data);
+  return normalizedPath ? `path:${normalizedPath}` : `member:${memberKey(data)}`;
+}
+
+function isVisibleProject(data: ProjectSummaryData): boolean {
+  return data.sessionCount > 0 || data.messageCount > 0 || data.hasMemory;
+}
+
+function aggregateProjectSummaries(summaries: ProjectSummaryData[]): ProjectListItem[] {
+  const projects = new Map<string, ProjectListItem>();
+  for (const data of summaries) {
+    // Claude can leave project directories containing only stale subagent
+    // folders. They have no user-visible project content and their path is a
+    // lossy slug reconstruction, so exposing them creates phantom collisions.
+    if (!isVisibleProject(data)) continue;
+
+    const key = projectGroupKey(data);
+    const current = projects.get(key);
+    if (!current) {
+      projects.set(key, {
+        projectId: key,
+        members: [{ sourceId: data.sourceId, slug: data.slug }],
+        slug: data.slug,
+        sourceIds: [data.sourceId],
+        folderName: data.folderName,
+        absolutePath: data.absolutePath,
+        sessionCount: data.sessionCount,
+        messageCount: data.messageCount,
+        tokenUsage: { ...data.tokenUsage },
+        tokensEstimated: data.tokensEstimated,
+        lastActiveAt: data.lastActiveAt,
+        firstActiveAt: data.firstActiveAt,
+        latestGitBranch: data.latestGitBranch,
+        hasMemory: data.hasMemory,
+      });
+      continue;
+    }
+
+    const nextMember = { sourceId: data.sourceId, slug: data.slug };
+    if (!current.members.some((member) => memberKey(member) === memberKey(nextMember))) {
+      current.members = [...current.members, nextMember].sort((a, b) => memberKey(a).localeCompare(memberKey(b)));
+    }
+    current.sourceIds = [...new Set(current.members.map((member) => member.sourceId))].sort();
+    current.sessionCount += data.sessionCount;
+    current.messageCount += data.messageCount;
+    current.tokenUsage.inputTokens += data.tokenUsage.inputTokens;
+    current.tokenUsage.outputTokens += data.tokenUsage.outputTokens;
+    current.tokenUsage.cacheCreationTokens += data.tokenUsage.cacheCreationTokens;
+    current.tokenUsage.cacheReadTokens += data.tokenUsage.cacheReadTokens;
+    current.tokensEstimated ||= data.tokensEstimated;
+    current.hasMemory ||= data.hasMemory;
+    if (data.firstActiveAt < current.firstActiveAt) current.firstActiveAt = data.firstActiveAt;
+    if (data.lastActiveAt > current.lastActiveAt) {
+      current.lastActiveAt = data.lastActiveAt;
+      current.latestGitBranch = data.latestGitBranch;
+      current.slug = data.slug;
+    }
+  }
+  return [...projects.values()];
 }
 
 function toSessionListItem(data: SessionSummaryData): SessionListItem {
   return {
     sessionId: data.sessionId,
     sourceId: data.sourceId,
+    projectSlug: data.projectSlug,
     startTime: data.startTime,
     lastUpdate: data.lastUpdate,
     lifespanMs: data.lifespanMs,

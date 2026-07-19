@@ -49,8 +49,8 @@ export function resolveProject(input: string, projects: ProjectListItem[]): Proj
   const lower = input.toLowerCase();
 
   // 3. Exact folderName match (case-insensitive)
-  const exactName = projects.find((p) => p.folderName.toLowerCase() === lower);
-  if (exactName) return exactName;
+  const exactNames = projects.filter((p) => p.folderName.toLowerCase() === lower);
+  if (exactNames.length === 1) return exactNames[0]!;
 
   // 4. Prefix match on folderName (if only one match)
   const prefixMatches = projects.filter((p) => p.folderName.toLowerCase().startsWith(lower));
@@ -61,8 +61,8 @@ export function resolveProject(input: string, projects: ProjectListItem[]): Proj
   if (substringMatches.length === 1) return substringMatches[0]!;
 
   // 6. Exact slug match
-  const slugMatch = projects.find((p) => p.slug === input);
-  if (slugMatch) return slugMatch;
+  const slugMatches = projects.filter((p) => p.slug === input || p.projectId === input);
+  if (slugMatches.length === 1) return slugMatches[0]!;
 
   return null;
 }

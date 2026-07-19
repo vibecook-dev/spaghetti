@@ -90,7 +90,7 @@ describe('Grok native cold ingest smoke', { skip: !native }, () => {
     const slugs = projects.map((p) => p.slug).sort();
     assert.deepEqual(slugs, [SLUG_A, SLUG_B, SLUG_C].sort());
     for (const p of projects) {
-      assert.equal(p.sourceId, 'grok');
+      assert.deepEqual(p.sourceIds, ['grok']);
     }
   });
 

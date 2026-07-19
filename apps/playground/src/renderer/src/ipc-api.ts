@@ -16,7 +16,7 @@
  * these methods should `await` them.
  */
 
-import type { SpaghettiAPI } from '@vibecook/spaghetti-sdk';
+import type { ProjectReference, SpaghettiAPI } from '@vibecook/spaghetti-sdk';
 import type { SpaghettiBridge } from '@shared/ipc';
 
 // Renderer-only: assert window.spaghetti exists at runtime.
@@ -50,8 +50,8 @@ export function createIpcApi(): SpaghettiAPI {
     rebuildIndex: () => bridge.rebuildIndex() as unknown,
 
     getProjectList: () => bridge.getProjectList() as unknown,
-    getSessionList: (projectSlug: string, options?: { sourceId?: string }) =>
-      bridge.getSessionList(projectSlug, options) as unknown,
+    getSessionList: (project: ProjectReference, options?: { sourceId?: string }) =>
+      bridge.getSessionList(project, options) as unknown,
     getSessionMessages: (
       projectSlug: string,
       sessionId: string,
@@ -66,8 +66,8 @@ export function createIpcApi(): SpaghettiAPI {
       sessionId: string,
       request?: Parameters<SpaghettiAPI['getSessionTimeline']>[2],
     ) => bridge.getSessionTimeline(projectSlug, sessionId, request) as unknown,
-    getProjectMemory: (projectSlug: string, options?: { sourceId?: string }) =>
-      bridge.getProjectMemory(projectSlug, options) as unknown,
+    getProjectMemory: (project: ProjectReference, options?: { sourceId?: string }) =>
+      bridge.getProjectMemory(project, options) as unknown,
     getSessionTodos: (projectSlug: string, sessionId: string) =>
       bridge.getSessionTodos(projectSlug, sessionId) as unknown,
     getSessionPlan: (projectSlug: string, sessionId: string) =>
@@ -76,10 +76,26 @@ export function createIpcApi(): SpaghettiAPI {
       bridge.getSessionTask(projectSlug, sessionId) as unknown,
     getToolResult: (projectSlug: string, sessionId: string, toolUseId: string) =>
       bridge.getToolResult(projectSlug, sessionId, toolUseId) as unknown,
-    getSessionSubagents: (projectSlug: string, sessionId: string) =>
-      bridge.getSessionSubagents(projectSlug, sessionId) as unknown,
-    getSubagentMessages: (projectSlug: string, sessionId: string, agentId: string, limit?: number, offset?: number) =>
-      bridge.getSubagentMessages(projectSlug, sessionId, agentId, limit, offset) as unknown,
+    getSessionSubagents: (
+      projectSlug: string,
+      sessionId: string,
+      options?: Parameters<SpaghettiAPI['getSessionSubagents']>[2],
+    ) => bridge.getSessionSubagents(projectSlug, sessionId, options) as unknown,
+    getSubagentMessages: (
+      projectSlug: string,
+      sessionId: string,
+      agentId: string,
+      limit?: number,
+      offset?: number,
+      workflowId?: string,
+      options?: { sourceId?: string },
+    ) => bridge.getSubagentMessages(projectSlug, sessionId, agentId, limit, offset, workflowId, options) as unknown,
+    getSubagentTimeline: (
+      projectSlug: string,
+      sessionId: string,
+      agentId: string,
+      request: Parameters<SpaghettiAPI['getSubagentTimeline']>[3],
+    ) => bridge.getSubagentTimeline(projectSlug, sessionId, agentId, request) as unknown,
     search: (query: unknown) => bridge.search(query as never) as unknown,
     getStats: () => bridge.getStats() as unknown,
 

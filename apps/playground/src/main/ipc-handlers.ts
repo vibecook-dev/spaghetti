@@ -3,6 +3,7 @@
  */
 
 import { BrowserWindow, ipcMain } from 'electron';
+import type { ProjectReference } from '@vibecook/spaghetti-sdk';
 import { EVENT_CHANNELS, IPC_CHANNELS } from '../shared/ipc.js';
 import { createSdk, getEngine, getSdk, retrySdkInit, startSdk, type InitSdkOptions } from './sdk.js';
 
@@ -40,13 +41,13 @@ export function registerIpcHandlers(): void {
 
   // Projects ----------------------------------------------------------------
   ipcMain.handle(IPC_CHANNELS.getProjectList, () => getSdk().getProjectList());
-  ipcMain.handle(IPC_CHANNELS.getProjectMemory, (_e, projectSlug: string, options?: { sourceId?: string }) =>
-    getSdk().getProjectMemory(projectSlug, options),
+  ipcMain.handle(IPC_CHANNELS.getProjectMemory, (_e, project: ProjectReference, options?: { sourceId?: string }) =>
+    getSdk().getProjectMemory(project, options),
   );
 
   // Sessions ----------------------------------------------------------------
-  ipcMain.handle(IPC_CHANNELS.getSessionList, (_e, projectSlug: string, options?: { sourceId?: string }) =>
-    getSdk().getSessionList(projectSlug, options),
+  ipcMain.handle(IPC_CHANNELS.getSessionList, (_e, project: ProjectReference, options?: { sourceId?: string }) =>
+    getSdk().getSessionList(project, options),
   );
   ipcMain.handle(
     IPC_CHANNELS.getSessionMessages,
@@ -75,13 +76,26 @@ export function registerIpcHandlers(): void {
   );
 
   // Subagents ---------------------------------------------------------------
-  ipcMain.handle(IPC_CHANNELS.getSessionSubagents, (_e, projectSlug: string, sessionId: string) =>
-    getSdk().getSessionSubagents(projectSlug, sessionId),
+  ipcMain.handle(IPC_CHANNELS.getSessionSubagents, (_e, projectSlug: string, sessionId: string, options) =>
+    getSdk().getSessionSubagents(projectSlug, sessionId, options),
   );
   ipcMain.handle(
     IPC_CHANNELS.getSubagentMessages,
-    (_e, projectSlug: string, sessionId: string, agentId: string, limit?: number, offset?: number) =>
-      getSdk().getSubagentMessages(projectSlug, sessionId, agentId, limit, offset),
+    (
+      _e,
+      projectSlug: string,
+      sessionId: string,
+      agentId: string,
+      limit?: number,
+      offset?: number,
+      workflowId?: string,
+      options?: { sourceId?: string },
+    ) => getSdk().getSubagentMessages(projectSlug, sessionId, agentId, limit, offset, workflowId, options),
+  );
+  ipcMain.handle(
+    IPC_CHANNELS.getSubagentTimeline,
+    (_e, projectSlug: string, sessionId: string, agentId: string, request) =>
+      getSdk().getSubagentTimeline(projectSlug, sessionId, agentId, request),
   );
 
   // Search / stats ----------------------------------------------------------

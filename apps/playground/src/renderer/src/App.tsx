@@ -5,7 +5,7 @@ import { SpaghettiProvider, type SpaghettiProviderProps } from '@vibecook/spaghe
 import type { ProjectListItem, SessionListItem, StoreStats } from '@vibecook/spaghetti-sdk';
 import { createIpcApi } from './ipc-api.js';
 import { LoadingScreen } from './components/LoadingScreen.js';
-import { SourceBadge } from './components/SourceBadge.js';
+import { SourceBadge, SourceBadges } from './components/SourceBadge.js';
 import { SessionMessagesView } from './components/SessionMessagesView.js';
 import { SearchOverlay, type SearchNavigateTarget } from './components/SearchOverlay.js';
 import { FileExplorerPanel } from './components/FileExplorerPanel.js';
@@ -39,12 +39,11 @@ type DebugSessionModule = typeof import('./dev/debug-session.js');
  */
 
 interface ProjectKey {
-  slug: string;
-  sourceId: string;
+  projectId: string;
 }
 
 function projectKey(p: ProjectKey): string {
-  return `${p.sourceId}:${p.slug}`;
+  return p.projectId;
 }
 
 export function App() {
@@ -85,14 +84,15 @@ function PlaygroundShell() {
   const [changeNonce, setChangeNonce] = useState(0);
   const [projectPrompts, setProjectPrompts] = useState<Record<string, string>>({});
   const [stats, setStats] = useState<StoreStats | null>(null);
-  const [sourceFilter, setSourceFilter] = useState<string | null>(null);
+  const [sessionSourceFilter, setSessionSourceFilter] = useState<string | null>(null);
   const [searchOpen, setSearchOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [filesOpen, setFilesOpen] = useState(true);
   const [leftOpen, setLeftOpen] = useState(true);
   // The reference opens on warm paper; dark parchment is the alternate illumination.
   const [isDark, setIsDark] = useState(false);
-  const pendingSessionId = useRef<string | null>(null);
+  const pendingSessionId = useRef<{ sessionId: string; sourceId?: string } | null>(null);
+  const [branchNavigateTarget, setBranchNavigateTarget] = useState<SearchNavigateTarget | null>(null);
 
   const [sources, setSources] = useState<SourceProgressState[]>(() => initialSourceStates());
   const [progress, setProgress] = useState<ProgressSnapshot | null>(null);
@@ -279,7 +279,7 @@ function PlaygroundShell() {
             continue;
           }
           try {
-            const sess = await window.spaghetti.getSessionList(p.slug, { sourceId: p.sourceId });
+            const sess = await window.spaghetti.getSessionList(p);
             next[key] = sess[0]?.firstPrompt || sess[0]?.summary || '';
           } catch {
             next[key] = '';
@@ -300,25 +300,33 @@ function PlaygroundShell() {
       setSessions([]);
       return;
     }
-    if (debugSession && projectKey(selected) === projectKey(debugSession.DEBUG_PROJECT)) {
+    const project = projects.find((candidate) => projectKey(candidate) === projectKey(selected));
+    if (!project) {
+      setSessions([]);
+      setSelectedSession(null);
+      return;
+    }
+    if (debugSession && projectKey(project) === projectKey(debugSession.DEBUG_PROJECT)) {
       setSessions([debugSession.DEBUG_SESSION]);
       return;
     }
     window.spaghetti
-      .getSessionList(selected.slug, { sourceId: selected.sourceId })
+      .getSessionList(project)
       .then((list) => {
         setSessions(list);
         const want = pendingSessionId.current;
         if (want) {
           pendingSessionId.current = null;
-          const idx = list.findIndex((s) => s.sessionId === want);
+          const idx = list.findIndex(
+            (s) => s.sessionId === want.sessionId && (!want.sourceId || s.sourceId === want.sourceId),
+          );
           if (idx >= 0) {
             setSelectedSession({ session: list[idx], index: idx });
           }
         }
       })
       .catch((e: unknown) => setError(String(e)));
-  }, [selected, changeNonce, debugSession]);
+  }, [selected, projects, changeNonce, debugSession]);
 
   const onRebuild = async () => {
     if (rebuilding || retrying) return;
@@ -365,24 +373,40 @@ function PlaygroundShell() {
     }
   };
 
-  const onSearchNavigate = useCallback((target: SearchNavigateTarget) => {
-    setSelected({ slug: target.projectSlug, sourceId: target.sourceId });
-    setSelectedSession(null);
-    pendingSessionId.current = target.sessionId ?? null;
-  }, []);
+  const onSearchNavigate = useCallback(
+    (target: SearchNavigateTarget) => {
+      const project = projects.find((candidate) =>
+        candidate.members.some((member) => member.sourceId === target.sourceId && member.slug === target.projectSlug),
+      );
+      if (!project) {
+        setError(`Project for ${target.sourceId}:${target.projectSlug} is no longer indexed.`);
+        return;
+      }
+      setSelected({ projectId: project.projectId });
+      setSelectedSession(null);
+      setSessionSourceFilter(null);
+      setBranchNavigateTarget(target.agentId ? target : null);
+      pendingSessionId.current = target.sessionId ? { sessionId: target.sessionId, sourceId: target.sourceId } : null;
+    },
+    [projects],
+  );
 
-  const sourceIds = useMemo(() => [...new Set(projects.map((p) => p.sourceId))].sort(), [projects]);
+  const sourceIds = useMemo(() => [...new Set(projects.flatMap((p) => p.sourceIds))].sort(), [projects]);
 
-  const filteredProjects = useMemo(() => {
-    if (!sourceFilter) return projects;
-    return projects.filter((p) => p.sourceId === sourceFilter);
-  }, [projects, sourceFilter]);
+  const filteredSessions = useMemo(
+    () => (sessionSourceFilter ? sessions.filter((session) => session.sourceId === sessionSourceFilter) : sessions),
+    [sessions, sessionSourceFilter],
+  );
 
   const selectedKey = selected ? projectKey(selected) : null;
   const selectedProject = selected ? projects.find((p) => projectKey(p) === selectedKey) : null;
 
   const scopeProject = selectedProject
-    ? { slug: selectedProject.slug, sourceId: selectedProject.sourceId, folderName: selectedProject.folderName }
+    ? {
+        projectId: selectedProject.projectId,
+        members: selectedProject.members,
+        folderName: selectedProject.folderName,
+      }
     : null;
 
   const modKey = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform) ? '⌘' : 'Ctrl+';
@@ -469,43 +493,27 @@ function PlaygroundShell() {
             <div className="shrink-0 border-b border-[color:var(--archive-ink-line-soft)]">
               <div className="h-10 px-4 flex items-center">
                 <span className="font-serif text-[10px] uppercase tracking-[0.15em] opacity-80">Projects</span>
-                <span className="ml-auto font-mono text-[8px] tracking-widest opacity-45">
-                  {filteredProjects.length}
-                </span>
+                <span className="ml-auto font-mono text-[8px] tracking-widest opacity-45">{projects.length}</span>
               </div>
-              {sourceIds.length > 1 ? (
-                <div className="px-4 pb-2.5 flex items-center gap-1.5 flex-wrap">
-                  <Chip active={sourceFilter === null} onClick={() => setSourceFilter(null)}>
-                    all
-                  </Chip>
-                  {sourceIds.map((id) => (
-                    <Chip key={id} active={sourceFilter === id} onClick={() => setSourceFilter(id)} title={id}>
-                      {sourceLabel(id).slice(0, 6)}
-                    </Chip>
-                  ))}
-                </div>
-              ) : null}
             </div>
 
             <div className="flex-1 overflow-y-auto scrollbar-hide py-2 space-y-px">
-              {filteredProjects.length === 0 ? (
-                <EmptyState
-                  title="No projects"
-                  detail={sourceFilter ? `No ${sourceLabel(sourceFilter)} projects.` : 'Index is empty.'}
-                />
+              {projects.length === 0 ? (
+                <EmptyState title="No projects" detail="Index is empty." />
               ) : (
-                filteredProjects.map((p) => {
+                projects.map((p) => {
                   const key = projectKey(p);
                   const isSelected = selectedKey === key;
                   const prompt = flattenPrompt(projectPrompts[key], 72);
-                  const tok = formatTokenUsage(p.tokenUsage, p.sourceId, p.tokensEstimated);
+                  const tok = formatTokenUsage(p.tokenUsage, undefined, p.tokensEstimated);
                   return (
                     <button
                       key={key}
                       type="button"
                       onClick={() => {
-                        setSelected({ slug: p.slug, sourceId: p.sourceId });
+                        setSelected({ projectId: p.projectId });
                         setSelectedSession(null);
+                        setSessionSourceFilter(null);
                       }}
                       className={`w-full text-left px-4 py-3 cursor-pointer transition-colors border-0 border-l-2 font-normal text-inherit ${
                         isSelected
@@ -517,7 +525,7 @@ function PlaygroundShell() {
                         <span className="min-w-0 truncate font-mono text-[10px] tracking-tight text-ink">
                           {p.folderName}
                         </span>
-                        <SourceBadge sourceId={p.sourceId} isDark={isDark} />
+                        <SourceBadges sourceIds={p.sourceIds} isDark={isDark} />
                       </div>
                       <p className="mb-2 line-clamp-2 font-serif text-[11px] leading-[1.35] opacity-65">
                         {prompt || '\u00A0'}
@@ -540,8 +548,8 @@ function PlaygroundShell() {
         <main className="flex-1 flex flex-col min-w-0 bg-transparent relative min-h-0">
           {selected && selectedSession ? (
             <SessionMessagesView
-              projectSlug={selected.slug}
-              sourceId={selected.sourceId}
+              projectSlug={selectedSession.session.projectSlug}
+              sourceId={selectedSession.session.sourceId}
               session={selectedSession.session}
               sessionIndex={selectedSession.index}
               hasMemory={selectedProject?.hasMemory}
@@ -550,7 +558,23 @@ function PlaygroundShell() {
               onToggleLeft={() => setLeftOpen(true)}
               filesOpen={filesOpen}
               onToggleFiles={() => setFilesOpen(true)}
-              onBack={() => setSelectedSession(null)}
+              onBack={() => {
+                setBranchNavigateTarget(null);
+                setSelectedSession(null);
+              }}
+              initialBranchTarget={
+                branchNavigateTarget?.sessionId === selectedSession.session.sessionId &&
+                branchNavigateTarget.sourceId === selectedSession.session.sourceId &&
+                branchNavigateTarget.agentId
+                  ? {
+                      agentId: branchNavigateTarget.agentId,
+                      workflowId: branchNavigateTarget.workflowId,
+                      spawnToolId: branchNavigateTarget.spawnToolId,
+                      agentTimelineIndex: branchNavigateTarget.agentTimelineIndex,
+                    }
+                  : undefined
+              }
+              onInitialBranchTargetConsumed={() => setBranchNavigateTarget(null)}
               debugMessages={
                 debugSession && selectedSession.session.sessionId === debugSession.DEBUG_SESSION.sessionId
                   ? debugSession.DEBUG_SESSION_MESSAGES
@@ -559,7 +583,7 @@ function PlaygroundShell() {
             />
           ) : (
             <>
-              <div className="h-10 border-b border-[color:var(--archive-ink-line)] flex items-center px-6 justify-between shrink-0">
+              <div className="min-h-10 border-b border-[color:var(--archive-ink-line)] flex items-center px-6 py-2 justify-between shrink-0 gap-4">
                 <div className="flex items-center gap-3 font-serif text-[10px] tracking-[0.15em]">
                   {!leftOpen && (
                     <button
@@ -571,9 +595,27 @@ function PlaygroundShell() {
                       <PanelLeft size={14} />
                     </button>
                   )}
-                  <span className="opacity-80">{selected ? `Sessions · ${sessions.length}` : 'Select a project'}</span>
-                  {selected ? <SourceBadge sourceId={selected.sourceId} isDark={isDark} /> : null}
+                  <span className="opacity-80">
+                    {selected ? `Sessions · ${filteredSessions.length}` : 'Select a project'}
+                  </span>
                 </div>
+                {selectedProject && selectedProject.sourceIds.length > 1 ? (
+                  <div className="flex items-center gap-1.5 flex-wrap justify-end">
+                    <Chip active={sessionSourceFilter === null} onClick={() => setSessionSourceFilter(null)}>
+                      all
+                    </Chip>
+                    {selectedProject.sourceIds.map((id) => (
+                      <Chip
+                        key={id}
+                        active={sessionSourceFilter === id}
+                        onClick={() => setSessionSourceFilter(id)}
+                        title={sourceLabel(id)}
+                      >
+                        <SourceBadge sourceId={id} isDark={isDark} />
+                      </Chip>
+                    ))}
+                  </div>
+                ) : null}
               </div>
               <div className="flex-1 overflow-y-auto scrollbar-hide py-1 space-y-px">
                 {!selected && (
@@ -587,17 +629,30 @@ function PlaygroundShell() {
                     }
                   />
                 )}
-                {selected && sessions.length === 0 && (
-                  <EmptyState title="No sessions" detail="This project has no indexed sessions yet." />
+                {selected && filteredSessions.length === 0 && (
+                  <EmptyState
+                    title="No sessions"
+                    detail={
+                      sessionSourceFilter
+                        ? `No ${sourceLabel(sessionSourceFilter)} sessions in this project.`
+                        : 'This project has no indexed sessions yet.'
+                    }
+                  />
                 )}
-                {sessions.map((s, index) => {
+                {filteredSessions.map((s) => {
+                  const index = sessions.findIndex(
+                    (session) => session.sourceId === s.sourceId && session.sessionId === s.sessionId,
+                  );
                   const prompt = flattenPrompt(s.firstPrompt || s.summary, 96);
                   const tok = formatTokenUsage(s.tokenUsage, s.sourceId, s.tokensEstimated);
                   return (
                     <button
                       key={`${s.sourceId}:${s.sessionId}`}
                       type="button"
-                      onClick={() => setSelectedSession({ session: s, index })}
+                      onClick={() => {
+                        setBranchNavigateTarget(null);
+                        setSelectedSession({ session: s, index });
+                      }}
                       className="block w-full text-left px-6 py-3.5 border-0 bg-transparent text-inherit cursor-pointer hover:bg-ink/[0.05] transition-colors"
                     >
                       <div className="flex items-center gap-2.5 mb-1.5">
@@ -654,8 +709,9 @@ function PlaygroundShell() {
           sessionArtifacts={
             selected && selectedSession
               ? {
-                  projectSlug: selected.slug,
-                  sourceId: selected.sourceId,
+                  projectSlug: selectedSession.session.projectSlug,
+                  sourceId: selectedSession.session.sourceId,
+                  memoryProject: selectedProject ?? undefined,
                   sessionId: selectedSession.session.sessionId,
                   hints: {
                     todoCount: selectedSession.session.todoCount,

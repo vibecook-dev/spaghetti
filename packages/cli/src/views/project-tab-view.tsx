@@ -54,8 +54,12 @@ function MemoryPanel({ project }: MemoryPanelProps): React.ReactElement {
   const termRows = stdout?.rows ?? 24;
 
   const content = useMemo(
-    () => api.getProjectMemory(project.slug, { sourceId: project.sourceId }),
-    [api, project.slug, project.sourceId],
+    () =>
+      api.getProjectMemory(
+        project,
+        project.sourceIds.includes('claude-code') ? { sourceId: 'claude-code' } : undefined,
+      ),
+    [api, project],
   );
   const lines = useMemo(() => (content ? renderMarkdownLines(content) : []), [content]);
 

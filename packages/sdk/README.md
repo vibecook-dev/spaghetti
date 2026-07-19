@@ -67,6 +67,7 @@ Two instances in the same process can point at different `rootDir`s as long as e
 - `getSessionTodos(projectSlug, sessionId)`
 - `getSessionPlan(projectSlug, sessionId)`
 - `getSessionSubagents(projectSlug, sessionId)`
+- `getSubagentTimeline(projectSlug, sessionId, agentId, request)`
 - `search(query)`
 - `getStats()`
 - `rebuildIndex()`

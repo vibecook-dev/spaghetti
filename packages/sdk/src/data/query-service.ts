@@ -9,7 +9,19 @@ import type { ProjectSummaryData, SessionSummaryData, TokenUsageSummary } from '
 import type { SearchQuery, SearchResultSet, StoreStats } from './segment-types.js';
 import { initializeSchema } from './schema.js';
 import { ensureTimelineProjection } from './timeline-projection.js';
-import type { TimelineFacets, TimelinePage, TimelinePageRequest } from './timeline-query.js';
+import {
+  ensureSearchableSubagentProjections,
+  ensureSessionSubagentProjections,
+  ensureSubagentTimelineProjection,
+} from './subagent-projection.js';
+import type {
+  SubagentTimelinePage,
+  SubagentTimelinePageRequest,
+  TimelineFacets,
+  TimelinePage,
+  TimelinePageRequest,
+} from './timeline-query.js';
+import type { SubagentListItem } from '../api.js';
 
 // ═══════════════════════════════════════════════════════════════════════════
 // INTERFACE
@@ -51,7 +63,8 @@ export interface QueryService {
   getSessionSubagents(
     slug: string,
     sessionId: string,
-  ): Array<{ agentId: string; agentType: string; messageCount: number }>;
+    options?: { sourceId?: string; includeNested?: boolean },
+  ): SubagentListItem[];
   getSubagentMessages(
     slug: string,
     sessionId: string,
@@ -59,7 +72,14 @@ export interface QueryService {
     limit: number,
     offset: number,
     workflowId?: string,
+    options?: { sourceId?: string },
   ): { messages: unknown[]; total: number; offset: number; hasMore: boolean };
+  getSubagentTimeline(
+    slug: string,
+    sessionId: string,
+    agentId: string,
+    request: SubagentTimelinePageRequest,
+  ): SubagentTimelinePage;
 
   // Workflows (agent-orchestration runs)
   getSessionWorkflows(
@@ -79,7 +99,8 @@ export interface QueryService {
     slug: string,
     sessionId: string,
     workflowId: string,
-  ): Array<{ agentId: string; agentType: string; messageCount: number }>;
+    options?: { sourceId?: string },
+  ): SubagentListItem[];
 
   // Details
   getProjectMemory(slug: string, options?: { sourceId?: string }): string | null;
@@ -164,9 +185,14 @@ interface FacetRow {
 }
 
 interface SubagentRow {
+  source_id: string;
   agent_id: string;
   agent_type: string;
   message_count: number;
+  workflow_id: string;
+  spawn_tool_id: string | null;
+  link_method: 'tool_result' | 'unlinked';
+  id: number;
 }
 
 interface WorkflowRow {
@@ -180,8 +206,13 @@ interface WorkflowRow {
   subagent_count: number;
 }
 
-interface SubagentMessagesRow {
-  messages: string;
+interface SubagentRawMessageRow {
+  data: string;
+  timestamp: string | null;
+}
+
+interface ToolAnchorRow {
+  tool_use_id: string;
 }
 
 interface MemoryRow {
@@ -217,6 +248,13 @@ interface SearchFtsRow {
   source_id: string;
   snippet: string;
   rank: number;
+}
+
+interface SubagentSearchFtsRow extends SearchFtsRow {
+  agent_id: string;
+  workflow_id: string;
+  timeline_index: number;
+  spawn_tool_id: string | null;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -288,7 +326,14 @@ class QueryServiceImpl implements QueryService {
     const params = options?.sourceId ? [options.sourceId] : [];
     const rows = this.db.all<ProjectSummaryRow>(
       `
-      SELECT p.slug, p.source_id, p.original_path,
+      SELECT p.slug, p.source_id,
+        COALESCE(
+          (SELECT NULLIF(project_path, '') FROM sessions
+            WHERE project_slug = p.slug AND source_id = p.source_id
+            ORDER BY modified_at DESC LIMIT 1),
+          p.original_path,
+          ''
+        ) AS original_path,
         (SELECT COUNT(*) FROM sessions WHERE project_slug = p.slug AND source_id = p.source_id) as session_count,
         COALESCE((SELECT SUM(mc.cnt) FROM (SELECT COUNT(*) as cnt FROM messages WHERE project_slug = p.slug AND source_id = p.source_id GROUP BY session_id) mc), 0) as message_count,
         COALESCE((SELECT SUM(input_tokens) FROM messages WHERE project_slug = p.slug AND source_id = p.source_id), 0) as input_tokens,
@@ -403,6 +448,7 @@ class QueryServiceImpl implements QueryService {
 
   getSessionTimelineFacets(slug: string, sessionId: string, options?: { sourceId?: string }): TimelineFacets {
     ensureTimelineProjection(this.db, sessionId);
+    ensureSessionSubagentProjections(this.db, sessionId, options?.sourceId);
     const sourceClause = options?.sourceId ? ' AND source_id = ?' : '';
     const params: unknown[] = options?.sourceId ? [slug, sessionId, options.sourceId] : [slug, sessionId];
 
@@ -421,10 +467,30 @@ class QueryServiceImpl implements QueryService {
         ORDER BY count DESC, tool_name`,
       ...params,
     );
-    const messageCounts = Object.fromEntries(messageRows.map((row) => [row.name, row.count]));
-    const toolCounts = Object.fromEntries(toolRows.map((row) => [row.name, row.count]));
+    const agentMessageRows = this.db.all<FacetRow>(
+      `SELECT display_type AS name, COUNT(*) AS count
+         FROM subagent_timeline_messages
+        WHERE project_slug = ? AND session_id = ?${sourceClause}
+        GROUP BY display_type`,
+      ...params,
+    );
+    const agentToolRows = this.db.all<FacetRow>(
+      `SELECT tool_name AS name, COUNT(*) AS count
+         FROM subagent_timeline_messages
+        WHERE project_slug = ? AND session_id = ?${sourceClause} AND tool_name IS NOT NULL
+        GROUP BY tool_name`,
+      ...params,
+    );
+    const messageCounts: Record<string, number> = {};
+    const toolCounts: Record<string, number> = {};
+    for (const row of [...messageRows, ...agentMessageRows]) {
+      messageCounts[row.name] = (messageCounts[row.name] ?? 0) + row.count;
+    }
+    for (const row of [...toolRows, ...agentToolRows]) {
+      toolCounts[row.name] = (toolCounts[row.name] ?? 0) + row.count;
+    }
     return {
-      total: messageRows.reduce((sum, row) => sum + row.count, 0),
+      total: [...messageRows, ...agentMessageRows].reduce((sum, row) => sum + row.count, 0),
       messageCounts,
       toolCounts,
     };
@@ -432,12 +498,43 @@ class QueryServiceImpl implements QueryService {
 
   getSessionTimeline(slug: string, sessionId: string, request: TimelinePageRequest = {}): TimelinePage {
     ensureTimelineProjection(this.db, sessionId);
+    ensureSessionSubagentProjections(this.db, sessionId, request.sourceId);
     const { sql: filterSql, params: filterParams } = buildTimelineFilter(request);
     const sourceSql = request.sourceId ? ' AND source_id = ?' : '';
-    const baseParams: unknown[] = request.sourceId
-      ? [slug, sessionId, request.sourceId, ...filterParams]
-      : [slug, sessionId, ...filterParams];
-    const where = `project_slug = ? AND session_id = ?${sourceSql}${filterSql}`;
+    const scopeParams: unknown[] = request.sourceId ? [slug, sessionId, request.sourceId] : [slug, sessionId];
+    let where = `project_slug = ? AND session_id = ?${sourceSql}${filterSql}`;
+    let baseParams: unknown[] = [...scopeParams, ...filterParams];
+
+    // A matching branch still needs its Task/Agent row in the parent page;
+    // otherwise a DB-level solo/search filter could produce branch counts but
+    // no control through which the user can reveal those messages.
+    if (filterSql) {
+      const branchRows = this.db.all<{
+        source_id: string;
+        workflow_id: string;
+        agent_id: string;
+      }>(
+        `SELECT DISTINCT source_id, workflow_id, agent_id
+           FROM subagent_timeline_messages
+          WHERE project_slug = ? AND session_id = ?${sourceSql}${filterSql}`,
+        ...scopeParams,
+        ...filterParams,
+      );
+      const matchingBranches = new Set(
+        branchRows.map((row) => subagentIdentity(row.source_id, row.workflow_id, row.agent_id)),
+      );
+      const anchorIds = this.listSubagents(slug, sessionId, undefined, { sourceId: request.sourceId })
+        .filter(
+          (thread) =>
+            thread.spawnToolId &&
+            matchingBranches.has(subagentIdentity(thread.sourceId, thread.workflowId, thread.agentId)),
+        )
+        .map((thread) => thread.spawnToolId!);
+      if (anchorIds.length) {
+        where = `project_slug = ? AND session_id = ?${sourceSql} AND ((1 = 1${filterSql}) OR tool_use_id IN (${placeholders(anchorIds)}))`;
+        baseParams = [...scopeParams, ...filterParams, ...anchorIds];
+      }
+    }
     const total =
       this.db.get<CountRow>(`SELECT COUNT(*) AS count FROM timeline_messages WHERE ${where}`, ...baseParams)?.count ??
       0;
@@ -488,19 +585,9 @@ class QueryServiceImpl implements QueryService {
   getSessionSubagents(
     slug: string,
     sessionId: string,
-  ): Array<{ agentId: string; agentType: string; messageCount: number }> {
-    // Top-level subagents only (workflow_id ''); workflow-nested ones are
-    // surfaced under their run via getWorkflowSubagents.
-    const rows = this.db.all<SubagentRow>(
-      "SELECT agent_id, agent_type, message_count FROM subagents WHERE project_slug = ? AND session_id = ? AND workflow_id = '' ORDER BY agent_id",
-      slug,
-      sessionId,
-    );
-    return rows.map((r) => ({
-      agentId: r.agent_id,
-      agentType: r.agent_type,
-      messageCount: r.message_count,
-    }));
+    options?: { sourceId?: string; includeNested?: boolean },
+  ): SubagentListItem[] {
+    return this.listSubagents(slug, sessionId, options?.includeNested ? undefined : '', options);
   }
 
   getSessionWorkflows(
@@ -537,18 +624,9 @@ class QueryServiceImpl implements QueryService {
     slug: string,
     sessionId: string,
     workflowId: string,
-  ): Array<{ agentId: string; agentType: string; messageCount: number }> {
-    const rows = this.db.all<SubagentRow>(
-      'SELECT agent_id, agent_type, message_count FROM subagents WHERE project_slug = ? AND session_id = ? AND workflow_id = ? ORDER BY agent_id',
-      slug,
-      sessionId,
-      workflowId,
-    );
-    return rows.map((r) => ({
-      agentId: r.agent_id,
-      agentType: r.agent_type,
-      messageCount: r.message_count,
-    }));
+    options?: { sourceId?: string },
+  ): SubagentListItem[] {
+    return this.listSubagents(slug, sessionId, workflowId, options);
   }
 
   getSubagentMessages(
@@ -558,49 +636,93 @@ class QueryServiceImpl implements QueryService {
     limit: number,
     offset: number,
     workflowId?: string,
+    options?: { sourceId?: string },
   ): { messages: unknown[]; total: number; offset: number; hasMore: boolean } {
-    // The subagents key is (project_slug, session_id, workflow_id, agent_id):
-    // the same agent_id can exist top-level (workflow_id = '') AND under a
-    // workflow. With an explicit workflowId we match exactly; without one,
-    // prefer the top-level transcript deterministically instead of letting
-    // SQLite pick an arbitrary row.
-    const row =
-      workflowId !== undefined
-        ? this.db.get<SubagentMessagesRow>(
-            'SELECT messages FROM subagents WHERE project_slug = ? AND session_id = ? AND agent_id = ? AND workflow_id = ?',
-            slug,
-            sessionId,
-            agentId,
-            workflowId,
-          )
-        : this.db.get<SubagentMessagesRow>(
-            `SELECT messages FROM subagents WHERE project_slug = ? AND session_id = ? AND agent_id = ?
-             ORDER BY CASE WHEN workflow_id = '' THEN 0 ELSE 1 END, workflow_id LIMIT 1`,
-            slug,
-            sessionId,
-            agentId,
-          );
-
-    if (!row) {
-      return { messages: [], total: 0, offset, hasMore: false };
-    }
-
-    let allMessages: unknown[];
-    try {
-      allMessages = JSON.parse(row.messages) as unknown[];
-    } catch {
-      allMessages = [];
-    }
-
-    const total = allMessages.length;
-    const paged = allMessages.slice(offset, offset + limit);
+    const sourceId = options?.sourceId ?? this.resolveSubagentSource(slug, sessionId, agentId, workflowId);
+    if (!sourceId) return { messages: [], total: 0, offset, hasMore: false };
+    const resolvedWorkflowId = this.resolveSubagentWorkflow(sourceId, sessionId, agentId, workflowId);
+    if (resolvedWorkflowId == null) return { messages: [], total: 0, offset, hasMore: false };
+    const params = [sourceId, sessionId, resolvedWorkflowId, agentId];
+    const total =
+      this.db.get<CountRow>(
+        `SELECT COUNT(*) AS count FROM subagent_messages
+          WHERE source_id = ? AND session_id = ? AND workflow_id = ? AND agent_id = ?`,
+        ...params,
+      )?.count ?? 0;
+    const rows = this.db.all<SubagentRawMessageRow>(
+      `SELECT data, timestamp FROM subagent_messages
+        WHERE source_id = ? AND session_id = ? AND workflow_id = ? AND agent_id = ?
+        ORDER BY msg_index LIMIT ? OFFSET ?`,
+      ...params,
+      limit,
+      offset,
+    );
+    const messages = rows
+      .map((row) => {
+        try {
+          const message = JSON.parse(row.data) as Record<string, unknown>;
+          if (!message.timestamp && row.timestamp) message.timestamp = row.timestamp;
+          return message;
+        } catch {
+          return null;
+        }
+      })
+      .filter((message): message is Record<string, unknown> => message !== null);
 
     return {
-      messages: paged,
+      messages,
       total,
       offset,
-      hasMore: offset + paged.length < total,
+      hasMore: offset + rows.length < total,
     };
+  }
+
+  getSubagentTimeline(
+    slug: string,
+    sessionId: string,
+    agentId: string,
+    request: SubagentTimelinePageRequest,
+  ): SubagentTimelinePage {
+    const workflowId = this.resolveSubagentWorkflow(request.sourceId, sessionId, agentId, request.workflowId);
+    if (workflowId == null) return { messages: [], total: 0, offset: request.offset ?? 0, hasMore: false };
+    ensureSubagentTimelineProjection(this.db, {
+      sourceId: request.sourceId,
+      projectSlug: slug,
+      sessionId,
+      workflowId,
+      agentId,
+    });
+    const { sql: filterSql, params: filterParams } = buildTimelineFilter(request);
+    const params: unknown[] = [request.sourceId, slug, sessionId, workflowId, agentId, ...filterParams];
+    const where = `source_id = ? AND project_slug = ? AND session_id = ? AND workflow_id = ? AND agent_id = ?${filterSql}`;
+    const total =
+      this.db.get<CountRow>(`SELECT COUNT(*) AS count FROM subagent_timeline_messages WHERE ${where}`, ...params)
+        ?.count ?? 0;
+    const limit = Math.max(1, Math.min(500, Math.floor(request.limit ?? 80)));
+    const offset = Math.max(0, Math.floor(request.offset ?? 0));
+    const rows = this.db.all<TimelineDataRow>(
+      `SELECT timeline_index, data FROM subagent_timeline_messages
+        WHERE ${where} ORDER BY timeline_index LIMIT ? OFFSET ?`,
+      ...params,
+      limit,
+      offset,
+    );
+    const thread = this.listSubagents(slug, sessionId, workflowId, { sourceId: request.sourceId }).find(
+      (candidate) => candidate.agentId === agentId,
+    );
+    const messages = rows
+      .map((row) => {
+        try {
+          const message = JSON.parse(row.data) as SubagentTimelinePage['messages'][number];
+          message.timelineId = `${sessionId}:${workflowId}:${agentId}:${row.timeline_index}`;
+          message.branchToolId = thread?.spawnToolId ?? undefined;
+          return message;
+        } catch {
+          return null;
+        }
+      })
+      .filter((message): message is SubagentTimelinePage['messages'][number] => message !== null);
+    return { messages, total, offset, hasMore: offset + rows.length < total };
   }
 
   // ─────────────────────────────────────────────────────────────────────────
@@ -683,15 +805,21 @@ class QueryServiceImpl implements QueryService {
   search(query: SearchQuery): SearchResultSet {
     const limit = query.limit ?? 50;
     const offset = query.offset ?? 0;
+    ensureSearchableSubagentProjections(this.db, query);
 
     // Build the FTS5 MATCH expression
     const matchExpr = escapeFts5(query.text);
 
-    // Build WHERE clauses for additional filters (applied as JOIN conditions)
+    // Build WHERE clauses for main-session messages.
     const whereParts: string[] = [];
     const whereParams: unknown[] = [];
 
-    if (query.projectSlug) {
+    if (query.projectMembers && query.projectMembers.length > 0) {
+      whereParts.push(`(${query.projectMembers.map(() => '(m.source_id = ? AND m.project_slug = ?)').join(' OR ')})`);
+      for (const member of query.projectMembers) {
+        whereParams.push(member.sourceId, member.slug);
+      }
+    } else if (query.projectSlug) {
       whereParts.push('m.project_slug = ?');
       whereParams.push(query.projectSlug);
     }
@@ -699,7 +827,7 @@ class QueryServiceImpl implements QueryService {
       whereParts.push('m.session_id = ?');
       whereParams.push(query.sessionId);
     }
-    if (query.type) {
+    if (query.type && query.type !== 'message' && query.type !== 'subagent') {
       whereParts.push('m.msg_type = ?');
       whereParams.push(query.type);
     }
@@ -709,36 +837,89 @@ class QueryServiceImpl implements QueryService {
     }
 
     const whereClause = whereParts.length > 0 ? `AND ${whereParts.join(' AND ')}` : '';
+    const includeMain = query.type !== 'subagent';
+    const includeSubagents = !query.type || query.type === 'subagent';
 
     // Count query
-    const countRow = this.db.get<CountRow>(
-      `SELECT COUNT(*) as count
-       FROM search_fts
-       JOIN messages m ON m.id = search_fts.rowid
-       WHERE search_fts MATCH ? ${whereClause}`,
-      matchExpr,
-      ...whereParams,
-    );
-    const total = countRow?.count ?? 0;
+    const mainTotal = includeMain
+      ? (this.db.get<CountRow>(
+          `SELECT COUNT(*) as count
+           FROM search_fts
+           JOIN messages m ON m.id = search_fts.rowid
+           WHERE search_fts MATCH ? ${whereClause}`,
+          matchExpr,
+          ...whereParams,
+        )?.count ?? 0)
+      : 0;
 
     // Result query
-    const rows = this.db.all<SearchFtsRow>(
-      `SELECT m.project_slug, m.session_id, m.msg_index, m.source_id,
-              snippet(search_fts, 0, '<b>', '</b>', '...', 64) as snippet,
-              rank
-       FROM search_fts
-       JOIN messages m ON m.id = search_fts.rowid
-       WHERE search_fts MATCH ? ${whereClause}
-       ORDER BY rank
-       LIMIT ? OFFSET ?`,
-      matchExpr,
-      ...whereParams,
-      limit,
-      offset,
-    );
+    const rows = includeMain
+      ? this.db.all<SearchFtsRow>(
+          `SELECT m.project_slug, m.session_id, m.msg_index, m.source_id,
+                  snippet(search_fts, 0, '<b>', '</b>', '...', 64) as snippet,
+                  rank
+           FROM search_fts
+           JOIN messages m ON m.id = search_fts.rowid
+           WHERE search_fts MATCH ? ${whereClause}
+           ORDER BY rank
+           LIMIT ?`,
+          matchExpr,
+          ...whereParams,
+          limit + offset,
+        )
+      : [];
 
-    return {
-      results: rows.map((row) => ({
+    const agentWhereParts: string[] = [];
+    const agentWhereParams: unknown[] = [];
+    if (query.projectMembers?.length) {
+      agentWhereParts.push(
+        `(${query.projectMembers.map(() => '(a.source_id = ? AND a.project_slug = ?)').join(' OR ')})`,
+      );
+      for (const member of query.projectMembers) agentWhereParams.push(member.sourceId, member.slug);
+    } else if (query.projectSlug) {
+      agentWhereParts.push('a.project_slug = ?');
+      agentWhereParams.push(query.projectSlug);
+    }
+    if (query.sessionId) {
+      agentWhereParts.push('a.session_id = ?');
+      agentWhereParams.push(query.sessionId);
+    }
+    if (query.sourceId) {
+      agentWhereParts.push('a.source_id = ?');
+      agentWhereParams.push(query.sourceId);
+    }
+    const agentWhere = agentWhereParts.length ? `AND ${agentWhereParts.join(' AND ')}` : '';
+    const agentTotal = includeSubagents
+      ? (this.db.get<CountRow>(
+          `SELECT COUNT(*) AS count
+             FROM subagent_search_fts
+             JOIN subagent_timeline_messages a ON a.id = subagent_search_fts.rowid
+            WHERE subagent_search_fts MATCH ? ${agentWhere}`,
+          matchExpr,
+          ...agentWhereParams,
+        )?.count ?? 0)
+      : 0;
+    const agentRows = includeSubagents
+      ? this.db.all<SubagentSearchFtsRow>(
+          `SELECT a.project_slug, a.session_id, a.timeline_index AS msg_index, a.timeline_index,
+                  a.source_id, a.agent_id, a.workflow_id, s.spawn_tool_id,
+                  snippet(subagent_search_fts, 0, '<b>', '</b>', '...', 64) AS snippet,
+                  rank
+             FROM subagent_search_fts
+             JOIN subagent_timeline_messages a ON a.id = subagent_search_fts.rowid
+             JOIN subagents s ON s.source_id = a.source_id AND s.project_slug = a.project_slug
+               AND s.session_id = a.session_id AND s.workflow_id = a.workflow_id AND s.agent_id = a.agent_id
+            WHERE subagent_search_fts MATCH ? ${agentWhere}
+            ORDER BY rank
+            LIMIT ?`,
+          matchExpr,
+          ...agentWhereParams,
+          limit + offset,
+        )
+      : [];
+
+    const merged = [
+      ...rows.map((row) => ({
         key: `message:${row.project_slug}/${row.session_id}/${row.msg_index}`,
         type: 'message' as const,
         snippet: row.snippet,
@@ -747,8 +928,28 @@ class QueryServiceImpl implements QueryService {
         sessionId: row.session_id || undefined,
         sourceId: row.source_id || undefined,
       })),
+      ...agentRows.map((row) => ({
+        key: `subagent:${row.project_slug}/${row.session_id}/${row.workflow_id}/${row.agent_id}/${row.timeline_index}`,
+        type: 'subagent' as const,
+        snippet: row.snippet,
+        rank: row.rank,
+        projectSlug: row.project_slug || undefined,
+        sessionId: row.session_id || undefined,
+        sourceId: row.source_id || undefined,
+        agentId: row.agent_id,
+        workflowId: row.workflow_id,
+        spawnToolId: row.spawn_tool_id || undefined,
+        agentTimelineIndex: row.timeline_index,
+      })),
+    ]
+      .sort((a, b) => a.rank - b.rank)
+      .slice(offset, offset + limit);
+    const total = mainTotal + agentTotal;
+
+    return {
+      results: merged,
       total,
-      hasMore: offset + rows.length < total,
+      hasMore: offset + merged.length < total,
     };
   }
 
@@ -757,7 +958,18 @@ class QueryServiceImpl implements QueryService {
   // ─────────────────────────────────────────────────────────────────────────
 
   getStats(): StoreStats {
-    const tables = ['projects', 'sessions', 'messages', 'subagents', 'tool_results', 'todos', 'tasks', 'plans'];
+    const tables = [
+      'projects',
+      'sessions',
+      'messages',
+      'subagents',
+      'subagent_messages',
+      'subagent_timeline_messages',
+      'tool_results',
+      'todos',
+      'tasks',
+      'plans',
+    ];
     const segmentsByType: Record<string, number> = {};
     let totalSegments = 0;
 
@@ -772,7 +984,8 @@ class QueryServiceImpl implements QueryService {
     const totalFingerprints = fpRow?.count ?? 0;
 
     const ftsRow = this.db.get<CountRow>('SELECT COUNT(*) as count FROM search_fts');
-    const searchIndexed = ftsRow?.count ?? 0;
+    const subagentFtsRow = this.db.get<CountRow>('SELECT COUNT(*) as count FROM subagent_search_fts');
+    const searchIndexed = (ftsRow?.count ?? 0) + (subagentFtsRow?.count ?? 0);
 
     const dbSizeBytes = this.db.getFileSize();
 
@@ -788,6 +1001,128 @@ class QueryServiceImpl implements QueryService {
   // ─────────────────────────────────────────────────────────────────────────
   // Private helpers
   // ─────────────────────────────────────────────────────────────────────────
+
+  private resolveSubagentSource(slug: string, sessionId: string, agentId: string, workflowId?: string): string | null {
+    const row = this.db.get<{ source_id: string }>(
+      `SELECT source_id FROM subagents
+        WHERE project_slug = ? AND session_id = ? AND agent_id = ?${workflowId === undefined ? '' : ' AND workflow_id = ?'}
+        ORDER BY CASE WHEN workflow_id = '' THEN 0 ELSE 1 END, workflow_id LIMIT 1`,
+      ...(workflowId === undefined ? [slug, sessionId, agentId] : [slug, sessionId, agentId, workflowId]),
+    );
+    return row?.source_id ?? null;
+  }
+
+  private resolveSubagentWorkflow(
+    sourceId: string,
+    sessionId: string,
+    agentId: string,
+    workflowId?: string,
+  ): string | null {
+    if (workflowId !== undefined) return workflowId;
+    const row = this.db.get<{ workflow_id: string }>(
+      `SELECT workflow_id FROM subagents
+        WHERE source_id = ? AND session_id = ? AND agent_id = ?
+        ORDER BY CASE WHEN workflow_id = '' THEN 0 ELSE 1 END, workflow_id LIMIT 1`,
+      sourceId,
+      sessionId,
+      agentId,
+    );
+    return row?.workflow_id ?? null;
+  }
+
+  private listSubagents(
+    slug: string,
+    sessionId: string,
+    workflowId: string | undefined,
+    options?: { sourceId?: string },
+  ): SubagentListItem[] {
+    ensureTimelineProjection(this.db, sessionId);
+    ensureSessionSubagentProjections(this.db, sessionId, options?.sourceId);
+    const workflowSql = workflowId === undefined ? '' : ' AND s.workflow_id = ?';
+    const rowSourceSql = options?.sourceId ? ' AND s.source_id = ?' : '';
+    const anchorSourceSql = options?.sourceId ? ' AND source_id = ?' : '';
+    const rowParams: unknown[] = [slug, sessionId];
+    if (workflowId !== undefined) rowParams.push(workflowId);
+    if (options?.sourceId) rowParams.push(options.sourceId);
+    const rows = this.db.all<SubagentRow>(
+      `SELECT s.id, s.source_id, s.agent_id, s.agent_type,
+              (SELECT COUNT(*) FROM subagent_timeline_messages t
+                WHERE t.source_id = s.source_id AND t.session_id = s.session_id
+                  AND t.workflow_id = s.workflow_id AND t.agent_id = s.agent_id) AS message_count,
+              s.workflow_id, s.spawn_tool_id, s.link_method
+         FROM subagents s
+        WHERE s.project_slug = ? AND s.session_id = ?${workflowSql}${rowSourceSql}
+        ORDER BY s.id`,
+      ...rowParams,
+    );
+    const anchors = this.db.all<ToolAnchorRow>(
+      `SELECT tool_use_id FROM timeline_messages
+        WHERE project_slug = ? AND session_id = ?${anchorSourceSql}
+          AND tool_name IN ('Task', 'Agent') AND tool_use_id IS NOT NULL
+        ORDER BY timeline_index`,
+      ...(options?.sourceId ? [slug, sessionId, options.sourceId] : [slug, sessionId]),
+    );
+    const explicitLinks = this.resolveSubagentSpawnToolIds(sessionId, options?.sourceId);
+    const used = new Set(rows.map((row) => row.spawn_tool_id).filter((value): value is string => Boolean(value)));
+    let ordinal = 0;
+    return rows.map((row) => {
+      let spawnToolId = row.spawn_tool_id ?? explicitLinks.get(row.agent_id) ?? null;
+      let linkMethod: SubagentListItem['linkMethod'] = row.link_method;
+      if (!row.spawn_tool_id && spawnToolId) linkMethod = 'tool_result';
+      while (!spawnToolId && ordinal < anchors.length) {
+        const candidate = anchors[ordinal++]!.tool_use_id;
+        if (!used.has(candidate)) {
+          spawnToolId = candidate;
+          used.add(candidate);
+          linkMethod = 'ordinal';
+        }
+      }
+      return {
+        sourceId: row.source_id,
+        agentId: row.agent_id,
+        agentType: row.agent_type,
+        messageCount: row.message_count,
+        workflowId: row.workflow_id,
+        spawnToolId,
+        linkMethod,
+      };
+    });
+  }
+
+  /** Resolve native-ingested sidecars using the agent id returned by Task/Agent. */
+  private resolveSubagentSpawnToolIds(sessionId: string, sourceId?: string): Map<string, string> {
+    const rows = this.db.all<{ data: string }>(
+      `SELECT data FROM messages WHERE session_id = ?${sourceId ? ' AND source_id = ?' : ''} ORDER BY msg_index`,
+      ...(sourceId ? [sessionId, sourceId] : [sessionId]),
+    );
+    const result = new Map<string, string>();
+    const agentIds = this.db
+      .all<{
+        agent_id: string;
+      }>(
+        `SELECT DISTINCT agent_id FROM subagents WHERE session_id = ?${sourceId ? ' AND source_id = ?' : ''}`,
+        ...(sourceId ? [sessionId, sourceId] : [sessionId]),
+      )
+      .map((row) => row.agent_id);
+    for (const row of rows) {
+      try {
+        const raw = JSON.parse(row.data) as Record<string, unknown>;
+        const message = raw.message as Record<string, unknown> | undefined;
+        if (!Array.isArray(message?.content)) continue;
+        for (const value of message.content) {
+          const block = value as Record<string, unknown>;
+          if (block.type !== 'tool_result' || typeof block.tool_use_id !== 'string') continue;
+          const content = typeof block.content === 'string' ? block.content : JSON.stringify(block.content ?? '');
+          for (const agentId of agentIds) {
+            if (!result.has(agentId) && content.includes(agentId)) result.set(agentId, block.tool_use_id);
+          }
+        }
+      } catch {
+        /* malformed raw row */
+      }
+    }
+    return result;
+  }
 
   private toProjectSummary(row: ProjectSummaryRow): ProjectSummaryData {
     const originalPath = row.original_path ?? '';
@@ -863,6 +1198,10 @@ class QueryServiceImpl implements QueryService {
 
 function placeholders(values: readonly unknown[]): string {
   return values.map(() => '?').join(', ');
+}
+
+function subagentIdentity(sourceId: string, workflowId: string, agentId: string): string {
+  return JSON.stringify([sourceId, workflowId, agentId]);
 }
 
 function buildTimelineFilter(request: TimelinePageRequest): { sql: string; params: unknown[] } {

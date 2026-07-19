@@ -32,7 +32,7 @@ export function StatsView(): React.ReactElement {
       messages += proj.messageCount;
       // Codex (and any source without per-message tokens) contributes 0s —
       // skip so totals aren't diluted by silent zeros.
-      if (!sourceReportsPerMessageTokens(proj.sourceId)) continue;
+      if (!proj.sourceIds.some(sourceReportsPerMessageTokens)) continue;
       inputTokens += proj.tokenUsage.inputTokens;
       outputTokens += proj.tokenUsage.outputTokens;
       cacheRead += proj.tokenUsage.cacheReadTokens;
@@ -42,7 +42,7 @@ export function StatsView(): React.ReactElement {
 
     // Top projects by total tokens, descending (token-reporting sources only)
     const ranked = [...p]
-      .filter((proj) => sourceReportsPerMessageTokens(proj.sourceId))
+      .filter((proj) => proj.sourceIds.some(sourceReportsPerMessageTokens))
       .map((proj) => ({ name: proj.folderName, tokens: totalTokens(proj.tokenUsage) }))
       .sort((a, b) => b.tokens - a.tokens)
       .slice(0, 5);

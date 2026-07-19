@@ -139,13 +139,13 @@ api.<span class="c-fn">onProgress</span>((p) => {
 
 <span class="c-kw">const</span> projects = api.<span class="c-fn">getProjectList</span>();
 <span class="c-kw">const</span> p = projects[<span class="c-num">0</span>];
-<span class="c-kw">const</span> sessions = api.<span class="c-fn">getSessionList</span>(p.slug, { sourceId: p.sourceId });
+<span class="c-kw">const</span> sessions = api.<span class="c-fn">getSessionList</span>(p);
 <span class="c-kw">const</span> page = api.<span class="c-fn">getSessionMessages</span>(
-  p.slug,
+  sessions[<span class="c-num">0</span>].projectSlug,
   sessions[<span class="c-num">0</span>].sessionId,
   <span class="c-num">50</span>,
   <span class="c-num">0</span>,
-  { sourceId: p.sourceId },
+  { sourceId: sessions[<span class="c-num">0</span>].sourceId },
 );
 <span class="c-kw">const</span> hits = api.<span class="c-fn">search</span>({ text: <span class="c-str">'refactor parser'</span>, limit: <span class="c-num">20</span> });
 
@@ -230,8 +230,8 @@ api.<span class="c-fn">onProgress</span>((p) => {
         <h2>Multi-source (RFC 006)</h2>
         <p class="section-desc">
           One index, <code>source_id</code> column — not one DB per agent. Project PK is
-          composite <code>(source_id, slug)</code> so Claude and Codex on the same cwd stay distinct.
-          Always pass <code>{ sourceId }</code> when drilling from a project list item.
+          composite <code>(source_id, slug)</code>. The project list aggregates agents that worked in
+          the same directory; pass its stable project locator when drilling into sessions.
         </p>
         <div class="code-block mb-24">
           <div class="code-header"><span>multi-source.ts</span><button class="copy-btn" type="button" data-copy>Copy</button></div>
@@ -249,8 +249,8 @@ api.<span class="c-fn">onProgress</span>((p) => {
 api.<span class="c-fn">getSourceIds</span>();                        <span class="c-cm">// ['claude-code', 'codex']</span>
 api.<span class="c-fn">getProjectList</span>({ sourceId: <span class="c-str">'codex'</span> }); <span class="c-cm">// Codex only</span>
 
-<span class="c-kw">const</span> p = api.<span class="c-fn">getProjectList</span>().<span class="c-fn">find</span>((x) =&gt; x.sourceId === <span class="c-str">'codex'</span>)!;
-api.<span class="c-fn">getSessionList</span>(p.slug, { sourceId: p.sourceId });</code></pre>
+<span class="c-kw">const</span> p = api.<span class="c-fn">getProjectList</span>().<span class="c-fn">find</span>((x) =&gt; x.sourceIds.<span class="c-fn">includes</span>(<span class="c-str">'codex'</span>))!;
+api.<span class="c-fn">getSessionList</span>(p); <span class="c-cm">// sessions from every agent in this workspace</span></code></pre>
         </div>
         <div class="callout">
           <span>ⓘ</span>
@@ -389,7 +389,7 @@ api.<span class="c-fn">getSessionList</span>(p.slug, { sourceId: p.sourceId });<
               <span class="method-badge sync">sync</span>
             </div>
             <div class="method-body">
-              <p>All projects sorted by last active date. Each item includes <code>sourceId</code>, session counts, token totals, and <code>tokensEstimated</code>.</p>
+              <p>Unique workspaces sorted by last active date. Each item includes its stable <code>projectId</code>, exact source/slug <code>members</code>, <code>sourceIds</code>, session counts, token totals, and <code>tokensEstimated</code>.</p>
               <table class="param-table">
                 <thead><tr><th>Param</th><th>Type</th><th>Description</th></tr></thead>
                 <tbody>
@@ -403,17 +403,17 @@ api.<span class="c-fn">getSessionList</span>(p.slug, { sourceId: p.sourceId });<
             <div class="method-header" data-toggle>
               <span class="method-chevron">▶</span>
               <div class="method-sig">
-                <span class="name">getSessionList</span><span class="params">(projectSlug, options?)</span>: <span class="ret">SessionListItem[]</span>
+                <span class="name">getSessionList</span><span class="params">(project, options?)</span>: <span class="ret">SessionListItem[]</span>
               </div>
               <span class="method-badge sync">sync</span>
             </div>
             <div class="method-body">
-              <p>Sessions for a project sorted by last update. <strong>Pass <code>sourceId</code></strong> when multiple agents share a slug (same cwd).</p>
+              <p>Sessions for a project sorted by last update. Pass a <code>ProjectListItem</code> (or other <code>ProjectLocator</code>) for exact multi-agent lookup. A slug string remains available for legacy callers.</p>
               <table class="param-table">
                 <thead><tr><th>Param</th><th>Type</th><th>Description</th></tr></thead>
                 <tbody>
-                  <tr><td>projectSlug</td><td>string</td><td>Project slug (encoded path).</td></tr>
-                  <tr><td>options.sourceId</td><td>string?</td><td>Scope to one agent — required for correct multi-source drill-down.</td></tr>
+                  <tr><td>project</td><td>ProjectReference</td><td>Stable project locator, or a legacy project slug string.</td></tr>
+                  <tr><td>options.sourceId</td><td>string?</td><td>Optional agent scope for legacy slug calls.</td></tr>
                 </tbody>
               </table>
             </div>
@@ -446,7 +446,7 @@ api.<span class="c-fn">getSessionList</span>(p.slug, { sourceId: p.sourceId });<
             <div class="method-header" data-toggle>
               <span class="method-chevron">▶</span>
               <div class="method-sig">
-                <span class="name">getProjectMemory</span><span class="params">(projectSlug, options?)</span>: <span class="ret">string | null</span>
+                <span class="name">getProjectMemory</span><span class="params">(project, options?)</span>: <span class="ret">string | null</span>
               </div>
               <span class="method-badge sync">sync</span>
             </div>
@@ -469,7 +469,7 @@ api.<span class="c-fn">getSessionList</span>(p.slug, { sourceId: p.sourceId });<
             <div class="method-header" data-toggle>
               <span class="method-chevron">▶</span>
               <div class="method-sig">
-                <span class="name">getProjectMemory</span><span class="params">(projectSlug)</span>: <span class="ret">string | null</span>
+                <span class="name">getProjectMemory</span><span class="params">(project)</span>: <span class="ret">string | null</span>
               </div>
               <span class="method-badge sync">sync</span>
             </div>
@@ -534,12 +534,25 @@ api.<span class="c-fn">getSessionList</span>(p.slug, { sourceId: p.sourceId });<
             <div class="method-header" data-toggle>
               <span class="method-chevron">▶</span>
               <div class="method-sig">
-                <span class="name">getSessionSubagents</span><span class="params">(projectSlug, sessionId)</span>: <span class="ret">SubagentListItem[]</span>
+                <span class="name">getSessionSubagents</span><span class="params">(projectSlug, sessionId, options?)</span>: <span class="ret">SubagentListItem[]</span>
               </div>
               <span class="method-badge sync">sync</span>
             </div>
             <div class="method-body">
-              <p>Top-level subagents for a session (excludes workflow-nested agents).</p>
+              <p>Subagent metadata with normalized message counts and parent Task/Agent linkage. Pass <code>{ includeNested: true }</code> to include workflow-nested agents.</p>
+            </div>
+          </div>
+
+          <div class="method">
+            <div class="method-header" data-toggle>
+              <span class="method-chevron">▶</span>
+              <div class="method-sig">
+                <span class="name">getSubagentTimeline</span><span class="params">(projectSlug, sessionId, agentId, request)</span>: <span class="ret">SubagentTimelinePage</span>
+              </div>
+              <span class="method-badge sync">sync</span>
+            </div>
+            <div class="method-body">
+              <p>DB-filtered, independently paginated display rows for an inline subagent branch. Raw sidecar messages remain available through <code>getSubagentMessages</code>.</p>
             </div>
           </div>
 
@@ -814,8 +827,10 @@ dispose();</code></pre>
           </div>
           <div class="code-block">
             <pre><code>{
-  slug: <span class="c-type">string</span>
-  sourceId: <span class="c-type">string</span>                 <span class="c-cm">// 'claude-code' | 'codex' | …</span>
+  projectId: <span class="c-type">string</span>                <span class="c-cm">// stable workspace identity</span>
+  members: <span class="c-type">ProjectMember[]</span>         <span class="c-cm">// exact { sourceId, slug } pairs</span>
+  slug: <span class="c-type">string</span>                     <span class="c-cm">// representative legacy slug</span>
+  sourceIds: <span class="c-type">string[]</span>              <span class="c-cm">// agents active in the workspace</span>
   folderName: <span class="c-type">string</span>
   absolutePath: <span class="c-type">string</span>
   sessionCount: <span class="c-type">number</span>
@@ -839,6 +854,7 @@ dispose();</code></pre>
             <pre><code>{
   sessionId: <span class="c-type">string</span>
   sourceId: <span class="c-type">string</span>
+  projectSlug: <span class="c-type">string</span>
   startTime: <span class="c-type">string</span>
   lastUpdate: <span class="c-type">string</span>
   lifespanMs: <span class="c-type">number</span>
@@ -889,7 +905,15 @@ dispose();</code></pre>
           </div>
           <div class="code-block">
             <pre><code><span class="c-cm">// SubagentListItem</span>
-{ agentId: <span class="c-type">string</span>; agentType: <span class="c-type">string</span>; messageCount: <span class="c-type">number</span> }
+{
+  sourceId: <span class="c-type">string</span>
+  agentId: <span class="c-type">string</span>
+  agentType: <span class="c-type">string</span>
+  messageCount: <span class="c-type">number</span>
+  workflowId: <span class="c-type">string</span>
+  spawnToolId: <span class="c-type">string | null</span>
+  linkMethod: <span class="c-type">'tool_result' | 'ordinal' | 'unlinked'</span>
+}
 
 <span class="c-cm">// WorkflowListItem</span>
 {

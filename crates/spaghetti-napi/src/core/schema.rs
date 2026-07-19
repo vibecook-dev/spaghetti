@@ -33,7 +33,10 @@ use thiserror::Error;
 /// v8: normalized timeline projection + dirty-session triggers. Rust only
 /// writes canonical messages; the shared TS query layer materializes display
 /// rows lazily, keeping all source adapters in one implementation.
-pub const SCHEMA_VERSION: u32 = 8;
+/// v9: source-aware, row-normalized subagent transcripts plus a lazy display
+/// projection and FTS index. Rust writes canonical subagent message rows; the
+/// shared TS query layer materializes display rows lazily.
+pub const SCHEMA_VERSION: u32 = 9;
 
 /// Full DDL for the current schema — lifted verbatim from the TS `SCHEMA_SQL`
 /// template literal. Whitespace differs; structure does not.
@@ -115,6 +118,7 @@ CREATE TABLE IF NOT EXISTS timeline_messages (
   timeline_index INTEGER NOT NULL,
   display_type TEXT NOT NULL,
   tool_name TEXT,
+  tool_use_id TEXT,
   search_text TEXT NOT NULL DEFAULT '',
   data TEXT NOT NULL,
   UNIQUE(session_id, timeline_index)
@@ -128,16 +132,56 @@ CREATE TABLE IF NOT EXISTS timeline_dirty_sessions (
 
 CREATE TABLE IF NOT EXISTS subagents (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  project_slug TEXT,
-  session_id TEXT,
-  agent_id TEXT,
-  agent_type TEXT,
-  file_name TEXT,
-  messages TEXT,
-  message_count INTEGER,
-  workflow_id TEXT,
+  source_id TEXT NOT NULL,
+  project_slug TEXT NOT NULL,
+  session_id TEXT NOT NULL,
+  agent_id TEXT NOT NULL,
+  agent_type TEXT NOT NULL,
+  file_name TEXT NOT NULL,
+  message_count INTEGER NOT NULL,
+  workflow_id TEXT NOT NULL DEFAULT '',
+  spawn_tool_id TEXT,
+  link_method TEXT NOT NULL DEFAULT 'unlinked',
   updated_at INTEGER,
-  UNIQUE(project_slug, session_id, workflow_id, agent_id)
+  UNIQUE(source_id, project_slug, session_id, workflow_id, agent_id)
+);
+
+CREATE TABLE IF NOT EXISTS subagent_messages (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  source_id TEXT NOT NULL,
+  project_slug TEXT NOT NULL,
+  session_id TEXT NOT NULL,
+  workflow_id TEXT NOT NULL DEFAULT '',
+  agent_id TEXT NOT NULL,
+  msg_index INTEGER NOT NULL,
+  timestamp TEXT,
+  data TEXT NOT NULL,
+  UNIQUE(source_id, session_id, workflow_id, agent_id, msg_index)
+);
+
+CREATE TABLE IF NOT EXISTS subagent_timeline_messages (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  source_id TEXT NOT NULL,
+  project_slug TEXT NOT NULL,
+  session_id TEXT NOT NULL,
+  workflow_id TEXT NOT NULL DEFAULT '',
+  agent_id TEXT NOT NULL,
+  timeline_index INTEGER NOT NULL,
+  display_type TEXT NOT NULL,
+  tool_name TEXT,
+  tool_use_id TEXT,
+  search_text TEXT NOT NULL DEFAULT '',
+  data TEXT NOT NULL,
+  UNIQUE(source_id, session_id, workflow_id, agent_id, timeline_index)
+);
+
+CREATE TABLE IF NOT EXISTS subagent_dirty_threads (
+  source_id TEXT NOT NULL,
+  project_slug TEXT NOT NULL,
+  session_id TEXT NOT NULL,
+  workflow_id TEXT NOT NULL DEFAULT '',
+  agent_id TEXT NOT NULL,
+  PRIMARY KEY(source_id, session_id, workflow_id, agent_id)
 );
 
 CREATE TABLE IF NOT EXISTS workflows (
@@ -218,12 +262,18 @@ CREATE INDEX IF NOT EXISTS idx_messages_session_idx ON messages(session_id, msg_
 CREATE INDEX IF NOT EXISTS idx_timeline_session_idx ON timeline_messages(session_id, timeline_index);
 CREATE INDEX IF NOT EXISTS idx_timeline_session_type ON timeline_messages(session_id, display_type, timeline_index);
 CREATE INDEX IF NOT EXISTS idx_timeline_session_tool ON timeline_messages(session_id, tool_name, timeline_index);
-CREATE INDEX IF NOT EXISTS idx_subagents_session ON subagents(project_slug, session_id);
+CREATE INDEX IF NOT EXISTS idx_timeline_session_tool_id ON timeline_messages(session_id, tool_use_id);
+CREATE INDEX IF NOT EXISTS idx_subagents_session ON subagents(source_id, project_slug, session_id);
+CREATE INDEX IF NOT EXISTS idx_subagent_messages_thread ON subagent_messages(source_id, session_id, workflow_id, agent_id, msg_index);
+CREATE INDEX IF NOT EXISTS idx_subagent_timeline_thread ON subagent_timeline_messages(source_id, session_id, workflow_id, agent_id, timeline_index);
+CREATE INDEX IF NOT EXISTS idx_subagent_timeline_type ON subagent_timeline_messages(source_id, session_id, display_type);
+CREATE INDEX IF NOT EXISTS idx_subagent_timeline_tool ON subagent_timeline_messages(source_id, session_id, tool_name);
 CREATE INDEX IF NOT EXISTS idx_tool_results_session ON tool_results(project_slug, session_id);
 CREATE INDEX IF NOT EXISTS idx_todos_session ON todos(session_id);
 
 -- Persistent FTS5 (content-synced with messages)
 CREATE VIRTUAL TABLE IF NOT EXISTS search_fts USING fts5(text_content, content='messages', content_rowid='id');
+CREATE VIRTUAL TABLE IF NOT EXISTS subagent_search_fts USING fts5(search_text, content='subagent_timeline_messages', content_rowid='id');
 
 -- Auto-sync triggers
 CREATE TRIGGER IF NOT EXISTS messages_ai AFTER INSERT ON messages BEGIN
@@ -235,6 +285,16 @@ END;
 CREATE TRIGGER IF NOT EXISTS messages_au AFTER UPDATE ON messages BEGIN
   INSERT INTO search_fts(search_fts, rowid, text_content) VALUES ('delete', old.id, old.text_content);
   INSERT INTO search_fts(rowid, text_content) VALUES (new.id, new.text_content);
+END;
+CREATE TRIGGER IF NOT EXISTS subagent_timeline_ai AFTER INSERT ON subagent_timeline_messages BEGIN
+  INSERT INTO subagent_search_fts(rowid, search_text) VALUES (new.id, new.search_text);
+END;
+CREATE TRIGGER IF NOT EXISTS subagent_timeline_ad AFTER DELETE ON subagent_timeline_messages BEGIN
+  INSERT INTO subagent_search_fts(subagent_search_fts, rowid, search_text) VALUES ('delete', old.id, old.search_text);
+END;
+CREATE TRIGGER IF NOT EXISTS subagent_timeline_au AFTER UPDATE ON subagent_timeline_messages BEGIN
+  INSERT INTO subagent_search_fts(subagent_search_fts, rowid, search_text) VALUES ('delete', old.id, old.search_text);
+  INSERT INTO subagent_search_fts(rowid, search_text) VALUES (new.id, new.search_text);
 END;
 CREATE TRIGGER IF NOT EXISTS timeline_dirty_ai AFTER INSERT ON messages BEGIN
   INSERT INTO timeline_dirty_sessions(session_id, source_id, project_slug)
@@ -251,6 +311,21 @@ CREATE TRIGGER IF NOT EXISTS timeline_dirty_au AFTER UPDATE ON messages BEGIN
   VALUES (new.session_id, new.source_id, new.project_slug)
   ON CONFLICT(session_id) DO UPDATE SET source_id = excluded.source_id, project_slug = excluded.project_slug;
 END;
+CREATE TRIGGER IF NOT EXISTS subagent_dirty_ai AFTER INSERT ON subagent_messages BEGIN
+  INSERT INTO subagent_dirty_threads(source_id, project_slug, session_id, workflow_id, agent_id)
+  VALUES (new.source_id, new.project_slug, new.session_id, new.workflow_id, new.agent_id)
+  ON CONFLICT(source_id, session_id, workflow_id, agent_id) DO UPDATE SET project_slug = excluded.project_slug;
+END;
+CREATE TRIGGER IF NOT EXISTS subagent_dirty_ad AFTER DELETE ON subagent_messages BEGIN
+  INSERT INTO subagent_dirty_threads(source_id, project_slug, session_id, workflow_id, agent_id)
+  VALUES (old.source_id, old.project_slug, old.session_id, old.workflow_id, old.agent_id)
+  ON CONFLICT(source_id, session_id, workflow_id, agent_id) DO UPDATE SET project_slug = excluded.project_slug;
+END;
+CREATE TRIGGER IF NOT EXISTS subagent_dirty_au AFTER UPDATE ON subagent_messages BEGIN
+  INSERT INTO subagent_dirty_threads(source_id, project_slug, session_id, workflow_id, agent_id)
+  VALUES (new.source_id, new.project_slug, new.session_id, new.workflow_id, new.agent_id)
+  ON CONFLICT(source_id, session_id, workflow_id, agent_id) DO UPDATE SET project_slug = excluded.project_slug;
+END;
 "#;
 
 /// Tables from previous schema versions that should be dropped during
@@ -261,6 +336,7 @@ const LEGACY_TABLES: &[&str] = &["segments", "search_index", "schema_version"];
 /// with the TS `CURRENT_TABLES` list (same order).
 const CURRENT_TABLES: &[&str] = &[
     "search_fts",
+    "subagent_search_fts",
     "source_files",
     "projects",
     "project_memories",
@@ -269,6 +345,9 @@ const CURRENT_TABLES: &[&str] = &[
     "timeline_messages",
     "timeline_dirty_sessions",
     "subagents",
+    "subagent_messages",
+    "subagent_timeline_messages",
+    "subagent_dirty_threads",
     "workflows",
     "tool_results",
     "todos",

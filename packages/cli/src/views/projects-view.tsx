@@ -2,7 +2,7 @@
  * ProjectsView — Scrollable list of projects
  */
 
-import React, { useMemo, useRef, useState } from 'react';
+import React, { useMemo, useRef } from 'react';
 import { Box, Text, useInput } from 'ink';
 import type { ProjectListItem } from '@vibecook/spaghetti-sdk';
 import { useViewNav } from './context.js';
@@ -10,39 +10,10 @@ import { useApi } from './shell.js';
 import { useListNavigation, useTerminalSize } from './hooks.js';
 import { formatTokenUsage, formatRelativeTime, formatNumber } from '../lib/format.js';
 import { ProjectTabView } from './project-tab-view.js';
-import { TabBar } from './tab-bar.js';
 import type { ViewEntry } from './types.js';
 
-/** Preferred tab order for known multi-agent sources. */
-const AGENT_TAB_ORDER = ['claude-code', 'codex', 'grok'];
-
-/** Short tab label for an agent source id. */
-function agentLabel(sourceId: string): string {
-  switch (sourceId) {
-    case 'claude-code':
-      return 'claude';
-    case 'codex':
-      return 'codex';
-    case 'grok':
-      return 'grok';
-    default:
-      return sourceId;
-  }
-}
-
-function sortAgentIds(ids: string[]): string[] {
-  return ids.slice().sort((a, b) => {
-    const ia = AGENT_TAB_ORDER.indexOf(a);
-    const ib = AGENT_TAB_ORDER.indexOf(b);
-    if (ia >= 0 && ib >= 0) return ia - ib;
-    if (ia >= 0) return -1;
-    if (ib >= 0) return 1;
-    return a.localeCompare(b);
-  });
-}
-
 function projectKey(p: ProjectListItem): string {
-  return `${p.sourceId}:${p.slug}`;
+  return p.projectId;
 }
 
 // ─── ProjectCard ───────────────────────────────────────────────────────
@@ -76,7 +47,7 @@ function ProjectCard({ project, firstPrompt, selected, cols }: ProjectCardProps)
   const truncatedPrompt = trunc(promptText, maxWidth - 4);
 
   // Line 3: stats (tokens: "—" when the agent has no per-message counts)
-  const tok = formatTokenUsage(p.tokenUsage, p.sourceId, p.tokensEstimated);
+  const tok = formatTokenUsage(p.tokenUsage, undefined, p.tokensEstimated);
   const stats = `${formatNumber(p.sessionCount)} sessions \u00B7 ${formatNumber(p.messageCount)} msgs \u00B7 ${tok} tokens \u00B7 ${formatRelativeTime(p.lastActiveAt)}`;
   const truncatedStats = trunc(stats, maxWidth - 4);
 
@@ -130,20 +101,7 @@ export function ProjectsView(): React.ReactElement {
     return list;
   }, [api]);
 
-  // Agents present — each becomes a tab (claude → codex → grok → others).
-  const agents = useMemo(() => {
-    const ids = Array.from(new Set(allProjects.map((p) => p.sourceId)));
-    return sortAgentIds(ids);
-  }, [allProjects]);
-  const hasTabs = agents.length > 1;
-
-  const [activeTab, setActiveTab] = useState(0);
-
-  // Projects shown = the active agent's, when tabs are present.
-  const projects = useMemo(
-    () => (hasTabs ? allProjects.filter((p) => p.sourceId === agents[activeTab]) : allProjects),
-    [allProjects, agents, activeTab, hasTabs],
-  );
+  const projects = allProjects;
 
   // Cache first prompts across renders and tab switches so a project is queried
   // at most once. Populated lazily for only the visible slice below — the old
@@ -151,11 +109,11 @@ export function ProjectsView(): React.ReactElement {
   const firstPromptCache = useRef<Map<string, string>>(new Map());
 
   // Viewport = terminal rows - header/footer chrome - the agent tab bar (1 line).
-  const chromeLines = hasTabs ? 5 : 4;
+  const chromeLines = 4;
   const viewportHeight = Math.max(5, rows - chromeLines);
   const visibleItems = Math.max(1, Math.floor(viewportHeight / 4));
 
-  const { selectedIndex, scrollOffset, moveUp, moveDown, jumpTo } = useListNavigation({
+  const { selectedIndex, scrollOffset, moveUp, moveDown } = useListNavigation({
     itemCount: projects.length,
     itemHeight: 4,
     viewportHeight,
@@ -170,18 +128,13 @@ export function ProjectsView(): React.ReactElement {
     for (const p of slice) {
       const key = projectKey(p);
       if (!cache.has(key)) {
-        const sess = api.getSessionList(p.slug, { sourceId: p.sourceId });
+        const sess = api.getSessionList(p);
         cache.set(key, sess.length > 0 ? sess[0].firstPrompt || '' : '');
       }
     }
     // Return a fresh snapshot so newly-cached prompts trigger a re-render.
     return new Map(cache);
   }, [api, projects, scrollOffset, visibleItems]);
-
-  const switchTab = (idx: number): void => {
-    setActiveTab(idx);
-    jumpTo(0); // reset selection to the top of the new agent's list
-  };
 
   // Key handling
   useInput(
@@ -190,10 +143,6 @@ export function ProjectsView(): React.ReactElement {
         moveUp();
       } else if (key.downArrow) {
         moveDown();
-      } else if (hasTabs && key.leftArrow) {
-        switchTab(Math.max(0, activeTab - 1));
-      } else if (hasTabs && key.rightArrow) {
-        switchTab(Math.min(agents.length - 1, activeTab + 1));
       } else if (key.return) {
         if (projects.length === 0) return;
         const project = projects[selectedIndex];
@@ -225,25 +174,18 @@ export function ProjectsView(): React.ReactElement {
 
   return (
     <Box flexDirection="column">
-      {hasTabs && <TabBar tabs={agents.map(agentLabel)} activeIndex={activeTab} onTabChange={switchTab} />}
-      {projects.length === 0 ? (
-        <Box paddingLeft={2}>
-          <Text dimColor>No {agentLabel(agents[activeTab])} projects.</Text>
-        </Box>
-      ) : (
-        visibleProjects.map((p, i) => {
-          const actualIndex = scrollOffset + i;
-          return (
-            <ProjectCard
-              key={projectKey(p)}
-              project={p}
-              firstPrompt={firstPrompts.get(projectKey(p)) || ''}
-              selected={actualIndex === selectedIndex}
-              cols={cols}
-            />
-          );
-        })
-      )}
+      {visibleProjects.map((p, i) => {
+        const actualIndex = scrollOffset + i;
+        return (
+          <ProjectCard
+            key={projectKey(p)}
+            project={p}
+            firstPrompt={firstPrompts.get(projectKey(p)) || ''}
+            selected={actualIndex === selectedIndex}
+            cols={cols}
+          />
+        );
+      })}
     </Box>
   );
 }

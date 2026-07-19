@@ -44,13 +44,16 @@ describe('source dimension (schema v5)', () => {
     assert.deepEqual(spaghetti.getSourceIds(), ['claude-code']);
   });
 
-  test('every project and session carries sourceId', () => {
+  test('every project carries an exact locator and every session carries its source project', () => {
     const projects = spaghetti.getProjectList();
     assert.ok(projects.length > 0, 'fixture should yield projects');
     for (const project of projects) {
-      assert.equal(project.sourceId, 'claude-code');
-      for (const session of spaghetti.getSessionList(project.slug)) {
+      assert.deepEqual(project.sourceIds, ['claude-code']);
+      assert.ok(project.projectId.startsWith('path:'));
+      assert.deepEqual(project.members, [{ sourceId: 'claude-code', slug: project.slug }]);
+      for (const session of spaghetti.getSessionList(project)) {
         assert.equal(session.sourceId, 'claude-code');
+        assert.equal(session.projectSlug, project.slug);
       }
     }
   });

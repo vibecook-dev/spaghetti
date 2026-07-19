@@ -12,6 +12,8 @@ import { transformRawMessagesToTimeline, type ChatSessionMessage } from '@vibeco
 import type {
   SegmentChangeBatch,
   SessionListItem,
+  SubagentListItem,
+  SubagentTimelinePageRequest,
   TimelineFacets,
   TimelinePage,
   TimelinePageRequest,
@@ -28,6 +30,30 @@ const LOADING_DELAY_MS = 280;
 const NEAR_TOP_PX = 80;
 const NEAR_BOTTOM_PX = 140;
 const LIVE_DEBOUNCE_MS = 180;
+const BRANCH_PAGE_SIZE = 80;
+
+interface BranchPageState {
+  messages: ChatSessionMessage[];
+  total: number;
+  offset: number;
+  hasMore: boolean;
+  loading: boolean;
+}
+
+export interface InitialBranchTarget {
+  agentId: string;
+  workflowId?: string;
+  spawnToolId?: string;
+  agentTimelineIndex?: number;
+}
+
+function branchKey(thread: SubagentListItem): string {
+  return JSON.stringify([thread.sourceId, thread.workflowId, thread.agentId]);
+}
+
+function threadToolId(thread: SubagentListItem): string {
+  return thread.spawnToolId ?? `unlinked-agent:${branchKey(thread)}`;
+}
 
 export interface SessionMessagesViewProps {
   projectSlug: string;
@@ -44,6 +70,8 @@ export interface SessionMessagesViewProps {
   onBack: () => void;
   /** Development gallery records; bypasses IPC/pagination when supplied. */
   debugMessages?: readonly AnyMsg[];
+  initialBranchTarget?: InitialBranchTarget;
+  onInitialBranchTargetConsumed?: () => void;
 }
 
 export function SessionMessagesView({
@@ -59,6 +87,8 @@ export function SessionMessagesView({
   onToggleFiles,
   onBack,
   debugMessages,
+  initialBranchTarget,
+  onInitialBranchTargetConsumed,
 }: SessionMessagesViewProps) {
   const [timeline, setTimeline] = useState<ChatSessionMessage[]>([]);
   const [facets, setFacets] = useState<TimelineFacets | null>(null);
@@ -68,6 +98,9 @@ export function SessionMessagesView({
   const [error, setError] = useState<string | null>(null);
   const [livePulse, setLivePulse] = useState(false);
   const [pendingNew, setPendingNew] = useState(0);
+  const [subagents, setSubagents] = useState<SubagentListItem[]>([]);
+  const [expandedBranchToolIds, setExpandedBranchToolIds] = useState<Set<string>>(() => new Set());
+  const [branchPages, setBranchPages] = useState<Map<string, BranchPageState>>(() => new Map());
 
   const cursorRef = useRef<number | undefined>(undefined);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
@@ -80,6 +113,8 @@ export function SessionMessagesView({
   const totalRef = useRef(0);
   const liveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pulseTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const consumedBranchTargetRef = useRef<string | null>(null);
+  const pendingBranchScrollRef = useRef<string | null>(null);
   const [debouncedSearch, setDebouncedSearch] = useState('');
   const cacheRef = useRef(
     new Map<
@@ -147,6 +182,96 @@ export function SessionMessagesView({
   }, [sourceId, anySoloActive, typeFilters, toolFilters, debouncedSearch]);
   const queryKey = useMemo(() => JSON.stringify(timelineRequest), [timelineRequest]);
 
+  const branchRequest = useMemo<SubagentTimelinePageRequest>(() => {
+    return {
+      sourceId,
+      includeTypes: timelineRequest.includeTypes,
+      includeTools: timelineRequest.includeTools,
+      excludeTypes: timelineRequest.excludeTypes,
+      excludeTools: timelineRequest.excludeTools,
+      search: timelineRequest.search,
+      limit: BRANCH_PAGE_SIZE,
+      offset: 0,
+    };
+  }, [timelineRequest, sourceId]);
+
+  const loadBranchPage = useCallback(
+    async (thread: SubagentListItem, append: boolean) => {
+      const key = branchKey(thread);
+      const current = branchPages.get(key);
+      if (current?.loading) return;
+      const offset = append ? (current?.offset ?? 0) + (current?.messages.length ?? 0) : 0;
+      setBranchPages((pages) => {
+        const next = new Map(pages);
+        next.set(key, {
+          messages: append ? (pages.get(key)?.messages ?? []) : [],
+          total: pages.get(key)?.total ?? thread.messageCount,
+          offset: append ? (pages.get(key)?.offset ?? 0) : 0,
+          hasMore: pages.get(key)?.hasMore ?? false,
+          loading: true,
+        });
+        return next;
+      });
+      try {
+        const page = await window.spaghetti.getSubagentTimeline(projectSlug, session.sessionId, thread.agentId, {
+          ...branchRequest,
+          workflowId: thread.workflowId,
+          offset,
+        });
+        setBranchPages((pages) => {
+          const next = new Map(pages);
+          const previous = next.get(key);
+          next.set(key, {
+            messages: append
+              ? [...(previous?.messages ?? []), ...(page.messages as ChatSessionMessage[])]
+              : (page.messages as ChatSessionMessage[]),
+            total: page.total,
+            offset: append ? (previous?.offset ?? 0) : page.offset,
+            hasMore: page.hasMore,
+            loading: false,
+          });
+          return next;
+        });
+      } catch (e: unknown) {
+        setError(String(e));
+        setBranchPages((pages) => {
+          const next = new Map(pages);
+          const previous = next.get(key);
+          if (previous) next.set(key, { ...previous, loading: false });
+          return next;
+        });
+      }
+    },
+    [branchPages, branchRequest, projectSlug, session.sessionId],
+  );
+
+  const toggleBranch = useCallback(
+    (toolUseId: string) => {
+      const opening = !expandedBranchToolIds.has(toolUseId);
+      setExpandedBranchToolIds((current) => {
+        const next = new Set(current);
+        if (opening) next.add(toolUseId);
+        else next.delete(toolUseId);
+        return next;
+      });
+      if (opening) {
+        for (const thread of subagents.filter((candidate) => threadToolId(candidate) === toolUseId)) {
+          const page = branchPages.get(branchKey(thread));
+          if (!page || page.messages.length === 0) void loadBranchPage(thread, false);
+        }
+      }
+    },
+    [branchPages, expandedBranchToolIds, loadBranchPage, subagents],
+  );
+
+  const loadMoreBranch = useCallback(
+    (key: string) => {
+      const thread = subagents.find((candidate) => branchKey(candidate) === key);
+      if (thread) void loadBranchPage(thread, true);
+    },
+    [loadBranchPage, subagents],
+  );
+
   const chatMessages = useMemo(() => {
     if (!debugMessages) return timeline;
     return filterTimelineMessages({
@@ -170,6 +295,86 @@ export function SessionMessagesView({
     searchQuery,
   ]);
 
+  const branchCountsByToolId = useMemo(() => {
+    const result = new Map<string, { threads: number; messages: number; loaded: number; loading: boolean }>();
+    for (const thread of subagents) {
+      const toolId = threadToolId(thread);
+      const page = branchPages.get(branchKey(thread));
+      const current = result.get(toolId) ?? { threads: 0, messages: 0, loaded: 0, loading: false };
+      current.threads += 1;
+      current.messages += page?.total ?? thread.messageCount;
+      current.loaded += page?.messages.length ?? 0;
+      current.loading ||= page?.loading ?? false;
+      result.set(toolId, current);
+    }
+    return result;
+  }, [branchPages, subagents]);
+
+  const embeddedMessages = useMemo(() => {
+    if (debugMessages) return chatMessages;
+    const result: ChatSessionMessage[] = [];
+    const appendThread = (thread: SubagentListItem, toolId: string, parent: ChatSessionMessage) => {
+      const key = branchKey(thread);
+      const page = branchPages.get(key);
+      if (!page) return;
+      result.push(...page.messages.map((branchMessage) => ({ ...branchMessage, branchToolId: toolId })));
+      if (page.hasMore && !page.loading) {
+        result.push({
+          timelineId: `branch-more:${key}:${page.offset + page.messages.length}`,
+          uuid: `branch-more:${key}`,
+          parentUuid: null,
+          type: 'system',
+          timestamp: page.messages.at(-1)?.timestamp ?? parent.timestamp,
+          sessionId: session.sessionId,
+          content: `Load more · ${page.messages.length}/${page.total}`,
+          agentId: thread.agentId,
+          isSidechain: true,
+          branchKey: key,
+          branchToolId: toolId,
+          systemSubtype: 'subagent_load_more',
+        });
+      }
+    };
+    for (const message of chatMessages) {
+      result.push(message);
+      const toolId = message.type === 'tool_use' ? message.toolUse?.toolId : undefined;
+      if (!toolId || !expandedBranchToolIds.has(toolId)) continue;
+      for (const thread of subagents.filter((candidate) => threadToolId(candidate) === toolId)) {
+        appendThread(thread, toolId, message);
+      }
+    }
+    // Keep orphaned/legacy sidecars accessible instead of silently dropping
+    // them when no trustworthy Task result or ordinal anchor exists.
+    for (const thread of subagents.filter((candidate) => !candidate.spawnToolId)) {
+      const toolId = threadToolId(thread);
+      const key = branchKey(thread);
+      const anchor: ChatSessionMessage = {
+        timelineId: `branch-anchor:${key}`,
+        uuid: `branch-anchor:${key}`,
+        parentUuid: null,
+        type: 'tool_use',
+        timestamp: chatMessages.at(-1)?.timestamp ?? session.lastUpdate,
+        sessionId: session.sessionId,
+        toolUse: {
+          toolName: 'Agent',
+          toolId,
+          input: { description: `${thread.agentType} · unlinked transcript`, subagent_type: thread.agentType },
+        },
+      };
+      result.push(anchor);
+      if (expandedBranchToolIds.has(toolId)) appendThread(thread, toolId, anchor);
+    }
+    return result;
+  }, [
+    branchPages,
+    chatMessages,
+    debugMessages,
+    expandedBranchToolIds,
+    session.lastUpdate,
+    session.sessionId,
+    subagents,
+  ]);
+
   const filterTotalCount = facets?.total ?? debugTimeline.length;
 
   // Reset when session changes
@@ -184,10 +389,149 @@ export function SessionMessagesView({
     cacheRef.current.clear();
     activeQueryKeyRef.current = '';
     setFacets(null);
+    setSubagents([]);
+    setExpandedBranchToolIds(new Set());
+    setBranchPages(new Map());
+    consumedBranchTargetRef.current = null;
     setPendingNew(0);
     setError(null);
     resetFilters();
   }, [session.sessionId, resetFilters]);
+
+  useEffect(() => {
+    if (debugMessages) return;
+    let cancelled = false;
+    void window.spaghetti
+      .getSessionSubagents(projectSlug, session.sessionId, { sourceId, includeNested: true })
+      .then((threads) => {
+        if (!cancelled) setSubagents(threads);
+      })
+      .catch((e: unknown) => {
+        if (!cancelled) setError(String(e));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [debugMessages, projectSlug, session.sessionId, sourceId]);
+
+  // Global FTS hits can land inside a subagent transcript. Open the owning
+  // Task/Agent branch and fetch a small window containing the matched row.
+  useEffect(() => {
+    if (!initialBranchTarget || debugMessages || subagents.length === 0) return;
+    const identity = JSON.stringify([
+      session.sessionId,
+      initialBranchTarget.workflowId ?? '',
+      initialBranchTarget.agentId,
+      initialBranchTarget.agentTimelineIndex ?? 0,
+    ]);
+    if (consumedBranchTargetRef.current === identity) return;
+    const thread = subagents.find(
+      (candidate) =>
+        candidate.agentId === initialBranchTarget.agentId &&
+        (initialBranchTarget.workflowId === undefined || candidate.workflowId === initialBranchTarget.workflowId),
+    );
+    if (!thread) return;
+    consumedBranchTargetRef.current = identity;
+    const toolUseId = initialBranchTarget.spawnToolId ?? threadToolId(thread);
+    setExpandedBranchToolIds((current) => new Set(current).add(toolUseId));
+    const offset = Math.max(0, (initialBranchTarget.agentTimelineIndex ?? 0) - 12);
+    const key = branchKey(thread);
+    setBranchPages((pages) => {
+      const next = new Map(pages);
+      next.set(key, { messages: [], total: thread.messageCount, offset, hasMore: false, loading: true });
+      return next;
+    });
+    void window.spaghetti
+      .getSubagentTimeline(projectSlug, session.sessionId, thread.agentId, {
+        ...branchRequest,
+        workflowId: thread.workflowId,
+        offset,
+      })
+      .then((page) => {
+        setBranchPages((pages) => {
+          const next = new Map(pages);
+          next.set(key, {
+            messages: page.messages as ChatSessionMessage[],
+            total: page.total,
+            offset: page.offset,
+            hasMore: page.hasMore,
+            loading: false,
+          });
+          return next;
+        });
+      })
+      .catch((e: unknown) => {
+        setError(String(e));
+        setBranchPages((pages) => {
+          const next = new Map(pages);
+          const previous = next.get(key);
+          if (previous) next.set(key, { ...previous, loading: false });
+          return next;
+        });
+      })
+      .finally(() => onInitialBranchTargetConsumed?.());
+
+    if (thread.spawnToolId) {
+      void (async () => {
+        let before: number | undefined;
+        let accumulated: ChatSessionMessage[] = [];
+        // Search navigation must also reveal an old parent Task that is not in
+        // the newest page. Walk in large DB pages, stopping as soon as its
+        // normalized tool id is present.
+        for (let pageNumber = 0; pageNumber < 40; pageNumber++) {
+          const parentPage = await window.spaghetti.getSessionTimeline(projectSlug, session.sessionId, {
+            sourceId,
+            limit: 500,
+            before,
+          });
+          const parentMessages = parentPage.messages as ChatSessionMessage[];
+          accumulated = [...parentMessages, ...accumulated];
+          const found = parentMessages.some(
+            (message) => message.type === 'tool_use' && message.toolUse?.toolId === toolUseId,
+          );
+          if (found || !parentPage.hasMore || parentPage.nextCursor == null) {
+            setTimeline(accumulated);
+            setPageMeta({ total: parentPage.total, hasMore: parentPage.hasMore });
+            cursorRef.current = parentPage.nextCursor;
+            totalRef.current = parentPage.total;
+            pendingBranchScrollRef.current = toolUseId;
+            return;
+          }
+          before = parentPage.nextCursor;
+        }
+      })().catch((e: unknown) => setError(String(e)));
+    } else {
+      pendingBranchScrollRef.current = toolUseId;
+    }
+  }, [
+    branchRequest,
+    debugMessages,
+    initialBranchTarget,
+    onInitialBranchTargetConsumed,
+    projectSlug,
+    session.sessionId,
+    sourceId,
+    subagents,
+  ]);
+
+  useLayoutEffect(() => {
+    const toolUseId = pendingBranchScrollRef.current;
+    const container = scrollContainerRef.current;
+    if (!toolUseId || !container) return;
+    const target = Array.from(container.querySelectorAll<HTMLElement>('[data-branch-tool-id]')).find(
+      (element) => element.dataset.branchToolId === toolUseId,
+    );
+    if (!target) return;
+    pendingBranchScrollRef.current = null;
+    target.scrollIntoView({ block: 'center' });
+  }, [embeddedMessages]);
+
+  // A branch page is filtered independently from its parent page. Collapse
+  // and invalidate loaded branch rows whenever the active DB filter changes.
+  useEffect(() => {
+    setExpandedBranchToolIds(new Set());
+    setBranchPages(new Map());
+  }, [queryKey]);
 
   // Session-wide facets come from normalized DB rows, never the loaded page.
   useEffect(() => {
@@ -264,8 +608,6 @@ export function SessionMessagesView({
     return () => {
       cancelled = true;
     };
-    // pageMeta/timeline are intentionally snapshots saved when queryKey changes.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projectSlug, session.sessionId, queryKey, debugMessages, debugTimeline]);
 
   const appendLiveTail = useCallback(async () => {
@@ -276,6 +618,17 @@ export function SessionMessagesView({
         window.spaghetti.getSessionTimelineFacets(projectSlug, session.sessionId, { sourceId }),
         window.spaghetti.getSessionTimeline(projectSlug, session.sessionId, timelineRequest),
       ]);
+      void window.spaghetti
+        .getSessionSubagents(projectSlug, session.sessionId, { sourceId, includeNested: true })
+        .then((threads) => {
+          setSubagents(threads);
+          for (const thread of threads) {
+            if (expandedBranchToolIds.has(threadToolId(thread))) {
+              void loadBranchPage(thread, false);
+            }
+          }
+        })
+        .catch(() => {});
       setFacets(nextFacets);
       const delta = Math.max(0, page.total - totalRef.current);
       totalRef.current = page.total;
@@ -294,7 +647,7 @@ export function SessionMessagesView({
     } catch {
       /* live refresh is best-effort */
     }
-  }, [projectSlug, session.sessionId, sourceId, timelineRequest, debugMessages]);
+  }, [debugMessages, expandedBranchToolIds, loadBranchPage, projectSlug, session.sessionId, sourceId, timelineRequest]);
 
   useEffect(() => {
     if (debugMessages) return;
@@ -502,7 +855,7 @@ export function SessionMessagesView({
                 New turns will appear here live.
               </p>
             </div>
-          ) : chatMessages.length === 0 ? (
+          ) : embeddedMessages.length === 0 ? (
             <div className="flex flex-col items-center justify-center h-full py-12 gap-2">
               <p className="font-serif text-[14px] leading-relaxed opacity-50">No messages match filters</p>
               <p className="font-mono text-[10px] tracking-[0.08em] uppercase opacity-40 max-w-xs text-center">
@@ -542,7 +895,14 @@ export function SessionMessagesView({
                   </div>
                 )}
 
-                <ArchiveTranscript messages={chatMessages} isDark={isDark} />
+                <ArchiveTranscript
+                  messages={embeddedMessages}
+                  isDark={isDark}
+                  expandedBranchToolIds={debugMessages ? undefined : expandedBranchToolIds}
+                  branchCountsByToolId={debugMessages ? undefined : branchCountsByToolId}
+                  onToggleBranch={debugMessages ? undefined : toggleBranch}
+                  onLoadMoreBranch={debugMessages ? undefined : loadMoreBranch}
+                />
               </div>
             </div>
           )}

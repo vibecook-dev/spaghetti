@@ -47,7 +47,13 @@ import type { QueryService } from '../../data/query-service.js';
 import type { IngestService } from '../../data/ingest-service.js';
 import type { AgentDataStore } from '../../data/agent-data-store.js';
 import type { AgentDataService, AgentDataServiceOptions, LifecycleOwner } from '../../data/lifecycle-owner.js';
-import type { TimelineFacets, TimelinePage, TimelinePageRequest } from '../../data/timeline-query.js';
+import type {
+  SubagentTimelinePage,
+  SubagentTimelinePageRequest,
+  TimelineFacets,
+  TimelinePage,
+  TimelinePageRequest,
+} from '../../data/timeline-query.js';
 import type { ClaudeCodeParser } from './parser/claude-code-parser.js';
 import type { FileService } from '../../io/index.js';
 import type { ClaudeCodeLiveUpdates } from './live/live-updates.js';
@@ -1223,8 +1229,9 @@ export class ClaudeCodeLifecycleOwner extends EventEmitter implements AgentDataS
   getSessionSubagents(
     slug: string,
     sessionId: string,
-  ): Array<{ agentId: string; agentType: string; messageCount: number }> {
-    return this.store.getSessionSubagents(slug, sessionId);
+    options?: { sourceId?: string; includeNested?: boolean },
+  ): ReturnType<AgentDataStore['getSessionSubagents']> {
+    return this.store.getSessionSubagents(slug, sessionId, options);
   }
 
   getSessionWorkflows(slug: string, sessionId: string): ReturnType<AgentDataStore['getSessionWorkflows']> {
@@ -1235,8 +1242,9 @@ export class ClaudeCodeLifecycleOwner extends EventEmitter implements AgentDataS
     slug: string,
     sessionId: string,
     workflowId: string,
-  ): Array<{ agentId: string; agentType: string; messageCount: number }> {
-    return this.store.getWorkflowSubagents(slug, sessionId, workflowId);
+    options?: { sourceId?: string },
+  ): ReturnType<AgentDataStore['getWorkflowSubagents']> {
+    return this.store.getWorkflowSubagents(slug, sessionId, workflowId, options);
   }
 
   getSubagentMessages(
@@ -1246,8 +1254,9 @@ export class ClaudeCodeLifecycleOwner extends EventEmitter implements AgentDataS
     limit: number,
     offset: number,
     workflowId?: string,
+    options?: { sourceId?: string },
   ): PaginatedSegmentResult<SessionMessage> {
-    const result = this.store.getSubagentMessages(slug, sessionId, agentId, limit, offset, workflowId);
+    const result = this.store.getSubagentMessages(slug, sessionId, agentId, limit, offset, workflowId, options);
 
     const segments: Segment<SessionMessage>[] = result.messages.map((msg, i) => ({
       key: `subagent:${slug}/${sessionId}/${agentId}/${offset + i}`,
@@ -1263,6 +1272,15 @@ export class ClaudeCodeLifecycleOwner extends EventEmitter implements AgentDataS
       offset: result.offset,
       hasMore: result.hasMore,
     };
+  }
+
+  getSubagentTimeline(
+    slug: string,
+    sessionId: string,
+    agentId: string,
+    request: SubagentTimelinePageRequest,
+  ): SubagentTimelinePage {
+    return this.store.getSubagentTimeline(slug, sessionId, agentId, request);
   }
 
   // ─────────────────────────────────────────────────────────────────────────

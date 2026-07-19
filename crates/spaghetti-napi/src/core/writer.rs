@@ -227,16 +227,29 @@ ON CONFLICT(session_id, msg_index) DO UPDATE SET
 
 const SQL_INSERT_SUBAGENT: &str = r#"
 INSERT INTO subagents (
-  project_slug, session_id, agent_id, agent_type, file_name,
-  messages, message_count, workflow_id, updated_at
+  source_id, project_slug, session_id, agent_id, agent_type, file_name,
+  message_count, workflow_id, spawn_tool_id, link_method, updated_at
 )
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-ON CONFLICT(project_slug, session_id, workflow_id, agent_id) DO UPDATE SET
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT(source_id, project_slug, session_id, workflow_id, agent_id) DO UPDATE SET
   agent_type = excluded.agent_type,
   file_name = excluded.file_name,
-  messages = excluded.messages,
   message_count = excluded.message_count,
+  spawn_tool_id = excluded.spawn_tool_id,
+  link_method = excluded.link_method,
   updated_at = excluded.updated_at
+"#;
+
+const SQL_DELETE_SUBAGENT_MESSAGES: &str = r#"
+DELETE FROM subagent_messages
+WHERE source_id = ? AND session_id = ? AND workflow_id = ? AND agent_id = ?
+"#;
+
+const SQL_INSERT_SUBAGENT_MESSAGE: &str = r#"
+INSERT INTO subagent_messages (
+  source_id, project_slug, session_id, workflow_id, agent_id, msg_index, timestamp, data
+)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 "#;
 
 const SQL_INSERT_WORKFLOW: &str = r#"
@@ -863,7 +876,6 @@ pub fn dispatch_event(
             transcript,
         } => {
             let now = now_ms();
-            let messages_json = serde_json::to_string(&transcript.messages)?;
             // Prefer the sidecar's real agent type (general-purpose, Explore, …)
             // over the filename-inferred enum kind. `to_string` on the enum
             // produces `"task"` (with quotes) — strip them to store the bare
@@ -878,17 +890,64 @@ pub fn dispatch_event(
             conn.execute(
                 SQL_INSERT_SUBAGENT,
                 params![
+                    source_id,
                     slug,
                     session_id,
                     transcript.agent_id,
                     agent_type,
                     transcript.file_name,
-                    messages_json,
                     message_count,
                     transcript.workflow_id,
+                    Option::<String>::None,
+                    "unlinked",
                     now,
                 ],
             )?;
+            conn.execute(
+                SQL_DELETE_SUBAGENT_MESSAGES,
+                params![
+                    source_id,
+                    session_id,
+                    transcript.workflow_id,
+                    transcript.agent_id
+                ],
+            )?;
+            for (index, message) in transcript.messages.iter().enumerate() {
+                let value = serde_json::to_value(message)?;
+                let timestamp = value
+                    .get("timestamp")
+                    .and_then(|candidate| candidate.as_str())
+                    .map(str::to_owned);
+                conn.execute(
+                    SQL_INSERT_SUBAGENT_MESSAGE,
+                    params![
+                        source_id,
+                        slug,
+                        session_id,
+                        transcript.workflow_id,
+                        transcript.agent_id,
+                        index as i64,
+                        timestamp,
+                        serde_json::to_string(&value)?,
+                    ],
+                )?;
+            }
+            if transcript.messages.is_empty() {
+                conn.execute(
+                    r#"INSERT INTO subagent_dirty_threads
+                       (source_id, project_slug, session_id, workflow_id, agent_id)
+                       VALUES (?, ?, ?, ?, ?)
+                       ON CONFLICT(source_id, session_id, workflow_id, agent_id)
+                       DO UPDATE SET project_slug = excluded.project_slug"#,
+                    params![
+                        source_id,
+                        slug,
+                        session_id,
+                        transcript.workflow_id,
+                        transcript.agent_id
+                    ],
+                )?;
+            }
             counts.subagents_written = 1;
         }
 

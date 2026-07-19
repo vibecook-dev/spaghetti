@@ -52,7 +52,7 @@ function mapKind(msg: ChatSessionMessage): RailKind {
     case 'thinking':
       return 'thought';
     case 'tool_use':
-      return msg.toolUse?.toolName === 'Task' ? 'branch_start' : 'tool_use';
+      return msg.toolUse?.toolName === 'Task' || msg.toolUse?.toolName === 'Agent' ? 'branch_start' : 'tool_use';
     case 'tool_result':
       return 'tool_result';
     case 'compact_summary':
@@ -104,8 +104,8 @@ function toolCommand(msg: ChatSessionMessage): string {
 }
 
 function branchLabel(msg: ChatSessionMessage): string | undefined {
-  if (msg.type !== 'tool_use' || msg.toolUse?.toolName !== 'Task') return undefined;
-  const input = msg.toolUse.input ?? {};
+  if (msg.type !== 'tool_use' || !['Task', 'Agent'].includes(msg.toolUse?.toolName ?? '')) return undefined;
+  const input = msg.toolUse?.input ?? {};
   const raw =
     (typeof input.description === 'string' && input.description) ||
     (typeof input.subagent_type === 'string' && input.subagent_type) ||
@@ -125,9 +125,20 @@ function messageIdentity(msg: ChatSessionMessage, index: number): string {
 export interface ArchiveTranscriptProps {
   messages: ChatSessionMessage[];
   isDark: boolean;
+  expandedBranchToolIds?: ReadonlySet<string>;
+  branchCountsByToolId?: ReadonlyMap<string, { threads: number; messages: number; loaded: number; loading: boolean }>;
+  onToggleBranch?: (toolUseId: string) => void;
+  onLoadMoreBranch?: (branchKey: string) => void;
 }
 
-export function ArchiveTranscript({ messages, isDark }: ArchiveTranscriptProps) {
+export function ArchiveTranscript({
+  messages,
+  isDark,
+  expandedBranchToolIds,
+  branchCountsByToolId,
+  onToggleBranch,
+  onLoadMoreBranch,
+}: ArchiveTranscriptProps) {
   const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set());
 
   const toggle = useCallback((id: string) => {
@@ -176,7 +187,14 @@ export function ArchiveTranscript({ messages, isDark }: ArchiveTranscriptProps) 
         const meta = TYPE_META[kind];
         const Icon = meta.Icon;
         const accent = accentHex(kind, isDark);
-        const isCollapsed = collapsed.has(identity);
+        const branchToolId = kind === 'branch_start' ? msg.toolUse?.toolId : undefined;
+        const branchSummary = branchToolId ? branchCountsByToolId?.get(branchToolId) : undefined;
+        const isControlledBranch = Boolean(branchToolId && expandedBranchToolIds && onToggleBranch);
+        const isCollapsed = isControlledBranch ? !expandedBranchToolIds!.has(branchToolId!) : collapsed.has(identity);
+        const toggleMessage = () => {
+          if (branchToolId && onToggleBranch) onToggleBranch(branchToolId);
+          else toggle(identity);
+        };
         const ToggleIcon = isCollapsed ? ChevronRight : ChevronDown;
         const isLast = i === visible.length - 1;
         const returnsToMain = depth > 0 && nextDepth < depth;
@@ -220,7 +238,8 @@ export function ArchiveTranscript({ messages, isDark }: ArchiveTranscriptProps) 
               {/* Square node — left accent rule, paper fill cuts the line */}
               <button
                 type="button"
-                onClick={() => toggle(identity)}
+                onClick={toggleMessage}
+                data-branch-tool-id={branchToolId}
                 aria-expanded={!isCollapsed}
                 aria-label={`${isCollapsed ? 'Expand' : 'Collapse'} ${meta.label} message`}
                 className="relative z-10 mt-1 flex items-center justify-center rounded-none"
@@ -277,7 +296,7 @@ export function ArchiveTranscript({ messages, isDark }: ArchiveTranscriptProps) 
               <div className="mt-1 mb-1.5 flex min-h-6 items-center gap-3">
                 <button
                   type="button"
-                  onClick={() => toggle(msg.uuid)}
+                  onClick={toggleMessage}
                   aria-expanded={!isCollapsed}
                   className="-ml-1 inline-flex h-6 items-center gap-1.5 px-1 font-mono text-[9px] font-bold uppercase tracking-[0.2em] opacity-85 transition-opacity hover:opacity-100 bg-transparent border-0 cursor-pointer"
                   style={{ color: accent }}
@@ -294,6 +313,13 @@ export function ArchiveTranscript({ messages, isDark }: ArchiveTranscriptProps) 
                     {labelChip}
                   </span>
                 ) : null}
+                {branchSummary ? (
+                  <span className="font-mono text-[8px] tracking-widest opacity-45">
+                    {branchSummary.loading
+                      ? 'loading…'
+                      : `${branchSummary.threads} agent${branchSummary.threads === 1 ? '' : 's'} · ${branchSummary.loaded}/${branchSummary.messages}`}
+                  </span>
+                ) : null}
                 {msg.type === 'tool_use' && msg.toolUse && kind !== 'branch_start' ? (
                   <span className="font-mono text-[9px] tracking-widest opacity-50">{msg.toolUse.toolName}</span>
                 ) : null}
@@ -303,7 +329,17 @@ export function ArchiveTranscript({ messages, isDark }: ArchiveTranscriptProps) 
               </div>
 
               <div className={isCollapsed ? 'hidden' : ''}>
-                <MessageBody msg={msg} kind={kind} isDark={isDark} accent={accent} />
+                {msg.systemSubtype === 'subagent_load_more' && msg.branchKey && onLoadMoreBranch ? (
+                  <button
+                    type="button"
+                    onClick={() => onLoadMoreBranch(msg.branchKey!)}
+                    className="border border-[color:var(--archive-ink-line-mid)] bg-transparent px-3 py-1.5 font-mono text-[9px] uppercase tracking-widest opacity-60 hover:opacity-100 cursor-pointer"
+                  >
+                    {msg.content || 'Load more agent messages'}
+                  </button>
+                ) : (
+                  <MessageBody msg={msg} kind={kind} isDark={isDark} accent={accent} />
+                )}
               </div>
             </div>
           </div>

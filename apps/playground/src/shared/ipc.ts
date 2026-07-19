@@ -20,10 +20,14 @@ import type {
   TimelinePage,
   TimelinePageRequest,
   ProjectListItem,
+  ProjectReference,
   SessionListItem,
   SourceFilter,
+  SubagentFilter,
   SubagentListItem,
   SubagentMessagePage,
+  SubagentTimelinePage,
+  SubagentTimelinePageRequest,
 } from '@vibecook/spaghetti-sdk';
 import type {
   InitProgress,
@@ -52,14 +56,11 @@ export interface SpaghettiIPC {
 
   // Projects ----------------------------------------------------------------
   getProjectList(): Promise<ProjectListItem[]>;
-  getProjectMemory(projectSlug: string, options?: SourceFilter): Promise<string | null>;
+  getProjectMemory(project: ProjectReference, options?: SourceFilter): Promise<string | null>;
 
   // Sessions ----------------------------------------------------------------
-  /**
-   * List sessions for a project. Pass `{ sourceId }` when the project came
-   * from a multi-source index so agents sharing the same slug stay distinct.
-   */
-  getSessionList(projectSlug: string, options?: SourceFilter): Promise<SessionListItem[]>;
+  /** List all project sessions; optionally filter to one agent source. */
+  getSessionList(project: ProjectReference, options?: SourceFilter): Promise<SessionListItem[]>;
   getSessionMessages(
     projectSlug: string,
     sessionId: string,
@@ -75,14 +76,22 @@ export interface SpaghettiIPC {
   getToolResult(projectSlug: string, sessionId: string, toolUseId: string): Promise<string | null>;
 
   // Subagents ---------------------------------------------------------------
-  getSessionSubagents(projectSlug: string, sessionId: string): Promise<SubagentListItem[]>;
+  getSessionSubagents(projectSlug: string, sessionId: string, options?: SubagentFilter): Promise<SubagentListItem[]>;
   getSubagentMessages(
     projectSlug: string,
     sessionId: string,
     agentId: string,
     limit?: number,
     offset?: number,
+    workflowId?: string,
+    options?: SourceFilter,
   ): Promise<SubagentMessagePage>;
+  getSubagentTimeline(
+    projectSlug: string,
+    sessionId: string,
+    agentId: string,
+    request: SubagentTimelinePageRequest,
+  ): Promise<SubagentTimelinePage>;
 
   // Search / stats ----------------------------------------------------------
   search(query: SearchQuery): Promise<SearchResultSet>;
@@ -121,6 +130,7 @@ export const IPC_CHANNELS = {
   getToolResult: 'spaghetti:getToolResult',
   getSessionSubagents: 'spaghetti:getSessionSubagents',
   getSubagentMessages: 'spaghetti:getSubagentMessages',
+  getSubagentTimeline: 'spaghetti:getSubagentTimeline',
   search: 'spaghetti:search',
   getStats: 'spaghetti:getStats',
 } as const;

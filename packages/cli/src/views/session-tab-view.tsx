@@ -642,23 +642,23 @@ export function SessionTabView({ project, session, sessionIndex }: SessionTabVie
   const viewportHeight = Math.max(termRows - 8, 5);
 
   const rawTodos = useMemo(
-    () => api.getSessionTodos(project.slug, session.sessionId),
-    [api, project.slug, session.sessionId],
+    () => api.getSessionTodos(session.projectSlug, session.sessionId),
+    [api, session.projectSlug, session.sessionId],
   );
   const todosCount = rawTodos.length;
   const todosMaxScroll = Math.max(0, todosCount - viewportHeight);
 
   const rawPlan = useMemo(
-    () => api.getSessionPlan(project.slug, session.sessionId),
-    [api, project.slug, session.sessionId],
+    () => api.getSessionPlan(session.projectSlug, session.sessionId),
+    [api, session.projectSlug, session.sessionId],
   );
   const planContent = useMemo(() => extractPlanContent(rawPlan), [rawPlan]);
   const planLineCount = useMemo(() => (planContent ? planContent.split('\n').length : 0), [planContent]);
   const planMaxScroll = Math.max(0, planLineCount - viewportHeight);
 
   const subagents = useMemo(
-    () => api.getSessionSubagents(project.slug, session.sessionId),
-    [api, project.slug, session.sessionId],
+    () => api.getSessionSubagents(session.projectSlug, session.sessionId),
+    [api, session.projectSlug, session.sessionId],
   );
   const subagentsCount = subagents.length;
   const subagentsViewportItems = Math.max(1, Math.floor(viewportHeight / 3));
@@ -671,8 +671,8 @@ export function SessionTabView({ project, session, sessionIndex }: SessionTabVie
   const teamMaxScroll = Math.max(0, teamRowCount - teamViewportItems);
 
   const workflows = useMemo(
-    () => api.getSessionWorkflows(project.slug, session.sessionId),
-    [api, project.slug, session.sessionId],
+    () => api.getSessionWorkflows(session.projectSlug, session.sessionId),
+    [api, session.projectSlug, session.sessionId],
   );
   const workflowCount = workflows.length;
   const workflowViewportItems = Math.max(1, Math.floor(viewportHeight / 3));
@@ -804,7 +804,7 @@ export function SessionTabView({ project, session, sessionIndex }: SessionTabVie
           const entry: ViewEntry = {
             type: 'detail',
             component: () => (
-              <WorkflowDetailView projectSlug={project.slug} sessionId={session.sessionId} workflow={wf} />
+              <WorkflowDetailView projectSlug={session.projectSlug} sessionId={session.sessionId} workflow={wf} />
             ),
             breadcrumb: `${wf.name}`,
             hints: '↑↓ select · ⏎ transcript · Esc back',
@@ -828,7 +828,7 @@ export function SessionTabView({ project, session, sessionIndex }: SessionTabVie
       {activeTab !== 0 && <HRule />}
       {activeTab === 1 && (
         <TodosPanel
-          projectSlug={project.slug}
+          projectSlug={session.projectSlug}
           sessionId={session.sessionId}
           scrollOffset={todosScroll}
           viewportHeight={viewportHeight}
@@ -836,7 +836,7 @@ export function SessionTabView({ project, session, sessionIndex }: SessionTabVie
       )}
       {activeTab === 2 && (
         <PlanPanel
-          projectSlug={project.slug}
+          projectSlug={session.projectSlug}
           sessionId={session.sessionId}
           scrollOffset={planScroll}
           viewportHeight={viewportHeight}
@@ -844,7 +844,7 @@ export function SessionTabView({ project, session, sessionIndex }: SessionTabVie
       )}
       {activeTab === 3 && (
         <SubagentsPanel
-          projectSlug={project.slug}
+          projectSlug={session.projectSlug}
           sessionId={session.sessionId}
           scrollOffset={subagentsScroll}
           selectedIndex={subagentsSelected}

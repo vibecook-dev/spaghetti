@@ -93,6 +93,10 @@ export interface SessionMessage {
   agentId?: string;
   /** Whether this message is part of a sidechain (sub-agent thread) */
   isSidechain?: boolean;
+  /** Stable normalized subagent thread key when rendered as an inline branch. */
+  branchKey?: string;
+  /** Parent Task/Agent tool-use id anchoring this branch in the main timeline. */
+  branchToolId?: string;
 
   // --- System event fields ---
   /** Subtype for system messages: 'compact_boundary' | 'local_command' | etc. */

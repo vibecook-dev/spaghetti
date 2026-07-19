@@ -60,9 +60,8 @@ export async function messagesCommand(
     throw noProjectMatch(projStr, suggestProjects(projStr, projects));
   }
 
-  // Resolve session (scoped to this project's agent)
-  const sourceScope = { sourceId: project.sourceId };
-  const sessions = api.getSessionList(project.slug, sourceScope);
+  // Resolve the session across every agent that worked in this project.
+  const sessions = api.getSessionList(project);
 
   if (sessions.length === 0) {
     throw new UserError(
@@ -77,6 +76,7 @@ export async function messagesCommand(
   if (!session) {
     throw noSessionMatch(sesStr, project.folderName);
   }
+  const sourceScope = { sourceId: session.sourceId };
 
   // Calculate offset and limit (guard NaN from commander's parseInt coercer)
   const requestedLimit = resolveLimit(opts.limit, 50);
@@ -95,13 +95,13 @@ export async function messagesCommand(
 
   // JSON/raw: fetch with exact limit, no filtering (raw stays source-native)
   if (opts.json) {
-    const page = api.getSessionMessages(project.slug, session.sessionId, displayLimit, offset, sourceScope);
+    const page = api.getSessionMessages(session.projectSlug, session.sessionId, displayLimit, offset, sourceScope);
     process.stdout.write(JSON.stringify(page, null, 2) + '\n');
     return;
   }
 
   if (opts.raw) {
-    const page = api.getSessionMessages(project.slug, session.sessionId, displayLimit, offset, sourceScope);
+    const page = api.getSessionMessages(session.projectSlug, session.sessionId, displayLimit, offset, sourceScope);
     for (const msg of page.messages) {
       process.stdout.write(JSON.stringify(msg) + '\n');
     }
@@ -115,27 +115,27 @@ export async function messagesCommand(
   const MAX_RETRIES = 2;
 
   const page = api.getSessionMessages(
-    project.slug,
+    session.projectSlug,
     session.sessionId,
     displayLimit * OVER_FETCH_MULTIPLIER,
     offset,
     sourceScope,
   );
-  let displayMessages = filterDisplayableMessages(adaptMessagesForDisplay(page.messages, project.sourceId));
+  let displayMessages = filterDisplayableMessages(adaptMessagesForDisplay(page.messages, session.sourceId));
   let totalRaw = page.total;
   let lastHasMore = page.hasMore;
   let fetchOffset = offset + page.messages.length;
 
   for (let retry = 0; retry < MAX_RETRIES && displayMessages.length < displayLimit && lastHasMore; retry++) {
     const morePage = api.getSessionMessages(
-      project.slug,
+      session.projectSlug,
       session.sessionId,
       displayLimit * OVER_FETCH_MULTIPLIER,
       fetchOffset,
       sourceScope,
     );
     displayMessages = displayMessages.concat(
-      filterDisplayableMessages(adaptMessagesForDisplay(morePage.messages, project.sourceId)),
+      filterDisplayableMessages(adaptMessagesForDisplay(morePage.messages, session.sourceId)),
     );
     totalRaw = morePage.total;
     lastHasMore = morePage.hasMore;
@@ -192,7 +192,7 @@ export async function messagesCommand(
     noTools: opts.noTools,
     noThinking: opts.noThinking,
     width,
-    sourceId: project.sourceId,
+    sourceId: session.sourceId,
   });
 
   // Pagination footer — reflect filtered count

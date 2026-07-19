@@ -28,7 +28,7 @@ export function AgentDataPlayground() {
   const [initDurationMs, setInitDurationMs] = useState(0);
 
   const [projects, setProjects] = useState<ProjectListItem[]>([]);
-  const [selectedSlug, setSelectedSlug] = useState<string | null>(null);
+  const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
   const [sessions, setSessions] = useState<SessionListItem[]>([]);
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
   const [messagePage, setMessagePage] = useState<MessagePage | null>(null);
@@ -120,15 +120,15 @@ export function AgentDataPlayground() {
   }, [ready, fetchProjectsAndStats]);
 
   const handleSelectProject = useCallback(
-    (slug: string) => {
-      setSelectedSlug(slug);
+    (project: ProjectListItem) => {
+      setSelectedProjectId(project.projectId);
       setSelectedSessionId(null);
       setMessagePage(null);
       setAllMessages([]);
       setLoadingSessions(true);
 
       try {
-        const list = api.getSessionList(slug);
+        const list = api.getSessionList(project);
         setSessions(list);
       } catch (err) {
         console.error('Failed to fetch sessions', err);
@@ -141,7 +141,8 @@ export function AgentDataPlayground() {
 
   const handleSelectSession = useCallback(
     (sessionId: string) => {
-      if (!selectedSlug) return;
+      const session = sessions.find((candidate) => candidate.sessionId === sessionId);
+      if (!session) return;
       setSelectedSessionId(sessionId);
       setLoadingMessages(true);
       setAllMessages([]);
@@ -149,10 +150,14 @@ export function AgentDataPlayground() {
       offsetRef.current = 0;
 
       try {
-        const probe = api.getSessionMessages(selectedSlug, sessionId, 1, 0);
+        const probe = api.getSessionMessages(session.projectSlug, sessionId, 1, 0, {
+          sourceId: session.sourceId,
+        });
         const total = probe.total;
         const startOffset = Math.max(0, total - 30);
-        const page = api.getSessionMessages(selectedSlug, sessionId, 30, startOffset);
+        const page = api.getSessionMessages(session.projectSlug, sessionId, 30, startOffset, {
+          sourceId: session.sourceId,
+        });
         setMessagePage({ ...page, hasMore: startOffset > 0 });
         setAllMessages(page.messages as AnyMsg[]);
         offsetRef.current = startOffset;
@@ -162,17 +167,21 @@ export function AgentDataPlayground() {
         setLoadingMessages(false);
       }
     },
-    [api, selectedSlug],
+    [api, sessions],
   );
 
   const handleLoadMore = useCallback(() => {
-    if (!selectedSlug || !selectedSessionId || offsetRef.current <= 0) return;
+    if (!selectedSessionId) return;
+    const session = sessions.find((candidate) => candidate.sessionId === selectedSessionId);
+    if (!session || offsetRef.current <= 0) return;
     setLoadingMessages(true);
 
     try {
       const newOffset = Math.max(0, offsetRef.current - 30);
       const limit = offsetRef.current - newOffset;
-      const page = api.getSessionMessages(selectedSlug, selectedSessionId, limit, newOffset);
+      const page = api.getSessionMessages(session.projectSlug, selectedSessionId, limit, newOffset, {
+        sourceId: session.sourceId,
+      });
       setMessagePage({ ...page, hasMore: newOffset > 0 });
       setAllMessages((prev) => [...(page.messages as AnyMsg[]), ...prev]);
       offsetRef.current = newOffset;
@@ -181,7 +190,7 @@ export function AgentDataPlayground() {
     } finally {
       setLoadingMessages(false);
     }
-  }, [api, selectedSlug, selectedSessionId]);
+  }, [api, sessions, selectedSessionId]);
 
   const handleSearch = useCallback(() => {
     if (!searchText.trim()) return;
@@ -194,10 +203,10 @@ export function AgentDataPlayground() {
   }, [api, searchText]);
 
   const handleViewMemory = useCallback(
-    (slug: string) => {
+    (project: ProjectListItem) => {
       try {
-        const content = api.getProjectMemory(slug);
-        setDetailOverlay({ type: 'memory', title: `Project Memory - ${slug}`, content });
+        const content = api.getProjectMemory(project);
+        setDetailOverlay({ type: 'memory', title: `Project Memory - ${project.folderName}`, content });
       } catch (err) {
         console.error('Failed to fetch memory', err);
       }
@@ -207,7 +216,9 @@ export function AgentDataPlayground() {
 
   const handleExpandToolResult = useCallback(
     (toolUseId: string) => {
-      if (!selectedSlug || !selectedSessionId) return;
+      if (!selectedSessionId) return;
+      const session = sessions.find((candidate) => candidate.sessionId === selectedSessionId);
+      if (!session) return;
       if (expandedToolResults[toolUseId]) {
         setExpandedToolResults((prev) => {
           const next = { ...prev };
@@ -217,31 +228,33 @@ export function AgentDataPlayground() {
         return;
       }
       try {
-        const result = api.getToolResult(selectedSlug, selectedSessionId, toolUseId);
+        const result = api.getToolResult(session.projectSlug, selectedSessionId, toolUseId);
         if (result) setExpandedToolResults((prev) => ({ ...prev, [toolUseId]: result }));
       } catch (err) {
         console.error('Failed to fetch tool result', err);
       }
     },
-    [api, selectedSlug, selectedSessionId, expandedToolResults],
+    [api, sessions, selectedSessionId, expandedToolResults],
   );
 
   useEffect(() => {
-    if (!selectedSlug || !selectedSessionId) {
+    const session = sessions.find((candidate) => candidate.sessionId === selectedSessionId);
+    if (!session || !selectedSessionId) {
       setSubagents([]);
       return;
     }
     try {
-      const list = api.getSessionSubagents(selectedSlug, selectedSessionId);
+      const list = api.getSessionSubagents(session.projectSlug, selectedSessionId);
       setSubagents(list);
     } catch {
       setSubagents([]);
     }
-  }, [api, selectedSlug, selectedSessionId]);
+  }, [api, sessions, selectedSessionId]);
 
   const handleExpandSubagent = useCallback(
     (agentId: string) => {
-      if (!selectedSlug || !selectedSessionId) return;
+      const session = sessions.find((candidate) => candidate.sessionId === selectedSessionId);
+      if (!session || !selectedSessionId) return;
       if (expandedSubagentId === agentId) {
         setExpandedSubagentId(null);
         setSubagentMessages([]);
@@ -252,7 +265,7 @@ export function AgentDataPlayground() {
       setSubagentMessages([]);
       subagentOffsetRef.current = 0;
       try {
-        const page = api.getSubagentMessages(selectedSlug, selectedSessionId, agentId, 30, 0);
+        const page = api.getSubagentMessages(session.projectSlug, selectedSessionId, agentId, 30, 0);
         setSubagentMessages(page.messages as AnyMsg[]);
         setSubagentHasMore(page.hasMore);
         subagentOffsetRef.current = page.messages.length;
@@ -262,15 +275,16 @@ export function AgentDataPlayground() {
         setLoadingSubagent(false);
       }
     },
-    [api, selectedSlug, selectedSessionId, expandedSubagentId],
+    [api, sessions, selectedSessionId, expandedSubagentId],
   );
 
   const handleLoadMoreSubagent = useCallback(() => {
-    if (!selectedSlug || !selectedSessionId || !expandedSubagentId) return;
+    const session = sessions.find((candidate) => candidate.sessionId === selectedSessionId);
+    if (!session || !selectedSessionId || !expandedSubagentId) return;
     setLoadingSubagent(true);
     try {
       const page = api.getSubagentMessages(
-        selectedSlug,
+        session.projectSlug,
         selectedSessionId,
         expandedSubagentId,
         30,
@@ -284,9 +298,9 @@ export function AgentDataPlayground() {
     } finally {
       setLoadingSubagent(false);
     }
-  }, [api, selectedSlug, selectedSessionId, expandedSubagentId]);
+  }, [api, sessions, selectedSessionId, expandedSubagentId]);
 
-  const selectedProject = projects.find((p) => p.slug === selectedSlug) ?? null;
+  const selectedProject = projects.find((p) => p.projectId === selectedProjectId) ?? null;
   const progressPct = initTotal > 0 ? Math.min(100, Math.round((initCurrent / initTotal) * 100)) : 0;
 
   if (!ready) {
@@ -406,11 +420,11 @@ export function AgentDataPlayground() {
             ) : (
               projects.map((p) => (
                 <ProjectCard
-                  key={p.slug}
+                  key={p.projectId}
                   project={p}
-                  isSelected={selectedSlug === p.slug}
-                  onClick={() => handleSelectProject(p.slug)}
-                  onMemoryClick={() => handleViewMemory(p.slug)}
+                  isSelected={selectedProjectId === p.projectId}
+                  onClick={() => handleSelectProject(p)}
+                  onMemoryClick={() => handleViewMemory(p)}
                 />
               ))
             )}
@@ -426,7 +440,7 @@ export function AgentDataPlayground() {
             </h2>
           </div>
           <div className="flex-1 overflow-y-auto">
-            {!selectedSlug ? (
+            {!selectedProjectId ? (
               <div className="p-3 text-xs text-white/40">Click a project</div>
             ) : loadingSessions ? (
               <div className="p-3 text-xs text-white/40">Loading...</div>

@@ -20,7 +20,7 @@ export interface SearchOptions {
 
 export async function searchCommand(api: SpaghettiAPI, query: string, opts: SearchOptions): Promise<void> {
   // Resolve project scope if provided
-  let projectSlug: string | undefined;
+  let projectMembers: Array<{ sourceId: string; slug: string }> | undefined;
 
   if (opts.project) {
     const projects = api.getProjectList();
@@ -30,7 +30,7 @@ export async function searchCommand(api: SpaghettiAPI, query: string, opts: Sear
       throw noProjectMatch(opts.project, suggestProjects(opts.project, projects));
     }
 
-    projectSlug = project.slug;
+    projectMembers = project.members;
   }
 
   const limit = resolveLimit(opts.limit, 20);
@@ -39,7 +39,7 @@ export async function searchCommand(api: SpaghettiAPI, query: string, opts: Sear
   // Execute search
   const results = api.search({
     text: query,
-    projectSlug,
+    projectMembers,
     limit,
     offset,
   });

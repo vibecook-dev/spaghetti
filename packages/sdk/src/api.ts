@@ -13,29 +13,50 @@ import type { TokenUsageSummary } from './data/summary-types.js';
 import type { SessionMessage, TeamDirectory } from './types/index.js';
 import type { SpaghettiLive } from './live/spaghetti-live.js';
 import type { SpaghettiRuntime } from './runtime/spaghetti-runtime.js';
-import type { TimelineFacets, TimelinePage, TimelinePageRequest } from './data/timeline-query.js';
+import type {
+  SubagentTimelinePage,
+  SubagentTimelinePageRequest,
+  TimelineFacets,
+  TimelinePage,
+  TimelinePageRequest,
+} from './data/timeline-query.js';
 
 // ═══════════════════════════════════════════════════════════════════════════
 // RESPONSE TYPES
 // ═══════════════════════════════════════════════════════════════════════════
 
-/**
- * Optional agent scope for project-keyed reads.
- *
- * Project slugs are shared across agents that worked the same directory
- * (cwd → slug). After schema v6, projects are distinct by `(source_id, slug)`,
- * so callers that know which agent they mean should pass `sourceId` when
- * listing sessions (and related project-scoped data). Omitting it keeps the
- * legacy union-across-sources behaviour.
- */
+/** Optional agent scope for source-aware reads. */
 export interface SourceFilter {
   sourceId?: string;
 }
 
-export interface ProjectListItem {
-  slug: string;
-  /** Agent product this project came from (e.g. 'claude-code'). */
+/** Subagent list scope; nested workflow agents are opt-in for compatibility. */
+export interface SubagentFilter extends SourceFilter {
+  includeNested?: boolean;
+}
+
+/** One source-owned database row contributing to an aggregated workspace. */
+export interface ProjectMember {
   sourceId: string;
+  slug: string;
+}
+
+/** Stable handle for project-scoped reads. */
+export interface ProjectLocator {
+  /** Stable workspace identity; path-based when an authoritative path exists. */
+  projectId: string;
+  /** Exact source/slug rows that belong to this workspace. */
+  members: ProjectMember[];
+}
+
+/** Legacy slug reads remain supported, but locators avoid lossy-slug collisions. */
+export type ProjectReference = string | ProjectLocator;
+
+export interface ProjectListItem extends ProjectLocator {
+  /** Representative legacy slug. Use `projectId` for UI identity. */
+  slug: string;
+  /** Every agent product contributing indexed content to this workspace. */
+  sourceIds: string[];
   folderName: string;
   absolutePath: string;
   sessionCount: number;
@@ -56,6 +77,8 @@ export interface SessionListItem {
   sessionId: string;
   /** Agent product this session came from (e.g. 'claude-code'). */
   sourceId: string;
+  /** Source-owned project slug for subsequent session reads. */
+  projectSlug: string;
   startTime: string;
   lastUpdate: string;
   lifespanMs: number;
@@ -83,9 +106,14 @@ export interface MessagePage {
 }
 
 export interface SubagentListItem {
+  sourceId: string;
   agentId: string;
   agentType: string;
   messageCount: number;
+  workflowId: string;
+  /** Parent Task/Agent tool-use id when an explicit result link was found. */
+  spawnToolId: string | null;
+  linkMethod: 'tool_result' | 'ordinal' | 'unlinked';
 }
 
 export interface WorkflowListItem {
@@ -131,15 +159,18 @@ export interface SpaghettiAPI {
   /** Get all projects sorted by last active date */
   /** Distinct agent sources present in the index (e.g. ['claude-code']). */
   getSourceIds(): string[];
-  /** List projects, optionally scoped to one agent source. */
+  /**
+   * List unique workspaces, optionally scoped to those touched by one agent.
+   * Project metrics are aggregated across the contributing agents.
+   */
   getProjectList(options?: SourceFilter): ProjectListItem[];
 
   /**
-   * Get all sessions for a project sorted by last update.
-   * Pass `{ sourceId }` when the project came from a multi-source index so
-   * sessions from other agents sharing the same slug are not mixed in.
+   * Get all sessions for a project sorted by last update. Sessions retain
+   * their individual `sourceId`; use the optional filter for an agent-only
+   * session list.
    */
-  getSessionList(projectSlug: string, options?: SourceFilter): SessionListItem[];
+  getSessionList(project: ProjectReference, options?: SourceFilter): SessionListItem[];
 
   /**
    * Get paginated messages for a session.
@@ -165,7 +196,7 @@ export interface SpaghettiAPI {
    * Memory is Claude-only today; with `{ sourceId }` other than `claude-code`,
    * returns null so a Codex project does not surface Claude's MEMORY.md.
    */
-  getProjectMemory(projectSlug: string, options?: SourceFilter): string | null;
+  getProjectMemory(project: ProjectReference, options?: SourceFilter): string | null;
 
   /** Get todos for a session */
   getSessionTodos(projectSlug: string, sessionId: string): unknown[];
@@ -180,13 +211,18 @@ export interface SpaghettiAPI {
   getToolResult(projectSlug: string, sessionId: string, toolUseId: string): string | null;
 
   /** Get top-level subagent list for a session (excludes workflow-nested) */
-  getSessionSubagents(projectSlug: string, sessionId: string): SubagentListItem[];
+  getSessionSubagents(projectSlug: string, sessionId: string, options?: SubagentFilter): SubagentListItem[];
 
   /** Get agent-orchestration workflow runs for a session */
   getSessionWorkflows(projectSlug: string, sessionId: string): WorkflowListItem[];
 
   /** Get the subagents that ran under a specific workflow */
-  getWorkflowSubagents(projectSlug: string, sessionId: string, workflowId: string): SubagentListItem[];
+  getWorkflowSubagents(
+    projectSlug: string,
+    sessionId: string,
+    workflowId: string,
+    options?: SourceFilter,
+  ): SubagentListItem[];
 
   /**
    * Get paginated subagent messages. Pass `workflowId` to disambiguate when
@@ -200,7 +236,16 @@ export interface SpaghettiAPI {
     limit?: number,
     offset?: number,
     workflowId?: string,
+    options?: SourceFilter,
   ): SubagentMessagePage;
+
+  /** Normalized, filterable display rows for one inline agent branch. */
+  getSubagentTimeline(
+    projectSlug: string,
+    sessionId: string,
+    agentId: string,
+    request: SubagentTimelinePageRequest,
+  ): SubagentTimelinePage;
 
   /** Full-text search across all segments */
   search(query: SearchQuery): SearchResultSet;

@@ -36,3 +36,18 @@ export interface TimelinePage {
   nextCursor?: number;
   hasMore: boolean;
 }
+
+/** Independently paginated normalized branch rows (oldest page first). */
+export interface SubagentTimelinePageRequest extends TimelineFilter {
+  sourceId: string;
+  workflowId?: string;
+  limit?: number;
+  offset?: number;
+}
+
+export interface SubagentTimelinePage {
+  messages: TimelineMessage[];
+  total: number;
+  offset: number;
+  hasMore: boolean;
+}

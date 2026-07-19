@@ -10,7 +10,7 @@ import { connectFileExplorer, type PortFileExplorer } from '@vibecook/mille/port
 import { FileTreeProvider, FileTree, useFileTreeRef } from '@vibecook/mille-ui';
 import { minimalIconTheme } from '@vibecook/mille-ui/icons/minimal';
 import { createCommandRegistry, defaultCommands } from '@vibecook/mille-ui/commands';
-import type { SubagentListItem } from '@vibecook/spaghetti-sdk';
+import type { ProjectReference, SubagentListItem } from '@vibecook/spaghetti-sdk';
 import '@vibecook/mille-ui/tokens.css';
 import '@vibecook/mille-ui/theme/minimal.css';
 import { onFxPort } from '../lib/fx-port.js';
@@ -21,6 +21,8 @@ import { StructureTree, type StructureNode } from './StructureTree.js';
 export interface SessionArtifactsProps {
   projectSlug: string;
   sourceId: string;
+  /** Aggregated project locator for source-correct project-level memory. */
+  memoryProject?: ProjectReference;
   sessionId: string;
   hints: {
     todoCount: number;
@@ -141,15 +143,15 @@ export function FileExplorerPanel({
     let cancelled = false;
     setArtifactLoading(true);
     setPreview(null);
-    const { projectSlug, sessionId, sourceId } = sessionArtifacts;
+    const { projectSlug, sessionId, sourceId, memoryProject } = sessionArtifacts;
     void (async () => {
       try {
         const [p, t, tsk, mem, agents] = await Promise.all([
           window.spaghetti.getSessionPlan(projectSlug, sessionId),
           window.spaghetti.getSessionTodos(projectSlug, sessionId),
           window.spaghetti.getSessionTask(projectSlug, sessionId),
-          window.spaghetti.getProjectMemory(projectSlug, { sourceId }),
-          window.spaghetti.getSessionSubagents(projectSlug, sessionId),
+          window.spaghetti.getProjectMemory(memoryProject ?? projectSlug, memoryProject ? undefined : { sourceId }),
+          window.spaghetti.getSessionSubagents(projectSlug, sessionId, { sourceId }),
         ]);
         if (cancelled) return;
         setPlan((p as PlanShape | null) ?? null);
@@ -172,7 +174,12 @@ export function FileExplorerPanel({
     return () => {
       cancelled = true;
     };
-  }, [sessionArtifacts?.projectSlug, sessionArtifacts?.sessionId, sessionArtifacts?.sourceId]);
+  }, [
+    sessionArtifacts?.projectSlug,
+    sessionArtifacts?.sessionId,
+    sessionArtifacts?.sourceId,
+    sessionArtifacts?.memoryProject,
+  ]);
 
   useEffect(() => {
     if (!open) {

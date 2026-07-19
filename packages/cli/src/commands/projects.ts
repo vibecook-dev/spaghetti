@@ -77,9 +77,9 @@ export async function projectsCommand(api: SpaghettiAPI, opts: ProjectsOptions):
       format: (v: any) => theme.project(String(v)),
     },
     {
-      key: 'sourceId',
-      label: 'Agent',
-      width: 8,
+      key: '_agents',
+      label: 'Agents',
+      width: 20,
       format: (v: any) => theme.agent(String(v)),
     },
     {
@@ -116,7 +116,8 @@ export async function projectsCommand(api: SpaghettiAPI, opts: ProjectsOptions):
   const rows = projects.map((p: ProjectListItem, i: number) => ({
     ...p,
     _index: i + 1,
-    _tokens: formatTokenUsage(p.tokenUsage, p.sourceId, p.tokensEstimated),
+    _agents: p.sourceIds.join(', '),
+    _tokens: formatTokenUsage(p.tokenUsage, undefined, p.tokensEstimated),
   }));
 
   const table = renderTable(rows, columns);
@@ -129,7 +130,7 @@ export async function projectsCommand(api: SpaghettiAPI, opts: ProjectsOptions):
   for (const p of projects) {
     totalSessions += p.sessionCount;
     totalMessages += p.messageCount;
-    if (sourceReportsPerMessageTokens(p.sourceId)) {
+    if (p.sourceIds.some(sourceReportsPerMessageTokens)) {
       anyTokenSource = true;
       totalTok += totalTokens(p.tokenUsage);
     }

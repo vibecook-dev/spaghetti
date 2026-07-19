@@ -81,7 +81,7 @@ describe('multi-source ingest (claude + grok)', () => {
   });
 
   test('getProjectList includes the grok project', () => {
-    const grokProject = spaghetti.getProjectList().find((p) => p.sourceId === 'grok');
+    const grokProject = spaghetti.getProjectList().find((p) => p.sourceIds.includes('grok'));
     assert.ok(grokProject, 'grok project present');
     assert.equal(grokProject.slug, GROK_SLUG);
   });
@@ -108,5 +108,6 @@ describe('multi-source ingest (claude + grok)', () => {
     const grokOnly = spaghetti.getProjectList({ sourceId: 'grok' });
     assert.equal(grokOnly.length, 1);
     assert.equal(grokOnly[0].slug, GROK_SLUG);
+    assert.deepEqual(grokOnly[0].sourceIds, ['grok']);
   });
 });

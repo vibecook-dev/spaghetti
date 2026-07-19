@@ -61,7 +61,7 @@ export async function todosCommand(
   }
 
   // Resolve session
-  const sessions = api.getSessionList(project.slug, { sourceId: project.sourceId });
+  const sessions = api.getSessionList(project);
 
   if (sessions.length === 0) {
     throw new UserError(
@@ -78,7 +78,7 @@ export async function todosCommand(
   }
 
   // Get todos
-  const todos = api.getSessionTodos(project.slug, session.sessionId) as TodoItem[];
+  const todos = api.getSessionTodos(session.projectSlug, session.sessionId) as TodoItem[];
 
   // JSON output
   if (opts.json) {

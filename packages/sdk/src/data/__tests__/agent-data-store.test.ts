@@ -116,17 +116,31 @@ describe('AgentDataStore (C1.1 skeleton)', () => {
     );
 
     sqlite.run(
-      `INSERT INTO subagents (project_slug, session_id, agent_id, agent_type, file_name, messages, message_count, workflow_id, updated_at)
+      `INSERT INTO subagents
+         (source_id, project_slug, session_id, agent_id, agent_type, file_name, message_count, workflow_id, updated_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      'claude-code',
       SLUG,
       SESSION_ID,
       'agent-0001',
       'general',
       'agent-0001.jsonl',
-      JSON.stringify([message]),
       1,
       '',
       Date.now(),
+    );
+    sqlite.run(
+      `INSERT INTO subagent_messages
+         (source_id, project_slug, session_id, workflow_id, agent_id, msg_index, timestamp, data)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      'claude-code',
+      SLUG,
+      SESSION_ID,
+      '',
+      'agent-0001',
+      0,
+      message.timestamp,
+      JSON.stringify(message),
     );
 
     sqlite.run(
@@ -205,9 +219,13 @@ describe('AgentDataStore (C1.1 skeleton)', () => {
     const agents = store.getSessionSubagents(SLUG, SESSION_ID);
     assert.strictEqual(agents.length, 1);
     assert.deepStrictEqual(agents[0], {
+      sourceId: 'claude-code',
       agentId: 'agent-0001',
       agentType: 'general',
       messageCount: 1,
+      workflowId: '',
+      spawnToolId: null,
+      linkMethod: 'unlinked',
     });
   });
 

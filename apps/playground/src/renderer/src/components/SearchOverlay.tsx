@@ -4,7 +4,7 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { SearchResult, SearchResultSet } from '@vibecook/spaghetti-sdk';
+import type { ProjectMember, SearchResult, SearchResultSet } from '@vibecook/spaghetti-sdk';
 import { SourceBadge } from './SourceBadge.js';
 import { Btn, Chip, EmptyState, Kbd, Spinner } from './ui.js';
 import { sourceLabel } from '../lib/source-progress.js';
@@ -14,6 +14,10 @@ export interface SearchNavigateTarget {
   projectSlug: string;
   sourceId: string;
   sessionId?: string;
+  agentId?: string;
+  workflowId?: string;
+  spawnToolId?: string;
+  agentTimelineIndex?: number;
 }
 
 export interface SearchOverlayProps {
@@ -22,7 +26,7 @@ export interface SearchOverlayProps {
   /** Known sources for filter chips (from project list). */
   sourceIds: string[];
   /** Optional scope: limit search to selected project. */
-  scopeProject?: { slug: string; sourceId: string; folderName?: string } | null;
+  scopeProject?: { projectId: string; members: ProjectMember[]; folderName?: string } | null;
   onNavigate: (target: SearchNavigateTarget) => void;
   isDark?: boolean;
 }
@@ -91,7 +95,7 @@ export function SearchOverlay({
           text: q,
           limit: LIMIT,
           ...(sourceId ? { sourceId } : {}),
-          ...(projectOnly && scopeProject ? { projectSlug: scopeProject.slug, sourceId: scopeProject.sourceId } : {}),
+          ...(projectOnly && scopeProject ? { projectMembers: scopeProject.members } : {}),
         });
         if (seq !== seqRef.current) return;
         setResults(res);
@@ -128,6 +132,10 @@ export function SearchOverlay({
         projectSlug: r.projectSlug,
         sourceId: r.sourceId ?? 'claude-code',
         sessionId: r.sessionId,
+        agentId: r.agentId,
+        workflowId: r.workflowId,
+        spawnToolId: r.spawnToolId,
+        agentTimelineIndex: r.agentTimelineIndex,
       });
       onClose();
     },
@@ -206,7 +214,7 @@ export function SearchOverlay({
               active={scopeToProject}
               onClick={() => setScopeToProject((v) => !v)}
               className="ml-auto"
-              title={`${scopeProject.slug} · ${scopeProject.sourceId}`}
+              title={scopeProject.members.map((member) => `${member.sourceId}:${member.slug}`).join('\n')}
             >
               In {scopeProject.folderName || 'project'}
             </Chip>

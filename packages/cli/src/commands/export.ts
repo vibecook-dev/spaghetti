@@ -146,7 +146,7 @@ export async function exportCommand(
   const includeTools = opts.includeTools ?? false;
 
   // Get sessions to export
-  let sessions = api.getSessionList(project.slug, { sourceId: project.sourceId });
+  let sessions = api.getSessionList(project);
 
   if (opts.session) {
     // Filter to a single session
@@ -173,9 +173,10 @@ export async function exportCommand(
     parts.push(`Sessions: ${sessions.length}`);
     parts.push('');
 
-    const sourceScope = { sourceId: project.sourceId };
     for (const session of sessions) {
-      const page = api.getSessionMessages(project.slug, session.sessionId, 100000, 0, sourceScope);
+      const page = api.getSessionMessages(session.projectSlug, session.sessionId, 100000, 0, {
+        sourceId: session.sourceId,
+      });
       parts.push(exportSessionAsMarkdown(session, page.messages, includeTools));
       parts.push('');
     }
@@ -185,10 +186,10 @@ export async function exportCommand(
   } else {
     // JSON export
     const exportedSessions: ExportedSession[] = [];
-    const sourceScope = { sourceId: project.sourceId };
-
     for (const session of sessions) {
-      const page = api.getSessionMessages(project.slug, session.sessionId, 100000, 0, sourceScope);
+      const page = api.getSessionMessages(session.projectSlug, session.sessionId, 100000, 0, {
+        sourceId: session.sourceId,
+      });
 
       let messages = page.messages;
       if (!includeTools) {

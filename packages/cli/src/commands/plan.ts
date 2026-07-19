@@ -34,7 +34,7 @@ export async function planCommand(
   }
 
   // Resolve session
-  const sessions = api.getSessionList(project.slug, { sourceId: project.sourceId });
+  const sessions = api.getSessionList(project);
 
   if (sessions.length === 0) {
     throw new UserError(
@@ -51,7 +51,7 @@ export async function planCommand(
   }
 
   // Get plan
-  const plan = api.getSessionPlan(project.slug, session.sessionId) as PlanData | null;
+  const plan = api.getSessionPlan(session.projectSlug, session.sessionId) as PlanData | null;
 
   // JSON output
   if (opts.json) {

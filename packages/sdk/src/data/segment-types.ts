@@ -130,6 +130,9 @@ export interface PaginatedSegmentResult<T = unknown> {
 export interface SearchQuery {
   text: string;
   type?: SegmentType;
+  /** Exact source/slug rows for an aggregated project scope. */
+  projectMembers?: Array<{ sourceId: string; slug: string }>;
+  /** Legacy single-slug scope. Prefer `projectMembers`. */
   projectSlug?: string;
   sessionId?: string;
   /** When set, only messages from this agent source (`claude-code` | `codex` | `grok`). */
@@ -148,6 +151,11 @@ export interface SearchResult {
   sessionId?: string;
   /** Agent product that owns the hit (multi-source index). */
   sourceId?: string;
+  /** Present when the hit belongs to an inline subagent branch. */
+  agentId?: string;
+  workflowId?: string;
+  spawnToolId?: string;
+  agentTimelineIndex?: number;
 }
 
 export interface SearchResultSet {

@@ -35,7 +35,7 @@ export async function subagentsCommand(
   }
 
   // Resolve session
-  const sessions = api.getSessionList(project.slug, { sourceId: project.sourceId });
+  const sessions = api.getSessionList(project);
 
   if (sessions.length === 0) {
     throw new UserError(
@@ -52,7 +52,7 @@ export async function subagentsCommand(
   }
 
   // Get subagents
-  const subagents = api.getSessionSubagents(project.slug, session.sessionId);
+  const subagents = api.getSessionSubagents(session.projectSlug, session.sessionId);
 
   // If agent index provided, show that agent's messages
   if (agentIndex !== undefined) {
@@ -62,7 +62,7 @@ export async function subagentsCommand(
     }
 
     const agent = subagents[idx - 1]!;
-    const msgPage = api.getSubagentMessages(project.slug, session.sessionId, agent.agentId, 1000, 0);
+    const msgPage = api.getSubagentMessages(session.projectSlug, session.sessionId, agent.agentId, 1000, 0);
 
     if (opts.json) {
       process.stdout.write(

@@ -20,7 +20,13 @@ import type { PaginatedSegmentResult, SearchQuery, SearchResultSet, StoreStats }
 import type { ProjectSummaryData, SessionSummaryData } from './summary-types.js';
 import type { AgentAnalytic, AgentConfig, SessionMessage } from '../types/index.js';
 import type { QueryService } from './query-service.js';
-import type { TimelineFacets, TimelinePage, TimelinePageRequest } from './timeline-query.js';
+import type {
+  SubagentTimelinePage,
+  SubagentTimelinePageRequest,
+  TimelineFacets,
+  TimelinePage,
+  TimelinePageRequest,
+} from './timeline-query.js';
 import type {
   Change,
   ChangeTopic,
@@ -65,13 +71,15 @@ export interface AgentDataStore {
   getSessionSubagents(
     slug: string,
     sessionId: string,
-  ): Array<{ agentId: string; agentType: string; messageCount: number }>;
+    options?: { sourceId?: string; includeNested?: boolean },
+  ): ReturnType<QueryService['getSessionSubagents']>;
   getSessionWorkflows(slug: string, sessionId: string): ReturnType<QueryService['getSessionWorkflows']>;
   getWorkflowSubagents(
     slug: string,
     sessionId: string,
     workflowId: string,
-  ): Array<{ agentId: string; agentType: string; messageCount: number }>;
+    options?: { sourceId?: string },
+  ): ReturnType<QueryService['getWorkflowSubagents']>;
   getSubagentMessages(
     slug: string,
     sessionId: string,
@@ -79,7 +87,14 @@ export interface AgentDataStore {
     limit: number,
     offset: number,
     workflowId?: string,
+    options?: { sourceId?: string },
   ): { messages: unknown[]; total: number; offset: number; hasMore: boolean };
+  getSubagentTimeline(
+    slug: string,
+    sessionId: string,
+    agentId: string,
+    request: SubagentTimelinePageRequest,
+  ): SubagentTimelinePage;
 
   // ── Details ──────────────────────────────────────────────────────────────
   getProjectMemory(slug: string, options?: { sourceId?: string }): string | null;
@@ -265,8 +280,9 @@ export class AgentDataStoreImpl implements AgentDataStore {
   getSessionSubagents(
     slug: string,
     sessionId: string,
-  ): Array<{ agentId: string; agentType: string; messageCount: number }> {
-    return this.queryService.getSessionSubagents(slug, sessionId);
+    options?: { sourceId?: string },
+  ): ReturnType<QueryService['getSessionSubagents']> {
+    return this.queryService.getSessionSubagents(slug, sessionId, options);
   }
 
   getSessionWorkflows(slug: string, sessionId: string): ReturnType<QueryService['getSessionWorkflows']> {
@@ -277,8 +293,9 @@ export class AgentDataStoreImpl implements AgentDataStore {
     slug: string,
     sessionId: string,
     workflowId: string,
-  ): Array<{ agentId: string; agentType: string; messageCount: number }> {
-    return this.queryService.getWorkflowSubagents(slug, sessionId, workflowId);
+    options?: { sourceId?: string },
+  ): ReturnType<QueryService['getWorkflowSubagents']> {
+    return this.queryService.getWorkflowSubagents(slug, sessionId, workflowId, options);
   }
 
   getSubagentMessages(
@@ -288,8 +305,18 @@ export class AgentDataStoreImpl implements AgentDataStore {
     limit: number,
     offset: number,
     workflowId?: string,
+    options?: { sourceId?: string },
   ): { messages: unknown[]; total: number; offset: number; hasMore: boolean } {
-    return this.queryService.getSubagentMessages(slug, sessionId, agentId, limit, offset, workflowId);
+    return this.queryService.getSubagentMessages(slug, sessionId, agentId, limit, offset, workflowId, options);
+  }
+
+  getSubagentTimeline(
+    slug: string,
+    sessionId: string,
+    agentId: string,
+    request: SubagentTimelinePageRequest,
+  ): SubagentTimelinePage {
+    return this.queryService.getSubagentTimeline(slug, sessionId, agentId, request);
   }
 
   // ── Details ────────────────────────────────────────────────────────────

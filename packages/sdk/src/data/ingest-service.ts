@@ -161,6 +161,8 @@ class IngestServiceImpl implements IngestService {
   private stmtInsertSession!: PreparedStatement;
   private stmtInsertMessage!: PreparedStatement;
   private stmtInsertSubagent!: PreparedStatement;
+  private stmtDeleteSubagentMessages!: PreparedStatement;
+  private stmtInsertSubagentMessage!: PreparedStatement;
   private stmtInsertWorkflow!: PreparedStatement;
   private stmtInsertToolResult!: PreparedStatement;
   private stmtInsertFileHistory!: PreparedStatement;
@@ -346,14 +348,28 @@ class IngestServiceImpl implements IngestService {
     );
 
     this.stmtInsertSubagent = this.db.prepare(
-      `INSERT INTO subagents (project_slug, session_id, agent_id, agent_type, file_name, messages, message_count, workflow_id, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-       ON CONFLICT(project_slug, session_id, workflow_id, agent_id) DO UPDATE SET
+      `INSERT INTO subagents
+         (source_id, project_slug, session_id, agent_id, agent_type, file_name, message_count,
+          workflow_id, spawn_tool_id, link_method, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(source_id, project_slug, session_id, workflow_id, agent_id) DO UPDATE SET
          agent_type = excluded.agent_type,
          file_name = excluded.file_name,
-         messages = excluded.messages,
          message_count = excluded.message_count,
+         spawn_tool_id = excluded.spawn_tool_id,
+         link_method = excluded.link_method,
          updated_at = excluded.updated_at`,
+    );
+
+    this.stmtDeleteSubagentMessages = this.db.prepare(
+      `DELETE FROM subagent_messages
+        WHERE source_id = ? AND session_id = ? AND workflow_id = ? AND agent_id = ?`,
+    );
+
+    this.stmtInsertSubagentMessage = this.db.prepare(
+      `INSERT INTO subagent_messages
+         (source_id, project_slug, session_id, workflow_id, agent_id, msg_index, timestamp, data)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
     );
 
     this.stmtInsertWorkflow = this.db.prepare(
@@ -498,17 +514,47 @@ class IngestServiceImpl implements IngestService {
     // Prefer the sidecar's real agent type (general-purpose, Explore, …)
     // over the filename-inferred kind (task/prompt_suggestion/compact).
     const agentType = transcript.meta?.agentType ?? transcript.agentType;
+    const spawnToolId = this.resolveSubagentSpawnToolId(sessionId, transcript.agentId);
     this.stmtInsertSubagent.run(
+      this.sourceId,
       slug,
       sessionId,
       transcript.agentId,
       agentType,
       transcript.fileName,
-      JSON.stringify(transcript.messages),
       transcript.messages.length,
       transcript.workflowId,
+      spawnToolId,
+      spawnToolId ? 'tool_result' : 'unlinked',
       now,
     );
+    this.stmtDeleteSubagentMessages.run(this.sourceId, sessionId, transcript.workflowId, transcript.agentId);
+    for (let index = 0; index < transcript.messages.length; index++) {
+      const message = transcript.messages[index] as unknown as Record<string, unknown>;
+      this.stmtInsertSubagentMessage.run(
+        this.sourceId,
+        slug,
+        sessionId,
+        transcript.workflowId,
+        transcript.agentId,
+        index,
+        typeof message.timestamp === 'string' ? message.timestamp : null,
+        JSON.stringify(message),
+      );
+    }
+    // Empty transcripts still need an empty materialized projection.
+    if (transcript.messages.length === 0) {
+      this.db.run(
+        `INSERT INTO subagent_dirty_threads(source_id, project_slug, session_id, workflow_id, agent_id)
+         VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(source_id, session_id, workflow_id, agent_id) DO UPDATE SET project_slug = excluded.project_slug`,
+        this.sourceId,
+        slug,
+        sessionId,
+        transcript.workflowId,
+        transcript.agentId,
+      );
+    }
   }
 
   onWorkflow(slug: string, sessionId: string, workflow: WorkflowRun): void {
@@ -850,6 +896,7 @@ class IngestServiceImpl implements IngestService {
 
   rebuildFts(): void {
     this.db.exec(`INSERT INTO search_fts(search_fts) VALUES('rebuild')`);
+    this.db.exec(`INSERT INTO subagent_search_fts(subagent_search_fts) VALUES('rebuild')`);
   }
 
   clearSourceData(): void {
@@ -858,6 +905,10 @@ class IngestServiceImpl implements IngestService {
     this.db.run('DELETE FROM messages WHERE source_id = ?', this.sourceId);
     this.db.run('DELETE FROM timeline_messages WHERE source_id = ?', this.sourceId);
     this.db.run('DELETE FROM timeline_dirty_sessions WHERE source_id = ?', this.sourceId);
+    this.db.run('DELETE FROM subagent_timeline_messages WHERE source_id = ?', this.sourceId);
+    this.db.run('DELETE FROM subagent_messages WHERE source_id = ?', this.sourceId);
+    this.db.run('DELETE FROM subagent_dirty_threads WHERE source_id = ?', this.sourceId);
+    this.db.run('DELETE FROM subagents WHERE source_id = ?', this.sourceId);
     this.db.run('DELETE FROM sessions WHERE source_id = ?', this.sourceId);
     this.db.run('DELETE FROM projects WHERE source_id = ?', this.sourceId);
     this.db.run('DELETE FROM source_files WHERE source_id = ?', this.sourceId);
@@ -875,6 +926,9 @@ class IngestServiceImpl implements IngestService {
       'timeline_messages',
       'timeline_dirty_sessions',
       'subagents',
+      'subagent_messages',
+      'subagent_timeline_messages',
+      'subagent_dirty_threads',
       'workflows',
       'tool_results',
       'todos',
@@ -898,6 +952,31 @@ class IngestServiceImpl implements IngestService {
   // ─────────────────────────────────────────────────────────────────────────
   // Private
   // ─────────────────────────────────────────────────────────────────────────
+
+  /** Link a Claude Task/Agent result to the transcript id it returned. */
+  private resolveSubagentSpawnToolId(sessionId: string, agentId: string): string | null {
+    const rows = this.db.all<{ data: string }>(
+      'SELECT data FROM messages WHERE session_id = ? AND source_id = ? ORDER BY msg_index',
+      sessionId,
+      this.sourceId,
+    );
+    for (const row of rows) {
+      try {
+        const raw = JSON.parse(row.data) as Record<string, unknown>;
+        const message = raw.message as Record<string, unknown> | undefined;
+        if (!Array.isArray(message?.content)) continue;
+        for (const value of message.content) {
+          const block = value as Record<string, unknown>;
+          if (block.type !== 'tool_result' || typeof block.tool_use_id !== 'string') continue;
+          const content = typeof block.content === 'string' ? block.content : JSON.stringify(block.content ?? '');
+          if (content.includes(agentId)) return block.tool_use_id;
+        }
+      } catch {
+        /* malformed raw row */
+      }
+    }
+    return null;
+  }
 
   private rowToFingerprint(row: SourceFileRow): SourceFingerprint {
     const fp: SourceFingerprint = { path: row.path, mtimeMs: row.mtime_ms, size: row.size };

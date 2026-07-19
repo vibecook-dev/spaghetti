@@ -29,11 +29,11 @@ function SessionCard({ session, index, selected, cols }: SessionCardProps): Reac
   // Line 1: #index branch ... short ID
   const num = selected ? `\x1b[1m\x1b[37m#${index + 1}\x1b[0m` : `\x1b[37m#${index + 1}\x1b[0m`;
   const branch = s.gitBranch ? (selected ? `\x1b[33m${s.gitBranch}\x1b[0m` : `\x1b[2m${s.gitBranch}\x1b[0m`) : '';
-  const shortId = `\x1b[2m${s.sessionId.slice(0, 8)}\x1b[0m`;
+  const shortId = `\x1b[2m${s.sourceId}:${s.sessionId.slice(0, 8)}\x1b[0m`;
 
   // Right-align the short ID
   const leftVisLen = `  #${index + 1}  ${s.gitBranch || ''}`.length + 2;
-  const rightLen = 8;
+  const rightLen = s.sourceId.length + 9;
   const gap = Math.max(1, cols - leftVisLen - rightLen - 2);
 
   // Line 2: first prompt
@@ -84,8 +84,8 @@ export function SessionsView({ project, initialIndex }: SessionsViewProps): Reac
   const cols = stdout?.columns ?? 80;
 
   const sessions = useMemo(() => {
-    return api.getSessionList(project.slug, { sourceId: project.sourceId });
-  }, [api, project.slug, project.sourceId]);
+    return api.getSessionList(project);
+  }, [api, project]);
 
   const { selectedIndex, scrollOffset, moveUp, moveDown } = useListNavigation({
     itemCount: sessions.length,
@@ -136,7 +136,7 @@ export function SessionsView({ project, initialIndex }: SessionsViewProps): Reac
         const actualIndex = scrollOffset + i;
         return (
           <SessionCard
-            key={s.sessionId}
+            key={`${s.sourceId}:${s.sessionId}`}
             session={s}
             index={actualIndex}
             selected={actualIndex === selectedIndex}

@@ -4,7 +4,7 @@
  * Wires the real Claude `small` fixture plus a synthetic Codex rollout tree via
  * `additionalSources`, initializes once, and asserts the unified index spans
  * both agents: `getSourceIds()` reports both, `getProjectList()` includes each
- * source's projects, and source filtering works. Also checks a warm re-init on
+ * unique projects, and source filtering works. Also checks a warm re-init on
  * the same DB doesn't duplicate.
  *
  * This is the RFC 006 multi-source lifecycle end to end: one shared store, one
@@ -27,8 +27,8 @@ import type { SpaghettiAPI } from '../index.js';
 const here = path.dirname(fileURLToPath(import.meta.url));
 const FIXTURE_ROOT_DIR = path.resolve(here, '../../../../crates/spaghetti-napi/fixtures/small/.claude');
 const CODEX_SESSION = '019cf46d-0924-7523-b3f5-f6f5cc0fcd16';
-const CODEX_CWD = '/tmp/codex-proj';
-const CODEX_SLUG = '-tmp-codex-proj';
+const CODEX_CWD = '/Users/test/project1';
+const CODEX_SLUG = '-Users-test-project1';
 
 function writeCodexFixture(codexRoot: string): void {
   const dayDir = path.join(codexRoot, 'sessions', '2026', '07', '13');
@@ -88,15 +88,20 @@ describe('multi-source ingest (claude + codex)', () => {
     assert.deepEqual(spaghetti.getSourceIds(), ['claude-code', 'codex']);
   });
 
-  test('getProjectList spans both sources', () => {
+  test('getProjectList aggregates agents that share a workspace', () => {
     const projects = spaghetti.getProjectList();
-    const sourceIds = new Set(projects.map((p) => p.sourceId));
-    assert.ok(sourceIds.has('claude-code'), 'has claude projects');
-    assert.ok(sourceIds.has('codex'), 'has codex projects');
-
-    const codexProject = projects.find((p) => p.sourceId === 'codex');
-    assert.ok(codexProject, 'codex project present');
-    assert.equal(codexProject.slug, CODEX_SLUG);
+    assert.equal(projects.length, 3, 'the shared cwd appears once, not once per agent');
+    const sharedProject = projects.find((p) => p.slug === CODEX_SLUG);
+    assert.ok(sharedProject, 'shared project present');
+    assert.deepEqual(sharedProject.sourceIds, ['claude-code', 'codex']);
+    assert.equal(sharedProject.sessionCount, 6, 'five Claude sessions plus one Codex session');
+    assert.deepEqual(sharedProject.members, [
+      { sourceId: 'claude-code', slug: CODEX_SLUG },
+      { sourceId: 'codex', slug: CODEX_SLUG },
+    ]);
+    const sharedSessions = spaghetti.getSessionList(sharedProject);
+    assert.equal(sharedSessions.length, 6);
+    assert.deepEqual(new Set(sharedSessions.map((session) => session.sourceId)), new Set(['claude-code', 'codex']));
   });
 
   test('the codex session and its messages are queryable', () => {
@@ -122,12 +127,12 @@ describe('multi-source ingest (claude + codex)', () => {
   });
 
   test('getSessionList scopes by sourceId when a slug is shared', () => {
-    // Even if only codex owns this slug in the fixture, the API contract is:
-    // with sourceId, never return rows from another agent.
     const scoped = spaghetti.getSessionList(CODEX_SLUG, { sourceId: 'codex' });
+    assert.equal(scoped.length, 1);
     assert.ok(scoped.every((s) => s.sourceId === 'codex'));
-    const empty = spaghetti.getSessionList(CODEX_SLUG, { sourceId: 'claude-code' });
-    assert.equal(empty.length, 0, 'claude scope on a codex-only slug returns nothing');
+    const claude = spaghetti.getSessionList(CODEX_SLUG, { sourceId: 'claude-code' });
+    assert.equal(claude.length, 5);
+    assert.ok(claude.every((s) => s.sourceId === 'claude-code'));
   });
 
   test('getProjectMemory is null for non-claude sources', () => {
@@ -138,6 +143,7 @@ describe('multi-source ingest (claude + codex)', () => {
     const codexOnly = spaghetti.getProjectList({ sourceId: 'codex' });
     assert.equal(codexOnly.length, 1);
     assert.equal(codexOnly[0].slug, CODEX_SLUG);
+    assert.deepEqual(codexOnly[0].sourceIds, ['codex']);
   });
 
   test('rebuildIndex() preserves BOTH sources (file-delete does not orphan codex)', async () => {

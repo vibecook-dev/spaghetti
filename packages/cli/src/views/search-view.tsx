@@ -120,13 +120,14 @@ export function SearchView({ query }: SearchViewProps): React.ReactElement {
 
   const results = resultSet.results;
 
-  // Build a lookup of project slug -> folder name (first match; multi-source
-  // may share slugs — session navigation resolves by sessionId below).
-  const projectNames = useMemo(() => {
+  // Build an exact source/slug lookup; slugs alone are lossy path encodings.
+  const projectsByMember = useMemo(() => {
     const map = new Map<string, string>();
     const projects = api.getProjectList();
     for (const p of projects) {
-      if (!map.has(p.slug)) map.set(p.slug, p.folderName);
+      for (const member of p.members) {
+        map.set(`${member.sourceId}/${member.slug}`, p.folderName);
+      }
     }
     return map;
   }, [api]);
@@ -134,26 +135,27 @@ export function SearchView({ query }: SearchViewProps): React.ReactElement {
   // Build session index + time lookup, scoped per project source when known.
   const sessionInfo = useMemo(() => {
     const map = new Map<string, { index: number; time: string; sourceId: string }>();
-    const projects = api.getProjectList();
-    const projectSlugs = new Set<string>();
+    const projectMembers = new Map<string, { slug: string; sourceId: string }>();
     for (const r of results) {
-      if (r.projectSlug) projectSlugs.add(r.projectSlug);
+      if (r.projectSlug && r.sourceId) {
+        projectMembers.set(`${r.sourceId}/${r.projectSlug}`, { slug: r.projectSlug, sourceId: r.sourceId });
+      }
     }
-    for (const slug of projectSlugs) {
-      // Prefer sessions from every source that owns this slug so FTS hits resolve.
-      const matching = projects.filter((p) => p.slug === slug);
-      const scopes = matching.length > 0 ? matching.map((p) => ({ sourceId: p.sourceId })) : [undefined];
-      for (const scope of scopes) {
-        const sessions = api.getSessionList(slug, scope);
-        for (let i = 0; i < sessions.length; i++) {
-          const key = `${slug}/${sessions[i].sessionId}`;
-          if (!map.has(key)) {
-            map.set(key, {
-              index: i,
-              time: sessions[i].lastUpdate,
-              sourceId: sessions[i].sourceId,
-            });
-          }
+    const projects = api.getProjectList();
+    for (const { slug, sourceId } of projectMembers.values()) {
+      const project = projects.find((candidate) =>
+        candidate.members.some((member) => member.sourceId === sourceId && member.slug === slug),
+      );
+      if (!project) continue;
+      const sessions = api.getSessionList(project, { sourceId });
+      for (let i = 0; i < sessions.length; i++) {
+        const key = `${slug}/${sessions[i].sourceId}/${sessions[i].sessionId}`;
+        if (!map.has(key)) {
+          map.set(key, {
+            index: i,
+            time: sessions[i].lastUpdate,
+            sourceId: sessions[i].sourceId,
+          });
         }
       }
     }
@@ -178,10 +180,11 @@ export function SearchView({ query }: SearchViewProps): React.ReactElement {
 
       // Find the project — prefer the source that owns this session when known.
       const projects = api.getProjectList();
-      const info = sessionId ? sessionInfo.get(`${slug}/${sessionId}`) : undefined;
-      const project =
-        (info ? projects.find((p) => p.slug === slug && p.sourceId === info.sourceId) : undefined) ??
-        projects.find((p) => p.slug === slug);
+      const project = projects.find((candidate) =>
+        candidate.members.some(
+          (member) => member.slug === slug && (!result.sourceId || member.sourceId === result.sourceId),
+        ),
+      );
       if (!project) {
         nav.pop();
         return;
@@ -199,9 +202,10 @@ export function SearchView({ query }: SearchViewProps): React.ReactElement {
         return;
       }
 
-      // Find the session index (scoped to this agent)
-      const sessions = api.getSessionList(slug, { sourceId: project.sourceId });
-      const sessIdx = sessions.findIndex((s) => s.sessionId === sessionId);
+      const sessions = api.getSessionList(project);
+      const sessIdx = sessions.findIndex(
+        (s) => s.sessionId === sessionId && (!result.sourceId || s.sourceId === result.sourceId),
+      );
       if (sessIdx < 0) {
         // Session not found — navigate to project level
         const sessionsEntry: ViewEntry = {
@@ -279,8 +283,10 @@ export function SearchView({ query }: SearchViewProps): React.ReactElement {
     <Box flexDirection="column">
       {visibleResults.map((r, i) => {
         const actualIndex = scrollOffset + i;
-        const projName = (r.projectSlug && projectNames.get(r.projectSlug)) || r.projectSlug || 'unknown';
-        const sessKey = r.projectSlug && r.sessionId ? `${r.projectSlug}/${r.sessionId}` : null;
+        const memberKey = r.projectSlug && r.sourceId ? `${r.sourceId}/${r.projectSlug}` : '';
+        const projName = projectsByMember.get(memberKey) || r.projectSlug || 'unknown';
+        const sessKey =
+          r.projectSlug && r.sessionId ? `${r.projectSlug}/${r.sourceId ?? 'claude-code'}/${r.sessionId}` : null;
         const info = sessKey ? sessionInfo.get(sessKey) : null;
 
         return (
