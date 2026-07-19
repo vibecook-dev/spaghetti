@@ -37,6 +37,7 @@ import type {
 } from '../live/change-events.js';
 import { createSubscriberRegistry, type SubscriberRegistry } from '../live/subscriber-registry.js';
 import type { ErrorSink } from '../io/error-sink.js';
+import type { TokenActivityBucketData } from './token-activity.js';
 
 // ═══════════════════════════════════════════════════════════════════════════
 // INTERFACE
@@ -54,11 +55,16 @@ export interface AgentDataStore {
   prepareTimelineProjections(
     onProgress?: (progress: { kind: 'session' | 'subagent'; current: number; total: number }) => void,
   ): { sessions: number; subagents: number };
+  prepareTokenActivity(): number;
   // ── Projects ─────────────────────────────────────────────────────────────
   getProjectSlugs(): string[];
   getSourceIds(): string[];
   getProjectSummaries(options?: { sourceId?: string }): ProjectSummaryData[];
   getSessionSummaries(projectSlug: string, options?: { sourceId?: string }): SessionSummaryData[];
+  getProjectTokenActivity(
+    projectSlug: string,
+    options: { sourceId?: string; from: string; to: string },
+  ): TokenActivityBucketData[];
 
   // ── Messages ─────────────────────────────────────────────────────────────
   getSessionMessages(
@@ -249,6 +255,10 @@ export class AgentDataStoreImpl implements AgentDataStore {
     return this.queryService.prepareTimelineProjections(onProgress);
   }
 
+  prepareTokenActivity(): number {
+    return this.queryService.prepareTokenActivity();
+  }
+
   getProjectSlugs(): string[] {
     return this.queryService.getProjectSlugs();
   }
@@ -263,6 +273,13 @@ export class AgentDataStoreImpl implements AgentDataStore {
 
   getSessionSummaries(projectSlug: string, options?: { sourceId?: string }): SessionSummaryData[] {
     return this.queryService.getSessionSummaries(projectSlug, options);
+  }
+
+  getProjectTokenActivity(
+    projectSlug: string,
+    options: { sourceId?: string; from: string; to: string },
+  ): TokenActivityBucketData[] {
+    return this.queryService.getProjectTokenActivity(projectSlug, options);
   }
 
   // ── Messages ───────────────────────────────────────────────────────────

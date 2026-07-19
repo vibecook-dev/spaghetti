@@ -26,6 +26,7 @@ export function formatTokenUsage(
     outputTokens: number;
     cacheCreationTokens: number;
     cacheReadTokens: number;
+    totalTokens?: number;
   },
   sourceId?: string,
   tokensEstimated?: boolean,
@@ -92,6 +93,9 @@ export function totalTokens(usage: {
   outputTokens: number;
   cacheCreationTokens: number;
   cacheReadTokens: number;
+  totalTokens?: number;
 }): number {
-  return usage.inputTokens + usage.outputTokens + usage.cacheCreationTokens + usage.cacheReadTokens;
+  return (
+    usage.totalTokens ?? usage.inputTokens + usage.outputTokens + usage.cacheCreationTokens + usage.cacheReadTokens
+  );
 }

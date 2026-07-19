@@ -104,6 +104,21 @@ describe('multi-source ingest (claude + codex)', () => {
     assert.deepEqual(new Set(sharedSessions.map((session) => session.sourceId)), new Set(['claude-code', 'codex']));
   });
 
+  test('getProjectTokenActivity aggregates project members and honors the source filter', () => {
+    const sharedProject = spaghetti.getProjectList().find((project) => project.slug === CODEX_SLUG);
+    assert.ok(sharedProject);
+    const all = spaghetti.getProjectTokenActivity(sharedProject, { from: '2020-01-01', to: '2030-01-01' });
+    assert.ok(all.days.length > 0);
+    assert.deepEqual(new Set(all.days.flatMap((day) => day.sourceIds)), new Set(['claude-code', 'codex']));
+    const codex = spaghetti.getProjectTokenActivity(sharedProject, {
+      sourceId: 'codex',
+      from: '2020-01-01',
+      to: '2030-01-01',
+    });
+    assert.ok(codex.days.length > 0);
+    assert.ok(codex.days.every((day) => day.sourceIds.length === 1 && day.sourceIds[0] === 'codex'));
+  });
+
   test('the codex session and its messages are queryable', () => {
     // Scoped list — no client-side sourceId filter required once the API
     // threads the agent dimension through.

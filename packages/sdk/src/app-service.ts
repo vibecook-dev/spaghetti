@@ -17,6 +17,9 @@ import type {
   SubagentMessagePage,
   SourceFilter,
   SubagentFilter,
+  TokenActivityDay,
+  TokenActivityQuery,
+  TokenActivityResult,
 } from './api.js';
 import type {
   SubagentTimelinePage,
@@ -156,6 +159,50 @@ class SpaghettiAppService extends EventEmitter implements SpaghettiAPI {
     return [...uniqueSummaries.values()]
       .sort((a, b) => (a.lastUpdate === b.lastUpdate ? 0 : a.lastUpdate > b.lastUpdate ? -1 : 1))
       .map(toSessionListItem);
+  }
+
+  getProjectTokenActivity(project: ProjectReference, query: TokenActivityQuery): TokenActivityResult {
+    const buckets =
+      typeof project === 'string'
+        ? this.dataService.getProjectTokenActivity(project, query)
+        : project.members
+            .filter((member) => !query.sourceId || member.sourceId === query.sourceId)
+            .flatMap((member) =>
+              this.dataService.getProjectTokenActivity(member.slug, {
+                sourceId: member.sourceId,
+                from: query.from,
+                to: query.to,
+              }),
+            );
+    const days = new Map<string, TokenActivityDay>();
+    for (const bucket of buckets) {
+      const current = days.get(bucket.date);
+      if (!current) {
+        days.set(bucket.date, {
+          date: bucket.date,
+          tokenUsage: { ...bucket.tokenUsage },
+          quality: tokenActivityQuality(bucket.exactTokens, bucket.estimatedTokens),
+          exactTokens: bucket.exactTokens,
+          estimatedTokens: bucket.estimatedTokens,
+          messageCount: bucket.messageCount,
+          sessionCount: bucket.sessionCount,
+          sourceIds: [bucket.sourceId],
+        });
+        continue;
+      }
+      current.tokenUsage.inputTokens += bucket.tokenUsage.inputTokens;
+      current.tokenUsage.outputTokens += bucket.tokenUsage.outputTokens;
+      current.tokenUsage.cacheCreationTokens += bucket.tokenUsage.cacheCreationTokens;
+      current.tokenUsage.cacheReadTokens += bucket.tokenUsage.cacheReadTokens;
+      current.tokenUsage.totalTokens += bucket.tokenUsage.totalTokens;
+      current.exactTokens += bucket.exactTokens;
+      current.estimatedTokens += bucket.estimatedTokens;
+      current.messageCount += bucket.messageCount;
+      current.sessionCount += bucket.sessionCount;
+      current.sourceIds = [...new Set([...current.sourceIds, bucket.sourceId])].sort();
+      current.quality = tokenActivityQuality(current.exactTokens, current.estimatedTokens);
+    }
+    return { from: query.from, to: query.to, days: [...days.values()].sort((a, b) => a.date.localeCompare(b.date)) };
   }
 
   getSessionMessages(
@@ -299,6 +346,13 @@ function sessionKey(session: Pick<SessionSummaryData, 'sourceId' | 'sessionId'>)
   return JSON.stringify([session.sourceId, session.sessionId]);
 }
 
+function tokenActivityQuality(exactTokens: number, estimatedTokens: number): TokenActivityDay['quality'] {
+  if (exactTokens > 0 && estimatedTokens > 0) return 'mixed';
+  if (estimatedTokens > 0) return 'estimated';
+  if (exactTokens > 0) return 'exact';
+  return 'unavailable';
+}
+
 function projectGroupKey(data: ProjectSummaryData): string {
   const normalizedPath = canonicalProjectPath(data);
   return normalizedPath ? `path:${normalizedPath}` : `member:${memberKey(data)}`;
@@ -349,6 +403,7 @@ function aggregateProjectSummaries(summaries: ProjectSummaryData[]): ProjectList
     current.tokenUsage.outputTokens += data.tokenUsage.outputTokens;
     current.tokenUsage.cacheCreationTokens += data.tokenUsage.cacheCreationTokens;
     current.tokenUsage.cacheReadTokens += data.tokenUsage.cacheReadTokens;
+    current.tokenUsage.totalTokens += data.tokenUsage.totalTokens;
     current.tokensEstimated ||= data.tokensEstimated;
     current.hasMemory ||= data.hasMemory;
     if (data.firstActiveAt < current.firstActiveAt) current.firstActiveAt = data.firstActiveAt;

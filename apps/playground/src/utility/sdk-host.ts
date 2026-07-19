@@ -46,6 +46,10 @@ async function dispatch(request: SdkRpcRequest): Promise<unknown> {
       return runtime.engine;
     case 'getProjectList':
       return runtime.read((sdk) => sdk.getProjectList());
+    case 'getProjectTokenActivity': {
+      const [project, query] = request.args;
+      return runtime.read((sdk) => sdk.getProjectTokenActivity(project, query));
+    }
     case 'getProjectMemory': {
       const [project, options] = request.args;
       return runtime.read((sdk) => sdk.getProjectMemory(project, options));

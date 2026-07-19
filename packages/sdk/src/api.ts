@@ -73,6 +73,29 @@ export interface ProjectListItem extends ProjectLocator {
   hasMemory: boolean;
 }
 
+export interface TokenActivityQuery extends SourceFilter {
+  /** Inclusive YYYY-MM-DD bounds. */
+  from: string;
+  to: string;
+}
+
+export interface TokenActivityDay {
+  date: string;
+  tokenUsage: TokenUsageSummary;
+  quality: 'exact' | 'estimated' | 'mixed' | 'unavailable';
+  exactTokens: number;
+  estimatedTokens: number;
+  messageCount: number;
+  sessionCount: number;
+  sourceIds: string[];
+}
+
+export interface TokenActivityResult {
+  from: string;
+  to: string;
+  days: TokenActivityDay[];
+}
+
 export interface SessionListItem {
   sessionId: string;
   /** Agent product this session came from (e.g. 'claude-code'). */
@@ -164,6 +187,9 @@ export interface SpaghettiAPI {
    * Project metrics are aggregated across the contributing agents.
    */
   getProjectList(options?: SourceFilter): ProjectListItem[];
+
+  /** Source-normalized daily token activity for one aggregated workspace. */
+  getProjectTokenActivity(project: ProjectReference, query: TokenActivityQuery): TokenActivityResult;
 
   /**
    * Get all sessions for a project sorted by last update. Sessions retain

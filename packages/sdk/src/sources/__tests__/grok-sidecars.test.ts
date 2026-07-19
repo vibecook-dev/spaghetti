@@ -5,7 +5,13 @@
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { buildTimestampMap, parseGrokEvents, parseGrokSignals, collectChatLineTypes } from '../grok/sidecars.js';
+import {
+  buildTimestampMap,
+  parseGrokEvents,
+  parseGrokSignals,
+  collectChatLineTypes,
+  distributeGrokSessionTokens,
+} from '../grok/sidecars.js';
 
 describe('Grok sidecars (turn-scoped join)', () => {
   test('conversation_message_count is the exact user line index', () => {
@@ -108,5 +114,23 @@ describe('Grok sidecars (turn-scoped join)', () => {
       ['{"type":"user","content":"a"}', '', '{"type":"assistant","content":"b"}', '\n'].join('\n'),
     );
     assert.deepEqual(types, ['user', 'assistant']);
+  });
+
+  test('session token estimates are distributed without changing their total', () => {
+    const allocations = distributeGrokSessionTokens(
+      [
+        '{"type":"user","content":"short"}',
+        '{"type":"assistant","content":"a much longer response"}',
+        '{"type":"reasoning","summary":"think","encrypted_content":"ignored-ciphertext"}',
+      ].join('\n'),
+      101,
+      new Set([0, 1, 2]),
+    );
+    assert.equal(
+      [...allocations.values()].reduce((sum, value) => sum + value, 0),
+      101,
+    );
+    assert.ok((allocations.get(1) ?? 0) > (allocations.get(0) ?? 0));
+    assert.ok(allocations.has(2));
   });
 });

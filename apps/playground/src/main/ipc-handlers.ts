@@ -14,6 +14,9 @@ export function registerIpcHandlers(client: SdkHostClient): void {
 
   // Projects ----------------------------------------------------------------
   ipcMain.handle(IPC_CHANNELS.getProjectList, () => client.request('getProjectList'));
+  ipcMain.handle(IPC_CHANNELS.getProjectTokenActivity, (_event, project: ProjectReference, query) =>
+    client.request('getProjectTokenActivity', project, query),
+  );
   ipcMain.handle(IPC_CHANNELS.getProjectMemory, (_event, project: ProjectReference, options?: { sourceId?: string }) =>
     client.request('getProjectMemory', project, options),
   );

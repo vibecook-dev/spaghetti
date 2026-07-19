@@ -46,6 +46,7 @@ import type {
 import type { QueryService } from '../../data/query-service.js';
 import type { IngestService } from '../../data/ingest-service.js';
 import type { AgentDataStore } from '../../data/agent-data-store.js';
+import type { TokenActivityBucketData } from '../../data/token-activity.js';
 import type { AgentDataService, AgentDataServiceOptions, LifecycleOwner } from '../../data/lifecycle-owner.js';
 import type {
   SubagentTimelinePage,
@@ -1200,6 +1201,13 @@ export class ClaudeCodeLifecycleOwner extends EventEmitter implements AgentDataS
 
   getSessionSummaries(projectSlug: string, options?: { sourceId?: string }): SessionSummaryData[] {
     return this.store.getSessionSummaries(projectSlug, options);
+  }
+
+  getProjectTokenActivity(
+    projectSlug: string,
+    options: { sourceId?: string; from: string; to: string },
+  ): TokenActivityBucketData[] {
+    return this.store.getProjectTokenActivity(projectSlug, options);
   }
 
   // ─────────────────────────────────────────────────────────────────────────

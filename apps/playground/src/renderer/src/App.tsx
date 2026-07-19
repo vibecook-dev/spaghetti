@@ -7,6 +7,7 @@ import { createIpcApi } from './ipc-api.js';
 import { LoadingScreen } from './components/LoadingScreen.js';
 import { SourceBadge, SourceBadges } from './components/SourceBadge.js';
 import { SessionMessagesView } from './components/SessionMessagesView.js';
+import { TokenActivityGraph } from './components/TokenActivityGraph.js';
 import { SearchOverlay, type SearchNavigateTarget } from './components/SearchOverlay.js';
 import { FileExplorerPanel } from './components/FileExplorerPanel.js';
 import { SettingsDialog } from './components/SettingsDialog.js';
@@ -530,13 +531,17 @@ function PlaygroundShell() {
     : undefined;
   const selectedSessionIsLive = !!selectedActivity && liveClock - selectedActivity.lastActivityAt < SESSION_LIVE_TTL_MS;
 
-  const scopeProject = selectedProject
-    ? {
-        projectId: selectedProject.projectId,
-        members: selectedProject.members,
-        folderName: selectedProject.folderName,
-      }
-    : null;
+  const scopeProject = useMemo(
+    () =>
+      selectedProject
+        ? {
+            projectId: selectedProject.projectId,
+            members: selectedProject.members,
+            folderName: selectedProject.folderName,
+          }
+        : null,
+    [selectedProject],
+  );
 
   const modKey = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform) ? '⌘' : 'Ctrl+';
 
@@ -753,6 +758,13 @@ function PlaygroundShell() {
                   </div>
                 ) : null}
               </div>
+              {scopeProject ? (
+                <TokenActivityGraph
+                  project={scopeProject}
+                  sourceId={sessionSourceFilter}
+                  activityRevision={sessionChangeNonce}
+                />
+              ) : null}
               <div className="flex-1 overflow-y-auto scrollbar-hide py-1 space-y-px">
                 {!selected && (
                   <EmptyState

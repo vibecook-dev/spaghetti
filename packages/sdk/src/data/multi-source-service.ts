@@ -37,6 +37,7 @@ import type {
   TimelinePageRequest,
 } from './timeline-query.js';
 import { ensureSqliteCacheHealthy, isSqliteCorruptError, wipeSqliteCacheFiles } from '../io/sqlite-health.js';
+import type { TokenActivityBucketData } from './token-activity.js';
 
 export class SpaghettiDataService extends EventEmitter implements AgentDataService, LifecycleInternal {
   private ready = false;
@@ -100,6 +101,8 @@ export class SpaghettiDataService extends EventEmitter implements AgentDataServi
         total,
       });
     });
+    this.emit('progress', { phase: 'storing', message: 'Aggregating token activity…' });
+    this.store.prepareTokenActivity();
     // Phase 3 — Plane 2 only after every source and projection is warm.
     for (const owner of this.owners) {
       await owner.startLivePipeline();
@@ -322,6 +325,13 @@ export class SpaghettiDataService extends EventEmitter implements AgentDataServi
 
   getProjectSummaries(options?: { sourceId?: string }): ProjectSummaryData[] {
     return this.store.getProjectSummaries(options);
+  }
+
+  getProjectTokenActivity(
+    projectSlug: string,
+    options: { sourceId?: string; from: string; to: string },
+  ): TokenActivityBucketData[] {
+    return this.store.getProjectTokenActivity(projectSlug, options);
   }
 
   getSessionSummaries(projectSlug: string, options?: { sourceId?: string }): SessionSummaryData[] {

@@ -7,6 +7,8 @@ export interface TokenUsageSummary {
   outputTokens: number;
   cacheCreationTokens: number;
   cacheReadTokens: number;
+  /** Source-normalized total; cached Codex input is not double-counted. */
+  totalTokens: number;
 }
 
 export interface SessionSummaryData {

@@ -23,6 +23,12 @@ import type {
   TimelinePageRequest,
 } from './timeline-query.js';
 import type { SubagentListItem } from '../api.js';
+import {
+  normalizedTokenTotal,
+  readTokenActivity,
+  rebuildDirtyTokenActivity,
+  type TokenActivityBucketData,
+} from './token-activity.js';
 
 // ═══════════════════════════════════════════════════════════════════════════
 // INTERFACE
@@ -36,6 +42,8 @@ export interface QueryService {
   prepareTimelineProjections(
     onProgress?: (progress: { kind: 'session' | 'subagent'; current: number; total: number }) => void,
   ): { sessions: number; subagents: number };
+  /** Materialize or refresh source-normalized daily token buckets. */
+  prepareTokenActivity(): number;
 
   // Projects
   getProjectSlugs(): string[];
@@ -43,6 +51,10 @@ export interface QueryService {
   getSourceIds(): string[];
   getProjectSummaries(options?: { sourceId?: string }): ProjectSummaryData[];
   getSessionSummaries(projectSlug: string, options?: { sourceId?: string }): SessionSummaryData[];
+  getProjectTokenActivity(
+    projectSlug: string,
+    options: { sourceId?: string; from: string; to: string },
+  ): TokenActivityBucketData[];
   /**
    * Distinct `project_slug` values present in `messages` but absent
    * from `projects`. Used by warm-start recovery to detect orphaned
@@ -307,6 +319,10 @@ class QueryServiceImpl implements QueryService {
     return { sessions, subagents };
   }
 
+  prepareTokenActivity(): number {
+    return rebuildDirtyTokenActivity(this.db);
+  }
+
   // ─────────────────────────────────────────────────────────────────────────
   // Projects
   // ─────────────────────────────────────────────────────────────────────────
@@ -353,10 +369,14 @@ class QueryServiceImpl implements QueryService {
         ) AS original_path,
         (SELECT COUNT(*) FROM sessions WHERE project_slug = p.slug AND source_id = p.source_id) as session_count,
         COALESCE((SELECT SUM(mc.cnt) FROM (SELECT COUNT(*) as cnt FROM messages WHERE project_slug = p.slug AND source_id = p.source_id GROUP BY session_id) mc), 0) as message_count,
-        COALESCE((SELECT SUM(input_tokens) FROM messages WHERE project_slug = p.slug AND source_id = p.source_id), 0) as input_tokens,
-        COALESCE((SELECT SUM(output_tokens) FROM messages WHERE project_slug = p.slug AND source_id = p.source_id), 0) as output_tokens,
-        COALESCE((SELECT SUM(cache_creation_tokens) FROM messages WHERE project_slug = p.slug AND source_id = p.source_id), 0) as cache_creation_tokens,
-        COALESCE((SELECT SUM(cache_read_tokens) FROM messages WHERE project_slug = p.slug AND source_id = p.source_id), 0) as cache_read_tokens,
+        COALESCE((SELECT SUM(input_tokens) FROM messages WHERE project_slug = p.slug AND source_id = p.source_id), 0)
+          + COALESCE((SELECT SUM(input_tokens) FROM subagent_messages WHERE project_slug = p.slug AND source_id = p.source_id), 0) as input_tokens,
+        COALESCE((SELECT SUM(output_tokens) FROM messages WHERE project_slug = p.slug AND source_id = p.source_id), 0)
+          + COALESCE((SELECT SUM(output_tokens) FROM subagent_messages WHERE project_slug = p.slug AND source_id = p.source_id), 0) as output_tokens,
+        COALESCE((SELECT SUM(cache_creation_tokens) FROM messages WHERE project_slug = p.slug AND source_id = p.source_id), 0)
+          + COALESCE((SELECT SUM(cache_creation_tokens) FROM subagent_messages WHERE project_slug = p.slug AND source_id = p.source_id), 0) as cache_creation_tokens,
+        COALESCE((SELECT SUM(cache_read_tokens) FROM messages WHERE project_slug = p.slug AND source_id = p.source_id), 0)
+          + COALESCE((SELECT SUM(cache_read_tokens) FROM subagent_messages WHERE project_slug = p.slug AND source_id = p.source_id), 0) as cache_read_tokens,
         COALESCE((SELECT MAX(tokens_estimated) FROM sessions WHERE project_slug = p.slug AND source_id = p.source_id), 0) as tokens_estimated,
         COALESCE((SELECT MAX(modified_at) FROM sessions WHERE project_slug = p.slug AND source_id = p.source_id), '1970-01-01') as last_active_at,
         COALESCE((SELECT MIN(created_at) FROM sessions WHERE project_slug = p.slug AND source_id = p.source_id), '1970-01-01') as first_active_at,
@@ -373,6 +393,13 @@ class QueryServiceImpl implements QueryService {
     );
 
     return rows.map((row) => this.toProjectSummary(row));
+  }
+
+  getProjectTokenActivity(
+    projectSlug: string,
+    options: { sourceId?: string; from: string; to: string },
+  ): TokenActivityBucketData[] {
+    return readTokenActivity(this.db, projectSlug, options);
   }
 
   getSessionSummaries(projectSlug: string, options?: { sourceId?: string }): SessionSummaryData[] {
@@ -393,10 +420,14 @@ class QueryServiceImpl implements QueryService {
         COALESCE(s.created_at, '1970-01-01') as created_at,
         COALESCE(s.modified_at, '1970-01-01') as modified_at,
         COALESCE((SELECT COUNT(*) FROM messages WHERE session_id = s.id AND project_slug = s.project_slug AND source_id = s.source_id), 0) as message_count,
-        COALESCE((SELECT SUM(input_tokens) FROM messages WHERE session_id = s.id AND project_slug = s.project_slug AND source_id = s.source_id), 0) as input_tokens,
-        COALESCE((SELECT SUM(output_tokens) FROM messages WHERE session_id = s.id AND project_slug = s.project_slug AND source_id = s.source_id), 0) as output_tokens,
-        COALESCE((SELECT SUM(cache_creation_tokens) FROM messages WHERE session_id = s.id AND project_slug = s.project_slug AND source_id = s.source_id), 0) as cache_creation_tokens,
-        COALESCE((SELECT SUM(cache_read_tokens) FROM messages WHERE session_id = s.id AND project_slug = s.project_slug AND source_id = s.source_id), 0) as cache_read_tokens,
+        COALESCE((SELECT SUM(input_tokens) FROM messages WHERE session_id = s.id AND project_slug = s.project_slug AND source_id = s.source_id), 0)
+          + COALESCE((SELECT SUM(input_tokens) FROM subagent_messages WHERE session_id = s.id AND project_slug = s.project_slug AND source_id = s.source_id), 0) as input_tokens,
+        COALESCE((SELECT SUM(output_tokens) FROM messages WHERE session_id = s.id AND project_slug = s.project_slug AND source_id = s.source_id), 0)
+          + COALESCE((SELECT SUM(output_tokens) FROM subagent_messages WHERE session_id = s.id AND project_slug = s.project_slug AND source_id = s.source_id), 0) as output_tokens,
+        COALESCE((SELECT SUM(cache_creation_tokens) FROM messages WHERE session_id = s.id AND project_slug = s.project_slug AND source_id = s.source_id), 0)
+          + COALESCE((SELECT SUM(cache_creation_tokens) FROM subagent_messages WHERE session_id = s.id AND project_slug = s.project_slug AND source_id = s.source_id), 0) as cache_creation_tokens,
+        COALESCE((SELECT SUM(cache_read_tokens) FROM messages WHERE session_id = s.id AND project_slug = s.project_slug AND source_id = s.source_id), 0)
+          + COALESCE((SELECT SUM(cache_read_tokens) FROM subagent_messages WHERE session_id = s.id AND project_slug = s.project_slug AND source_id = s.source_id), 0) as cache_read_tokens,
         COALESCE(s.tokens_estimated, 0) as tokens_estimated,
         COALESCE((SELECT COUNT(*) FROM todos WHERE session_id = s.id), 0) as todo_count,
         s.plan_slug,
@@ -1147,7 +1178,9 @@ class QueryServiceImpl implements QueryService {
       outputTokens: row.output_tokens,
       cacheCreationTokens: row.cache_creation_tokens,
       cacheReadTokens: row.cache_read_tokens,
+      totalTokens: 0,
     };
+    tokenUsage.totalTokens = normalizedTokenTotal(row.source_id, tokenUsage);
 
     return {
       slug: row.slug,
@@ -1185,7 +1218,9 @@ class QueryServiceImpl implements QueryService {
       outputTokens: row.output_tokens,
       cacheCreationTokens: row.cache_creation_tokens,
       cacheReadTokens: row.cache_read_tokens,
+      totalTokens: 0,
     };
+    tokenUsage.totalTokens = normalizedTokenTotal(row.source_id, tokenUsage);
 
     return {
       sessionId: row.id,

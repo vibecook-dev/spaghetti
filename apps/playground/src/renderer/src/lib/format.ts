@@ -8,10 +8,13 @@ export interface TokenUsageLike {
   outputTokens: number;
   cacheCreationTokens: number;
   cacheReadTokens: number;
+  totalTokens?: number;
 }
 
 export function totalTokens(usage: TokenUsageLike): number {
-  return usage.inputTokens + usage.outputTokens + usage.cacheCreationTokens + usage.cacheReadTokens;
+  return (
+    usage.totalTokens ?? usage.inputTokens + usage.outputTokens + usage.cacheCreationTokens + usage.cacheReadTokens
+  );
 }
 
 export function formatTokens(n: number): string {

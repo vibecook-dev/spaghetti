@@ -114,6 +114,7 @@ export const DEBUG_PROJECT: ProjectListItem = {
     outputTokens: 12_480,
     cacheCreationTokens: 2_048,
     cacheReadTokens: 96_000,
+    totalTokens: 158_848,
   },
   tokensEstimated: false,
   lastActiveAt: timestamp(900),

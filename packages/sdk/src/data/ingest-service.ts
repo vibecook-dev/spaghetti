@@ -26,7 +26,7 @@ import type { IngestEngine } from '../settings.js';
 import type { IngestHooks, MessageExtractor, SessionTokenApi } from '../sources/types.js';
 import { claudeCodeMessageExtractor } from '../sources/claude-code/message-extractor.js';
 import type { SourceFingerprint } from './segment-types.js';
-import { initializeSchema } from './schema.js';
+import { initializeSchema, TOKEN_ACTIVITY_TRIGGER_NAMES, TOKEN_ACTIVITY_TRIGGERS_SQL } from './schema.js';
 import { projectTimelineRawMessage } from './timeline-projection.js';
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -369,8 +369,9 @@ class IngestServiceImpl implements IngestService {
 
     this.stmtInsertSubagentMessage = this.db.prepare(
       `INSERT INTO subagent_messages
-         (source_id, project_slug, session_id, workflow_id, agent_id, msg_index, timestamp, data)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+         (source_id, project_slug, session_id, workflow_id, agent_id, msg_index, timestamp,
+          input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, data)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );
 
     this.stmtInsertWorkflow = this.db.prepare(
@@ -577,6 +578,7 @@ class IngestServiceImpl implements IngestService {
     this.stmtDeleteSubagentMessages.run(this.sourceId, sessionId, transcript.workflowId, transcript.agentId);
     for (let index = 0; index < transcript.messages.length; index++) {
       const message = transcript.messages[index] as unknown as Record<string, unknown>;
+      const extracted = this.messageExtractor.extract(message);
       this.stmtInsertSubagentMessage.run(
         this.sourceId,
         slug,
@@ -584,7 +586,11 @@ class IngestServiceImpl implements IngestService {
         transcript.workflowId,
         transcript.agentId,
         index,
-        typeof message.timestamp === 'string' ? message.timestamp : null,
+        extracted?.timestamp ?? (typeof message.timestamp === 'string' ? message.timestamp : null),
+        extracted?.tokens.inputTokens ?? 0,
+        extracted?.tokens.outputTokens ?? 0,
+        extracted?.tokens.cacheCreationTokens ?? 0,
+        extracted?.tokens.cacheReadTokens ?? 0,
         JSON.stringify(message),
       );
     }
@@ -765,6 +771,13 @@ class IngestServiceImpl implements IngestService {
     } catch {
       /* ignore */
     }
+    for (const trigger of TOKEN_ACTIVITY_TRIGGER_NAMES) {
+      try {
+        this.db.exec(`DROP TRIGGER IF EXISTS ${trigger}`);
+      } catch {
+        /* ignore */
+      }
+    }
 
     // Fast path: aggressive PRAGMAs. Safe path (desktop / live:true): keep
     // durable defaults so a kill mid-ingest is less likely to corrupt the cache.
@@ -809,6 +822,22 @@ class IngestServiceImpl implements IngestService {
       this.rebuildFts();
     } catch {
       /* ignore */
+    }
+
+    // Restore live dirty tracking, then mark each imported day once. The
+    // materializer will collapse a broad cold import into one full scan.
+    try {
+      this.db.exec(TOKEN_ACTIVITY_TRIGGERS_SQL);
+      this.db.exec(`
+        INSERT OR IGNORE INTO token_activity_dirty(source_id, project_slug, activity_day)
+        SELECT DISTINCT source_id, project_slug, substr(timestamp, 1, 10)
+          FROM messages WHERE timestamp IS NOT NULL AND length(timestamp) >= 10;
+        INSERT OR IGNORE INTO token_activity_dirty(source_id, project_slug, activity_day)
+        SELECT DISTINCT source_id, project_slug, substr(timestamp, 1, 10)
+          FROM subagent_messages WHERE timestamp IS NOT NULL AND length(timestamp) >= 10;
+      `);
+    } catch {
+      /* ignore — schema recovery can rebuild the derived table on demand */
     }
 
     // Restore safe PRAGMAs
@@ -959,6 +988,8 @@ class IngestServiceImpl implements IngestService {
     this.db.run('DELETE FROM subagent_messages WHERE source_id = ?', this.sourceId);
     this.db.run('DELETE FROM subagent_dirty_threads WHERE source_id = ?', this.sourceId);
     this.db.run('DELETE FROM subagents WHERE source_id = ?', this.sourceId);
+    this.db.run('DELETE FROM token_activity_daily WHERE source_id = ?', this.sourceId);
+    this.db.run('DELETE FROM token_activity_dirty WHERE source_id = ?', this.sourceId);
     this.db.run('DELETE FROM sessions WHERE source_id = ?', this.sourceId);
     this.db.run('DELETE FROM projects WHERE source_id = ?', this.sourceId);
     this.db.run('DELETE FROM source_files WHERE source_id = ?', this.sourceId);
@@ -981,6 +1012,8 @@ class IngestServiceImpl implements IngestService {
       'subagent_messages',
       'subagent_timeline_messages',
       'subagent_dirty_threads',
+      'token_activity_daily',
+      'token_activity_dirty',
       'workflows',
       'tool_results',
       'todos',

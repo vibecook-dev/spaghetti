@@ -41,7 +41,71 @@ import type { SqliteService } from '../io/index.js';
 // its canonical raw index, and tool results are stored as explicit
 // associations so append-only live ingest can update one call without
 // invalidating and rebuilding the entire session.
-export const SCHEMA_VERSION = 10;
+//
+// v11: subagent token columns plus source-normalized daily token activity.
+// Canonical message triggers mark affected project-days dirty; the shared
+// query layer rebuilds only those buckets and cold ingest materializes all.
+export const SCHEMA_VERSION = 11;
+
+export const TOKEN_ACTIVITY_TRIGGER_NAMES = [
+  'token_activity_messages_ai',
+  'token_activity_messages_ad',
+  'token_activity_messages_au',
+  'token_activity_subagents_ai',
+  'token_activity_subagents_ad',
+  'token_activity_subagents_au',
+  'token_activity_session_quality_au',
+] as const;
+
+/** Reused after bulk ingest temporarily suppresses per-row dirty markers. */
+export const TOKEN_ACTIVITY_TRIGGERS_SQL = `
+CREATE TRIGGER IF NOT EXISTS token_activity_messages_ai AFTER INSERT ON messages
+WHEN new.timestamp IS NOT NULL AND length(new.timestamp) >= 10 BEGIN
+  INSERT OR IGNORE INTO token_activity_dirty(source_id, project_slug, activity_day)
+  VALUES (new.source_id, new.project_slug, substr(new.timestamp, 1, 10));
+END;
+CREATE TRIGGER IF NOT EXISTS token_activity_messages_ad AFTER DELETE ON messages
+WHEN old.timestamp IS NOT NULL AND length(old.timestamp) >= 10 BEGIN
+  INSERT OR IGNORE INTO token_activity_dirty(source_id, project_slug, activity_day)
+  VALUES (old.source_id, old.project_slug, substr(old.timestamp, 1, 10));
+END;
+CREATE TRIGGER IF NOT EXISTS token_activity_messages_au
+AFTER UPDATE OF timestamp, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, source_id, project_slug ON messages BEGIN
+  INSERT OR IGNORE INTO token_activity_dirty(source_id, project_slug, activity_day)
+  SELECT old.source_id, old.project_slug, substr(old.timestamp, 1, 10)
+   WHERE old.timestamp IS NOT NULL AND length(old.timestamp) >= 10;
+  INSERT OR IGNORE INTO token_activity_dirty(source_id, project_slug, activity_day)
+  SELECT new.source_id, new.project_slug, substr(new.timestamp, 1, 10)
+   WHERE new.timestamp IS NOT NULL AND length(new.timestamp) >= 10;
+END;
+CREATE TRIGGER IF NOT EXISTS token_activity_subagents_ai AFTER INSERT ON subagent_messages
+WHEN new.timestamp IS NOT NULL AND length(new.timestamp) >= 10 BEGIN
+  INSERT OR IGNORE INTO token_activity_dirty(source_id, project_slug, activity_day)
+  VALUES (new.source_id, new.project_slug, substr(new.timestamp, 1, 10));
+END;
+CREATE TRIGGER IF NOT EXISTS token_activity_subagents_ad AFTER DELETE ON subagent_messages
+WHEN old.timestamp IS NOT NULL AND length(old.timestamp) >= 10 BEGIN
+  INSERT OR IGNORE INTO token_activity_dirty(source_id, project_slug, activity_day)
+  VALUES (old.source_id, old.project_slug, substr(old.timestamp, 1, 10));
+END;
+CREATE TRIGGER IF NOT EXISTS token_activity_subagents_au
+AFTER UPDATE OF timestamp, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, source_id, project_slug ON subagent_messages BEGIN
+  INSERT OR IGNORE INTO token_activity_dirty(source_id, project_slug, activity_day)
+  SELECT old.source_id, old.project_slug, substr(old.timestamp, 1, 10)
+   WHERE old.timestamp IS NOT NULL AND length(old.timestamp) >= 10;
+  INSERT OR IGNORE INTO token_activity_dirty(source_id, project_slug, activity_day)
+  SELECT new.source_id, new.project_slug, substr(new.timestamp, 1, 10)
+   WHERE new.timestamp IS NOT NULL AND length(new.timestamp) >= 10;
+END;
+CREATE TRIGGER IF NOT EXISTS token_activity_session_quality_au AFTER UPDATE OF tokens_estimated ON sessions BEGIN
+  INSERT OR IGNORE INTO token_activity_dirty(source_id, project_slug, activity_day)
+  SELECT source_id, project_slug, substr(timestamp, 1, 10) FROM messages
+   WHERE session_id = new.id AND source_id = new.source_id AND timestamp IS NOT NULL AND length(timestamp) >= 10;
+  INSERT OR IGNORE INTO token_activity_dirty(source_id, project_slug, activity_day)
+  SELECT source_id, project_slug, substr(timestamp, 1, 10) FROM subagent_messages
+   WHERE session_id = new.id AND source_id = new.source_id AND timestamp IS NOT NULL AND length(timestamp) >= 10;
+END;
+`;
 
 export const SCHEMA_SQL = `
 -- Meta
@@ -168,6 +232,10 @@ CREATE TABLE IF NOT EXISTS subagent_messages (
   agent_id TEXT NOT NULL,
   msg_index INTEGER NOT NULL,
   timestamp TEXT,
+  input_tokens INTEGER DEFAULT 0,
+  output_tokens INTEGER DEFAULT 0,
+  cache_creation_tokens INTEGER DEFAULT 0,
+  cache_read_tokens INTEGER DEFAULT 0,
   data TEXT NOT NULL,
   UNIQUE(source_id, session_id, workflow_id, agent_id, msg_index)
 );
@@ -195,6 +263,29 @@ CREATE TABLE IF NOT EXISTS subagent_dirty_threads (
   workflow_id TEXT NOT NULL DEFAULT '',
   agent_id TEXT NOT NULL,
   PRIMARY KEY(source_id, session_id, workflow_id, agent_id)
+);
+
+CREATE TABLE IF NOT EXISTS token_activity_daily (
+  source_id TEXT NOT NULL,
+  project_slug TEXT NOT NULL,
+  activity_day TEXT NOT NULL,
+  input_tokens INTEGER NOT NULL DEFAULT 0,
+  output_tokens INTEGER NOT NULL DEFAULT 0,
+  cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
+  cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+  total_tokens INTEGER NOT NULL DEFAULT 0,
+  exact_tokens INTEGER NOT NULL DEFAULT 0,
+  estimated_tokens INTEGER NOT NULL DEFAULT 0,
+  message_count INTEGER NOT NULL DEFAULT 0,
+  session_count INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (source_id, project_slug, activity_day)
+);
+
+CREATE TABLE IF NOT EXISTS token_activity_dirty (
+  source_id TEXT NOT NULL,
+  project_slug TEXT NOT NULL,
+  activity_day TEXT NOT NULL,
+  PRIMARY KEY (source_id, project_slug, activity_day)
 );
 
 CREATE TABLE IF NOT EXISTS workflows (
@@ -272,6 +363,7 @@ CREATE TABLE IF NOT EXISTS file_history (
 CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project_slug);
 CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(project_slug, session_id);
 CREATE INDEX IF NOT EXISTS idx_messages_session_idx ON messages(session_id, msg_index);
+CREATE INDEX IF NOT EXISTS idx_messages_activity_day ON messages(source_id, project_slug, substr(timestamp, 1, 10));
 CREATE INDEX IF NOT EXISTS idx_timeline_session_idx ON timeline_messages(session_id, timeline_index);
 CREATE INDEX IF NOT EXISTS idx_timeline_session_raw ON timeline_messages(session_id, raw_index);
 CREATE INDEX IF NOT EXISTS idx_timeline_session_type ON timeline_messages(session_id, display_type, timeline_index);
@@ -280,6 +372,8 @@ CREATE INDEX IF NOT EXISTS idx_timeline_session_tool_id ON timeline_messages(ses
 CREATE INDEX IF NOT EXISTS idx_timeline_results_tool ON timeline_tool_results(session_id, tool_use_id, raw_index);
 CREATE INDEX IF NOT EXISTS idx_subagents_session ON subagents(source_id, project_slug, session_id);
 CREATE INDEX IF NOT EXISTS idx_subagent_messages_thread ON subagent_messages(source_id, session_id, workflow_id, agent_id, msg_index);
+CREATE INDEX IF NOT EXISTS idx_subagent_messages_activity_day ON subagent_messages(source_id, project_slug, substr(timestamp, 1, 10));
+CREATE INDEX IF NOT EXISTS idx_token_activity_project_day ON token_activity_daily(project_slug, activity_day, source_id);
 CREATE INDEX IF NOT EXISTS idx_subagent_timeline_thread ON subagent_timeline_messages(source_id, session_id, workflow_id, agent_id, timeline_index);
 CREATE INDEX IF NOT EXISTS idx_subagent_timeline_type ON subagent_timeline_messages(source_id, session_id, display_type);
 CREATE INDEX IF NOT EXISTS idx_subagent_timeline_tool ON subagent_timeline_messages(source_id, session_id, tool_name);
@@ -353,6 +447,11 @@ CREATE TRIGGER IF NOT EXISTS subagent_dirty_au AFTER UPDATE ON subagent_messages
   VALUES (new.source_id, new.project_slug, new.session_id, new.workflow_id, new.agent_id)
   ON CONFLICT(source_id, session_id, workflow_id, agent_id) DO UPDATE SET project_slug = excluded.project_slug;
 END;
+
+-- Daily token activity is derived from canonical rows. Mutations only mark
+-- days dirty; recomputation avoids fragile arithmetic when rows are upserted
+-- or sidecars later change token/timestamp attribution.
+${TOKEN_ACTIVITY_TRIGGERS_SQL}
 `;
 
 /**
@@ -378,6 +477,8 @@ const CURRENT_TABLES = [
   'subagent_messages',
   'subagent_timeline_messages',
   'subagent_dirty_threads',
+  'token_activity_daily',
+  'token_activity_dirty',
   'workflows',
   'tool_results',
   'todos',
@@ -448,6 +549,13 @@ export function initializeSchema(db: SqliteService): void {
       'subagent_dirty_ai',
       'subagent_dirty_ad',
       'subagent_dirty_au',
+      'token_activity_messages_ai',
+      'token_activity_messages_ad',
+      'token_activity_messages_au',
+      'token_activity_subagents_ai',
+      'token_activity_subagents_ad',
+      'token_activity_subagents_au',
+      'token_activity_session_quality_au',
     ]) {
       try {
         db.exec(`DROP TRIGGER IF EXISTS ${trigger}`);

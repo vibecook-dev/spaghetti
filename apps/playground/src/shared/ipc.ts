@@ -28,6 +28,8 @@ import type {
   SubagentMessagePage,
   SubagentTimelinePage,
   SubagentTimelinePageRequest,
+  TokenActivityQuery,
+  TokenActivityResult,
 } from '@vibecook/spaghetti-sdk';
 import type {
   InitProgress,
@@ -75,6 +77,7 @@ export interface SpaghettiIPC {
 
   // Projects ----------------------------------------------------------------
   getProjectList(): Promise<ProjectListItem[]>;
+  getProjectTokenActivity(project: ProjectReference, query: TokenActivityQuery): Promise<TokenActivityResult>;
   getProjectMemory(project: ProjectReference, options?: SourceFilter): Promise<string | null>;
 
   // Sessions ----------------------------------------------------------------
@@ -147,6 +150,7 @@ export const IPC_CHANNELS = {
   retryInit: 'spaghetti:retryInit',
   getEngine: 'spaghetti:getEngine',
   getProjectList: 'spaghetti:getProjectList',
+  getProjectTokenActivity: 'spaghetti:getProjectTokenActivity',
   getProjectMemory: 'spaghetti:getProjectMemory',
   getSessionList: 'spaghetti:getSessionList',
   getSessionMessages: 'spaghetti:getSessionMessages',

@@ -233,7 +233,22 @@ describe('IngestService.writeBatch (RFC 005 C2.6)', () => {
       agentId: 'a-xyz',
       agentType: 'task',
       fileName: 'agent-a-xyz.jsonl',
-      messages: [{ type: 'user', message: { role: 'user', content: 'go' } } as unknown as SessionMessage],
+      messages: [
+        {
+          type: 'assistant',
+          timestamp: '2026-04-20T00:00:02Z',
+          message: {
+            role: 'assistant',
+            content: 'go',
+            usage: {
+              input_tokens: 12,
+              output_tokens: 3,
+              cache_creation_input_tokens: 5,
+              cache_read_input_tokens: 7,
+            },
+          },
+        } as unknown as SessionMessage,
+      ],
       workflowId: '',
     };
 
@@ -253,6 +268,15 @@ describe('IngestService.writeBatch (RFC 005 C2.6)', () => {
     assert.ok(dbRow);
     assert.equal(dbRow.agent_id, 'a-xyz');
     assert.equal(dbRow.message_count, 1);
+    assert.deepEqual(
+      sqlite.get<{
+        input_tokens: number;
+        output_tokens: number;
+        cache_creation_tokens: number;
+        cache_read_tokens: number;
+      }>('SELECT input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens FROM subagent_messages'),
+      { input_tokens: 12, output_tokens: 3, cache_creation_tokens: 5, cache_read_tokens: 7 },
+    );
   });
 
   test('tool_result row → INSERT into tool_results + tool-result.added event', async () => {
@@ -554,6 +578,12 @@ describe('IngestService.writeBatch (RFC 005 C2.6)', () => {
 
   test('beginBulkIngest + endBulkIngest still work alongside writeBatch', () => {
     assert.doesNotThrow(() => ingest.beginBulkIngest());
+    assert.equal(
+      sqlite.get<{ count: number }>(
+        `SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'trigger' AND name = 'token_activity_messages_ai'`,
+      )?.count,
+      0,
+    );
     sqlite.run(
       `INSERT INTO messages (project_slug, session_id, msg_index, msg_type, uuid, timestamp, data, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, text_content, byte_offset)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -572,6 +602,19 @@ describe('IngestService.writeBatch (RFC 005 C2.6)', () => {
       0,
     );
     assert.doesNotThrow(() => ingest.endBulkIngest());
+    assert.equal(
+      sqlite.get<{ count: number }>(
+        `SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'trigger' AND name = 'token_activity_messages_ai'`,
+      )?.count,
+      1,
+    );
+    assert.equal(
+      sqlite.get<{ count: number }>(
+        `SELECT COUNT(*) AS count FROM token_activity_dirty WHERE project_slug = ? AND activity_day = '2026-04-20'`,
+        SLUG,
+      )?.count,
+      1,
+    );
   });
 });
 

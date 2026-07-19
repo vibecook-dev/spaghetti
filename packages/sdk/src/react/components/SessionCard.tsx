@@ -17,7 +17,7 @@ export function SessionCard({
   onPlanClick?: () => void;
   onTaskClick?: () => void;
 }) {
-  const totalTokens = session.tokenUsage.inputTokens + session.tokenUsage.outputTokens;
+  const totalTokens = session.tokenUsage.totalTokens;
 
   return (
     <button

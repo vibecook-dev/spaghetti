@@ -27,9 +27,10 @@
  *
  * ## Session tokens
  *
- * `signals.contextTokensUsed` is a session aggregate. Attribute it to the last
- * assistant message and set `tokens_estimated=1` so the UI never treats it as
- * per-message API usage.
+ * `signals.contextTokensUsed` is a session aggregate. Distribute it across
+ * timestamped retained records by readable-content weight and mark the session
+ * estimated. This preserves the session total without creating a false spike
+ * on the last assistant/day.
  */
 
 import * as path from 'node:path';
@@ -241,6 +242,67 @@ export function collectChatLineTypes(chatText: string): string[] {
   return types;
 }
 
+function grokRecordWeight(record: Record<string, unknown>): number {
+  const type = typeof record.type === 'string' ? record.type : '';
+  let value: unknown;
+  switch (type) {
+    case 'system':
+    case 'user':
+      value = record.content;
+      break;
+    case 'assistant':
+      value = [record.content, record.tool_calls];
+      break;
+    case 'reasoning':
+      // encrypted_content is ciphertext, not a meaningful token proxy.
+      value = record.summary;
+      break;
+    case 'tool_result':
+    case 'backend_tool_call':
+      value = record;
+      break;
+    default:
+      return 0;
+  }
+  const serialized = typeof value === 'string' ? value : JSON.stringify(value ?? '');
+  return Math.max(1, serialized.length);
+}
+
+/** Largest-remainder allocation keeps the estimated session total exact. */
+export function distributeGrokSessionTokens(
+  chatText: string,
+  totalTokens: number,
+  eligibleIndexes?: ReadonlySet<number>,
+): Map<number, number> {
+  const weighted: Array<{ index: number; weight: number; fraction: number; tokens: number }> = [];
+  let absoluteIndex = 0;
+  for (const line of chatText.split('\n')) {
+    if (!line.trim()) continue;
+    try {
+      const record = JSON.parse(line) as Record<string, unknown>;
+      const weight = eligibleIndexes && !eligibleIndexes.has(absoluteIndex) ? 0 : grokRecordWeight(record);
+      if (weight > 0) weighted.push({ index: absoluteIndex, weight, fraction: 0, tokens: 0 });
+    } catch {
+      /* invalid records are not persisted */
+    }
+    absoluteIndex++;
+  }
+  const safeTotal = Math.max(0, Math.floor(totalTokens));
+  const weightTotal = weighted.reduce((sum, row) => sum + row.weight, 0);
+  if (safeTotal === 0 || weightTotal === 0) return new Map();
+
+  let assigned = 0;
+  for (const row of weighted) {
+    const exact = (safeTotal * row.weight) / weightTotal;
+    row.tokens = Math.floor(exact);
+    row.fraction = exact - row.tokens;
+    assigned += row.tokens;
+  }
+  weighted.sort((a, b) => b.fraction - a.fraction || a.index - b.index);
+  for (let i = 0; i < safeTotal - assigned; i++) weighted[i % weighted.length]!.tokens++;
+  return new Map(weighted.filter((row) => row.tokens > 0).map((row) => [row.index, row.tokens]));
+}
+
 /**
  * Load sibling sidecars for a chat_history path and apply timestamps + tokens
  * via the shared SessionTokenApi (TS writer).
@@ -250,12 +312,14 @@ export function applyGrokSidecars(
   chatHistoryFile: string,
   sessionId: string,
   api: SessionTokenApi,
-  opts?: { fallbackCreated?: string | null; lastAssistantIndex?: number | null },
+  opts?: { fallbackCreated?: string | null },
 ): void {
   const sessionDir = path.dirname(chatHistoryFile);
+  let chatText: string;
   let lineTypes: string[];
   try {
-    lineTypes = collectChatLineTypes(fileService.readFileSync(chatHistoryFile));
+    chatText = fileService.readFileSync(chatHistoryFile);
+    lineTypes = collectChatLineTypes(chatText);
   } catch {
     return;
   }
@@ -291,22 +355,14 @@ export function applyGrokSidecars(
   }
   if (!signals || signals.contextTokensUsed <= 0) return;
 
-  let lastAssistant = opts?.lastAssistantIndex ?? null;
-  if (lastAssistant == null) {
-    for (let i = lineTypes.length - 1; i >= 0; i--) {
-      if (lineTypes[i] === 'assistant') {
-        lastAssistant = i;
-        break;
-      }
-    }
+  const allocations = distributeGrokSessionTokens(chatText, signals.contextTokensUsed, new Set(tsMap.keys()));
+  for (const [msgIndex, inputTokens] of allocations) {
+    api.updateMessageTokens(sessionId, msgIndex, {
+      inputTokens,
+      outputTokens: 0,
+      cacheCreationTokens: 0,
+      cacheReadTokens: 0,
+    });
   }
-  if (lastAssistant == null) return;
-
-  api.updateMessageTokens(sessionId, lastAssistant, {
-    inputTokens: signals.contextTokensUsed,
-    outputTokens: 0,
-    cacheCreationTokens: 0,
-    cacheReadTokens: 0,
-  });
   api.setSessionTokensEstimated(sessionId, true);
 }

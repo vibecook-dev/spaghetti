@@ -28,7 +28,7 @@ export function ProjectCard({
       <div className="flex gap-3 text-[10px] text-white/40">
         <span>{project.sessionCount} sessions</span>
         <span>{project.messageCount} msgs</span>
-        <span>{formatTokenCount(project.tokenUsage.inputTokens + project.tokenUsage.outputTokens)} tokens</span>
+        <span>{formatTokenCount(project.tokenUsage.totalTokens)} tokens</span>
       </div>
       <div className="flex gap-1 mt-1">
         {project.latestGitBranch && (

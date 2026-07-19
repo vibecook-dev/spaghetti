@@ -23,6 +23,7 @@ import type {
   StoreStats,
 } from './segment-types.js';
 import type { SessionSummaryData, ProjectSummaryData } from './summary-types.js';
+import type { TokenActivityBucketData } from './token-activity.js';
 import type { Project, Session, SessionMessage, AgentConfig, AgentAnalytic } from '../types/index.js';
 import type { AgentDataStore } from './agent-data-store.js';
 import type { LiveWatch } from '../live/live-watch.js';
@@ -105,6 +106,10 @@ export interface AgentDataService extends EventEmitter {
   getSourceIds(): string[];
   getProjectSummaries(options?: { sourceId?: string }): ProjectSummaryData[];
   getSessionSummaries(projectSlug: string, options?: { sourceId?: string }): SessionSummaryData[];
+  getProjectTokenActivity(
+    projectSlug: string,
+    options: { sourceId?: string; from: string; to: string },
+  ): TokenActivityBucketData[];
 
   getProjectMemory(slug: string, options?: { sourceId?: string }): string | null;
   getSessionTodos(slug: string, sessionId: string): unknown[];

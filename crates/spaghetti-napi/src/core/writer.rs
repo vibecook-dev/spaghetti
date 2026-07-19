@@ -247,9 +247,10 @@ WHERE source_id = ? AND session_id = ? AND workflow_id = ? AND agent_id = ?
 
 const SQL_INSERT_SUBAGENT_MESSAGE: &str = r#"
 INSERT INTO subagent_messages (
-  source_id, project_slug, session_id, workflow_id, agent_id, msg_index, timestamp, data
+  source_id, project_slug, session_id, workflow_id, agent_id, msg_index, timestamp,
+  input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, data
 )
-VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 "#;
 
 const SQL_INSERT_WORKFLOW: &str = r#"
@@ -782,6 +783,28 @@ impl Writer {
 /// `WorkerError`, `ClearSourceFiles`) are rejected here — they're
 /// control-flow events, not row writes, and belong in the caller's
 /// state machine.
+fn subagent_message_tokens(value: &serde_json::Value, source_id: &str) -> [i64; 4] {
+    if source_id != "claude-code" || value.get("type").and_then(|v| v.as_str()) != Some("assistant")
+    {
+        return [0, 0, 0, 0];
+    }
+    let usage = value
+        .get("message")
+        .and_then(|message| message.get("usage"));
+    let number = |key: &str| {
+        usage
+            .and_then(|candidate| candidate.get(key))
+            .and_then(|candidate| candidate.as_u64())
+            .unwrap_or(0) as i64
+    };
+    [
+        number("input_tokens"),
+        number("output_tokens"),
+        number("cache_creation_input_tokens"),
+        number("cache_read_input_tokens"),
+    ]
+}
+
 pub fn dispatch_event(
     conn: &Connection,
     ev: &IngestEvent,
@@ -914,6 +937,7 @@ pub fn dispatch_event(
             )?;
             for (index, message) in transcript.messages.iter().enumerate() {
                 let value = serde_json::to_value(message)?;
+                let tokens = subagent_message_tokens(&value, source_id);
                 let timestamp = value
                     .get("timestamp")
                     .and_then(|candidate| candidate.as_str())
@@ -928,6 +952,10 @@ pub fn dispatch_event(
                         transcript.agent_id,
                         index as i64,
                         timestamp,
+                        tokens[0],
+                        tokens[1],
+                        tokens[2],
+                        tokens[3],
                         serde_json::to_string(&value)?,
                     ],
                 )?;
@@ -1189,6 +1217,26 @@ mod tests {
     fn fresh_writer() -> Writer {
         let conn = Connection::open_in_memory().expect("open in-memory db");
         Writer::from_connection(conn).expect("new writer")
+    }
+
+    #[test]
+    fn claude_subagent_usage_is_projected_into_token_columns() {
+        let message = serde_json::json!({
+            "type": "assistant",
+            "message": {
+                "usage": {
+                    "input_tokens": 12,
+                    "output_tokens": 3,
+                    "cache_creation_input_tokens": 5,
+                    "cache_read_input_tokens": 7
+                }
+            }
+        });
+        assert_eq!(
+            subagent_message_tokens(&message, "claude-code"),
+            [12, 3, 5, 7]
+        );
+        assert_eq!(subagent_message_tokens(&message, "codex"), [0, 0, 0, 0]);
     }
 
     /// Phase B: custom source_id is bound on projects/sessions/messages.
@@ -1622,6 +1670,18 @@ mod tests {
                 trigger_count, 0,
                 "FTS triggers must be dropped in bulk mode"
             );
+            let activity_trigger_count: i64 = w
+                .conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND name LIKE 'token_activity_%'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(
+                activity_trigger_count, 0,
+                "activity triggers must be dropped"
+            );
 
             let (tx, rx) = unbounded::<IngestEvent>();
             tx.send(IngestEvent::Project {
@@ -1665,6 +1725,23 @@ mod tests {
         assert_eq!(
             triggers, 3,
             "auto-sync triggers must be recreated by finish"
+        );
+        let activity_triggers: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND name LIKE 'token_activity_%'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(activity_triggers, 7, "activity triggers must be recreated");
+        let dirty_days: i64 = conn
+            .query_row("SELECT COUNT(*) FROM token_activity_dirty", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert!(
+            dirty_days > 0,
+            "bulk rows must be marked for one-shot rollup"
         );
     }
 
