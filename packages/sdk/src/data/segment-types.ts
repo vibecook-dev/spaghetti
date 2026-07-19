@@ -65,8 +65,12 @@ export interface SegmentChange {
   key: SegmentKey;
   type: SegmentType;
   action: SegmentChangeAction;
+  /** Agent source owning this session/project change. */
+  sourceId?: string;
   projectSlug?: string;
   sessionId?: string;
+  /** Monotonic process-local live revision (`Change.seq`). */
+  revision?: number;
 }
 
 export interface SegmentChangeBatch {

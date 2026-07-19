@@ -69,15 +69,27 @@ export function createCodexLiveWatch(deps: CodexLiveWatchDeps): CodexLiveWatch {
   let watcher: Watcher | null = null;
   let unsubscribe: Unsubscribe | null = null;
   let timer: ReturnType<typeof setTimeout> | null = null;
+  let workTail: Promise<void> = Promise.resolve();
+  let stopping = false;
 
   function schedule(file: string): void {
+    if (stopping) return;
     pending.add(file);
     if (timer) return;
     timer = setTimeout(() => {
       timer = null;
       const batch = [...pending];
       pending.clear();
-      for (const f of batch) void ingestChanged(f);
+      // All sources share one better-sqlite3 handle. Serialize files instead
+      // of launching untracked async writes, and retain the tail so stop()
+      // can drain before the coordinator closes that handle.
+      for (const f of batch) {
+        workTail = workTail
+          .then(() => ingestChanged(f))
+          .catch((err: unknown) => {
+            deps.errorSink.error(err instanceof Error ? err : new Error(String(err)));
+          });
+      }
     }, DEBOUNCE_MS);
   }
 
@@ -143,11 +155,18 @@ export function createCodexLiveWatch(deps: CodexLiveWatchDeps): CodexLiveWatch {
         const sessionsIndex: SessionsIndex = { version: 1, originalPath: meta.cwd, entries: [meta.entry] };
         deps.ingestService.onProject(meta.slug, meta.cwd, sessionsIndex);
         deps.ingestService.onSession(meta.slug, meta.entry);
-        st = { byteOffset: 0, nextIndex: 0, slug: meta.slug, sessionId: meta.sessionId };
+        const fingerprint = deps.ingestService.getFingerprint(file);
+        st = {
+          byteOffset: fingerprint?.bytePosition ?? 0,
+          nextIndex: deps.ingestService.getNextMessageIndex(meta.sessionId),
+          slug: meta.slug,
+          sessionId: meta.sessionId,
+        };
         state.set(file, st);
         if (!existed) {
           deps.store.emit({
             type: 'session.created',
+            sourceId: 'codex',
             seq: 0,
             ts: Date.now(),
             slug: meta.slug,
@@ -193,6 +212,15 @@ export function createCodexLiveWatch(deps: CodexLiveWatchDeps): CodexLiveWatch {
         const result = await deps.ingestService.writeBatch(rows);
         for (const change of result.changes) deps.store.emit(change);
       }
+      const currentStats = deps.fileService.getStats(file);
+      if (currentStats) {
+        deps.ingestService.upsertFingerprint({
+          path: file,
+          mtimeMs: currentStats.mtimeMs,
+          size: currentStats.size,
+          bytePosition: st.byteOffset,
+        });
+      }
     } catch (err) {
       deps.errorSink.error(err instanceof Error ? err : new Error(String(err)));
     }
@@ -202,6 +230,7 @@ export function createCodexLiveWatch(deps: CodexLiveWatchDeps): CodexLiveWatch {
     sourceId: 'codex',
     async start(): Promise<void> {
       if (watcher) return;
+      stopping = false;
       watcher = createParcelWatcher();
       try {
         unsubscribe = await watcher.subscribe(
@@ -233,6 +262,7 @@ export function createCodexLiveWatch(deps: CodexLiveWatchDeps): CodexLiveWatch {
     },
 
     async stop(): Promise<void> {
+      stopping = true;
       if (timer) {
         clearTimeout(timer);
         timer = null;
@@ -242,6 +272,8 @@ export function createCodexLiveWatch(deps: CodexLiveWatchDeps): CodexLiveWatch {
         await unsubscribe();
         unsubscribe = null;
       }
+      await workTail;
+      workTail = Promise.resolve();
       watcher = null;
       state.clear();
     },

@@ -46,7 +46,10 @@ export type Dispose = () => void;
  * Payloads carry enough context that subscribers don't need to re-
  * query SQLite for the common case (append new message, redraw chat).
  */
-export type Change =
+export type Change = {
+  /** Agent source that committed the change. Optional for legacy callers. */
+  sourceId?: string;
+} & (
   | {
       type: 'session.message.added';
       seq: number;
@@ -124,7 +127,8 @@ export type Change =
       ts: number;
       file: 'settings' | 'settings.local';
       settings: SettingsFile;
-    };
+    }
+);
 
 /**
  * Convenience alias for the literal `Change['type']` tag set —

@@ -41,6 +41,25 @@ export interface ReadyInfo {
   durationMs: number;
 }
 
+export interface SessionStreamSnapshot {
+  streamId: string;
+  sourceId: string;
+  projectSlug: string;
+  sessionId: string;
+  page: TimelinePage;
+  facets: TimelineFacets;
+  subagents: SubagentListItem[];
+}
+
+export interface ActiveSessionChange {
+  streamId: string;
+  sourceId: string;
+  projectSlug: string;
+  sessionId: string;
+  revision: number;
+  reason: 'append' | 'upsert' | 'subagent' | 'reset';
+}
+
 export interface SpaghettiIPC {
   // Lifecycle ---------------------------------------------------------------
   isReady(): Promise<boolean>;
@@ -70,6 +89,14 @@ export interface SpaghettiIPC {
   ): Promise<MessagePage>;
   getSessionTimelineFacets(projectSlug: string, sessionId: string, options?: SourceFilter): Promise<TimelineFacets>;
   getSessionTimeline(projectSlug: string, sessionId: string, request?: TimelinePageRequest): Promise<TimelinePage>;
+  /** Register the one visible transcript before returning its consistent initial snapshot. */
+  openSessionStream(
+    projectSlug: string,
+    sessionId: string,
+    request: TimelinePageRequest,
+  ): Promise<SessionStreamSnapshot>;
+  /** Release a transcript stream; stale close calls cannot close a newer stream. */
+  closeSessionStream(streamId: string): Promise<{ ok: true }>;
   getSessionTodos(projectSlug: string, sessionId: string): Promise<unknown[]>;
   getSessionPlan(projectSlug: string, sessionId: string): Promise<unknown | null>;
   getSessionTask(projectSlug: string, sessionId: string): Promise<unknown | null>;
@@ -106,6 +133,7 @@ export interface SpaghettiEvents {
   onProgress(cb: (progress: InitProgress) => void): () => void;
   onReady(cb: (info: ReadyInfo) => void): () => void;
   onChange(cb: (batch: SegmentChangeBatch) => void): () => void;
+  onActiveSessionChange(cb: (change: ActiveSessionChange) => void): () => void;
   /** Fired when main-process SDK initialize() rejects. */
   onInitError(cb: (message: string) => void): () => void;
 }
@@ -124,6 +152,8 @@ export const IPC_CHANNELS = {
   getSessionMessages: 'spaghetti:getSessionMessages',
   getSessionTimelineFacets: 'spaghetti:getSessionTimelineFacets',
   getSessionTimeline: 'spaghetti:getSessionTimeline',
+  openSessionStream: 'spaghetti:openSessionStream',
+  closeSessionStream: 'spaghetti:closeSessionStream',
   getSessionTodos: 'spaghetti:getSessionTodos',
   getSessionPlan: 'spaghetti:getSessionPlan',
   getSessionTask: 'spaghetti:getSessionTask',
@@ -139,5 +169,6 @@ export const EVENT_CHANNELS = {
   progress: 'spaghetti:event:progress',
   ready: 'spaghetti:event:ready',
   change: 'spaghetti:event:change',
+  activeSessionChange: 'spaghetti:event:active-session-change',
   initError: 'spaghetti:event:init-error',
 } as const;

@@ -8,8 +8,9 @@ import type { SqliteService } from '../io/index.js';
 import type { ProjectSummaryData, SessionSummaryData, TokenUsageSummary } from './summary-types.js';
 import type { SearchQuery, SearchResultSet, StoreStats } from './segment-types.js';
 import { initializeSchema } from './schema.js';
-import { ensureTimelineProjection } from './timeline-projection.js';
+import { ensureTimelineProjection, rebuildDirtyTimelineProjections } from './timeline-projection.js';
 import {
+  rebuildDirtySubagentProjections,
   ensureSearchableSubagentProjections,
   ensureSessionSubagentProjections,
   ensureSubagentTimelineProjection,
@@ -31,6 +32,10 @@ export interface QueryService {
   open(dbPath: string): void;
   close(): void;
   isOpen(): boolean;
+  /** Finish rebuildable display indexes after native cold/warm ingest. */
+  prepareTimelineProjections(
+    onProgress?: (progress: { kind: 'session' | 'subagent'; current: number; total: number }) => void,
+  ): { sessions: number; subagents: number };
 
   // Projects
   getProjectSlugs(): string[];
@@ -290,6 +295,18 @@ class QueryServiceImpl implements QueryService {
     return this.opened;
   }
 
+  prepareTimelineProjections(
+    onProgress?: (progress: { kind: 'session' | 'subagent'; current: number; total: number }) => void,
+  ): { sessions: number; subagents: number } {
+    const sessions = rebuildDirtyTimelineProjections(this.db, (progress) =>
+      onProgress?.({ kind: 'session', current: progress.current, total: progress.total }),
+    );
+    const subagents = rebuildDirtySubagentProjections(this.db, (progress) =>
+      onProgress?.({ kind: 'subagent', current: progress.current, total: progress.total }),
+    );
+    return { sessions, subagents };
+  }
+
   // ─────────────────────────────────────────────────────────────────────────
   // Projects
   // ─────────────────────────────────────────────────────────────────────────
@@ -498,7 +515,6 @@ class QueryServiceImpl implements QueryService {
 
   getSessionTimeline(slug: string, sessionId: string, request: TimelinePageRequest = {}): TimelinePage {
     ensureTimelineProjection(this.db, sessionId);
-    ensureSessionSubagentProjections(this.db, sessionId, request.sourceId);
     const { sql: filterSql, params: filterParams } = buildTimelineFilter(request);
     const sourceSql = request.sourceId ? ' AND source_id = ?' : '';
     const scopeParams: unknown[] = request.sourceId ? [slug, sessionId, request.sourceId] : [slug, sessionId];
@@ -509,6 +525,7 @@ class QueryServiceImpl implements QueryService {
     // otherwise a DB-level solo/search filter could produce branch counts but
     // no control through which the user can reveal those messages.
     if (filterSql) {
+      ensureSessionSubagentProjections(this.db, sessionId, request.sourceId);
       const branchRows = this.db.all<{
         source_id: string;
         workflow_id: string;
@@ -1037,7 +1054,6 @@ class QueryServiceImpl implements QueryService {
     options?: { sourceId?: string },
   ): SubagentListItem[] {
     ensureTimelineProjection(this.db, sessionId);
-    ensureSessionSubagentProjections(this.db, sessionId, options?.sourceId);
     const workflowSql = workflowId === undefined ? '' : ' AND s.workflow_id = ?';
     const rowSourceSql = options?.sourceId ? ' AND s.source_id = ?' : '';
     const anchorSourceSql = options?.sourceId ? ' AND source_id = ?' : '';
@@ -1045,10 +1061,7 @@ class QueryServiceImpl implements QueryService {
     if (workflowId !== undefined) rowParams.push(workflowId);
     if (options?.sourceId) rowParams.push(options.sourceId);
     const rows = this.db.all<SubagentRow>(
-      `SELECT s.id, s.source_id, s.agent_id, s.agent_type,
-              (SELECT COUNT(*) FROM subagent_timeline_messages t
-                WHERE t.source_id = s.source_id AND t.session_id = s.session_id
-                  AND t.workflow_id = s.workflow_id AND t.agent_id = s.agent_id) AS message_count,
+      `SELECT s.id, s.source_id, s.agent_id, s.agent_type, s.message_count,
               s.workflow_id, s.spawn_tool_id, s.link_method
          FROM subagents s
         WHERE s.project_slug = ? AND s.session_id = ?${workflowSql}${rowSourceSql}

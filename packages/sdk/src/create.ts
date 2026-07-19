@@ -117,13 +117,20 @@ export function createSpaghettiService(options?: SpaghettiServiceOptions): Spagh
 
   const resolvedEngine = options?.engine ?? resolveEngine();
   const nativeAddon = resolvedEngine === 'rs' ? loadNativeAddon() : null;
+  const live = options?.live ?? false;
 
   // ── DurableStore (SQLite + FTS) ────────────────────────────────────────
   const store = createDurableStore({
     sqlite: sharedSqlite,
     errorSink,
-    engine: resolvedEngine,
-    native: nativeAddon,
+    // Live updates must stay on the process-owned better-sqlite3 handle.
+    // Opening a short-lived native writer for every batch both blocks the
+    // Electron main thread and breaks the single-writer contract when the
+    // Codex/Grok live pipelines are using this same connection. Lifecycle
+    // owners still receive resolvedEngine/nativeAddon below, so exclusive
+    // cold-start ingest continues to use Rust.
+    engine: live ? 'ts' : resolvedEngine,
+    native: live ? null : nativeAddon,
   });
 
   // Align StaticIngest + LiveDiskIngest on the same DB file (was a bug:
@@ -133,7 +140,6 @@ export function createSpaghettiService(options?: SpaghettiServiceOptions): Spagh
 
   // Claude live pipeline only when primary is Claude Code and live is on.
   // Codex/Grok own their LiveWatch implementations inside their owners.
-  const live = options?.live ?? false;
   // Long-lived surfaces (`live: true`) default to safer bulk so a crash
   // mid-cold-ingest is less likely to leave SQLITE_CORRUPT for next launch.
   const safeBulk = options?.safeBulk ?? live;

@@ -157,6 +157,18 @@ describe('normalized subagent transcript queries', () => {
     assert.equal(threads[0]?.linkMethod, 'tool_result');
   });
 
+  test('ordinary parent paging and branch listing do not rebuild a dirty branch', () => {
+    const dirtyCount = () =>
+      sqlite.get<{ count: number }>(
+        'SELECT COUNT(*) AS count FROM subagent_dirty_threads WHERE session_id = ?',
+        SESSION,
+      )?.count;
+    assert.equal(dirtyCount(), 1);
+    assert.equal(query.getSessionTimeline(SLUG, SESSION, { sourceId: SOURCE, limit: 20 }).messages.length, 1);
+    query.getSessionSubagents(SLUG, SESSION, { sourceId: SOURCE });
+    assert.equal(dirtyCount(), 1, 'main-session reads must stay independent of branch projection work');
+  });
+
   test('normalizes branch rows and merges their tool results', () => {
     const page = query.getSubagentTimeline(SLUG, SESSION, AGENT, { sourceId: SOURCE, limit: 20 });
     assert.equal(page.total, 2, 'the injected sidechain prompt is not a displayed user message');

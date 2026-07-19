@@ -141,6 +141,30 @@ export function ensureSessionSubagentProjections(db: SqliteService, sessionId: s
   }
 }
 
+/** Materialize native-ingested branch projections before the service is ready. */
+export function rebuildDirtySubagentProjections(
+  db: SqliteService,
+  onProgress?: (progress: { current: number; total: number }) => void,
+): number {
+  const rows = db.all<DirtyThreadRow>(
+    `SELECT source_id, project_slug, session_id, workflow_id, agent_id
+       FROM subagent_dirty_threads
+      ORDER BY session_id, workflow_id, agent_id`,
+  );
+  for (let index = 0; index < rows.length; index++) {
+    const row = rows[index]!;
+    ensureSubagentTimelineProjection(db, {
+      sourceId: row.source_id,
+      projectSlug: row.project_slug,
+      sessionId: row.session_id,
+      workflowId: row.workflow_id,
+      agentId: row.agent_id,
+    });
+    onProgress?.({ current: index + 1, total: rows.length });
+  }
+  return rows.length;
+}
+
 /** Materialize dirty threads relevant to a global/project/session search. */
 export function ensureSearchableSubagentProjections(
   db: SqliteService,

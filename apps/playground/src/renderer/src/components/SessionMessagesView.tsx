@@ -10,7 +10,6 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import { ArrowLeft, PanelLeft, PanelRight } from 'lucide-react';
 import { transformRawMessagesToTimeline, type ChatSessionMessage } from '@vibecook/spaghetti-sdk/react';
 import type {
-  SegmentChangeBatch,
   SessionListItem,
   SubagentListItem,
   SubagentTimelinePageRequest,
@@ -18,6 +17,7 @@ import type {
   TimelinePage,
   TimelinePageRequest,
 } from '@vibecook/spaghetti-sdk';
+import type { ActiveSessionChange } from '../../../shared/ipc.js';
 import { SourceBadge } from './SourceBadge.js';
 import { ArchiveTranscript } from './ArchiveTranscript.js';
 import { MessageFilterBar, useMessageFilters, countTimelineMessages, filterTimelineMessages } from './filters/index.js';
@@ -26,11 +26,41 @@ import { Btn, LiveDot, Spinner } from './ui.js';
 type AnyMsg = Record<string, unknown>;
 
 const PAGE_SIZE = 30;
-const LOADING_DELAY_MS = 280;
 const NEAR_TOP_PX = 80;
 const NEAR_BOTTOM_PX = 140;
-const LIVE_DEBOUNCE_MS = 180;
+const LIVE_DEBOUNCE_MS = 80;
 const BRANCH_PAGE_SIZE = 80;
+const timelineFingerprintCache = new WeakMap<object, string>();
+
+function timelineFingerprint(message: ChatSessionMessage): string {
+  const cached = timelineFingerprintCache.get(message);
+  if (cached) return cached;
+  let fingerprint: string;
+  try {
+    fingerprint = JSON.stringify(message);
+  } catch {
+    fingerprint = `${message.timelineId}:${message.timestamp}:${message.type}:${message.content ?? ''}`;
+  }
+  timelineFingerprintCache.set(message, fingerprint);
+  return fingerprint;
+}
+
+/** Preserve object identity for unchanged rows so virtualized Markdown does not re-render. */
+function reconcileTimeline(
+  current: readonly ChatSessionMessage[],
+  incoming: readonly ChatSessionMessage[],
+): ChatSessionMessage[] {
+  const byId = new Map(
+    incoming.filter((message) => message.timelineId).map((message) => [message.timelineId, message]),
+  );
+  const currentIds = new Set(current.map((message) => message.timelineId).filter(Boolean));
+  const preserved = current.map((previous) => {
+    const next = previous.timelineId ? byId.get(previous.timelineId) : undefined;
+    return next && timelineFingerprint(previous) !== timelineFingerprint(next) ? next : previous;
+  });
+  const additions = incoming.filter((message) => !message.timelineId || !currentIds.has(message.timelineId));
+  return [...preserved, ...additions];
+}
 
 interface BranchPageState {
   messages: ChatSessionMessage[];
@@ -101,6 +131,7 @@ export function SessionMessagesView({
   const [subagents, setSubagents] = useState<SubagentListItem[]>([]);
   const [expandedBranchToolIds, setExpandedBranchToolIds] = useState<Set<string>>(() => new Set());
   const [branchPages, setBranchPages] = useState<Map<string, BranchPageState>>(() => new Map());
+  const [pendingBranchScroll, setPendingBranchScroll] = useState<string | null>(null);
 
   const cursorRef = useRef<number | undefined>(undefined);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
@@ -113,8 +144,15 @@ export function SessionMessagesView({
   const totalRef = useRef(0);
   const liveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pulseTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /** Invalidates overlapping live refreshes and refreshes from a prior session. */
+  const liveRefreshSeqRef = useRef(0);
+  const liveNeedsSubagentRefreshRef = useRef(false);
+  const activeStreamIdRef = useRef<string | null>(null);
+  const lastActiveRevisionRef = useRef(0);
+  const preOpenActiveChangeRef = useRef<ActiveSessionChange | null>(null);
+  const requestLiveRefreshRef = useRef<(refreshSubagents: boolean, reset: boolean) => void>(() => {});
+  const liveResetPendingRef = useRef(false);
   const consumedBranchTargetRef = useRef<string | null>(null);
-  const pendingBranchScrollRef = useRef<string | null>(null);
   const [debouncedSearch, setDebouncedSearch] = useState('');
   const cacheRef = useRef(
     new Map<
@@ -379,6 +417,7 @@ export function SessionMessagesView({
 
   // Reset when session changes
   useEffect(() => {
+    liveRefreshSeqRef.current += 1;
     isPrependingRef.current = false;
     shouldScrollToBottomRef.current = false;
     prevScrollHeightRef.current = 0;
@@ -392,11 +431,61 @@ export function SessionMessagesView({
     setSubagents([]);
     setExpandedBranchToolIds(new Set());
     setBranchPages(new Map());
+    setPendingBranchScroll(null);
     consumedBranchTargetRef.current = null;
     setPendingNew(0);
     setError(null);
     resetFilters();
   }, [session.sessionId, resetFilters]);
+
+  // Register the sole visible transcript in the UtilityProcess before using
+  // its snapshot. Later commits are source-aware stream notifications, so
+  // inactive sessions never trigger detailed timeline pulls.
+  useEffect(() => {
+    if (debugMessages) return;
+    let cancelled = false;
+    let openedStreamId: string | null = null;
+    const queryKeyAtOpen = queryKey;
+    void window.spaghetti
+      .openSessionStream(projectSlug, session.sessionId, { sourceId, limit: PAGE_SIZE })
+      .then((snapshot) => {
+        openedStreamId = snapshot.streamId;
+        if (cancelled) {
+          void window.spaghetti.closeSessionStream(snapshot.streamId);
+          return;
+        }
+        activeStreamIdRef.current = snapshot.streamId;
+        lastActiveRevisionRef.current = 0;
+        if (activeQueryKeyRef.current !== queryKeyAtOpen) return;
+        shouldScrollToBottomRef.current = true;
+        setTimeline(snapshot.page.messages as ChatSessionMessage[]);
+        setPageMeta({ total: snapshot.page.total, hasMore: snapshot.page.hasMore });
+        cursorRef.current = snapshot.page.nextCursor;
+        totalRef.current = snapshot.page.total;
+        setFacets(snapshot.facets);
+        setSubagents(snapshot.subagents);
+        setLoading(false);
+        const pending = preOpenActiveChangeRef.current;
+        preOpenActiveChangeRef.current = null;
+        if (pending?.streamId === snapshot.streamId) {
+          lastActiveRevisionRef.current = pending.revision;
+          requestLiveRefreshRef.current(
+            pending.reason === 'subagent' || pending.reason === 'reset',
+            pending.reason === 'reset',
+          );
+        }
+      })
+      .catch((e: unknown) => {
+        if (!cancelled) setError(String(e));
+      });
+    return () => {
+      cancelled = true;
+      activeStreamIdRef.current = null;
+      lastActiveRevisionRef.current = 0;
+      preOpenActiveChangeRef.current = null;
+      if (openedStreamId) void window.spaghetti.closeSessionStream(openedStreamId);
+    };
+  }, [debugMessages, projectSlug, session.sessionId, sourceId]);
 
   useEffect(() => {
     if (debugMessages) return;
@@ -494,14 +583,14 @@ export function SessionMessagesView({
             setPageMeta({ total: parentPage.total, hasMore: parentPage.hasMore });
             cursorRef.current = parentPage.nextCursor;
             totalRef.current = parentPage.total;
-            pendingBranchScrollRef.current = toolUseId;
+            setPendingBranchScroll(toolUseId);
             return;
           }
           before = parentPage.nextCursor;
         }
       })().catch((e: unknown) => setError(String(e)));
     } else {
-      pendingBranchScrollRef.current = toolUseId;
+      setPendingBranchScroll(toolUseId);
     }
   }, [
     branchRequest,
@@ -513,18 +602,6 @@ export function SessionMessagesView({
     sourceId,
     subagents,
   ]);
-
-  useLayoutEffect(() => {
-    const toolUseId = pendingBranchScrollRef.current;
-    const container = scrollContainerRef.current;
-    if (!toolUseId || !container) return;
-    const target = Array.from(container.querySelectorAll<HTMLElement>('[data-branch-tool-id]')).find(
-      (element) => element.dataset.branchToolId === toolUseId,
-    );
-    if (!target) return;
-    pendingBranchScrollRef.current = null;
-    target.scrollIntoView({ block: 'center' });
-  }, [embeddedMessages]);
 
   // A branch page is filtered independently from its parent page. Collapse
   // and invalidate loaded branch rows whenever the active DB filter changes.
@@ -591,7 +668,6 @@ export function SessionMessagesView({
     cursorRef.current = undefined;
     void (async () => {
       try {
-        await delay(LOADING_DELAY_MS);
         const page = await window.spaghetti.getSessionTimeline(projectSlug, session.sessionId, timelineRequest);
         if (cancelled) return;
         shouldScrollToBottomRef.current = true;
@@ -610,65 +686,113 @@ export function SessionMessagesView({
     };
   }, [projectSlug, session.sessionId, queryKey, debugMessages, debugTimeline]);
 
-  const appendLiveTail = useCallback(async () => {
-    if (debugMessages) return;
-    try {
-      cacheRef.current.clear();
-      const [nextFacets, page] = await Promise.all([
-        window.spaghetti.getSessionTimelineFacets(projectSlug, session.sessionId, { sourceId }),
-        window.spaghetti.getSessionTimeline(projectSlug, session.sessionId, timelineRequest),
-      ]);
-      void window.spaghetti
-        .getSessionSubagents(projectSlug, session.sessionId, { sourceId, includeNested: true })
-        .then((threads) => {
-          setSubagents(threads);
-          for (const thread of threads) {
-            if (expandedBranchToolIds.has(threadToolId(thread))) {
-              void loadBranchPage(thread, false);
-            }
+  const appendLiveTail = useCallback(
+    async (refreshSubagents = false, reset = false) => {
+      if (debugMessages) return;
+      const refreshSeq = ++liveRefreshSeqRef.current;
+      try {
+        const [nextFacets, page] = await Promise.all([
+          window.spaghetti.getSessionTimelineFacets(projectSlug, session.sessionId, { sourceId }),
+          window.spaghetti.getSessionTimeline(projectSlug, session.sessionId, timelineRequest),
+        ]);
+        if (refreshSeq !== liveRefreshSeqRef.current) return;
+
+        cacheRef.current.clear();
+        setFacets(nextFacets);
+        const delta = Math.max(0, page.total - totalRef.current);
+        totalRef.current = page.total;
+        if (nearBottomRef.current) {
+          shouldScrollToBottomRef.current = true;
+          setTimeline((current) =>
+            reset
+              ? (page.messages as ChatSessionMessage[])
+              : reconcileTimeline(current, page.messages as ChatSessionMessage[]),
+          );
+          setPageMeta({ total: page.total, hasMore: page.hasMore });
+          cursorRef.current = page.nextCursor;
+          setPendingNew(0);
+        } else {
+          setTimeline((current) =>
+            reset
+              ? (page.messages as ChatSessionMessage[])
+              : reconcileTimeline(current, page.messages as ChatSessionMessage[]),
+          );
+          setPageMeta((current) => ({ total: page.total, hasMore: current?.hasMore ?? page.hasMore }));
+          if (delta > 0) setPendingNew((count) => count + delta);
+        }
+        setLivePulse(true);
+        if (pulseTimerRef.current) clearTimeout(pulseTimerRef.current);
+        pulseTimerRef.current = setTimeout(() => setLivePulse(false), 1200);
+        setError((current) => (current?.startsWith('Live refresh failed:') ? null : current));
+
+        if (!refreshSubagents) return;
+        const threads = await window.spaghetti.getSessionSubagents(projectSlug, session.sessionId, {
+          sourceId,
+          includeNested: true,
+        });
+        if (refreshSeq !== liveRefreshSeqRef.current) return;
+        setSubagents(threads);
+        for (const thread of threads) {
+          if (expandedBranchToolIds.has(threadToolId(thread))) {
+            void loadBranchPage(thread, false);
           }
-        })
-        .catch(() => {});
-      setFacets(nextFacets);
-      const delta = Math.max(0, page.total - totalRef.current);
-      totalRef.current = page.total;
-      if (nearBottomRef.current) {
-        shouldScrollToBottomRef.current = true;
-        setTimeline(page.messages as ChatSessionMessage[]);
-        setPageMeta({ total: page.total, hasMore: page.hasMore });
-        cursorRef.current = page.nextCursor;
-        setPendingNew(0);
-      } else if (delta > 0) {
-        setPendingNew((count) => count + delta);
+        }
+      } catch (e: unknown) {
+        if (refreshSeq === liveRefreshSeqRef.current) {
+          const message = e instanceof Error ? e.message : String(e);
+          setError(`Live refresh failed: ${message}`);
+        }
       }
-      setLivePulse(true);
-      if (pulseTimerRef.current) clearTimeout(pulseTimerRef.current);
-      pulseTimerRef.current = setTimeout(() => setLivePulse(false), 1200);
-    } catch {
-      /* live refresh is best-effort */
-    }
-  }, [debugMessages, expandedBranchToolIds, loadBranchPage, projectSlug, session.sessionId, sourceId, timelineRequest]);
+    },
+    [debugMessages, expandedBranchToolIds, loadBranchPage, projectSlug, session.sessionId, sourceId, timelineRequest],
+  );
+
+  requestLiveRefreshRef.current = (refreshSubagents, reset) => {
+    if (refreshSubagents) liveNeedsSubagentRefreshRef.current = true;
+    if (reset) liveResetPendingRef.current = true;
+    if (liveTimerRef.current) clearTimeout(liveTimerRef.current);
+    liveTimerRef.current = setTimeout(() => {
+      const shouldRefreshSubagents = liveNeedsSubagentRefreshRef.current;
+      const shouldReset = liveResetPendingRef.current;
+      liveNeedsSubagentRefreshRef.current = false;
+      liveResetPendingRef.current = false;
+      void appendLiveTail(shouldRefreshSubagents, shouldReset);
+    }, LIVE_DEBOUNCE_MS);
+  };
 
   useEffect(() => {
     if (debugMessages) return;
-    const unsub = window.spaghetti.onChange((batch: SegmentChangeBatch) => {
-      const relevant =
-        !batch.changes?.length ||
-        batch.changes.some((c) => !c.sessionId || c.sessionId === session.sessionId || c.projectSlug === projectSlug);
-      if (!relevant) return;
-
-      if (liveTimerRef.current) clearTimeout(liveTimerRef.current);
-      liveTimerRef.current = setTimeout(() => {
-        void appendLiveTail();
-      }, LIVE_DEBOUNCE_MS);
+    const unsub = window.spaghetti.onActiveSessionChange((change: ActiveSessionChange) => {
+      if (change.streamId !== activeStreamIdRef.current) {
+        if (
+          !activeStreamIdRef.current &&
+          change.sourceId === sourceId &&
+          change.projectSlug === projectSlug &&
+          change.sessionId === session.sessionId &&
+          change.revision > (preOpenActiveChangeRef.current?.revision ?? 0)
+        ) {
+          preOpenActiveChangeRef.current = change;
+        }
+        return;
+      }
+      if (change.revision <= lastActiveRevisionRef.current) return;
+      lastActiveRevisionRef.current = change.revision;
+      requestLiveRefreshRef.current(
+        change.reason === 'subagent' || change.reason === 'reset',
+        change.reason === 'reset',
+      );
     });
 
     return () => {
       unsub();
+      liveRefreshSeqRef.current += 1;
+      liveNeedsSubagentRefreshRef.current = false;
+      liveResetPendingRef.current = false;
+      preOpenActiveChangeRef.current = null;
       if (liveTimerRef.current) clearTimeout(liveTimerRef.current);
       if (pulseTimerRef.current) clearTimeout(pulseTimerRef.current);
     };
-  }, [session.sessionId, projectSlug, appendLiveTail, debugMessages]);
+  }, [debugMessages, projectSlug, session.sessionId, sourceId]);
 
   // ── Scroll restoration ────────────────────────────────────────────────
   useLayoutEffect(() => {
@@ -706,8 +830,6 @@ export function SessionMessagesView({
     loadMoreInFlightRef.current = true;
     setLoadingMore(true);
     try {
-      await delay(LOADING_DELAY_MS);
-
       const page = await window.spaghetti.getSessionTimeline(projectSlug, session.sessionId, {
         ...timelineRequest,
         before: cursorRef.current,
@@ -751,8 +873,12 @@ export function SessionMessagesView({
   const jumpToLatest = useCallback(() => {
     nearBottomRef.current = true;
     setPendingNew(0);
-    void appendLiveTail();
+    void appendLiveTail(true);
   }, [appendLiveTail]);
+
+  const consumeBranchScrollTarget = useCallback(() => {
+    setPendingBranchScroll(null);
+  }, []);
 
   void hasMemory; // artifacts live in Structure panel
   const hasMore = pageMeta?.hasMore ?? false;
@@ -902,6 +1028,9 @@ export function SessionMessagesView({
                   branchCountsByToolId={debugMessages ? undefined : branchCountsByToolId}
                   onToggleBranch={debugMessages ? undefined : toggleBranch}
                   onLoadMoreBranch={debugMessages ? undefined : loadMoreBranch}
+                  scrollElementRef={scrollContainerRef}
+                  scrollToBranchToolId={pendingBranchScroll}
+                  onScrollTargetConsumed={consumeBranchScrollTarget}
                 />
               </div>
             </div>
@@ -922,8 +1051,4 @@ export function SessionMessagesView({
       </div>
     </div>
   );
-}
-
-function delay(ms: number): Promise<void> {
-  return new Promise((r) => setTimeout(r, ms));
 }

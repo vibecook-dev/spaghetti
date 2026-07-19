@@ -28,6 +28,9 @@ const bridge: SpaghettiBridge = {
     ipcRenderer.invoke(IPC_CHANNELS.getSessionTimelineFacets, projectSlug, sessionId, options),
   getSessionTimeline: (projectSlug, sessionId, request) =>
     ipcRenderer.invoke(IPC_CHANNELS.getSessionTimeline, projectSlug, sessionId, request),
+  openSessionStream: (projectSlug, sessionId, request) =>
+    ipcRenderer.invoke(IPC_CHANNELS.openSessionStream, projectSlug, sessionId, request),
+  closeSessionStream: (streamId) => ipcRenderer.invoke(IPC_CHANNELS.closeSessionStream, streamId),
   getSessionTodos: (projectSlug, sessionId) => ipcRenderer.invoke(IPC_CHANNELS.getSessionTodos, projectSlug, sessionId),
   getSessionPlan: (projectSlug, sessionId) => ipcRenderer.invoke(IPC_CHANNELS.getSessionPlan, projectSlug, sessionId),
   getSessionTask: (projectSlug, sessionId) => ipcRenderer.invoke(IPC_CHANNELS.getSessionTask, projectSlug, sessionId),
@@ -70,6 +73,11 @@ const bridge: SpaghettiBridge = {
     const handler = (_e: IpcRendererEvent, batch: unknown) => cb(batch as Parameters<typeof cb>[0]);
     ipcRenderer.on(EVENT_CHANNELS.change, handler);
     return () => ipcRenderer.removeListener(EVENT_CHANNELS.change, handler);
+  },
+  onActiveSessionChange: (cb) => {
+    const handler = (_e: IpcRendererEvent, change: unknown) => cb(change as Parameters<typeof cb>[0]);
+    ipcRenderer.on(EVENT_CHANNELS.activeSessionChange, handler);
+    return () => ipcRenderer.removeListener(EVENT_CHANNELS.activeSessionChange, handler);
   },
   onInitError: (cb) => {
     const handler = (_e: IpcRendererEvent, message: unknown) => cb(String(message));

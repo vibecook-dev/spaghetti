@@ -19,6 +19,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, appendFileSync, rmSync } from 'n
 import { createSpaghettiService } from '../index.js';
 import { createCodexSource } from '../sources/index.js';
 import type { SpaghettiAPI } from '../index.js';
+import type { Change } from '../live/change-events.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const FIXTURE_ROOT_DIR = path.resolve(here, '../../../../crates/spaghetti-napi/fixtures/small/.claude');
@@ -91,6 +92,8 @@ describe('Codex live disk ingest (Plane 2)', () => {
   });
 
   test('appended prose and tool records are streamed into the store live', async () => {
+    const liveChanges: Change[] = [];
+    const disposeLive = spaghetti.live?.onChange((change) => liveChanges.push(change));
     // Append an assistant turn (plus a token_count event the extractor skips).
     appendFileSync(
       rolloutPath,
@@ -121,6 +124,14 @@ describe('Codex live disk ingest (Plane 2)', () => {
     );
     // The skipped event_msg did not become a message row.
     assert.equal(codexMessageCount(), 2);
+    assert.deepEqual(
+      liveChanges.flatMap((change) =>
+        change.type === 'session.message.added' && change.sourceId === 'codex' ? [change.sessionId] : [],
+      ),
+      [CODEX_SESSION],
+      'the first watcher event resumes at the persisted byte checkpoint instead of replaying the baseline turn',
+    );
+    disposeLive?.();
 
     appendFileSync(
       rolloutPath,

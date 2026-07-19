@@ -211,6 +211,21 @@ describe('IngestService.writeBatch (RFC 005 C2.6)', () => {
       'spaghetti',
     );
     assert.ok((ftsRow?.n ?? 0) >= 1, 'FTS index should be synced');
+
+    // The display projection commits atomically with the raw row, so the next
+    // UI page is a bounded read rather than a full-session rebuild.
+    const timelineRow = sqlite.get<{ display_type: string; raw_index: number }>(
+      `SELECT display_type, raw_index FROM timeline_messages
+        WHERE session_id = ? AND timeline_index = ?`,
+      SESSION_ID,
+      0,
+    );
+    assert.deepEqual(timelineRow, { display_type: 'user', raw_index: 0 });
+    assert.equal(
+      sqlite.get<{ n: number }>('SELECT COUNT(*) AS n FROM timeline_dirty_sessions WHERE session_id = ?', SESSION_ID)
+        ?.n,
+      0,
+    );
   });
 
   test('subagent row → INSERT into subagents + subagent.updated event', async () => {

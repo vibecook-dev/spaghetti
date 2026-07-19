@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Library, Moon, PanelLeft, Search, Settings, Sun } from 'lucide-react';
 import { TrafficLights } from './components/TrafficLights.js';
 import { SpaghettiProvider, type SpaghettiProviderProps } from '@vibecook/spaghetti-sdk/react';
-import type { ProjectListItem, SessionListItem, StoreStats } from '@vibecook/spaghetti-sdk';
+import type { ProjectListItem, SegmentChangeBatch, SessionListItem, StoreStats } from '@vibecook/spaghetti-sdk';
 import { createIpcApi } from './ipc-api.js';
 import { LoadingScreen } from './components/LoadingScreen.js';
 import { SourceBadge, SourceBadges } from './components/SourceBadge.js';
@@ -10,7 +10,7 @@ import { SessionMessagesView } from './components/SessionMessagesView.js';
 import { SearchOverlay, type SearchNavigateTarget } from './components/SearchOverlay.js';
 import { FileExplorerPanel } from './components/FileExplorerPanel.js';
 import { SettingsDialog } from './components/SettingsDialog.js';
-import { Btn, Chip, Dot, EmptyState, Kbd } from './components/ui.js';
+import { Btn, Chip, Dot, EmptyState, Kbd, LiveDot } from './components/ui.js';
 import {
   flattenPrompt,
   formatBytes,
@@ -40,6 +40,18 @@ type DebugSessionModule = typeof import('./dev/debug-session.js');
 
 interface ProjectKey {
   projectId: string;
+}
+
+interface LiveSessionState {
+  revision: number;
+  lastActivityAt: number;
+  unreadCount: number;
+}
+
+const SESSION_LIVE_TTL_MS = 6_000;
+
+function liveSessionKey(sourceId: string, projectSlug: string, sessionId: string): string {
+  return JSON.stringify([sourceId, projectSlug, sessionId]);
 }
 
 function projectKey(p: ProjectKey): string {
@@ -81,7 +93,8 @@ function PlaygroundShell() {
     index: number;
   } | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [changeNonce, setChangeNonce] = useState(0);
+  const [projectChangeNonce, setProjectChangeNonce] = useState(0);
+  const [sessionChangeNonce, setSessionChangeNonce] = useState(0);
   const [projectPrompts, setProjectPrompts] = useState<Record<string, string>>({});
   const [stats, setStats] = useState<StoreStats | null>(null);
   const [sessionSourceFilter, setSessionSourceFilter] = useState<string | null>(null);
@@ -92,7 +105,12 @@ function PlaygroundShell() {
   // The reference opens on warm paper; dark parchment is the alternate illumination.
   const [isDark, setIsDark] = useState(false);
   const pendingSessionId = useRef<{ sessionId: string; sourceId?: string } | null>(null);
+  const projectChangeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const sessionChangeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [branchNavigateTarget, setBranchNavigateTarget] = useState<SearchNavigateTarget | null>(null);
+  const [liveSessions, setLiveSessions] = useState<Record<string, LiveSessionState>>({});
+  const [liveClock, setLiveClock] = useState(Date.now());
+  const selectedSessionRef = useRef<typeof selectedSession>(null);
 
   const [sources, setSources] = useState<SourceProgressState[]>(() => initialSourceStates());
   const [progress, setProgress] = useState<ProgressSnapshot | null>(null);
@@ -129,6 +147,23 @@ function PlaygroundShell() {
   useEffect(() => {
     document.documentElement.classList.toggle('dark', isDark);
   }, [isDark]);
+
+  useEffect(() => {
+    selectedSessionRef.current = selectedSession;
+    if (!selectedSession) return;
+    const { sourceId, projectSlug, sessionId } = selectedSession.session;
+    const key = liveSessionKey(sourceId, projectSlug, sessionId);
+    setLiveSessions((current) => {
+      const state = current[key];
+      return state?.unreadCount ? { ...current, [key]: { ...state, unreadCount: 0 } } : current;
+    });
+  }, [selectedSession]);
+
+  useEffect(() => {
+    if (!ready) return;
+    const timer = window.setInterval(() => setLiveClock(Date.now()), 1_000);
+    return () => window.clearInterval(timer);
+  }, [ready]);
 
   useEffect(() => {
     if (ready && !rebuilding && !retrying) return;
@@ -173,9 +208,11 @@ function PlaygroundShell() {
         msg.includes('malformed') ||
         msg.includes('wiped for re-ingest') ||
         msg.includes('re-ingesting from disk') ||
-        msg.includes('corrupted')
+        msg.includes('corrupted') ||
+        msg.includes('sdk utility exited')
       ) {
         setError(null);
+        setReady(false);
         setRetrying(false);
         setSources(initialSourceStates());
         setLoadHeadline('Recovering index');
@@ -202,8 +239,44 @@ function PlaygroundShell() {
       });
     });
 
-    const unsubChange = bridge.onChange(() => {
-      setChangeNonce((n) => n + 1);
+    const unsubChange = bridge.onChange((batch: SegmentChangeBatch) => {
+      const selectedNow = selectedSessionRef.current?.session;
+      setLiveSessions((current) => {
+        let next = current;
+        for (const change of batch.changes ?? []) {
+          if (!change.sourceId || !change.projectSlug || !change.sessionId) continue;
+          const key = liveSessionKey(change.sourceId, change.projectSlug, change.sessionId);
+          const previous = current[key] ?? { revision: 0, lastActivityAt: 0, unreadCount: 0 };
+          const isSelected =
+            selectedNow?.sourceId === change.sourceId &&
+            selectedNow.projectSlug === change.projectSlug &&
+            selectedNow.sessionId === change.sessionId;
+          const added = change.type === 'message' && !isSelected ? 1 : 0;
+          if (next === current) next = { ...current };
+          next[key] = {
+            revision: Math.max(previous.revision, change.revision ?? batch.timestamp),
+            lastActivityAt: batch.timestamp,
+            unreadCount: isSelected ? 0 : previous.unreadCount + added,
+          };
+        }
+        return next;
+      });
+      setLiveClock(Date.now());
+      // Session-list metadata is cheap and useful while browsing one project.
+      // Whole-library counts are much broader, so refresh those on a slower
+      // lane. The visible transcript has its own exact, session-scoped lane.
+      if (!sessionChangeTimerRef.current) {
+        sessionChangeTimerRef.current = setTimeout(() => {
+          sessionChangeTimerRef.current = null;
+          setSessionChangeNonce((n) => n + 1);
+        }, 1000);
+      }
+      if (!projectChangeTimerRef.current) {
+        projectChangeTimerRef.current = setTimeout(() => {
+          projectChangeTimerRef.current = null;
+          setProjectChangeNonce((n) => n + 1);
+        }, 5000);
+      }
     });
 
     const unsubInitError = bridge.onInitError((message) => {
@@ -240,6 +313,8 @@ function PlaygroundShell() {
       unsubReady();
       unsubChange();
       unsubInitError();
+      if (sessionChangeTimerRef.current) clearTimeout(sessionChangeTimerRef.current);
+      if (projectChangeTimerRef.current) clearTimeout(projectChangeTimerRef.current);
     };
   }, []);
 
@@ -262,14 +337,20 @@ function PlaygroundShell() {
       .getStats()
       .then(setStats)
       .catch(() => setStats(null));
-  }, [ready, changeNonce, debugSession]);
+  }, [ready, projectChangeNonce, debugSession]);
 
   useEffect(() => {
     if (!ready || projects.length === 0) return;
     let cancelled = false;
     const run = async () => {
       const next: Record<string, string> = {};
-      const queue = [...projects];
+      // Project prompts do not change when an existing session appends. Only
+      // query projects that have not been resolved yet instead of re-reading
+      // every project's session list after each live summary refresh.
+      const queue = projects.filter(
+        (project) => !Object.prototype.hasOwnProperty.call(projectPrompts, projectKey(project)),
+      );
+      if (queue.length === 0) return;
       const workers = Array.from({ length: Math.min(6, queue.length) }, async () => {
         while (queue.length > 0 && !cancelled) {
           const p = queue.shift()!;
@@ -293,7 +374,7 @@ function PlaygroundShell() {
     return () => {
       cancelled = true;
     };
-  }, [ready, projects, changeNonce, debugSession]);
+  }, [ready, projects, projectPrompts, debugSession]);
 
   useEffect(() => {
     if (!selected) {
@@ -323,10 +404,19 @@ function PlaygroundShell() {
           if (idx >= 0) {
             setSelectedSession({ session: list[idx], index: idx });
           }
+          return;
         }
+        setSelectedSession((current) => {
+          if (!current) return null;
+          const idx = list.findIndex(
+            (session) =>
+              session.sessionId === current.session.sessionId && session.sourceId === current.session.sourceId,
+          );
+          return idx >= 0 ? { session: list[idx], index: idx } : current;
+        });
       })
       .catch((e: unknown) => setError(String(e)));
-  }, [selected, projects, changeNonce, debugSession]);
+  }, [selected, projects, sessionChangeNonce, debugSession]);
 
   const onRebuild = async () => {
     if (rebuilding || retrying) return;
@@ -342,7 +432,8 @@ function PlaygroundShell() {
       setSources((prev) => prev.map((s) => ({ ...s, stage: 'done' as const, fraction: 1 })));
       setProgress({ phase: 'indexing', message: `Rebuilt in ${durationMs}ms`, current: 1, total: 1 });
       setReady(true);
-      setChangeNonce((n) => n + 1);
+      setProjectChangeNonce((n) => n + 1);
+      setSessionChangeNonce((n) => n + 1);
     } catch (e: unknown) {
       setError(String(e));
     } finally {
@@ -365,7 +456,8 @@ function PlaygroundShell() {
       if (await window.spaghetti.isReady()) {
         setReady(true);
         setRetrying(false);
-        setChangeNonce((n) => n + 1);
+        setProjectChangeNonce((n) => n + 1);
+        setSessionChangeNonce((n) => n + 1);
       }
     } catch (e: unknown) {
       setError(String(e));
@@ -645,12 +737,21 @@ function PlaygroundShell() {
                   );
                   const prompt = flattenPrompt(s.firstPrompt || s.summary, 96);
                   const tok = formatTokenUsage(s.tokenUsage, s.sourceId, s.tokensEstimated);
+                  const activityKey = liveSessionKey(s.sourceId, s.projectSlug, s.sessionId);
+                  const activity = liveSessions[activityKey];
+                  const isLive = !!activity && liveClock - activity.lastActivityAt < SESSION_LIVE_TTL_MS;
                   return (
                     <button
                       key={`${s.sourceId}:${s.sessionId}`}
                       type="button"
                       onClick={() => {
                         setBranchNavigateTarget(null);
+                        if (activity?.unreadCount) {
+                          setLiveSessions((current) => ({
+                            ...current,
+                            [activityKey]: { ...current[activityKey]!, unreadCount: 0 },
+                          }));
+                        }
                         setSelectedSession({ session: s, index });
                       }}
                       className="block w-full text-left px-6 py-3.5 border-0 bg-transparent text-inherit cursor-pointer hover:bg-ink/[0.05] transition-colors"
@@ -665,6 +766,12 @@ function PlaygroundShell() {
                         <span className="flex-1" />
                         <span className="font-mono text-[9px] opacity-40">{s.sessionId.slice(0, 8)}</span>
                         <SourceBadge sourceId={s.sourceId} isDark={isDark} />
+                        <LiveDot active={isLive} />
+                        {activity?.unreadCount ? (
+                          <span className="font-mono text-[8px] tabular-nums text-sanguine">
+                            +{activity.unreadCount}
+                          </span>
+                        ) : null}
                       </div>
                       {/* Session prompt quote — design thought scale: 13px serif */}
                       <div className="mb-1.5 truncate font-serif text-[13px] leading-relaxed opacity-70">

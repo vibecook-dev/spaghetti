@@ -36,7 +36,12 @@ import type { SqliteService } from '../io/index.js';
 // dedicated FTS index. Threads link back to their spawning Task/Agent tool id,
 // so the UI can lazily embed branches without flattening them into parent
 // pagination.
-export const SCHEMA_VERSION = 9;
+//
+// v10: incremental parent timeline projection. Each normalized row retains
+// its canonical raw index, and tool results are stored as explicit
+// associations so append-only live ingest can update one call without
+// invalidating and rebuilding the entire session.
+export const SCHEMA_VERSION = 10;
 
 export const SCHEMA_SQL = `
 -- Meta
@@ -114,6 +119,7 @@ CREATE TABLE IF NOT EXISTS timeline_messages (
   source_id TEXT NOT NULL,
   project_slug TEXT NOT NULL,
   session_id TEXT NOT NULL,
+  raw_index INTEGER NOT NULL,
   timeline_index INTEGER NOT NULL,
   display_type TEXT NOT NULL,
   tool_name TEXT,
@@ -121,6 +127,14 @@ CREATE TABLE IF NOT EXISTS timeline_messages (
   search_text TEXT NOT NULL DEFAULT '',
   data TEXT NOT NULL,
   UNIQUE(session_id, timeline_index)
+);
+
+CREATE TABLE IF NOT EXISTS timeline_tool_results (
+  session_id TEXT NOT NULL,
+  raw_index INTEGER NOT NULL,
+  tool_use_id TEXT NOT NULL,
+  result_data TEXT NOT NULL,
+  PRIMARY KEY(session_id, raw_index, tool_use_id)
 );
 
 CREATE TABLE IF NOT EXISTS timeline_dirty_sessions (
@@ -259,9 +273,11 @@ CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project_slug);
 CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(project_slug, session_id);
 CREATE INDEX IF NOT EXISTS idx_messages_session_idx ON messages(session_id, msg_index);
 CREATE INDEX IF NOT EXISTS idx_timeline_session_idx ON timeline_messages(session_id, timeline_index);
+CREATE INDEX IF NOT EXISTS idx_timeline_session_raw ON timeline_messages(session_id, raw_index);
 CREATE INDEX IF NOT EXISTS idx_timeline_session_type ON timeline_messages(session_id, display_type, timeline_index);
 CREATE INDEX IF NOT EXISTS idx_timeline_session_tool ON timeline_messages(session_id, tool_name, timeline_index);
 CREATE INDEX IF NOT EXISTS idx_timeline_session_tool_id ON timeline_messages(session_id, tool_use_id);
+CREATE INDEX IF NOT EXISTS idx_timeline_results_tool ON timeline_tool_results(session_id, tool_use_id, raw_index);
 CREATE INDEX IF NOT EXISTS idx_subagents_session ON subagents(source_id, project_slug, session_id);
 CREATE INDEX IF NOT EXISTS idx_subagent_messages_thread ON subagent_messages(source_id, session_id, workflow_id, agent_id, msg_index);
 CREATE INDEX IF NOT EXISTS idx_subagent_timeline_thread ON subagent_timeline_messages(source_id, session_id, workflow_id, agent_id, timeline_index);
@@ -313,7 +329,7 @@ CREATE TRIGGER IF NOT EXISTS timeline_dirty_ad AFTER DELETE ON messages BEGIN
     source_id = excluded.source_id,
     project_slug = excluded.project_slug;
 END;
-CREATE TRIGGER IF NOT EXISTS timeline_dirty_au AFTER UPDATE ON messages BEGIN
+CREATE TRIGGER IF NOT EXISTS timeline_dirty_au AFTER UPDATE OF data, timestamp, msg_index, source_id, project_slug ON messages BEGIN
   INSERT INTO timeline_dirty_sessions(session_id, source_id, project_slug)
   VALUES (new.session_id, new.source_id, new.project_slug)
   ON CONFLICT(session_id) DO UPDATE SET
@@ -356,6 +372,7 @@ const CURRENT_TABLES = [
   'sessions',
   'messages',
   'timeline_messages',
+  'timeline_tool_results',
   'timeline_dirty_sessions',
   'subagents',
   'subagent_messages',

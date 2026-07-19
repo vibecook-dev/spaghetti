@@ -27,6 +27,7 @@ import type { IngestHooks, MessageExtractor, SessionTokenApi } from '../sources/
 import { claudeCodeMessageExtractor } from '../sources/claude-code/message-extractor.js';
 import type { SourceFingerprint } from './segment-types.js';
 import { initializeSchema } from './schema.js';
+import { projectTimelineRawMessage } from './timeline-projection.js';
 
 // ═══════════════════════════════════════════════════════════════════════════
 // INTERFACE
@@ -488,25 +489,70 @@ class IngestServiceImpl implements IngestService {
       return;
     }
     const data = JSON.stringify(message);
+    const ownsTransaction = !this.inTransaction;
+    if (ownsTransaction) {
+      this.db.exec('BEGIN IMMEDIATE');
+      this.inTransaction = true;
+    }
+    try {
+      this.stmtInsertMessage.run(
+        slug,
+        sessionId,
+        index,
+        extracted.msgType,
+        extracted.uuid,
+        extracted.timestamp,
+        data,
+        extracted.tokens.inputTokens,
+        extracted.tokens.outputTokens,
+        extracted.tokens.cacheCreationTokens,
+        extracted.tokens.cacheReadTokens,
+        extracted.text,
+        byteOffset,
+        this.sourceId,
+      );
 
-    this.stmtInsertMessage.run(
-      slug,
-      sessionId,
-      index,
-      extracted.msgType,
-      extracted.uuid,
-      extracted.timestamp,
-      data,
-      extracted.tokens.inputTokens,
-      extracted.tokens.outputTokens,
-      extracted.tokens.cacheCreationTokens,
-      extracted.tokens.cacheReadTokens,
-      extracted.text,
-      byteOffset,
-      this.sourceId,
-    );
-
-    this.hooks.onMessageWritten?.(extracted, { slug, sessionId, msgIndex: index });
+      // Keep the normalized transcript current in the same transaction as its
+      // canonical row. The raw-table trigger marks the session dirty first;
+      // successful projection clears that marker before the transaction commits.
+      projectTimelineRawMessage(this.db, {
+        sourceId: this.sourceId,
+        projectSlug: slug,
+        sessionId,
+        rawIndex: index,
+        rawMessage: message as unknown as Record<string, unknown>,
+      });
+      const activityAt = extracted.timestamp || new Date().toISOString();
+      this.db.run(
+        `UPDATE sessions
+            SET modified_at = CASE
+                  WHEN modified_at IS NULL OR modified_at = '' OR modified_at < ? THEN ?
+                  ELSE modified_at
+                END,
+                updated_at = ?
+          WHERE id = ? AND source_id = ?`,
+        activityAt,
+        activityAt,
+        Date.now(),
+        sessionId,
+        this.sourceId,
+      );
+      this.hooks.onMessageWritten?.(extracted, { slug, sessionId, msgIndex: index });
+      if (ownsTransaction) {
+        this.db.exec('COMMIT');
+        this.inTransaction = false;
+      }
+    } catch (error) {
+      if (ownsTransaction && this.inTransaction) {
+        try {
+          this.db.exec('ROLLBACK');
+        } catch {
+          /* transaction may already have rolled back */
+        }
+        this.inTransaction = false;
+      }
+      throw error;
+    }
   }
 
   onSubagent(slug: string, sessionId: string, transcript: SubagentTranscript): void {
@@ -829,7 +875,7 @@ class IngestServiceImpl implements IngestService {
           this.native.liveIngestBatch(this.dbPath, nativeRows, this.sourceId);
         }
         return {
-          changes: buildChangesFromRows(rows, this.messageExtractor),
+          changes: buildChangesFromRows(rows, this.messageExtractor, this.sourceId),
           durationMs: Date.now() - startedAt,
         };
       } catch (err) {
@@ -881,7 +927,7 @@ class IngestServiceImpl implements IngestService {
     }
 
     return {
-      changes: buildChangesFromRows(rows, this.messageExtractor),
+      changes: buildChangesFromRows(rows, this.messageExtractor, this.sourceId),
       durationMs: Date.now() - startedAt,
     };
   }
@@ -904,6 +950,10 @@ class IngestServiceImpl implements IngestService {
     // is healthy; then sessions/projects; fingerprints last.
     this.db.run('DELETE FROM messages WHERE source_id = ?', this.sourceId);
     this.db.run('DELETE FROM timeline_messages WHERE source_id = ?', this.sourceId);
+    this.db.run(
+      'DELETE FROM timeline_tool_results WHERE session_id IN (SELECT id FROM sessions WHERE source_id = ?)',
+      this.sourceId,
+    );
     this.db.run('DELETE FROM timeline_dirty_sessions WHERE source_id = ?', this.sourceId);
     this.db.run('DELETE FROM subagent_timeline_messages WHERE source_id = ?', this.sourceId);
     this.db.run('DELETE FROM subagent_messages WHERE source_id = ?', this.sourceId);
@@ -915,6 +965,7 @@ class IngestServiceImpl implements IngestService {
   }
 
   clearSessionMessages(sessionId: string): void {
+    this.db.run('DELETE FROM timeline_tool_results WHERE session_id = ?', sessionId);
     this.db.run('DELETE FROM timeline_messages WHERE session_id = ? AND source_id = ?', sessionId, this.sourceId);
     this.db.run('DELETE FROM messages WHERE session_id = ? AND source_id = ?', sessionId, this.sourceId);
     this.db.run('UPDATE sessions SET tokens_estimated = 0 WHERE id = ? AND source_id = ?', sessionId, this.sourceId);
@@ -924,6 +975,7 @@ class IngestServiceImpl implements IngestService {
     const tables = [
       'messages',
       'timeline_messages',
+      'timeline_tool_results',
       'timeline_dirty_sessions',
       'subagents',
       'subagent_messages',
@@ -1198,7 +1250,7 @@ type RowOf<C extends ParsedRowCategory> = Extract<ParsedRow, { category: C }>;
  */
 interface RowHandler<C extends ParsedRowCategory> {
   apply(row: RowOf<C>, ctx: RowWriteContext): void;
-  toChange(row: RowOf<C>, ts: number): Change | null;
+  toChange(row: RowOf<C>, ts: number, sourceId: string): Change | null;
 }
 
 type RowHandlers = { [C in ParsedRowCategory]: RowHandler<C> };
@@ -1216,8 +1268,9 @@ function handler<C extends ParsedRowCategory>(h: RowHandler<C>): RowHandler<C> {
 const ROW_HANDLERS: RowHandlers = {
   message: handler<'message'>({
     apply: (r, c) => c.onMessage(r.slug, r.sessionId, r.message, r.msgIndex, r.byteOffset),
-    toChange: (r, ts) => ({
+    toChange: (r, ts, sourceId) => ({
       type: 'session.message.added',
+      sourceId,
       seq: 0,
       ts,
       slug: r.slug,
@@ -1228,8 +1281,9 @@ const ROW_HANDLERS: RowHandlers = {
   }),
   subagent: handler<'subagent'>({
     apply: (r, c) => c.onSubagent(r.slug, r.sessionId, r.transcript),
-    toChange: (r, ts) => ({
+    toChange: (r, ts, sourceId) => ({
       type: 'subagent.updated',
+      sourceId,
       seq: 0,
       ts,
       slug: r.slug,
@@ -1240,8 +1294,9 @@ const ROW_HANDLERS: RowHandlers = {
   }),
   tool_result: handler<'tool_result'>({
     apply: (r, c) => c.onToolResult(r.slug, r.sessionId, r.result),
-    toChange: (r, ts) => ({
+    toChange: (r, ts, sourceId) => ({
       type: 'tool-result.added',
+      sourceId,
       seq: 0,
       ts,
       slug: r.slug,
@@ -1251,7 +1306,7 @@ const ROW_HANDLERS: RowHandlers = {
   }),
   file_history: handler<'file_history'>({
     apply: (r, c) => c.onFileHistory(r.sessionId, r.history),
-    toChange: (r, ts) => {
+    toChange: (r, ts, sourceId) => {
       // `apply` persists every snapshot in the ParsedRow to SQLite,
       // but this `toChange` emits only ONE `file-history.added` event
       // — for `snapshots[0]`. Multi-snapshot rows (produced by
@@ -1265,6 +1320,7 @@ const ROW_HANDLERS: RowHandlers = {
       if (!snap) return null;
       return {
         type: 'file-history.added',
+        sourceId,
         seq: 0,
         ts,
         sessionId: r.sessionId,
@@ -1275,8 +1331,9 @@ const ROW_HANDLERS: RowHandlers = {
   }),
   todo: handler<'todo'>({
     apply: (r, c) => c.onTodo(r.sessionId, r.todo),
-    toChange: (r, ts) => ({
+    toChange: (r, ts, sourceId) => ({
       type: 'todo.updated',
+      sourceId,
       seq: 0,
       ts,
       sessionId: r.sessionId,
@@ -1286,8 +1343,9 @@ const ROW_HANDLERS: RowHandlers = {
   }),
   task: handler<'task'>({
     apply: (r, c) => c.onTask(r.sessionId, r.task),
-    toChange: (r, ts) => ({
+    toChange: (r, ts, sourceId) => ({
       type: 'task.updated',
+      sourceId,
       seq: 0,
       ts,
       sessionId: r.sessionId,
@@ -1296,8 +1354,9 @@ const ROW_HANDLERS: RowHandlers = {
   }),
   plan: handler<'plan'>({
     apply: (r, c) => c.onPlan(r.slug, r.plan),
-    toChange: (r, ts) => ({
+    toChange: (r, ts, sourceId) => ({
       type: 'plan.upserted',
+      sourceId,
       seq: 0,
       ts,
       slug: r.slug,
@@ -1342,7 +1401,7 @@ function applyRowHandler(row: ParsedRow, ctx: RowWriteContext): void {
  * here would divorce the counter from fan-out order; see C3.1 for the
  * history.
  */
-function buildChangesFromRows(rows: ParsedRow[], extractor: MessageExtractor): Change[] {
+function buildChangesFromRows(rows: ParsedRow[], extractor: MessageExtractor, sourceId: string): Change[] {
   const changes: Change[] = [];
   for (const row of rows) {
     // Only emit message.added for rows that were (or would be) written.
@@ -1351,7 +1410,7 @@ function buildChangesFromRows(rows: ParsedRow[], extractor: MessageExtractor): C
       continue;
     }
     const ts = Date.now();
-    const change = (ROW_HANDLERS[row.category] as RowHandler<typeof row.category>).toChange(row as never, ts);
+    const change = (ROW_HANDLERS[row.category] as RowHandler<typeof row.category>).toChange(row as never, ts, sourceId);
     if (change !== null) changes.push(change);
   }
   return changes;

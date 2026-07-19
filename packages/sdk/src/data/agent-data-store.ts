@@ -50,6 +50,10 @@ import type { ErrorSink } from '../io/error-sink.js';
  * no observable behavior change.
  */
 export interface AgentDataStore {
+  /** Internal lifecycle maintenance after exclusive native ingest. */
+  prepareTimelineProjections(
+    onProgress?: (progress: { kind: 'session' | 'subagent'; current: number; total: number }) => void,
+  ): { sessions: number; subagents: number };
   // ── Projects ─────────────────────────────────────────────────────────────
   getProjectSlugs(): string[];
   getSourceIds(): string[];
@@ -238,6 +242,12 @@ export class AgentDataStoreImpl implements AgentDataStore {
   }
 
   // ── Projects ───────────────────────────────────────────────────────────
+
+  prepareTimelineProjections(
+    onProgress?: (progress: { kind: 'session' | 'subagent'; current: number; total: number }) => void,
+  ): { sessions: number; subagents: number } {
+    return this.queryService.prepareTimelineProjections(onProgress);
+  }
 
   getProjectSlugs(): string[] {
     return this.queryService.getProjectSlugs();

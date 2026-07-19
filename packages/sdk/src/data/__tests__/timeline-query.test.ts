@@ -8,6 +8,7 @@ import { createSqliteService } from '../../io/sqlite-service.js';
 import type { SqliteService } from '../../io/index.js';
 import { createQueryService, type QueryService } from '../query-service.js';
 import { initializeSchema } from '../schema.js';
+import { projectTimelineRawMessage } from '../timeline-projection.js';
 
 const SLUG = 'timeline-project';
 const SESSION = 'timeline-session';
@@ -102,11 +103,33 @@ describe('normalized timeline DB queries', () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
+  test('lifecycle preparation materializes native-ingested rows before reads', () => {
+    const prepared = query.prepareTimelineProjections();
+    assert.deepEqual(prepared, { sessions: 1, subagents: 0 });
+    assert.equal(sqlite.get<{ count: number }>('SELECT COUNT(*) AS count FROM timeline_dirty_sessions')?.count, 0);
+    assert.equal(
+      sqlite.get<{ count: number }>('SELECT COUNT(*) AS count FROM timeline_messages WHERE session_id = ?', SESSION)
+        ?.count,
+      6,
+    );
+  });
+
   test('facets count the full normalized session, including split assistant parts', () => {
     const facets = query.getSessionTimelineFacets(SLUG, SESSION, { sourceId: 'claude-code' });
     assert.equal(facets.total, 6);
     assert.deepEqual(facets.messageCounts, { assistant: 2, checkpoint: 1, thinking: 1, tool_use: 1, user: 1 });
     assert.deepEqual(facets.toolCounts, { Bash: 1 });
+  });
+
+  test('token attribution updates do not invalidate the display projection', () => {
+    sqlite.run('UPDATE messages SET input_tokens = ? WHERE session_id = ? AND msg_index = ?', 42, SESSION, 1);
+    assert.equal(
+      sqlite.get<{ count: number }>(
+        'SELECT COUNT(*) AS count FROM timeline_dirty_sessions WHERE session_id = ?',
+        SESSION,
+      )?.count,
+      0,
+    );
   });
 
   test('solo query finds an old type absent from the loaded newest page', () => {
@@ -158,6 +181,94 @@ describe('normalized timeline DB queries', () => {
     assert.equal(second.messages.length, 2);
     assert.equal(second.hasMore, true);
     assert.equal(new Set([...first.messages, ...second.messages].map((message) => message.timelineId)).size, 4);
+  });
+
+  test('an appended result updates only its paired tool row and leaves the projection clean', () => {
+    const before = sqlite.get<{ id: number }>(
+      "SELECT id FROM timeline_messages WHERE session_id = ? AND tool_use_id = 'tool-1'",
+      SESSION,
+    );
+    assert.ok(before);
+    const updatedResult = {
+      type: 'user',
+      uuid: 'result-1',
+      timestamp: '2026-01-01T00:00:02Z',
+      sessionId: SESSION,
+      message: {
+        role: 'user',
+        content: [{ type: 'tool_result', tool_use_id: 'tool-1', content: 'incremental result' }],
+      },
+    };
+    sqlite.run(
+      'UPDATE messages SET data = ? WHERE session_id = ? AND msg_index = 2',
+      JSON.stringify(updatedResult),
+      SESSION,
+    );
+    projectTimelineRawMessage(sqlite, {
+      sourceId: 'claude-code',
+      projectSlug: SLUG,
+      sessionId: SESSION,
+      rawIndex: 2,
+      rawMessage: updatedResult,
+    });
+
+    const after = sqlite.get<{ id: number; data: string }>(
+      "SELECT id, data FROM timeline_messages WHERE session_id = ? AND tool_use_id = 'tool-1'",
+      SESSION,
+    );
+    assert.equal(after?.id, before.id, 'the paired tool row is updated in place');
+    assert.equal(
+      (JSON.parse(after!.data) as { toolUse: { result: { content: string } } }).toolUse.result.content,
+      'incremental result',
+    );
+    assert.equal(
+      sqlite.get<{ count: number }>(
+        'SELECT COUNT(*) AS count FROM timeline_dirty_sessions WHERE session_id = ?',
+        SESSION,
+      )?.count,
+      0,
+    );
+  });
+
+  test('append projection preserves old row identities and is immediately pageable', () => {
+    const stable = sqlite.get<{ id: number }>(
+      "SELECT id FROM timeline_messages WHERE session_id = ? AND display_type = 'checkpoint'",
+      SESSION,
+    );
+    const appended = {
+      type: 'assistant',
+      uuid: 'assistant-append',
+      timestamp: '2026-01-01T00:00:05Z',
+      sessionId: SESSION,
+      message: { role: 'assistant', content: [{ type: 'text', text: 'incremental append' }] },
+    };
+    sqlite.run(
+      `INSERT INTO messages (source_id, project_slug, session_id, msg_index, msg_type, data)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+      'claude-code',
+      SLUG,
+      SESSION,
+      5,
+      appended.type,
+      JSON.stringify(appended),
+    );
+    projectTimelineRawMessage(sqlite, {
+      sourceId: 'claude-code',
+      projectSlug: SLUG,
+      sessionId: SESSION,
+      rawIndex: 5,
+      rawMessage: appended,
+    });
+
+    assert.equal(
+      sqlite.get<{ id: number }>(
+        "SELECT id FROM timeline_messages WHERE session_id = ? AND display_type = 'checkpoint'",
+        SESSION,
+      )?.id,
+      stable?.id,
+    );
+    const page = query.getSessionTimeline(SLUG, SESSION, { limit: 1 });
+    assert.equal(page.messages[0]?.content, 'incremental append');
   });
 
   test('raw updates mark the projection dirty and refresh the next query', () => {

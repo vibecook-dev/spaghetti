@@ -150,6 +150,7 @@ export function createSettingsHandler(
 
     const change: Change = {
       type: 'settings.changed',
+      sourceId: 'claude-code',
       seq: 0, // store.emit() stamps the real value
       ts: Date.now(),
       file: category === 'settings' ? 'settings' : 'settings.local',

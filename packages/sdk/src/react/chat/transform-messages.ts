@@ -19,6 +19,32 @@ export interface TransformRawMessagesOptions {
   sourceId?: string;
 }
 
+/** Tool results carried by one canonical raw row, after source adaptation. */
+export function extractToolResultsFromRawMessage(
+  rawMessage: AnyMsg,
+  options?: TransformRawMessagesOptions,
+): ToolResultInfo[] {
+  const sourceId = options?.sourceId;
+  const entry =
+    sourceId && sourceId !== 'claude-code'
+      ? (adaptMessagesForDisplay([rawMessage], sourceId)[0] as unknown as AnyMsg | undefined)
+      : rawMessage;
+  if (!entry || entry.type !== 'user') return [];
+  const content = (entry.message as { content?: unknown } | undefined)?.content;
+  if (!Array.isArray(content)) return [];
+  const results: ToolResultInfo[] = [];
+  for (const item of content) {
+    if (!item || typeof item !== 'object' || item.type !== 'tool_result') continue;
+    results.push({
+      toolId: String(item.tool_use_id ?? ''),
+      isError: item.is_error === true,
+      content: toolResultContent(item.content),
+      rawJson: sourceId === 'codex' || sourceId === 'grok' ? undefined : item,
+    });
+  }
+  return results;
+}
+
 function toolResultContent(content: unknown): string {
   if (typeof content === 'string') return content;
   if (content == null) return '';

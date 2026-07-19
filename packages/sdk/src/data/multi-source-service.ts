@@ -86,7 +86,21 @@ export class SpaghettiDataService extends EventEmitter implements AgentDataServi
     for (const owner of this.owners) {
       await owner.attachShared();
     }
-    // Phase 3 — Plane 2 after every source is warm.
+    // Native cold/warm ingest writes canonical rows without running the
+    // TypeScript display transformer. Finish those rebuildable indexes now so
+    // opening a session never performs an O(session length) write transaction.
+    this.store.prepareTimelineProjections(({ kind, current, total }) => {
+      // Projection preparation can cover hundreds of sessions. Keep startup
+      // visible without flooding the UtilityProcess -> main -> renderer port.
+      if (current !== 1 && current !== total && current % 10 !== 0) return;
+      this.emit('progress', {
+        phase: 'storing',
+        message: kind === 'session' ? 'Normalizing session transcripts…' : 'Normalizing subagent transcripts…',
+        current,
+        total,
+      });
+    });
+    // Phase 3 — Plane 2 only after every source and projection is warm.
     for (const owner of this.owners) {
       await owner.startLivePipeline();
     }

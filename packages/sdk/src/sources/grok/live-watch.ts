@@ -84,8 +84,11 @@ export function createGrokLiveWatch(deps: GrokLiveWatchDeps): GrokLiveWatch {
   let watcher: Watcher | null = null;
   let unsubscribe: Unsubscribe | null = null;
   let timer: ReturnType<typeof setTimeout> | null = null;
+  let workTail: Promise<void> = Promise.resolve();
+  let stopping = false;
 
   function scheduleChat(chatFile: string): void {
+    if (stopping) return;
     const cur = pending.get(chatFile) ?? {};
     cur.chatHistory = chatFile;
     cur.sidecarOnly = false;
@@ -94,6 +97,7 @@ export function createGrokLiveWatch(deps: GrokLiveWatchDeps): GrokLiveWatch {
   }
 
   function scheduleSidecar(sidecarFile: string): void {
+    if (stopping) return;
     const chatFile = chatHistoryForSidecar(sidecarFile);
     const cur = pending.get(chatFile) ?? {};
     // If chat is already scheduled, sidecar runs after ingestChanged.
@@ -112,11 +116,19 @@ export function createGrokLiveWatch(deps: GrokLiveWatchDeps): GrokLiveWatch {
       const batch = [...pending.entries()];
       pending.clear();
       for (const [chatFile, work] of batch) {
-        if (work.chatHistory) {
-          void ingestChanged(chatFile);
-        } else if (work.sidecarOnly) {
-          void reapplySidecars(chatFile);
-        }
+        // Keep every shared-connection mutation in one ordered tail. This
+        // also lets stop() await sidecar work before SQLite is closed.
+        workTail = workTail
+          .then(async () => {
+            if (work.chatHistory) {
+              await ingestChanged(chatFile);
+            } else if (work.sidecarOnly) {
+              reapplySidecars(chatFile);
+            }
+          })
+          .catch((err: unknown) => {
+            deps.errorSink.error(err instanceof Error ? err : new Error(String(err)));
+          });
       }
     }, DEBOUNCE_MS);
   }
@@ -166,11 +178,18 @@ export function createGrokLiveWatch(deps: GrokLiveWatchDeps): GrokLiveWatch {
         deps.ingestService.onProject(slug, meta.cwd, sessionsIndex);
         deps.ingestService.onSession(slug, entry);
 
-        st = { byteOffset: 0, nextIndex: 0, slug, sessionId: meta.sessionId };
+        const fingerprint = deps.ingestService.getFingerprint(file);
+        st = {
+          byteOffset: fingerprint?.bytePosition ?? 0,
+          nextIndex: deps.ingestService.getNextMessageIndex(meta.sessionId),
+          slug,
+          sessionId: meta.sessionId,
+        };
         state.set(file, st);
         if (!existed) {
           deps.store.emit({
             type: 'session.created',
+            sourceId: 'grok',
             seq: 0,
             ts: Date.now(),
             slug,
@@ -239,6 +258,15 @@ export function createGrokLiveWatch(deps: GrokLiveWatchDeps): GrokLiveWatch {
       } catch {
         /* sidecar best-effort */
       }
+      const currentStats = deps.fileService.getStats(file);
+      if (currentStats) {
+        deps.ingestService.upsertFingerprint({
+          path: file,
+          mtimeMs: currentStats.mtimeMs,
+          size: currentStats.size,
+          bytePosition: st.byteOffset,
+        });
+      }
     } catch (err) {
       deps.errorSink.error(err instanceof Error ? err : new Error(String(err)));
     }
@@ -259,6 +287,7 @@ export function createGrokLiveWatch(deps: GrokLiveWatchDeps): GrokLiveWatch {
     sourceId: 'grok',
     async start(): Promise<void> {
       if (watcher) return;
+      stopping = false;
       watcher = createParcelWatcher();
       try {
         unsubscribe = await watcher.subscribe(deps.sessionsDir, onEvents, { ignore: [], recursive: true });
@@ -269,6 +298,7 @@ export function createGrokLiveWatch(deps: GrokLiveWatchDeps): GrokLiveWatch {
     },
 
     async stop(): Promise<void> {
+      stopping = true;
       if (timer) {
         clearTimeout(timer);
         timer = null;
@@ -278,6 +308,8 @@ export function createGrokLiveWatch(deps: GrokLiveWatchDeps): GrokLiveWatch {
         await unsubscribe();
         unsubscribe = null;
       }
+      await workTail;
+      workTail = Promise.resolve();
       watcher = null;
       state.clear();
     },

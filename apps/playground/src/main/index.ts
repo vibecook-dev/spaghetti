@@ -15,12 +15,40 @@ import { realpath } from 'node:fs/promises';
 import { basename, dirname, extname, isAbsolute, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { IngestEngine } from '@vibecook/spaghetti-sdk';
-import { registerIpcHandlers, wireEventForwarding } from './ipc-handlers.js';
+import type { SdkHostEvent } from '../shared/sdk-protocol.js';
+import { EVENT_CHANNELS } from '../shared/ipc.js';
+import { registerIpcHandlers } from './ipc-handlers.js';
 import { resolveAppEngine } from './settings.js';
-import { disposeSdk, shutdownSdk } from './sdk.js';
+import { SdkHostClient } from './sdk-host-client.js';
 import { closeMilleWorkspace, getMilleActiveRoot, openMilleWorkspace } from './mille-host.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
+let sdkHostClient: SdkHostClient | null = null;
+
+function broadcast(channel: string, payload: unknown): void {
+  for (const win of BrowserWindow.getAllWindows()) {
+    if (!win.isDestroyed()) win.webContents.send(channel, payload);
+  }
+}
+
+function broadcastSdkEvent(event: SdkHostEvent): void {
+  switch (event.event) {
+    case 'progress':
+      broadcast(EVENT_CHANNELS.progress, event.payload);
+      return;
+    case 'ready':
+      broadcast(EVENT_CHANNELS.ready, event.payload);
+      return;
+    case 'change':
+      broadcast(EVENT_CHANNELS.change, event.payload);
+      return;
+    case 'active-session-change':
+      broadcast(EVENT_CHANNELS.activeSessionChange, event.payload);
+      return;
+    case 'init-error':
+      broadcast(EVENT_CHANNELS.initError, event.payload);
+  }
+}
 
 // ── Single instance ─────────────────────────────────────────────────────────
 // Prevent two playground processes from exclusive-ingesting the same cache
@@ -123,7 +151,9 @@ void app.whenReady().then(async () => {
 
   const engine = resolveAppEngine();
   const dbPath = resolvePlaygroundDbPath(engine);
-  registerIpcHandlers();
+  const sdkHost = new SdkHostClient({ dbPath, engine, onEvent: broadcastSdkEvent });
+  sdkHostClient = sdkHost;
+  registerIpcHandlers(sdkHost);
 
   // Mille file explorer — open/close workspace from the Files panel.
   // open-workspace forks UtilityProcess + transfers MessagePort to renderer.
@@ -206,13 +236,9 @@ void app.whenReady().then(async () => {
 
   createWindow();
 
-  void wireEventForwarding({ dbPath, engine }).catch((err) => {
-    console.error('[main] SDK initialization failed', err);
-    for (const win of BrowserWindow.getAllWindows()) {
-      if (!win.isDestroyed()) {
-        win.webContents.send('spaghetti:event:init-error', String(err));
-      }
-    }
+  void sdkHost.start().catch((err: unknown) => {
+    console.error('[main] SDK utility failed to start', err);
+    broadcast(EVENT_CHANNELS.initError, String(err));
   });
 
   app.on('activate', () => {
@@ -237,10 +263,10 @@ app.on('before-quit', (event) => {
   event.preventDefault();
   isQuitting = true;
   closeMilleWorkspace();
-  void disposeSdk()
+  void (sdkHostClient?.dispose() ?? Promise.resolve())
     .catch((err) => {
-      console.error('[main] dispose failed', err);
-      shutdownSdk();
+      console.error('[main] SDK utility dispose failed', err);
+      sdkHostClient?.kill();
     })
     .finally(() => {
       app.exit(0);

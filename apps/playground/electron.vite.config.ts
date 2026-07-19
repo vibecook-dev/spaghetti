@@ -20,11 +20,12 @@ export default defineConfig({
   main: {
     plugins: [externalizeDepsPlugin()],
     build: {
-      // Multi-entry: main window process + mille UtilityProcess host
+      // Multi-entry: main window process + isolated utility hosts.
       rollupOptions: {
         input: {
           index: resolve(__dirname, 'src/main/index.ts'),
           'fx-host': resolve(__dirname, 'src/utility/fx-host.ts'),
+          'sdk-host': resolve(__dirname, 'src/utility/sdk-host.ts'),
         },
         external: mainExternals,
       },

@@ -1,88 +1,73 @@
-/**
- * Wires the shared IPC contract to the SDK instance.
- */
+/** Thin IPC broker: renderer requests are forwarded to the SDK UtilityProcess. */
 
-import { BrowserWindow, ipcMain } from 'electron';
+import { ipcMain } from 'electron';
 import type { ProjectReference } from '@vibecook/spaghetti-sdk';
-import { EVENT_CHANNELS, IPC_CHANNELS } from '../shared/ipc.js';
-import { createSdk, getEngine, getSdk, retrySdkInit, startSdk, type InitSdkOptions } from './sdk.js';
+import { IPC_CHANNELS } from '../shared/ipc.js';
+import type { SdkHostClient } from './sdk-host-client.js';
 
-function broadcast(channel: string, payload: unknown): void {
-  for (const win of BrowserWindow.getAllWindows()) {
-    if (!win.isDestroyed()) {
-      win.webContents.send(channel, payload);
-    }
-  }
-}
-
-function attachLifecycleBroadcast(sdk: ReturnType<typeof createSdk>): void {
-  sdk.onProgress((progress) => broadcast(EVENT_CHANNELS.progress, progress));
-  sdk.onReady((info) => broadcast(EVENT_CHANNELS.ready, info));
-  sdk.onChange((batch) => broadcast(EVENT_CHANNELS.change, batch));
-}
-
-export function registerIpcHandlers(): void {
+export function registerIpcHandlers(client: SdkHostClient): void {
   // Lifecycle ---------------------------------------------------------------
-  ipcMain.handle(IPC_CHANNELS.isReady, () => {
-    try {
-      return getSdk().isReady();
-    } catch {
-      return false;
-    }
-  });
-  ipcMain.handle(IPC_CHANNELS.rebuildIndex, () => getSdk().rebuildIndex());
-  ipcMain.handle(IPC_CHANNELS.retryInit, async () => {
-    await retrySdkInit((service) => {
-      attachLifecycleBroadcast(service);
-    });
-    return { ok: true as const };
-  });
-  ipcMain.handle(IPC_CHANNELS.getEngine, () => getEngine());
+  ipcMain.handle(IPC_CHANNELS.isReady, () => client.request('isReady'));
+  ipcMain.handle(IPC_CHANNELS.rebuildIndex, () => client.request('rebuildIndex'));
+  ipcMain.handle(IPC_CHANNELS.retryInit, () => client.request('retryInit'));
+  ipcMain.handle(IPC_CHANNELS.getEngine, () => client.request('getEngine'));
 
   // Projects ----------------------------------------------------------------
-  ipcMain.handle(IPC_CHANNELS.getProjectList, () => getSdk().getProjectList());
-  ipcMain.handle(IPC_CHANNELS.getProjectMemory, (_e, project: ProjectReference, options?: { sourceId?: string }) =>
-    getSdk().getProjectMemory(project, options),
+  ipcMain.handle(IPC_CHANNELS.getProjectList, () => client.request('getProjectList'));
+  ipcMain.handle(IPC_CHANNELS.getProjectMemory, (_event, project: ProjectReference, options?: { sourceId?: string }) =>
+    client.request('getProjectMemory', project, options),
   );
 
   // Sessions ----------------------------------------------------------------
-  ipcMain.handle(IPC_CHANNELS.getSessionList, (_e, project: ProjectReference, options?: { sourceId?: string }) =>
-    getSdk().getSessionList(project, options),
+  ipcMain.handle(IPC_CHANNELS.getSessionList, (_event, project: ProjectReference, options?: { sourceId?: string }) =>
+    client.request('getSessionList', project, options),
   );
   ipcMain.handle(
     IPC_CHANNELS.getSessionMessages,
-    (_e, projectSlug: string, sessionId: string, limit?: number, offset?: number, options?: { sourceId?: string }) =>
-      getSdk().getSessionMessages(projectSlug, sessionId, limit, offset, options),
+    (
+      _event,
+      projectSlug: string,
+      sessionId: string,
+      limit?: number,
+      offset?: number,
+      options?: { sourceId?: string },
+    ) => client.request('getSessionMessages', projectSlug, sessionId, limit, offset, options),
   );
   ipcMain.handle(
     IPC_CHANNELS.getSessionTimelineFacets,
-    (_e, projectSlug: string, sessionId: string, options?: { sourceId?: string }) =>
-      getSdk().getSessionTimelineFacets(projectSlug, sessionId, options),
+    (_event, projectSlug: string, sessionId: string, options?: { sourceId?: string }) =>
+      client.request('getSessionTimelineFacets', projectSlug, sessionId, options),
   );
-  ipcMain.handle(IPC_CHANNELS.getSessionTimeline, (_e, projectSlug: string, sessionId: string, request) =>
-    getSdk().getSessionTimeline(projectSlug, sessionId, request),
+  ipcMain.handle(IPC_CHANNELS.getSessionTimeline, (_event, projectSlug: string, sessionId: string, request) =>
+    client.request('getSessionTimeline', projectSlug, sessionId, request),
   );
-  ipcMain.handle(IPC_CHANNELS.getSessionTodos, (_e, projectSlug: string, sessionId: string) =>
-    getSdk().getSessionTodos(projectSlug, sessionId),
+  ipcMain.handle(IPC_CHANNELS.openSessionStream, (_event, projectSlug: string, sessionId: string, request) =>
+    client.request('openSessionStream', projectSlug, sessionId, request),
   );
-  ipcMain.handle(IPC_CHANNELS.getSessionPlan, (_e, projectSlug: string, sessionId: string) =>
-    getSdk().getSessionPlan(projectSlug, sessionId),
+  ipcMain.handle(IPC_CHANNELS.closeSessionStream, (_event, streamId: string) =>
+    client.request('closeSessionStream', streamId),
   );
-  ipcMain.handle(IPC_CHANNELS.getSessionTask, (_e, projectSlug: string, sessionId: string) =>
-    getSdk().getSessionTask(projectSlug, sessionId),
+  ipcMain.handle(IPC_CHANNELS.getSessionTodos, (_event, projectSlug: string, sessionId: string) =>
+    client.request('getSessionTodos', projectSlug, sessionId),
   );
-  ipcMain.handle(IPC_CHANNELS.getToolResult, (_e, projectSlug: string, sessionId: string, toolUseId: string) =>
-    getSdk().getToolResult(projectSlug, sessionId, toolUseId),
+  ipcMain.handle(IPC_CHANNELS.getSessionPlan, (_event, projectSlug: string, sessionId: string) =>
+    client.request('getSessionPlan', projectSlug, sessionId),
+  );
+  ipcMain.handle(IPC_CHANNELS.getSessionTask, (_event, projectSlug: string, sessionId: string) =>
+    client.request('getSessionTask', projectSlug, sessionId),
+  );
+  ipcMain.handle(IPC_CHANNELS.getToolResult, (_event, projectSlug: string, sessionId: string, toolUseId: string) =>
+    client.request('getToolResult', projectSlug, sessionId, toolUseId),
   );
 
   // Subagents ---------------------------------------------------------------
-  ipcMain.handle(IPC_CHANNELS.getSessionSubagents, (_e, projectSlug: string, sessionId: string, options) =>
-    getSdk().getSessionSubagents(projectSlug, sessionId, options),
+  ipcMain.handle(IPC_CHANNELS.getSessionSubagents, (_event, projectSlug: string, sessionId: string, options) =>
+    client.request('getSessionSubagents', projectSlug, sessionId, options),
   );
   ipcMain.handle(
     IPC_CHANNELS.getSubagentMessages,
     (
-      _e,
+      _event,
       projectSlug: string,
       sessionId: string,
       agentId: string,
@@ -90,24 +75,15 @@ export function registerIpcHandlers(): void {
       offset?: number,
       workflowId?: string,
       options?: { sourceId?: string },
-    ) => getSdk().getSubagentMessages(projectSlug, sessionId, agentId, limit, offset, workflowId, options),
+    ) => client.request('getSubagentMessages', projectSlug, sessionId, agentId, limit, offset, workflowId, options),
   );
   ipcMain.handle(
     IPC_CHANNELS.getSubagentTimeline,
-    (_e, projectSlug: string, sessionId: string, agentId: string, request) =>
-      getSdk().getSubagentTimeline(projectSlug, sessionId, agentId, request),
+    (_event, projectSlug: string, sessionId: string, agentId: string, request) =>
+      client.request('getSubagentTimeline', projectSlug, sessionId, agentId, request),
   );
 
   // Search / stats ----------------------------------------------------------
-  ipcMain.handle(IPC_CHANNELS.search, (_e, query) => getSdk().search(query));
-  ipcMain.handle(IPC_CHANNELS.getStats, () => getSdk().getStats());
-}
-
-/**
- * Create the SDK, attach progress/ready/change listeners, then initialize.
- */
-export async function wireEventForwarding(options: InitSdkOptions): Promise<void> {
-  const sdk = createSdk(options);
-  attachLifecycleBroadcast(sdk);
-  await startSdk();
+  ipcMain.handle(IPC_CHANNELS.search, (_event, query) => client.request('search', query));
+  ipcMain.handle(IPC_CHANNELS.getStats, () => client.request('getStats'));
 }

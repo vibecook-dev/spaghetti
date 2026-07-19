@@ -9,7 +9,8 @@
  * - Type label mono uppercase; body serif for prose
  */
 
-import { useState, useCallback, useMemo, type ComponentType } from 'react';
+import { useState, useCallback, useLayoutEffect, useMemo, useRef, type ComponentType, type RefObject } from 'react';
+import { useVirtualizer } from '@tanstack/react-virtual';
 import {
   User,
   Feather,
@@ -129,6 +130,9 @@ export interface ArchiveTranscriptProps {
   branchCountsByToolId?: ReadonlyMap<string, { threads: number; messages: number; loaded: number; loading: boolean }>;
   onToggleBranch?: (toolUseId: string) => void;
   onLoadMoreBranch?: (branchKey: string) => void;
+  scrollElementRef: RefObject<HTMLDivElement | null>;
+  scrollToBranchToolId?: string | null;
+  onScrollTargetConsumed?: () => void;
 }
 
 export function ArchiveTranscript({
@@ -138,8 +142,13 @@ export function ArchiveTranscript({
   branchCountsByToolId,
   onToggleBranch,
   onLoadMoreBranch,
+  scrollElementRef,
+  scrollToBranchToolId,
+  onScrollTargetConsumed,
 }: ArchiveTranscriptProps) {
   const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set());
+  const rootRef = useRef<HTMLDivElement>(null);
+  const [scrollMargin, setScrollMargin] = useState(0);
 
   const toggle = useCallback((id: string) => {
     setCollapsed((prev) => {
@@ -177,9 +186,40 @@ export function ArchiveTranscript({
   const paper = paperFill(isDark);
   const branchAccent = accentHex('branch_start', isDark);
 
+  // The transcript shares the session scroller with pagination banners, so
+  // tell the virtualizer where this list begins inside that scroll element.
+  useLayoutEffect(() => {
+    const root = rootRef.current;
+    const scroll = scrollElementRef.current;
+    if (!root || !scroll) return;
+    const next = root.getBoundingClientRect().top - scroll.getBoundingClientRect().top + scroll.scrollTop;
+    setScrollMargin((current) => (Math.abs(current - next) < 0.5 ? current : next));
+  });
+
+  const rowVirtualizer = useVirtualizer({
+    count: visible.length,
+    getScrollElement: () => scrollElementRef.current,
+    estimateSize: () => 180,
+    overscan: 6,
+    scrollMargin,
+    getItemKey: (index) => visible[index]?.identity ?? index,
+  });
+
+  useLayoutEffect(() => {
+    if (!scrollToBranchToolId) return;
+    const index = visible.findIndex(
+      ({ msg }) => msg.type === 'tool_use' && msg.toolUse?.toolId === scrollToBranchToolId,
+    );
+    if (index < 0) return;
+    rowVirtualizer.scrollToIndex(index, { align: 'center' });
+    onScrollTargetConsumed?.();
+  }, [onScrollTargetConsumed, rowVirtualizer, scrollToBranchToolId, visible]);
+
   return (
-    <div className="flex flex-col">
-      {visible.map(({ msg, identity }, i) => {
+    <div ref={rootRef} className="relative w-full" style={{ height: rowVirtualizer.getTotalSize() }}>
+      {rowVirtualizer.getVirtualItems().map((virtualRow) => {
+        const i = virtualRow.index;
+        const { msg, identity } = visible[i]!;
         const next = visible[i + 1];
         const depth = depthOf(msg);
         const nextDepth = next ? depthOf(next.msg) : 0;
@@ -204,142 +244,150 @@ export function ArchiveTranscript({
         const labelChip = branchLabel(msg);
 
         return (
-          <div key={identity} className="relative flex" style={{ marginLeft: depth * INDENT }}>
-            {/* Rail column */}
-            <div className="relative shrink-0 flex justify-start" style={{ width: RAIL_W }}>
-              {/* Continuous main rail behind branched entries */}
-              {depth > 0 && (
+          <div
+            key={identity}
+            ref={rowVirtualizer.measureElement}
+            data-index={virtualRow.index}
+            className="absolute left-0 top-0 w-full"
+            style={{ transform: `translateY(${virtualRow.start - scrollMargin}px)` }}
+          >
+            <div className="relative flex" style={{ marginLeft: depth * INDENT }}>
+              {/* Rail column */}
+              <div className="relative shrink-0 flex justify-start" style={{ width: RAIL_W }}>
+                {/* Continuous main rail behind branched entries */}
+                {depth > 0 && (
+                  <div
+                    className="absolute w-px"
+                    style={{ left: -depth * INDENT, background: line, top: 0, ...railExtent }}
+                  />
+                )}
+
+                {/* Solid main / dashed branch rail */}
                 <div
-                  className="absolute w-px"
-                  style={{ left: -depth * INDENT, background: line, top: 0, ...railExtent }}
+                  className="absolute left-0"
+                  style={
+                    depth > 0
+                      ? returnsToMain
+                        ? {
+                            borderLeft: `1px dashed ${branchAccent}`,
+                            top: 0,
+                            height: 'calc(100% - 42px)',
+                          }
+                        : {
+                            borderLeft: `1px dashed ${branchAccent}`,
+                            top: 0,
+                            ...railExtent,
+                          }
+                      : { width: 1, background: line, top: 0, ...railExtent }
+                  }
                 />
-              )}
 
-              {/* Solid main / dashed branch rail */}
-              <div
-                className="absolute left-0"
-                style={
-                  depth > 0
-                    ? returnsToMain
-                      ? {
-                          borderLeft: `1px dashed ${branchAccent}`,
-                          top: 0,
-                          height: 'calc(100% - 42px)',
-                        }
-                      : {
-                          borderLeft: `1px dashed ${branchAccent}`,
-                          top: 0,
-                          ...railExtent,
-                        }
-                    : { width: 1, background: line, top: 0, ...railExtent }
-                }
-              />
-
-              {/* Square node — left accent rule, paper fill cuts the line */}
-              <button
-                type="button"
-                onClick={toggleMessage}
-                data-branch-tool-id={branchToolId}
-                aria-expanded={!isCollapsed}
-                aria-label={`${isCollapsed ? 'Expand' : 'Collapse'} ${meta.label} message`}
-                className="relative z-10 mt-1 flex items-center justify-center rounded-none"
-                style={{
-                  width: NODE_SIZE,
-                  height: NODE_SIZE,
-                  borderLeft: `1px solid ${accent}`,
-                  background: paper,
-                  color: accent,
-                }}
-              >
-                <Icon size={12} />
-              </button>
-
-              {/* Dashed cubic fork into sub-thread */}
-              {drawFork && (
-                <svg
-                  className="absolute pointer-events-none overflow-visible"
-                  style={{ left: 0, bottom: -2, width: INDENT + 2, height: 44 }}
-                  viewBox={`0 0 ${INDENT + 2} 44`}
-                  aria-hidden
-                >
-                  <path
-                    d={`M0 0 C 0 26, ${INDENT} 18, ${INDENT} 44`}
-                    fill="none"
-                    stroke={branchAccent}
-                    strokeWidth="1"
-                    strokeDasharray="2 2"
-                  />
-                </svg>
-              )}
-
-              {/* Mirrored dashed return to main rail */}
-              {returnsToMain && (
-                <svg
-                  className="absolute pointer-events-none overflow-visible"
-                  style={{ left: -INDENT, bottom: -2, width: INDENT + 2, height: 44 }}
-                  viewBox={`0 0 ${INDENT + 2} 44`}
-                  aria-hidden
-                >
-                  <path
-                    d={`M${INDENT} 0 C ${INDENT} 26, 0 18, 0 44`}
-                    fill="none"
-                    stroke={branchAccent}
-                    strokeWidth="1"
-                    strokeDasharray="2 2"
-                  />
-                </svg>
-              )}
-            </div>
-
-            {/* Content */}
-            <div className="flex-1 min-w-0 pb-8 pl-3">
-              <div className="mt-1 mb-1.5 flex min-h-6 items-center gap-3">
+                {/* Square node — left accent rule, paper fill cuts the line */}
                 <button
                   type="button"
                   onClick={toggleMessage}
+                  data-branch-tool-id={branchToolId}
                   aria-expanded={!isCollapsed}
-                  className="-ml-1 inline-flex h-6 items-center gap-1.5 px-1 font-mono text-[9px] font-bold uppercase tracking-[0.2em] opacity-85 transition-opacity hover:opacity-100 bg-transparent border-0 cursor-pointer"
-                  style={{ color: accent }}
+                  aria-label={`${isCollapsed ? 'Expand' : 'Collapse'} ${meta.label} message`}
+                  className="relative z-10 mt-1 flex items-center justify-center rounded-none"
+                  style={{
+                    width: NODE_SIZE,
+                    height: NODE_SIZE,
+                    borderLeft: `1px solid ${accent}`,
+                    background: paper,
+                    color: accent,
+                  }}
                 >
-                  <span>{meta.label}</span>
-                  <ToggleIcon size={11} strokeWidth={1.6} />
+                  <Icon size={12} />
                 </button>
-                {labelChip ? (
-                  <span
-                    className="font-mono text-[9px] tracking-widest px-2 py-0.5 border rounded-none max-w-[220px] truncate"
-                    style={{ color: accent, borderColor: accent + '66' }}
-                    title={labelChip}
+
+                {/* Dashed cubic fork into sub-thread */}
+                {drawFork && (
+                  <svg
+                    className="absolute pointer-events-none overflow-visible"
+                    style={{ left: 0, bottom: -2, width: INDENT + 2, height: 44 }}
+                    viewBox={`0 0 ${INDENT + 2} 44`}
+                    aria-hidden
                   >
-                    {labelChip}
-                  </span>
-                ) : null}
-                {branchSummary ? (
-                  <span className="font-mono text-[8px] tracking-widest opacity-45">
-                    {branchSummary.loading
-                      ? 'loading…'
-                      : `${branchSummary.threads} agent${branchSummary.threads === 1 ? '' : 's'} · ${branchSummary.loaded}/${branchSummary.messages}`}
-                  </span>
-                ) : null}
-                {msg.type === 'tool_use' && msg.toolUse && kind !== 'branch_start' ? (
-                  <span className="font-mono text-[9px] tracking-widest opacity-50">{msg.toolUse.toolName}</span>
-                ) : null}
-                <span className="ml-auto font-mono text-[8px] uppercase tracking-widest opacity-40">
-                  {formatTs(msg.timestamp)}
-                </span>
+                    <path
+                      d={`M0 0 C 0 26, ${INDENT} 18, ${INDENT} 44`}
+                      fill="none"
+                      stroke={branchAccent}
+                      strokeWidth="1"
+                      strokeDasharray="2 2"
+                    />
+                  </svg>
+                )}
+
+                {/* Mirrored dashed return to main rail */}
+                {returnsToMain && (
+                  <svg
+                    className="absolute pointer-events-none overflow-visible"
+                    style={{ left: -INDENT, bottom: -2, width: INDENT + 2, height: 44 }}
+                    viewBox={`0 0 ${INDENT + 2} 44`}
+                    aria-hidden
+                  >
+                    <path
+                      d={`M${INDENT} 0 C ${INDENT} 26, 0 18, 0 44`}
+                      fill="none"
+                      stroke={branchAccent}
+                      strokeWidth="1"
+                      strokeDasharray="2 2"
+                    />
+                  </svg>
+                )}
               </div>
 
-              <div className={isCollapsed ? 'hidden' : ''}>
-                {msg.systemSubtype === 'subagent_load_more' && msg.branchKey && onLoadMoreBranch ? (
+              {/* Content */}
+              <div className="flex-1 min-w-0 pb-8 pl-3">
+                <div className="mt-1 mb-1.5 flex min-h-6 items-center gap-3">
                   <button
                     type="button"
-                    onClick={() => onLoadMoreBranch(msg.branchKey!)}
-                    className="border border-[color:var(--archive-ink-line-mid)] bg-transparent px-3 py-1.5 font-mono text-[9px] uppercase tracking-widest opacity-60 hover:opacity-100 cursor-pointer"
+                    onClick={toggleMessage}
+                    aria-expanded={!isCollapsed}
+                    className="-ml-1 inline-flex h-6 items-center gap-1.5 px-1 font-mono text-[9px] font-bold uppercase tracking-[0.2em] opacity-85 transition-opacity hover:opacity-100 bg-transparent border-0 cursor-pointer"
+                    style={{ color: accent }}
                   >
-                    {msg.content || 'Load more agent messages'}
+                    <span>{meta.label}</span>
+                    <ToggleIcon size={11} strokeWidth={1.6} />
                   </button>
-                ) : (
-                  <MessageBody msg={msg} kind={kind} isDark={isDark} accent={accent} />
-                )}
+                  {labelChip ? (
+                    <span
+                      className="font-mono text-[9px] tracking-widest px-2 py-0.5 border rounded-none max-w-[220px] truncate"
+                      style={{ color: accent, borderColor: accent + '66' }}
+                      title={labelChip}
+                    >
+                      {labelChip}
+                    </span>
+                  ) : null}
+                  {branchSummary ? (
+                    <span className="font-mono text-[8px] tracking-widest opacity-45">
+                      {branchSummary.loading
+                        ? 'loading…'
+                        : `${branchSummary.threads} agent${branchSummary.threads === 1 ? '' : 's'} · ${branchSummary.loaded}/${branchSummary.messages}`}
+                    </span>
+                  ) : null}
+                  {msg.type === 'tool_use' && msg.toolUse && kind !== 'branch_start' ? (
+                    <span className="font-mono text-[9px] tracking-widest opacity-50">{msg.toolUse.toolName}</span>
+                  ) : null}
+                  <span className="ml-auto font-mono text-[8px] uppercase tracking-widest opacity-40">
+                    {formatTs(msg.timestamp)}
+                  </span>
+                </div>
+
+                <div className={isCollapsed ? 'hidden' : ''}>
+                  {msg.systemSubtype === 'subagent_load_more' && msg.branchKey && onLoadMoreBranch ? (
+                    <button
+                      type="button"
+                      onClick={() => onLoadMoreBranch(msg.branchKey!)}
+                      className="border border-[color:var(--archive-ink-line-mid)] bg-transparent px-3 py-1.5 font-mono text-[9px] uppercase tracking-widest opacity-60 hover:opacity-100 cursor-pointer"
+                    >
+                      {msg.content || 'Load more agent messages'}
+                    </button>
+                  ) : (
+                    <MessageBody msg={msg} kind={kind} isDark={isDark} accent={accent} />
+                  )}
+                </div>
               </div>
             </div>
           </div>
