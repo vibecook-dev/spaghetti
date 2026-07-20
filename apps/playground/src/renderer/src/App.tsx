@@ -97,6 +97,7 @@ function PlaygroundShell() {
   const [projects, setProjects] = useState<ProjectListItem[]>([]);
   const [selected, setSelected] = useState<ProjectKey | null>(null);
   const [sessions, setSessions] = useState<SessionListItem[]>([]);
+  const [sessionListProjectKey, setSessionListProjectKey] = useState<string | null>(null);
   const [selectedSession, setSelectedSession] = useState<{
     session: SessionListItem;
     index: number;
@@ -362,22 +363,29 @@ function PlaygroundShell() {
   useEffect(() => {
     if (!selected) {
       setSessions([]);
+      setSessionListProjectKey(null);
       return;
     }
     const project = projects.find((candidate) => projectKey(candidate) === projectKey(selected));
     if (!project) {
       setSessions([]);
+      setSessionListProjectKey(null);
       setSelectedSession(null);
       return;
     }
+    const requestedProjectKey = projectKey(project);
     if (debugSession && projectKey(project) === projectKey(debugSession.DEBUG_PROJECT)) {
       setSessions([debugSession.DEBUG_SESSION]);
+      setSessionListProjectKey(requestedProjectKey);
       return;
     }
-    window.spaghetti
+    let cancelled = false;
+    void window.spaghetti
       .getSessionList(project)
       .then((list) => {
+        if (cancelled) return;
         setSessions(list);
+        setSessionListProjectKey(requestedProjectKey);
         const want = pendingSessionId.current;
         if (want) {
           pendingSessionId.current = null;
@@ -398,7 +406,12 @@ function PlaygroundShell() {
           return idx >= 0 ? { session: list[idx], index: idx } : current;
         });
       })
-      .catch((e: unknown) => setError(String(e)));
+      .catch((e: unknown) => {
+        if (!cancelled) setError(String(e));
+      });
+    return () => {
+      cancelled = true;
+    };
   }, [selected, projects, sessionChangeNonce, debugSession]);
 
   const onRebuild = async () => {
@@ -484,6 +497,7 @@ function PlaygroundShell() {
   );
 
   const selectedKey = selected ? projectKey(selected) : null;
+  const sessionPanelLoading = selectedKey !== null && sessionListProjectKey !== selectedKey;
   const selectedProject = selected ? projects.find((p) => projectKey(p) === selectedKey) : null;
   const selectedActivity = selectedSession
     ? liveSessions[
@@ -656,7 +670,7 @@ function PlaygroundShell() {
         ) : null}
 
         {/* MAIN */}
-        <main className="flex-1 flex flex-col min-w-0 bg-transparent relative min-h-0">
+        <main className="flex-1 flex flex-col min-w-0 bg-transparent relative min-h-0" aria-busy={sessionPanelLoading}>
           {selected && selectedSession ? (
             <SessionMessagesView
               projectSlug={selectedSession.session.projectSlug}
@@ -828,6 +842,22 @@ function PlaygroundShell() {
                     </button>
                   );
                 })}
+              </div>
+              <div
+                className={`session-panel-loading absolute inset-0 z-10 flex items-center justify-center bg-paper/30 backdrop-blur-[2px] transition-opacity duration-300 ease-out ${
+                  sessionPanelLoading ? 'session-panel-loading--active opacity-100' : 'pointer-events-none opacity-0'
+                }`}
+                aria-hidden={!sessionPanelLoading}
+              >
+                <div className="w-52 max-w-[70%] text-center" role="status" aria-live="polite">
+                  <div className="session-panel-loading__track" aria-hidden="true" />
+                  <div className="mt-3 font-mono text-[8px] uppercase tracking-[0.16em] opacity-65">
+                    Loading sessions
+                  </div>
+                  {selectedProject ? (
+                    <div className="mt-1 truncate font-serif text-[10px] opacity-45">{selectedProject.folderName}</div>
+                  ) : null}
+                </div>
               </div>
             </>
           )}

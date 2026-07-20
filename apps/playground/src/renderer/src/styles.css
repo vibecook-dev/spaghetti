@@ -187,6 +187,64 @@ body,
   app-region: no-drag;
 }
 
+/* Project changes keep the previous session list legible while the replacement loads. */
+@keyframes session-panel-loading-enter {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes session-panel-loading-sweep {
+  from {
+    transform: translateX(-135%);
+  }
+  to {
+    transform: translateX(335%);
+  }
+}
+
+.session-panel-loading {
+  will-change: opacity;
+}
+
+.session-panel-loading--active {
+  animation: session-panel-loading-enter 180ms ease-out both;
+}
+
+.session-panel-loading__track {
+  position: relative;
+  height: 1px;
+  overflow: hidden;
+  background: var(--archive-ink-line-soft);
+}
+
+.session-panel-loading__track::after {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 30%;
+  content: '';
+  background: var(--archive-ink);
+}
+
+.session-panel-loading--active .session-panel-loading__track::after {
+  animation: session-panel-loading-sweep 1.15s cubic-bezier(0.45, 0, 0.55, 1) infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .session-panel-loading--active,
+  .session-panel-loading--active .session-panel-loading__track::after {
+    animation: none;
+  }
+
+  .session-panel-loading__track::after {
+    width: 100%;
+    opacity: 0.55;
+  }
+}
+
 /* macOS-style traffic lights (custom, always visible) */
 .traffic-lights {
   height: 12px;

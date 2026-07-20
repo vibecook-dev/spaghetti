@@ -104,8 +104,8 @@ export function TokenActivityGraph({
   const hasEstimate = result?.days.some((day) => day.quality === 'estimated' || day.quality === 'mixed') ?? false;
 
   return (
-    <section className="shrink-0 border-b border-[color:var(--archive-ink-line-soft)] px-6 py-3">
-      <div className="mb-2 flex items-center gap-3">
+    <section className="shrink-0 border-b border-[color:var(--archive-ink-line-soft)] px-6 py-2">
+      <div className="mb-1.5 flex items-center gap-3">
         <span className="font-serif text-[9px] uppercase tracking-[0.15em] opacity-70">Token activity</span>
         <span className="font-mono text-[8px] tabular-nums opacity-45">
           {result ? `${hasEstimate ? '~' : ''}${formatTokens(total)} · past year` : 'loading…'}
@@ -116,60 +116,62 @@ export function TokenActivityGraph({
         {LEVEL_OPACITY.map((opacity, level) => (
           <span
             key={opacity}
-            className="h-2 w-2 border border-[color:var(--archive-ink-line-soft)]"
+            className="h-1.5 w-1.5 border border-[color:var(--archive-ink-line-soft)]"
             style={{ backgroundColor: `rgb(var(--archive-live-rgb) / ${level === 0 ? 0.06 : opacity})` }}
           />
         ))}
         <span className="font-mono text-[7px] uppercase tracking-wider opacity-35">more</span>
       </div>
 
-      <div className="pl-5">
-        <div className="mb-1 flex gap-1">
+      <div className="w-max max-w-full overflow-x-auto scrollbar-hide">
+        <div className="mb-1 flex gap-[2px] pl-[18px]">
           {calendar.weeks.map((week, index) => {
             const firstOfMonth = week.find((date) => date.getUTCDate() <= 7);
             return (
-              <span key={index} className="min-w-0 flex-1 font-mono text-[7px] opacity-35">
+              <span key={index} className="w-[5px] shrink-0 font-mono text-[6px] opacity-35">
                 {firstOfMonth ? firstOfMonth.toLocaleDateString(undefined, { timeZone: 'UTC', month: 'short' }) : ''}
               </span>
             );
           })}
         </div>
-      </div>
 
-      <div className="flex gap-1">
-        <div className="grid w-4 shrink-0 grid-rows-7 gap-1 font-mono text-[7px] opacity-35">
-          <span />
-          <span>Mon</span>
-          <span />
-          <span>Wed</span>
-          <span />
-          <span>Fri</span>
-          <span />
-        </div>
-        <div className="flex min-w-0 flex-1 gap-1">
-          {calendar.weeks.map((week, weekIndex) => (
-            <div key={weekIndex} className="grid min-w-0 flex-1 grid-rows-7 gap-1">
-              {week.map((date) => {
-                const key = dateKey(date);
-                const day = days.get(key);
-                const future = key > calendar.today;
-                const level = future ? 0 : activityLevel(day?.tokenUsage.totalTokens ?? 0, ceiling);
-                return (
-                  <span
-                    key={key}
-                    className={`aspect-square min-h-1 min-w-1 border transition-colors ${
-                      future ? 'border-transparent bg-transparent' : 'border-[color:var(--archive-ink-line-soft)]'
-                    }`}
-                    style={
-                      future ? undefined : { backgroundColor: `rgb(var(--archive-live-rgb) / ${LEVEL_OPACITY[level]})` }
-                    }
-                    title={future ? undefined : dayTitle(day, date)}
-                    aria-label={future ? undefined : dayTitle(day, date).replaceAll('\n', ', ')}
-                  />
-                );
-              })}
-            </div>
-          ))}
+        <div className="flex gap-[2px]">
+          <div className="grid w-4 shrink-0 grid-rows-7 gap-[2px] font-mono text-[6px] leading-[5px] opacity-35">
+            <span />
+            <span>Mon</span>
+            <span />
+            <span>Wed</span>
+            <span />
+            <span>Fri</span>
+            <span />
+          </div>
+          <div className="flex gap-[2px]">
+            {calendar.weeks.map((week, weekIndex) => (
+              <div key={weekIndex} className="grid w-[5px] shrink-0 grid-rows-7 gap-[2px]">
+                {week.map((date) => {
+                  const key = dateKey(date);
+                  const day = days.get(key);
+                  const future = key > calendar.today;
+                  const level = future ? 0 : activityLevel(day?.tokenUsage.totalTokens ?? 0, ceiling);
+                  return (
+                    <span
+                      key={key}
+                      className={`h-[5px] w-[5px] border transition-colors ${
+                        future ? 'border-transparent bg-transparent' : 'border-[color:var(--archive-ink-line-soft)]'
+                      }`}
+                      style={
+                        future
+                          ? undefined
+                          : { backgroundColor: `rgb(var(--archive-live-rgb) / ${LEVEL_OPACITY[level]})` }
+                      }
+                      title={future ? undefined : dayTitle(day, date)}
+                      aria-label={future ? undefined : dayTitle(day, date).replaceAll('\n', ', ')}
+                    />
+                  );
+                })}
+              </div>
+            ))}
+          </div>
         </div>
       </div>
     </section>
