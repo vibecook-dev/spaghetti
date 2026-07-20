@@ -139,6 +139,9 @@ export function SessionMessagesView({
   const prevScrollHeightRef = useRef(0);
   const isPrependingRef = useRef(false);
   const shouldScrollToBottomRef = useRef(false);
+  const scrollToBottomBehaviorRef = useRef<ScrollBehavior>('auto');
+  const tailScrollInProgressRef = useRef(false);
+  const tailScrollEndTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const loadMoreInFlightRef = useRef(false);
   /** True when the viewport is near the conversation tail. */
   const nearBottomRef = useRef(true);
@@ -420,6 +423,10 @@ export function SessionMessagesView({
     liveRefreshSeqRef.current += 1;
     isPrependingRef.current = false;
     shouldScrollToBottomRef.current = false;
+    scrollToBottomBehaviorRef.current = 'auto';
+    tailScrollInProgressRef.current = false;
+    if (tailScrollEndTimerRef.current) clearTimeout(tailScrollEndTimerRef.current);
+    tailScrollEndTimerRef.current = null;
     prevScrollHeightRef.current = 0;
     loadMoreInFlightRef.current = false;
     nearBottomRef.current = true;
@@ -458,6 +465,7 @@ export function SessionMessagesView({
         lastActiveRevisionRef.current = 0;
         if (activeQueryKeyRef.current !== queryKeyAtOpen) return;
         shouldScrollToBottomRef.current = true;
+        scrollToBottomBehaviorRef.current = 'auto';
         setTimeline(snapshot.page.messages as ChatSessionMessage[]);
         setPageMeta({ total: snapshot.page.total, hasMore: snapshot.page.hasMore });
         cursorRef.current = snapshot.page.nextCursor;
@@ -671,6 +679,7 @@ export function SessionMessagesView({
         const page = await window.spaghetti.getSessionTimeline(projectSlug, session.sessionId, timelineRequest);
         if (cancelled) return;
         shouldScrollToBottomRef.current = true;
+        scrollToBottomBehaviorRef.current = 'auto';
         setTimeline(page.messages as ChatSessionMessage[]);
         setPageMeta({ total: page.total, hasMore: page.hasMore });
         cursorRef.current = page.nextCursor;
@@ -703,6 +712,7 @@ export function SessionMessagesView({
         totalRef.current = page.total;
         if (nearBottomRef.current) {
           shouldScrollToBottomRef.current = true;
+          scrollToBottomBehaviorRef.current = 'smooth';
           setTimeline((current) =>
             reset
               ? (page.messages as ChatSessionMessage[])
@@ -801,8 +811,24 @@ export function SessionMessagesView({
       container.scrollTop += diff;
       isPrependingRef.current = false;
     } else if (shouldScrollToBottomRef.current) {
-      container.scrollTop = container.scrollHeight;
+      const behavior =
+        scrollToBottomBehaviorRef.current === 'smooth' && !window.matchMedia('(prefers-reduced-motion: reduce)').matches
+          ? 'smooth'
+          : 'auto';
+      container.scrollTo({ top: container.scrollHeight, behavior });
+      tailScrollInProgressRef.current = behavior === 'smooth';
+      if (tailScrollEndTimerRef.current) clearTimeout(tailScrollEndTimerRef.current);
+      tailScrollEndTimerRef.current =
+        behavior === 'smooth'
+          ? setTimeout(() => {
+              tailScrollInProgressRef.current = false;
+              tailScrollEndTimerRef.current = null;
+              const distance = container.scrollHeight - container.scrollTop - container.clientHeight;
+              nearBottomRef.current = distance < NEAR_BOTTOM_PX;
+            }, 600)
+          : null;
       shouldScrollToBottomRef.current = false;
+      scrollToBottomBehaviorRef.current = 'auto';
       nearBottomRef.current = true;
     }
     if (restoreScrollTopRef.current != null) {
@@ -853,7 +879,8 @@ export function SessionMessagesView({
     (e: React.UIEvent<HTMLDivElement>) => {
       const el = e.currentTarget;
       const { scrollTop, scrollHeight, clientHeight } = el;
-      nearBottomRef.current = scrollHeight - scrollTop - clientHeight < NEAR_BOTTOM_PX;
+      nearBottomRef.current =
+        tailScrollInProgressRef.current || scrollHeight - scrollTop - clientHeight < NEAR_BOTTOM_PX;
 
       if (nearBottomRef.current && pendingNew > 0) {
         setPendingNew(0);
@@ -864,6 +891,24 @@ export function SessionMessagesView({
       }
     },
     [loadingMore, pageMeta?.hasMore, timeline.length, loadMoreMessages, pendingNew],
+  );
+
+  const cancelTailScroll = useCallback(() => {
+    if (!tailScrollInProgressRef.current) return;
+    const container = scrollContainerRef.current;
+    tailScrollInProgressRef.current = false;
+    if (tailScrollEndTimerRef.current) clearTimeout(tailScrollEndTimerRef.current);
+    tailScrollEndTimerRef.current = null;
+    if (!container) return;
+    container.scrollTo({ top: container.scrollTop, behavior: 'auto' });
+    nearBottomRef.current = container.scrollHeight - container.scrollTop - container.clientHeight < NEAR_BOTTOM_PX;
+  }, []);
+
+  useEffect(
+    () => () => {
+      if (tailScrollEndTimerRef.current) clearTimeout(tailScrollEndTimerRef.current);
+    },
+    [],
   );
 
   const jumpToLatest = useCallback(() => {
@@ -964,7 +1009,14 @@ export function SessionMessagesView({
       ) : null}
 
       <div className="relative flex-1 min-h-0 archive-transcript">
-        <div ref={scrollContainerRef} onScroll={handleScroll} className="h-full overflow-y-auto scrollbar-hide">
+        <div
+          ref={scrollContainerRef}
+          onScroll={handleScroll}
+          onWheel={cancelTailScroll}
+          onPointerDown={cancelTailScroll}
+          onTouchStart={cancelTailScroll}
+          className="h-full overflow-y-auto scrollbar-hide"
+        >
           {loading && timeline.length === 0 ? (
             <div className="flex items-center justify-center h-full gap-3 py-12">
               <Spinner className="h-5 w-5" />

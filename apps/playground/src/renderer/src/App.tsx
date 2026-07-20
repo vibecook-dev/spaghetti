@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Library, Moon, PanelLeft, Search, Settings, Sun } from 'lucide-react';
 import { TrafficLights } from './components/TrafficLights.js';
 import { SpaghettiProvider, type SpaghettiProviderProps } from '@vibecook/spaghetti-sdk/react';
@@ -121,6 +121,9 @@ function PlaygroundShell() {
   const [liveClock, setLiveClock] = useState(Date.now());
   const selectedSessionRef = useRef<typeof selectedSession>(null);
   const selectedProjectMembersRef = useRef<Set<string>>(new Set());
+  const projectItemRefs = useRef(new Map<string, HTMLButtonElement>());
+  const projectItemPositionsRef = useRef(new Map<string, number>());
+  const projectItemAnimationsRef = useRef(new Map<string, Animation>());
 
   const [sources, setSources] = useState<SourceProgressState[]>(() => initialSourceStates());
   const [progress, setProgress] = useState<ProgressSnapshot | null>(null);
@@ -164,6 +167,52 @@ function PlaygroundShell() {
       return state?.unreadCount ? { ...current, [key]: { ...state, unreadCount: 0 } } : current;
     });
   }, [selectedSession]);
+
+  useLayoutEffect(() => {
+    if (!leftOpen) {
+      projectItemPositionsRef.current.clear();
+      for (const animation of projectItemAnimationsRef.current.values()) animation.cancel();
+      projectItemAnimationsRef.current.clear();
+      return;
+    }
+
+    const nextPositions = new Map<string, number>();
+    const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+    for (const [key, element] of projectItemRefs.current) {
+      projectItemAnimationsRef.current.get(key)?.cancel();
+      projectItemAnimationsRef.current.delete(key);
+      const nextTop = element.offsetTop;
+      nextPositions.set(key, nextTop);
+      const previousTop = projectItemPositionsRef.current.get(key);
+      const deltaY = previousTop == null ? 0 : previousTop - nextTop;
+      if (reduceMotion || Math.abs(deltaY) < 1) continue;
+
+      const animation = element.animate([{ transform: `translateY(${deltaY}px)` }, { transform: 'translateY(0)' }], {
+        duration: 420,
+        easing: 'cubic-bezier(0.22, 1, 0.36, 1)',
+      });
+      projectItemAnimationsRef.current.set(key, animation);
+      animation.addEventListener(
+        'finish',
+        () => {
+          if (projectItemAnimationsRef.current.get(key) === animation) {
+            projectItemAnimationsRef.current.delete(key);
+          }
+        },
+        { once: true },
+      );
+    }
+
+    projectItemPositionsRef.current = nextPositions;
+  }, [leftOpen, projects]);
+
+  useEffect(
+    () => () => {
+      for (const animation of projectItemAnimationsRef.current.values()) animation.cancel();
+    },
+    [],
+  );
 
   useEffect(() => {
     if (!ready) return;
@@ -546,6 +595,41 @@ function PlaygroundShell() {
     );
   }
 
+  const sessionHeading = (
+    <div className="flex items-center gap-3 font-serif text-[10px] tracking-[0.15em]">
+      {!leftOpen && (
+        <button
+          type="button"
+          onClick={() => setLeftOpen(true)}
+          className="opacity-50 hover:opacity-100 bg-transparent border-0 text-ink cursor-pointer p-0"
+          title="Show projects"
+        >
+          <PanelLeft size={14} />
+        </button>
+      )}
+      <span className="opacity-80">{selected ? `Sessions · ${filteredSessions.length}` : 'Select a project'}</span>
+    </div>
+  );
+
+  const sessionSourceControls =
+    selectedProject && selectedProject.sourceIds.length > 1 ? (
+      <div className="flex flex-wrap items-center justify-end gap-1.5">
+        <Chip active={sessionSourceFilter === null} onClick={() => setSessionSourceFilter(null)}>
+          all
+        </Chip>
+        {selectedProject.sourceIds.map((id) => (
+          <Chip
+            key={id}
+            active={sessionSourceFilter === id}
+            onClick={() => setSessionSourceFilter(id)}
+            title={sourceLabel(id)}
+          >
+            <SourceBadge sourceId={id} isDark={isDark} />
+          </Chip>
+        ))}
+      </div>
+    ) : null;
+
   return (
     <div
       className={`h-full w-full flex flex-col overflow-hidden relative rounded-none border border-[color:var(--archive-ink-line-outer)] transition-colors duration-500 ${
@@ -631,6 +715,10 @@ function PlaygroundShell() {
                   return (
                     <button
                       key={key}
+                      ref={(element) => {
+                        if (element) projectItemRefs.current.set(key, element);
+                        else projectItemRefs.current.delete(key);
+                      }}
                       type="button"
                       onClick={() => {
                         setSelected({ projectId: p.projectId });
@@ -709,47 +797,19 @@ function PlaygroundShell() {
             />
           ) : (
             <>
-              <div className="min-h-10 border-b border-[color:var(--archive-ink-line)] flex items-center px-6 py-2 justify-between shrink-0 gap-4">
-                <div className="flex items-center gap-3 font-serif text-[10px] tracking-[0.15em]">
-                  {!leftOpen && (
-                    <button
-                      type="button"
-                      onClick={() => setLeftOpen(true)}
-                      className="opacity-50 hover:opacity-100 bg-transparent border-0 text-ink cursor-pointer p-0"
-                      title="Show projects"
-                    >
-                      <PanelLeft size={14} />
-                    </button>
-                  )}
-                  <span className="opacity-80">
-                    {selected ? `Sessions · ${filteredSessions.length}` : 'Select a project'}
-                  </span>
-                </div>
-                {selectedProject && selectedProject.sourceIds.length > 1 ? (
-                  <div className="flex items-center gap-1.5 flex-wrap justify-end">
-                    <Chip active={sessionSourceFilter === null} onClick={() => setSessionSourceFilter(null)}>
-                      all
-                    </Chip>
-                    {selectedProject.sourceIds.map((id) => (
-                      <Chip
-                        key={id}
-                        active={sessionSourceFilter === id}
-                        onClick={() => setSessionSourceFilter(id)}
-                        title={sourceLabel(id)}
-                      >
-                        <SourceBadge sourceId={id} isDark={isDark} />
-                      </Chip>
-                    ))}
-                  </div>
-                ) : null}
-              </div>
               {scopeProject ? (
                 <TokenActivityGraph
                   project={scopeProject}
                   sourceId={sessionSourceFilter}
                   activityRevision={sessionChangeNonce}
+                  header={sessionHeading}
+                  controls={sessionSourceControls}
                 />
-              ) : null}
+              ) : (
+                <div className="flex min-h-10 shrink-0 items-center justify-between gap-4 border-b border-[color:var(--archive-ink-line)] px-6 py-2">
+                  {sessionHeading}
+                </div>
+              )}
               <div className="flex-1 overflow-y-auto scrollbar-hide py-1 space-y-px">
                 {!selected && (
                   <EmptyState

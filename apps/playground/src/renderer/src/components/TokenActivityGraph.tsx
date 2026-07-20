@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import type { ProjectLocator, TokenActivityDay, TokenActivityResult } from '@vibecook/spaghetti-sdk';
 import { formatTokens } from '../lib/format.js';
 import { sourceLabel } from '../lib/source-progress.js';
@@ -61,10 +61,14 @@ export function TokenActivityGraph({
   project,
   sourceId,
   activityRevision,
+  header,
+  controls,
 }: {
   project: ProjectLocator;
   sourceId?: string | null;
   activityRevision: number;
+  header: ReactNode;
+  controls?: ReactNode;
 }) {
   const calendar = useMemo(buildWeeks, []);
   const [result, setResult] = useState<TokenActivityResult | null>(null);
@@ -104,32 +108,27 @@ export function TokenActivityGraph({
   const hasEstimate = result?.days.some((day) => day.quality === 'estimated' || day.quality === 'mixed') ?? false;
 
   return (
-    <section className="shrink-0 border-b border-[color:var(--archive-ink-line-soft)] px-6 py-2">
-      <div className="mb-1.5 flex items-center gap-3">
-        <span className="font-serif text-[9px] uppercase tracking-[0.15em] opacity-70">Token activity</span>
-        <span className="font-mono text-[8px] tabular-nums opacity-45">
-          {result ? `${hasEstimate ? '~' : ''}${formatTokens(total)} · past year` : 'loading…'}
-        </span>
-        {error ? <span className="truncate font-mono text-[8px] text-sanguine">{error}</span> : null}
-        <span className="flex-1" />
-        <span className="font-mono text-[7px] uppercase tracking-wider opacity-35">less</span>
-        {LEVEL_OPACITY.map((opacity, level) => (
-          <span
-            key={opacity}
-            className="h-1.5 w-1.5 border border-[color:var(--archive-ink-line-soft)]"
-            style={{ backgroundColor: `rgb(var(--archive-live-rgb) / ${level === 0 ? 0.06 : opacity})` }}
-          />
-        ))}
-        <span className="font-mono text-[7px] uppercase tracking-wider opacity-35">more</span>
+    <section className="shrink-0 border-b border-[color:var(--archive-ink-line)] px-6 py-2">
+      <div className="flex min-h-6 items-center justify-between gap-4">
+        <div className="flex min-w-0 items-center gap-3">
+          {header}
+          <span className="h-3 w-px shrink-0 bg-ink/15" aria-hidden="true" />
+          <span className="shrink-0 font-mono text-[8px] tabular-nums opacity-45">
+            {result ? `${hasEstimate ? '~' : ''}${formatTokens(total)} tokens · past year` : 'loading tokens…'}
+          </span>
+          {error ? <span className="truncate font-mono text-[8px] text-sanguine">{error}</span> : null}
+        </div>
+        {controls}
       </div>
 
-      <div className="w-max max-w-full overflow-x-auto scrollbar-hide">
+      <div className="mt-1.5 w-max max-w-full overflow-x-auto scrollbar-hide">
         <div className="mb-1 flex gap-[2px] pl-[18px]">
           {calendar.weeks.map((week, index) => {
-            const firstOfMonth = week.find((date) => date.getUTCDate() <= 7);
+            const firstOfMonth = week.find((date) => date.getUTCDate() === 1);
+            const showMonth = firstOfMonth && firstOfMonth.getUTCMonth() % 2 === 0;
             return (
               <span key={index} className="w-[5px] shrink-0 font-mono text-[6px] opacity-35">
-                {firstOfMonth ? firstOfMonth.toLocaleDateString(undefined, { timeZone: 'UTC', month: 'short' }) : ''}
+                {showMonth ? firstOfMonth.toLocaleDateString(undefined, { timeZone: 'UTC', month: 'short' }) : ''}
               </span>
             );
           })}
@@ -172,6 +171,18 @@ export function TokenActivityGraph({
               </div>
             ))}
           </div>
+        </div>
+
+        <div className="mt-1 flex items-center justify-end gap-1.5">
+          <span className="font-mono text-[6px] uppercase tracking-wider opacity-35">less</span>
+          {LEVEL_OPACITY.map((opacity, level) => (
+            <span
+              key={opacity}
+              className="h-1.5 w-1.5 border border-[color:var(--archive-ink-line-soft)]"
+              style={{ backgroundColor: `rgb(var(--archive-live-rgb) / ${level === 0 ? 0.06 : opacity})` }}
+            />
+          ))}
+          <span className="font-mono text-[6px] uppercase tracking-wider opacity-35">more</span>
         </div>
       </div>
     </section>
