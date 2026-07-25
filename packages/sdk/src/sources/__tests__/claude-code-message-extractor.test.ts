@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { claudeCodeMessageExtractor } from '../claude-code/message-extractor.js';
 import { createClaudeCodeSource } from '../claude-code/index.js';
+import { normalizeClaudeFirstPrompt } from '../claude-code/session-metadata.js';
 
 // The extractor is a behavior-identical relocation of the inline extraction
 // that used to live in `data/ingest-service.ts` (RFC 006). These tests pin the
@@ -20,6 +21,7 @@ test('extracts a user message with string content', () => {
   assert.equal(out.text, 'hello world');
   assert.equal(out.uuid, 'u-1');
   assert.equal(out.timestamp, '2026-07-13T00:00:00.000Z');
+  assert.deepEqual(out.sessionMetadata, { humanPrompt: 'hello world' });
   assert.deepEqual(out.tokens, {
     inputTokens: 0,
     outputTokens: 0,
@@ -73,7 +75,29 @@ test('pulls text from user tool_result blocks (string and array content)', () =>
 
 test('indexes summary and ai-title prose', () => {
   assert.equal(claudeCodeMessageExtractor.extract({ type: 'summary', summary: 'a recap' })?.text, 'a recap');
-  assert.equal(claudeCodeMessageExtractor.extract({ type: 'ai-title', aiTitle: 'My Session' })?.text, 'My Session');
+  const title = claudeCodeMessageExtractor.extract({ type: 'ai-title', aiTitle: 'My Session' });
+  assert.equal(title?.text, 'My Session');
+  assert.deepEqual(title?.sessionMetadata, { aiTitle: 'My Session' });
+});
+
+test('does not project Claude local-command wrappers as human prompts', () => {
+  const caveat = claudeCodeMessageExtractor.extract({
+    type: 'user',
+    isMeta: true,
+    message: { role: 'user', content: '<local-command-caveat>ignore</local-command-caveat>' },
+  });
+  const command = claudeCodeMessageExtractor.extract({
+    type: 'user',
+    message: { role: 'user', content: '<command-name>/login</command-name>' },
+  });
+  assert.equal(caveat?.sessionMetadata, undefined);
+  assert.equal(command?.sessionMetadata, undefined);
+  assert.equal(normalizeClaudeFirstPrompt('<task-notification>generated</task-notification>'), 'No prompt');
+  assert.equal(normalizeClaudeFirstPrompt('No prompt'), 'No prompt');
+  assert.equal(normalizeClaudeFirstPrompt('A real prompt'), 'A real prompt');
+  // sessions-index.json entries routinely omit firstPrompt despite the type.
+  assert.equal(normalizeClaudeFirstPrompt(undefined), 'No prompt');
+  assert.equal(normalizeClaudeFirstPrompt(null), 'No prompt');
 });
 
 test('unknown/other types get "unknown" msgType and empty text, never null', () => {

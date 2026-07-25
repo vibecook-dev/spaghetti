@@ -19,6 +19,7 @@
 
 import type { SessionMessage } from '../../types/index.js';
 import type { ExtractedMessage, MessageExtractor } from '../types.js';
+import { extractClaudeSessionMetadata } from './session-metadata.js';
 
 /** FTS/preview text is capped; the raw line in `messages.data` is untouched. */
 const MAX_TEXT_LENGTH = 2_000;
@@ -157,6 +158,7 @@ export const claudeCodeMessageExtractor: MessageExtractor = {
       uuid: extractUuid(message),
       timestamp: extractTimestamp(message),
       tokens: extractTokens(message),
+      sessionMetadata: extractClaudeSessionMetadata(message),
     };
   },
 };

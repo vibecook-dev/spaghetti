@@ -203,6 +203,24 @@ ON CONFLICT(id) DO UPDATE SET
   source_id = excluded.source_id
 "#;
 
+const SQL_UPDATE_SESSION_METADATA: &str = r#"
+UPDATE sessions
+   SET first_prompt = CASE
+         WHEN ?1 IS NOT NULL AND (
+           first_prompt IS NULL OR trim(first_prompt) = '' OR first_prompt = 'No prompt'
+           OR lower(ltrim(first_prompt)) LIKE '<local-command-%'
+           OR lower(ltrim(first_prompt)) LIKE '<command-%'
+           OR lower(ltrim(first_prompt)) LIKE '<task-notification>%'
+           OR lower(ltrim(first_prompt)) LIKE '<system-reminder>%'
+           OR lower(ltrim(first_prompt)) LIKE '<ide_%'
+         ) THEN ?1
+         ELSE first_prompt
+       END,
+       ai_title = COALESCE(?2, ai_title),
+       custom_title = COALESCE(?3, custom_title)
+ WHERE id = ?4 AND source_id = ?5
+"#;
+
 const SQL_INSERT_MESSAGE: &str = r#"
 INSERT INTO messages (
   project_slug, session_id, msg_index, msg_type, uuid, timestamp, data,
@@ -907,13 +925,18 @@ pub fn dispatch_event(
 
         IngestEvent::Session { slug, entry } => {
             let now = now_ms();
+            let first_prompt = if source_id == "claude-code" {
+                crate::claude::session_metadata::normalize_first_prompt(&entry.first_prompt)
+            } else {
+                entry.first_prompt.clone()
+            };
             conn.execute(
                 SQL_INSERT_SESSION,
                 params![
                     entry.session_id,
                     slug,
                     entry.full_path,
-                    entry.first_prompt,
+                    first_prompt,
                     entry.summary,
                     entry.git_branch,
                     entry.project_path,
@@ -965,6 +988,26 @@ pub fn dispatch_event(
                     source_id,
                 ],
             )?;
+            if source_id == "claude-code"
+                && matches!(msg_type.as_str(), "user" | "ai-title" | "custom-title")
+            {
+                if let Ok(value) = serde_json::from_str::<serde_json::Value>(raw_json) {
+                    if let Some(metadata) =
+                        crate::claude::session_metadata::project_session_metadata(&value)
+                    {
+                        conn.execute(
+                            SQL_UPDATE_SESSION_METADATA,
+                            params![
+                                metadata.human_prompt.as_deref(),
+                                metadata.ai_title.as_deref(),
+                                metadata.custom_title.as_deref(),
+                                session_id,
+                                source_id,
+                            ],
+                        )?;
+                    }
+                }
+            }
             counts.messages_written = 1;
         }
 
@@ -1391,6 +1434,77 @@ mod tests {
             })
             .unwrap();
         assert_eq!(sess, "codex");
+    }
+
+    #[test]
+    fn claude_messages_materialize_titles_and_genuine_first_prompt() {
+        let conn = Connection::open_in_memory().unwrap();
+        schema::set_pragmas(&conn).unwrap();
+        schema::initialize_schema(&conn).unwrap();
+        let mut entry = sample_session("s1");
+        entry.first_prompt = "<local-command-caveat>ignore</local-command-caveat>".into();
+        let message = |index: u32, msg_type: &str, raw_json: &str| IngestEvent::Message {
+            slug: "p".into(),
+            session_id: "s1".into(),
+            index,
+            byte_offset: index as u64,
+            raw_json: raw_json.into(),
+            msg_type: msg_type.into(),
+            uuid: None,
+            timestamp: None,
+            input_tokens: 0,
+            output_tokens: 0,
+            cache_creation_tokens: 0,
+            cache_read_tokens: 0,
+            fts_text: None,
+        };
+        let events = vec![
+            IngestEvent::Project {
+                slug: "p".into(),
+                original_path: "/x".into(),
+                sessions_index_json: "{}".into(),
+            },
+            IngestEvent::Session {
+                slug: "p".into(),
+                entry,
+            },
+            message(
+                0,
+                "user",
+                r#"{"type":"user","isMeta":true,"message":{"role":"user","content":"<local-command-caveat>ignore</local-command-caveat>"}}"#,
+            ),
+            message(
+                1,
+                "ai-title",
+                r#"{"type":"ai-title","aiTitle":"Generated title"}"#,
+            ),
+            message(
+                2,
+                "user",
+                r#"{"type":"user","message":{"role":"user","content":"The genuine prompt"}}"#,
+            ),
+            message(
+                3,
+                "custom-title",
+                r#"{"type":"custom-title","customTitle":"Pinned title"}"#,
+            ),
+        ];
+        write_batch_with_tx(&conn, &events, "claude-code").expect("batch");
+        let metadata: (String, String, String) = conn
+            .query_row(
+                "SELECT first_prompt, ai_title, custom_title FROM sessions WHERE id = 's1'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            metadata,
+            (
+                "The genuine prompt".into(),
+                "Generated title".into(),
+                "Pinned title".into()
+            )
+        );
     }
 
     fn sample_session(id: &str) -> SessionIndexEntry {

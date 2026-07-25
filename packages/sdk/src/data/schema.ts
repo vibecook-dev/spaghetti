@@ -49,7 +49,11 @@ import type { SqliteService } from '../io/index.js';
 //
 // v13: timestamp-independent session summary totals, dirty-session tracking,
 // and source-scoped materialization completion markers.
-export const SCHEMA_VERSION = 13;
+//
+// v14: materialized Claude AI/custom session titles. Titles are projected at
+// ingest time so list queries stay constant-time and live title changes appear
+// without rescanning transcript JSON.
+export const SCHEMA_VERSION = 14;
 
 export const TOKEN_ACTIVITY_TRIGGER_NAMES = [
   'token_activity_messages_ai',
@@ -248,6 +252,8 @@ CREATE TABLE IF NOT EXISTS sessions (
   full_path TEXT,
   first_prompt TEXT,
   summary TEXT,
+  ai_title TEXT NOT NULL DEFAULT '',
+  custom_title TEXT NOT NULL DEFAULT '',
   git_branch TEXT,
   project_path TEXT,
   is_sidechain INTEGER,

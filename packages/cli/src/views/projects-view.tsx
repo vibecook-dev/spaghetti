@@ -129,7 +129,7 @@ export function ProjectsView(): React.ReactElement {
       const key = projectKey(p);
       if (!cache.has(key)) {
         const sess = api.getSessionList(p);
-        cache.set(key, sess.length > 0 ? sess[0].firstPrompt || '' : '');
+        cache.set(key, sess.length > 0 ? sess[0].title || sess[0].firstPrompt || sess[0].summary || '' : '');
       }
     }
     // Return a fresh snapshot so newly-cached prompts trigger a re-render.

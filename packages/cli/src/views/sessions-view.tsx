@@ -37,7 +37,8 @@ function SessionCard({ session, index, selected, cols }: SessionCardProps): Reac
   const gap = Math.max(1, cols - leftVisLen - rightLen - 2);
 
   // Line 2: first prompt
-  const promptFlat = s.firstPrompt ? s.firstPrompt.replace(/\n+/g, ' ').replace(/\s+/g, ' ').trim() : '';
+  const preview = s.title || s.firstPrompt || s.summary;
+  const promptFlat = preview ? preview.replace(/\n+/g, ' ').replace(/\s+/g, ' ').trim() : '';
   const promptText = promptFlat ? `"${promptFlat}"` : '';
   const maxPromptLen = Math.max(cols - 6, 20);
   const truncatedPrompt =

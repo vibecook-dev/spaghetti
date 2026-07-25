@@ -836,7 +836,7 @@ function PlaygroundShell() {
                   const index = sessions.findIndex(
                     (session) => session.sourceId === s.sourceId && session.sessionId === s.sessionId,
                   );
-                  const prompt = flattenPrompt(s.firstPrompt || s.summary, 96);
+                  const prompt = flattenPrompt(s.title || s.firstPrompt || s.summary, 96);
                   const tok = formatTokenUsage(s.tokenUsage, s.sourceId, s.tokensEstimated);
                   const activityKey = liveSessionKey(s.sourceId, s.projectSlug, s.sessionId);
                   const activity = liveSessions[activityKey];

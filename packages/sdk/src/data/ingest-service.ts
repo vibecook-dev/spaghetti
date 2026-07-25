@@ -25,6 +25,7 @@ import type { NativeAddon } from '../native.js';
 import type { IngestEngine } from '../settings.js';
 import type { IngestHooks, MessageExtractor, SessionTokenApi } from '../sources/types.js';
 import { claudeCodeMessageExtractor } from '../sources/claude-code/message-extractor.js';
+import { normalizeClaudeFirstPrompt } from '../sources/claude-code/session-metadata.js';
 import type { SourceFingerprint } from './segment-types.js';
 import {
   initializeSchema,
@@ -172,6 +173,7 @@ class IngestServiceImpl implements IngestService {
   private stmtInsertMemory!: PreparedStatement;
   private stmtInsertSession!: PreparedStatement;
   private stmtInsertMessage!: PreparedStatement;
+  private stmtUpdateSessionMetadata!: PreparedStatement;
   private stmtInsertSubagent!: PreparedStatement;
   private stmtDeleteSubagentMessages!: PreparedStatement;
   private stmtInsertSubagentMessage!: PreparedStatement;
@@ -359,6 +361,24 @@ class IngestServiceImpl implements IngestService {
          source_id = excluded.source_id`,
     );
 
+    this.stmtUpdateSessionMetadata = this.db.prepare(
+      `UPDATE sessions
+          SET first_prompt = CASE
+                WHEN ? IS NOT NULL AND (
+                  first_prompt IS NULL OR trim(first_prompt) = '' OR first_prompt = 'No prompt'
+                  OR lower(ltrim(first_prompt)) LIKE '<local-command-%'
+                  OR lower(ltrim(first_prompt)) LIKE '<command-%'
+                  OR lower(ltrim(first_prompt)) LIKE '<task-notification>%'
+                  OR lower(ltrim(first_prompt)) LIKE '<system-reminder>%'
+                  OR lower(ltrim(first_prompt)) LIKE '<ide_%'
+                ) THEN ?
+                ELSE first_prompt
+              END,
+              ai_title = COALESCE(?, ai_title),
+              custom_title = COALESCE(?, custom_title)
+        WHERE id = ? AND source_id = ?`,
+    );
+
     this.stmtInsertSubagent = this.db.prepare(
       `INSERT INTO subagents
          (source_id, project_slug, session_id, agent_id, agent_type, file_name, message_count,
@@ -471,12 +491,14 @@ class IngestServiceImpl implements IngestService {
 
   onSession(slug: string, entry: SessionIndexEntry): void {
     const now = Date.now();
+    const firstPrompt =
+      this.sourceId === 'claude-code' ? normalizeClaudeFirstPrompt(entry.firstPrompt) : entry.firstPrompt;
     this.hooks.onSessionStart?.(entry.sessionId);
     this.stmtInsertSession.run(
       entry.sessionId,
       slug,
       entry.fullPath,
-      entry.firstPrompt,
+      firstPrompt,
       entry.summary,
       entry.gitBranch,
       entry.projectPath,
@@ -523,6 +545,10 @@ class IngestServiceImpl implements IngestService {
         byteOffset,
         this.sourceId,
       );
+      if (extracted.sessionMetadata) {
+        const { humanPrompt = null, aiTitle = null, customTitle = null } = extracted.sessionMetadata;
+        this.stmtUpdateSessionMetadata.run(humanPrompt, humanPrompt, aiTitle, customTitle, sessionId, this.sourceId);
+      }
 
       // Keep the normalized transcript current in the same transaction as its
       // canonical row. The raw-table trigger marks the session dirty first;
@@ -1039,7 +1065,15 @@ class IngestServiceImpl implements IngestService {
     this.db.run('DELETE FROM timeline_tool_results WHERE session_id = ?', sessionId);
     this.db.run('DELETE FROM timeline_messages WHERE session_id = ? AND source_id = ?', sessionId, this.sourceId);
     this.db.run('DELETE FROM messages WHERE session_id = ? AND source_id = ?', sessionId, this.sourceId);
-    this.db.run('UPDATE sessions SET tokens_estimated = 0 WHERE id = ? AND source_id = ?', sessionId, this.sourceId);
+    this.db.run(
+      `UPDATE sessions
+          SET tokens_estimated = 0,
+              ai_title = CASE WHEN source_id = 'claude-code' THEN '' ELSE ai_title END,
+              custom_title = CASE WHEN source_id = 'claude-code' THEN '' ELSE custom_title END
+        WHERE id = ? AND source_id = ?`,
+      sessionId,
+      this.sourceId,
+    );
   }
 
   deleteAllData(): void {

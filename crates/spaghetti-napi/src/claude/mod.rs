@@ -15,6 +15,7 @@ pub mod fts_text;
 /// Anthropic JSONL → thin message projection (RFC 006 seam).
 pub mod message_extractor;
 pub mod project_parser;
+pub mod session_metadata;
 pub mod types;
 
 pub use message_extractor::{project_jsonl_line, MessageProjection};

@@ -114,6 +114,8 @@ export interface SessionListItem {
   tokensEstimated: boolean;
   messageCount: number;
   fullPath: string;
+  /** User-pinned title, or the agent's latest generated title. */
+  title: string;
   summary: string;
   firstPrompt: string;
   gitBranch: string;

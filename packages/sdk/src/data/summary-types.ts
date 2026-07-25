@@ -27,6 +27,8 @@ export interface SessionSummaryData {
   tokensEstimated: boolean;
   messageCount: number;
   fullPath: string;
+  /** User-pinned title, or Claude's latest generated title when unpinned. */
+  title: string;
   summary: string;
   firstPrompt: string;
   gitBranch: string;

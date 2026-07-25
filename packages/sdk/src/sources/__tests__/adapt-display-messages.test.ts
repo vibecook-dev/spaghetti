@@ -200,6 +200,27 @@ describe('adaptMessageForDisplay', () => {
 });
 
 describe('transformRawMessagesToTimeline + sourceId', () => {
+  test('Claude local-command wrappers do not become user timeline rows', () => {
+    const raw = [
+      {
+        type: 'user',
+        isMeta: true,
+        message: { role: 'user', content: '<local-command-caveat>ignore</local-command-caveat>' },
+      },
+      {
+        type: 'user',
+        message: { role: 'user', content: '<command-name>/login</command-name>' },
+      },
+      {
+        type: 'user',
+        message: { role: 'user', content: 'actual human prompt' },
+      },
+    ];
+    const timeline = transformRawMessagesToTimeline(raw, { sourceId: 'claude-code' });
+    assert.equal(timeline.length, 1);
+    assert.equal(timeline[0]?.content, 'actual human prompt');
+  });
+
   test('without sourceId, Codex response_item rows produce an empty timeline', () => {
     const raw = [
       {

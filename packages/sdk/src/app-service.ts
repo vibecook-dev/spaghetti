@@ -430,6 +430,7 @@ function toSessionListItem(data: SessionSummaryData): SessionListItem {
     tokensEstimated: data.tokensEstimated,
     messageCount: data.messageCount,
     fullPath: data.fullPath,
+    title: data.title,
     summary: data.summary,
     firstPrompt: data.firstPrompt,
     gitBranch: data.gitBranch,

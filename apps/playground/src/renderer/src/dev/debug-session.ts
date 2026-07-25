@@ -135,6 +135,7 @@ export const DEBUG_SESSION: SessionListItem = {
   tokensEstimated: false,
   messageCount: DEBUG_PROJECT.messageCount,
   fullPath: '/debug/spaghetti-message-gallery/debug-message-gallery.jsonl',
+  title: 'Complete transcript gallery',
   summary: 'Development fixture containing every transcript row and representative tool payload.',
   firstPrompt: 'Render the complete message gallery for visual QA.',
   gitBranch: 'ui/message-gallery',

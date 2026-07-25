@@ -138,7 +138,7 @@ export function suggestSessions(input: string, sessions: SessionListItem[]): Ses
   // Try matching against summary or firstPrompt
   const lower = input.toLowerCase();
   const textMatches = sessions.filter((s) => {
-    const summary = (s.summary || '').toLowerCase();
+    const summary = `${s.title || ''} ${s.summary || ''}`.toLowerCase();
     const prompt = (s.firstPrompt || '').toLowerCase();
     return summary.includes(lower) || prompt.includes(lower);
   });

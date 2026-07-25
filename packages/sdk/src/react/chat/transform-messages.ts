@@ -10,6 +10,7 @@
  */
 
 import type { SessionMessage, ToolResultInfo } from './types.js';
+import { isClaudeSyntheticUserRecord } from '../../sources/claude-code/session-metadata.js';
 import { adaptMessagesForDisplay } from '../../sources/adapt-display-messages.js';
 
 type AnyMsg = Record<string, any>;
@@ -82,6 +83,7 @@ export function transformRawMessagesToTimeline(
     if (type === 'user') {
       const message = entry.message as { content?: string | AnyMsg[]; role?: string } | undefined;
       if (!message?.content) continue;
+      const isSyntheticClaudeUser = (!sourceId || sourceId === 'claude-code') && isClaudeSyntheticUserRecord(entry);
 
       if (Array.isArray(message.content)) {
         const contentArray = message.content;
@@ -109,7 +111,7 @@ export function transformRawMessagesToTimeline(
           }
           // tool_result-only user rows are not rendered as user messages
           const hasText = contentArray.some((c) => c?.type === 'text' && c.text);
-          if (!hasText) continue;
+          if (!hasText || isSyntheticClaudeUser) continue;
           const textParts = contentArray.filter((c) => c?.type === 'text').map((c) => String(c.text ?? ''));
           out.push({
             uuid: String(entry.uuid ?? cryptoRandom()),
@@ -129,7 +131,7 @@ export function transformRawMessagesToTimeline(
 
         const textParts = contentArray.filter((c) => c?.type === 'text').map((c) => String(c.text ?? ''));
         const content = textParts.join('\n');
-        if (!content && !entry.isCompactSummary) continue;
+        if ((!content && !entry.isCompactSummary) || isSyntheticClaudeUser) continue;
 
         out.push({
           uuid: String(entry.uuid ?? cryptoRandom()),
@@ -145,6 +147,7 @@ export function transformRawMessagesToTimeline(
           rawJson: entry,
         });
       } else if (typeof message.content === 'string') {
+        if (isSyntheticClaudeUser) continue;
         out.push({
           uuid: String(entry.uuid ?? cryptoRandom()),
           parentUuid: (entry.parentUuid as string) ?? null,

@@ -170,6 +170,7 @@ interface SessionSummaryRow {
   full_path: string;
   first_prompt: string;
   summary: string;
+  title: string;
   git_branch: string;
   project_path: string;
   is_sidechain: number;
@@ -361,7 +362,7 @@ class QueryServiceImpl implements QueryService {
     const rows = this.db.all<ProjectSummaryRow>(
       `
       WITH ranked_sessions AS (
-        SELECT project_slug, source_id, project_path, first_prompt, summary, git_branch,
+        SELECT project_slug, source_id, project_path, first_prompt, summary, ai_title, custom_title, git_branch,
                created_at, modified_at, tokens_estimated,
                ROW_NUMBER() OVER (
                  PARTITION BY project_slug, source_id
@@ -377,8 +378,10 @@ class QueryServiceImpl implements QueryService {
                MIN(created_at) AS first_active_at,
                MAX(CASE WHEN recent_rank = 1 THEN NULLIF(project_path, '') END) AS latest_project_path,
                MAX(CASE WHEN recent_rank = 1 THEN git_branch END) AS latest_git_branch,
-               MAX(CASE WHEN recent_rank = 1
-                        THEN COALESCE(NULLIF(first_prompt, ''), NULLIF(summary, ''), '') END) AS latest_prompt
+               MAX(CASE WHEN recent_rank = 1 THEN COALESCE(
+                 NULLIF(custom_title, ''), NULLIF(ai_title, ''),
+                 NULLIF(first_prompt, ''), NULLIF(summary, ''), ''
+               ) END) AS latest_prompt
           FROM ranked_sessions
          GROUP BY project_slug, source_id
       ),
@@ -440,6 +443,7 @@ class QueryServiceImpl implements QueryService {
         s.full_path,
         COALESCE(s.first_prompt, '') as first_prompt,
         COALESCE(s.summary, '') as summary,
+        COALESCE(NULLIF(s.custom_title, ''), NULLIF(s.ai_title, ''), '') as title,
         COALESCE(s.git_branch, '') as git_branch,
         COALESCE(s.project_path, '') as project_path,
         COALESCE(s.is_sidechain, 0) as is_sidechain,
@@ -1259,6 +1263,7 @@ class QueryServiceImpl implements QueryService {
       messageCount: row.message_count,
       fullPath: row.full_path ?? '',
       summary: row.summary ?? '',
+      title: row.title ?? '',
       firstPrompt: row.first_prompt ?? '',
       gitBranch: row.git_branch ?? '',
       todoCount: row.todo_count,

@@ -20,6 +20,7 @@ import type {
   WorkflowRun,
 } from '../../../types/index.js';
 import type { ProjectParseSink } from '../../../data/parse-sink.js';
+import { extractClaudeHumanPrompt } from '../session-metadata.js';
 import {
   parseSubagentFilename,
   inferSubagentType,
@@ -27,9 +28,6 @@ import {
   parseFileHistoryFilename,
   parsePlanFilename,
 } from './filename-conventions.js';
-
-// Sentinel object used to break out of streaming JSONL reads early
-const EARLY_EXIT_SIGNAL = Symbol('EARLY_EXIT_SIGNAL');
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // PROJECT PARSER OPTIONS
@@ -381,35 +379,20 @@ export class ProjectParserImpl implements ProjectParser {
       const stats = this.fileService.getStats(filePath);
       if (!stats) continue;
 
-      // Use streaming reader with early exit to extract just the first
-      // user prompt without loading the entire file into memory.
+      // Stream the file and retain only the first genuine human prompt.
+      // `readJsonlStreaming` deliberately contains callback errors, so a
+      // thrown sentinel cannot be used to stop iteration here.
       let firstPrompt = '';
       try {
         this.fileService.readJsonlStreaming<Record<string, unknown>>(filePath, (msg) => {
-          const message = msg.message as Record<string, unknown> | undefined;
-          if (message?.role === 'user') {
-            const content = message.content;
-            if (typeof content === 'string') {
-              firstPrompt = content.slice(0, 200);
-            } else if (Array.isArray(content)) {
-              for (const block of content) {
-                const b = block as Record<string, unknown>;
-                if (b.type === 'text' && typeof b.text === 'string') {
-                  firstPrompt = (b.text as string).slice(0, 200);
-                  break;
-                }
-              }
-            }
-            // We found the first user message — throw to exit early.
-            // The streaming reader will catch this and stop reading.
-            throw EARLY_EXIT_SIGNAL;
+          if (firstPrompt) return;
+          const candidate = extractClaudeHumanPrompt(msg);
+          if (candidate) {
+            firstPrompt = candidate;
           }
         });
-      } catch (e) {
-        // Ignore the early exit signal; any other error means can't read
-        if (e !== EARLY_EXIT_SIGNAL) {
-          // can't read — firstPrompt stays empty
-        }
+      } catch {
+        // Ignore read errors for discovery.
       }
 
       const modifiedIso = new Date(stats.mtimeMs).toISOString();

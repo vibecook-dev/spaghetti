@@ -37,6 +37,12 @@ export interface ExtractedMessage {
     cacheCreationTokens: number;
     cacheReadTokens: number;
   };
+  /** Optional session-list metadata carried by this source record. */
+  sessionMetadata?: {
+    humanPrompt?: string;
+    aiTitle?: string;
+    customTitle?: string;
+  };
 }
 
 /**

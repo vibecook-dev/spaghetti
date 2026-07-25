@@ -24,6 +24,7 @@ use regex::Regex;
 use serde_json::Value;
 
 use crate::claude::message_extractor;
+use crate::claude::session_metadata;
 use crate::claude::types::{
     FileHistorySession, FileHistorySnapshotFile, PersistedToolResult, PlanFile, SessionIndexEntry,
     SessionMessage, SessionsIndex, SubagentMeta, SubagentTranscript, SubagentType, TaskEntry,
@@ -913,58 +914,24 @@ fn epoch_ms_to_iso8601(ms: f64) -> String {
         .unwrap_or_else(|_| "1970-01-01T00:00:00.000Z".to_string())
 }
 
-/// Read the first user message from a JSONL session file and return its first
-/// 200 UTF-16 code units of text as a first-prompt candidate.
+/// Read the first genuine human prompt from a JSONL session file.
 ///
-/// Matches the TS `discoverSessionEntries` peek exactly:
-/// - a message is "user" when its `message.role === 'user'` (not the top-level
-///   `type`);
-/// - scanning STOPS at the first such message even if it carries no text block
-///   (the caller then maps the empty result to "No prompt"); it does NOT keep
-///   looking for a later user message with text;
-/// - the text is truncated with `.slice(0, 200)` = 200 UTF-16 code units.
-///
-/// Returns `None` when the file can't be opened / has no user message / the
-/// first user message has no extractable text.
+/// Claude uses user-role envelopes for local commands, metadata, compact
+/// summaries, and tool results. Those are skipped until a human text record is
+/// found. Text is truncated to 200 UTF-16 code units for TS parity.
 fn peek_first_user_prompt(path: &Path) -> Option<String> {
     use std::cell::RefCell;
 
-    // `done` guards the "stop at the first user message" rule independently of
-    // whether text was actually extracted — read_jsonl_streaming has no early
-    // exit, so subsequent lines must be ignored once we've seen a user message.
-    let done: RefCell<bool> = RefCell::new(false);
     let found: RefCell<Option<String>> = RefCell::new(None);
     let _ = crate::core::jsonl::read_jsonl_streaming(path, 0, |line, _, _| {
-        if *done.borrow() {
+        if found.borrow().is_some() {
             return;
         }
         let Ok(val) = serde_json::from_str::<serde_json::Value>(line) else {
             return;
         };
-        let Some(message) = val.get("message") else {
-            return;
-        };
-        if message.get("role").and_then(|v| v.as_str()) != Some("user") {
-            return;
-        }
-        // First user message — record any text, then stop regardless.
-        *done.borrow_mut() = true;
-        let text = match message.get("content") {
-            Some(serde_json::Value::String(s)) => Some(s.clone()),
-            Some(serde_json::Value::Array(blocks)) => blocks.iter().find_map(|block| {
-                if block.get("type").and_then(|v| v.as_str()) == Some("text") {
-                    block
-                        .get("text")
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string())
-                } else {
-                    None
-                }
-            }),
-            _ => None,
-        };
-        if let Some(t) = text {
-            *found.borrow_mut() = Some(crate::core::text::truncate_utf16(&t, 200).to_owned());
+        if let Some(prompt) = session_metadata::extract_human_prompt(&val) {
+            *found.borrow_mut() = Some(prompt);
         }
     });
     found.into_inner()
@@ -1369,20 +1336,21 @@ mod tests {
     // ── 10. first-prompt peek parity (item 8) ─────────────────────────────
 
     #[test]
-    fn peek_first_prompt_stops_at_first_user_message_even_without_text() {
-        // First user message has no text block (image only); a LATER user
-        // message does. TS stops at the first user message, so the result is
-        // None (caller maps to "No prompt") — NOT "later text".
+    fn peek_first_prompt_skips_non_prompt_user_records() {
+        // Claude uses user-role rows for tool results and metadata. Neither
+        // should prevent a later genuine human prompt from naming the session.
         let dir = mk_tempdir();
         let path = dir.path().join("s.jsonl");
         let body = concat!(
-            r#"{"type":"user","message":{"role":"user","content":[{"type":"image","source":{}}]}}"#,
+            r#"{"type":"user","isMeta":true,"message":{"role":"user","content":"<local-command-caveat>ignore</local-command-caveat>"}}"#,
+            "\n",
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","content":"done"}]}}"#,
             "\n",
             r#"{"type":"user","message":{"role":"user","content":"later text"}}"#,
             "\n",
         );
         fs::write(&path, body).unwrap();
-        assert_eq!(peek_first_user_prompt(&path), None);
+        assert_eq!(peek_first_user_prompt(&path).as_deref(), Some("later text"));
     }
 
     #[test]

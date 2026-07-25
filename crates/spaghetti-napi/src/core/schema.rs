@@ -43,7 +43,8 @@ use thiserror::Error;
 /// v11: tokenized subagent rows and rebuildable daily token-activity buckets.
 /// v12: ingestion-owned session/day rollups; query paths are read-only.
 /// v13: timestamp-independent summary totals and materialization checkpoints.
-pub const SCHEMA_VERSION: u32 = 13;
+/// v14: materialized Claude AI/custom session titles.
+pub const SCHEMA_VERSION: u32 = 14;
 
 /// Full DDL for the current schema — lifted verbatim from the TS `SCHEMA_SQL`
 /// template literal. Whitespace differs; structure does not.
@@ -86,6 +87,8 @@ CREATE TABLE IF NOT EXISTS sessions (
   full_path TEXT,
   first_prompt TEXT,
   summary TEXT,
+  ai_title TEXT NOT NULL DEFAULT '',
+  custom_title TEXT NOT NULL DEFAULT '',
   git_branch TEXT,
   project_path TEXT,
   is_sidechain INTEGER,

@@ -196,7 +196,7 @@ export async function sessionsCommand(
     ...s,
     _index: i + 1,
     _tokens: formatTokenUsage(s.tokenUsage, s.sourceId, s.tokensEstimated),
-    _summary: s.summary || s.firstPrompt || '',
+    _summary: s.title || s.summary || s.firstPrompt || '',
   }));
 
   const table = renderTable(rows, columns);

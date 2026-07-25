@@ -36,8 +36,11 @@ export function SessionCard({
         )}
       </div>
 
-      {session.summary && <div className="text-xs text-white/70 mb-0.5 truncate">{session.summary}</div>}
-      {!session.summary && session.firstPrompt && (
+      {session.title && <div className="text-xs text-white/70 mb-0.5 truncate">{session.title}</div>}
+      {!session.title && session.summary && (
+        <div className="text-xs text-white/70 mb-0.5 truncate">{session.summary}</div>
+      )}
+      {!session.title && !session.summary && session.firstPrompt && (
         <div className="text-xs text-white/50 mb-0.5 truncate italic">{session.firstPrompt}</div>
       )}
 

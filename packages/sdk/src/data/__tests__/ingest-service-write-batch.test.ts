@@ -228,6 +228,45 @@ describe('IngestService.writeBatch (RFC 005 C2.6)', () => {
     );
   });
 
+  test('Claude metadata rows materialize titles and replace a synthetic first prompt', async () => {
+    sqlite.run(
+      `UPDATE sessions SET first_prompt = ?, ai_title = '', custom_title = '' WHERE id = ?`,
+      '<local-command-caveat>ignore</local-command-caveat>',
+      SESSION_ID,
+    );
+    const records = [
+      {
+        type: 'user',
+        isMeta: true,
+        message: { role: 'user', content: '<local-command-caveat>ignore</local-command-caveat>' },
+      },
+      { type: 'ai-title', aiTitle: 'Generated title' },
+      { type: 'user', message: { role: 'user', content: 'The genuine prompt' } },
+      { type: 'custom-title', customTitle: 'Pinned title' },
+    ] as SessionMessage[];
+
+    await ingest.writeBatch(
+      records.map((message, index) => ({
+        category: 'message' as const,
+        slug: SLUG,
+        sessionId: SESSION_ID,
+        message,
+        msgIndex: index,
+        byteOffset: index,
+      })),
+    );
+
+    const session = sqlite.get<{ first_prompt: string; ai_title: string; custom_title: string }>(
+      `SELECT first_prompt, ai_title, custom_title FROM sessions WHERE id = ?`,
+      SESSION_ID,
+    );
+    assert.deepEqual(session, {
+      first_prompt: 'The genuine prompt',
+      ai_title: 'Generated title',
+      custom_title: 'Pinned title',
+    });
+  });
+
   test('subagent row → INSERT into subagents + subagent.updated event', async () => {
     const transcript: SubagentTranscript = {
       agentId: 'a-xyz',
