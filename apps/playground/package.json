@@ -21,8 +21,8 @@
     "@radix-ui/react-dialog": "^1.1.19",
     "@radix-ui/react-tooltip": "^1.2.12",
     "@tanstack/react-virtual": "^3.14.6",
-    "@vibecook/mille": "file:../../../../mille/packages/mille",
-    "@vibecook/mille-ui": "file:../../../../mille/packages/mille-ui",
+    "@vibecook/mille": "^0.3.0",
+    "@vibecook/mille-ui": "^0.3.0",
     "@vibecook/spaghetti-sdk": "workspace:*",
     "better-sqlite3": "^12.0.0",
     "lucide-react": "^0.468.0",
@@ -30,11 +30,11 @@
     "react-dom": "^19.0.0"
   },
   "optionalDependencies": {
-    "@vibecook/mille-darwin-arm64": "file:../../../../mille/packages/mille-darwin-arm64",
-    "@vibecook/mille-darwin-x64": "file:../../../../mille/packages/mille-darwin-x64",
-    "@vibecook/mille-linux-arm64-gnu": "file:../../../../mille/packages/mille-linux-arm64-gnu",
-    "@vibecook/mille-linux-x64-gnu": "file:../../../../mille/packages/mille-linux-x64-gnu",
-    "@vibecook/mille-win32-x64-msvc": "file:../../../../mille/packages/mille-win32-x64-msvc"
+    "@vibecook/mille-darwin-arm64": "^0.3.0",
+    "@vibecook/mille-darwin-x64": "^0.3.0",
+    "@vibecook/mille-linux-arm64-gnu": "^0.3.0",
+    "@vibecook/mille-linux-x64-gnu": "^0.3.0",
+    "@vibecook/mille-win32-x64-msvc": "^0.3.0"
   },
   "devDependencies": {
     "@electron/rebuild": "^4.0.3",

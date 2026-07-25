@@ -51,11 +51,11 @@ importers:
         specifier: ^3.14.6
         version: 3.14.6(react-dom@19.2.4(react@19.2.4))(react@19.2.4)
       '@vibecook/mille':
-        specifier: file:../../../../mille/packages/mille
-        version: file:../../mille/packages/mille(react@19.2.4)
+        specifier: ^0.3.0
+        version: 0.3.0(react@19.2.4)
       '@vibecook/mille-ui':
-        specifier: file:../../../../mille/packages/mille-ui
-        version: file:../../mille/packages/mille-ui(@radix-ui/react-context-menu@2.3.3(@types/react-dom@19.2.3(@types/react@19.2.14))(@types/react@19.2.14)(react-dom@19.2.4(react@19.2.4))(react@19.2.4))(@radix-ui/react-dialog@1.1.19(@types/react-dom@19.2.3(@types/react@19.2.14))(@types/react@19.2.14)(react-dom@19.2.4(react@19.2.4))(react@19.2.4))(@radix-ui/react-tooltip@1.2.12(@types/react-dom@19.2.3(@types/react@19.2.14))(@types/react@19.2.14)(react-dom@19.2.4(react@19.2.4))(react@19.2.4))(@tanstack/react-virtual@3.14.6(react-dom@19.2.4(react@19.2.4))(react@19.2.4))(@vibecook/mille@file:../../mille/packages/mille(react@19.2.4))(react-dom@19.2.4(react@19.2.4))(react@19.2.4)
+        specifier: ^0.3.0
+        version: 0.3.0(@radix-ui/react-context-menu@2.3.3(@types/react-dom@19.2.3(@types/react@19.2.14))(@types/react@19.2.14)(react-dom@19.2.4(react@19.2.4))(react@19.2.4))(@radix-ui/react-dialog@1.1.19(@types/react-dom@19.2.3(@types/react@19.2.14))(@types/react@19.2.14)(react-dom@19.2.4(react@19.2.4))(react@19.2.4))(@radix-ui/react-tooltip@1.2.12(@types/react-dom@19.2.3(@types/react@19.2.14))(@types/react@19.2.14)(react-dom@19.2.4(react@19.2.4))(react@19.2.4))(@tanstack/react-virtual@3.14.6(react-dom@19.2.4(react@19.2.4))(react@19.2.4))(@vibecook/mille@0.3.0(react@19.2.4))(react-dom@19.2.4(react@19.2.4))(react@19.2.4)
       '@vibecook/spaghetti-sdk':
         specifier: workspace:*
         version: link:../../packages/sdk
@@ -110,20 +110,20 @@ importers:
         version: 7.3.2(@types/node@24.12.2)(jiti@1.21.7)(tsx@4.21.0)
     optionalDependencies:
       '@vibecook/mille-darwin-arm64':
-        specifier: file:../../../../mille/packages/mille-darwin-arm64
-        version: file:../../mille/packages/mille-darwin-arm64
+        specifier: ^0.3.0
+        version: 0.3.0
       '@vibecook/mille-darwin-x64':
-        specifier: file:../../../../mille/packages/mille-darwin-x64
-        version: file:../../mille/packages/mille-darwin-x64
+        specifier: ^0.3.0
+        version: 0.3.0
       '@vibecook/mille-linux-arm64-gnu':
-        specifier: file:../../../../mille/packages/mille-linux-arm64-gnu
-        version: file:../../mille/packages/mille-linux-arm64-gnu
+        specifier: ^0.3.0
+        version: 0.3.0
       '@vibecook/mille-linux-x64-gnu':
-        specifier: file:../../../../mille/packages/mille-linux-x64-gnu
-        version: file:../../mille/packages/mille-linux-x64-gnu
+        specifier: ^0.3.0
+        version: 0.3.0
       '@vibecook/mille-win32-x64-msvc':
-        specifier: file:../../../../mille/packages/mille-win32-x64-msvc
-        version: file:../../mille/packages/mille-win32-x64-msvc
+        specifier: ^0.3.0
+        version: 0.3.0
 
   crates/spaghetti-napi:
     devDependencies:
@@ -2179,41 +2179,55 @@ packages:
   '@ungap/structured-clone@1.3.3':
     resolution: {integrity: sha512-60YRaenCQcVjYEKOcG824+DRGGIQ3VKErcBoAEDJZz5bKIs2ZG+X/H9Nk+Q6EVkwJk5QNApxbrc5QtBSwtrXAg==}
 
-  '@vibecook/mille-darwin-arm64@file:../../mille/packages/mille-darwin-arm64':
-    resolution: {directory: ../../mille/packages/mille-darwin-arm64, type: directory}
+  '@vibecook/mille-darwin-arm64@0.3.0':
+    resolution: {integrity: sha512-X/+HkWEdX15vlzsQb5TMLDqrKsTy97sigZ9TSiDUExSJr/wKJoLDf3urBEcr3iNsXlIoSY/XpTKda9N/3hfCBQ==}
     engines: {node: '>=18'}
     cpu: [arm64]
     os: [darwin]
 
-  '@vibecook/mille-darwin-x64@file:../../mille/packages/mille-darwin-x64':
-    resolution: {directory: ../../mille/packages/mille-darwin-x64, type: directory}
+  '@vibecook/mille-darwin-x64@0.3.0':
+    resolution: {integrity: sha512-M/nrGCpl7tjEeUA45jcUPhpmuJrM3sM+lBL6TRB2wH4ZMH/+rryAiuUpBc8GMrn1fqLV8vSSyCTjtUnpbfLIYA==}
     engines: {node: '>=18'}
     cpu: [x64]
     os: [darwin]
 
-  '@vibecook/mille-linux-arm64-gnu@file:../../mille/packages/mille-linux-arm64-gnu':
-    resolution: {directory: ../../mille/packages/mille-linux-arm64-gnu, type: directory}
+  '@vibecook/mille-linux-arm64-gnu@0.3.0':
+    resolution: {integrity: sha512-tbvPwLhWscs1dUcf+B4xJbeUo2OAuGRLijknWAbFP3+ykWyjm4DIFpIdnI1R+9KrBXJqZWvL5ig54KhcqSQzXg==}
     engines: {node: '>=18'}
     cpu: [arm64]
     os: [linux]
     libc: [glibc]
 
-  '@vibecook/mille-linux-x64-gnu@file:../../mille/packages/mille-linux-x64-gnu':
-    resolution: {directory: ../../mille/packages/mille-linux-x64-gnu, type: directory}
+  '@vibecook/mille-linux-arm64-musl@0.3.0':
+    resolution: {integrity: sha512-ZCauXHIOjPLtHc5jr7gzcM2LHId0YMDyg/m9Ota1P3g7K3q/ugXhDVMJWfk0kwENYTV9pTf24mWl55WY3IdLyg==}
+    engines: {node: '>=18'}
+    cpu: [arm64]
+    os: [linux]
+    libc: [musl]
+
+  '@vibecook/mille-linux-x64-gnu@0.3.0':
+    resolution: {integrity: sha512-QyhTE4kRMnWQz3Zp43SyGOyIVObEjIMXzhZWe4hvGtOWfXTCspRGwmWa11y6oUhGCTb5HRzdDNRyLNqbehDQ2g==}
     engines: {node: '>=18'}
     cpu: [x64]
     os: [linux]
     libc: [glibc]
 
-  '@vibecook/mille-ui@file:../../mille/packages/mille-ui':
-    resolution: {directory: ../../mille/packages/mille-ui, type: directory}
+  '@vibecook/mille-linux-x64-musl@0.3.0':
+    resolution: {integrity: sha512-xRD8mgkSUHg5lnQJiZSotVy+OBSKZ9YI1FGUFnKKEQhRXw76cFnqlbmsijK3Mot4WKvtaq7+MN2stAfZwPdNmw==}
+    engines: {node: '>=18'}
+    cpu: [x64]
+    os: [linux]
+    libc: [musl]
+
+  '@vibecook/mille-ui@0.3.0':
+    resolution: {integrity: sha512-it7GpEuVqXv0G7uCT+5NMPMTO0ZmyS2SDJq41D8cLVrDNo19AUch/hBTsGObT4zld1lw/OhTew/ayjMasSlbQg==}
     engines: {node: '>=20'}
     peerDependencies:
       '@radix-ui/react-context-menu': ^2.0.0
       '@radix-ui/react-dialog': ^1.0.0
       '@radix-ui/react-tooltip': ^1.0.0
       '@tanstack/react-virtual': ^3.0.0
-      '@vibecook/mille': workspace:^
+      '@vibecook/mille': ^0.3.0
       react: '>=19.0.0'
       react-dom: '>=19.0.0'
     peerDependenciesMeta:
@@ -2224,14 +2238,20 @@ packages:
       '@radix-ui/react-tooltip':
         optional: true
 
-  '@vibecook/mille-win32-x64-msvc@file:../../mille/packages/mille-win32-x64-msvc':
-    resolution: {directory: ../../mille/packages/mille-win32-x64-msvc, type: directory}
+  '@vibecook/mille-win32-arm64-msvc@0.3.0':
+    resolution: {integrity: sha512-PH83YMfpNfg4DTwfHBtevXPAqd0KoCdLXb9MXd1sE9U4pytCECDDV+5/9J2nPKHpVMoDGbONLGJxYcAFI88Xuw==}
+    engines: {node: '>=18'}
+    cpu: [arm64]
+    os: [win32]
+
+  '@vibecook/mille-win32-x64-msvc@0.3.0':
+    resolution: {integrity: sha512-JTjSVNfuE2v+wUud5P2rq7Ay2rvURFwCzwpdo8BsNUleB49bTwGRp2rPbKsEiYmeRl/TEDIzwjbvLwGPpDlGVw==}
     engines: {node: '>=18'}
     cpu: [x64]
     os: [win32]
 
-  '@vibecook/mille@file:../../mille/packages/mille':
-    resolution: {directory: ../../mille/packages/mille, type: directory}
+  '@vibecook/mille@0.3.0':
+    resolution: {integrity: sha512-0VuBXjG/cTH49inmKTnVVMNxI9AyzNL1hMAADVREr/nMBFBA5R1WZOXgME5/9OtAX0mimbe+0mfbh97y30itRA==}
     engines: {node: '>=20'}
     peerDependencies:
       react: '>=18'
@@ -6573,22 +6593,28 @@ snapshots:
 
   '@ungap/structured-clone@1.3.3': {}
 
-  '@vibecook/mille-darwin-arm64@file:../../mille/packages/mille-darwin-arm64':
+  '@vibecook/mille-darwin-arm64@0.3.0':
     optional: true
 
-  '@vibecook/mille-darwin-x64@file:../../mille/packages/mille-darwin-x64':
+  '@vibecook/mille-darwin-x64@0.3.0':
     optional: true
 
-  '@vibecook/mille-linux-arm64-gnu@file:../../mille/packages/mille-linux-arm64-gnu':
+  '@vibecook/mille-linux-arm64-gnu@0.3.0':
     optional: true
 
-  '@vibecook/mille-linux-x64-gnu@file:../../mille/packages/mille-linux-x64-gnu':
+  '@vibecook/mille-linux-arm64-musl@0.3.0':
     optional: true
 
-  '@vibecook/mille-ui@file:../../mille/packages/mille-ui(@radix-ui/react-context-menu@2.3.3(@types/react-dom@19.2.3(@types/react@19.2.14))(@types/react@19.2.14)(react-dom@19.2.4(react@19.2.4))(react@19.2.4))(@radix-ui/react-dialog@1.1.19(@types/react-dom@19.2.3(@types/react@19.2.14))(@types/react@19.2.14)(react-dom@19.2.4(react@19.2.4))(react@19.2.4))(@radix-ui/react-tooltip@1.2.12(@types/react-dom@19.2.3(@types/react@19.2.14))(@types/react@19.2.14)(react-dom@19.2.4(react@19.2.4))(react@19.2.4))(@tanstack/react-virtual@3.14.6(react-dom@19.2.4(react@19.2.4))(react@19.2.4))(@vibecook/mille@file:../../mille/packages/mille(react@19.2.4))(react-dom@19.2.4(react@19.2.4))(react@19.2.4)':
+  '@vibecook/mille-linux-x64-gnu@0.3.0':
+    optional: true
+
+  '@vibecook/mille-linux-x64-musl@0.3.0':
+    optional: true
+
+  '@vibecook/mille-ui@0.3.0(@radix-ui/react-context-menu@2.3.3(@types/react-dom@19.2.3(@types/react@19.2.14))(@types/react@19.2.14)(react-dom@19.2.4(react@19.2.4))(react@19.2.4))(@radix-ui/react-dialog@1.1.19(@types/react-dom@19.2.3(@types/react@19.2.14))(@types/react@19.2.14)(react-dom@19.2.4(react@19.2.4))(react@19.2.4))(@radix-ui/react-tooltip@1.2.12(@types/react-dom@19.2.3(@types/react@19.2.14))(@types/react@19.2.14)(react-dom@19.2.4(react@19.2.4))(react@19.2.4))(@tanstack/react-virtual@3.14.6(react-dom@19.2.4(react@19.2.4))(react@19.2.4))(@vibecook/mille@0.3.0(react@19.2.4))(react-dom@19.2.4(react@19.2.4))(react@19.2.4)':
     dependencies:
       '@tanstack/react-virtual': 3.14.6(react-dom@19.2.4(react@19.2.4))(react@19.2.4)
-      '@vibecook/mille': file:../../mille/packages/mille(react@19.2.4)
+      '@vibecook/mille': 0.3.0(react@19.2.4)
       react: 19.2.4
       react-dom: 19.2.4(react@19.2.4)
     optionalDependencies:
@@ -6596,11 +6622,22 @@ snapshots:
       '@radix-ui/react-dialog': 1.1.19(@types/react-dom@19.2.3(@types/react@19.2.14))(@types/react@19.2.14)(react-dom@19.2.4(react@19.2.4))(react@19.2.4)
       '@radix-ui/react-tooltip': 1.2.12(@types/react-dom@19.2.3(@types/react@19.2.14))(@types/react@19.2.14)(react-dom@19.2.4(react@19.2.4))(react@19.2.4)
 
-  '@vibecook/mille-win32-x64-msvc@file:../../mille/packages/mille-win32-x64-msvc':
+  '@vibecook/mille-win32-arm64-msvc@0.3.0':
     optional: true
 
-  '@vibecook/mille@file:../../mille/packages/mille(react@19.2.4)':
+  '@vibecook/mille-win32-x64-msvc@0.3.0':
+    optional: true
+
+  '@vibecook/mille@0.3.0(react@19.2.4)':
     optionalDependencies:
+      '@vibecook/mille-darwin-arm64': 0.3.0
+      '@vibecook/mille-darwin-x64': 0.3.0
+      '@vibecook/mille-linux-arm64-gnu': 0.3.0
+      '@vibecook/mille-linux-arm64-musl': 0.3.0
+      '@vibecook/mille-linux-x64-gnu': 0.3.0
+      '@vibecook/mille-linux-x64-musl': 0.3.0
+      '@vibecook/mille-win32-arm64-msvc': 0.3.0
+      '@vibecook/mille-win32-x64-msvc': 0.3.0
       react: 19.2.4
 
   '@vitejs/plugin-react@4.7.0(vite@6.4.1(@types/node@22.19.15)(jiti@1.21.7)(tsx@4.21.0))':
