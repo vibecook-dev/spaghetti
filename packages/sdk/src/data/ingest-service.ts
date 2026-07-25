@@ -560,17 +560,16 @@ class IngestServiceImpl implements IngestService {
         rawIndex: index,
         rawMessage: message as unknown as Record<string, unknown>,
       });
-      const activityAt = extracted.timestamp || new Date().toISOString();
+      // `modified_at` is deliberately NOT advanced per message. It carries what
+      // the source's own index says about the session, which is exactly what the
+      // native engine writes — bumping it here made the two engines disagree on
+      // every session. Worse, records that carry no timestamp (`summary`,
+      // `ai-title`, `mode`, …) fell back to wall-clock, so the same files
+      // ingested twice produced different rows, breaking the invariant that the
+      // index is a pure function of what is on disk. `updated_at` is row
+      // bookkeeping and stays.
       this.db.run(
-        `UPDATE sessions
-            SET modified_at = CASE
-                  WHEN modified_at IS NULL OR modified_at = '' OR modified_at < ? THEN ?
-                  ELSE modified_at
-                END,
-                updated_at = ?
-          WHERE id = ? AND source_id = ?`,
-        activityAt,
-        activityAt,
+        `UPDATE sessions SET updated_at = ? WHERE id = ? AND source_id = ?`,
         Date.now(),
         sessionId,
         this.sourceId,
