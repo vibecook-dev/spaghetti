@@ -1,5 +1,44 @@
 # Changelog
 
+## [0.5.21](https://github.com/jamesyong-42/spaghetti/compare/spaghetti-v0.5.20...spaghetti-v0.5.21) (2026-07-25)
+
+
+### Features
+
+* add database-backed message filtering ([3cde1c5](https://github.com/jamesyong-42/spaghetti/commit/3cde1c5d142511412db30db3ba0e8633841be3c5))
+* add project token activity heatmap ([d6a935d](https://github.com/jamesyong-42/spaghetti/commit/d6a935d2ab2076dbddf1fd10659a28bd9256b0f6))
+* aggregate projects and index subagent transcripts ([bdf1083](https://github.com/jamesyong-42/spaghetti/commit/bdf10836030147db5d3306a53c3eb63e749102b8))
+* ingest rich Codex transcript records ([6436e88](https://github.com/jamesyong-42/spaghetti/commit/6436e88140db0a77e74f0c523ea05799b9463a7b))
+* ingest rich Grok transcripts ([80257a5](https://github.com/jamesyong-42/spaghetti/commit/80257a5db16ccfd255ebb3aa824c51543d849bb6))
+* move live session indexing to utility process ([1327e7f](https://github.com/jamesyong-42/spaghetti/commit/1327e7f541c19959c90223699dc4a89894f7b5eb))
+* **playground,sdk:** multi-source UI, timeline chat, and SQLite recovery ([97d5773](https://github.com/jamesyong-42/spaghetti/commit/97d57738d0b12b6a7772fd95fc5e1d9e41c28d33))
+* **playground:** adapt shell to archive paper design ([53fa7f0](https://github.com/jamesyong-42/spaghetti/commit/53fa7f027598c6ff9f93d77e20677c73f63fb3a2))
+* **playground:** add archive settings panel ([01fcd19](https://github.com/jamesyong-42/spaghetti/commit/01fcd19364c2fdb1684c03b8850a433ae8b8bd92))
+* **playground:** add debug galleries and file viewer ([4c47651](https://github.com/jamesyong-42/spaghetti/commit/4c47651ad390626ca27ef9460601698d4ad0000e))
+* **playground:** archive chrome, mille Structure panel, and design typography ([f9da1d2](https://github.com/jamesyong-42/spaghetti/commit/f9da1d2a4b8729deb14873261fa7aa3b5c2c7740))
+* **playground:** embed mille file explorer as right Files panel ([adb0a7e](https://github.com/jamesyong-42/spaghetti/commit/adb0a7ede083447cce30aba4b50cfd878009aae6))
+* **playground:** search, live chat, artifacts, filters, and shell polish ([e02c397](https://github.com/jamesyong-42/spaghetti/commit/e02c397a996e7be32b6f3bc32e3fe06967064ec5))
+* refine live session indicators ([054a289](https://github.com/jamesyong-42/spaghetti/commit/054a289a207946a3d9cd37f084bd7c85c41466c9))
+* **sdk,napi:** materialize Claude session titles ([9e9a1d8](https://github.com/jamesyong-42/spaghetti/commit/9e9a1d81c26a4f00eaaa7706077e1f015d5dc43d))
+
+
+### Bug Fixes
+
+* **ci:** pin pnpm via packageManager instead of a stale major ([de2fa92](https://github.com/jamesyong-42/spaghetti/commit/de2fa92bcee27dfa9dc49ead5caf922bad7bb1a1))
+* **codex:** force re-ingest when first_prompt extract rules change ([23e05c7](https://github.com/jamesyong-42/spaghetti/commit/23e05c7aa845c4ba6abe4ef9b4405ac49a911461))
+* **codex:** use real human prompt for session list titles ([d60ecd4](https://github.com/jamesyong-42/spaghetti/commit/d60ecd440693c10da8601c2ae8356f5824bc6445))
+* **napi:** apportion Grok session tokens like the TS writer ([bec4a83](https://github.com/jamesyong-42/spaghetti/commit/bec4a833f4490bc94d01d38bfdc0c7fe85048f41))
+* normalize Codex sessions and transcript identity ([aded0e8](https://github.com/jamesyong-42/spaghetti/commit/aded0e8332633331ff58b076de475308a5844da2))
+* **playground:** align archive colors with spaghetti-ui-design ([958f98d](https://github.com/jamesyong-42/spaghetti/commit/958f98d9e85189ce5a1693d01ac684d5b40cfa76))
+* **playground:** align archive design details ([1b38b6b](https://github.com/jamesyong-42/spaghetti/commit/1b38b6b912a2bf4061453b086fece275d8eed886))
+* **playground:** always show boot screen ([6c6e70a](https://github.com/jamesyong-42/spaghetti/commit/6c6e70a4203e71f2a2e26df86e5f19be59ed07a8))
+* **playground:** depend on published mille instead of a sibling checkout ([a231ce0](https://github.com/jamesyong-42/spaghetti/commit/a231ce04da03aeabdb45cacdb322722cbfffda55))
+* **playground:** show all message tool filters ([14120b3](https://github.com/jamesyong-42/spaghetti/commit/14120b31dfb23f45180d4e821da94dcc60fad217))
+* **sdk:** name the path when the native watcher cannot bind ([130c6c0](https://github.com/jamesyong-42/spaghetti/commit/130c6c01d618aca26e9403b3031e3b78a412ef4a))
+* **sdk:** render Codex/Grok messages in playground session view ([cb08ae9](https://github.com/jamesyong-42/spaghetti/commit/cb08ae9ded58656fc74871ae297ae698fa875fe0))
+* **sdk:** spell watcher events under the caller-supplied root ([2a082ce](https://github.com/jamesyong-42/spaghetti/commit/2a082ce0707e3531ac65b681a854b535acd5b969))
+* **sdk:** stop stamping wall-clock into sessions.modified_at ([17491fe](https://github.com/jamesyong-42/spaghetti/commit/17491fee35fe4ef3151667ad91ae9603f22c981c))
+
 ## [0.5.20](https://github.com/jamesyong-42/spaghetti/compare/spaghetti-v0.5.19...spaghetti-v0.5.20) (2026-07-16)
 
 
