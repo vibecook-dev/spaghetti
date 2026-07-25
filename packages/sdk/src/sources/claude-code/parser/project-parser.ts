@@ -38,6 +38,56 @@ export interface ProjectParserOptions {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// SLUG SHAPE
+// ═══════════════════════════════════════════════════════════════════════════════
+
+export interface SlugShape {
+  /** Precedes the first segment: `/` on POSIX, `D:\` on Windows. */
+  prefix: string;
+  /** Joins segments: `/` on POSIX, `\` on Windows. */
+  sep: string;
+  /** The dash-encoded remainder, still to be split. */
+  rest: string;
+}
+
+/**
+ * Split a project slug into its fixed prefix, separator, and encoded tail.
+ *
+ * Claude Code derives a slug from the project's absolute cwd, so the
+ * leading characters tell us which platform wrote it:
+ *
+ * | cwd                     | slug                | shape      |
+ * |-------------------------|---------------------|------------|
+ * | `/Users/me/app`         | `-Users-me-app`     | `/`, `/`   |
+ * | `D:\Projects\app`       | `D--Projects-app`   | `D:\`, `\` |
+ * | `D:\Projects\app` (old) | `D:-Projects-app`   | `D:\`, `\` |
+ *
+ * A POSIX cwd is always absolute, so it always yields a leading `-`.
+ * That makes "no leading dash, but starts with `<letter>--` or
+ * `<letter>:-`" an unambiguous Windows drive marker. Both Windows
+ * spellings occur in the wild: current Claude Code folds the colon into
+ * `-` (giving the doubled dash), older builds and the Codex/Grok readers
+ * preserve it.
+ *
+ * Detection is deliberately platform-independent rather than keyed off
+ * `path.sep` — a synced `~/.claude` must decode to the same path text on
+ * any host, and the CLI compares these against `process.cwd()` verbatim.
+ * Keep in sync with `slug_shape` in
+ * `crates/spaghetti-napi/src/claude/project_parser.rs`.
+ */
+export function slugShape(slug: string): SlugShape {
+  // `X--…` or `X:-…` — a Windows drive letter. Length 3 is the bare drive
+  // root (`D--` → `D:\`), so `>=` not `>`.
+  if (slug.length >= 3 && /[A-Za-z]/.test(slug[0]!) && (slug[1] === '-' || slug[1] === ':') && slug[2] === '-') {
+    return { prefix: `${slug[0]!.toUpperCase()}:\\`, sep: '\\', rest: slug.slice(3) };
+  }
+  if (slug.startsWith('-')) {
+    return { prefix: '/', sep: '/', rest: slug.slice(1) };
+  }
+  return { prefix: '', sep: '/', rest: slug };
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // PROJECT PARSER INTERFACE
 // ═══════════════════════════════════════════════════════════════════════════════
 
@@ -752,50 +802,31 @@ export class ProjectParserImpl implements ProjectParser {
   }
 
   private slugToPath(slug: string): string {
-    const sep = path.sep;
-    const isWindows = sep === '\\';
+    const { prefix, sep, rest } = slugShape(slug);
+    if (rest === '') return prefix;
 
-    // Detect Windows drive-letter slug: e.g. "-C-Users-..." → "C:\Users\..."
-    const driveMatch = isWindows ? slug.match(/^-([A-Za-z])-(.*)$/) : null;
-
-    let naive: string;
-    let parts: string[];
-    let drivePrefix: string;
-
-    if (driveMatch) {
-      drivePrefix = driveMatch[1]!.toUpperCase() + ':';
-      naive = drivePrefix + sep + driveMatch[2]!.replace(/-/g, sep);
-      parts = driveMatch[2]!.split('-');
-    } else {
-      naive = slug.replace(/^-/, sep).replace(/-/g, sep);
-      parts = slug.replace(/^-/, '').split('-');
-      drivePrefix = '';
-    }
-
-    if (parts.length === 0) return naive;
-
-    let resolved = drivePrefix;
+    const parts = rest.split('-');
+    let resolved = '';
     let i = 0;
     while (i < parts.length) {
       let matched = false;
       for (let end = parts.length; end > i; end--) {
-        const candidate = sep + parts.slice(i, end).join('-');
-        const fullCandidate = resolved + candidate;
-        const stats = this.fileService.getStats(fullCandidate);
-        if (stats) {
-          resolved = fullCandidate;
+        const candidate = parts.slice(i, end).join('-');
+        const probe = resolved === '' ? prefix + candidate : prefix + resolved + sep + candidate;
+        if (this.fileService.getStats(probe)) {
+          resolved = resolved === '' ? candidate : resolved + sep + candidate;
           i = end;
           matched = true;
           break;
         }
       }
       if (!matched) {
-        resolved += sep + parts[i];
+        resolved = resolved === '' ? parts[i]! : resolved + sep + parts[i]!;
         i++;
       }
     }
 
-    return resolved || naive;
+    return prefix + resolved;
   }
 }
 
