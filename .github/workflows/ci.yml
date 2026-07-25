@@ -38,20 +38,22 @@ jobs:
       # root devDependency installed by the frozen-lockfile step.
       - name: Test
         run: pnpm test:packages
+      # These five ran on ubuntu only, which is precisely why Windows could
+      # report green while `spag sessions .` was broken there: the ingest
+      # diffs are the rs-vs-ts parity gate (the one check that would have
+      # caught a platform-specific slug decoder), and lint/format failed on
+      # Windows for reasons that had nothing to do with the code being wrong
+      # — single-quoted globs the Windows shell doesn't strip, and a CRLF
+      # worktree. Both are fixed; run them everywhere so they stay fixed.
       - name: Ingest diff (small fixture)
-        if: matrix.os == 'ubuntu-latest'
         run: pnpm test:ingest-diff
       - name: Ingest diff (medium fixture)
-        if: matrix.os == 'ubuntu-latest'
         run: pnpm test:ingest-diff:medium
       - name: Ingest diff (Grok small fixture)
-        if: matrix.os == 'ubuntu-latest'
         run: pnpm test:ingest-diff:grok
       - name: Lint
-        if: matrix.os == 'ubuntu-latest'
         run: pnpm lint
       - name: Format check
-        if: matrix.os == 'ubuntu-latest'
         run: pnpm run format:check
 
   rust-check:
