@@ -49,7 +49,7 @@ import {
   SkillViewer,
   MCPToolViewer,
 } from '../viewers';
-import { chatCardVariants, chatCardHeaderVariants, badgeVariants, timelineHeaderVariants } from '../variants';
+import { chatCardVariants, chatCardHeaderVariants, timelineHeaderVariants } from '../variants';
 import { getToolConfig, typography } from '../theme';
 import type { SessionMessage, ConnectorInfo } from '../types';
 

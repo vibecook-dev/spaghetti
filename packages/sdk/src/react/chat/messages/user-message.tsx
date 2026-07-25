@@ -30,7 +30,7 @@ interface UserMessageProps {
   connector: ConnectorInfo;
 }
 
-export const UserMessage = memo(function UserMessage({ message, connector }: UserMessageProps) {
+export const UserMessage = memo(function UserMessage({ message }: UserMessageProps) {
   return (
     <div className="flex flex-col items-end mb-4 mt-2 animate-fadeInUp">
       <div className="max-w-[85%] flex flex-col items-end">

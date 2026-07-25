@@ -7,8 +7,8 @@
 import React, { useMemo, memo } from 'react';
 import { Edit3 } from 'lucide-react';
 import { cn } from '../../lib/utils.js';
-import { chatCardVariants, chatCardHeaderVariants, badgeVariants } from '../variants';
-import { syntaxColors, toolColors } from '../theme';
+import { chatCardVariants, chatCardHeaderVariants } from '../variants';
+import { syntaxColors } from '../theme';
 import { useIsDark } from '../utils/helpers';
 
 interface DiffLine {

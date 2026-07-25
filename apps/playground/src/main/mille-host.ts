@@ -70,7 +70,7 @@ export function openMilleWorkspace(win: BrowserWindow, root: string): void {
       throw new Error(`not a directory: ${root}`);
     }
   } catch (e) {
-    throw new Error(`Cannot open folder "${root}": ${e instanceof Error ? e.message : String(e)}`);
+    throw new Error(`Cannot open folder "${root}": ${e instanceof Error ? e.message : String(e)}`, { cause: e });
   }
 
   if (fxProcess !== null && activeRoot === root) {
