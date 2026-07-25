@@ -300,7 +300,15 @@ export function createResilientWatcher(options: ResilientWatcherOptions = {}): W
       try {
         stopPrimary = await primary.subscribe(rootPath, onEvents, watchOptions);
       } catch (error) {
-        options.onPrimaryUnavailable?.(error instanceof Error ? error : new Error(String(error)));
+        // Name the path. Backends report a bare reason — parcel says "No such
+        // file or directory" on POSIX and "Invalid handle" on Windows, neither
+        // of which says *what* failed to bind. Since polling still subscribed,
+        // this is the only signal the caller gets, and `subscribe` resolves as
+        // though fully attached.
+        const cause = error instanceof Error ? error : new Error(String(error));
+        options.onPrimaryUnavailable?.(
+          new Error(`native watcher unavailable for ${rootPath}: ${cause.message}`, { cause }),
+        );
       }
       return async () => {
         try {

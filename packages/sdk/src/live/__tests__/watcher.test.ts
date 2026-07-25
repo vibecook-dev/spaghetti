@@ -434,7 +434,14 @@ describe('resource-bounded polling reconciliation', () => {
       onPrimaryUnavailable: (error) => unavailable.push(error),
     });
     const unsubscribe = await watcher.subscribe(tempDir, collector.onEvents, { ignore: [], recursive: true });
-    assert.deepEqual(unavailable, [failure]);
+    // The report names the path that failed to bind — backends supply only a
+    // bare reason — and keeps the backend's own error as `cause`.
+    assert.equal(unavailable.length, 1);
+    assert.equal(unavailable[0]?.cause, failure);
+    assert.ok(
+      unavailable[0]?.message.includes(tempDir) && unavailable[0]?.message.includes(failure.message),
+      `expected the report to name the root and the reason, got: ${unavailable[0]?.message}`,
+    );
 
     const target = path.join(tempDir, 'fallback-live.jsonl');
     writeFileSync(target, '{}\n');

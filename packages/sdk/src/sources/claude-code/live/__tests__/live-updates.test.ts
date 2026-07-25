@@ -495,10 +495,13 @@ describe('LiveUpdates graceful startup (RFC 005 C2.7)', () => {
         // Give the async attach a moment to fail and route through onError.
         await new Promise((r) => setTimeout(r, 150));
 
-        const todoErr = errors.find((e) => /todos\//.test(e.message));
+        // Match the path, not a `todos/` substring: the separator is `\` on
+        // Windows, and the backends' own messages name no path at all.
+        const todosDir = path.join(fx.rootDir, 'todos');
+        const todoErr = errors.find((e) => e.message.includes(todosDir));
         assert.ok(
           todoErr,
-          `expected onError to report the missing todos/ subdir. Collected: ${errors.map((e) => e.message).join(' | ')}`,
+          `expected onError to report the missing ${todosDir}. Collected: ${errors.map((e) => e.message).join(' | ')}`,
         );
       } finally {
         await fx.cleanup();
