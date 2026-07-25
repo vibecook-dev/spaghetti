@@ -302,6 +302,36 @@ describe('createParcelWatcher (RFC 005 C2.1)', () => {
     // The event type for a created-after-snapshot file is `create`.
     assert.strictEqual(hit?.type, 'create');
   });
+
+  // ─── root spelling ────────────────────────────────────────────────────
+  // Every other test in this suite subscribes to `realTempDir` to sidestep
+  // parcel's canonicalisation. Production can't: sources pass the rootDir
+  // they were configured with, and the polling backend echoes that spelling
+  // back. Two spellings of one file meant the live tailer missed the byte
+  // checkpoint keyed on the cold-ingest path and replayed the file from 0.
+  test('events are spelled under the caller-supplied root, not the resolved one', async (t) => {
+    if (tempDir === realTempDir) {
+      t.skip('root is not symlinked on this platform');
+      return;
+    }
+    const watcher = createParcelWatcher();
+    const { onEvents, waitForMatch } = createCollector();
+
+    const unsubscribe: Unsubscribe = await watcher.subscribe(tempDir, onEvents, {
+      ignore: [],
+      recursive: true,
+    });
+    await new Promise((r) => setTimeout(r, 100));
+
+    const target = path.join(tempDir, 'unresolved-root.txt');
+    writeFileSync(target, 'hello');
+
+    const evt = await waitForMatch((e) => samePath(e.path, target));
+    assert.strictEqual(evt.path, target);
+    assert.ok(!evt.path.startsWith(realTempDir), `event leaked the resolved root: ${evt.path}`);
+
+    await unsubscribe();
+  });
 });
 
 describe('resource-bounded polling reconciliation', () => {

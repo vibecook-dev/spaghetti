@@ -24,6 +24,7 @@
 
 import parcelWatcher from '@parcel/watcher';
 import chokidar from 'chokidar';
+import { realpathSync } from 'node:fs';
 import { readdir, stat } from 'node:fs/promises';
 import * as path from 'node:path';
 
@@ -340,6 +341,7 @@ export function createResilientWatcher(options: ResilientWatcherOptions = {}): W
 export function createParcelWatcher(): Watcher {
   return {
     async subscribe(rootPath, onEvents, options) {
+      const toWatchedPath = createWatchedPathMapper(rootPath);
       const subscription = await parcelWatcher.subscribe(
         rootPath,
         (err, events) => {
@@ -356,7 +358,7 @@ export function createParcelWatcher(): Watcher {
           // Parcel's Event shape is `{ type, path }` — a structural
           // match for `WatchEvent`. Map-to-new-object to avoid leaking
           // any future extra fields parcel might add.
-          onEvents(events.map((e) => ({ type: e.type, path: e.path })));
+          onEvents(events.map((e) => ({ type: e.type, path: toWatchedPath(e.path) })));
         },
         { ignore: options.ignore },
       );
@@ -371,10 +373,36 @@ export function createParcelWatcher(): Watcher {
     },
 
     async getEventsSince(rootPath, snapshotFile) {
+      const toWatchedPath = createWatchedPathMapper(rootPath);
       const events = await parcelWatcher.getEventsSince(rootPath, snapshotFile);
-      return events.map((e) => ({ type: e.type, path: e.path }));
+      return events.map((e) => ({ type: e.type, path: toWatchedPath(e.path) }));
     },
   };
+}
+
+/**
+ * Parcel reports events under the *resolved* watch root — on macOS a rootPath
+ * beneath `/var` or `/tmp` comes back as `/private/var/…`. The polling backend
+ * derives its paths from `rootPath` verbatim, so the two backends behind
+ * {@link createResilientWatcher} would otherwise hand consumers two spellings
+ * of the same file. That is not cosmetic: live tailers key their byte
+ * checkpoint (`source_files.path`, a PRIMARY KEY) by path, so the second
+ * spelling misses the checkpoint written by cold ingest, re-reads the file
+ * from byte 0, and duplicates every row it replays at a shifted `msg_index`.
+ *
+ * Map parcel's resolved paths back onto the caller's root so every path that
+ * reaches the store is spelled the way the source's `rootDir` spells it.
+ */
+function createWatchedPathMapper(rootPath: string): (filePath: string) => string {
+  let resolvedRoot: string;
+  try {
+    resolvedRoot = realpathSync(rootPath);
+  } catch {
+    return (filePath) => filePath;
+  }
+  if (resolvedRoot === rootPath) return (filePath) => filePath;
+  const prefix = resolvedRoot.endsWith(path.sep) ? resolvedRoot : resolvedRoot + path.sep;
+  return (filePath) => (filePath.startsWith(prefix) ? path.join(rootPath, filePath.slice(prefix.length)) : filePath);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -418,8 +446,11 @@ export function createChokidarWatcher(): Watcher {
         depth: options.recursive ? undefined : 0,
       });
 
-      const emit = (type: WatchEvent['type'], path: string): void => {
-        onEvents([{ type, path }]);
+      // Same root-spelling normalization as the parcel backend, so a fallback
+      // swap can't change which paths reach the store.
+      const toWatchedPath = createWatchedPathMapper(rootPath);
+      const emit = (type: WatchEvent['type'], filePath: string): void => {
+        onEvents([{ type, path: toWatchedPath(filePath) }]);
       };
 
       watcher.on('add', (p) => emit('create', p));
