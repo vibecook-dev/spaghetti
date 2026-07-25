@@ -1,0 +1,23 @@
+# Normalize line endings.
+#
+# Without this, a Windows clone with the default `core.autocrlf=true`
+# checks every file out as CRLF, while Prettier's `endOfLine: "lf"` (its
+# default, and what the repo is formatted with) then flags all ~370
+# source files. That made `pnpm format:check` — and therefore the
+# .githooks/pre-commit hook — fail for every Windows contributor.
+#
+# `text=auto eol=lf` keeps LF in the working tree on all platforms.
+* text=auto eol=lf
+
+# Binary — never touch these.
+*.node   binary
+*.png    binary
+*.jpg    binary
+*.jpeg   binary
+*.gif    binary
+*.ico    binary
+*.webp   binary
+*.woff   binary
+*.woff2  binary
+*.db     binary
+*.sqlite binary
