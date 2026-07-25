@@ -17,9 +17,11 @@ jobs:
         os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
+      # No `version:` — action-setup reads `packageManager` from package.json.
+      # `overrides` / `onlyBuiltDependencies` live in pnpm-workspace.yaml, which
+      # only pnpm >= 10 reads; a pinned pnpm 9 here sees no overrides and fails
+      # --frozen-lockfile with ERR_PNPM_LOCKFILE_CONFIG_MISMATCH.
       - uses: pnpm/action-setup@v4
-        with:
-          version: 9
       - uses: actions/setup-node@v4
         with:
           node-version: 24

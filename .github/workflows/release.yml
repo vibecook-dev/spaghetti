@@ -79,10 +79,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # Version comes from `packageManager` in package.json — see ci.yml.
       - name: Install pnpm
         uses: pnpm/action-setup@v4
-        with:
-          version: 9
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
