@@ -361,11 +361,8 @@ fn stream_session(
     let mut send_err: Option<SendError<IngestEvent>> = None;
 
     // events.jsonl + signals.json (same join rules as TS sidecars).
-    let (ts_map, signals, _line_types) =
-        sidecars::load_sidecars(&sess.path, sess.meta.created.as_deref());
-
-    // Buffer last assistant so we can re-upsert with session-aggregate tokens.
-    let mut last_assistant: Option<(u32, u64, String, message_extractor::MessageProjection)> = None;
+    let side = sidecars::load_sidecars(&sess.path, sess.meta.created.as_deref());
+    let ts_map = &side.ts_map;
 
     let stream = read_jsonl_streaming(&sess.path, 0, |line, _idx, byte_offset| {
         if send_err.is_some() {
@@ -392,15 +389,12 @@ fn stream_session(
                     msg_type: proj.msg_type.clone(),
                     uuid: proj.uuid.clone(),
                     timestamp,
-                    input_tokens: 0,
+                    input_tokens: side.tokens.get(&idx).copied().unwrap_or(0),
                     output_tokens: 0,
                     cache_creation_tokens: 0,
                     cache_read_tokens: 0,
                     fts_text: fts,
                 };
-                if proj.msg_type == "assistant" {
-                    last_assistant = Some((idx, byte_offset, line.to_owned(), proj));
-                }
                 if let Err(e) = events.send(ev) {
                     send_err = Some(e);
                     return;
@@ -420,37 +414,19 @@ fn stream_session(
         last_byte = r.final_byte_position.max(last_byte);
     }
 
-    // Attribute signals.contextTokensUsed onto the last assistant + estimate flag.
-    if let Some(sig) = signals {
-        if sig.context_tokens_used > 0 {
-            if let Some((idx, byte_offset, raw, proj)) = last_assistant {
-                let fts = if proj.fts_text.is_empty() {
-                    None
-                } else {
-                    Some(proj.fts_text)
-                };
-                let timestamp = ts_map.get(&idx).cloned();
-                events.send(IngestEvent::Message {
-                    slug: slug.to_owned(),
-                    session_id: session_id.clone(),
-                    index: idx,
-                    byte_offset,
-                    raw_json: raw,
-                    msg_type: proj.msg_type,
-                    uuid: proj.uuid,
-                    timestamp,
-                    input_tokens: sig.context_tokens_used,
-                    output_tokens: 0,
-                    cache_creation_tokens: 0,
-                    cache_read_tokens: 0,
-                    fts_text: fts,
-                })?;
-                events.send(IngestEvent::SessionTokensEstimated {
-                    session_id: session_id.clone(),
-                    estimated: true,
-                })?;
-            }
-        }
+    // Per-message tokens were attached inline from `side.tokens`; all that is
+    // left is the estimate flag. TS raises it whenever signals report usage,
+    // even if the allocation ends up empty, so the flag does not depend on the
+    // session happening to contain an assistant row.
+    if side
+        .signals
+        .as_ref()
+        .is_some_and(|sig| sig.context_tokens_used > 0)
+    {
+        events.send(IngestEvent::SessionTokensEstimated {
+            session_id: session_id.clone(),
+            estimated: true,
+        })?;
     }
 
     Ok((message_count, last_byte))

@@ -253,6 +253,122 @@ pub fn build_timestamp_map(
     map
 }
 
+/// Mirror of TS `grokRecordWeight`.
+///
+/// The weight is a *length*, so key ordering is irrelevant — reordering an
+/// object's keys cannot change how many characters it serializes to, which is
+/// why `serde_json`'s sorted `Map` is fine here. Length is counted in UTF-16
+/// code units because the TS side measures `String.prototype.length`; bytes or
+/// `chars()` would disagree on any astral-plane character.
+fn record_weight(record: &Value) -> u64 {
+    let serialized = match record.get("type").and_then(Value::as_str).unwrap_or("") {
+        "system" | "user" => stringify_or_raw(record.get("content")),
+        "assistant" => {
+            // TS builds the array `[content, tool_calls]`, and a missing member
+            // stringifies as `null` rather than vanishing.
+            let content = record.get("content").cloned().unwrap_or(Value::Null);
+            let tool_calls = record.get("tool_calls").cloned().unwrap_or(Value::Null);
+            serde_json::to_string(&Value::Array(vec![content, tool_calls])).unwrap_or_default()
+        }
+        // encrypted_content is ciphertext, not a meaningful token proxy.
+        "reasoning" => stringify_or_raw(record.get("summary")),
+        "tool_result" | "backend_tool_call" => serde_json::to_string(record).unwrap_or_default(),
+        _ => return 0,
+    };
+    (serialized.encode_utf16().count() as u64).max(1)
+}
+
+/// TS: `typeof value === 'string' ? value : JSON.stringify(value ?? '')`.
+fn stringify_or_raw(value: Option<&Value>) -> String {
+    match value {
+        // A raw string is measured unquoted and unescaped.
+        Some(Value::String(s)) => s.clone(),
+        // `value ?? ''` folds both null and undefined to the empty string, which
+        // JSON.stringify renders as the two-character `""`.
+        None | Some(Value::Null) => "\"\"".to_owned(),
+        Some(v) => serde_json::to_string(v).unwrap_or_default(),
+    }
+}
+
+/// Largest-remainder allocation keeps the estimated session total exact.
+///
+/// Port of TS `distributeGrokSessionTokens`. The arithmetic runs in f64 in the
+/// same order as the TS expression so both engines land on the same floor and
+/// the same remainder ranking.
+pub fn distribute_session_tokens(
+    chat_text: &str,
+    total_tokens: u64,
+    eligible: &std::collections::HashSet<u32>,
+) -> HashMap<u32, u64> {
+    struct Row {
+        index: u32,
+        weight: u64,
+        fraction: f64,
+        tokens: u64,
+    }
+
+    let mut weighted: Vec<Row> = Vec::new();
+    let mut absolute_index: u32 = 0;
+    for line in chat_text.split('\n') {
+        // Blank lines are skipped WITHOUT advancing the index; unparseable ones
+        // still advance it. Both match TS, and the index is what the message
+        // rows are keyed on, so drifting here misattributes every later row.
+        if line.trim().is_empty() {
+            continue;
+        }
+        if let Ok(record) = serde_json::from_str::<Value>(line) {
+            let weight = if eligible.contains(&absolute_index) {
+                record_weight(&record)
+            } else {
+                0
+            };
+            if weight > 0 {
+                weighted.push(Row {
+                    index: absolute_index,
+                    weight,
+                    fraction: 0.0,
+                    tokens: 0,
+                });
+            }
+        }
+        absolute_index = absolute_index.saturating_add(1);
+    }
+
+    let weight_total: u64 = weighted.iter().map(|row| row.weight).sum();
+    if total_tokens == 0 || weight_total == 0 {
+        return HashMap::new();
+    }
+
+    let mut assigned: u64 = 0;
+    for row in weighted.iter_mut() {
+        let exact = (total_tokens as f64 * row.weight as f64) / weight_total as f64;
+        let floored = exact.floor();
+        row.tokens = floored as u64;
+        row.fraction = exact - floored;
+        assigned = assigned.saturating_add(row.tokens);
+    }
+
+    weighted.sort_by(|a, b| {
+        b.fraction
+            .partial_cmp(&a.fraction)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.index.cmp(&b.index))
+    });
+    let leftover = total_tokens.saturating_sub(assigned);
+    if !weighted.is_empty() {
+        for i in 0..leftover {
+            let slot = (i % weighted.len() as u64) as usize;
+            weighted[slot].tokens = weighted[slot].tokens.saturating_add(1);
+        }
+    }
+
+    weighted
+        .into_iter()
+        .filter(|row| row.tokens > 0)
+        .map(|row| (row.index, row.tokens))
+        .collect()
+}
+
 pub fn parse_signals(text: &str) -> Option<GrokSignals> {
     let v: Value = serde_json::from_str(text).ok()?;
     let used = v
@@ -268,14 +384,27 @@ pub fn parse_signals(text: &str) -> Option<GrokSignals> {
     })
 }
 
+/// Timestamp map, signals, line types, and the per-line token allocation.
+pub struct Sidecars {
+    pub ts_map: TimestampMap,
+    pub signals: Option<GrokSignals>,
+    pub line_types: Vec<String>,
+    /// Absolute chat_history line index → estimated input tokens.
+    pub tokens: HashMap<u32, u64>,
+}
+
 /// Load timestamp map + signals from sibling files next to chat_history.
-pub fn load_sidecars(
-    chat_history: &Path,
-    fallback_created: Option<&str>,
-) -> (TimestampMap, Option<GrokSignals>, Vec<String>) {
+pub fn load_sidecars(chat_history: &Path, fallback_created: Option<&str>) -> Sidecars {
     let session_dir = match chat_history.parent() {
         Some(p) => p,
-        None => return (HashMap::new(), None, Vec::new()),
+        None => {
+            return Sidecars {
+                ts_map: HashMap::new(),
+                signals: None,
+                line_types: Vec::new(),
+                tokens: HashMap::new(),
+            }
+        }
     };
 
     let chat_text = std::fs::read_to_string(chat_history).unwrap_or_default();
@@ -288,12 +417,93 @@ pub fn load_sidecars(
         .ok()
         .and_then(|t| parse_signals(&t));
 
-    (ts_map, signals, line_types)
+    // Same eligibility set as TS: only lines that earned a timestamp.
+    let tokens = match signals.as_ref() {
+        Some(sig) if sig.context_tokens_used > 0 => {
+            let eligible: std::collections::HashSet<u32> = ts_map.keys().copied().collect();
+            distribute_session_tokens(&chat_text, sig.context_tokens_used, &eligible)
+        }
+        _ => HashMap::new(),
+    };
+
+    Sidecars {
+        ts_map,
+        signals,
+        line_types,
+        tokens,
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashSet;
+
+    const ALLOC_LINES: &str = concat!(
+        r#"{"type":"user","content":"short"}"#,
+        "\n",
+        r#"{"type":"assistant","content":"a much longer response"}"#,
+        "\n",
+        r#"{"type":"reasoning","summary":"think","encrypted_content":"ignored-ciphertext"}"#,
+    );
+
+    /// Exact values, cross-checked against the TS implementation. Weights are
+    /// 5 / 31 / 5 — the assistant serializes as `["a much longer response",null]`
+    /// and `encrypted_content` is excluded — so 101 splits 12 / 76 / 12 with the
+    /// single leftover going to the largest remainder.
+    #[test]
+    fn distributes_session_tokens_like_the_ts_writer() {
+        let alloc =
+            distribute_session_tokens(ALLOC_LINES, 101, &HashSet::from([0_u32, 1_u32, 2_u32]));
+        assert_eq!(alloc.get(&0), Some(&12));
+        assert_eq!(alloc.get(&1), Some(&77));
+        assert_eq!(alloc.get(&2), Some(&12));
+        assert_eq!(alloc.values().sum::<u64>(), 101, "total must stay exact");
+    }
+
+    /// Ineligible lines (no timestamp) drop out of the weighting entirely rather
+    /// than taking a zero share, so the total redistributes across the rest.
+    #[test]
+    fn ineligible_lines_are_excluded_from_the_weighting() {
+        let alloc = distribute_session_tokens(ALLOC_LINES, 101, &HashSet::from([0_u32, 1_u32]));
+        assert_eq!(alloc.get(&0), Some(&14));
+        assert_eq!(alloc.get(&1), Some(&87));
+        assert_eq!(alloc.get(&2), None);
+        assert_eq!(alloc.values().sum::<u64>(), 101);
+    }
+
+    /// Weights count UTF-16 code units, matching JS `String.length`. An emoji is
+    /// 2 units but 4 bytes, so a byte-length port would weight these unevenly
+    /// and hand out 7/3 instead of 5/5.
+    #[test]
+    fn weights_count_utf16_units_not_bytes() {
+        let lines = concat!(
+            r#"{"type":"user","content":"😀"}"#,
+            "\n",
+            r#"{"type":"user","content":"ab"}"#,
+        );
+        let alloc = distribute_session_tokens(lines, 10, &HashSet::from([0_u32, 1_u32]));
+        assert_eq!(alloc.get(&0), Some(&5));
+        assert_eq!(alloc.get(&1), Some(&5));
+    }
+
+    /// Blank lines do not advance the index but unparseable ones do — the index
+    /// is what message rows are keyed on, so drift here misattributes tokens.
+    #[test]
+    fn blank_lines_do_not_advance_the_index_but_bad_json_does() {
+        let lines = concat!(
+            "\n",
+            r#"{"type":"user","content":"aa"}"#,
+            "\n",
+            "{ not json",
+            "\n",
+            r#"{"type":"user","content":"bb"}"#,
+        );
+        // Index 0 = first real line, 1 = the bad JSON, 2 = the last line.
+        let alloc = distribute_session_tokens(lines, 8, &HashSet::from([0_u32, 2_u32]));
+        assert_eq!(alloc.get(&0), Some(&4));
+        assert_eq!(alloc.get(&2), Some(&4));
+    }
 
     #[test]
     fn turn_scoped_join_exact_user_and_loop_pairing() {
