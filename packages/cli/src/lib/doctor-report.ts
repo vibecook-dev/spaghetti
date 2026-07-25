@@ -97,13 +97,22 @@ export interface DoctorReport {
   channelSessions: ChannelSessionsReport;
 }
 
+/**
+ * Locate an agent CLI on PATH.
+ *
+ * `command -v` is a POSIX shell builtin — on Windows it runs under
+ * cmd.exe, which has no such command, so every lookup threw and doctor
+ * reported "not in PATH" even for installed binaries. `where` is the
+ * Windows equivalent and prints one match per line; take the first.
+ */
 function findBin(name: string): string | null {
+  const cmd = process.platform === 'win32' ? `where ${name}` : `command -v ${name}`;
   try {
-    const out = execSync(`command -v ${name}`, {
+    const out = execSync(cmd, {
       encoding: 'utf-8',
       stdio: ['ignore', 'pipe', 'ignore'],
     }).trim();
-    return out || null;
+    return out.split(/\r?\n/)[0]?.trim() || null;
   } catch {
     return null;
   }

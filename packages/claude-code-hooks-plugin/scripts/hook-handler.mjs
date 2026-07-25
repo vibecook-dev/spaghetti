@@ -11,6 +11,7 @@
  */
 
 import { readFileSync, appendFileSync, mkdirSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { join } from 'node:path';
 
 // ── Read stdin synchronously ────────────────────────────────────────────
@@ -61,7 +62,12 @@ for (const [k, v] of Object.entries(input)) {
 
 // ── Append to JSONL ─────────────────────────────────────────────────────
 
-const dataDir = join(process.env.HOME || '/tmp', '.spaghetti', 'hooks');
+// `homedir()`, not `process.env.HOME` — HOME is not a Windows-guaranteed
+// variable (USERPROFILE is), and the `/tmp` fallback resolved
+// drive-relative, writing events somewhere the SDK never reads. Both
+// sides must agree on `~/.spaghetti/hooks`; see `SPAGHETTI_DIR` in
+// packages/cli/src/lib/updater.ts and the hooks reader in the SDK.
+const dataDir = join(homedir(), '.spaghetti', 'hooks');
 try {
   mkdirSync(dataDir, { recursive: true });
 } catch { /* already exists */ }
