@@ -46,6 +46,8 @@ export interface SettingsFile {
   agentPushNotifEnabled?: boolean;
   skipWorkflowUsageWarning?: boolean;
   skipAutoPermissionPrompt?: boolean;
+  /** Co-authorship trailers Claude Code appends, e.g. `{ commit: '' }`. */
+  attribution?: Record<string, string>;
 }
 
 export interface DailyActivity {

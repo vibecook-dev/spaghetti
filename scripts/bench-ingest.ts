@@ -29,8 +29,9 @@
 
 import { createRequire } from 'node:module';
 import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import * as path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 
 import { createSpaghettiService } from '../packages/sdk/dist/index.js';
@@ -56,7 +57,9 @@ const { values } = parseArgs({
   },
 });
 
-const repoRoot = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..');
+// `fileURLToPath`, not `new URL(...).pathname` — see the note in
+// scripts/ingest-diff.ts; the latter resolves to `D:\D:\repo` on Windows.
+const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const defaultFixture = path.join(repoRoot, 'crates/spaghetti-napi/fixtures/small/.claude');
 const fixtureRootDir = path.resolve(expandTilde(values.fixture ?? defaultFixture));
 
@@ -91,7 +94,10 @@ if (!existsSync(fixtureRootDir)) {
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
 function expandTilde(p: string): string {
-  if (p.startsWith('~/')) return path.join(process.env.HOME ?? '', p.slice(2));
+  // `homedir()`, not `process.env.HOME` — HOME is not set on Windows
+  // outside of shells that emulate it, where the empty fallback would
+  // silently turn `~/x` into a relative path.
+  if (p.startsWith('~/')) return path.join(homedir(), p.slice(2));
   return p;
 }
 

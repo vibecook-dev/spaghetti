@@ -24,6 +24,8 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
+from ts_types import interface_fields
+
 CLAUDE_DIR = Path.home() / ".claude"
 
 
@@ -617,9 +619,12 @@ def validate_sessions() -> Section:
         s.gap("Directory does not exist")
         return s
 
+    # Read straight from the interface. The hand-written copy this replaced
+    # listed only {kind, entrypoint, name} as optional, so the eight fields a
+    # 2026-07 audit had already added to ActiveSessionFile were reported as
+    # unmodelled for as long as the copy went unmaintained.
     REQUIRED_KEYS = {"pid", "sessionId", "cwd", "startedAt"}
-    OPTIONAL_KEYS = {"kind", "entrypoint", "name"}
-    EXPECTED_KEYS = REQUIRED_KEYS | OPTIONAL_KEYS
+    EXPECTED_KEYS = interface_fields("ActiveSessionFile", "claude/toplevel-files-data.ts")
 
     file_count = 0
     all_keys: set[str] = set()
@@ -722,7 +727,7 @@ def validate_subagent_meta() -> Section:
         s.gap("projects/ does not exist")
         return s
 
-    EXPECTED_KEYS = {"agentType", "description", "worktreePath"}
+    EXPECTED_KEYS = interface_fields("SubagentMeta", "index.ts")
 
     meta_count = 0
     all_keys: set[str] = set()

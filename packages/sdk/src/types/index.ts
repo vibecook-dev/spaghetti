@@ -110,6 +110,11 @@ export interface SubagentMeta {
   name?: string;
   spawnDepth?: number;
   worktreePath?: string;
+  /**
+   * `tool_use` id of the Agent call that spawned this subagent — the join
+   * back to the assistant message that launched it.
+   */
+  toolUseId?: string;
 }
 
 export interface SubagentTranscript {

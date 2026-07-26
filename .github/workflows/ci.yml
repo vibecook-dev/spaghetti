@@ -29,6 +29,21 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - name: Build
         run: pnpm build
+      # `pnpm build` regenerates three committed artifacts: the napi loader
+      # (crates/spaghetti-napi/index.js), Cargo.lock, and the SDK's bundled
+      # parse-worker.js. Nothing checked they stayed current, so they rotted
+      # silently — parse-worker.js had drifted into a fork of the project
+      # parser still importing the long-deleted `packages/core`, and would
+      # have kept its own stale copy of any parser fix.
+      #
+      # Unlike the lint/format/ingest-diff steps below, this one is genuinely
+      # platform-independent: the generators read committed inputs and emit
+      # identical bytes on every host. Running it once is the whole signal,
+      # and confining it to one runner avoids failing on incidental
+      # cross-platform differences in generated output.
+      - name: Generated files are current
+        if: matrix.os == 'ubuntu-latest'
+        run: git diff --exit-code -- Cargo.lock crates/spaghetti-napi packages/sdk/src/workers/parse-worker.js
       - name: Typecheck
         run: pnpm typecheck
       # Run BOTH the SDK and CLI suites (test:packages). The `@vibecook/spaghetti`
@@ -38,25 +53,37 @@ jobs:
       # root devDependency installed by the frozen-lockfile step.
       - name: Test
         run: pnpm test:packages
+      # These five ran on ubuntu only, which is precisely why Windows could
+      # report green while `spag sessions .` was broken there: the ingest
+      # diffs are the rs-vs-ts parity gate (the one check that would have
+      # caught a platform-specific slug decoder), and lint/format failed on
+      # Windows for reasons that had nothing to do with the code being wrong
+      # — single-quoted globs the Windows shell doesn't strip, and a CRLF
+      # worktree. Both are fixed; run them everywhere so they stay fixed.
       - name: Ingest diff (small fixture)
-        if: matrix.os == 'ubuntu-latest'
         run: pnpm test:ingest-diff
       - name: Ingest diff (medium fixture)
-        if: matrix.os == 'ubuntu-latest'
         run: pnpm test:ingest-diff:medium
       - name: Ingest diff (Grok small fixture)
-        if: matrix.os == 'ubuntu-latest'
         run: pnpm test:ingest-diff:grok
       - name: Lint
-        if: matrix.os == 'ubuntu-latest'
         run: pnpm lint
       - name: Format check
-        if: matrix.os == 'ubuntu-latest'
         run: pnpm run format:check
 
+  # The Rust ingest engine is the default on every platform, but only ubuntu
+  # ever compiled or ran it. That is how a POSIX-only `slug_to_path` shipped:
+  # `cargo test` on Linux cannot observe a Windows path bug, and the tests
+  # that now cover it only pass on Linux because they were deliberately
+  # written to assert Windows decoding on any host. The next such bug will
+  # not be written so conveniently.
   rust-check:
-    name: Rust check
-    runs-on: ubuntu-latest
+    name: Rust check (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
       - name: Install Rust toolchain
@@ -70,8 +97,13 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
+          # Already keyed by runner.os, so the two legs cache independently.
           key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
+      # Formatting is byte-identical on every host, so one runner is the whole
+      # signal. clippy is not: it only lints code it compiles, so anything
+      # behind `#[cfg(windows)]` is invisible to the ubuntu leg.
       - name: cargo fmt
+        if: matrix.os == 'ubuntu-latest'
         run: cargo fmt --all -- --check
       - name: cargo clippy
         run: cargo clippy --workspace --all-targets -- --deny warnings

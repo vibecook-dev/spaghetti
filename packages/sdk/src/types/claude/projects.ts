@@ -45,6 +45,17 @@ export interface BaseMessageFields {
   slug?: string;
   permissionMode?: string;
   entrypoint?: string;
+  /**
+   * Which surface produced the turn — `'bg'` marks a background agent.
+   * Present on every envelope type, not just one.
+   */
+  sessionKind?: string;
+  /**
+   * Snake-case duplicate of {@link sessionId}. Claude Code emits both;
+   * modelled so the field is not reported as unmodelled, but prefer
+   * `sessionId`.
+   */
+  session_id?: string;
 }
 
 export type SessionMessageType =
@@ -53,6 +64,7 @@ export type SessionMessageType =
   | 'attachment'
   | 'bridge-session'
   | 'custom-title'
+  | 'file-history-delta'
   | 'file-history-snapshot'
   | 'mode'
   | 'pr-link'
@@ -72,6 +84,7 @@ export type SessionMessage =
   | AttachmentMessage
   | BridgeSessionMessage
   | CustomTitleMessage
+  | FileHistoryDeltaMessage
   | FileHistorySnapshotMessage
   | ModeMessage
   | PrLinkMessage
@@ -166,6 +179,22 @@ export interface FileHistorySnapshotMessage {
   snapshot: FileHistorySnapshot;
 }
 
+/**
+ * Incremental counterpart to {@link FileHistorySnapshotMessage}: one
+ * tracked file changing, rather than a whole snapshot. Emitted between
+ * snapshots, referring back to the snapshot it amends via
+ * `snapshotMessageId`.
+ */
+export interface FileHistoryDeltaMessage {
+  type: 'file-history-delta';
+  messageId: string;
+  /** The `file-history-snapshot` message this delta amends. */
+  snapshotMessageId: string;
+  /** Path relative to the project root, spelled with the host separator. */
+  trackingPath: string;
+  backup: FileBackupEntry;
+}
+
 export interface FileHistorySnapshot {
   messageId: string;
   timestamp: string;
@@ -176,6 +205,12 @@ export interface FileBackupEntry {
   backupFileName: string | null;
   version: number;
   backupTime: string;
+  /**
+   * Absolute directory the tracked file lives in. Observed on
+   * `file-history-delta` backups; optional because the snapshot form has
+   * not been seen carrying it.
+   */
+  realParentDir?: string;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -205,6 +240,16 @@ export interface UserMessage extends BaseMessageFields {
   promptSource?: string;
   imagePasteIds?: string[];
   teamName?: string;
+  /**
+   * Newline-delimited JSON the classifier prepends to the prompt (git
+   * status and similar). A raw string, not parsed JSON — it may hold
+   * several concatenated objects.
+   */
+  classifierMetaLines?: string;
+  /** API message id of the assistant turn this prompt interrupted. */
+  interruptedMessageId?: string;
+  /** Why a tool call was refused (e.g. `'automode-blocked'`). */
+  toolDenialKind?: string;
 }
 
 export interface UserMessagePayload {
@@ -283,6 +328,18 @@ export interface AssistantMessage extends BaseMessageFields {
   /** HTTP status of the API error that produced this line (e.g. 429, 529). */
   apiErrorStatus?: number;
   teamName?: string;
+  /**
+   * Provenance for a turn produced on behalf of an MCP tool or a skill,
+   * rather than directly by the model. Set together as applicable:
+   * `attributionMcpServer` + `attributionMcpTool` name the MCP call
+   * (e.g. `'claude-in-chrome'` / `'tabs_context_mcp'`);
+   * `attributionSkill` names the invoked skill (e.g. `'deep-research'`).
+   */
+  attributionMcpServer?: string;
+  attributionMcpTool?: string;
+  attributionSkill?: string;
+  /** Reasoning-effort tier the turn ran at (e.g. `'low'`, `'xhigh'`). */
+  effort?: string;
 }
 
 export interface AssistantMessagePayload {
@@ -357,6 +414,10 @@ export type ToolName =
   | 'TeamCreate'
   | 'TeamDelete'
   | 'TaskGet'
+  | 'Monitor'
+  | 'PowerShell'
+  | 'ScheduleWakeup'
+  | 'Workflow'
   | `mcp__${string}`;
 
 export interface TokenUsage {
@@ -393,12 +454,18 @@ export type SystemMessage =
   | LocalCommandSystemMessage
   | BridgeStatusSystemMessage
   | AwaySummarySystemMessage
-  | InformationalSystemMessage;
+  | InformationalSystemMessage
+  | ScheduledTaskFireSystemMessage;
 
 interface SystemMessageBase extends BaseMessageFields {
   type: 'system';
   level?: 'info' | 'error' | 'suggestion';
   isMeta?: boolean;
+  /** Extra context hooks injected into the turn. Empty array when none. */
+  hookAdditionalContext?: unknown[];
+  /** Work still outstanding when the line was written. */
+  pendingBackgroundAgentCount?: number;
+  pendingWorkflowCount?: number;
 }
 
 export interface StopHookSummarySystemMessage extends SystemMessageBase {
@@ -472,6 +539,16 @@ export interface AwaySummarySystemMessage extends SystemMessageBase {
 export interface InformationalSystemMessage extends SystemMessageBase {
   subtype: 'informational';
   content?: string;
+}
+
+/**
+ * Marks a turn started by a scheduled task (a cron routine firing) rather
+ * than by the user. `content` names the schedule, e.g. "Running scheduled
+ * task (Apr 15 12:15pm)".
+ */
+export interface ScheduledTaskFireSystemMessage extends SystemMessageBase {
+  subtype: 'scheduled_task_fire';
+  content: string;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════

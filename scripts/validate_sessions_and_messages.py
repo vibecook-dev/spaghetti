@@ -18,9 +18,13 @@ import sys
 from pathlib import Path
 from collections import defaultdict
 
+from ts_types import declared_fields, discriminant_values, union_members
+
 # ═══════════════════════════════════════════════════════════════════════════════
-# EXPECTED SCHEMAS (from @spaghetti/core types/projects.ts)
+# EXPECTED SCHEMAS (read from the TypeScript types — see below)
 # ═══════════════════════════════════════════════════════════════════════════════
+
+PROJECTS_TS = "claude/projects.ts"
 
 EXPECTED_SESSION_INDEX_ROOT_FIELDS = {"version", "originalPath", "entries"}
 
@@ -30,12 +34,7 @@ EXPECTED_SESSION_INDEX_ENTRY_FIELDS = {
     "isSidechain"
 }
 
-EXPECTED_MESSAGE_TYPES = {
-    "agent-name", "attachment", "custom-title",
-    "file-history-snapshot", "pr-link", "progress", "permission-mode", "saved_hook_context",
-    "user", "assistant", "system", "summary", "queue-operation",
-    "last-prompt"
-}
+EXPECTED_MESSAGE_TYPES = union_members("SessionMessageType", PROJECTS_TS)
 
 EXPECTED_BASE_MESSAGE_FIELDS = {
     "type", "uuid", "parentUuid", "timestamp", "sessionId", "cwd",
@@ -85,7 +84,18 @@ KNOWN_EXTRA_ENVELOPE_FIELDS = {
     "origin", "messageCount",
 }
 
-ALL_KNOWN_ENVELOPE_FIELDS = EXPECTED_BASE_MESSAGE_FIELDS | KNOWN_EXTRA_ENVELOPE_FIELDS
+# Every property declared by any interface in projects.ts. The check below
+# is a superset test — it asks "does the envelope carry a field the types
+# model nowhere at all", not "is this field on the right interface" — so
+# reading them in bulk is exactly as strict as the hand-written set above
+# while being incapable of lagging the types. KNOWN_EXTRA_ENVELOPE_FIELDS
+# is retained for fields observed in the wild that are deliberately not
+# modelled yet.
+DECLARED_TYPE_FIELDS = declared_fields(PROJECTS_TS)
+
+ALL_KNOWN_ENVELOPE_FIELDS = (
+    EXPECTED_BASE_MESSAGE_FIELDS | KNOWN_EXTRA_ENVELOPE_FIELDS | DECLARED_TYPE_FIELDS
+)
 
 EXPECTED_ASSISTANT_CONTENT_BLOCK_TYPES = {
     "thinking", "redacted_thinking", "text", "tool_use"
@@ -95,21 +105,9 @@ EXPECTED_STOP_REASONS = {
     "end_turn", "tool_use", "stop_sequence", "max_tokens", None
 }
 
-EXPECTED_TOOL_NAMES = {
-    "Read", "Write", "Edit", "Glob", "Grep", "Bash",
-    "Task", "TodoWrite", "TaskCreate", "TaskUpdate", "TaskList",
-    "TaskOutput", "TaskStop", "TaskGet",
-    "WebSearch", "WebFetch", "NotebookEdit",
-    "AskUserQuestion", "EnterPlanMode", "ExitPlanMode",
-    "Skill", "KillShell", "ToolSearch",
-    "EnterWorktree", "ExitWorktree",
-    "SendMessage",
-    "CronCreate", "CronDelete", "CronList",
-    "LSP",
-    "TeamCreate", "TeamDelete",
-    "Agent",
-    # mcp__* tools are matched by prefix
-}
+# mcp__* tools are matched by prefix at the call site, so the template
+# literal member of the union is not represented here.
+EXPECTED_TOOL_NAMES = union_members("ToolName", PROJECTS_TS)
 
 EXPECTED_USER_CONTENT_BLOCK_TYPES = {
     "text", "tool_result", "image", "document"
@@ -121,11 +119,7 @@ EXPECTED_PROGRESS_DATA_TYPES = {
     "waiting_for_task"
 }
 
-EXPECTED_SYSTEM_SUBTYPES = {
-    "stop_hook_summary", "turn_duration", "api_error",
-    "compact_boundary", "microcompact_boundary", "local_command",
-    "bridge_status"
-}
+EXPECTED_SYSTEM_SUBTYPES = discriminant_values("subtype", PROJECTS_TS)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

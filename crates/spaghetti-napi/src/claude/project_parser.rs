@@ -822,11 +822,72 @@ fn parse_leading_int(s: &str) -> Option<i64> {
 
 // ─── Slug → path (filesystem-probing) ───────────────────────────────────────
 
+/// The fixed leading portion of a decoded slug, plus the separator that
+/// joins its segments and the still-encoded remainder.
+///
+/// Claude Code derives a slug from the project's absolute cwd, so the
+/// leading characters tell us which platform wrote it:
+///
+/// | cwd                      | slug                     | shape         |
+/// |--------------------------|--------------------------|---------------|
+/// | `/Users/me/app`          | `-Users-me-app`          | `/`, `/`      |
+/// | `D:\Projects\app`        | `D--Projects-app`        | `D:\`, `\`    |
+/// | `D:\Projects\app` (old)  | `D:-Projects-app`        | `D:\`, `\`    |
+///
+/// A POSIX cwd is always absolute, so it always yields a leading `-`.
+/// That makes "no leading dash, but starts with `<letter>--` or
+/// `<letter>:-`" an unambiguous Windows drive marker. The two Windows
+/// spellings both occur in the wild: current Claude Code folds the
+/// colon into `-` (giving the doubled dash), older builds and the
+/// Codex/Grok readers preserve it.
+///
+/// Detection is platform-independent on purpose — a synced `~/.claude`
+/// must decode to the same path text on any host, and the CLI compares
+/// these against `process.cwd()` verbatim.
+struct SlugShape<'a> {
+    /// Precedes the first segment: `/` on POSIX, `D:\` on Windows.
+    prefix: String,
+    /// Joins segments: `/` on POSIX, `\` on Windows.
+    sep: char,
+    /// The dash-encoded remainder, still to be split.
+    rest: &'a str,
+}
+
+fn slug_shape(slug: &str) -> SlugShape<'_> {
+    let bytes = slug.as_bytes();
+    // `X--…` or `X:-…` — a Windows drive letter. Length 3 is the bare
+    // drive root (`D--` → `D:\`), so `>=` not `>`.
+    if bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && (bytes[1] == b':' || bytes[1] == b'-')
+        && bytes[2] == b'-'
+    {
+        let drive = (bytes[0] as char).to_ascii_uppercase();
+        return SlugShape {
+            prefix: format!("{drive}:\\"),
+            sep: '\\',
+            rest: &slug[3..],
+        };
+    }
+    if let Some(rest) = slug.strip_prefix('-') {
+        return SlugShape {
+            prefix: "/".to_string(),
+            sep: '/',
+            rest,
+        };
+    }
+    SlugShape {
+        prefix: String::new(),
+        sep: '/',
+        rest: slug,
+    }
+}
+
 /// Reconstruct the absolute path a project slug was derived from.
 ///
-/// Claude Code encodes project paths into slugs by replacing every `/`
-/// with `-`. Reversing the encoding naively (every `-` → `/`) corrupts
-/// legitimate hyphens in directory names — e.g. a slug like
+/// Claude Code encodes project paths into slugs by replacing every path
+/// separator with `-`. Reversing that naively (every `-` → separator)
+/// corrupts legitimate hyphens in directory names — e.g. a slug like
 /// `-Users-me-Projects-vibe-ctl` can decode to either
 /// `/Users/me/Projects/vibe/ctl` or `/Users/me/Projects/vibe-ctl`
 /// depending on what actually exists on disk.
@@ -838,39 +899,34 @@ fn parse_leading_int(s: &str) -> Option<i64> {
 /// Fall back to the next-longest, and finally to a single segment.
 ///
 /// For slugs whose underlying project dir no longer exists (stale
-/// state, deleted project), the probe fails for every candidate and we
-/// degrade gracefully to the naive `-` → `/` mapping — the display
-/// path may be wrong but ingest still works.
+/// state, deleted project, or a Windows slug being decoded on a POSIX
+/// host), the probe fails for every candidate and we degrade gracefully
+/// to the naive one-segment-per-dash mapping — the display path may be
+/// wrong but ingest still works.
 fn slug_to_path(slug: &str) -> String {
-    let has_leading_dash = slug.starts_with('-');
-    let trimmed = slug.strip_prefix('-').unwrap_or(slug);
-    if trimmed.is_empty() {
-        return if has_leading_dash {
-            "/".to_string()
-        } else {
-            String::new()
-        };
+    let SlugShape { prefix, sep, rest } = slug_shape(slug);
+    if rest.is_empty() {
+        return prefix;
     }
 
-    let parts: Vec<&str> = trimmed.split('-').collect();
+    let parts: Vec<&str> = rest.split('-').collect();
     let mut resolved = String::new();
-    let prefix = if has_leading_dash { "/" } else { "" };
 
     let mut i = 0;
     while i < parts.len() {
         let mut matched = false;
         for end in (i + 1..=parts.len()).rev() {
             let candidate_segment = parts[i..end].join("-");
-            let full_candidate = format!("{prefix}{resolved}/{candidate_segment}");
-            // Trim any duplicate leading slash when resolved is empty.
-            let probe_path = full_candidate.replace("//", "/");
+            let probe_path = if resolved.is_empty() {
+                format!("{prefix}{candidate_segment}")
+            } else {
+                format!("{prefix}{resolved}{sep}{candidate_segment}")
+            };
             if std::fs::metadata(&probe_path).is_ok() {
-                if resolved.is_empty() {
-                    resolved.push_str(&candidate_segment);
-                } else {
-                    resolved.push('/');
-                    resolved.push_str(&candidate_segment);
+                if !resolved.is_empty() {
+                    resolved.push(sep);
                 }
+                resolved.push_str(&candidate_segment);
                 i = end;
                 matched = true;
                 break;
@@ -878,7 +934,7 @@ fn slug_to_path(slug: &str) -> String {
         }
         if !matched {
             if !resolved.is_empty() {
-                resolved.push('/');
+                resolved.push(sep);
             }
             resolved.push_str(parts[i]);
             i += 1;
@@ -1477,5 +1533,66 @@ mod tests {
     fn parse_plans_missing_dir_is_empty() {
         let dir = mk_tempdir();
         assert!(parse_plans(dir.path()).is_empty());
+    }
+
+    // ─── slug → path ────────────────────────────────────────────────────
+
+    /// These assert the *naive* decode (no probe hits), which is what
+    /// runs whenever the encoded directory no longer exists on this host
+    /// — including every Windows slug decoded on a POSIX CI runner. The
+    /// probing behaviour is covered separately below.
+    #[test]
+    fn slug_to_path_decodes_posix_slugs() {
+        assert_eq!(
+            slug_to_path("-Users-me-Projects-app"),
+            "/Users/me/Projects/app"
+        );
+        assert_eq!(slug_to_path("-"), "/");
+        assert_eq!(slug_to_path(""), "");
+    }
+
+    #[test]
+    fn slug_to_path_decodes_windows_drive_slugs() {
+        // Current Claude Code folds the colon into a dash, so `D:\` → `D--`.
+        assert_eq!(
+            slug_to_path("D--Projects-p100-spaghetti"),
+            "D:\\Projects\\p100\\spaghetti"
+        );
+        assert_eq!(slug_to_path("C--Users-me"), "C:\\Users\\me");
+        // Older builds (and the Codex/Grok readers) keep the colon.
+        assert_eq!(slug_to_path("D:-I3T-WordplayAR"), "D:\\I3T\\WordplayAR");
+        // Bare drive root.
+        assert_eq!(slug_to_path("D--"), "D:\\");
+        assert_eq!(slug_to_path("D:-"), "D:\\");
+        // Drive letters normalize to uppercase so the two spellings of the
+        // same project agree.
+        assert_eq!(slug_to_path("d--Projects-app"), "D:\\Projects\\app");
+    }
+
+    /// A leading dash always wins: a POSIX directory that merely *starts*
+    /// with something drive-shaped must not be read as a Windows path.
+    #[test]
+    fn slug_to_path_prefers_posix_when_leading_dash_present() {
+        assert_eq!(slug_to_path("-d--Projects-app"), "/d//Projects/app");
+        assert_eq!(slug_to_path("-home-d--foo"), "/home/d//foo");
+    }
+
+    /// The filesystem probe is what disambiguates hyphens that belong to a
+    /// directory name from hyphens that encode a separator. Build a real
+    /// tree and confirm the longest-match-first probe consumes `p100-app`
+    /// as one segment rather than splitting it.
+    #[test]
+    fn slug_to_path_probes_filesystem_to_keep_hyphenated_dirs() {
+        let dir = mk_tempdir();
+        let nested = dir.path().join("p100-app").join("sub");
+        fs::create_dir_all(&nested).unwrap();
+
+        // Re-encode the real temp dir the way Claude Code would, then
+        // decode it back and expect the original path.
+        let root = dir.path().to_str().unwrap();
+        let slug = format!("{root}/p100-app/sub").replace(['/', '\\'], "-");
+        // On Windows the temp root carries a drive letter, so re-encoding
+        // yields the `C:-…` spelling; both shapes are handled.
+        assert_eq!(slug_to_path(&slug), nested.to_str().unwrap());
     }
 }

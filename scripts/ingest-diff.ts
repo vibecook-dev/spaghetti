@@ -60,7 +60,9 @@
 
 import { createRequire } from 'node:module';
 import { existsSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import * as path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 
 import Database from 'better-sqlite3';
@@ -114,7 +116,11 @@ if (coldSource !== 'claude' && coldSource !== 'codex' && coldSource !== 'grok') 
 const nativeSourceId: string | undefined =
   coldSource === 'claude' ? undefined : coldSource === 'codex' ? 'codex' : 'grok';
 
-const repoRoot = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..');
+// `fileURLToPath`, not `new URL(...).pathname`: on Windows the latter
+// yields `/D:/repo/scripts`, which `path.resolve` then reads as a
+// drive-relative path and expands to `D:\D:\repo` — the fixture lookup
+// below can never hit.
+const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const defaultFixtureBySource: Record<ColdSource, string> = {
   claude: path.join(repoRoot, 'crates/spaghetti-napi/fixtures/small/.claude'),
   codex: path.join(repoRoot, 'crates/spaghetti-napi/fixtures/small-codex/.codex'),
@@ -122,8 +128,8 @@ const defaultFixtureBySource: Record<ColdSource, string> = {
 };
 const defaultFixture = defaultFixtureBySource[coldSource];
 const fixtureRootDir = path.resolve(values.fixture ?? defaultFixture);
-const tsDbPath = path.resolve(values['ts-db'] ?? '/tmp/ingest-diff-ts.db');
-const rustDbPath = path.resolve(values['rust-db'] ?? '/tmp/ingest-diff-rust.db');
+const tsDbPath = path.resolve(values['ts-db'] ?? path.join(tmpdir(), 'ingest-diff-ts.db'));
+const rustDbPath = path.resolve(values['rust-db'] ?? path.join(tmpdir(), 'ingest-diff-rust.db'));
 
 const liveBatchLines = Number.parseInt(values.lines ?? '200', 10);
 const liveBatchChunk = Number.parseInt(values.chunk ?? '25', 10);

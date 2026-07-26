@@ -19,7 +19,16 @@ export interface InstalledPluginsFile {
 export type MarketplaceSource =
   | {
       source: 'github';
+      /** `owner/name`, not a URL. */
       repo: string;
+    }
+  | {
+      /**
+       * Any git remote, including SSH — used for marketplaces outside
+       * GitHub, or GitHub ones added by clone URL rather than `owner/name`.
+       */
+      source: 'git';
+      url: string;
     }
   | {
       source: 'directory';
