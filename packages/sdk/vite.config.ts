@@ -13,6 +13,14 @@ export default defineConfig({
       entry: {
         index: resolve(__dirname, 'src/index.ts'),
         react: resolve(__dirname, 'src/react/index.ts'),
+        // Emitted so `dist/parse-worker.js` sits next to `dist/index.js`,
+        // which is where WorkerPool looks for it. Without this entry the
+        // published package shipped no worker script at all, so parallel
+        // cold start could never run — see the note in worker-pool.ts.
+        // `.ts` is explicit: a generated `parse-worker.js` sits beside the
+        // source for the from-src dev path, and would otherwise win
+        // resolution here.
+        'parse-worker': resolve(__dirname, 'src/workers/parse-worker.ts'),
       },
       formats: ['es', 'cjs'],
       fileName: (format, entryName) => `${entryName}.${format === 'es' ? 'js' : 'cjs'}`,
