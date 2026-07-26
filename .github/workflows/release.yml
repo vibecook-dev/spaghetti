@@ -40,7 +40,13 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          gh workflow run napi-build.yml --repo "${{ github.repository }}" --ref "${{ steps.release.outputs.tag_name }}"
+          # `-f publish=true` is REQUIRED. napi-build.yml's publish job is
+          # gated on that input (default false) so the workflow can be
+          # dispatched by hand to exercise a build without touching the
+          # registry. Drop the flag and the native package never reaches npm;
+          # the release then fails at the "Require ... on npm" gate below
+          # rather than shipping an SDK whose native dependency is missing.
+          gh workflow run napi-build.yml --repo "${{ github.repository }}" --ref "${{ steps.release.outputs.tag_name }}" -f publish=true
           RUN_ID=""
           for i in $(seq 1 12); do
             # `|| true` so a transient gh failure just retries the loop (and, if
