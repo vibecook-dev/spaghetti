@@ -53,6 +53,11 @@
           "jsonpath": "$.version"
         },
         {
+          "type": "json",
+          "path": "crates/spaghetti-napi/npm/win32-arm64-msvc/package.json",
+          "jsonpath": "$.version"
+        },
+        {
           "type": "generic",
           "path": "crates/spaghetti-napi/Cargo.toml"
         }

@@ -58,6 +58,18 @@ jobs:
               cd crates/spaghetti-napi
               npx napi build --platform --release --target x86_64-pc-windows-msvc
 
+          # Cross-compiled from the x64 host, mirroring how aarch64-linux is
+          # built on ubuntu-latest: the MSVC ARM64 toolset ships in the
+          # windows runner image, so no extra install step is needed. Without
+          # this binary Windows-on-ARM silently falls back to the TypeScript
+          # ingest path — the loader has always had a `win32-arm64-msvc`
+          # branch, it just had nothing to load.
+          - host: windows-latest
+            target: aarch64-pc-windows-msvc
+            build: |
+              cd crates/spaghetti-napi
+              npx napi build --platform --release --target aarch64-pc-windows-msvc
+
     name: Build - ${{ matrix.settings.target }}
     runs-on: ${{ matrix.settings.host }}
     steps:
@@ -141,6 +153,11 @@ jobs:
             target: aarch64-unknown-linux-gnu
           - host: windows-latest
             target: x86_64-pc-windows-msvc
+          # windows-11-arm is the GitHub-hosted ARM Windows runner (free for
+          # public repos), so the cross-compiled binary is require()-loaded on
+          # real hardware rather than shipped unverified.
+          - host: windows-11-arm
+            target: aarch64-pc-windows-msvc
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v5
 

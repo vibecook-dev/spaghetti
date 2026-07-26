@@ -1,0 +1,33 @@
+{
+  "name": "@vibecook/spaghetti-sdk-native-win32-arm64-msvc",
+  "version": "0.5.21",
+  "description": "Native (Rust) ingest core for @vibecook/spaghetti-sdk — win32-arm64-msvc binary",
+  "cpu": [
+    "arm64"
+  ],
+  "os": [
+    "win32"
+  ],
+  "main": "spaghetti.win32-arm64-msvc.node",
+  "files": [
+    "spaghetti.win32-arm64-msvc.node"
+  ],
+  "license": "MIT",
+  "author": "James Yong",
+  "engines": {
+    "node": ">=18"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/jamesyong-42/spaghetti.git",
+    "directory": "crates/spaghetti-napi"
+  },
+  "homepage": "https://github.com/jamesyong-42/spaghetti#readme",
+  "bugs": {
+    "url": "https://github.com/jamesyong-42/spaghetti/issues"
+  }
+}
