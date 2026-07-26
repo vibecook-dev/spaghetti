@@ -9,6 +9,7 @@
 
 import { Worker } from 'node:worker_threads';
 import * as os from 'node:os';
+import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { WorkerToMainMessage, MainToWorkerMessage } from './worker-types.js';
 
@@ -52,10 +53,21 @@ class WorkerPoolImpl implements WorkerPool {
     this.maxWorkers = options?.maxWorkers ?? Math.min(os.cpus().length - 1, 8);
     if (this.maxWorkers < 1) this.maxWorkers = 1;
 
-    // Resolve worker script path relative to this file. fileURLToPath, not
+    // Resolve the worker script next to this module. fileURLToPath, not
     // URL.pathname: the latter yields "/C:/..." on Windows, which Worker
     // cannot open.
-    this.workerScript = options?.workerScript ?? fileURLToPath(new URL('./parse-worker.js', import.meta.url));
+    //
+    // Deliberately NOT `new URL('./parse-worker.js', import.meta.url)`.
+    // That is bundler syntax for an asset reference, and in library mode
+    // vite resolves it by inlining the whole worker as a
+    // `data:text/javascript;base64,...` URL. `fileURLToPath` then throws
+    // ERR_INVALID_URL_SCHEME on it, so every `createWorkerPool()` call from
+    // the built package threw in the constructor and cold start silently
+    // fell back to sequential parsing. Joining a dirname to a plain string
+    // is opaque to the bundler's asset scanner, so the path survives the
+    // build and points at the `parse-worker` entry emitted alongside it.
+    this.workerScript =
+      options?.workerScript ?? path.join(path.dirname(fileURLToPath(import.meta.url)), 'parse-worker.js');
   }
 
   async parseProjects(rootDir: string, slugs: string[], onMessage: (msg: WorkerToMainMessage) => void): Promise<void> {
