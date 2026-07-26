@@ -71,9 +71,19 @@ jobs:
       - name: Format check
         run: pnpm run format:check
 
+  # The Rust ingest engine is the default on every platform, but only ubuntu
+  # ever compiled or ran it. That is how a POSIX-only `slug_to_path` shipped:
+  # `cargo test` on Linux cannot observe a Windows path bug, and the tests
+  # that now cover it only pass on Linux because they were deliberately
+  # written to assert Windows decoding on any host. The next such bug will
+  # not be written so conveniently.
   rust-check:
-    name: Rust check
-    runs-on: ubuntu-latest
+    name: Rust check (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
       - name: Install Rust toolchain
@@ -87,8 +97,13 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
+          # Already keyed by runner.os, so the two legs cache independently.
           key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
+      # Formatting is byte-identical on every host, so one runner is the whole
+      # signal. clippy is not: it only lints code it compiles, so anything
+      # behind `#[cfg(windows)]` is invisible to the ubuntu leg.
       - name: cargo fmt
+        if: matrix.os == 'ubuntu-latest'
         run: cargo fmt --all -- --check
       - name: cargo clippy
         run: cargo clippy --workspace --all-targets -- --deny warnings
