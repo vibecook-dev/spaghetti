@@ -33,15 +33,19 @@ import type { InitProgress } from '../packages/sdk/src/data/segment-types.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, '..');
-const WORKER_TS = join(ROOT, 'packages/sdk/src/workers/parse-worker.ts');
 const WORKER_JS = join(ROOT, 'packages/sdk/src/workers/parse-worker.js');
 
 if (!existsSync(WORKER_JS)) {
   console.log('Building parse-worker.js for worker threads...');
-  execSync(
-    `npx esbuild "${WORKER_TS}" --bundle --platform=node --format=esm --outfile="${WORKER_JS}" --external:better-sqlite3`,
-    { cwd: ROOT, stdio: 'inherit' },
-  );
+  // Delegate to the SDK's `gen:worker` rather than repeating the esbuild
+  // invocation. This script used to carry its own copy and ran it from the
+  // repo root, which changes the source paths esbuild embeds as comments —
+  // so the two generators produced byte-different bundles of identical
+  // code, and whichever ran last dirtied the tree.
+  execSync('pnpm --filter @vibecook/spaghetti-sdk run gen:worker', {
+    cwd: ROOT,
+    stdio: 'inherit',
+  });
   console.log('');
 }
 

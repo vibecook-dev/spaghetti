@@ -21,7 +21,8 @@
     "dist"
   ],
   "scripts": {
-    "build": "vite build",
+    "gen:worker": "esbuild src/workers/parse-worker.ts --bundle --platform=node --format=esm --outfile=src/workers/parse-worker.js --external:better-sqlite3",
+    "build": "pnpm gen:worker && vite build",
     "clean": "rm -rf dist",
     "typecheck": "tsc --noEmit",
     "test": "node --import tsx --test --test-force-exit src/__tests__/*.test.ts src/**/__tests__/*.test.ts"
@@ -61,6 +62,7 @@
     "@types/react-syntax-highlighter": "^15.5.13",
     "@types/ws": "^8.5.0",
     "@vitejs/plugin-react": "^4.0.0",
+    "esbuild": "^0.27.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "typescript": "^5.7.0",

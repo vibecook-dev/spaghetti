@@ -1,7 +1,7 @@
-// packages/sdk/src/workers/parse-worker.ts
+// src/workers/parse-worker.ts
 import { parentPort } from "node:worker_threads";
 
-// packages/sdk/src/io/file-service.ts
+// src/io/file-service.ts
 import { EventEmitter as EventEmitter2 } from "events";
 import {
   readFileSync,
@@ -19,13 +19,13 @@ import {
 import { readFile, writeFile, appendFile, unlink } from "fs/promises";
 import { dirname as dirname3, join as join3 } from "path";
 
-// node_modules/.pnpm/chokidar@4.0.3/node_modules/chokidar/esm/index.js
+// ../../node_modules/.pnpm/chokidar@4.0.3/node_modules/chokidar/esm/index.js
 import { stat as statcb } from "fs";
 import { stat as stat3, readdir as readdir2 } from "fs/promises";
 import { EventEmitter } from "events";
 import * as sysPath2 from "path";
 
-// node_modules/.pnpm/readdirp@4.1.2/node_modules/readdirp/esm/index.js
+// ../../node_modules/.pnpm/readdirp@4.1.2/node_modules/readdirp/esm/index.js
 import { stat, lstat, readdir, realpath } from "node:fs/promises";
 import { Readable } from "node:stream";
 import { resolve as presolve, relative as prelative, join as pjoin, sep as psep } from "node:path";
@@ -244,7 +244,7 @@ function readdirp(root, options = {}) {
   return new ReaddirpStream(options);
 }
 
-// node_modules/.pnpm/chokidar@4.0.3/node_modules/chokidar/esm/handler.js
+// ../../node_modules/.pnpm/chokidar@4.0.3/node_modules/chokidar/esm/handler.js
 import { watchFile, unwatchFile, watch as fs_watch } from "fs";
 import { open, stat as stat2, lstat as lstat2, realpath as fsrealpath } from "fs/promises";
 import * as sysPath from "path";
@@ -1000,7 +1000,7 @@ var NodeFsHandler = class {
   }
 };
 
-// node_modules/.pnpm/chokidar@4.0.3/node_modules/chokidar/esm/index.js
+// ../../node_modules/.pnpm/chokidar@4.0.3/node_modules/chokidar/esm/index.js
 var SLASH = "/";
 var SLASH_SLASH = "//";
 var ONE_DOT = ".";
@@ -1710,7 +1710,7 @@ function watch(paths, options = {}) {
 }
 var esm_default = { watch, FSWatcher };
 
-// packages/sdk/src/io/streaming-jsonl-reader.ts
+// src/io/streaming-jsonl-reader.ts
 import { openSync, readSync, closeSync, statSync } from "fs";
 var BUFFER_SIZE = 65536;
 function readJsonlStreaming(filePath, callback, options) {
@@ -1827,7 +1827,7 @@ function readJsonlStreaming(filePath, callback, options) {
   return result;
 }
 
-// packages/sdk/src/io/file-service.ts
+// src/io/file-service.ts
 var FileServiceImpl = class extends EventEmitter2 {
   directoryWatchers = /* @__PURE__ */ new Map();
   fileWatchers = /* @__PURE__ */ new Map();
@@ -2153,10 +2153,10 @@ function createFileService() {
   return new FileServiceImpl();
 }
 
-// packages/sdk/src/sources/claude-code/parser/project-parser.ts
+// src/sources/claude-code/parser/project-parser.ts
 import * as path from "node:path";
 
-// packages/sdk/src/sources/claude-code/session-metadata.ts
+// src/sources/claude-code/session-metadata.ts
 var SYNTHETIC_USER_PREFIXES = [
   "<local-command-caveat>",
   "<local-command-stdout>",
@@ -2206,7 +2206,7 @@ function extractClaudeHumanPrompt(raw) {
   return text.slice(0, 200);
 }
 
-// packages/sdk/src/sources/claude-code/parser/filename-conventions.ts
+// src/sources/claude-code/parser/filename-conventions.ts
 var SUBAGENT_FILENAME = /^agent-(a.+)\.jsonl$/;
 var TODO_FILENAME = /^(.+?)-agent-(.+)\.json$/;
 var FILE_HISTORY_FILENAME = /^([0-9a-f]+)@v(\d+)(?:\..*)?$/;
@@ -2249,7 +2249,7 @@ function parsePlanFilename(basename4) {
   return { slug: match[1] };
 }
 
-// packages/sdk/src/sources/claude-code/parser/project-parser.ts
+// src/sources/claude-code/parser/project-parser.ts
 function slugShape(slug) {
   if (slug.length >= 3 && /[A-Za-z]/.test(slug[0]) && (slug[1] === "-" || slug[1] === ":") && slug[2] === "-") {
     return { prefix: `${slug[0].toUpperCase()}:\\`, sep: "\\", rest: slug.slice(3) };
@@ -2803,7 +2803,7 @@ function createProjectParser(fileService2) {
   return new ProjectParserImpl(fileService2);
 }
 
-// packages/sdk/src/workers/parse-worker.ts
+// src/workers/parse-worker.ts
 if (!parentPort) {
   throw new Error("parse-worker must be run as a worker thread");
 }
