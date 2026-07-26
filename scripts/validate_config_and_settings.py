@@ -20,18 +20,21 @@ import re
 import sys
 from pathlib import Path
 
+from ts_types import discriminated_variants, interface_fields, union_members
+
 CLAUDE_DIR = Path.home() / ".claude"
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Known type definitions (from @spaghetti/core types)
 # ═══════════════════════════════════════════════════════════════════════════════
 
-# SettingsFile fields
+# SettingsFile fields, read from the interface rather than copied. The copy
+# this replaced stopped at `hooks`, so five keys already present in TS
+# (tui, autoCompactEnabled, agentPushNotifEnabled, skipWorkflowUsageWarning,
+# skipAutoPermissionPrompt) were reported as unmodelled.
 SETTINGS_FIELDS_REQUIRED = set()  # permissions was required in type but may be absent in local
-SETTINGS_FIELDS_OPTIONAL = {"permissions", "effortLevel", "enabledPlugins",
-                             "alwaysThinkingEnabled", "statusLine", "env",
-                             "cleanupPeriodDays", "extraKnownMarketplaces", "hooks"}
-SETTINGS_ALL_FIELDS = SETTINGS_FIELDS_REQUIRED | SETTINGS_FIELDS_OPTIONAL
+SETTINGS_ALL_FIELDS = interface_fields("SettingsFile", "claude/toplevel-files-data.ts")
+SETTINGS_FIELDS_OPTIONAL = SETTINGS_ALL_FIELDS - SETTINGS_FIELDS_REQUIRED
 
 # PermissionsConfig fields
 PERMISSIONS_FIELDS_REQUIRED = {"allow"}
@@ -77,10 +80,9 @@ KNOWN_MARKETPLACE_ENTRY_OPTIONAL = {"autoUpdate"}
 
 # MarketplaceSource fields
 MARKETPLACE_SOURCE_COMMON_FIELDS = {"source"}
-MARKETPLACE_SOURCE_FIELDS_BY_KIND = {
-    "github": {"repo"},
-    "directory": {"path"},
-}
+MARKETPLACE_SOURCE_FIELDS_BY_KIND = discriminated_variants(
+    "MarketplaceSource", "source", "claude/plugins-data.ts"
+)
 
 # InstallCountsCacheFile fields
 INSTALL_COUNTS_CACHE_TOP = {"version", "fetchedAt", "counts"}
@@ -92,48 +94,11 @@ PLUGIN_INSTALL_COUNT_FIELDS = {"plugin", "unique_installs"}
 BLOCKLIST_TOP = {"fetchedAt", "plugins"}
 BLOCKLIST_ENTRY_FIELDS = {"plugin", "added_at", "reason", "text"}
 
-# TelemetryEventName union values
-KNOWN_TELEMETRY_EVENT_NAMES = {
-    "tengu_claudeai_mcp_eligibility",
-    "tengu_config_cache_stats",
-    "tengu_context_size",
-    "tengu_continue",
-    "tengu_dir_search",
-    "tengu_exit",
-    "tengu_file_history_snapshot_success",
-    "tengu_init",
-    "tengu_input_command",
-    "tengu_mcp_cli_status",
-    "tengu_mcp_ide_server_connection_failed",
-    "tengu_mcp_ide_server_connection_succeeded",
-    "tengu_mcp_server_connection_failed",
-    "tengu_mcp_server_connection_succeeded",
-    "tengu_mcp_servers",
-    "tengu_node_warning",
-    "tengu_notification_method_used",
-    "tengu_paste_text",
-    "tengu_prompt_suggestion_init",
-    "tengu_repl_hook_finished",
-    "tengu_ripgrep_availability",
-    "tengu_run_hook",
-    "tengu_session_forked_branches_fetched",
-    "tengu_shell_set_cwd",
-    "tengu_startup_manual_model_config",
-    "tengu_startup_telemetry",
-    "tengu_status_line_mount",
-    "tengu_timer",
-    "tengu_trust_dialog_shown",
-    "tengu_native_auto_updater_fail",
-    "tengu_native_auto_updater_start",
-    "tengu_version_check_failure",
-}
+TELEMETRY_TS = "claude/telemetry-data.ts"
 
-TELEMETRY_EVENT_DATA_KEYS = {
-    "event_name", "client_timestamp", "model", "session_id",
-    "user_type", "betas", "env", "entrypoint", "is_interactive",
-    "client_type", "additional_metadata", "event_id", "device_id",
-    "auth", "parent_session_id", "process",
-}
+KNOWN_TELEMETRY_EVENT_NAMES = union_members("TelemetryEventName", TELEMETRY_TS)
+
+TELEMETRY_EVENT_DATA_KEYS = interface_fields("TelemetryEventData", TELEMETRY_TS)
 
 TELEMETRY_ENV_KEYS = {
     "platform", "node_version", "terminal", "package_managers",
@@ -181,7 +146,10 @@ CLAUDE_GLOBAL_STATE_KNOWN = {"numStartups", "installMethod", "autoUpdates",
 
 # ActiveSessionFile fields
 ACTIVE_SESSION_FIELDS_REQUIRED = {"pid", "sessionId", "cwd", "startedAt"}
-ACTIVE_SESSION_FIELDS_OPTIONAL = {"kind", "entrypoint", "name"}
+ACTIVE_SESSION_FIELDS_OPTIONAL = (
+    interface_fields("ActiveSessionFile", "claude/toplevel-files-data.ts")
+    - ACTIVE_SESSION_FIELDS_REQUIRED
+)
 
 # McpNeedsAuthCache — Record<string, {timestamp: number}>
 # (validated structurally)
