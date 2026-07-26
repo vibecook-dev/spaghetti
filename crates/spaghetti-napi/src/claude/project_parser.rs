@@ -859,7 +859,8 @@ fn slug_shape(slug: &str) -> SlugShape<'_> {
     // drive root (`D--` → `D:\`), so `>=` not `>`.
     if bytes.len() >= 3
         && bytes[0].is_ascii_alphabetic()
-        && ((bytes[1] == b'-' && bytes[2] == b'-') || (bytes[1] == b':' && bytes[2] == b'-'))
+        && (bytes[1] == b':' || bytes[1] == b'-')
+        && bytes[2] == b'-'
     {
         let drive = (bytes[0] as char).to_ascii_uppercase();
         return SlugShape {
@@ -1542,7 +1543,10 @@ mod tests {
     /// probing behaviour is covered separately below.
     #[test]
     fn slug_to_path_decodes_posix_slugs() {
-        assert_eq!(slug_to_path("-Users-me-Projects-app"), "/Users/me/Projects/app");
+        assert_eq!(
+            slug_to_path("-Users-me-Projects-app"),
+            "/Users/me/Projects/app"
+        );
         assert_eq!(slug_to_path("-"), "/");
         assert_eq!(slug_to_path(""), "");
     }
