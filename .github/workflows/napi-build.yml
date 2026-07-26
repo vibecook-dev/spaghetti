@@ -1,11 +1,10 @@
 name: NAPI Build
 
-# Builds @vibecook/spaghetti-sdk-native for all 5 targets, require()-loads
-# every resulting .node binary on a matching host, and publishes the single
-# fat main package (bundling all 5 binaries) to npm with provenance.
+# Builds @vibecook/spaghetti-sdk-native for all 6 targets, require()-loads
+# every resulting .node binary on a matching host, and (when dispatched with
+# `publish=true`) publishes the single fat main package to npm with provenance.
 #
-# Triggered by release.yml on release_created, or manually via
-# workflow_dispatch (useful for debugging).
+# release.yml passes that input; a bare manual dispatch builds and tests only.
 
 env:
   DEBUG: napi:*
@@ -17,6 +16,11 @@ permissions:
 
 on:
   workflow_dispatch:
+    inputs:
+      publish:
+        description: 'Publish @vibecook/spaghetti-sdk-native to npm after the binaries pass their load checks'
+        type: boolean
+        default: false
 
 jobs:
   build:
@@ -134,7 +138,7 @@ jobs:
     runs-on: ${{ matrix.settings.host }}
     strategy:
       fail-fast: false
-      # Every published binary must be require()-loaded before publish. All 5
+      # Every published binary must be require()-loaded before publish. All 6
       # build targets have a matching test host. darwin-x64 runs on the Apple
       # Silicon runner under Rosetta 2 (setup-node architecture: x64 makes the
       # whole job x64) — GitHub's Intel macos-13 runners are retired/starved
@@ -188,9 +192,14 @@ jobs:
           cd crates/spaghetti-napi
           node -e "const m = require('./index.js'); if (!m.nativeVersion) { throw new Error('nativeVersion export missing'); } console.log('Loaded OK, nativeVersion =', m.nativeVersion());"
 
+  # Gated on an explicit input. The header calls workflow_dispatch "useful for
+  # debugging", but until this gate existed every dispatch ran the matrix and
+  # then attempted an npm publish — so there was no way to exercise a build
+  # without reaching for the registry. release.yml passes `-f publish=true`.
   publish:
     name: Publish to npm
     needs: [test]
+    if: ${{ inputs.publish }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -223,7 +232,7 @@ jobs:
           cd crates/spaghetti-napi
           npx napi artifacts
 
-      # We publish ONLY the main package, which fat-bundles all 5 .node binaries
+      # We publish ONLY the main package, which fat-bundles all 6 .node binaries
       # (see its `files: ["*.node"]`). The per-platform packages under
       # crates/spaghetti-napi/npm/* are deliberately NOT published: nothing
       # references them. The proper slim layout would have the main package
