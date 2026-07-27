@@ -11,7 +11,7 @@
   ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/jamesyong-42/spaghetti.git",
+    "url": "https://github.com/vibecook-dev/spaghetti.git",
     "directory": "packages/claude-code-hooks-plugin"
   }
 }

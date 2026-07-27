@@ -7,7 +7,7 @@ members = [
 [workspace.package]
 edition = "2021"
 license = "MIT"
-repository = "https://github.com/jamesyong-42/spaghetti"
+repository = "https://github.com/vibecook-dev/spaghetti"
 
 [workspace.lints.rust]
 unsafe_code = "warn"

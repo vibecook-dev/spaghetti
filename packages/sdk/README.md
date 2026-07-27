@@ -2,7 +2,7 @@
 
 Local-first SDK for multi-agent history — index Claude Code, Codex, Grok (and more) into SQLite, query sessions/messages/artifacts, and run full-text search.
 
-Part of [Spaghetti](https://github.com/jamesyong-42/spaghetti).
+Part of [Spaghetti](https://github.com/vibecook-dev/spaghetti).
 
 [![npm](https://img.shields.io/npm/v/@vibecook/spaghetti-sdk.svg)](https://www.npmjs.com/package/@vibecook/spaghetti-sdk)
 [![node](https://img.shields.io/badge/node-%3E%3D18-brightgreen.svg)](https://nodejs.org/)
@@ -174,4 +174,4 @@ The public API is unchanged.
 
 ## License
 
-[MIT](https://github.com/jamesyong-42/spaghetti/blob/main/LICENSE) — James Yong
+[MIT](https://github.com/vibecook-dev/spaghetti/blob/main/LICENSE) — James Yong

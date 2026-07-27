@@ -8,10 +8,10 @@ Spaghetti is a local-first CLI and SDK for coding-agent data. It indexes **Claud
 [![npm version](https://img.shields.io/npm/v/@vibecook/spaghetti-sdk.svg?label=@vibecook/spaghetti-sdk)](https://www.npmjs.com/package/@vibecook/spaghetti-sdk)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Node](https://img.shields.io/badge/node-%3E%3D18-brightgreen.svg)](https://nodejs.org/)
-[![CI](https://github.com/jamesyong-42/spaghetti/actions/workflows/ci.yml/badge.svg)](https://github.com/jamesyong-42/spaghetti/actions/workflows/ci.yml)
-[![Docs](https://img.shields.io/badge/docs-GitHub%20Pages-2dd4bf)](https://jamesyong-42.github.io/spaghetti/)
+[![CI](https://github.com/vibecook-dev/spaghetti/actions/workflows/ci.yml/badge.svg)](https://github.com/vibecook-dev/spaghetti/actions/workflows/ci.yml)
+[![Docs](https://img.shields.io/badge/docs-GitHub%20Pages-2dd4bf)](https://vibecook-dev.github.io/spaghetti/)
 
-**Docs:** [https://jamesyong-42.github.io/spaghetti/](https://jamesyong-42.github.io/spaghetti/) · [API reference](https://jamesyong-42.github.io/spaghetti/api.html) · [CLI commands](https://jamesyong-42.github.io/spaghetti/commands.html)
+**Docs:** [https://vibecook-dev.github.io/spaghetti/](https://vibecook-dev.github.io/spaghetti/) · [API reference](https://vibecook-dev.github.io/spaghetti/api.html) · [CLI commands](https://vibecook-dev.github.io/spaghetti/commands.html)
 
 ```text
 ╭ Spaghetti v0.5.17 ─────────────────────────────────────────────────────╮
@@ -57,7 +57,7 @@ If `~/.codex/sessions` exists, Codex is auto-detected and indexed alongside Clau
 | [`@vibecook/spaghetti`](https://www.npmjs.com/package/@vibecook/spaghetti) | Interactive TUI plus one-shot CLI commands |
 | [`@vibecook/spaghetti-sdk`](https://www.npmjs.com/package/@vibecook/spaghetti-sdk) | Scripts, apps, and custom tooling over the same index |
 | Native Rust ingest | Faster Claude cold starts by default, with automatic TypeScript fallback |
-| [Docs site](https://jamesyong-42.github.io/spaghetti/) | Product overview, architecture, CLI & API reference |
+| [Docs site](https://vibecook-dev.github.io/spaghetti/) | Product overview, architecture, CLI & API reference |
 
 ## Common commands
 
@@ -113,9 +113,9 @@ await api.dispose();
 
 | Link | Contents |
 |---|---|
-| [Product site](https://jamesyong-42.github.io/spaghetti/) | Overview, architecture, install |
-| [CLI commands](https://jamesyong-42.github.io/spaghetti/commands.html) | Full command reference |
-| [API reference](https://jamesyong-42.github.io/spaghetti/api.html) | SDK methods, multi-source, live/runtime |
+| [Product site](https://vibecook-dev.github.io/spaghetti/) | Overview, architecture, install |
+| [CLI commands](https://vibecook-dev.github.io/spaghetti/commands.html) | Full command reference |
+| [API reference](https://vibecook-dev.github.io/spaghetti/api.html) | SDK methods, multi-source, live/runtime |
 | [`site/`](site/) | Source for GitHub Pages (preview: `npx serve site`) |
 
 ## Repo map

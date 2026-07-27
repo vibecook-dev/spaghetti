@@ -23,11 +23,11 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/jamesyong-42/spaghetti.git",
+    "url": "https://github.com/vibecook-dev/spaghetti.git",
     "directory": "crates/spaghetti-napi"
   },
-  "homepage": "https://github.com/jamesyong-42/spaghetti#readme",
+  "homepage": "https://github.com/vibecook-dev/spaghetti#readme",
   "bugs": {
-    "url": "https://github.com/jamesyong-42/spaghetti/issues"
+    "url": "https://github.com/vibecook-dev/spaghetti/issues"
   }
 }

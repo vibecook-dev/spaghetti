@@ -2,7 +2,7 @@
 
 **Inspect, search, and navigate Claude Code data from the terminal.**
 
-Part of [Spaghetti](https://github.com/jamesyong-42/spaghetti). The CLI ships both a full-screen Ink TUI and one-shot commands. It indexes `~/.claude` into local SQLite via [`@vibecook/spaghetti-sdk`](https://www.npmjs.com/package/@vibecook/spaghetti-sdk).
+Part of [Spaghetti](https://github.com/vibecook-dev/spaghetti). The CLI ships both a full-screen Ink TUI and one-shot commands. It indexes `~/.claude` into local SQLite via [`@vibecook/spaghetti-sdk`](https://www.npmjs.com/package/@vibecook/spaghetti-sdk).
 
 [![npm](https://img.shields.io/npm/v/@vibecook/spaghetti.svg)](https://www.npmjs.com/package/@vibecook/spaghetti)
 [![node](https://img.shields.io/badge/node-%3E%3D18-brightgreen.svg)](https://nodejs.org/)
@@ -116,4 +116,4 @@ If you want to build on top of the same data pipeline, use [`@vibecook/spaghetti
 
 ## License
 
-[MIT](https://github.com/jamesyong-42/spaghetti/blob/main/LICENSE) — James Yong
+[MIT](https://github.com/vibecook-dev/spaghetti/blob/main/LICENSE) — James Yong
