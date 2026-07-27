@@ -11,7 +11,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 
 export const MARKETPLACE_NAME = 'spaghetti';
-export const REPO = 'jamesyong-42/spaghetti';
+export const REPO = 'vibecook-dev/spaghetti';
 
 export interface PluginMeta {
   /** Bare plugin name (e.g. "spaghetti-hooks"). */
