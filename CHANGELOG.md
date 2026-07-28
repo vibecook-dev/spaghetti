@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.5.22](https://github.com/vibecook-dev/spaghetti/compare/spaghetti-v0.5.21...spaghetti-v0.5.22) (2026-07-28)
+
+
+### Features
+
+* **napi:** build a native binary for Windows on ARM ([#82](https://github.com/vibecook-dev/spaghetti/issues/82)) ([0e9a741](https://github.com/vibecook-dev/spaghetti/commit/0e9a7411b2059b1090a6f0a12c1d8740498f721f))
+
+
+### Bug Fixes
+
+* **ci:** stop generated files from failing every release PR ([#85](https://github.com/vibecook-dev/spaghetti/issues/85)) ([02452b0](https://github.com/vibecook-dev/spaghetti/commit/02452b0e4871216dbda8aa0c96346daedfe204a9))
+* make Windows a first-class platform ([#79](https://github.com/vibecook-dev/spaghetti/issues/79)) ([a6c88cf](https://github.com/vibecook-dev/spaghetti/commit/a6c88cf95c9a78c0eb857f906623137644850deb))
+* **sdk:** ship the parse worker so parallel cold start actually runs ([#81](https://github.com/vibecook-dev/spaghetti/issues/81)) ([5e60e75](https://github.com/vibecook-dev/spaghetti/commit/5e60e75febd8856376d72ee85e8adaad9989904f))
+
 ## [0.5.21](https://github.com/jamesyong-42/spaghetti/compare/spaghetti-v0.5.20...spaghetti-v0.5.21) (2026-07-25)
 
 
