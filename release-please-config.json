@@ -60,6 +60,11 @@
         {
           "type": "generic",
           "path": "crates/spaghetti-napi/Cargo.toml"
+        },
+        {
+          "type": "toml",
+          "path": "Cargo.lock",
+          "jsonpath": "$.package[?(@.name.value==='spaghetti-napi')].version"
         }
       ]
     }
