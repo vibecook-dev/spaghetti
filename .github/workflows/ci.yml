@@ -29,12 +29,18 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - name: Build
         run: pnpm build
-      # `pnpm build` regenerates three committed artifacts: the napi loader
-      # (crates/spaghetti-napi/index.js), Cargo.lock, and the SDK's bundled
+      # `pnpm build` regenerates committed artifacts: the napi type surface
+      # (crates/spaghetti-napi/index.d.ts), Cargo.lock, and the SDK's bundled
       # parse-worker.js. Nothing checked they stayed current, so they rotted
       # silently — parse-worker.js had drifted into a fork of the project
       # parser still importing the long-deleted `packages/core`, and would
       # have kept its own stale copy of any parser fix.
+      #
+      # The napi *loader* (index.js) is deliberately excluded: it is gitignored
+      # because `napi build` stamps the version into it in ~50 places, which no
+      # release-please updater can track. Cargo.lock embeds the version too, but
+      # must stay committed, so release-please bumps it via a `toml` extra-file.
+      # See RELEASING.md before touching either.
       #
       # Unlike the lint/format/ingest-diff steps below, this one is genuinely
       # platform-independent: the generators read committed inputs and emit

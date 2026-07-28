@@ -50,4 +50,20 @@ The authoritative baseline lives in `.release-please-manifest.json` (single comp
 
 Adding a new published workspace member (another platform crate, a new SDK subpackage, etc.) means adding its `package.json` to `extra-files` — otherwise it will drift out of the lock-step bump and fail publishing.
 
+### Generated files and the version bump
+
+Two files in the Rust addon are generated and embed the version. Both used to break the CI `Generated files are current` check on every release PR, because `release-please` bumps `package.json`/`Cargo.toml` but cannot run a build:
+
+- **`Cargo.lock`** is bumped by an `extra-files` entry using the `toml` updater. Its jsonpath is
+  `$.package[?(@.name.value==='spaghetti-napi')].version` — note **`.value`**. The updater parses
+  TOML into position-annotated nodes (`{start, end, value}`), so the intuitive `@.name==='…'`
+  matches nothing and the updater silently no-ops with only a `No entries modified` warning.
+  Match by name rather than array index: `[[package]]` is sorted alphabetically, so an index would
+  silently retarget a different crate when dependencies change.
+- **`crates/spaghetti-napi/index.js`** is deliberately **not** committed (see `.gitignore`). `napi build`
+  regenerates it and stamps the version into a per-platform guard in ~50 places, which no updater can
+  track. It is still published: `files` in `package.json` is an allowlist that overrides `.gitignore`,
+  and every publish path builds first. `index.d.ts` stays committed — it is the reviewable API surface
+  and carries no version.
+
 Future releases should continue from whatever the manifest currently records — through `release-please`, not through manual version/tag commits.
