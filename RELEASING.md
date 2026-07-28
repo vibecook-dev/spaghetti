@@ -62,8 +62,18 @@ Two files in the Rust addon are generated and embed the version. Both used to br
   silently retarget a different crate when dependencies change.
 - **`crates/spaghetti-napi/index.js`** is deliberately **not** committed (see `.gitignore`). `napi build`
   regenerates it and stamps the version into a per-platform guard in ~50 places, which no updater can
-  track. It is still published: `files` in `package.json` is an allowlist that overrides `.gitignore`,
-  and every publish path builds first. `index.d.ts` stays committed — it is the reviewable API surface
-  and carries no version.
+  track. `index.d.ts` stays committed — it is the reviewable API surface and carries no version.
+
+  It travels as a **build artifact**: `napi-build.yml`'s build job uploads it next to the `.node`
+  binary, the test job gets it from the artifact download, and the publish job lifts it out of an
+  artifact before packing. Note that **neither the test job nor the publish job runs a build** — they
+  consume prebuilt binaries — so nothing may assume a fresh checkout contains a loader. `napi` has no
+  loader-only generator (`napi build` is the sole producer and needs the Rust toolchain), which is why
+  it moves through artifacts rather than being regenerated on demand.
+
+  Getting this wrong fails quietly in one direction: `files` in `package.json` silently skips entries
+  that are absent on disk, so a missing loader would publish a package whose `main` points at nothing.
+  The publish job therefore hard-fails if no loader is found and `require()`s the assembled package
+  before publishing.
 
 Future releases should continue from whatever the manifest currently records — through `release-please`, not through manual version/tag commits.
