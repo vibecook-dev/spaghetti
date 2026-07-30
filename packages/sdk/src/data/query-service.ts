@@ -211,6 +211,7 @@ interface SubagentRow {
   workflow_id: string;
   spawn_tool_id: string | null;
   link_method: 'tool_result' | 'unlinked';
+  worktree_path: string | null;
   id: number;
 }
 
@@ -1121,7 +1122,7 @@ class QueryServiceImpl implements QueryService {
     if (options?.sourceId) rowParams.push(options.sourceId);
     const rows = this.db.all<SubagentRow>(
       `SELECT s.id, s.source_id, s.agent_id, s.agent_type, s.message_count,
-              s.workflow_id, s.spawn_tool_id, s.link_method
+              s.workflow_id, s.spawn_tool_id, s.link_method, s.worktree_path
          FROM subagents s
         WHERE s.project_slug = ? AND s.session_id = ?${workflowSql}${rowSourceSql}
         ORDER BY s.id`,
@@ -1157,6 +1158,10 @@ class QueryServiceImpl implements QueryService {
         workflowId: row.workflow_id,
         spawnToolId,
         linkMethod,
+        // Spread rather than `?? undefined`: an optional property that is
+        // absent must not materialize as an own key holding `undefined`, or
+        // every deepStrictEqual against a plain literal starts failing.
+        ...(row.worktree_path !== null ? { worktreePath: row.worktree_path } : {}),
       };
     });
   }

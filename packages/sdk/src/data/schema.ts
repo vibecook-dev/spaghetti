@@ -53,7 +53,12 @@ import type { SqliteService } from '../io/index.js';
 // v14: materialized Claude AI/custom session titles. Titles are projected at
 // ingest time so list queries stay constant-time and live title changes appear
 // without rescanning transcript JSON.
-export const SCHEMA_VERSION = 14;
+//
+// v15: subagents.worktree_path. `SubagentMeta.worktreePath` has been parsed on
+// both the TS and Rust sides for a while but was dropped on the floor at write
+// time, so "which worktree is this agent working in" was unanswerable from the
+// database even though it sat in the meta sidecar on disk.
+export const SCHEMA_VERSION = 15;
 
 export const TOKEN_ACTIVITY_TRIGGER_NAMES = [
   'token_activity_messages_ai',
@@ -327,6 +332,10 @@ CREATE TABLE IF NOT EXISTS subagents (
   workflow_id TEXT NOT NULL DEFAULT '',
   spawn_tool_id TEXT,
   link_method TEXT NOT NULL DEFAULT 'unlinked',
+  -- Absolute path of the git worktree the agent ran in, from the meta
+  -- sidecar's worktreePath. NULL for the vast majority of agents, which
+  -- run directly in the project root.
+  worktree_path TEXT,
   updated_at INTEGER,
   UNIQUE(source_id, project_slug, session_id, workflow_id, agent_id)
 );

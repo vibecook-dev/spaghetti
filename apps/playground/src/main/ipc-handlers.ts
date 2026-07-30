@@ -4,6 +4,7 @@ import { ipcMain } from 'electron';
 import type { ProjectReference } from '@vibecook/spaghetti-sdk';
 import { IPC_CHANNELS } from '../shared/ipc.js';
 import type { SdkHostClient } from './sdk-host-client.js';
+import { listWorktrees } from './worktrees.js';
 
 export function registerIpcHandlers(client: SdkHostClient): void {
   // Lifecycle ---------------------------------------------------------------
@@ -20,6 +21,10 @@ export function registerIpcHandlers(client: SdkHostClient): void {
   ipcMain.handle(IPC_CHANNELS.getProjectMemory, (_event, project: ProjectReference, options?: { sourceId?: string }) =>
     client.request('getProjectMemory', project, options),
   );
+  // Answered here rather than forwarded: a live `git worktree list` is a
+  // question about the workspace right now, not about the session files the
+  // SDK derives its database from. See the header of `worktrees.ts`.
+  ipcMain.handle(IPC_CHANNELS.getProjectWorktrees, (_event, projectPath: string) => listWorktrees(projectPath));
 
   // Sessions ----------------------------------------------------------------
   ipcMain.handle(IPC_CHANNELS.getSessionList, (_event, project: ProjectReference, options?: { sourceId?: string }) =>

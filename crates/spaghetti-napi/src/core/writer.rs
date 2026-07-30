@@ -246,15 +246,16 @@ ON CONFLICT(session_id, msg_index) DO UPDATE SET
 const SQL_INSERT_SUBAGENT: &str = r#"
 INSERT INTO subagents (
   source_id, project_slug, session_id, agent_id, agent_type, file_name,
-  message_count, workflow_id, spawn_tool_id, link_method, updated_at
+  message_count, workflow_id, spawn_tool_id, link_method, worktree_path, updated_at
 )
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(source_id, project_slug, session_id, workflow_id, agent_id) DO UPDATE SET
   agent_type = excluded.agent_type,
   file_name = excluded.file_name,
   message_count = excluded.message_count,
   spawn_tool_id = excluded.spawn_tool_id,
   link_method = excluded.link_method,
+  worktree_path = excluded.worktree_path,
   updated_at = excluded.updated_at
 "#;
 
@@ -1028,6 +1029,12 @@ pub fn dispatch_event(
                     .to_string(),
             };
             let message_count = transcript.messages.len() as i64;
+            // Only worktree-isolated agents carry this; everything else ran in
+            // the project root and stores NULL rather than a redundant copy.
+            let worktree_path = transcript
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.worktree_path.clone());
             conn.execute(
                 SQL_INSERT_SUBAGENT,
                 params![
@@ -1041,6 +1048,7 @@ pub fn dispatch_event(
                     transcript.workflow_id,
                     Option::<String>::None,
                     "unlinked",
+                    worktree_path,
                     now,
                 ],
             )?;
