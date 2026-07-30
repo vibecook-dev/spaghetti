@@ -24,8 +24,43 @@ The publish workflow then publishes the released package versions from the merge
 1. Merge normal commits into `main`.
 2. Wait for `release-please` to open or update its release PR.
 3. Review that PR like any other PR.
-4. Merge the release PR.
-5. Let the `Release` GitHub Actions workflow publish the packages.
+4. **Approve its checks and wait for `NAPI Build` to pass.** Checks on release
+   PRs land as `action_required` — GitHub holds workflow runs on bot-authored
+   PRs until someone approves them, so they will sit indefinitely untouched.
+   `NAPI Build` runs the full 6-target matrix and load checks here.
+5. Merge the release PR.
+6. Let the `Release` GitHub Actions workflow publish the packages.
+
+Step 4 is the gate that matters. Merging cuts the tag, and from that moment the
+version is spent whether or not anything reaches npm (see below) — so the last
+opportunity to find a broken native build is while the release PR is still open.
+
+## If a Release Fails
+
+**Roll forward. Do not try to finish the broken version.** Land the fix on
+`main`, let `release-please` open a new release PR, and release the next patch.
+The failed version simply never existed on npm, which is normal and cheap.
+
+Repairing a release in place is not possible, for two independent reasons:
+
+- **A `workflow_dispatch` always reads its workflow definition from the ref it
+  targets.** Dispatching `napi-build.yml` against a tag re-runs that workflow
+  file *as it existed at that tag*, so a CI fix merged to `main` afterwards has
+  no effect there. `napi-build.yml` has a `source_ref` input for exactly this —
+  `gh workflow run napi-build.yml --ref main -f publish=true -f source_ref=<tag>`
+  runs `main`'s workflow against the tag's source — but note it splits the two,
+  so only reach for it when the fix is confined to workflow logic.
+- **`release.yml`'s publish job cannot run for an existing tag.** It ships
+  `@vibecook/spaghetti-sdk` and `@vibecook/spaghetti`, and is `on: push` to
+  `main` gated on `release_created`; `release-please` will not re-create a
+  version it has already released. Re-running the old failed run does not work
+  either — its native-build watch step waits on the original run id, which is a
+  completed failure, so it aborts immediately. There is no `NPM_TOKEN` to
+  publish by hand; publishing is token-less OIDC only.
+
+So `source_ref` recovers the native package alone. The SDK and CLI halves of a
+burned release have no path to npm, which is why the release-PR gate above
+exists and why rolling forward is the documented answer.
 
 ## Commit Conventions
 

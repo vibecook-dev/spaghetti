@@ -5,6 +5,10 @@ name: NAPI Build
 # `publish=true`) publishes the single fat main package to npm with provenance.
 #
 # release.yml passes that input; a bare manual dispatch builds and tests only.
+#
+# It also runs automatically on release-please's release PR (build + test, never
+# publish) so a broken native build costs a CI run instead of a burned version —
+# see the `pull_request` trigger below.
 
 env:
   DEBUG: napi:*
@@ -21,6 +25,27 @@ on:
         description: 'Publish @vibecook/spaghetti-sdk-native to npm after the binaries pass their load checks'
         type: boolean
         default: false
+      source_ref:
+        description: 'Tag/branch to build from. Leave empty to build the ref this run was dispatched against.'
+        type: string
+        default: ''
+
+  # Release PRs only (filtered per-job on github.head_ref — `branches:` here
+  # matches the BASE branch, not the head). The tag is cut the moment this PR
+  # merges, and a workflow_dispatch always reads its own definition from the ref
+  # it targets, so a workflow bug that reaches a tag cannot be fixed for that
+  # tag by a later commit on main. This PR run is the last point where the
+  # 6-target matrix is checked while a version can still be *not* released.
+  pull_request:
+    branches: [main]
+
+# Grouped by event so a PR run can never share a group with — and therefore
+# never queue behind or cancel — a release's publishing dispatch. Only PR runs
+# cancel: release-please force-pushes its branch on every merge to main, and
+# each force-push would otherwise leave 6 superseded runners building.
+concurrency:
+  group: napi-build-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   build:
@@ -76,8 +101,17 @@ jobs:
 
     name: Build - ${{ matrix.settings.target }}
     runs-on: ${{ matrix.settings.host }}
+    # On pull_request, run only for release-please's PR. Every other PR is
+    # covered by ci.yml, which builds the addon natively on all three hosts;
+    # this workflow's value is the cross-compiled targets and the load checks,
+    # and those only need to gate the commit that becomes a tag. `test` and
+    # `publish` need no matching guard — they `needs:` this job, and a skipped
+    # dependency skips its dependents.
+    if: ${{ github.event_name != 'pull_request' || startsWith(github.head_ref, 'release-please--') }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v5
+        with:
+          ref: ${{ inputs.source_ref || github.ref }}
 
       # pnpm must be on PATH before setup-node, which auto-validates the
       # `packageManager` field in root package.json and fails if missing.
@@ -175,6 +209,8 @@ jobs:
             target: aarch64-pc-windows-msvc
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v5
+        with:
+          ref: ${{ inputs.source_ref || github.ref }}
 
       - name: Install pnpm
         run: npm install -g pnpm@11.13.1
@@ -216,7 +252,13 @@ jobs:
       contents: read
       id-token: write
     steps:
+      # MUST match the ref the matrix built. This job never builds — it reads
+      # the version straight out of package.json and publishes under it — so a
+      # mismatch here would ship the binaries of one ref under the version
+      # number of another.
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v5
+        with:
+          ref: ${{ inputs.source_ref || github.ref }}
 
       - name: Install pnpm
         run: npm install -g pnpm@11.13.1
