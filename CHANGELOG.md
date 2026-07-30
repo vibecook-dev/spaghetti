@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.23](https://github.com/vibecook-dev/spaghetti/compare/spaghetti-v0.5.22...spaghetti-v0.5.23) (2026-07-30)
+
+
+### Bug Fixes
+
+* **ci:** ship the napi loader as a build artifact ([#86](https://github.com/vibecook-dev/spaghetti/issues/86)) ([8c5e175](https://github.com/vibecook-dev/spaghetti/commit/8c5e175c3a42652c04c466c978429a9837027baa))
+
 ## [0.5.22](https://github.com/vibecook-dev/spaghetti/compare/spaghetti-v0.5.21...spaghetti-v0.5.22) (2026-07-28)
 
 
