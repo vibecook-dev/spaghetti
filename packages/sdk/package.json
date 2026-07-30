@@ -1,6 +1,6 @@
 {
   "name": "@vibecook/spaghetti-sdk",
-  "version": "0.5.22",
+  "version": "0.5.23",
   "type": "module",
   "main": "./dist/index.cjs",
   "module": "./dist/index.js",
