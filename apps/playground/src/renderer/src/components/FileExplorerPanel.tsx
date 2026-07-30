@@ -442,6 +442,30 @@ export function FileExplorerPanel({
     ];
   }, [subagents]);
 
+  /**
+   * Agents of the open session grouped by the worktree they ran in.
+   *
+   * This join is the point of the whole section: git can tell you a worktree
+   * exists, but only the session data knows an agent is working in it.
+   *
+   * Keyed on both spellings git gave us, because the two sides record paths
+   * independently and need not agree on the symlinked form — `/var` against
+   * `/private/var` on macOS being the standard way this silently matches
+   * nothing.
+   */
+  const agentsByWorktree = useMemo((): Map<string, SubagentListItem[]> => {
+    const byPath = new Map<string, SubagentListItem[]>();
+    for (const agent of subagents) {
+      const raw = agent.worktreePath;
+      if (raw === undefined) continue;
+      const key = normalizeWorktreeKey(raw);
+      const bucket = byPath.get(key);
+      if (bucket) bucket.push(agent);
+      else byPath.set(key, [agent]);
+    }
+    return byPath;
+  }, [subagents]);
+
   const worktreesTree = useMemo((): StructureNode[] => {
     if (worktrees.length === 0) return [];
     return [
@@ -449,23 +473,36 @@ export function FileExplorerPanel({
         name: 'worktrees',
         type: 'folder',
         isOpen: true,
-        children: worktrees.map((w) => ({
-          name: worktreeLabel(w),
-          type: 'file' as const,
-          content: [
-            `# ${worktreeLabel(w)}`,
-            '',
-            `Path: ${w.path}`,
-            `Branch: ${w.branchRef ?? (w.detached ? '(detached HEAD)' : '—')}`,
-            `HEAD: ${w.head ?? '—'}`,
-            `Main worktree: ${w.isMain ? 'yes' : 'no'}`,
-            ...(w.locked ? [`Locked: ${w.lockReason ?? '(no reason given)'}`] : []),
-            ...(w.prunable ? [`Prunable: ${w.prunableReason ?? '(no reason given)'}`] : []),
-          ].join('\n'),
-        })),
+        children: worktrees.map((w) => {
+          const agents = [
+            ...(agentsByWorktree.get(normalizeWorktreeKey(w.path)) ?? []),
+            ...(w.realPath !== null && w.realPath !== w.path
+              ? (agentsByWorktree.get(normalizeWorktreeKey(w.realPath)) ?? [])
+              : []),
+          ];
+          const label = worktreeLabel(w);
+          const agentSuffix = agents.length > 0 ? ` · ${agents.length} agent${agents.length === 1 ? '' : 's'}` : '';
+          return {
+            name: `${label}${agentSuffix}`,
+            type: 'file' as const,
+            content: [
+              `# ${label}`,
+              '',
+              `Path: ${w.path}`,
+              `Branch: ${w.branchRef ?? (w.detached ? '(detached HEAD)' : '—')}`,
+              `HEAD: ${w.head ?? '—'}`,
+              `Main worktree: ${w.isMain ? 'yes' : 'no'}`,
+              ...(w.locked ? [`Locked: ${w.lockReason ?? '(no reason given)'}`] : []),
+              ...(w.prunable ? [`Prunable: ${w.prunableReason ?? '(no reason given)'}`] : []),
+              ...(agents.length > 0
+                ? ['', '## Agents in this worktree', ...agents.map((a) => `- ${a.agentType || 'agent'} (${a.agentId})`)]
+                : []),
+            ].join('\n'),
+          };
+        }),
       },
     ];
-  }, [worktrees]);
+  }, [worktrees, agentsByWorktree]);
 
   const trees: Record<ArtifactSectionId, StructureNode[]> = {
     plans: plansTree,
@@ -582,6 +619,19 @@ export function FileExplorerPanel({
       ) : null}
     </aside>
   );
+}
+
+/**
+ * Reduce a worktree path to a comparison key.
+ *
+ * Only the differences that carry no meaning are erased: a trailing separator,
+ * and Windows backslashes against the forward slashes git prints even there.
+ * Case is deliberately left alone — the renderer cannot tell a case-insensitive
+ * volume from a case-sensitive one, and folding it would merge two genuinely
+ * distinct directories on Linux.
+ */
+function normalizeWorktreeKey(p: string): string {
+  return p.replace(/\\/g, '/').replace(/\/+$/, '');
 }
 
 /**

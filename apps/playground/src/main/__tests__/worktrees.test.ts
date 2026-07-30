@@ -16,7 +16,7 @@
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
 import { execSync, spawnSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
 import { listWorktrees, parseWorktreePorcelain } from '../worktrees.js';
@@ -167,6 +167,26 @@ describe('listWorktrees', () => {
       assert.equal(got[1]!.isMain, false);
       assert.equal(got[1]!.branch, 'feature');
       assert.ok(got[1]!.head, 'a checked-out worktree reports a HEAD');
+    } finally {
+      rmSync(base, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+    }
+  });
+
+  test('realPath resolves symlinks so cross-source path matching works', skipNoGit ?? {}, async () => {
+    // The macOS temp dir is itself reached through /var -> /private/var, so
+    // this asserts the property that matters — realPath is the fully resolved
+    // spelling — without hard-coding a platform's symlink layout.
+    const base = mkdtempSync(path.join(tmpdir(), 'spag-real-'));
+    try {
+      const main = path.join(base, 'repo');
+      runGit(base, ['init', '-q', '-b', 'main', 'repo']);
+      writeFileSync(path.join(main, 'f.txt'), 'x\n');
+      runGit(main, ['add', '-A']);
+      runGit(main, ['commit', '-q', '-m', 'init']);
+
+      const [wt] = await listWorktrees(main);
+      assert.ok(wt, 'expected the main worktree');
+      assert.equal(wt.realPath, realpathSync.native(wt.path));
     } finally {
       rmSync(base, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
     }

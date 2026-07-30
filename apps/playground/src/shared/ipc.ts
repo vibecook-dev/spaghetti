@@ -47,8 +47,18 @@ import type {
  * `src/renderer` and `src/shared`.
  */
 export interface WorktreeInfo {
-  /** Absolute path to the worktree's root directory. */
+  /** Absolute path to the worktree's root directory, exactly as git reported it. */
   path: string;
+  /**
+   * `path` with symlinks resolved, or `null` when it could not be resolved
+   * (a prunable worktree's directory is typically gone).
+   *
+   * Carried so consumers can match this worktree against a path recorded by
+   * something else — an agent's `worktreePath`, say — without knowing which
+   * spelling either side used. macOS `/var` vs `/private/var` is the usual
+   * culprit, and comparing only the raw strings silently finds nothing.
+   */
+  realPath: string | null;
   /** Commit the worktree is checked out at. `null` for a bare repository. */
   head: string | null;
   /**

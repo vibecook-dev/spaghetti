@@ -17,6 +17,7 @@
  */
 
 import { spawn as nodeSpawn } from 'node:child_process';
+import { realpathSync } from 'node:fs';
 
 // `WorktreeInfo` is part of the renderer-facing IPC contract, so it is defined
 // in `src/shared`. The web tsconfig includes only `src/renderer` + `src/shared`,
@@ -79,6 +80,7 @@ export function parseWorktreePorcelain(stdout: string): WorktreeInfo[] {
       push();
       current = {
         path: line.slice('worktree '.length),
+        realPath: null,
         head: null,
         branch: null,
         branchRef: null,
@@ -130,6 +132,23 @@ export function parseWorktreePorcelain(stdout: string): WorktreeInfo[] {
 
   push();
   return out;
+}
+
+/**
+ * Fill in `realPath` for each entry.
+ *
+ * Kept out of `parseWorktreePorcelain` so that stays a pure string->data
+ * function testable without a filesystem. A path that cannot be resolved keeps
+ * `realPath: null` — normal for a prunable worktree, whose directory is gone.
+ */
+function resolveRealPaths(worktrees: WorktreeInfo[]): WorktreeInfo[] {
+  return worktrees.map((w) => {
+    try {
+      return { ...w, realPath: realpathSync.native(w.path) };
+    } catch {
+      return w;
+    }
+  });
 }
 
 /**
@@ -197,7 +216,7 @@ export async function listWorktrees(projectPath: string, options: ListWorktreesO
         return;
       }
       try {
-        finish(parseWorktreePorcelain(stdout));
+        finish(resolveRealPaths(parseWorktreePorcelain(stdout)));
       } catch (err) {
         warn(`[worktrees] could not parse porcelain output: ${String(err)}`);
         finish([]);

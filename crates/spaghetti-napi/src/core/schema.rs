@@ -44,7 +44,9 @@ use thiserror::Error;
 /// v12: ingestion-owned session/day rollups; query paths are read-only.
 /// v13: timestamp-independent summary totals and materialization checkpoints.
 /// v14: materialized Claude AI/custom session titles.
-pub const SCHEMA_VERSION: u32 = 14;
+/// v15: subagents.worktree_path — the meta sidecar's `worktreePath`, which
+/// both ingest paths parsed and then discarded at write time.
+pub const SCHEMA_VERSION: u32 = 15;
 
 /// Full DDL for the current schema — lifted verbatim from the TS `SCHEMA_SQL`
 /// template literal. Whitespace differs; structure does not.
@@ -161,6 +163,10 @@ CREATE TABLE IF NOT EXISTS subagents (
   workflow_id TEXT NOT NULL DEFAULT '',
   spawn_tool_id TEXT,
   link_method TEXT NOT NULL DEFAULT 'unlinked',
+  -- Absolute path of the git worktree the agent ran in, from the meta
+  -- sidecar's `worktreePath`. NULL for the vast majority of agents, which
+  -- run directly in the project root.
+  worktree_path TEXT,
   updated_at INTEGER,
   UNIQUE(source_id, project_slug, session_id, workflow_id, agent_id)
 );

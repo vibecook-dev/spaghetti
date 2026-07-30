@@ -141,6 +141,12 @@ export interface SubagentListItem {
   /** Parent Task/Agent tool-use id when an explicit result link was found. */
   spawnToolId: string | null;
   linkMethod: 'tool_result' | 'ordinal' | 'unlinked';
+  /**
+   * Absolute path of the git worktree this agent ran in, when it was spawned
+   * with worktree isolation. Absent for the majority of agents, which work
+   * directly in the project root.
+   */
+  worktreePath?: string;
 }
 
 export interface WorkflowListItem {

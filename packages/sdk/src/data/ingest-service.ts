@@ -382,14 +382,15 @@ class IngestServiceImpl implements IngestService {
     this.stmtInsertSubagent = this.db.prepare(
       `INSERT INTO subagents
          (source_id, project_slug, session_id, agent_id, agent_type, file_name, message_count,
-          workflow_id, spawn_tool_id, link_method, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          workflow_id, spawn_tool_id, link_method, worktree_path, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(source_id, project_slug, session_id, workflow_id, agent_id) DO UPDATE SET
          agent_type = excluded.agent_type,
          file_name = excluded.file_name,
          message_count = excluded.message_count,
          spawn_tool_id = excluded.spawn_tool_id,
          link_method = excluded.link_method,
+         worktree_path = excluded.worktree_path,
          updated_at = excluded.updated_at`,
     );
 
@@ -609,6 +610,9 @@ class IngestServiceImpl implements IngestService {
       transcript.workflowId,
       spawnToolId,
       spawnToolId ? 'tool_result' : 'unlinked',
+      // Only worktree-isolated agents carry this; everything else ran in the
+      // project root and stores NULL rather than a redundant copy of it.
+      transcript.meta?.worktreePath ?? null,
       now,
     );
     this.stmtDeleteSubagentMessages.run(this.sourceId, sessionId, transcript.workflowId, transcript.agentId);
