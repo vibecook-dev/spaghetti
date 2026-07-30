@@ -11,6 +11,7 @@ import { FileTreeProvider, FileTree, useFileTreeRef } from '@vibecook/mille-ui';
 import { minimalIconTheme } from '@vibecook/mille-ui/icons/minimal';
 import { createCommandRegistry, defaultCommands } from '@vibecook/mille-ui/commands';
 import type { ProjectReference, SubagentListItem } from '@vibecook/spaghetti-sdk';
+import type { WorktreeInfo } from '@shared/ipc.js';
 import '@vibecook/mille-ui/tokens.css';
 import '@vibecook/mille-ui/theme/minimal.css';
 import { onFxPort } from '../lib/fx-port.js';
@@ -41,14 +42,21 @@ export interface FileExplorerPanelProps {
   sessionArtifacts?: SessionArtifactsProps | null;
 }
 
-type ArtifactSectionId = 'plans' | 'todos' | 'tasks' | 'memory' | 'subagents';
+type ArtifactSectionId = 'plans' | 'todos' | 'tasks' | 'memory' | 'subagents' | 'worktrees';
 
-const ARTIFACT_SECTIONS: { id: ArtifactSectionId; label: string }[] = [
-  { id: 'plans', label: 'Plans' },
-  { id: 'todos', label: 'Todos' },
-  { id: 'tasks', label: 'Tasks' },
-  { id: 'memory', label: 'Memory' },
-  { id: 'subagents', label: 'Subagents' },
+/**
+ * `scope` decides what an empty section says. Everything here used to be
+ * session-derived, so the accordion could assume "no session" was the only
+ * reason to be empty. Worktrees belong to the project and are readable with no
+ * session selected at all, so the prompt has to follow the section.
+ */
+const ARTIFACT_SECTIONS: { id: ArtifactSectionId; label: string; scope: 'session' | 'project' }[] = [
+  { id: 'plans', label: 'Plans', scope: 'session' },
+  { id: 'todos', label: 'Todos', scope: 'session' },
+  { id: 'tasks', label: 'Tasks', scope: 'session' },
+  { id: 'memory', label: 'Memory', scope: 'session' },
+  { id: 'subagents', label: 'Subagents', scope: 'session' },
+  { id: 'worktrees', label: 'Worktrees', scope: 'project' },
 ];
 
 interface PlanShape {
@@ -101,6 +109,8 @@ export function FileExplorerPanel({
   const [task, setTask] = useState<TaskShape | null>(null);
   const [memory, setMemory] = useState<string | null>(null);
   const [subagents, setSubagents] = useState<SubagentListItem[]>([]);
+  const [worktrees, setWorktrees] = useState<WorktreeInfo[]>([]);
+  const [worktreesLoading, setWorktreesLoading] = useState(false);
   const [artifactLoading, setArtifactLoading] = useState(false);
   const [preview, setPreview] = useState<{ section: ArtifactSectionId; node: StructureNode } | null>(null);
   const [projectPreview, setProjectPreview] = useState<ProjectFilePreview | null>(null);
@@ -128,6 +138,35 @@ export function FileExplorerPanel({
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, [open, onClose, preview, projectPreview]);
+
+  // Worktrees follow the open project, not the selected session — a repo has
+  // them whether or not a transcript is being read. Kept out of the artifact
+  // effect below so switching sessions within one project doesn't re-shell to
+  // git for an answer that cannot have changed.
+  useEffect(() => {
+    if (!open || projectPath === null) {
+      setWorktrees([]);
+      return;
+    }
+    let cancelled = false;
+    setWorktreesLoading(true);
+    void (async () => {
+      try {
+        const list = await window.spaghetti.getProjectWorktrees(projectPath);
+        if (!cancelled) setWorktrees(list);
+      } catch {
+        // listWorktrees resolves rather than rejects for the expected cases
+        // (no repo, no git), so reaching here means the bridge itself failed.
+        // An empty list is the right answer either way.
+        if (!cancelled) setWorktrees([]);
+      } finally {
+        if (!cancelled) setWorktreesLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [open, projectPath]);
 
   // Load artifact trees when a session is selected
   useEffect(() => {
@@ -403,12 +442,38 @@ export function FileExplorerPanel({
     ];
   }, [subagents]);
 
+  const worktreesTree = useMemo((): StructureNode[] => {
+    if (worktrees.length === 0) return [];
+    return [
+      {
+        name: 'worktrees',
+        type: 'folder',
+        isOpen: true,
+        children: worktrees.map((w) => ({
+          name: worktreeLabel(w),
+          type: 'file' as const,
+          content: [
+            `# ${worktreeLabel(w)}`,
+            '',
+            `Path: ${w.path}`,
+            `Branch: ${w.branchRef ?? (w.detached ? '(detached HEAD)' : '—')}`,
+            `HEAD: ${w.head ?? '—'}`,
+            `Main worktree: ${w.isMain ? 'yes' : 'no'}`,
+            ...(w.locked ? [`Locked: ${w.lockReason ?? '(no reason given)'}`] : []),
+            ...(w.prunable ? [`Prunable: ${w.prunableReason ?? '(no reason given)'}`] : []),
+          ].join('\n'),
+        })),
+      },
+    ];
+  }, [worktrees]);
+
   const trees: Record<ArtifactSectionId, StructureNode[]> = {
     plans: plansTree,
     todos: todosTree,
     tasks: tasksTree,
     memory: memoryTree,
     subagents: subagentsTree,
+    worktrees: worktreesTree,
   };
 
   if (!open) return null;
@@ -459,21 +524,31 @@ export function FileExplorerPanel({
 
         {/* Bottom-anchored accordion: every tree opens directly below its own switch. */}
         <div className="max-h-[calc(100%-180px)] shrink-0 overflow-y-auto border-t border-[color:var(--archive-ink-line-soft)] bg-[color:var(--archive-paper)] scrollbar-hide">
-          {ARTIFACT_SECTIONS.map(({ id, label }) => {
+          {ARTIFACT_SECTIONS.map(({ id, label, scope }) => {
             const nodes = trees[id];
-            const hasSession = Boolean(sessionArtifacts);
             const isOpen = openSections.has(id);
+            // Each section reports against the thing it is actually derived
+            // from: a session for the artifact sections, the project itself
+            // for worktrees.
+            const ready = scope === 'session' ? Boolean(sessionArtifacts) : projectPath !== null;
+            const notReadyPrompt = scope === 'session' ? 'Open a session' : 'Select a project';
+            const loading = scope === 'session' ? artifactLoading : worktreesLoading;
             return (
               <section key={id} className="border-b border-[color:var(--archive-ink-line-soft)]" data-section={id}>
                 <ArtifactToggle label={label} open={isOpen} onToggle={() => toggleSection(id)} />
                 {isOpen ? (
                   <div className="border-t border-[color:var(--archive-ink-line-soft)] pb-1">
-                    {!hasSession ? (
-                      <p className="px-3 py-2 font-mono text-[9px] tracking-wide opacity-40">Open a session</p>
-                    ) : artifactLoading ? (
+                    {!ready ? (
+                      <p className="px-3 py-2 font-mono text-[9px] tracking-wide opacity-40">{notReadyPrompt}</p>
+                    ) : loading ? (
                       <div className="flex items-center gap-2 px-3 py-3 font-mono text-[9px] uppercase tracking-widest opacity-50">
                         <Spinner /> Loading…
                       </div>
+                    ) : id === 'worktrees' && nodes.length === 0 ? (
+                      // Distinct from "no repo": a single-worktree repository is
+                      // the overwhelmingly common case and shouldn't read as an
+                      // error or a missing feature.
+                      <p className="px-3 py-2 font-mono text-[9px] tracking-wide opacity-40">No linked worktrees</p>
                     ) : (
                       <StructureTree nodes={nodes} onOpenFile={(node) => setPreview({ section: id, node })} />
                     )}
@@ -507,6 +582,22 @@ export function FileExplorerPanel({
       ) : null}
     </aside>
   );
+}
+
+/**
+ * Row label for one worktree.
+ *
+ * Branch name leads because that is how anyone refers to a worktree in
+ * practice; the directory basename is frequently just the branch again, or an
+ * opaque temp path for an agent-created one. Falls back to a short SHA when
+ * detached, since "no branch" alone would make several rows indistinguishable.
+ */
+function worktreeLabel(w: WorktreeInfo): string {
+  const base = w.bare ? '(bare)' : (w.branch ?? (w.head !== null ? `(detached ${w.head.slice(0, 7)})` : '(detached)'));
+  const flags = [w.isMain ? 'main' : null, w.locked ? 'locked' : null, w.prunable ? 'prunable' : null].filter(
+    (f): f is string => f !== null,
+  );
+  return flags.length > 0 ? `${base} · ${flags.join(' · ')}` : base;
 }
 
 function ArtifactToggle({ label, open, onToggle }: { label: string; open: boolean; onToggle: () => void }) {

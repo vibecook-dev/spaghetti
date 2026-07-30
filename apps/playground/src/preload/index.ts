@@ -20,6 +20,7 @@ const bridge: SpaghettiBridge = {
   getProjectList: () => ipcRenderer.invoke(IPC_CHANNELS.getProjectList),
   getProjectTokenActivity: (project, query) => ipcRenderer.invoke(IPC_CHANNELS.getProjectTokenActivity, project, query),
   getProjectMemory: (project, options) => ipcRenderer.invoke(IPC_CHANNELS.getProjectMemory, project, options),
+  getProjectWorktrees: (projectPath) => ipcRenderer.invoke(IPC_CHANNELS.getProjectWorktrees, projectPath),
 
   // Sessions ----------------------------------------------------------------
   getSessionList: (project, options) => ipcRenderer.invoke(IPC_CHANNELS.getSessionList, project, options),

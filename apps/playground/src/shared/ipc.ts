@@ -39,6 +39,39 @@ import type {
   StoreStats,
 } from '@vibecook/spaghetti-sdk';
 
+/**
+ * One entry from `git worktree list --porcelain`.
+ *
+ * Defined here rather than beside the enumerator in `src/main/worktrees.ts`
+ * because it crosses the bridge: the renderer's tsconfig includes only
+ * `src/renderer` and `src/shared`.
+ */
+export interface WorktreeInfo {
+  /** Absolute path to the worktree's root directory. */
+  path: string;
+  /** Commit the worktree is checked out at. `null` for a bare repository. */
+  head: string | null;
+  /**
+   * Short branch name (`feature/x`). `null` when detached or bare — read
+   * `detached` to tell those two apart.
+   */
+  branch: string | null;
+  /** Full ref as git reported it (`refs/heads/feature/x`), for exact matching. */
+  branchRef: string | null;
+  /**
+   * The repository's primary worktree. Git always lists it first, which is the
+   * only signal available — the porcelain format has no explicit marker.
+   */
+  isMain: boolean;
+  detached: boolean;
+  bare: boolean;
+  locked: boolean;
+  /** Text after `locked`, when git supplied a reason. Empty reasons stay `null`. */
+  lockReason: string | null;
+  prunable: boolean;
+  prunableReason: string | null;
+}
+
 export interface ReadyInfo {
   durationMs: number;
 }
@@ -79,6 +112,15 @@ export interface SpaghettiIPC {
   getProjectList(): Promise<ProjectListItem[]>;
   getProjectTokenActivity(project: ProjectReference, query: TokenActivityQuery): Promise<TokenActivityResult>;
   getProjectMemory(project: ProjectReference, options?: SourceFilter): Promise<string | null>;
+  /**
+   * Linked worktrees of the repository containing `projectPath`.
+   *
+   * Unlike every other method here this is answered by the main process
+   * directly rather than forwarded to the SDK — it is a live `git` query about
+   * the workspace, not data derived from Claude Code's session files. Resolves
+   * to `[]` for an unversioned project rather than rejecting.
+   */
+  getProjectWorktrees(projectPath: string): Promise<WorktreeInfo[]>;
 
   // Sessions ----------------------------------------------------------------
   /** List all project sessions; optionally filter to one agent source. */
@@ -152,6 +194,7 @@ export const IPC_CHANNELS = {
   getProjectList: 'spaghetti:getProjectList',
   getProjectTokenActivity: 'spaghetti:getProjectTokenActivity',
   getProjectMemory: 'spaghetti:getProjectMemory',
+  getProjectWorktrees: 'spaghetti:getProjectWorktrees',
   getSessionList: 'spaghetti:getSessionList',
   getSessionMessages: 'spaghetti:getSessionMessages',
   getSessionTimelineFacets: 'spaghetti:getSessionTimelineFacets',
