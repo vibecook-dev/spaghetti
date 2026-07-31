@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.24](https://github.com/vibecook-dev/spaghetti/compare/spaghetti-v0.5.23...spaghetti-v0.5.24) (2026-07-31)
+
+
+### Features
+
+* show a project's git worktrees, and which agent is in each ([#90](https://github.com/vibecook-dev/spaghetti/issues/90)) ([b0d74d3](https://github.com/vibecook-dev/spaghetti/commit/b0d74d3592688e322ccbaf94fd28ef5e205eae8d))
+
 ## [0.5.23](https://github.com/vibecook-dev/spaghetti/compare/spaghetti-v0.5.22...spaghetti-v0.5.23) (2026-07-30)
 
 
