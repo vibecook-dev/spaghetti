@@ -8,16 +8,16 @@ allowBuilds:
   electron: true
   esbuild: true
 minimumReleaseAgeExclude:
-  - '@vibecook/mille-darwin-arm64@0.3.0'
-  - '@vibecook/mille-darwin-x64@0.3.0'
-  - '@vibecook/mille-linux-arm64-gnu@0.3.0'
-  - '@vibecook/mille-linux-arm64-musl@0.3.0'
-  - '@vibecook/mille-linux-x64-gnu@0.3.0'
-  - '@vibecook/mille-linux-x64-musl@0.3.0'
-  - '@vibecook/mille-ui@0.3.0'
-  - '@vibecook/mille-win32-arm64-msvc@0.3.0'
-  - '@vibecook/mille-win32-x64-msvc@0.3.0'
-  - '@vibecook/mille@0.3.0'
+  - '@vibecook/mille-darwin-arm64@0.3.0 || 0.3.1'
+  - '@vibecook/mille-darwin-x64@0.3.0 || 0.3.1'
+  - '@vibecook/mille-linux-arm64-gnu@0.3.0 || 0.3.1'
+  - '@vibecook/mille-linux-arm64-musl@0.3.0 || 0.3.1'
+  - '@vibecook/mille-linux-x64-gnu@0.3.0 || 0.3.1'
+  - '@vibecook/mille-linux-x64-musl@0.3.0 || 0.3.1'
+  - '@vibecook/mille-ui@0.3.0 || 0.3.1'
+  - '@vibecook/mille-win32-arm64-msvc@0.3.0 || 0.3.1'
+  - '@vibecook/mille-win32-x64-msvc@0.3.0 || 0.3.1'
+  - '@vibecook/mille@0.3.0 || 0.3.1'
 onlyBuiltDependencies:
   - better-sqlite3
   - esbuild
