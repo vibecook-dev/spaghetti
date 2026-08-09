@@ -22,6 +22,15 @@ if [ -z "$PYTHON" ]; then
   exit 1
 fi
 
+# The validators print box-drawing characters and read TS sources containing
+# em dashes. Python picks its stdio and default file encoding from the console,
+# which on Windows is cp1252 — so both the output and the reads die with
+# UnicodeEncodeError/UnicodeDecodeError outside a UTF-8 terminal. UTF-8 mode
+# fixes both, and belongs here rather than in the CI workflow so it also covers
+# anyone running this from cmd.exe or PowerShell.
+export PYTHONUTF8=1
+export PYTHONIOENCODING=utf-8
+
 echo "Running spaghetti type validators... (using $PYTHON)"
 echo ""
 
