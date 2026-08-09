@@ -6,7 +6,7 @@
 **Depends on:** [RFC 003 — Rust Ingest Core](./003-rust-ingest-core.md) · [RFC 004 — Rust Ingest Follow-ups](./004-rust-ingest-followups.md) · [RFC 006 — Normalized Message Model](./006-normalized-message-model.md)
 **Blocks:** [RFC 009 — Retire the TypeScript Bulk Ingest Engine](./009-retire-typescript-bulk-ingest.md)
 **Independent of:** [RFC 007 — Retire the Runtime Bridge](./007-retire-runtime-bridge.md)
-**Phase records:** [Phase 0 — contract freeze and baseline](./008-phase-0-baseline.md) · [Phase 1 — warm reconciliation gate](./008-phase-1-gate.md) · [Phase 2 — transaction and error protocol gate](./008-phase-2-gate.md) · [Phase 3A — token attribution decision](./008-phase-3a-attribution.md) · [Phase 3 — estimation gate](./008-phase-3-gate.md) · [Phase 4A — warm strategy decision](./008-phase-4a-warm-strategy.md)
+**Phase records:** [Phase 0 — contract freeze and baseline](./008-phase-0-baseline.md) · [Phase 1 — warm reconciliation gate](./008-phase-1-gate.md) · [Phase 2 — transaction and error protocol gate](./008-phase-2-gate.md) · [Phase 3A — token attribution decision](./008-phase-3a-attribution.md) · [Phase 3 — estimation gate](./008-phase-3-gate.md) · [Phase 4A — warm strategy decision](./008-phase-4a-warm-strategy.md) · [Phase 4 — performance and platform gate](./008-phase-4-gate.md)
 
 ---
 
