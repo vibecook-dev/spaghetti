@@ -367,6 +367,19 @@ pub(crate) fn run_ingest(
         )
         .map_err(IngestInternalError::Io)?;
 
+    // Every project is gone from disk but rows survive — treat that as the
+    // deletion it is (RFC 008 Phase 1.5). Without this, removing `projects/`
+    // left every project and session indexed forever: the slug loop has
+    // nothing to re-write, and `ClearSourceFiles` only touches fingerprints.
+    //
+    // Ordered before the plans parse on purpose. The clear wipes the artifact
+    // tables too, `plans` among them, so the re-parse below repopulates them —
+    // which is exactly the RFC's requirement that independent inputs still
+    // ingest when `projects/` is absent.
+    if slugs.is_empty() && source_has_stored_state(&resolved.db_path, &resolved.source_id) {
+        let _ = sender.send(IngestEvent::ClearSourceData);
+    }
+
     // Emit the global plans index first — mirrors the TS engine, which
     // sends every `plans/*.md` through `sink.onPlan` before the project
     // loop (project-parser.ts `parseAllProjectsStreaming`). All plan
@@ -600,6 +613,85 @@ fn warm_has_no_changes(
     Ok(diff.added.is_empty() && diff.modified.is_empty() && diff.deleted.is_empty())
 }
 
+/// Does this source have any stored state left in the index?
+///
+/// Probed across every table that outlives a single run: canonical rows
+/// (`projects`, `sessions`), fingerprints (`source_files`), and the
+/// materialization / repair markers. Checking only sessions and fingerprints
+/// would call a source "empty" while its projects or its contract marker
+/// survived, and the clear would be skipped (RFC 008 Phase 1.5).
+///
+/// A read failure answers `true`: doing an idempotent clear we did not need is
+/// cheap, while skipping one we did need leaves permanent orphans.
+fn source_has_stored_state(db_path: &Path, source_id: &str) -> bool {
+    if !db_path.exists() {
+        return false;
+    }
+    let Ok(conn) = Connection::open_with_flags(
+        db_path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    ) else {
+        return true;
+    };
+
+    const PROBES: [&str; 4] = [
+        "SELECT 1 FROM projects WHERE source_id = ?1 LIMIT 1",
+        "SELECT 1 FROM sessions WHERE source_id = ?1 LIMIT 1",
+        "SELECT 1 FROM source_files WHERE source_id = ?1 LIMIT 1",
+        "SELECT 1 FROM source_materializations WHERE source_id = ?1 LIMIT 1",
+    ];
+    for sql in PROBES {
+        match conn.query_row(sql, [source_id], |row| row.get::<_, i64>(0)) {
+            Ok(_) => return true,
+            Err(rusqlite::Error::QueryReturnedNoRows) => {}
+            // Missing table or any other read failure — assume state exists.
+            Err(_) => return true,
+        }
+    }
+    false
+}
+
+/// Run the idempotent source clear on its own, with nothing to re-read.
+///
+/// Used when a source's root has disappeared: the files are gone, so the rows
+/// must go too. Without this an absent root returned success and left every row
+/// in place forever, because the reader had nothing to diff against.
+fn clear_source_only(
+    resolved: &ResolvedOptions,
+    start: Instant,
+) -> std::result::Result<IngestStats, IngestInternalError> {
+    let (sender, receiver) = bounded::<IngestEvent>(4);
+    let db_path = resolved.db_path.clone();
+    let source_id = resolved.source_id.clone();
+
+    let writer_handle = std::thread::Builder::new()
+        .name("spaghetti-writer-clear".into())
+        .spawn(
+            move || -> std::result::Result<WriterStats, crate::core::writer::WriterError> {
+                let mut writer = Writer::with_source_id(&db_path, source_id)?;
+                let stats = writer.run(receiver)?;
+                writer.finish()?;
+                Ok(stats)
+            },
+        )
+        .map_err(IngestInternalError::Io)?;
+
+    let _ = sender.send(IngestEvent::ClearSourceData);
+    drop(sender);
+
+    writer_handle
+        .join()
+        .map_err(|_| IngestInternalError::WriterPanic)??;
+
+    // Deliberately no contract publication. The source is empty, not
+    // materialised — and the clear just invalidated its marker, so a later run
+    // against a restored root does the full read it needs.
+    Ok(IngestStats {
+        duration_ms: u32::try_from(start.elapsed().as_millis()).unwrap_or(u32::MAX),
+        ..IngestStats::default()
+    })
+}
+
 /// Codex cold/warm ingest — `source_id = "codex"`.
 fn run_codex_ingest(
     resolved: &ResolvedOptions,
@@ -610,7 +702,15 @@ fn run_codex_ingest(
 
     let sessions_dir = resolved.root_dir.join("sessions");
     if !sessions_dir.is_dir() {
-        // No Codex sessions — empty success (additive source).
+        // An absent root is a deletion, not a no-op. This used to return
+        // success immediately, which left every Codex row indexed forever
+        // once the user deleted the directory (RFC 008 Phase 1.5).
+        //
+        // Still cheap for the common case: a machine that never ran Codex has
+        // no stored state, so the probe short-circuits and nothing is written.
+        if source_has_stored_state(&resolved.db_path, &resolved.source_id) {
+            return clear_source_only(resolved, start);
+        }
         return Ok(IngestStats {
             duration_ms: u32::try_from(start.elapsed().as_millis()).unwrap_or(u32::MAX),
             ..IngestStats::default()
@@ -712,7 +812,15 @@ fn run_grok_ingest(
 
     let sessions_dir = resolved.root_dir.join("sessions");
     if !sessions_dir.is_dir() {
-        // No Grok sessions — empty success (additive source).
+        // An absent root is a deletion, not a no-op. This used to return
+        // success immediately, which left every Grok row indexed forever
+        // once the user deleted the directory (RFC 008 Phase 1.5).
+        //
+        // Still cheap for the common case: a machine that never ran Grok has
+        // no stored state, so the probe short-circuits and nothing is written.
+        if source_has_stored_state(&resolved.db_path, &resolved.source_id) {
+            return clear_source_only(resolved, start);
+        }
         return Ok(IngestStats {
             duration_ms: u32::try_from(start.elapsed().as_millis()).unwrap_or(u32::MAX),
             ..IngestStats::default()
@@ -1099,6 +1207,157 @@ mod tests {
             crate::core::ingest_contract::is_source_contract_current(&conn, "codex").unwrap(),
             "repairing claude-code must not invalidate codex"
         );
+    }
+
+    // ─── RFC 008 Phase 1.5 — an absent root is a deletion ──────────────────
+
+    fn claude_row_counts(db: &Path) -> (i64, i64, i64) {
+        let conn = Connection::open(db).unwrap();
+        let one = |sql: &str| -> i64 { conn.query_row(sql, [], |r| r.get(0)).unwrap() };
+        (
+            one("SELECT COUNT(*) FROM projects WHERE source_id = 'claude-code'"),
+            one("SELECT COUNT(*) FROM sessions WHERE source_id = 'claude-code'"),
+            one("SELECT COUNT(*) FROM source_files WHERE source_id = 'claude-code'"),
+        )
+    }
+
+    #[test]
+    fn deleting_every_project_clears_its_rows() {
+        let claude = fake_claude_fixture();
+        let db_dir = TempDir::new().unwrap();
+        let db = db_dir.path().join("spaghetti.db");
+
+        run_ingest(&warm_opts(claude.path(), &db), None).expect("initial ingest");
+        let (projects, sessions, _) = claude_row_counts(&db);
+        assert!(projects > 0 && sessions > 0, "fixture should have indexed");
+
+        // The user deletes their whole projects tree.
+        std::fs::remove_dir_all(claude.path().join("projects")).unwrap();
+
+        run_ingest(&warm_opts(claude.path(), &db), None).expect("ingest after deletion");
+
+        let (projects, sessions, files) = claude_row_counts(&db);
+        assert_eq!(projects, 0, "deleted projects must not survive as orphans");
+        assert_eq!(sessions, 0, "deleted sessions must not survive as orphans");
+        assert_eq!(files, 0, "their fingerprints must go too");
+    }
+
+    #[test]
+    fn global_plans_still_ingest_when_projects_is_absent() {
+        let claude = fake_claude_fixture();
+        let db_dir = TempDir::new().unwrap();
+        let db = db_dir.path().join("spaghetti.db");
+
+        run_ingest(&warm_opts(claude.path(), &db), None).expect("initial ingest");
+
+        // Projects gone, but a global plan remains — it is an independent
+        // input and must survive the deletion of everything else.
+        std::fs::remove_dir_all(claude.path().join("projects")).unwrap();
+        let plans_dir = claude.path().join("plans");
+        std::fs::create_dir_all(&plans_dir).unwrap();
+        std::fs::write(plans_dir.join("keep-me.md"), "# Keep\n").unwrap();
+
+        run_ingest(&warm_opts(claude.path(), &db), None).expect("ingest after deletion");
+
+        let conn = Connection::open(&db).unwrap();
+        let plans: i64 = conn
+            .query_row("SELECT COUNT(*) FROM plans", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(plans, 1, "a global plan must ingest even with no projects");
+    }
+
+    #[test]
+    fn an_absent_source_with_no_stored_state_is_a_cheap_no_op() {
+        // A machine that never ran Codex: no root, no rows. The probe must
+        // short-circuit rather than spin up a writer to clear nothing.
+        let empty = TempDir::new().unwrap();
+        let db_dir = TempDir::new().unwrap();
+        let db = db_dir.path().join("spaghetti.db");
+
+        let opts = IngestOptions {
+            agent_dir: empty.path().to_string_lossy().into(),
+            db_path: db.to_string_lossy().into(),
+            mode: "cold".into(),
+            progress_interval_ms: None,
+            parallelism: None,
+            source_id: Some("codex".into()),
+            safe_bulk: None,
+        };
+
+        let stats = run_ingest(&opts, None).expect("no-op ingest");
+        assert_eq!(stats.sessions_processed, 0);
+        assert!(stats.errors.is_empty());
+        // No database was created for a source that has nothing.
+        assert!(!db.exists(), "a pure no-op must not create the index file");
+    }
+
+    #[test]
+    fn an_absent_codex_root_clears_its_rows_but_not_claudes() {
+        // Exercises the clear_source_only branch, which the Claude test above
+        // does not reach — that one goes through the normal event stream.
+        let empty = TempDir::new().unwrap();
+        let db_dir = TempDir::new().unwrap();
+        let db = db_dir.path().join("spaghetti.db");
+
+        // Seed both sources directly; building a real Codex fixture here would
+        // test the reader, not the deletion branch.
+        {
+            let conn = Connection::open(&db).unwrap();
+            crate::core::schema::initialize_schema(&conn).unwrap();
+            for source in ["codex", "claude-code"] {
+                conn.execute(
+                    "INSERT INTO projects (slug, source_id, original_path, sessions_index, updated_at) \
+                     VALUES (?1, ?2, '/x', '{}', 1)",
+                    rusqlite::params![format!("proj-{source}"), source],
+                )
+                .unwrap();
+            }
+        }
+
+        let opts = IngestOptions {
+            agent_dir: empty.path().to_string_lossy().into(),
+            db_path: db.to_string_lossy().into(),
+            mode: "cold".into(),
+            progress_interval_ms: None,
+            parallelism: None,
+            source_id: Some("codex".into()),
+            safe_bulk: None,
+        };
+        run_ingest(&opts, None).expect("clear-only ingest");
+
+        let conn = Connection::open(&db).unwrap();
+        let count = |source: &str| -> i64 {
+            conn.query_row(
+                "SELECT COUNT(*) FROM projects WHERE source_id = ?1",
+                [source],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        assert_eq!(count("codex"), 0, "an absent codex root deletes codex rows");
+        assert_eq!(count("claude-code"), 1, "and leaves claude alone");
+    }
+
+    #[test]
+    fn stored_state_probe_covers_more_than_sessions() {
+        let db_dir = TempDir::new().unwrap();
+        let db = db_dir.path().join("probe.db");
+        {
+            let conn = Connection::open(&db).unwrap();
+            crate::core::schema::initialize_schema(&conn).unwrap();
+        }
+        assert!(
+            !source_has_stored_state(&db, "codex"),
+            "an empty index has no state"
+        );
+
+        // A source whose only trace is its contract marker still has state —
+        // probing sessions alone would call this empty and skip the clear.
+        {
+            let conn = Connection::open(&db).unwrap();
+            crate::core::ingest_contract::mark_source_contract_current(&conn, "codex").unwrap();
+        }
+        assert!(source_has_stored_state(&db, "codex"));
     }
 
     #[test]

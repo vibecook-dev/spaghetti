@@ -74,6 +74,12 @@ pub const CATEGORY_TODO: &str = "todo";
 pub const CATEGORY_TASK: &str = "task";
 /// `file-history/<session>/<hash>@v<n>`.
 pub const CATEGORY_FILE_HISTORY: &str = "file_history";
+/// `plans/<slug>.md` — global, not project-scoped.
+pub const CATEGORY_PLAN: &str = "plan";
+/// `projects/<slug>/<session>/subagents/**/agent-*.meta.json`.
+pub const CATEGORY_SUBAGENT_META: &str = "subagent_meta";
+/// `projects/<slug>/<session>/subagents/workflows/<wf>/journal.jsonl`.
+pub const CATEGORY_WORKFLOW_JOURNAL: &str = "workflow_journal";
 
 // ─── Regex patterns — copied verbatim from project-parser.ts ────────────────
 
@@ -86,6 +92,12 @@ static UUID_JSONL: Lazy<Regex> = Lazy::new(|| {
 /// Matches `agent-<id>.jsonl`. Port of `extractAgentId`'s pattern.
 static SUBAGENT_FILE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"^agent-(.+)\.jsonl$").expect("SUBAGENT_FILE regex compiles"));
+
+/// Matches the `agent-<id>.meta.json` sidecar the parser reads for agent type
+/// and description.
+static SUBAGENT_META_FILE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"^agent-(.+)\.meta\.json$").expect("SUBAGENT_META_FILE regex compiles")
+});
 
 /// Matches file-history snapshot names `<hash>@v<n>`.
 static FILE_HISTORY_SNAPSHOT: Lazy<Regex> = Lazy::new(|| {
@@ -348,8 +360,33 @@ fn discover_all(root_dir: &Path) -> Result<Vec<DiscoveredFile>, FingerprintError
     discover_todos(&root_dir.join("todos"), &mut out)?;
     discover_tasks(&root_dir.join("tasks"), &mut out)?;
     discover_file_history(&root_dir.join("file-history"), &mut out)?;
+    discover_plans(&root_dir.join("plans"), &mut out)?;
 
     Ok(out)
+}
+
+/// `plans/*.md` — global plans, not project-scoped.
+///
+/// The parser reads these via `parse_plans`, but discovery never fingerprinted
+/// them, so an edited plan was invisible to warm start (RFC 008 Phase 1.4).
+fn discover_plans(plans_dir: &Path, out: &mut Vec<DiscoveredFile>) -> Result<(), FingerprintError> {
+    let entries = match fs::read_dir(plans_dir) {
+        Ok(e) => e,
+        Err(_) => return Ok(()), // no plans dir is absence, not an error
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        if path.extension().and_then(|s| s.to_str()) != Some("md") {
+            continue;
+        }
+        push_file(out, &path, CATEGORY_PLAN, None, None)?;
+    }
+
+    Ok(())
 }
 
 /// Scan `<root_dir>/projects/<slug>/*` for every artefact category we
@@ -480,8 +517,57 @@ fn scan_project_sessions(
     Ok(())
 }
 
-/// `subagents/` dir — any `agent-*.jsonl` file.
+/// `subagents/` dir — flat `agent-*.jsonl`, their `.meta.json` sidecars, and
+/// the nested `workflows/<wf_id>/` tree.
+///
+/// The parser reads all four shapes (`read_one_subagent` opens the sibling
+/// `.meta.json`; `read_workflow_journal` opens `journal.jsonl`; the nested walk
+/// picks up workflow-orchestrated transcripts). Discovery previously saw only
+/// the flat `agent-*.jsonl`, so a changed agent type, a changed journal, or a
+/// whole workflow's transcripts were invisible to warm start — RFC 008
+/// Phase 1.4.
 fn scan_subagents(
+    dir: &Path,
+    slug: &str,
+    session_id: &str,
+    out: &mut Vec<DiscoveredFile>,
+) -> Result<(), FingerprintError> {
+    scan_agent_files(dir, slug, session_id, out)?;
+
+    // Nested: subagents/workflows/<wf_id>/{agent-*.jsonl, agent-*.meta.json,
+    // journal.jsonl}. Mirrors the parser's walk in `read_subagents`.
+    let workflows = dir.join("workflows");
+    if let Ok(wf_dirs) = fs::read_dir(&workflows) {
+        for wf_entry in wf_dirs.flatten() {
+            let wf_path = wf_entry.path();
+            if !wf_path.is_dir() {
+                continue;
+            }
+            scan_agent_files(&wf_path, slug, session_id, out)?;
+
+            let journal = wf_path.join("journal.jsonl");
+            if journal.is_file() {
+                push_file(
+                    out,
+                    &journal,
+                    CATEGORY_WORKFLOW_JOURNAL,
+                    Some(slug.to_owned()),
+                    Some(session_id.to_owned()),
+                )?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// One directory's `agent-*.jsonl` transcripts plus their `.meta.json` sidecars.
+///
+/// The sidecar gets its own category rather than riding along with the
+/// transcript: it changes independently (an agent's type or description can be
+/// rewritten without the transcript growing), and a fingerprint that tracked
+/// only the transcript would miss it.
+fn scan_agent_files(
     dir: &Path,
     slug: &str,
     session_id: &str,
@@ -505,6 +591,14 @@ fn scan_subagents(
                 out,
                 &path,
                 CATEGORY_SUBAGENT,
+                Some(slug.to_owned()),
+                Some(session_id.to_owned()),
+            )?;
+        } else if SUBAGENT_META_FILE.is_match(name) {
+            push_file(
+                out,
+                &path,
+                CATEGORY_SUBAGENT_META,
                 Some(slug.to_owned()),
                 Some(session_id.to_owned()),
             )?;
@@ -1112,6 +1206,129 @@ mod tests {
         assert_eq!(a.category, CATEGORY_SUBAGENT);
         assert_eq!(a.project_slug.as_deref(), Some("s"));
         assert_eq!(a.session_id.as_deref(), Some(session.as_str()));
+    }
+
+    // ─── RFC 008 Phase 1.4 — inputs the parser reads must be fingerprinted ──
+    //
+    // Each of these was consumed by the parser but invisible to discovery, so
+    // editing one left warm start convinced nothing had changed.
+
+    #[test]
+    fn global_plans_are_discovered() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        write_file(&tmp.path().join("plans").join("my-plan.md"), b"# Plan\n");
+        // Non-markdown siblings are not plan inputs.
+        write_file(&tmp.path().join("plans").join("notes.txt"), b"ignore me\n");
+
+        let diff = compute_diff(tmp.path(), &HashMap::new()).expect("diff");
+
+        assert_eq!(diff.added.len(), 1);
+        assert_eq!(diff.added[0].category, CATEGORY_PLAN);
+        assert!(
+            diff.added[0].project_slug.is_none(),
+            "plans are global, not project-scoped"
+        );
+    }
+
+    #[test]
+    fn subagent_meta_sidecar_is_discovered_separately_from_its_transcript() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let session = uuid_bare(7);
+        let dir = tmp
+            .path()
+            .join("projects")
+            .join("s")
+            .join(&session)
+            .join("subagents");
+        write_file(&dir.join("agent-abc.jsonl"), b"{}\n");
+        write_file(&dir.join("agent-abc.meta.json"), b"{\"type\":\"x\"}\n");
+
+        let diff = compute_diff(tmp.path(), &HashMap::new()).expect("diff");
+
+        let mut categories: Vec<&str> = diff.added.iter().map(|a| a.category.as_str()).collect();
+        categories.sort_unstable();
+        // Separate rows: the sidecar's agent type can be rewritten without the
+        // transcript growing, so one fingerprint could not cover both.
+        assert_eq!(categories, vec![CATEGORY_SUBAGENT, CATEGORY_SUBAGENT_META]);
+    }
+
+    #[test]
+    fn nested_workflow_transcripts_and_journal_are_discovered() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let session = uuid_bare(8);
+        let wf = tmp
+            .path()
+            .join("projects")
+            .join("s")
+            .join(&session)
+            .join("subagents")
+            .join("workflows")
+            .join("wf_1");
+        write_file(&wf.join("agent-nested.jsonl"), b"{}\n");
+        write_file(&wf.join("agent-nested.meta.json"), b"{}\n");
+        write_file(&wf.join("journal.jsonl"), b"{}\n");
+
+        let diff = compute_diff(tmp.path(), &HashMap::new()).expect("diff");
+
+        let mut categories: Vec<&str> = diff.added.iter().map(|a| a.category.as_str()).collect();
+        categories.sort_unstable();
+        assert_eq!(
+            categories,
+            vec![
+                CATEGORY_SUBAGENT,
+                CATEGORY_SUBAGENT_META,
+                CATEGORY_WORKFLOW_JOURNAL
+            ]
+        );
+        // Session attribution survives the nesting — the workflow dir sits two
+        // levels below `subagents/`, and losing it here would strand the rows.
+        for added in &diff.added {
+            assert_eq!(added.session_id.as_deref(), Some(session.as_str()));
+            assert_eq!(added.project_slug.as_deref(), Some("s"));
+        }
+    }
+
+    #[test]
+    fn editing_a_journal_shows_up_as_a_modification() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let session = uuid_bare(9);
+        let journal = tmp
+            .path()
+            .join("projects")
+            .join("s")
+            .join(&session)
+            .join("subagents")
+            .join("workflows")
+            .join("wf_1")
+            .join("journal.jsonl");
+        write_file(&journal, b"{}\n");
+
+        // Fingerprint it as it stands, then grow it.
+        let first = compute_diff(tmp.path(), &HashMap::new()).expect("first diff");
+        let stored: HashMap<String, SourceFingerprint> = first
+            .added
+            .iter()
+            .map(|a| {
+                (
+                    a.path.clone(),
+                    SourceFingerprint {
+                        path: a.path.clone(),
+                        mtime_ms: a.mtime_ms,
+                        size: a.size,
+                        byte_position: None,
+                        category: a.category.clone(),
+                        project_slug: a.project_slug.clone(),
+                        session_id: a.session_id.clone(),
+                    },
+                )
+            })
+            .collect();
+        write_file(&journal, b"{}\n{\"more\":true}\n");
+
+        let second = compute_diff(tmp.path(), &stored).expect("second diff");
+
+        assert_eq!(second.modified.len(), 1, "a grown journal must be modified");
+        assert!(second.added.is_empty());
     }
 
     #[test]
