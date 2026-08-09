@@ -79,6 +79,11 @@ jobs:
         run: pnpm test:ingest-diff:medium
       - name: Ingest diff (Grok small fixture)
         run: pnpm test:ingest-diff:grok
+      # Held out of CI until RFC 008 Phase 3 decided the token-estimation
+      # policy, because it was expected to fail. It reaches zero diffs as of
+      # the narrowed session-level fallback, so it guards that policy now.
+      - name: Ingest diff (Codex small fixture)
+        run: pnpm test:ingest-diff:codex
       - name: Lint
         run: pnpm lint
       - name: Format check

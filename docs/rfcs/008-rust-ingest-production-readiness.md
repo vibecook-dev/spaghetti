@@ -6,7 +6,7 @@
 **Depends on:** [RFC 003 — Rust Ingest Core](./003-rust-ingest-core.md) · [RFC 004 — Rust Ingest Follow-ups](./004-rust-ingest-followups.md) · [RFC 006 — Normalized Message Model](./006-normalized-message-model.md)
 **Blocks:** [RFC 009 — Retire the TypeScript Bulk Ingest Engine](./009-retire-typescript-bulk-ingest.md)
 **Independent of:** [RFC 007 — Retire the Runtime Bridge](./007-retire-runtime-bridge.md)
-**Phase records:** [Phase 0 — contract freeze and baseline](./008-phase-0-baseline.md) · [Phase 1 — warm reconciliation gate](./008-phase-1-gate.md) · [Phase 2 — transaction and error protocol gate](./008-phase-2-gate.md)
+**Phase records:** [Phase 0 — contract freeze and baseline](./008-phase-0-baseline.md) · [Phase 1 — warm reconciliation gate](./008-phase-1-gate.md) · [Phase 2 — transaction and error protocol gate](./008-phase-2-gate.md) · [Phase 3A — token attribution decision](./008-phase-3a-attribution.md) · [Phase 3 — estimation gate](./008-phase-3-gate.md)
 
 ---
 
@@ -343,6 +343,23 @@ Choose one policy:
 3. **Drop estimation:** report only official usage.
 
 The choice is recorded in this RFC before implementation. If neither existing message columns nor deterministic turn reconstruction can represent the chosen policy, an explicit provenance/pending table or column is allowed. `sessions.tokens_estimated` keeps its current meaning—true when the session contains estimates—and is never overloaded as a pending marker.
+
+> **Decision (2026-08-09): policy 2, session-level fallback, narrowed to
+> completed turns.** Estimate a session only when it has at least one completed
+> user→assistant turn *and* no official usage at all; mixed sessions remain
+> partially unattributed. No schema migration is required.
+>
+> Official attribution turned out to be at parity already — the whole
+> divergence was the estimate. Policy 1 was rejected because its benefit lands
+> only on mixed sessions, of which a survey of 18 real sessions found none, and
+> it would cost a per-message provenance migration. Policy 3 was rejected
+> because a session Codex genuinely never counted (roughly 1 in 18) still has
+> real usage worth showing when labelled.
+>
+> The narrowing exists because the unnarrowed TS behaviour reported usage for
+> sessions where the model never ran — an aborted session, an unfinished turn,
+> an unanswered question. Full rationale and the per-fixture traces are in
+> [`008-phase-3a-attribution.md`](./008-phase-3a-attribution.md).
 
 ### Phase 3A exit gate
 

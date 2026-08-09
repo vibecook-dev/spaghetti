@@ -82,18 +82,31 @@ produces byte-identical files.
 
 ### Known divergence: Codex token estimation
 
+> **Corrected 2026-08-09 by Phase 3A.** The original text below the rule read
+> the six diffs as landing on sessions `02`, `03`, `04` — "the three sessions
+> with un-attributed turns". That was wrong in both the sessions and the cause.
+> The diffs were on `01`, `04`, `05`, the three fixtures containing a
+> `developer` preamble, and what differed was TS tiktoken-estimating that
+> preamble. Sessions `02` and `03` had **zero message rows** and could not
+> differ at all.
+>
+> The reason none of it was about turn attribution: the fixtures emitted turns
+> as `event_msg`, which the extractor skips as a UI projection, so six sessions
+> produced five messages between them and not one user or assistant row. The
+> fixtures were rebuilt on the canonical `response_item` shape in Phase 3A; the
+> count is now 11 diffs across 10 sessions, and official attribution is at
+> parity. See [`008-phase-3a-attribution.md`](./008-phase-3a-attribution.md).
+
 Not normalized away, per Phase 0's instruction to enumerate rather than
-reconcile. Six differences, all one cause:
+reconcile. Six differences as measured at the time:
 
 | Column | TS | Rust | Where |
 | --- | --- | --- | --- |
-| `sessions.tokens_estimated` | `1` | `0` | fixtures `02`, `03`, `04` |
-| `messages.input_tokens` | non-zero | `0` | turns in those sessions |
+| `sessions.tokens_estimated` | `1` | `0` | fixtures `01`, `04`, `05` |
+| `messages.input_tokens` | non-zero | `0` | the `developer` record in each |
 
 Cause is documented in `crates/spaghetti-napi/src/codex/reader.rs`: the tiktoken
-estimate for missing `token_count` is TS-only. The affected sessions are exactly
-the three with un-attributed turns — no `token_count`, total-only, and mixed
-coverage.
+estimate for missing `token_count` is TS-only.
 
 **Decision P4 owns this.** Phase 3A chooses between a turn-aware port, a
 session-level fallback, and dropping estimation; this baseline is the input to

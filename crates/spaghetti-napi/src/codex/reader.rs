@@ -15,6 +15,7 @@ use regex::Regex;
 
 use crate::claude::fingerprint::DiscoveryError;
 use crate::claude::types::{SessionIndexEntry, SessionsIndex};
+use crate::codex::estimate_tokens;
 use crate::codex::message_extractor::{self, MessageProjection};
 use crate::core::event::IngestEvent;
 use crate::core::jsonl::read_jsonl_streaming;
@@ -478,6 +479,13 @@ fn stream_session(
     let mut last_assistant: Option<(u32, u64, String, MessageProjection)> = None;
     let mut send_err: Option<SendError<IngestEvent>> = None;
 
+    // Estimation state (RFC 008 Phase 3A). Only `(index, type, text)` is kept
+    // — enough to estimate from, and small, because the text is already
+    // truncated to the same 2,000 UTF-16 units the TS side stores.
+    let mut attributed = false;
+    let mut estimable: Vec<(u32, String, String)> = Vec::new();
+    let mut saw_assistant = false;
+
     let stream = read_jsonl_streaming(&sess.path, 0, |line, _idx, byte_offset| {
         if send_err.is_some() {
             return;
@@ -503,6 +511,14 @@ fn stream_session(
                     cache_read_tokens: 0,
                     fts_text: proj.fts_text.clone(),
                 };
+                if proj.msg_type == "assistant" {
+                    saw_assistant = true;
+                }
+                if let Some(text) = proj.fts_text.as_deref() {
+                    if !text.is_empty() {
+                        estimable.push((idx, proj.msg_type.clone(), text.to_owned()));
+                    }
+                }
                 if proj.msg_type == "assistant" {
                     last_assistant = Some((idx, byte_offset, line.to_owned(), proj));
                 }
@@ -539,6 +555,7 @@ fn stream_session(
                             send_err = Some(e);
                             return;
                         }
+                        attributed = true;
                         // Total-only count (no per-turn last_token_usage): clear
                         // the pointer so a subsequent total-only count isn't
                         // re-applied to this same assistant (mirrors the TS
@@ -564,7 +581,63 @@ fn stream_session(
     if let Ok(r) = stream {
         last_byte = r.final_byte_position.max(last_byte);
     }
+
+    emit_estimates_if_warranted(session_id, attributed, saw_assistant, &estimable, events)?;
+
     Ok((message_count, last_byte))
+}
+
+/// Estimate a session's tokens, but only when it earned an estimate.
+///
+/// Two conditions, both required (RFC 008 Phase 3A, policy 2 narrowed):
+///
+/// 1. **No official usage anywhere in the session.** A partially attributed
+///    session keeps its official values and leaves the uncovered turns at
+///    zero; mixing measured and estimated numbers inside one session would
+///    make the session total un-interpretable.
+/// 2. **At least one assistant message.** That is the model's reply, so it
+///    proves both that the model ran and that the turn finished. A tool call
+///    alone does not — the turn is still in flight and the official count
+///    arrives with the reply.
+///
+/// Without the second condition the estimator reports usage for work that
+/// never happened: an aborted session holding only a developer preamble, a
+/// mid-turn tail, a question the model never answered. Those are not
+/// approximations of real usage; there is no usage to approximate.
+fn emit_estimates_if_warranted(
+    session_id: &str,
+    attributed: bool,
+    saw_assistant: bool,
+    estimable: &[(u32, String, String)],
+    events: &Sender<IngestEvent>,
+) -> Result<(), CodexReadError> {
+    if attributed || !saw_assistant || estimable.is_empty() {
+        // `tokens_estimated` stays false. The writer defaults it to false, and
+        // an attributed session must not be relabelled as an estimate.
+        return Ok(());
+    }
+
+    let mut any = false;
+    for (index, msg_type, text) in estimable {
+        let Some((input, output)) = estimate_tokens::estimate_for(msg_type, text) else {
+            continue;
+        };
+        events.send(IngestEvent::MessageTokens {
+            session_id: session_id.to_owned(),
+            index: *index,
+            input_tokens: u64::from(input),
+            output_tokens: u64::from(output),
+        })?;
+        any = true;
+    }
+
+    if any {
+        events.send(IngestEvent::SessionTokensEstimated {
+            session_id: session_id.to_owned(),
+            estimated: true,
+        })?;
+    }
+    Ok(())
 }
 
 fn file_stats(path: &Path) -> (f64, u64) {
@@ -854,5 +927,113 @@ mod tests {
         assert_eq!(reemit.2, 50);
         // 5b: no emit ever carries the second total (999).
         assert!(!assistant_msgs.iter().any(|(_, i, _)| *i == 999));
+    }
+
+    // ── RFC 008 Phase 3A — the estimation guard ────────────────────────────
+
+    /// Build a one-session rollout from raw payload lines and read it.
+    fn read_session(lines: &[&str]) -> Vec<IngestEvent> {
+        let tmp = TempDir::new().unwrap();
+        let day = tmp.path().join("sessions/2026/01/01");
+        std::fs::create_dir_all(&day).unwrap();
+        let file = day.join("rollout-2026-01-01T00-00-00-019bbbbbbbbbbbbbbbbbbbbbbbb.jsonl");
+        let mut f = std::fs::File::create(&file).unwrap();
+        writeln!(
+            f,
+            r#"{{"timestamp":"2026-01-01T00:00:00.000Z","type":"session_meta","payload":{{"id":"est-1","cwd":"/tmp/demo"}}}}"#
+        )
+        .unwrap();
+        for l in lines {
+            writeln!(f, "{l}").unwrap();
+        }
+        drop(f);
+
+        let (tx, rx) = unbounded();
+        CodexReader::read_all(tmp.path().join("sessions").as_path(), &tx).unwrap();
+        drop(tx);
+        rx.iter().collect()
+    }
+
+    fn user(text: &str) -> String {
+        format!(
+            r#"{{"timestamp":"2026-01-01T00:00:01.000Z","type":"response_item","payload":{{"type":"message","role":"user","content":[{{"type":"input_text","text":"{text}"}}]}}}}"#
+        )
+    }
+
+    fn assistant(text: &str) -> String {
+        format!(
+            r#"{{"timestamp":"2026-01-01T00:00:02.000Z","type":"response_item","payload":{{"type":"message","role":"assistant","content":[{{"type":"output_text","text":"{text}"}}]}}}}"#
+        )
+    }
+
+    const OFFICIAL: &str = r#"{"type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":3,"output_tokens":7,"cached_input_tokens":0,"reasoning_output_tokens":0,"total_tokens":10}}}}"#;
+
+    fn estimates(events: &[IngestEvent]) -> Vec<(u32, u64, u64)> {
+        events
+            .iter()
+            .filter_map(|e| match e {
+                IngestEvent::MessageTokens {
+                    index,
+                    input_tokens,
+                    output_tokens,
+                    ..
+                } => Some((*index, *input_tokens, *output_tokens)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn marked_estimated(events: &[IngestEvent]) -> bool {
+        events.iter().any(|e| {
+            matches!(
+                e,
+                IngestEvent::SessionTokensEstimated {
+                    estimated: true,
+                    ..
+                }
+            )
+        })
+    }
+
+    #[test]
+    fn a_completed_turn_without_official_usage_is_estimated() {
+        let ev = read_session(&[&user("hello world"), &assistant("hi there")]);
+        assert_eq!(
+            estimates(&ev),
+            vec![(1, 2, 0), (2, 0, 2)],
+            "user text counts as input, assistant text as output"
+        );
+        assert!(marked_estimated(&ev), "and the session is labelled");
+    }
+
+    #[test]
+    fn official_usage_suppresses_estimation_entirely() {
+        // Not "estimate the uncovered rows" — a session with any official
+        // value keeps only measured numbers, so its total stays interpretable.
+        let ev = read_session(&[&user("hello world"), &assistant("hi there"), OFFICIAL]);
+        assert!(estimates(&ev).is_empty(), "got: {:?}", estimates(&ev));
+        assert!(!marked_estimated(&ev));
+    }
+
+    #[test]
+    fn a_session_with_no_assistant_reply_is_not_estimated() {
+        // The model never answered. There is no usage to approximate, and the
+        // unnarrowed policy invented some here (RFC 008 Phase 3A, fixture 10).
+        let ev = read_session(&[&user("are the migrations reversible?")]);
+        assert!(estimates(&ev).is_empty(), "got: {:?}", estimates(&ev));
+        assert!(!marked_estimated(&ev));
+    }
+
+    #[test]
+    fn a_turn_still_in_flight_is_not_estimated() {
+        // A tool call is not a completed turn: the reply, and the official
+        // count that comes with it, have not been written yet (fixture 06).
+        let ev = read_session(&[
+            &user("check the lockfile"),
+            r#"{"type":"response_item","payload":{"type":"function_call","name":"shell","call_id":"c1"}}"#,
+            r#"{"type":"response_item","payload":{"type":"function_call_output","call_id":"c1","output":" M lock"}}"#,
+        ]);
+        assert!(estimates(&ev).is_empty(), "got: {:?}", estimates(&ev));
+        assert!(!marked_estimated(&ev));
     }
 }

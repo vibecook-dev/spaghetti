@@ -84,9 +84,23 @@ export function createCodexIngestHooks(): IngestHooks {
       }
 
       if (!attributedTurnBySession.has(sessionId)) {
-        // No official count — tiktoken-estimate stored text.
+        // No official count — tiktoken-estimate stored text, but only for a
+        // session where a turn actually finished.
+        //
+        // An assistant message is the marker: it is the model's reply, so it
+        // proves both that the model ran and that the turn completed. A tool
+        // call alone does not — the turn is still in flight, and the official
+        // count arrives with the reply.
+        //
+        // Without this guard the estimator reported usage for work that never
+        // happened: an aborted session with only a developer preamble, a
+        // mid-turn tail whose reply had not been generated, and a question the
+        // model never answered (RFC 008 Phase 3A, fixtures 05, 06, 10). Those
+        // are not approximations of real usage — there is no usage to
+        // approximate.
         const rows = api.listSessionMessageTexts(sessionId);
-        if (rows.length === 0) {
+        const turnCompleted = rows.some((r) => r.msgType === 'assistant');
+        if (rows.length === 0 || !turnCompleted) {
           api.setSessionTokensEstimated(sessionId, false);
         } else {
           const estimates = estimateTokensFromMessageRows(

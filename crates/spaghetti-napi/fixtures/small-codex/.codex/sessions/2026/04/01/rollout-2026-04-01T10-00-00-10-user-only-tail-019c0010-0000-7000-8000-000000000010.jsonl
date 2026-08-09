@@ -1,0 +1,3 @@
+{"timestamp":"2026-04-01T10:01:00.000Z","type":"session_meta","payload":{"id":"019c0010-0000-7000-8000-000000000010","timestamp":"2026-04-01T10:01:00.000Z","cwd":"/home/fixture/project","originator":"codex_cli_rs","cli_version":"0.98.0","source":"cli","model_provider":"openai"}}
+{"timestamp":"2026-04-01T10:01:01.000Z","type":"turn_context","payload":{"cwd":"/home/fixture/project","approval_policy":"on-request","sandbox_policy":{"type":"read-only"},"model":"gpt-5.3-codex","personality":"pragmatic"}}
+{"timestamp":"2026-04-01T10:01:02.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Are the migrations reversible?"}]}}

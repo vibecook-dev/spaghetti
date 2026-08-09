@@ -770,6 +770,27 @@ impl Writer {
                 // future byte_position updates on source_files.
             }
 
+            IngestEvent::MessageTokens {
+                ref session_id,
+                index,
+                input_tokens,
+                output_tokens,
+            } => {
+                if !self.in_transaction {
+                    self.begin_transaction("<orphan>")?;
+                }
+                self.conn.execute(
+                    "UPDATE messages SET input_tokens = ?1, output_tokens = ?2                      WHERE session_id = ?3 AND msg_index = ?4 AND source_id = ?5",
+                    params![
+                        input_tokens as i64,
+                        output_tokens as i64,
+                        session_id,
+                        index as i64,
+                        &self.source_id
+                    ],
+                )?;
+            }
+
             IngestEvent::SessionTokensEstimated {
                 ref session_id,
                 estimated,
@@ -1426,7 +1447,8 @@ pub fn dispatch_event(
         // handle these directly in their transaction state machine and
         // must not route them here. If this ever fires it's a logic bug
         // in the caller — surface it loudly rather than silently no-op.
-        IngestEvent::SessionComplete { .. }
+        IngestEvent::MessageTokens { .. }
+        | IngestEvent::SessionComplete { .. }
         | IngestEvent::ProjectComplete { .. }
         | IngestEvent::ProjectAbort { .. }
         | IngestEvent::RecordSkip { .. }

@@ -11,19 +11,19 @@
       },
       "projects": {
         "rows": 1,
-        "digest": "809cfb504958dc09"
+        "digest": "0a1bb2512d87cc70"
       },
       "project_memories": {
         "rows": 0,
         "digest": "4f53cda18c2baa0c"
       },
       "sessions": {
-        "rows": 6,
-        "digest": "47558b99d7e60b19"
+        "rows": 10,
+        "digest": "6f6e8ed4f82c42d4"
       },
       "messages": {
-        "rows": 5,
-        "digest": "8846adc937345fb2"
+        "rows": 30,
+        "digest": "8a8ac6787fc3da06"
       },
       "subagents": {
         "rows": 0,
@@ -62,18 +62,18 @@
         "digest": "4f53cda18c2baa0c"
       }
     },
-    "fingerprints": 6,
-    "fts": 5,
+    "fingerprints": 10,
+    "fts": 30,
     "tokens": {
-      "input": 26,
-      "output": 0,
+      "input": 1517,
+      "output": 614,
       "cacheCreation": 0,
       "cacheRead": 0,
-      "sessionsEstimated": 3
+      "sessionsEstimated": 1
     },
     "ftsProbes": {
-      "the": 0,
-      "session": 0,
+      "the": 17,
+      "session": 1,
       "error": 0
     }
   },
@@ -86,19 +86,19 @@
       },
       "projects": {
         "rows": 1,
-        "digest": "809cfb504958dc09"
+        "digest": "0a1bb2512d87cc70"
       },
       "project_memories": {
         "rows": 0,
         "digest": "4f53cda18c2baa0c"
       },
       "sessions": {
-        "rows": 6,
-        "digest": "7b143a27aa404573"
+        "rows": 10,
+        "digest": "6f6e8ed4f82c42d4"
       },
       "messages": {
-        "rows": 5,
-        "digest": "41166459f98f2c19"
+        "rows": 30,
+        "digest": "8a8ac6787fc3da06"
       },
       "subagents": {
         "rows": 0,
@@ -137,20 +137,20 @@
         "digest": "4f53cda18c2baa0c"
       }
     },
-    "fingerprints": 6,
-    "fts": 5,
+    "fingerprints": 10,
+    "fts": 30,
     "tokens": {
-      "input": 0,
-      "output": 0,
+      "input": 1517,
+      "output": 614,
       "cacheCreation": 0,
       "cacheRead": 0,
-      "sessionsEstimated": 0
+      "sessionsEstimated": 1
     },
     "ftsProbes": {
-      "the": 0,
-      "session": 0,
+      "the": 17,
+      "session": 1,
       "error": 0
     }
   },
-  "diffCount": 6
+  "diffCount": 0
 }
