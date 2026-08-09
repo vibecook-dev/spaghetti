@@ -158,7 +158,7 @@ Matches a naive search. Do not delete:
 | Gate | Result |
 | --- | --- |
 | `pnpm build` / `typecheck` / `lint` / `format:check` | pass |
-| CLI suite | 26 tests, all pass |
+| `pnpm test:packages` | pass — 435 SDK, 113 CLI |
 | Doctor renders without removed sections, still reports active indexing | pass |
 | Removed commands give the normal unknown-command response | pass |
 | `pnpm why ws` / `@types/ws` — not owned by SDK or CLI | pass (transitive via `ink` only) |
@@ -166,7 +166,12 @@ Matches a naive search. Do not delete:
 | Built SDK declarations contain no Plane 3 symbol | pass |
 | No production import of a deleted module | pass |
 
-The SDK suite is red for an unrelated toolchain reason — Node v26.6.0 has no
-`better-sqlite3@12.9.0` prebuild and the `node-gyp` fallback fails on MSVC
-(`LNK1117`). 37 tests fail with `ERR_DLOPEN_FAILED`, every stack through
-`SqliteServiceImpl`, none touching Plane 3. It predates this work.
+Getting the SDK suite green required an unrelated dependency fix, committed
+separately: `better-sqlite3` 12.9.0 has no Node 26 prebuild, and its `node-gyp`
+fallback fails on MSVC (`LNK1117`). 12.11.1 ships one.
+
+`pnpm test` additionally runs `pnpm validate`, where two type-drift suites fail.
+Those failures reproduce at `211f4b1` and are unrelated to this RFC: Claude Code
+writes on-disk fields our types do not cover yet (`settings.json` `model`,
+assistant `errorDetails` / `isAbortedMidStream`, system `choice` /
+`fallbackModel`, the `SendUserFile` tool, and two `stats-cache.json` keys).

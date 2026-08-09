@@ -1,7 +1,7 @@
 # RFC 007: Retire the Runtime Bridge
 
-**Status:** Accepted (v3 — single-release removal)
-**Implementation readiness:** Phase 0 complete (2026-08-08); removal in progress.
+**Status:** Implemented (v3 — single-release removal)
+**Implementation:** complete 2026-08-08. Aftercare: keep the doctor leftover section for at least one more minor release, then close.
 **Created:** 2026-08-06
 **Revised:** 2026-08-08
 **Split from:** `007-retire-runtime-bridge-and-ts-ingest.md` Draft v6
