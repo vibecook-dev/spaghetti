@@ -29,7 +29,7 @@
 
 import { createRequire } from 'node:module';
 import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { homedir, tmpdir } from 'node:os';
+import { arch, cpus, homedir, platform, tmpdir, totalmem } from 'node:os';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
@@ -234,6 +234,33 @@ function toReportSummary(s: Summary): ReportSummary {
   return { min: s.min, median: s.median, mean: s.mean, max: s.max, samples: s.samples };
 }
 
+/**
+ * Machine identity for the report.
+ *
+ * RFC 008 Phase 4 accepts the Rust warm path at `max(2 x TS median, 3s)`. The
+ * ratio half is self-normalizing — both engines run back to back here, so
+ * hardware cancels. The 3-second floor does not, and neither does any archived
+ * number read months later. Record what produced them.
+ */
+function hostInfo(): {
+  platform: string;
+  arch: string;
+  cpuModel: string;
+  cpuCount: number;
+  totalMemBytes: number;
+  node: string;
+} {
+  const cpu = cpus();
+  return {
+    platform: platform(),
+    arch: arch(),
+    cpuModel: cpu[0]?.model?.trim() ?? 'unknown',
+    cpuCount: cpu.length,
+    totalMemBytes: totalmem(),
+    node: process.version,
+  };
+}
+
 function writeReport(results: Summary[]): void {
   if (!reportJsonPath) return;
   const native = require('@vibecook/spaghetti-sdk-native') as NativeAddon;
@@ -244,6 +271,7 @@ function writeReport(results: Summary[]): void {
     warmup: number;
     fixture: string;
     native: string;
+    host: ReturnType<typeof hostInfo>;
     cold: { rust?: ReportSummary; ts?: ReportSummary };
     warm: { rust?: ReportSummary };
   } = {
@@ -251,6 +279,7 @@ function writeReport(results: Summary[]): void {
     warmup,
     fixture: fixtureRootDir,
     native: native.nativeVersion(),
+    host: hostInfo(),
     cold: {},
     warm: {},
   };

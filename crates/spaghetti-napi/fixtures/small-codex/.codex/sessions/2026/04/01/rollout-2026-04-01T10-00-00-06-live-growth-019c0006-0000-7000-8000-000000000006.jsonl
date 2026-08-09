@@ -1,0 +1,5 @@
+{"timestamp":"2026-04-01T10:00:37.000Z","type":"session_meta","payload":{"id":"019c0006-0000-7000-8000-000000000006","timestamp":"2026-04-01T10:00:37.000Z","cwd":"/home/fixture/project","originator":"codex_cli_rs","cli_version":"0.98.0","source":"cli","model_provider":"openai"}}
+{"timestamp":"2026-04-01T10:00:38.000Z","type":"turn_context","payload":{"cwd":"/home/fixture/project","approval_policy":"on-request","sandbox_policy":{"type":"read-only"},"model":"gpt-5.3-codex","personality":"pragmatic"}}
+{"timestamp":"2026-04-01T10:00:39.000Z","type":"event_msg","payload":{"type":"user_message","message":"Check whether the lockfile changed.","images":[]}}
+{"timestamp":"2026-04-01T10:00:40.000Z","type":"response_item","payload":{"type":"function_call","name":"shell_command","arguments":"{\"command\":\"git status --short\"}","call_id":"call_fixture_0001"}}
+{"timestamp":"2026-04-01T10:00:41.000Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call_fixture_0001","output":" M pnpm-lock.yaml"}}
