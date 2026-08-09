@@ -1,6 +1,6 @@
-{"timestamp":"2026-04-01T10:00:10.000Z","type":"session_meta","payload":{"id":"019c0002-0000-7000-8000-000000000002","timestamp":"2026-04-01T10:00:10.000Z","cwd":"/home/fixture/project","originator":"codex_cli_rs","cli_version":"0.98.0","source":"cli","model_provider":"openai"}}
-{"timestamp":"2026-04-01T10:00:11.000Z","type":"turn_context","payload":{"cwd":"/home/fixture/project","approval_policy":"on-request","sandbox_policy":{"type":"read-only"},"model":"gpt-5.3-codex","personality":"pragmatic"}}
-{"timestamp":"2026-04-01T10:00:12.000Z","type":"event_msg","payload":{"type":"user_message","message":"What does this function return on an empty slice?","images":[]}}
-{"timestamp":"2026-04-01T10:00:13.000Z","type":"event_msg","payload":{"type":"agent_message","message":"None — the iterator terminates before the first yield."}}
-{"timestamp":"2026-04-01T10:00:14.000Z","type":"event_msg","payload":{"type":"user_message","message":"Thanks.","images":[]}}
-{"timestamp":"2026-04-01T10:00:15.000Z","type":"event_msg","payload":{"type":"agent_message","message":"Any time."}}
+{"timestamp":"2026-04-01T10:00:11.000Z","type":"session_meta","payload":{"id":"019c0002-0000-7000-8000-000000000002","timestamp":"2026-04-01T10:00:11.000Z","cwd":"/home/fixture/project","originator":"codex_cli_rs","cli_version":"0.98.0","source":"cli","model_provider":"openai"}}
+{"timestamp":"2026-04-01T10:00:12.000Z","type":"turn_context","payload":{"cwd":"/home/fixture/project","approval_policy":"on-request","sandbox_policy":{"type":"read-only"},"model":"gpt-5.3-codex","personality":"pragmatic"}}
+{"timestamp":"2026-04-01T10:00:13.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"What does this function return on an empty slice?"}]}}
+{"timestamp":"2026-04-01T10:00:14.000Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"None — the iterator terminates before the first yield."}],"phase":"commentary"}}
+{"timestamp":"2026-04-01T10:00:15.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Thanks."}]}}
+{"timestamp":"2026-04-01T10:00:16.000Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Any time."}],"phase":"commentary"}}

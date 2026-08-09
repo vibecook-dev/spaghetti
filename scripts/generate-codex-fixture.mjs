@@ -106,11 +106,48 @@ function developerPreamble(text) {
   };
 }
 
+/**
+ * A user turn.
+ *
+ * This must be a `response_item`, not the `event_msg/user_message` that real
+ * Codex *also* emits. Both appear in a real rollout — 18 real sessions carried
+ * 747 `response_item` messages against 570 `event_msg` projections — but the
+ * extractor deliberately keeps only the canonical `response_item` and skips
+ * the UI projection, or every turn would be indexed twice.
+ *
+ * The first version of this generator emitted only the `event_msg` form, so
+ * no fixture produced a user or assistant row at all and there was nothing for
+ * `last_token_usage` to attribute onto. The token-attribution fixtures tested
+ * nothing (RFC 008 Phase 3A).
+ */
 function userMessage(text) {
-  return { timestamp: ts(), type: 'event_msg', payload: { type: 'user_message', message: text, images: [] } };
+  return {
+    timestamp: ts(),
+    type: 'response_item',
+    payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text }] },
+  };
 }
 
+/** An assistant turn — the row `last_token_usage` is attributed onto. */
 function assistantMessage(text) {
+  return {
+    timestamp: ts(),
+    type: 'response_item',
+    payload: {
+      type: 'message',
+      role: 'assistant',
+      content: [{ type: 'output_text', text }],
+      phase: 'commentary',
+    },
+  };
+}
+
+/**
+ * The UI projection of a turn. Real Codex emits these alongside the canonical
+ * record; the extractor skips them. Kept so at least one fixture proves the
+ * skip still holds and turns are not double-counted.
+ */
+function agentMessageEvent(text) {
   return { timestamp: ts(), type: 'event_msg', payload: { type: 'agent_message', message: text } };
 }
 
@@ -180,6 +217,8 @@ function officialPerTurn(id) {
     turnContext(),
     userMessage('Rename the parser module.'),
     assistantMessage('Renamed it and updated the two imports.'),
+    // The UI projection of the same turn. Must not become a second row.
+    agentMessageEvent('Renamed it and updated the two imports.'),
     tokenCountLast(usage(120, 40), usage(120, 40)),
     userMessage('Now add a test.'),
     assistantMessage('Added one covering the rename.'),
@@ -262,6 +301,76 @@ function liveGrowth(id) {
   ];
 }
 
+
+/**
+ * 07 — un-attributed first turn, official count arriving only later.
+ *
+ * The mirror of 04, and the harder direction: a turn-aware policy has to
+ * decide what the later official value covers. If `last_token_usage` covers
+ * only its own turn, turn 1 stays uncovered and is estimable; if the estimator
+ * instead reads the arrival of *any* official count as "this session is
+ * attributed", turn 1 is silently left at zero.
+ */
+function unattributedThenOfficial(id) {
+  return [
+    sessionMeta(id),
+    turnContext(),
+    userMessage('Start the migration.'),
+    assistantMessage('Migrated the first two tables.'),
+    userMessage('Continue with the rest.'),
+    assistantMessage('Done — the remaining four are migrated.'),
+    tokenCountLast(usage(150, 60), usage(150, 60)),
+  ];
+}
+
+/**
+ * 08 — several token_count events for one assistant turn.
+ *
+ * Real Codex emits a token_count per model response, and a single turn can
+ * produce more than one. Whether the last wins or they accumulate changes the
+ * stored value, so the policy has to say which.
+ */
+function multipleCountsOneAssistant(id) {
+  return [
+    sessionMeta(id),
+    turnContext(),
+    userMessage('Refactor the reader.'),
+    assistantMessage('Refactored, and the tests still pass.'),
+    tokenCountLast(usage(80, 20), usage(80, 20)),
+    tokenCountLast(usage(45, 15), usage(125, 35)),
+  ];
+}
+
+/**
+ * 09 — an assistant-only tail: a turn with no user record before it.
+ *
+ * Nothing precedes the assistant, so official input tokens on it cannot be
+ * covering a user record. A turn-aware policy must not look for one.
+ */
+function assistantOnlyTail(id) {
+  return [
+    sessionMeta(id),
+    turnContext(),
+    assistantMessage('Continuing from the previous session.'),
+    tokenCountLast(usage(60, 25), usage(60, 25)),
+  ];
+}
+
+/**
+ * 10 — a user-only tail: a user turn the model never answered.
+ *
+ * There is no assistant row to attribute onto, so any official count that
+ * arrives has nowhere to go. Distinguishing this from "not processed yet" is
+ * one of the Phase 3A exit-gate requirements.
+ */
+function userOnlyTail(id) {
+  return [
+    sessionMeta(id),
+    turnContext(),
+    userMessage('Are the migrations reversible?'),
+  ];
+}
+
 // ─── Emit ──────────────────────────────────────────────────────────────────
 
 const SESSIONS = [
@@ -271,6 +380,10 @@ const SESSIONS = [
   ['04-mixed-coverage', '019c0004-0000-7000-8000-000000000004', mixedCoverage],
   ['05-empty-internal', '019c0005-0000-7000-8000-000000000005', emptyInternal],
   ['06-live-growth', '019c0006-0000-7000-8000-000000000006', liveGrowth],
+  ['07-unattributed-then-official', '019c0007-0000-7000-8000-000000000007', unattributedThenOfficial],
+  ['08-multiple-counts-one-assistant', '019c0008-0000-7000-8000-000000000008', multipleCountsOneAssistant],
+  ['09-assistant-only-tail', '019c0009-0000-7000-8000-000000000009', assistantOnlyTail],
+  ['10-user-only-tail', '019c0010-0000-7000-8000-000000000010', userOnlyTail],
 ];
 
 for (const [label, id, build] of SESSIONS) {
