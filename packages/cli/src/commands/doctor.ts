@@ -1,6 +1,5 @@
 /**
- * Doctor command — text health check for spaghetti, its plugins, and
- * related data paths.
+ * Doctor command — text health check for spaghetti and its data paths.
  *
  * The data is gathered by `collectDoctorReport()` in lib/doctor-report.ts
  * so the same snapshot can be rendered by the TUI's DoctorView.
@@ -8,14 +7,13 @@
 
 import { theme } from '../lib/color.js';
 import {
-  PLUGIN_STATUS_LABEL,
   collectDoctorReport,
   formatBytes,
-  formatRelative,
-  pluginStatusKind,
+  leftoverLines,
+  leftoverManualCommands,
   tildify,
   type DoctorReport,
-  type PluginStatusKind,
+  type LeftoverKind,
 } from '../lib/doctor-report.js';
 
 const OK = theme.success('✓');
@@ -37,16 +35,27 @@ function heading(title: string): string {
   return `${INDENT}${theme.heading(title)}`;
 }
 
-function statusIconAndText(kind: PluginStatusKind): { icon: string; text: string } {
+function colorForLeftover(kind: LeftoverKind, detail: string): string {
   switch (kind) {
-    case 'ok':
-      return { icon: OK, text: theme.success(PLUGIN_STATUS_LABEL.ok) };
-    case 'disabled':
-      return { icon: WARN, text: theme.warning(PLUGIN_STATUS_LABEL.disabled) };
-    case 'path-missing':
-      return { icon: WARN, text: theme.warning(PLUGIN_STATUS_LABEL['path-missing']) };
-    case 'not-installed':
-      return { icon: BAD, text: theme.error(PLUGIN_STATUS_LABEL['not-installed']) };
+    case 'clean':
+      return theme.success(detail);
+    case 'leftover':
+    case 'source-mismatch':
+      return theme.warning(detail);
+    case 'unknown':
+      return theme.error(detail);
+  }
+}
+
+function leftoverIcon(kind: LeftoverKind): string {
+  switch (kind) {
+    case 'clean':
+      return OK;
+    case 'leftover':
+    case 'source-mismatch':
+      return WARN;
+    case 'unknown':
+      return BAD;
   }
 }
 
@@ -71,10 +80,9 @@ function renderReport(report: DoctorReport): string {
   }
   lines.push(row(env.settings.exists ? OK : WARN, 'settings.json', tildify(env.settings.path)));
   lines.push(row(env.pluginsDir.exists ? OK : WARN, 'plugins dir', tildify(env.pluginsDir.path)));
-  lines.push(sub('Claude Code plugins only (hooks / channel)'));
   lines.push('');
 
-  // ─── Index & live (Plane 1 / 2 / 3) ─────────────────────────────────
+  // ─── Index & live (Plane 1 / 2) ─────────────────────────────────────
   const ix = report.indexLive;
   lines.push(heading('Index & live'));
   const engineLabel =
@@ -103,48 +111,16 @@ function renderReport(report: DoctorReport): string {
   lines.push(sub(tildify(ix.activeSessionsDir)));
   lines.push('');
 
-  // ─── Plugins ────────────────────────────────────────────────────────
-  lines.push(heading('Plugins'));
-  for (const p of report.plugins) {
-    const kind = pluginStatusKind(p.state);
-    const { icon, text } = statusIconAndText(kind);
-    const version = p.state.version ? theme.muted(`v${p.state.version}`) : '';
-    lines.push(row(icon, p.name, `${text}${version ? '  ' + version : ''}`));
-    lines.push(sub(p.description));
-    if (kind === 'not-installed') {
-      lines.push(sub(theme.accent(`→ spag plugin install ${p.name}`)));
-    } else if (kind === 'disabled') {
-      lines.push(sub('→ enable in ~/.claude/settings.json (enabledPlugins)'));
-    } else if (kind === 'path-missing' && p.state.installPath) {
-      lines.push(sub(`path: ${tildify(p.state.installPath)}`));
-    }
+  // ─── Retired Claude Code plugins (RFC 007) ──────────────────────────
+  lines.push(heading('Claude Code plugins'));
+  lines.push(sub('read-only — these plugins were removed from spaghetti'));
+  for (const line of leftoverLines(report.leftovers)) {
+    lines.push(row(leftoverIcon(line.kind), line.label, colorForLeftover(line.kind, line.detail)));
   }
-  lines.push('');
-
-  // ─── Hook events ────────────────────────────────────────────────────
-  lines.push(heading('Hook events'));
-  const he = report.hookEvents;
-  if (he.kind === 'ok') {
-    lines.push(row(OK, 'events file', tildify(he.path)));
-    lines.push(sub(`${he.count.toLocaleString()} event(s), updated ${formatRelative(he.mtimeMs)}`));
-  } else if (he.kind === 'missing') {
-    lines.push(row(BAD, 'events file', theme.error('none')));
-    lines.push(sub(`expected at ${tildify(he.path)}`));
-    lines.push(sub(theme.accent('→ spag plugin install spaghetti-hooks')));
-  } else {
-    lines.push(row(BAD, 'events file', theme.error(`read error: ${he.message}`)));
-  }
-  lines.push('');
-
-  // ─── Channel sessions ───────────────────────────────────────────────
-  lines.push(heading('Channel sessions'));
-  const cs = report.channelSessions;
-  if (cs.kind === 'ok') {
-    lines.push(row(OK, 'sessions dir', tildify(cs.path)));
-    lines.push(sub(`${cs.activeCount} active session file(s)`));
-  } else {
-    lines.push(row(DOT, 'sessions dir', theme.muted(tildify(cs.path))));
-    lines.push(sub('not created yet — start a Claude Code session with spaghetti-channel'));
+  const manual = leftoverManualCommands(report.leftovers);
+  if (manual.length > 0) {
+    lines.push(sub('remove with:'));
+    for (const command of manual) lines.push(sub(theme.accent(command)));
   }
   lines.push('');
 

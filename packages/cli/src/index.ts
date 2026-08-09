@@ -25,11 +25,6 @@ import { planCommand } from './commands/plan.js';
 import type { PlanOptions } from './commands/plan.js';
 import { exportCommand } from './commands/export.js';
 import type { ExportOptions } from './commands/export.js';
-import { hooksCommand } from './commands/hooks.js';
-import type { HooksOptions } from './commands/hooks.js';
-import { chatCommand } from './commands/chat.js';
-import type { ChatOptions } from './commands/chat.js';
-import { pluginCommand } from './commands/plugin.js';
 import { doctorCommand } from './commands/doctor.js';
 import { engineCommand } from './commands/engine.js';
 import { theme } from './lib/color.js';
@@ -83,10 +78,7 @@ export function createProgram(): Command {
     { name: 'subagents', alias: 'sub', description: 'View subagents' },
     { name: 'plan', alias: 'pl', description: 'View session plan' },
     { name: 'export', alias: 'x', description: 'Export project data' },
-    { name: 'hooks', alias: 'h', description: 'View hook events' },
-    { name: 'chat', alias: 'c', description: 'Chat with active Claude Code sessions' },
-    { name: 'plugin', alias: '', description: 'Manage spaghetti Claude Code plugins' },
-    { name: 'doctor', alias: '', description: 'Health check for spaghetti, plugins, and data paths' },
+    { name: 'doctor', alias: '', description: 'Health check for spaghetti and its data paths' },
     { name: 'engine', alias: '', description: 'Show or switch the active ingest engine (ts | rs)' },
     { name: 'uninstall', alias: '', description: 'Show uninstall instructions' },
     { name: 'update', alias: '', description: 'Check for updates and install the latest version' },
@@ -347,65 +339,9 @@ export function createProgram(): Command {
 
   program.addCommand(exportCmd);
 
-  // Hooks command (does not need SpaghettiAPI — reads JSONL directly)
-  const hooksCmd = new Command('hooks')
-    .alias('h')
-    .description('View captured hook events')
-    .option('-f, --follow', 'Stream events in real-time (like tail -f)')
-    .option('--filter <type>', 'Filter by hook event name (e.g., PreToolUse)')
-    .option('-l, --limit <n>', 'Show last N events (default: 50)', parseInt)
-    .option('--json', 'Output as JSON')
-    .option('--clear', 'Clear all recorded events')
-    .action(async (cmdOpts: HooksOptions) => {
-      await hooksCommand({
-        follow: cmdOpts.follow,
-        filter: cmdOpts.filter,
-        limit: cmdOpts.limit,
-        json: cmdOpts.json,
-        clear: cmdOpts.clear,
-      });
-    });
-
-  program.addCommand(hooksCmd);
-
-  // Chat command (does not need SpaghettiAPI — talks to channel WebSocket servers)
-  const chatCmd = new Command('chat')
-    .alias('c')
-    .description('Chat with active Claude Code sessions')
-    .argument('[message]', 'Message to send (requires --session)')
-    .option('-f, --follow', 'Stream messages in real-time (like tail -f)')
-    .option('-s, --session <id>', 'Target session UUID prefix or index')
-    .option('-a, --all', 'Apply to all sessions (default for follow)')
-    .option('-l, --limit <n>', 'History entries to show before following', parseInt)
-    .option('--json', 'Output as JSON')
-    .option('--cleanup', 'Remove stale session files')
-    .action(async (message: string | undefined, cmdOpts: ChatOptions) => {
-      await chatCommand(message, {
-        follow: cmdOpts.follow,
-        session: cmdOpts.session,
-        all: cmdOpts.all,
-        limit: cmdOpts.limit,
-        json: cmdOpts.json,
-        cleanup: cmdOpts.cleanup,
-      });
-    });
-
-  program.addCommand(chatCmd);
-
-  // Plugin command (does not need SpaghettiAPI)
-  const pluginCmd = new Command('plugin')
-    .description('Manage spaghetti Claude Code plugins (spaghetti-hooks, spaghetti-channel)')
-    .argument('<action>', 'Action: install, uninstall, status')
-    .argument('[plugin]', 'Target plugin name (default: all spaghetti plugins)')
-    .action(async (action: string, target: string | undefined) => {
-      await pluginCommand(action, target);
-    });
-
-  program.addCommand(pluginCmd);
-
   // Doctor command (does not need SpaghettiAPI)
   const doctorCmd = new Command('doctor')
-    .description('Health check for spaghetti, its plugins, and related data paths')
+    .description('Health check for spaghetti and its related data paths')
     .action(async () => {
       await doctorCommand(VERSION);
     });

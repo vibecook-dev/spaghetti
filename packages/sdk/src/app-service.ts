@@ -43,14 +43,10 @@ import type { SessionSummaryData, ProjectSummaryData } from './data/summary-type
 import type { TeamDirectory } from './types/index.js';
 import type { SpaghettiLive } from './live/spaghetti-live.js';
 import { createSpaghettiLive } from './live/spaghetti-live.js';
-import type { SpaghettiRuntime } from './runtime/spaghetti-runtime.js';
-import { createSpaghettiRuntime } from './runtime/spaghetti-runtime.js';
-import type { RuntimeBridge } from './planes/runtime-bridge.js';
 import type { ErrorSink } from './io/error-sink.js';
 
 class SpaghettiAppService extends EventEmitter implements SpaghettiAPI {
   private dataService: AgentDataService;
-  private runtimeBridge: RuntimeBridge | undefined;
 
   /**
    * Public `api.live` handle — present only when the lifecycle owner
@@ -60,16 +56,9 @@ class SpaghettiAppService extends EventEmitter implements SpaghettiAPI {
    */
   readonly live?: SpaghettiLive;
 
-  /**
-   * Public `api.runtime` handle — Plane 3 (hooks + channels). Present
-   * when the factory passed a RuntimeBridge (default create path).
-   */
-  readonly runtime?: SpaghettiRuntime;
-
-  constructor(dataService: AgentDataService, errorSink?: ErrorSink, runtimeBridge?: RuntimeBridge) {
+  constructor(dataService: AgentDataService, errorSink?: ErrorSink) {
     super();
     this.dataService = dataService;
-    this.runtimeBridge = runtimeBridge;
 
     this.dataService.on('progress', (data) => this.emit('progress', data));
     this.dataService.on('ready', (data) => this.emit('ready', data));
@@ -90,10 +79,6 @@ class SpaghettiAppService extends EventEmitter implements SpaghettiAPI {
         this.live = createSpaghettiLive(getStore(), liveWatch, errorSink);
       }
     }
-
-    if (runtimeBridge) {
-      this.runtime = createSpaghettiRuntime(runtimeBridge);
-    }
   }
 
   async initialize(): Promise<void> {
@@ -109,15 +94,10 @@ class SpaghettiAppService extends EventEmitter implements SpaghettiAPI {
   }
 
   /**
-   * C3.4: awaitable teardown. Stops runtime watchers, then delegates to
-   * `shutdownAsync` when the underlying data-service exposes it.
+   * C3.4: awaitable teardown. Delegates to `shutdownAsync` when the
+   * underlying data-service exposes it.
    */
   async dispose(): Promise<void> {
-    try {
-      this.runtimeBridge?.stop();
-    } catch {
-      /* ignore */
-    }
     const async_ = this.dataService.shutdownAsync?.bind(this.dataService);
     if (async_) {
       await async_();
@@ -441,10 +421,6 @@ function toSessionListItem(data: SessionSummaryData): SessionListItem {
   };
 }
 
-export function createSpaghettiAppService(
-  dataService: AgentDataService,
-  errorSink?: ErrorSink,
-  runtimeBridge?: RuntimeBridge,
-): SpaghettiAPI {
-  return new SpaghettiAppService(dataService, errorSink, runtimeBridge);
+export function createSpaghettiAppService(dataService: AgentDataService, errorSink?: ErrorSink): SpaghettiAPI {
+  return new SpaghettiAppService(dataService, errorSink);
 }

@@ -21,14 +21,11 @@ export function defaultSpaghettiStateDir(): string {
 }
 
 /** Build the path map for a Codex installation. */
-export function buildCodexPaths(rootDir: string, stateDir: string): AgentSourcePaths {
+export function buildCodexPaths(rootDir: string): AgentSourcePaths {
   return {
     // sessions/YYYY/MM/DD/rollout-*.jsonl
     sessionsDir: path.join(rootDir, 'sessions'),
     settingsFile: path.join(rootDir, 'config.toml'),
     // Spaghetti-owned state (source-independent).
-    hookEventsFile: path.join(stateDir, 'hooks', 'events.jsonl'),
-    channelSessionsDir: path.join(stateDir, 'channel', 'sessions'),
-    channelMessagesDir: path.join(stateDir, 'channel', 'messages'),
   };
 }

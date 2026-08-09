@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>CLI Commands — Spaghetti</title>
-  <meta name="description" content="Spaghetti CLI command reference for multi-agent history: projects, sessions, messages, search, stats, export, hooks, chat, doctor, engine, and more." />
+  <meta name="description" content="Spaghetti CLI command reference for multi-agent history: projects, sessions, messages, search, stats, export, doctor, engine, and more." />
   <meta name="theme-color" content="#050607" />
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%232dd4bf'/%3E%3Ctext x='16' y='22' text-anchor='middle' font-family='monospace' font-size='14' font-weight='700' fill='%23042f2e'%3Esp%3C/text%3E%3C/svg%3E" />
   <script>
@@ -299,55 +299,6 @@ spag doctor</code></pre>
         <div class="cmd-examples">
           <code>spag export . --format markdown -o session.md</code>
           <code>spag x spaghetti -s latest --include-tools</code>
-        </div>
-      </article>
-
-      <article class="cmd-detail" id="hooks">
-        <div class="cmd-detail-header">
-          <h3>spag hooks</h3>
-          <span class="alias">alias: h</span>
-        </div>
-        <p>View Claude Code hook events captured by the Spaghetti hooks plugin. Does not require a full index rebuild.</p>
-        <ul class="cmd-flags">
-          <li><code>-f, --follow</code><span>Stream like <code>tail -f</code></span></li>
-          <li><code>--filter &lt;type&gt;</code><span>e.g. PreToolUse</span></li>
-          <li><code>-l, --limit &lt;n&gt;</code><span>Last N events (default 50)</span></li>
-          <li><code>--clear</code><span>Clear recorded events</span></li>
-          <li><code>--json</code><span>JSON output</span></li>
-        </ul>
-        <div class="cmd-examples">
-          <code>spag hooks --follow</code>
-          <code>spag h --filter PreToolUse --limit 100</code>
-        </div>
-      </article>
-
-      <article class="cmd-detail" id="chat">
-        <div class="cmd-detail-header">
-          <h3>spag chat [message]</h3>
-          <span class="alias">alias: c</span>
-        </div>
-        <p>Talk to active Claude Code sessions via the channels plugin (loopback WebSocket). Requires the channel plugin to be installed and a live session.</p>
-        <ul class="cmd-flags">
-          <li><code>-f, --follow</code><span>Stream messages in real time</span></li>
-          <li><code>-s, --session &lt;id&gt;</code><span>Target session UUID prefix or index</span></li>
-          <li><code>-a, --all</code><span>Apply to all sessions</span></li>
-          <li><code>-l, --limit &lt;n&gt;</code><span>History entries before follow</span></li>
-          <li><code>--cleanup</code><span>Remove stale session discovery files</span></li>
-        </ul>
-        <div class="cmd-examples">
-          <code>spag chat --follow</code>
-          <code>spag c -s a3f1 "what's the status?"</code>
-        </div>
-      </article>
-
-      <article class="cmd-detail" id="plugin">
-        <div class="cmd-detail-header">
-          <h3>spag plugin &lt;action&gt; [plugin]</h3>
-        </div>
-        <p>Install, uninstall, or check Spaghetti’s Claude Code plugins (hooks, channels).</p>
-        <div class="cmd-examples">
-          <code>spag plugin list</code>
-          <code>spag plugin install hooks</code>
         </div>
       </article>
 

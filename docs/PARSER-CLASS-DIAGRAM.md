@@ -487,6 +487,6 @@ classDiagram
 
 - Type modules under `packages/sdk/src/types/` and `crates/spaghetti-napi/src/types/` (see `PARSER-PIPELINE.md` for the full type inventory).
 - The React adapter (`packages/sdk/src/react/`) — pure consumption, no parsing or live logic.
-- The channel plugin (`packages/claude-code-channels-plugin`) and hooks plugin (`packages/claude-code-hooks-plugin`) — separate MCP-layer concerns. The `io/channel-*` and `io/hook-event-watcher.ts` modules they integrate with are also omitted.
+- (Removed 2026-08-08 by RFC 007: the channel and hooks plugins, and the `io/channel-*` / `io/hook-event-watcher.ts` modules they integrated with, no longer exist.)
 - The legacy `data/segment-store.ts` / `data/segment-types.ts` shims — kept for backwards-compatibility export surface, not used by the current pipeline.
 - App-level wiring (`apps/` / CLI / Electron) — they instantiate `createSpaghettiService` and consume `SpaghettiAPI`; no engine internals.

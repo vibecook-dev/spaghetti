@@ -1,5 +1,38 @@
 # @vibecook/spaghetti-core
 
+## Removed in 0.6.0
+
+The runtime surface is gone. There is no replacement for hook or channel
+streaming; transcript ingest, query, and live updates are unaffected.
+
+- `SpaghettiAPI.runtime`, `SpaghettiRuntime`, `createSpaghettiRuntime`
+- `createRuntimeBridge`, `RuntimeBridge`, `CreateRuntimeBridgeOptions`
+- `RuntimeEvent` and its three guards
+- `createHookEventWatcher`, `getDefaultHookEventsPath`, and their types
+- `createChannelRegistry`, `createChannelClient`, `createChannelManager`, and their types
+- the `types/spaghetti/` hook and channel wire types, plus the
+  `types/hook-events.js` and `types/channel-messages.js` shims
+- `AgentSourcePaths.hookEventsFile`, `.channelSessionsDir`, `.channelMessagesDir`
+- `ws` and `@types/ws`
+- `buildClaudeCodePaths` / `buildCodexPaths` / `buildGrokPaths` lost their now-unused
+  `stateDir` parameter
+
+**Retained:** `listActiveSessionsFromDir`, `isProcessAlive`,
+`ListActiveSessionsOptions`, `ActiveSessionFile`, and
+`AgentSourcePaths.sessionsDir`. They moved from `planes/` to
+`sources/claude-code/`; the public export names are unchanged.
+
+```ts
+// Before
+const sessions = api.runtime?.listActiveSessions({ requireAlive: true }) ?? [];
+
+// After
+const source = createClaudeCodeSource();
+const sessions = listActiveSessionsFromDir(source.paths.sessionsDir, { requireAlive: true });
+```
+
+See [RFC 007](../../docs/rfcs/007-retire-runtime-bridge.md).
+
 ## 0.4.0
 
 ### Minor Changes

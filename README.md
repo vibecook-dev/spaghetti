@@ -138,7 +138,7 @@ await api.dispose();
 - [CLI README](packages/cli/README.md)
 - [SDK README](packages/sdk/README.md)
 - [Releasing guide](RELEASING.md)
-- [Three-plane architecture](docs/THREE-PLANE-INGEST-ARCHITECTURE.md)
+- [Two-plane architecture](docs/TWO-PLANE-INGEST-ARCHITECTURE.md)
 
 ## License
 

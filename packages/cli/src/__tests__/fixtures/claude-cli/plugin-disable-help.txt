@@ -1,0 +1,9 @@
+Usage: claude plugin disable [options] [plugin]
+
+Disable an enabled plugin
+
+Options:
+  -a, --all            Disable all enabled plugins
+  -h, --help           Display help for command
+  -s, --scope <scope>  Installation scope: user, project, local (default:
+                       auto-detect)

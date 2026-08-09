@@ -1,0 +1,9 @@
+Usage: claude plugin marketplace remove|rm [options] <name>
+
+Remove a configured marketplace
+
+Options:
+  -h, --help       Display help for command
+  --scope <scope>  Remove the marketplace declaration from a specific settings
+                   scope: user, project, or local. Omit to remove it from every
+                   scope.

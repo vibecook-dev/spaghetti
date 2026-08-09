@@ -1,7 +1,0 @@
-{
-  "name": "spaghetti-channel",
-  "version": "1.0.0",
-  "description": "Universal chat bridge for Claude Code sessions — WebSocket server that connects external clients (TUI, web, mobile) to running Claude Code sessions with permission relay support",
-  "author": { "name": "James Yong" },
-  "keywords": ["channel", "chat", "websocket", "spaghetti"]
-}

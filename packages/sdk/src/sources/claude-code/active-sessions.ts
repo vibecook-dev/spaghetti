@@ -1,14 +1,16 @@
 /**
  * Active Claude Code sessions — reads `~/.claude/sessions/{pid}.json`.
  *
- * Plane 3 / RuntimeBridge support. Types: `ActiveSessionFile` in
- * `types/toplevel-files-data.ts`.
+ * Owned by the Claude Code source, not by an ingest plane: the discovery
+ * files are part of Claude Code's on-disk product layout, and doctor /
+ * index-live reporting reads them independently of any streaming surface.
+ * Types: `ActiveSessionFile` in `types/claude/toplevel-files-data.ts`.
  */
 
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-import type { ActiveSessionFile } from '../types/claude/toplevel-files-data.js';
+import type { ActiveSessionFile } from '../../types/claude/toplevel-files-data.js';
 
 /**
  * True if the OS still has a process with this pid (signal 0 probe).

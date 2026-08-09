@@ -29,12 +29,12 @@
 | Surface | Notes |
 |---|---|
 | Teams | Cold TS parse; no FTS; no RS; no live watch |
-| Active PID sessions | `api.runtime` only |
+| Active PID sessions | `listActiveSessionsFromDir` only |
 | Plugins / statsig / session-env | Limited readers |
 
 ## Ignored (documented)
 
-debug, telemetry, paste-cache, backups (type only), shell-snapshots, cache, ide, root CLAUDE.md, hook *scripts* (hook *events* are Spaghetti plugin state).
+debug, telemetry, paste-cache, backups (type only), shell-snapshots, cache, ide, root CLAUDE.md, hook *scripts* (hook *event* capture was removed in RFC 007).
 
 ## Out of scope
 

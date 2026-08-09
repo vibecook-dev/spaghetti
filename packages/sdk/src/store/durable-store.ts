@@ -5,7 +5,7 @@
  * and AgentDataStore (read cache + change emit). Construct via
  * {@link createDurableStore} so factories never open a second connection.
  *
- * See `docs/THREE-PLANE-INGEST-ARCHITECTURE.md`.
+ * See `docs/TWO-PLANE-INGEST-ARCHITECTURE.md`.
  */
 
 import type { ErrorSink } from '../io/error-sink.js';

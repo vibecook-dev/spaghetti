@@ -1,11 +1,10 @@
 /**
  * AgentSource — adapter boundary for a local agent product (Plane 0).
  *
- * Claude Code is the only source today. Future agents plug in by
- * implementing this interface; ingest planes read roots from here
- * instead of hardcoding `~/.claude` / `~/.spaghetti`.
+ * Claude Code, Codex, and Grok implement this interface; ingest planes
+ * read roots from here instead of hardcoding `~/.claude` / `~/.spaghetti`.
  *
- * See `docs/THREE-PLANE-INGEST-ARCHITECTURE.md` and
+ * See `docs/TWO-PLANE-INGEST-ARCHITECTURE.md` and
  * `docs/PR-PLAN-THREE-PLANE-SHAPE.md`.
  */
 
@@ -130,12 +129,6 @@ export interface AgentSourcePaths {
    * Claude: `settings.json`; Codex/Grok: often `config.toml`.
    */
   settingsFile?: string;
-  /** Hook events JSONL (Spaghetti state), e.g. `~/.spaghetti/hooks/events.jsonl` */
-  hookEventsFile: string;
-  /** Channel session discovery dir, e.g. `~/.spaghetti/channel/sessions` */
-  channelSessionsDir: string;
-  /** Channel message history dir, e.g. `~/.spaghetti/channel/messages` */
-  channelMessagesDir: string;
 }
 
 /**

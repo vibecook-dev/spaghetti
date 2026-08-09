@@ -23,10 +23,13 @@ export {
   createClaudeCodeParser,
   createProjectParser,
   classifyClaudePath,
+  listActiveSessionsFromDir,
+  isProcessAlive,
   type ClaudeCodeSourceOptions,
   type ClaudeCodeAgentSource,
   type ClaudeCodeParser,
   type ClaudeCodeParserOptions,
+  type ListActiveSessionsOptions,
 } from './claude-code/index.js';
 export {
   createCodexSource,

@@ -60,7 +60,7 @@ export * from './api.js';
 export { createSpaghettiService, type SpaghettiServiceOptions } from './create.js';
 export { createSpaghettiAppService } from './app-service.js';
 
-// Agent sources (three-plane architecture — Claude Code today)
+// Agent sources (two-plane architecture — Claude Code, Codex, Grok)
 export type {
   AgentSource,
   AgentSourceId,
@@ -73,6 +73,9 @@ export {
   createClaudeCodeSource,
   defaultClaudeDir,
   defaultSpaghettiStateDir,
+  listActiveSessionsFromDir,
+  isProcessAlive,
+  type ListActiveSessionsOptions,
   type ClaudeCodeSourceOptions,
   createCodexSource,
   defaultCodexDir,
@@ -97,20 +100,7 @@ export {
   createLiveDiskIngest,
   type LiveDiskIngest,
   type LiveDiskIngestOptions,
-  createRuntimeBridge,
-  type RuntimeBridge,
-  type CreateRuntimeBridgeOptions,
-  listActiveSessionsFromDir,
-  isProcessAlive,
-  type ListActiveSessionsOptions,
 } from './planes/index.js';
-export type { RuntimeEvent } from './events/runtime-event.js';
-export {
-  isHookRuntimeEvent,
-  isChannelSessionsRuntimeEvent,
-  isSessionActiveRuntimeEvent,
-} from './events/runtime-event.js';
-export type { SpaghettiRuntime } from './runtime/spaghetti-runtime.js';
 
 // Native addon bridge (RFC 003)
 export {

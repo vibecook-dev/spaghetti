@@ -30,7 +30,7 @@
   "dependencies": {
     "@parcel/watcher": "^2.5.0",
     "@vibecook/spaghetti-sdk-native": "workspace:*",
-    "better-sqlite3": "^12.0.0",
+    "better-sqlite3": "^12.11.1",
     "chokidar": "^4.0.0",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
@@ -39,8 +39,7 @@
     "react-markdown": "^10.1.0",
     "react-syntax-highlighter": "^15.6.1",
     "remark-gfm": "^4.0.1",
-    "tailwind-merge": "^2.6.0",
-    "ws": "^8.18.0"
+    "tailwind-merge": "^2.6.0"
   },
   "peerDependencies": {
     "react": "^19.0.0",
@@ -60,7 +59,6 @@
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
     "@types/react-syntax-highlighter": "^15.5.13",
-    "@types/ws": "^8.5.0",
     "@vitejs/plugin-react": "^4.0.0",
     "esbuild": "^0.27.0",
     "react": "^19.0.0",

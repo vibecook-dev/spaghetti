@@ -8,21 +8,25 @@
  */
 
 import { execSync } from 'node:child_process';
-import { existsSync, readdirSync, statSync } from 'node:fs';
+import { existsSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import {
   createClaudeCodeSource,
-  createHookEventWatcher,
-  createRuntimeBridge,
   defaultDbPathForEngine,
-  getChannelSessionsDir,
   isNativeIngestEnabled,
+  listActiveSessionsFromDir,
   resolveActiveEngine,
   resolveEngine,
   type IngestEngine,
 } from '@vibecook/spaghetti-sdk';
-import { PLUGINS, PLUGINS_DIR, SETTINGS_PATH, getPluginState, type PluginState } from './plugins.js';
+import {
+  claudePaths,
+  createDefaultCommandRunner,
+  defaultClaudeHome,
+  probePluginLeftovers,
+  type PluginLeftoverReport,
+} from './plugin-leftovers.js';
 
 export const CLAUDE_DIR = join(homedir(), '.claude');
 export const CODEX_DIR = join(homedir(), '.codex');
@@ -53,20 +57,13 @@ export interface EnvironmentReport {
   pluginsDir: PathStatus;
 }
 
-export interface PluginReport {
-  name: string;
-  description: string;
-  state: PluginState;
-}
-
-export type HookEventsReport =
-  | { kind: 'ok'; path: string; count: number; mtimeMs: number }
-  | { kind: 'missing'; path: string }
-  | { kind: 'error'; message: string };
-
-export type ChannelSessionsReport =
-  | { kind: 'ok'; path: string; activeCount: number }
-  | { kind: 'absent'; path: string };
+/**
+ * Retired-plugin leftover state (RFC 007). Doctor renders this instead of a
+ * plugin health check: the plugins are gone from Spaghetti, so the only question
+ * is whether a trace of them is left in Claude Code, and whether we can prove it
+ * either way.
+ */
+export type PluginLeftoversReport = PluginLeftoverReport;
 
 /** Index + Plane 2/3 defaults (follow-up: "doctor shows live status"). */
 export interface IndexLiveReport {
@@ -92,9 +89,8 @@ export interface DoctorReport {
   version: string;
   environment: EnvironmentReport;
   indexLive: IndexLiveReport;
-  plugins: PluginReport[];
-  hookEvents: HookEventsReport;
-  channelSessions: ChannelSessionsReport;
+  /** RFC 007 — retiring-plugin leftovers, read-only. */
+  leftovers: PluginLeftoversReport;
 }
 
 /**
@@ -149,6 +145,7 @@ function collectAgentRoots(): AgentRootReport[] {
 }
 
 function collectEnvironment(): EnvironmentReport {
+  const paths = claudePaths(defaultClaudeHome());
   return {
     node: process.version,
     platform: process.platform,
@@ -156,34 +153,9 @@ function collectEnvironment(): EnvironmentReport {
     claudeBin: findClaudeBinary(),
     claudeDir: { path: CLAUDE_DIR, exists: existsSync(CLAUDE_DIR) },
     agentRoots: collectAgentRoots(),
-    settings: { path: SETTINGS_PATH, exists: existsSync(SETTINGS_PATH) },
-    pluginsDir: { path: PLUGINS_DIR, exists: existsSync(PLUGINS_DIR) },
+    settings: { path: paths.settings, exists: existsSync(paths.settings) },
+    pluginsDir: { path: paths.pluginsDir, exists: existsSync(paths.pluginsDir) },
   };
-}
-
-function collectHookEvents(): HookEventsReport {
-  try {
-    const watcher = createHookEventWatcher();
-    const path = watcher.getEventsPath();
-    if (!existsSync(path)) return { kind: 'missing', path };
-    const stats = statSync(path);
-    const history = watcher.getHistory();
-    return { kind: 'ok', path, count: history.length, mtimeMs: stats.mtimeMs };
-  } catch (err) {
-    return { kind: 'error', message: err instanceof Error ? err.message : String(err) };
-  }
-}
-
-function collectChannelSessions(): ChannelSessionsReport {
-  const path = getChannelSessionsDir();
-  if (!existsSync(path)) return { kind: 'absent', path };
-  let activeCount = 0;
-  try {
-    activeCount = readdirSync(path).filter((f) => f.endsWith('.json')).length;
-  } catch {
-    /* swallow — shown as 0 */
-  }
-  return { kind: 'ok', path, activeCount };
 }
 
 function collectIndexLive(): IndexLiveReport {
@@ -202,9 +174,9 @@ function collectIndexLive(): IndexLiveReport {
   }
 
   const source = createClaudeCodeSource();
-  const bridge = createRuntimeBridge(source);
-  const alive = bridge.listActiveSessions({ requireAlive: true });
-  const onDisk = bridge.listActiveSessions({ requireAlive: false });
+  const sessionsDir = source.paths.sessionsDir;
+  const alive = listActiveSessionsFromDir(sessionsDir, { requireAlive: true });
+  const onDisk = listActiveSessionsFromDir(sessionsDir, { requireAlive: false });
 
   return {
     preferredEngine,
@@ -216,24 +188,19 @@ function collectIndexLive(): IndexLiveReport {
     dbSizeBytes,
     liveDefaultLongLived: true,
     liveDefaultOneShot: false,
-    activeSessionsDir: bridge.activeSessionsDir(),
+    activeSessionsDir: sessionsDir,
     activeSessionsOnDisk: onDisk.length,
     activeSessionsAlive: alive.length,
   };
 }
 
 export function collectDoctorReport(version: string): DoctorReport {
+  const claudeHome = defaultClaudeHome();
   return {
     version,
     environment: collectEnvironment(),
     indexLive: collectIndexLive(),
-    plugins: PLUGINS.map((p) => ({
-      name: p.name,
-      description: p.description,
-      state: getPluginState(p.name),
-    })),
-    hookEvents: collectHookEvents(),
-    channelSessions: collectChannelSessions(),
+    leftovers: probePluginLeftovers({ claudeHome, runCommand: createDefaultCommandRunner() }),
   };
 }
 
@@ -259,18 +226,92 @@ export function formatRelative(ts: number): string {
   return `${Math.floor(diff / 86_400_000)}d ago`;
 }
 
-export type PluginStatusKind = 'ok' | 'disabled' | 'path-missing' | 'not-installed';
+// ─── Retired-plugin leftover presentation (RFC 007) ─────────────────────
 
-export function pluginStatusKind(state: PluginState): PluginStatusKind {
-  if (!state.installed) return 'not-installed';
-  if (!state.pathExists) return 'path-missing';
-  if (!state.enabled) return 'disabled';
-  return 'ok';
+export type LeftoverKind = 'clean' | 'leftover' | 'source-mismatch' | 'unknown';
+
+export interface LeftoverLine {
+  kind: LeftoverKind;
+  label: string;
+  detail: string;
 }
 
-export const PLUGIN_STATUS_LABEL: Record<PluginStatusKind, string> = {
-  ok: 'installed & enabled',
-  disabled: 'installed, disabled',
-  'path-missing': 'registered, path missing',
-  'not-installed': 'not installed',
-};
+/**
+ * Flatten a leftover report into renderable lines shared by the CLI text
+ * output and the Ink view. There are no install/enable calls to action — the
+ * only offered direction is removal, and only for state proven to be ours.
+ */
+export function leftoverLines(report: PluginLeftoversReport): LeftoverLine[] {
+  const lines: LeftoverLine[] = [];
+
+  for (const plugin of report.plugins) {
+    if (plugin.userInstall.status === 'unknown') {
+      lines.push({ kind: 'unknown', label: plugin.name, detail: unknownDetail(plugin.userInstall) });
+    } else if (plugin.userInstall.status === 'present') {
+      const record = plugin.userInstall.value;
+      lines.push({
+        kind: 'leftover',
+        label: plugin.name,
+        detail: `installed (user scope)${record.version ? ` v${record.version}` : ''}`,
+      });
+    }
+
+    if (plugin.userEnabled.status === 'unknown') {
+      lines.push({ kind: 'unknown', label: plugin.name, detail: unknownDetail(plugin.userEnabled) });
+    } else if (plugin.userEnabled.status === 'present' && plugin.userEnabled.value.enabled) {
+      lines.push({ kind: 'leftover', label: plugin.name, detail: 'enabled in user settings' });
+    }
+
+    if (plugin.nonUserInstalls.status === 'present') {
+      for (const record of plugin.nonUserInstalls.value) {
+        lines.push({
+          kind: 'leftover',
+          label: plugin.name,
+          detail: `installed in ${record.scope} scope — resolve manually`,
+        });
+      }
+    }
+  }
+
+  const marketplace = report.userMarketplace;
+  if (marketplace.status === 'unknown') {
+    lines.push({ kind: 'unknown', label: 'marketplace', detail: unknownDetail(marketplace) });
+  } else if (marketplace.status === 'present') {
+    lines.push(
+      marketplace.value.ownership === 'owned'
+        ? { kind: 'leftover', label: 'marketplace', detail: 'registered (user scope)' }
+        : {
+            kind: 'source-mismatch',
+            label: 'marketplace',
+            detail: `source ${marketplace.value.sourceDescription} is not this repository — resolve manually`,
+          },
+    );
+  }
+
+  if (lines.length === 0) {
+    lines.push({ kind: 'clean', label: 'plugins', detail: 'no leftovers' });
+  }
+  return lines;
+}
+
+function unknownDetail(result: { status: 'unknown'; input: string; reason: string } | unknown): string {
+  const r = result as { input?: string; reason?: string };
+  return `unknown — ${r.reason ?? 'could not determine'} (${r.input ?? 'unknown input'})`;
+}
+
+/** The manual commands doctor offers, for proven-ours state only. */
+export function leftoverManualCommands(report: PluginLeftoversReport): string[] {
+  const commands: string[] = [];
+  for (const plugin of report.plugins) {
+    if (plugin.userEnabled.status === 'present' && plugin.userEnabled.value.enabled) {
+      commands.push(`claude plugin disable --scope user ${plugin.id}`);
+    }
+    if (plugin.userInstall.status === 'present') {
+      commands.push(`claude plugin uninstall --scope user --keep-data ${plugin.id}`);
+    }
+  }
+  if (report.userMarketplace.status === 'present' && report.userMarketplace.value.ownership === 'owned') {
+    commands.push('claude plugin marketplace remove --scope user spaghetti');
+  }
+  return commands;
+}

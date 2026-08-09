@@ -5,7 +5,7 @@
  * This module names the boundary and maps AgentSource + DurableStore
  * into the options LifecycleOwner already understands.
  *
- * See `docs/THREE-PLANE-INGEST-ARCHITECTURE.md`.
+ * See `docs/TWO-PLANE-INGEST-ARCHITECTURE.md`.
  */
 
 import type { FileService } from '../io/file-service.js';

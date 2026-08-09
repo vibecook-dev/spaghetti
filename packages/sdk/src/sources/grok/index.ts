@@ -70,7 +70,7 @@ export function createGrokSource(options?: GrokSourceOptions): AgentSource {
     id: 'grok',
     rootDir,
     stateDir,
-    paths: buildGrokPaths(rootDir, stateDir),
+    paths: buildGrokPaths(rootDir),
     classify: (absPath: string) => classifyGrokPath(absPath, rootDir),
     messages: grokMessageExtractor,
   };

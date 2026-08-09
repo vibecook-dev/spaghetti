@@ -3,7 +3,7 @@
 **Status:** Proposed
 **Created:** 2026-07-13
 **Depends on:** step 1 (source dimension, schema v5 — shipped) · step 2 (classifier is a property of `AgentSource` — shipped)
-**Companion:** `docs/THREE-PLANE-INGEST-ARCHITECTURE.md` §8 (longer-term multi-agent)
+**Companion:** `docs/TWO-PLANE-INGEST-ARCHITECTURE.md` §7 (longer-term multi-agent)
 **Empirical grounding:** `docs/rfcs/006-appendix-agent-survey.md` — a five-agent survey (Codex, Gemini CLI, Grok Build, OpenCode, Cursor) that inspected real installs / primary source. It confirms the thin-core direction and forces the amendments folded into §3.1, §4, §6 and §8 below. Read it before implementing.
 
 ---

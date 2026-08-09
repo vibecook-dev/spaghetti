@@ -12,7 +12,6 @@ import type {
 import type { TokenUsageSummary } from './data/summary-types.js';
 import type { SessionMessage, TeamDirectory } from './types/index.js';
 import type { SpaghettiLive } from './live/spaghetti-live.js';
-import type { SpaghettiRuntime } from './runtime/spaghetti-runtime.js';
 import type {
   SubagentTimelinePage,
   SubagentTimelinePageRequest,
@@ -314,15 +313,7 @@ export interface SpaghettiAPI {
   readonly live?: SpaghettiLive;
 
   /**
-   * Runtime surface (Plane 3) — hooks + channel session discovery.
-   * Present when built via `createSpaghettiService` (always for the
-   * default factory path). Lazy-starts watchers on first subscribe.
-   * See `docs/THREE-PLANE-INGEST-ARCHITECTURE.md` §6.
-   */
-  readonly runtime?: SpaghettiRuntime;
-
-  /**
-   * Awaitable teardown. Stops live disk + runtime pipelines, drains
+   * Awaitable teardown. Stops the live disk pipeline, drains
    * in-flight writes, disposes subscribers, and closes SQLite. Prefer
    * this to `shutdown()` when the caller can `await` — `shutdown()` is
    * fire-and-forget.
