@@ -8,7 +8,7 @@
 //! [`crossbeam_channel::Sender`].
 //!
 //! Parse errors inside an individual session or file are swallowed and
-//! re-emitted as [`IngestEvent::WorkerError`] — this matches the TS
+//! re-emitted as [`IngestEvent::RecordSkip`] — this matches the TS
 //! parser's behaviour of wrapping each sub-parse in its own `try/catch`.
 //! The only error the caller sees is a channel-send failure, which is
 //! fatal (the writer has gone away).
@@ -69,6 +69,15 @@ pub enum ParseError {
     /// bytes); clippy's `result_large_err` flags anything over ~128.
     #[error("event channel closed")]
     ChannelClosed(#[source] Box<SendError<IngestEvent>>),
+
+    /// The project cannot be trusted as a whole — its directory could not be
+    /// enumerated, or a file failed in a way that makes the remaining view
+    /// partial rather than merely incomplete.
+    ///
+    /// Distinct from a skipped record: this rolls the project back, where a
+    /// bad line leaves every other record in the project committed.
+    #[error("{path}: {message}")]
+    Fatal { path: String, message: String },
 }
 
 impl From<SendError<IngestEvent>> for ParseError {
@@ -92,10 +101,16 @@ impl ProjectParser {
 
     /// Parse a single project and push its [`IngestEvent`]s into `events`.
     ///
-    /// Errors surfaced by sub-parsers (bad JSON lines, missing files inside
-    /// a session) are emitted as [`IngestEvent::WorkerError`] rather than
-    /// returned, matching the TS parser's inline `try/catch` behaviour.
-    /// The only error returned is a fatal [`ParseError::ChannelClosed`].
+    /// Record-level failures (a bad JSON line, an unreadable session) are
+    /// emitted as [`IngestEvent::RecordSkip`] and do not stop the project.
+    /// Project-level failures return [`ParseError::Fatal`], which this
+    /// function converts into the terminal `ProjectFatal` + `ProjectAbort`
+    /// pair before returning.
+    ///
+    /// **Exactly one terminal event per started project.** The guard below is
+    /// the only place `ProjectComplete` or `ProjectAbort` is emitted, so no
+    /// early return can leave the writer holding an open transaction for a
+    /// project nobody finished (RFC 008 Phase 2).
     pub fn parse_project(
         &self,
         root_dir: &Path,
@@ -103,6 +118,40 @@ impl ProjectParser {
         events: &Sender<IngestEvent>,
     ) -> Result<(), ParseError> {
         let start = Instant::now();
+        let outcome = self.parse_project_body(root_dir, slug, events);
+
+        match &outcome {
+            Ok(()) => {
+                let duration_ms = u32::try_from(start.elapsed().as_millis()).unwrap_or(u32::MAX);
+                events.send(IngestEvent::ProjectComplete {
+                    slug: slug.to_owned(),
+                    duration_ms,
+                })?;
+            }
+            // The writer is gone; there is nobody left to tell. Sending here
+            // would just fail again and mask the original error.
+            Err(ParseError::ChannelClosed(_)) => {}
+            Err(ParseError::Fatal { path, message }) => {
+                let _ = events.send(IngestEvent::ProjectFatal {
+                    slug: slug.to_owned(),
+                    path: path.clone(),
+                    message: message.clone(),
+                });
+                let _ = events.send(IngestEvent::ProjectAbort {
+                    slug: slug.to_owned(),
+                });
+            }
+        }
+
+        outcome
+    }
+
+    fn parse_project_body(
+        &self,
+        root_dir: &Path,
+        slug: &str,
+        events: &Sender<IngestEvent>,
+    ) -> Result<(), ParseError> {
         let project_dir = root_dir.join("projects").join(slug);
 
         // 1. Read + parse sessions-index.json (or synthesise an empty one).
@@ -152,13 +201,8 @@ impl ProjectParser {
             parse_one_session(root_dir, &project_dir, slug, entry, events)?;
         }
 
-        // 6. Final project-complete marker
-        let duration_ms = u32::try_from(start.elapsed().as_millis()).unwrap_or(u32::MAX);
-        events.send(IngestEvent::ProjectComplete {
-            slug: slug.to_owned(),
-            duration_ms,
-        })?;
-
+        // The terminal event is emitted by `parse_project`'s guard, not here —
+        // see its doc comment.
         Ok(())
     }
 }
@@ -215,11 +259,14 @@ fn parse_one_session(
                 last_byte_position = byte_offset;
             }
             Err(parse_err) => {
-                // Mirror the TS parser: swallow the bad line but record it
-                // as a WorkerError so the orchestrator can surface it.
-                if let Err(e) = events.send(IngestEvent::WorkerError {
+                // Skip the record, keep the project. The path is the session
+                // file, which is what the fingerprint suppression keys on, so
+                // the file is re-read next run rather than being recorded as
+                // successfully ingested.
+                if let Err(e) = events.send(IngestEvent::RecordSkip {
                     slug: slug.to_owned(),
-                    error: format!("session {session_id} line {index}: {parse_err}"),
+                    path: file_path.to_string_lossy().into_owned(),
+                    message: format!("session {session_id} line {index}: {parse_err}"),
                 }) {
                     send_error = Some(e);
                 }
@@ -238,9 +285,14 @@ fn parse_one_session(
             last_byte_position = r.final_byte_position.max(last_byte_position);
         }
         Err(e) => {
-            events.send(IngestEvent::WorkerError {
+            // A mid-read failure costs this session, not the project: the
+            // messages already streamed above are real and other sessions in
+            // the project are unaffected. Withholding the fingerprint is what
+            // makes the truncated read retry.
+            events.send(IngestEvent::RecordSkip {
                 slug: slug.to_owned(),
-                error: format!("session {session_id} read error: {e}"),
+                path: file_path.to_string_lossy().into_owned(),
+                message: format!("session {session_id} read error: {e}"),
             })?;
         }
     }
@@ -1269,8 +1321,14 @@ mod tests {
         assert!(
             events
                 .iter()
-                .any(|ev| matches!(ev, IngestEvent::WorkerError { .. })),
-            "bad line should emit WorkerError"
+                .any(|ev| matches!(ev, IngestEvent::RecordSkip { .. })),
+            "bad line should emit RecordSkip"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|ev| matches!(ev, IngestEvent::ProjectComplete { .. })),
+            "a skipped record must still let its project complete"
         );
     }
 

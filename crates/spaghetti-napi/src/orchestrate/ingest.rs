@@ -48,7 +48,8 @@ use rayon::prelude::*;
 use rusqlite::{Connection, OpenFlags};
 
 use crate::claude::fingerprint::{self, FingerprintStore, SourceFingerprint};
-use crate::claude::project_parser::ProjectParser;
+use crate::claude::project_parser::{ParseError, ProjectParser};
+use crate::core::errors::{CollectedError, ErrorReport, Severity};
 use crate::core::event::IngestEvent;
 use crate::core::writer::{Writer, WriterStats};
 
@@ -93,16 +94,43 @@ pub struct IngestStats {
     pub sessions_processed: u32,
     pub messages_written: u32,
     pub subagents_written: u32,
-    /// Non-fatal errors collected during ingest — parse failures, missing
-    /// session files, etc.
+    /// Non-fatal errors collected during ingest, capped for display. Read
+    /// `error_count` for the real total — a caller that treats
+    /// `errors.length` as the count will silently under-report once more
+    /// than [`DISPLAY_CAP`](crate::core::errors::DISPLAY_CAP) inputs fail.
     pub errors: Vec<IngestError>,
+    /// Uncapped number of errors seen.
+    pub error_count: u32,
+    /// True when `errors` was truncated, i.e. `error_count > errors.len()`.
+    pub errors_truncated: bool,
 }
 
+/// One reported ingest failure. Matches `FrozenNativeIngestError` in
+/// `packages/sdk/src/native.ts`, frozen by RFC 008 Phase 0.
 #[napi(object)]
 #[derive(Debug, Clone)]
 pub struct IngestError {
-    pub slug: String,
+    /// Absent for `severity = "source"`, which by definition happened before
+    /// any project identity existed. Phase 0 made this optional precisely so
+    /// such failures need not invent a slug.
+    pub slug: Option<String>,
+    /// Always present — every surfaced error can name a file even when it
+    /// cannot name a project.
+    pub path: String,
+    /// One of `record-skip`, `project-fatal`, `source`.
+    pub severity: String,
     pub message: String,
+}
+
+impl From<&crate::core::errors::CollectedError> for IngestError {
+    fn from(e: &crate::core::errors::CollectedError) -> Self {
+        Self {
+            slug: e.slug.clone(),
+            path: e.path.clone(),
+            severity: e.severity.as_str().to_owned(),
+            message: e.message.clone(),
+        }
+    }
 }
 
 /// Progress snapshot for the optional on-progress callback. Fires once
@@ -209,6 +237,17 @@ fn resolve_parallelism(requested: Option<u32>) -> usize {
         None | Some(0) => default,
         Some(n) => (n as usize).clamp(1, MAX_PARALLELISM),
     }
+}
+
+/// What a writer thread hands back once the stream closes: the counters, and
+/// every failure it saw on the way.
+///
+/// Kept together because they must be read together — `stats` alone cannot
+/// tell a caller whether the run is trustworthy, which is exactly how a
+/// dropped project once passed for success.
+struct WriterOutcome {
+    stats: WriterStats,
+    errors: ErrorReport,
 }
 
 /// Fatal ingest errors — these reject the NAPI promise. Non-fatal
@@ -357,12 +396,13 @@ pub(crate) fn run_ingest(
     let writer_handle = std::thread::Builder::new()
         .name("spaghetti-writer".into())
         .spawn(
-            move || -> std::result::Result<WriterStats, crate::core::writer::WriterError> {
+            move || -> std::result::Result<WriterOutcome, crate::core::writer::WriterError> {
                 let mut writer = Writer::with_source_id(&db_path, source_id)?;
                 writer.open_for_bulk_ingest_with_mode(bulk_mode)?;
                 let stats = writer.run(receiver)?;
+                let errors = writer.take_errors();
                 writer.finish()?;
-                Ok(stats)
+                Ok(WriterOutcome { stats, errors })
             },
         )
         .map_err(IngestInternalError::Io)?;
@@ -420,11 +460,11 @@ pub(crate) fn run_ingest(
     // precisely and don't contend with whatever else might be using the
     // global rayon pool (e.g. later rayon-using code in the same crate).
     //
-    // Parser errors below the project-boundary level are already emitted
-    // as IngestEvent::WorkerError inside parse_project; here we only
-    // collect ChannelClosed / other unrecoverable failures. `filter_map`
-    // lets every parser finish its own project before we reduce to a
-    // Vec<IngestError>.
+    // Record- and project-level failures travel as events and are collected
+    // by the writer, which is the only consumer that sees all of them. Here we
+    // collect just the one failure the event channel cannot carry: the channel
+    // itself being closed. `filter_map` lets every parser finish its own
+    // project before we reduce.
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(parallelism)
         .thread_name(|i| format!("spaghetti-parser-{i}"))
@@ -462,7 +502,7 @@ pub(crate) fn run_ingest(
     // is held only briefly.
     let drain_lock: Mutex<()> = Mutex::new(());
     let projects_done = Arc::new(AtomicU32::new(0));
-    let errors: Vec<IngestError> = pool.install(|| {
+    let channel_failures: Vec<CollectedError> = pool.install(|| {
         slugs
             .par_iter()
             .filter_map(|slug| {
@@ -490,10 +530,27 @@ pub(crate) fn run_ingest(
                 let done = projects_done.fetch_add(1, Ordering::Relaxed) + 1;
                 emit("parsing", done);
 
-                parse_result.err().map(|e| IngestError {
-                    slug: slug.clone(),
-                    message: e.to_string(),
-                })
+                match parse_result {
+                    Ok(()) => None,
+                    // Already on the wire as ProjectFatal + ProjectAbort; the
+                    // writer records it. Reporting it here too would
+                    // double-count against `error_count`.
+                    Err(ParseError::Fatal { .. }) => None,
+                    // The writer is gone, so nothing sent from here would
+                    // arrive. This is the one failure the orchestrator must
+                    // carry itself.
+                    Err(e @ ParseError::ChannelClosed(_)) => Some(CollectedError {
+                        slug: Some(slug.clone()),
+                        path: resolved
+                            .root_dir
+                            .join("projects")
+                            .join(slug)
+                            .to_string_lossy()
+                            .into_owned(),
+                        severity: Severity::ProjectFatal,
+                        message: e.to_string(),
+                    }),
+                }
             })
             .collect()
     });
@@ -523,9 +580,17 @@ pub(crate) fn run_ingest(
     drop(sender);
     emit("finalizing", projects_done.load(Ordering::Relaxed));
 
-    let writer_stats: WriterStats = writer_handle
+    let WriterOutcome {
+        stats: writer_stats,
+        mut errors,
+    } = writer_handle
         .join()
         .map_err(|_| IngestInternalError::WriterPanic)??;
+
+    // Fold in the failures the event channel could not carry.
+    for failure in channel_failures {
+        errors.record(failure);
+    }
 
     // Success-last contract publication (RFC 008 Phase 1.3).
     //
@@ -535,13 +600,11 @@ pub(crate) fn run_ingest(
     // unconditionally — would let a failed run look complete, and the next warm
     // start would skip the repair it still needs.
     //
-    // Two independent failure channels have to be clean, because they carry
-    // different things. `errors` holds project-level parse failures — what a
-    // parser *returns*. Per-record failures never appear there; they travel as
-    // `WorkerError` events, and the writer rolls the whole project back on one,
-    // so a single bad line drops a project while `errors` stays empty. Gating
-    // on `errors` alone published the contract over exactly that loss.
-    publish_contract_if_clean(&resolved, &errors, writer_stats.worker_errors);
+    // One report now, covering every severity — a skipped record, a
+    // rolled-back project, and a source-level failure all withhold the marker.
+    // Any of them means some input was not materialised, and the marker is
+    // what decides whether the next warm start bothers to retry.
+    publish_contract_if_clean(&resolved, &errors);
 
     let duration_ms = u32::try_from(start.elapsed().as_millis()).unwrap_or(u32::MAX);
 
@@ -551,8 +614,18 @@ pub(crate) fn run_ingest(
         sessions_processed: writer_stats.sessions_processed,
         messages_written: writer_stats.messages_written,
         subagents_written: writer_stats.subagents_written,
-        errors,
+        ..stats_errors(&errors)
     })
+}
+
+/// Project an [`ErrorReport`] onto the three error fields of [`IngestStats`].
+fn stats_errors(errors: &ErrorReport) -> IngestStats {
+    IngestStats {
+        errors: errors.errors().iter().map(IngestError::from).collect(),
+        error_count: errors.total(),
+        errors_truncated: errors.truncated(),
+        ..IngestStats::default()
+    }
 }
 
 /// Mark this source as having completed under the current ingest contract,
@@ -562,12 +635,8 @@ pub(crate) fn run_ingest(
 /// Publishing when we should not have is not: the marker is what defeats the
 /// warm fast path, so a wrong `true` makes the repair unreachable. Every
 /// failure path here therefore leaves the marker alone.
-fn publish_contract_if_clean(
-    resolved: &ResolvedOptions,
-    errors: &[IngestError],
-    worker_errors: u32,
-) {
-    if !errors.is_empty() || worker_errors > 0 {
+fn publish_contract_if_clean(resolved: &ResolvedOptions, errors: &ErrorReport) {
+    if !errors.is_empty() {
         return;
     }
     let Ok(conn) = Connection::open(&resolved.db_path) else {
@@ -699,11 +768,12 @@ fn clear_source_only(
     let writer_handle = std::thread::Builder::new()
         .name("spaghetti-writer-clear".into())
         .spawn(
-            move || -> std::result::Result<WriterStats, crate::core::writer::WriterError> {
+            move || -> std::result::Result<WriterOutcome, crate::core::writer::WriterError> {
                 let mut writer = Writer::with_source_id(&db_path, source_id)?;
                 let stats = writer.run(receiver)?;
+                let errors = writer.take_errors();
                 writer.finish()?;
-                Ok(stats)
+                Ok(WriterOutcome { stats, errors })
             },
         )
         .map_err(IngestInternalError::Io)?;
@@ -797,12 +867,13 @@ fn run_codex_ingest(
     let writer_handle = std::thread::Builder::new()
         .name("spaghetti-writer-codex".into())
         .spawn(
-            move || -> std::result::Result<WriterStats, crate::core::writer::WriterError> {
+            move || -> std::result::Result<WriterOutcome, crate::core::writer::WriterError> {
                 let mut writer = Writer::with_source_id(&db_path, source_id)?;
                 writer.open_for_bulk_ingest_with_mode(bulk_mode)?;
                 let stats = writer.run(receiver)?;
+                let errors = writer.take_errors();
                 writer.finish()?;
-                Ok(stats)
+                Ok(WriterOutcome { stats, errors })
             },
         )
         .map_err(IngestInternalError::Io)?;
@@ -815,14 +886,17 @@ fn run_codex_ingest(
     drop(sender);
     emit("finalizing", read_stats.projects, read_stats.projects);
 
-    let writer_stats: WriterStats = writer_handle
+    let WriterOutcome {
+        stats: writer_stats,
+        errors,
+    } = writer_handle
         .join()
         .map_err(|_| IngestInternalError::WriterPanic)??;
 
-    // Success-last, same rule as the Claude path. These readers do not yet
-    // accumulate per-record errors (RFC 008 Phase 2 gives them the error
-    // protocol), so a clean writer join is the whole signal available today.
-    publish_contract_if_clean(resolved, &[], 0);
+    // Success-last, same rule and now the same error protocol as the Claude
+    // path: whatever the reader reported as RecordSkip / ProjectFatal /
+    // SourceError reached the writer and is in this report.
+    publish_contract_if_clean(resolved, &errors);
 
     Ok(IngestStats {
         duration_ms: u32::try_from(start.elapsed().as_millis()).unwrap_or(u32::MAX),
@@ -830,7 +904,7 @@ fn run_codex_ingest(
         sessions_processed: writer_stats.sessions_processed.max(read_stats.sessions),
         messages_written: writer_stats.messages_written,
         subagents_written: 0,
-        errors: vec![],
+        ..stats_errors(&errors)
     })
 }
 
@@ -907,12 +981,13 @@ fn run_grok_ingest(
     let writer_handle = std::thread::Builder::new()
         .name("spaghetti-writer-grok".into())
         .spawn(
-            move || -> std::result::Result<WriterStats, crate::core::writer::WriterError> {
+            move || -> std::result::Result<WriterOutcome, crate::core::writer::WriterError> {
                 let mut writer = Writer::with_source_id(&db_path, source_id)?;
                 writer.open_for_bulk_ingest_with_mode(bulk_mode)?;
                 let stats = writer.run(receiver)?;
+                let errors = writer.take_errors();
                 writer.finish()?;
-                Ok(stats)
+                Ok(WriterOutcome { stats, errors })
             },
         )
         .map_err(IngestInternalError::Io)?;
@@ -925,14 +1000,17 @@ fn run_grok_ingest(
     drop(sender);
     emit("finalizing", read_stats.projects, read_stats.projects);
 
-    let writer_stats: WriterStats = writer_handle
+    let WriterOutcome {
+        stats: writer_stats,
+        errors,
+    } = writer_handle
         .join()
         .map_err(|_| IngestInternalError::WriterPanic)??;
 
-    // Success-last, same rule as the Claude path. These readers do not yet
-    // accumulate per-record errors (RFC 008 Phase 2 gives them the error
-    // protocol), so a clean writer join is the whole signal available today.
-    publish_contract_if_clean(resolved, &[], 0);
+    // Success-last, same rule and now the same error protocol as the Claude
+    // path: whatever the reader reported as RecordSkip / ProjectFatal /
+    // SourceError reached the writer and is in this report.
+    publish_contract_if_clean(resolved, &errors);
 
     Ok(IngestStats {
         duration_ms: u32::try_from(start.elapsed().as_millis()).unwrap_or(u32::MAX),
@@ -940,7 +1018,7 @@ fn run_grok_ingest(
         sessions_processed: writer_stats.sessions_processed.max(read_stats.sessions),
         messages_written: writer_stats.messages_written,
         subagents_written: 0,
-        errors: vec![],
+        ..stats_errors(&errors)
     })
 }
 
@@ -2019,14 +2097,28 @@ mod phase_1_gate {
         body.push_str("not-valid-json\n");
         fs::write(&path, body).unwrap();
 
-        run_ingest(&warm_opts(claude.path(), &db), None).expect("run completes");
+        let stats = run_ingest(&warm_opts(claude.path(), &db), None).expect("run completes");
 
         let conn = Connection::open(&db).unwrap();
         assert!(
             !crate::core::ingest_contract::is_source_contract_current(&conn, "claude-code")
                 .unwrap(),
-            "a run that dropped a project must leave the contract unpublished so it retries"
+            "a partial success must leave the contract unpublished so it retries"
         );
+
+        // Phase 2 narrowed the blast radius. The same input that used to
+        // discard the entire project — every good record with it — now skips
+        // one record and commits the rest, and says so.
+        let shape = shape_of(&db);
+        assert_eq!(
+            shape.messages.len(),
+            2,
+            "the good records around a bad line must survive"
+        );
+        assert_eq!(shape.projects.len(), 1, "the project must not be dropped");
+        assert_eq!(stats.error_count, 1, "and the skip must be reported");
+        assert_eq!(stats.errors[0].severity, "record-skip");
+        assert!(!stats.errors_truncated);
     }
 
     #[test]

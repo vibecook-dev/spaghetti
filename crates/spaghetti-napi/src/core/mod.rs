@@ -12,6 +12,7 @@
 //! override) so multi-source indexes stay correct when native ingest
 //! shares a DB with other agents.
 
+pub mod errors;
 pub mod event;
 pub mod ingest_contract;
 pub mod jsonl;

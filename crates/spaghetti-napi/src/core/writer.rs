@@ -15,8 +15,11 @@
 //!   which is almost always [`IngestEvent::Project`] but may be any other
 //!   variant if the parser emitted them in a permissive order.
 //! - It commits on [`IngestEvent::ProjectComplete`].
-//! - A [`IngestEvent::WorkerError`] rolls back the current transaction
-//!   and skips forward to the next project boundary.
+//! - A [`IngestEvent::ProjectFatal`] rolls back the current transaction and
+//!   poisons the slug until its terminal event, so late-arriving data for
+//!   that project is dropped rather than committed under its successor.
+//! - A [`IngestEvent::RecordSkip`] is recorded and changes no transaction
+//!   state — one unreadable record does not invalidate its project.
 //! - A fatal SQL error is returned up; the caller decides whether to
 //!   continue.
 //!
@@ -45,6 +48,7 @@ use crossbeam_channel::Receiver;
 use rusqlite::{params, Connection};
 use thiserror::Error;
 
+use super::errors::{CollectedError, ErrorReport, Severity};
 use super::event::IngestEvent;
 use super::schema::{self, SchemaError};
 
@@ -96,10 +100,6 @@ pub struct WriterStats {
     pub sessions_processed: u32,
     pub messages_written: u32,
     pub subagents_written: u32,
-    /// Projects whose transaction was rolled back by an
-    /// [`IngestEvent::WorkerError`]. Non-zero means the run is a partial
-    /// success and must not publish the ingest contract (RFC 008 Phase 1.3).
-    pub worker_errors: u32,
 }
 
 /// Per-table row counters used by both [`Writer::handle_event`] (cold-start
@@ -442,6 +442,15 @@ pub struct Writer {
     in_transaction: bool,
     /// Slug of the current project's transaction, if any.
     current_slug: Option<String>,
+    /// Projects that hit a `ProjectFatal`. Data events arriving for a
+    /// poisoned slug are dropped rather than written — without this they
+    /// would land in whatever transaction happened to be open next, which is
+    /// how a rolled-back project's rows reappear under its successor.
+    ///
+    /// Bounded by the number of projects, and cleared by the slug's terminal
+    /// event.
+    poisoned: std::collections::HashSet<String>,
+    errors: ErrorReport,
     stats: WriterStats,
 }
 
@@ -470,6 +479,8 @@ impl Writer {
             bulk_mode: false,
             in_transaction: false,
             current_slug: None,
+            poisoned: std::collections::HashSet::new(),
+            errors: ErrorReport::default(),
             stats: WriterStats::default(),
         })
     }
@@ -496,6 +507,8 @@ impl Writer {
             bulk_mode: false,
             in_transaction: false,
             current_slug: None,
+            poisoned: std::collections::HashSet::new(),
+            errors: ErrorReport::default(),
             stats: WriterStats::default(),
         })
     }
@@ -565,7 +578,8 @@ impl Writer {
     /// - The first data-bearing event after a boundary (or at startup)
     ///   starts a transaction.
     /// - [`IngestEvent::ProjectComplete`] commits it.
-    /// - [`IngestEvent::WorkerError`] rolls it back.
+    /// - [`IngestEvent::ProjectFatal`] and [`IngestEvent::ProjectAbort`] roll
+    ///   it back.
     /// - Channel-close with an open transaction rolls it back as well
     ///   (matching the TS `close()` behaviour which rolls back to avoid
     ///   persisting partial data).
@@ -587,6 +601,16 @@ impl Writer {
         }
 
         Ok(self.stats)
+    }
+
+    /// Take the errors collected while consuming the stream.
+    ///
+    /// Separate from [`WriterStats`] because that is `Copy` and this is not,
+    /// but also because they are read at different times: stats are a result,
+    /// while the report decides whether the run may publish its contract and
+    /// which fingerprints are withheld.
+    pub fn take_errors(&mut self) -> ErrorReport {
+        std::mem::take(&mut self.errors)
     }
 
     /// Restore normal PRAGMAs and close. Takes `self` by value so the
@@ -633,8 +657,8 @@ impl Writer {
         // delegate the SQL work to the shared `dispatch_event` helper
         // (which is also used by `write_batch_with_tx` on the live-ingest
         // path). Control-flow variants (SessionComplete / ProjectComplete
-        // / WorkerError) are handled inline because they own the per-
-        // project transaction state machine.
+        // / the failure events) are handled inline because they own the
+        // per-project transaction state machine.
         match ev {
             IngestEvent::Project { ref slug, .. }
             | IngestEvent::ProjectMemory { ref slug, .. }
@@ -645,6 +669,10 @@ impl Writer {
             | IngestEvent::ToolResult { ref slug, .. }
             | IngestEvent::Plan { ref slug, .. } => {
                 let slug = slug.clone();
+                // Drop anything still arriving for a rolled-back project.
+                if self.poisoned.contains(&slug) {
+                    return Ok(());
+                }
                 self.ensure_transaction(&slug)?;
                 let counts = dispatch_event(&self.conn, &ev, &self.source_id)?;
                 self.stats.sessions_processed = self
@@ -698,41 +726,94 @@ impl Writer {
             }
 
             IngestEvent::ProjectComplete { slug, .. } => {
+                // A poisoned project must not commit, no matter who says it
+                // completed. A reader that hit a fatal is expected to send
+                // `ProjectAbort` instead, but a `ProjectComplete` racing in
+                // behind the fatal would otherwise commit the very rows the
+                // rollback just discarded.
+                if self.poisoned.remove(&slug) {
+                    if self.in_transaction {
+                        self.rollback_transaction();
+                    }
+                    self.current_slug = None;
+                    return Ok(());
+                }
+
                 // Commit the current transaction if it belongs to this
                 // project. If it's an orphan transaction, commit anyway —
                 // the orchestrator is telling us we've reached a natural
                 // boundary.
                 if self.in_transaction {
                     self.commit_transaction()?;
-                    self.stats.projects_processed = self.stats.projects_processed.saturating_add(1);
-                } else {
-                    // No pending writes for this project; still bump
-                    // projects_processed because the project was seen.
-                    self.stats.projects_processed = self.stats.projects_processed.saturating_add(1);
                 }
-                // Always clear the slug regardless of the branch above.
-                let _ = slug;
+                // Bump either way: with no pending writes the project was
+                // still seen and completed.
+                self.stats.projects_processed = self.stats.projects_processed.saturating_add(1);
                 self.current_slug = None;
             }
 
-            IngestEvent::WorkerError { slug: _, error: _ } => {
-                // Roll back any in-flight work for this project and keep
-                // going; the writer's only job is to not persist partial
-                // project data.
-                //
-                // Counted because nothing else sees it. `IngestStats.errors`
-                // holds only project-level parse failures — the value a
-                // parser *returns* — while per-record failures travel as
-                // these events, so a run that dropped a project this way
-                // still looked clean to the orchestrator and published the
-                // ingest contract over it. Phase 2 owns giving these a real
-                // error channel and a finer rollback boundary; Phase 1 only
-                // needs the run to stop claiming it succeeded.
-                self.stats.worker_errors = self.stats.worker_errors.saturating_add(1);
+            IngestEvent::ProjectAbort { slug } => {
+                // Terminal counterpart to ProjectComplete. Discards without
+                // committing and lifts the poison, so a later project reusing
+                // the writer is unaffected. Not counted as processed — the
+                // project produced nothing.
                 if self.in_transaction {
                     self.rollback_transaction();
                 }
+                self.poisoned.remove(&slug);
                 self.current_slug = None;
+            }
+
+            IngestEvent::RecordSkip {
+                slug,
+                path,
+                message,
+            } => {
+                // Deliberately no transaction effect. One unreadable record
+                // does not invalidate the rest of its project; treating it as
+                // fatal is exactly the bug RFC 008 Phase 1 found, where a
+                // single bad line discarded every good record around it.
+                self.errors.record(CollectedError {
+                    slug: Some(slug),
+                    path,
+                    severity: Severity::RecordSkip,
+                    message,
+                });
+            }
+
+            IngestEvent::ProjectFatal {
+                slug,
+                path,
+                message,
+            } => {
+                if self.in_transaction {
+                    self.rollback_transaction();
+                }
+                // Poison until the terminal event. Data events for this
+                // project may still be in flight — the parser fills a local
+                // buffer that is drained afterwards — and without the poison
+                // they would open a fresh transaction and commit the rows the
+                // rollback just threw away.
+                self.poisoned.insert(slug.clone());
+                self.current_slug = None;
+                self.errors.record(CollectedError {
+                    slug: Some(slug),
+                    path,
+                    severity: Severity::ProjectFatal,
+                    message,
+                });
+            }
+
+            IngestEvent::SourceError { path, message } => {
+                // Belongs to no project, so it poisons nothing and touches no
+                // transaction. Its only consequence is that the source cannot
+                // be marked current, which keeps the failure retryable.
+                self.errors.record(CollectedError {
+                    slug: None,
+                    path,
+                    severity: Severity::Source,
+                    message,
+                });
             }
 
             IngestEvent::ClearSourceFiles => {
@@ -865,11 +946,19 @@ impl Writer {
     fn ensure_transaction(&mut self, slug: &str) -> Result<(), WriterError> {
         if let Some(current) = &self.current_slug {
             if current != slug {
-                // Different project — commit the old one before starting
-                // the new one.
+                // Different project — close the old one before starting the
+                // new one. A poisoned predecessor rolls back instead of
+                // committing: slug-switch tolerance exists so interleaved
+                // streams still commit at a sane boundary, not to override a
+                // rollback that already happened.
                 if self.in_transaction {
-                    self.commit_transaction()?;
-                    self.stats.projects_processed = self.stats.projects_processed.saturating_add(1);
+                    if self.poisoned.contains(current.as_str()) {
+                        self.rollback_transaction();
+                    } else {
+                        self.commit_transaction()?;
+                        self.stats.projects_processed =
+                            self.stats.projects_processed.saturating_add(1);
+                    }
                 }
             }
         }
@@ -895,7 +984,8 @@ impl Writer {
 
     /// Roll back the current transaction, swallowing any error that
     /// occurs during rollback itself (matches the TS empty-catch). Used
-    /// on `WorkerError` and on channel-close with an open transaction.
+    /// on `ProjectFatal` / `ProjectAbort` and on channel-close with an open
+    /// transaction.
     fn rollback_transaction(&mut self) {
         let _ = self.conn.execute_batch("ROLLBACK");
         self.in_transaction = false;
@@ -926,8 +1016,8 @@ impl Writer {
 /// fallback in `handle_event`, or via [`write_batch_with_tx`] on the
 /// live path).
 ///
-/// Orchestration variants (`ProjectComplete`, `SessionComplete`,
-/// `WorkerError`, `ClearSourceFiles`) are rejected here — they're
+/// Orchestration variants (`ProjectComplete`, `SessionComplete`, the three
+/// failure events, `ClearSourceFiles`) are rejected here — they're
 /// control-flow events, not row writes, and belong in the caller's
 /// state machine.
 fn subagent_message_tokens(value: &serde_json::Value, source_id: &str) -> [i64; 4] {
@@ -1292,7 +1382,10 @@ pub fn dispatch_event(
         // in the caller — surface it loudly rather than silently no-op.
         IngestEvent::SessionComplete { .. }
         | IngestEvent::ProjectComplete { .. }
-        | IngestEvent::WorkerError { .. }
+        | IngestEvent::ProjectAbort { .. }
+        | IngestEvent::RecordSkip { .. }
+        | IngestEvent::ProjectFatal { .. }
+        | IngestEvent::SourceError { .. }
         | IngestEvent::ClearSourceFiles
         | IngestEvent::ClearSourceData => {
             // Intentionally no-op for compatibility with callers that
@@ -1778,13 +1871,13 @@ mod tests {
         assert_eq!(text, "second");
     }
 
-    /// WorkerError mid-project rolls back, next project still writes.
+    /// ProjectFatal mid-project rolls back, next project still writes.
     #[test]
-    fn worker_error_rolls_back_current_project() {
+    fn project_fatal_rolls_back_current_project() {
         let mut w = fresh_writer();
         let (tx, rx) = unbounded::<IngestEvent>();
 
-        // Project 1 — gets a WorkerError and should be rolled back.
+        // Project 1 — goes fatal and should be rolled back.
         tx.send(IngestEvent::Project {
             slug: "p1".into(),
             original_path: "/tmp/p1".into(),
@@ -1792,11 +1885,14 @@ mod tests {
         })
         .unwrap();
         tx.send(message_event("p1", "s1", 0)).unwrap();
-        tx.send(IngestEvent::WorkerError {
+        tx.send(IngestEvent::ProjectFatal {
             slug: "p1".into(),
-            error: "boom".into(),
+            path: "/tmp/p1/s1.jsonl".into(),
+            message: "boom".into(),
         })
         .unwrap();
+        tx.send(IngestEvent::ProjectAbort { slug: "p1".into() })
+            .unwrap();
 
         // Project 2 — clean, should persist.
         tx.send(IngestEvent::Project {
@@ -2275,7 +2371,7 @@ mod tests {
     }
 
     /// Orchestration-only events (ProjectComplete, SessionComplete,
-    /// WorkerError, ClearSourceFiles) are no-ops inside the batch — they
+    /// failure events, ClearSourceFiles) are no-ops inside the batch — they
     /// don't write rows, don't move counters, and don't error.
     #[test]
     fn write_batch_with_tx_ignores_orchestration_events() {
@@ -2291,9 +2387,20 @@ mod tests {
                 slug: "p1".into(),
                 duration_ms: 0,
             },
-            IngestEvent::WorkerError {
+            IngestEvent::RecordSkip {
                 slug: "p1".into(),
-                error: "ignored".into(),
+                path: "/tmp/p1/s.jsonl".into(),
+                message: "ignored".into(),
+            },
+            IngestEvent::ProjectFatal {
+                slug: "p1".into(),
+                path: "/tmp/p1".into(),
+                message: "ignored".into(),
+            },
+            IngestEvent::ProjectAbort { slug: "p1".into() },
+            IngestEvent::SourceError {
+                path: "/tmp".into(),
+                message: "ignored".into(),
             },
             IngestEvent::ClearSourceFiles,
         ];

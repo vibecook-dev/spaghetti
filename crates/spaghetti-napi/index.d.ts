@@ -14,8 +14,24 @@
  */
 export declare function ingest(opts: IngestOptions, onProgress?: (progress: IngestProgress) => void): Promise<IngestStats>
 
+/**
+ * One reported ingest failure. Matches `FrozenNativeIngestError` in
+ * `packages/sdk/src/native.ts`, frozen by RFC 008 Phase 0.
+ */
 export interface IngestError {
-  slug: string
+  /**
+   * Absent for `severity = "source"`, which by definition happened before
+   * any project identity existed. Phase 0 made this optional precisely so
+   * such failures need not invent a slug.
+   */
+  slug?: string
+  /**
+   * Always present — every surfaced error can name a file even when it
+   * cannot name a project.
+   */
+  path: string
+  /** One of `record-skip`, `project-fatal`, `source`. */
+  severity: string
   message: string
 }
 
@@ -77,10 +93,16 @@ export interface IngestStats {
   messagesWritten: number
   subagentsWritten: number
   /**
-   * Non-fatal errors collected during ingest — parse failures, missing
-   * session files, etc.
+   * Non-fatal errors collected during ingest, capped for display. Read
+   * `error_count` for the real total — a caller that treats
+   * `errors.length` as the count will silently under-report once more
+   * than [`DISPLAY_CAP`](crate::core::errors::DISPLAY_CAP) inputs fail.
    */
   errors: Array<IngestError>
+  /** Uncapped number of errors seen. */
+  errorCount: number
+  /** True when `errors` was truncated, i.e. `error_count > errors.len()`. */
+  errorsTruncated: boolean
 }
 
 /** Result of one `live_ingest_batch` call. */
