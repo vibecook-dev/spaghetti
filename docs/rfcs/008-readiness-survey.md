@@ -2,7 +2,7 @@
 
 **Companion to:** [RFC 008 — Rust Bulk Ingest Production Readiness](./008-rust-ingest-production-readiness.md)
 **Surveyed:** 2026-08-08 at `13ac10e` (after RFC 007's removal)
-**Status:** Findings only. No production behavior changed.
+**Status:** Findings and decisions. §4 records what was settled and what shipped.
 
 What the RFC asks for, measured against what is actually in the tree. This
 exists so Phase 0 starts from facts rather than from the RFC's assumptions about
@@ -150,20 +150,92 @@ changed"), and §1.1 shows it is a wider change than the RFC's wording implies.
 
 ---
 
-## 4. Open questions for the author
+## 4. Decisions
 
-1. **Large-corpus baseline.** Phase 0 wants timings on "a real large corpus."
-   The developer's `~/.claude` is ~525 MB indexed. Is that the reference corpus,
-   and is its hardware the reference hardware for Phase 4's
-   `max(2 × TS median, 3 s)` threshold? Those numbers are not reproducible
-   across machines otherwise.
-2. **Codex fixture provenance.** Codex sessions contain real prompts. Are
-   fixtures synthesized, or captured and scrubbed? The RFC does not say, and it
-   determines how much of Phase 0 is authoring versus collecting.
-3. **`pnpm validate` drift.** Two of three validator suites fail at `211f4b1`
-   and still fail — Claude Code has added on-disk fields the types do not cover
-   (`settings.json` `model`, assistant `errorDetails` / `isAbortedMidStream`,
-   system `choice` / `fallbackModel`, the `SendUserFile` tool, two
-   `stats-cache.json` keys). CI does not run `validate`, so this is invisible
-   there. Phase 0 freezes a contract against real data; worth fixing first so
-   the baseline is not frozen against types known to be behind.
+Settled 2026-08-08. Each was decided by measuring, not by preference.
+
+### 4.1 Perf gate: the existing generator, on `ubuntu-latest`
+
+Phase 4's threshold has two halves that behave differently. `2 x TS median` is a
+*ratio* — both engines run back to back on one machine, so hardware cancels and
+the comparison is meaningful anywhere. The `3 second` floor is absolute and does
+not cancel. Only the floor needs a named machine.
+
+- **Corpus:** `scripts/generate-medium-fixture.mjs --scale N`, the deterministic
+  seeded generator the bench gate already uses at `--scale 50` (~35k messages /
+  ~50 MB). Scale it up for "real large corpus". It is reproducible and needs no
+  committed corpus.
+- **Hardware for the floor:** `ubuntu-latest`, matching the existing bench gate.
+- **The developer's `~/.claude`** (269 MB / 696 sessions; Grok is 1.1 GB) is a
+  sanity corpus, not the gate. It cannot be committed, cannot be reproduced by
+  anyone else, and drifts daily.
+- **Done:** the bench report now records platform, arch, CPU model and count,
+  total memory, and node version. It previously recorded runs, warmup, fixture,
+  and native version — nothing about the machine, which made any archived number
+  uninterpretable later.
+
+### 4.2 Codex fixtures: synthesized
+
+The measurement decided this. Of 18 real Codex sessions, the six required shapes
+were covered as follows:
+
+| Shape | Real sessions |
+| --- | --- |
+| `last + total` | 17 |
+| no `token_count` | 1 |
+| total-only | 0 |
+| mixed coverage | 0 |
+| empty / internal-only | 0 |
+| live-growth tail | 0 |
+
+Capturing gets two of six; the other four must be authored regardless. Real
+sessions carry real prompts, so scrubbing buys nothing that authoring does not.
+There is also precedent — `codex/reader.rs` unit tests already hand-write JSONL,
+including a total-only case.
+
+**Done:** `scripts/generate-codex-fixture.mjs` emits all six as
+`fixtures/small-codex/`, one behavior per file, with a README mapping each. The
+envelope is modelled on real output, and `03` pins `token_count` with
+`info: null` — a real shape that is easy to mistake for an absent event.
+
+**First run produced Phase 3A's evidence.** `pnpm test:ingest-diff:codex` reports
+6 differences, all the documented TS-only tiktoken estimator: `tokens_estimated`
+and `messages.input_tokens` on exactly the three sessions with un-attributed
+turns. Per Phase 0, this is enumerated, not normalized — and the check is
+deliberately out of CI until P4 is decided.
+
+### 4.3 Type drift: fixed before the freeze
+
+Phase 0's whole output is a frozen contract plus golden snapshots. Freezing it
+while the type layer is known to lag real data would bake the drift into the
+baseline, and Phase 5 would then soak against a reference that was wrong on
+arrival.
+
+**Done:** the fields Claude Code added are now modelled (`settings.json` `model`;
+`stats-cache.json` `dailyModelTokensVersion`; assistant `errorDetails` /
+`isAbortedMidStream`; system subtype `model_consent_fallback`; the `SendUserFile`
+tool), and the dropped `totalSpeculationTimeSavedMs` became optional rather than
+deleted. All three validator suites pass.
+
+The root cause is worth recording: the stats-cache field set was a hand-copied
+literal, while settings.json was read from the interface. The copy rotted; the
+derived one did not. Stats-cache now reads from the interface too.
+
+**One correction to the original recommendation.** "Add `pnpm validate` to CI"
+was wrong as stated — runners have no `~/.claude`, so the real-data half cannot
+run there. What CI *can* prove is the other half: each validator resolves the
+interfaces and unions it checks at import, and dies if one was renamed or
+deleted. Suites now exit 78 to report "skipped" distinctly, so a skip never reads
+as a pass. Detecting Claude Code changing its on-disk format still requires a
+machine that runs Claude Code.
+
+---
+
+## 5. Still open
+
+1. **Which scale is "real large"?** §4.1 settles the mechanism but not the
+   number. Pick it when Phase 4 has warm-path timings to compare, rather than
+   guessing now.
+2. **P4 itself** — port the estimator turn-aware, narrow it to session-level, or
+   drop it. §4.2 supplies the fixtures and the measured divergence; Phase 3A
+   makes the call.
