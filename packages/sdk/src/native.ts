@@ -37,12 +37,76 @@ export interface NativeIngestOptions {
   safeBulk?: boolean;
 }
 
+/**
+ * Severity of one surfaced ingest error (RFC 008 Phase 2).
+ *
+ * - `record-skip` — a bad record inside an otherwise fine project. Reported;
+ *   does not roll back or poison the project.
+ * - `project-fatal` — unreadable project input. Rolls back that project; later
+ *   projects still ingest.
+ * - `source` — failed before any project identity existed (discovery, a
+ *   pre-identity read). Has no slug, poisons nothing, but invalidates the
+ *   source's success marker so the next warm run retries.
+ *
+ * Frozen in Phase 0, produced in Phase 2 — see {@link FrozenNativeIngestError}.
+ */
+export type NativeIngestErrorSeverity = 'record-skip' | 'project-fatal' | 'source';
+
+/**
+ * The agreed shape of a native ingest error (RFC 008 Phase 0, item 5).
+ *
+ * **Not yet produced.** Today's addon returns `{ slug, message }` — see
+ * {@link NativeIngestStats}. This type exists so Phase 2 implements an approved
+ * contract rather than inventing one mid-change, which is what the RFC means by
+ * freezing the wire shape before touching parser behavior.
+ *
+ * The difference that matters is `slug` becoming optional. It is required
+ * today, so a failure that happens *before* a project slug exists cannot be
+ * expressed at all — which is precisely why those failures are currently
+ * swallowed instead of reported (`claude/project_parser.rs` documents the
+ * swallow). A required slug also invites inventing a fake one, which the RFC
+ * explicitly forbids.
+ *
+ * `path` becomes mandatory in exchange: every surfaced error can name a file
+ * even when it cannot name a project.
+ */
+export interface FrozenNativeIngestError {
+  /** Absent for `source` severity — no project identity existed yet. */
+  slug?: string;
+  /** Always present. The file the error is about. */
+  path: string;
+  severity: NativeIngestErrorSeverity;
+  message: string;
+}
+
+/**
+ * The agreed error-reporting fields on ingest stats (RFC 008 Phase 0, item 5).
+ *
+ * **Not yet produced.** `errors` is capped for display while `errorCount` stays
+ * uncapped, so a caller can say "12 of 4,000 failures" instead of silently
+ * showing the first hundred as if they were all of them. `errorsTruncated`
+ * makes that distinction checkable rather than inferred from a length.
+ */
+export interface FrozenNativeIngestErrorReport {
+  /** First N errors, for display. */
+  errors: FrozenNativeIngestError[];
+  /** Uncapped total, however many were kept for display. */
+  errorCount: number;
+  /** True when `errors.length < errorCount`. */
+  errorsTruncated: boolean;
+}
+
 export interface NativeIngestStats {
   durationMs: number;
   projectsProcessed: number;
   sessionsProcessed: number;
   messagesWritten: number;
   subagentsWritten: number;
+  /**
+   * Current shape, produced by the shipped addon. RFC 008 Phase 2 replaces this
+   * with {@link FrozenNativeIngestErrorReport}; until then `slug` is required
+   * and pre-identity failures have nowhere to go.
+   */
   errors: Array<{ slug: string; message: string }>;
 }
 
