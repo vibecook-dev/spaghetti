@@ -100,6 +100,28 @@ session-level fallback, and dropping estimation; this baseline is the input to
 that choice, which is why `pnpm test:ingest-diff:codex` is deliberately not in
 CI yet.
 
+### Known divergence: fingerprint coverage
+
+The `fingerprints` count differs by engine and always has — on the `small`
+Claude fixture, TS records **16** and Rust **38**.
+
+This is intended, not drift. RFC 003 gave the Rust port wider warm-start
+coverage: the TS ingest fingerprints only session JSONL and
+`sessions-index.json`, while Rust also covers subagent transcripts, tool
+results, memory, todos, tasks, and file-history snapshots. RFC 008 Phase 1.4
+widened it further — plans, `agent-*.meta.json` sidecars, workflow
+`journal.jsonl`, and nested `subagents/workflows/<wf>/` transcripts, which the
+parser read but discovery never saw.
+
+The consequence is asymmetric in the safe direction: Rust notices changes TS
+misses, so Rust re-ingests where TS would wrongly stay warm.
+
+`source_files` is excluded from the diff harness's table inventory, so this gap
+does **not** surface as a diff — the exclusion predates this work and its stated
+reason ("the Rust ingest doesn't write it") is now stale, since Rust does write
+it. The counts above are the record; a future phase that wants the harness to
+compare fingerprints will have to decide whether to bring TS up to parity first.
+
 ---
 
 ## 3. Timings
