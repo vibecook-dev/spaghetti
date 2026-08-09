@@ -61,14 +61,7 @@ def union_members(type_name: str, rel: str) -> set[str]:
     return set(re.findall(r"'([^']+)'", _type_body(type_name, rel)))
 
 
-def interface_fields(interface_name: str, rel: str) -> set[str]:
-    """
-    Property names declared directly on an interface.
-
-    Inherited members are not followed — callers that need them should
-    union the base interface explicitly, which keeps this readable
-    without a real type checker.
-    """
+def _interface_body(interface_name: str, rel: str) -> str:
     match = re.search(
         rf"interface {re.escape(interface_name)}[^{{]*\{{(.*?)^\}}",
         source(rel),
@@ -76,7 +69,29 @@ def interface_fields(interface_name: str, rel: str) -> set[str]:
     )
     if not match:
         _die(f"could not find `interface {interface_name}` in {rel}")
-    return set(re.findall(r"^ {2}(\w+)\??:", match.group(1), re.MULTILINE))
+    return match.group(1)
+
+
+def interface_fields(interface_name: str, rel: str) -> set[str]:
+    """
+    Property names declared directly on an interface, optional or not.
+
+    Inherited members are not followed — callers that need them should
+    union the base interface explicitly, which keeps this readable
+    without a real type checker.
+    """
+    return set(re.findall(r"^ {2}(\w+)\??:", _interface_body(interface_name, rel), re.MULTILINE))
+
+
+def interface_optional_fields(interface_name: str, rel: str) -> set[str]:
+    """
+    Only the `name?:` properties.
+
+    Lets a validator say "declared but not guaranteed present" instead of
+    forcing every modelled key to appear in real data — the distinction that
+    separates a field the product dropped from a field we failed to model.
+    """
+    return set(re.findall(r"^ {2}(\w+)\?:", _interface_body(interface_name, rel), re.MULTILINE))
 
 
 def declared_fields(rel: str) -> set[str]:

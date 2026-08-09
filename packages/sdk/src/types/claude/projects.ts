@@ -327,6 +327,17 @@ export interface AssistantMessage extends BaseMessageFields {
   apiError?: string;
   /** HTTP status of the API error that produced this line (e.g. 429, 529). */
   apiErrorStatus?: number;
+  /**
+   * Raw error body for the failed request, as `"<status> <json>"` — e.g.
+   * `429 {"type":"error","error":{"type":"rate_limit_error",...}}`. Stored
+   * verbatim, so it is a string rather than a parsed object.
+   */
+  errorDetails?: string;
+  /**
+   * True when the stream was cut off partway through, so `message.content`
+   * holds a partial turn.
+   */
+  isAbortedMidStream?: boolean;
   teamName?: string;
   /**
    * Provenance for a turn produced on behalf of an MCP tool or a skill,
@@ -417,6 +428,7 @@ export type ToolName =
   | 'Monitor'
   | 'PowerShell'
   | 'ScheduleWakeup'
+  | 'SendUserFile'
   | 'Workflow'
   | `mcp__${string}`;
 
@@ -455,7 +467,8 @@ export type SystemMessage =
   | BridgeStatusSystemMessage
   | AwaySummarySystemMessage
   | InformationalSystemMessage
-  | ScheduledTaskFireSystemMessage;
+  | ScheduledTaskFireSystemMessage
+  | ModelConsentFallbackSystemMessage;
 
 interface SystemMessageBase extends BaseMessageFields {
   type: 'system';
@@ -549,6 +562,23 @@ export interface InformationalSystemMessage extends SystemMessageBase {
 export interface ScheduledTaskFireSystemMessage extends SystemMessageBase {
   subtype: 'scheduled_task_fire';
   content: string;
+}
+
+/**
+ * Records the prompt shown when the requested model was unavailable (rate
+ * limited, out of credits) and Claude Code offered a fallback. Written whether
+ * or not the user accepted, so `choice` is the outcome, not a request.
+ */
+export interface ModelConsentFallbackSystemMessage extends SystemMessageBase {
+  subtype: 'model_consent_fallback';
+  /** Outcome of the prompt, e.g. `cancelled` when the user declined. */
+  choice: string;
+  /** Model offered instead, e.g. `claude-opus-5[1m]`. */
+  fallbackModel: string;
+  /** Model originally requested, e.g. `claude-fable-5`. */
+  originalModel: string;
+  /** Whether the fallback was written back as the session default. */
+  persistedAsDefault: boolean;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
