@@ -60,6 +60,26 @@ platform. `x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl` now
 ship, and are load-tested **inside `node:24-alpine`**, not on the Ubuntu host:
 a glibc host proves nothing about a musl build.
 
+**Verified by dispatching the release matrix build-only** (`publish=false`),
+because that workflow does not run on ordinary PRs — it is gated to
+release-please PRs and tags, so the musl work would otherwise have shipped
+unexercised. All 8 targets build and all 8 load-test green.
+
+That verification was worth the cycles: the first three attempts failed, each
+for a different reason.
+
+| Attempt                    | Failure                                                                                                                                                            |
+| -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `musl-tools` cross-compile | `musl-gcc` cannot link a cdylib — it passes `-lgcc_s` and musl has no such library                                                                                 |
+| musl.cc cross toolchain    | the host was unreachable, putting a third party in the release path                                                                                                |
+| job-level `container:`     | GitHub supports JavaScript actions in Alpine containers only on x64, so `actions/checkout` fails on ARM; and the napi-rs image's Node was too old for the napi CLI |
+
+The working shape is an explicit `docker run` with checkout and caching on the
+host, so no JavaScript action executes inside the container and the image is
+chosen freely. The last fix was one line: an explicit `--target` makes Rust
+look for the cross-named linker `aarch64-linux-musl-gcc` even when the host
+already _is_ that target, and Alpine ships it as plain `gcc`.
+
 ### A pinned glibc baseline
 
 The build host's glibc becomes the artifact's floor, so `ubuntu-latest` moves

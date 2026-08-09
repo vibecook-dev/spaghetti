@@ -21,7 +21,14 @@ generated from the same target list in
 | Windows  | arm64 | —            | `aarch64-pc-windows-msvc`    | `windows-latest`        | `windows-11-arm`                       |
 
 Every artifact is `require()`-loaded on a matching host before publish. A
-binary that cannot load never ships.
+binary that cannot load never ships. All eight were verified green on
+2026-08-09.
+
+Each musl target builds natively on its own architecture inside Alpine, via an
+explicit `docker run` rather than a job-level `container:` — GitHub only
+supports JavaScript actions in Alpine containers on x64 runners, so
+`actions/checkout` itself fails on an ARM host. Keeping checkout outside the
+container avoids that entirely.
 
 ## The glibc minimum is 2.35
 
