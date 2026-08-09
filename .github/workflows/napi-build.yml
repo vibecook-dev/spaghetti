@@ -127,6 +127,10 @@ jobs:
                 apk add --no-cache build-base curl rustup >/dev/null &&
                 rustup-init -y --default-toolchain stable --profile minimal                   --target aarch64-unknown-linux-musl >/dev/null &&
                 . "$HOME/.cargo/env" &&
+                # Even building natively on aarch64 Alpine, an explicit
+                # --target makes Rust look for the cross-named linker
+                # `aarch64-linux-musl-gcc`. Alpine ships it as plain `gcc`.
+                export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=gcc &&
                 cd crates/spaghetti-napi && npm install --silent &&
                 npx napi build --platform --release --target aarch64-unknown-linux-musl &&
                 strip *.node'
