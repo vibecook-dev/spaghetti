@@ -450,6 +450,13 @@ pub struct Writer {
     /// Bounded by the number of projects, and cleared by the slug's terminal
     /// event.
     poisoned: std::collections::HashSet<String>,
+    /// Fingerprints held until every project has an outcome. See
+    /// [`Writer::flush_fingerprints`] for why they cannot be written on
+    /// arrival.
+    fingerprints: Vec<IngestEvent>,
+    /// Projects that reached `ProjectComplete` and committed. Only these may
+    /// contribute fingerprints.
+    completed: std::collections::HashSet<String>,
     errors: ErrorReport,
     stats: WriterStats,
 }
@@ -480,6 +487,8 @@ impl Writer {
             in_transaction: false,
             current_slug: None,
             poisoned: std::collections::HashSet::new(),
+            fingerprints: Vec::new(),
+            completed: std::collections::HashSet::new(),
             errors: ErrorReport::default(),
             stats: WriterStats::default(),
         })
@@ -508,6 +517,8 @@ impl Writer {
             in_transaction: false,
             current_slug: None,
             poisoned: std::collections::HashSet::new(),
+            fingerprints: Vec::new(),
+            completed: std::collections::HashSet::new(),
             errors: ErrorReport::default(),
             stats: WriterStats::default(),
         })
@@ -588,19 +599,66 @@ impl Writer {
             self.handle_event(ev)?;
         }
 
-        // Channel closed. The fingerprint tail batch has no explicit
-        // ProjectComplete, so commit it here; any *other* open transaction is
-        // a partial project (the parser died before ProjectComplete) whose
-        // rows must not persist, so roll it back.
+        // Channel closed. Any still-open transaction is a partial project —
+        // the parser died before its terminal event — so its rows must not
+        // persist.
         if self.in_transaction {
-            if self.current_slug.as_deref() == Some(FINGERPRINT_TX_SLUG) {
-                self.commit_transaction()?;
-            } else {
-                self.rollback_transaction();
-            }
+            self.rollback_transaction();
         }
 
+        self.flush_fingerprints()?;
+
         Ok(self.stats)
+    }
+
+    /// Persist the fingerprints that earned it, in one transaction.
+    ///
+    /// A fingerprint is a claim that a file was read successfully: it is what
+    /// lets the next warm start skip the file. Writing one for an input that
+    /// failed is therefore worse than writing none — the failure is recorded
+    /// as a success and never retried. So nothing is written until every
+    /// project has an outcome, and then only for:
+    ///
+    /// - paths whose project reached `ProjectComplete` (a rolled-back or
+    ///   never-finished project contributes nothing), and
+    /// - paths that did not themselves fail, at any severity.
+    ///
+    /// Global inputs — plans and other standalone files, which carry no slug —
+    /// have no project to wait for, so they need only the second rule. They
+    /// ride the same single transaction, which is the "deterministic internal
+    /// transaction unit" the RFC asks for.
+    ///
+    /// The RFC describes readers holding these buffers. Holding them here
+    /// instead keeps one choke point for all three sources and preserves the
+    /// pre-parse stat capture that guards against concurrent appends — the
+    /// orchestrator must still stat before reading, and only the *write* is
+    /// deferred. The enforced contract is identical.
+    fn flush_fingerprints(&mut self) -> Result<(), WriterError> {
+        let pending = std::mem::take(&mut self.fingerprints);
+        if pending.is_empty() {
+            return Ok(());
+        }
+
+        self.begin_transaction(FINGERPRINT_TX_SLUG)?;
+        for ev in &pending {
+            let IngestEvent::Fingerprint {
+                path, project_slug, ..
+            } = ev
+            else {
+                continue;
+            };
+            if self.errors.path_failed(path) {
+                continue;
+            }
+            if let Some(slug) = project_slug {
+                if !self.completed.contains(slug) || self.errors.slug_is_fatal(slug) {
+                    continue;
+                }
+            }
+            dispatch_event(&self.conn, ev, &self.source_id)?;
+        }
+        self.commit_transaction()?;
+        Ok(())
     }
 
     /// Take the errors collected while consuming the stream.
@@ -749,6 +807,7 @@ impl Writer {
                 // Bump either way: with no pending writes the project was
                 // still seen and completed.
                 self.stats.projects_processed = self.stats.projects_processed.saturating_add(1);
+                self.completed.insert(slug);
                 self.current_slug = None;
             }
 
@@ -911,24 +970,11 @@ impl Writer {
             }
 
             IngestEvent::Fingerprint { .. } => {
-                // Fingerprints are orchestrator-emitted at the tail of the
-                // stream, after all per-project events and the
-                // ClearSourceFiles marker. Batch every fingerprint upsert into
-                // one dedicated transaction (committed by `run` at channel
-                // close) instead of one autocommit per row.
-                if self.in_transaction && self.current_slug.as_deref() != Some(FINGERPRINT_TX_SLUG)
-                {
-                    // Defensive: a still-open project tx (ClearSourceFiles
-                    // normally already closed it). Commit before opening the
-                    // fingerprint batch.
-                    self.commit_transaction()?;
-                    self.stats.projects_processed = self.stats.projects_processed.saturating_add(1);
-                    self.current_slug = None;
-                }
-                if !self.in_transaction {
-                    self.begin_transaction(FINGERPRINT_TX_SLUG)?;
-                }
-                let _counts = dispatch_event(&self.conn, &ev, &self.source_id)?;
+                // Buffered, not written. A fingerprint is a claim that a file
+                // was ingested successfully, so it cannot be persisted before
+                // that file's project has an outcome. `flush_fingerprints` at
+                // channel close applies the rules (RFC 008 Phase 2).
+                self.fingerprints.push(ev);
             }
         }
 
@@ -1991,14 +2037,14 @@ mod tests {
     /// on channel close — not one autocommit per row, and not rolled back.
     #[test]
     fn fingerprints_are_batched_and_committed_on_close() {
-        fn fingerprint_event(path: &str) -> IngestEvent {
+        fn fingerprint_event(path: &str, slug: &str) -> IngestEvent {
             IngestEvent::Fingerprint {
                 path: path.into(),
                 mtime_ms: 123.0,
                 size: 10,
                 byte_position: Some(10),
                 category: "session".into(),
-                project_slug: Some("p".into()),
+                project_slug: Some(slug.into()),
                 session_id: Some("s".into()),
             }
         }
@@ -2018,15 +2064,19 @@ mod tests {
         })
         .unwrap();
         tx.send(IngestEvent::ClearSourceFiles).unwrap();
-        tx.send(fingerprint_event("/abs/a.jsonl")).unwrap();
-        tx.send(fingerprint_event("/abs/b.jsonl")).unwrap();
+        tx.send(fingerprint_event("/abs/a.jsonl", "p1")).unwrap();
+        tx.send(fingerprint_event("/abs/b.jsonl", "p1")).unwrap();
+        // Belongs to a project that never completed — must not be written,
+        // or the next warm start skips a file this run never ingested.
+        tx.send(fingerprint_event("/abs/ghost.jsonl", "never-ran"))
+            .unwrap();
         drop(tx);
 
         w.run(rx).expect("run");
         assert_eq!(
             count(&w.conn, "source_files"),
             2,
-            "fingerprint batch must commit on channel close"
+            "completed projects' fingerprints commit; an unfinished project's do not"
         );
     }
 

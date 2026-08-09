@@ -1740,7 +1740,7 @@ mod tests {
 // each case is supposed to produce.
 
 #[cfg(test)]
-mod phase_1_gate {
+pub(super) mod phase_1_gate {
     use super::tests::{fake_claude_fixture, warm_opts};
     use super::*;
     use std::fs;
@@ -1748,17 +1748,17 @@ mod phase_1_gate {
 
     /// A comparable snapshot of everything a warm run is supposed to converge.
     #[derive(Debug, PartialEq)]
-    struct Shape {
-        projects: Vec<String>,
-        sessions: Vec<String>,
-        messages: Vec<(String, i64, String)>,
-        plans: Vec<String>,
-        todos: Vec<String>,
-        subagents: Vec<String>,
-        fingerprints: Vec<String>,
+    pub(super) struct Shape {
+        pub(super) projects: Vec<String>,
+        pub(super) sessions: Vec<String>,
+        pub(super) messages: Vec<(String, i64, String)>,
+        pub(super) plans: Vec<String>,
+        pub(super) todos: Vec<String>,
+        pub(super) subagents: Vec<String>,
+        pub(super) fingerprints: Vec<String>,
     }
 
-    fn shape_of(db: &Path) -> Shape {
+    pub(super) fn shape_of(db: &Path) -> Shape {
         let conn = Connection::open(db).unwrap();
         let col = |sql: &str| -> Vec<String> {
             let mut stmt = conn.prepare(sql).unwrap();
@@ -1832,7 +1832,7 @@ mod phase_1_gate {
     const SESSION: &str = "11111111-2222-3333-4444-555555555555";
     const SLUG: &str = "-Users-me-proj";
 
-    fn session_path(root: &Path) -> PathBuf {
+    pub(super) fn session_path(root: &Path) -> PathBuf {
         root.join("projects")
             .join(SLUG)
             .join(format!("{SESSION}.jsonl"))
@@ -1842,7 +1842,7 @@ mod phase_1_gate {
         root.join("projects").join(SLUG).join(SESSION)
     }
 
-    fn seeded() -> (TempDir, TempDir, PathBuf) {
+    pub(super) fn seeded() -> (TempDir, TempDir, PathBuf) {
         let claude = fake_claude_fixture();
         let db_dir = TempDir::new().unwrap();
         let db = db_dir.path().join("gate.db");
@@ -1850,7 +1850,7 @@ mod phase_1_gate {
         (claude, db_dir, db)
     }
 
-    fn user_line(uuid: &str, text: &str) -> String {
+    pub(super) fn user_line(uuid: &str, text: &str) -> String {
         format!(
             "{{\"type\":\"user\",\"uuid\":\"{uuid}\",\"timestamp\":\"2026-04-17T00:00:09Z\",\
              \"sessionId\":\"{SESSION}\",\"isSidechain\":false,\"userType\":\"external\",\
@@ -1963,7 +1963,7 @@ mod phase_1_gate {
 
     // ─── Repair cases ──────────────────────────────────────────────────────
 
-    fn age_contract(db: &Path) {
+    pub(super) fn age_contract(db: &Path) {
         let conn = Connection::open(db).unwrap();
         conn.execute(
             "UPDATE source_materializations SET version = ?1 \
@@ -2224,6 +2224,130 @@ mod phase_1_gate {
         assert_eq!(
             survived, 2,
             "a claude clear must not reach codex rows, wherever their paths point"
+        );
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// RFC 008 Phase 2 — transaction and error protocol
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[cfg(test)]
+mod phase_2_gate {
+    use super::phase_1_gate::{age_contract, seeded, session_path, shape_of, user_line};
+    use super::tests::warm_opts;
+    use super::*;
+    use std::fs;
+
+    /// Every `source_files` path currently recorded.
+    fn fingerprinted(db: &Path) -> Vec<String> {
+        let conn = Connection::open(db).unwrap();
+        let mut stmt = conn
+            .prepare("SELECT path FROM source_files ORDER BY path")
+            .unwrap();
+        let out = stmt
+            .query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect();
+        out
+    }
+
+    /// Append a line the parser cannot read.
+    fn corrupt(path: &Path) {
+        let mut body = fs::read_to_string(path).unwrap();
+        body.push_str("not-valid-json\n");
+        fs::write(path, body).unwrap();
+    }
+
+    #[test]
+    fn a_bad_record_between_valid_records_keeps_the_project() {
+        let (claude, _d, db) = seeded();
+        let path = session_path(claude.path());
+
+        // good, bad, good — the bad line must cost exactly itself.
+        let mut body = fs::read_to_string(&path).unwrap();
+        body.push_str("not-valid-json\n");
+        body.push_str(&user_line("u3", "after-the-bad-line"));
+        fs::write(&path, body).unwrap();
+
+        let stats = run_ingest(&warm_opts(claude.path(), &db), None).expect("ingest");
+
+        let shape = shape_of(&db);
+        assert_eq!(
+            shape.messages.len(),
+            3,
+            "records on both sides of a bad line must commit"
+        );
+        assert_eq!(stats.error_count, 1);
+        assert_eq!(stats.errors[0].severity, "record-skip");
+        assert_eq!(
+            stats.errors[0].slug.as_deref(),
+            Some("-Users-me-proj"),
+            "a record skip knows its project"
+        );
+    }
+
+    #[test]
+    fn a_failed_input_is_retried_on_the_next_warm_run() {
+        // The exit-gate item this whole phase turns on. A fingerprint is a
+        // claim the file was ingested; writing one for a file that failed
+        // records the failure as a success and it never retries.
+        let (claude, _d, db) = seeded();
+        let path = session_path(claude.path());
+        corrupt(&path);
+
+        run_ingest(&warm_opts(claude.path(), &db), None).expect("failing ingest");
+        assert!(
+            !fingerprinted(&db).contains(&path.to_string_lossy().into_owned()),
+            "a file that failed must not be fingerprinted"
+        );
+
+        // Warm again with the file still broken: the missing fingerprint has
+        // to defeat the fast path, or the retry never happens.
+        let retry = run_ingest(&warm_opts(claude.path(), &db), None).expect("retry");
+        assert!(
+            retry.projects_processed > 0,
+            "a withheld fingerprint must defeat the warm fast path"
+        );
+
+        // Repair the file; the next run should ingest it and fingerprint it.
+        let repaired: String = fs::read_to_string(&path)
+            .unwrap()
+            .lines()
+            .filter(|l| *l != "not-valid-json")
+            .map(|l| format!("{l}\n"))
+            .collect();
+        fs::write(&path, repaired).unwrap();
+
+        let fixed = run_ingest(&warm_opts(claude.path(), &db), None).expect("repaired ingest");
+        assert_eq!(fixed.error_count, 0, "the repaired file must ingest clean");
+        assert!(
+            fingerprinted(&db).contains(&path.to_string_lossy().into_owned()),
+            "and now earn its fingerprint"
+        );
+    }
+
+    #[test]
+    fn a_clean_run_still_fingerprints_everything() {
+        // Guard against the buffering silently withholding everything, which
+        // would look like "no bugs" while making every warm start cold.
+        let (claude, _d, db) = seeded();
+        let before = fingerprinted(&db);
+        assert!(!before.is_empty(), "the seed run must fingerprint");
+
+        age_contract(&db);
+        run_ingest(&warm_opts(claude.path(), &db), None).expect("repair");
+        assert_eq!(
+            fingerprinted(&db),
+            before,
+            "a clean rebuild must reproduce the same fingerprints"
+        );
+
+        let again = run_ingest(&warm_opts(claude.path(), &db), None).expect("warm");
+        assert_eq!(
+            again.projects_processed, 0,
+            "and then warm-start to a no-op"
         );
     }
 }
