@@ -11,6 +11,7 @@ use crossbeam_channel::{SendError, Sender};
 use once_cell::sync::Lazy;
 use regex::Regex;
 
+use crate::claude::fingerprint::DiscoveryError;
 use crate::claude::types::{SessionIndexEntry, SessionsIndex};
 use crate::core::event::IngestEvent;
 use crate::core::jsonl::read_jsonl_streaming;
@@ -99,7 +100,15 @@ impl GrokReader {
         sessions_dir: &Path,
         events: &Sender<IngestEvent>,
     ) -> Result<GrokReadStats, GrokReadError> {
-        let files = discover(sessions_dir);
+        let (files, discovery_errors) = discover(sessions_dir);
+        for err in discovery_errors {
+            // No project identity yet — this failed while working out which
+            // sessions exist. Poisons nothing, but withholds the marker.
+            let _ = events.send(IngestEvent::SourceError {
+                path: err.path,
+                message: err.message,
+            });
+        }
         let mut by_project: BTreeMap<String, (String, Vec<SessionFile>)> = BTreeMap::new();
 
         for path in files {
@@ -183,7 +192,11 @@ impl GrokReader {
         sessions_dir: &Path,
         stored: &std::collections::HashMap<String, crate::claude::fingerprint::SourceFingerprint>,
     ) -> bool {
-        let files = discover(sessions_dir);
+        let (files, discovery_errors) = discover(sessions_dir);
+        if !discovery_errors.is_empty() {
+            // A directory we could not read may hold changes we cannot see.
+            return false;
+        }
         if files.is_empty() && stored.is_empty() {
             return true;
         }
@@ -217,13 +230,30 @@ pub struct GrokReadStats {
     pub messages: u32,
 }
 
-fn discover(sessions_dir: &Path) -> Vec<PathBuf> {
+fn discover(sessions_dir: &Path) -> (Vec<PathBuf>, Vec<DiscoveryError>) {
     let mut out = Vec::new();
+    let mut errors = Vec::new();
+    // Absence is not a failure: a machine that never ran this agent has no
+    // sessions directory.
     if !sessions_dir.is_dir() {
-        return out;
+        return (out, errors);
     }
     let walker = walkdir::WalkDir::new(sessions_dir).follow_links(false);
-    for entry in walker.into_iter().filter_map(|e| e.ok()) {
+    for entry in walker {
+        // A descent that failed is not "no files here". Swallowing it made an
+        // unreadable directory look like an empty one, so its sessions were
+        // silently dropped from the index (RFC 008 Phase 2C).
+        let entry = match entry {
+            Ok(e) => e,
+            Err(e) => {
+                let at = e.path().unwrap_or(sessions_dir).to_path_buf();
+                errors.push(DiscoveryError {
+                    path: at.to_string_lossy().into_owned(),
+                    message: e.to_string(),
+                });
+                continue;
+            }
+        };
         if !entry.file_type().is_file() {
             continue;
         }
@@ -232,7 +262,7 @@ fn discover(sessions_dir: &Path) -> Vec<PathBuf> {
         }
     }
     out.sort();
-    out
+    (out, errors)
 }
 
 /// Read session metadata from sibling `summary.json`, with directory fallbacks.

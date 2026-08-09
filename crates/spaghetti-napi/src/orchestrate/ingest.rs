@@ -488,6 +488,18 @@ pub(crate) fn run_ingest(
     let empty_store: HashMap<String, SourceFingerprint> = HashMap::new();
     let pre_parse_diff = fingerprint::compute_diff(&resolved.root_dir, &empty_store)?;
 
+    // Discovery failures have no project identity — they happened while
+    // finding out which projects exist. They poison nothing, but they do
+    // withhold the success marker: a directory we could not enumerate may
+    // hold files this run never saw, and marking the source current over that
+    // would make the next warm start skip the retry.
+    for err in &pre_parse_diff.errors {
+        let _ = sender.send(IngestEvent::SourceError {
+            path: err.path.clone(),
+            message: err.message.clone(),
+        });
+    }
+
     // Serialize per-project event streams onto the shared channel so the
     // writer sees each project's events contiguously. Without this, events
     // from N parallel parsers interleave, forcing the writer to commit+
@@ -695,6 +707,12 @@ fn warm_has_no_changes(
     // and only this source's.
     let diff = fingerprint::compute_diff(&resolved.root_dir, &stored)?;
     if !diff.added.is_empty() || !diff.modified.is_empty() || !diff.deleted.is_empty() {
+        return Ok(false);
+    }
+    // A directory we could not enumerate might hold changes we cannot see, so
+    // "no differences found" is not the same as "no differences". Take the
+    // slow path and let the run report the failure.
+    if !diff.errors.is_empty() {
         return Ok(false);
     }
 
@@ -2325,6 +2343,72 @@ mod phase_2_gate {
         assert!(
             fingerprinted(&db).contains(&path.to_string_lossy().into_owned()),
             "and now earn its fingerprint"
+        );
+    }
+
+    /// A file standing where a directory belongs.
+    ///
+    /// This is the phase's cross-platform fault seam. `read_dir` on a
+    /// non-directory fails with something that is *not* `NotFound` on Linux,
+    /// macOS, and Windows alike, so it exercises the enumeration-failure path
+    /// without needing mode bits, ACLs, or a privileged test runner. The RFC
+    /// rules out a Unix-only `chmod 0` as the sole acceptance test.
+    fn block_dir_with_a_file(path: &Path) {
+        if path.exists() {
+            fs::remove_dir_all(path).unwrap();
+        }
+        fs::write(path, b"not a directory").unwrap();
+    }
+
+    #[test]
+    fn an_unreadable_directory_is_an_error_not_an_empty_scan() {
+        let (claude, _d, db) = seeded();
+        block_dir_with_a_file(&claude.path().join("todos"));
+
+        let stats = run_ingest(&warm_opts(claude.path(), &db), None).expect("run completes");
+
+        assert!(
+            stats.error_count > 0,
+            "an unreadable directory must be reported, not silently read as empty"
+        );
+        let src: Vec<_> = stats
+            .errors
+            .iter()
+            .filter(|e| e.severity == "source")
+            .collect();
+        assert!(!src.is_empty(), "got: {:?}", stats.errors);
+        assert!(
+            src[0].slug.is_none(),
+            "a discovery failure has no project identity and must not invent one"
+        );
+
+        let conn = Connection::open(&db).unwrap();
+        assert!(
+            !crate::core::ingest_contract::is_source_contract_current(&conn, "claude-code")
+                .unwrap(),
+            "a source error must withhold the marker so the scan retries"
+        );
+    }
+
+    #[test]
+    fn a_blocked_directory_defeats_the_warm_fast_path() {
+        // The consequence that matters: if a failed scan could still report
+        // "nothing changed", the index would stay stale until something else
+        // happened to change.
+        let (claude, _d, db) = seeded();
+        assert_eq!(
+            run_ingest(&warm_opts(claude.path(), &db), None)
+                .unwrap()
+                .projects_processed,
+            0,
+            "baseline: a clean tree warm-starts to a no-op"
+        );
+
+        block_dir_with_a_file(&claude.path().join("todos"));
+        let blocked = run_ingest(&warm_opts(claude.path(), &db), None).expect("run");
+        assert!(
+            blocked.projects_processed > 0,
+            "a scan that could not see everything must not claim nothing changed"
         );
     }
 

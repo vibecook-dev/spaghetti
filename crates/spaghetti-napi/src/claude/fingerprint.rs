@@ -210,6 +210,56 @@ pub struct FingerprintDiff {
     /// Count of files where on-disk mtime+size matched the fingerprint
     /// exactly — useful for "nothing to do" short-circuits in the caller.
     pub unchanged_count: u32,
+    /// Directories that exist but could not be enumerated.
+    ///
+    /// Non-empty means the scan is incomplete: files may exist that this run
+    /// could not see. Reporting zero of them as "nothing changed" is how a
+    /// permission fault becomes a silently stale index, so the caller turns
+    /// these into `SourceError` and withholds the success marker.
+    pub errors: Vec<DiscoveryError>,
+}
+
+/// A directory or entry that exists but could not be read.
+///
+/// Absence never appears here. A source that never wrote todos has no `todos/`
+/// directory, and that is nothing to report.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiscoveryError {
+    pub path: String,
+    pub message: String,
+}
+
+/// Files found by a scan, plus the places the scan could not look.
+#[derive(Debug, Default)]
+pub struct Discovery {
+    pub files: Vec<DiscoveredFile>,
+    pub errors: Vec<DiscoveryError>,
+}
+
+impl Discovery {
+    fn fail(&mut self, path: &Path, err: &std::io::Error) {
+        self.errors.push(DiscoveryError {
+            path: path.to_string_lossy().into_owned(),
+            message: err.to_string(),
+        });
+    }
+}
+
+/// Enumerate a directory, separating absence from failure.
+///
+/// `Ok(None)` means the directory is not there, which is normal and silent.
+/// Anything else — permission denied, I/O error, a path that is not a
+/// directory — is recorded, because it means the scan cannot honestly claim
+/// to have seen everything.
+fn read_dir_reporting(dir: &Path, out: &mut Discovery) -> Option<fs::ReadDir> {
+    match fs::read_dir(dir) {
+        Ok(entries) => Some(entries),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => {
+            out.fail(dir, &e);
+            None
+        }
+    }
 }
 
 // ─── FingerprintStore — read side ──────────────────────────────────────────
@@ -289,11 +339,14 @@ pub fn compute_diff(
 ) -> Result<FingerprintDiff, FingerprintError> {
     let discovered = discover_all(root_dir)?;
 
-    let mut diff = FingerprintDiff::default();
+    let mut diff = FingerprintDiff {
+        errors: discovered.errors,
+        ..FingerprintDiff::default()
+    };
     let mut seen_paths: std::collections::HashSet<&str> =
-        std::collections::HashSet::with_capacity(discovered.len());
+        std::collections::HashSet::with_capacity(discovered.files.len());
 
-    for file in &discovered {
+    for file in &discovered.files {
         seen_paths.insert(file.path.as_str());
 
         match stored.get(&file.path) {
@@ -353,8 +406,8 @@ pub fn compute_diff(
 /// 2. A `~/.claude` tree contains unrelated dirs (`plugins/`, `shell/`,
 ///    `ide/`, `statsig/`, etc.) we do *not* want to fingerprint. An
 ///    allow-listed walk is O(files we care about), not O(everything).
-fn discover_all(root_dir: &Path) -> Result<Vec<DiscoveredFile>, FingerprintError> {
-    let mut out = Vec::new();
+fn discover_all(root_dir: &Path) -> Result<Discovery, FingerprintError> {
+    let mut out = Discovery::default();
 
     discover_projects(&root_dir.join("projects"), &mut out)?;
     discover_todos(&root_dir.join("todos"), &mut out)?;
@@ -369,13 +422,21 @@ fn discover_all(root_dir: &Path) -> Result<Vec<DiscoveredFile>, FingerprintError
 ///
 /// The parser reads these via `parse_plans`, but discovery never fingerprinted
 /// them, so an edited plan was invisible to warm start (RFC 008 Phase 1.4).
-fn discover_plans(plans_dir: &Path, out: &mut Vec<DiscoveredFile>) -> Result<(), FingerprintError> {
-    let entries = match fs::read_dir(plans_dir) {
-        Ok(e) => e,
-        Err(_) => return Ok(()), // no plans dir is absence, not an error
+fn discover_plans(plans_dir: &Path, out: &mut Discovery) -> Result<(), FingerprintError> {
+    let Some(entries) = read_dir_reporting(plans_dir, out) else {
+        return Ok(());
     };
 
-    for entry in entries.flatten() {
+    for entry in entries {
+        let entry = match entry {
+            Ok(e) => e,
+
+            Err(e) => {
+                out.fail(plans_dir, &e);
+
+                continue;
+            }
+        };
         let path = entry.path();
         if !path.is_file() {
             continue;
@@ -383,7 +444,7 @@ fn discover_plans(plans_dir: &Path, out: &mut Vec<DiscoveredFile>) -> Result<(),
         if path.extension().and_then(|s| s.to_str()) != Some("md") {
             continue;
         }
-        push_file(out, &path, CATEGORY_PLAN, None, None)?;
+        push_file(&mut out.files, &path, CATEGORY_PLAN, None, None)?;
     }
 
     Ok(())
@@ -392,16 +453,21 @@ fn discover_plans(plans_dir: &Path, out: &mut Vec<DiscoveredFile>) -> Result<(),
 /// Scan `<root_dir>/projects/<slug>/*` for every artefact category we
 /// recognise. A missing `projects/` dir is not an error — matches the
 /// TS `try { ... } catch { /* projects dir doesn't exist */ }` pattern.
-fn discover_projects(
-    projects_dir: &Path,
-    out: &mut Vec<DiscoveredFile>,
-) -> Result<(), FingerprintError> {
-    let entries = match fs::read_dir(projects_dir) {
-        Ok(e) => e,
-        Err(_) => return Ok(()),
+fn discover_projects(projects_dir: &Path, out: &mut Discovery) -> Result<(), FingerprintError> {
+    let Some(entries) = read_dir_reporting(projects_dir, out) else {
+        return Ok(());
     };
 
-    for entry in entries.flatten() {
+    for entry in entries {
+        let entry = match entry {
+            Ok(e) => e,
+
+            Err(e) => {
+                out.fail(projects_dir, &e);
+
+                continue;
+            }
+        };
         let project_path = entry.path();
         if !project_path.is_dir() {
             continue;
@@ -424,14 +490,22 @@ fn discover_projects(
 fn scan_project_root(
     project_dir: &Path,
     slug: &str,
-    out: &mut Vec<DiscoveredFile>,
+    out: &mut Discovery,
 ) -> Result<(), FingerprintError> {
-    let entries = match fs::read_dir(project_dir) {
-        Ok(e) => e,
-        Err(_) => return Ok(()),
+    let Some(entries) = read_dir_reporting(project_dir, out) else {
+        return Ok(());
     };
 
-    for entry in entries.flatten() {
+    for entry in entries {
+        let entry = match entry {
+            Ok(e) => e,
+
+            Err(e) => {
+                out.fail(project_dir, &e);
+
+                continue;
+            }
+        };
         let path = entry.path();
         if !path.is_file() {
             continue;
@@ -443,7 +517,7 @@ fn scan_project_root(
         if UUID_JSONL.is_match(name) {
             let session_id = name.trim_end_matches(".jsonl").to_owned();
             push_file(
-                out,
+                &mut out.files,
                 &path,
                 CATEGORY_SESSION,
                 Some(slug.to_owned()),
@@ -451,7 +525,7 @@ fn scan_project_root(
             )?;
         } else if name == "sessions-index.json" {
             push_file(
-                out,
+                &mut out.files,
                 &path,
                 CATEGORY_SESSIONS_INDEX,
                 Some(slug.to_owned()),
@@ -467,11 +541,17 @@ fn scan_project_root(
 fn scan_project_memory(
     project_dir: &Path,
     slug: &str,
-    out: &mut Vec<DiscoveredFile>,
+    out: &mut Discovery,
 ) -> Result<(), FingerprintError> {
     let memory = project_dir.join("memory").join("MEMORY.md");
     if memory.is_file() {
-        push_file(out, &memory, CATEGORY_MEMORY, Some(slug.to_owned()), None)?;
+        push_file(
+            &mut out.files,
+            &memory,
+            CATEGORY_MEMORY,
+            Some(slug.to_owned()),
+            None,
+        )?;
     }
     Ok(())
 }
@@ -483,11 +563,10 @@ fn scan_project_memory(
 fn scan_project_sessions(
     project_dir: &Path,
     slug: &str,
-    out: &mut Vec<DiscoveredFile>,
+    out: &mut Discovery,
 ) -> Result<(), FingerprintError> {
-    let entries = match fs::read_dir(project_dir) {
-        Ok(e) => e,
-        Err(_) => return Ok(()),
+    let Some(entries) = read_dir_reporting(project_dir, out) else {
+        return Ok(());
     };
 
     // Session-subdir names are UUIDs; derive by stripping `.jsonl` off the
@@ -497,7 +576,16 @@ fn scan_project_sessions(
             .expect("UUID_BARE regex compiles")
     });
 
-    for entry in entries.flatten() {
+    for entry in entries {
+        let entry = match entry {
+            Ok(e) => e,
+
+            Err(e) => {
+                out.fail(project_dir, &e);
+
+                continue;
+            }
+        };
         let path = entry.path();
         if !path.is_dir() {
             continue;
@@ -530,15 +618,22 @@ fn scan_subagents(
     dir: &Path,
     slug: &str,
     session_id: &str,
-    out: &mut Vec<DiscoveredFile>,
+    out: &mut Discovery,
 ) -> Result<(), FingerprintError> {
     scan_agent_files(dir, slug, session_id, out)?;
 
     // Nested: subagents/workflows/<wf_id>/{agent-*.jsonl, agent-*.meta.json,
     // journal.jsonl}. Mirrors the parser's walk in `read_subagents`.
     let workflows = dir.join("workflows");
-    if let Ok(wf_dirs) = fs::read_dir(&workflows) {
-        for wf_entry in wf_dirs.flatten() {
+    if let Some(wf_dirs) = read_dir_reporting(&workflows, out) {
+        for wf_entry in wf_dirs {
+            let wf_entry = match wf_entry {
+                Ok(e) => e,
+                Err(e) => {
+                    out.fail(&workflows, &e);
+                    continue;
+                }
+            };
             let wf_path = wf_entry.path();
             if !wf_path.is_dir() {
                 continue;
@@ -548,7 +643,7 @@ fn scan_subagents(
             let journal = wf_path.join("journal.jsonl");
             if journal.is_file() {
                 push_file(
-                    out,
+                    &mut out.files,
                     &journal,
                     CATEGORY_WORKFLOW_JOURNAL,
                     Some(slug.to_owned()),
@@ -571,14 +666,22 @@ fn scan_agent_files(
     dir: &Path,
     slug: &str,
     session_id: &str,
-    out: &mut Vec<DiscoveredFile>,
+    out: &mut Discovery,
 ) -> Result<(), FingerprintError> {
-    let entries = match fs::read_dir(dir) {
-        Ok(e) => e,
-        Err(_) => return Ok(()),
+    let Some(entries) = read_dir_reporting(dir, out) else {
+        return Ok(());
     };
 
-    for entry in entries.flatten() {
+    for entry in entries {
+        let entry = match entry {
+            Ok(e) => e,
+
+            Err(e) => {
+                out.fail(dir, &e);
+
+                continue;
+            }
+        };
         let path = entry.path();
         if !path.is_file() {
             continue;
@@ -588,7 +691,7 @@ fn scan_agent_files(
         };
         if SUBAGENT_FILE.is_match(name) {
             push_file(
-                out,
+                &mut out.files,
                 &path,
                 CATEGORY_SUBAGENT,
                 Some(slug.to_owned()),
@@ -596,7 +699,7 @@ fn scan_agent_files(
             )?;
         } else if SUBAGENT_META_FILE.is_match(name) {
             push_file(
-                out,
+                &mut out.files,
                 &path,
                 CATEGORY_SUBAGENT_META,
                 Some(slug.to_owned()),
@@ -613,14 +716,22 @@ fn scan_tool_results(
     dir: &Path,
     slug: &str,
     session_id: &str,
-    out: &mut Vec<DiscoveredFile>,
+    out: &mut Discovery,
 ) -> Result<(), FingerprintError> {
-    let entries = match fs::read_dir(dir) {
-        Ok(e) => e,
-        Err(_) => return Ok(()),
+    let Some(entries) = read_dir_reporting(dir, out) else {
+        return Ok(());
     };
 
-    for entry in entries.flatten() {
+    for entry in entries {
+        let entry = match entry {
+            Ok(e) => e,
+
+            Err(e) => {
+                out.fail(dir, &e);
+
+                continue;
+            }
+        };
         let path = entry.path();
         if !path.is_file() {
             continue;
@@ -630,7 +741,7 @@ fn scan_tool_results(
         };
         if name.ends_with(".txt") {
             push_file(
-                out,
+                &mut out.files,
                 &path,
                 CATEGORY_TOOL_RESULT,
                 Some(slug.to_owned()),
@@ -643,13 +754,21 @@ fn scan_tool_results(
 }
 
 /// `todos/` — flat directory of `<session>-agent-<agent>.json` files.
-fn discover_todos(todos_dir: &Path, out: &mut Vec<DiscoveredFile>) -> Result<(), FingerprintError> {
-    let entries = match fs::read_dir(todos_dir) {
-        Ok(e) => e,
-        Err(_) => return Ok(()),
+fn discover_todos(todos_dir: &Path, out: &mut Discovery) -> Result<(), FingerprintError> {
+    let Some(entries) = read_dir_reporting(todos_dir, out) else {
+        return Ok(());
     };
 
-    for entry in entries.flatten() {
+    for entry in entries {
+        let entry = match entry {
+            Ok(e) => e,
+
+            Err(e) => {
+                out.fail(todos_dir, &e);
+
+                continue;
+            }
+        };
         let path = entry.path();
         if !path.is_file() {
             continue;
@@ -659,7 +778,7 @@ fn discover_todos(todos_dir: &Path, out: &mut Vec<DiscoveredFile>) -> Result<(),
         };
         if let Some(caps) = TODO_FILE.captures(name) {
             let session_id = caps.get(1).map(|m| m.as_str().to_owned());
-            push_file(out, &path, CATEGORY_TODO, None, session_id)?;
+            push_file(&mut out.files, &path, CATEGORY_TODO, None, session_id)?;
         }
     }
 
@@ -669,13 +788,21 @@ fn discover_todos(todos_dir: &Path, out: &mut Vec<DiscoveredFile>) -> Result<(),
 /// `tasks/<session>/{.lock,.highwatermark}`. We recurse one level and emit
 /// an entry per dotfile — the TS parser uses both `.lock` existence and
 /// `.highwatermark` content, so both need fingerprints.
-fn discover_tasks(tasks_dir: &Path, out: &mut Vec<DiscoveredFile>) -> Result<(), FingerprintError> {
-    let entries = match fs::read_dir(tasks_dir) {
-        Ok(e) => e,
-        Err(_) => return Ok(()),
+fn discover_tasks(tasks_dir: &Path, out: &mut Discovery) -> Result<(), FingerprintError> {
+    let Some(entries) = read_dir_reporting(tasks_dir, out) else {
+        return Ok(());
     };
 
-    for entry in entries.flatten() {
+    for entry in entries {
+        let entry = match entry {
+            Ok(e) => e,
+
+            Err(e) => {
+                out.fail(tasks_dir, &e);
+
+                continue;
+            }
+        };
         let session_dir = entry.path();
         if !session_dir.is_dir() {
             continue;
@@ -688,7 +815,13 @@ fn discover_tasks(tasks_dir: &Path, out: &mut Vec<DiscoveredFile>) -> Result<(),
         for task_file in [".lock", ".highwatermark"] {
             let path = session_dir.join(task_file);
             if path.is_file() {
-                push_file(out, &path, CATEGORY_TASK, None, Some(session_id.clone()))?;
+                push_file(
+                    &mut out.files,
+                    &path,
+                    CATEGORY_TASK,
+                    None,
+                    Some(session_id.clone()),
+                )?;
             }
         }
     }
@@ -698,16 +831,33 @@ fn discover_tasks(tasks_dir: &Path, out: &mut Vec<DiscoveredFile>) -> Result<(),
 
 /// `file-history/<session>/<hash>@v<n>` — flat per-session directories
 /// full of snapshot blobs.
-fn discover_file_history(
-    root: &Path,
-    out: &mut Vec<DiscoveredFile>,
-) -> Result<(), FingerprintError> {
-    let walker = match fs::read_dir(root) {
-        Ok(_) => WalkDir::new(root).min_depth(2).max_depth(2),
-        Err(_) => return Ok(()),
-    };
+fn discover_file_history(root: &Path, out: &mut Discovery) -> Result<(), FingerprintError> {
+    // Probe the root first so an absent `file-history/` stays silent while a
+    // permission failure on it is reported.
+    match fs::read_dir(root) {
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => {
+            out.fail(root, &e);
+            return Ok(());
+        }
+    }
 
-    for entry in walker.into_iter().filter_map(Result::ok) {
+    for entry in WalkDir::new(root).min_depth(2).max_depth(2) {
+        let entry = match entry {
+            Ok(e) => e,
+            Err(e) => {
+                // A descent that failed. Report the path if walkdir knows it,
+                // otherwise the root — either way the scan is incomplete and
+                // must not read as "nothing here".
+                let at = e.path().unwrap_or(root).to_path_buf();
+                out.errors.push(DiscoveryError {
+                    path: at.to_string_lossy().into_owned(),
+                    message: e.to_string(),
+                });
+                continue;
+            }
+        };
         if !entry.file_type().is_file() {
             continue;
         }
@@ -724,7 +874,13 @@ fn discover_file_history(
             _ => None,
         });
 
-        push_file(out, &path, CATEGORY_FILE_HISTORY, None, session_id)?;
+        push_file(
+            &mut out.files,
+            &path,
+            CATEGORY_FILE_HISTORY,
+            None,
+            session_id,
+        )?;
     }
 
     Ok(())
