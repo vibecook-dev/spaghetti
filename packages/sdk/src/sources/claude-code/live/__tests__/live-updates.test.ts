@@ -55,7 +55,21 @@ const SESSION_ID = 'session-xyz';
 // queue's 30 ms debounce + 75 ms batch window + SQLite commit usually
 // lands within a few hundred ms; 2 s gives headroom for CI noise.
 const POLL_INTERVAL_MS = 50;
-const POLL_MAX_ITER = 40; // 40 * 50ms = 2s
+/**
+ * Budgets are ceilings, not waits. `pollUntil` returns the moment `check()`
+ * succeeds, so a generous ceiling costs a passing test nothing — it only
+ * changes how long a genuinely broken pipeline takes to report, and it cannot
+ * mask a break, because a pipeline that never delivers never satisfies
+ * `check()` at any budget.
+ *
+ * They are generous because the old 2 s / 10 s pair failed under load: watcher
+ * startup plus SQLite init ate the budget before the first poll, surfacing as
+ * `test timed out after 10000ms`. That happened on Windows CI and reproduces
+ * locally when the full suite runs in parallel — so this is deliberately not
+ * gated on `process.env.CI`, which would have left the local flake in place.
+ */
+const POLL_MAX_ITER = 200; // 10s ceiling
+const TEST_TIMEOUT_MS = 45_000;
 const QUIET_MS = 500;
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -267,7 +281,7 @@ async function createFixture(opts: FixtureOptions = {}): Promise<Fixture> {
 // ═══════════════════════════════════════════════════════════════════════════
 
 describe('LiveUpdates end-to-end (RFC 005 C2.7)', () => {
-  test('live write lands in SQLite', { timeout: 10000 }, async () => {
+  test('live write lands in SQLite', { timeout: TEST_TIMEOUT_MS }, async () => {
     const fx = await createFixture({
       ensureDirs: ['projects', 'todos'],
       seed: [{ slug: SLUG, sessionIds: [SESSION_ID] }],
@@ -291,7 +305,7 @@ describe('LiveUpdates end-to-end (RFC 005 C2.7)', () => {
     }
   });
 
-  test('append after initial write is captured', { timeout: 10000 }, async () => {
+  test('append after initial write is captured', { timeout: TEST_TIMEOUT_MS }, async () => {
     const fx = await createFixture({
       ensureDirs: ['projects', 'todos'],
       seed: [{ slug: SLUG, sessionIds: [SESSION_ID] }],
@@ -319,7 +333,7 @@ describe('LiveUpdates end-to-end (RFC 005 C2.7)', () => {
     }
   });
 
-  test('rewrite is captured', { timeout: 10000 }, async () => {
+  test('rewrite is captured', { timeout: TEST_TIMEOUT_MS }, async () => {
     const fx = await createFixture({
       ensureDirs: ['projects', 'todos'],
       seed: [{ slug: SLUG, sessionIds: [SESSION_ID] }],
@@ -362,7 +376,7 @@ describe('LiveUpdates end-to-end (RFC 005 C2.7)', () => {
     }
   });
 
-  test('nested workflow subagent transcript lands with its workflow_id', { timeout: 10000 }, async () => {
+  test('nested workflow subagent transcript lands with its workflow_id', { timeout: TEST_TIMEOUT_MS }, async () => {
     const fx = await createFixture({
       ensureDirs: ['projects', 'todos'],
       seed: [{ slug: SLUG, sessionIds: [SESSION_ID] }],
@@ -394,7 +408,7 @@ describe('LiveUpdates end-to-end (RFC 005 C2.7)', () => {
     }
   });
 
-  test('todo file lands in SQLite', { timeout: 10000 }, async () => {
+  test('todo file lands in SQLite', { timeout: TEST_TIMEOUT_MS }, async () => {
     const fx = await createFixture({
       ensureDirs: ['projects', 'todos'],
       seed: [{ slug: SLUG, sessionIds: [SESSION_ID] }],
@@ -424,7 +438,7 @@ describe('LiveUpdates end-to-end (RFC 005 C2.7)', () => {
     }
   });
 
-  test('stop() halts further writes', { timeout: 10000 }, async () => {
+  test('stop() halts further writes', { timeout: TEST_TIMEOUT_MS }, async () => {
     const fx = await createFixture({
       ensureDirs: ['projects', 'todos'],
       seed: [{ slug: SLUG, sessionIds: [SESSION_ID] }],
@@ -466,7 +480,7 @@ describe('LiveUpdates end-to-end (RFC 005 C2.7)', () => {
 describe('LiveUpdates graceful startup (RFC 005 C2.7)', () => {
   test(
     'start() resolves without attaching watchers; prewarm on missing todos/ surfaces via onError',
-    { timeout: 10000 },
+    { timeout: TEST_TIMEOUT_MS },
     async () => {
       const errors: Error[] = [];
       const fx = await createFixture({
@@ -515,7 +529,7 @@ describe('LiveUpdates graceful startup (RFC 005 C2.7)', () => {
 // ═══════════════════════════════════════════════════════════════════════════
 
 describe('LiveUpdates lazy ref-counting (RFC 005 C3.2)', () => {
-  test('without prewarm: writing a JSONL line produces no SQLite rows', { timeout: 10000 }, async () => {
+  test('without prewarm: writing a JSONL line produces no SQLite rows', { timeout: TEST_TIMEOUT_MS }, async () => {
     const fx = await createFixture({
       ensureDirs: ['projects'],
       seed: [{ slug: SLUG, sessionIds: [SESSION_ID] }],
@@ -536,7 +550,7 @@ describe('LiveUpdates lazy ref-counting (RFC 005 C3.2)', () => {
     }
   });
 
-  test('prewarm attaches the watcher; subsequent writes ingest', { timeout: 10000 }, async () => {
+  test('prewarm attaches the watcher; subsequent writes ingest', { timeout: TEST_TIMEOUT_MS }, async () => {
     const fx = await createFixture({
       ensureDirs: ['projects'],
       seed: [{ slug: SLUG, sessionIds: [SESSION_ID] }],
@@ -561,45 +575,49 @@ describe('LiveUpdates lazy ref-counting (RFC 005 C3.2)', () => {
     }
   });
 
-  test('stacking two prewarms then disposing one keeps the watcher attached', { timeout: 10000 }, async () => {
-    const fx = await createFixture({
-      ensureDirs: ['projects'],
-      seed: [{ slug: SLUG, sessionIds: [SESSION_ID] }],
-    });
-    try {
-      await fx.live.start();
-      // First prewarm: slug+sessionId scope.
-      // Second prewarm: slug-only. Both resolve to the same `projects`
-      // scope, so the ref count is 2. Disposing one drops it to 1, not
-      // 0, and the watcher stays attached.
-      const dispose1 = fx.live.prewarm({ kind: 'session', slug: SLUG, sessionId: SESSION_ID });
-      const dispose2 = fx.live.prewarm({ kind: 'session', slug: SLUG });
-      await new Promise((r) => setTimeout(r, 150));
-
-      const sessionPath = path.join(fx.rootDir, 'projects', SLUG, `${SESSION_ID}.jsonl`);
-      writeFileSync(sessionPath, makeUserMessage('uuid-1', 'baseline'));
-      await pollUntil(() => {
-        const r = fx.sqlite.get<{ n: number }>(`SELECT COUNT(*) AS n FROM messages WHERE session_id = ?`, SESSION_ID);
-        return r && r.n >= 1 ? r : undefined;
+  test(
+    'stacking two prewarms then disposing one keeps the watcher attached',
+    { timeout: TEST_TIMEOUT_MS },
+    async () => {
+      const fx = await createFixture({
+        ensureDirs: ['projects'],
+        seed: [{ slug: SLUG, sessionIds: [SESSION_ID] }],
       });
+      try {
+        await fx.live.start();
+        // First prewarm: slug+sessionId scope.
+        // Second prewarm: slug-only. Both resolve to the same `projects`
+        // scope, so the ref count is 2. Disposing one drops it to 1, not
+        // 0, and the watcher stays attached.
+        const dispose1 = fx.live.prewarm({ kind: 'session', slug: SLUG, sessionId: SESSION_ID });
+        const dispose2 = fx.live.prewarm({ kind: 'session', slug: SLUG });
+        await new Promise((r) => setTimeout(r, 150));
 
-      dispose2();
-      await new Promise((r) => setTimeout(r, 50));
+        const sessionPath = path.join(fx.rootDir, 'projects', SLUG, `${SESSION_ID}.jsonl`);
+        writeFileSync(sessionPath, makeUserMessage('uuid-1', 'baseline'));
+        await pollUntil(() => {
+          const r = fx.sqlite.get<{ n: number }>(`SELECT COUNT(*) AS n FROM messages WHERE session_id = ?`, SESSION_ID);
+          return r && r.n >= 1 ? r : undefined;
+        });
 
-      const baseline =
-        fx.sqlite.get<{ n: number }>(`SELECT COUNT(*) AS n FROM messages WHERE session_id = ?`, SESSION_ID)?.n ?? 0;
-      appendFileSync(sessionPath, makeUserMessage('uuid-stacking', 'after partial release'));
+        dispose2();
+        await new Promise((r) => setTimeout(r, 50));
 
-      const row = await pollUntil(() => {
-        const r = fx.sqlite.get<{ n: number }>(`SELECT COUNT(*) AS n FROM messages WHERE session_id = ?`, SESSION_ID);
-        return r && r.n > baseline ? r : undefined;
-      });
-      assert.ok(row.n > baseline, 'watcher should still be attached via the first prewarm');
-      dispose1();
-    } finally {
-      await fx.cleanup();
-    }
-  });
+        const baseline =
+          fx.sqlite.get<{ n: number }>(`SELECT COUNT(*) AS n FROM messages WHERE session_id = ?`, SESSION_ID)?.n ?? 0;
+        appendFileSync(sessionPath, makeUserMessage('uuid-stacking', 'after partial release'));
+
+        const row = await pollUntil(() => {
+          const r = fx.sqlite.get<{ n: number }>(`SELECT COUNT(*) AS n FROM messages WHERE session_id = ?`, SESSION_ID);
+          return r && r.n > baseline ? r : undefined;
+        });
+        assert.ok(row.n > baseline, 'watcher should still be attached via the first prewarm');
+        dispose1();
+      } finally {
+        await fx.cleanup();
+      }
+    },
+  );
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -607,7 +625,7 @@ describe('LiveUpdates lazy ref-counting (RFC 005 C3.2)', () => {
 // ═══════════════════════════════════════════════════════════════════════════
 
 describe('LiveUpdates tasks/ scope (RFC 005 C5.2)', () => {
-  test('task prewarm + .lock create lands a tasks row + emits task.updated', { timeout: 10000 }, async () => {
+  test('task prewarm + .lock create lands a tasks row + emits task.updated', { timeout: TEST_TIMEOUT_MS }, async () => {
     const fx = await createFixture({
       ensureDirs: ['tasks'],
       seed: [{ slug: 'task-slug', sessionIds: ['s1'] }],
@@ -643,7 +661,7 @@ describe('LiveUpdates tasks/ scope (RFC 005 C5.2)', () => {
 
   test(
     '.lock + .highwatermark within debounce window collapse — at least one event + final state lands',
-    { timeout: 10000 },
+    { timeout: TEST_TIMEOUT_MS },
     async () => {
       // Coalescing collapses bursts of edits per debounce window into
       // ideally one event, but timing is OS- and FS-dependent. The
@@ -706,7 +724,7 @@ describe('LiveUpdates tasks/ scope (RFC 005 C5.2)', () => {
 // ═══════════════════════════════════════════════════════════════════════════
 
 describe('LiveUpdates file-history/ scope (RFC 005 C5.3)', () => {
-  test('file-history snapshot lands + emits file-history.added', { timeout: 10000 }, async () => {
+  test('file-history snapshot lands + emits file-history.added', { timeout: TEST_TIMEOUT_MS }, async () => {
     const fx = await createFixture({ ensureDirs: ['file-history'] });
     try {
       await fx.live.start();
@@ -745,7 +763,7 @@ describe('LiveUpdates file-history/ scope (RFC 005 C5.3)', () => {
 // ═══════════════════════════════════════════════════════════════════════════
 
 describe('LiveUpdates plans/ scope (RFC 005 C5.4)', () => {
-  test('plan markdown file lands + emits plan.upserted', { timeout: 10000 }, async () => {
+  test('plan markdown file lands + emits plan.upserted', { timeout: TEST_TIMEOUT_MS }, async () => {
     const fx = await createFixture({ ensureDirs: ['plans'] });
     try {
       await fx.live.start();
@@ -785,7 +803,7 @@ describe('LiveUpdates plans/ scope (RFC 005 C5.4)', () => {
 // ═══════════════════════════════════════════════════════════════════════════
 
 describe('LiveUpdates settings/ scope (RFC 005 C5.5)', () => {
-  test('settings.json write lands + emits settings.changed', { timeout: 10000 }, async () => {
+  test('settings.json write lands + emits settings.changed', { timeout: TEST_TIMEOUT_MS }, async () => {
     const fx = await createFixture({ ensureDirs: [] });
     try {
       await fx.live.start();
@@ -823,7 +841,7 @@ describe('LiveUpdates settings/ scope (RFC 005 C5.5)', () => {
 
   test(
     'atomic-rename write collapses settings.changed events — final parsed value lands',
-    { timeout: 10000 },
+    { timeout: TEST_TIMEOUT_MS },
     async () => {
       // The 150 ms trailing coalescer ideally collapses
       // delete+create from atomic rename into a single emit, but
@@ -869,58 +887,66 @@ describe('LiveUpdates settings/ scope (RFC 005 C5.5)', () => {
     },
   );
 
-  test('settings.local.json emits settings.changed with file="settings.local"', { timeout: 10000 }, async () => {
-    const fx = await createFixture({ ensureDirs: [] });
-    try {
-      await fx.live.start();
-      const captured: Change[] = [];
-      const sub = fx.store.subscribe({ kind: 'settings' }, (c) => {
-        captured.push(c);
-      });
-      const dispose = fx.live.prewarm({ kind: 'settings' });
-      await new Promise((r) => setTimeout(r, 150));
+  test(
+    'settings.local.json emits settings.changed with file="settings.local"',
+    { timeout: TEST_TIMEOUT_MS },
+    async () => {
+      const fx = await createFixture({ ensureDirs: [] });
+      try {
+        await fx.live.start();
+        const captured: Change[] = [];
+        const sub = fx.store.subscribe({ kind: 'settings' }, (c) => {
+          captured.push(c);
+        });
+        const dispose = fx.live.prewarm({ kind: 'settings' });
+        await new Promise((r) => setTimeout(r, 150));
 
-      writeFileSync(path.join(fx.rootDir, 'settings.local.json'), JSON.stringify({ permissions: { allow: ['*'] } }));
+        writeFileSync(path.join(fx.rootDir, 'settings.local.json'), JSON.stringify({ permissions: { allow: ['*'] } }));
 
-      const event = await pollUntil(() => {
-        const hit = captured.find((c) => c.type === 'settings.changed' && c.file === 'settings.local');
-        return hit ? hit : undefined;
-      });
-      assert.equal(event.type, 'settings.changed');
-      if (event.type === 'settings.changed') assert.equal(event.file, 'settings.local');
+        const event = await pollUntil(() => {
+          const hit = captured.find((c) => c.type === 'settings.changed' && c.file === 'settings.local');
+          return hit ? hit : undefined;
+        });
+        assert.equal(event.type, 'settings.changed');
+        if (event.type === 'settings.changed') assert.equal(event.file, 'settings.local');
 
-      sub();
-      dispose();
-    } finally {
-      await fx.cleanup();
-    }
-  });
+        sub();
+        dispose();
+      } finally {
+        await fx.cleanup();
+      }
+    },
+  );
 
-  test('corrupt settings.json never throws; no event fires until a valid parse lands', { timeout: 10000 }, async () => {
-    const fx = await createFixture({ ensureDirs: [] });
-    try {
-      await fx.live.start();
-      const captured: Change[] = [];
-      const sub = fx.store.subscribe({ kind: 'settings' }, (c) => {
-        captured.push(c);
-      });
-      const dispose = fx.live.prewarm({ kind: 'settings' });
-      await new Promise((r) => setTimeout(r, 150));
+  test(
+    'corrupt settings.json never throws; no event fires until a valid parse lands',
+    { timeout: TEST_TIMEOUT_MS },
+    async () => {
+      const fx = await createFixture({ ensureDirs: [] });
+      try {
+        await fx.live.start();
+        const captured: Change[] = [];
+        const sub = fx.store.subscribe({ kind: 'settings' }, (c) => {
+          captured.push(c);
+        });
+        const dispose = fx.live.prewarm({ kind: 'settings' });
+        await new Promise((r) => setTimeout(r, 150));
 
-      const settingsPath = path.join(fx.rootDir, 'settings.json');
-      const startCount = captured.length;
-      writeFileSync(settingsPath, 'not json');
+        const settingsPath = path.join(fx.rootDir, 'settings.json');
+        const startCount = captured.length;
+        writeFileSync(settingsPath, 'not json');
 
-      // Wait past the debounce plus a safety margin.
-      await new Promise((r) => setTimeout(r, QUIET_MS));
+        // Wait past the debounce plus a safety margin.
+        await new Promise((r) => setTimeout(r, QUIET_MS));
 
-      const corruptEvents = captured.slice(startCount).filter((c) => c.type === 'settings.changed');
-      assert.equal(corruptEvents.length, 0, 'corrupt write must not surface a settings.changed event');
+        const corruptEvents = captured.slice(startCount).filter((c) => c.type === 'settings.changed');
+        assert.equal(corruptEvents.length, 0, 'corrupt write must not surface a settings.changed event');
 
-      sub();
-      dispose();
-    } finally {
-      await fx.cleanup();
-    }
-  });
+        sub();
+        dispose();
+      } finally {
+        await fx.cleanup();
+      }
+    },
+  );
 });

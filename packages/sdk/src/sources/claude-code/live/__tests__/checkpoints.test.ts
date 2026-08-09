@@ -8,9 +8,10 @@
  *   - `scheduleFlush()` debounces on a 2 s trailing edge.
  *   - `stop()` forces a final flush regardless of pending debounce.
  *
- * Uses only the built-in node:test runner and real timers — the
- * debounce-path test waits 2100 ms to keep the implementation honest
- * about using `setTimeout.unref()` and avoid fake-timer coupling.
+ * Uses only the built-in node:test runner and real timers, to keep the
+ * implementation honest about `setTimeout.unref()` and avoid fake-timer
+ * coupling. Debounce-path tests poll for the flush rather than sleeping a
+ * fixed interval — see `readAfterFlush`.
  */
 
 import { test, describe } from 'node:test';
@@ -37,6 +38,37 @@ function makeCheckpoint(overrides: Partial<Checkpoint> = {}): Checkpoint {
     lastMtimeMs: 1_700_000_000_000,
     ...overrides,
   };
+}
+
+interface StateFile {
+  version?: number;
+  checkpoints: Checkpoint[];
+}
+
+/**
+ * Read the state file once the debounced flush has landed.
+ *
+ * This used to be `await sleep(2100)` against a 2 s debounce — 100 ms of
+ * headroom, which a loaded shared runner eats routinely. It was a recurring
+ * Windows CI flake (ENOENT: the timer simply had not fired yet).
+ *
+ * Polling keeps the fast path fast: on an idle machine this returns at ~2 s
+ * just as the sleep did, while the ceiling absorbs a slow scheduler instead of
+ * failing. The ceiling only delays the report of a real breakage; it cannot
+ * hide one, because a store that never flushes still never produces the file.
+ */
+async function readAfterFlush(filePath: string, timeoutMs = 20_000): Promise<StateFile> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    try {
+      return JSON.parse(await readFile(filePath, 'utf8')) as StateFile;
+    } catch (err) {
+      if (Date.now() >= deadline) {
+        throw new Error(`debounced flush never landed at ${filePath} within ${timeoutMs}ms`, { cause: err });
+      }
+      await sleep(25);
+    }
+  }
 }
 
 /**
@@ -191,12 +223,7 @@ describe('CheckpointStore', () => {
       store.set(cp.path, cp);
       store.scheduleFlush();
 
-      // Wait past the 2 s debounce — 2100 ms picks up any late-fire jitter
-      // from the event loop without making the test slow.
-      await sleep(2100);
-
-      const raw = await readFile(filePath, 'utf8');
-      const parsed = JSON.parse(raw) as { version: number; checkpoints: Checkpoint[] };
+      const parsed = await readAfterFlush(filePath);
       assert.equal(parsed.version, 1);
       assert.equal(parsed.checkpoints.length, 1);
       assert.deepEqual(parsed.checkpoints[0], cp);
@@ -216,10 +243,8 @@ describe('CheckpointStore', () => {
       store.scheduleFlush();
       store.scheduleFlush();
       store.scheduleFlush();
-      // Should still fire exactly once after the window.
-      await sleep(2100);
-      const raw = await readFile(filePath, 'utf8');
-      const parsed = JSON.parse(raw) as { checkpoints: Checkpoint[] };
+      // Should still coalesce to a single record after the window.
+      const parsed = await readAfterFlush(filePath);
       assert.equal(parsed.checkpoints.length, 1);
       await store.stop();
     } finally {
