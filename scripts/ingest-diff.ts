@@ -59,7 +59,8 @@
  */
 
 import { createRequire } from 'node:module';
-import { existsSync, rmSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { existsSync, rmSync, mkdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -92,6 +93,7 @@ const { values } = parseArgs({
     'rust-db': { type: 'string' },
     mode: { type: 'string' },
     source: { type: 'string' },
+    'snapshot-json': { type: 'string' },
     lines: { type: 'string' },
     chunk: { type: 'string' },
   },
@@ -732,6 +734,73 @@ async function main(): Promise<void> {
   const tsDb = new Database(tsDbPath, { readonly: true });
   const rustDb = new Database(rustDbPath, { readonly: true });
 
+  /**
+   * Deterministic per-engine snapshot for the RFC 008 Phase 0 baseline.
+   *
+   * Row *contents* are hashed rather than dumped: the point is to detect that
+   * something changed and where, not to review 35k rows in a diff. Counts stay
+   * plain so a reviewer can see the shape at a glance without decoding a digest.
+   *
+   * Everything the diff harness already ignores as engine-local — `updated_at`,
+   * `source_files.mtime_ms` — is ignored here for the same reason, so a snapshot
+   * does not churn on every run.
+   */
+  function snapshotDb(db: Database.Database, label: string): Record<string, unknown> {
+    const tables: Record<string, { rows: number; digest: string }> = {};
+    for (const spec of TABLE_SPECS) {
+      const exists = db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name=?`).get(spec.name);
+      if (!exists) continue;
+      const rows = dumpTable(db, spec);
+      tables[spec.name] = {
+        rows: rows.length,
+        digest: createHash('sha256').update(canonical(rows)).digest('hex').slice(0, 16),
+      };
+    }
+
+    const scalar = (sql: string): number => {
+      try {
+        return (db.prepare(sql).get() as { v: number } | undefined)?.v ?? 0;
+      } catch {
+        return -1;
+      }
+    };
+
+    return {
+      engine: label,
+      tables,
+      // `source_files` is outside TABLE_SPECS because only the TS engine writes
+      // it today (RFC 008 Phase 1 changes that). Counted, not digested, so the
+      // baseline records the asymmetry instead of hiding it.
+      fingerprints: scalar('SELECT COUNT(*) AS v FROM source_files'),
+      fts: scalar('SELECT COUNT(*) AS v FROM search_fts'),
+      tokens: {
+        input: scalar('SELECT COALESCE(SUM(input_tokens),0) AS v FROM messages'),
+        output: scalar('SELECT COALESCE(SUM(output_tokens),0) AS v FROM messages'),
+        cacheCreation: scalar('SELECT COALESCE(SUM(cache_creation_tokens),0) AS v FROM messages'),
+        cacheRead: scalar('SELECT COALESCE(SUM(cache_read_tokens),0) AS v FROM messages'),
+        sessionsEstimated: scalar('SELECT COUNT(*) AS v FROM sessions WHERE tokens_estimated = 1'),
+      },
+    };
+  }
+
+  /** Fixed FTS queries — a search that silently stops matching is a real regression. */
+  const FTS_PROBES = ['the', 'session', 'error'];
+
+  function snapshotFts(db: Database.Database): Record<string, number> {
+    const out: Record<string, number> = {};
+    for (const q of FTS_PROBES) {
+      try {
+        const row = db.prepare('SELECT COUNT(*) AS v FROM search_fts WHERE search_fts MATCH ?').get(q) as
+          | { v: number }
+          | undefined;
+        out[q] = row?.v ?? 0;
+      } catch {
+        out[q] = -1;
+      }
+    }
+    return out;
+  }
+
   const allDiffs: Diff[] = [];
 
   try {
@@ -774,6 +843,28 @@ async function main(): Promise<void> {
       });
     } else {
       console.log(`  ✓ search_fts: ${tsFts} rows (count match)`);
+    }
+
+    // RFC 008 Phase 0 baseline. Written from inside the try so it captures the
+    // same DBs the diff just read — a snapshot taken after close would be a
+    // different run.
+    const snapshotPath = values['snapshot-json'];
+    if (snapshotPath) {
+      const snapshot = {
+        source: coldSource,
+        // Repo-relative and POSIX-separated: an absolute path would make the
+        // committed baseline churn on every machine that regenerates it.
+        fixture: path.relative(repoRoot, fixtureRootDir).split(path.sep).join('/'),
+        schemaVersion: (
+          tsDb.prepare("SELECT value AS v FROM schema_meta WHERE key='version'").get() as { v: string } | undefined
+        )?.v,
+        ts: { ...snapshotDb(tsDb, 'ts'), ftsProbes: snapshotFts(tsDb) },
+        rust: { ...snapshotDb(rustDb, 'rs'), ftsProbes: snapshotFts(rustDb) },
+        diffCount: allDiffs.length,
+      };
+      mkdirSync(path.dirname(snapshotPath), { recursive: true });
+      writeFileSync(snapshotPath, `${JSON.stringify(snapshot, null, 2)}\n`);
+      console.log(`  → snapshot: ${snapshotPath}`);
     }
   } finally {
     tsDb.close();

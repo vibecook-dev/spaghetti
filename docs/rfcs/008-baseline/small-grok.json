@@ -1,0 +1,156 @@
+{
+  "source": "grok",
+  "fixture": "crates/spaghetti-napi/fixtures/small-grok/.grok",
+  "schemaVersion": "15",
+  "ts": {
+    "engine": "ts",
+    "tables": {
+      "schema_meta": {
+        "rows": 1,
+        "digest": "4aab27ed42407de5"
+      },
+      "projects": {
+        "rows": 3,
+        "digest": "83129282dd43fc87"
+      },
+      "project_memories": {
+        "rows": 0,
+        "digest": "4f53cda18c2baa0c"
+      },
+      "sessions": {
+        "rows": 4,
+        "digest": "35f806b912d0d8b2"
+      },
+      "messages": {
+        "rows": 16,
+        "digest": "c1c2bb57793c1c9a"
+      },
+      "subagents": {
+        "rows": 0,
+        "digest": "4f53cda18c2baa0c"
+      },
+      "workflows": {
+        "rows": 0,
+        "digest": "4f53cda18c2baa0c"
+      },
+      "tool_results": {
+        "rows": 0,
+        "digest": "4f53cda18c2baa0c"
+      },
+      "todos": {
+        "rows": 0,
+        "digest": "4f53cda18c2baa0c"
+      },
+      "tasks": {
+        "rows": 0,
+        "digest": "4f53cda18c2baa0c"
+      },
+      "plans": {
+        "rows": 0,
+        "digest": "4f53cda18c2baa0c"
+      },
+      "config": {
+        "rows": 0,
+        "digest": "4f53cda18c2baa0c"
+      },
+      "analytics": {
+        "rows": 0,
+        "digest": "4f53cda18c2baa0c"
+      },
+      "file_history": {
+        "rows": 0,
+        "digest": "4f53cda18c2baa0c"
+      }
+    },
+    "fingerprints": 4,
+    "fts": 16,
+    "tokens": {
+      "input": 17400,
+      "output": 0,
+      "cacheCreation": 0,
+      "cacheRead": 0,
+      "sessionsEstimated": 4
+    },
+    "ftsProbes": {
+      "the": 5,
+      "session": 0,
+      "error": 0
+    }
+  },
+  "rust": {
+    "engine": "rs",
+    "tables": {
+      "schema_meta": {
+        "rows": 1,
+        "digest": "4aab27ed42407de5"
+      },
+      "projects": {
+        "rows": 3,
+        "digest": "83129282dd43fc87"
+      },
+      "project_memories": {
+        "rows": 0,
+        "digest": "4f53cda18c2baa0c"
+      },
+      "sessions": {
+        "rows": 4,
+        "digest": "35f806b912d0d8b2"
+      },
+      "messages": {
+        "rows": 16,
+        "digest": "c1c2bb57793c1c9a"
+      },
+      "subagents": {
+        "rows": 0,
+        "digest": "4f53cda18c2baa0c"
+      },
+      "workflows": {
+        "rows": 0,
+        "digest": "4f53cda18c2baa0c"
+      },
+      "tool_results": {
+        "rows": 0,
+        "digest": "4f53cda18c2baa0c"
+      },
+      "todos": {
+        "rows": 0,
+        "digest": "4f53cda18c2baa0c"
+      },
+      "tasks": {
+        "rows": 0,
+        "digest": "4f53cda18c2baa0c"
+      },
+      "plans": {
+        "rows": 0,
+        "digest": "4f53cda18c2baa0c"
+      },
+      "config": {
+        "rows": 0,
+        "digest": "4f53cda18c2baa0c"
+      },
+      "analytics": {
+        "rows": 0,
+        "digest": "4f53cda18c2baa0c"
+      },
+      "file_history": {
+        "rows": 0,
+        "digest": "4f53cda18c2baa0c"
+      }
+    },
+    "fingerprints": 4,
+    "fts": 16,
+    "tokens": {
+      "input": 17400,
+      "output": 0,
+      "cacheCreation": 0,
+      "cacheRead": 0,
+      "sessionsEstimated": 4
+    },
+    "ftsProbes": {
+      "the": 5,
+      "session": 0,
+      "error": 0
+    }
+  },
+  "diffCount": 0
+}
