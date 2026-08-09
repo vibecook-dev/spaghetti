@@ -27,6 +27,7 @@ import type { IngestHooks, MessageExtractor, SessionTokenApi } from '../sources/
 import { claudeCodeMessageExtractor } from '../sources/claude-code/message-extractor.js';
 import { normalizeClaudeFirstPrompt } from '../sources/claude-code/session-metadata.js';
 import type { SourceFingerprint } from './segment-types.js';
+import { invalidateSourceContract } from './ingest-contract.js';
 import {
   initializeSchema,
   SESSION_SUMMARY_TRIGGER_NAMES,
@@ -40,6 +41,29 @@ import {
   rebuildDirtyTokenActivity,
   rebuildSourceTokenActivity,
 } from './token-activity.js';
+
+/**
+ * The one source allowed to clear the artifact tables, because it is the only
+ * one that writes them. See `clearSourceData`.
+ */
+const CLAUDE_ARTIFACT_OWNER = 'claude-code';
+
+/**
+ * Artifact tables with no `source_id` column. Cleared in full or not at all.
+ *
+ * Order is children before parents so a future foreign key cannot strand a row
+ * mid-clear; today none are enforced, but the ordering costs nothing and stops
+ * the next schema change from being a silent trap.
+ */
+const UNSCOPED_ARTIFACT_TABLES = [
+  'tool_results',
+  'todos',
+  'tasks',
+  'file_history',
+  'workflows',
+  'plans',
+  'project_memories',
+] as const;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // INTERFACE
@@ -1047,6 +1071,29 @@ class IngestServiceImpl implements IngestService {
     this.db.exec(`INSERT INTO subagent_search_fts(subagent_search_fts) VALUES('rebuild')`);
   }
 
+  /**
+   * Wipe everything this source owns, atomically.
+   *
+   * Two kinds of table are involved.
+   *
+   * **Source-scoped** tables carry `source_id` and clear by it. Children clear
+   * before parents so no delete strands a row it was meant to cascade from.
+   *
+   * **Artifact tables** — `project_memories`, `workflows`, `tool_results`,
+   * `todos`, `tasks`, `plans`, `file_history` — have no `source_id` column, so
+   * they cannot be cleared selectively. They are cleared *in full*, and only
+   * when the source being cleared is `claude-code`.
+   *
+   * That is safe today because Claude Code is their sole writer, which is a
+   * property of the readers rather than of the schema: the Codex and Grok
+   * readers emit only project/session/message/fingerprint events and never the
+   * artifact events these tables are written from. `fingerprint-source-ownership`
+   * and `source-clear.test.ts` pin that assumption.
+   *
+   * A future source that writes any of these seven must add ownership to the
+   * schema first — clearing them for Codex would delete Claude's artifacts, and
+   * *not* clearing them for a second Claude-like writer would strand rows.
+   */
   clearSourceData(): void {
     this.db.transaction(() => {
       // Keep fingerprints and the completion marker in the same atomic wipe as
@@ -1069,9 +1116,22 @@ class IngestServiceImpl implements IngestService {
       this.db.run('DELETE FROM session_summary_totals WHERE source_id = ?', this.sourceId);
       this.db.run('DELETE FROM session_summary_dirty WHERE source_id = ?', this.sourceId);
       invalidateTokenActivityMaterialization(this.db, this.sourceId);
+
+      // Artifact tables — no source_id to filter on, so all-or-nothing, and
+      // only for their sole writer. See the doc comment above.
+      if (this.sourceId === CLAUDE_ARTIFACT_OWNER) {
+        for (const table of UNSCOPED_ARTIFACT_TABLES) {
+          this.db.run(`DELETE FROM ${table}`);
+        }
+      }
+
       this.db.run('DELETE FROM sessions WHERE source_id = ?', this.sourceId);
       this.db.run('DELETE FROM projects WHERE source_id = ?', this.sourceId);
       this.db.run('DELETE FROM source_files WHERE source_id = ?', this.sourceId);
+
+      // Last, and inside the same transaction: a clear that rolls back must not
+      // leave the source looking repaired (RFC 008 Phase 1.3).
+      invalidateSourceContract(this.db, this.sourceId);
     });
   }
 

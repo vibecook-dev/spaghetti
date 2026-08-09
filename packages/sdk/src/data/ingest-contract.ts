@@ -11,15 +11,27 @@
  * Stored in `source_materializations` under a per-source projection key. A
  * global key would be wrong: repairing Claude Code must not re-ingest Codex.
  *
- * ── Phase 0 scope ──────────────────────────────────────────────────────────
+ * ── Who writes it, and why that is asymmetric ──────────────────────────────
  *
- * This is the *representation only*. Nothing calls `markSourceContractCurrent`
- * yet, and no source is treated as repaired — Phase 0's exit gate requires that
- * no production behavior change. Phase 1 owns the forced upgrade repair, and
- * the RFC is explicit about the ordering there: publish the version last, only
- * after entity writes, derived rebuilds, and fingerprint publication all
- * succeed with no omitted-fingerprint error. On failure or crash the marker
- * must stay absent or stale so the next warm run retries.
+ * The marker describes *Rust ingest* completion — hence the key name — so only
+ * the Rust orchestrator publishes it, success-last, after the writer joins
+ * cleanly with no per-record errors. The TypeScript engine never publishes it.
+ *
+ * That asymmetry is intentional and safe in both directions:
+ *
+ * - TS-then-Rust: Rust finds no marker, reads that as "older", and does one
+ *   full re-ingest. Extra work, correct result.
+ * - Rust-then-TS: the TS engine has its own warm logic and ignores the marker
+ *   entirely.
+ *
+ * What is *not* optional is invalidation. `clearSourceData` below drops the
+ * marker inside the same transaction as the rows, in both engines — a TS clear
+ * that left a Rust marker behind would tell the next Rust warm start that a
+ * wiped source was fully materialised.
+ *
+ * `source_materializations` is deliberately absent from the ingest-diff table
+ * inventory, because a cross-engine diff would flag this asymmetry as a
+ * divergence when it is the design.
  */
 
 import type { SqliteService } from '../io/sqlite-service.js';
