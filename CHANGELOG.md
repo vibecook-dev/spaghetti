@@ -1,5 +1,41 @@
 # Changelog
 
+<!-- Standing notice — maintained by hand, not by release-please. -->
+
+## Removed in 0.6.0 — Plane 3 (hooks, chat, plugins)
+
+`spag hooks`, `spag chat`, `spag plugin`, the Hooks Monitor and Chat TUI views,
+the `spaghetti-hooks` / `spaghetti-channel` Claude Code plugins, and the SDK
+runtime surface (`api.runtime`, `createRuntimeBridge`, `RuntimeEvent`, the
+hook/channel watchers and wire types, and the `hookEventsFile` /
+`channelSessionsDir` / `channelMessagesDir` source paths) are gone. `ws` and
+`@types/ws` left both packages with them.
+
+Transcript ingest, search, query, and live updates are unaffected. No data was
+migrated or deleted.
+
+**If Claude Code still has the plugins installed**, removing the npm package
+does not remove them — it never did. `spag doctor` reports them and prints:
+
+```bash
+claude plugin disable   --scope user spaghetti-hooks@spaghetti
+claude plugin uninstall --scope user --keep-data spaghetti-hooks@spaghetti
+claude plugin disable   --scope user spaghetti-channel@spaghetti
+claude plugin uninstall --scope user --keep-data spaghetti-channel@spaghetti
+claude plugin marketplace remove --scope user spaghetti
+```
+
+`--keep-data` preserves the plugins' data directories; `~/.spaghetti/hooks` and
+`~/.spaghetti/channel` are left alone entirely. Needs Claude Code 2.1.223+.
+
+`api.runtime.listActiveSessions()` is replaced by `listActiveSessionsFromDir(paths.sessionsDir)`.
+`ActiveSessionFile` and `paths.sessionsDir` are retained.
+
+Design: [RFC 007](docs/rfcs/007-retire-runtime-bridge.md). The plugins remain in
+git history at `211f4b1` if they are ever wanted back.
+
+<!-- End standing notice. -->
+
 ## [0.5.23](https://github.com/vibecook-dev/spaghetti/compare/spaghetti-v0.5.22...spaghetti-v0.5.23) (2026-07-30)
 
 

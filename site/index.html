@@ -505,9 +505,9 @@
 
       <!-- Three planes -->
       <div class="section-header center mt-48">
-        <div class="eyebrow">Three planes</div>
+        <div class="eyebrow">Two planes</div>
         <h2>History, deltas, and live agent state</h2>
-        <p class="lead">Planes 1–2 share the durable index. Plane 3 is a separate event stream — runtime events never write SQLite.</p>
+        <p class="lead">Both planes share the durable index. The index is a pure function of files on disk — Spaghetti reads what agents leave behind and never holds a handle to an agent process.</p>
       </div>
       <div class="features-grid" style="margin-top:28px">
         <article class="feature-card">
@@ -683,7 +683,6 @@
               <div class="t-muted"> │   │   ├─ Todos · Plan · Subagents</div>
               <div class="t-muted"> │   │   └─ Workflows</div>
               <div class="t-muted"> │   └─ Memory <span class="t-dim">(Claude only)</span></div>
-              <div class="t-white"> ├─ Hooks Monitor</div>
               <div class="t-white"> ├─ Stats · Help · Doctor</div>
               <div class="t-white"> └─ Chat <span class="t-dim">(Claude channel)</span></div>
               <hr class="term-divider" />

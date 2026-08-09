@@ -63,7 +63,7 @@ export function createCodexSource(options?: CodexSourceOptions): AgentSource {
     id: 'codex',
     rootDir,
     stateDir,
-    paths: buildCodexPaths(rootDir, stateDir),
+    paths: buildCodexPaths(rootDir),
     classify: (absPath: string) => classifyCodexPath(absPath, rootDir),
     messages: codexMessageExtractor,
   };

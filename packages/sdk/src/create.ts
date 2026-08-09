@@ -5,7 +5,7 @@
  * Lifecycle owners are built via {@link createLifecycleOwnerForSource} (Phase E)
  * so product branches do not live here.
  *
- * See `docs/THREE-PLANE-INGEST-ARCHITECTURE.md` and `docs/PR-PLAN-THREE-PLANE-SHAPE.md`.
+ * See `docs/TWO-PLANE-INGEST-ARCHITECTURE.md` and `docs/PR-PLAN-THREE-PLANE-SHAPE.md`.
  */
 
 import { createFileService } from './io/file-service.js';
@@ -21,7 +21,6 @@ import { createClaudeCodeSource, type AgentSource } from './sources/index.js';
 import { createLifecycleOwnerForSource } from './sources/registry.js';
 import { createClaudeCodeLiveDiskIngest } from './sources/claude-code/live/disk-ingest.js';
 import { createDurableStore } from './store/durable-store.js';
-import { createRuntimeBridge } from './planes/runtime-bridge.js';
 
 export interface SpaghettiServiceOptions {
   /** Override the data service implementation (for testing or custom setups) */
@@ -182,15 +181,7 @@ export function createSpaghettiService(options?: SpaghettiServiceOptions): Spagh
 
   const dataService = new SpaghettiDataService(store.data, owners);
 
-  // Plane 3: RuntimeBridge — always attached on the default factory path.
-  // Watchers start lazily on first api.runtime subscribe. The hook/channel
-  // paths it consumes are Claude Code concepts, so bind to the Claude
-  // source wherever it sits in the source list — a non-Claude primary
-  // (e.g. Codex-only setup) must not feed its roots to the bridge.
-  const bridgeSource = allSources.find((s) => s.id === 'claude-code') ?? primary;
-  const runtimeBridge = createRuntimeBridge(bridgeSource, { errorSink });
-
-  return createSpaghettiAppService(dataService, errorSink, runtimeBridge);
+  return createSpaghettiAppService(dataService, errorSink);
 }
 
 // Re-export the service factories for manual wiring

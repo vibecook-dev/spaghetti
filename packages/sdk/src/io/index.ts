@@ -27,13 +27,6 @@ export {
 } from './streaming-jsonl-reader.js';
 
 export {
-  type HookEventWatcherOptions,
-  type HookEventWatcher,
-  createHookEventWatcher,
-  getDefaultHookEventsPath,
-} from './hook-event-watcher.js';
-
-export {
   type SqliteConfig,
   type RunResult,
   type PreparedStatement,
@@ -49,12 +42,6 @@ export {
   ensureSqliteCacheHealthy,
   isSqliteCorruptError,
 } from './sqlite-health.js';
-
-export { type ChannelRegistryOptions, type ChannelRegistry, createChannelRegistry } from './channel-registry.js';
-
-export { type ChannelClientOptions, type ChannelClient, createChannelClient } from './channel-client.js';
-
-export { type ChannelManagerOptions, type ChannelManager, createChannelManager } from './channel-manager.js';
 
 export {
   type ErrorSink,

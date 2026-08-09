@@ -3,7 +3,10 @@
 **Status:** Implemented (façades + factory composition)  
 **Created:** 2026-07-10  
 **Implemented:** 2026-07-10  
-**Companion:** `docs/THREE-PLANE-INGEST-ARCHITECTURE.md`  
+**Companion:** `docs/TWO-PLANE-INGEST-ARCHITECTURE.md`  
+**Superseded in part:** 2026-08-08 — Plane 3 (RuntimeBridge, hooks, channels) was
+removed by [RFC 007](./rfcs/007-retire-runtime-bridge.md). PR6 and every Plane 3
+reference below are historical; the shipped architecture has two planes.  
 **Goal:** Make the SDK composition match the north-star diagram **without** rewriting cold ingest, changing public query APIs, or breaking CLI.
 
 ```text

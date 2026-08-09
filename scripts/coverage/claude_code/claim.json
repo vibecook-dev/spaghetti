@@ -106,8 +106,8 @@
       "status": "partial",
       "match": { "bucket": "secondary.sessions_pid" },
       "engines": { "ts": true, "rs": false },
-      "product": ["runtime.active_sessions"],
-      "notes": "Active PID registry via api.runtime / listActiveSessions; not durable index."
+      "product": ["active_sessions"],
+      "notes": "Active PID registry read by listActiveSessionsFromDir; not durable index."
     },
     {
       "id": "secondary.plugins",
@@ -145,7 +145,7 @@
       "status": "ignored",
       "match": { "toplevel": "hooks" },
       "engines": { "ts": false, "rs": false },
-      "notes": "Hook scripts on disk not loaded; hook *events* via Spaghetti plugin JSONL."
+      "notes": "Hook scripts on disk are not loaded. Spaghetti no longer captures hook events (RFC 007)."
     },
     {
       "id": "toplevel.telemetry",

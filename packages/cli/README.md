@@ -51,10 +51,8 @@ Home
  │   │   ├─ Plan
  │   │   └─ Subagents
  │   └─ Memory
- ├─ Hooks Monitor
  ├─ Stats
  ├─ Help
- ├─ Chat
  └─ Doctor
 ```
 
@@ -74,12 +72,30 @@ The TUI initializes the core service lazily and shows a boot screen with progres
 | `subagents [project] [session] [agent]` | `sub` | Inspect subagent transcripts |
 | `plan [project] [session]` | `pl` | Show a session plan |
 | `export [project]` | `x` | Export project/session data (JSON or Markdown) |
-| `hooks` | `h` | View captured hook events |
-| `chat` | `c` | Chat with active Claude Code sessions |
-| `plugin <action> [plugin]` |  | Install/uninstall/check Spaghetti plugins |
-| `doctor` |  | Health-check data paths and plugin state |
+| `doctor` |  | Health-check data paths and leftover Claude Code plugins |
 | `update` |  | Check for and install updates |
 | `uninstall` |  | Show uninstall instructions |
+
+### Removed: hooks, chat, and plugins
+
+`spag hooks`, `spag chat`, `spag plugin`, the Hooks Monitor and Chat TUI views,
+and the `spaghetti-hooks` / `spaghetti-channel` Claude Code plugins were removed
+in 0.6.0. Transcript ingest, search, and live updates are unaffected.
+
+Uninstalling this CLI never removed plugins that Claude Code had already
+installed, so `spag doctor` still reports them and prints the removal commands:
+
+```bash
+claude plugin disable   --scope user spaghetti-hooks@spaghetti
+claude plugin uninstall --scope user --keep-data spaghetti-hooks@spaghetti
+claude plugin disable   --scope user spaghetti-channel@spaghetti
+claude plugin uninstall --scope user --keep-data spaghetti-channel@spaghetti
+claude plugin marketplace remove --scope user spaghetti
+```
+
+`--scope user` and `--keep-data` are not optional: without a scope,
+`marketplace remove` drops the declaration from every scope, and `--keep-data`
+is what preserves the plugins' data directories. Needs Claude Code 2.1.223+.
 
 ### Flexible resolution
 
@@ -100,8 +116,6 @@ spag sessions .
 spag messages . latest
 spag search "refactor parser"
 spag export . --format markdown --output session.md
-spag hooks --follow
-spag chat --follow
 spag doctor
 ```
 

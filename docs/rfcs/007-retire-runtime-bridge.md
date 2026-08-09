@@ -1,12 +1,27 @@
 # RFC 007: Retire the Runtime Bridge
 
-**Status:** Proposed (v2)
-**Implementation readiness:** Phase 0 may start; Phases 1–4 remain blocked by their stated gates.
+**Status:** Accepted (v3 — single-release removal)
+**Implementation readiness:** Phase 0 complete (2026-08-08); removal in progress.
 **Created:** 2026-08-06
-**Revised:** 2026-08-07
+**Revised:** 2026-08-08
 **Split from:** `007-retire-runtime-bridge-and-ts-ingest.md` Draft v6
 **Author:** James Yong + Kimi
 **Companion RFCs:** [RFC 008 — Rust Bulk Ingest Production Readiness](./008-rust-ingest-production-readiness.md) · [RFC 009 — Retire the TypeScript Bulk Ingest Engine](./009-retire-typescript-bulk-ingest.md)
+**Removal manifest:** [007-removal-manifest.md](./007-removal-manifest.md)
+
+> **v3 revision (2026-08-08).** Spaghetti is pre-1.0 with no external consumers
+> of the CLI or SDK. A staged deprecation existed to protect users who do not
+> exist, and its machinery — a deprecation release, a guided uninstall command,
+> `@deprecated` annotations, an immutable recovery tag, a migration runbook —
+> cost more than the risk it hedged. v3 deletes Plane 3 in **one release**.
+>
+> What survives from the staged plan is the part that is still load-bearing: the
+> read-only leftover probe, so `spag doctor` can tell you whether the plugins are
+> still installed in Claude Code and print the raw commands to remove them.
+> Uninstalling the npm package never removed those, and that is still true.
+>
+> Recovery, if it is ever wanted, is ordinary git history: the plugins live at
+> commit `211f4b1` and its ancestors. No special tag is cut or maintained.
 
 ---
 
@@ -16,10 +31,7 @@ Retire Plane 3: the runtime bridge, hook-event and channel-session streaming sur
 
 This RFC does one thing only. It does not change cold/warm ingest, engine selection, SQLite files, the query path, or the live transcript writer. Those concerns moved to RFCs 008 and 009 so this removal can ship independently and be reviewed as a bounded product-surface change.
 
-The retirement spans two published releases:
-
-1. A deprecation release that detects installed plugins and marketplace registrations and provides a working guided uninstall.
-2. A removal release that deletes the bridge and plugins while retaining a read-only doctor check for leftovers.
+The retirement ships in one release: the bridge and plugins are deleted, and a read-only doctor check for leftovers is retained so a user whose Claude Code still has the plugins registered is told, and told how to remove them.
 
 ---
 
@@ -45,8 +57,8 @@ The outcome is intentionally narrow:
 3. Do not change the TypeScript live writer or filesystem watchers.
 4. Do not change the SQLite schema or migrate user data.
 5. Do not redesign the CLI/TUI outside the entries removed here.
-6. Do not mutate Claude plugin or marketplace state unless the user invokes `spag plugin uninstall` and either confirms its interactive plan or passes `--yes`.
-7. Do not recursively discover or mutate arbitrary project/local plugin declarations. Automated cleanup is limited to the user scope historically created by `spag plugin install`; detected non-user state is diagnostic and manual.
+6. Do not mutate Claude plugin or marketplace state at all. Spaghetti prints commands; the user runs them.
+7. Do not recursively discover arbitrary project/local plugin declarations. Detected non-user state is diagnostic only.
 8. Do not purge plugin persistent data or the existing `~/.spaghetti/hooks`/`~/.spaghetti/channel` files. Retirement disables/uninstalls code and registrations only.
 9. Do not decide the future of the Rust engine. RFC 008 owns readiness; RFC 009 owns cutover.
 
@@ -54,19 +66,27 @@ The outcome is intentionally narrow:
 
 ## Decisions
 
-| ID  | Decision                         | Choice                                                                                                                                                    |
-| --- | -------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| R1  | Plugin fate                      | Delete both bundled plugins after one published deprecation window                                                                                        |
-| R2  | Uninstall authorization          | Interactive invocation previews and prompts; affirmative confirmation or `--yes` executes. Non-interactive invocation without `--yes` never mutates state |
-| R3  | Leftover detection after removal | Keep a read-only doctor probe; do not keep the plugin command                                                                                             |
-| R4  | Historical documents             | Keep dated records and add supersession notes instead of rewriting history                                                                                |
-| R5  | Automated cleanup scope          | Mutate user-scope Spaghetti registrations only; report project/local, source-mismatched, and unknown state for manual resolution                          |
-| R6  | Post-removal recovery            | Preserve an immutable deprecation Git tag and reinstall plugins from a local checkout of that tag; pinning the npm package alone is insufficient          |
-| R7  | Notice lifetime                  | Doctor always renders current leftover state; the deprecation-release TUI banner appears once per process, with no persisted acknowledgement              |
-| R8  | Removal cutover                  | Merging plugin deletion to the canonical marketplace branch is the external removal event; do it only when the removal release is ready to publish        |
-| R9  | Plugin persistent data           | Preserve it during guided/manual uninstall with Claude's `--keep-data` option; purging plugin-generated data is outside this RFC                          |
+| ID  | Decision                         | Choice                                                                                                                                              |
+| --- | -------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| R1  | Plugin fate                      | **(v3)** Delete both bundled plugins in a single release. No deprecation window — pre-1.0, no external consumers                                     |
+| R2  | Uninstall authorization          | **(v3)** No automated uninstall ships. Doctor and `spag uninstall` print raw `claude` commands; the user runs them                                   |
+| R3  | Leftover detection after removal | Keep a read-only doctor probe; do not keep the plugin command                                                                                       |
+| R4  | Historical documents             | Keep dated records and add supersession notes instead of rewriting history                                                                          |
+| R5  | Cleanup scope                    | **(v3)** Printed commands cover user-scope Spaghetti identities only; project/local, source-mismatched, and unknown state is reported for the user  |
+| R6  | Post-removal recovery            | **(v3)** Ordinary git history. The plugins remain reachable at `211f4b1` and its ancestors; no tag is cut, and none is maintained                    |
+| R7  | Notice lifetime                  | **(v3)** Doctor renders current leftover state. No TUI banner, no deprecation warnings — there is no window for them to appear in                    |
+| R8  | Removal cutover                  | **(v3)** One commit. Removing the plugins from the default branch and from the packages is the same event                                            |
+| R9  | Plugin persistent data           | Preserve it. The printed commands use `--keep-data`; purging plugin-generated data is outside this RFC                                               |
 
 Changing one of these decisions requires editing this table before implementation.
+
+**Why R1/R6/R7/R8 changed in v3.** The staged plan spent a release, a bespoke
+uninstall command with a planner and capability gate, ~40 `@deprecated`
+annotations, an immutable tag, and a migration runbook on protecting consumers
+that do not exist. The residual risk it actually hedged — someone upgrading with
+plugins still registered in Claude Code — is fully covered by the retained
+doctor probe, which reports the leftovers and prints the exact removal commands.
+That probe is the only piece of the staged machinery worth keeping.
 
 ---
 
@@ -111,67 +131,60 @@ The probe accepts an explicit Claude home/path set and an injected read-only com
 
 Automatic execution has a capability gate: the detected Claude CLI must support explicit `--scope user` for plugin disable, plugin uninstall, and marketplace removal, plus `--keep-data` for plugin uninstall. Claude Code 2.1.223 is the known-good RFC-review fixture, not an asserted minimum. Phase 0 records the verified minimum version/capability fixture. An older or incompatible CLI is treated as an unavailable executor for mutation; never drop `--scope user` or `--keep-data` as a compatibility fallback.
 
-### Guided uninstall state machine
+#### Phase 0 capability record (verified 2026-08-08)
 
-`spag plugin uninstall [plugin] [--yes]` first probes state and builds a complete ordered plan. It does not edit JSON files directly.
+`MINIMUM_CLEANUP_VERSION` is **2.1.223**, declared in `packages/cli/src/lib/plugin-cleanup.ts`.
 
-For a selected user-scope plugin, the plan may contain:
+The gate was exercised end to end against **Claude Code 2.1.226** on win32 x64. Captured fixtures live in `packages/cli/src/__tests__/fixtures/claude-cli/`; a synthetic older CLI lives in `fixtures/claude-cli-unsupported/` and must always fail the gate.
 
-1. `claude plugin disable --scope user <plugin-id>` when the user settings entry is enabled;
-2. `claude plugin uninstall --scope user --keep-data <plugin-id>` when a user installation is present.
+| Command                            | Required flag  | 2.1.226 behavior                                       |
+| ---------------------------------- | -------------- | ------------------------------------------------------ |
+| `claude plugin disable`            | `--scope user` | `-s, --scope <scope>`, default **auto-detect**         |
+| `claude plugin uninstall`          | `--scope user` | `-s, --scope <scope>`, default `user`                  |
+| `claude plugin uninstall`          | `--keep-data`  | preserves `~/.claude/plugins/data/{id}/`               |
+| `claude plugin marketplace remove` | `--scope user` | `--scope <scope>`; **omitting it removes every scope** |
 
-The no-target command selects both plugins in hooks-then-channel order. After both are proven absent and disabled, it may append:
+The last two rows are why the flags are non-negotiable: without `--scope`, marketplace removal reaches project and local scopes, and disable resolves a scope by inference rather than instruction.
 
-3. `claude plugin marketplace remove --scope user spaghetti`, but only when the marketplace source matches this repository and no visible plugin scope or relevant input is present or unknown.
+The isolated-environment mechanism is the **`CLAUDE_CONFIG_DIR`** environment variable, verified in `packages/cli/src/__tests__/claude-cli-capabilities.test.ts`. It redirects the whole configuration root; the test asserts a sentinel file and a `~/.claude/plugins` snapshot in the developer's real home are unchanged after driving the real executable.
 
-A targeted command changes only the selected user-scope plugin and never removes the shared marketplace. Visible non-user copies of that plugin are reported but do not block a verified user-scope targeted cleanup. Running the no-target command is the explicit full-cleanup operation; for that operation, any visible non-user installation, source mismatch, or relevant `unknown` result blocks all mutation before execution.
+### Manual cleanup guidance
 
-Before mutation, print the planned operations and the exact raw commands. Authorization and exit status are:
+No command mutates Claude Code state. Doctor and `spag uninstall` print raw
+commands for the user to run, and only for identities and scopes the probe
+proved belong to Spaghetti:
 
-An invocation is interactive only when both `process.stdin.isTTY` and the prompt/output stream's `isTTY` are true. Every other no-`--yes` invocation follows the non-interactive row.
+```
+claude plugin disable   --scope user <plugin-id>
+claude plugin uninstall --scope user --keep-data <plugin-id>
+claude plugin marketplace remove --scope user spaghetti
+```
 
-| Situation                                                                   | Mutation                                       | Exit                     |
-| --------------------------------------------------------------------------- | ---------------------------------------------- | ------------------------ |
-| requested postcondition already satisfied                                   | none; report clean no-op                       | 0                        |
-| interactive, no `--yes`, user confirms                                      | execute plan                                   | 0 on verified completion |
-| interactive, no `--yes`, user declines                                      | none; report cancelled, never success          | 2                        |
-| non-interactive without `--yes`                                             | none; print plan and authorization requirement | 2                        |
-| `--yes` and all required state is known and automatable                     | execute plan                                   | 0 on verified completion |
-| a required state is unknown or the no-target plan has a manual-only blocker | none; print diagnostics and manual commands    | 2                        |
-| Claude executable is unavailable or lacks required scope capabilities       | none; print compatible manual guidance         | 1                        |
-| an operation or postcondition check fails                                   | stop; report partial state and remaining work  | 1                        |
+Three rules govern what may be printed:
 
-Execution is fail-fast. Re-run the probe after every command and after the final command. A command that exits zero but does not establish its postcondition is a failure. Never attempt marketplace removal after an earlier failure, a remaining plugin, a non-user installation, a source mismatch, or an `unknown` result. Never label an incomplete default cleanup as successful.
+- `--scope user` is never omitted. Without it, `claude plugin marketplace remove`
+  removes the declaration from *every* scope and `claude plugin disable`
+  auto-detects one. `--keep-data` is never omitted either, so plugin data
+  directories survive.
+- The marketplace command appears only when the registration's source normalises
+  to `vibecook-dev/spaghetti`. For a source mismatch, print the inspection
+  evidence and say the user must resolve it — never a removal command for a
+  registration whose ownership is unproven.
+- Non-user installations and `unknown` results are reported with their scope and
+  path so the user can act. They are never presented as clean.
 
-Manual output includes destructive commands only for identities and scopes proven to belong to Spaghetti. For a source mismatch or unknown identity, print inspection evidence and explain that the user must resolve it; do not recommend a marketplace-removal command as though ownership were proven.
+Requires Claude Code 2.1.223 or newer for the flags above; see the Phase 0
+capability record.
 
-`--yes` belongs to `spag` and is not forwarded to Claude. All subprocess arguments are passed as an argument vector through an injected executor, not interpolated into a shell string.
+### Notice behavior
 
-Evaluation precedence is deterministic: probe and requested-postcondition checks first, then plan preview/authorization, then executor capability, then execution/postcondition verification. Thus clean state returns 0 without needing Claude; unknown/manual state or missing authorization returns 2 without executor checks; an authorized known non-empty plan with an unavailable/unsupported executor returns 1.
+Doctor always renders the Plane 3 leftover section: `clean`, named leftovers,
+source mismatches, or `unknown` paths. It never offers install or enable
+actions. There is no TUI banner and no deprecation warning anywhere — the
+surfaces those would have warned about are gone in the same release.
 
-### Deprecation and notice behavior
+Keep the doctor section for at least one additional minor release.
 
-- Every Phase 3 SDK deletion is marked `@deprecated` in the published deprecation-release declarations, with the exact removal version. Hook/channel streaming and control APIs say “no replacement”; active-session callers are directed to the retained `listActiveSessionsFromDir`/`isProcessAlive` exports.
-- `spag hooks`, `spag chat`, and `spag plugin install|status` print a removal warning on stderr on every invocation. JSON stdout remains machine-readable.
-- `spag plugin uninstall` identifies itself as the migration path and names the last version that contains it.
-- During the deprecation release, TUI boot displays one retirement banner per process even when plugin state is clean. It has no acknowledgement file or other persistent state. When leftovers or unknown state exist, the banner names them.
-- Doctor always renders the Plane 3 leftover section. It reports `clean`, named leftovers, source mismatches, or `unknown` paths; it never offers install/enable actions.
-- After Phase 3 removes the hooks/chat views, only the doctor leftover section remains. Keep it for at least one additional minor release.
-
-### Immutable recovery source
-
-The deprecation release tag is the recovery artifact. Before Phase 3 can merge:
-
-1. The exact deprecation version and Git tag are recorded in the root, SDK, and CLI changelogs. The canonical release evidence records the tag's resolved commit SHA after the tag is created; the tagged commit is not required to contain its own hash.
-2. The tag exists on the canonical remote and contains both plugin directories plus the root marketplace manifest.
-3. From a clean checkout of that tag, an isolated Claude environment can register the checkout as a local user marketplace and install both plugins.
-4. The tested rollback runbook is published. It states explicitly that the pinned npm CLI's `spag plugin install` is not a post-removal recovery mechanism because it resolves the repository's current default branch.
-
-Phase 3 must not delete the default-branch plugin sources before this immutable recovery rehearsal passes.
-
-The canonical default branch remains a functioning marketplace source throughout the deprecation window. Phase 3 deletion work may be developed and verified on a release branch, but merging that deletion is the removal cutover because existing and pinned deprecation CLIs resolve the repository's current default branch. The cutover merge occurs only when the next-minor removal artifacts and site deployment are ready to publish. If publication fails after the merge, immediately revert the deletion commit to restore the marketplace source before retrying.
-
----
 
 ## Current coupling that must be preserved or relocated
 
@@ -230,112 +243,19 @@ No deprecation messaging ships until this gate passes.
 
 ---
 
-## Phase 1 — Deprecation and guided uninstall release
+## Removal — detach, delete, ship
 
-### CLI behavior
+One release. Phase 0's harness is already in place; everything below lands
+together.
 
-- Add `--yes` to the `plugin` command registration and implement `spag plugin uninstall` through the Phase 0 probe, pure planner, and injected executor.
-- The no-target command is the full user-scope cleanup: disable/uninstall both plugin IDs, verify them absent, then remove only the matching user marketplace.
-- A targeted command disables/uninstalls only the selected user-scope plugin and never removes the shared marketplace.
-- `spag plugin install` remains functional from the canonical marketplace throughout the deprecation window but prints the exact removal version and the immutable-tag recovery limitation.
-- `spag hooks`, `spag chat`, and `spag plugin install|status` emit the normative deprecation warning on stderr.
-- Update `spag uninstall` to consume the read-only probe and, when expected user-scope leftovers are present, put `spag plugin uninstall --yes` before the npm uninstall step. Unknown/source-mismatch state is diagnostic only. Explain that removing the npm CLI alone does not stop installed Claude plugins. Replace the broad `rm -rf ~/.spaghetti` default suggestion with cache-specific paths; any full data purge is a separate, explicit warning outside the retirement flow.
-- Doctor and TUI consume `lib/plugin-leftovers.ts` directly in this phase. Remove their install/enable calls to action and render the normative leftover states.
+### Detach first
 
-### SDK deprecation
-
-- Add published `@deprecated` annotations, with the exact removal version, to every `delete-in-phase-3` SDK declaration, including:
-  - `SpaghettiAPI.runtime` and `SpaghettiRuntime`;
-  - `createRuntimeBridge`, `RuntimeBridge`, and `CreateRuntimeBridgeOptions`;
-  - `RuntimeEvent` and its guards;
-  - hook watcher, channel registry/client/manager, hook/channel wire types and helpers;
-  - hook/channel source-path fields.
-- Do not deprecate the relocated active-session helpers or `ActiveSessionFile`.
-- Verify the generated SDK declaration artifact contains the annotations. Runtime hook/channel messages say “no replacement; transcript ingest/query/live updates are unaffected,” while active-session methods point to the retained helpers.
-
-### Product messaging
-
-- Implement the normative doctor and once-per-process TUI notice behavior without adding persisted state.
-- Update the root, SDK, and CLI changelogs with the deprecation version, exact removal version, deprecation Git tag, `spag plugin uninstall --yes`, raw Claude fallback commands, and immutable recovery runbook. Record the tag's resolved commit SHA in the post-tag canonical release evidence.
-- Mark the SDK runtime surface, `spag hooks`, `spag chat`, `spag plugin`, and the two TUI views deprecated in current package READMEs and the site; publish the Phase 0 minimum Claude cleanup version/capability requirement and state that uninstall preserves persistent data.
-- Preserve dated architecture/audit documents unchanged until Phase 3 adds supersession notes.
-
-### Recovery artifact
-
-- Publish the deprecation Git tag from the exact release commit.
-- From a clean checkout of that tag, register the absolute checkout path as a user marketplace in an isolated Claude environment and install both plugins.
-- Record the tag, commit SHA, deprecation package version, and successful rehearsal in the release evidence.
-
-### Verification matrix
-
-Run unit cases with fake homes/executors and repeat the successful and partial-failure cases against the isolated real Claude environment:
-
-| Initial state                                      | Invocation/mode                   | Expected mutation/result                                      | Exit |
-| -------------------------------------------------- | --------------------------------- | ------------------------------------------------------------- | ---- |
-| clean                                              | no target, `--yes`                | none; clean no-op                                             | 0    |
-| user hooks only                                    | no target, `--yes`                | hooks disabled if needed, uninstalled                         | 0    |
-| user channel only                                  | no target, `--yes`                | channel disabled if needed, uninstalled                       | 0    |
-| both user plugins                                  | no target, `--yes`                | hooks then channel removed                                    | 0    |
-| expected marketplace only                          | no target, `--yes`                | user marketplace removed                                      | 0    |
-| both user plugins + expected marketplace           | no target, `--yes`                | plugins verified absent, then marketplace removed             | 0    |
-| enabled-setting-only plugin + expected marketplace | no target, `--yes`                | setting disabled, then marketplace removed if fully clean     | 0    |
-| hooks + channel + marketplace                      | target hooks, `--yes`             | hooks only; channel and marketplace retained                  | 0    |
-| user + project/local hooks                         | target hooks, `--yes`             | user hooks removed; non-user copy retained and reported       | 0    |
-| executable plan                                    | interactive confirmation accepted | exact previewed plan executes                                 | 0    |
-| executable plan                                    | interactive confirmation declined | none; explicit cancelled result                               | 2    |
-| executable plan                                    | non-interactive, no `--yes`       | none; exact commands and authorization requirement printed    | 2    |
-| visible project/local installation                 | no target, `--yes`                | none; scope/context and manual commands reported              | 2    |
-| source-mismatched `spaghetti` marketplace          | no target, `--yes`                | none; mismatch reported, registration retained                | 2    |
-| malformed/unreadable/unsupported relevant state    | no target, `--yes`                | none; affected path/command reported as unknown               | 2    |
-| Claude executable unavailable or unsupported       | non-empty plan, `--yes`           | none; compatible manual guidance printed                      | 1    |
-| middle command fails or postcondition remains      | no target, `--yes`                | fail-fast; no marketplace removal; exact remaining work shown | 1    |
-
-### Release gate
-
-- The deprecation CLI and SDK packages are published and installable, and their generated help/declarations contain the promised warning and deprecation metadata.
-- Guided uninstall passes the matrix, including exit codes, argument vectors, confirmation modes, fail-fast behavior, and post-command re-probes.
-- Every uninstall argument vector contains explicit `--scope user` and `--keep-data`; sentinel plugin-data and `~/.spaghetti` hook/channel files survive both fake and isolated-real cleanup cases.
-- The supported and unsupported Claude capability fixtures both pass; unsupported versions perform no mutation.
-- Doctor/TUI behavior is verified for clean, plugin-only, marketplace-only, source-mismatch, and unknown states.
-- `spag uninstall` prints plugin cleanup before npm removal and does not present recursive `~/.spaghetti` deletion as cache-only cleanup.
-- The immutable tag is present on the canonical remote and the clean-checkout plugin install rehearsal passes.
-- A pre-cutover smoke test proves the canonical default-branch marketplace still installs both plugins.
-- Release notes identify the exact deprecation version as the last version containing `spag plugin uninstall` and the exact next-minor removal version.
-
-Phase 3 may be prepared after the published packages, immutable tag, changelogs, and recovery rehearsal exist, but its deletion commit cannot merge to the canonical marketplace branch until the Phase 4 removal cutover. The waiting period is one published minor release, not a calendar guess.
-
----
-
-## Phase 2 — Detach retained functionality
-
-This phase may be developed and tested during the deprecation window, but no published version disables the bridge before the Phase 3 removal release.
-
-### SDK work
-
-- Rewire doctor/index-live consumers to the relocated active-session module without routing through `RuntimeBridge`.
-- Put runtime-bridge construction behind one package-private composition seam and exercise bridge-disabled mode in tests. The seam is not an exported option, environment variable, user setting, or generated declaration. The shipped default remains enabled until Phase 3 removes the public surface.
-- Prove config, analytics, transcript ingest, query, and live transcript updates do not import Plane 3.
-- Keep the deprecated SDK barrel exports working through the deprecation release; classify those edges as `compatibility-until-phase-3` rather than trying to detach them early.
-
-### CLI work
-
-- Rewire doctor to the relocated active-session reader.
-- Verify the Phase 1 doctor/TUI leftover rendering imports only `lib/plugin-leftovers.ts` and shared presentation helpers, never hooks/chat/plugin command modules.
-- Keep retiring command/view registrations working through the deprecation release and classify their imports as `compatibility-until-phase-3`.
-
-### Exit gate
-
-- No retained non-Plane-3 implementation module imports a `delete-in-phase-3` module. The only remaining production edges into retiring code originate from the deprecated SDK barrels and the explicitly retiring CLI commands/views recorded as `compatibility-until-phase-3`.
-- TUI boot, doctor, and active-index reporting work with the bridge construction disabled.
-- Doctor and `spag uninstall` still render leftover cleanup with all hooks/chat/plugin command modules and `lib/plugin-cleanup.ts` unavailable in the test graph.
-- Every removal-manifest entry remains in its declared category; `retain-diagnostic` and `retain-history` references are explicitly excluded from deletion grep failures.
-- No uncategorized Plane 3 import or current-document reference remains.
-
----
-
-## Phase 3 — Remove Plane 3
-
-Develop and verify this phase on the removal release branch. Passing its exit gate makes the commit a release candidate; it does not authorize merging the plugin deletion to the canonical marketplace branch before Phase 4.
+- Rewire doctor and index-live consumers to the relocated active-session module
+  instead of `RuntimeBridge`.
+- Prove config, analytics, transcript ingest, query, and live transcript updates
+  do not import Plane 3.
+- Verify doctor/TUI leftover rendering imports only `lib/plugin-leftovers.ts` and
+  shared presentation helpers.
 
 ### SDK deletions
 
@@ -359,16 +279,15 @@ Develop and verify this phase on the removal release branch. Passing its exit ga
 - Remove only `hookEventsFile`, `channelSessionsDir`, and `channelMessagesDir` from `sources/types.ts` and the Claude/Codex/Grok path implementations. Retain `sessionsDir` for active-session/index reporting and retain unrelated settings/config paths.
 - Remove both `ws` and `@types/ws` from the SDK manifest and regenerate the lockfile.
 - Delete runtime-bridge tests, remove the Plane 3 assertion/import from `sources/__tests__/claude-code-source.test.ts`, update source-path tests for Claude/Codex/Grok, and retain relocated active-session tests.
-- Remove the Phase 2 internal construction seam with the bridge; do not leave a dead feature flag or test-only option.
 
 ### CLI deletions and edits
 
 - Delete `commands/hooks.ts`, `commands/chat.ts`, and `commands/plugin.ts`.
-- Delete `lib/plugins.ts` and the temporary `lib/plugin-cleanup.ts` planner/executor plus mutation tests; retain `lib/plugin-leftovers.ts` and its read-only probe tests.
+- Delete `lib/plugins.ts`; retain `lib/plugin-leftovers.ts` and its read-only probe tests.
 - Delete `views/hooks-monitor-view.tsx` and `views/chat-view.tsx`; keep the unrelated React list-navigation helper named `views/hooks.ts`.
-- Unregister the commands, aliases, known-command suggestions, menu entries, plugin stats, and all hook/channel doctor collectors and renderers; remove the corresponding navigation discriminants from `views/types.ts`.
-- Keep active-index doctor reporting plus the read-only leftover section. Its manual commands are raw `claude plugin disable/uninstall --keep-data/marketplace remove` commands, never the now-removed `spag plugin` command.
-- Update retained `spag uninstall` to consume the read-only probe, run before npm removal, and print raw user-scope cleanup commands only for identities proven to belong to Spaghetti. Source-mismatch/unknown cases print diagnostics and refer to `spag doctor` without a destructive marketplace command. Cache-only instructions name cache paths rather than all of `~/.spaghetti`. It remains instructional and performs no Claude mutation.
+- Unregister the commands, aliases, known-command suggestions, menu entries, and all hook/channel doctor collectors and renderers; remove the corresponding navigation discriminants from `views/types.ts`.
+- Keep active-index doctor reporting plus the read-only leftover section. Its manual commands are raw `claude plugin disable/uninstall --keep-data/marketplace remove` commands, never a `spag plugin` command.
+- `spag uninstall` consumes the read-only probe, lists plugin cleanup before npm removal, and prints raw user-scope commands only for identities proven to belong to Spaghetti. Source-mismatch/unknown cases print diagnostics and refer to `spag doctor`. Cache-only instructions name cache paths rather than all of `~/.spaghetti`. It performs no mutation.
 - Remove both `ws` and `@types/ws` from the CLI manifest.
 
 ### Plugin packages
@@ -377,16 +296,14 @@ Develop and verify this phase on the removal release branch. Passing its exit ga
 - Delete `packages/claude-code-channels-plugin/`.
 - Remove both plugin entries from the root `.claude-plugin/marketplace.json`; delete the manifest/directory only if nothing else uses it.
 - Regenerate `pnpm-lock.yaml`.
-- Do not delete, move, or retag the immutable deprecation recovery tag.
 
 ### Docs and site
 
 - Move the current architecture content from `docs/THREE-PLANE-INGEST-ARCHITECTURE.md` to `docs/TWO-PLANE-INGEST-ARCHITECTURE.md` and rewrite it for the retained static/live-disk planes. Leave the old path as a short supersession pointer so dated RFC/plan links remain valid; update root/current README links and retained SDK source comments to the new path.
 - Remove Plane 3, hooks, chat, and plugin command sections from the site and current READMEs.
-- Update `docs/coverage/claude-code.md` and its machine source `scripts/coverage/claude_code/claim.json` so active sessions point to the relocated reader rather than `api.runtime`; update other current design documents found by the removal manifest.
+- Update `docs/coverage/claude-code.md` and its machine source `scripts/coverage/claude_code/claim.json` so active sessions point to the relocated reader rather than `api.runtime`.
 - Add a supersession note to `docs/PR-PLAN-THREE-PLANE-SHAPE.md` and other dated architecture records.
-- Keep dated audits as history.
-- Add root, SDK, and CLI removal entries while retaining the earlier deprecation entries, exact cleanup commands, and immutable-tag rollback runbooks.
+- Add root, SDK, and CLI changelog entries describing the removal and the manual cleanup commands.
 
 ### Exit gate
 
@@ -399,56 +316,30 @@ Develop and verify this phase on the removal release branch. Passing its exit ga
 - The lockfile has no importer for either deleted plugin package.
 - Built SDK declarations and package exports contain no removed Plane 3 symbol or source-path field.
 - Repository dependency search finds no production import of a deleted module. String searches allow only `retain-diagnostic` and `retain-history` manifest entries.
-- Package-content inspection finds no runtime bridge, hook/channel implementation, plugin package, marketplace manifest, `ws`, or `@types/ws` in the packed SDK/CLI release-candidate artifacts.
+- Package-content inspection finds no runtime bridge, hook/channel implementation, plugin package, marketplace manifest, `ws`, or `@types/ws` in the packed SDK/CLI artifacts.
 
----
+### Aftercare
 
-## Phase 4 — Removal release and aftercare
+1. Verify the published package contents, generated declarations, help output, changelogs, deployed site, and generated lockfile rather than relying on the working tree.
+2. Keep the read-only doctor warning for at least one additional minor release and verify it introduces no persistent acknowledgement/config file.
+3. Close the RFC once the removal artifacts and the doctor leftover checks are verified.
 
-1. Build and inspect the final SDK/CLI packages and site deployment from the Phase 3 release candidate while the canonical marketplace branch still contains Plane 3.
-2. Re-run the canonical marketplace install smoke test immediately before cutover.
-3. Merge the verified Phase 3 deletion commit to the canonical marketplace branch and publish the removal packages, site, and final manual cleanup commands as one coordinated cutover.
-4. If any required publication fails, revert the deletion commit to restore the canonical marketplace before retrying; do not leave a removal-only default branch paired with unpublished packages/docs.
-5. Verify upgrade from the last deprecation release with:
-   - no leftovers;
-   - user plugin leftovers;
-   - enabled-setting-only leftovers;
-   - marketplace-only leftovers;
-   - a source-mismatched marketplace;
-   - unknown/unreadable state;
-   - a visible project/local installation.
-6. After the default branch no longer contains the plugins, repeat a fresh recovery from the immutable deprecation tag in an isolated Claude environment and prove both plugins install and run.
-7. Verify the published SDK/CLI package contents, generated declarations, help output, root/SDK/CLI changelogs, deployed site, and generated lockfile rather than relying on the working tree.
-8. Keep the read-only doctor warning for at least one additional minor release and verify it introduces no persistent acknowledgement/config file.
-9. Close the RFC only after the release evidence links the deprecation artifact, immutable tag/commit, cleanup matrix, removal artifacts, upgrade checks, cutover/revert rehearsal, and post-deletion recovery rehearsal.
-
----
 
 ## Rollback
 
-- Before Phase 3 ships: revert the deletion commits; no application-data rollback exists because the release changes no ingest/database data and guided uninstall preserves plugin persistent data.
-- After the removal release, users needing the SDK/CLI Plane 3 surface pin the exact last deprecation package versions recorded in the changelogs.
-- Existing installed plugins are not reconstructed or silently changed by the removal release.
-- A fresh post-removal plugin reinstall uses the immutable deprecation Git tag, not the pinned CLI installer:
-  1. Clone the canonical repository at the recorded deprecation tag and verify its commit SHA.
-  2. Inspect `claude plugin marketplace list --json`. If no user marketplace named `spaghetti` exists, add the absolute checkout path with `claude plugin marketplace add --scope user <absolute-checkout>`.
-  3. If the expected default-branch user registration exists, the runbook explicitly asks the user before replacing it with the local tagged checkout. A source mismatch or project/local registration stops the automated runbook for manual resolution.
-  4. Install `spaghetti-hooks@spaghetti` and `spaghetti-channel@spaghetti` with explicit `--scope user`.
-- The deprecation release notes replace `<deprecation-version>`, `<deprecation-tag>`, `<commit-sha>`, and `<absolute-checkout>` placeholders with concrete values or concrete derivation instructions before Phase 3 merges.
-- The retained transcript ingest/query/live planes continue independently during rollback.
+- Revert the deletion commit. There is no application-data rollback to perform: the release changes no ingest or database data, and it never touched plugin state.
+- Anyone who wants the Plane 3 surface back can pin the last package version that contained it, or check out `211f4b1`. Git history is the recovery mechanism; no tag is cut for the purpose.
+- Existing installed plugins are not reconstructed or silently changed. If Claude Code still has them registered, they keep working from their own cache until the user removes them — doctor says so and prints the commands.
+- The retained transcript ingest/query/live planes are unaffected throughout.
 
 ---
 
 ## Overall completion criteria
 
-- Two-release sequence completed.
 - No Plane 3 runtime code or bundled plugin remains.
-- No user plugin was silently removed.
-- Guided cleanup preserved plugin persistent data and did not delete existing hook/channel data files.
+- No user plugin was silently removed, and no plugin data was deleted.
 - `spag uninstall` shows state-specific plugin cleanup before npm removal and distinguishes cache-only cleanup from an explicit full-data purge.
-- The deprecation release warned every removed SDK/CLI/TUI surface and shipped a verified guided uninstall.
 - Active-session doctor reporting remains functional.
 - Leftover plugin, enabled-setting, marketplace, scope, source-mismatch, and unknown states remain diagnosable.
 - Neither `ws` nor `@types/ws` remains owned by the SDK or CLI.
-- The immutable tag supports a fresh, tested post-removal plugin recovery; pinning npm alone is never presented as sufficient.
 - No ingest, database, or engine-selection behavior changed as part of this RFC.

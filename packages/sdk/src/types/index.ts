@@ -4,9 +4,8 @@
  *
  * Layout:
  * - `types/claude/`     — ~/.claude on-disk product shapes
- * - `types/spaghetti/`  — hooks + channel (Spaghetti-owned runtime)
  *
- * Prefer importing from `types/claude` or `types/spaghetti` in product code;
+ * Prefer importing from `types/claude` in product code;
  * this barrel remains stable for external consumers.
  */
 
@@ -14,7 +13,6 @@
 export * from './claude/index.js';
 
 // ── Spaghetti runtime ──────────────────────────────────────────────────────
-export * from './spaghetti/index.js';
 
 // ═══════════════════════════════════════════════════════════════════════════
 // CLAUDE CODE AGENT — top-level aggregation (parser output models)

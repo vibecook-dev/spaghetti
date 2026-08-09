@@ -28,8 +28,7 @@
     "nanospinner": "^1.2.2",
     "picocolors": "^1.1.1",
     "react": "^19.2.4",
-    "string-width": "^7.2.0",
-    "ws": "^8.18.0"
+    "string-width": "^7.2.0"
   },
   "publishConfig": {
     "access": "public"
@@ -46,7 +45,6 @@
     "@types/marked-terminal": "^6.1.1",
     "@types/node": "^22.0.0",
     "@types/react": "^19.2.14",
-    "@types/ws": "^8.5.0",
     "cross-env": "^7.0.3",
     "tsup": "^8.4.0",
     "tsx": "^4.19.0",

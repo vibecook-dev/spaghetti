@@ -18,24 +18,23 @@ import {
   collectDoctorReport,
   formatBytes,
   formatRelative,
-  pluginStatusKind,
-  PLUGIN_STATUS_LABEL,
+  leftoverLines,
+  leftoverManualCommands,
   tildify,
   type DoctorReport,
-  type PluginReport,
-  type PluginStatusKind,
+  type LeftoverKind,
 } from '../lib/doctor-report.js';
 
 // ─── Status icons ──────────────────────────────────────────────────────
 
-function StatusIcon({ kind }: { kind: PluginStatusKind | 'ok' | 'warn' | 'bad' | 'dot' }): React.ReactElement {
+function StatusIcon({ kind }: { kind: LeftoverKind | 'ok' | 'warn' | 'bad' | 'dot' }): React.ReactElement {
   if (kind === 'ok') return <Text color="green">✓</Text>;
   if (kind === 'warn') return <Text color="yellow">!</Text>;
   if (kind === 'bad') return <Text color="red">✗</Text>;
   if (kind === 'dot') return <Text dimColor>·</Text>;
-  // PluginStatusKind
-  if (kind === 'not-installed') return <Text color="red">✗</Text>;
-  if (kind === 'path-missing' || kind === 'disabled') return <Text color="yellow">!</Text>;
+  // LeftoverKind
+  if (kind === 'unknown') return <Text color="red">✗</Text>;
+  if (kind === 'leftover' || kind === 'source-mismatch') return <Text color="yellow">!</Text>;
   return <Text color="green">✓</Text>;
 }
 
@@ -87,29 +86,38 @@ function Spacer(): React.ReactElement {
   return <Text> </Text>;
 }
 
-// ─── Plugin row rendering ──────────────────────────────────────────────
+// ─── Retired-plugin leftover rendering (RFC 007) ───────────────────────
 
-function PluginRow({ plugin }: { plugin: PluginReport }): React.ReactElement {
-  const kind = pluginStatusKind(plugin.state);
-  const label = PLUGIN_STATUS_LABEL[kind];
-  const statusColor = kind === 'ok' ? 'green' : kind === 'not-installed' ? 'red' : 'yellow';
+function leftoverColor(kind: LeftoverKind): string {
+  if (kind === 'clean') return 'green';
+  if (kind === 'unknown') return 'red';
+  return 'yellow';
+}
 
-  const version = plugin.state.version ? `  v${plugin.state.version}` : '';
+/**
+ * Read-only leftover section. There is deliberately no install or enable call
+ * to action — the plugins are retiring, so the only direction offered is
+ * removal, and only for state proven to belong to Spaghetti.
+ */
+function LeftoverSection({ report }: { report: DoctorReport }): React.ReactElement {
+  const lines = leftoverLines(report.leftovers);
+  const manual = leftoverManualCommands(report.leftovers);
 
   return (
     <>
-      <Row icon={<StatusIcon kind={kind} />} label={plugin.name}>
-        <Text color={statusColor}>{label}</Text>
-        <Text dimColor>{version}</Text>
-      </Row>
-      <Sub>{plugin.description}</Sub>
-      {kind === 'not-installed' && (
-        <Sub>
-          <Text color="cyan">→ spag plugin install {plugin.name}</Text>
+      <SectionHeading title="Claude Code plugins" />
+      <Sub>read-only — these plugins were removed from spaghetti</Sub>
+      {lines.map((line, i) => (
+        <Row key={`${line.label}-${i}`} icon={<StatusIcon kind={line.kind} />} label={line.label}>
+          <Text color={leftoverColor(line.kind)}>{line.detail}</Text>
+        </Row>
+      ))}
+      {manual.length > 0 && <Sub>remove with:</Sub>}
+      {manual.map((command) => (
+        <Sub key={command}>
+          <Text color="cyan">{command}</Text>
         </Sub>
-      )}
-      {kind === 'disabled' && <Sub>→ enable in ~/.claude/settings.json (enabledPlugins)</Sub>}
-      {kind === 'path-missing' && plugin.state.installPath && <Sub>path: {tildify(plugin.state.installPath)}</Sub>}
+      ))}
     </>
   );
 }
@@ -141,8 +149,6 @@ export function DoctorView(): React.ReactElement {
 
   const env = report.environment;
   const ix = report.indexLive;
-  const he = report.hookEvents;
-  const cs = report.channelSessions;
   const engineLabel =
     ix.preferredEngine === ix.effectiveEngine ? ix.effectiveEngine : `${ix.preferredEngine} → ${ix.effectiveEngine}`;
 
@@ -184,7 +190,6 @@ export function DoctorView(): React.ReactElement {
       <Row icon={<StatusIcon kind={env.pluginsDir.exists ? 'ok' : 'warn'} />} label="plugins dir">
         {tildify(env.pluginsDir.path)}
       </Row>
-      <Sub>Claude Code plugins only (hooks / channel)</Sub>
       <Spacer />
 
       {/* Index & live */}
@@ -215,58 +220,8 @@ export function DoctorView(): React.ReactElement {
       <Sub>{tildify(ix.activeSessionsDir)}</Sub>
       <Spacer />
 
-      {/* Plugins */}
-      <SectionHeading title="Plugins" />
-      {report.plugins.map((p) => (
-        <PluginRow key={p.name} plugin={p} />
-      ))}
-      <Spacer />
-
-      {/* Hook events */}
-      <SectionHeading title="Hook events" />
-      {he.kind === 'ok' ? (
-        <>
-          <Row icon={<StatusIcon kind="ok" />} label="events file">
-            {tildify(he.path)}
-          </Row>
-          <Sub>
-            {he.count.toLocaleString()} event(s), updated {formatRelative(he.mtimeMs)}
-          </Sub>
-        </>
-      ) : he.kind === 'missing' ? (
-        <>
-          <Row icon={<StatusIcon kind="bad" />} label="events file">
-            <Text color="red">none</Text>
-          </Row>
-          <Sub>expected at {tildify(he.path)}</Sub>
-          <Sub>
-            <Text color="cyan">→ spag plugin install spaghetti-hooks</Text>
-          </Sub>
-        </>
-      ) : (
-        <Row icon={<StatusIcon kind="bad" />} label="events file">
-          <Text color="red">read error: {he.message}</Text>
-        </Row>
-      )}
-      <Spacer />
-
-      {/* Channel sessions */}
-      <SectionHeading title="Channel sessions" />
-      {cs.kind === 'ok' ? (
-        <>
-          <Row icon={<StatusIcon kind="ok" />} label="sessions dir">
-            {tildify(cs.path)}
-          </Row>
-          <Sub>{cs.activeCount} active session file(s)</Sub>
-        </>
-      ) : (
-        <>
-          <Row icon={<StatusIcon kind="dot" />} label="sessions dir">
-            <Text dimColor>{tildify(cs.path)}</Text>
-          </Row>
-          <Sub>not created yet — start a Claude Code session with spaghetti-channel</Sub>
-        </>
-      )}
+      {/* Retired Claude Code plugins (RFC 007) */}
+      <LeftoverSection report={report} />
       <Spacer />
     </Box>
   );

@@ -18,7 +18,7 @@ export function defaultSpaghettiStateDir(): string {
 }
 
 /** Build the full path map for a Claude Code installation. */
-export function buildClaudeCodePaths(rootDir: string, stateDir: string): ClaudeCodePaths {
+export function buildClaudeCodePaths(rootDir: string): ClaudeCodePaths {
   return {
     projectsDir: path.join(rootDir, 'projects'),
     todosDir: path.join(rootDir, 'todos'),
@@ -27,8 +27,5 @@ export function buildClaudeCodePaths(rootDir: string, stateDir: string): ClaudeC
     fileHistoryDir: path.join(rootDir, 'file-history'),
     sessionsDir: path.join(rootDir, 'sessions'),
     settingsFile: path.join(rootDir, 'settings.json'),
-    hookEventsFile: path.join(stateDir, 'hooks', 'events.jsonl'),
-    channelSessionsDir: path.join(stateDir, 'channel', 'sessions'),
-    channelMessagesDir: path.join(stateDir, 'channel', 'messages'),
   };
 }

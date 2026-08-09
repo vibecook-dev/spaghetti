@@ -8,7 +8,6 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 
 import { createClaudeCodeSource, defaultClaudeDir, defaultSpaghettiStateDir } from '../claude-code/index.js';
-import { createRuntimeBridge } from '../../planes/runtime-bridge.js';
 import { toLifecycleOptions } from '../../planes/static-ingest.js';
 
 describe('createClaudeCodeSource', () => {
@@ -31,9 +30,6 @@ describe('createClaudeCodeSource', () => {
     assert.equal(source.rootDir, '/tmp/fake-claude');
     assert.equal(source.stateDir, '/tmp/fake-spaghetti');
     assert.equal(source.paths.projectsDir, path.join('/tmp/fake-claude', 'projects'));
-    assert.equal(source.paths.hookEventsFile, path.join('/tmp/fake-spaghetti', 'hooks', 'events.jsonl'));
-    assert.equal(source.paths.channelSessionsDir, path.join('/tmp/fake-spaghetti', 'channel', 'sessions'));
-    assert.equal(source.paths.channelMessagesDir, path.join('/tmp/fake-spaghetti', 'channel', 'messages'));
     assert.equal(source.paths.sessionsDir, path.join('/tmp/fake-claude', 'sessions'));
     assert.equal(source.paths.settingsFile, path.join('/tmp/fake-claude', 'settings.json'));
   });
@@ -48,18 +44,5 @@ describe('createClaudeCodeSource', () => {
     assert.equal(opts.rootDir, '/data/claude');
     assert.equal(opts.engine, 'ts');
     assert.equal(opts.dbPath, '/tmp/idx.db');
-  });
-
-  it('RuntimeBridge exposes source paths and starts stopped', () => {
-    const source = createClaudeCodeSource({
-      rootDir: '/c',
-      stateDir: '/s',
-    });
-    const bridge = createRuntimeBridge(source);
-    assert.equal(bridge.hookEventsPath(), path.join('/s', 'hooks', 'events.jsonl'));
-    assert.equal(bridge.channelSessionsDir(), path.join('/s', 'channel', 'sessions'));
-    assert.equal(bridge.channelMessagesDir(), path.join('/s', 'channel', 'messages'));
-    assert.equal(bridge.source, source);
-    assert.equal(bridge.isRunning(), false);
   });
 });

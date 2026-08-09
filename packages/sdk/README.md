@@ -101,16 +101,15 @@ At init, the service:
 
 Query and ingest share one SQLite connection to avoid `SQLITE_BUSY` conflicts.
 
-## Architecture (three planes)
+## Architecture (two planes)
 
-Composition follows a stable internal shape (see monorepo `docs/THREE-PLANE-INGEST-ARCHITECTURE.md`):
+Composition follows a stable internal shape (see monorepo `docs/TWO-PLANE-INGEST-ARCHITECTURE.md`):
 
 | Piece | Role |
 |---|---|
 | `AgentSource` / `createClaudeCodeSource()` | Agent product roots (`~/.claude`, `~/.spaghetti`) |
 | Static ingest | Cold/warm full parse into SQLite |
 | Live disk (`{ live: true }` → `api.live`) | Watcher + incremental writes + `Change` events |
-| Runtime (`api.runtime`) | Hooks stream + channel session discovery |
 | Durable store | Shared SQLite query + ingest + data store |
 
 ```ts
@@ -125,10 +124,9 @@ svc.live?.onChange({ type: 'session', slug: '…', sessionId: '…' }, (e) => {
   console.log('disk change', e.type);
 });
 
-// Plane 3 — hooks / channel sessions (always on default factory)
-svc.runtime?.onEvent((e) => {
-  if (e.type === 'hook') console.log(e.name, e.sessionId);
-});
+// Claude Code active sessions — read straight from ~/.claude/sessions
+import { listActiveSessionsFromDir } from '@vibecook/spaghetti-sdk';
+const active = listActiveSessionsFromDir(source.paths.sessionsDir, { requireAlive: true });
 ```
 
 `claudeDir` remains supported and seeds the default Claude Code source.  

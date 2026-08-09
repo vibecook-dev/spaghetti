@@ -16,11 +16,9 @@ import type { WelcomePanelStats } from './welcome-panel.js';
 import { ProjectsView } from './projects-view.js';
 import { StatsView } from './stats-view.js';
 import { HelpView } from './help-view.js';
-import { HooksMonitorView } from './hooks-monitor-view.js';
-import { ChatView } from './chat-view.js';
 import { DoctorView } from './doctor-view.js';
 import { formatTokens, formatBytes, totalTokens } from '../lib/format.js';
-import { PLUGINS, getPluginState } from '../lib/plugins.js';
+import { defaultClaudeHome, probePluginLeftovers } from '../lib/plugin-leftovers.js';
 import type { ViewEntry } from './types.js';
 
 // ─── Menu Item Rendering ──────────────────────────────────────────────
@@ -115,14 +113,15 @@ export function MenuView(): React.ReactElement {
       /* already captured loadError above, or secondary failure */
     }
 
-    // Lightweight plugin snapshot for the menu's right-stat — just reads
-    // two JSON files; safe to do on mount.
-    const total = PLUGINS.length;
-    const healthy = PLUGINS.reduce((n, p) => {
-      const st = getPluginState(p.name);
-      return st.installed && st.enabled && st.pathExists ? n + 1 : n;
-    }, 0);
-    const pluginStat = healthy === total ? `${total}/${total} plugins` : `${healthy}/${total} plugins`;
+    // RFC 007: the menu no longer advertises plugin health — the plugins are
+    // retiring, so the only thing worth surfacing is whether leftovers remain.
+    // Read-only, three JSON files; safe to do on mount.
+    const leftovers = probePluginLeftovers({ claudeHome: defaultClaudeHome() });
+    const pluginStat = leftovers.clean
+      ? 'no leftovers'
+      : leftovers.unknowns.length > 0
+        ? 'state unknown'
+        : 'leftovers found';
 
     return {
       panelStats: stats,
@@ -152,17 +151,11 @@ export function MenuView(): React.ReactElement {
       description: projectsDescription,
       rightStat: `${projectCount} projects`,
     },
-    {
-      name: 'Hooks Monitor',
-      description: 'Real-time hook event stream from spaghetti-hooks plugin',
-      rightStat: 'live',
-    },
     { name: 'Stats', description: 'Usage statistics, token counts, top projects', rightStat: `${tokenStr} tokens` },
     { name: 'Help', description: 'Navigation, commands, and keyboard shortcuts', rightStat: '? keybindings' },
-    { name: 'Chat', description: 'Interactive chat with active Claude Code sessions', rightStat: 'open' },
     {
       name: 'Doctor',
-      description: 'Health check for spaghetti, plugins, and data paths',
+      description: 'Health check for spaghetti and its data paths',
       rightStat: pluginStatStr,
     },
   ];
@@ -189,35 +182,19 @@ export function MenuView(): React.ReactElement {
           nav.push(entry);
         } else if (selectedIndex === 1) {
           const entry: ViewEntry = {
-            type: 'hooks-monitor',
-            component: HooksMonitorView,
-            breadcrumb: 'Hooks Monitor',
-            hints: '\u2191\u2193 navigate  \u23CE detail  1-8 filter  c clear  Esc back',
-          };
-          nav.push(entry);
-        } else if (selectedIndex === 2) {
-          const entry: ViewEntry = {
             type: 'stats',
             component: StatsView,
             breadcrumb: 'Stats',
           };
           nav.push(entry);
-        } else if (selectedIndex === 3) {
+        } else if (selectedIndex === 2) {
           const entry: ViewEntry = {
             type: 'help',
             component: HelpView,
             breadcrumb: 'Help',
           };
           nav.push(entry);
-        } else if (selectedIndex === 4) {
-          const entry: ViewEntry = {
-            type: 'chat',
-            component: ChatView,
-            breadcrumb: 'Chat',
-            hints: '\u2191\u2193 scroll  \u2190\u2192 switch session  Esc back  Enter send',
-          };
-          nav.push(entry);
-        } else if (selectedIndex === 5) {
+        } else if (selectedIndex === 3) {
           const entry: ViewEntry = {
             type: 'doctor',
             component: DoctorView,

@@ -21,14 +21,11 @@ export function defaultSpaghettiStateDir(): string {
 }
 
 /** Build the path map for a Grok installation. */
-export function buildGrokPaths(rootDir: string, stateDir: string): AgentSourcePaths {
+export function buildGrokPaths(rootDir: string): AgentSourcePaths {
   return {
     // sessions/<url-encoded-abs-cwd>/<session-uuid>/chat_history.jsonl
     sessionsDir: path.join(rootDir, 'sessions'),
     settingsFile: path.join(rootDir, 'user-settings.json'),
     // Spaghetti-owned state (source-independent).
-    hookEventsFile: path.join(stateDir, 'hooks', 'events.jsonl'),
-    channelSessionsDir: path.join(stateDir, 'channel', 'sessions'),
-    channelMessagesDir: path.join(stateDir, 'channel', 'messages'),
   };
 }

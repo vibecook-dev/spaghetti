@@ -8,6 +8,7 @@ import { claudeCodeMessageExtractor } from './message-extractor.js';
 import { buildClaudeCodePaths, defaultClaudeDir, defaultSpaghettiStateDir } from './paths.js';
 
 export { buildClaudeCodePaths, defaultClaudeDir, defaultSpaghettiStateDir } from './paths.js';
+export { listActiveSessionsFromDir, isProcessAlive, type ListActiveSessionsOptions } from './active-sessions.js';
 export { ClaudeCodeLifecycleOwner } from './lifecycle-owner.js';
 export { classifyClaudePath, classify, HARD_IGNORE_SEGMENTS, HARD_IGNORE_SUFFIXES } from './classify.js';
 export {
@@ -55,7 +56,7 @@ export function createClaudeCodeSource(options?: ClaudeCodeSourceOptions): Claud
     id: 'claude-code',
     rootDir,
     stateDir,
-    paths: buildClaudeCodePaths(rootDir, stateDir),
+    paths: buildClaudeCodePaths(rootDir),
     // Path→category rules live in ./classify.ts (product layout). The live
     // plane calls source.classify — never hardcodes Claude's tree.
     classify: (absPath: string) => classifyClaudePath(absPath, rootDir),

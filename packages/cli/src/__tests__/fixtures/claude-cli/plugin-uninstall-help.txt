@@ -1,0 +1,14 @@
+Usage: claude plugin uninstall|remove [options] <plugin>
+
+Uninstall an installed plugin
+
+Options:
+  -h, --help           Display help for command
+  --keep-data          Preserve the plugin's persistent data directory
+                       (~/.claude/plugins/data/{id}/)
+  --prune              Also remove auto-installed dependencies that are no
+                       longer needed (requires -y in non-interactive contexts)
+  -s, --scope <scope>  Uninstall from scope: user, project, or local (default:
+                       "user")
+  -y, --yes            Skip the --prune confirmation prompt (required when stdin
+                       or stdout is not a TTY)

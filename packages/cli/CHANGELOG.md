@@ -1,5 +1,24 @@
 # @vibecook/spaghetti
 
+## Removed in 0.6.0
+
+`spag hooks`, `spag chat`, and `spag plugin` are gone, along with the Hooks
+Monitor and Chat TUI views and the two bundled Claude Code plugins. Transcript
+ingest, search, and live updates are unaffected.
+
+- **`spag doctor`** keeps a read-only section reporting leftover plugin state in
+  Claude Code — installed, enabled-only, marketplace registration, non-user
+  scopes, and inputs it could not read — and prints the raw `claude` commands to
+  remove what it can prove belongs to Spaghetti.
+- **`spag uninstall`** lists that cleanup *before* the npm removal, because
+  removing the CLI never stopped plugins Claude Code had already installed. It
+  also names cache paths individually instead of suggesting a blanket
+  `rm -rf ~/.spaghetti`, which would have deleted hook and channel history too.
+- `ws` and `@types/ws` are no longer dependencies.
+
+Cleanup commands need Claude Code 2.1.223+ for `--scope user` and `--keep-data`.
+See [RFC 007](../../docs/rfcs/007-retire-runtime-bridge.md).
+
 ## 0.4.0
 
 ### Minor Changes
