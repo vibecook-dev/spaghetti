@@ -67,19 +67,73 @@ jobs:
               npx napi build --platform --release --target x86_64-apple-darwin
               strip -x *.node
 
-          - host: ubuntu-latest
+          # Pinned, not `ubuntu-latest`. The build host's glibc becomes the
+          # artifact's minimum, so a floating host silently raises the floor
+          # for users the day GitHub moves the label — which is exactly what
+          # RFC 008 Phase 4 means by a pinned baseline. 22.04 ships glibc
+          # 2.35; `ubuntu-latest` is 24.04 and would demand 2.39, excluding
+          # Ubuntu 22.04 LTS and Debian 12. If this runner is retired the
+          # build fails loudly, which is the right failure mode — better than
+          # quietly shipping a narrower artifact.
+          - host: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
             build: |
               cd crates/spaghetti-napi
               npx napi build --platform --release --target x86_64-unknown-linux-gnu
               strip *.node
 
-          - host: ubuntu-latest
+          - host: ubuntu-22.04
             target: aarch64-unknown-linux-gnu
             build: |
               cd crates/spaghetti-napi
               npx napi build --platform --release --target aarch64-unknown-linux-gnu
               aarch64-linux-gnu-strip *.node
+
+          # musl, for Alpine and other non-glibc Linux. Without these an
+          # Alpine container is x64 Linux with no loadable artifact — it
+          # silently fell back to the TypeScript engine, which looks exactly
+          # like an unsupported platform (RFC 008 Phase 4).
+          #
+          # Built inside Alpine via an explicit `docker run`, with checkout and
+          # caching staying on the host. Three earlier approaches failed, each
+          # for a reason worth not repeating:
+          #
+          #  - `musl-tools`' `musl-gcc` wrapper cannot link a cdylib: it passes
+          #    `-lgcc_s` for dynamic linking and musl has no such library
+          #    (`cannot find libgcc_s.so.1`).
+          #  - Fetching a cross toolchain from musl.cc put a single
+          #    third-party host in the release path; it was unreachable.
+          #  - A job-level `container:` cannot work for arm64 — GitHub only
+          #    supports JavaScript actions in Alpine containers on x64
+          #    runners, so `actions/checkout` itself fails on an ARM host.
+          #
+          # `docker run` sidesteps the last of those entirely, because no
+          # JavaScript action ever executes inside the container.
+          - host: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            build: |
+              docker run --rm -v "$PWD:/w" -w /w node:24-alpine sh -c '
+                apk add --no-cache build-base curl rustup >/dev/null &&
+                rustup-init -y --default-toolchain stable --profile minimal                   --target x86_64-unknown-linux-musl >/dev/null &&
+                . "$HOME/.cargo/env" &&
+                cd crates/spaghetti-napi && npm install --silent &&
+                npx napi build --platform --release --target x86_64-unknown-linux-musl &&
+                strip *.node'
+
+          - host: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+            build: |
+              docker run --rm -v "$PWD:/w" -w /w node:24-alpine sh -c '
+                apk add --no-cache build-base curl rustup >/dev/null &&
+                rustup-init -y --default-toolchain stable --profile minimal                   --target aarch64-unknown-linux-musl >/dev/null &&
+                . "$HOME/.cargo/env" &&
+                # Even building natively on aarch64 Alpine, an explicit
+                # --target makes Rust look for the cross-named linker
+                # `aarch64-linux-musl-gcc`. Alpine ships it as plain `gcc`.
+                export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=gcc &&
+                cd crates/spaghetti-napi && npm install --silent &&
+                npx napi build --platform --release --target aarch64-unknown-linux-musl &&
+                strip *.node'
 
           - host: windows-latest
             target: x86_64-pc-windows-msvc
@@ -126,6 +180,8 @@ jobs:
           node-version: 24
           package-manager-cache: false
 
+      # Host toolchain. The musl targets build inside Docker with their own
+      # toolchain, so this is unused for them and harmless.
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -207,6 +263,16 @@ jobs:
           # real hardware rather than shipped unverified.
           - host: windows-11-arm
             target: aarch64-pc-windows-msvc
+          # musl artifacts are load-tested inside Alpine, not on the Ubuntu
+          # host. A glibc host would happily load nothing of interest here —
+          # the whole point of a musl build is that it works where glibc is
+          # absent, and only an Alpine container proves that.
+          - host: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            dockerImage: node:24-alpine
+          - host: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+            dockerImage: node:24-alpine
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v5
         with:
@@ -235,9 +301,15 @@ jobs:
           path: crates/spaghetti-napi
 
       - name: Smoke test bindings
+        if: matrix.settings.dockerImage == ''
         run: |
           cd crates/spaghetti-napi
           node -e "const m = require('./index.js'); if (!m.nativeVersion) { throw new Error('nativeVersion export missing'); } console.log('Loaded OK, nativeVersion =', m.nativeVersion());"
+
+      - name: Smoke test bindings (musl / Alpine)
+        if: matrix.settings.dockerImage != ''
+        run: |
+          docker run --rm             -v "$PWD/crates/spaghetti-napi:/addon"             -w /addon             ${{ matrix.settings.dockerImage }}             node -e "const m = require('./index.js'); if (!m.nativeVersion) { throw new Error('nativeVersion export missing'); } console.log('Loaded OK on musl, nativeVersion =', m.nativeVersion());"
 
   # Gated on an explicit input. The header calls workflow_dispatch "useful for
   # debugging", but until this gate existed every dispatch ran the matrix and

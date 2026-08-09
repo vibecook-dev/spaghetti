@@ -6,7 +6,7 @@
 **Depends on:** [RFC 003 — Rust Ingest Core](./003-rust-ingest-core.md) · [RFC 004 — Rust Ingest Follow-ups](./004-rust-ingest-followups.md) · [RFC 006 — Normalized Message Model](./006-normalized-message-model.md)
 **Blocks:** [RFC 009 — Retire the TypeScript Bulk Ingest Engine](./009-retire-typescript-bulk-ingest.md)
 **Independent of:** [RFC 007 — Retire the Runtime Bridge](./007-retire-runtime-bridge.md)
-**Phase records:** [Phase 0 — contract freeze and baseline](./008-phase-0-baseline.md) · [Phase 1 — warm reconciliation gate](./008-phase-1-gate.md) · [Phase 2 — transaction and error protocol gate](./008-phase-2-gate.md) · [Phase 3A — token attribution decision](./008-phase-3a-attribution.md) · [Phase 3 — estimation gate](./008-phase-3-gate.md)
+**Phase records:** [Phase 0 — contract freeze and baseline](./008-phase-0-baseline.md) · [Phase 1 — warm reconciliation gate](./008-phase-1-gate.md) · [Phase 2 — transaction and error protocol gate](./008-phase-2-gate.md) · [Phase 3A — token attribution decision](./008-phase-3a-attribution.md) · [Phase 3 — estimation gate](./008-phase-3-gate.md) · [Phase 4A — warm strategy decision](./008-phase-4a-warm-strategy.md) · [Phase 4 — performance and platform gate](./008-phase-4-gate.md)
 
 ---
 
@@ -409,6 +409,22 @@ After Phases 1 through 3 are green:
 4. Otherwise port per-project incremental deletion/reinsert and rerun the Phase 1/2 matrices unchanged.
 
 Performance work may not weaken correctness tests or fingerprint/error semantics.
+
+> **Decision (2026-08-09): the full-source path is accepted. Per-project
+> incremental is not implemented.**
+>
+> On a 1,404-session / 44 MB corpus, Rust warm medians are 60 ms unchanged,
+> 2.61 s after growth, 2.59 s after a deletion, and 2.57 s on a forced repair.
+> The thresholds are 3 s and 13.3 s, so every scenario clears by 5× or more.
+>
+> The measurement that settles it: **Rust's full-source rebuild is 2.5× faster
+> than the TS incremental path** (2.61 s vs 6.65 s on growth). The reserved
+> optimisation would have been optimising something already faster than its own
+> comparison target — while adding exactly the kind of per-project incremental
+> state Phases 1 and 2 showed to be the main source of correctness risk.
+>
+> Hardware, corpus, run counts, and raw samples are in
+> [`008-phase-4a-warm-strategy.md`](./008-phase-4a-warm-strategy.md).
 
 ### Platform coverage
 

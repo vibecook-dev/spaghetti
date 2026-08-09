@@ -12,11 +12,18 @@
  *   pnpm bench:ingest --runs 10 --parallelism 4 # specific parallelism
  *   pnpm bench:ingest --only rust               # skip the TS path
  *   pnpm bench:ingest --warmup 0                # skip warmup (default is 1)
- *   pnpm bench:ingest --mode warm --only rust   # warm-start (0 changes) fast path
+ *   pnpm bench:ingest --mode warm                # warm-start, both engines
+ *   pnpm bench:ingest --mode warm --scenario growth   # a day of new messages
  *
- * `--mode warm` benchmarks the warm-start fast path: seeds the DB with
- * one cold run, then measures subsequent warm ingests without modifying
- * the fixture between runs. Only supported for --only rust.
+ * `--mode warm` seeds each engine's DB with one full ingest, then measures
+ * subsequent warm ingests. `--scenario` states what changed between runs:
+ * `unchanged` (the fast path), `growth` (a day of new messages), `deletion`
+ * (a removed session), or `repair` (a stale ingest-contract version, which
+ * defeats the fast path and forces a full rebuild).
+ *
+ * Both engines are measured. RFC 008 Phase 4 accepts the Rust full-source
+ * warm path when its median is no worse than max(2 x TS median, 3s), and that
+ * comparison needs the TS incremental warm path on the same corpus.
  *
  *   pnpm bench:ingest --report-json <path>      # write a machine-readable report
  *   pnpm bench:ingest --compare-to <baseline>   # compare to baseline, exit 1 on regression
@@ -28,7 +35,16 @@
  */
 
 import { createRequire } from 'node:module';
-import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  appendFileSync,
+  cpSync,
+  existsSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import { arch, cpus, homedir, platform, tmpdir, totalmem } from 'node:os';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -52,6 +68,7 @@ const { values } = parseArgs({
     parallelism: { type: 'string' },
     only: { type: 'string' }, // 'rust' | 'ts'
     mode: { type: 'string' }, // 'cold' | 'warm'
+    scenario: { type: 'string' }, // 'unchanged' | 'growth' | 'deletion' | 'repair'
     'report-json': { type: 'string' },
     'compare-to': { type: 'string' },
   },
@@ -81,9 +98,140 @@ if (mode !== 'cold' && mode !== 'warm') {
   process.exit(2);
 }
 
-if (mode === 'warm' && only !== 'rust') {
-  console.error(`--mode warm requires --only rust (TS warm-start path is not exposed to this bench)`);
+// ─── Warm scenarios (RFC 008 Phase 4) ───────────────────────────────────────
+//
+// A warm benchmark is only meaningful against a stated change. "Warm" alone
+// conflates the fast path (nothing changed, ~60ms) with a full rebuild
+// (something changed, seconds) — numbers that differ by two orders of
+// magnitude and answer different questions.
+//
+// Every scenario mutates a working copy of the fixture, never the committed
+// one, and runs before each measured iteration so every sample sees the same
+// kind of change.
+
+type Scenario = 'unchanged' | 'growth' | 'deletion' | 'repair';
+
+const scenario = (values.scenario ?? 'unchanged') as Scenario;
+if (!['unchanged', 'growth', 'deletion', 'repair'].includes(scenario)) {
+  console.error(`--scenario must be unchanged|growth|deletion|repair, got: ${scenario}`);
   process.exit(2);
+}
+if (scenario !== 'unchanged' && mode !== 'warm') {
+  console.error(`--scenario ${scenario} only applies to --mode warm`);
+  process.exit(2);
+}
+
+/**
+ * The tree the benchmark actually reads.
+ *
+ * Cold runs and the unchanged scenario read the fixture in place. Anything
+ * that mutates works on a copy, so a benchmark can never leave the committed
+ * fixture — or a developer's real `~/.claude` — modified.
+ */
+const benchDir = scenario === 'unchanged' ? fixtureRootDir : path.join(tmpdir(), 'bench-ingest-worktree');
+
+if (scenario !== 'unchanged') {
+  rmSync(benchDir, { recursive: true, force: true });
+  cpSync(fixtureRootDir, benchDir, { recursive: true });
+}
+
+/** Every session JSONL under the bench tree, sorted for determinism. */
+function sessionFiles(): string[] {
+  const out: string[] = [];
+  const projects = path.join(benchDir, 'projects');
+  if (!existsSync(projects)) return out;
+  for (const slug of readdirSync(projects).sort()) {
+    const dir = path.join(projects, slug);
+    if (!statSync(dir).isDirectory()) continue;
+    for (const f of readdirSync(dir).sort()) {
+      if (f.endsWith('.jsonl')) out.push(path.join(dir, f));
+    }
+  }
+  return out;
+}
+
+let scenarioCursor = 0;
+
+/**
+ * One day of activity: append ~20 messages to a session, moving to a
+ * different session each iteration so repeated runs are not all re-reading
+ * the same hot file.
+ */
+function applyGrowth(): void {
+  const files = sessionFiles();
+  if (files.length === 0) return;
+  const target = files[scenarioCursor % files.length];
+  scenarioCursor += 1;
+  const sessionId = path.basename(target, '.jsonl');
+  let body = '';
+  for (let i = 0; i < 20; i++) {
+    body +=
+      JSON.stringify({
+        type: 'user',
+        uuid: `bench-${scenarioCursor}-${i}`,
+        timestamp: new Date().toISOString(),
+        sessionId,
+        isSidechain: false,
+        userType: 'external',
+        cwd: '/',
+        version: '1',
+        gitBranch: 'main',
+        message: { role: 'user', content: `bench growth ${scenarioCursor}-${i}` },
+      }) + '\n';
+  }
+  appendFileSync(target, body);
+}
+
+/** A session the user deleted — the case that must not leave orphan rows. */
+function applyDeletion(): void {
+  const files = sessionFiles();
+  if (files.length === 0) return;
+  rmSync(files[scenarioCursor % files.length], { force: true });
+  scenarioCursor += 1;
+}
+
+/**
+ * Forced upgrade repair: every file matches, but the stored ingest-contract
+ * version is stale, so the warm fast path must be defeated and the source
+ * rebuilt (RFC 008 Phase 1.3). This is the worst warm case by construction.
+ */
+function applyRepair(dbPath?: string): void {
+  if (!dbPath) return;
+  if (!existsSync(dbPath)) return;
+  // Required lazily: `require` is built from the SDK package above, and
+  // this runs only in the repair scenario.
+  const Database = require('better-sqlite3') as typeof import('better-sqlite3');
+  const db = new Database(dbPath);
+  // Loud on purpose. The first version of this wrote `WHERE materialization =`
+  // — not a column — inside a try/catch, so the UPDATE errored, the scenario
+  // silently did nothing, and the benchmark reported fast-path timings as if
+  // they were a forced rebuild. A scenario that quietly fails to apply is
+  // worse than one that crashes.
+  const res = db
+    .prepare(`UPDATE source_materializations SET version = 0 WHERE projection = ?`)
+    .run('rust-ingest-contract');
+  db.close();
+  if (res.changes === 0) {
+    throw new Error(
+      'repair scenario: no rust-ingest-contract row to invalidate — the DB was ' +
+        'not seeded by the Rust engine, so the fast path would not be defeated',
+    );
+  }
+}
+
+let currentDbPath: string | undefined;
+
+function applyScenario(): void {
+  switch (scenario) {
+    case 'growth':
+      return applyGrowth();
+    case 'deletion':
+      return applyDeletion();
+    case 'repair':
+      return applyRepair(currentDbPath);
+    case 'unchanged':
+      return;
+  }
 }
 
 if (!existsSync(fixtureRootDir)) {
@@ -168,7 +316,7 @@ async function runRustOnce(dbPath: string): Promise<number> {
   const native = require('@vibecook/spaghetti-sdk-native') as NativeAddon;
   const t0 = performance.now();
   await native.ingest({
-    agentDir: fixtureRootDir,
+    agentDir: benchDir,
     dbPath,
     mode,
     parallelism,
@@ -180,7 +328,7 @@ async function seedWarmDb(dbPath: string): Promise<void> {
   cleanDb(dbPath);
   const native = require('@vibecook/spaghetti-sdk-native') as NativeAddon;
   await native.ingest({
-    agentDir: fixtureRootDir,
+    agentDir: benchDir,
     dbPath,
     mode: 'cold',
     parallelism,
@@ -188,28 +336,46 @@ async function seedWarmDb(dbPath: string): Promise<void> {
 }
 
 async function runTsOnce(dbPath: string): Promise<number> {
-  cleanDb(dbPath);
-  const svc = createSpaghettiService({ rootDir: fixtureRootDir, dbPath });
+  // Warm mode reuses the seeded DB on purpose. `initialize()` takes the TS
+  // incremental warm path when fingerprints already exist, which is the path
+  // RFC 008 Phase 4 compares the Rust full-source path against. Cleaning here
+  // would have measured a cold start and called it warm.
+  if (mode === 'cold') cleanDb(dbPath);
+  const svc = createSpaghettiService({ rootDir: benchDir, dbPath });
   const t0 = performance.now();
   await svc.initialize();
   svc.shutdown();
   return performance.now() - t0;
 }
 
+async function seedTsWarmDb(dbPath: string): Promise<void> {
+  cleanDb(dbPath);
+  const svc = createSpaghettiService({ rootDir: benchDir, dbPath });
+  await svc.initialize();
+  svc.shutdown();
+}
+
 async function runBench(label: string, fn: (dbPath: string) => Promise<number>): Promise<Summary> {
   const dbPath = path.join(tmpdir(), `bench-ingest-${label.toLowerCase()}.db`);
+  currentDbPath = dbPath;
 
   // For warm mode we seed the DB with one cold run before any warm
   // measurement can be meaningful.
-  if (mode === 'warm' && label === 'rust') {
-    await seedWarmDb(dbPath);
+  if (mode === 'warm') {
+    if (label === 'rust') await seedWarmDb(dbPath);
+    else await seedTsWarmDb(dbPath);
   }
 
   for (let i = 0; i < warmup; i++) {
+    if (mode === 'warm') applyScenario();
     await fn(dbPath);
   }
   const samples: number[] = [];
   for (let i = 0; i < runs; i++) {
+    // Mutate before each measured run so every sample sees the same *kind* of
+    // change. Without this the second run of a growth scenario would find
+    // nothing changed and time the fast path instead.
+    if (mode === 'warm') applyScenario();
     samples.push(await fn(dbPath));
   }
   cleanDb(dbPath);

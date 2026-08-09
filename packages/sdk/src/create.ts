@@ -14,7 +14,7 @@ import { createConsoleErrorSink, type ErrorSink } from './io/error-sink.js';
 import { createSpaghettiAppService } from './app-service.js';
 import type { AgentDataService, LifecycleOwner } from './data/agent-data-service.js';
 import { SpaghettiDataService } from './data/multi-source-service.js';
-import { loadNativeAddon } from './native.js';
+import { loadNativeAddon, nativeLoadFailure } from './native.js';
 import { defaultDbPathForEngine, resolveEngine, type IngestEngine } from './settings.js';
 import type { SpaghettiAPI } from './api.js';
 import { createClaudeCodeSource, type AgentSource } from './sources/index.js';
@@ -116,6 +116,25 @@ export function createSpaghettiService(options?: SpaghettiServiceOptions): Spagh
 
   const resolvedEngine = options?.engine ?? resolveEngine();
   const nativeAddon = resolvedEngine === 'rs' ? loadNativeAddon() : null;
+
+  // The Rust engine was asked for and is not there. The run continues on the
+  // TypeScript engine and produces the same index, so this is a diagnostic
+  // rather than a failure — but it must not be silent. Before RFC 008 Phase 4
+  // the fallback was invisible: `engine: 'rs'` was configured, `ts` actually
+  // ran, and nothing said so.
+  if (resolvedEngine === 'rs' && nativeAddon === null) {
+    const failure = nativeLoadFailure();
+    if (failure) {
+      errorSink.error(failure, {
+        component: 'NativeAddon',
+        platform: failure.platform,
+        arch: failure.arch,
+        libc: failure.libc,
+        expectedVersion: failure.expectedVersion,
+        activeEngine: 'ts',
+      });
+    }
+  }
   const live = options?.live ?? false;
 
   // ── DurableStore (SQLite + FTS) ────────────────────────────────────────
