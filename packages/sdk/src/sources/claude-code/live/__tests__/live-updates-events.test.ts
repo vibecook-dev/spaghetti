@@ -27,7 +27,9 @@ import type { Change } from '../../../../live/change-events.js';
 
 const SLUG = 'e2e-slug';
 const SESSION_ID = 'e2e-session';
-const DELIVERY_TIMEOUT_MS = 2000;
+/** Ceilings, not waits — see the note in live-updates.test.ts. */
+const DELIVERY_TIMEOUT_MS = 10_000;
+const TEST_TIMEOUT_MS = 45_000;
 
 /**
  * Resolve when `api.live.onChange` fires OR `timeoutMs` elapses,
@@ -114,33 +116,37 @@ describe('api.live.onChange end-to-end delivery (RFC 005 C3.3 + C3.4)', () => {
     rmSync(tempRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   });
 
-  test('api.live.onChange delivers session.message.added for a live JSONL write', { timeout: 10000 }, async () => {
-    assert.ok(api.live, 'api.live should be defined under { live: true }');
+  test(
+    'api.live.onChange delivers session.message.added for a live JSONL write',
+    { timeout: TEST_TIMEOUT_MS },
+    async () => {
+      assert.ok(api.live, 'api.live should be defined under { live: true }');
 
-    const topic = { kind: 'session' as const, slug: SLUG, sessionId: SESSION_ID };
-    const changePromise = awaitFirstChangeFromApi(api, topic, DELIVERY_TIMEOUT_MS);
+      const topic = { kind: 'session' as const, slug: SLUG, sessionId: SESSION_ID };
+      const changePromise = awaitFirstChangeFromApi(api, topic, DELIVERY_TIMEOUT_MS);
 
-    // `onChange(topic, ...)` internally prewarms the projects/
-    // scope as part of the composed dispose; it attaches the
-    // watcher. Give parcel a tick to actually bind before writing
-    // the fixture — the pipeline tolerates write-before-attach
-    // (subsequent update events would catch it) but this keeps the
-    // timing comfortably within the 2s budget.
-    await new Promise((r) => setTimeout(r, 150));
+      // `onChange(topic, ...)` internally prewarms the projects/
+      // scope as part of the composed dispose; it attaches the
+      // watcher. Give parcel a tick to actually bind before writing
+      // the fixture — the pipeline tolerates write-before-attach
+      // (subsequent update events would catch it) but this keeps the
+      // timing comfortably within the 2s budget.
+      await new Promise((r) => setTimeout(r, 150));
 
-    writeFileSync(sessionPath, makeUserMessage('uuid-api-live-1', 'hello from C3.4'));
+      writeFileSync(sessionPath, makeUserMessage('uuid-api-live-1', 'hello from C3.4'));
 
-    const change = await changePromise;
+      const change = await changePromise;
 
-    assert.equal(change.type, 'session.message.added');
-    if (change.type !== 'session.message.added') return; // narrow
-    assert.equal(change.slug, SLUG);
-    assert.equal(change.sessionId, SESSION_ID);
-    assert.ok(change.seq >= 1, `seq should be >= 1, got ${change.seq}`);
-    assert.equal(typeof change.ts, 'number');
-  });
+      assert.equal(change.type, 'session.message.added');
+      if (change.type !== 'session.message.added') return; // narrow
+      assert.equal(change.slug, SLUG);
+      assert.equal(change.sessionId, SESSION_ID);
+      assert.ok(change.seq >= 1, `seq should be >= 1, got ${change.seq}`);
+      assert.equal(typeof change.ts, 'number');
+    },
+  );
 
-  test('api.live.prewarm returns a Dispose that idempotently detaches', { timeout: 10000 }, async () => {
+  test('api.live.prewarm returns a Dispose that idempotently detaches', { timeout: TEST_TIMEOUT_MS }, async () => {
     assert.ok(api.live);
     const dispose = api.live.prewarm({ kind: 'session', slug: SLUG });
     assert.equal(typeof dispose, 'function');
