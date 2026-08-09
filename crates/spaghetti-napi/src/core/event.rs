@@ -153,6 +153,20 @@ pub enum IngestEvent {
     /// Stamp `sessions.tokens_estimated` (Grok session-aggregate / Codex estimate).
     SessionTokensEstimated { session_id: String, estimated: bool },
 
+    /// Overwrite one message's token columns, leaving the rest of the row
+    /// alone. Mirrors the TS `updateMessageTokens`.
+    ///
+    /// The alternative — re-sending the whole `Message` — means holding every
+    /// message's raw JSON for the length of a session just in case an estimate
+    /// is needed at the end, which on a large session doubles peak memory for
+    /// a case that arises roughly once in eighteen sessions.
+    MessageTokens {
+        session_id: String,
+        index: u32,
+        input_tokens: u64,
+        output_tokens: u64,
+    },
+
     /// End-of-project marker — signals the writer to commit the current
     /// transaction. Maps to `onProjectComplete`.
     ProjectComplete { slug: String, duration_ms: u32 },

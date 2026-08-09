@@ -69,17 +69,19 @@ coverage, needs no scrubbing, and lets each file name its own behavior.
 event carries only rate limits — easy to mistake for an absent event, and the
 Rust reader treats it as "no usage".
 
-### Known divergence — do not normalize
+### Cross-engine status
 
-`pnpm test:ingest-diff:codex` reports **11 differences**, all one cause: the
-tiktoken estimate for sessions with no official usage is TS-only.
+`pnpm test:ingest-diff:codex` reports **zero differences** and runs in CI.
 
-Official attribution is already at parity. Every session carrying an official
-`token_count` — `01`, `03`, `04`, `07`, `08`, `09` — produces byte-identical
-token columns in both engines, including the cumulative-total fallback, the
-partially-covered sessions, and last-write-wins when one assistant turn draws
-several counts.
+It did not always. The historical six-diff divergence was the tiktoken
+estimate, and RFC 008 Phase 3 closed it by choosing a policy — session-level
+fallback narrowed to sessions where a turn actually completed — and porting it
+to Rust. Official attribution was already at parity throughout: every session
+carrying a `token_count` produced identical token columns in both engines,
+including the cumulative-total fallback, partially-covered sessions, and
+last-write-wins when one assistant draws several counts.
 
-The divergence is confined to `02`, `05`, `06`, and `10`, the four sessions
-with no official usage at all. RFC 008 Phase 3A owns the decision; see
-`docs/rfcs/008-phase-3a-attribution.md` for the full per-message trace.
+`02` is the only fixture that receives an estimate. `05`, `06`, and `10` are
+deliberately *not* estimated — no turn completed in them, so there is no usage
+to approximate. See `docs/rfcs/008-phase-3a-attribution.md` for the full
+per-message trace and the rationale.
