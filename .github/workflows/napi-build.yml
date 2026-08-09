@@ -94,32 +94,42 @@ jobs:
           # silently fell back to the TypeScript engine, which looks exactly
           # like an unsupported platform (RFC 008 Phase 4).
           #
-          # Built natively inside Alpine on each architecture, not
-          # cross-compiled from Ubuntu. Two cross attempts failed for
-          # different reasons, both worth not repeating: `musl-tools`'
-          # `musl-gcc` wrapper cannot link a cdylib (`cannot find
-          # libgcc_s.so.1` — it links `-lgcc_s` dynamically and musl has no
-          # such library), and pulling a cross toolchain from musl.cc made the
-          # build depend on a single third-party host, which was down when it
-          # was tried.
+          # Built inside Alpine via an explicit `docker run`, with checkout and
+          # caching staying on the host. Three earlier approaches failed, each
+          # for a reason worth not repeating:
           #
-          # The napi-rs image carries a complete musl Rust + Node toolchain,
-          # so there is no cross setup at all.
+          #  - `musl-tools`' `musl-gcc` wrapper cannot link a cdylib: it passes
+          #    `-lgcc_s` for dynamic linking and musl has no such library
+          #    (`cannot find libgcc_s.so.1`).
+          #  - Fetching a cross toolchain from musl.cc put a single
+          #    third-party host in the release path; it was unreachable.
+          #  - A job-level `container:` cannot work for arm64 — GitHub only
+          #    supports JavaScript actions in Alpine containers on x64
+          #    runners, so `actions/checkout` itself fails on an ARM host.
+          #
+          # `docker run` sidesteps the last of those entirely, because no
+          # JavaScript action ever executes inside the container.
           - host: ubuntu-latest
             target: x86_64-unknown-linux-musl
-            container: ghcr.io/napi-rs/napi-rs/nodejs-rust:lts-alpine
             build: |
-              cd crates/spaghetti-napi
-              npx napi build --platform --release --target x86_64-unknown-linux-musl
-              strip *.node
+              docker run --rm -v "$PWD:/w" -w /w node:24-alpine sh -c '
+                apk add --no-cache build-base curl rustup >/dev/null &&
+                rustup-init -y --default-toolchain stable --profile minimal                   --target x86_64-unknown-linux-musl >/dev/null &&
+                . "$HOME/.cargo/env" &&
+                cd crates/spaghetti-napi && npm install --silent &&
+                npx napi build --platform --release --target x86_64-unknown-linux-musl &&
+                strip *.node'
 
           - host: ubuntu-24.04-arm
             target: aarch64-unknown-linux-musl
-            container: ghcr.io/napi-rs/napi-rs/nodejs-rust:lts-alpine
             build: |
-              cd crates/spaghetti-napi
-              npx napi build --platform --release --target aarch64-unknown-linux-musl
-              strip *.node
+              docker run --rm -v "$PWD:/w" -w /w node:24-alpine sh -c '
+                apk add --no-cache build-base curl rustup >/dev/null &&
+                rustup-init -y --default-toolchain stable --profile minimal                   --target aarch64-unknown-linux-musl >/dev/null &&
+                . "$HOME/.cargo/env" &&
+                cd crates/spaghetti-napi && npm install --silent &&
+                npx napi build --platform --release --target aarch64-unknown-linux-musl &&
+                strip *.node'
 
           - host: windows-latest
             target: x86_64-pc-windows-msvc
@@ -141,8 +151,6 @@ jobs:
 
     name: Build - ${{ matrix.settings.target }}
     runs-on: ${{ matrix.settings.host }}
-    # Empty for every non-musl target, which runs directly on the host.
-    container: ${{ matrix.settings.container || '' }}
     # On pull_request, run only for release-please's PR. Every other PR is
     # covered by ci.yml, which builds the addon natively on all three hosts;
     # this workflow's value is the cross-compiled targets and the load checks,
@@ -161,26 +169,19 @@ jobs:
       # `npm install`, not pnpm — leaving the auto-cache on causes the
       # post-step to fail when the pnpm store path doesn't exist.
       - name: Install pnpm
-        if: matrix.settings.container == ''
         run: npm install -g pnpm@11.13.1
 
       - uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v5
-        if: matrix.settings.container == ''
         with:
           node-version: 24
           package-manager-cache: false
 
+      # Host toolchain. The musl targets build inside Docker with their own
+      # toolchain, so this is unused for them and harmless.
       - name: Install Rust toolchain
-        if: matrix.settings.container == ''
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.settings.target }}
-
-      # The image ships a musl Rust toolchain but not necessarily this exact
-      # target triple; adding it is a no-op when already present.
-      - name: Add Rust target (container)
-        if: matrix.settings.container != ''
-        run: rustup target add ${{ matrix.settings.target }}
 
       # Cache the cargo registry + target dir so fat-LTO release builds don't
       # recompile every dependency from scratch on each release. Keyed per
