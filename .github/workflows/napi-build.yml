@@ -93,19 +93,33 @@ jobs:
           # Alpine container is x64 Linux with no loadable artifact — it
           # silently fell back to the TypeScript engine, which looks exactly
           # like an unsupported platform (RFC 008 Phase 4).
+          #
+          # Built natively inside Alpine on each architecture, not
+          # cross-compiled from Ubuntu. Two cross attempts failed for
+          # different reasons, both worth not repeating: `musl-tools`'
+          # `musl-gcc` wrapper cannot link a cdylib (`cannot find
+          # libgcc_s.so.1` — it links `-lgcc_s` dynamically and musl has no
+          # such library), and pulling a cross toolchain from musl.cc made the
+          # build depend on a single third-party host, which was down when it
+          # was tried.
+          #
+          # The napi-rs image carries a complete musl Rust + Node toolchain,
+          # so there is no cross setup at all.
           - host: ubuntu-latest
             target: x86_64-unknown-linux-musl
+            container: ghcr.io/napi-rs/napi-rs/nodejs-rust:lts-alpine
             build: |
               cd crates/spaghetti-napi
               npx napi build --platform --release --target x86_64-unknown-linux-musl
               strip *.node
 
-          - host: ubuntu-latest
+          - host: ubuntu-24.04-arm
             target: aarch64-unknown-linux-musl
+            container: ghcr.io/napi-rs/napi-rs/nodejs-rust:lts-alpine
             build: |
               cd crates/spaghetti-napi
               npx napi build --platform --release --target aarch64-unknown-linux-musl
-              llvm-strip *.node
+              strip *.node
 
           - host: windows-latest
             target: x86_64-pc-windows-msvc
@@ -127,6 +141,8 @@ jobs:
 
     name: Build - ${{ matrix.settings.target }}
     runs-on: ${{ matrix.settings.host }}
+    # Empty for every non-musl target, which runs directly on the host.
+    container: ${{ matrix.settings.container || '' }}
     # On pull_request, run only for release-please's PR. Every other PR is
     # covered by ci.yml, which builds the addon natively on all three hosts;
     # this workflow's value is the cross-compiled targets and the load checks,
@@ -145,17 +161,26 @@ jobs:
       # `npm install`, not pnpm — leaving the auto-cache on causes the
       # post-step to fail when the pnpm store path doesn't exist.
       - name: Install pnpm
+        if: matrix.settings.container == ''
         run: npm install -g pnpm@11.13.1
 
       - uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v5
+        if: matrix.settings.container == ''
         with:
           node-version: 24
           package-manager-cache: false
 
       - name: Install Rust toolchain
+        if: matrix.settings.container == ''
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.settings.target }}
+
+      # The image ships a musl Rust toolchain but not necessarily this exact
+      # target triple; adding it is a no-op when already present.
+      - name: Add Rust target (container)
+        if: matrix.settings.container != ''
+        run: rustup target add ${{ matrix.settings.target }}
 
       # Cache the cargo registry + target dir so fat-LTO release builds don't
       # recompile every dependency from scratch on each release. Keyed per
@@ -175,21 +200,6 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
 
-      # musl needs its own C toolchain and linker; the GNU cross-compilers
-      # above cannot produce a static-musl .node. `llvm` supplies llvm-strip
-      # for the aarch64 build, since the GNU strip cannot read a musl aarch64
-      # object.
-      - name: Install cross-compilation tools (musl)
-        if: endsWith(matrix.settings.target, '-unknown-linux-musl')
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y musl-tools llvm
-      - name: Install aarch64 musl cross toolchain
-        if: matrix.settings.target == 'aarch64-unknown-linux-musl'
-        run: |
-          curl -sSL https://musl.cc/aarch64-linux-musl-cross.tgz | sudo tar xz -C /opt
-          echo "/opt/aarch64-linux-musl-cross/bin" >> "$GITHUB_PATH"
-
       - name: Install dependencies
         run: |
           cd crates/spaghetti-napi
@@ -198,9 +208,6 @@ jobs:
       - name: Build native addon
         env:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
-          CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: aarch64-linux-musl-gcc
-          CC_aarch64_unknown_linux_musl: aarch64-linux-musl-gcc
         run: ${{ matrix.settings.build }}
 
       - name: Upload artifact
