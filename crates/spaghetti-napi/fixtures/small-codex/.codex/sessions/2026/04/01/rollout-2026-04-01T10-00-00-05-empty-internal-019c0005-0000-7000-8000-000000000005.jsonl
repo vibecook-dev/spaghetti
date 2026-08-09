@@ -1,0 +1,4 @@
+{"timestamp":"2026-04-01T10:00:33.000Z","type":"session_meta","payload":{"id":"019c0005-0000-7000-8000-000000000005","timestamp":"2026-04-01T10:00:33.000Z","cwd":"/home/fixture/project","originator":"codex_cli_rs","cli_version":"0.98.0","source":"cli","model_provider":"openai"}}
+{"timestamp":"2026-04-01T10:00:34.000Z","type":"response_item","payload":{"type":"message","role":"developer","content":[{"type":"input_text","text":"You are a coding agent operating in a fixture repository."}]}}
+{"timestamp":"2026-04-01T10:00:35.000Z","type":"turn_context","payload":{"cwd":"/home/fixture/project","approval_policy":"on-request","sandbox_policy":{"type":"read-only"},"model":"gpt-5.3-codex","personality":"pragmatic"}}
+{"timestamp":"2026-04-01T10:00:36.000Z","type":"event_msg","payload":{"type":"turn_aborted","reason":"interrupted"}}

@@ -149,7 +149,9 @@ if (mode === 'cold' && !existsSync(fixtureRootDir)) {
       'regenerate with: node scripts/generate-grok-fixture.mjs --out crates/spaghetti-napi/fixtures/small-grok',
     );
   } else if (coldSource === 'codex') {
-    console.error('Codex fixture not shipped yet — pass --fixture <path-to-.codex>');
+    console.error(
+      'regenerate with: node scripts/generate-codex-fixture.mjs --out crates/spaghetti-napi/fixtures/small-codex',
+    );
   } else {
     console.error(
       'regenerate with: node scripts/generate-ingest-fixture.mjs --out crates/spaghetti-napi/fixtures/small',
