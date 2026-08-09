@@ -33,7 +33,7 @@
 //!
 //! Populated in RFC 003 commit 1.7.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
@@ -367,18 +367,26 @@ pub(crate) fn run_ingest(
         )
         .map_err(IngestInternalError::Io)?;
 
-    // Every project is gone from disk but rows survive — treat that as the
-    // deletion it is (RFC 008 Phase 1.5). Without this, removing `projects/`
-    // left every project and session indexed forever: the slug loop has
-    // nothing to re-write, and `ClearSourceFiles` only touches fingerprints.
+    // Full-source clear before the re-read (RFC 008 P1, Phase 1.1).
     //
-    // Ordered before the plans parse on purpose. The clear wipes the artifact
-    // tables too, `plans` among them, so the re-parse below repopulates them —
-    // which is exactly the RFC's requirement that independent inputs still
-    // ingest when `projects/` is absent.
-    if slugs.is_empty() && source_has_stored_state(&resolved.db_path, &resolved.source_id) {
-        let _ = sender.send(IngestEvent::ClearSourceData);
-    }
+    // Reaching this point means either a cold run or a warm run that found
+    // changes, and both rebuild everything. Without the clear the rebuild was
+    // upsert-only, so anything that *shrank* or *disappeared* survived: a
+    // truncated session kept its dropped messages, a deleted session kept its
+    // whole row, deleted sidecars kept their todos, subagents, and plans, and
+    // removing `projects/` left every project indexed forever. Fingerprints
+    // converged — `pre_parse_diff` re-emits the full discovered set below — but
+    // the entity rows never did.
+    //
+    // Codex and Grok already cleared this way; Claude was the outlier.
+    //
+    // Ordered before the plans parse on purpose: the clear wipes the artifact
+    // tables, `plans` among them, and the parse immediately below repopulates
+    // them. That is also what lets independent inputs keep ingesting when
+    // `projects/` is absent (Phase 1.5).
+    //
+    // On a cold run the DELETEs hit empty tables, so the cost is noise.
+    let _ = sender.send(IngestEvent::ClearSourceData);
 
     // Emit the global plans index first — mirrors the TS engine, which
     // sends every `plans/*.md` through `sink.onPlan` before the project
@@ -610,7 +618,24 @@ fn warm_has_no_changes(
     // `/agent-old`). `load_all` is source-scoped now, so the rows are already
     // and only this source's.
     let diff = fingerprint::compute_diff(&resolved.root_dir, &stored)?;
-    Ok(diff.added.is_empty() && diff.modified.is_empty() && diff.deleted.is_empty())
+    if !diff.added.is_empty() || !diff.modified.is_empty() || !diff.deleted.is_empty() {
+        return Ok(false);
+    }
+
+    // Fingerprints track files, so a project directory holding no files at all
+    // is invisible to the diff above — creating or removing one is a change no
+    // file changed. A cold run indexes it anyway, because the slug list comes
+    // from a directory scan, so without this check warm and cold disagree on
+    // exactly the empty projects.
+    let scanned: BTreeSet<String> = scan_project_slugs(&resolved.root_dir)?
+        .into_iter()
+        .collect();
+    let mut stmt = conn.prepare("SELECT slug FROM projects WHERE source_id = ?1")?;
+    let indexed = stmt
+        .query_map([&resolved.source_id], |row| row.get::<_, String>(0))?
+        .collect::<std::result::Result<BTreeSet<String>, _>>()?;
+
+    Ok(scanned == indexed)
 }
 
 /// Does this source have any stored state left in the index?
@@ -948,7 +973,7 @@ mod tests {
 
     /// Build a minimal fake `~/.claude` with one project, one session, and
     /// two messages. Returns the root tempdir (keep alive for the test).
-    fn fake_claude_fixture() -> TempDir {
+    pub(super) fn fake_claude_fixture() -> TempDir {
         let dir = TempDir::new().unwrap();
         let slug = "-Users-me-proj";
         let project_dir = dir.path().join("projects").join(slug);
@@ -1106,7 +1131,7 @@ mod tests {
     }
 
     /// Build the standard warm options for a fixture + db pair.
-    fn warm_opts(agent_dir: &Path, db: &Path) -> IngestOptions {
+    pub(super) fn warm_opts(agent_dir: &Path, db: &Path) -> IngestOptions {
         IngestOptions {
             agent_dir: agent_dir.to_string_lossy().into(),
             db_path: db.to_string_lossy().into(),
@@ -1613,5 +1638,364 @@ mod tests {
             })
             .unwrap();
         assert_eq!(fp_sid, crate::core::DEFAULT_SOURCE_ID);
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// RFC 008 Phase 1 exit gate — warm convergence matrix
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// The gate asks one question in several shapes: after a change on disk, does a
+// warm run leave the index equal to what the files say, and is the run after
+// that a true no-op?
+//
+// Convergence is asserted by comparing a warm run against a cold rebuild of the
+// same tree. That is stronger than checking counts — it catches a warm path
+// that drops rows *and* one that keeps stale ones, without hand-listing what
+// each case is supposed to produce.
+
+#[cfg(test)]
+mod phase_1_gate {
+    use super::tests::{fake_claude_fixture, warm_opts};
+    use super::*;
+    use std::fs;
+    use tempfile::TempDir;
+
+    /// A comparable snapshot of everything a warm run is supposed to converge.
+    #[derive(Debug, PartialEq)]
+    struct Shape {
+        projects: Vec<String>,
+        sessions: Vec<String>,
+        messages: Vec<(String, i64, String)>,
+        plans: Vec<String>,
+        todos: Vec<String>,
+        subagents: Vec<String>,
+        fingerprints: Vec<String>,
+    }
+
+    fn shape_of(db: &Path) -> Shape {
+        let conn = Connection::open(db).unwrap();
+        let col = |sql: &str| -> Vec<String> {
+            let mut stmt = conn.prepare(sql).unwrap();
+            let out = stmt
+                .query_map([], |r| r.get::<_, String>(0))
+                .unwrap()
+                .filter_map(|r| r.ok())
+                .collect();
+            out
+        };
+        let messages = {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT session_id, msg_index, COALESCE(uuid,'') FROM messages \
+                     ORDER BY session_id, msg_index",
+                )
+                .unwrap();
+            let out = stmt
+                .query_map([], |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, i64>(1)?,
+                        r.get::<_, String>(2)?,
+                    ))
+                })
+                .unwrap()
+                .filter_map(|r| r.ok())
+                .collect();
+            out
+        };
+
+        Shape {
+            projects: col("SELECT slug FROM projects ORDER BY slug"),
+            sessions: col("SELECT id FROM sessions ORDER BY id"),
+            messages,
+            plans: col("SELECT slug FROM plans ORDER BY slug"),
+            todos: col("SELECT session_id || '/' || agent_id FROM todos ORDER BY 1"),
+            subagents: col("SELECT file_name FROM subagents ORDER BY file_name"),
+            fingerprints: col("SELECT path FROM source_files ORDER BY path"),
+        }
+    }
+
+    /// Warm-ingest `agent_dir`, assert the result equals a cold rebuild of the
+    /// same tree, then assert the next warm run is a true no-op.
+    fn assert_converges(agent_dir: &Path, db: &Path, case: &str) {
+        run_ingest(&warm_opts(agent_dir, db), None)
+            .unwrap_or_else(|e| panic!("{case}: warm failed: {e}"));
+        let warm = shape_of(db);
+
+        let fresh_dir = TempDir::new().unwrap();
+        let fresh = fresh_dir.path().join("cold.db");
+        let mut cold_opts = warm_opts(agent_dir, &fresh);
+        cold_opts.mode = "cold".into();
+        run_ingest(&cold_opts, None).unwrap_or_else(|e| panic!("{case}: cold failed: {e}"));
+        let cold = shape_of(&fresh);
+
+        assert_eq!(
+            warm, cold,
+            "{case}: warm did not converge on the cold result"
+        );
+
+        let again = run_ingest(&warm_opts(agent_dir, db), None)
+            .unwrap_or_else(|e| panic!("{case}: second warm failed: {e}"));
+        assert_eq!(
+            again.projects_processed, 0,
+            "{case}: a converged tree must warm-start to a no-op"
+        );
+        assert_eq!(shape_of(db), warm, "{case}: the no-op run changed rows");
+    }
+
+    const SESSION: &str = "11111111-2222-3333-4444-555555555555";
+    const SLUG: &str = "-Users-me-proj";
+
+    fn session_path(root: &Path) -> PathBuf {
+        root.join("projects")
+            .join(SLUG)
+            .join(format!("{SESSION}.jsonl"))
+    }
+
+    fn session_dir(root: &Path) -> PathBuf {
+        root.join("projects").join(SLUG).join(SESSION)
+    }
+
+    fn seeded() -> (TempDir, TempDir, PathBuf) {
+        let claude = fake_claude_fixture();
+        let db_dir = TempDir::new().unwrap();
+        let db = db_dir.path().join("gate.db");
+        run_ingest(&warm_opts(claude.path(), &db), None).expect("seed ingest");
+        (claude, db_dir, db)
+    }
+
+    fn user_line(uuid: &str, text: &str) -> String {
+        format!(
+            "{{\"type\":\"user\",\"uuid\":\"{uuid}\",\"timestamp\":\"2026-04-17T00:00:09Z\",\
+             \"sessionId\":\"{SESSION}\",\"isSidechain\":false,\"userType\":\"external\",\
+             \"cwd\":\"/\",\"version\":\"1\",\"gitBranch\":\"main\",\
+             \"message\":{{\"role\":\"user\",\"content\":\"{text}\"}}}}\n"
+        )
+    }
+
+    // ─── File-level changes ────────────────────────────────────────────────
+
+    #[test]
+    fn append_converges() {
+        let (claude, _d, db) = seeded();
+        let p = session_path(claude.path());
+        let mut body = fs::read_to_string(&p).unwrap();
+        body.push_str(&user_line("u3", "third"));
+        fs::write(&p, body).unwrap();
+
+        assert_converges(claude.path(), &db, "append");
+    }
+
+    #[test]
+    fn truncate_converges() {
+        let (claude, _d, db) = seeded();
+        let p = session_path(claude.path());
+        let first = fs::read_to_string(&p).unwrap();
+        let first = first.lines().next().unwrap().to_owned();
+        fs::write(&p, format!("{first}\n")).unwrap();
+
+        assert_converges(claude.path(), &db, "truncate");
+    }
+
+    #[test]
+    fn rewrite_converges() {
+        let (claude, _d, db) = seeded();
+        let p = session_path(claude.path());
+        // Same line count, different content and length — a rewrite the
+        // metadata fingerprint can actually see.
+        fs::write(
+            &p,
+            user_line("rewritten-1", "rewritten content, longer than before"),
+        )
+        .unwrap();
+
+        assert_converges(claude.path(), &db, "rewrite");
+    }
+
+    #[test]
+    fn session_deletion_converges() {
+        let (claude, _d, db) = seeded();
+        fs::remove_file(session_path(claude.path())).unwrap();
+
+        assert_converges(claude.path(), &db, "session deletion");
+    }
+
+    #[test]
+    fn empty_project_with_no_session_file_converges() {
+        let (claude, _d, db) = seeded();
+        // A project directory that exists but holds nothing readable.
+        fs::create_dir_all(claude.path().join("projects").join("-empty-proj")).unwrap();
+
+        assert_converges(claude.path(), &db, "empty project");
+    }
+
+    // ─── Sidecars: add, change, delete ─────────────────────────────────────
+
+    #[test]
+    fn sidecar_add_change_delete_converges() {
+        let (claude, _d, db) = seeded();
+        let sess = session_dir(claude.path());
+        let subagents = sess.join("subagents");
+        let wf = subagents.join("workflows").join("wf_1");
+        let todo = claude
+            .path()
+            .join("todos")
+            .join(format!("{SESSION}-agent-a.json"));
+        let plan = claude.path().join("plans").join("p.md");
+
+        fs::create_dir_all(&wf).unwrap();
+        fs::create_dir_all(sess.join("tool-results")).unwrap();
+        fs::create_dir_all(claude.path().join("todos")).unwrap();
+        fs::create_dir_all(claude.path().join("plans")).unwrap();
+        fs::write(subagents.join("agent-a.jsonl"), "{}\n").unwrap();
+        fs::write(
+            subagents.join("agent-a.meta.json"),
+            "{\"agentType\":\"one\"}\n",
+        )
+        .unwrap();
+        fs::write(wf.join("agent-nested.jsonl"), "{}\n").unwrap();
+        fs::write(wf.join("journal.jsonl"), "{}\n").unwrap();
+        fs::write(sess.join("tool-results").join("t1.txt"), "out\n").unwrap();
+        fs::write(&todo, "[]\n").unwrap();
+        fs::write(&plan, "# P\n").unwrap();
+        assert_converges(claude.path(), &db, "sidecar add");
+
+        fs::write(
+            subagents.join("agent-a.meta.json"),
+            "{\"agentType\":\"two-and-noticeably-longer\"}\n",
+        )
+        .unwrap();
+        fs::write(wf.join("journal.jsonl"), "{}\n{\"grew\":true}\n").unwrap();
+        fs::write(&plan, "# P, now with more content\n").unwrap();
+        assert_converges(claude.path(), &db, "sidecar change");
+
+        fs::remove_file(&todo).unwrap();
+        fs::remove_file(&plan).unwrap();
+        fs::remove_dir_all(&subagents).unwrap();
+        assert_converges(claude.path(), &db, "sidecar delete");
+    }
+
+    // ─── Repair cases ──────────────────────────────────────────────────────
+
+    fn age_contract(db: &Path) {
+        let conn = Connection::open(db).unwrap();
+        conn.execute(
+            "UPDATE source_materializations SET version = ?1 \
+             WHERE source_id = 'claude-code' AND projection = ?2",
+            rusqlite::params![
+                crate::core::ingest_contract::RUST_INGEST_CONTRACT_VERSION - 1,
+                crate::core::ingest_contract::RUST_INGEST_CONTRACT
+            ],
+        )
+        .unwrap();
+    }
+
+    fn plan_count(db: &Path, slug: &str) -> i64 {
+        let conn = Connection::open(db).unwrap();
+        conn.query_row("SELECT COUNT(*) FROM plans WHERE slug = ?1", [slug], |r| {
+            r.get(0)
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn seeded_orphans_survive_until_the_contract_bumps() {
+        let (claude, _d, db) = seeded();
+
+        // A row no fingerprint can explain — the historical-build case the
+        // contract marker exists for. Every file on disk still matches.
+        {
+            let conn = Connection::open(&db).unwrap();
+            conn.execute(
+                "INSERT INTO plans (slug, title, content, size, updated_at) \
+                 VALUES ('orphan', 'Orphan', 'left by an older build', 1, 1)",
+                [],
+            )
+            .unwrap();
+        }
+
+        let noop = run_ingest(&warm_opts(claude.path(), &db), None).expect("unchanged warm");
+        assert_eq!(
+            noop.projects_processed, 0,
+            "files match, so warm is a no-op"
+        );
+        assert_eq!(
+            plan_count(&db, "orphan"),
+            1,
+            "fingerprints cannot see this row — that is the premise, not a bug"
+        );
+
+        age_contract(&db);
+        run_ingest(&warm_opts(claude.path(), &db), None).expect("forced repair");
+
+        assert_eq!(
+            plan_count(&db, "orphan"),
+            0,
+            "the repair must evict rows fingerprints cannot see"
+        );
+    }
+
+    #[test]
+    fn a_crash_before_contract_publication_converges_on_retry() {
+        let (claude, _d, db) = seeded();
+
+        // A run that did the work but died before publishing: the marker is
+        // absent while the rows remain. Absent reads as older, so the next warm
+        // run must repeat the work rather than trust the index.
+        {
+            let conn = Connection::open(&db).unwrap();
+            conn.execute(
+                "DELETE FROM source_materializations \
+                 WHERE source_id = 'claude-code' AND projection = ?1",
+                [crate::core::ingest_contract::RUST_INGEST_CONTRACT],
+            )
+            .unwrap();
+        }
+
+        let retried = run_ingest(&warm_opts(claude.path(), &db), None).expect("retry");
+        assert!(
+            retried.projects_processed > 0,
+            "an unpublished marker must force the work to run again"
+        );
+
+        {
+            let conn = Connection::open(&db).unwrap();
+            assert!(
+                crate::core::ingest_contract::is_source_contract_current(&conn, "claude-code")
+                    .unwrap(),
+                "and the retry must publish, or every start repairs forever"
+            );
+        }
+
+        let after = run_ingest(&warm_opts(claude.path(), &db), None).expect("post-retry warm");
+        assert_eq!(after.projects_processed, 0, "the retry must converge");
+    }
+
+    #[test]
+    fn multi_source_rows_survive_a_claude_repair() {
+        let (claude, _d, db) = seeded();
+        {
+            let conn = Connection::open(&db).unwrap();
+            conn.execute(
+                "INSERT INTO projects (slug, source_id, original_path, sessions_index, updated_at) \
+                 VALUES ('codex-proj', 'codex', '/x', '{}', 1)",
+                [],
+            )
+            .unwrap();
+        }
+        age_contract(&db);
+
+        run_ingest(&warm_opts(claude.path(), &db), None).expect("claude repair");
+
+        let conn = Connection::open(&db).unwrap();
+        let codex: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM projects WHERE source_id = 'codex'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(codex, 1, "a claude repair must not touch codex rows");
     }
 }
