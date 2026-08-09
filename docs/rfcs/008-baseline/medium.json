@@ -1,13 +1,13 @@
 {
   "source": "claude",
   "fixture": "crates/spaghetti-napi/fixtures/medium/.claude",
-  "schemaVersion": "15",
+  "schemaVersion": "16",
   "ts": {
     "engine": "ts",
     "tables": {
       "schema_meta": {
         "rows": 1,
-        "digest": "4aab27ed42407de5"
+        "digest": "7aa7ab160ae5eb65"
       },
       "projects": {
         "rows": 9,
@@ -82,7 +82,7 @@
     "tables": {
       "schema_meta": {
         "rows": 1,
-        "digest": "4aab27ed42407de5"
+        "digest": "7aa7ab160ae5eb65"
       },
       "projects": {
         "rows": 9,

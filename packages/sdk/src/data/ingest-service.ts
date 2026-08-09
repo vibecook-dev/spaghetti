@@ -469,7 +469,7 @@ class IngestServiceImpl implements IngestService {
     this.stmtUpsertFingerprint = this.db.prepare(
       `INSERT INTO source_files (path, mtime_ms, size, byte_position, source_id)
        VALUES (?, ?, ?, ?, ?)
-       ON CONFLICT(path) DO UPDATE SET
+       ON CONFLICT(source_id, path) DO UPDATE SET
          mtime_ms = excluded.mtime_ms,
          size = excluded.size,
          byte_position = excluded.byte_position`,
@@ -710,15 +710,26 @@ class IngestServiceImpl implements IngestService {
 
   getFingerprint(filePath: string): SourceFingerprint | null {
     const row = this.db.get<SourceFileRow>(
-      'SELECT path, mtime_ms, size, byte_position FROM source_files WHERE path = ?',
+      'SELECT path, mtime_ms, size, byte_position FROM source_files WHERE source_id = ? AND path = ?',
+      this.sourceId,
       filePath,
     );
     if (!row) return null;
     return this.rowToFingerprint(row);
   }
 
+  /**
+   * Every fingerprint owned by *this* service's source.
+   *
+   * Scoped deliberately: callers are per-source lifecycle owners that treat the
+   * result as "the files I ingested". Unscoped, a Codex warm start walked
+   * Claude's and Grok's fingerprints too.
+   */
   getAllFingerprints(): SourceFingerprint[] {
-    const rows = this.db.all<SourceFileRow>('SELECT path, mtime_ms, size, byte_position FROM source_files');
+    const rows = this.db.all<SourceFileRow>(
+      'SELECT path, mtime_ms, size, byte_position FROM source_files WHERE source_id = ?',
+      this.sourceId,
+    );
     return rows.map((row) => this.rowToFingerprint(row));
   }
 
@@ -727,7 +738,7 @@ class IngestServiceImpl implements IngestService {
   }
 
   deleteFingerprint(filePath: string): void {
-    this.db.run('DELETE FROM source_files WHERE path = ?', filePath);
+    this.db.run('DELETE FROM source_files WHERE source_id = ? AND path = ?', this.sourceId, filePath);
   }
 
   getNextMessageIndex(sessionId: string): number {

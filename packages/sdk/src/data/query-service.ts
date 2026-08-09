@@ -1057,6 +1057,10 @@ class QueryServiceImpl implements QueryService {
       totalSegments += count;
     }
 
+    // Deliberately unscoped: this is whole-index stats, sitting alongside a
+    // count of every other table. `source_files` is keyed (source_id, path),
+    // so a scoped count here would answer a different question than the rows
+    // above it.
     const fpRow = this.db.get<CountRow>('SELECT COUNT(*) as count FROM source_files');
     const totalFingerprints = fpRow?.count ?? 0;
 
