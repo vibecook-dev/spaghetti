@@ -535,10 +535,13 @@ pub(crate) fn run_ingest(
     // unconditionally — would let a failed run look complete, and the next warm
     // start would skip the repair it still needs.
     //
-    // `errors` holds per-record parse failures. Those omit their fingerprints
-    // so the file retries next run, which means the source is *not* fully
-    // materialised and must not be marked current.
-    publish_contract_if_clean(&resolved, &errors);
+    // Two independent failure channels have to be clean, because they carry
+    // different things. `errors` holds project-level parse failures — what a
+    // parser *returns*. Per-record failures never appear there; they travel as
+    // `WorkerError` events, and the writer rolls the whole project back on one,
+    // so a single bad line drops a project while `errors` stays empty. Gating
+    // on `errors` alone published the contract over exactly that loss.
+    publish_contract_if_clean(&resolved, &errors, writer_stats.worker_errors);
 
     let duration_ms = u32::try_from(start.elapsed().as_millis()).unwrap_or(u32::MAX);
 
@@ -559,8 +562,12 @@ pub(crate) fn run_ingest(
 /// Publishing when we should not have is not: the marker is what defeats the
 /// warm fast path, so a wrong `true` makes the repair unreachable. Every
 /// failure path here therefore leaves the marker alone.
-fn publish_contract_if_clean(resolved: &ResolvedOptions, errors: &[IngestError]) {
-    if !errors.is_empty() {
+fn publish_contract_if_clean(
+    resolved: &ResolvedOptions,
+    errors: &[IngestError],
+    worker_errors: u32,
+) {
+    if !errors.is_empty() || worker_errors > 0 {
         return;
     }
     let Ok(conn) = Connection::open(&resolved.db_path) else {
@@ -815,7 +822,7 @@ fn run_codex_ingest(
     // Success-last, same rule as the Claude path. These readers do not yet
     // accumulate per-record errors (RFC 008 Phase 2 gives them the error
     // protocol), so a clean writer join is the whole signal available today.
-    publish_contract_if_clean(resolved, &[]);
+    publish_contract_if_clean(resolved, &[], 0);
 
     Ok(IngestStats {
         duration_ms: u32::try_from(start.elapsed().as_millis()).unwrap_or(u32::MAX),
@@ -925,7 +932,7 @@ fn run_grok_ingest(
     // Success-last, same rule as the Claude path. These readers do not yet
     // accumulate per-record errors (RFC 008 Phase 2 gives them the error
     // protocol), so a clean writer join is the whole signal available today.
-    publish_contract_if_clean(resolved, &[]);
+    publish_contract_if_clean(resolved, &[], 0);
 
     Ok(IngestStats {
         duration_ms: u32::try_from(start.elapsed().as_millis()).unwrap_or(u32::MAX),
@@ -1997,5 +2004,134 @@ mod phase_1_gate {
             )
             .unwrap();
         assert_eq!(codex, 1, "a claude repair must not touch codex rows");
+    }
+
+    #[test]
+    fn a_partial_success_does_not_publish_the_contract_marker() {
+        let (claude, _d, db) = seeded();
+        age_contract(&db);
+
+        // A record the parser cannot read. The run still completes and every
+        // good record still ingests, which is exactly the partial success the
+        // marker must not report as a finished repair.
+        let path = session_path(claude.path());
+        let mut body = fs::read_to_string(&path).unwrap();
+        body.push_str("not-valid-json\n");
+        fs::write(&path, body).unwrap();
+
+        run_ingest(&warm_opts(claude.path(), &db), None).expect("run completes");
+
+        let conn = Connection::open(&db).unwrap();
+        assert!(
+            !crate::core::ingest_contract::is_source_contract_current(&conn, "claude-code")
+                .unwrap(),
+            "a run that dropped a project must leave the contract unpublished so it retries"
+        );
+    }
+
+    #[test]
+    fn project_deletion_converges() {
+        let (claude, _d, db) = seeded();
+        fs::remove_dir_all(claude.path().join("projects").join(SLUG)).unwrap();
+        assert_converges(claude.path(), &db, "project deletion");
+    }
+
+    #[test]
+    fn root_deletion_fails_loudly_and_identically_in_both_modes() {
+        let (claude, _d, db) = seeded();
+        let before = shape_of(&db);
+        fs::remove_dir_all(claude.path()).unwrap();
+
+        // Final root deletion is the one matrix case that deliberately does
+        // NOT clear. An absent root is rejected before any source dispatch,
+        // because the configured path going missing is far more often a
+        // misconfiguration — wrong CLAUDE_CONFIG_DIR, unmounted volume — than
+        // an intentional wipe, and clearing on it would turn a typo into
+        // silent mass deletion.
+        //
+        // Convergence here means the two modes agree and neither mutates: an
+        // absent root is refused, not half-applied. A root that still exists
+        // with its contents gone is the case that clears, covered above.
+        for mode in ["warm", "cold"] {
+            let mut opts = warm_opts(claude.path(), &db);
+            opts.mode = mode.into();
+            let err = run_ingest(&opts, None)
+                .expect_err(&format!("{mode}: an absent root must not succeed"));
+            assert!(
+                err.to_string().contains("agent root dir not found"),
+                "{mode}: unexpected error: {err}"
+            );
+        }
+
+        assert_eq!(shape_of(&db), before, "a refused ingest must not mutate");
+    }
+
+    #[test]
+    fn plans_without_projects_converges() {
+        let (claude, _d, db) = seeded();
+        // `projects/` is gone but the global plans index remains. The plans
+        // must survive the clear that the missing projects trigger, because
+        // they are an independent input, not a child of any project.
+        fs::remove_dir_all(claude.path().join("projects")).unwrap();
+        let plans_dir = claude.path().join("plans");
+        fs::create_dir_all(&plans_dir).unwrap();
+        fs::write(plans_dir.join("keep-me.md"), "# Keep\n").unwrap();
+
+        assert_converges(claude.path(), &db, "plans without projects");
+
+        let conn = Connection::open(&db).unwrap();
+        let plans: i64 = conn
+            .query_row("SELECT COUNT(*) FROM plans", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(plans, 1, "global plans must still ingest without projects");
+    }
+
+    #[test]
+    fn prefix_colliding_source_roots_and_duplicate_paths_converge() {
+        let (claude, _d, db) = seeded();
+
+        // Two hazards at once, both named by RFC 008 P8. `age-old` is a string
+        // prefix sibling of the real root, and one seeded path sits *inside*
+        // the Claude root while belonging to codex — so any ownership inferred
+        // from the path rather than from source_id gets it wrong.
+        let root = claude.path().to_string_lossy().to_string();
+        let colliding = format!("{root}-old/projects/p/s.jsonl");
+        let duplicate = session_path(claude.path()).to_string_lossy().to_string();
+        {
+            let conn = Connection::open(&db).unwrap();
+            for path in [&colliding, &duplicate] {
+                conn.execute(
+                    "INSERT INTO source_files (path, source_id, mtime_ms, size, category) \
+                     VALUES (?1, 'codex', 1.0, 1, 'session')",
+                    [path],
+                )
+                .unwrap();
+            }
+        }
+
+        // A converged tree must still fast-path: codex rows inside the Claude
+        // root must not read as Claude files that appeared or changed.
+        let stats = run_ingest(&warm_opts(claude.path(), &db), None).expect("warm");
+        assert_eq!(
+            stats.projects_processed, 0,
+            "another source's rows must not defeat the fast path"
+        );
+
+        // And a Claude rebuild must not delete them.
+        age_contract(&db);
+        run_ingest(&warm_opts(claude.path(), &db), None).expect("repair");
+
+        let conn = Connection::open(&db).unwrap();
+        let survived: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM source_files WHERE source_id = 'codex'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            survived, 2,
+            "a claude clear must not reach codex rows, wherever their paths point"
+        );
     }
 }
