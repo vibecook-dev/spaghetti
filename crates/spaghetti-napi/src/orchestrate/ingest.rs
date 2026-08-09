@@ -542,7 +542,7 @@ fn warm_has_no_changes(
         return Ok(false);
     }
 
-    let store = FingerprintStore::new(&conn);
+    let store = FingerprintStore::new(&conn, &resolved.source_id);
     let stored = match store.load_all() {
         Ok(s) if s.is_empty() => return Ok(false), // nothing persisted yet
         Ok(s) => s,
@@ -590,7 +590,7 @@ fn run_codex_ingest(
             if crate::core::token_activity::is_materialized(&conn, &resolved.source_id)
                 .unwrap_or(false)
             {
-                let store = FingerprintStore::new(&conn);
+                let store = FingerprintStore::new(&conn, &resolved.source_id);
                 if let Ok(stored) = store.load_all() {
                     if !stored.is_empty() && CodexReader::warm_unchanged(&sessions_dir, &stored) {
                         return Ok(IngestStats {
@@ -682,7 +682,7 @@ fn run_grok_ingest(
             if crate::core::token_activity::is_materialized(&conn, &resolved.source_id)
                 .unwrap_or(false)
             {
-                let store = FingerprintStore::new(&conn);
+                let store = FingerprintStore::new(&conn, &resolved.source_id);
                 if let Ok(stored) = store.load_all() {
                     if !stored.is_empty() && GrokReader::warm_unchanged(&sessions_dir, &stored) {
                         return Ok(IngestStats {

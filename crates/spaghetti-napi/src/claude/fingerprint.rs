@@ -202,33 +202,46 @@ pub struct FingerprintDiff {
 
 // ─── FingerprintStore — read side ──────────────────────────────────────────
 
-/// Read-only accessor over the `source_files` table.
+/// Read-only accessor over the `source_files` table, scoped to one source.
 ///
 /// Holds a borrow of an existing `rusqlite::Connection` — does not own
 /// the connection so tests and the real ingest orchestrator can share one.
+///
+/// The source is a constructor argument rather than a per-call one because
+/// every read has to be scoped: `source_files` is keyed `(source_id, path)`,
+/// and two agents can hold the same absolute path. Unscoped, this handed
+/// Codex's warm-unchanged check Claude's fingerprints (RFC 008 P8).
 pub struct FingerprintStore<'a> {
     conn: &'a Connection,
+    source_id: String,
 }
 
 impl<'a> FingerprintStore<'a> {
-    /// Wrap a connection. The caller is responsible for ensuring the
-    /// schema is initialised (`source_files` must exist).
-    pub fn new(conn: &'a Connection) -> Self {
-        Self { conn }
+    /// Wrap a connection for one source. The caller is responsible for ensuring
+    /// the schema is initialised (`source_files` must exist).
+    pub fn new(conn: &'a Connection, source_id: impl Into<String>) -> Self {
+        Self {
+            conn,
+            source_id: source_id.into(),
+        }
     }
 
-    /// Load every row in `source_files` into a path-keyed map.
+    /// Load this source's rows from `source_files` into a path-keyed map.
     ///
     /// Mirrors `IngestServiceImpl.getAllFingerprints` but also pulls the
     /// `category / project_slug / session_id` columns so the diff can
     /// route modifications back to the right parser without re-walking
     /// the path.
+    ///
+    /// Keying the map by path alone is safe *because* the query is
+    /// source-scoped; the same path under two sources would otherwise collide
+    /// silently and the later row would win.
     pub fn load_all(&self) -> Result<HashMap<String, SourceFingerprint>, FingerprintError> {
         let mut stmt = self.conn.prepare(
             "SELECT path, mtime_ms, size, byte_position, category, project_slug, session_id \
-             FROM source_files",
+             FROM source_files WHERE source_id = ?1",
         )?;
-        let rows = stmt.query_map([], |row| {
+        let rows = stmt.query_map([&self.source_id], |row| {
             Ok(SourceFingerprint {
                 path: row.get::<_, String>(0)?,
                 mtime_ms: row.get::<_, f64>(1).unwrap_or(0.0),
@@ -698,17 +711,20 @@ mod tests {
 
     /// Set up the minimal `source_files` schema our tests need. We don't
     /// run the full schema module here — that would pull every table in
-    /// for no reason.
+    /// for no reason. The key mirrors the real one: `(source_id, path)`, so
+    /// these tests exercise the same ownership rules production does.
     fn init_source_files(conn: &Connection) {
         conn.execute_batch(
             "CREATE TABLE source_files (\
-               path TEXT PRIMARY KEY,\
+               path TEXT NOT NULL,\
+               source_id TEXT NOT NULL DEFAULT 'claude-code',\
                mtime_ms REAL,\
                size INTEGER,\
                byte_position INTEGER,\
                category TEXT,\
                project_slug TEXT,\
-               session_id TEXT\
+               session_id TEXT,\
+               PRIMARY KEY (source_id, path)\
              )",
         )
         .expect("create source_files");
@@ -740,6 +756,64 @@ mod tests {
             ],
         )
         .expect("insert fingerprint");
+    }
+
+    /// Insert a row owned by an explicit source. Only the fields the ownership
+    /// tests care about; everything else is a placeholder.
+    fn insert_fp_for(conn: &Connection, source_id: &str, path: &str, size: u64) {
+        conn.execute(
+            "INSERT INTO source_files \
+             (path, source_id, mtime_ms, size, byte_position, category, project_slug, session_id) \
+             VALUES (?1, ?2, 1.0, ?3, NULL, 'session', NULL, NULL)",
+            rusqlite::params![path, source_id, size as i64],
+        )
+        .expect("insert fingerprint for source");
+    }
+
+    #[test]
+    fn store_load_all_is_scoped_to_its_source() {
+        let conn = Connection::open_in_memory().expect("open mem db");
+        init_source_files(&conn);
+
+        // The same absolute path under two sources — legal, and the reason the
+        // key is (source_id, path). An unscoped load would collapse these into
+        // one map entry and hand Codex whichever row happened to win.
+        insert_fp_for(&conn, "claude-code", "/repo/shared/a.jsonl", 100);
+        insert_fp_for(&conn, "codex", "/repo/shared/a.jsonl", 999);
+        insert_fp_for(&conn, "grok", "/only/grok.jsonl", 7);
+
+        let claude = FingerprintStore::new(&conn, "claude-code")
+            .load_all()
+            .expect("load claude");
+        let codex = FingerprintStore::new(&conn, "codex")
+            .load_all()
+            .expect("load codex");
+        let grok = FingerprintStore::new(&conn, "grok")
+            .load_all()
+            .expect("load grok");
+
+        assert_eq!(claude.len(), 1);
+        assert_eq!(claude["/repo/shared/a.jsonl"].size, 100);
+
+        assert_eq!(codex.len(), 1);
+        assert_eq!(codex["/repo/shared/a.jsonl"].size, 999);
+
+        assert_eq!(grok.len(), 1);
+        assert!(!grok.contains_key("/repo/shared/a.jsonl"));
+    }
+
+    #[test]
+    fn store_load_all_is_empty_for_an_unknown_source() {
+        let conn = Connection::open_in_memory().expect("open mem db");
+        init_source_files(&conn);
+        insert_fp_for(&conn, "claude-code", "/a.jsonl", 1);
+
+        // A source with no rows must read as empty, not as "everything".
+        // Warm-unchanged treats an empty map as "nothing persisted yet".
+        let unknown = FingerprintStore::new(&conn, "not-a-source")
+            .load_all()
+            .expect("load unknown");
+        assert!(unknown.is_empty());
     }
 
     /// Write a file and its parent directories.
@@ -1086,7 +1160,7 @@ mod tests {
             Some("sess1"),
         );
 
-        let store = FingerprintStore::new(&conn);
+        let store = FingerprintStore::new(&conn, "claude-code");
         let loaded = store.load_all().expect("load_all");
 
         assert_eq!(loaded.len(), 2);
@@ -1127,7 +1201,7 @@ mod tests {
             Some(&uuid_bare(0)),
         );
 
-        let store = FingerprintStore::new(&conn);
+        let store = FingerprintStore::new(&conn, "claude-code");
         let loaded = store.load_all().expect("load_all");
         let diff = compute_diff(tmp.path(), &loaded).expect("diff");
 

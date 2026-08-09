@@ -341,7 +341,7 @@ const SQL_UPDATE_SESSION_HAS_TASK: &str = "UPDATE sessions SET has_task = 1 WHER
 const SQL_INSERT_SOURCE_FILE: &str = r#"
 INSERT INTO source_files (path, mtime_ms, size, byte_position, category, project_slug, session_id, source_id)
 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-ON CONFLICT(path) DO UPDATE SET
+ON CONFLICT(source_id, path) DO UPDATE SET
   mtime_ms = excluded.mtime_ms,
   size = excluded.size,
   byte_position = excluded.byte_position,

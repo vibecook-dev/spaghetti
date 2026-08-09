@@ -46,7 +46,7 @@ use thiserror::Error;
 /// v14: materialized Claude AI/custom session titles.
 /// v15: subagents.worktree_path — the meta sidecar's `worktreePath`, which
 /// both ingest paths parsed and then discarded at write time.
-pub const SCHEMA_VERSION: u32 = 15;
+pub const SCHEMA_VERSION: u32 = 16;
 
 /// Full DDL for the current schema — lifted verbatim from the TS `SCHEMA_SQL`
 /// template literal. Whitespace differs; structure does not.
@@ -55,15 +55,19 @@ const SCHEMA_SQL: &str = r#"
 CREATE TABLE IF NOT EXISTS schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 
 -- Source file tracking
+-- Fingerprints are owned per source. The key is (source_id, path), not path
+-- alone: two agents can legitimately hold the same absolute path, and with a
+-- path-only key one source's delete removed the other's row (RFC 008 P8).
 CREATE TABLE IF NOT EXISTS source_files (
-  path TEXT PRIMARY KEY,
+  path TEXT NOT NULL,
   source_id TEXT NOT NULL DEFAULT 'claude-code',
   mtime_ms REAL,
   size INTEGER,
   byte_position INTEGER,
   category TEXT,
   project_slug TEXT,
-  session_id TEXT
+  session_id TEXT,
+  PRIMARY KEY (source_id, path)
 );
 
 -- Core entities

@@ -58,7 +58,7 @@ import type { SqliteService } from '../io/index.js';
 // both the TS and Rust sides for a while but was dropped on the floor at write
 // time, so "which worktree is this agent working in" was unanswerable from the
 // database even though it sat in the meta sidecar on disk.
-export const SCHEMA_VERSION = 15;
+export const SCHEMA_VERSION = 16;
 
 export const TOKEN_ACTIVITY_TRIGGER_NAMES = [
   'token_activity_messages_ai',
@@ -223,15 +223,19 @@ export const SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 
 -- Source file tracking
+-- Fingerprints are owned per source. The key is (source_id, path), not path
+-- alone: two agents can legitimately hold the same absolute path, and with a
+-- path-only key one source's delete removed the other's row (RFC 008 P8).
 CREATE TABLE IF NOT EXISTS source_files (
-  path TEXT PRIMARY KEY,
+  path TEXT NOT NULL,
   source_id TEXT NOT NULL DEFAULT 'claude-code',
   mtime_ms REAL,
   size INTEGER,
   byte_position INTEGER,
   category TEXT,
   project_slug TEXT,
-  session_id TEXT
+  session_id TEXT,
+  PRIMARY KEY (source_id, path)
 );
 
 -- Core entities
