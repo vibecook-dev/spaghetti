@@ -169,7 +169,7 @@ impl ProjectParser {
                 sessions_index.entries,
                 &project_dir,
                 sessions_index.original_path.as_deref(),
-            ),
+            )?,
             original_path: sessions_index.original_path,
         };
 
@@ -204,6 +204,67 @@ impl ProjectParser {
         // The terminal event is emitted by `parse_project`'s guard, not here —
         // see its doc comment.
         Ok(())
+    }
+}
+
+// ─── Deterministic fault injection ──────────────────────────────────────────
+
+/// A test-only seam for forcing an I/O failure at a named path.
+///
+/// RFC 008 Phase 2 requires the transaction/error matrix to pass on Linux,
+/// macOS, and Windows, and explicitly rules out a Unix-only `chmod 0` as the
+/// sole acceptance test. Some failures — a project directory that exists but
+/// cannot be enumerated — have no portable way to provoke from the filesystem
+/// alone, so the RFC allows a deterministic fault seam instead. This is it.
+///
+/// Compiled out of release builds entirely: in `#[cfg(not(test))]` the check
+/// is a `None` that the optimiser deletes.
+pub(crate) mod fault {
+    #[cfg(test)]
+    use std::collections::HashMap;
+    use std::path::Path;
+    #[cfg(test)]
+    use std::path::PathBuf;
+    #[cfg(test)]
+    use std::sync::Mutex;
+
+    #[cfg(test)]
+    static ARMED: Mutex<Option<HashMap<PathBuf, String>>> = Mutex::new(None);
+
+    /// Make reads of `path` fail with `message` until [`disarm`] is called.
+    ///
+    /// Keyed by absolute path, and every test that uses this owns a unique
+    /// temp directory, so concurrently running tests cannot see each other's
+    /// faults.
+    #[cfg(test)]
+    pub(crate) fn arm(path: &Path, message: &str) {
+        let mut guard = ARMED.lock().expect("fault registry poisoned");
+        guard
+            .get_or_insert_with(HashMap::new)
+            .insert(path.to_path_buf(), message.to_owned());
+    }
+
+    #[cfg(test)]
+    pub(crate) fn disarm(path: &Path) {
+        if let Some(map) = ARMED.lock().expect("fault registry poisoned").as_mut() {
+            map.remove(path);
+        }
+    }
+
+    /// The injected failure for `path`, if one is armed.
+    #[cfg(test)]
+    pub(crate) fn injected(path: &Path) -> Option<String> {
+        ARMED
+            .lock()
+            .expect("fault registry poisoned")
+            .as_ref()
+            .and_then(|m| m.get(path).cloned())
+    }
+
+    #[cfg(not(test))]
+    #[inline(always)]
+    pub(crate) fn injected(_path: &Path) -> Option<String> {
+        None
     }
 }
 
@@ -412,17 +473,17 @@ fn merge_with_discovered_entries(
     index_entries: Vec<SessionIndexEntry>,
     project_dir: &Path,
     original_path: Option<&str>,
-) -> Vec<SessionIndexEntry> {
+) -> Result<Vec<SessionIndexEntry>, ParseError> {
     let mut indexed: std::collections::HashSet<String> =
         index_entries.iter().map(|e| e.session_id.clone()).collect();
     let mut merged = index_entries;
 
-    for entry in discover_session_entries(project_dir, original_path) {
+    for entry in discover_session_entries(project_dir, original_path)? {
         if indexed.insert(entry.session_id.clone()) {
             merged.push(entry);
         }
     }
-    merged
+    Ok(merged)
 }
 
 /// Port of TS `discoverSessionEntries` — scans the project dir for
@@ -436,9 +497,31 @@ fn merge_with_discovered_entries(
 fn discover_session_entries(
     project_dir: &Path,
     original_path: Option<&str>,
-) -> Vec<SessionIndexEntry> {
-    let Ok(read_dir) = std::fs::read_dir(project_dir) else {
-        return Vec::new();
+) -> Result<Vec<SessionIndexEntry>, ParseError> {
+    // Enumerating the project directory is what tells us which sessions exist.
+    // If it fails we cannot know, and a merged index built from the
+    // sessions-index alone would look complete while silently omitting every
+    // session on disk — so this is fatal to the project rather than a skipped
+    // record (RFC 008 Phase 2).
+    //
+    // A missing directory is not a failure: the slug came from a directory
+    // listing, so this means it was deleted mid-run, which the next warm start
+    // handles as the deletion it is.
+    if let Some(err) = fault::injected(project_dir) {
+        return Err(ParseError::Fatal {
+            path: project_dir.to_string_lossy().into_owned(),
+            message: err,
+        });
+    }
+    let read_dir = match std::fs::read_dir(project_dir) {
+        Ok(rd) => rd,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => {
+            return Err(ParseError::Fatal {
+                path: project_dir.to_string_lossy().into_owned(),
+                message: e.to_string(),
+            })
+        }
     };
 
     let slug_fallback = project_dir
@@ -493,7 +576,7 @@ fn discover_session_entries(
             is_sidechain: false,
         });
     }
-    out
+    Ok(out)
 }
 
 // ─── MEMORY.md ──────────────────────────────────────────────────────────────

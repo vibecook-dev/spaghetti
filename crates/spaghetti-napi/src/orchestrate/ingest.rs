@@ -2435,3 +2435,376 @@ mod phase_2_gate {
         );
     }
 }
+
+#[cfg(test)]
+mod phase_2_matrix {
+    //! RFC 008 Phase 2 transaction/error matrix.
+    //!
+    //! Every case here runs on Linux, macOS, and Windows. Failures that have
+    //! no portable filesystem provocation use the parser's deterministic fault
+    //! seam, which the RFC allows precisely because a Unix-only `chmod 0`
+    //! cannot be the sole acceptance test.
+
+    use super::phase_1_gate::{seeded, session_path, shape_of, user_line};
+    use super::tests::{fake_claude_fixture, warm_opts};
+    use super::*;
+    use crate::claude::project_parser::fault;
+    use std::fs;
+    use tempfile::TempDir;
+
+    const SLUG: &str = "-Users-me-proj";
+    const P2_A: &str = "aaaaaaaa-0000-0000-0000-000000000001";
+    const P2_B: &str = "aaaaaaaa-0000-0000-0000-000000000002";
+    const SEED_SESSION: &str = "11111111-2222-3333-4444-555555555555";
+
+    /// Arm a fault, run the closure, and always disarm — a leaked fault would
+    /// poison whatever test happened to use the same path next.
+    fn with_fault<T>(path: &Path, message: &str, f: impl FnOnce() -> T) -> T {
+        fault::arm(path, message);
+        let out = f();
+        fault::disarm(path);
+        out
+    }
+
+    fn project_dir(root: &Path, slug: &str) -> PathBuf {
+        root.join("projects").join(slug)
+    }
+
+    fn fingerprints(db: &Path) -> Vec<String> {
+        let conn = Connection::open(db).unwrap();
+        let mut stmt = conn
+            .prepare("SELECT path FROM source_files ORDER BY path")
+            .unwrap();
+        let out = stmt
+            .query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect();
+        out
+    }
+
+    /// Add a project with N sessions, so a fatal has a bystander to spare and
+    /// a multi-session project to roll back.
+    fn add_project(root: &Path, slug: &str, sessions: &[&str]) {
+        let dir = project_dir(root, slug);
+        fs::create_dir_all(&dir).unwrap();
+        let entries: Vec<String> = sessions
+            .iter()
+            .map(|sid| {
+                format!(
+                    concat!(
+                        r#"{{"sessionId":"{}","fullPath":"","fileMtime":0.0,"#,
+                        r#""firstPrompt":"","summary":"","messageCount":1,"#,
+                        r#""created":"2026-04-17T00:00:00Z","modified":"2026-04-17T00:00:01Z","#,
+                        r#""gitBranch":"main","projectPath":"/x","isSidechain":false}}"#
+                    ),
+                    sid
+                )
+            })
+            .collect();
+        fs::write(
+            dir.join("sessions-index.json"),
+            format!(
+                r#"{{"originalPath":"/x","entries":[{}]}}"#,
+                entries.join(",")
+            ),
+        )
+        .unwrap();
+        for sid in sessions {
+            let line = user_line("m1", "hello").replace(SEED_SESSION, sid);
+            fs::write(dir.join(format!("{sid}.jsonl")), line).unwrap();
+        }
+    }
+
+    // ── Bad record between valid records ───────────────────────────────────
+    // Covered by phase_2_gate::a_bad_record_between_valid_records_keeps_the_project.
+
+    // ── A fatal project, and the bystander that must survive it ────────────
+
+    #[test]
+    fn a_fatal_project_rolls_back_and_later_projects_still_ingest() {
+        let (claude, _d, db) = seeded();
+        add_project(claude.path(), "-p2", &[P2_A, P2_B]);
+
+        let doomed = project_dir(claude.path(), "-p2");
+        let stats = with_fault(&doomed, "enumeration failed", || {
+            run_ingest(&warm_opts(claude.path(), &db), None).expect("run completes")
+        });
+
+        let shape = shape_of(&db);
+        assert_eq!(
+            shape.projects,
+            vec![SLUG.to_string()],
+            "the fatal project must not commit, and the healthy one must"
+        );
+        assert!(
+            !shape.sessions.iter().any(|s| s == P2_A || s == P2_B),
+            "no session of a rolled-back project may survive: {:?}",
+            shape.sessions
+        );
+        assert_eq!(
+            shape.messages.len(),
+            2,
+            "the bystander project keeps every message"
+        );
+
+        let fatal: Vec<_> = stats
+            .errors
+            .iter()
+            .filter(|e| e.severity == "project-fatal")
+            .collect();
+        assert_eq!(fatal.len(), 1, "got: {:?}", stats.errors);
+        assert_eq!(fatal[0].slug.as_deref(), Some("-p2"));
+    }
+
+    // ── An aborted project leaves nothing behind ───────────────────────────
+
+    #[test]
+    fn an_aborted_project_leaves_no_rows_and_no_fingerprints() {
+        let (claude, _d, db) = seeded();
+        add_project(claude.path(), "-p2", &[P2_A]);
+
+        let doomed = project_dir(claude.path(), "-p2");
+        with_fault(&doomed, "enumeration failed", || {
+            run_ingest(&warm_opts(claude.path(), &db), None).expect("run")
+        });
+
+        let prints = fingerprints(&db);
+        assert!(
+            !prints.iter().any(|p| p.contains("-p2")),
+            "a rolled-back project must not fingerprint anything, or its files \
+             are recorded as ingested and never retried: {prints:?}"
+        );
+        assert!(
+            prints.iter().any(|p| p.contains(SLUG)),
+            "while the healthy project keeps its fingerprints"
+        );
+    }
+
+    // ── The failure retries, and clears once the fault is gone ─────────────
+
+    #[test]
+    fn a_fatal_project_retries_and_recovers() {
+        let (claude, _d, db) = seeded();
+        add_project(claude.path(), "-p2", &[P2_A]);
+        let doomed = project_dir(claude.path(), "-p2");
+
+        with_fault(&doomed, "enumeration failed", || {
+            run_ingest(&warm_opts(claude.path(), &db), None).expect("failing run");
+            // Still broken: the warm fast path must not skip the retry.
+            let again = run_ingest(&warm_opts(claude.path(), &db), None).expect("retry");
+            assert!(
+                again.projects_processed > 0,
+                "an unpublished contract must defeat the fast path"
+            );
+        });
+
+        let healed = run_ingest(&warm_opts(claude.path(), &db), None).expect("healed run");
+        assert_eq!(healed.error_count, 0, "the fault is gone; the run is clean");
+        assert!(
+            shape_of(&db).projects.contains(&"-p2".to_string()),
+            "and the project finally lands"
+        );
+    }
+
+    // ── More than 100 errors: total and truncation ─────────────────────────
+
+    #[test]
+    fn more_than_a_hundred_errors_report_total_and_truncation() {
+        let (claude, _d, db) = seeded();
+        let path = session_path(claude.path());
+
+        let mut body = fs::read_to_string(&path).unwrap();
+        for _ in 0..150 {
+            body.push_str("not-valid-json\n");
+        }
+        fs::write(&path, body).unwrap();
+
+        let stats = run_ingest(&warm_opts(claude.path(), &db), None).expect("run");
+
+        assert_eq!(stats.error_count, 150, "the total is uncapped");
+        assert_eq!(stats.errors.len(), 100, "the display list is capped");
+        assert!(stats.errors_truncated);
+        assert!(
+            !fingerprints(&db).contains(&path.to_string_lossy().into_owned()),
+            "the errored path is withheld even though it is past the display cap"
+        );
+    }
+
+    // ── A file that vanishes between discovery and read ────────────────────
+
+    #[test]
+    fn a_file_that_vanishes_after_discovery_is_absence_not_an_error() {
+        // Claude Code rotates transcripts while spaghetti runs. A file that
+        // existed at scan time and is gone by read time is a deletion we
+        // simply missed, not a fault — reporting it would cry wolf on a
+        // perfectly normal race.
+        let (claude, _d, db) = seeded();
+        let extra =
+            project_dir(claude.path(), SLUG).join("99999999-0000-0000-0000-00000000000a.jsonl");
+        fs::write(&extra, user_line("x1", "temp")).unwrap();
+        fs::remove_file(&extra).unwrap();
+
+        let stats = run_ingest(&warm_opts(claude.path(), &db), None).expect("run");
+        assert_eq!(
+            stats.error_count, 0,
+            "a vanished file is not a failure: {:?}",
+            stats.errors
+        );
+    }
+
+    // ── A fatal on the only project ────────────────────────────────────────
+
+    #[test]
+    fn a_fatal_on_the_only_project_commits_nothing_and_still_returns() {
+        let db_dir = TempDir::new().unwrap();
+        let db = db_dir.path().join("close.db");
+        let claude = fake_claude_fixture();
+
+        let doomed = project_dir(claude.path(), SLUG);
+        let stats = with_fault(&doomed, "enumeration failed", || {
+            run_ingest(&warm_opts(claude.path(), &db), None)
+        })
+        .expect("a fatal must not reject the promise");
+
+        assert_eq!(
+            shape_of(&db).projects,
+            Vec::<String>::new(),
+            "the only project went fatal, so nothing may commit"
+        );
+        assert!(stats.error_count > 0);
+    }
+
+    // ── Exactly one terminal event per started project ─────────────────────
+
+    #[test]
+    fn a_fatal_project_emits_one_terminal_event_and_never_completes() {
+        use crate::core::event::IngestEvent;
+        use crossbeam_channel::unbounded;
+
+        let claude = fake_claude_fixture();
+        let doomed = project_dir(claude.path(), SLUG);
+        let (tx, rx) = unbounded::<IngestEvent>();
+
+        with_fault(&doomed, "enumeration failed", || {
+            let parser = crate::claude::project_parser::ProjectParser::new();
+            let _ = parser.parse_project(claude.path(), SLUG, &tx);
+        });
+        drop(tx);
+
+        let events: Vec<IngestEvent> = rx.into_iter().collect();
+        let completes = events
+            .iter()
+            .filter(|e| matches!(e, IngestEvent::ProjectComplete { .. }))
+            .count();
+        let aborts = events
+            .iter()
+            .filter(|e| matches!(e, IngestEvent::ProjectAbort { .. }))
+            .count();
+
+        assert_eq!(completes, 0, "a fatal project must not report completion");
+        assert_eq!(aborts, 1, "exactly one terminal event: {events:#?}");
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, IngestEvent::ProjectFatal { .. })),
+            "and the fatal itself must be reported"
+        );
+    }
+
+    #[test]
+    fn a_healthy_project_emits_exactly_one_terminal_event() {
+        use crate::core::event::IngestEvent;
+        use crossbeam_channel::unbounded;
+
+        let claude = fake_claude_fixture();
+        let (tx, rx) = unbounded::<IngestEvent>();
+        let parser = crate::claude::project_parser::ProjectParser::new();
+        parser.parse_project(claude.path(), SLUG, &tx).unwrap();
+        drop(tx);
+
+        let events: Vec<IngestEvent> = rx.into_iter().collect();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| matches!(
+                    e,
+                    IngestEvent::ProjectComplete { .. } | IngestEvent::ProjectAbort { .. }
+                ))
+                .count(),
+            1,
+            "exactly one terminal event"
+        );
+    }
+
+    // ── A data event arriving for a poisoned project is dropped ────────────
+
+    #[test]
+    fn late_data_for_a_poisoned_project_does_not_commit_under_its_successor() {
+        // The reason the poison set exists. The parser fills a local buffer
+        // that is drained after the fact, so a project's rows can still be in
+        // flight when its fatal lands. Without the poison they open a fresh
+        // transaction and commit under whatever project comes next.
+        use crate::core::event::IngestEvent;
+        use crate::core::writer::Writer;
+        use crossbeam_channel::unbounded;
+
+        let db_dir = TempDir::new().unwrap();
+        let db = db_dir.path().join("poison.db");
+        let mut w = Writer::with_source_id(&db, "claude-code".to_string()).unwrap();
+        let (tx, rx) = unbounded::<IngestEvent>();
+
+        tx.send(IngestEvent::Project {
+            slug: "doomed".into(),
+            original_path: "/x".into(),
+            sessions_index_json: "{}".into(),
+        })
+        .unwrap();
+        tx.send(IngestEvent::ProjectFatal {
+            slug: "doomed".into(),
+            path: "/x".into(),
+            message: "boom".into(),
+        })
+        .unwrap();
+        // Arrives after the rollback — must be dropped, not re-opened.
+        tx.send(IngestEvent::Project {
+            slug: "doomed".into(),
+            original_path: "/x".into(),
+            sessions_index_json: "{}".into(),
+        })
+        .unwrap();
+        tx.send(IngestEvent::ProjectAbort {
+            slug: "doomed".into(),
+        })
+        .unwrap();
+        tx.send(IngestEvent::Project {
+            slug: "healthy".into(),
+            original_path: "/y".into(),
+            sessions_index_json: "{}".into(),
+        })
+        .unwrap();
+        tx.send(IngestEvent::ProjectComplete {
+            slug: "healthy".into(),
+            duration_ms: 0,
+        })
+        .unwrap();
+        drop(tx);
+
+        w.run(rx).expect("run");
+
+        let conn = Connection::open(&db).unwrap();
+        let mut stmt = conn
+            .prepare("SELECT slug FROM projects ORDER BY slug")
+            .unwrap();
+        let slugs: Vec<String> = stmt
+            .query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect();
+        assert_eq!(
+            slugs,
+            vec!["healthy".to_string()],
+            "a poisoned project's late rows must not survive"
+        );
+    }
+}

@@ -154,7 +154,18 @@ impl CodexReader {
         let mut by_project: BTreeMap<String, (String, Vec<SessionFile>)> = BTreeMap::new();
 
         for path in files {
-            let Some(meta) = peek(&path) else { continue };
+            let meta = match peek(&path) {
+                Ok(Some(m)) => m,
+                // Readable but not attributable — nothing to report.
+                Ok(None) => continue,
+                Err(message) => {
+                    let _ = events.send(IngestEvent::SourceError {
+                        path: path.to_string_lossy().into_owned(),
+                        message,
+                    });
+                    continue;
+                }
+            };
             let slug = encode_slug(&meta.cwd);
             let (mtime_ms, size) = file_stats(&path);
             by_project
@@ -362,13 +373,20 @@ fn is_internal_rollout(path: &Path) -> bool {
     has_parent && !id.is_empty() && !logical_id.is_empty() && logical_id != id
 }
 
-fn peek(path: &Path) -> Option<PeekMeta> {
+/// Read just enough of a rollout to learn which project it belongs to.
+///
+/// `Ok(None)` means the file was readable but carries no `cwd` — a truncated
+/// or not-yet-started rollout, which is normal and not worth reporting.
+/// `Err` means the file could not be read at all, which is a pre-identity
+/// failure: there is no slug to attribute it to, and silently skipping it
+/// dropped the session from the index with nothing said (RFC 008 Phase 2).
+fn peek(path: &Path) -> Result<Option<PeekMeta>, String> {
     let mut cwd: Option<String> = None;
     let mut session_id: Option<String> = None;
     let mut timestamp: Option<String> = None;
     let mut first_prompt = String::new();
 
-    let _ = read_jsonl_streaming(path, 0, |line, index, _| {
+    let read = read_jsonl_streaming(path, 0, |line, index, _| {
         // Keep scanning until we have cwd + a real (non-injected) prompt, or hit the cap.
         if index >= PEEK_LINE_LIMIT || (cwd.is_some() && !first_prompt.is_empty()) {
             return;
@@ -399,7 +417,13 @@ fn peek(path: &Path) -> Option<PeekMeta> {
         }
     });
 
-    let cwd = cwd?;
+    if let Err(e) = read {
+        return Err(e.to_string());
+    }
+
+    let Some(cwd) = cwd else {
+        return Ok(None);
+    };
     let session_id = session_id
         .or_else(|| {
             let name = path.file_name()?.to_str()?;
@@ -407,12 +431,12 @@ fn peek(path: &Path) -> Option<PeekMeta> {
         })
         .unwrap_or_else(|| path.file_name().unwrap().to_string_lossy().into_owned());
 
-    Some(PeekMeta {
+    Ok(Some(PeekMeta {
         cwd,
         session_id,
         timestamp,
         first_prompt,
-    })
+    }))
 }
 
 fn session_entry(s: &SessionFile) -> SessionIndexEntry {
@@ -614,7 +638,7 @@ mod tests {
         )
         .unwrap();
 
-        let meta = peek(&file).expect("peek");
+        let meta = peek(&file).expect("readable").expect("attributable");
         assert_eq!(meta.first_prompt, "do a full code audit of this project");
     }
 
@@ -642,7 +666,7 @@ mod tests {
         )
         .unwrap();
 
-        let meta = peek(&file).expect("peek");
+        let meta = peek(&file).expect("readable").expect("attributable");
         assert_eq!(meta.first_prompt, "help me find iframe code");
     }
 
