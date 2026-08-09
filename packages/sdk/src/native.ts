@@ -167,12 +167,97 @@ export interface NativeAddon {
   liveIngestBatch(dbPath: string, rows: NativeLiveRow[], sourceId?: string): NativeLiveBatchResult;
 }
 
+/**
+ * Why the native addon did not load, in terms a user can act on.
+ *
+ * The loader used to swallow the require failure entirely, so "the addon is
+ * missing" and "the addon exists but this platform has no prebuilt binary" and
+ * "the binary is there but its glibc is too old" all looked identical: the
+ * engine silently became `ts` and nothing said why. RFC 008 Phase 4 requires
+ * the missing-addon path to be loud and actionable.
+ */
+export class EngineUnavailableError extends Error {
+  /** `process.platform` — `linux`, `darwin`, `win32`. */
+  readonly platform: string;
+  /** `process.arch` — `x64`, `arm64`. */
+  readonly arch: string;
+  /**
+   * `glibc`, `musl`, or `null` off Linux.
+   *
+   * Worth carrying because it is the difference between "unsupported
+   * platform" and "wrong artifact for a supported one" — an Alpine container
+   * is x64 Linux and still cannot load a GNU build.
+   */
+  readonly libc: 'glibc' | 'musl' | null;
+  /** Version of the addon package the SDK expects. */
+  readonly expectedVersion: string;
+  /** The underlying resolution failure. */
+  readonly cause: unknown;
+
+  constructor(init: {
+    platform: string;
+    arch: string;
+    libc: 'glibc' | 'musl' | null;
+    expectedVersion: string;
+    cause: unknown;
+  }) {
+    const target = [init.platform, init.arch, init.libc].filter(Boolean).join('-');
+    super(
+      `Native ingest addon unavailable for ${target}. ` +
+        `Falling back to the TypeScript engine, which is slower but produces the same index. ` +
+        `${installHint(init.platform, init.libc)}`,
+    );
+    this.name = 'EngineUnavailableError';
+    this.platform = init.platform;
+    this.arch = init.arch;
+    this.libc = init.libc;
+    this.expectedVersion = init.expectedVersion;
+    this.cause = init.cause;
+  }
+}
+
+function installHint(platform: string, libc: 'glibc' | 'musl' | null): string {
+  if (platform === 'linux' && libc === 'musl') {
+    return (
+      'On Alpine and other musl systems, install the musl build: ' +
+      '`npm i @vibecook/spaghetti-sdk-native-linux-x64-musl` (or `-arm64-musl`).'
+    );
+  }
+  if (platform === 'linux') {
+    return (
+      'Check that your glibc meets the documented minimum, or reinstall to fetch ' +
+      'the prebuilt binary: `npm i @vibecook/spaghetti-sdk-native`.'
+    );
+  }
+  return 'Reinstall to fetch the prebuilt binary: `npm i @vibecook/spaghetti-sdk-native`.';
+}
+
+/**
+ * Which C library this Node was built against.
+ *
+ * `glibcVersionRuntime` is present in the process report on glibc and absent
+ * on musl — the detection Node's own ecosystem uses, and it needs no child
+ * process or filesystem probe.
+ */
+export function detectLibc(): 'glibc' | 'musl' | null {
+  if (process.platform !== 'linux') return null;
+  try {
+    const header = (process.report?.getReport() as { header?: Record<string, unknown> } | undefined)?.header;
+    return header && 'glibcVersionRuntime' in header ? 'glibc' : 'musl';
+  } catch {
+    return null;
+  }
+}
+
 let cached: NativeAddon | null | undefined;
+let loadFailure: EngineUnavailableError | null = null;
 
 /**
  * Load the native addon, returning null if unavailable.
  *
  * Result is memoized — a missing addon won't be retried on subsequent calls.
+ * When it fails, the reason is kept and available from
+ * {@link nativeLoadFailure} rather than discarded.
  */
 export function loadNativeAddon(): NativeAddon | null {
   if (cached !== undefined) return cached;
@@ -180,11 +265,48 @@ export function loadNativeAddon(): NativeAddon | null {
   try {
     const require = createRequire(import.meta.url);
     cached = require('@vibecook/spaghetti-sdk-native') as NativeAddon;
-  } catch {
+    loadFailure = null;
+  } catch (err) {
     cached = null;
+    loadFailure = new EngineUnavailableError({
+      platform: process.platform,
+      arch: process.arch,
+      libc: detectLibc(),
+      expectedVersion: expectedAddonVersion(),
+      cause: err,
+    });
   }
 
   return cached;
+}
+
+/**
+ * Version of the addon this SDK expects.
+ *
+ * The two are released in lockstep, so the SDK's own version is the answer.
+ * Read at call time from the package manifest rather than baked in, because a
+ * baked constant drifts silently the moment a release bumps one and not the
+ * other — and this value exists to help diagnose exactly that kind of skew.
+ */
+function expectedAddonVersion(): string {
+  try {
+    const require = createRequire(import.meta.url);
+    return (require('../package.json') as { version?: string }).version ?? 'unknown';
+  } catch {
+    return 'unknown';
+  }
+}
+
+/**
+ * Why the native addon is unavailable, or `null` when it loaded.
+ *
+ * Call after {@link loadNativeAddon}. Surfacing this is what turns a silent
+ * fallback into an actionable one — the engine still works, so this is a
+ * diagnostic rather than a thrown error.
+ */
+export function nativeLoadFailure(): EngineUnavailableError | null {
+  loadNativeAddon();
+  return loadFailure;
 }
 
 /**

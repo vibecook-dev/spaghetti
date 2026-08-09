@@ -105,6 +105,9 @@ export {
 // Native addon bridge (RFC 003)
 export {
   loadNativeAddon,
+  nativeLoadFailure,
+  EngineUnavailableError,
+  detectLibc,
   isNativeIngestEnabled,
   resolveActiveEngine,
   type NativeAddon,
