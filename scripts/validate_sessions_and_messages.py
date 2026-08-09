@@ -131,8 +131,10 @@ def main():
     projects_dir = claude_dir / "projects"
 
     if not projects_dir.exists():
-        print("ERROR: ~/.claude/projects/ does not exist")
-        sys.exit(1)
+        # See validate_config_and_settings.py — type lookups already ran at
+        # import; only the real-data half is unavailable.
+        print("SKIPPED: ~/.claude/projects/ does not exist (no real Claude Code data to validate against)")
+        sys.exit(78)
 
     # Stats
     stats = {

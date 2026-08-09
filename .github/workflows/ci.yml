@@ -52,6 +52,13 @@ jobs:
         run: git diff --exit-code -- Cargo.lock crates/spaghetti-napi packages/sdk/src/workers/parse-worker.js
       - name: Typecheck
         run: pnpm typecheck
+      # Runners have no ~/.claude, so the real-data half of every validator
+      # skips. What still runs is the type-parsing half: each validator resolves
+      # the interfaces and unions it checks against at import, and dies if one
+      # was renamed or deleted. That is the part CI can prove. Detecting Claude
+      # Code changing its on-disk format needs a machine that actually runs it.
+      - name: Validate types (type lookups; real-data checks skip on CI)
+        run: pnpm validate
       # Run BOTH the SDK and CLI suites (test:packages). The `@vibecook/spaghetti`
       # filter alone matched only the CLI. The SDK suite needs the built native
       # addon + better-sqlite3, both present here: `pnpm build` above ran

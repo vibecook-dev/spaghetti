@@ -32,6 +32,11 @@ export interface ExtraKnownMarketplace {
 
 export interface SettingsFile {
   permissions: PermissionsConfig;
+  /**
+   * Default model alias, e.g. `opus[1m]`. The `[1m]` suffix selects the
+   * 1M-token context variant, so this is not a bare model id.
+   */
+  model?: string;
   effortLevel?: string;
   enabledPlugins?: Record<string, boolean>;
   alwaysThinkingEnabled?: boolean;
@@ -85,13 +90,20 @@ export interface StatsCacheFile {
   lastComputedDate: string;
   dailyActivity: DailyActivity[];
   dailyModelTokens: DailyModelTokens[];
+  /**
+   * Schema version for `dailyModelTokens` alone, tracked separately from the
+   * file-level `version` so Claude Code can rebuild that projection without
+   * invalidating the rest of the cache.
+   */
+  dailyModelTokensVersion?: number;
   modelUsage: Record<string, ModelUsageStats>;
   totalSessions: number;
   totalMessages: number;
   longestSession: LongestSession;
   firstSessionDate: string;
   hourCounts: Record<string, number>;
-  totalSpeculationTimeSavedMs: number;
+  /** Dropped by Claude Code around stats-cache v5; still present in older caches. */
+  totalSpeculationTimeSavedMs?: number;
 }
 
 export interface HistoryPastedContent {

@@ -27,33 +27,37 @@ echo ""
 
 PASS=0
 FAIL=0
+SKIP=0
 
-echo "=== Session/Message Types ==="
-if "$PYTHON" scripts/validate_sessions_and_messages.py 2>&1 | tail -3; then
-  PASS=$((PASS+1))
-else
-  FAIL=$((FAIL+1))
-fi
+# Exit 78 means "no real Claude Code data here" — the type lookups still ran at
+# import, so a renamed or deleted interface has already failed. Only the
+# real-data half is unavailable, which is the normal case on a CI runner.
+SKIP_CODE=78
 
-echo ""
-echo "=== Config/Settings Types ==="
-if "$PYTHON" scripts/validate_config_and_settings.py 2>&1 | tail -3; then
-  PASS=$((PASS+1))
-else
-  FAIL=$((FAIL+1))
-fi
+run_suite() {
+  local title="$1" script="$2" status=0
+  echo "=== $title ==="
+  "$PYTHON" "$script" 2>&1 | tail -3 || status=$?
+  case "$status" in
+    0) PASS=$((PASS+1)) ;;
+    "$SKIP_CODE") SKIP=$((SKIP+1)) ;;
+    *) FAIL=$((FAIL+1)) ;;
+  esac
+  echo ""
+}
 
-echo ""
-echo "=== Secondary Data Types ==="
-if "$PYTHON" scripts/validate_secondary_data.py 2>&1 | tail -3; then
-  PASS=$((PASS+1))
-else
-  FAIL=$((FAIL+1))
-fi
+run_suite "Session/Message Types" scripts/validate_sessions_and_messages.py
+run_suite "Config/Settings Types" scripts/validate_config_and_settings.py
+run_suite "Secondary Data Types" scripts/validate_secondary_data.py
 
-echo ""
 echo "=============================="
-echo "Validation suites: $PASS passed, $FAIL failed"
+echo "Validation suites: $PASS passed, $FAIL failed, $SKIP skipped"
+if [ $SKIP -gt 0 ]; then
+  echo ""
+  echo "Skipped suites need a real ~/.claude. They only catch Claude Code"
+  echo "changing its on-disk format, which no CI runner can observe — run"
+  echo "'pnpm validate' on a machine you actually use Claude Code on."
+fi
 if [ $FAIL -gt 0 ]; then
   exit 1
 fi

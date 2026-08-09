@@ -20,7 +20,12 @@ import re
 import sys
 from pathlib import Path
 
-from ts_types import discriminated_variants, interface_fields, union_members
+from ts_types import (
+    discriminated_variants,
+    interface_fields,
+    interface_optional_fields,
+    union_members,
+)
 
 CLAUDE_DIR = Path.home() / ".claude"
 
@@ -41,12 +46,14 @@ PERMISSIONS_FIELDS_REQUIRED = {"allow"}
 PERMISSIONS_FIELDS_OPTIONAL = {"deny"}
 PERMISSIONS_ALL_FIELDS = PERMISSIONS_FIELDS_REQUIRED | PERMISSIONS_FIELDS_OPTIONAL
 
-# StatsCacheFile fields
-STATS_CACHE_FIELDS = {
-    "version", "lastComputedDate", "dailyActivity", "dailyModelTokens",
-    "modelUsage", "totalSessions", "totalMessages", "longestSession",
-    "firstSessionDate", "hourCounts", "totalSpeculationTimeSavedMs",
-}
+# StatsCacheFile fields, read from the interface for the same reason
+# SettingsFile is: a hand-copied set silently rots when Claude Code adds or
+# drops a key. Optional (`?:`) members are "may be absent", which is how a
+# dropped field like totalSpeculationTimeSavedMs stays modelled for older
+# caches without failing against current ones.
+STATS_CACHE_ALL_FIELDS = interface_fields("StatsCacheFile", "claude/toplevel-files-data.ts")
+STATS_CACHE_FIELDS_OPTIONAL = interface_optional_fields("StatsCacheFile", "claude/toplevel-files-data.ts")
+STATS_CACHE_FIELDS_REQUIRED = STATS_CACHE_ALL_FIELDS - STATS_CACHE_FIELDS_OPTIONAL
 
 # DailyActivity fields
 DAILY_ACTIVITY_FIELDS = {"date", "messageCount", "sessionCount", "toolCallCount"}
@@ -288,7 +295,12 @@ def validate_stats_cache():
         return
 
     # Top-level keys
-    check_keys("stats-cache.json top-level", data.keys(), STATS_CACHE_FIELDS)
+    check_keys(
+        "stats-cache.json top-level",
+        data.keys(),
+        STATS_CACHE_FIELDS_REQUIRED,
+        STATS_CACHE_FIELDS_OPTIONAL,
+    )
 
     # DailyActivity entries
     daily = data.get("dailyActivity", [])
@@ -912,8 +924,12 @@ def validate_top_level():
 
 def main():
     if not CLAUDE_DIR.exists():
-        print(f"ERROR: {CLAUDE_DIR} does not exist")
-        sys.exit(1)
+        # Importing this module already exercised every interface_fields() /
+        # union_members() lookup, so a renamed or deleted type has failed by
+        # now. What is left needs real Claude Code output, which a CI runner
+        # does not have — report that honestly instead of passing or failing.
+        print(f"SKIPPED: {CLAUDE_DIR} does not exist (no real Claude Code data to validate against)")
+        sys.exit(78)
 
     print(f"Validating @spaghetti/core types against {CLAUDE_DIR}")
     print(f"{'=' * 78}")
