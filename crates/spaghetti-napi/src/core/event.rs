@@ -48,10 +48,18 @@ use crate::claude::types::{
 
 /// One unit of work pushed from a parser thread to the writer thread.
 ///
-/// Variants mirror the TS `ProjectParseSink` callbacks one-for-one (plus a
-/// `WorkerError` variant used for transporting parse failures). Each variant
-/// carries the minimum data needed to write exactly one row (or, for
+/// Variants mirror the TS `ProjectParseSink` callbacks one-for-one, plus the
+/// control events that carry failures and transaction boundaries. Each
+/// data variant carries the minimum needed to write exactly one row (or, for
 /// `Message`, one `messages` + one derived `search_fts` row).
+///
+/// The three failure variants are deliberately distinct rather than one
+/// overloaded error, because the writer has to react differently to each:
+/// [`RecordSkip`](IngestEvent::RecordSkip) keeps the project,
+/// [`ProjectFatal`](IngestEvent::ProjectFatal) rolls it back and poisons the
+/// slug, and [`SourceError`](IngestEvent::SourceError) belongs to no project
+/// at all. Collapsing them is what let one bad line silently discard a whole
+/// project before RFC 008 Phase 2.
 #[derive(Debug)]
 pub enum IngestEvent {
     /// Start of a project directory. Maps to `onProject`.
@@ -149,13 +157,45 @@ pub enum IngestEvent {
     /// transaction. Maps to `onProjectComplete`.
     ProjectComplete { slug: String, duration_ms: u32 },
 
-    /// A worker encountered a non-fatal parse error for the given project.
-    /// The writer rolls back the in-flight transaction and skips forward.
+    /// End-of-project marker for a project the writer must **not** commit.
+    /// Rolls back without committing and clears the project's poison state.
     ///
-    /// This variant has no TS equivalent — the TS parser swallows errors
-    /// inline. In Rust we prefer to transport them so the orchestrator
-    /// can record them in the final `IngestStats.errors` list.
-    WorkerError { slug: String, error: String },
+    /// Paired with [`IngestEvent::ProjectComplete`]: every project a reader
+    /// starts emits exactly one of the two, so the writer can never be left
+    /// holding an open transaction for a project nobody finished.
+    ProjectAbort { slug: String },
+
+    /// One record inside a project could not be read — a malformed JSONL
+    /// line, say. Records the error and nothing else: the project keeps its
+    /// transaction and every other record in it still commits.
+    ///
+    /// Replaces half of the old `WorkerError`, which rolled the whole
+    /// project back on one bad line even though both emission sites meant
+    /// "skip this record" (RFC 008 Phase 2).
+    RecordSkip {
+        slug: String,
+        path: String,
+        message: String,
+    },
+
+    /// A project cannot be trusted as a whole. Rolls its transaction back and
+    /// poisons the slug, so any data event still in flight for it is ignored
+    /// rather than written into the next project's transaction.
+    ProjectFatal {
+        slug: String,
+        path: String,
+        message: String,
+    },
+
+    /// A failure that happened before any project identity existed —
+    /// discovery could not enumerate a directory, or a file failed to open
+    /// before its owning project was known.
+    ///
+    /// Carries no slug on purpose. The alternative is inventing one, which
+    /// RFC 008 P8 forbids: a fake slug becomes a real row. It poisons no
+    /// project, but it does invalidate the source's success marker, so the
+    /// unchanged fast path cannot skip the retry.
+    SourceError { path: String, message: String },
 
     /// Truncate the `source_files` table. Emitted by the orchestrator
     /// before a batch of `Fingerprint` events so warm-fallback re-ingests
@@ -366,10 +406,24 @@ mod tests {
         };
         assert!(format!("{pc:?}").contains("ProjectComplete"));
 
-        let err = IngestEvent::WorkerError {
+        let skip = IngestEvent::RecordSkip {
             slug: "proj".into(),
-            error: "boom".into(),
+            path: "/tmp/proj/s.jsonl".into(),
+            message: "boom".into(),
         };
-        assert!(format!("{err:?}").contains("WorkerError"));
+        assert!(format!("{skip:?}").contains("RecordSkip"));
+
+        let fatal = IngestEvent::ProjectFatal {
+            slug: "proj".into(),
+            path: "/tmp/proj".into(),
+            message: "boom".into(),
+        };
+        assert!(format!("{fatal:?}").contains("ProjectFatal"));
+
+        let src = IngestEvent::SourceError {
+            path: "/tmp".into(),
+            message: "boom".into(),
+        };
+        assert!(format!("{src:?}").contains("SourceError"));
     }
 }

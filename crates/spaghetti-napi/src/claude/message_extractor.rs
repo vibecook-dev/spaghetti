@@ -33,7 +33,7 @@ pub struct MessageProjection {
 ///
 /// Always returns `Ok` for valid JSON (including unknown `type` values).
 /// Returns `Err` only when the line is not JSON at all — matching the
-/// previous parser behaviour of emitting `WorkerError` for bad lines.
+/// parser behaviour of emitting `RecordSkip` for bad lines.
 pub fn project_jsonl_line(line: &str) -> Result<MessageProjection, serde_json::Error> {
     // Loose Value first for top-level fields (matches TS
     // `msg as Record<string, unknown>`), so we don't reverse-engineer

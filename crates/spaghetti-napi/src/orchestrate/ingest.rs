@@ -48,7 +48,8 @@ use rayon::prelude::*;
 use rusqlite::{Connection, OpenFlags};
 
 use crate::claude::fingerprint::{self, FingerprintStore, SourceFingerprint};
-use crate::claude::project_parser::ProjectParser;
+use crate::claude::project_parser::{ParseError, ProjectParser};
+use crate::core::errors::{CollectedError, ErrorReport, Severity};
 use crate::core::event::IngestEvent;
 use crate::core::writer::{Writer, WriterStats};
 
@@ -93,16 +94,43 @@ pub struct IngestStats {
     pub sessions_processed: u32,
     pub messages_written: u32,
     pub subagents_written: u32,
-    /// Non-fatal errors collected during ingest — parse failures, missing
-    /// session files, etc.
+    /// Non-fatal errors collected during ingest, capped for display. Read
+    /// `error_count` for the real total — a caller that treats
+    /// `errors.length` as the count will silently under-report once more
+    /// than [`DISPLAY_CAP`](crate::core::errors::DISPLAY_CAP) inputs fail.
     pub errors: Vec<IngestError>,
+    /// Uncapped number of errors seen.
+    pub error_count: u32,
+    /// True when `errors` was truncated, i.e. `error_count > errors.len()`.
+    pub errors_truncated: bool,
 }
 
+/// One reported ingest failure. Matches `FrozenNativeIngestError` in
+/// `packages/sdk/src/native.ts`, frozen by RFC 008 Phase 0.
 #[napi(object)]
 #[derive(Debug, Clone)]
 pub struct IngestError {
-    pub slug: String,
+    /// Absent for `severity = "source"`, which by definition happened before
+    /// any project identity existed. Phase 0 made this optional precisely so
+    /// such failures need not invent a slug.
+    pub slug: Option<String>,
+    /// Always present — every surfaced error can name a file even when it
+    /// cannot name a project.
+    pub path: String,
+    /// One of `record-skip`, `project-fatal`, `source`.
+    pub severity: String,
     pub message: String,
+}
+
+impl From<&crate::core::errors::CollectedError> for IngestError {
+    fn from(e: &crate::core::errors::CollectedError) -> Self {
+        Self {
+            slug: e.slug.clone(),
+            path: e.path.clone(),
+            severity: e.severity.as_str().to_owned(),
+            message: e.message.clone(),
+        }
+    }
 }
 
 /// Progress snapshot for the optional on-progress callback. Fires once
@@ -209,6 +237,17 @@ fn resolve_parallelism(requested: Option<u32>) -> usize {
         None | Some(0) => default,
         Some(n) => (n as usize).clamp(1, MAX_PARALLELISM),
     }
+}
+
+/// What a writer thread hands back once the stream closes: the counters, and
+/// every failure it saw on the way.
+///
+/// Kept together because they must be read together — `stats` alone cannot
+/// tell a caller whether the run is trustworthy, which is exactly how a
+/// dropped project once passed for success.
+struct WriterOutcome {
+    stats: WriterStats,
+    errors: ErrorReport,
 }
 
 /// Fatal ingest errors — these reject the NAPI promise. Non-fatal
@@ -357,12 +396,13 @@ pub(crate) fn run_ingest(
     let writer_handle = std::thread::Builder::new()
         .name("spaghetti-writer".into())
         .spawn(
-            move || -> std::result::Result<WriterStats, crate::core::writer::WriterError> {
+            move || -> std::result::Result<WriterOutcome, crate::core::writer::WriterError> {
                 let mut writer = Writer::with_source_id(&db_path, source_id)?;
                 writer.open_for_bulk_ingest_with_mode(bulk_mode)?;
                 let stats = writer.run(receiver)?;
+                let errors = writer.take_errors();
                 writer.finish()?;
-                Ok(stats)
+                Ok(WriterOutcome { stats, errors })
             },
         )
         .map_err(IngestInternalError::Io)?;
@@ -420,11 +460,11 @@ pub(crate) fn run_ingest(
     // precisely and don't contend with whatever else might be using the
     // global rayon pool (e.g. later rayon-using code in the same crate).
     //
-    // Parser errors below the project-boundary level are already emitted
-    // as IngestEvent::WorkerError inside parse_project; here we only
-    // collect ChannelClosed / other unrecoverable failures. `filter_map`
-    // lets every parser finish its own project before we reduce to a
-    // Vec<IngestError>.
+    // Record- and project-level failures travel as events and are collected
+    // by the writer, which is the only consumer that sees all of them. Here we
+    // collect just the one failure the event channel cannot carry: the channel
+    // itself being closed. `filter_map` lets every parser finish its own
+    // project before we reduce.
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(parallelism)
         .thread_name(|i| format!("spaghetti-parser-{i}"))
@@ -448,6 +488,18 @@ pub(crate) fn run_ingest(
     let empty_store: HashMap<String, SourceFingerprint> = HashMap::new();
     let pre_parse_diff = fingerprint::compute_diff(&resolved.root_dir, &empty_store)?;
 
+    // Discovery failures have no project identity — they happened while
+    // finding out which projects exist. They poison nothing, but they do
+    // withhold the success marker: a directory we could not enumerate may
+    // hold files this run never saw, and marking the source current over that
+    // would make the next warm start skip the retry.
+    for err in &pre_parse_diff.errors {
+        let _ = sender.send(IngestEvent::SourceError {
+            path: err.path.clone(),
+            message: err.message.clone(),
+        });
+    }
+
     // Serialize per-project event streams onto the shared channel so the
     // writer sees each project's events contiguously. Without this, events
     // from N parallel parsers interleave, forcing the writer to commit+
@@ -462,7 +514,7 @@ pub(crate) fn run_ingest(
     // is held only briefly.
     let drain_lock: Mutex<()> = Mutex::new(());
     let projects_done = Arc::new(AtomicU32::new(0));
-    let errors: Vec<IngestError> = pool.install(|| {
+    let channel_failures: Vec<CollectedError> = pool.install(|| {
         slugs
             .par_iter()
             .filter_map(|slug| {
@@ -490,10 +542,27 @@ pub(crate) fn run_ingest(
                 let done = projects_done.fetch_add(1, Ordering::Relaxed) + 1;
                 emit("parsing", done);
 
-                parse_result.err().map(|e| IngestError {
-                    slug: slug.clone(),
-                    message: e.to_string(),
-                })
+                match parse_result {
+                    Ok(()) => None,
+                    // Already on the wire as ProjectFatal + ProjectAbort; the
+                    // writer records it. Reporting it here too would
+                    // double-count against `error_count`.
+                    Err(ParseError::Fatal { .. }) => None,
+                    // The writer is gone, so nothing sent from here would
+                    // arrive. This is the one failure the orchestrator must
+                    // carry itself.
+                    Err(e @ ParseError::ChannelClosed(_)) => Some(CollectedError {
+                        slug: Some(slug.clone()),
+                        path: resolved
+                            .root_dir
+                            .join("projects")
+                            .join(slug)
+                            .to_string_lossy()
+                            .into_owned(),
+                        severity: Severity::ProjectFatal,
+                        message: e.to_string(),
+                    }),
+                }
             })
             .collect()
     });
@@ -523,9 +592,17 @@ pub(crate) fn run_ingest(
     drop(sender);
     emit("finalizing", projects_done.load(Ordering::Relaxed));
 
-    let writer_stats: WriterStats = writer_handle
+    let WriterOutcome {
+        stats: writer_stats,
+        mut errors,
+    } = writer_handle
         .join()
         .map_err(|_| IngestInternalError::WriterPanic)??;
+
+    // Fold in the failures the event channel could not carry.
+    for failure in channel_failures {
+        errors.record(failure);
+    }
 
     // Success-last contract publication (RFC 008 Phase 1.3).
     //
@@ -535,13 +612,11 @@ pub(crate) fn run_ingest(
     // unconditionally — would let a failed run look complete, and the next warm
     // start would skip the repair it still needs.
     //
-    // Two independent failure channels have to be clean, because they carry
-    // different things. `errors` holds project-level parse failures — what a
-    // parser *returns*. Per-record failures never appear there; they travel as
-    // `WorkerError` events, and the writer rolls the whole project back on one,
-    // so a single bad line drops a project while `errors` stays empty. Gating
-    // on `errors` alone published the contract over exactly that loss.
-    publish_contract_if_clean(&resolved, &errors, writer_stats.worker_errors);
+    // One report now, covering every severity — a skipped record, a
+    // rolled-back project, and a source-level failure all withhold the marker.
+    // Any of them means some input was not materialised, and the marker is
+    // what decides whether the next warm start bothers to retry.
+    publish_contract_if_clean(&resolved, &errors);
 
     let duration_ms = u32::try_from(start.elapsed().as_millis()).unwrap_or(u32::MAX);
 
@@ -551,8 +626,18 @@ pub(crate) fn run_ingest(
         sessions_processed: writer_stats.sessions_processed,
         messages_written: writer_stats.messages_written,
         subagents_written: writer_stats.subagents_written,
-        errors,
+        ..stats_errors(&errors)
     })
+}
+
+/// Project an [`ErrorReport`] onto the three error fields of [`IngestStats`].
+fn stats_errors(errors: &ErrorReport) -> IngestStats {
+    IngestStats {
+        errors: errors.errors().iter().map(IngestError::from).collect(),
+        error_count: errors.total(),
+        errors_truncated: errors.truncated(),
+        ..IngestStats::default()
+    }
 }
 
 /// Mark this source as having completed under the current ingest contract,
@@ -562,12 +647,8 @@ pub(crate) fn run_ingest(
 /// Publishing when we should not have is not: the marker is what defeats the
 /// warm fast path, so a wrong `true` makes the repair unreachable. Every
 /// failure path here therefore leaves the marker alone.
-fn publish_contract_if_clean(
-    resolved: &ResolvedOptions,
-    errors: &[IngestError],
-    worker_errors: u32,
-) {
-    if !errors.is_empty() || worker_errors > 0 {
+fn publish_contract_if_clean(resolved: &ResolvedOptions, errors: &ErrorReport) {
+    if !errors.is_empty() {
         return;
     }
     let Ok(conn) = Connection::open(&resolved.db_path) else {
@@ -626,6 +707,12 @@ fn warm_has_no_changes(
     // and only this source's.
     let diff = fingerprint::compute_diff(&resolved.root_dir, &stored)?;
     if !diff.added.is_empty() || !diff.modified.is_empty() || !diff.deleted.is_empty() {
+        return Ok(false);
+    }
+    // A directory we could not enumerate might hold changes we cannot see, so
+    // "no differences found" is not the same as "no differences". Take the
+    // slow path and let the run report the failure.
+    if !diff.errors.is_empty() {
         return Ok(false);
     }
 
@@ -699,11 +786,12 @@ fn clear_source_only(
     let writer_handle = std::thread::Builder::new()
         .name("spaghetti-writer-clear".into())
         .spawn(
-            move || -> std::result::Result<WriterStats, crate::core::writer::WriterError> {
+            move || -> std::result::Result<WriterOutcome, crate::core::writer::WriterError> {
                 let mut writer = Writer::with_source_id(&db_path, source_id)?;
                 let stats = writer.run(receiver)?;
+                let errors = writer.take_errors();
                 writer.finish()?;
-                Ok(stats)
+                Ok(WriterOutcome { stats, errors })
             },
         )
         .map_err(IngestInternalError::Io)?;
@@ -797,12 +885,13 @@ fn run_codex_ingest(
     let writer_handle = std::thread::Builder::new()
         .name("spaghetti-writer-codex".into())
         .spawn(
-            move || -> std::result::Result<WriterStats, crate::core::writer::WriterError> {
+            move || -> std::result::Result<WriterOutcome, crate::core::writer::WriterError> {
                 let mut writer = Writer::with_source_id(&db_path, source_id)?;
                 writer.open_for_bulk_ingest_with_mode(bulk_mode)?;
                 let stats = writer.run(receiver)?;
+                let errors = writer.take_errors();
                 writer.finish()?;
-                Ok(stats)
+                Ok(WriterOutcome { stats, errors })
             },
         )
         .map_err(IngestInternalError::Io)?;
@@ -815,14 +904,17 @@ fn run_codex_ingest(
     drop(sender);
     emit("finalizing", read_stats.projects, read_stats.projects);
 
-    let writer_stats: WriterStats = writer_handle
+    let WriterOutcome {
+        stats: writer_stats,
+        errors,
+    } = writer_handle
         .join()
         .map_err(|_| IngestInternalError::WriterPanic)??;
 
-    // Success-last, same rule as the Claude path. These readers do not yet
-    // accumulate per-record errors (RFC 008 Phase 2 gives them the error
-    // protocol), so a clean writer join is the whole signal available today.
-    publish_contract_if_clean(resolved, &[], 0);
+    // Success-last, same rule and now the same error protocol as the Claude
+    // path: whatever the reader reported as RecordSkip / ProjectFatal /
+    // SourceError reached the writer and is in this report.
+    publish_contract_if_clean(resolved, &errors);
 
     Ok(IngestStats {
         duration_ms: u32::try_from(start.elapsed().as_millis()).unwrap_or(u32::MAX),
@@ -830,7 +922,7 @@ fn run_codex_ingest(
         sessions_processed: writer_stats.sessions_processed.max(read_stats.sessions),
         messages_written: writer_stats.messages_written,
         subagents_written: 0,
-        errors: vec![],
+        ..stats_errors(&errors)
     })
 }
 
@@ -907,12 +999,13 @@ fn run_grok_ingest(
     let writer_handle = std::thread::Builder::new()
         .name("spaghetti-writer-grok".into())
         .spawn(
-            move || -> std::result::Result<WriterStats, crate::core::writer::WriterError> {
+            move || -> std::result::Result<WriterOutcome, crate::core::writer::WriterError> {
                 let mut writer = Writer::with_source_id(&db_path, source_id)?;
                 writer.open_for_bulk_ingest_with_mode(bulk_mode)?;
                 let stats = writer.run(receiver)?;
+                let errors = writer.take_errors();
                 writer.finish()?;
-                Ok(stats)
+                Ok(WriterOutcome { stats, errors })
             },
         )
         .map_err(IngestInternalError::Io)?;
@@ -925,14 +1018,17 @@ fn run_grok_ingest(
     drop(sender);
     emit("finalizing", read_stats.projects, read_stats.projects);
 
-    let writer_stats: WriterStats = writer_handle
+    let WriterOutcome {
+        stats: writer_stats,
+        errors,
+    } = writer_handle
         .join()
         .map_err(|_| IngestInternalError::WriterPanic)??;
 
-    // Success-last, same rule as the Claude path. These readers do not yet
-    // accumulate per-record errors (RFC 008 Phase 2 gives them the error
-    // protocol), so a clean writer join is the whole signal available today.
-    publish_contract_if_clean(resolved, &[], 0);
+    // Success-last, same rule and now the same error protocol as the Claude
+    // path: whatever the reader reported as RecordSkip / ProjectFatal /
+    // SourceError reached the writer and is in this report.
+    publish_contract_if_clean(resolved, &errors);
 
     Ok(IngestStats {
         duration_ms: u32::try_from(start.elapsed().as_millis()).unwrap_or(u32::MAX),
@@ -940,7 +1036,7 @@ fn run_grok_ingest(
         sessions_processed: writer_stats.sessions_processed.max(read_stats.sessions),
         messages_written: writer_stats.messages_written,
         subagents_written: 0,
-        errors: vec![],
+        ..stats_errors(&errors)
     })
 }
 
@@ -1662,7 +1758,7 @@ mod tests {
 // each case is supposed to produce.
 
 #[cfg(test)]
-mod phase_1_gate {
+pub(super) mod phase_1_gate {
     use super::tests::{fake_claude_fixture, warm_opts};
     use super::*;
     use std::fs;
@@ -1670,17 +1766,17 @@ mod phase_1_gate {
 
     /// A comparable snapshot of everything a warm run is supposed to converge.
     #[derive(Debug, PartialEq)]
-    struct Shape {
-        projects: Vec<String>,
-        sessions: Vec<String>,
-        messages: Vec<(String, i64, String)>,
-        plans: Vec<String>,
-        todos: Vec<String>,
-        subagents: Vec<String>,
-        fingerprints: Vec<String>,
+    pub(super) struct Shape {
+        pub(super) projects: Vec<String>,
+        pub(super) sessions: Vec<String>,
+        pub(super) messages: Vec<(String, i64, String)>,
+        pub(super) plans: Vec<String>,
+        pub(super) todos: Vec<String>,
+        pub(super) subagents: Vec<String>,
+        pub(super) fingerprints: Vec<String>,
     }
 
-    fn shape_of(db: &Path) -> Shape {
+    pub(super) fn shape_of(db: &Path) -> Shape {
         let conn = Connection::open(db).unwrap();
         let col = |sql: &str| -> Vec<String> {
             let mut stmt = conn.prepare(sql).unwrap();
@@ -1754,7 +1850,7 @@ mod phase_1_gate {
     const SESSION: &str = "11111111-2222-3333-4444-555555555555";
     const SLUG: &str = "-Users-me-proj";
 
-    fn session_path(root: &Path) -> PathBuf {
+    pub(super) fn session_path(root: &Path) -> PathBuf {
         root.join("projects")
             .join(SLUG)
             .join(format!("{SESSION}.jsonl"))
@@ -1764,7 +1860,7 @@ mod phase_1_gate {
         root.join("projects").join(SLUG).join(SESSION)
     }
 
-    fn seeded() -> (TempDir, TempDir, PathBuf) {
+    pub(super) fn seeded() -> (TempDir, TempDir, PathBuf) {
         let claude = fake_claude_fixture();
         let db_dir = TempDir::new().unwrap();
         let db = db_dir.path().join("gate.db");
@@ -1772,7 +1868,7 @@ mod phase_1_gate {
         (claude, db_dir, db)
     }
 
-    fn user_line(uuid: &str, text: &str) -> String {
+    pub(super) fn user_line(uuid: &str, text: &str) -> String {
         format!(
             "{{\"type\":\"user\",\"uuid\":\"{uuid}\",\"timestamp\":\"2026-04-17T00:00:09Z\",\
              \"sessionId\":\"{SESSION}\",\"isSidechain\":false,\"userType\":\"external\",\
@@ -1885,7 +1981,7 @@ mod phase_1_gate {
 
     // ─── Repair cases ──────────────────────────────────────────────────────
 
-    fn age_contract(db: &Path) {
+    pub(super) fn age_contract(db: &Path) {
         let conn = Connection::open(db).unwrap();
         conn.execute(
             "UPDATE source_materializations SET version = ?1 \
@@ -2019,14 +2115,28 @@ mod phase_1_gate {
         body.push_str("not-valid-json\n");
         fs::write(&path, body).unwrap();
 
-        run_ingest(&warm_opts(claude.path(), &db), None).expect("run completes");
+        let stats = run_ingest(&warm_opts(claude.path(), &db), None).expect("run completes");
 
         let conn = Connection::open(&db).unwrap();
         assert!(
             !crate::core::ingest_contract::is_source_contract_current(&conn, "claude-code")
                 .unwrap(),
-            "a run that dropped a project must leave the contract unpublished so it retries"
+            "a partial success must leave the contract unpublished so it retries"
         );
+
+        // Phase 2 narrowed the blast radius. The same input that used to
+        // discard the entire project — every good record with it — now skips
+        // one record and commits the rest, and says so.
+        let shape = shape_of(&db);
+        assert_eq!(
+            shape.messages.len(),
+            2,
+            "the good records around a bad line must survive"
+        );
+        assert_eq!(shape.projects.len(), 1, "the project must not be dropped");
+        assert_eq!(stats.error_count, 1, "and the skip must be reported");
+        assert_eq!(stats.errors[0].severity, "record-skip");
+        assert!(!stats.errors_truncated);
     }
 
     #[test]
@@ -2132,6 +2242,569 @@ mod phase_1_gate {
         assert_eq!(
             survived, 2,
             "a claude clear must not reach codex rows, wherever their paths point"
+        );
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// RFC 008 Phase 2 — transaction and error protocol
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[cfg(test)]
+mod phase_2_gate {
+    use super::phase_1_gate::{age_contract, seeded, session_path, shape_of, user_line};
+    use super::tests::warm_opts;
+    use super::*;
+    use std::fs;
+
+    /// Every `source_files` path currently recorded.
+    fn fingerprinted(db: &Path) -> Vec<String> {
+        let conn = Connection::open(db).unwrap();
+        let mut stmt = conn
+            .prepare("SELECT path FROM source_files ORDER BY path")
+            .unwrap();
+        let out = stmt
+            .query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect();
+        out
+    }
+
+    /// Append a line the parser cannot read.
+    fn corrupt(path: &Path) {
+        let mut body = fs::read_to_string(path).unwrap();
+        body.push_str("not-valid-json\n");
+        fs::write(path, body).unwrap();
+    }
+
+    #[test]
+    fn a_bad_record_between_valid_records_keeps_the_project() {
+        let (claude, _d, db) = seeded();
+        let path = session_path(claude.path());
+
+        // good, bad, good — the bad line must cost exactly itself.
+        let mut body = fs::read_to_string(&path).unwrap();
+        body.push_str("not-valid-json\n");
+        body.push_str(&user_line("u3", "after-the-bad-line"));
+        fs::write(&path, body).unwrap();
+
+        let stats = run_ingest(&warm_opts(claude.path(), &db), None).expect("ingest");
+
+        let shape = shape_of(&db);
+        assert_eq!(
+            shape.messages.len(),
+            3,
+            "records on both sides of a bad line must commit"
+        );
+        assert_eq!(stats.error_count, 1);
+        assert_eq!(stats.errors[0].severity, "record-skip");
+        assert_eq!(
+            stats.errors[0].slug.as_deref(),
+            Some("-Users-me-proj"),
+            "a record skip knows its project"
+        );
+    }
+
+    #[test]
+    fn a_failed_input_is_retried_on_the_next_warm_run() {
+        // The exit-gate item this whole phase turns on. A fingerprint is a
+        // claim the file was ingested; writing one for a file that failed
+        // records the failure as a success and it never retries.
+        let (claude, _d, db) = seeded();
+        let path = session_path(claude.path());
+        corrupt(&path);
+
+        run_ingest(&warm_opts(claude.path(), &db), None).expect("failing ingest");
+        assert!(
+            !fingerprinted(&db).contains(&path.to_string_lossy().into_owned()),
+            "a file that failed must not be fingerprinted"
+        );
+
+        // Warm again with the file still broken: the missing fingerprint has
+        // to defeat the fast path, or the retry never happens.
+        let retry = run_ingest(&warm_opts(claude.path(), &db), None).expect("retry");
+        assert!(
+            retry.projects_processed > 0,
+            "a withheld fingerprint must defeat the warm fast path"
+        );
+
+        // Repair the file; the next run should ingest it and fingerprint it.
+        let repaired: String = fs::read_to_string(&path)
+            .unwrap()
+            .lines()
+            .filter(|l| *l != "not-valid-json")
+            .map(|l| format!("{l}\n"))
+            .collect();
+        fs::write(&path, repaired).unwrap();
+
+        let fixed = run_ingest(&warm_opts(claude.path(), &db), None).expect("repaired ingest");
+        assert_eq!(fixed.error_count, 0, "the repaired file must ingest clean");
+        assert!(
+            fingerprinted(&db).contains(&path.to_string_lossy().into_owned()),
+            "and now earn its fingerprint"
+        );
+    }
+
+    /// A file standing where a directory belongs.
+    ///
+    /// This is the phase's cross-platform fault seam. `read_dir` on a
+    /// non-directory fails with something that is *not* `NotFound` on Linux,
+    /// macOS, and Windows alike, so it exercises the enumeration-failure path
+    /// without needing mode bits, ACLs, or a privileged test runner. The RFC
+    /// rules out a Unix-only `chmod 0` as the sole acceptance test.
+    fn block_dir_with_a_file(path: &Path) {
+        if path.exists() {
+            fs::remove_dir_all(path).unwrap();
+        }
+        fs::write(path, b"not a directory").unwrap();
+    }
+
+    #[test]
+    fn an_unreadable_directory_is_an_error_not_an_empty_scan() {
+        let (claude, _d, db) = seeded();
+        block_dir_with_a_file(&claude.path().join("todos"));
+
+        let stats = run_ingest(&warm_opts(claude.path(), &db), None).expect("run completes");
+
+        assert!(
+            stats.error_count > 0,
+            "an unreadable directory must be reported, not silently read as empty"
+        );
+        let src: Vec<_> = stats
+            .errors
+            .iter()
+            .filter(|e| e.severity == "source")
+            .collect();
+        assert!(!src.is_empty(), "got: {:?}", stats.errors);
+        assert!(
+            src[0].slug.is_none(),
+            "a discovery failure has no project identity and must not invent one"
+        );
+
+        let conn = Connection::open(&db).unwrap();
+        assert!(
+            !crate::core::ingest_contract::is_source_contract_current(&conn, "claude-code")
+                .unwrap(),
+            "a source error must withhold the marker so the scan retries"
+        );
+    }
+
+    #[test]
+    fn a_blocked_directory_defeats_the_warm_fast_path() {
+        // The consequence that matters: if a failed scan could still report
+        // "nothing changed", the index would stay stale until something else
+        // happened to change.
+        let (claude, _d, db) = seeded();
+        assert_eq!(
+            run_ingest(&warm_opts(claude.path(), &db), None)
+                .unwrap()
+                .projects_processed,
+            0,
+            "baseline: a clean tree warm-starts to a no-op"
+        );
+
+        block_dir_with_a_file(&claude.path().join("todos"));
+        let blocked = run_ingest(&warm_opts(claude.path(), &db), None).expect("run");
+        assert!(
+            blocked.projects_processed > 0,
+            "a scan that could not see everything must not claim nothing changed"
+        );
+    }
+
+    #[test]
+    fn a_clean_run_still_fingerprints_everything() {
+        // Guard against the buffering silently withholding everything, which
+        // would look like "no bugs" while making every warm start cold.
+        let (claude, _d, db) = seeded();
+        let before = fingerprinted(&db);
+        assert!(!before.is_empty(), "the seed run must fingerprint");
+
+        age_contract(&db);
+        run_ingest(&warm_opts(claude.path(), &db), None).expect("repair");
+        assert_eq!(
+            fingerprinted(&db),
+            before,
+            "a clean rebuild must reproduce the same fingerprints"
+        );
+
+        let again = run_ingest(&warm_opts(claude.path(), &db), None).expect("warm");
+        assert_eq!(
+            again.projects_processed, 0,
+            "and then warm-start to a no-op"
+        );
+    }
+}
+
+#[cfg(test)]
+mod phase_2_matrix {
+    //! RFC 008 Phase 2 transaction/error matrix.
+    //!
+    //! Every case here runs on Linux, macOS, and Windows. Failures that have
+    //! no portable filesystem provocation use the parser's deterministic fault
+    //! seam, which the RFC allows precisely because a Unix-only `chmod 0`
+    //! cannot be the sole acceptance test.
+
+    use super::phase_1_gate::{seeded, session_path, shape_of, user_line};
+    use super::tests::{fake_claude_fixture, warm_opts};
+    use super::*;
+    use crate::claude::project_parser::fault;
+    use std::fs;
+    use tempfile::TempDir;
+
+    const SLUG: &str = "-Users-me-proj";
+    const P2_A: &str = "aaaaaaaa-0000-0000-0000-000000000001";
+    const P2_B: &str = "aaaaaaaa-0000-0000-0000-000000000002";
+    const SEED_SESSION: &str = "11111111-2222-3333-4444-555555555555";
+
+    /// Arm a fault, run the closure, and always disarm — a leaked fault would
+    /// poison whatever test happened to use the same path next.
+    fn with_fault<T>(path: &Path, message: &str, f: impl FnOnce() -> T) -> T {
+        fault::arm(path, message);
+        let out = f();
+        fault::disarm(path);
+        out
+    }
+
+    fn project_dir(root: &Path, slug: &str) -> PathBuf {
+        root.join("projects").join(slug)
+    }
+
+    fn fingerprints(db: &Path) -> Vec<String> {
+        let conn = Connection::open(db).unwrap();
+        let mut stmt = conn
+            .prepare("SELECT path FROM source_files ORDER BY path")
+            .unwrap();
+        let out = stmt
+            .query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect();
+        out
+    }
+
+    /// Add a project with N sessions, so a fatal has a bystander to spare and
+    /// a multi-session project to roll back.
+    fn add_project(root: &Path, slug: &str, sessions: &[&str]) {
+        let dir = project_dir(root, slug);
+        fs::create_dir_all(&dir).unwrap();
+        let entries: Vec<String> = sessions
+            .iter()
+            .map(|sid| {
+                format!(
+                    concat!(
+                        r#"{{"sessionId":"{}","fullPath":"","fileMtime":0.0,"#,
+                        r#""firstPrompt":"","summary":"","messageCount":1,"#,
+                        r#""created":"2026-04-17T00:00:00Z","modified":"2026-04-17T00:00:01Z","#,
+                        r#""gitBranch":"main","projectPath":"/x","isSidechain":false}}"#
+                    ),
+                    sid
+                )
+            })
+            .collect();
+        fs::write(
+            dir.join("sessions-index.json"),
+            format!(
+                r#"{{"originalPath":"/x","entries":[{}]}}"#,
+                entries.join(",")
+            ),
+        )
+        .unwrap();
+        for sid in sessions {
+            let line = user_line("m1", "hello").replace(SEED_SESSION, sid);
+            fs::write(dir.join(format!("{sid}.jsonl")), line).unwrap();
+        }
+    }
+
+    // ── Bad record between valid records ───────────────────────────────────
+    // Covered by phase_2_gate::a_bad_record_between_valid_records_keeps_the_project.
+
+    // ── A fatal project, and the bystander that must survive it ────────────
+
+    #[test]
+    fn a_fatal_project_rolls_back_and_later_projects_still_ingest() {
+        let (claude, _d, db) = seeded();
+        add_project(claude.path(), "-p2", &[P2_A, P2_B]);
+
+        let doomed = project_dir(claude.path(), "-p2");
+        let stats = with_fault(&doomed, "enumeration failed", || {
+            run_ingest(&warm_opts(claude.path(), &db), None).expect("run completes")
+        });
+
+        let shape = shape_of(&db);
+        assert_eq!(
+            shape.projects,
+            vec![SLUG.to_string()],
+            "the fatal project must not commit, and the healthy one must"
+        );
+        assert!(
+            !shape.sessions.iter().any(|s| s == P2_A || s == P2_B),
+            "no session of a rolled-back project may survive: {:?}",
+            shape.sessions
+        );
+        assert_eq!(
+            shape.messages.len(),
+            2,
+            "the bystander project keeps every message"
+        );
+
+        let fatal: Vec<_> = stats
+            .errors
+            .iter()
+            .filter(|e| e.severity == "project-fatal")
+            .collect();
+        assert_eq!(fatal.len(), 1, "got: {:?}", stats.errors);
+        assert_eq!(fatal[0].slug.as_deref(), Some("-p2"));
+    }
+
+    // ── An aborted project leaves nothing behind ───────────────────────────
+
+    #[test]
+    fn an_aborted_project_leaves_no_rows_and_no_fingerprints() {
+        let (claude, _d, db) = seeded();
+        add_project(claude.path(), "-p2", &[P2_A]);
+
+        let doomed = project_dir(claude.path(), "-p2");
+        with_fault(&doomed, "enumeration failed", || {
+            run_ingest(&warm_opts(claude.path(), &db), None).expect("run")
+        });
+
+        let prints = fingerprints(&db);
+        assert!(
+            !prints.iter().any(|p| p.contains("-p2")),
+            "a rolled-back project must not fingerprint anything, or its files \
+             are recorded as ingested and never retried: {prints:?}"
+        );
+        assert!(
+            prints.iter().any(|p| p.contains(SLUG)),
+            "while the healthy project keeps its fingerprints"
+        );
+    }
+
+    // ── The failure retries, and clears once the fault is gone ─────────────
+
+    #[test]
+    fn a_fatal_project_retries_and_recovers() {
+        let (claude, _d, db) = seeded();
+        add_project(claude.path(), "-p2", &[P2_A]);
+        let doomed = project_dir(claude.path(), "-p2");
+
+        with_fault(&doomed, "enumeration failed", || {
+            run_ingest(&warm_opts(claude.path(), &db), None).expect("failing run");
+            // Still broken: the warm fast path must not skip the retry.
+            let again = run_ingest(&warm_opts(claude.path(), &db), None).expect("retry");
+            assert!(
+                again.projects_processed > 0,
+                "an unpublished contract must defeat the fast path"
+            );
+        });
+
+        let healed = run_ingest(&warm_opts(claude.path(), &db), None).expect("healed run");
+        assert_eq!(healed.error_count, 0, "the fault is gone; the run is clean");
+        assert!(
+            shape_of(&db).projects.contains(&"-p2".to_string()),
+            "and the project finally lands"
+        );
+    }
+
+    // ── More than 100 errors: total and truncation ─────────────────────────
+
+    #[test]
+    fn more_than_a_hundred_errors_report_total_and_truncation() {
+        let (claude, _d, db) = seeded();
+        let path = session_path(claude.path());
+
+        let mut body = fs::read_to_string(&path).unwrap();
+        for _ in 0..150 {
+            body.push_str("not-valid-json\n");
+        }
+        fs::write(&path, body).unwrap();
+
+        let stats = run_ingest(&warm_opts(claude.path(), &db), None).expect("run");
+
+        assert_eq!(stats.error_count, 150, "the total is uncapped");
+        assert_eq!(stats.errors.len(), 100, "the display list is capped");
+        assert!(stats.errors_truncated);
+        assert!(
+            !fingerprints(&db).contains(&path.to_string_lossy().into_owned()),
+            "the errored path is withheld even though it is past the display cap"
+        );
+    }
+
+    // ── A file that vanishes between discovery and read ────────────────────
+
+    #[test]
+    fn a_file_that_vanishes_after_discovery_is_absence_not_an_error() {
+        // Claude Code rotates transcripts while spaghetti runs. A file that
+        // existed at scan time and is gone by read time is a deletion we
+        // simply missed, not a fault — reporting it would cry wolf on a
+        // perfectly normal race.
+        let (claude, _d, db) = seeded();
+        let extra =
+            project_dir(claude.path(), SLUG).join("99999999-0000-0000-0000-00000000000a.jsonl");
+        fs::write(&extra, user_line("x1", "temp")).unwrap();
+        fs::remove_file(&extra).unwrap();
+
+        let stats = run_ingest(&warm_opts(claude.path(), &db), None).expect("run");
+        assert_eq!(
+            stats.error_count, 0,
+            "a vanished file is not a failure: {:?}",
+            stats.errors
+        );
+    }
+
+    // ── A fatal on the only project ────────────────────────────────────────
+
+    #[test]
+    fn a_fatal_on_the_only_project_commits_nothing_and_still_returns() {
+        let db_dir = TempDir::new().unwrap();
+        let db = db_dir.path().join("close.db");
+        let claude = fake_claude_fixture();
+
+        let doomed = project_dir(claude.path(), SLUG);
+        let stats = with_fault(&doomed, "enumeration failed", || {
+            run_ingest(&warm_opts(claude.path(), &db), None)
+        })
+        .expect("a fatal must not reject the promise");
+
+        assert_eq!(
+            shape_of(&db).projects,
+            Vec::<String>::new(),
+            "the only project went fatal, so nothing may commit"
+        );
+        assert!(stats.error_count > 0);
+    }
+
+    // ── Exactly one terminal event per started project ─────────────────────
+
+    #[test]
+    fn a_fatal_project_emits_one_terminal_event_and_never_completes() {
+        use crate::core::event::IngestEvent;
+        use crossbeam_channel::unbounded;
+
+        let claude = fake_claude_fixture();
+        let doomed = project_dir(claude.path(), SLUG);
+        let (tx, rx) = unbounded::<IngestEvent>();
+
+        with_fault(&doomed, "enumeration failed", || {
+            let parser = crate::claude::project_parser::ProjectParser::new();
+            let _ = parser.parse_project(claude.path(), SLUG, &tx);
+        });
+        drop(tx);
+
+        let events: Vec<IngestEvent> = rx.into_iter().collect();
+        let completes = events
+            .iter()
+            .filter(|e| matches!(e, IngestEvent::ProjectComplete { .. }))
+            .count();
+        let aborts = events
+            .iter()
+            .filter(|e| matches!(e, IngestEvent::ProjectAbort { .. }))
+            .count();
+
+        assert_eq!(completes, 0, "a fatal project must not report completion");
+        assert_eq!(aborts, 1, "exactly one terminal event: {events:#?}");
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, IngestEvent::ProjectFatal { .. })),
+            "and the fatal itself must be reported"
+        );
+    }
+
+    #[test]
+    fn a_healthy_project_emits_exactly_one_terminal_event() {
+        use crate::core::event::IngestEvent;
+        use crossbeam_channel::unbounded;
+
+        let claude = fake_claude_fixture();
+        let (tx, rx) = unbounded::<IngestEvent>();
+        let parser = crate::claude::project_parser::ProjectParser::new();
+        parser.parse_project(claude.path(), SLUG, &tx).unwrap();
+        drop(tx);
+
+        let events: Vec<IngestEvent> = rx.into_iter().collect();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| matches!(
+                    e,
+                    IngestEvent::ProjectComplete { .. } | IngestEvent::ProjectAbort { .. }
+                ))
+                .count(),
+            1,
+            "exactly one terminal event"
+        );
+    }
+
+    // ── A data event arriving for a poisoned project is dropped ────────────
+
+    #[test]
+    fn late_data_for_a_poisoned_project_does_not_commit_under_its_successor() {
+        // The reason the poison set exists. The parser fills a local buffer
+        // that is drained after the fact, so a project's rows can still be in
+        // flight when its fatal lands. Without the poison they open a fresh
+        // transaction and commit under whatever project comes next.
+        use crate::core::event::IngestEvent;
+        use crate::core::writer::Writer;
+        use crossbeam_channel::unbounded;
+
+        let db_dir = TempDir::new().unwrap();
+        let db = db_dir.path().join("poison.db");
+        let mut w = Writer::with_source_id(&db, "claude-code".to_string()).unwrap();
+        let (tx, rx) = unbounded::<IngestEvent>();
+
+        tx.send(IngestEvent::Project {
+            slug: "doomed".into(),
+            original_path: "/x".into(),
+            sessions_index_json: "{}".into(),
+        })
+        .unwrap();
+        tx.send(IngestEvent::ProjectFatal {
+            slug: "doomed".into(),
+            path: "/x".into(),
+            message: "boom".into(),
+        })
+        .unwrap();
+        // Arrives after the rollback — must be dropped, not re-opened.
+        tx.send(IngestEvent::Project {
+            slug: "doomed".into(),
+            original_path: "/x".into(),
+            sessions_index_json: "{}".into(),
+        })
+        .unwrap();
+        tx.send(IngestEvent::ProjectAbort {
+            slug: "doomed".into(),
+        })
+        .unwrap();
+        tx.send(IngestEvent::Project {
+            slug: "healthy".into(),
+            original_path: "/y".into(),
+            sessions_index_json: "{}".into(),
+        })
+        .unwrap();
+        tx.send(IngestEvent::ProjectComplete {
+            slug: "healthy".into(),
+            duration_ms: 0,
+        })
+        .unwrap();
+        drop(tx);
+
+        w.run(rx).expect("run");
+
+        let conn = Connection::open(&db).unwrap();
+        let mut stmt = conn
+            .prepare("SELECT slug FROM projects ORDER BY slug")
+            .unwrap();
+        let slugs: Vec<String> = stmt
+            .query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect();
+        assert_eq!(
+            slugs,
+            vec!["healthy".to_string()],
+            "a poisoned project's late rows must not survive"
         );
     }
 }

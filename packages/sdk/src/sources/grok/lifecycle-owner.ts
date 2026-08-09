@@ -20,6 +20,7 @@
  * Change events and extract-null skips stay on one connection.
  */
 
+import { reportIngestErrors } from '../../data/ingest-error-report.js';
 import { EventEmitter } from 'events';
 
 import type { FileService } from '../../io/index.js';
@@ -182,7 +183,7 @@ export class GrokLifecycleOwner extends EventEmitter implements LifecycleOwner {
       phase: 'parsing',
       message: `Running native Grok ingest (${native.nativeVersion()})…`,
     });
-    await native.ingest(
+    const stats = await native.ingest(
       {
         agentDir: this.source.rootDir,
         dbPath: this.dbPath,
@@ -204,6 +205,10 @@ export class GrokLifecycleOwner extends EventEmitter implements LifecycleOwner {
         });
       },
     );
+
+    // A partial ingest still resolves — the failed inputs kept their retry —
+    // so the result is the only record that anything went wrong.
+    reportIngestErrors('grok', stats, this.errorSink);
   }
 
   /** Pure-TS GrokReader path. Handle must be open. */
