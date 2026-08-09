@@ -13,6 +13,7 @@
 //! shares a DB with other agents.
 
 pub mod event;
+pub mod ingest_contract;
 pub mod jsonl;
 pub mod schema;
 pub mod text;

@@ -354,6 +354,30 @@ ON CONFLICT(source_id, path) DO UPDATE SET
 /// fingerprints when one source re-ingests (Phase B).
 const SQL_CLEAR_SOURCE_FILES: &str = "DELETE FROM source_files WHERE source_id = ?";
 
+/// The one source allowed to clear the artifact tables, because it is the only
+/// one that writes them.
+///
+/// Verified rather than assumed: the Codex and Grok readers emit only
+/// Fingerprint / Message / Project / Session / *Complete events and never the
+/// artifact events these tables are written from.
+const CLAUDE_ARTIFACT_OWNER: &str = "claude-code";
+
+/// Artifact tables with no `source_id` column, so all-or-nothing.
+///
+/// Children before parents: no foreign keys are enforced today, but the
+/// ordering costs nothing and keeps the next schema change from being a silent
+/// trap. A future source that writes any of these must add ownership to the
+/// schema first.
+const UNSCOPED_ARTIFACT_TABLES: [&str; 7] = [
+    "tool_results",
+    "todos",
+    "tasks",
+    "file_history",
+    "workflows",
+    "plans",
+    "project_memories",
+];
+
 /// Synthetic slug for the transaction that batches the tail-of-stream
 /// `Fingerprint` writes. `run` commits (rather than rolls back) the open
 /// transaction on channel close when it carries this slug — every other open
@@ -759,12 +783,28 @@ impl Writer {
                         params![self.source_id],
                     )?;
                     super::token_activity::invalidate_materialization(&self.conn, &self.source_id)?;
+
+                    // Artifact tables carry no source_id, so they are all-or-
+                    // nothing and only for their sole writer. See
+                    // UNSCOPED_ARTIFACT_TABLES.
+                    if self.source_id == CLAUDE_ARTIFACT_OWNER {
+                        for table in UNSCOPED_ARTIFACT_TABLES {
+                            self.conn.execute(&format!("DELETE FROM {table}"), [])?;
+                        }
+                    }
+
                     self.conn
                         .execute(SQL_CLEAR_SOURCE_SESSIONS, params![self.source_id])?;
                     self.conn
                         .execute(SQL_CLEAR_SOURCE_PROJECTS, params![self.source_id])?;
                     self.conn
                         .execute(SQL_CLEAR_SOURCE_FILES, params![self.source_id])?;
+                    // Last, inside the same transaction: a clear that rolls
+                    // back must not leave the source looking repaired.
+                    super::ingest_contract::invalidate_source_contract(
+                        &self.conn,
+                        &self.source_id,
+                    )?;
                     Ok(())
                 })();
                 match clear_result {

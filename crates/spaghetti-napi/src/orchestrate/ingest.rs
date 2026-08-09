@@ -506,6 +506,19 @@ pub(crate) fn run_ingest(
         .join()
         .map_err(|_| IngestInternalError::WriterPanic)??;
 
+    // Success-last contract publication (RFC 008 Phase 1.3).
+    //
+    // Everything the contract covers has now committed: the writer joined
+    // without error, which means entity writes, the FTS rebuild, the token
+    // rollup, and the fingerprint flush all finished. Publishing earlier — or
+    // unconditionally — would let a failed run look complete, and the next warm
+    // start would skip the repair it still needs.
+    //
+    // `errors` holds per-record parse failures. Those omit their fingerprints
+    // so the file retries next run, which means the source is *not* fully
+    // materialised and must not be marked current.
+    publish_contract_if_clean(&resolved, &errors);
+
     let duration_ms = u32::try_from(start.elapsed().as_millis()).unwrap_or(u32::MAX);
 
     Ok(IngestStats {
@@ -516,6 +529,23 @@ pub(crate) fn run_ingest(
         subagents_written: writer_stats.subagents_written,
         errors,
     })
+}
+
+/// Mark this source as having completed under the current ingest contract,
+/// but only when the run was clean.
+///
+/// Failing to publish is always safe — it costs one extra full re-ingest.
+/// Publishing when we should not have is not: the marker is what defeats the
+/// warm fast path, so a wrong `true` makes the repair unreachable. Every
+/// failure path here therefore leaves the marker alone.
+fn publish_contract_if_clean(resolved: &ResolvedOptions, errors: &[IngestError]) {
+    if !errors.is_empty() {
+        return;
+    }
+    let Ok(conn) = Connection::open(&resolved.db_path) else {
+        return;
+    };
+    let _ = crate::core::ingest_contract::mark_source_contract_current(&conn, &resolved.source_id);
 }
 
 /// Warm-start pre-check: read the stored `source_files` fingerprints
@@ -542,6 +572,17 @@ fn warm_has_no_changes(
         return Ok(false);
     }
 
+    // Forced upgrade repair (RFC 008 Phase 1.3). Historical builds can leave
+    // rows no fingerprint diff reveals — a parent-less sidecar written before a
+    // project rolled back, say — so an older contract version has to defeat the
+    // fast path even when every file matches. Absent reads as older, which is
+    // the safe direction.
+    if !crate::core::ingest_contract::is_source_contract_current(&conn, &resolved.source_id)
+        .unwrap_or(false)
+    {
+        return Ok(false);
+    }
+
     let store = FingerprintStore::new(&conn, &resolved.source_id);
     let stored = match store.load_all() {
         Ok(s) if s.is_empty() => return Ok(false), // nothing persisted yet
@@ -549,18 +590,13 @@ fn warm_has_no_changes(
         Err(_) => return Ok(false), // treat any read failure as "has changes"
     };
 
-    // Multi-source: only consider fingerprints under this source's root so
-    // Codex paths don't force Claude into perpetual full re-ingest (and vice versa).
-    let root_s = resolved.root_dir.to_string_lossy();
-    let filtered: HashMap<String, fingerprint::SourceFingerprint> = stored
-        .into_iter()
-        .filter(|(p, _)| p.starts_with(root_s.as_ref()))
-        .collect();
-    if filtered.is_empty() {
-        return Ok(false);
-    }
-
-    let diff = fingerprint::compute_diff(&resolved.root_dir, &filtered)?;
+    // No path-prefix filter here. There used to be one, because `load_all` read
+    // every source's rows and ownership had to be recovered from the path — the
+    // exact `starts_with(root)` inference RFC 008 P8 warns against, and a real
+    // hazard for roots that are string prefixes of each other (`/agent` vs
+    // `/agent-old`). `load_all` is source-scoped now, so the rows are already
+    // and only this source's.
+    let diff = fingerprint::compute_diff(&resolved.root_dir, &stored)?;
     Ok(diff.added.is_empty() && diff.modified.is_empty() && diff.deleted.is_empty())
 }
 
@@ -588,6 +624,11 @@ fn run_codex_ingest(
             OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
         ) {
             if crate::core::token_activity::is_materialized(&conn, &resolved.source_id)
+                .unwrap_or(false)
+                && crate::core::ingest_contract::is_source_contract_current(
+                    &conn,
+                    &resolved.source_id,
+                )
                 .unwrap_or(false)
             {
                 let store = FingerprintStore::new(&conn, &resolved.source_id);
@@ -646,6 +687,11 @@ fn run_codex_ingest(
         .join()
         .map_err(|_| IngestInternalError::WriterPanic)??;
 
+    // Success-last, same rule as the Claude path. These readers do not yet
+    // accumulate per-record errors (RFC 008 Phase 2 gives them the error
+    // protocol), so a clean writer join is the whole signal available today.
+    publish_contract_if_clean(resolved, &[]);
+
     Ok(IngestStats {
         duration_ms: u32::try_from(start.elapsed().as_millis()).unwrap_or(u32::MAX),
         projects_processed: writer_stats.projects_processed.max(read_stats.projects),
@@ -680,6 +726,11 @@ fn run_grok_ingest(
             OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
         ) {
             if crate::core::token_activity::is_materialized(&conn, &resolved.source_id)
+                .unwrap_or(false)
+                && crate::core::ingest_contract::is_source_contract_current(
+                    &conn,
+                    &resolved.source_id,
+                )
                 .unwrap_or(false)
             {
                 let store = FingerprintStore::new(&conn, &resolved.source_id);
@@ -737,6 +788,11 @@ fn run_grok_ingest(
     let writer_stats: WriterStats = writer_handle
         .join()
         .map_err(|_| IngestInternalError::WriterPanic)??;
+
+    // Success-last, same rule as the Claude path. These readers do not yet
+    // accumulate per-record errors (RFC 008 Phase 2 gives them the error
+    // protocol), so a clean writer join is the whole signal available today.
+    publish_contract_if_clean(resolved, &[]);
 
     Ok(IngestStats {
         duration_ms: u32::try_from(start.elapsed().as_millis()).unwrap_or(u32::MAX),
@@ -939,6 +995,110 @@ mod tests {
             )
             .unwrap();
         assert_eq!(count, 2);
+    }
+
+    /// Build the standard warm options for a fixture + db pair.
+    fn warm_opts(agent_dir: &Path, db: &Path) -> IngestOptions {
+        IngestOptions {
+            agent_dir: agent_dir.to_string_lossy().into(),
+            db_path: db.to_string_lossy().into(),
+            mode: "warm".into(),
+            progress_interval_ms: None,
+            parallelism: None,
+            source_id: None,
+            safe_bulk: None,
+        }
+    }
+
+    #[test]
+    fn a_clean_ingest_publishes_the_contract_marker() {
+        let claude = fake_claude_fixture();
+        let db_dir = TempDir::new().unwrap();
+        let db = db_dir.path().join("spaghetti.db");
+
+        run_ingest(&warm_opts(claude.path(), &db), None).expect("initial ingest");
+
+        let conn = Connection::open(&db).unwrap();
+        assert!(
+            crate::core::ingest_contract::is_source_contract_current(&conn, "claude-code").unwrap(),
+            "a clean run must mark the source current, or every warm start repairs forever"
+        );
+    }
+
+    #[test]
+    fn a_stale_contract_version_defeats_the_warm_fast_path() {
+        let claude = fake_claude_fixture();
+        let db_dir = TempDir::new().unwrap();
+        let db = db_dir.path().join("spaghetti.db");
+        let opts = warm_opts(claude.path(), &db);
+
+        run_ingest(&opts, None).expect("initial ingest");
+
+        // Baseline: with the marker current and no file changes, warm is a no-op.
+        let noop = run_ingest(&opts, None).expect("warm no-op");
+        assert_eq!(noop.projects_processed, 0, "warm should be a no-op here");
+
+        // Now age the marker without touching a single file. This is the case
+        // fingerprints cannot see — a build whose rows are wrong in a way no
+        // mtime or size reveals.
+        {
+            let conn = Connection::open(&db).unwrap();
+            conn.execute(
+                "UPDATE source_materializations SET version = ?1 \
+                 WHERE source_id = 'claude-code' AND projection = ?2",
+                rusqlite::params![
+                    crate::core::ingest_contract::RUST_INGEST_CONTRACT_VERSION - 1,
+                    crate::core::ingest_contract::RUST_INGEST_CONTRACT
+                ],
+            )
+            .unwrap();
+        }
+
+        let repaired = run_ingest(&opts, None).expect("forced repair");
+        assert!(
+            repaired.projects_processed > 0,
+            "a stale contract version must force a re-ingest even when every file matches"
+        );
+
+        // And the repair republishes, so the next run is a no-op again.
+        let conn = Connection::open(&db).unwrap();
+        assert!(
+            crate::core::ingest_contract::is_source_contract_current(&conn, "claude-code").unwrap()
+        );
+    }
+
+    #[test]
+    fn the_repair_is_per_source() {
+        let claude = fake_claude_fixture();
+        let db_dir = TempDir::new().unwrap();
+        let db = db_dir.path().join("spaghetti.db");
+
+        run_ingest(&warm_opts(claude.path(), &db), None).expect("initial ingest");
+
+        // Mark an unrelated source current, then age Claude's marker.
+        {
+            let conn = Connection::open(&db).unwrap();
+            crate::core::ingest_contract::mark_source_contract_current(&conn, "codex").unwrap();
+            conn.execute(
+                "UPDATE source_materializations SET version = ?1 \
+                 WHERE source_id = 'claude-code' AND projection = ?2",
+                rusqlite::params![
+                    crate::core::ingest_contract::RUST_INGEST_CONTRACT_VERSION - 1,
+                    crate::core::ingest_contract::RUST_INGEST_CONTRACT
+                ],
+            )
+            .unwrap();
+        }
+
+        run_ingest(&warm_opts(claude.path(), &db), None).expect("forced repair");
+
+        // Repairing Claude must leave Codex alone — a global marker would have
+        // dragged every source through a full re-ingest.
+        let conn = Connection::open(&db).unwrap();
+        assert!(
+            crate::core::ingest_contract::is_source_contract_current(&conn, "codex").unwrap(),
+            "repairing claude-code must not invalidate codex"
+        );
     }
 
     #[test]
