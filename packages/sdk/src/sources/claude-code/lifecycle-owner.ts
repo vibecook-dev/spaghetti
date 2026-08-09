@@ -10,6 +10,7 @@
  * re-exports remain in `data/agent-data-service.ts` and `data/lifecycle-owner.ts`.
  */
 
+import { reportIngestErrors } from '../../data/ingest-error-report.js';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { existsSync, mkdirSync } from 'node:fs';
@@ -256,7 +257,7 @@ export class ClaudeCodeLifecycleOwner extends EventEmitter implements AgentDataS
   private async initializeWithNative(native: NonNullable<ReturnType<typeof loadNativeAddon>>): Promise<void> {
     this.emitProgress('parsing', `Running native ingest (${native.nativeVersion()})...`);
 
-    await native.ingest(
+    const stats = await native.ingest(
       {
         agentDir: this.rootDir,
         dbPath: this.dbPath,
@@ -288,6 +289,12 @@ export class ClaudeCodeLifecycleOwner extends EventEmitter implements AgentDataS
         }
       },
     );
+
+    // A partial ingest is a success as far as the promise is concerned — the
+    // run completed and the failed inputs kept their retry — so the result is
+    // the only place the failures exist. Discarding it is how a dropped
+    // project used to pass unnoticed.
+    reportIngestErrors('claude-code', stats, this.options.errorSink);
   }
 
   /**

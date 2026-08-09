@@ -14,6 +14,7 @@ import type { AgentDataServiceOptions } from '../data/agent-data-service.js';
 import type { AgentSource } from '../sources/types.js';
 import type { DurableStore } from '../store/durable-store.js';
 import type { IngestEngine } from '../settings.js';
+import type { ErrorSink } from '../io/error-sink.js';
 
 /**
  * Dependencies StaticIngest needs from the factory. LifecycleOwner
@@ -32,7 +33,10 @@ export interface StaticIngestDeps {
  * Map plane deps into LifecycleOwner constructor options.
  */
 export function toLifecycleOptions(
-  deps: Pick<StaticIngestDeps, 'source' | 'engine' | 'dbPath'> & { safeBulk?: boolean },
+  deps: Pick<StaticIngestDeps, 'source' | 'engine' | 'dbPath'> & {
+    safeBulk?: boolean;
+    errorSink?: ErrorSink;
+  },
 ): AgentDataServiceOptions {
   const options: AgentDataServiceOptions = {
     rootDir: deps.source.rootDir,
@@ -40,5 +44,6 @@ export function toLifecycleOptions(
   if (deps.dbPath !== undefined) options.dbPath = deps.dbPath;
   if (deps.engine !== undefined) options.engine = deps.engine;
   if (deps.safeBulk !== undefined) options.safeBulk = deps.safeBulk;
+  if (deps.errorSink !== undefined) options.errorSink = deps.errorSink;
   return options;
 }

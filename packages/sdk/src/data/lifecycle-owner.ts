@@ -28,6 +28,7 @@ import type { Project, Session, SessionMessage, AgentConfig, AgentAnalytic } fro
 import type { AgentDataStore } from './agent-data-store.js';
 import type { LiveWatch } from '../live/live-watch.js';
 import type { IngestEngine } from '../settings.js';
+import type { ErrorSink } from '../io/error-sink.js';
 import type {
   SubagentTimelinePage,
   SubagentTimelinePageRequest,
@@ -280,6 +281,12 @@ export interface AgentDataServiceOptions {
    * less likely to leave a corrupt cache.
    */
   safeBulk?: boolean;
+  /**
+   * Where to report non-fatal ingest failures. Without it a partial ingest
+   * completes silently — the run is still correct and the failed inputs still
+   * retry, but nobody is told which files were dropped (RFC 008 Phase 2).
+   */
+  errorSink?: ErrorSink;
 }
 
 /** @deprecated Use {@link AgentDataService}. */

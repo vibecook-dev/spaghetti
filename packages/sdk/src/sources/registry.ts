@@ -63,6 +63,7 @@ const REGISTRY: Record<AgentSourceId, LifecycleOwnerFactory> = {
         engine: deps.engine,
         dbPath: deps.dbPath,
         safeBulk: deps.safeBulk,
+        errorSink: deps.errorSink,
       }),
       deps.claudeLive,
     );

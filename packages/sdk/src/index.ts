@@ -109,7 +109,16 @@ export {
   resolveActiveEngine,
   type NativeAddon,
   type ActiveEngineInfo,
+  // Ingest error reporting (RFC 008 Phase 2). Exported so a consumer can read
+  // `path` and `severity` off a failure directly, rather than casting its way
+  // into the stats object.
+  type NativeIngestStats,
+  type NativeIngestError,
+  type NativeIngestErrorReport,
+  type NativeIngestErrorSeverity,
 } from './native.js';
+
+export { reportIngestErrors, summarizeIngestErrors } from './data/ingest-error-report.js';
 
 // Settings (engine selection, etc.)
 export {
