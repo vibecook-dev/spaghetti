@@ -96,6 +96,10 @@ pub struct WriterStats {
     pub sessions_processed: u32,
     pub messages_written: u32,
     pub subagents_written: u32,
+    /// Projects whose transaction was rolled back by an
+    /// [`IngestEvent::WorkerError`]. Non-zero means the run is a partial
+    /// success and must not publish the ingest contract (RFC 008 Phase 1.3).
+    pub worker_errors: u32,
 }
 
 /// Per-table row counters used by both [`Writer::handle_event`] (cold-start
@@ -713,9 +717,18 @@ impl Writer {
 
             IngestEvent::WorkerError { slug: _, error: _ } => {
                 // Roll back any in-flight work for this project and keep
-                // going. The error is surfaced by the orchestrator via
-                // `IngestStats.errors`; the writer's only job is to not
-                // persist partial project data.
+                // going; the writer's only job is to not persist partial
+                // project data.
+                //
+                // Counted because nothing else sees it. `IngestStats.errors`
+                // holds only project-level parse failures — the value a
+                // parser *returns* — while per-record failures travel as
+                // these events, so a run that dropped a project this way
+                // still looked clean to the orchestrator and published the
+                // ingest contract over it. Phase 2 owns giving these a real
+                // error channel and a finer rollback boundary; Phase 1 only
+                // needs the run to stop claiming it succeeded.
+                self.stats.worker_errors = self.stats.worker_errors.saturating_add(1);
                 if self.in_transaction {
                     self.rollback_transaction();
                 }
