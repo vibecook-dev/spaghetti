@@ -8,7 +8,8 @@ Phases 0–5 are merged and the soak release is published (`0.6.1`). RFC 008 is
 
 > ## ✅ Executed on macOS, 2026-08-10 — see [§8 Outcome](#8-outcome-macos-run)
 >
-> Fixes in **[#115](https://github.com/vibecook-dev/spaghetti/pull/115)**. On a
+> Fixes in **[#115](https://github.com/vibecook-dev/spaghetti/pull/115)** and
+> **[#116](https://github.com/vibecook-dev/spaghetti/pull/116)**. On a
 > 113-project real corpus the audit went from **360 divergences to 223**, and
 > all 223 are the accepted `agent_type` rows. Every other table is clean.
 >
@@ -242,10 +243,20 @@ The `imagePasteIds` bug is the one worth internalising, and it generalises §6:
   but it is one call site away from mattering, and #115 fixes it too.
 
 **RFC 008 §9 lists "silent parser failure" as a sign-off blocker.** It was
-happening on 5.6% of lines the whole time. Making a typed-parse failure
-*loud* — routing it to the `record-skip` error sink that §5 already defines —
-is the systemic fix and is **not** in #115. It is the first thing the next
-person should pick up.
+happening on 5.6% of lines the whole time. Making a typed-parse failure *loud*
+is the systemic fix, and it landed in
+[#116](https://github.com/vibecook-dev/spaghetti/pull/116).
+
+The interesting part is that it could not simply report everything.
+`errored_paths` gates fingerprint withholding, so reporting all 5,035 failures
+would have withheld the fingerprint of every file containing one and re-ingested
+much of the corpus on every warm start, forever — against a 60 ms warm path. The
+filter is whether the failure cost anything: read the `type` discriminator off
+the raw JSON (still available when the typed parse just failed) and report only
+when that variant would have contributed searchable text. False for all 1,260
+remaining failures here, so the report is empty and warm start is untouched —
+while the `imagePasteIds` bug that started this would have been caught the first
+time it ran.
 
 ### The timestamp bug was mischaracterised
 
@@ -305,7 +316,14 @@ experiment.
 
 - `subagents.agent_type`, 223 rows — accepted, unchanged, and still the reason
   the real-corpus diff can never reach zero while both engines exist.
-- Making silent typed-parse failures loud (above).
+- **Ship it.** #115 and #116 are unreleased, and `0.6.1` cannot be installed on
+  npm 12. Sign-off waits on a `0.6.2` that a stock `npm install` can actually
+  run — verify that as part of cutting it, because the workspace cannot detect
+  this class of breakage (pnpm allowlists `better-sqlite3`).
 - Re-run on **Linux/ext4**. Two of the five bugs were filesystem- or
   platform-shaped, so a third platform is still worth a pass — though the
   ordering fix now pins the one that was FS-dependent.
+- The 745 lines that still fail the typed parse are skills/context telemetry
+  keyed on `event` rather than `type` — a different record family that is not a
+  `SessionMessage` at all. They cost nothing today. If they ever need indexing
+  they need their own reader, not another variant bolted onto this enum.

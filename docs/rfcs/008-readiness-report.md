@@ -5,7 +5,7 @@ gates are now met on two platforms, but the published soak release
 (`0.6.1`) **cannot be installed on npm 12**, so it does not demonstrate a
 working shipped artifact. Sign-off waits on a release that can. See §9.
 
-**Cross-platform verification:** [`008-handoff-mac.md`](./008-handoff-mac.md) — executed on macOS 2026-08-10 (§8 of that doc). Fixes in [#115](https://github.com/vibecook-dev/spaghetti/pull/115). As predicted, macOS found a *different* divergence set, not a subset: both open Windows items vanished and three new classes appeared, one of them silent data loss.
+**Cross-platform verification:** [`008-handoff-mac.md`](./008-handoff-mac.md) — executed on macOS 2026-08-10 (§8 of that doc). Fixes in [#115](https://github.com/vibecook-dev/spaghetti/pull/115) and [#116](https://github.com/vibecook-dev/spaghetti/pull/116). As predicted, macOS found a *different* divergence set, not a subset: both open Windows items vanished and three new classes appeared, one of them silent data loss.
 
 **Dated:** 2026-08-10 · **Verified on:** Windows 11 / NTFS and macOS 15 / APFS · **Current version:** `0.6.1` (published)
 **Phases:** [0](./008-phase-0-baseline.md) · [1](./008-phase-1-gate.md) · [2](./008-phase-2-gate.md) · [3](./008-phase-3-gate.md) · [4](./008-phase-4-gate.md)
@@ -192,21 +192,42 @@ is clean.
 | `plans.title`                         |    0 | Did not reproduce — closed by the CRLF fix in #111, and a macOS corpus is pure-LF.                                                                              |
 | `tool_results`                        |    0 | Did not reproduce — the row needed an `E--` Windows drive-root slug. 143 rows clean.                                                                             |
 
-### Open — silent typed-parse failure
+### Resolved — silent typed-parse failure ([#116](https://github.com/vibecook-dev/spaghetti/pull/116))
 
 Not a divergence in the diff, which is why five phases missed it: a sweep of
 the corpus through the Rust typed parser found **5,035 of 89,559 session lines
-(5.6%) failing to deserialize**, every one silently. Both call sites discard
-the error (`Err(_) => None`, `if let Ok(msg)`) and neither reports it, so a
-failure is indistinguishable from a record that legitimately contributes no
-text.
+(5.6%) failing to deserialize**, every one silently. Both call sites discarded
+the error (`Err(_) => None`, `if let Ok(msg)`), so a failure was
+indistinguishable from a record that legitimately contributes no text.
 
-Two of those causes are fixed in #115 (`imagePasteIds`, and
-`attachment.content` at 3,754 lines — typed `String` but sometimes an array).
-The remainder are variants that contribute no text today, so they cost nothing
-*yet*. **The systemic fix — routing a typed-parse failure to the `record-skip`
-error sink §5 already defines — is not done**, and RFC 008 §9 names "silent
-parser failure" as a sign-off blocker. This is the first thing to pick up next.
+Three of the causes are fixed outright — `imagePasteIds` and
+`attachment.content` (3,754 lines) in #115, `LastPromptMessage` (515 lines) in
+#116, all three the same defect of a shape asserted from documentation rather
+than from data. That leaves 745, which are not `SessionMessage`s at all:
+skills/context telemetry keyed on `event` rather than `type`.
+
+**The systemic fix is the reporting, and it could not simply report
+everything.** `errored_paths` gates fingerprint withholding, so reporting all
+5,035 would withhold the fingerprint of every file containing one and re-ingest
+a large fraction of the corpus on every warm start, forever — against a warm
+path measured in §3 at 60 ms. The filter is therefore whether the failure cost
+anything: the `type` discriminator is read off the raw JSON (which still works
+when the typed parse just failed) and reported only when that variant would
+have contributed searchable text. On this corpus that is false for all 1,260
+remaining failures, so the error report is empty and warm start is untouched.
+
+Verified by breaking one `user` line and watching the alarm ring — a
+check that is silent when it should shout cannot be trusted on "tests pass":
+
+```
+cold  projects=114 errorCount=0     no false alarms
+warm  projects=0                    still a true no-op
+break one user line, warm again:
+      projects=9  errorCount=1
+      [record-skip] session … line 0: stored without searchable text —
+                    type=user: missing field `role`
+warm again: still re-reads, because the fingerprint stays withheld
+```
 
 ---
 
@@ -284,23 +305,20 @@ works. This one does not.
 
 Two further items, neither of which existed when this report was first drafted:
 
-- The parity fixes in
-  [#115](https://github.com/vibecook-dev/spaghetti/pull/115) — including the
+- The fixes in [#115](https://github.com/vibecook-dev/spaghetti/pull/115) and
+  [#116](https://github.com/vibecook-dev/spaghetti/pull/116) — including the
   `messages.text_content` **data loss** — are unreleased. Signing off on
   `0.6.1` would sign off on a build that silently drops user text from search.
-- **Silent parser failure**, which §9 names as a blocker, is real and
-  measured: 5.6% of session lines fail the typed parse without reporting
-  anything (§6). #115 fixes the two causes that had visible consequences; the
-  systemic fix does not exist yet.
+- **Silent parser failure**, which §9 names as a blocker, was real and
+  measured at 5.6% of session lines. Now fixed in #116 (§6), but likewise
+  unreleased.
 
 Remaining before sign-off:
 
-1. Merge #115.
-2. Route typed-parse failures to the `record-skip` error sink so the failure
-   mode is loud (§6).
-3. Cut **`0.6.2`**, and verify a clean `npm install` of it works on npm 12.
-4. Re-run the fixture diffs and one real-corpus audit against that release.
-5. Re-date this report and sign §9.
+1. Merge #115, then #116 (stacked on it).
+2. Cut **`0.6.2`**, and verify a clean `npm install` of it works on npm 12.
+3. Re-run the fixture diffs and one real-corpus audit against that release.
+4. Re-date this report and sign §9.
 
 Until then RFC 009 may **not** begin Phase 0. Every other handoff condition is
 met: the token-estimation policy is settled, the supported-platform list is
