@@ -407,6 +407,12 @@ export class ProjectParserImpl implements ProjectParser {
     const extra = discovered.filter((e) => !indexedIds.has(e.sessionId));
     if (extra.length === 0) return indexEntries;
 
+    // Sorted, because the source is a directory listing and neither engine
+    // gets a guaranteed order from one. NTFS returns entries sorted while
+    // ext4 and APFS do not, so an unsorted merge agreed on Windows and
+    // disagreed on Linux and macOS — a cross-engine divergence that depended
+    // on the developer's filesystem (RFC 008 Phase 5).
+    extra.sort((a, b) => a.sessionId.localeCompare(b.sessionId));
     return [...indexEntries, ...extra];
   }
 

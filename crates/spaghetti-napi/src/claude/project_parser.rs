@@ -478,7 +478,14 @@ fn merge_with_discovered_entries(
         index_entries.iter().map(|e| e.session_id.clone()).collect();
     let mut merged = index_entries;
 
-    for entry in discover_session_entries(project_dir, original_path)? {
+    // Sorted, because the source is a directory listing and neither engine
+    // gets a guaranteed order from one. NTFS returns entries sorted while ext4
+    // and APFS do not, so an unsorted merge agreed on Windows and disagreed on
+    // Linux and macOS — a cross-engine divergence that depended on the
+    // developer's filesystem (RFC 008 Phase 5).
+    let mut discovered = discover_session_entries(project_dir, original_path)?;
+    discovered.sort_by(|a, b| a.session_id.cmp(&b.session_id));
+    for entry in discovered {
         if indexed.insert(entry.session_id.clone()) {
             merged.push(entry);
         }
