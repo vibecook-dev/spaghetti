@@ -36,6 +36,13 @@ git history at `211f4b1` if they are ever wanted back.
 
 <!-- End standing notice. -->
 
+## [0.6.1](https://github.com/vibecook-dev/spaghetti/compare/spaghetti-v0.6.0...spaghetti-v0.6.1) (2026-08-10)
+
+
+### Bug Fixes
+
+* **napi:** publish the musl platform packages ([#109](https://github.com/vibecook-dev/spaghetti/issues/109)) ([5ead091](https://github.com/vibecook-dev/spaghetti/commit/5ead091980c21a133441facf62960f21b5d0788d))
+
 ## [0.6.0](https://github.com/vibecook-dev/spaghetti/compare/spaghetti-v0.5.23...spaghetti-v0.6.0) (2026-08-10)
 
 
