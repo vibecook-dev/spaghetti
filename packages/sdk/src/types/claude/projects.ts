@@ -238,7 +238,13 @@ export interface UserMessage extends BaseMessageFields {
   promptId?: string;
   /** How the prompt was entered (e.g. 'typed', 'paste'). */
   promptSource?: string;
-  imagePasteIds?: string[];
+  /**
+   * Observed as **numbers** (`[1]`, `[2]`) in real transcripts — this was
+   * declared `string[]`, which TS never checks at runtime but the Rust port
+   * mirrored into a strict `Vec<String>` that failed the whole record. Kept
+   * as a union because older transcripts may carry either.
+   */
+  imagePasteIds?: Array<string | number>;
   teamName?: string;
   /**
    * Newline-delimited JSON the classifier prepends to the prompt (git

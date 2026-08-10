@@ -263,7 +263,7 @@ mod tests {
             full_path: "/tmp/s1.jsonl".into(),
             file_mtime: 1.0,
             first_prompt: "hi".into(),
-            summary: "summary".into(),
+            summary: Some("summary".into()),
             message_count: 3,
             created: "2026-04-17T00:00:00Z".into(),
             modified: "2026-04-17T00:00:01Z".into(),

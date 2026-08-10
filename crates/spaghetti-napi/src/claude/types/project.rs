@@ -30,8 +30,18 @@ pub struct SessionIndexEntry {
     pub file_mtime: f64,
     #[serde(default)]
     pub first_prompt: String,
-    #[serde(default)]
-    pub summary: String,
+    /// `Option` rather than `String` because TS distinguishes two states that
+    /// `#[serde(default)]` on a `String` collapses into one: the key **absent**
+    /// from the index entry (TS omits it and writes SQL `NULL`) and the key
+    /// present but empty (TS writes `''`). The real corpus has both — 6 NULL
+    /// and 117 empty — so defaulting to `String` made Rust write `''` for all
+    /// 123 and diverge on exactly the 6.
+    ///
+    /// `skip_serializing_if` keeps the round-trip faithful: a `None` must be
+    /// omitted again, not re-emitted as `null`, or `projects.sessions_index`
+    /// would diverge instead.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
     #[serde(default)]
     pub message_count: u64,
     #[serde(default)]

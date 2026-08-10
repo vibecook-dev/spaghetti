@@ -35,6 +35,36 @@ import { createRequire } from 'node:module';
 const _require = createRequire(import.meta.url);
 const VERSION = (_require('../package.json') as { version: string }).version;
 
+/**
+ * Turn an initialization failure into guidance that matches its actual cause.
+ *
+ * This used to append "Install a supported agent" to every failure, which is
+ * the wrong advice for the most common one: npm 12 blocks install scripts by
+ * default, so `better-sqlite3` never fetches its prebuilt binding and every
+ * DB-touching command dies. Telling that user to install an agent they already
+ * have sends them somewhere there is nothing to find.
+ */
+export function initFailureHint(msg: string): string {
+  if (/bindings file|better_sqlite3\.node|node-gyp|prebuild-install/i.test(msg)) {
+    return [
+      "better-sqlite3's native binding is missing — its install script did not run.",
+      'npm 12 blocks install scripts by default. Re-install allowing this one:',
+      '',
+      '  npm install --allow-scripts=better-sqlite3 @vibecook/spaghetti',
+      '',
+      'Already installed? Fetch the binding without a reinstall:',
+      '',
+      '  npm install-scripts approve better-sqlite3',
+      '',
+      'pnpm users: add better-sqlite3 to onlyBuiltDependencies in pnpm-workspace.yaml.',
+    ].join('\n');
+  }
+  if (/root dir not found|not a directory|ENOENT/i.test(msg)) {
+    return 'Install a supported agent and re-run. Data roots: ~/.claude, ~/.codex, ~/.grok';
+  }
+  return 'Re-run with --verbose for the full stack.';
+}
+
 /** Helper to initialize the service with standard error handling */
 async function withService<T>(fn: (api: Awaited<ReturnType<typeof initService>>) => Promise<T>): Promise<T> {
   let api;
@@ -43,10 +73,7 @@ async function withService<T>(fn: (api: Awaited<ReturnType<typeof initService>>)
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     process.stderr.write(
-      theme.error('\nFailed to initialize: ') +
-        msg +
-        '\n' +
-        theme.muted('Install a supported agent and re-run. Data roots: ~/.claude, ~/.codex, ~/.grok\n\n'),
+      theme.error('\nFailed to initialize: ') + msg + '\n' + theme.muted(initFailureHint(msg) + '\n\n'),
     );
     if (process.argv.includes('--verbose') && err instanceof Error && err.stack) {
       process.stderr.write(theme.muted(err.stack + '\n'));

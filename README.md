@@ -50,6 +50,26 @@ npx @vibecook/spaghetti search "worker pool"
 
 If `~/.codex/sessions` exists, Codex is auto-detected and indexed alongside Claude Code (zero config).
 
+### On npm 12: allow one install script
+
+npm 12 blocks package install scripts by default. Spaghetti stores its index in
+SQLite via `better-sqlite3`, which downloads its prebuilt native binding from a
+postinstall — so under a stock npm 12 the install completes but every command
+that touches the index fails with `Could not locate the bindings file`.
+
+```bash
+npm install -g --allow-scripts=better-sqlite3 @vibecook/spaghetti
+```
+
+Already installed? Fetch the binding without reinstalling:
+
+```bash
+npm install-scripts approve better-sqlite3
+```
+
+npm 11 and earlier run install scripts by default and need neither flag. pnpm
+users list it under `onlyBuiltDependencies` (this repo already does).
+
 ## What you get
 
 | Surface | Best for |
@@ -131,6 +151,7 @@ await api.dispose();
 
 - Node.js `>=18` for end users
 - `~/.claude` and/or `~/.codex` for real data
+- On npm 12, `--allow-scripts=better-sqlite3` at install time ([why](#on-npm-12-allow-one-install-script))
 - `pnpm` + Node.js 24 for local workspace development
 
 ## Learn more

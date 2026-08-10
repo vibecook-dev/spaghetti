@@ -1808,7 +1808,7 @@ mod tests {
             full_path: format!("/tmp/{id}.jsonl"),
             file_mtime: 100.0,
             first_prompt: "first".into(),
-            summary: "sum".into(),
+            summary: Some("sum".into()),
             message_count: 3,
             created: "2026-04-17T00:00:00Z".into(),
             modified: "2026-04-17T00:00:01Z".into(),
