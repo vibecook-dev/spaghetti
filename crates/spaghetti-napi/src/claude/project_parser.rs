@@ -556,7 +556,12 @@ fn discover_session_entries(
             .and_then(|m| m.modified())
             .ok()
             .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|d| d.as_secs_f64() * 1000.0)
+            // Node computes `stats.mtimeMs` as `sec * 1000 + nsec / 1e6`. Computing
+            // `as_secs_f64() * 1000.0` instead rounds differently in the last
+            // millisecond, and both engines then truncate when rendering three
+            // decimal digits — which turned a floating-point hair's breadth into
+            // a visible 1 ms disagreement on session timestamps (RFC 008 Phase 5).
+            .map(|d| d.as_secs() as f64 * 1000.0 + d.subsec_nanos() as f64 / 1_000_000.0)
             .unwrap_or(0.0);
 
         // Port of the TS discoverSessionEntries: set `created` and
