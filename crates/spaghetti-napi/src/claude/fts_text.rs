@@ -313,7 +313,10 @@ mod tests {
         );
         let msg: SessionMessage =
             serde_json::from_str(&json).expect("numeric imagePasteIds must still parse as user");
-        assert!(matches!(msg, SessionMessage::User(_)), "must be a User, not Unknown");
+        assert!(
+            matches!(msg, SessionMessage::User(_)),
+            "must be a User, not Unknown"
+        );
         assert_eq!(extract_message_text(&msg), "look at this");
     }
 
