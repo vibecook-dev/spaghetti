@@ -109,8 +109,13 @@ error sink.
 ## 6. Data divergence status
 
 Fixtures: **zero diffs on all four.** Real corpus (276 MB, 23 projects, 50,697
-messages): **427 divergences**, down from 657 before the Phase 5 linkage fix.
+messages): **421 divergences**, down from 657 at the start of Phase 5.
 Messages, todos, tasks, workflows, project memories, and FTS are clean.
+
+**The real corpus is live**, so counts move between runs — it is a working
+`~/.claude` that grows while the audit runs. Treat the numbers below as a
+snapshot and the _shapes_ as the finding; only the fixtures are reproducible
+enough to gate CI.
 
 ### Accepted
 
@@ -127,12 +132,12 @@ Messages, todos, tasks, workflows, project memories, and FTS are clean.
 
 ### Open — characterised, not yet resolved
 
-| Table / field                    | Count | Note                                                                                                                                        |
-| -------------------------------- | ----- | ------------------------------------------------------------------------------------------------------------------------------------------- |
-| `projects.sessions_index`        | 2     | Serialized index blob differs on 2 of 24 projects.                                                                                          |
-| `plans.title`                    | 2     | Title extraction differs on 2 plans.                                                                                                        |
-| `tool_results` (4 fields, 1 row) | 4     | All four fields differ on a single row, which reads as a row-ordering or off-by-one alignment difference rather than four independent bugs. |
-| `file_history.data`              | 1     | Snapshot blob differs on 1 row.                                                                                                             |
+| Table / field                    | Count | Note                                                                                                                                                                                                            |
+| -------------------------------- | ----- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `projects.sessions_index`        | 1     | Was 2. Both engines appended discovered-but-unindexed sessions in directory order and neither sorted, which agreed on NTFS and disagreed on ext4/APFS; both now sort. One row still differs and is unexplained. |
+| `plans.title`                    | 2     | Title extraction differs on 2 plans.                                                                                                                                                                            |
+| `tool_results` (4 fields, 1 row) | 4     | All four fields differ on a single row, which reads as a row-ordering or off-by-one alignment difference rather than four independent bugs.                                                                     |
+| `file_history.data`              | 1     | Snapshot blob differs on 1 row.                                                                                                                                                                                 |
 
 **These are the last blocker to sign-off besides the release itself.** Ten
 rows across four tables, none in the message or session bodies. Each needs to
