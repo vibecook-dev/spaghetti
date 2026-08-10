@@ -136,6 +136,31 @@ pub fn extract_message_text(msg: &SessionMessage) -> String {
     truncate(&parts.join("\n")).to_owned()
 }
 
+/// Would a line carrying this `type` have contributed searchable text?
+///
+/// Read off the raw JSON's discriminator, so it answers the question even when
+/// the typed parse just failed — which is the whole point. A failed parse on a
+/// contributing type means text that belongs in the index is missing from it; a
+/// failed parse on any other type costs nothing, because [`extract_message_text`]
+/// returns `""` for those variants anyway and the verbatim line is still stored.
+///
+/// That distinction is what makes reporting these failures affordable. Every
+/// reported failure withholds its file's fingerprint (so the input retries on
+/// the next warm start), so reporting the ones that cost nothing would re-ingest
+/// a large fraction of the corpus on every run, forever. On a 113-project real
+/// corpus this predicate is false for all 1,260 remaining failures — they are
+/// skills/context telemetry keyed on `event` rather than `type`, plus
+/// `last-prompt` records.
+///
+/// Kept beside [`extract_message_text`] deliberately: the two must agree, and a
+/// variant that starts contributing text has to be added in both places.
+pub fn type_contributes_text(msg_type: &str) -> bool {
+    matches!(
+        msg_type,
+        "user" | "assistant" | "system" | "summary" | "ai-title"
+    )
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Tests
 // ═══════════════════════════════════════════════════════════════════════════
