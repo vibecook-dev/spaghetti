@@ -1,12 +1,13 @@
 # RFC 008 — Rust Ingest Readiness Report
 
-**Status:** ⚠️ **Draft — not signed off.** Every technical gate below is met, but the
-completion gate requires a published soak release, which has not happened yet.
-See §9.
+**Status:** ⚠️ **Draft — not signed off.** The data-divergence and rollback
+gates are now met on two platforms, but the published soak release
+(`0.6.1`) **cannot be installed on npm 12**, so it does not demonstrate a
+working shipped artifact. Sign-off waits on a release that can. See §9.
 
-**Cross-platform handoff:** [`008-handoff-mac.md`](./008-handoff-mac.md) — all work to date ran on Windows, and every divergence class found so far has been platform-dependent.
+**Cross-platform verification:** [`008-handoff-mac.md`](./008-handoff-mac.md) — executed on macOS 2026-08-10 (§8 of that doc). Fixes in [#115](https://github.com/vibecook-dev/spaghetti/pull/115). As predicted, macOS found a *different* divergence set, not a subset: both open Windows items vanished and three new classes appeared, one of them silent data loss.
 
-**Dated:** 2026-08-09 · **Branch commit:** `d2a3713` · **Current version:** `0.5.23` (unreleased)
+**Dated:** 2026-08-10 · **Verified on:** Windows 11 / NTFS and macOS 15 / APFS · **Current version:** `0.6.1` (published)
 **Phases:** [0](./008-phase-0-baseline.md) · [1](./008-phase-1-gate.md) · [2](./008-phase-2-gate.md) · [3](./008-phase-3-gate.md) · [4](./008-phase-4-gate.md)
 
 ---
@@ -14,8 +15,25 @@ See §9.
 ## 1. Shipped package versions and native target matrix
 
 Versions are lockstep across `@vibecook/spaghetti-sdk`,
-`@vibecook/spaghetti-sdk-native`, and the CLI. **The soak release has not been
-cut**, so the version below is the current unreleased one; §9 is what remains.
+`@vibecook/spaghetti-sdk-native`, and the CLI.
+
+**The soak release is cut.** `0.6.0` shipped the Rust behaviour with the TS
+fallback retained; `0.6.1` followed with the CRLF plan-title fix. All three
+packages are published at `0.6.1` and `latest` points at it:
+
+| Package                          | Published | Notes                                                          |
+| -------------------------------- | --------- | -------------------------------------------------------------- |
+| `@vibecook/spaghetti`            | `0.6.1`   | CLI                                                            |
+| `@vibecook/spaghetti-sdk`        | `0.6.1`   |                                                                |
+| `@vibecook/spaghetti-sdk-native` | `0.6.1`   | ships all 8 platform binaries bundled; `next` still on `0.6.0-rc.0` |
+
+The native package carries every target in the one tarball (`files: ["*.node"]`,
+no `optionalDependencies`) — verified by unpacking the published artifact, which
+also confirms the `crates/spaghetti-napi/npm/*` platform packages are vestigial
+(see the handoff's trap list).
+
+**Caveat that blocks sign-off:** the published CLI does not work on a stock
+npm 12 install. See §9.
 
 Eight targets, each `require()`-loaded on a matching host before publish —
 verified green on 2026-08-09:
@@ -110,9 +128,19 @@ error sink.
 
 ## 6. Data divergence status
 
-Fixtures: **zero diffs on all four.** Real corpus (276 MB, 23 projects, 50,697
-messages): **421 divergences**, down from 657 at the start of Phase 5.
-Messages, todos, tasks, workflows, project memories, and FTS are clean.
+Fixtures: **zero diffs on all four**, on both Windows and macOS.
+
+Real corpus, two platforms:
+
+| Platform          | Corpus                            | Divergences                                    |
+| ----------------- | --------------------------------- | ---------------------------------------------- |
+| Windows 11 / NTFS | 276 MB, 23 projects, 50,697 msgs  | 421 (from 657 at the start of Phase 5)         |
+| macOS 15 / APFS   | 113 projects, 42,783 msgs         | 360 → **223**, all of them accepted `agent_type` |
+
+**Every non-accepted divergence is closed.** On Windows, messages were clean
+and the open items sat in metadata; on macOS `messages` was *not* clean until
+#115 — the platform that found the data loss was the second one, which is the
+whole argument for cross-platform verification.
 
 **The real corpus is live**, so counts move between runs — it is a working
 `~/.claude` that grows while the audit runs. Treat the numbers below as a
@@ -121,10 +149,24 @@ enough to gate CI.
 
 ### Accepted
 
-| Divergence                            | Count | Why accepted                                                                                                                                                                                                                                                                             |
-| ------------------------------------- | ----- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `subagents.agent_type`                | 412   | **Rust is correct and TS is wrong.** TS records the literal `"task"`; Rust reads the `agent-*.meta.json` sidecar and records the real type (`workflow-subagent`, `general-purpose`, `Explore`, `Plan`, …). Backporting sidecar reading to TS would be work on an engine RFC 009 deletes. |
-| `sessions.created_at` / `modified_at` | 4     | 1 ms rounding: TS rounds the file mtime up, Rust truncates. Benign; no data is lost or misordered at that resolution.                                                                                                                                                                    |
+| Divergence             | Count | Why accepted                                                                                                                                                                                                                                                                             |
+| ---------------------- | ----- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `subagents.agent_type` | 412   | **Rust is correct and TS is wrong.** TS records the literal `"task"`; Rust reads the `agent-*.meta.json` sidecar and records the real type (`workflow-subagent`, `general-purpose`, `Explore`, `Plan`, …). Backporting sidecar reading to TS would be work on an engine RFC 009 deletes. |
+
+> **Retracted 2026-08-10:** `sessions.created_at` / `modified_at` was accepted
+> here as "1 ms rounding: TS rounds the file mtime up, Rust truncates. Benign."
+> That diagnosis was wrong. It was two float defects in `epoch_ms_to_iso8601` —
+> an f64 nanosecond product past 2^53, and `time`'s `Iso8601` renderer emitting
+> 38 of every 1000 millisecond values one low. Systematic at ~3.8% of computed
+> timestamps rather than a rounding convention. Fixed in
+> [#115](https://github.com/vibecook-dev/spaghetti/pull/115); details in the
+> handoff §8.
+>
+> The lesson is about the acceptance itself: "benign rounding" was a plausible
+> story that fit the evidence (a 1 ms delta) and closed the question. It took
+> reading the actual mtime off disk — exactly `…422.465`, so *one engine was
+> simply wrong* — to reopen it. **A divergence explained by a convention
+> neither engine documents is a hypothesis, not a finding.**
 
 ### Resolved during Phase 5
 
@@ -132,18 +174,39 @@ enough to gate CI.
 | ----------------------------------------- | ----- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `subagents.spawn_tool_id` / `link_method` | 226   | Rust never implemented linkage — the columns were filled with `NULL` / `"unlinked"` literals. Ported from TS. **This was data loss**, since RFC 009 deletes the engine that had the links. |
 
-### Open — characterised, not yet resolved
+### Resolved on macOS (2026-08-10, [#115](https://github.com/vibecook-dev/spaghetti/pull/115))
 
-| Table / field                    | Count | Note                                                                                                                                                                                                            |
-| -------------------------------- | ----- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `projects.sessions_index`        | 1     | Was 2. Both engines appended discovered-but-unindexed sessions in directory order and neither sorted, which agreed on NTFS and disagreed on ext4/APFS; both now sort. One row still differs and is unexplained. |
-| `plans.title`                    | 2     | Title extraction differs on 2 plans.                                                                                                                                                                            |
-| `tool_results` (4 fields, 1 row) | 4     | All four fields differ on a single row, which reads as a row-ordering or off-by-one alignment difference rather than four independent bugs.                                                                     |
-| `file_history.data`              | 1     | Snapshot blob differs on 1 row.                                                                                                                                                                                 |
+Every item left open above is now closed. The macOS corpus (113 projects,
+42,783 messages) went from **360 divergences to 223**, and all 223 remaining
+are the accepted `agent_type` rows — the documented floor. Every other table
+is clean.
 
-**These are the last blocker to sign-off besides the release itself.** Ten
-rows across four tables, none in the message or session bodies. Each needs to
-be resolved or explicitly accepted before §9 can be signed.
+| Table / field                         | Rows | Resolution                                                                                                                                                       |
+| ------------------------------------- | ---: | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `messages.text_content`               |   21 | **Data loss, new on macOS.** `imagePasteIds` typed `Vec<String>` from a TS annotation that says `string[]`; Claude Code writes numbers, so serde failed the whole record and emptied its FTS blob. |
+| `subagents.message_count`             |   54 | Same root cause, different call site — the unparseable line is dropped from the transcript. Every diff was exactly `rs = ts − 1`.                                |
+| `file_history.data`                   |   50 | Snapshots emitted in `read_dir` order. NTFS sorts, APFS does not — 1 row on Windows, 50 here. Now sorted by file name.                                           |
+| `sessions.summary`                    |    6 | `String` collapsed *absent* (TS omits the key → `NULL`) and *empty* (TS writes `''`). Now `Option<String>` with `skip_serializing_if`.                          |
+| `projects.sessions_index`             |    4 | 3 were the `summary` bug above; the 4th was the timestamp bug below.                                                                                            |
+| `sessions.created_at` / `modified_at` |    2 | Two float defects in `epoch_ms_to_iso8601` — see the retraction above.                                                                                          |
+| `plans.title`                         |    0 | Did not reproduce — closed by the CRLF fix in #111, and a macOS corpus is pure-LF.                                                                              |
+| `tool_results`                        |    0 | Did not reproduce — the row needed an `E--` Windows drive-root slug. 143 rows clean.                                                                             |
+
+### Open — silent typed-parse failure
+
+Not a divergence in the diff, which is why five phases missed it: a sweep of
+the corpus through the Rust typed parser found **5,035 of 89,559 session lines
+(5.6%) failing to deserialize**, every one silently. Both call sites discard
+the error (`Err(_) => None`, `if let Ok(msg)`) and neither reports it, so a
+failure is indistinguishable from a record that legitimately contributes no
+text.
+
+Two of those causes are fixed in #115 (`imagePasteIds`, and
+`attachment.content` at 3,754 lines — typed `String` but sometimes an array).
+The remainder are variants that contribute no text today, so they cost nothing
+*yet*. **The systemic fix — routing a typed-parse failure to the `record-skip`
+error sink §5 already defines — is not done**, and RFC 008 §9 names "silent
+parser failure" as a sign-off blocker. This is the first thing to pick up next.
 
 ---
 
@@ -170,6 +233,18 @@ be resolved or explicitly accepted before §9 can be signed.
 
 ## 8. Rollback
 
+**Proven on the published `0.6.1`, 2026-08-10** — not on a branch. Run against
+a sandboxed `HOME` so the real cache was never touched:
+
+| Step                                     | Result                                                                    |
+| ---------------------------------------- | ------------------------------------------------------------------------- |
+| `SPAG_ENGINE=ts spag engine`             | `engine: ts (TypeScript)`, `source: env SPAG_ENGINE=ts`                   |
+| `SPAG_ENGINE=ts spag projects`           | TS engine rebuilt its own index into `spaghetti-ts.db`                    |
+| `spaghetti-rs.db` after the TS run       | **byte-identical** (md5 unchanged) — no cross-engine contamination        |
+| Totals, both engines                     | identical: 9 projects · 32 sessions · 712 messages · 996.2K tokens        |
+| `spag engine ts` → `spag engine`         | `config.json` written; `source: config file`                              |
+| `spag engine rs` (round trip)            | switches back; both DB files coexist, neither rebuilt                     |
+
 The TypeScript engine remains selectable throughout.
 
 - `SPAG_ENGINE=ts`, or `engine: 'ts'` in `createSpaghetti`, or the persisted
@@ -191,17 +266,45 @@ The TypeScript engine remains selectable throughout.
 the report is committed after the soak release. Passing tests on an unreleased
 branch is not sufficient."_
 
+| # | Gate                                                | Status                                                                        |
+| - | --------------------------------------------------- | ----------------------------------------------------------------------------- |
+| 1 | Publish a minor release with the TS fallback retained | ✅ `0.6.0`, then `0.6.1`                                                       |
+| 2 | Resolve or explicitly accept the open divergences     | ✅ all closed on two platforms; only accepted `agent_type` remains (§6)        |
+| 3 | Prove rollback on that release                        | ✅ proven on published `0.6.1` (§8)                                            |
+| 4 | Re-date and sign                                      | ⚠️ **withheld** — see below                                                    |
+
+**Why sign-off is withheld even though 1–3 are met.**
+
+Gate 1 is satisfied only in the narrow sense that a version number exists on
+npm. `npm install -g @vibecook/spaghetti@0.6.1` on npm 12 — the current npm —
+produces a CLI where every command that touches the index fails, because npm 12
+blocks install scripts by default and `better-sqlite3` fetches its native
+binding from a postinstall. The soak gate exists to prove the *shipped artifact*
+works. This one does not.
+
+Two further items, neither of which existed when this report was first drafted:
+
+- The parity fixes in
+  [#115](https://github.com/vibecook-dev/spaghetti/pull/115) — including the
+  `messages.text_content` **data loss** — are unreleased. Signing off on
+  `0.6.1` would sign off on a build that silently drops user text from search.
+- **Silent parser failure**, which §9 names as a blocker, is real and
+  measured: 5.6% of session lines fail the typed parse without reporting
+  anything (§6). #115 fixes the two causes that had visible consequences; the
+  systemic fix does not exist yet.
+
 Remaining before sign-off:
 
-1. **Cut and publish a minor release** carrying the Rust behaviour with the TS
-   fallback retained — the soak requirement of "at least one published minor
-   release".
-2. **Resolve or explicitly accept the ten open divergences** in §6.
-3. **Prove rollback on that release**, not on a branch.
-4. Re-date this report and sign §9.
+1. Merge #115.
+2. Route typed-parse failures to the `record-skip` error sink so the failure
+   mode is loud (§6).
+3. Cut **`0.6.2`**, and verify a clean `npm install` of it works on npm 12.
+4. Re-run the fixture diffs and one real-corpus audit against that release.
+5. Re-date this report and sign §9.
 
 Until then RFC 009 may **not** begin Phase 0. Every other handoff condition is
 met: the token-estimation policy is settled, the supported-platform list is
-published, `EngineUnavailableError` has shipped, the warm strategy is measured
-and recorded, and no unresolved divergence involves data loss, stale warm
-results, partial project commits, or silent parser failure.
+published and now verified against the published tarball, `EngineUnavailableError`
+has shipped, the warm strategy is measured and recorded, rollback is proven on a
+real release, and no unresolved divergence involves stale warm results or
+partial project commits.

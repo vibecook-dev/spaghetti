@@ -6,6 +6,19 @@
 Phases 0–5 are merged and the soak release is published (`0.6.1`). RFC 008 is
 **not signed off**. This note is what a fresh pair of hands needs to finish it.
 
+> ## ✅ Executed on macOS, 2026-08-10 — see [§8 Outcome](#8-outcome-macos-run)
+>
+> Fixes in **[#115](https://github.com/vibecook-dev/spaghetti/pull/115)**. On a
+> 113-project real corpus the audit went from **360 divergences to 223**, and
+> all 223 are the accepted `agent_type` rows. Every other table is clean.
+>
+> The core prediction below held: macOS found a **different** set, not a
+> subset. Both open Windows items vanished, and three classes Windows never
+> showed turned up — one of them silent data loss in `messages`.
+>
+> Sign-off is still withheld, but for a **new** reason: the published `0.6.1`
+> cannot be installed on npm 12. See §8.
+
 ---
 
 ## 1. Why a second platform matters here, specifically
@@ -28,6 +41,10 @@ that narrows the search enormously.
 
 ## 2. Open divergences, with leads
 
+> **All closed as of 2026-08-10 — see [§8](#8-outcome-macos-run).** The table
+> below is the Windows-side state and the leads that were handed over; two of
+> the four did not reproduce on macOS, which was itself the diagnosis.
+
 Run the real-corpus audit (§4) and compare against this list.
 
 | Divergence                            | Status and lead                                                                                                                                                                                                                                                                                                                                               |
@@ -49,6 +66,12 @@ Run the real-corpus audit (§4) and compare against this list.
 ---
 
 ## 3. Non-divergence work remaining
+
+> **Status after the macOS run (§8):** (1) done — rollback proven on published
+> `0.6.1`. (2) done — §1 now lists the shipped versions. (3) **still withheld**,
+> and the reason changed: the divergences are closed, but `0.6.1` cannot be
+> installed on npm 12, and the fixes in #115 are unreleased. RFC 009 stays
+> blocked.
 
 1. **Prove rollback on the published release.** The readiness report calls for
    it and it has not been done. Install `0.6.1`, force the TS engine
@@ -121,7 +144,19 @@ copy the fixture first, so they cannot touch a real `~/.claude`.
   one exists — a _file standing where a directory belongs_ makes `read_dir`
   fail with a non-`NotFound` error on all three platforms.
 - **Scope prettier to the files you touched.** `scripts/` is not in
-  `format:check`, and a broad glob reformats unrelated files.
+  `format:check`, and a broad glob reformats unrelated files. (`README.md` is
+  outside the glob and already fails `prettier --check` on its tables — leave
+  it alone rather than reformatting it as a side effect.)
+- **npm 12 blocks install scripts**, so a stock `npm i @vibecook/spaghetti`
+  leaves `better-sqlite3` without its binding and every DB command dies. The
+  repo is immune because `pnpm-workspace.yaml` lists it under
+  `onlyBuiltDependencies` — which is exactly why this went unnoticed until
+  someone installed the published tarball. Added 2026-08-10; see §8.
+- **Freeze the corpus before auditing.** `cp -Rc ~/.claude <snapshot>` is an
+  APFS clone — seconds, no meaningful extra disk — and it removes the
+  "counts move between runs" problem §5 warns about. Without it you cannot
+  tell a fix from corpus drift. On a big corpus, subset it too: the full one
+  produced a >7 GB DB *per engine*.
 
 ---
 
@@ -159,3 +194,118 @@ five phases of fixtures did not.
 3. Take `tool_results` if it reproduces; otherwise `file_history.data`, testing
    the CRLF hypothesis first.
 4. Prove rollback on `0.6.1` — it is a gate item and needs no investigation.
+
+---
+
+## 8. Outcome (macOS run)
+
+**Run:** 2026-08-10, macOS 15 / APFS / arm64, Node 26.5.0, corpus of 113
+projects · 260 sessions · 42,783 messages. Fixes: **[#115](https://github.com/vibecook-dev/spaghetti/pull/115)**.
+
+Fixture diffs were zero on macOS before any change, so there was no
+platform bug at the fixture layer.
+
+### The §2 table, resolved
+
+| §2 item                               | Outcome                                                                                                                         |
+| ------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| `tool_results` — Rust missing 1 row   | **Did not reproduce.** 143 rows clean. The `E--` drive-root hypothesis was right — it is Windows-only.                          |
+| `plans.title`                         | **Did not reproduce.** 36 rows clean; the CRLF fix in #111 holds and a macOS corpus is pure-LF anyway.                          |
+| `file_history.data`                   | **Reproduced and grew** — 1 row on Windows, 50 here. Not CRLF: snapshots were emitted in `read_dir` order. Fixed by sorting.    |
+| `projects.sessions_index`             | **Reproduced.** 3 of 4 were the `summary` null/empty bug below; the 4th was the timestamp bug. All closed.                      |
+| `sessions.created_at` / `modified_at` | **Reproduced, and the report's explanation was wrong.** Not rounding direction — two float bugs in the formatter. See below.    |
+
+### Three classes Windows never showed
+
+| Divergence                  | Rows | Cause                                                                                                                                                        |
+| --------------------------- | ---: | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `messages.text_content`     |   21 | **Data loss.** `imagePasteIds` is typed `string[]` in TS but Claude Code writes *numbers*. Rust mirrored the annotation, serde rejected the whole record. |
+| `subagents.message_count`   |   54 | Same root cause, different call site: the unparseable line is dropped from the transcript instead of blanked. Every diff was exactly `rs = ts − 1`.          |
+| `sessions.summary`          |    6 | `String` collapsed *absent* (TS omits the key, writes `NULL`) and *empty* (TS writes `''`). The corpus has 6 and 117.                                        |
+
+### What this says about the engine
+
+The `imagePasteIds` bug is the one worth internalising, and it generalises §6:
+
+- **A wrong TS type annotation is free in TS and fatal in Rust.** TypeScript
+  erases types at runtime, so `string[]` on a field that holds numbers cost the
+  TS engine nothing for as long as it has existed. Porting it faithfully turned
+  a documentation error into silent data loss.
+- **The damage lands nowhere near the wrong field.** `imagePasteIds` is never
+  read. It failed the record, and the *record's* text vanished from search.
+- **Both call sites swallow the error** (`Err(_) => None`,
+  `if let Ok(msg)`), so nothing was reported, no count moved, and the row was
+  still written — just empty. A sweep of the corpus through the typed parser
+  found **5,035 of 89,559 session lines (5.6%) failing silently**, dominated by
+  `attachment.content` (3,754), which is typed `String` but is sometimes an
+  array. That one is currently harmless — attachments contribute no FTS text —
+  but it is one call site away from mattering, and #115 fixes it too.
+
+**RFC 008 §9 lists "silent parser failure" as a sign-off blocker.** It was
+happening on 5.6% of lines the whole time. Making a typed-parse failure
+*loud* — routing it to the `record-skip` error sink that §5 already defines —
+is the systemic fix and is **not** in #115. It is the first thing the next
+person should pick up.
+
+### The timestamp bug was mischaracterised
+
+The report called this "1 ms rounding: TS rounds the file mtime up, Rust
+truncates. Benign." Both halves are wrong. `epoch_ms_to_iso8601` carried two
+independent float defects:
+
+1. `ms * 1e6` exceeds f64's exact-integer range (2^53 ≈ 9.0e15). A 2026 mtime
+   is ~1.79e12 ms, so the nanosecond product is ~1.79e18 and the nearest f64
+   lands low — `1785895422465.0` ms became `1785895422464999936` ns, and
+   truncating dropped a whole millisecond.
+2. Underneath it, `time`'s `Iso8601` config asked for 3 decimal digits renders
+   **38 of every 1000** millisecond values one low — exactly those ≡ 4 or 7
+   (mod 8), the fractions not exactly representable in binary.
+
+So it was systematic at ~3.8% of timestamps, not a rounding convention. It
+surfaced on only one session here because indexed sessions copy their
+timestamps verbatim from `sessions-index.json`; only *discovered* sessions
+compute from mtime. A corpus with many unindexed sessions would show far more.
+
+The fraction is now formatted from the integer remainder, and the regression
+test sweeps all 1000 fractions — every single-value test already in that file
+passed straight through the bug.
+
+### Non-divergence gate items
+
+- **Rollback proven on the published `0.6.1`** (§3.1), in a sandboxed `HOME`:
+  `SPAG_ENGINE=ts` reports `engine: ts (TypeScript), source: env`, the TS
+  engine rebuilds its own index, and `spaghetti-rs.db` comes back
+  **byte-identical** (md5) afterwards. The persisted path (`spag engine ts` →
+  `config.json` → `source: config file`) and the round-trip back to `rs` both
+  work. Both engines report identical totals.
+- **The published `0.6.1` cannot be installed on npm 12.** npm 12 blocks
+  install scripts by default, so `better-sqlite3` never fetches its prebuilt
+  binding and every DB-touching command dies with `Could not locate the
+  bindings file` — reported to the user as *"Install a supported agent and
+  re-run"*, which is the wrong advice for someone whose agent is installed.
+  #115 fixes the diagnostic and documents `--allow-scripts=better-sqlite3`.
+  **This is why §9 is still unsigned:** the soak gate exists to prove the
+  shipped artifact works, and this one does not on current npm.
+
+### Method note
+
+The audit ran against an **APFS clone of `~/.claude`** (`cp -Rc`, seconds, no
+meaningful extra disk) rather than the live directory. §5 warns that live
+counts move between runs; freezing a snapshot removes that entirely and is
+what made "measure, fix, re-measure" trustworthy — each fix was verified
+against byte-identical input. Worth doing on any platform.
+
+The full corpus was subsetted to 113 of 136 projects (the 23 excluded are the
+largest). The whole corpus produced a >7 GB DB per engine and the machine had
+19 GB free; the subset keeps 83% of project diversity in 8% of the bytes. Since
+the harness compares engine-vs-engine on identical input, any subset is a valid
+experiment.
+
+### Still open
+
+- `subagents.agent_type`, 223 rows — accepted, unchanged, and still the reason
+  the real-corpus diff can never reach zero while both engines exist.
+- Making silent typed-parse failures loud (above).
+- Re-run on **Linux/ext4**. Two of the five bugs were filesystem- or
+  platform-shaped, so a third platform is still worth a pass — though the
+  ordering fix now pins the one that was FS-dependent.
