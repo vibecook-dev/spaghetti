@@ -2467,6 +2467,7 @@ var ProjectParserImpl = class {
     const discovered = this.discoverSessionEntries(projectDir, originalPath);
     const extra = discovered.filter((e) => !indexedIds.has(e.sessionId));
     if (extra.length === 0) return indexEntries;
+    extra.sort((a, b) => a.sessionId.localeCompare(b.sessionId));
     return [...indexEntries, ...extra];
   }
   discoverSessionEntries(projectDir, originalPath) {

@@ -878,8 +878,9 @@ async function main(): Promise<void> {
     process.exit(0);
   }
 
-  console.log(`RESULT: ${allDiffs.length} diff(s) — first 10:`);
-  for (const d of allDiffs.slice(0, 10)) {
+  const shown = Number(process.env.INGEST_DIFF_SHOW ?? '10');
+  console.log(`RESULT: ${allDiffs.length} diff(s) — first ${shown}:`);
+  for (const d of allDiffs.slice(0, shown)) {
     const prefix = `  [${d.table}#${d.rowIndex}] ${d.kind}`;
     if (d.kind === 'row-count') {
       console.log(`${prefix}: ts=${d.tsValue} rust=${d.rustValue}`);

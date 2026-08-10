@@ -1087,6 +1087,67 @@ impl Writer {
 /// failure events, `ClearSourceFiles`) are rejected here — they're
 /// control-flow events, not row writes, and belong in the caller's
 /// state machine.
+/// Find the `tool_use_id` of the tool call that spawned a subagent.
+///
+/// Port of the TS `resolveSubagentSpawnToolId`. Claude records a subagent's
+/// result as a `tool_result` block in the parent session whose content
+/// mentions the agent id; that block's `tool_use_id` is the spawning call.
+/// Without this the whole `subagents.spawn_tool_id` / `link_method` pair was
+/// written as `NULL` / `"unlinked"` literals — on a real corpus that silently
+/// dropped the linkage for 113 of 638 subagents (RFC 008 Phase 5).
+///
+/// The `LIKE` is an optimisation, not the test. TS re-reads and JSON-parses
+/// every message in the session for *every* subagent, which is quadratic in a
+/// session with many agents; pushing a substring prefilter into SQLite means
+/// only plausible rows are parsed. It is a strict superset of the JSON check
+/// below, so it cannot cause a miss.
+fn resolve_spawn_tool_id(
+    conn: &Connection,
+    source_id: &str,
+    session_id: &str,
+    agent_id: &str,
+) -> Result<Option<String>, WriterError> {
+    if agent_id.is_empty() {
+        return Ok(None);
+    }
+    let mut stmt = conn.prepare_cached(
+        "SELECT data FROM messages          WHERE session_id = ?1 AND source_id = ?2 AND data LIKE '%' || ?3 || '%'          ORDER BY msg_index",
+    )?;
+    let mut rows = stmt.query(params![session_id, source_id, agent_id])?;
+    while let Some(row) = rows.next()? {
+        let data: String = row.get(0)?;
+        let Ok(raw) = serde_json::from_str::<serde_json::Value>(&data) else {
+            continue; // malformed raw row — TS swallows these too
+        };
+        let Some(content) = raw
+            .get("message")
+            .and_then(|m| m.get("content"))
+            .and_then(|c| c.as_array())
+        else {
+            continue;
+        };
+        for block in content {
+            if block.get("type").and_then(|t| t.as_str()) != Some("tool_result") {
+                continue;
+            }
+            let Some(tool_use_id) = block.get("tool_use_id").and_then(|t| t.as_str()) else {
+                continue;
+            };
+            // The block's content may be a bare string or a nested structure;
+            // stringify either way, matching TS.
+            let body = match block.get("content") {
+                Some(serde_json::Value::String(s)) => s.clone(),
+                Some(v) => v.to_string(),
+                None => String::new(),
+            };
+            if body.contains(agent_id) {
+                return Ok(Some(tool_use_id.to_owned()));
+            }
+        }
+    }
+    Ok(None)
+}
+
 fn subagent_message_tokens(value: &serde_json::Value, source_id: &str) -> [i64; 4] {
     if source_id != "claude-code" || value.get("type").and_then(|v| v.as_str()) != Some("assistant")
     {
@@ -1245,6 +1306,18 @@ pub fn dispatch_event(
                 .meta
                 .as_ref()
                 .and_then(|meta| meta.worktree_path.clone());
+            // Resolved here rather than in the parser: the linkage lives in
+            // the *parent session's* messages, which are already written by
+            // the time a subagent event arrives (the parser streams a
+            // session's messages before reading its subagents) and are
+            // visible to this same transaction.
+            let spawn_tool_id =
+                resolve_spawn_tool_id(conn, source_id, session_id, &transcript.agent_id)?;
+            let link_method = if spawn_tool_id.is_some() {
+                "tool_result"
+            } else {
+                "unlinked"
+            };
             conn.execute(
                 SQL_INSERT_SUBAGENT,
                 params![
@@ -1256,8 +1329,8 @@ pub fn dispatch_event(
                     transcript.file_name,
                     message_count,
                     transcript.workflow_id,
-                    Option::<String>::None,
-                    "unlinked",
+                    spawn_tool_id,
+                    link_method,
                     worktree_path,
                     now,
                 ],
@@ -2566,5 +2639,101 @@ mod tests {
             )
             .unwrap();
         assert_eq!(cold_msg, live_msg);
+    }
+
+    // ── RFC 008 Phase 5 — subagent spawn linkage ───────────────────────────
+
+    /// A parent-session message carrying a `tool_result` that names an agent.
+    fn tool_result_message(session_id: &str, tool_use_id: &str, body: &str) -> serde_json::Value {
+        serde_json::json!({
+            "type": "user",
+            "sessionId": session_id,
+            "message": {
+                "role": "user",
+                "content": [{
+                    "type": "tool_result",
+                    "tool_use_id": tool_use_id,
+                    "content": body,
+                }]
+            }
+        })
+    }
+
+    fn insert_parent_message(conn: &Connection, session_id: &str, value: &serde_json::Value) {
+        conn.execute(
+            "INSERT INTO messages (source_id, project_slug, session_id, msg_index, data, \
+             msg_type, byte_offset) VALUES ('claude-code','p',?1,0,?2,'user',0)",
+            params![session_id, value.to_string()],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn spawn_linkage_matches_the_tool_result_naming_the_agent() {
+        let w = fresh_writer();
+        insert_parent_message(
+            &w.conn,
+            "s1",
+            &tool_result_message("s1", "toolu_spawn_1", "Agent abc123 finished its work."),
+        );
+
+        let got = resolve_spawn_tool_id(&w.conn, "claude-code", "s1", "abc123").unwrap();
+        assert_eq!(got.as_deref(), Some("toolu_spawn_1"));
+    }
+
+    #[test]
+    fn an_agent_no_tool_result_mentions_stays_unlinked() {
+        // `unlinked` is a legitimate outcome, not a failure — a subagent whose
+        // result never came back has no spawning call to point at.
+        let w = fresh_writer();
+        insert_parent_message(
+            &w.conn,
+            "s1",
+            &tool_result_message("s1", "toolu_spawn_1", "Agent zzz999 finished its work."),
+        );
+
+        let got = resolve_spawn_tool_id(&w.conn, "claude-code", "s1", "abc123").unwrap();
+        assert_eq!(got, None);
+    }
+
+    #[test]
+    fn linkage_does_not_cross_sessions_or_sources() {
+        // The prefilter is a `LIKE` over the whole row, so a match in another
+        // session or another source would be found if the scoping were wrong.
+        let w = fresh_writer();
+        insert_parent_message(
+            &w.conn,
+            "other-session",
+            &tool_result_message("other-session", "toolu_wrong", "Agent abc123 finished."),
+        );
+
+        let got = resolve_spawn_tool_id(&w.conn, "claude-code", "s1", "abc123").unwrap();
+        assert_eq!(got, None, "a different session must not supply the linkage");
+
+        let got = resolve_spawn_tool_id(&w.conn, "codex", "other-session", "abc123").unwrap();
+        assert_eq!(got, None, "a different source must not supply the linkage");
+    }
+
+    #[test]
+    fn a_structured_tool_result_body_is_searched_too() {
+        // Real transcripts carry the body as a nested array as often as a
+        // bare string; TS stringifies either, so this must match.
+        let w = fresh_writer();
+        let value = serde_json::json!({
+            "type": "user",
+            "sessionId": "s1",
+            "message": {
+                "role": "user",
+                "content": [{
+                    "type": "tool_result",
+                    "tool_use_id": "toolu_spawn_2",
+                    "content": [{ "type": "text", "text": "Agent abc123 done." }],
+                }]
+            }
+        });
+        insert_parent_message(&w.conn, "s1", &value);
+
+        let got = resolve_spawn_tool_id(&w.conn, "claude-code", "s1", "abc123").unwrap();
+        assert_eq!(got.as_deref(), Some("toolu_spawn_2"));
     }
 }
