@@ -4,6 +4,8 @@
 completion gate requires a published soak release, which has not happened yet.
 See §9.
 
+**Cross-platform handoff:** [`008-handoff-mac.md`](./008-handoff-mac.md) — all work to date ran on Windows, and every divergence class found so far has been platform-dependent.
+
 **Dated:** 2026-08-09 · **Branch commit:** `d2a3713` · **Current version:** `0.5.23` (unreleased)
 **Phases:** [0](./008-phase-0-baseline.md) · [1](./008-phase-1-gate.md) · [2](./008-phase-2-gate.md) · [3](./008-phase-3-gate.md) · [4](./008-phase-4-gate.md)
 
