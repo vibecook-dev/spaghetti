@@ -1177,10 +1177,15 @@ pub(crate) fn parse_plans(root_dir: &Path) -> Vec<PlanFile> {
             .metadata()
             .map(|m| m.len())
             .unwrap_or(content.len() as u64);
+        // Trimming the carriage return is not cosmetic. JS treats CR as a
+        // line terminator for `$` in multiline mode, so its `(.+)` stops
+        // before it; Rust's regex crate recognises only LF, so the same
+        // pattern swallows it. On a CRLF plan file the two engines therefore
+        // disagreed by exactly one invisible character (RFC 008 Phase 5).
         let title = PLAN_TITLE
             .captures(&content)
             .and_then(|c| c.get(1))
-            .map(|m| m.as_str().to_owned())
+            .map(|m| m.as_str().trim_end_matches('\r').to_owned())
             .unwrap_or_else(|| slug.clone());
 
         plans.push(PlanFile {
