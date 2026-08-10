@@ -3,8 +3,8 @@
   "originalPath": "/Users/test/project3",
   "entries": [
     {
-      "sessionId": "f0b5e9e0-9d2e-784c-47fe-707d93b458ab",
-      "fullPath": "/Users/jamesyong/Projects/project100/p008/spaghetti/crates/spaghetti-napi/fixtures/small/.claude/projects/-Users-test-project3/f0b5e9e0-9d2e-784c-47fe-707d93b458ab.jsonl",
+      "sessionId": "40f26ec0-7084-ef15-b183-2d832ca4ecd6",
+      "fullPath": "D:\\Projects\\p100\\spaghetti\\crates\\spaghetti-napi\\fixtures\\small\\.claude\\projects\\-Users-test-project3\\40f26ec0-7084-ef15-b183-2d832ca4ecd6.jsonl",
       "fileMtime": 1775001600000,
       "firstPrompt": "What does the error \"cannot borrow as mutable\" mean?",
       "summary": "",
@@ -16,8 +16,8 @@
       "isSidechain": false
     },
     {
-      "sessionId": "1b286cf4-a385-400c-be15-10085858d5df",
-      "fullPath": "/Users/jamesyong/Projects/project100/p008/spaghetti/crates/spaghetti-napi/fixtures/small/.claude/projects/-Users-test-project3/1b286cf4-a385-400c-be15-10085858d5df.jsonl",
+      "sessionId": "8e477cc0-4fae-0675-0ed0-713eac5dcedf",
+      "fullPath": "D:\\Projects\\p100\\spaghetti\\crates\\spaghetti-napi\\fixtures\\small\\.claude\\projects\\-Users-test-project3\\8e477cc0-4fae-0675-0ed0-713eac5dcedf.jsonl",
       "fileMtime": 1775001600000,
       "firstPrompt": "Convert this callback-based API to async/await.",
       "summary": "",
@@ -29,8 +29,8 @@
       "isSidechain": false
     },
     {
-      "sessionId": "77f29845-9d5a-c8e7-ceaf-c2a68af9dc3b",
-      "fullPath": "/Users/jamesyong/Projects/project100/p008/spaghetti/crates/spaghetti-napi/fixtures/small/.claude/projects/-Users-test-project3/77f29845-9d5a-c8e7-ceaf-c2a68af9dc3b.jsonl",
+      "sessionId": "ba99f27e-1257-df98-ef0d-a3cb59063eae",
+      "fullPath": "D:\\Projects\\p100\\spaghetti\\crates\\spaghetti-napi\\fixtures\\small\\.claude\\projects\\-Users-test-project3\\ba99f27e-1257-df98-ef0d-a3cb59063eae.jsonl",
       "fileMtime": 1775001600000,
       "firstPrompt": "Convert this callback-based API to async/await.",
       "summary": "",

@@ -4,7 +4,7 @@
   "entries": [
     {
       "sessionId": "54770fec-7aff-bc2f-0c2e-10170aa2987b",
-      "fullPath": "/Users/jamesyong/Projects/project100/p008/spaghetti/crates/spaghetti-napi/fixtures/small/.claude/projects/-Users-test-project2/54770fec-7aff-bc2f-0c2e-10170aa2987b.jsonl",
+      "fullPath": "D:\\Projects\\p100\\spaghetti\\crates\\spaghetti-napi\\fixtures\\small\\.claude\\projects\\-Users-test-project2\\54770fec-7aff-bc2f-0c2e-10170aa2987b.jsonl",
       "fileMtime": 1775001600000,
       "firstPrompt": "Add error handling to the parser.",
       "summary": "",
@@ -16,8 +16,8 @@
       "isSidechain": false
     },
     {
-      "sessionId": "8bdef261-88b8-6d2d-6bda-5548c77e4944",
-      "fullPath": "/Users/jamesyong/Projects/project100/p008/spaghetti/crates/spaghetti-napi/fixtures/small/.claude/projects/-Users-test-project2/8bdef261-88b8-6d2d-6bda-5548c77e4944.jsonl",
+      "sessionId": "a152a159-b665-ccec-a7dc-220dbbd5e3d3",
+      "fullPath": "D:\\Projects\\p100\\spaghetti\\crates\\spaghetti-napi\\fixtures\\small\\.claude\\projects\\-Users-test-project2\\a152a159-b665-ccec-a7dc-220dbbd5e3d3.jsonl",
       "fileMtime": 1775001600000,
       "firstPrompt": "Refactor this function to be more readable.",
       "summary": "",
@@ -29,8 +29,8 @@
       "isSidechain": false
     },
     {
-      "sessionId": "8e090b83-bd27-cdca-60b6-323c82391dc2",
-      "fullPath": "/Users/jamesyong/Projects/project100/p008/spaghetti/crates/spaghetti-napi/fixtures/small/.claude/projects/-Users-test-project2/8e090b83-bd27-cdca-60b6-323c82391dc2.jsonl",
+      "sessionId": "62867455-efd0-d7c2-d878-1248b01991e5",
+      "fullPath": "D:\\Projects\\p100\\spaghetti\\crates\\spaghetti-napi\\fixtures\\small\\.claude\\projects\\-Users-test-project2\\62867455-efd0-d7c2-d878-1248b01991e5.jsonl",
       "fileMtime": 1775001600000,
       "firstPrompt": "Refactor this function to be more readable.",
       "summary": "",
@@ -42,8 +42,8 @@
       "isSidechain": false
     },
     {
-      "sessionId": "e6d812b6-8506-8067-e316-e940b71fbe7d",
-      "fullPath": "/Users/jamesyong/Projects/project100/p008/spaghetti/crates/spaghetti-napi/fixtures/small/.claude/projects/-Users-test-project2/e6d812b6-8506-8067-e316-e940b71fbe7d.jsonl",
+      "sessionId": "f0682db7-9bca-451b-59ce-cf2885f7c0a0",
+      "fullPath": "D:\\Projects\\p100\\spaghetti\\crates\\spaghetti-napi\\fixtures\\small\\.claude\\projects\\-Users-test-project2\\f0682db7-9bca-451b-59ce-cf2885f7c0a0.jsonl",
       "fileMtime": 1775001600000,
       "firstPrompt": "What does the error \"cannot borrow as mutable\" mean?",
       "summary": "",
@@ -55,8 +55,8 @@
       "isSidechain": false
     },
     {
-      "sessionId": "3eae150c-4986-2854-82f8-f39aa8744f2a",
-      "fullPath": "/Users/jamesyong/Projects/project100/p008/spaghetti/crates/spaghetti-napi/fixtures/small/.claude/projects/-Users-test-project2/3eae150c-4986-2854-82f8-f39aa8744f2a.jsonl",
+      "sessionId": "53a8b60b-d79d-e380-10b1-5cd86cc03d6d",
+      "fullPath": "D:\\Projects\\p100\\spaghetti\\crates\\spaghetti-napi\\fixtures\\small\\.claude\\projects\\-Users-test-project2\\53a8b60b-d79d-e380-10b1-5cd86cc03d6d.jsonl",
       "fileMtime": 1775001600000,
       "firstPrompt": "How do I sort an array in place?",
       "summary": "",

@@ -261,6 +261,14 @@ function buildSessionLines(sessionId, messageCount) {
   return { lines, toolUseIds };
 }
 
+/**
+ * The `tool_use_id` of the call that spawns the fixture's subagent.
+ *
+ * Fixed rather than generated so a test can assert the exact linkage rather
+ * than merely that *something* was linked.
+ */
+const SPAWN_TOOL_USE_ID = 'toolu_fixture_spawn_0001';
+
 // ─── sessions-index.json ───────────────────────────────────────────────────
 
 function buildSessionEntry(sessionId, fullPath, firstPrompt, messageCount, projectOriginalPath) {
@@ -297,6 +305,40 @@ function generateProject(projectIdx, { sessionRange, includeMemory, includeSubag
     sessionIds.push(sessionId);
     const messageCount = pickInt(8, 18);
     const { lines, toolUseIds } = buildSessionLines(sessionId, messageCount);
+
+    // Link the subagent to a spawning tool call.
+    //
+    // Claude records a subagent's result as a `tool_result` block in the
+    // parent session whose content mentions the agent id; that block's
+    // `tool_use_id` is the call that spawned it. Without this pair the
+    // subagent is legitimately `unlinked` in both engines — which is why the
+    // fixture agreed while a real corpus disagreed on 113 rows, and the Rust
+    // writer's hardcoded `unlinked` went unnoticed for five phases
+    // (RFC 008 Phase 5).
+    if (includeSubagent && s === 0) {
+      lines.push({
+        parentUuid: null,
+        isSidechain: false,
+        userType: 'external',
+        cwd: originalPath,
+        sessionId,
+        version: '1.0.0',
+        gitBranch: 'main',
+        type: 'user',
+        uuid: nextUuid(),
+        timestamp: '2026-04-01T00:00:30.000Z',
+        message: {
+          role: 'user',
+          content: [
+            {
+              type: 'tool_result',
+              tool_use_id: SPAWN_TOOL_USE_ID,
+              content: `Agent abc123 finished: found three TODO comments.`,
+            },
+          ],
+        },
+      });
+    }
 
     // Write the JSONL
     const jsonlPath = path.join(projectDir, `${sessionId}.jsonl`);

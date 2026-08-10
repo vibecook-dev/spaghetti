@@ -4,7 +4,7 @@
   "entries": [
     {
       "sessionId": "03ddf851-127d-6cfe-a095-f121d263f759",
-      "fullPath": "/Users/jamesyong/Projects/project100/p008/spaghetti/crates/spaghetti-napi/fixtures/small/.claude/projects/-Users-test-project1/03ddf851-127d-6cfe-a095-f121d263f759.jsonl",
+      "fullPath": "D:\\Projects\\p100\\spaghetti\\crates\\spaghetti-napi\\fixtures\\small\\.claude\\projects\\-Users-test-project1\\03ddf851-127d-6cfe-a095-f121d263f759.jsonl",
       "fileMtime": 1775001600000,
       "firstPrompt": "Add error handling to the parser.",
       "summary": "",
@@ -17,7 +17,7 @@
     },
     {
       "sessionId": "11b81818-e411-e72a-3616-0a1c77d01112",
-      "fullPath": "/Users/jamesyong/Projects/project100/p008/spaghetti/crates/spaghetti-napi/fixtures/small/.claude/projects/-Users-test-project1/11b81818-e411-e72a-3616-0a1c77d01112.jsonl",
+      "fullPath": "D:\\Projects\\p100\\spaghetti\\crates\\spaghetti-napi\\fixtures\\small\\.claude\\projects\\-Users-test-project1\\11b81818-e411-e72a-3616-0a1c77d01112.jsonl",
       "fileMtime": 1775001600000,
       "firstPrompt": "How do I sort an array in place?",
       "summary": "",
@@ -30,7 +30,7 @@
     },
     {
       "sessionId": "a990f707-2165-babd-6abd-27ad6eaca973",
-      "fullPath": "/Users/jamesyong/Projects/project100/p008/spaghetti/crates/spaghetti-napi/fixtures/small/.claude/projects/-Users-test-project1/a990f707-2165-babd-6abd-27ad6eaca973.jsonl",
+      "fullPath": "D:\\Projects\\p100\\spaghetti\\crates\\spaghetti-napi\\fixtures\\small\\.claude\\projects\\-Users-test-project1\\a990f707-2165-babd-6abd-27ad6eaca973.jsonl",
       "fileMtime": 1775001600000,
       "firstPrompt": "Convert this callback-based API to async/await.",
       "summary": "",
@@ -43,7 +43,7 @@
     },
     {
       "sessionId": "99bd513c-6d07-73e1-1cf2-80db0e4f007d",
-      "fullPath": "/Users/jamesyong/Projects/project100/p008/spaghetti/crates/spaghetti-napi/fixtures/small/.claude/projects/-Users-test-project1/99bd513c-6d07-73e1-1cf2-80db0e4f007d.jsonl",
+      "fullPath": "D:\\Projects\\p100\\spaghetti\\crates\\spaghetti-napi\\fixtures\\small\\.claude\\projects\\-Users-test-project1\\99bd513c-6d07-73e1-1cf2-80db0e4f007d.jsonl",
       "fileMtime": 1775001600000,
       "firstPrompt": "Write a unit test for the above.",
       "summary": "",
@@ -56,7 +56,7 @@
     },
     {
       "sessionId": "27627183-c325-104c-a4af-71cf2907bee9",
-      "fullPath": "/Users/jamesyong/Projects/project100/p008/spaghetti/crates/spaghetti-napi/fixtures/small/.claude/projects/-Users-test-project1/27627183-c325-104c-a4af-71cf2907bee9.jsonl",
+      "fullPath": "D:\\Projects\\p100\\spaghetti\\crates\\spaghetti-napi\\fixtures\\small\\.claude\\projects\\-Users-test-project1\\27627183-c325-104c-a4af-71cf2907bee9.jsonl",
       "fileMtime": 1775001600000,
       "firstPrompt": "What does the error \"cannot borrow as mutable\" mean?",
       "summary": "",
