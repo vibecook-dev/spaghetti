@@ -315,10 +315,20 @@ Two further items, neither of which existed when this report was first drafted:
 
 Remaining before sign-off:
 
-1. Merge #115, then #116 (stacked on it).
-2. Cut **`0.6.2`**, and verify a clean `npm install` of it works on npm 12.
-3. Re-run the fixture diffs and one real-corpus audit against that release.
-4. Re-date this report and sign §9.
+1. Merge #115, then #116.
+2. **Only then** let the release PR go out. Release-please already has
+   [#112](https://github.com/vibecook-dev/spaghetti/pull/112) open for `0.6.2`,
+   raised before any of this work and carrying only the CRLF fix from #111.
+   Merging it first spends the `0.6.2` number on a build that still drops user
+   text from search and still cannot be installed on npm 12 — and a shipped
+   release cannot be repaired in place, so the fixes would land on `0.6.3`.
+   Release-please regenerates #112 as commits reach `main`, so the ordering is
+   the whole intervention: merge the fixes and let the release PR catch up.
+3. Verify a clean `npm install` of that release works **on npm 12** — the
+   workspace cannot detect this class of breakage, because
+   `pnpm-workspace.yaml` allowlists `better-sqlite3`.
+4. Re-run the fixture diffs and one real-corpus audit against that release.
+5. Re-date this report and sign §9.
 
 Until then RFC 009 may **not** begin Phase 0. Every other handoff condition is
 met: the token-estimation policy is settled, the supported-platform list is
