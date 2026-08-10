@@ -469,7 +469,7 @@ fn file_stats(path: &Path) -> (f64, u64) {
                 .modified()
                 .ok()
                 .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-                .map(|d| d.as_secs_f64() * 1000.0)
+                .map(|d| d.as_secs() as f64 * 1000.0 + d.subsec_nanos() as f64 / 1_000_000.0)
                 .unwrap_or(0.0);
             (mtime_ms, m.len())
         }
