@@ -325,7 +325,10 @@ function generateProject(projectIdx, { sessionRange, includeMemory, includeSubag
         version: '1.0.0',
         gitBranch: 'main',
         type: 'user',
-        uuid: nextUuid(),
+        // Fixed, not `nextUuid()`. This block is emitted conditionally, so
+        // drawing from the deterministic id stream would shift every id after
+        // it and make the fixture depend on which projects opted in.
+        uuid: 'fixture-spawn-result-0001',
         timestamp: '2026-04-01T00:00:30.000Z',
         message: {
           role: 'user',
