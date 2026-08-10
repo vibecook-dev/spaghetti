@@ -36,6 +36,34 @@ git history at `211f4b1` if they are ever wanted back.
 
 <!-- End standing notice. -->
 
+## [0.6.0](https://github.com/vibecook-dev/spaghetti/compare/spaghetti-v0.5.23...spaghetti-v0.6.0) (2026-08-10)
+
+
+### ⚠ BREAKING CHANGES
+
+* api.runtime, createRuntimeBridge, RuntimeEvent, the hook/channel watchers and wire types, and the hookEventsFile / channelSessionsDir / channelMessagesDir source paths are removed with no replacement. api.runtime.listActiveSessions() is replaced by listActiveSessionsFromDir(paths.sessionsDir). spag hooks, spag chat, and spag plugin are removed. Transcript ingest, search, query, and live updates are unaffected.
+
+### Features
+
+* **fixtures:** add Codex corpus and record bench hardware ([#97](https://github.com/vibecook-dev/spaghetti/issues/97)) ([20ec07c](https://github.com/vibecook-dev/spaghetti/commit/20ec07cd9ab63290d3eeeae62618ea4b15780212))
+* **ingest:** complete the source clear and force one upgrade repair ([#101](https://github.com/vibecook-dev/spaghetti/issues/101)) ([09aca56](https://github.com/vibecook-dev/spaghetti/commit/09aca564146e6ca1eb1cea157014a93b92a46e93))
+* **ingest:** fingerprint every consumed input, treat absent roots as deletion ([#102](https://github.com/vibecook-dev/spaghetti/issues/102)) ([29851ab](https://github.com/vibecook-dev/spaghetti/commit/29851abbf5be534d0c0b9e93f8d8c9aa2ed7d3ca))
+* **napi:** Codex token estimation decision and port (RFC 008 Phase 3) ([#105](https://github.com/vibecook-dev/spaghetti/issues/105)) ([812dedc](https://github.com/vibecook-dev/spaghetti/commit/812dedca8a8bda5ce19f868e97b7e0bec7af7429))
+* **napi:** transaction and error protocol (RFC 008 Phase 2) ([#104](https://github.com/vibecook-dev/spaghetti/issues/104)) ([c8971c2](https://github.com/vibecook-dev/spaghetti/commit/c8971c2987700a46f93a82dc68d8091089ba9761))
+* retire the runtime bridge, hooks, chat, and plugins ([#93](https://github.com/vibecook-dev/spaghetti/issues/93)) ([b0cfa8d](https://github.com/vibecook-dev/spaghetti/commit/b0cfa8d2703e9e7e1471abf304b615136f835503))
+* **rfc-008:** freeze the Phase 0 contracts and capture the baseline ([#99](https://github.com/vibecook-dev/spaghetti/issues/99)) ([996d79d](https://github.com/vibecook-dev/spaghetti/commit/996d79d694c3aa4bb6546ab0bcfb57405814a05b))
+* show a project's git worktrees, and which agent is in each ([#90](https://github.com/vibecook-dev/spaghetti/issues/90)) ([b0d74d3](https://github.com/vibecook-dev/spaghetti/commit/b0d74d3592688e322ccbaf94fd28ef5e205eae8d))
+* warm strategy decision, musl artifacts, loud fallback (RFC 008 Phase 4) ([#106](https://github.com/vibecook-dev/spaghetti/issues/106)) ([81e848e](https://github.com/vibecook-dev/spaghetti/commit/81e848e596628f352f35fd07d95b41bf192872d1))
+
+
+### Bug Fixes
+
+* **ingest:** key fingerprints by (source_id, path) ([#100](https://github.com/vibecook-dev/spaghetti/issues/100)) ([51c400a](https://github.com/vibecook-dev/spaghetti/commit/51c400a91661d9ac98ad89c74d5eb79c1eb2430c))
+* **napi:** compute mtimeMs the way Node does ([#108](https://github.com/vibecook-dev/spaghetti/issues/108)) ([776bf73](https://github.com/vibecook-dev/spaghetti/commit/776bf73514d4b9ce27cffc6e8e5a14771d4cb5ee))
+* **napi:** converge the warm ingest on the cold result (RFC 008 Phase 1 gate) ([#103](https://github.com/vibecook-dev/spaghetti/issues/103)) ([ec19799](https://github.com/vibecook-dev/spaghetti/commit/ec197990d59517377017442391c81dde3052097b))
+* **napi:** subagent spawn linkage + RFC 008 readiness report (Phase 5) ([#107](https://github.com/vibecook-dev/spaghetti/issues/107)) ([be78471](https://github.com/vibecook-dev/spaghetti/commit/be78471c1fefc9c001ee4a35af2ecd9136fd2d76))
+* **types:** cover Claude Code fields the validators flagged ([#95](https://github.com/vibecook-dev/spaghetti/issues/95)) ([1b29935](https://github.com/vibecook-dev/spaghetti/commit/1b29935ac6ea6da4969e8cdd216f02c7b390c3bd))
+
 ## [0.5.23](https://github.com/vibecook-dev/spaghetti/compare/spaghetti-v0.5.22...spaghetti-v0.5.23) (2026-07-30)
 
 
