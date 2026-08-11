@@ -569,10 +569,23 @@ pub struct QueueOperationMessage {
 // Variant: last-prompt
 // ─────────────────────────────────────────────────────────────────────────
 
+/// Modelled from the real record rather than from `BaseMessageFields`.
+///
+/// This used to flatten the base (requiring `uuid`, `timestamp`, `sessionId`)
+/// and require `lastPrompt`. Real records carry none of `uuid`/`timestamp`/`cwd`
+/// and make both payload fields optional — the three observed shapes are
+/// `{sessionId, type}` plus `lastPrompt` and/or `leafUuid`. So every one of the
+/// 515 `last-prompt` lines in a 113-project corpus failed the typed parse,
+/// silently. Nothing reads this variant, so nothing was lost, but it is the
+/// same defect as the `attachment.content` and `imagePasteIds` mismatches: a
+/// shape asserted from documentation instead of from data.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LastPromptMessage {
-    #[serde(flatten)]
-    pub base: BaseMessageFields,
-    pub last_prompt: String,
+    #[serde(default)]
+    pub session_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_prompt: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub leaf_uuid: Option<String>,
 }

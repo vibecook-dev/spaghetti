@@ -23,6 +23,7 @@ use once_cell::sync::Lazy;
 use regex::Regex;
 use serde_json::Value;
 
+use crate::claude::fts_text;
 use crate::claude::message_extractor;
 use crate::claude::session_metadata;
 use crate::claude::types::{
@@ -312,13 +313,31 @@ fn parse_one_session(
             return;
         }
         match build_message_event(slug, &session_id, line, index, byte_offset) {
-            Ok(ev) => {
+            Ok((ev, lost_fts_text)) => {
                 if let Err(e) = events.send(ev) {
                     send_error = Some(e);
                     return;
                 }
                 message_count = message_count.saturating_add(1);
                 last_byte_position = byte_offset;
+
+                // The row is stored, but its searchable text is not. Report it
+                // so the failure is visible and the fingerprint is withheld —
+                // an empty `text_content` is otherwise indistinguishable from a
+                // message that genuinely has nothing to index, which is how a
+                // `Vec<String>` that should have been numbers cost 21 user
+                // messages their place in the index without moving any count.
+                if let Some(detail) = lost_fts_text {
+                    if let Err(e) = events.send(IngestEvent::RecordSkip {
+                        slug: slug.to_owned(),
+                        path: file_path.to_string_lossy().into_owned(),
+                        message: format!(
+                            "session {session_id} line {index}: stored without searchable text — {detail}"
+                        ),
+                    }) {
+                        send_error = Some(e);
+                    }
+                }
             }
             Err(parse_err) => {
                 // Skip the record, keep the project. The path is the session
@@ -360,12 +379,24 @@ fn parse_one_session(
     }
 
     // Subagents (incl. nested workflow transcripts, tagged by workflow_id)
-    for transcript in read_subagents(project_dir, &session_id) {
+    for (transcript, dropped) in read_subagents(project_dir, &session_id) {
         events.send(IngestEvent::Subagent {
             slug: slug.to_owned(),
             session_id: session_id.clone(),
             transcript,
         })?;
+        // Lines the transcript could not type-parse are simply absent from it.
+        // Report so the count is not quietly wrong and the file re-reads.
+        if let Some(d) = dropped {
+            events.send(IngestEvent::RecordSkip {
+                slug: slug.to_owned(),
+                path: d.path,
+                message: format!(
+                    "subagent transcript dropped {} unparseable line(s); first was {}",
+                    d.count, d.first_error
+                ),
+            })?;
+        }
     }
 
     // Workflow run records (agent-orchestration analytics)
@@ -419,29 +450,38 @@ fn parse_one_session(
 
 /// Parse one JSONL line into an `IngestEvent::Message` via the Claude
 /// [`message_extractor`] (RFC 006 / Phase B seam).
+///
+/// The second element is set when the line's typed parse failed on a variant
+/// that should have contributed searchable text. The row is still returned —
+/// the verbatim JSON belongs in the table either way — and the caller reports
+/// the loss separately.
 fn build_message_event(
     slug: &str,
     session_id: &str,
     line: &str,
     index: u32,
     byte_offset: u64,
-) -> Result<IngestEvent, serde_json::Error> {
+) -> Result<(IngestEvent, Option<String>), serde_json::Error> {
     let p = message_extractor::project_jsonl_line(line)?;
-    Ok(IngestEvent::Message {
-        slug: slug.to_owned(),
-        session_id: session_id.to_owned(),
-        index,
-        byte_offset,
-        raw_json: line.to_owned(),
-        msg_type: p.msg_type,
-        uuid: p.uuid,
-        timestamp: p.timestamp,
-        input_tokens: p.input_tokens,
-        output_tokens: p.output_tokens,
-        cache_creation_tokens: p.cache_creation_tokens,
-        cache_read_tokens: p.cache_read_tokens,
-        fts_text: p.fts_text,
-    })
+    let lost = p.lost_fts_text;
+    Ok((
+        IngestEvent::Message {
+            slug: slug.to_owned(),
+            session_id: session_id.to_owned(),
+            index,
+            byte_offset,
+            raw_json: line.to_owned(),
+            msg_type: p.msg_type,
+            uuid: p.uuid,
+            timestamp: p.timestamp,
+            input_tokens: p.input_tokens,
+            output_tokens: p.output_tokens,
+            cache_creation_tokens: p.cache_creation_tokens,
+            cache_read_tokens: p.cache_read_tokens,
+            fts_text: p.fts_text,
+        },
+        lost,
+    ))
 }
 
 // ─── sessions-index.json ────────────────────────────────────────────────────
@@ -604,7 +644,10 @@ fn read_project_memory(project_dir: &Path) -> Option<String> {
 
 // ─── Subagents ──────────────────────────────────────────────────────────────
 
-fn read_subagents(project_dir: &Path, session_id: &str) -> Vec<SubagentTranscript> {
+fn read_subagents(
+    project_dir: &Path,
+    session_id: &str,
+) -> Vec<(SubagentTranscript, Option<DroppedSubagentLines>)> {
     let dir = project_dir.join(session_id).join("subagents");
     let mut out = Vec::new();
 
@@ -654,25 +697,67 @@ fn read_subagents(project_dir: &Path, session_id: &str) -> Vec<SubagentTranscrip
     out
 }
 
-fn read_one_subagent(path: &Path, name: &str, workflow_id: &str) -> SubagentTranscript {
+/// Lines a subagent transcript could not type-parse, and that carried content.
+///
+/// A dropped line here is worse than on the session path — the transcript is
+/// the only thing holding it, so there is no verbatim JSON to fall back on.
+/// Even so the filter is the same [`fts_text::type_contributes_text`], because
+/// the alternative is untenable: a transcript containing a `{}` line, or any of
+/// the skills telemetry that shares these files, would withhold its fingerprint
+/// and re-ingest on every warm start forever. The Phase 1 convergence gate
+/// fails exactly that way if this reports indiscriminately.
+struct DroppedSubagentLines {
+    path: String,
+    count: u32,
+    first_error: String,
+}
+
+fn read_one_subagent(
+    path: &Path,
+    name: &str,
+    workflow_id: &str,
+) -> (SubagentTranscript, Option<DroppedSubagentLines>) {
     let mut messages: Vec<SessionMessage> = Vec::new();
-    let _ = read_jsonl_streaming(path, 0, |line, _idx, _off| {
-        if let Ok(msg) = serde_json::from_str::<SessionMessage>(line) {
-            messages.push(msg);
+    let mut dropped: Option<DroppedSubagentLines> = None;
+    let _ = read_jsonl_streaming(path, 0, |line, idx, _off| {
+        match serde_json::from_str::<SessionMessage>(line) {
+            Ok(msg) => messages.push(msg),
+            Err(e) => {
+                let msg_type = serde_json::from_str::<Value>(line)
+                    .ok()
+                    .and_then(|v| v.get("type").and_then(Value::as_str).map(str::to_owned))
+                    .unwrap_or_default();
+                if !fts_text::type_contributes_text(&msg_type) {
+                    return;
+                }
+                match &mut dropped {
+                    Some(d) => d.count = d.count.saturating_add(1),
+                    None => {
+                        dropped = Some(DroppedSubagentLines {
+                            path: path.to_string_lossy().into_owned(),
+                            count: 1,
+                            first_error: format!("line {idx} (type={msg_type}): {e}"),
+                        })
+                    }
+                }
+            }
         }
     });
     // Sibling `agent-{id}.meta.json` carries the real agent type + description.
     let meta = std::fs::read_to_string(path.with_extension("meta.json"))
         .ok()
         .and_then(|raw| serde_json::from_str::<SubagentMeta>(&raw).ok());
-    SubagentTranscript {
-        agent_id: extract_agent_id(name),
-        agent_type: infer_agent_type(name),
-        file_name: name.to_owned(),
-        messages,
-        meta,
-        workflow_id: workflow_id.to_owned(),
-    }
+    (
+        SubagentTranscript {
+            agent_id: extract_agent_id(name),
+            agent_type: infer_agent_type(name),
+            file_name: name.to_owned(),
+            messages,
+            meta,
+            workflow_id: workflow_id.to_owned(),
+        },
+        dropped,
+    )
 }
 
 /// Parse workflow run records under `projects/{slug}/{sid}/workflows/`.
@@ -1352,6 +1437,73 @@ mod tests {
         assert_eq!(transcript.messages.len(), 1);
     }
 
+    #[test]
+    fn subagent_transcript_reports_a_dropped_message_but_not_a_dropped_blank() {
+        // A dropped line is worse here than on the session path — the
+        // transcript is the only thing holding it, so it is simply gone and
+        // `message_count` is quietly short. But the filter still has to be
+        // "did this carry content", because `{}` lines and skills telemetry
+        // live in these files too and reporting those would withhold the
+        // fingerprint on every warm start (the Phase 1 convergence gate fails
+        // exactly that way).
+        let dir = mk_tempdir();
+        let session_id = "88888888-8888-8888-8888-888888888888";
+        let project_dir = mk_project(dir.path(), "proj-sub-drop");
+
+        let idx = format!(
+            r#"{{"version":1,"entries":[{{"sessionId":"{session_id}","fullPath":"","fileMtime":0,"firstPrompt":"","summary":"","messageCount":0,"created":"","modified":"","gitBranch":"","projectPath":"","isSidechain":false}}]}}"#
+        );
+        fs::write(project_dir.join("sessions-index.json"), idx).unwrap();
+        fs::write(project_dir.join(format!("{session_id}.jsonl")), "").unwrap();
+
+        let subagents_dir = project_dir.join(session_id).join("subagents");
+        fs::create_dir_all(&subagents_dir).unwrap();
+
+        // Transcript A: a `user` line serde rejects → real loss, reported.
+        let broken = r#"{"type":"user","uuid":"u1","timestamp":"2026-04-17T00:00:00Z","sessionId":"s1","cwd":"/tmp","version":"1","gitBranch":"main","isSidechain":false,"userType":"external","message":{"role":"user"}}"#;
+        fs::write(
+            subagents_dir.join("agent-alpha.jsonl"),
+            format!("{}\n{broken}\n", user_line("keep")),
+        )
+        .unwrap();
+
+        // Transcript B: a bare `{}` → carries nothing, must stay silent.
+        fs::write(
+            subagents_dir.join("agent-beta.jsonl"),
+            format!("{}\n{{}}\n", user_line("keep")),
+        )
+        .unwrap();
+
+        let events = run_parser(dir.path(), "proj-sub-drop");
+
+        let skips: Vec<&String> = events
+            .iter()
+            .filter_map(|ev| match ev {
+                IngestEvent::RecordSkip { path, .. } => Some(path),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(skips.len(), 1, "exactly one transcript lost content");
+        assert!(
+            skips[0].contains("agent-alpha"),
+            "the reported path must be the transcript that lost a message: {:?}",
+            skips
+        );
+
+        // Both transcripts still ingest whatever did parse.
+        for t in events.iter().filter_map(|ev| match ev {
+            IngestEvent::Subagent { transcript, .. } => Some(transcript),
+            _ => None,
+        }) {
+            assert_eq!(
+                t.messages.len(),
+                1,
+                "{} kept its parseable message",
+                t.file_name
+            );
+        }
+    }
+
     // ── 5. Todo file ──────────────────────────────────────────────────────
 
     #[test]
@@ -1418,6 +1570,94 @@ mod tests {
                 .iter()
                 .any(|ev| matches!(ev, IngestEvent::ProjectComplete { .. })),
             "a skipped record must still let its project complete"
+        );
+    }
+
+    // ── 6b. Typed-parse failure that costs indexed text ───────────────────
+
+    #[test]
+    fn a_user_line_stored_without_its_text_is_reported() {
+        // The regression this exists for: a `user` line the typed parse
+        // rejects is still written, with an empty `text_content`. Nothing
+        // moved — the message count was right, the row was there, the diff
+        // showed a field mismatch and nothing else — so a wrong type
+        // annotation quietly cost 21 messages their place in the index.
+        // The row must still be written AND the loss must be reported.
+        let dir = mk_tempdir();
+        let session_id = "66666666-6666-6666-6666-666666666666";
+        let project_dir = mk_project(dir.path(), "proj-lost-text");
+
+        let idx = format!(
+            r#"{{"version":1,"entries":[{{"sessionId":"{session_id}","fullPath":"","fileMtime":0,"firstPrompt":"","summary":"","messageCount":0,"created":"","modified":"","gitBranch":"","projectPath":"","isSidechain":false}}]}}"#
+        );
+        fs::write(project_dir.join("sessions-index.json"), idx).unwrap();
+
+        // Valid JSON, valid `type`, payload serde rejects.
+        let broken = r#"{"type":"user","uuid":"u9","timestamp":"2026-04-17T00:00:00Z","sessionId":"s1","cwd":"/tmp","version":"1","gitBranch":"main","isSidechain":false,"userType":"external","message":{"role":"user"}}"#;
+        let body = format!("{}\n{broken}\n", user_line("a"));
+        fs::write(project_dir.join(format!("{session_id}.jsonl")), body).unwrap();
+
+        let events = run_parser(dir.path(), "proj-lost-text");
+
+        let msgs: Vec<_> = events
+            .iter()
+            .filter(|ev| matches!(ev, IngestEvent::Message { .. }))
+            .collect();
+        assert_eq!(msgs.len(), 2, "the row is still stored, verbatim");
+
+        let skip = events
+            .iter()
+            .find_map(|ev| match ev {
+                IngestEvent::RecordSkip { message, path, .. } => Some((message, path)),
+                _ => None,
+            })
+            .expect("losing searchable text must be reported");
+        assert!(
+            skip.0.contains("without searchable text"),
+            "got: {}",
+            skip.0
+        );
+        assert!(
+            skip.1.ends_with(".jsonl"),
+            "must key on the session file so its fingerprint is withheld: {}",
+            skip.1
+        );
+    }
+
+    #[test]
+    fn a_line_that_indexes_nothing_anyway_is_not_reported() {
+        // The counterweight. Reporting these would withhold the fingerprint of
+        // any file containing skills telemetry or a malformed attachment, so
+        // the corpus would re-ingest in full on every warm start.
+        let dir = mk_tempdir();
+        let session_id = "77777777-7777-7777-7777-777777777777";
+        let project_dir = mk_project(dir.path(), "proj-quiet");
+
+        let idx = format!(
+            r#"{{"version":1,"entries":[{{"sessionId":"{session_id}","fullPath":"","fileMtime":0,"firstPrompt":"","summary":"","messageCount":0,"created":"","modified":"","gitBranch":"","projectPath":"","isSidechain":false}}]}}"#
+        );
+        fs::write(project_dir.join("sessions-index.json"), idx).unwrap();
+
+        // A skills-telemetry line (no `type`) and an attachment serde rejects.
+        let telemetry = r#"{"event":"skill_injection","timestamp":"2026-04-17T00:00:00Z","matchedSkills":[],"droppedByCap":0}"#;
+        let attachment = r#"{"type":"attachment","attachment":{"type":"x","content":[{"type":"text","text":"a"}]}}"#;
+        let body = format!("{}\n{telemetry}\n{attachment}\n", user_line("a"));
+        fs::write(project_dir.join(format!("{session_id}.jsonl")), body).unwrap();
+
+        let events = run_parser(dir.path(), "proj-quiet");
+        assert_eq!(
+            events
+                .iter()
+                .filter(|ev| matches!(ev, IngestEvent::Message { .. }))
+                .count(),
+            3,
+            "every line is still stored"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|ev| matches!(ev, IngestEvent::RecordSkip { .. })),
+            "nothing indexable was lost, so nothing may be reported"
         );
     }
 

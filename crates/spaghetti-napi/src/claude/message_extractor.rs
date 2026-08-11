@@ -27,6 +27,15 @@ pub struct MessageProjection {
     pub cache_read_tokens: u64,
     /// `None` when empty / untyped parse failed — writer treats as `""`.
     pub fts_text: Option<String>,
+    /// Set when the typed parse failed **and** the line's `type` says it should
+    /// have contributed searchable text — i.e. this row is now in the index
+    /// without its content. The caller turns it into a `RecordSkip` so the
+    /// failure is reported and the file's fingerprint is withheld.
+    ///
+    /// `None` both when the parse succeeded and when it failed on a variant
+    /// that contributes nothing anyway; see
+    /// [`fts_text::type_contributes_text`] for why the two are not the same.
+    pub lost_fts_text: Option<String>,
 }
 
 /// Project one JSONL line into stored columns.
@@ -34,6 +43,10 @@ pub struct MessageProjection {
 /// Always returns `Ok` for valid JSON (including unknown `type` values).
 /// Returns `Err` only when the line is not JSON at all — matching the
 /// parser behaviour of emitting `RecordSkip` for bad lines.
+///
+/// A *typed* parse failure is not an `Err` here: the row still belongs in the
+/// table with its verbatim JSON. It surfaces as [`MessageProjection::lost_fts_text`]
+/// when it cost content, so the caller can report it without discarding the row.
 pub fn project_jsonl_line(line: &str) -> Result<MessageProjection, serde_json::Error> {
     // Loose Value first for top-level fields (matches TS
     // `msg as Record<string, unknown>`), so we don't reverse-engineer
@@ -58,17 +71,17 @@ pub fn project_jsonl_line(line: &str) -> Result<MessageProjection, serde_json::E
             (0, 0, 0, 0)
         };
 
-    // Typed parse for FTS; failure → still emit the row with no fts blob.
-    let fts_text = match serde_json::from_str::<SessionMessage>(line) {
+    // Typed parse for FTS; failure → still emit the row with no fts blob, but
+    // say so when the blob should not have been empty.
+    let (fts_text, lost_fts_text) = match serde_json::from_str::<SessionMessage>(line) {
         Ok(msg) => {
             let s = fts_text::extract_message_text(&msg);
-            if s.is_empty() {
-                None
-            } else {
-                Some(s)
-            }
+            (if s.is_empty() { None } else { Some(s) }, None)
         }
-        Err(_) => None,
+        Err(e) if fts_text::type_contributes_text(&msg_type) => {
+            (None, Some(format!("type={msg_type}: {e}")))
+        }
+        Err(_) => (None, None),
     };
 
     Ok(MessageProjection {
@@ -80,6 +93,7 @@ pub fn project_jsonl_line(line: &str) -> Result<MessageProjection, serde_json::E
         cache_creation_tokens,
         cache_read_tokens,
         fts_text,
+        lost_fts_text,
     })
 }
 
@@ -102,6 +116,66 @@ mod tests {
 
     // BaseMessageFields required by SessionMessage user/assistant variants.
     const BASE: &str = r#""uuid":"u1","parentUuid":null,"timestamp":"2026-01-01T00:00:00.000Z","sessionId":"s1","cwd":"/tmp","version":"1","gitBranch":"main","isSidechain":false,"userType":"external""#;
+
+    #[test]
+    fn a_contributing_type_that_fails_to_parse_reports_the_loss() {
+        // A `user` line whose payload serde rejects. The row must still project
+        // — the verbatim JSON belongs in the table — but the empty FTS blob has
+        // to be distinguishable from a message that genuinely indexes nothing,
+        // which is the distinction that let 21 messages go missing silently.
+        let line = format!(r#"{{"type":"user",{BASE},"message":{{"role":"user"}}}}"#);
+        let p = project_jsonl_line(&line).expect("still projects");
+        assert_eq!(p.msg_type, "user");
+        assert!(p.fts_text.is_none(), "no text could be extracted");
+        let lost = p.lost_fts_text.expect("the loss must be reported");
+        assert!(lost.contains("type=user"), "got: {lost}");
+    }
+
+    #[test]
+    fn a_non_contributing_type_that_fails_to_parse_reports_nothing() {
+        // `attachment` yields no FTS text even when it parses, so a failure
+        // costs nothing. Reporting it anyway would withhold the file's
+        // fingerprint and re-ingest it on every warm start, forever — 3,754
+        // lines' worth on a real corpus.
+        let line = r#"{"type":"attachment","attachment":{"nope":1}}"#;
+        let p = project_jsonl_line(line).expect("still projects");
+        assert_eq!(p.msg_type, "attachment");
+        assert!(p.fts_text.is_none());
+        assert!(
+            p.lost_fts_text.is_none(),
+            "a variant that indexes nothing must stay silent"
+        );
+    }
+
+    #[test]
+    fn a_line_with_no_type_field_reports_nothing() {
+        // Skills/context telemetry is keyed on `event`, not `type`, and is not
+        // a SessionMessage at all. 745 such lines on a real corpus.
+        let line =
+            r#"{"event":"skill_injection","timestamp":"2026-01-01T00:00:00Z","matchedSkills":[]}"#;
+        let p = project_jsonl_line(line).expect("still projects");
+        assert_eq!(p.msg_type, "unknown");
+        assert!(p.lost_fts_text.is_none());
+    }
+
+    #[test]
+    fn a_successful_parse_never_reports_a_loss() {
+        let line =
+            format!(r#"{{"type":"user",{BASE},"message":{{"role":"user","content":"hi"}}}}"#);
+        let p = project_jsonl_line(&line).expect("project");
+        assert_eq!(p.fts_text.as_deref(), Some("hi"));
+        assert!(p.lost_fts_text.is_none());
+    }
+
+    #[test]
+    fn an_empty_but_successful_extraction_is_not_a_loss() {
+        // Parses fine, indexes nothing. Distinct from a failure, and the whole
+        // point of tracking the two separately.
+        let line = format!(r#"{{"type":"user",{BASE},"message":{{"role":"user","content":""}}}}"#);
+        let p = project_jsonl_line(&line).expect("project");
+        assert!(p.fts_text.is_none());
+        assert!(p.lost_fts_text.is_none());
+    }
 
     #[test]
     fn projects_assistant_tokens_and_fts() {
