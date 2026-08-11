@@ -1,13 +1,14 @@
 # RFC 008 — Rust Ingest Readiness Report
 
-**Status:** ⚠️ **Draft — not signed off.** The data-divergence and rollback
-gates are now met on two platforms, but the published soak release
-(`0.6.1`) **cannot be installed on npm 12**, so it does not demonstrate a
-working shipped artifact. Sign-off waits on a release that can. See §9.
+**Status:** ⚠️ **Draft — not signed off.** Divergence, rollback, and
+data-loss gates are all met on the published `0.6.2`, and the data loss is
+demonstrably fixed for users (§8). One gate remains: a **stock `npm install`
+on npm 12 still does not work**, and the remedies `0.6.2` printed were
+themselves wrong. See §9 — what is left is a decision, not an investigation.
 
 **Cross-platform verification:** [`008-handoff-mac.md`](./008-handoff-mac.md) — executed on macOS 2026-08-10 (§8 of that doc). Fixes in [#115](https://github.com/vibecook-dev/spaghetti/pull/115) and [#116](https://github.com/vibecook-dev/spaghetti/pull/116). As predicted, macOS found a *different* divergence set, not a subset: both open Windows items vanished and three new classes appeared, one of them silent data loss.
 
-**Dated:** 2026-08-10 · **Verified on:** Windows 11 / NTFS and macOS 15 / APFS · **Current version:** `0.6.1` (published)
+**Dated:** 2026-08-11 · **Verified on:** Windows 11 / NTFS and macOS 15 / APFS · **Current version:** `0.6.2` (published)
 **Phases:** [0](./008-phase-0-baseline.md) · [1](./008-phase-1-gate.md) · [2](./008-phase-2-gate.md) · [3](./008-phase-3-gate.md) · [4](./008-phase-4-gate.md)
 
 ---
@@ -18,22 +19,23 @@ Versions are lockstep across `@vibecook/spaghetti-sdk`,
 `@vibecook/spaghetti-sdk-native`, and the CLI.
 
 **The soak release is cut.** `0.6.0` shipped the Rust behaviour with the TS
-fallback retained; `0.6.1` followed with the CRLF plan-title fix. All three
-packages are published at `0.6.1` and `latest` points at it:
+fallback retained, `0.6.1` added the CRLF plan-title fix, and `0.6.2`
+(2026-08-11) carries the macOS parity work and the silent-parse-failure fix.
+All three packages are published at `0.6.2` and `latest` points at it:
 
 | Package                          | Published | Notes                                                          |
 | -------------------------------- | --------- | -------------------------------------------------------------- |
-| `@vibecook/spaghetti`            | `0.6.1`   | CLI                                                            |
-| `@vibecook/spaghetti-sdk`        | `0.6.1`   |                                                                |
-| `@vibecook/spaghetti-sdk-native` | `0.6.1`   | ships all 8 platform binaries bundled; `next` still on `0.6.0-rc.0` |
+| `@vibecook/spaghetti`            | `0.6.2`   | CLI                                                            |
+| `@vibecook/spaghetti-sdk`        | `0.6.2`   |                                                                |
+| `@vibecook/spaghetti-sdk-native` | `0.6.2`   | ships all 8 platform binaries bundled; `next` still on `0.6.0-rc.0` |
 
 The native package carries every target in the one tarball (`files: ["*.node"]`,
 no `optionalDependencies`) — verified by unpacking the published artifact, which
 also confirms the `crates/spaghetti-napi/npm/*` platform packages are vestigial
 (see the handoff's trap list).
 
-**Caveat that blocks sign-off:** the published CLI does not work on a stock
-npm 12 install. See §9.
+**Caveat that blocks sign-off:** the published CLI still does not work on a
+stock npm 12 install, on any of these versions. See §9.
 
 Eight targets, each `require()`-loaded on a matching host before publish —
 verified green on 2026-08-09:
@@ -254,8 +256,9 @@ warm again: still re-reads, because the fingerprint stays withheld
 
 ## 8. Rollback
 
-**Proven on the published `0.6.1`, 2026-08-10** — not on a branch. Run against
-a sandboxed `HOME` so the real cache was never touched:
+**Re-proven on the published `0.6.2`, 2026-08-11** (originally on `0.6.1`) —
+not on a branch, and against a sandboxed `HOME` so the real cache was never
+touched. Same result on both releases, `native: available (v0.6.2)`:
 
 | Step                                     | Result                                                                    |
 | ---------------------------------------- | ------------------------------------------------------------------------- |
@@ -267,6 +270,22 @@ a sandboxed `HOME` so the real cache was never touched:
 | `spag engine rs` (round trip)            | switches back; both DB files coexist, neither rebuilt                     |
 
 The TypeScript engine remains selectable throughout.
+
+### The data-loss fix, confirmed in the published artifact
+
+Verified on shipped tarballs rather than a build — a session carrying one user
+message of the shape that used to fail (`imagePasteIds: [1]`, content array of
+`text` + `image`), searched through the CLI:
+
+| Release | `spag search "ZANZIBARQUUX"`     |
+| ------- | -------------------------------- |
+| `0.6.1` | `No results` — silently unindexed |
+| `0.6.2` | `1 results` ✅                    |
+
+Both engines find it on `0.6.2`, so the recovered text is in the index rather
+than in one engine's projection of it. This is the check worth repeating on any
+future release: the failure it guards against moved no counter and raised no
+error — the row was present and its text simply was not.
 
 - `SPAG_ENGINE=ts`, or `engine: 'ts'` in `createSpaghetti`, or the persisted
   `~/.spaghetti/config.json` setting.
@@ -287,31 +306,48 @@ The TypeScript engine remains selectable throughout.
 the report is committed after the soak release. Passing tests on an unreleased
 branch is not sufficient."_
 
-| # | Gate                                                | Status                                                                        |
-| - | --------------------------------------------------- | ----------------------------------------------------------------------------- |
-| 1 | Publish a minor release with the TS fallback retained | ✅ `0.6.0`, then `0.6.1`                                                       |
-| 2 | Resolve or explicitly accept the open divergences     | ✅ all closed on two platforms; only accepted `agent_type` remains (§6)        |
-| 3 | Prove rollback on that release                        | ✅ proven on published `0.6.1` (§8)                                            |
-| 4 | Re-date and sign                                      | ⚠️ **withheld** — see below                                                    |
+| #   | Gate                                                  | Status                                                                             |
+| --- | ----------------------------------------------------- | ---------------------------------------------------------------------------------- |
+| 1   | Publish a minor release with the TS fallback retained | ✅ `0.6.0` → `0.6.1` → `0.6.2` (2026-08-11) carrying every fix below               |
+| 2   | Resolve or explicitly accept the open divergences     | ✅ all closed on two platforms; only accepted `agent_type` remains (§6)            |
+| 3   | Prove rollback on that release                        | ✅ re-proven on published `0.6.2` (§8)                                             |
+| 3b  | The data loss is actually gone from the artifact      | ✅ `0.6.1` returns no results, `0.6.2` finds the message (§8)                      |
+| 4   | A stock install of that release runs                  | ❌ **fails on npm 12** — the one gate still open                                   |
+| 5   | Re-date and sign                                      | ⚠️ **withheld** — see below                                                        |
 
-**Why sign-off is withheld even though 1–3 are met.**
+**Why sign-off is still withheld.** Gates 1–3b are now genuinely met on a
+published artifact, and the data loss is demonstrably fixed for users. Gate 4
+is not, and it is the one the completion criterion is really about — *"the
+shipped artifact works."*
 
-Gate 1 is satisfied only in the narrow sense that a version number exists on
-npm. `npm install -g @vibecook/spaghetti@0.6.1` on npm 12 — the current npm —
-produces a CLI where every command that touches the index fails, because npm 12
-blocks install scripts by default and `better-sqlite3` fetches its native
-binding from a postinstall. The soak gate exists to prove the *shipped artifact*
-works. This one does not.
+`npm install -g @vibecook/spaghetti@0.6.2` on npm 12, the current npm, still
+produces a CLI where every command that touches the index fails: npm 12 blocks
+install scripts by default and `better-sqlite3` fetches its binding from a
+postinstall. `0.6.2` improves on `0.6.1` by *diagnosing* this correctly instead
+of blaming a missing agent — but it does not remove the dependency on that
+script, so a stock install is still broken.
 
-Two further items, neither of which existed when this report was first drafted:
+Worse, and found only by running them: **the two remedies `0.6.2` prints were
+themselves wrong**, in both the CLI message and the README. `--allow-scripts` is
+refused outright for project-scoped installs, and `npm install-scripts approve`
+records the permission without ever executing the script — so it answers
+"Approved" and changes nothing. A user who followed either was left exactly as
+broken, by a tool that now sounded certain.
+[#117](https://github.com/vibecook-dev/spaghetti/pull/117) replaces them with
+forms that were each executed against the published tarball first.
 
-- The fixes in [#115](https://github.com/vibecook-dev/spaghetti/pull/115) and
-  [#116](https://github.com/vibecook-dev/spaghetti/pull/116) — including the
-  `messages.text_content` **data loss** — are unreleased. Signing off on
-  `0.6.1` would sign off on a build that silently drops user text from search.
-- **Silent parser failure**, which §9 names as a blocker, was real and
-  measured at 5.6% of session lines. Now fixed in #116 (§6), but likewise
-  unreleased.
+That leaves a real decision rather than more work, and it is not the report's
+to make:
+
+- **Ship `0.6.3` with #117 and sign**, accepting that installation takes one
+  documented step on npm 12. Defensible: the step is small, correct, and
+  discoverable from the error itself.
+- **Or treat "a stock `npm install` must work" as the gate** and remove the
+  postinstall dependency first — `node:sqlite`, or a binding shipped as real
+  npm dependencies. Larger, and RFC-sized.
+
+Either way `0.6.2` should not be the release that gets signed: its install
+guidance is actively wrong, and a shipped release cannot be repaired in place.
 
 Remaining before sign-off:
 
@@ -322,12 +358,20 @@ Remaining before sign-off:
    that mattered: had #112 merged first it would have spent the version number
    on a build that still dropped user text from search, and a shipped release
    cannot be repaired in place.
-2. **Release `0.6.2`** (merge #112), then verify a clean `npm install` of it
-   works **on npm 12** — the workspace cannot detect this class of breakage,
-   because `pnpm-workspace.yaml` allowlists `better-sqlite3`. This is the gate
-   `0.6.1` failed and the reason sign-off is still open.
-3. Re-run the fixture diffs and one real-corpus audit against that release.
-4. Re-date this report and sign §9.
+2. ~~Release `0.6.2`, then verify a clean `npm install` on npm 12.~~
+   **Done 2026-08-11, and the install gate failed** — see the table above. The
+   release shipped; the stock install did not work, and the guidance it printed
+   was wrong.
+3. ~~Re-run the fixture diffs and one real-corpus audit against that release.~~
+   **Done** — four fixtures zero, real corpus 223 (all accepted `agent_type`),
+   rollback re-proven, and the data loss confirmed gone from the published
+   artifact (§8).
+4. **Merge [#117](https://github.com/vibecook-dev/spaghetti/pull/117) and cut
+   `0.6.3`** so the printed remedies are ones that work.
+5. Decide the question in the table above: is "installs in one documented step"
+   sufficient, or must a stock `npm install` work? Only the second needs more
+   engineering.
+6. Re-date this report and sign §9.
 
 Until then RFC 009 may **not** begin Phase 0. Every other handoff condition is
 met: the token-estimation policy is settled, the supported-platform list is
