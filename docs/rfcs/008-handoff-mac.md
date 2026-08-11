@@ -316,16 +316,18 @@ experiment.
 
 - `subagents.agent_type`, 223 rows — accepted, unchanged, and still the reason
   the real-corpus diff can never reach zero while both engines exist.
-- **Ship it, in this order.** #115 and #116 are unreleased, and `0.6.1` cannot
-  be installed on npm 12. Sign-off waits on a `0.6.2` that a stock
-  `npm install` can actually run — verify that as part of cutting it, because
-  the workspace cannot detect this class of breakage (pnpm allowlists
-  `better-sqlite3`). **Watch the release PR:** release-please already has
-  [#112](https://github.com/vibecook-dev/spaghetti/pull/112) open for `0.6.2`,
-  raised before this work and carrying only #111. Merging it ahead of the fixes
-  spends the version number on a build that still drops user text from search,
-  and a shipped release cannot be repaired in place. Merge the fixes first and
-  let #112 regenerate.
+- **Ship it.** #115 and #116 landed on `main` 2026-08-11 (`456bf28`,
+  `4df448c`) and release-please folded both into
+  [#112](https://github.com/vibecook-dev/spaghetti/pull/112) within a minute of
+  each merge, so `0.6.2` now carries them. What remains is releasing it and
+  **verifying a stock `npm install` of that release actually runs on npm 12** —
+  the gate `0.6.1` failed, and one the workspace cannot check for itself
+  because pnpm allowlists `better-sqlite3`.
+
+  The ordering here was load-bearing and nearly went the other way: #112 had
+  been open since before this work carrying only #111, and merging it first
+  would have spent the version number on a build that still dropped user text
+  from search. A shipped release cannot be repaired in place.
 - Re-run on **Linux/ext4**. Two of the five bugs were filesystem- or
   platform-shaped, so a third platform is still worth a pass — though the
   ordering fix now pins the one that was FS-dependent.
