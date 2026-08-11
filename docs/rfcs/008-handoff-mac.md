@@ -17,8 +17,10 @@ Phases 0–5 are merged and the soak release is published (`0.6.1`). RFC 008 is
 > subset. Both open Windows items vanished, and three classes Windows never
 > showed turned up — one of them silent data loss in `messages`.
 >
-> Sign-off is still withheld, but for a **new** reason: the published `0.6.1`
-> cannot be installed on npm 12. See §8.
+> **RFC 008 §9 is signed as of 2026-08-11, against published `0.7.0`.** The last
+> gate — a stock `npm install` working on npm 12 — took four releases and was
+> finally closed by deleting `better-sqlite3` outright
+> ([RFC 010](./010-adopt-node-sqlite.md)), not by documenting around it.
 
 ---
 
@@ -316,18 +318,20 @@ experiment.
 
 - `subagents.agent_type`, 223 rows — accepted, unchanged, and still the reason
   the real-corpus diff can never reach zero while both engines exist.
-- **Ship it.** #115 and #116 landed on `main` 2026-08-11 (`456bf28`,
-  `4df448c`) and release-please folded both into
-  [#112](https://github.com/vibecook-dev/spaghetti/pull/112) within a minute of
-  each merge, so `0.6.2` now carries them. What remains is releasing it and
-  **verifying a stock `npm install` of that release actually runs on npm 12** —
-  the gate `0.6.1` failed, and one the workspace cannot check for itself
-  because pnpm allowlists `better-sqlite3`.
+- ~~**Ship it.**~~ **Done.** #115 and #116 landed 2026-08-11 and shipped in
+  `0.6.2`; #117 corrected the install guidance; #120 removed `better-sqlite3`
+  entirely and shipped in **`0.7.0`**, which passes a stock npm 12 install with
+  no flags. §9 is signed.
 
-  The ordering here was load-bearing and nearly went the other way: #112 had
-  been open since before this work carrying only #111, and merging it first
-  would have spent the version number on a build that still dropped user text
-  from search. A shipped release cannot be repaired in place.
+  The merge ordering was load-bearing and nearly went the other way: the release
+  PR had been open since before this work carrying only #111, and merging it
+  first would have spent the version number on a build that still dropped user
+  text from search. A shipped release cannot be repaired in place.
+
+  Worth keeping from the tail of this: `0.6.2` shipped two remedies for the npm
+  12 failure that had **never been executed**, and neither worked. Documentation
+  is not a fix when it is untested, and an untested instruction is worse than
+  none — the user follows it, sees no error, and is still broken.
 - Re-run on **Linux/ext4**. Two of the five bugs were filesystem- or
   platform-shaped, so a third platform is still worth a pass — though the
   ordering fix now pins the one that was FS-dependent.

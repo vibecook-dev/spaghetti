@@ -1,14 +1,17 @@
 # RFC 008 — Rust Ingest Readiness Report
 
-**Status:** ⚠️ **Draft — not signed off.** Divergence, rollback, and
-data-loss gates are all met on the published `0.6.2`, and the data loss is
-demonstrably fixed for users (§8). One gate remains: a **stock `npm install`
-on npm 12 still does not work**, and the remedies `0.6.2` printed were
-themselves wrong. See §9 — what is left is a decision, not an investigation.
+**Status:** ✅ **Signed off — 2026-08-11, on published `0.7.0`.** Every gate was
+verified against artifacts installed from npm rather than a build: fixtures at
+zero on two platforms, the real-corpus diff down to the single accepted
+`agent_type` class, rollback proven on the shipped release, the data loss gone
+from what users install, and a **stock `npm install` on npm 12 working with no
+flags**. That last one took four releases and, ultimately, deleting the
+dependency that needed an install script ([RFC 010](./010-adopt-node-sqlite.md)).
+See §9. **RFC 009 is unblocked.**
 
 **Cross-platform verification:** [`008-handoff-mac.md`](./008-handoff-mac.md) — executed on macOS 2026-08-10 (§8 of that doc). Fixes in [#115](https://github.com/vibecook-dev/spaghetti/pull/115) and [#116](https://github.com/vibecook-dev/spaghetti/pull/116). As predicted, macOS found a *different* divergence set, not a subset: both open Windows items vanished and three new classes appeared, one of them silent data loss.
 
-**Dated:** 2026-08-11 · **Verified on:** Windows 11 / NTFS and macOS 15 / APFS · **Current version:** `0.6.2` (published)
+**Dated:** 2026-08-11 · **Verified on:** Windows 11 / NTFS and macOS 15 / APFS · **Signed against:** `0.7.0` (published)
 **Phases:** [0](./008-phase-0-baseline.md) · [1](./008-phase-1-gate.md) · [2](./008-phase-2-gate.md) · [3](./008-phase-3-gate.md) · [4](./008-phase-4-gate.md)
 
 ---
@@ -18,24 +21,25 @@ themselves wrong. See §9 — what is left is a decision, not an investigation.
 Versions are lockstep across `@vibecook/spaghetti-sdk`,
 `@vibecook/spaghetti-sdk-native`, and the CLI.
 
-**The soak release is cut.** `0.6.0` shipped the Rust behaviour with the TS
-fallback retained, `0.6.1` added the CRLF plan-title fix, and `0.6.2`
-(2026-08-11) carries the macOS parity work and the silent-parse-failure fix.
-All three packages are published at `0.6.2` and `latest` points at it:
+**The soak release is cut, and then some.** `0.6.0` shipped the Rust behaviour
+with the TS fallback retained; `0.6.1` added the CRLF plan-title fix; `0.6.2`
+carried the macOS parity work and the silent-parse-failure fix; and `0.7.0`
+(2026-08-11) removed `better-sqlite3` so a stock install works. All three
+packages are published at `0.7.0` and `latest` points at it:
 
 | Package                          | Published | Notes                                                          |
 | -------------------------------- | --------- | -------------------------------------------------------------- |
-| `@vibecook/spaghetti`            | `0.6.2`   | CLI                                                            |
-| `@vibecook/spaghetti-sdk`        | `0.6.2`   |                                                                |
-| `@vibecook/spaghetti-sdk-native` | `0.6.2`   | ships all 8 platform binaries bundled; `next` still on `0.6.0-rc.0` |
+| `@vibecook/spaghetti`            | `0.7.0`   | CLI                                                            |
+| `@vibecook/spaghetti-sdk`        | `0.7.0`   | no install script; index runs on `node:sqlite`                  |
+| `@vibecook/spaghetti-sdk-native` | `0.7.0`   | ships all 8 platform binaries bundled; `next` still on `0.6.0-rc.0` |
 
 The native package carries every target in the one tarball (`files: ["*.node"]`,
 no `optionalDependencies`) — verified by unpacking the published artifact, which
 also confirms the `crates/spaghetti-napi/npm/*` platform packages are vestigial
 (see the handoff's trap list).
 
-**Caveat that blocks sign-off:** the published CLI still does not work on a
-stock npm 12 install, on any of these versions. See §9.
+**Resolved as of `0.7.0`:** the published CLI now works on a stock npm 12
+install with no flags. `0.6.0`–`0.6.3` did not. See §9.
 
 Eight targets, each `require()`-loaded on a matching host before publish —
 verified green on 2026-08-09:
@@ -302,78 +306,68 @@ error — the row was present and its text simply was not.
 
 ## 9. Sign-off
 
-**Not given.** The completion gate is explicit: _"RFC 008 is complete only when
-the report is committed after the soak release. Passing tests on an unreleased
-branch is not sufficient."_
+**Given — 2026-08-11, on published `0.7.0`.**
 
-| #   | Gate                                                  | Status                                                                             |
-| --- | ----------------------------------------------------- | ---------------------------------------------------------------------------------- |
-| 1   | Publish a minor release with the TS fallback retained | ✅ `0.6.0` → `0.6.1` → `0.6.2` (2026-08-11) carrying every fix below               |
-| 2   | Resolve or explicitly accept the open divergences     | ✅ all closed on two platforms; only accepted `agent_type` remains (§6)            |
-| 3   | Prove rollback on that release                        | ✅ re-proven on published `0.6.2` (§8)                                             |
-| 3b  | The data loss is actually gone from the artifact      | ✅ `0.6.1` returns no results, `0.6.2` finds the message (§8)                      |
-| 4   | A stock install of that release runs                  | ❌ **fails on npm 12** — the one gate still open                                   |
-| 5   | Re-date and sign                                      | ⚠️ **withheld** — see below                                                        |
+The completion gate was explicit: _"RFC 008 is complete only when the report is
+committed after the soak release. Passing tests on an unreleased branch is not
+sufficient."_ Every gate below was verified against artifacts installed from
+npm, not against a build.
 
-**Why sign-off is still withheld.** Gates 1–3b are now genuinely met on a
-published artifact, and the data loss is demonstrably fixed for users. Gate 4
-is not, and it is the one the completion criterion is really about — *"the
-shipped artifact works."*
+| #   | Gate                                                  | Status                                                                    |
+| --- | ----------------------------------------------------- | ------------------------------------------------------------------------- |
+| 1   | Publish a minor release with the TS fallback retained | ✅ `0.6.0` → `0.6.1` → `0.6.2` → **`0.7.0`**                              |
+| 2   | Resolve or explicitly accept the open divergences     | ✅ closed on two platforms; only the accepted `agent_type` remains (§6)   |
+| 3   | Prove rollback on that release                        | ✅ on published `0.7.0` — `SPAG_ENGINE=ts`, identical totals (§8)         |
+| 3b  | The data loss is gone from the artifact users install | ✅ `0.6.1` finds nothing, `0.6.2`+ finds it (§8)                          |
+| 3c  | Silent parser failure is loud                         | ✅ #116 — reported via the `record-skip` sink §5 defines (§6)             |
+| 4   | A stock install of that release runs                  | ✅ **`npm i -g @vibecook/spaghetti@0.7.0` on npm 12, zero flags**         |
+| 5   | Re-date and sign                                      | ✅ this section                                                           |
 
-`npm install -g @vibecook/spaghetti@0.6.2` on npm 12, the current npm, still
-produces a CLI where every command that touches the index fails: npm 12 blocks
-install scripts by default and `better-sqlite3` fetches its binding from a
-postinstall. `0.6.2` improves on `0.6.1` by *diagnosing* this correctly instead
-of blaming a missing agent — but it does not remove the dependency on that
-script, so a stock install is still broken.
+### Gate 4, the one that took three releases
 
-Worse, and found only by running them: **the two remedies `0.6.2` prints were
-themselves wrong**, in both the CLI message and the README. `--allow-scripts` is
-refused outright for project-scoped installs, and `npm install-scripts approve`
-records the permission without ever executing the script — so it answers
-"Approved" and changes nothing. A user who followed either was left exactly as
-broken, by a tool that now sounded certain.
-[#117](https://github.com/vibecook-dev/spaghetti/pull/117) replaces them with
-forms that were each executed against the published tarball first.
+`0.6.1` blamed a missing agent. `0.6.2` diagnosed the real cause but printed two
+remedies that had never been run, and neither worked — `--allow-scripts` is
+refused for project-scoped installs, and `install-scripts approve` grants
+permission without executing anything. `0.6.3` corrected the wording. None of
+them made a stock install work, because all three still needed an install script
+to fetch `better-sqlite3`'s binding.
 
-That leaves a real decision rather than more work, and it is not the report's
-to make:
+`0.7.0` removes the dependency instead (RFC 010). Verified on npm 12.0.1:
 
-- **Ship `0.6.3` with #117 and sign**, accepting that installation takes one
-  documented step on npm 12. Defensible: the step is small, correct, and
-  discoverable from the error itself.
-- **Or treat "a stock `npm install` must work" as the gate** and remove the
-  postinstall dependency first — `node:sqlite`, or a binding shipped as real
-  npm dependencies. Larger, and RFC-sized.
+```
+npm i -g @vibecook/spaghetti@0.7.0     # no flags, no allowlist
+  added 248 packages
+  npm warn install-scripts 1 package had install scripts blocked:
+  npm warn install-scripts   @parcel/watcher (install: build-from-source.js)
 
-Either way `0.6.2` should not be the release that gets signed: its install
-guidance is actively wrong, and a shipped release cannot be repaired in place.
+spag projects   → 9 projects · 32 sessions · 712 messages · 996.2K tokens
+spag search     → 458 results          (FTS5, through node:sqlite)
+SPAG_ENGINE=ts  → engine: ts, identical totals
+```
 
-Remaining before sign-off:
+Note the second line: a script **was** blocked and it did not matter.
+`@parcel/watcher` ships per-platform binaries as `optionalDependencies` and
+keeps its build script only as a fallback, so blocking it costs nothing. That is
+the difference between a dependency that *needs* a script and one that merely
+*has* one — and it is why the fix was removing `better-sqlite3` rather than
+documenting around it.
 
-1. ~~Merge #115, then #116.~~ **Done 2026-08-11** — `456bf28` and `4df448c`.
-   Release-please regenerated
-   [#112](https://github.com/vibecook-dev/spaghetti/pull/112) within a minute of
-   each, so `0.6.2` now carries both. That ordering was the one intervention
-   that mattered: had #112 merged first it would have spent the version number
-   on a build that still dropped user text from search, and a shipped release
-   cannot be repaired in place.
-2. ~~Release `0.6.2`, then verify a clean `npm install` on npm 12.~~
-   **Done 2026-08-11, and the install gate failed** — see the table above. The
-   release shipped; the stock install did not work, and the guidance it printed
-   was wrong.
-3. ~~Re-run the fixture diffs and one real-corpus audit against that release.~~
-   **Done** — four fixtures zero, real corpus 223 (all accepted `agent_type`),
-   rollback re-proven, and the data loss confirmed gone from the published
-   artifact (§8).
-4. **Merge [#117](https://github.com/vibecook-dev/spaghetti/pull/117) and cut
-   `0.6.3`** so the printed remedies are ones that work.
-5. Decide the question in the table above: is "installs in one documented step"
-   sufficient, or must a stock `npm install` work? Only the second needs more
-   engineering.
-6. Re-date this report and sign §9.
+### What this signs off, and what it does not
 
-Until then RFC 009 may **not** begin Phase 0. Every other handoff condition is
+Signed: the Rust bulk-ingest engine is production-ready. Fixtures are at zero on
+Windows and macOS, the real-corpus diff is down to the single accepted
+`agent_type` class, rollback works on the shipped build, and no unresolved
+divergence involves data loss, stale warm results, partial project commits, or
+silent parser failure.
+
+Not signed away — the accepted divergence stands. `subagents.agent_type` differs
+on ~223 rows because **Rust is correct and TS is wrong**, so the real-corpus
+diff can never reach zero while both engines exist. It remains a manual audit
+rather than a CI gate, and RFC 009 removes the reason it exists.
+
+**RFC 009 may begin Phase 0.**
+
+Every other handoff condition is
 met: the token-estimation policy is settled, the supported-platform list is
 published and now verified against the published tarball, `EngineUnavailableError`
 has shipped, the warm strategy is measured and recorded, rollback is proven on a
