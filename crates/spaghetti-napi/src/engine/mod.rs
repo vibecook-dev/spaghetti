@@ -6,6 +6,7 @@
 
 mod commit;
 mod owner_lock;
+mod projection;
 mod query_pool;
 mod writer;
 
@@ -13,6 +14,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 
+use crate::adapter::FactBatch;
 use commit::{CommitReceipt, ObservationCommit};
 use owner_lock::DatabaseOwnerLock;
 pub use owner_lock::OwnerMetadata;
@@ -300,6 +302,17 @@ impl SpaghettiEngineCore {
     ) -> Result<CommitReceipt, EngineError> {
         let (writer, _) = self.clients()?;
         writer.commit_observation(request)
+    }
+
+    /// Commit storage-agnostic adapter facts through the common projectors.
+    /// Change-log entries and durable fact counts are derived by the engine.
+    pub(crate) fn commit_facts(
+        &self,
+        request: ObservationCommit,
+        batch: FactBatch,
+    ) -> Result<CommitReceipt, EngineError> {
+        let (writer, _) = self.clients()?;
+        writer.commit_facts(request, batch)
     }
 
     /// Replay durable projection changes from a snapshot-consistent read-only

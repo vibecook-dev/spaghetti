@@ -450,6 +450,14 @@ const RFC011_SCHEMA_TABLES = [
   'projection_versions',
   'source_record_errors',
   'change_log',
+  'fact_records',
+  'canonical_sessions',
+  'canonical_messages',
+  'canonical_runs',
+  'run_evidence',
+  'observed_run_states',
+  'usage_contributions',
+  'usage_totals',
 ] as const;
 
 const TABLE_SPECS: TableSpec[] = [
@@ -488,6 +496,38 @@ const TABLE_SPECS: TableSpec[] = [
   {
     name: 'change_log',
     orderBy: 'commit_seq, ordinal',
+  },
+  {
+    name: 'fact_records',
+    orderBy: 'fact_id',
+  },
+  {
+    name: 'canonical_sessions',
+    orderBy: 'session_key',
+  },
+  {
+    name: 'canonical_messages',
+    orderBy: 'message_key',
+  },
+  {
+    name: 'canonical_runs',
+    orderBy: 'run_key',
+  },
+  {
+    name: 'run_evidence',
+    orderBy: 'fact_id',
+  },
+  {
+    name: 'observed_run_states',
+    orderBy: 'run_key',
+  },
+  {
+    name: 'usage_contributions',
+    orderBy: 'fact_id',
+  },
+  {
+    name: 'usage_totals',
+    orderBy: 'session_key',
   },
   {
     name: 'projects',

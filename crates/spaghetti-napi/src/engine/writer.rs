@@ -13,9 +13,11 @@ use std::time::Duration;
 use crossbeam_channel::{bounded, Receiver, Sender};
 use rusqlite::Connection;
 
+use crate::adapter::FactBatch;
 use crate::core::schema;
 
 use super::commit::{self, CommitReceipt, ObservationCommit};
+use super::projection;
 use super::EngineError;
 
 #[derive(Debug, Clone)]
@@ -28,6 +30,11 @@ enum WriterCommand {
     Health(Sender<Result<WriterHealth, EngineError>>),
     Commit {
         request: Box<ObservationCommit>,
+        response: Sender<Result<CommitReceipt, EngineError>>,
+    },
+    CommitFacts {
+        request: Box<ObservationCommit>,
+        batch: Box<FactBatch>,
         response: Sender<Result<CommitReceipt, EngineError>>,
     },
     Shutdown,
@@ -68,6 +75,27 @@ impl WriterClient {
         self.commands
             .send(WriterCommand::Commit {
                 request: Box::new(request),
+                response: response_tx,
+            })
+            .map_err(|_| EngineError::WorkerUnavailable { worker: "writer" })?;
+        response_rx
+            .recv()
+            .map_err(|_| EngineError::WorkerUnavailable { worker: "writer" })?
+    }
+
+    pub fn commit_facts(
+        &self,
+        request: ObservationCommit,
+        batch: FactBatch,
+    ) -> Result<CommitReceipt, EngineError> {
+        if !self.alive.load(Ordering::Acquire) {
+            return Err(EngineError::WorkerUnavailable { worker: "writer" });
+        }
+        let (response_tx, response_rx) = bounded(1);
+        self.commands
+            .send(WriterCommand::CommitFacts {
+                request: Box::new(request),
+                batch: Box::new(batch),
                 response: response_tx,
             })
             .map_err(|_| EngineError::WorkerUnavailable { worker: "writer" })?;
@@ -166,6 +194,17 @@ fn writer_thread(
             }
             WriterCommand::Commit { request, response } => {
                 let _ = response.send(commit::apply_observation_commit(&mut connection, &request));
+            }
+            WriterCommand::CommitFacts {
+                request,
+                batch,
+                response,
+            } => {
+                let _ = response.send(projection::apply_fact_observation_commit(
+                    &mut connection,
+                    &request,
+                    &batch,
+                ));
             }
             WriterCommand::Shutdown => break,
         }

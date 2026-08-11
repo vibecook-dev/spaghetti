@@ -24,6 +24,7 @@ pub use directory_snapshot::{
     DirectoryEntryState, DirectoryScan, DirectorySelection, DirectorySelector, DirectorySnapshot,
     DirectorySnapshotConfig,
 };
+pub use file::platform_path_key;
 pub use model::{
     DriverQuarantine, FileIdentity, RecordHash, RecordOrigin, Revision, SourceCursor,
     SourceDriverError, SourceMediaType, SourceRecord,

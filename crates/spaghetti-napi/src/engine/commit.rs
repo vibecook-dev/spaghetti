@@ -177,19 +177,19 @@ pub(super) trait TransactionalProjectionWork {
         &self,
         transaction: &Transaction<'_>,
         context: &ProjectionCommitContext,
-    ) -> Result<(), EngineError>;
+    ) -> Result<Vec<ChangeEntry>, EngineError>;
 
     fn apply_runtime(
         &self,
         transaction: &Transaction<'_>,
         context: &ProjectionCommitContext,
-    ) -> Result<(), EngineError>;
+    ) -> Result<Vec<ChangeEntry>, EngineError>;
 
     fn apply_usage(
         &self,
         transaction: &Transaction<'_>,
         context: &ProjectionCommitContext,
-    ) -> Result<(), EngineError>;
+    ) -> Result<Vec<ChangeEntry>, EngineError>;
 }
 
 /// Stable provenance allocated before projection work, but visible to readers
@@ -209,24 +209,24 @@ impl TransactionalProjectionWork for NoProjectionWork {
         &self,
         _transaction: &Transaction<'_>,
         _context: &ProjectionCommitContext,
-    ) -> Result<(), EngineError> {
-        Ok(())
+    ) -> Result<Vec<ChangeEntry>, EngineError> {
+        Ok(Vec::new())
     }
 
     fn apply_runtime(
         &self,
         _transaction: &Transaction<'_>,
         _context: &ProjectionCommitContext,
-    ) -> Result<(), EngineError> {
-        Ok(())
+    ) -> Result<Vec<ChangeEntry>, EngineError> {
+        Ok(Vec::new())
     }
 
     fn apply_usage(
         &self,
         _transaction: &Transaction<'_>,
         _context: &ProjectionCommitContext,
-    ) -> Result<(), EngineError> {
-        Ok(())
+    ) -> Result<Vec<ChangeEntry>, EngineError> {
+        Ok(Vec::new())
     }
 }
 
@@ -240,6 +240,14 @@ pub(crate) fn apply_observation_commit(
         &NoProjectionWork,
         &NoopCommitHook,
     )
+}
+
+pub(super) fn apply_observation_commit_with_projection(
+    connection: &mut Connection,
+    request: &ObservationCommit,
+    projection_work: &dyn TransactionalProjectionWork,
+) -> Result<CommitReceipt, EngineError> {
+    apply_observation_commit_with_components(connection, request, projection_work, &NoopCommitHook)
 }
 
 pub(super) fn apply_observation_commit_with_components(
@@ -279,12 +287,15 @@ pub(super) fn apply_observation_commit_with_components(
         generation: request.object.generation,
     };
 
-    projection_work.apply_canonical(&transaction, &projection_context)?;
+    let mut changes = request.changes.clone();
+    changes.extend(projection_work.apply_canonical(&transaction, &projection_context)?);
     hook.reach(CommitStage::MidCanonicalProjection)?;
-    projection_work.apply_runtime(&transaction, &projection_context)?;
+    changes.extend(projection_work.apply_runtime(&transaction, &projection_context)?);
     hook.reach(CommitStage::MidRuntimeProjection)?;
-    projection_work.apply_usage(&transaction, &projection_context)?;
+    changes.extend(projection_work.apply_usage(&transaction, &projection_context)?);
     hook.reach(CommitStage::MidUsageProjection)?;
+    let changes = coalesce_changes(changes);
+    validate_changes(&changes)?;
 
     finalize_source_object(&transaction, source_object_id, commit_seq, &request.object)?;
     hook.reach(CommitStage::AfterCursorUpdate)?;
@@ -301,7 +312,7 @@ pub(super) fn apply_observation_commit_with_components(
         commit_seq,
         &request.record_errors,
     )?;
-    write_change_log(&transaction, commit_seq, &request.changes)?;
+    write_change_log(&transaction, commit_seq, &changes)?;
     hook.reach(CommitStage::AfterOutboxInsert)?;
 
     transaction
@@ -327,8 +338,23 @@ pub(super) fn apply_observation_commit_with_components(
         source_instance_id,
         source_stream_id,
         source_object_id,
-        change_count: u32::try_from(request.changes.len()).unwrap_or(u32::MAX),
+        change_count: u32::try_from(changes.len()).unwrap_or(u32::MAX),
     })
+}
+
+fn coalesce_changes(changes: Vec<ChangeEntry>) -> Vec<ChangeEntry> {
+    let mut positions = std::collections::BTreeMap::new();
+    let mut coalesced = Vec::with_capacity(changes.len());
+    for change in changes {
+        let key = (change.topic.clone(), change.entity_key.clone());
+        if let Some(position) = positions.get(&key).copied() {
+            coalesced[position] = change;
+        } else {
+            positions.insert(key, coalesced.len());
+            coalesced.push(change);
+        }
+    }
+    coalesced
 }
 
 #[derive(Debug, Clone)]
@@ -394,16 +420,7 @@ fn validate_commit(request: &ObservationCommit) -> Result<(), EngineError> {
         }
     }
 
-    for change in &request.changes {
-        require_text("change.topic", &change.topic)?;
-        require_text("change.operation", &change.operation)?;
-        require_bytes("change.entity_key", &change.entity_key)?;
-        if change.schema_version == 0 {
-            return Err(EngineError::InvalidCommit(
-                "change schema_version must be greater than zero".to_string(),
-            ));
-        }
-    }
+    validate_changes(&request.changes)?;
 
     for error in &request.record_errors {
         require_bytes("record_error.payload_hash", &error.payload_hash)?;
@@ -412,6 +429,20 @@ fn validate_commit(request: &ObservationCommit) -> Result<(), EngineError> {
         require_text("record_error.error_message", &error.error_message)?;
         require_text("record_error.adapter_version", &error.adapter_version)?;
         to_i64(error.generation, "record error generation")?;
+    }
+    Ok(())
+}
+
+fn validate_changes(changes: &[ChangeEntry]) -> Result<(), EngineError> {
+    for change in changes {
+        require_text("change.topic", &change.topic)?;
+        require_text("change.operation", &change.operation)?;
+        require_bytes("change.entity_key", &change.entity_key)?;
+        if change.schema_version == 0 {
+            return Err(EngineError::InvalidCommit(
+                "change schema_version must be greater than zero".to_string(),
+            ));
+        }
     }
     Ok(())
 }
@@ -833,24 +864,27 @@ mod tests {
             &self,
             transaction: &Transaction<'_>,
             context: &ProjectionCommitContext,
-        ) -> Result<(), EngineError> {
-            write_fixture_projection(transaction, "fixture_canonical", context)
+        ) -> Result<Vec<ChangeEntry>, EngineError> {
+            write_fixture_projection(transaction, "fixture_canonical", context)?;
+            Ok(Vec::new())
         }
 
         fn apply_runtime(
             &self,
             transaction: &Transaction<'_>,
             context: &ProjectionCommitContext,
-        ) -> Result<(), EngineError> {
-            write_fixture_projection(transaction, "fixture_runtime", context)
+        ) -> Result<Vec<ChangeEntry>, EngineError> {
+            write_fixture_projection(transaction, "fixture_runtime", context)?;
+            Ok(Vec::new())
         }
 
         fn apply_usage(
             &self,
             transaction: &Transaction<'_>,
             context: &ProjectionCommitContext,
-        ) -> Result<(), EngineError> {
-            write_fixture_projection(transaction, "fixture_usage", context)
+        ) -> Result<Vec<ChangeEntry>, EngineError> {
+            write_fixture_projection(transaction, "fixture_usage", context)?;
+            Ok(Vec::new())
         }
     }
 

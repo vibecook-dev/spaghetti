@@ -62,7 +62,10 @@ import type { SqliteService } from '../io/index.js';
 // v17: RFC 011 source catalog, atomic ingest commits, projection readiness,
 // record diagnostics, and durable change-log outbox. This TS DDL is a
 // transitional migration mirror; Rust remains the target schema authority.
-export const SCHEMA_VERSION = 17;
+//
+// v18: RFC 011 provenance-bearing fact storage, canonical shadow history,
+// runtime evidence/state, and contribution-based usage totals.
+export const SCHEMA_VERSION = 18;
 
 export const TOKEN_ACTIVITY_TRIGGER_NAMES = [
   'token_activity_messages_ai',
@@ -554,6 +557,134 @@ CREATE TABLE IF NOT EXISTS source_record_errors (
   PRIMARY KEY (source_object_id, generation, cursor_start, cursor_end)
 );
 
+-- RFC 011 typed-fact audit store and common projections. Adapters emit the
+-- facts; only the common writer maps them into these tables.
+CREATE TABLE IF NOT EXISTS fact_records (
+  fact_id BLOB PRIMARY KEY,
+  fact_kind TEXT NOT NULL,
+  entity_key BLOB,
+  source_instance_id INTEGER NOT NULL REFERENCES source_instances(source_instance_id) ON DELETE CASCADE,
+  source_stream_id INTEGER NOT NULL REFERENCES source_streams(source_stream_id) ON DELETE CASCADE,
+  source_object_id INTEGER NOT NULL REFERENCES source_objects(source_object_id) ON DELETE CASCADE,
+  source_generation INTEGER NOT NULL,
+  cursor_start BLOB NOT NULL,
+  cursor_end BLOB NOT NULL,
+  payload_hash BLOB NOT NULL,
+  local_fact_ordinal INTEGER NOT NULL,
+  observed_at INTEGER NOT NULL,
+  payload_json BLOB NOT NULL,
+  last_commit_seq INTEGER NOT NULL REFERENCES ingest_commits(commit_seq) ON DELETE RESTRICT
+);
+
+CREATE TABLE IF NOT EXISTS canonical_sessions (
+  session_key BLOB PRIMARY KEY,
+  project_key BLOB NOT NULL,
+  native_session_id TEXT NOT NULL,
+  native_project_key TEXT NOT NULL,
+  cwd TEXT,
+  git_branch TEXT,
+  first_prompt TEXT,
+  ai_title TEXT,
+  custom_title TEXT,
+  source_time TEXT,
+  source_time_quality TEXT,
+  fact_id BLOB NOT NULL REFERENCES fact_records(fact_id) ON DELETE CASCADE,
+  source_object_id INTEGER NOT NULL,
+  source_generation INTEGER NOT NULL,
+  cursor_end BLOB NOT NULL,
+  last_commit_seq INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS canonical_messages (
+  message_key BLOB PRIMARY KEY,
+  session_key BLOB NOT NULL,
+  native_message_id TEXT,
+  native_kind TEXT NOT NULL,
+  role TEXT NOT NULL,
+  content_json BLOB NOT NULL,
+  source_time TEXT,
+  source_time_quality TEXT,
+  parent_native_message_id TEXT,
+  model TEXT,
+  search_text TEXT,
+  raw_json BLOB NOT NULL,
+  fact_id BLOB NOT NULL REFERENCES fact_records(fact_id) ON DELETE CASCADE,
+  source_object_id INTEGER NOT NULL,
+  source_generation INTEGER NOT NULL,
+  cursor_start BLOB NOT NULL,
+  cursor_end BLOB NOT NULL,
+  last_commit_seq INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS canonical_runs (
+  run_key BLOB PRIMARY KEY,
+  session_key BLOB NOT NULL,
+  native_run_id TEXT NOT NULL,
+  parent_run_key BLOB,
+  fact_id BLOB NOT NULL REFERENCES fact_records(fact_id) ON DELETE CASCADE,
+  source_object_id INTEGER NOT NULL,
+  source_generation INTEGER NOT NULL,
+  cursor_end BLOB NOT NULL,
+  last_commit_seq INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS run_evidence (
+  fact_id BLOB PRIMARY KEY REFERENCES fact_records(fact_id) ON DELETE CASCADE,
+  run_key BLOB NOT NULL,
+  evidence_kind TEXT NOT NULL,
+  evidence_strength TEXT NOT NULL,
+  native_state TEXT,
+  source_time TEXT,
+  source_time_quality TEXT,
+  source_object_id INTEGER NOT NULL,
+  source_generation INTEGER NOT NULL,
+  cursor_end BLOB NOT NULL,
+  last_commit_seq INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS observed_run_states (
+  run_key BLOB PRIMARY KEY,
+  state TEXT NOT NULL,
+  decisive_evidence_id BLOB NOT NULL REFERENCES run_evidence(fact_id) ON DELETE CASCADE,
+  last_activity_at TEXT,
+  terminal_at TEXT,
+  last_commit_seq INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS usage_contributions (
+  fact_id BLOB PRIMARY KEY REFERENCES fact_records(fact_id) ON DELETE CASCADE,
+  subject_key BLOB NOT NULL,
+  session_key BLOB NOT NULL,
+  scope TEXT NOT NULL,
+  accounting TEXT NOT NULL,
+  quality TEXT NOT NULL,
+  quality_bucket TEXT NOT NULL,
+  input_tokens INTEGER NOT NULL,
+  output_tokens INTEGER NOT NULL,
+  cache_creation_tokens INTEGER NOT NULL,
+  cache_read_tokens INTEGER NOT NULL,
+  model TEXT,
+  source_time TEXT,
+  source_time_quality TEXT,
+  source_object_id INTEGER NOT NULL,
+  source_generation INTEGER NOT NULL,
+  cursor_end BLOB NOT NULL,
+  last_commit_seq INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS usage_totals (
+  session_key BLOB PRIMARY KEY,
+  exact_input_tokens INTEGER NOT NULL DEFAULT 0,
+  exact_output_tokens INTEGER NOT NULL DEFAULT 0,
+  exact_cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
+  exact_cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+  estimated_input_tokens INTEGER NOT NULL DEFAULT 0,
+  estimated_output_tokens INTEGER NOT NULL DEFAULT 0,
+  estimated_cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
+  estimated_cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+  last_commit_seq INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS workflows (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   project_slug TEXT,
@@ -655,6 +786,13 @@ CREATE INDEX IF NOT EXISTS idx_ingest_commits_source_seq ON ingest_commits(sourc
 CREATE INDEX IF NOT EXISTS idx_change_log_topic_cursor ON change_log(topic, commit_seq, ordinal);
 CREATE INDEX IF NOT EXISTS idx_projection_versions_readiness ON projection_versions(readiness, projection_id);
 CREATE INDEX IF NOT EXISTS idx_source_record_errors_commit ON source_record_errors(first_commit_seq);
+CREATE INDEX IF NOT EXISTS idx_fact_records_object_generation ON fact_records(source_object_id, source_generation);
+CREATE INDEX IF NOT EXISTS idx_fact_records_entity_kind ON fact_records(entity_key, fact_kind);
+CREATE INDEX IF NOT EXISTS idx_canonical_sessions_project ON canonical_sessions(project_key, session_key);
+CREATE INDEX IF NOT EXISTS idx_canonical_messages_session_order ON canonical_messages(session_key, source_generation, cursor_start);
+CREATE INDEX IF NOT EXISTS idx_canonical_runs_session ON canonical_runs(session_key, run_key);
+CREATE INDEX IF NOT EXISTS idx_run_evidence_run_order ON run_evidence(run_key, source_generation, cursor_end);
+CREATE INDEX IF NOT EXISTS idx_usage_contributions_session ON usage_contributions(session_key, fact_id);
 
 -- Persistent FTS5 (content-synced with messages)
 CREATE VIRTUAL TABLE IF NOT EXISTS search_fts USING fts5(text_content, content='messages', content_rowid='id');
@@ -742,6 +880,14 @@ const LEGACY_TABLES = ['segments', 'search_index', 'schema_version'];
 const CURRENT_TABLES = [
   'search_fts',
   'subagent_search_fts',
+  'observed_run_states',
+  'usage_totals',
+  'usage_contributions',
+  'run_evidence',
+  'canonical_messages',
+  'canonical_runs',
+  'canonical_sessions',
+  'fact_records',
   'source_record_errors',
   'change_log',
   'projection_versions',

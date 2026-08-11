@@ -5,6 +5,7 @@
 //! this module is the first (and currently only) producer for the native
 //! cold/warm path.
 
+pub mod adapter;
 /// On-disk fingerprint discovery + `source_files` store helpers.
 ///
 /// The walk is Claude-layout-specific; `FingerprintStore` itself is a
@@ -18,5 +19,6 @@ pub mod project_parser;
 pub mod session_metadata;
 pub mod types;
 
+pub use adapter::ClaudeCodeAdapter;
 pub use message_extractor::{project_jsonl_line, MessageProjection};
 pub use project_parser::ProjectParser;

@@ -33,6 +33,10 @@ SOURCE_LAYER_FORBIDDEN_RE = re.compile(
     r"\b(?:crate::(?:claude|codex|grok|engine|orchestrate|napi_engine)"
     r"|rusqlite|napi|sonic_rs|serde_json)(?:::|\b)"
 )
+ADAPTER_STORAGE_FORBIDDEN_RE = re.compile(
+    r"\b(?:crate::(?:engine|orchestrate|napi_engine|core::(?:schema|writer|event))"
+    r"|rusqlite|napi)(?:::|\b)"
+)
 
 
 def repo_path(path: Path) -> str:
@@ -126,6 +130,21 @@ def discover_rust_source_boundary_violations() -> set[str]:
     }
 
 
+def discover_rust_adapter_storage_boundary_violations() -> set[str]:
+    root = REPO_ROOT / "crates/spaghetti-napi/src"
+    paths = list((root / "adapter").rglob("*.rs"))
+    paths.extend(
+        path
+        for adapter in ("claude", "codex", "grok")
+        if (path := root / adapter / "adapter.rs").exists()
+    )
+    return {
+        repo_path(path)
+        for path in sorted(paths)
+        if ADAPTER_STORAGE_FORBIDDEN_RE.search(production_rust_text(path))
+    }
+
+
 DISCOVERERS: dict[str, Callable[[], set[str]]] = {
     "typescript_sql_authorities": discover_typescript_sql_authorities,
     "typescript_sql_drivers": discover_typescript_sql_drivers,
@@ -133,6 +152,7 @@ DISCOVERERS: dict[str, Callable[[], set[str]]] = {
     "source_specific_runtime_services": discover_source_runtime_services,
     "rust_common_source_dispatch": discover_rust_common_source_dispatch,
     "rust_source_boundary_violations": discover_rust_source_boundary_violations,
+    "rust_adapter_storage_boundary_violations": discover_rust_adapter_storage_boundary_violations,
 }
 
 

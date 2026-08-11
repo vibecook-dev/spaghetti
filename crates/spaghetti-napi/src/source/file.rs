@@ -131,13 +131,13 @@ pub(crate) fn file_identity(path: &Path, metadata: &Metadata) -> FileIdentity {
             volume: u64::from(volume),
             file: u128::from(file),
         },
-        _ => FileIdentity::ConfinedPath(path_key(path)),
+        _ => FileIdentity::ConfinedPath(platform_path_key(path)),
     }
 }
 
 #[cfg(not(any(unix, windows)))]
 pub(crate) fn file_identity(path: &Path, _metadata: &Metadata) -> FileIdentity {
-    FileIdentity::ConfinedPath(path_key(path))
+    FileIdentity::ConfinedPath(platform_path_key(path))
 }
 
 pub(crate) fn modified_ns(metadata: &Metadata) -> i128 {
@@ -172,7 +172,9 @@ pub(crate) fn confined_relative_path_key(path: &Path) -> Result<Vec<u8>, SourceD
     Ok(output)
 }
 
-pub(crate) fn path_key(path: &Path) -> Vec<u8> {
+/// Binary-safe component-framed key for an already host-approved platform
+/// path. Unlike [`confined_relative_path_key`], absolute roots are allowed.
+pub fn platform_path_key(path: &Path) -> Vec<u8> {
     let mut output = vec![1];
     for component in path.components() {
         let bytes = os_bytes(component.as_os_str());

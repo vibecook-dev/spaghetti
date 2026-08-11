@@ -24,6 +24,7 @@
 
 use napi_derive::napi;
 
+pub mod adapter;
 pub mod claude;
 pub mod codex;
 pub mod core;
