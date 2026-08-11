@@ -29,6 +29,10 @@ SOURCE_RUNTIME_RE = re.compile(
     r"(?:^|[-_/])(?:live|watch|watcher|checkpoint|writer|query|lifecycle-owner)(?:[-_/\.]|$)"
 )
 SOURCE_ID_LITERAL_RE = re.compile(r'"(?:claude-code|codex|grok)"')
+SOURCE_LAYER_FORBIDDEN_RE = re.compile(
+    r"\b(?:crate::(?:claude|codex|grok|engine|orchestrate|napi_engine)"
+    r"|rusqlite|napi|sonic_rs|serde_json)(?:::|\b)"
+)
 
 
 def repo_path(path: Path) -> str:
@@ -111,12 +115,24 @@ def discover_rust_common_source_dispatch() -> set[str]:
     return found
 
 
+def discover_rust_source_boundary_violations() -> set[str]:
+    root = REPO_ROOT / "crates/spaghetti-napi/src/source"
+    if not root.exists():
+        return set()
+    return {
+        repo_path(path)
+        for path in sorted(root.rglob("*.rs"))
+        if SOURCE_LAYER_FORBIDDEN_RE.search(production_rust_text(path))
+    }
+
+
 DISCOVERERS: dict[str, Callable[[], set[str]]] = {
     "typescript_sql_authorities": discover_typescript_sql_authorities,
     "typescript_sql_drivers": discover_typescript_sql_drivers,
     "typescript_query_projection_mutators": discover_query_projection_mutators,
     "source_specific_runtime_services": discover_source_runtime_services,
     "rust_common_source_dispatch": discover_rust_common_source_dispatch,
+    "rust_source_boundary_violations": discover_rust_source_boundary_violations,
 }
 
 

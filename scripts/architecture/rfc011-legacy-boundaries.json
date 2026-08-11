@@ -23,16 +23,11 @@
     },
     "typescript_sql_drivers": {
       "description": "Production TypeScript modules importing node:sqlite or better-sqlite3. RFC 010 leaves these as a transitional boundary only.",
-      "allowed": [
-        "packages/sdk/src/io/sqlite-health.ts",
-        "packages/sdk/src/io/sqlite-service.ts"
-      ]
+      "allowed": ["packages/sdk/src/io/sqlite-health.ts", "packages/sdk/src/io/sqlite-service.ts"]
     },
     "typescript_query_projection_mutators": {
       "description": "Query modules that still invoke projection ensure/rebuild work. RFC 011 moves this work to the writer.",
-      "allowed": [
-        "packages/sdk/src/data/query-service.ts"
-      ]
+      "allowed": ["packages/sdk/src/data/query-service.ts"]
     },
     "source_specific_runtime_services": {
       "description": "Legacy source-local lifecycle, live, watcher, and checkpoint services. New adapters must use the common Rust engine runtime.",
@@ -61,6 +56,10 @@
         "crates/spaghetti-napi/src/core/writer.rs",
         "crates/spaghetti-napi/src/orchestrate/ingest.rs"
       ]
+    },
+    "rust_source_boundary_violations": {
+      "description": "The common Rust source layer cannot depend on vendor adapters, the Spaghetti engine/store, N-API, or JSON decoders.",
+      "allowed": []
     }
   }
 }

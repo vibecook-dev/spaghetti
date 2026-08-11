@@ -14,6 +14,8 @@
 //! - [`codex`] / [`grok`] — additional AgentSource native cold/warm readers.
 //! - [`engine`] — persistent RFC 011 lifecycle, ownership, writer, and query
 //!   workers (library-first; no Node types).
+//! - [`source`] — adapter-neutral RFC 011 source drivers, provenance records,
+//!   and bounded recovery scheduling.
 //! - [`orchestrate`] — NAPI entrypoints that glue cold/warm ingest
 //!   and live batch writes onto the core writer.
 
@@ -29,6 +31,7 @@ pub mod engine;
 pub mod grok;
 mod napi_engine;
 pub mod orchestrate;
+pub mod source;
 
 // Re-export NAPI entrypoints at the crate root so existing bindings and
 // docs that name `ingest` / `live_ingest_batch` keep resolving.

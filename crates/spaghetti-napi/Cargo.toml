@@ -42,6 +42,7 @@ tracing-subscriber.workspace = true
 walkdir.workspace = true
 regex.workspace = true
 once_cell.workspace = true
+blake3.workspace = true
 
 # Time formatting
 time.workspace = true
