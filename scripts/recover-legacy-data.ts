@@ -12,7 +12,7 @@
  * Run with: npx tsx scripts/recover-legacy-data.ts
  */
 
-import Database from 'better-sqlite3';
+import { DatabaseSync } from 'node:sqlite';
 import { decode } from '@msgpack/msgpack';
 import { join } from 'path';
 import { homedir } from 'os';
@@ -131,8 +131,8 @@ async function main() {
   // ─────────────────────────────────────────────────────────────────────────
 
   console.log('Opening source databases (read-only)...');
-  const sourceA = new Database(SOURCE_A_PATH, { readonly: true, fileMustExist: true });
-  const sourceB = new Database(SOURCE_B_PATH, { readonly: true, fileMustExist: true });
+  const sourceA = new DatabaseSync(SOURCE_A_PATH, { readOnly: true });
+  const sourceB = new DatabaseSync(SOURCE_B_PATH, { readOnly: true });
   console.log('  Source A opened.');
   console.log('  Source B opened.');
 

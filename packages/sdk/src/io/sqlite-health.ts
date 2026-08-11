@@ -16,7 +16,7 @@
  * should {@link wipeSqliteCacheFiles} and re-run cold ingest once.
  */
 
-import Database from 'better-sqlite3';
+import { DatabaseSync } from 'node:sqlite';
 import { existsSync, rmSync } from 'node:fs';
 
 export interface CacheHealthResult {
@@ -98,10 +98,15 @@ export function ensureSqliteCacheHealthy(dbPath: string): CacheHealthResult {
     return { wiped: false };
   }
 
-  let db: Database.Database | null = null;
+  let db: DatabaseSync | null = null;
   try {
-    db = new Database(dbPath, { readonly: true, fileMustExist: true });
-    const check = db.pragma('quick_check');
+    // `readOnly`, not `readonly` — the driver ignores unknown options without
+    // complaining, so the `better-sqlite3` spelling would silently open a
+    // suspected-corrupt database *writable*. It also throws on a missing file,
+    // which is what `fileMustExist` was doing here (the `existsSync` above
+    // already covers the same ground).
+    db = new DatabaseSync(dbPath, { readOnly: true });
+    const check = db.prepare('PRAGMA quick_check').all();
     if (!isQuickCheckOk(check)) {
       const detail =
         typeof check === 'string'

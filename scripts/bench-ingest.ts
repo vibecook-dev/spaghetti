@@ -200,8 +200,8 @@ function applyRepair(dbPath?: string): void {
   if (!existsSync(dbPath)) return;
   // Required lazily: `require` is built from the SDK package above, and
   // this runs only in the repair scenario.
-  const Database = require('better-sqlite3') as typeof import('better-sqlite3');
-  const db = new Database(dbPath);
+  const { DatabaseSync } = require('node:sqlite') as typeof import('node:sqlite');
+  const db = new DatabaseSync(dbPath);
   // Loud on purpose. The first version of this wrote `WHERE materialization =`
   // — not a column — inside a try/catch, so the UPDATE errored, the scenario
   // silently did nothing, and the benchmark reported fast-path timings as if

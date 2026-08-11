@@ -9,7 +9,7 @@ export default defineConfig({
   clean: true,
   splitting: false,
   banner: { js: '#!/usr/bin/env node' },
-  external: ['better-sqlite3', 'chokidar'],
+  external: ['chokidar'],
   esbuildOptions(options) {
     options.jsx = 'automatic';
   },

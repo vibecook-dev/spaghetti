@@ -8,7 +8,6 @@ const __dirname = fileURLToPath(new URL('.', import.meta.url));
 // Native / Node-only packages must stay external so esbuild never tries to
 // load `.node` binaries (and so the renderer cannot pull them via HMR).
 const mainExternals = [
-  'better-sqlite3',
   '@parcel/watcher',
   '@vibecook/spaghetti-sdk',
   '@vibecook/spaghetti-sdk-native',
@@ -62,7 +61,7 @@ export default defineConfig({
     // mille rebuilds (e.g. single-click folder expand) are picked up
     // without a stale .vite/deps snapshot of double-click expand.
     optimizeDeps: {
-      exclude: ['@vibecook/mille', '@vibecook/mille-ui', 'better-sqlite3'],
+      exclude: ['@vibecook/mille', '@vibecook/mille-ui'],
     },
   },
 });

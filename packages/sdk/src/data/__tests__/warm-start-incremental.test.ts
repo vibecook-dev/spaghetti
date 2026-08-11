@@ -115,8 +115,8 @@ describe('TS warm start — incremental correctness', () => {
 
     // Simulate the historical damage: head row overwritten by an
     // appended message, and no heal marker (old-version DB).
-    const Database = require('better-sqlite3');
-    const db = new Database(dbPath);
+    const { DatabaseSync } = require('node:sqlite');
+    const db = new DatabaseSync(dbPath);
     db.prepare('UPDATE messages SET uuid = ?, data = ? WHERE session_id = ? AND msg_index = 0').run(
       'uuid-999',
       JSON.stringify({ type: 'user', uuid: 'uuid-999' }),

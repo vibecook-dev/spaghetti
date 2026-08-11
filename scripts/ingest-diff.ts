@@ -66,7 +66,7 @@ import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 
-import Database from 'better-sqlite3';
+import { DatabaseSync } from 'node:sqlite';
 
 import {
   createSpaghettiService,
@@ -532,7 +532,7 @@ const TABLE_SPECS: TableSpec[] = [
 
 type Row = Record<string, unknown>;
 
-function dumpTable(db: Database.Database, spec: TableSpec): Row[] {
+function dumpTable(db: DatabaseSync, spec: TableSpec): Row[] {
   const where = spec.where ? ` WHERE ${spec.where}` : '';
   const rows = db.prepare(`SELECT * FROM ${spec.name}${where} ORDER BY ${spec.orderBy}`).all() as Row[];
   return rows.map((row) => normaliseRow(row, spec));
@@ -731,8 +731,8 @@ async function main(): Promise<void> {
 
   console.log('');
   console.log('opening both DBs read-only for compare...');
-  const tsDb = new Database(tsDbPath, { readonly: true });
-  const rustDb = new Database(rustDbPath, { readonly: true });
+  const tsDb = new DatabaseSync(tsDbPath, { readOnly: true });
+  const rustDb = new DatabaseSync(rustDbPath, { readOnly: true });
 
   /**
    * Deterministic per-engine snapshot for the RFC 008 Phase 0 baseline.

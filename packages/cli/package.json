@@ -34,7 +34,7 @@
     "access": "public"
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=22.13.0"
   },
   "repository": {
     "type": "git",
