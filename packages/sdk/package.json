@@ -21,7 +21,7 @@
     "dist"
   ],
   "scripts": {
-    "gen:worker": "esbuild src/workers/parse-worker.ts --bundle --platform=node --format=esm --outfile=src/workers/parse-worker.js --external:better-sqlite3",
+    "gen:worker": "esbuild src/workers/parse-worker.ts --bundle --platform=node --format=esm --outfile=src/workers/parse-worker.js",
     "build": "pnpm gen:worker && vite build",
     "clean": "rm -rf dist",
     "typecheck": "tsc --noEmit",
@@ -30,7 +30,6 @@
   "dependencies": {
     "@parcel/watcher": "^2.5.0",
     "@vibecook/spaghetti-sdk-native": "workspace:*",
-    "better-sqlite3": "^12.11.1",
     "chokidar": "^4.0.0",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
@@ -54,7 +53,6 @@
     }
   },
   "devDependencies": {
-    "@types/better-sqlite3": "^7.6.0",
     "@types/node": "^22.0.0",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
@@ -72,7 +70,7 @@
     "provenance": true
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=22.13.0"
   },
   "repository": {
     "type": "git",

@@ -5,16 +5,14 @@
   "type": "module",
   "main": "./out/main/index.js",
   "scripts": {
-    "predev": "pnpm -F @vibecook/spaghetti-sdk build && node scripts/ensure-electron.mjs && electron-rebuild -f -w better-sqlite3",
-    "prestart": "pnpm -F @vibecook/spaghetti-sdk build && node scripts/ensure-electron.mjs && electron-rebuild -f -w better-sqlite3",
+    "predev": "pnpm -F @vibecook/spaghetti-sdk build && node scripts/ensure-electron.mjs",
+    "prestart": "pnpm -F @vibecook/spaghetti-sdk build && node scripts/ensure-electron.mjs",
     "dev": "electron-vite dev",
     "build": "pnpm -F @vibecook/spaghetti-sdk build && node scripts/ensure-electron.mjs && electron-vite build",
     "start": "electron-vite preview",
     "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
     "clean": "rm -rf out",
-    "ensure-electron": "node scripts/ensure-electron.mjs",
-    "rebuild:electron": "electron-rebuild -f -w better-sqlite3",
-    "rebuild:node": "pnpm -w rebuild better-sqlite3"
+    "ensure-electron": "node scripts/ensure-electron.mjs"
   },
   "dependencies": {
     "@radix-ui/react-context-menu": "^2.3.3",
@@ -24,7 +22,6 @@
     "@vibecook/mille": "^0.3.1",
     "@vibecook/mille-ui": "^0.3.1",
     "@vibecook/spaghetti-sdk": "workspace:*",
-    "better-sqlite3": "^12.11.1",
     "lucide-react": "^0.468.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0"

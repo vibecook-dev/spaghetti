@@ -38,41 +38,33 @@ const VERSION = (_require('../package.json') as { version: string }).version;
 /**
  * Turn an initialization failure into guidance that matches its actual cause.
  *
- * This used to append "Install a supported agent" to every failure, which is
- * the wrong advice for the most common one: npm 12 blocks install scripts by
- * default, so `better-sqlite3` never fetches its prebuilt binding and every
- * DB-touching command dies. Telling that user to install an agent they already
- * have sends them somewhere there is nothing to find.
+ * This used to append "Install a supported agent" to every failure, which was
+ * the wrong advice for the one users actually hit: npm 12 blocks install
+ * scripts by default, so `better-sqlite3` never fetched its prebuilt binding
+ * and every DB-touching command died. That whole class is gone as of RFC 010 —
+ * the index runs on `node:sqlite` and the package has no install script to
+ * block — so the specific remedies that shipped in `0.6.2` and `0.6.3` are
+ * retired with the dependency rather than left pointing at a package that is
+ * no longer here.
+ *
+ * A generic native-binding arm stays, but deliberately says little. The only
+ * remaining native dependency is `@parcel/watcher`, and blocked install scripts
+ * are *not* how it fails: it ships per-platform binaries as
+ * `optionalDependencies` and keeps its build script only as a fallback, so npm
+ * 12 blocking that script costs nothing. If it is genuinely absent the failure
+ * is a missing module rather than a missing binding, and prescribing a remedy
+ * for a cause we have not confirmed is what produced the wrong advice in
+ * `0.6.2`.
  */
 export function initFailureHint(msg: string): string {
-  if (/bindings file|better_sqlite3\.node|node-gyp|prebuild-install/i.test(msg)) {
-    // Every command below was run against a published build before being
-    // printed here. `0.6.2` shipped two that were not, and both failed in ways
-    // that look like success: `--allow-scripts` on a project-scoped install is
-    // a hard `EALLOWSCRIPTS` error, and `install-scripts approve` records the
-    // permission in package.json without ever running the script — so it
-    // reports "Approved" and changes nothing. Approve only grants; `rebuild`
-    // is what executes.
+  if (/bindings file|\.node['"]?\s|node-gyp|prebuild-install/i.test(msg)) {
     return [
-      "better-sqlite3's native binding is missing — its install script did not run.",
-      'npm 12 blocks install scripts by default.',
+      'A native module failed to load.',
       '',
-      'Fix an existing install (either kind):',
+      "The index does not use one — it runs on Node's built-in SQLite — so this is",
+      'a dependency rather than the store itself. Reinstalling usually resolves it.',
       '',
-      '  npm install-scripts approve better-sqlite3',
-      '  npm rebuild better-sqlite3',
-      '',
-      'Or reinstall globally, allowing that one script:',
-      '',
-      '  npm install -g --allow-scripts=better-sqlite3 @vibecook/spaghetti',
-      '',
-      // The flag is rejected outright for project-scoped installs, so those
-      // have to declare it in the manifest instead.
-      'Installing as a project dependency? The flag is refused there — add to package.json:',
-      '',
-      '  "allowScripts": { "better-sqlite3": true }',
-      '',
-      'pnpm users: add better-sqlite3 to onlyBuiltDependencies in pnpm-workspace.yaml.',
+      'Re-run with --verbose for the full stack.',
     ].join('\n');
   }
   if (/root dir not found|not a directory|ENOENT/i.test(msg)) {

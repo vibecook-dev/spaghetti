@@ -50,35 +50,15 @@ npx @vibecook/spaghetti search "worker pool"
 
 If `~/.codex/sessions` exists, Codex is auto-detected and indexed alongside Claude Code (zero config).
 
-### On npm 12: allow one install script
+### No install scripts, no native build step
 
-npm 12 blocks package install scripts by default. Spaghetti stores its index in
-SQLite via `better-sqlite3`, which downloads its prebuilt native binding from a
-postinstall — so under a stock npm 12 the install completes but every command
-that touches the index fails with `Could not locate the bindings file`.
+Spaghetti's index runs on Node's built-in SQLite (`node:sqlite`), and the
+optional Rust ingest engine ships prebuilt binaries inside its package. Nothing
+compiles or downloads on install, so a stock `npm install` works regardless of
+your package manager's install-script policy — including npm 12, which blocks
+them by default.
 
-```bash
-npm install -g --allow-scripts=better-sqlite3 @vibecook/spaghetti
-```
-
-Already installed? Approving records the permission but does **not** run the
-script — `rebuild` is what executes it, so you need both:
-
-```bash
-npm install-scripts approve better-sqlite3
-npm rebuild better-sqlite3
-```
-
-Installing Spaghetti as a project dependency rather than globally? npm refuses
-the `--allow-scripts` flag there (`EALLOWSCRIPTS`); declare it in your
-`package.json` instead:
-
-```json
-"allowScripts": { "better-sqlite3": true }
-```
-
-npm 11 and earlier run install scripts by default and need none of this. pnpm
-users list it under `onlyBuiltDependencies` (this repo already does).
+This required Node `>=22.13.0`; earlier versions are out of support.
 
 ## What you get
 
@@ -159,9 +139,8 @@ await api.dispose();
 
 ## Requirements
 
-- Node.js `>=18` for end users
+- Node.js `>=22.13.0` for end users (`node:sqlite`)
 - `~/.claude` and/or `~/.codex` for real data
-- On npm 12, `--allow-scripts=better-sqlite3` at install time ([why](#on-npm-12-allow-one-install-script))
 - `pnpm` + Node.js 24 for local workspace development
 
 ## Learn more

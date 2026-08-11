@@ -7,7 +7,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, writeFileSync, existsSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import Database from 'better-sqlite3';
+import { DatabaseSync } from 'node:sqlite';
 import { ensureSqliteCacheHealthy, isSqliteCorruptError, wipeSqliteCacheFiles } from '../sqlite-health.js';
 
 describe('ensureSqliteCacheHealthy', () => {
@@ -30,7 +30,7 @@ describe('ensureSqliteCacheHealthy', () => {
 
   test('healthy db is left alone', () => {
     const path = join(dir, 'healthy.db');
-    const db = new Database(path);
+    const db = new DatabaseSync(path);
     db.exec('CREATE TABLE t (id INTEGER PRIMARY KEY); INSERT INTO t VALUES (1);');
     db.close();
     const r = ensureSqliteCacheHealthy(path);

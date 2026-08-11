@@ -14,42 +14,24 @@ describe('initFailureHint', () => {
     ' → /app/node_modules/better-sqlite3/build/Release/better_sqlite3.node',
   ].join('\n');
 
-  test('missing native binding explains install scripts, not agents', () => {
+  // RFC 010 removed better-sqlite3, so the "bindings file" failure it used to
+  // produce can no longer come from this package. The remedies `0.6.2`/`0.6.3`
+  // printed are retired with it rather than left naming a dependency that is
+  // gone — stale-but-plausible instructions are worse than none.
+  test('a native binding failure no longer prescribes better-sqlite3 remedies', () => {
     const hint = initFailureHint(bindingsError);
-    assert.match(hint, /better-sqlite3/);
-    assert.match(hint, /install script/i);
+    assert.match(hint, /native module failed to load/i);
+    assert.doesNotMatch(hint, /better-sqlite3/, 'the dependency is gone; do not name it');
+    assert.doesNotMatch(hint, /--allow-scripts/, 'no remedy for a dependency we no longer ship');
     assert.doesNotMatch(hint, /Install a supported agent/);
   });
 
-  test('missing native binding names a pnpm remedy too', () => {
-    assert.match(initFailureHint(bindingsError), /onlyBuiltDependencies/);
-  });
-
-  // `0.6.2` shipped two commands that had never been run. Both failed in ways
-  // that resemble success — `--allow-scripts` on a project install is a hard
-  // `EALLOWSCRIPTS` error, and `install-scripts approve` prints "Approved"
-  // while running nothing. These assertions pin the forms that were actually
-  // executed against a published build.
-  test('the approve step is paired with the rebuild that executes it', () => {
+  test('it does not speculate about a cause it has not confirmed', () => {
+    // 0.6.2 shipped remedies that were never run and did not work. The lesson
+    // generalises: say what happened, point at --verbose, and stop.
     const hint = initFailureHint(bindingsError);
-    const approve = hint.indexOf('npm install-scripts approve better-sqlite3');
-    const rebuild = hint.indexOf('npm rebuild better-sqlite3');
-    assert.ok(approve !== -1, 'must mention approve');
-    assert.ok(rebuild !== -1, 'approve alone is a no-op — rebuild must be named');
-    assert.ok(approve < rebuild, 'approve grants, rebuild executes — order matters');
-  });
-
-  test('the --allow-scripts form is only offered for a global install', () => {
-    const hint = initFailureHint(bindingsError);
-    // Project-scoped installs reject the flag outright, so any occurrence of it
-    // has to carry `-g`.
-    for (const line of hint.split('\n').filter((l) => l.includes('--allow-scripts'))) {
-      assert.match(line, /npm install -g /, `flag offered without -g: ${line.trim()}`);
-    }
-  });
-
-  test('project-scoped installs are told to use the manifest field', () => {
-    assert.match(initFailureHint(bindingsError), /"allowScripts"/);
+    assert.match(hint, /--verbose/);
+    assert.doesNotMatch(hint, /npm install|npm rebuild|allow-scripts/, 'no unverified remedy');
   });
 
   test('a genuinely missing corpus still points at the data roots', () => {
