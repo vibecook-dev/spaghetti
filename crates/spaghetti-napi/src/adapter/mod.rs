@@ -18,9 +18,10 @@ pub use contract::{
 pub use facts::{
     ContentBlock, DelegationFact, DelegationKind, DelegationMetadataFact, DelegationSpawnFact,
     EntityKey, EvidenceKind, EvidenceStrength, Fact, FactBatch, FactEnvelope, FactId,
-    FactProvenance, MessageFact, MessageRole, PresenceFact, QualifiedTimestamp, RelationStrength,
-    RunEvidenceFact, RunFact, SessionFact, TeamInboxMessageSnapshot, TeamInboxSnapshotFact,
-    TeamMemberSnapshot, TeamSnapshotFact, TimestampQuality, TokenUsage, UsageAccounting, UsageFact,
-    UsageScope, ValueQuality,
+    FactProvenance, MessageFact, MessageRole, PlanSnapshotFact, PresenceFact, QualifiedTimestamp,
+    RelationStrength, RunEvidenceFact, RunFact, SessionFact, TaskCollectionKind, TaskItemSnapshot,
+    TaskSnapshotCoverage, TaskSnapshotFact, TaskStatus, TeamInboxMessageSnapshot,
+    TeamInboxSnapshotFact, TeamMemberSnapshot, TeamSnapshotFact, TimestampQuality, TokenUsage,
+    UsageAccounting, UsageFact, UsageScope, ValueQuality,
 };
 pub use registry::{AdapterRegistry, AdapterRegistryBuilder};

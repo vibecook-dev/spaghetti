@@ -2,14 +2,15 @@
 
 Status: Phase 4 history/usage complete; Phase 5 delegation, native metadata,
 parent-spawn correlation, team/config/inbox snapshots, and active-session
-presence implemented on 2026-08-11
+presence plus task/todo/plan snapshots implemented on 2026-08-11
 
 This survey defines the native inputs and semantic claims currently made by
 the Rust `claude-code` adapter. It is narrower than the legacy Claude parser on
 purpose: Phase 4 covers canonical transcript history, run lineage/activity,
 and native usage. Phase 5 now adds delegation joins, authoritative team and
 inbox snapshots, and native active-session registry presence while richer
-runtime packs remain in progress.
+runtime packs remain in progress. Replaceable task, todo, and plan documents
+now use the same fact/projection path.
 
 ## Installation and source identity
 
@@ -39,14 +40,17 @@ authoritative snapshot.
 | `team-configs`         | `teams`    | `*/config.json`                      | `ReplaceDocument` (1 MiB bound)                  | Canonical    | Team       |
 | `team-inboxes`         | `teams`    | `*/inboxes/*.json`                   | `ReplaceDocument` (4 MiB bound)                  | Canonical    | Team inbox |
 | `active-sessions`      | `sessions` | `*.json`                             | `PresenceObject` (64 KiB content bound)          | Canonical    | Presence   |
+| `todo-snapshots`       | `home`     | `todos/*-agent-*.json`               | `ReplaceDocument` (1 MiB bound)                  | Canonical    | Task list  |
+| `task-items`           | `home`     | `tasks/*/*.json`                     | `ReplaceDocument` (256 KiB bound)                | Canonical    | Task       |
+| `plan-documents`       | `home`     | `plans/*.md`                         | `ReplaceDocument` (4 MiB bound)                  | Canonical    | Plan       |
 
 Transcript streams use incremental byte cursors and interactive priority. The
-three document streams use snapshot-replace consistency and foreground-repair
-priority. The presence stream uses snapshot replacement and interactive
-priority. All six use `MirrorSource` deletion and full raw retention during
-shadow migration. Common drivers—not the adapter—own framing or stable reads,
-file identity, generations/revisions, checkpoints, watcher recovery, and
-scheduling.
+team/metadata document streams use snapshot-replace consistency and
+foreground-repair priority. The presence, task, todo, and plan streams use
+snapshot replacement and interactive priority. All nine use `MirrorSource`
+deletion and full raw retention during shadow migration. Common drivers—not
+the adapter—own framing or stable reads, file identity,
+generations/revisions, checkpoints, watcher recovery, and scheduling.
 
 Parent identity comes from `<project-slug>/<session-uuid>.jsonl`. Subagent
 identity preserves the parent session, optional `workflows/<workflow-id>`
@@ -59,6 +63,11 @@ Team config identity comes from `<team>/config.json`; inbox identity comes from
 `<team>/inboxes/<recipient>.json`. Paths outside these exact shapes fail object
 bootstrap. Active-session identity starts from exactly `<positive-pid>.json`;
 nested, non-numeric, or zero-PID names fail bootstrap.
+
+Todo, task, and plan paths are rooted at `home` but confined to exact
+`todos/<session>-agent-<agent>.json`,
+`tasks/<collection>/<canonical-positive-id>.json`, and `plans/<slug>.md`
+shapes. A task payload ID must match its path ID.
 
 ## Native record interpretation
 
@@ -86,6 +95,11 @@ Each complete native record or document is decoded once into common facts:
 - `PresenceFact` for each present active-session registry object, preserving
   session/run relation, process-incarnation identity, PID, cwd, native status,
   timestamps, version/protocol, bridge, and messaging-socket fields;
+- `TaskSnapshotFact` for each complete todo list or numbered task item,
+  preserving explicit coverage, scope only when native, status, ownership,
+  dependency fields, and stable item identity;
+- `PlanSnapshotFact` for each plan markdown document, preserving native slug,
+  heading-derived title, exact content, and byte size;
 - `RunEvidenceFact::ActivityObserved` with `NativeActivity` strength;
 - `UsageFact` when the record contains non-zero native usage.
 
@@ -142,6 +156,11 @@ The additive active-session stream advances the adapter contract to version 6
 and declares `claude-code-active-session-v1`. Existing transcript,
 delegation, team, and inbox fact identities are unchanged.
 
+The additive todo, task-item, and plan streams advance the adapter contract to
+version 7 and declare `claude-code-todo-v1`,
+`claude-code-task-item-v1`, and `claude-code-plan-v1`. Existing facts in all
+earlier streams keep their identity and meaning.
+
 Team identity comes from the native directory name. Member identity is scoped
 by team plus native member name, and an inbox is scoped by team plus recipient.
 Inbox messages prefer non-empty native `msg_id`. Older messages derive a
@@ -167,6 +186,15 @@ no presence fact and retracts the prior assertion; a present zero-byte file is
 instead preserved as malformed unknown content. The durable row proves registry
 presence only. Native status strings are retained, but neither they nor a host
 PID probe create durable run state, process-liveness history, or completion.
+
+Claude declares `runtime.tasks` as native and live at task granularity. A todo
+file is a complete collection snapshot; numbered task JSON is one independently
+replaceable item document. Todo item identity excludes status so ordinary
+status edits update the same item. Numbered tasks use their native collection
+and item IDs. A task-directory name is not assumed to be a session or team
+because the native corpus uses both and other scopes. Plans use their native
+slug and remain standalone until separate evidence supplies a trustworthy
+relation. Task completion is never run completion evidence.
 
 The transcript decoder declares activity only. Neither it nor the presence
 pack turns quiet files, missing watch events, or filesystem nesting into
@@ -221,14 +249,20 @@ retracts the canonical row without changing a quiet transcript/run to a
 terminal state. Competing presence assertions are retained and diagnosed;
 removing the competitor resolves the deterministic canonical view.
 
+Every committed todo, task-item, or plan revision replaces the assertion owned
+by that source object. Complete todo replacements retract missing children;
+one task-item removal affects only that document's item. Agreeing item
+documents merge into one collection, while distinct assertions for the same
+task or plan remain conflicting and diagnosed. Superseded audit facts retract
+only after canonical foreign keys move to the current decisive assertions.
+
 ## Remaining Phase 5 sources
 
 Legacy tool-result text that only mentions an agent ID is not used for native
 correlation. A future compatibility fallback must be classified
 `NativeIndirect`, not explicit. The adapter also does not yet declare
-`sessions-index.json`, memory, tool-result files,
-workflows, todos, tasks, plans, file
-history, settings, or other sidecars. Those inputs need replace-document,
+`sessions-index.json`, memory, tool-result files, workflows, file history,
+settings, or other sidecars. Those inputs need replace-document,
 directory-snapshot, or other reviewed stream and capability semantics.
 Credentials, debug logs, telemetry, caches, and arbitrary symlink escapes
 remain out of scope.
@@ -275,3 +309,10 @@ field preservation, present-empty versus absent distinction, same-generation
 replacement, late transcript/run correlation, confirmed removal, competing
 assertions, diagnostic clearing, and the invariant that registry removal does
 not invent terminal run state.
+
+The task/todo/plan trace covers strict paths and payload identity, complete
+versus item-document coverage, status-stable identity, future native status
+preservation, ambiguous-scope non-attribution, Markdown title fallback,
+same-generation replacement, removed-child and file retraction, item merging,
+late session correlation, deterministic conflicts and clearing, audit cleanup,
+and the invariant that completed tasks do not create terminal run state.

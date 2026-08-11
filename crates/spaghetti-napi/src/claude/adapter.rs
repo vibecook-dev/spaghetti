@@ -17,9 +17,10 @@ use crate::adapter::{
     DecodeDisposition, DecoderId, DelegationFact, DelegationKind, DelegationMetadataFact,
     DelegationSpawnFact, DeletionPolicy, DiscoveryContext, DriverSpec, EntityKey, EntityScope,
     EvidenceKind, EvidenceStrength, Fact, FactBatch, MessageFact, MessageRole, ObjectSelector,
-    PresenceFact, QualifiedTimestamp, RawRetentionPolicy, RelationStrength, RunEvidenceFact,
-    RunFact, SessionFact, SourceInstance, SourceInstanceKey, SourceInstanceSpec,
+    PlanSnapshotFact, PresenceFact, QualifiedTimestamp, RawRetentionPolicy, RelationStrength,
+    RunEvidenceFact, RunFact, SessionFact, SourceInstance, SourceInstanceKey, SourceInstanceSpec,
     SourceObjectDescriptor, SourceRoot, StreamAuthority, StreamId, StreamSpec, SupportLevel,
+    TaskCollectionKind, TaskItemSnapshot, TaskSnapshotCoverage, TaskSnapshotFact, TaskStatus,
     TeamInboxMessageSnapshot, TeamInboxSnapshotFact, TeamMemberSnapshot, TeamSnapshotFact,
     TimestampQuality, TokenUsage, UsageAccounting, UsageFact, UsageScope, ValueQuality,
 };
@@ -41,19 +42,29 @@ const SUBAGENT_META_STREAM: &str = "subagent-metadata";
 const TEAM_CONFIG_STREAM: &str = "team-configs";
 const TEAM_INBOX_STREAM: &str = "team-inboxes";
 const ACTIVE_SESSION_STREAM: &str = "active-sessions";
+const TODO_STREAM: &str = "todo-snapshots";
+const TASK_ITEM_STREAM: &str = "task-items";
+const PLAN_STREAM: &str = "plan-documents";
 const PARENT_DECODER: &str = "claude-session-record";
 const SUBAGENT_DECODER: &str = "claude-subagent-record";
 const SUBAGENT_META_DECODER: &str = "claude-subagent-metadata";
 const TEAM_CONFIG_DECODER: &str = "claude-team-config";
 const TEAM_INBOX_DECODER: &str = "claude-team-inbox";
 const ACTIVE_SESSION_DECODER: &str = "claude-active-session";
+const TODO_DECODER: &str = "claude-todo-snapshot";
+const TASK_ITEM_DECODER: &str = "claude-task-item";
+const PLAN_DECODER: &str = "claude-plan-document";
 const OBJECT_CONTEXT_VERSION: u32 = 1;
 const SUBAGENT_META_MAX_BYTES: usize = 64 * 1024;
 const TEAM_CONFIG_MAX_BYTES: usize = 1024 * 1024;
 const TEAM_INBOX_MAX_BYTES: usize = 4 * 1024 * 1024;
 const ACTIVE_SESSION_MAX_BYTES: usize = 64 * 1024;
+const TODO_MAX_BYTES: usize = 1024 * 1024;
+const TASK_ITEM_MAX_BYTES: usize = 256 * 1024;
+const PLAN_MAX_BYTES: usize = 4 * 1024 * 1024;
 const TEAM_MEMBER_LIMIT: usize = 256;
 const TEAM_INBOX_MESSAGE_LIMIT: usize = 4_096;
+const TODO_ITEM_LIMIT: usize = 4_096;
 
 const HISTORY_SESSIONS: &str = "history.sessions";
 const HISTORY_MESSAGES: &str = "history.messages";
@@ -65,6 +76,7 @@ const RUNTIME_SUBAGENTS: &str = "runtime.subagents";
 const RUNTIME_TEAMS: &str = "runtime.teams";
 const RUNTIME_TEAM_INBOX: &str = "runtime.team_inbox";
 const RUNTIME_PRESENCE: &str = "runtime.presence";
+const RUNTIME_TASKS: &str = "runtime.tasks";
 const USAGE_INPUT_TOKENS: &str = "usage.input_tokens";
 const USAGE_OUTPUT_TOKENS: &str = "usage.output_tokens";
 const USAGE_CACHE_TOKENS: &str = "usage.cache_tokens";
@@ -83,13 +95,16 @@ impl ClaudeCodeAdapter {
                 id: AdapterId::new(ADAPTER_ID).expect("static Claude adapter id is valid"),
                 display_name: "Claude Code".to_string(),
                 adapter_version: env!("CARGO_PKG_VERSION").to_string(),
-                contract_version: 6,
+                contract_version: 7,
                 source_schema_versions: vec![
                     "claude-code-jsonl-v1".to_string(),
                     "claude-code-subagent-meta-v1".to_string(),
                     "claude-code-team-config-v1".to_string(),
                     "claude-code-team-inbox-v2".to_string(),
                     "claude-code-active-session-v1".to_string(),
+                    "claude-code-todo-v1".to_string(),
+                    "claude-code-task-item-v1".to_string(),
+                    "claude-code-plan-v1".to_string(),
                 ],
                 capabilities: claude_capabilities(),
             },
@@ -279,6 +294,63 @@ impl AgentAdapter for ClaudeCodeAdapter {
                 retention: RawRetentionPolicy::Full,
                 capabilities: presence_capabilities(),
             },
+            StreamSpec {
+                id: StreamId::new(TODO_STREAM)?,
+                driver: DriverSpec::ReplaceDocument(ReplaceDocumentConfig {
+                    max_document_bytes: TODO_MAX_BYTES,
+                }),
+                selector: ObjectSelector {
+                    root_name: "home".to_string(),
+                    include: vec!["todos/*-agent-*.json".to_string()],
+                    exclude: Vec::new(),
+                },
+                decoder: DecoderId::new(TODO_DECODER)?,
+                authority: StreamAuthority::Canonical,
+                entity_scope: EntityScope::Custom("task_collection".to_string()),
+                priority: IngestPriority::Interactive,
+                consistency: ConsistencyPolicy::SnapshotReplace,
+                deletion: DeletionPolicy::MirrorSource,
+                retention: RawRetentionPolicy::Full,
+                capabilities: task_capabilities(),
+            },
+            StreamSpec {
+                id: StreamId::new(TASK_ITEM_STREAM)?,
+                driver: DriverSpec::ReplaceDocument(ReplaceDocumentConfig {
+                    max_document_bytes: TASK_ITEM_MAX_BYTES,
+                }),
+                selector: ObjectSelector {
+                    root_name: "home".to_string(),
+                    include: vec!["tasks/*/*.json".to_string()],
+                    exclude: Vec::new(),
+                },
+                decoder: DecoderId::new(TASK_ITEM_DECODER)?,
+                authority: StreamAuthority::Canonical,
+                entity_scope: EntityScope::Custom("task".to_string()),
+                priority: IngestPriority::Interactive,
+                consistency: ConsistencyPolicy::SnapshotReplace,
+                deletion: DeletionPolicy::MirrorSource,
+                retention: RawRetentionPolicy::Full,
+                capabilities: task_capabilities(),
+            },
+            StreamSpec {
+                id: StreamId::new(PLAN_STREAM)?,
+                driver: DriverSpec::ReplaceDocument(ReplaceDocumentConfig {
+                    max_document_bytes: PLAN_MAX_BYTES,
+                }),
+                selector: ObjectSelector {
+                    root_name: "home".to_string(),
+                    include: vec!["plans/*.md".to_string()],
+                    exclude: Vec::new(),
+                },
+                decoder: DecoderId::new(PLAN_DECODER)?,
+                authority: StreamAuthority::Canonical,
+                entity_scope: EntityScope::Custom("plan".to_string()),
+                priority: IngestPriority::Interactive,
+                consistency: ConsistencyPolicy::SnapshotReplace,
+                deletion: DeletionPolicy::MirrorSource,
+                retention: RawRetentionPolicy::Full,
+                capabilities: task_capabilities(),
+            },
         ];
         for stream in &streams {
             stream.validate(instance)?;
@@ -310,6 +382,15 @@ impl AgentAdapter for ClaudeCodeAdapter {
             ACTIVE_SESSION_STREAM => encode_object_context(
                 &ClaudeActiveSessionContext::from_path(&object.relative_path)?,
             )?,
+            TODO_STREAM => {
+                encode_object_context(&ClaudeTodoContext::from_path(&object.relative_path)?)?
+            }
+            TASK_ITEM_STREAM => {
+                encode_object_context(&ClaudeTaskItemContext::from_path(&object.relative_path)?)?
+            }
+            PLAN_STREAM => {
+                encode_object_context(&ClaudePlanContext::from_path(&object.relative_path)?)?
+            }
             _ => {
                 return Err(AdapterError::new(
                     AdapterErrorClass::StreamFatal,
@@ -358,6 +439,18 @@ impl AgentAdapter for ClaudeCodeAdapter {
                 let object_context = ClaudeActiveSessionContext::decode(context.object_context)?;
                 decode_active_session(self.adapter_id(), &object_context, record, output)
             }
+            TODO_DECODER => {
+                let object_context = ClaudeTodoContext::decode(context.object_context)?;
+                decode_todo_snapshot(self.adapter_id(), &object_context, record, output)
+            }
+            TASK_ITEM_DECODER => {
+                let object_context = ClaudeTaskItemContext::decode(context.object_context)?;
+                decode_task_item(self.adapter_id(), &object_context, record, output)
+            }
+            PLAN_DECODER => {
+                let object_context = ClaudePlanContext::decode(context.object_context)?;
+                decode_plan_document(self.adapter_id(), &object_context, record, output)
+            }
             _ => Err(AdapterError::unknown_decoder(context.decoder)),
         }
     }
@@ -398,6 +491,15 @@ fn claude_capabilities() -> Vec<CapabilityDeclaration> {
             Availability::Live,
             Some(
                 "agent-owned registry presence is durable; host PID liveness and time-based freshness remain transient assessments",
+            ),
+        ),
+        capability(
+            RUNTIME_TASKS,
+            SupportLevel::Native,
+            CapabilityGranularity::Custom("task".to_string()),
+            Availability::Live,
+            Some(
+                "todo files are complete snapshots, numbered task files are item documents, and task status never implies run completion",
             ),
         ),
         live_native(USAGE_INPUT_TOKENS, CapabilityGranularity::Message),
@@ -463,6 +565,18 @@ fn subagent_metadata_capabilities() -> Vec<CapabilityId> {
 fn presence_capabilities() -> Vec<CapabilityId> {
     [
         RUNTIME_PRESENCE,
+        SOURCE_LIVE,
+        SOURCE_RECONCILE,
+        SOURCE_RESUME_CURSOR,
+    ]
+    .into_iter()
+    .map(|id| CapabilityId::new(id).expect("static Claude stream capability id is valid"))
+    .collect()
+}
+
+fn task_capabilities() -> Vec<CapabilityId> {
+    [
+        RUNTIME_TASKS,
         SOURCE_LIVE,
         SOURCE_RECONCILE,
         SOURCE_RESUME_CURSOR,
@@ -659,6 +773,117 @@ impl ClaudeActiveSessionContext {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct ClaudeTodoContext {
+    native_session_id: String,
+    native_agent_id: String,
+}
+
+impl ClaudeTodoContext {
+    fn from_path(relative_path: &Path) -> Result<Self, AdapterError> {
+        let components = utf8_components(relative_path)?;
+        if components.len() != 2 || components[0] != "todos" {
+            return Err(path_error(
+                relative_path,
+                "todo path must be todos/<session>-agent-<agent>.json",
+            ));
+        }
+        let Some(stem) = components[1].strip_suffix(".json") else {
+            return Err(path_error(relative_path, "todo file must end in .json"));
+        };
+        let Some((native_session_id, native_agent_id)) = stem.rsplit_once("-agent-") else {
+            return Err(path_error(
+                relative_path,
+                "todo file name has no agent delimiter",
+            ));
+        };
+        if native_session_id.is_empty() || native_agent_id.is_empty() {
+            return Err(path_error(
+                relative_path,
+                "todo session and agent ids must not be empty",
+            ));
+        }
+        Ok(Self {
+            native_session_id: native_session_id.to_string(),
+            native_agent_id: native_agent_id.to_string(),
+        })
+    }
+
+    fn decode(context: &AdapterObjectContext) -> Result<Self, AdapterError> {
+        decode_object_context(context)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct ClaudeTaskItemContext {
+    native_collection_id: String,
+    native_task_id: String,
+}
+
+impl ClaudeTaskItemContext {
+    fn from_path(relative_path: &Path) -> Result<Self, AdapterError> {
+        let components = utf8_components(relative_path)?;
+        if components.len() != 3 || components[0] != "tasks" || components[1].is_empty() {
+            return Err(path_error(
+                relative_path,
+                "task path must be tasks/<collection>/<positive-id>.json",
+            ));
+        }
+        let Some(stem) = components[2].strip_suffix(".json") else {
+            return Err(path_error(relative_path, "task item must end in .json"));
+        };
+        let canonical_id = stem
+            .parse::<u64>()
+            .ok()
+            .filter(|value| *value > 0)
+            .map(|value| value.to_string());
+        if canonical_id.as_deref() != Some(stem) {
+            return Err(path_error(
+                relative_path,
+                "task item file name must be a canonical positive integer",
+            ));
+        }
+        Ok(Self {
+            native_collection_id: components[1].clone(),
+            native_task_id: stem.to_string(),
+        })
+    }
+
+    fn decode(context: &AdapterObjectContext) -> Result<Self, AdapterError> {
+        decode_object_context(context)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct ClaudePlanContext {
+    native_plan_id: String,
+}
+
+impl ClaudePlanContext {
+    fn from_path(relative_path: &Path) -> Result<Self, AdapterError> {
+        let components = utf8_components(relative_path)?;
+        if components.len() != 2 || components[0] != "plans" {
+            return Err(path_error(
+                relative_path,
+                "plan path must be plans/<slug>.md",
+            ));
+        }
+        let Some(native_plan_id) = components[1]
+            .strip_suffix(".md")
+            .filter(|value| !value.is_empty())
+        else {
+            return Err(path_error(relative_path, "plan slug must not be empty"));
+        };
+        Ok(Self {
+            native_plan_id: native_plan_id.to_string(),
+        })
+    }
+
+    fn decode(context: &AdapterObjectContext) -> Result<Self, AdapterError> {
+        decode_object_context(context)
+    }
+}
+
 fn encode_object_context<T: Serialize>(context: &T) -> Result<Vec<u8>, AdapterError> {
     serde_json::to_vec(context).map_err(|error| {
         AdapterError::new(
@@ -799,6 +1024,32 @@ struct ClaudeActiveSessionDocument {
     bridge_session_id: Option<String>,
     #[serde(default)]
     messaging_socket_path: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ClaudeTodoItemDocument {
+    content: String,
+    status: String,
+    #[serde(default)]
+    active_form: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ClaudeTaskItemDocument {
+    id: String,
+    subject: String,
+    description: String,
+    #[serde(default)]
+    active_form: Option<String>,
+    #[serde(default)]
+    owner: Option<String>,
+    status: String,
+    #[serde(default)]
+    blocks: Vec<String>,
+    #[serde(default)]
+    blocked_by: Vec<String>,
 }
 
 fn decode_team_config(
@@ -1177,6 +1428,297 @@ fn preserve_active_session_contract_loss(
         format!("Claude active session {detail}"),
     )?;
     Ok(DecodeDisposition::PreservedUnknown)
+}
+
+fn decode_todo_snapshot(
+    adapter_id: &AdapterId,
+    context: &ClaudeTodoContext,
+    record: &SourceRecord,
+    output: &mut FactBatch,
+) -> Result<DecodeDisposition, AdapterError> {
+    let documents: Vec<ClaudeTodoItemDocument> = match serde_json::from_slice(&record.payload) {
+        Ok(documents) => documents,
+        Err(error) => {
+            preserve_unknown(
+                record,
+                output,
+                Some("todo_snapshot".to_string()),
+                format!("Claude todo snapshot is not a supported JSON array: {error}"),
+            )?;
+            return Ok(DecodeDisposition::PreservedUnknown);
+        }
+    };
+    if documents.len() > TODO_ITEM_LIMIT {
+        return preserve_task_contract_loss(
+            record,
+            output,
+            "todo_snapshot",
+            &format!("exceeds the {TODO_ITEM_LIMIT} item bound"),
+        );
+    }
+
+    let mut native_collection_key = Vec::new();
+    push_key_component(&mut native_collection_key, b"todo");
+    push_key_component(
+        &mut native_collection_key,
+        context.native_session_id.as_bytes(),
+    );
+    push_key_component(
+        &mut native_collection_key,
+        context.native_agent_id.as_bytes(),
+    );
+    let collection = EntityKey::native(
+        adapter_id,
+        record.source_instance_id,
+        "task_collection",
+        &native_collection_key,
+    )?;
+
+    let mut occurrences: BTreeMap<[u8; 32], u32> = BTreeMap::new();
+    let mut items = Vec::with_capacity(documents.len());
+    for document in documents {
+        let Some(subject) = nonempty(&document.content) else {
+            return preserve_task_contract_loss(
+                record,
+                output,
+                "todo_snapshot",
+                "contains an item with empty content",
+            );
+        };
+        let Some(native_status) = nonempty(&document.status) else {
+            return preserve_task_contract_loss(
+                record,
+                output,
+                "todo_snapshot",
+                "contains an item with empty status",
+            );
+        };
+        let digest = *blake3::hash(subject.as_bytes()).as_bytes();
+        let occurrence = occurrences.entry(digest).or_default();
+        let mut native_task_key = native_collection_key.clone();
+        push_key_component(&mut native_task_key, b"content-fingerprint");
+        push_key_component(&mut native_task_key, &digest);
+        push_key_component(&mut native_task_key, &occurrence.to_be_bytes());
+        *occurrence = occurrence.saturating_add(1);
+        items.push(TaskItemSnapshot {
+            task: EntityKey::native(
+                adapter_id,
+                record.source_instance_id,
+                "task",
+                &native_task_key,
+            )?,
+            native_task_id: None,
+            subject,
+            description: None,
+            active_form: document.active_form.as_deref().and_then(nonempty),
+            native_owner: None,
+            status: task_status(&native_status),
+            blocks: Vec::new(),
+            blocked_by: Vec::new(),
+        });
+    }
+
+    let session = EntityKey::native(
+        adapter_id,
+        record.source_instance_id,
+        "session",
+        context.native_session_id.as_bytes(),
+    )?;
+    let run = (context.native_agent_id == context.native_session_id)
+        .then(|| {
+            EntityKey::native(
+                adapter_id,
+                record.source_instance_id,
+                "run",
+                context.native_session_id.as_bytes(),
+            )
+        })
+        .transpose()?;
+    output.push(
+        record,
+        Fact::TaskSnapshot(TaskSnapshotFact {
+            collection,
+            session: Some(session),
+            run,
+            team: None,
+            native_collection_id: format!(
+                "{}-agent-{}",
+                context.native_session_id, context.native_agent_id
+            ),
+            native_owner_id: Some(context.native_agent_id.clone()),
+            kind: TaskCollectionKind::TodoList,
+            coverage: TaskSnapshotCoverage::Complete,
+            items,
+        }),
+    )?;
+    Ok(DecodeDisposition::Applied)
+}
+
+fn decode_task_item(
+    adapter_id: &AdapterId,
+    context: &ClaudeTaskItemContext,
+    record: &SourceRecord,
+    output: &mut FactBatch,
+) -> Result<DecodeDisposition, AdapterError> {
+    let document: ClaudeTaskItemDocument = match serde_json::from_slice(&record.payload) {
+        Ok(document) => document,
+        Err(error) => {
+            preserve_unknown(
+                record,
+                output,
+                Some("task_item".to_string()),
+                format!("Claude task item is not a supported JSON object: {error}"),
+            )?;
+            return Ok(DecodeDisposition::PreservedUnknown);
+        }
+    };
+    if document.id != context.native_task_id {
+        return preserve_task_contract_loss(
+            record,
+            output,
+            "task_item",
+            "payload id does not match the source file name",
+        );
+    }
+    let Some(subject) = nonempty(&document.subject) else {
+        return preserve_task_contract_loss(record, output, "task_item", "subject is empty");
+    };
+    let Some(native_status) = nonempty(&document.status) else {
+        return preserve_task_contract_loss(record, output, "task_item", "status is empty");
+    };
+    if document
+        .blocks
+        .iter()
+        .chain(document.blocked_by.iter())
+        .any(|value| value.trim().is_empty())
+    {
+        return preserve_task_contract_loss(
+            record,
+            output,
+            "task_item",
+            "contains an empty dependency id",
+        );
+    }
+
+    let mut native_collection_key = Vec::new();
+    push_key_component(&mut native_collection_key, b"task-directory");
+    push_key_component(
+        &mut native_collection_key,
+        context.native_collection_id.as_bytes(),
+    );
+    let mut native_task_key = native_collection_key.clone();
+    push_key_component(&mut native_task_key, context.native_task_id.as_bytes());
+    output.push(
+        record,
+        Fact::TaskSnapshot(TaskSnapshotFact {
+            collection: EntityKey::native(
+                adapter_id,
+                record.source_instance_id,
+                "task_collection",
+                &native_collection_key,
+            )?,
+            // A Claude task-directory name can be a session id, team name, or
+            // other native scope. Keep it unjoined until another native fact
+            // disambiguates it rather than guessing from its spelling.
+            session: None,
+            run: None,
+            team: None,
+            native_collection_id: context.native_collection_id.clone(),
+            native_owner_id: None,
+            kind: TaskCollectionKind::NativeTaskList,
+            coverage: TaskSnapshotCoverage::ItemDocument,
+            items: vec![TaskItemSnapshot {
+                task: EntityKey::native(
+                    adapter_id,
+                    record.source_instance_id,
+                    "task",
+                    &native_task_key,
+                )?,
+                native_task_id: Some(context.native_task_id.clone()),
+                subject,
+                description: Some(document.description),
+                active_form: document.active_form.as_deref().and_then(nonempty),
+                native_owner: document.owner.as_deref().and_then(nonempty),
+                status: task_status(&native_status),
+                blocks: document.blocks,
+                blocked_by: document.blocked_by,
+            }],
+        }),
+    )?;
+    Ok(DecodeDisposition::Applied)
+}
+
+fn decode_plan_document(
+    adapter_id: &AdapterId,
+    context: &ClaudePlanContext,
+    record: &SourceRecord,
+    output: &mut FactBatch,
+) -> Result<DecodeDisposition, AdapterError> {
+    let content = match std::str::from_utf8(&record.payload) {
+        Ok(content) => content.to_string(),
+        Err(error) => {
+            preserve_unknown(
+                record,
+                output,
+                Some("plan_document".to_string()),
+                format!("Claude plan document is not valid UTF-8: {error}"),
+            )?;
+            return Ok(DecodeDisposition::PreservedUnknown);
+        }
+    };
+    let title = first_markdown_heading(&content).unwrap_or_else(|| context.native_plan_id.clone());
+    output.push(
+        record,
+        Fact::PlanSnapshot(PlanSnapshotFact {
+            plan: EntityKey::native(
+                adapter_id,
+                record.source_instance_id,
+                "plan",
+                context.native_plan_id.as_bytes(),
+            )?,
+            native_plan_id: context.native_plan_id.clone(),
+            title,
+            size_bytes: record.payload.len() as u64,
+            content,
+            source_time: None,
+        }),
+    )?;
+    Ok(DecodeDisposition::Applied)
+}
+
+fn preserve_task_contract_loss(
+    record: &SourceRecord,
+    output: &mut FactBatch,
+    native_kind: &str,
+    detail: &str,
+) -> Result<DecodeDisposition, AdapterError> {
+    preserve_unknown(
+        record,
+        output,
+        Some(native_kind.to_string()),
+        format!("Claude {native_kind} {detail}"),
+    )?;
+    Ok(DecodeDisposition::PreservedUnknown)
+}
+
+fn task_status(native_status: &str) -> TaskStatus {
+    match native_status {
+        "pending" => TaskStatus::Pending,
+        "in_progress" => TaskStatus::InProgress,
+        "completed" => TaskStatus::Completed,
+        other => TaskStatus::Other(other.to_string()),
+    }
+}
+
+fn first_markdown_heading(content: &str) -> Option<String> {
+    content.lines().find_map(|line| {
+        let rest = line.strip_prefix('#')?;
+        let first = rest.chars().next()?;
+        if !first.is_whitespace() {
+            return None;
+        }
+        nonempty(rest.trim_start_matches(char::is_whitespace))
+    })
 }
 
 fn team_member_key(
@@ -1868,6 +2410,24 @@ mod tests {
         )
     }
 
+    fn document_record(payload: &[u8]) -> SourceRecord {
+        SourceRecord::new(
+            &RecordOrigin {
+                source_instance_id: 7,
+                stream_id: 8,
+                object_id: 9,
+                observed_at: 10,
+                source_timestamp_hint: None,
+                media_type: SourceMediaType::new("application/json").unwrap(),
+            },
+            1,
+            crate::source::SourceCursor::snapshot(crate::source::Revision::ZERO),
+            crate::source::SourceCursor::snapshot(crate::source::Revision::digest(payload)),
+            0,
+            payload.to_vec(),
+        )
+    }
+
     fn absent_presence_record() -> SourceRecord {
         SourceRecord::absent(
             &RecordOrigin {
@@ -1918,8 +2478,8 @@ mod tests {
             discovered[0].roots[3].path,
             std::fs::canonicalize(root.path()).unwrap().join("sessions")
         );
-        assert_eq!(streams.len(), 6);
-        assert_eq!(adapter.manifest().contract_version, 6);
+        assert_eq!(streams.len(), 9);
+        assert_eq!(adapter.manifest().contract_version, 7);
         assert!(adapter
             .manifest()
             .source_schema_versions
@@ -1940,6 +2500,21 @@ mod tests {
             .source_schema_versions
             .iter()
             .any(|version| version == "claude-code-active-session-v1"));
+        assert!(adapter
+            .manifest()
+            .source_schema_versions
+            .iter()
+            .any(|version| version == "claude-code-todo-v1"));
+        assert!(adapter
+            .manifest()
+            .source_schema_versions
+            .iter()
+            .any(|version| version == "claude-code-task-item-v1"));
+        assert!(adapter
+            .manifest()
+            .source_schema_versions
+            .iter()
+            .any(|version| version == "claude-code-plan-v1"));
         assert!(matches!(streams[0].driver, DriverSpec::AppendDelimited(_)));
         assert!(matches!(streams[1].driver, DriverSpec::AppendDelimited(_)));
         assert!(matches!(streams[2].driver, DriverSpec::ReplaceDocument(_)));
@@ -1962,12 +2537,33 @@ mod tests {
                 max_content_bytes: ACTIVE_SESSION_MAX_BYTES
             })
         ));
+        assert!(matches!(
+            streams[6].driver,
+            DriverSpec::ReplaceDocument(ReplaceDocumentConfig {
+                max_document_bytes: TODO_MAX_BYTES
+            })
+        ));
+        assert!(matches!(
+            streams[7].driver,
+            DriverSpec::ReplaceDocument(ReplaceDocumentConfig {
+                max_document_bytes: TASK_ITEM_MAX_BYTES
+            })
+        ));
+        assert!(matches!(
+            streams[8].driver,
+            DriverSpec::ReplaceDocument(ReplaceDocumentConfig {
+                max_document_bytes: PLAN_MAX_BYTES
+            })
+        ));
         assert_eq!(streams[0].decoder.as_str(), PARENT_DECODER);
         assert_eq!(streams[1].decoder.as_str(), SUBAGENT_DECODER);
         assert_eq!(streams[2].decoder.as_str(), SUBAGENT_META_DECODER);
         assert_eq!(streams[3].decoder.as_str(), TEAM_CONFIG_DECODER);
         assert_eq!(streams[4].decoder.as_str(), TEAM_INBOX_DECODER);
         assert_eq!(streams[5].decoder.as_str(), ACTIVE_SESSION_DECODER);
+        assert_eq!(streams[6].decoder.as_str(), TODO_DECODER);
+        assert_eq!(streams[7].decoder.as_str(), TASK_ITEM_DECODER);
+        assert_eq!(streams[8].decoder.as_str(), PLAN_DECODER);
         assert_eq!(streams[2].authority, StreamAuthority::Supplemental);
         assert_eq!(streams[2].consistency, ConsistencyPolicy::SnapshotReplace);
         assert_eq!(streams[3].authority, StreamAuthority::Canonical);
@@ -1977,6 +2573,15 @@ mod tests {
         assert_eq!(streams[5].authority, StreamAuthority::Canonical);
         assert_eq!(streams[5].priority, IngestPriority::Interactive);
         assert_eq!(streams[5].consistency, ConsistencyPolicy::SnapshotReplace);
+        for stream in &streams[6..=8] {
+            assert_eq!(stream.authority, StreamAuthority::Canonical);
+            assert_eq!(stream.priority, IngestPriority::Interactive);
+            assert_eq!(stream.consistency, ConsistencyPolicy::SnapshotReplace);
+            assert!(stream
+                .capabilities
+                .iter()
+                .any(|capability| capability.as_str() == RUNTIME_TASKS));
+        }
         assert!(streams[0]
             .capabilities
             .iter()
@@ -2038,6 +2643,18 @@ mod tests {
             CapabilityGranularity::Custom("process_presence".to_string())
         );
         assert_eq!(presence.support.availability, Availability::Live);
+        let tasks = adapter
+            .manifest()
+            .capabilities
+            .iter()
+            .find(|capability| capability.id.as_str() == RUNTIME_TASKS)
+            .unwrap();
+        assert_eq!(tasks.support.level, SupportLevel::Native);
+        assert_eq!(
+            tasks.support.granularity,
+            CapabilityGranularity::Custom("task".to_string())
+        );
+        assert_eq!(tasks.support.availability, Availability::Live);
     }
 
     #[test]
@@ -2078,6 +2695,275 @@ mod tests {
                 )
                 .is_err());
         }
+    }
+
+    #[test]
+    fn task_todo_and_plan_contexts_require_exact_native_paths() {
+        let root = TempDir::new().unwrap();
+        let adapter = ClaudeCodeAdapter::new();
+
+        let todo = adapter
+            .bootstrap_object(
+                &instance(root.path()),
+                &object(TODO_STREAM, &format!("todos/{SESSION}-agent-worker.json")),
+            )
+            .unwrap();
+        assert_eq!(
+            ClaudeTodoContext::decode(&todo).unwrap(),
+            ClaudeTodoContext {
+                native_session_id: SESSION.to_string(),
+                native_agent_id: "worker".to_string(),
+            }
+        );
+        let task = adapter
+            .bootstrap_object(
+                &instance(root.path()),
+                &object(TASK_ITEM_STREAM, "tasks/rewrite/12.json"),
+            )
+            .unwrap();
+        assert_eq!(
+            ClaudeTaskItemContext::decode(&task).unwrap(),
+            ClaudeTaskItemContext {
+                native_collection_id: "rewrite".to_string(),
+                native_task_id: "12".to_string(),
+            }
+        );
+        let plan = adapter
+            .bootstrap_object(
+                &instance(root.path()),
+                &object(PLAN_STREAM, "plans/ship-it.md"),
+            )
+            .unwrap();
+        assert_eq!(
+            ClaudePlanContext::decode(&plan).unwrap(),
+            ClaudePlanContext {
+                native_plan_id: "ship-it".to_string(),
+            }
+        );
+
+        for (stream, invalid) in [
+            (TODO_STREAM, "todos/no-agent-.json"),
+            (TODO_STREAM, "nested/todos/s-agent-a.json"),
+            (TASK_ITEM_STREAM, "tasks/list/0.json"),
+            (TASK_ITEM_STREAM, "tasks/list/01.json"),
+            (TASK_ITEM_STREAM, "tasks/list/id.json"),
+            (PLAN_STREAM, "plans/.md"),
+            (PLAN_STREAM, "plans/nested/plan.md"),
+        ] {
+            assert!(adapter
+                .bootstrap_object(&instance(root.path()), &object(stream, invalid))
+                .is_err());
+        }
+    }
+
+    #[test]
+    fn todo_snapshot_is_complete_scoped_and_stable_across_status_edits() {
+        let root = TempDir::new().unwrap();
+        let adapter = ClaudeCodeAdapter::new();
+        let object_context = adapter
+            .bootstrap_object(
+                &instance(root.path()),
+                &object(
+                    TODO_STREAM,
+                    &format!("todos/{SESSION}-agent-{SESSION}.json"),
+                ),
+            )
+            .unwrap();
+        let first = document_record(
+            br#"[
+              {"content":"Add task projection","status":"pending","activeForm":"Adding task projection"},
+              {"content":"Run parity","status":"future_native_status"}
+            ]"#,
+        );
+        let mut batch = FactBatch::new(4, 4).unwrap();
+        let disposition = adapter
+            .decode(
+                DecodeContext {
+                    decoder: &DecoderId::new(TODO_DECODER).unwrap(),
+                    object_context: &object_context,
+                },
+                &first,
+                &mut batch,
+            )
+            .unwrap();
+        assert_eq!(disposition, DecodeDisposition::Applied);
+        let Fact::TaskSnapshot(snapshot) = &batch.facts()[0].value else {
+            panic!("expected todo task snapshot");
+        };
+        assert_eq!(snapshot.kind, TaskCollectionKind::TodoList);
+        assert_eq!(snapshot.coverage, TaskSnapshotCoverage::Complete);
+        assert!(snapshot.session.is_some());
+        assert!(snapshot.run.is_some());
+        assert!(snapshot.team.is_none());
+        assert_eq!(snapshot.native_owner_id.as_deref(), Some(SESSION));
+        assert_eq!(snapshot.items.len(), 2);
+        assert_eq!(snapshot.items[0].subject, "Add task projection");
+        assert_eq!(snapshot.items[0].status, TaskStatus::Pending);
+        assert_eq!(
+            snapshot.items[1].status,
+            TaskStatus::Other("future_native_status".to_string())
+        );
+        assert!(!fact_values(&batch).any(|fact| matches!(fact, Fact::RunEvidence(_))));
+
+        let changed = document_record(
+            br#"[{"content":"Add task projection","status":"completed","activeForm":"Adding task projection"}]"#,
+        );
+        let mut changed_batch = FactBatch::new(4, 4).unwrap();
+        adapter
+            .decode(
+                DecodeContext {
+                    decoder: &DecoderId::new(TODO_DECODER).unwrap(),
+                    object_context: &object_context,
+                },
+                &changed,
+                &mut changed_batch,
+            )
+            .unwrap();
+        let Fact::TaskSnapshot(changed_snapshot) = &changed_batch.facts()[0].value else {
+            panic!("expected updated todo task snapshot");
+        };
+        assert_eq!(changed_snapshot.items[0].task, snapshot.items[0].task);
+        assert_eq!(changed_snapshot.items[0].status, TaskStatus::Completed);
+    }
+
+    #[test]
+    fn numbered_task_item_preserves_dependencies_without_guessing_scope() {
+        let root = TempDir::new().unwrap();
+        let adapter = ClaudeCodeAdapter::new();
+        let object_context = adapter
+            .bootstrap_object(
+                &instance(root.path()),
+                &object(TASK_ITEM_STREAM, "tasks/truffle-rust-rewrite/1.json"),
+            )
+            .unwrap();
+        let record = document_record(
+            br#"{
+              "id":"1",
+              "subject":"Port the task pack",
+              "description":"Keep replacement provenance",
+              "activeForm":"Porting the task pack",
+              "owner":"worker",
+              "status":"in_progress",
+              "blocks":["2"],
+              "blockedBy":["3"]
+            }"#,
+        );
+        let mut batch = FactBatch::new(4, 4).unwrap();
+        let disposition = adapter
+            .decode(
+                DecodeContext {
+                    decoder: &DecoderId::new(TASK_ITEM_DECODER).unwrap(),
+                    object_context: &object_context,
+                },
+                &record,
+                &mut batch,
+            )
+            .unwrap();
+        assert_eq!(disposition, DecodeDisposition::Applied);
+        let Fact::TaskSnapshot(snapshot) = &batch.facts()[0].value else {
+            panic!("expected native task snapshot");
+        };
+        assert_eq!(snapshot.kind, TaskCollectionKind::NativeTaskList);
+        assert_eq!(snapshot.coverage, TaskSnapshotCoverage::ItemDocument);
+        assert!(snapshot.session.is_none());
+        assert!(snapshot.run.is_none());
+        assert!(snapshot.team.is_none());
+        assert_eq!(snapshot.items.len(), 1);
+        let item = &snapshot.items[0];
+        assert_eq!(item.native_task_id.as_deref(), Some("1"));
+        assert_eq!(item.native_owner.as_deref(), Some("worker"));
+        assert_eq!(item.status, TaskStatus::InProgress);
+        assert_eq!(item.blocks, ["2"]);
+        assert_eq!(item.blocked_by, ["3"]);
+        assert!(!fact_values(&batch).any(|fact| matches!(fact, Fact::RunEvidence(_))));
+
+        let mismatch = document_record(
+            br#"{"id":"2","subject":"wrong file","description":"","status":"pending"}"#,
+        );
+        let mut mismatch_batch = FactBatch::new(2, 2).unwrap();
+        assert_eq!(
+            adapter
+                .decode(
+                    DecodeContext {
+                        decoder: &DecoderId::new(TASK_ITEM_DECODER).unwrap(),
+                        object_context: &object_context,
+                    },
+                    &mismatch,
+                    &mut mismatch_batch,
+                )
+                .unwrap(),
+            DecodeDisposition::PreservedUnknown
+        );
+        assert!(matches!(
+            mismatch_batch.facts()[0].value,
+            Fact::UnknownRecord { .. }
+        ));
+    }
+
+    #[test]
+    fn plan_document_preserves_markdown_and_falls_back_to_the_native_slug() {
+        let root = TempDir::new().unwrap();
+        let adapter = ClaudeCodeAdapter::new();
+        let object_context = adapter
+            .bootstrap_object(
+                &instance(root.path()),
+                &object(PLAN_STREAM, "plans/ship-it.md"),
+            )
+            .unwrap();
+        let record = document_record(b"preamble\r\n# Ship It\r\n\r\nBody.\r\n");
+        let mut batch = FactBatch::new(2, 2).unwrap();
+        assert_eq!(
+            adapter
+                .decode(
+                    DecodeContext {
+                        decoder: &DecoderId::new(PLAN_DECODER).unwrap(),
+                        object_context: &object_context,
+                    },
+                    &record,
+                    &mut batch,
+                )
+                .unwrap(),
+            DecodeDisposition::Applied
+        );
+        let Fact::PlanSnapshot(plan) = &batch.facts()[0].value else {
+            panic!("expected plan snapshot");
+        };
+        assert_eq!(plan.native_plan_id, "ship-it");
+        assert_eq!(plan.title, "Ship It");
+        assert_eq!(plan.content.as_bytes(), record.payload);
+        assert_eq!(plan.size_bytes, record.payload.len() as u64);
+
+        let headless = document_record(b"No heading here.\n");
+        let mut headless_batch = FactBatch::new(2, 2).unwrap();
+        adapter
+            .decode(
+                DecodeContext {
+                    decoder: &DecoderId::new(PLAN_DECODER).unwrap(),
+                    object_context: &object_context,
+                },
+                &headless,
+                &mut headless_batch,
+            )
+            .unwrap();
+        let Fact::PlanSnapshot(headless_plan) = &headless_batch.facts()[0].value else {
+            panic!("expected headless plan snapshot");
+        };
+        assert_eq!(headless_plan.title, "ship-it");
+
+        let mut invalid_batch = FactBatch::new(2, 2).unwrap();
+        assert_eq!(
+            adapter
+                .decode(
+                    DecodeContext {
+                        decoder: &DecoderId::new(PLAN_DECODER).unwrap(),
+                        object_context: &object_context,
+                    },
+                    &document_record(&[0xff]),
+                    &mut invalid_batch,
+                )
+                .unwrap(),
+            DecodeDisposition::PreservedUnknown
+        );
     }
 
     #[test]

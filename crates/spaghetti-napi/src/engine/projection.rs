@@ -20,6 +20,7 @@ use super::commit::{
     ProjectionCommitContext, TransactionalProjectionWork,
 };
 use super::presence_projection::apply_presence_facts;
+use super::task_projection::apply_task_snapshots;
 use super::team_projection::apply_team_snapshots;
 use super::EngineError;
 
@@ -263,6 +264,8 @@ impl TransactionalProjectionWork for FactProjectionWork<'_> {
                 | Fact::TeamSnapshot(_)
                 | Fact::TeamInboxSnapshot(_)
                 | Fact::Presence(_)
+                | Fact::TaskSnapshot(_)
+                | Fact::PlanSnapshot(_)
                 | Fact::RunEvidence(_)
                 | Fact::Usage(_) => {}
             }
@@ -502,6 +505,7 @@ impl TransactionalProjectionWork for FactProjectionWork<'_> {
 
         changes.extend(apply_presence_facts(transaction, context, self.batch)?);
         changes.extend(apply_team_snapshots(transaction, context, self.batch)?);
+        changes.extend(apply_task_snapshots(transaction, context, self.batch)?);
 
         transaction
             .execute(
@@ -2376,10 +2380,11 @@ mod tests {
 
     use crate::adapter::{
         AdapterId, AdapterObjectContext, AgentAdapter, DecodeContext, DecoderId, FactBatch,
-        PresenceFact, RunEvidenceFact, RunFact, SourceInstance, SourceInstanceKey,
-        SourceInstanceSpec as AdapterSourceInstanceSpec, SourceObjectDescriptor, SourceRoot,
-        StreamId, TeamInboxMessageSnapshot, TeamInboxSnapshotFact, TeamMemberSnapshot,
-        TeamSnapshotFact,
+        PlanSnapshotFact, PresenceFact, RunEvidenceFact, RunFact, SessionFact, SourceInstance,
+        SourceInstanceKey, SourceInstanceSpec as AdapterSourceInstanceSpec, SourceObjectDescriptor,
+        SourceRoot, StreamId, TaskCollectionKind, TaskItemSnapshot, TaskSnapshotCoverage,
+        TaskSnapshotFact, TaskStatus, TeamInboxMessageSnapshot, TeamInboxSnapshotFact,
+        TeamMemberSnapshot, TeamSnapshotFact,
     };
     use crate::claude::ClaudeCodeAdapter;
     use crate::core::schema;
@@ -2608,6 +2613,59 @@ mod tests {
             name_source: Some("derived".to_string()),
             bridge_session_id: None,
             messaging_socket_path: Some("/tmp/claude-4242.sock".to_string()),
+        }
+    }
+
+    fn task_item(native_key: &str, subject: &str, status: TaskStatus) -> TaskItemSnapshot {
+        TaskItemSnapshot {
+            task: entity("task", native_key),
+            native_task_id: Some(native_key.to_string()),
+            subject: subject.to_string(),
+            description: Some(format!("description for {subject}")),
+            active_form: Some(format!("working on {subject}")),
+            native_owner: Some("worker".to_string()),
+            status,
+            blocks: vec!["later".to_string()],
+            blocked_by: vec!["earlier".to_string()],
+        }
+    }
+
+    fn todo_fact(items: Vec<TaskItemSnapshot>) -> TaskSnapshotFact {
+        TaskSnapshotFact {
+            collection: entity("task_collection", "todo-list"),
+            session: Some(entity("session", SESSION)),
+            run: Some(entity("run", SESSION)),
+            team: None,
+            native_collection_id: format!("{SESSION}-agent-{SESSION}"),
+            native_owner_id: Some(SESSION.to_string()),
+            kind: TaskCollectionKind::TodoList,
+            coverage: TaskSnapshotCoverage::Complete,
+            items,
+        }
+    }
+
+    fn native_task_fact(items: Vec<TaskItemSnapshot>) -> TaskSnapshotFact {
+        TaskSnapshotFact {
+            collection: entity("task_collection", "native-list"),
+            session: None,
+            run: None,
+            team: None,
+            native_collection_id: "native-list".to_string(),
+            native_owner_id: None,
+            kind: TaskCollectionKind::NativeTaskList,
+            coverage: TaskSnapshotCoverage::ItemDocument,
+            items,
+        }
+    }
+
+    fn plan_fact(title: &str, content: &str) -> PlanSnapshotFact {
+        PlanSnapshotFact {
+            plan: entity("plan", "ship-it"),
+            native_plan_id: "ship-it".to_string(),
+            title: title.to_string(),
+            content: content.to_string(),
+            size_bytes: content.len() as u64,
+            source_time: None,
         }
     }
 
@@ -4864,6 +4922,670 @@ mod tests {
                 )
                 .unwrap(),
             "delete"
+        );
+    }
+
+    #[test]
+    fn complete_task_snapshot_replaces_items_retracts_and_joins_late_session_history() {
+        let mut connection = database();
+        register_object(&mut connection);
+        let collection_key = entity("task_collection", "todo-list");
+        let first_task_key = entity("task", "todo-one");
+        let second_task_key = entity("task", "todo-two");
+
+        let first_record = direct_record(1, 0, 1, 20, b"todo-v1");
+        let mut first = FactBatch::new(2, 1).unwrap();
+        first
+            .push(
+                &first_record,
+                Fact::TaskSnapshot(todo_fact(vec![
+                    task_item("todo-one", "first", TaskStatus::Pending),
+                    task_item("todo-two", "second", TaskStatus::InProgress),
+                ])),
+            )
+            .unwrap();
+        commit_direct_batch(&mut connection, &first_record, 1, 0, 21, &first);
+
+        let initial: (String, i64, i64, i64, i64) = connection
+            .query_row(
+                r#"
+                SELECT resolution_status, assertion_count,
+                       complete_snapshot_count, item_document_count, item_count
+                FROM canonical_task_collections WHERE collection_key = ?1
+                "#,
+                [collection_key.as_bytes()],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(initial, ("resolved".to_string(), 1, 1, 0, 2));
+        assert_eq!(count(&connection, "canonical_tasks"), 2);
+        assert_eq!(count(&connection, "canonical_sessions"), 0);
+        assert_eq!(count(&connection, "observed_run_states"), 0);
+
+        // A complete task snapshot is independently queryable. Stable scope
+        // keys let later history join without rewriting the task assertion.
+        let history_object_key = b"late-task-history";
+        apply_observation_commit(
+            &mut connection,
+            &request_for_object(
+                history_object_key,
+                ExpectedSourceCursor::Absent,
+                1,
+                SourceCursor::append_offset(0).into_bytes(),
+                25,
+            ),
+        )
+        .unwrap();
+        let history_record = object_record(
+            2,
+            1,
+            SourceCursor::append_offset(0),
+            SourceCursor::append_offset(1),
+            26,
+            b"late-task-session",
+        );
+        let mut history = FactBatch::new(2, 1).unwrap();
+        history
+            .push(
+                &history_record,
+                Fact::Session(SessionFact {
+                    session: entity("session", SESSION),
+                    project: entity("project", PROJECT),
+                    native_session_id: SESSION.to_string(),
+                    native_project_key: PROJECT.to_string(),
+                    cwd: Some("/fixture/project".to_string()),
+                    git_branch: None,
+                    first_prompt: None,
+                    ai_title: None,
+                    custom_title: None,
+                    source_time: None,
+                }),
+            )
+            .unwrap();
+        commit_object_batch(
+            &mut connection,
+            history_object_key,
+            &history_record,
+            1,
+            SourceCursor::append_offset(0).into_bytes(),
+            27,
+            &history,
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    r#"
+                    SELECT COUNT(*)
+                    FROM canonical_task_collections AS collection
+                    JOIN canonical_sessions AS session
+                      ON session.session_key = collection.session_key
+                    WHERE collection.collection_key = ?1
+                    "#,
+                    [collection_key.as_bytes()],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            1
+        );
+
+        let updated_record = direct_record(1, 1, 2, 30, b"todo-v2");
+        let mut updated = FactBatch::new(2, 1).unwrap();
+        updated
+            .push(
+                &updated_record,
+                Fact::TaskSnapshot(todo_fact(vec![task_item(
+                    "todo-one",
+                    "first",
+                    TaskStatus::Completed,
+                )])),
+            )
+            .unwrap();
+        commit_direct_batch(&mut connection, &updated_record, 1, 1, 31, &updated);
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT task_status FROM canonical_tasks WHERE task_key = ?1",
+                    [first_task_key.as_bytes()],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "completed"
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM canonical_tasks WHERE task_key = ?1",
+                    [second_task_key.as_bytes()],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            0
+        );
+        assert_eq!(count(&connection, "task_snapshot_assertions"), 1);
+        assert_eq!(count(&connection, "task_item_assertions"), 1);
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM fact_records WHERE fact_kind = 'task_snapshot'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            1
+        );
+        assert_eq!(count(&connection, "observed_run_states"), 0);
+
+        let deleted_record = direct_record(1, 2, 3, 40, b"todo-deleted");
+        let deleted = FactBatch::new(1, 1).unwrap();
+        commit_direct_batch(&mut connection, &deleted_record, 1, 2, 41, &deleted);
+        assert_eq!(count(&connection, "canonical_task_collections"), 0);
+        assert_eq!(count(&connection, "canonical_tasks"), 0);
+        assert_eq!(count(&connection, "task_snapshot_assertions"), 0);
+        assert_eq!(count(&connection, "task_item_assertions"), 0);
+        assert_eq!(count(&connection, "canonical_sessions"), 1);
+        assert_eq!(count(&connection, "observed_run_states"), 0);
+        assert_eq!(
+            connection
+                .query_row(
+                    r#"
+                    SELECT operation FROM change_log
+                    WHERE topic = 'runtime.task-collection.changed'
+                      AND entity_key = ?1
+                    ORDER BY commit_seq DESC LIMIT 1
+                    "#,
+                    [collection_key.as_bytes()],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "delete"
+        );
+    }
+
+    #[test]
+    fn task_item_documents_merge_then_conflict_and_resolve_per_object() {
+        let mut connection = database();
+        register_object(&mut connection);
+        let second_object_key = b"task-item-secondary";
+        apply_observation_commit(
+            &mut connection,
+            &request_for_object(
+                second_object_key,
+                ExpectedSourceCursor::Absent,
+                1,
+                SourceCursor::append_offset(0).into_bytes(),
+                12,
+            ),
+        )
+        .unwrap();
+        let collection_key = entity("task_collection", "native-list");
+        let shared_task_key = entity("task", "shared");
+        let secondary_task_key = entity("task", "secondary");
+
+        let primary_record = direct_record(1, 0, 1, 20, b"task-primary");
+        let mut primary = FactBatch::new(2, 1).unwrap();
+        primary
+            .push(
+                &primary_record,
+                Fact::TaskSnapshot(native_task_fact(vec![task_item(
+                    "shared",
+                    "shared task",
+                    TaskStatus::Pending,
+                )])),
+            )
+            .unwrap();
+        commit_direct_batch(&mut connection, &primary_record, 1, 0, 21, &primary);
+
+        let secondary_record = object_record(
+            2,
+            1,
+            SourceCursor::append_offset(0),
+            SourceCursor::append_offset(1),
+            30,
+            b"task-secondary",
+        );
+        let mut secondary = FactBatch::new(2, 1).unwrap();
+        secondary
+            .push(
+                &secondary_record,
+                Fact::TaskSnapshot(native_task_fact(vec![task_item(
+                    "secondary",
+                    "second task",
+                    TaskStatus::InProgress,
+                )])),
+            )
+            .unwrap();
+        commit_object_batch(
+            &mut connection,
+            second_object_key,
+            &secondary_record,
+            1,
+            SourceCursor::append_offset(0).into_bytes(),
+            31,
+            &secondary,
+        );
+        let merged: (String, i64, i64, i64) = connection
+            .query_row(
+                r#"
+                SELECT resolution_status, assertion_count,
+                       item_document_count, item_count
+                FROM canonical_task_collections WHERE collection_key = ?1
+                "#,
+                [collection_key.as_bytes()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(merged, ("resolved".to_string(), 2, 2, 2));
+        assert_eq!(count(&connection, "canonical_tasks"), 2);
+
+        // Replacing only the second item document retracts its old task and
+        // can create a competing assertion for the first without touching
+        // the primary source object's evidence.
+        let competing_record = object_record(
+            2,
+            1,
+            SourceCursor::append_offset(1),
+            SourceCursor::append_offset(2),
+            40,
+            b"task-competing",
+        );
+        let mut competing = FactBatch::new(2, 1).unwrap();
+        competing
+            .push(
+                &competing_record,
+                Fact::TaskSnapshot(native_task_fact(vec![task_item(
+                    "shared",
+                    "competing subject",
+                    TaskStatus::Completed,
+                )])),
+            )
+            .unwrap();
+        commit_object_batch(
+            &mut connection,
+            second_object_key,
+            &competing_record,
+            1,
+            SourceCursor::append_offset(1).into_bytes(),
+            41,
+            &competing,
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM canonical_tasks WHERE task_key = ?1",
+                    [secondary_task_key.as_bytes()],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            0
+        );
+        let conflict: (String, i64, i64) = connection
+            .query_row(
+                "SELECT resolution_status, assertion_count, competing_item_count FROM canonical_tasks WHERE task_key = ?1",
+                [shared_task_key.as_bytes()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(conflict, ("conflicting".to_string(), 2, 1));
+        assert_eq!(count(&connection, "task_item_assertions"), 2);
+        assert_eq!(
+            connection
+                .query_row(
+                    r#"
+                    SELECT operation FROM change_log
+                    WHERE topic = 'diagnostic.runtime.task-conflict'
+                      AND entity_key = ?1
+                    ORDER BY commit_seq DESC LIMIT 1
+                    "#,
+                    [shared_task_key.as_bytes()],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "upsert"
+        );
+
+        let retracted_record = object_record(
+            2,
+            1,
+            SourceCursor::append_offset(2),
+            SourceCursor::append_offset(3),
+            50,
+            b"task-retracted",
+        );
+        let retracted = FactBatch::new(1, 1).unwrap();
+        commit_object_batch(
+            &mut connection,
+            second_object_key,
+            &retracted_record,
+            1,
+            SourceCursor::append_offset(2).into_bytes(),
+            51,
+            &retracted,
+        );
+        let resolved: (String, String, i64, i64) = connection
+            .query_row(
+                "SELECT resolution_status, task_status, assertion_count, competing_item_count FROM canonical_tasks WHERE task_key = ?1",
+                [shared_task_key.as_bytes()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            resolved,
+            ("resolved".to_string(), "pending".to_string(), 1, 0)
+        );
+        assert_eq!(count(&connection, "task_snapshot_assertions"), 1);
+        assert_eq!(count(&connection, "task_item_assertions"), 1);
+        assert_eq!(count(&connection, "observed_run_states"), 0);
+        assert_eq!(
+            connection
+                .query_row(
+                    r#"
+                    SELECT operation FROM change_log
+                    WHERE topic = 'diagnostic.runtime.task-conflict'
+                      AND entity_key = ?1
+                    ORDER BY commit_seq DESC LIMIT 1
+                    "#,
+                    [shared_task_key.as_bytes()],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "delete"
+        );
+    }
+
+    #[test]
+    fn competing_complete_task_snapshots_are_diagnosed_and_resolve() {
+        let mut connection = database();
+        register_object(&mut connection);
+        let second_object_key = b"todo-secondary";
+        apply_observation_commit(
+            &mut connection,
+            &request_for_object(
+                second_object_key,
+                ExpectedSourceCursor::Absent,
+                1,
+                SourceCursor::append_offset(0).into_bytes(),
+                12,
+            ),
+        )
+        .unwrap();
+        let collection_key = entity("task_collection", "todo-list");
+
+        let primary_record = direct_record(1, 0, 1, 20, b"todo-primary");
+        let mut primary = FactBatch::new(2, 1).unwrap();
+        primary
+            .push(
+                &primary_record,
+                Fact::TaskSnapshot(todo_fact(vec![task_item(
+                    "todo-one",
+                    "primary item",
+                    TaskStatus::Pending,
+                )])),
+            )
+            .unwrap();
+        commit_direct_batch(&mut connection, &primary_record, 1, 0, 21, &primary);
+
+        let secondary_record = object_record(
+            2,
+            1,
+            SourceCursor::append_offset(0),
+            SourceCursor::append_offset(1),
+            30,
+            b"todo-secondary",
+        );
+        let mut secondary = FactBatch::new(2, 1).unwrap();
+        secondary
+            .push(
+                &secondary_record,
+                Fact::TaskSnapshot(todo_fact(vec![task_item(
+                    "todo-two",
+                    "competing item",
+                    TaskStatus::InProgress,
+                )])),
+            )
+            .unwrap();
+        commit_object_batch(
+            &mut connection,
+            second_object_key,
+            &secondary_record,
+            1,
+            SourceCursor::append_offset(0).into_bytes(),
+            31,
+            &secondary,
+        );
+        let conflict: (String, i64, i64, i64) = connection
+            .query_row(
+                r#"
+                SELECT resolution_status, assertion_count,
+                       competing_metadata_count, item_count
+                FROM canonical_task_collections WHERE collection_key = ?1
+                "#,
+                [collection_key.as_bytes()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(conflict, ("conflicting".to_string(), 2, 1, 2));
+        assert_eq!(
+            connection
+                .query_row(
+                    r#"
+                    SELECT operation FROM change_log
+                    WHERE topic = 'diagnostic.runtime.task-collection-conflict'
+                      AND entity_key = ?1
+                    ORDER BY commit_seq DESC LIMIT 1
+                    "#,
+                    [collection_key.as_bytes()],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "upsert"
+        );
+
+        let retracted_record = object_record(
+            2,
+            1,
+            SourceCursor::append_offset(1),
+            SourceCursor::append_offset(2),
+            40,
+            b"todo-secondary-retracted",
+        );
+        let retracted = FactBatch::new(1, 1).unwrap();
+        commit_object_batch(
+            &mut connection,
+            second_object_key,
+            &retracted_record,
+            1,
+            SourceCursor::append_offset(1).into_bytes(),
+            41,
+            &retracted,
+        );
+        let resolved: (String, i64, i64, i64) = connection
+            .query_row(
+                r#"
+                SELECT resolution_status, assertion_count,
+                       competing_metadata_count, item_count
+                FROM canonical_task_collections WHERE collection_key = ?1
+                "#,
+                [collection_key.as_bytes()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(resolved, ("resolved".to_string(), 1, 0, 1));
+        assert_eq!(
+            connection
+                .query_row(
+                    r#"
+                    SELECT operation FROM change_log
+                    WHERE topic = 'diagnostic.runtime.task-collection-conflict'
+                      AND entity_key = ?1
+                    ORDER BY commit_seq DESC LIMIT 1
+                    "#,
+                    [collection_key.as_bytes()],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "delete"
+        );
+    }
+
+    #[test]
+    fn plan_documents_replace_conflict_resolve_and_retract() {
+        let mut connection = database();
+        register_object(&mut connection);
+        let second_object_key = b"plan-secondary";
+        apply_observation_commit(
+            &mut connection,
+            &request_for_object(
+                second_object_key,
+                ExpectedSourceCursor::Absent,
+                1,
+                SourceCursor::append_offset(0).into_bytes(),
+                12,
+            ),
+        )
+        .unwrap();
+        let plan_key = entity("plan", "ship-it");
+
+        let first_record = direct_record(1, 0, 1, 20, b"plan-v1");
+        let mut first = FactBatch::new(2, 1).unwrap();
+        first
+            .push(
+                &first_record,
+                Fact::PlanSnapshot(plan_fact("Ship It", "# Ship It\n\nVersion one.\n")),
+            )
+            .unwrap();
+        commit_direct_batch(&mut connection, &first_record, 1, 0, 21, &first);
+
+        let updated_record = direct_record(1, 1, 2, 30, b"plan-v2");
+        let mut updated = FactBatch::new(2, 1).unwrap();
+        updated
+            .push(
+                &updated_record,
+                Fact::PlanSnapshot(plan_fact("Ship It Safely", "# Ship It Safely\n\nV2.\n")),
+            )
+            .unwrap();
+        commit_direct_batch(&mut connection, &updated_record, 1, 1, 31, &updated);
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT title FROM canonical_plans WHERE plan_key = ?1",
+                    [plan_key.as_bytes()],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "Ship It Safely"
+        );
+        assert_eq!(count(&connection, "plan_assertions"), 1);
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM fact_records WHERE fact_kind = 'plan_snapshot'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            1
+        );
+
+        let competing_record = object_record(
+            2,
+            1,
+            SourceCursor::append_offset(0),
+            SourceCursor::append_offset(1),
+            40,
+            b"plan-competing",
+        );
+        let mut competing = FactBatch::new(2, 1).unwrap();
+        competing
+            .push(
+                &competing_record,
+                Fact::PlanSnapshot(plan_fact("Competing", "# Competing\n")),
+            )
+            .unwrap();
+        commit_object_batch(
+            &mut connection,
+            second_object_key,
+            &competing_record,
+            1,
+            SourceCursor::append_offset(0).into_bytes(),
+            41,
+            &competing,
+        );
+        let conflict: (String, i64, i64) = connection
+            .query_row(
+                "SELECT resolution_status, assertion_count, competing_plan_count FROM canonical_plans WHERE plan_key = ?1",
+                [plan_key.as_bytes()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(conflict, ("conflicting".to_string(), 2, 1));
+
+        let retracted_record = object_record(
+            2,
+            1,
+            SourceCursor::append_offset(1),
+            SourceCursor::append_offset(2),
+            50,
+            b"plan-retracted",
+        );
+        let retracted = FactBatch::new(1, 1).unwrap();
+        commit_object_batch(
+            &mut connection,
+            second_object_key,
+            &retracted_record,
+            1,
+            SourceCursor::append_offset(1).into_bytes(),
+            51,
+            &retracted,
+        );
+        let resolved: (String, String, i64, i64) = connection
+            .query_row(
+                "SELECT resolution_status, title, assertion_count, competing_plan_count FROM canonical_plans WHERE plan_key = ?1",
+                [plan_key.as_bytes()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            resolved,
+            ("resolved".to_string(), "Ship It Safely".to_string(), 1, 0)
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    r#"
+                    SELECT operation FROM change_log
+                    WHERE topic = 'diagnostic.runtime.plan-conflict'
+                      AND entity_key = ?1
+                    ORDER BY commit_seq DESC LIMIT 1
+                    "#,
+                    [plan_key.as_bytes()],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "delete"
+        );
+
+        let deleted_record = direct_record(1, 2, 3, 60, b"plan-deleted");
+        let deleted = FactBatch::new(1, 1).unwrap();
+        commit_direct_batch(&mut connection, &deleted_record, 1, 2, 61, &deleted);
+        assert_eq!(count(&connection, "canonical_plans"), 0);
+        assert_eq!(count(&connection, "plan_assertions"), 0);
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM fact_records WHERE fact_kind = 'plan_snapshot'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            0
         );
     }
 

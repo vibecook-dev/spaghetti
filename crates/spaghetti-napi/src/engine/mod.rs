@@ -9,6 +9,7 @@ mod owner_lock;
 mod presence_projection;
 mod projection;
 mod query_pool;
+mod task_projection;
 mod team_projection;
 mod writer;
 

@@ -370,6 +370,71 @@ pub struct PresenceFact {
     pub messaging_socket_path: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TaskCollectionKind {
+    TodoList,
+    NativeTaskList,
+    Other(String),
+}
+
+/// Whether one source document describes the complete collection or one
+/// independently replaceable item within it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TaskSnapshotCoverage {
+    Complete,
+    ItemDocument,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TaskStatus {
+    Pending,
+    InProgress,
+    Completed,
+    Other(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskItemSnapshot {
+    pub task: EntityKey,
+    pub native_task_id: Option<String>,
+    pub subject: String,
+    pub description: Option<String>,
+    pub active_form: Option<String>,
+    pub native_owner: Option<String>,
+    pub status: TaskStatus,
+    pub blocks: Vec<String>,
+    pub blocked_by: Vec<String>,
+}
+
+/// One replaceable task-bearing document. A complete snapshot retracts items
+/// missing from its replacement; an item document retracts only that native
+/// item when the document disappears. Optional scope relations are asserted
+/// only when the native layout makes them unambiguous.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskSnapshotFact {
+    pub collection: EntityKey,
+    pub session: Option<EntityKey>,
+    pub run: Option<EntityKey>,
+    pub team: Option<EntityKey>,
+    pub native_collection_id: String,
+    pub native_owner_id: Option<String>,
+    pub kind: TaskCollectionKind,
+    pub coverage: TaskSnapshotCoverage,
+    pub items: Vec<TaskItemSnapshot>,
+}
+
+/// One replaceable plan document. Plans remain independently queryable when
+/// no transcript has yet supplied a trustworthy session relation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlanSnapshotFact {
+    pub plan: EntityKey,
+    pub native_plan_id: String,
+    pub title: String,
+    pub content: String,
+    pub size_bytes: u64,
+    pub source_time: Option<QualifiedTimestamp>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EvidenceKind {
     RunDeclared,
@@ -465,6 +530,8 @@ pub enum Fact {
     TeamSnapshot(TeamSnapshotFact),
     TeamInboxSnapshot(TeamInboxSnapshotFact),
     Presence(PresenceFact),
+    TaskSnapshot(TaskSnapshotFact),
+    PlanSnapshot(PlanSnapshotFact),
     RunEvidence(RunEvidenceFact),
     Usage(UsageFact),
     UnknownRecord {
@@ -486,6 +553,8 @@ impl Fact {
             Self::TeamSnapshot(_) => "team_snapshot",
             Self::TeamInboxSnapshot(_) => "team_inbox_snapshot",
             Self::Presence(_) => "presence",
+            Self::TaskSnapshot(_) => "task_snapshot",
+            Self::PlanSnapshot(_) => "plan_snapshot",
             Self::RunEvidence(_) => "run_evidence",
             Self::Usage(_) => "usage",
             Self::UnknownRecord { .. } => "unknown_record",
@@ -503,6 +572,8 @@ impl Fact {
             Self::TeamSnapshot(fact) => Some(&fact.team),
             Self::TeamInboxSnapshot(fact) => Some(&fact.inbox),
             Self::Presence(fact) => Some(&fact.presence),
+            Self::TaskSnapshot(fact) => Some(&fact.collection),
+            Self::PlanSnapshot(fact) => Some(&fact.plan),
             Self::RunEvidence(fact) => Some(&fact.run),
             Self::Usage(fact) => Some(&fact.subject),
             Self::UnknownRecord { .. } => None,

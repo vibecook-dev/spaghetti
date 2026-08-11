@@ -60,7 +60,9 @@ use thiserror::Error;
 /// normalized membership/message projections and replacement provenance.
 /// v23: Claude active-session presence assertions, canonical current rows,
 /// process-incarnation identity, and conflict provenance.
-pub const SCHEMA_VERSION: u32 = 23;
+/// v24: replaceable task/todo/plan assertions with explicit snapshot
+/// coverage, canonical current rows, and conflict provenance.
+pub const SCHEMA_VERSION: u32 = 24;
 
 /// Full DDL for the current schema — lifted verbatim from the TS `SCHEMA_SQL`
 /// template literal. Whitespace differs; structure does not.
@@ -831,6 +833,113 @@ CREATE TABLE IF NOT EXISTS canonical_team_inbox_messages (
   last_commit_seq INTEGER NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS task_snapshot_assertions (
+  fact_id BLOB PRIMARY KEY REFERENCES fact_records(fact_id) ON DELETE CASCADE,
+  collection_key BLOB NOT NULL,
+  session_key BLOB,
+  run_key BLOB,
+  team_key BLOB,
+  native_collection_id TEXT NOT NULL,
+  native_owner_id TEXT,
+  collection_kind TEXT NOT NULL,
+  native_collection_kind TEXT NOT NULL,
+  coverage TEXT NOT NULL,
+  metadata_digest BLOB NOT NULL,
+  source_object_id INTEGER NOT NULL,
+  source_generation INTEGER NOT NULL,
+  cursor_end BLOB NOT NULL,
+  last_commit_seq INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS task_item_assertions (
+  fact_id BLOB NOT NULL REFERENCES task_snapshot_assertions(fact_id) ON DELETE CASCADE,
+  task_key BLOB NOT NULL,
+  collection_key BLOB NOT NULL,
+  item_ordinal INTEGER NOT NULL,
+  native_task_id TEXT,
+  subject TEXT NOT NULL,
+  description TEXT,
+  active_form TEXT,
+  native_owner TEXT,
+  task_status TEXT NOT NULL,
+  native_status TEXT NOT NULL,
+  blocks_json BLOB NOT NULL,
+  blocked_by_json BLOB NOT NULL,
+  item_digest BLOB NOT NULL,
+  PRIMARY KEY (fact_id, task_key)
+);
+
+CREATE TABLE IF NOT EXISTS canonical_task_collections (
+  collection_key BLOB PRIMARY KEY,
+  session_key BLOB,
+  run_key BLOB,
+  team_key BLOB,
+  native_collection_id TEXT NOT NULL,
+  native_owner_id TEXT,
+  collection_kind TEXT NOT NULL,
+  native_collection_kind TEXT NOT NULL,
+  resolution_status TEXT NOT NULL,
+  decisive_fact_id BLOB NOT NULL REFERENCES task_snapshot_assertions(fact_id) ON DELETE CASCADE,
+  assertion_count INTEGER NOT NULL,
+  competing_metadata_count INTEGER NOT NULL,
+  complete_snapshot_count INTEGER NOT NULL,
+  item_document_count INTEGER NOT NULL,
+  item_count INTEGER NOT NULL,
+  last_commit_seq INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS canonical_tasks (
+  task_key BLOB PRIMARY KEY,
+  collection_key BLOB NOT NULL,
+  item_ordinal INTEGER NOT NULL,
+  native_task_id TEXT,
+  subject TEXT NOT NULL,
+  description TEXT,
+  active_form TEXT,
+  native_owner TEXT,
+  task_status TEXT NOT NULL,
+  native_status TEXT NOT NULL,
+  blocks_json BLOB NOT NULL,
+  blocked_by_json BLOB NOT NULL,
+  resolution_status TEXT NOT NULL,
+  decisive_fact_id BLOB NOT NULL REFERENCES task_snapshot_assertions(fact_id) ON DELETE CASCADE,
+  assertion_count INTEGER NOT NULL,
+  competing_item_count INTEGER NOT NULL,
+  last_commit_seq INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS plan_assertions (
+  fact_id BLOB PRIMARY KEY REFERENCES fact_records(fact_id) ON DELETE CASCADE,
+  plan_key BLOB NOT NULL,
+  native_plan_id TEXT NOT NULL,
+  title TEXT NOT NULL,
+  content TEXT NOT NULL,
+  size_bytes INTEGER NOT NULL,
+  source_time TEXT,
+  source_time_quality TEXT,
+  plan_digest BLOB NOT NULL,
+  source_object_id INTEGER NOT NULL,
+  source_generation INTEGER NOT NULL,
+  cursor_end BLOB NOT NULL,
+  last_commit_seq INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS canonical_plans (
+  plan_key BLOB PRIMARY KEY,
+  native_plan_id TEXT NOT NULL,
+  title TEXT NOT NULL,
+  content TEXT NOT NULL,
+  size_bytes INTEGER NOT NULL,
+  source_time TEXT,
+  source_time_quality TEXT,
+  resolution_status TEXT NOT NULL,
+  decisive_fact_id BLOB NOT NULL REFERENCES plan_assertions(fact_id) ON DELETE CASCADE,
+  assertion_count INTEGER NOT NULL,
+  competing_plan_count INTEGER NOT NULL,
+  last_commit_seq INTEGER NOT NULL
+);
+
+
 CREATE TABLE IF NOT EXISTS usage_contributions (
   fact_id BLOB PRIMARY KEY REFERENCES fact_records(fact_id) ON DELETE CASCADE,
   subject_key BLOB NOT NULL,
@@ -996,6 +1105,15 @@ CREATE INDEX IF NOT EXISTS idx_team_inbox_snapshot_assertions_source ON team_inb
 CREATE INDEX IF NOT EXISTS idx_team_inbox_message_assertions_inbox ON team_inbox_message_assertions(inbox_key, message_key);
 CREATE INDEX IF NOT EXISTS idx_canonical_team_inboxes_team ON canonical_team_inboxes(team_key, inbox_key);
 CREATE INDEX IF NOT EXISTS idx_canonical_team_inbox_messages_inbox ON canonical_team_inbox_messages(inbox_key, message_ordinal);
+CREATE INDEX IF NOT EXISTS idx_task_snapshot_assertions_collection ON task_snapshot_assertions(collection_key, fact_id);
+CREATE INDEX IF NOT EXISTS idx_task_snapshot_assertions_source ON task_snapshot_assertions(source_object_id, collection_key);
+CREATE INDEX IF NOT EXISTS idx_task_snapshot_assertions_session ON task_snapshot_assertions(session_key, collection_key);
+CREATE INDEX IF NOT EXISTS idx_task_item_assertions_collection ON task_item_assertions(collection_key, task_key);
+CREATE INDEX IF NOT EXISTS idx_task_item_assertions_task ON task_item_assertions(task_key, fact_id);
+CREATE INDEX IF NOT EXISTS idx_canonical_task_collections_session ON canonical_task_collections(session_key, collection_key);
+CREATE INDEX IF NOT EXISTS idx_canonical_tasks_collection ON canonical_tasks(collection_key, item_ordinal);
+CREATE INDEX IF NOT EXISTS idx_plan_assertions_plan ON plan_assertions(plan_key, fact_id);
+CREATE INDEX IF NOT EXISTS idx_plan_assertions_source ON plan_assertions(source_object_id, plan_key);
 CREATE INDEX IF NOT EXISTS idx_usage_contributions_session ON usage_contributions(session_key, fact_id);
 
 -- Persistent FTS5 (content-synced with messages)
@@ -1136,6 +1254,12 @@ const LEGACY_TABLES: &[&str] = &["segments", "search_index", "schema_version"];
 const CURRENT_TABLES: &[&str] = &[
     "search_fts",
     "subagent_search_fts",
+    "canonical_plans",
+    "plan_assertions",
+    "canonical_tasks",
+    "canonical_task_collections",
+    "task_item_assertions",
+    "task_snapshot_assertions",
     "canonical_delegation_spawns",
     "canonical_delegation_metadata",
     "canonical_delegations",
@@ -1621,6 +1745,12 @@ mod tests {
             "table",
             "canonical_team_inbox_messages"
         ));
+        assert!(object_exists(&conn, "table", "task_snapshot_assertions"));
+        assert!(object_exists(&conn, "table", "task_item_assertions"));
+        assert!(object_exists(&conn, "table", "canonical_task_collections"));
+        assert!(object_exists(&conn, "table", "canonical_tasks"));
+        assert!(object_exists(&conn, "table", "plan_assertions"));
+        assert!(object_exists(&conn, "table", "canonical_plans"));
         assert!(object_exists(&conn, "table", "usage_contributions"));
         assert!(object_exists(&conn, "table", "usage_totals"));
         assert!(object_exists(&conn, "table", "search_fts")); // FTS5 virtual table
@@ -1635,6 +1765,11 @@ mod tests {
             &conn,
             "index",
             "idx_canonical_presences_session"
+        ));
+        assert!(object_exists(
+            &conn,
+            "index",
+            "idx_canonical_tasks_collection"
         ));
         assert!(object_exists(&conn, "trigger", "messages_ai"));
         assert!(object_exists(&conn, "trigger", "messages_ad"));

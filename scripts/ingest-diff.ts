@@ -472,6 +472,12 @@ const RFC011_SCHEMA_TABLES = [
   'team_inbox_message_assertions',
   'canonical_team_inboxes',
   'canonical_team_inbox_messages',
+  'task_snapshot_assertions',
+  'task_item_assertions',
+  'canonical_task_collections',
+  'canonical_tasks',
+  'plan_assertions',
+  'canonical_plans',
   'usage_contributions',
   'usage_totals',
 ] as const;
@@ -602,6 +608,32 @@ const TABLE_SPECS: TableSpec[] = [
   {
     name: 'canonical_team_inbox_messages',
     orderBy: 'inbox_key, message_ordinal',
+  },
+  {
+    name: 'task_snapshot_assertions',
+    orderBy: 'fact_id',
+  },
+  {
+    name: 'task_item_assertions',
+    orderBy: 'fact_id, item_ordinal',
+    jsonColumns: ['blocks_json', 'blocked_by_json'],
+  },
+  {
+    name: 'canonical_task_collections',
+    orderBy: 'collection_key',
+  },
+  {
+    name: 'canonical_tasks',
+    orderBy: 'collection_key, item_ordinal',
+    jsonColumns: ['blocks_json', 'blocked_by_json'],
+  },
+  {
+    name: 'plan_assertions',
+    orderBy: 'fact_id',
+  },
+  {
+    name: 'canonical_plans',
+    orderBy: 'plan_key',
   },
   {
     name: 'usage_contributions',
