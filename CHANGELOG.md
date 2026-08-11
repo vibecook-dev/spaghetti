@@ -36,6 +36,22 @@ git history at `211f4b1` if they are ever wanted back.
 
 <!-- End standing notice. -->
 
+## [0.7.0](https://github.com/vibecook-dev/spaghetti/compare/spaghetti-v0.6.2...spaghetti-v0.7.0) (2026-08-11)
+
+
+### ⚠ BREAKING CHANGES
+
+* **sdk:** requires Node >=22.13.0, the first release where node:sqlite needs no flag. Node 18 and 20 are both out of support.
+
+### Features
+
+* **sdk:** run the index on node:sqlite and delete the last install script ([#120](https://github.com/vibecook-dev/spaghetti/issues/120)) ([9dfd57d](https://github.com/vibecook-dev/spaghetti/commit/9dfd57de4cda3cd73597c4765e6ec400e41796aa))
+
+
+### Bug Fixes
+
+* **cli:** correct the npm 12 install guidance, which 0.6.2 got wrong ([#117](https://github.com/vibecook-dev/spaghetti/issues/117)) ([1d42f62](https://github.com/vibecook-dev/spaghetti/commit/1d42f629d551f54d15431e2f37beea8c122022e4))
+
 ## [0.6.2](https://github.com/vibecook-dev/spaghetti/compare/spaghetti-v0.6.1...spaghetti-v0.6.2) (2026-08-11)
 
 
