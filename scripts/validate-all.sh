@@ -58,6 +58,7 @@ run_suite() {
 run_suite "Session/Message Types" scripts/validate_sessions_and_messages.py
 run_suite "Config/Settings Types" scripts/validate_config_and_settings.py
 run_suite "Secondary Data Types" scripts/validate_secondary_data.py
+run_suite "RFC 011 Architecture Boundaries" scripts/architecture/check_rfc011_boundaries.py
 
 echo "=============================="
 echo "Validation suites: $PASS passed, $FAIL failed, $SKIP skipped"

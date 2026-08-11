@@ -136,6 +136,68 @@ export interface NativeLiveBatchResult {
   durationMs: number;
 }
 
+/** Options for the persistent RFC 011 engine shell. */
+export interface SpaghettiEngineOpenOptions {
+  dbPath: string;
+  /** Persistent read-only SQLite workers. Defaults to 2; maximum 16. */
+  queryWorkers?: number;
+  /** Diagnostic host label written to the owner metadata sidecar. */
+  ownerLabel?: string;
+}
+
+/** Structured metadata for the process that exclusively owns a database. */
+export interface SpaghettiEngineOwner {
+  protocolVersion: number;
+  ownerId: string;
+  ownerLabel: string;
+  processId: number;
+  startedAtUnixMs: number;
+  databasePath: string;
+  executable?: string;
+  hostname?: string;
+  engineVersion: string;
+}
+
+export interface SpaghettiEngineStatus {
+  state: 'running' | 'stopping' | 'stopped';
+  databasePath: string;
+  acceptingQueries: boolean;
+  writerAlive: boolean;
+  configuredQueryWorkers: number;
+  aliveQueryWorkers: number;
+  inFlightQueries: number;
+  owner?: SpaghettiEngineOwner;
+}
+
+export interface SpaghettiEngineHealth {
+  status: SpaghettiEngineStatus;
+  healthy: boolean;
+  detail?: string;
+}
+
+/** First typed read model exposed by the persistent engine. */
+export interface SpaghettiEngineOverview {
+  schemaVersion: number;
+  /** Zero until RFC 011 Phase 2 introduces durable ingest commits. */
+  commitSeq: number;
+  projects: number;
+  sessions: number;
+  messages: number;
+  writerDataVersion: number;
+  journalMode: string;
+  queryOnly: boolean;
+  readOnly: boolean;
+}
+
+/** Async handle backed by one persistent Rust engine lifecycle. */
+export interface SpaghettiEngine {
+  readonly status: SpaghettiEngineStatus;
+  health(signal?: AbortSignal): Promise<SpaghettiEngineHealth>;
+  overview(signal?: AbortSignal): Promise<SpaghettiEngineOverview>;
+  cancelPendingQueries(): number;
+  dispose(): Promise<SpaghettiEngineStatus>;
+}
+
 export interface NativeAddon {
   /** Returns the semver of the loaded native addon. */
   nativeVersion(): string;
@@ -165,6 +227,8 @@ export interface NativeAddon {
    * the Rust side when omitted.
    */
   liveIngestBatch(dbPath: string, rows: NativeLiveRow[], sourceId?: string): NativeLiveBatchResult;
+  /** Open the persistent RFC 011 engine shell off the JavaScript thread. */
+  openSpaghettiEngine(options: SpaghettiEngineOpenOptions): Promise<SpaghettiEngine>;
 }
 
 /**
@@ -278,6 +342,23 @@ export function loadNativeAddon(): NativeAddon | null {
   }
 
   return cached;
+}
+
+/**
+ * Open the persistent Rust observation/query engine.
+ *
+ * This is the Phase 1 lifecycle surface, not yet a replacement for
+ * {@link createSpaghettiService}. The existing service remains the explicit
+ * legacy ingest/query mode while query parity is built behind this handle.
+ */
+export function openSpaghettiEngine(options: SpaghettiEngineOpenOptions): Promise<SpaghettiEngine> {
+  const addon = loadNativeAddon();
+  if (!addon) {
+    const failure = nativeLoadFailure();
+    if (failure) throw failure;
+    throw new Error('Persistent SpaghettiEngine requires the native addon, but it could not be loaded.');
+  }
+  return addon.openSpaghettiEngine(options);
 }
 
 /**

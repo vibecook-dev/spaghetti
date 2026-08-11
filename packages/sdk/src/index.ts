@@ -105,6 +105,7 @@ export {
 // Native addon bridge (RFC 003)
 export {
   loadNativeAddon,
+  openSpaghettiEngine,
   nativeLoadFailure,
   EngineUnavailableError,
   detectLibc,
@@ -119,6 +120,12 @@ export {
   type NativeIngestError,
   type NativeIngestErrorReport,
   type NativeIngestErrorSeverity,
+  type SpaghettiEngine,
+  type SpaghettiEngineOpenOptions,
+  type SpaghettiEngineOwner,
+  type SpaghettiEngineStatus,
+  type SpaghettiEngineHealth,
+  type SpaghettiEngineOverview,
 } from './native.js';
 
 export { reportIngestErrors, summarizeIngestErrors } from './data/ingest-error-report.js';

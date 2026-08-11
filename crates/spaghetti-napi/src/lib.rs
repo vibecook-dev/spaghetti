@@ -12,6 +12,8 @@
 //! - [`claude`] — Claude Code–specific types, message FTS extraction,
 //!   project tree walk, on-disk fingerprint discovery.
 //! - [`codex`] / [`grok`] — additional AgentSource native cold/warm readers.
+//! - [`engine`] — persistent RFC 011 lifecycle, ownership, writer, and query
+//!   workers (library-first; no Node types).
 //! - [`orchestrate`] — NAPI entrypoints that glue cold/warm ingest
 //!   and live batch writes onto the core writer.
 
@@ -23,11 +25,17 @@ use napi_derive::napi;
 pub mod claude;
 pub mod codex;
 pub mod core;
+pub mod engine;
 pub mod grok;
+mod napi_engine;
 pub mod orchestrate;
 
 // Re-export NAPI entrypoints at the crate root so existing bindings and
 // docs that name `ingest` / `live_ingest_batch` keep resolving.
+pub use napi_engine::{
+    open_spaghetti_engine, EngineHealth, EngineOpenOptions, EngineOverviewResult,
+    EngineOwnerMetadata, EngineStatus, SpaghettiEngine,
+};
 pub use orchestrate::ingest::{
     ingest, IngestError, IngestOptions, IngestProgress, IngestStats, IngestTask,
 };

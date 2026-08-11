@@ -1,0 +1,66 @@
+{
+  "schema_version": 1,
+  "baseline_commit": "7d24381c6bf971eadde549377dd8831faa7898b1",
+  "rules": {
+    "typescript_sql_authorities": {
+      "description": "Production TypeScript modules that still know about the synchronous SQLite service. This allowlist may shrink, never grow.",
+      "allowed": [
+        "packages/sdk/src/create.ts",
+        "packages/sdk/src/data/idle-maintenance.ts",
+        "packages/sdk/src/data/ingest-contract.ts",
+        "packages/sdk/src/data/ingest-service.ts",
+        "packages/sdk/src/data/query-service.ts",
+        "packages/sdk/src/data/schema.ts",
+        "packages/sdk/src/data/segment-store.ts",
+        "packages/sdk/src/data/subagent-projection.ts",
+        "packages/sdk/src/data/timeline-projection.ts",
+        "packages/sdk/src/data/token-activity.ts",
+        "packages/sdk/src/io/index.ts",
+        "packages/sdk/src/io/sqlite-service.ts",
+        "packages/sdk/src/sources/claude-code/live/live-updates.ts",
+        "packages/sdk/src/store/durable-store.ts"
+      ]
+    },
+    "typescript_sql_drivers": {
+      "description": "Production TypeScript modules importing node:sqlite or better-sqlite3. RFC 010 leaves these as a transitional boundary only.",
+      "allowed": [
+        "packages/sdk/src/io/sqlite-health.ts",
+        "packages/sdk/src/io/sqlite-service.ts"
+      ]
+    },
+    "typescript_query_projection_mutators": {
+      "description": "Query modules that still invoke projection ensure/rebuild work. RFC 011 moves this work to the writer.",
+      "allowed": [
+        "packages/sdk/src/data/query-service.ts"
+      ]
+    },
+    "source_specific_runtime_services": {
+      "description": "Legacy source-local lifecycle, live, watcher, and checkpoint services. New adapters must use the common Rust engine runtime.",
+      "allowed": [
+        "packages/sdk/src/sources/claude-code/lifecycle-owner.ts",
+        "packages/sdk/src/sources/claude-code/live/checkpoints.ts",
+        "packages/sdk/src/sources/claude-code/live/coalescing-queue.ts",
+        "packages/sdk/src/sources/claude-code/live/disk-ingest.ts",
+        "packages/sdk/src/sources/claude-code/live/incremental-parser.ts",
+        "packages/sdk/src/sources/claude-code/live/index.ts",
+        "packages/sdk/src/sources/claude-code/live/live-updates.ts",
+        "packages/sdk/src/sources/claude-code/live/scope-attacher.ts",
+        "packages/sdk/src/sources/claude-code/live/session-tail.ts",
+        "packages/sdk/src/sources/claude-code/live/settings-handler.ts",
+        "packages/sdk/src/sources/codex/lifecycle-owner.ts",
+        "packages/sdk/src/sources/codex/live-watch.ts",
+        "packages/sdk/src/sources/grok/lifecycle-owner.ts",
+        "packages/sdk/src/sources/grok/live-watch.ts"
+      ]
+    },
+    "rust_common_source_dispatch": {
+      "description": "Source-id branching outside adapter modules. Existing branches are migration debt; new common-engine branches are forbidden.",
+      "allowed": [
+        "crates/spaghetti-napi/src/core/mod.rs",
+        "crates/spaghetti-napi/src/core/token_activity.rs",
+        "crates/spaghetti-napi/src/core/writer.rs",
+        "crates/spaghetti-napi/src/orchestrate/ingest.rs"
+      ]
+    }
+  }
+}
