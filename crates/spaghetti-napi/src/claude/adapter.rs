@@ -1,8 +1,9 @@
-//! RFC 011 Claude Code adapter declaration and transcript decoder.
+//! RFC 011 Claude Code adapter declaration and native record decoders.
 //!
 //! Filesystem framing, checkpoints, generations, scheduling, and retries stay
 //! in the common source layer. This module owns Claude path and JSON meaning.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path};
 
 use serde::de::DeserializeOwned;
@@ -18,7 +19,8 @@ use crate::adapter::{
     EvidenceKind, EvidenceStrength, Fact, FactBatch, MessageFact, MessageRole, ObjectSelector,
     QualifiedTimestamp, RawRetentionPolicy, RelationStrength, RunEvidenceFact, RunFact,
     SessionFact, SourceInstance, SourceInstanceKey, SourceInstanceSpec, SourceObjectDescriptor,
-    SourceRoot, StreamAuthority, StreamId, StreamSpec, SupportLevel, TimestampQuality, TokenUsage,
+    SourceRoot, StreamAuthority, StreamId, StreamSpec, SupportLevel, TeamInboxMessageSnapshot,
+    TeamInboxSnapshotFact, TeamMemberSnapshot, TeamSnapshotFact, TimestampQuality, TokenUsage,
     UsageAccounting, UsageFact, UsageScope, ValueQuality,
 };
 use crate::claude::message_extractor;
@@ -36,11 +38,19 @@ const ADAPTER_ID: &str = "claude-code";
 const PARENT_STREAM: &str = "session-transcripts";
 const SUBAGENT_STREAM: &str = "subagent-transcripts";
 const SUBAGENT_META_STREAM: &str = "subagent-metadata";
+const TEAM_CONFIG_STREAM: &str = "team-configs";
+const TEAM_INBOX_STREAM: &str = "team-inboxes";
 const PARENT_DECODER: &str = "claude-session-record";
 const SUBAGENT_DECODER: &str = "claude-subagent-record";
 const SUBAGENT_META_DECODER: &str = "claude-subagent-metadata";
+const TEAM_CONFIG_DECODER: &str = "claude-team-config";
+const TEAM_INBOX_DECODER: &str = "claude-team-inbox";
 const OBJECT_CONTEXT_VERSION: u32 = 1;
 const SUBAGENT_META_MAX_BYTES: usize = 64 * 1024;
+const TEAM_CONFIG_MAX_BYTES: usize = 1024 * 1024;
+const TEAM_INBOX_MAX_BYTES: usize = 4 * 1024 * 1024;
+const TEAM_MEMBER_LIMIT: usize = 256;
+const TEAM_INBOX_MESSAGE_LIMIT: usize = 4_096;
 
 const HISTORY_SESSIONS: &str = "history.sessions";
 const HISTORY_MESSAGES: &str = "history.messages";
@@ -49,6 +59,8 @@ const HISTORY_TIMESTAMPS: &str = "history.timestamps";
 const HISTORY_MODEL_IDENTITY: &str = "history.model_identity";
 const RUNTIME_SESSION_ACTIVITY: &str = "runtime.session_activity";
 const RUNTIME_SUBAGENTS: &str = "runtime.subagents";
+const RUNTIME_TEAMS: &str = "runtime.teams";
+const RUNTIME_TEAM_INBOX: &str = "runtime.team_inbox";
 const USAGE_INPUT_TOKENS: &str = "usage.input_tokens";
 const USAGE_OUTPUT_TOKENS: &str = "usage.output_tokens";
 const USAGE_CACHE_TOKENS: &str = "usage.cache_tokens";
@@ -67,10 +79,12 @@ impl ClaudeCodeAdapter {
                 id: AdapterId::new(ADAPTER_ID).expect("static Claude adapter id is valid"),
                 display_name: "Claude Code".to_string(),
                 adapter_version: env!("CARGO_PKG_VERSION").to_string(),
-                contract_version: 4,
+                contract_version: 5,
                 source_schema_versions: vec![
                     "claude-code-jsonl-v1".to_string(),
                     "claude-code-subagent-meta-v1".to_string(),
+                    "claude-code-team-config-v1".to_string(),
+                    "claude-code-team-inbox-v2".to_string(),
                 ],
                 capabilities: claude_capabilities(),
             },
@@ -131,6 +145,10 @@ impl AgentAdapter for ClaudeCodeAdapter {
                     SourceRoot {
                         name: "projects".to_string(),
                         path: canonical.join("projects"),
+                    },
+                    SourceRoot {
+                        name: "teams".to_string(),
+                        path: canonical.join("teams"),
                     },
                 ],
                 discovery_reason: "configured Claude Code data root".to_string(),
@@ -194,6 +212,44 @@ impl AgentAdapter for ClaudeCodeAdapter {
                 retention: RawRetentionPolicy::Full,
                 capabilities: subagent_metadata_capabilities(),
             },
+            StreamSpec {
+                id: StreamId::new(TEAM_CONFIG_STREAM)?,
+                driver: DriverSpec::ReplaceDocument(ReplaceDocumentConfig {
+                    max_document_bytes: TEAM_CONFIG_MAX_BYTES,
+                }),
+                selector: ObjectSelector {
+                    root_name: "teams".to_string(),
+                    include: vec!["*/config.json".to_string()],
+                    exclude: Vec::new(),
+                },
+                decoder: DecoderId::new(TEAM_CONFIG_DECODER)?,
+                authority: StreamAuthority::Canonical,
+                entity_scope: EntityScope::Custom("team".to_string()),
+                priority: IngestPriority::ForegroundRepair,
+                consistency: ConsistencyPolicy::SnapshotReplace,
+                deletion: DeletionPolicy::MirrorSource,
+                retention: RawRetentionPolicy::Full,
+                capabilities: team_config_capabilities(),
+            },
+            StreamSpec {
+                id: StreamId::new(TEAM_INBOX_STREAM)?,
+                driver: DriverSpec::ReplaceDocument(ReplaceDocumentConfig {
+                    max_document_bytes: TEAM_INBOX_MAX_BYTES,
+                }),
+                selector: ObjectSelector {
+                    root_name: "teams".to_string(),
+                    include: vec!["*/inboxes/*.json".to_string()],
+                    exclude: Vec::new(),
+                },
+                decoder: DecoderId::new(TEAM_INBOX_DECODER)?,
+                authority: StreamAuthority::Canonical,
+                entity_scope: EntityScope::Custom("team_inbox".to_string()),
+                priority: IngestPriority::ForegroundRepair,
+                consistency: ConsistencyPolicy::SnapshotReplace,
+                deletion: DeletionPolicy::MirrorSource,
+                retention: RawRetentionPolicy::Full,
+                capabilities: team_inbox_capabilities(),
+            },
         ];
         for stream in &streams {
             stream.validate(instance)?;
@@ -216,6 +272,12 @@ impl AgentAdapter for ClaudeCodeAdapter {
             SUBAGENT_META_STREAM => encode_object_context(&ClaudeSubagentMetadataContext {
                 child: ClaudeTranscriptContext::subagent_meta(&object.relative_path)?,
             })?,
+            TEAM_CONFIG_STREAM => {
+                encode_object_context(&ClaudeTeamConfigContext::from_path(&object.relative_path)?)?
+            }
+            TEAM_INBOX_STREAM => {
+                encode_object_context(&ClaudeTeamInboxContext::from_path(&object.relative_path)?)?
+            }
             _ => {
                 return Err(AdapterError::new(
                     AdapterErrorClass::StreamFatal,
@@ -252,6 +314,14 @@ impl AgentAdapter for ClaudeCodeAdapter {
                 let object_context = ClaudeSubagentMetadataContext::decode(context.object_context)?;
                 decode_subagent_metadata(self.adapter_id(), &object_context.child, record, output)
             }
+            TEAM_CONFIG_DECODER => {
+                let object_context = ClaudeTeamConfigContext::decode(context.object_context)?;
+                decode_team_config(self.adapter_id(), &object_context, record, output)
+            }
+            TEAM_INBOX_DECODER => {
+                let object_context = ClaudeTeamInboxContext::decode(context.object_context)?;
+                decode_team_inbox(self.adapter_id(), &object_context, record, output)
+            }
             _ => Err(AdapterError::unknown_decoder(context.decoder)),
         }
     }
@@ -283,6 +353,8 @@ fn claude_capabilities() -> Vec<CapabilityDeclaration> {
                 "child identity is native; layout lineage remains durable and matching native spawn/metadata tool-use IDs strengthen it explicitly; silence never implies completion",
             ),
         ),
+        live_native(RUNTIME_TEAMS, CapabilityGranularity::Team),
+        live_native(RUNTIME_TEAM_INBOX, CapabilityGranularity::Message),
         live_native(USAGE_INPUT_TOKENS, CapabilityGranularity::Message),
         live_native(USAGE_OUTPUT_TOKENS, CapabilityGranularity::Message),
         live_native(USAGE_CACHE_TOKENS, CapabilityGranularity::Message),
@@ -438,6 +510,62 @@ impl ClaudeSubagentMetadataContext {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct ClaudeTeamConfigContext {
+    native_team_id: String,
+}
+
+impl ClaudeTeamConfigContext {
+    fn from_path(relative_path: &Path) -> Result<Self, AdapterError> {
+        let components = utf8_components(relative_path)?;
+        if components.len() != 2 || components[1] != "config.json" || components[0].is_empty() {
+            return Err(path_error(
+                relative_path,
+                "team config path must be <team>/config.json",
+            ));
+        }
+        Ok(Self {
+            native_team_id: components[0].clone(),
+        })
+    }
+
+    fn decode(context: &AdapterObjectContext) -> Result<Self, AdapterError> {
+        decode_object_context(context)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct ClaudeTeamInboxContext {
+    native_team_id: String,
+    native_recipient_name: String,
+}
+
+impl ClaudeTeamInboxContext {
+    fn from_path(relative_path: &Path) -> Result<Self, AdapterError> {
+        let components = utf8_components(relative_path)?;
+        if components.len() != 3 || components[0].is_empty() || components[1] != "inboxes" {
+            return Err(path_error(
+                relative_path,
+                "team inbox path must be <team>/inboxes/<recipient>.json",
+            ));
+        }
+        let Some(native_recipient_name) = components[2]
+            .strip_suffix(".json")
+            .filter(|name| !name.is_empty())
+        else {
+            return Err(path_error(relative_path, "invalid team inbox file name"));
+        };
+        Ok(Self {
+            native_team_id: components[0].clone(),
+            native_recipient_name: native_recipient_name.to_string(),
+        })
+    }
+
+    fn decode(context: &AdapterObjectContext) -> Result<Self, AdapterError> {
+        decode_object_context(context)
+    }
+}
+
 fn encode_object_context<T: Serialize>(context: &T) -> Result<Vec<u8>, AdapterError> {
     serde_json::to_vec(context).map_err(|error| {
         AdapterError::new(
@@ -492,6 +620,345 @@ struct ClaudeSubagentMetadataDocument {
     worktree_path: Option<String>,
     #[serde(default)]
     tool_use_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ClaudeTeamConfigDocument {
+    name: String,
+    #[serde(default)]
+    description: Option<String>,
+    created_at: i64,
+    lead_agent_id: String,
+    lead_session_id: String,
+    members: Vec<ClaudeTeamMemberDocument>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ClaudeTeamMemberDocument {
+    agent_id: String,
+    name: String,
+    #[serde(default)]
+    agent_type: Option<String>,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    prompt: Option<String>,
+    #[serde(default)]
+    color: Option<String>,
+    #[serde(default)]
+    plan_mode_required: Option<bool>,
+    joined_at: i64,
+    tmux_pane_id: String,
+    cwd: String,
+    subscriptions: Vec<String>,
+    #[serde(default)]
+    backend_type: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ClaudeTeamInboxMessageDocument {
+    from: String,
+    text: String,
+    #[serde(default)]
+    summary: Option<String>,
+    timestamp: String,
+    #[serde(default)]
+    color: Option<String>,
+    read: bool,
+    #[serde(default, rename = "msg_id")]
+    message_id: Option<String>,
+    #[serde(default, rename = "msgV")]
+    message_version: Option<u32>,
+    #[serde(default, rename = "type")]
+    kind: Option<String>,
+}
+
+fn decode_team_config(
+    adapter_id: &AdapterId,
+    context: &ClaudeTeamConfigContext,
+    record: &SourceRecord,
+    output: &mut FactBatch,
+) -> Result<DecodeDisposition, AdapterError> {
+    let document: ClaudeTeamConfigDocument = match serde_json::from_slice(&record.payload) {
+        Ok(document) => document,
+        Err(error) => {
+            preserve_unknown(
+                record,
+                output,
+                Some("team_config".to_string()),
+                format!("Claude team config is not a supported JSON object: {error}"),
+            )?;
+            return Ok(DecodeDisposition::PreservedUnknown);
+        }
+    };
+    if document.members.len() > TEAM_MEMBER_LIMIT {
+        preserve_unknown(
+            record,
+            output,
+            Some("team_config".to_string()),
+            format!("Claude team config exceeds the {TEAM_MEMBER_LIMIT} member bound"),
+        )?;
+        return Ok(DecodeDisposition::PreservedUnknown);
+    }
+    let Some(name) = nonempty(&document.name) else {
+        return preserve_team_config_contract_loss(record, output, "team name is empty");
+    };
+    let Some(native_lead_agent_id) = nonempty(&document.lead_agent_id) else {
+        return preserve_team_config_contract_loss(record, output, "lead agent id is empty");
+    };
+    let Some(native_lead_session_id) = nonempty(&document.lead_session_id) else {
+        return preserve_team_config_contract_loss(record, output, "lead session id is empty");
+    };
+    let team = EntityKey::native(
+        adapter_id,
+        record.source_instance_id,
+        "team",
+        context.native_team_id.as_bytes(),
+    )?;
+    let mut member_names = BTreeSet::new();
+    let mut members = Vec::with_capacity(document.members.len());
+    for member in document.members {
+        let Some(native_name) = nonempty(&member.name) else {
+            return preserve_team_config_contract_loss(record, output, "member name is empty");
+        };
+        let Some(native_agent_id) = nonempty(&member.agent_id) else {
+            return preserve_team_config_contract_loss(record, output, "member agent id is empty");
+        };
+        if !member_names.insert(native_name.clone()) {
+            return preserve_team_config_contract_loss(
+                record,
+                output,
+                "member names are not unique",
+            );
+        }
+        members.push(TeamMemberSnapshot {
+            member: team_member_key(
+                adapter_id,
+                record.source_instance_id,
+                &context.native_team_id,
+                &native_name,
+            )?,
+            native_agent_id,
+            native_name,
+            agent_type: member.agent_type.as_deref().and_then(nonempty),
+            model: member.model.as_deref().and_then(nonempty),
+            prompt: member.prompt.as_deref().and_then(nonempty),
+            color: member.color.as_deref().and_then(nonempty),
+            plan_mode_required: member.plan_mode_required,
+            joined_at: epoch_millis_timestamp(member.joined_at),
+            tmux_pane_id: member.tmux_pane_id,
+            cwd: member.cwd,
+            subscriptions: member.subscriptions,
+            backend_type: member.backend_type.as_deref().and_then(nonempty),
+        });
+    }
+    let lead_member = members
+        .iter()
+        .find(|member| member.native_agent_id == native_lead_agent_id)
+        .map(|member| member.member.clone());
+    output.push(
+        record,
+        Fact::TeamSnapshot(TeamSnapshotFact {
+            team,
+            native_team_id: context.native_team_id.clone(),
+            name,
+            description: document.description.as_deref().and_then(nonempty),
+            created_at: epoch_millis_timestamp(document.created_at),
+            lead_member,
+            native_lead_agent_id,
+            lead_session: EntityKey::native(
+                adapter_id,
+                record.source_instance_id,
+                "session",
+                native_lead_session_id.as_bytes(),
+            )?,
+            native_lead_session_id,
+            members,
+        }),
+    )?;
+    Ok(DecodeDisposition::Applied)
+}
+
+fn preserve_team_config_contract_loss(
+    record: &SourceRecord,
+    output: &mut FactBatch,
+    detail: &str,
+) -> Result<DecodeDisposition, AdapterError> {
+    preserve_unknown(
+        record,
+        output,
+        Some("team_config".to_string()),
+        format!("Claude team config {detail}"),
+    )?;
+    Ok(DecodeDisposition::PreservedUnknown)
+}
+
+fn decode_team_inbox(
+    adapter_id: &AdapterId,
+    context: &ClaudeTeamInboxContext,
+    record: &SourceRecord,
+    output: &mut FactBatch,
+) -> Result<DecodeDisposition, AdapterError> {
+    let documents: Vec<ClaudeTeamInboxMessageDocument> =
+        match serde_json::from_slice(&record.payload) {
+            Ok(documents) => documents,
+            Err(error) => {
+                preserve_unknown(
+                    record,
+                    output,
+                    Some("team_inbox".to_string()),
+                    format!("Claude team inbox is not a supported JSON array: {error}"),
+                )?;
+                return Ok(DecodeDisposition::PreservedUnknown);
+            }
+        };
+    if documents.len() > TEAM_INBOX_MESSAGE_LIMIT {
+        preserve_unknown(
+            record,
+            output,
+            Some("team_inbox".to_string()),
+            format!("Claude team inbox exceeds the {TEAM_INBOX_MESSAGE_LIMIT} message bound"),
+        )?;
+        return Ok(DecodeDisposition::PreservedUnknown);
+    }
+    let team = EntityKey::native(
+        adapter_id,
+        record.source_instance_id,
+        "team",
+        context.native_team_id.as_bytes(),
+    )?;
+    let recipient = team_member_key(
+        adapter_id,
+        record.source_instance_id,
+        &context.native_team_id,
+        &context.native_recipient_name,
+    )?;
+    let mut native_ids = BTreeSet::new();
+    let mut legacy_occurrences = BTreeMap::<[u8; 32], u32>::new();
+    let mut messages = Vec::with_capacity(documents.len());
+    for document in documents {
+        let Some(native_sender_name) = nonempty(&document.from) else {
+            return preserve_team_inbox_contract_loss(record, output, "sender is empty");
+        };
+        let Some(timestamp) = nonempty(&document.timestamp) else {
+            return preserve_team_inbox_contract_loss(record, output, "timestamp is empty");
+        };
+        let native_message_id = document.message_id.as_deref().and_then(nonempty);
+        let mut native_message_key = Vec::new();
+        push_key_component(&mut native_message_key, context.native_team_id.as_bytes());
+        push_key_component(
+            &mut native_message_key,
+            context.native_recipient_name.as_bytes(),
+        );
+        if let Some(message_id) = &native_message_id {
+            if !native_ids.insert(message_id.clone()) {
+                return preserve_team_inbox_contract_loss(
+                    record,
+                    output,
+                    "contains duplicate native message ids",
+                );
+            }
+            push_key_component(&mut native_message_key, b"native-id");
+            push_key_component(&mut native_message_key, message_id.as_bytes());
+        } else {
+            let mut hasher = blake3::Hasher::new();
+            hash_component(&mut hasher, native_sender_name.as_bytes());
+            hash_component(&mut hasher, timestamp.as_bytes());
+            hash_component(&mut hasher, document.text.as_bytes());
+            let digest = *hasher.finalize().as_bytes();
+            let occurrence = legacy_occurrences.entry(digest).or_default();
+            push_key_component(&mut native_message_key, b"legacy-fingerprint");
+            push_key_component(&mut native_message_key, &digest);
+            push_key_component(&mut native_message_key, &occurrence.to_be_bytes());
+            *occurrence = occurrence.saturating_add(1);
+        }
+        messages.push(TeamInboxMessageSnapshot {
+            message: EntityKey::native(
+                adapter_id,
+                record.source_instance_id,
+                "team_inbox_message",
+                &native_message_key,
+            )?,
+            sender: team_member_key(
+                adapter_id,
+                record.source_instance_id,
+                &context.native_team_id,
+                &native_sender_name,
+            )?,
+            native_message_id,
+            native_kind: document.kind.as_deref().and_then(nonempty),
+            native_version: document.message_version,
+            native_sender_name,
+            text: document.text,
+            summary: document.summary.as_deref().and_then(nonempty),
+            color: document.color.as_deref().and_then(nonempty),
+            source_time: native_timestamp(&timestamp),
+            read: document.read,
+        });
+    }
+    let mut native_inbox_key = Vec::new();
+    push_key_component(&mut native_inbox_key, context.native_team_id.as_bytes());
+    push_key_component(
+        &mut native_inbox_key,
+        context.native_recipient_name.as_bytes(),
+    );
+    output.push(
+        record,
+        Fact::TeamInboxSnapshot(TeamInboxSnapshotFact {
+            inbox: EntityKey::native(
+                adapter_id,
+                record.source_instance_id,
+                "team_inbox",
+                &native_inbox_key,
+            )?,
+            team,
+            recipient,
+            native_team_id: context.native_team_id.clone(),
+            native_recipient_name: context.native_recipient_name.clone(),
+            messages,
+        }),
+    )?;
+    Ok(DecodeDisposition::Applied)
+}
+
+fn preserve_team_inbox_contract_loss(
+    record: &SourceRecord,
+    output: &mut FactBatch,
+    detail: &str,
+) -> Result<DecodeDisposition, AdapterError> {
+    preserve_unknown(
+        record,
+        output,
+        Some("team_inbox".to_string()),
+        format!("Claude team inbox {detail}"),
+    )?;
+    Ok(DecodeDisposition::PreservedUnknown)
+}
+
+fn team_member_key(
+    adapter_id: &AdapterId,
+    source_instance_id: u64,
+    native_team_id: &str,
+    native_member_name: &str,
+) -> Result<EntityKey, AdapterError> {
+    let mut native_key = Vec::new();
+    push_key_component(&mut native_key, native_team_id.as_bytes());
+    push_key_component(&mut native_key, native_member_name.as_bytes());
+    EntityKey::native(adapter_id, source_instance_id, "team_member", &native_key)
+}
+
+fn epoch_millis_timestamp(value: i64) -> QualifiedTimestamp {
+    QualifiedTimestamp {
+        value: crate::core::timefmt::epoch_ms_to_iso8601(value as f64),
+        quality: TimestampQuality::NativeExact,
+    }
+}
+
+fn hash_component(hasher: &mut blake3::Hasher, value: &[u8]) {
+    hasher.update(&(value.len() as u64).to_be_bytes());
+    hasher.update(value);
 }
 
 fn decode_subagent_metadata(
@@ -813,6 +1280,31 @@ fn delegation_spawn_descriptors(content: &[ContentBlock]) -> Vec<DelegationSpawn
             })
         })
         .collect()
+}
+
+fn team_config_capabilities() -> Vec<CapabilityId> {
+    [
+        RUNTIME_TEAMS,
+        SOURCE_LIVE,
+        SOURCE_RECONCILE,
+        SOURCE_RESUME_CURSOR,
+    ]
+    .into_iter()
+    .map(|id| CapabilityId::new(id).expect("static Claude stream capability id is valid"))
+    .collect()
+}
+
+fn team_inbox_capabilities() -> Vec<CapabilityId> {
+    [
+        RUNTIME_TEAMS,
+        RUNTIME_TEAM_INBOX,
+        SOURCE_LIVE,
+        SOURCE_RECONCILE,
+        SOURCE_RESUME_CURSOR,
+    ]
+    .into_iter()
+    .map(|id| CapabilityId::new(id).expect("static Claude stream capability id is valid"))
+    .collect()
 }
 
 fn preserve_unknown(
@@ -1138,21 +1630,55 @@ mod tests {
                 spec: discovered[0].clone(),
             })
             .unwrap();
-        assert_eq!(streams.len(), 3);
-        assert_eq!(adapter.manifest().contract_version, 4);
+        assert_eq!(discovered[0].roots.len(), 3);
+        assert_eq!(discovered[0].roots[2].name, "teams");
+        assert_eq!(
+            discovered[0].roots[2].path,
+            std::fs::canonicalize(root.path()).unwrap().join("teams")
+        );
+        assert_eq!(streams.len(), 5);
+        assert_eq!(adapter.manifest().contract_version, 5);
         assert!(adapter
             .manifest()
             .source_schema_versions
             .iter()
             .any(|version| version == "claude-code-subagent-meta-v1"));
+        assert!(adapter
+            .manifest()
+            .source_schema_versions
+            .iter()
+            .any(|version| version == "claude-code-team-config-v1"));
+        assert!(adapter
+            .manifest()
+            .source_schema_versions
+            .iter()
+            .any(|version| version == "claude-code-team-inbox-v2"));
         assert!(matches!(streams[0].driver, DriverSpec::AppendDelimited(_)));
         assert!(matches!(streams[1].driver, DriverSpec::AppendDelimited(_)));
         assert!(matches!(streams[2].driver, DriverSpec::ReplaceDocument(_)));
+        assert!(matches!(
+            streams[3].driver,
+            DriverSpec::ReplaceDocument(ReplaceDocumentConfig {
+                max_document_bytes: TEAM_CONFIG_MAX_BYTES
+            })
+        ));
+        assert!(matches!(
+            streams[4].driver,
+            DriverSpec::ReplaceDocument(ReplaceDocumentConfig {
+                max_document_bytes: TEAM_INBOX_MAX_BYTES
+            })
+        ));
         assert_eq!(streams[0].decoder.as_str(), PARENT_DECODER);
         assert_eq!(streams[1].decoder.as_str(), SUBAGENT_DECODER);
         assert_eq!(streams[2].decoder.as_str(), SUBAGENT_META_DECODER);
+        assert_eq!(streams[3].decoder.as_str(), TEAM_CONFIG_DECODER);
+        assert_eq!(streams[4].decoder.as_str(), TEAM_INBOX_DECODER);
         assert_eq!(streams[2].authority, StreamAuthority::Supplemental);
         assert_eq!(streams[2].consistency, ConsistencyPolicy::SnapshotReplace);
+        assert_eq!(streams[3].authority, StreamAuthority::Canonical);
+        assert_eq!(streams[3].consistency, ConsistencyPolicy::SnapshotReplace);
+        assert_eq!(streams[4].authority, StreamAuthority::Canonical);
+        assert_eq!(streams[4].consistency, ConsistencyPolicy::SnapshotReplace);
         assert!(streams[0]
             .capabilities
             .iter()
@@ -1165,6 +1691,14 @@ mod tests {
             .capabilities
             .iter()
             .any(|capability| capability.as_str() == RUNTIME_SUBAGENTS));
+        assert!(streams[3]
+            .capabilities
+            .iter()
+            .any(|capability| capability.as_str() == RUNTIME_TEAMS));
+        assert!(streams[4]
+            .capabilities
+            .iter()
+            .any(|capability| capability.as_str() == RUNTIME_TEAM_INBOX));
         let support = adapter
             .manifest()
             .capabilities
@@ -1174,6 +1708,22 @@ mod tests {
         assert_eq!(support.support.level, SupportLevel::Derived);
         assert_eq!(support.support.granularity, CapabilityGranularity::Run);
         assert_eq!(support.support.availability, Availability::Live);
+        let teams = adapter
+            .manifest()
+            .capabilities
+            .iter()
+            .find(|capability| capability.id.as_str() == RUNTIME_TEAMS)
+            .unwrap();
+        assert_eq!(teams.support.level, SupportLevel::Native);
+        assert_eq!(teams.support.granularity, CapabilityGranularity::Team);
+        let inbox = adapter
+            .manifest()
+            .capabilities
+            .iter()
+            .find(|capability| capability.id.as_str() == RUNTIME_TEAM_INBOX)
+            .unwrap();
+        assert_eq!(inbox.support.level, SupportLevel::Native);
+        assert_eq!(inbox.support.granularity, CapabilityGranularity::Message);
     }
 
     #[test]
@@ -1190,6 +1740,155 @@ mod tests {
         assert_eq!(decoded.project_slug, "project");
         assert_eq!(decoded.session_id, SESSION);
         assert!(decoded.agent_id.is_none());
+    }
+
+    #[test]
+    fn team_config_snapshot_preserves_native_membership_without_activity_inference() {
+        let root = TempDir::new().unwrap();
+        let adapter = ClaudeCodeAdapter::new();
+        let object_context = adapter
+            .bootstrap_object(
+                &instance(root.path()),
+                &object(TEAM_CONFIG_STREAM, "alpha/config.json"),
+            )
+            .unwrap();
+        let record = record(
+            br#"{
+              "name":"alpha",
+              "description":"ship the engine",
+              "createdAt":1786406400000,
+              "leadAgentId":"lead@alpha",
+              "leadSessionId":"01234567-89ab-cdef-0123-456789abcdef",
+              "members":[{
+                "agentId":"lead@alpha",
+                "name":"team-lead",
+                "agentType":"general-purpose",
+                "model":"claude-opus",
+                "prompt":"coordinate",
+                "color":"blue",
+                "planModeRequired":true,
+                "joinedAt":1786406400001,
+                "tmuxPaneId":"%1",
+                "cwd":"/repo",
+                "subscriptions":["changes"],
+                "backendType":"tmux"
+              }]
+            }"#,
+        );
+        let mut batch = FactBatch::new(8, 4).unwrap();
+        let disposition = adapter
+            .decode(
+                DecodeContext {
+                    decoder: &DecoderId::new(TEAM_CONFIG_DECODER).unwrap(),
+                    object_context: &object_context,
+                },
+                &record,
+                &mut batch,
+            )
+            .unwrap();
+
+        assert_eq!(disposition, DecodeDisposition::Applied);
+        assert_eq!(batch.facts().len(), 1);
+        let Fact::TeamSnapshot(snapshot) = &batch.facts()[0].value else {
+            panic!("expected team snapshot");
+        };
+        assert_eq!(snapshot.native_team_id, "alpha");
+        assert_eq!(snapshot.name, "alpha");
+        assert_eq!(snapshot.native_lead_agent_id, "lead@alpha");
+        assert_eq!(snapshot.native_lead_session_id, SESSION);
+        assert_eq!(
+            snapshot.lead_member.as_ref(),
+            Some(&snapshot.members[0].member)
+        );
+        assert_eq!(snapshot.members.len(), 1);
+        assert_eq!(snapshot.members[0].native_name, "team-lead");
+        assert_eq!(snapshot.members[0].subscriptions, ["changes"]);
+        assert_eq!(snapshot.members[0].backend_type.as_deref(), Some("tmux"));
+        assert!(fact_values(&batch).all(|fact| !matches!(fact, Fact::RunEvidence(_))));
+    }
+
+    #[test]
+    fn team_inbox_snapshot_uses_native_ids_and_keeps_legacy_identity_across_read_edits() {
+        let root = TempDir::new().unwrap();
+        let adapter = ClaudeCodeAdapter::new();
+        let object_context = adapter
+            .bootstrap_object(
+                &instance(root.path()),
+                &object(TEAM_INBOX_STREAM, "alpha/inboxes/team-lead.json"),
+            )
+            .unwrap();
+        let decode = |payload: &[u8]| {
+            let record = record(payload);
+            let mut batch = FactBatch::new(8, 4).unwrap();
+            let disposition = adapter
+                .decode(
+                    DecodeContext {
+                        decoder: &DecoderId::new(TEAM_INBOX_DECODER).unwrap(),
+                        object_context: &object_context,
+                    },
+                    &record,
+                    &mut batch,
+                )
+                .unwrap();
+            assert_eq!(disposition, DecodeDisposition::Applied);
+            let Fact::TeamInboxSnapshot(snapshot) = &batch.facts()[0].value else {
+                panic!("expected team inbox snapshot");
+            };
+            snapshot.clone()
+        };
+        let first = decode(
+            br#"[
+              {"from":"worker","text":"native","timestamp":"2026-08-11T00:00:00Z","read":false,"msg_id":"msg-1","msgV":1,"type":"message"},
+              {"from":"worker","text":"legacy","summary":"status","timestamp":"2026-08-11T00:00:01Z","read":false}
+            ]"#,
+        );
+        let updated = decode(
+            br#"[
+              {"from":"worker","text":"native","timestamp":"2026-08-11T00:00:00Z","read":true,"msg_id":"msg-1","msgV":1,"type":"message"},
+              {"from":"worker","text":"legacy","summary":"status","timestamp":"2026-08-11T00:00:01Z","read":true}
+            ]"#,
+        );
+
+        assert_eq!(first.native_team_id, "alpha");
+        assert_eq!(first.native_recipient_name, "team-lead");
+        assert_eq!(first.messages.len(), 2);
+        assert_eq!(
+            first.messages[0].native_message_id.as_deref(),
+            Some("msg-1")
+        );
+        assert_eq!(first.messages[0].native_version, Some(1));
+        assert_eq!(first.messages[0].native_kind.as_deref(), Some("message"));
+        assert_eq!(first.messages[0].message, updated.messages[0].message);
+        assert_eq!(first.messages[1].message, updated.messages[1].message);
+        assert!(!first.messages[1].read);
+        assert!(updated.messages[1].read);
+    }
+
+    #[test]
+    fn unsupported_team_documents_are_preserved_for_future_decoders() {
+        let root = TempDir::new().unwrap();
+        let adapter = ClaudeCodeAdapter::new();
+        let object_context = adapter
+            .bootstrap_object(
+                &instance(root.path()),
+                &object(TEAM_INBOX_STREAM, "alpha/inboxes/team-lead.json"),
+            )
+            .unwrap();
+        let record = record(br#"{"messages":[]}"#);
+        let mut batch = FactBatch::new(8, 4).unwrap();
+        let disposition = adapter
+            .decode(
+                DecodeContext {
+                    decoder: &DecoderId::new(TEAM_INBOX_DECODER).unwrap(),
+                    object_context: &object_context,
+                },
+                &record,
+                &mut batch,
+            )
+            .unwrap();
+
+        assert_eq!(disposition, DecodeDisposition::PreservedUnknown);
+        assert!(matches!(batch.facts()[0].value, Fact::UnknownRecord { .. }));
     }
 
     #[test]

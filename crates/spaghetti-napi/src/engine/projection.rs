@@ -19,6 +19,7 @@ use super::commit::{
     apply_observation_commit_with_projection, ChangeEntry, CommitReceipt, ObservationCommit,
     ProjectionCommitContext, TransactionalProjectionWork,
 };
+use super::team_projection::apply_team_snapshots;
 use super::EngineError;
 
 const CHANGE_SCHEMA_VERSION: u32 = 1;
@@ -258,6 +259,8 @@ impl TransactionalProjectionWork for FactProjectionWork<'_> {
                 Fact::Delegation(_)
                 | Fact::DelegationMetadata(_)
                 | Fact::DelegationSpawn(_)
+                | Fact::TeamSnapshot(_)
+                | Fact::TeamInboxSnapshot(_)
                 | Fact::RunEvidence(_)
                 | Fact::Usage(_) => {}
             }
@@ -494,6 +497,8 @@ impl TransactionalProjectionWork for FactProjectionWork<'_> {
             changes.push(delegation_change(&child_run_key, &reduction)?);
             changes.push(delegation_conflict_change(&child_run_key, &reduction)?);
         }
+
+        changes.extend(apply_team_snapshots(transaction, context, self.batch)?);
 
         transaction
             .execute(
@@ -2370,7 +2375,8 @@ mod tests {
         AdapterId, AdapterObjectContext, AgentAdapter, DecodeContext, DecoderId, FactBatch,
         RunEvidenceFact, RunFact, SourceInstance, SourceInstanceKey,
         SourceInstanceSpec as AdapterSourceInstanceSpec, SourceObjectDescriptor, SourceRoot,
-        StreamId,
+        StreamId, TeamInboxMessageSnapshot, TeamInboxSnapshotFact, TeamMemberSnapshot,
+        TeamSnapshotFact,
     };
     use crate::claude::ClaudeCodeAdapter;
     use crate::core::schema;
@@ -2569,6 +2575,77 @@ mod tests {
             native_key.as_bytes(),
         )
         .unwrap()
+    }
+
+    fn exact(value: &str) -> QualifiedTimestamp {
+        QualifiedTimestamp {
+            value: value.to_string(),
+            quality: TimestampQuality::NativeExact,
+        }
+    }
+
+    fn team_fact(name: &str, members: &[(&str, &str)]) -> TeamSnapshotFact {
+        let team = entity("team", "alpha");
+        let members = members
+            .iter()
+            .map(|(agent_id, native_name)| TeamMemberSnapshot {
+                member: entity("team_member", native_name),
+                native_agent_id: (*agent_id).to_string(),
+                native_name: (*native_name).to_string(),
+                agent_type: Some("general-purpose".to_string()),
+                model: Some("claude-sonnet".to_string()),
+                prompt: Some("work".to_string()),
+                color: Some("blue".to_string()),
+                plan_mode_required: Some(false),
+                joined_at: exact("2026-08-11T00:00:00.001Z"),
+                tmux_pane_id: "%1".to_string(),
+                cwd: "/fixture/project".to_string(),
+                subscriptions: vec!["changes".to_string()],
+                backend_type: Some("tmux".to_string()),
+            })
+            .collect::<Vec<_>>();
+        TeamSnapshotFact {
+            team,
+            native_team_id: "alpha".to_string(),
+            name: name.to_string(),
+            description: Some("fixture team".to_string()),
+            created_at: exact("2026-08-11T00:00:00.000Z"),
+            lead_member: members.first().map(|member| member.member.clone()),
+            native_lead_agent_id: members
+                .first()
+                .map(|member| member.native_agent_id.clone())
+                .unwrap_or_else(|| "lead@alpha".to_string()),
+            lead_session: entity("session", SESSION),
+            native_lead_session_id: SESSION.to_string(),
+            members,
+        }
+    }
+
+    fn inbox_message(native_key: &str, text: &str, read: bool) -> TeamInboxMessageSnapshot {
+        TeamInboxMessageSnapshot {
+            message: entity("team_inbox_message", native_key),
+            sender: entity("team_member", "worker"),
+            native_message_id: Some(native_key.to_string()),
+            native_kind: Some("message".to_string()),
+            native_version: Some(1),
+            native_sender_name: "worker".to_string(),
+            text: text.to_string(),
+            summary: None,
+            color: Some("green".to_string()),
+            source_time: exact("2026-08-11T00:00:01.000Z"),
+            read,
+        }
+    }
+
+    fn inbox_fact(messages: Vec<TeamInboxMessageSnapshot>) -> TeamInboxSnapshotFact {
+        TeamInboxSnapshotFact {
+            inbox: entity("team_inbox", "alpha/team-lead"),
+            team: entity("team", "alpha"),
+            recipient: entity("team_member", "team-lead"),
+            native_team_id: "alpha".to_string(),
+            native_recipient_name: "team-lead".to_string(),
+            messages,
+        }
     }
 
     fn commit_direct_batch(
@@ -4486,6 +4563,279 @@ mod tests {
                 )
                 .unwrap(),
             "upsert"
+        );
+    }
+
+    #[test]
+    fn team_snapshot_same_generation_replacement_retracts_members_without_run_inference() {
+        let mut connection = database();
+        register_object(&mut connection);
+        let team_key = entity("team", "alpha");
+        let lead_key = entity("team_member", "team-lead");
+        let worker_key = entity("team_member", "worker");
+
+        let first_record = direct_record(1, 0, 1, 20, b"team-v1");
+        let mut first = FactBatch::new(4, 2).unwrap();
+        first
+            .push(
+                &first_record,
+                Fact::TeamSnapshot(team_fact(
+                    "alpha",
+                    &[("lead@alpha", "team-lead"), ("worker@alpha", "worker")],
+                )),
+            )
+            .unwrap();
+        commit_direct_batch(&mut connection, &first_record, 1, 0, 21, &first);
+
+        let initial: (String, i64, i64) = connection
+            .query_row(
+                "SELECT config_status, assertion_count, member_count FROM canonical_teams WHERE team_key = ?1",
+                [team_key.as_bytes()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(initial, ("resolved".to_string(), 1, 2));
+        assert_eq!(count(&connection, "canonical_team_members"), 2);
+        assert_eq!(count(&connection, "observed_run_states"), 0);
+
+        let second_record = direct_record(1, 1, 2, 30, b"team-v2");
+        let mut second = FactBatch::new(4, 2).unwrap();
+        second
+            .push(
+                &second_record,
+                Fact::TeamSnapshot(team_fact("alpha renamed", &[("lead@alpha", "team-lead")])),
+            )
+            .unwrap();
+        commit_direct_batch(&mut connection, &second_record, 1, 1, 31, &second);
+
+        let replaced: (String, i64) = connection
+            .query_row(
+                "SELECT name, member_count FROM canonical_teams WHERE team_key = ?1",
+                [team_key.as_bytes()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(replaced, ("alpha renamed".to_string(), 1));
+        assert_eq!(count(&connection, "team_snapshot_assertions"), 1);
+        assert_eq!(count(&connection, "team_member_assertions"), 1);
+        assert_eq!(count(&connection, "canonical_team_members"), 1);
+        assert!(connection
+            .query_row(
+                "SELECT 1 FROM canonical_team_members WHERE member_key = ?1",
+                [lead_key.as_bytes()],
+                |_| Ok(()),
+            )
+            .optional()
+            .unwrap()
+            .is_some());
+        assert!(connection
+            .query_row(
+                "SELECT 1 FROM canonical_team_members WHERE member_key = ?1",
+                [worker_key.as_bytes()],
+                |_| Ok(()),
+            )
+            .optional()
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM fact_records WHERE fact_kind = 'team_snapshot'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            1
+        );
+
+        let deleted_record = direct_record(1, 2, 3, 40, b"team-deleted");
+        let deleted = FactBatch::new(1, 1).unwrap();
+        commit_direct_batch(&mut connection, &deleted_record, 1, 2, 41, &deleted);
+        assert_eq!(count(&connection, "canonical_teams"), 0);
+        assert_eq!(count(&connection, "canonical_team_members"), 0);
+        assert_eq!(count(&connection, "team_snapshot_assertions"), 0);
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT operation FROM change_log WHERE topic = 'runtime.team.changed' AND entity_key = ?1 ORDER BY commit_seq DESC LIMIT 1",
+                    [team_key.as_bytes()],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "delete"
+        );
+    }
+
+    #[test]
+    fn orphan_inbox_mirrors_read_edits_empty_arrays_and_file_deletion() {
+        let mut connection = database();
+        register_object(&mut connection);
+        let inbox_key = entity("team_inbox", "alpha/team-lead");
+        let first_message_key = entity("team_inbox_message", "msg-1");
+
+        let first_record = direct_record(1, 0, 1, 20, b"inbox-v1");
+        let mut first = FactBatch::new(4, 2).unwrap();
+        first
+            .push(
+                &first_record,
+                Fact::TeamInboxSnapshot(inbox_fact(vec![
+                    inbox_message("msg-1", "first", false),
+                    inbox_message("msg-2", "second", false),
+                ])),
+            )
+            .unwrap();
+        commit_direct_batch(&mut connection, &first_record, 1, 0, 21, &first);
+        assert_eq!(count(&connection, "canonical_teams"), 0);
+        assert_eq!(count(&connection, "canonical_team_inboxes"), 1);
+        assert_eq!(count(&connection, "canonical_team_inbox_messages"), 2);
+
+        let second_record = direct_record(1, 1, 2, 30, b"inbox-v2");
+        let mut second = FactBatch::new(4, 2).unwrap();
+        second
+            .push(
+                &second_record,
+                Fact::TeamInboxSnapshot(inbox_fact(vec![inbox_message("msg-1", "first", true)])),
+            )
+            .unwrap();
+        commit_direct_batch(&mut connection, &second_record, 1, 1, 31, &second);
+        let projected: (i64, i64, String) = connection
+            .query_row(
+                "SELECT read, message_ordinal, message_status FROM canonical_team_inbox_messages WHERE message_key = ?1",
+                [first_message_key.as_bytes()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(projected, (1, 0, "resolved".to_string()));
+        assert_eq!(count(&connection, "canonical_team_inbox_messages"), 1);
+        assert_eq!(count(&connection, "team_inbox_snapshot_assertions"), 1);
+
+        let empty_record = direct_record(1, 2, 3, 40, b"inbox-empty-array");
+        let mut empty = FactBatch::new(2, 1).unwrap();
+        empty
+            .push(
+                &empty_record,
+                Fact::TeamInboxSnapshot(inbox_fact(Vec::new())),
+            )
+            .unwrap();
+        commit_direct_batch(&mut connection, &empty_record, 1, 2, 41, &empty);
+        let message_count: i64 = connection
+            .query_row(
+                "SELECT message_count FROM canonical_team_inboxes WHERE inbox_key = ?1",
+                [inbox_key.as_bytes()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(message_count, 0);
+        assert_eq!(count(&connection, "canonical_team_inbox_messages"), 0);
+
+        let deleted_record = direct_record(1, 3, 4, 50, b"inbox-deleted");
+        let deleted = FactBatch::new(1, 1).unwrap();
+        commit_direct_batch(&mut connection, &deleted_record, 1, 3, 51, &deleted);
+        assert_eq!(count(&connection, "canonical_team_inboxes"), 0);
+        assert_eq!(count(&connection, "team_inbox_snapshot_assertions"), 0);
+    }
+
+    #[test]
+    fn competing_team_snapshots_are_retained_and_resolve_after_retraction() {
+        let mut connection = database();
+        register_object(&mut connection);
+        let second_object_key = b"team-config-secondary";
+        apply_observation_commit(
+            &mut connection,
+            &request_for_object(
+                second_object_key,
+                ExpectedSourceCursor::Absent,
+                1,
+                SourceCursor::append_offset(0).into_bytes(),
+                12,
+            ),
+        )
+        .unwrap();
+        let team_key = entity("team", "alpha");
+
+        let primary_record = direct_record(1, 0, 1, 20, b"team-primary");
+        let mut primary = FactBatch::new(2, 1).unwrap();
+        primary
+            .push(
+                &primary_record,
+                Fact::TeamSnapshot(team_fact("primary", &[("lead@alpha", "team-lead")])),
+            )
+            .unwrap();
+        commit_direct_batch(&mut connection, &primary_record, 1, 0, 21, &primary);
+
+        let secondary_record = object_record(
+            2,
+            1,
+            SourceCursor::append_offset(0),
+            SourceCursor::append_offset(1),
+            30,
+            b"team-secondary",
+        );
+        let mut secondary = FactBatch::new(2, 1).unwrap();
+        secondary
+            .push(
+                &secondary_record,
+                Fact::TeamSnapshot(team_fact("secondary", &[("lead@alpha", "team-lead")])),
+            )
+            .unwrap();
+        commit_object_batch(
+            &mut connection,
+            second_object_key,
+            &secondary_record,
+            1,
+            SourceCursor::append_offset(0).into_bytes(),
+            31,
+            &secondary,
+        );
+
+        let conflicting: (String, i64, i64) = connection
+            .query_row(
+                "SELECT config_status, assertion_count, competing_snapshot_count FROM canonical_teams WHERE team_key = ?1",
+                [team_key.as_bytes()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(conflicting, ("conflicting".to_string(), 2, 1));
+        assert_eq!(count(&connection, "team_snapshot_assertions"), 2);
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT operation FROM change_log WHERE topic = 'diagnostic.runtime.team-config-conflict' AND entity_key = ?1 ORDER BY commit_seq DESC LIMIT 1",
+                    [team_key.as_bytes()],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "upsert"
+        );
+
+        let retracted_record = object_record(
+            2,
+            1,
+            SourceCursor::append_offset(1),
+            SourceCursor::append_offset(2),
+            40,
+            b"team-secondary-deleted",
+        );
+        let retracted = FactBatch::new(1, 1).unwrap();
+        commit_object_batch(
+            &mut connection,
+            second_object_key,
+            &retracted_record,
+            1,
+            SourceCursor::append_offset(1).into_bytes(),
+            41,
+            &retracted,
+        );
+        let resolved: (String, i64, i64, String) = connection
+            .query_row(
+                "SELECT config_status, assertion_count, competing_snapshot_count, name FROM canonical_teams WHERE team_key = ?1",
+                [team_key.as_bytes()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            resolved,
+            ("resolved".to_string(), 1, 0, "primary".to_string())
         );
     }
 

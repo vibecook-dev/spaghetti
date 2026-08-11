@@ -8,6 +8,7 @@ mod commit;
 mod owner_lock;
 mod projection;
 mod query_pool;
+mod team_projection;
 mod writer;
 
 use std::fs;

@@ -137,15 +137,16 @@ STATSIG_FAILED_LOG_EVENT = {"eventName", "metadata", "user", "time"}
 STATSIG_USER_FIELDS = {"customIDs", "userID", "appVersion", "custom", "statsigEnvironment"}
 
 # TeamConfig fields
-TEAM_CONFIG_FIELDS = {"name", "description", "createdAt", "leadAgentId", "leadSessionId", "members"}
+TEAM_CONFIG_REQUIRED = {"name", "createdAt", "leadAgentId", "leadSessionId", "members"}
+TEAM_CONFIG_OPTIONAL = {"description"}
 
 # TeamMember fields
-TEAM_MEMBER_REQUIRED = {"agentId", "name", "model", "joinedAt", "tmuxPaneId", "cwd", "subscriptions"}
-TEAM_MEMBER_OPTIONAL = {"prompt", "color", "planModeRequired", "backendType", "agentType"}
+TEAM_MEMBER_REQUIRED = {"agentId", "name", "joinedAt", "tmuxPaneId", "cwd", "subscriptions"}
+TEAM_MEMBER_OPTIONAL = {"model", "prompt", "color", "planModeRequired", "backendType", "agentType"}
 
 # InboxMessage fields
 INBOX_MESSAGE_REQUIRED = {"from", "text", "timestamp", "read"}
-INBOX_MESSAGE_OPTIONAL = {"summary", "color"}
+INBOX_MESSAGE_OPTIONAL = {"summary", "color", "msg_id", "msgV", "type"}
 
 # ClaudeGlobalState known fields
 CLAUDE_GLOBAL_STATE_KNOWN = {"numStartups", "installMethod", "autoUpdates",
@@ -728,7 +729,12 @@ def validate_teams():
             if err:
                 fail(f"teams/{team_name}/config.json: {err}")
             elif isinstance(data, dict):
-                check_keys(f"teams/{team_name}/config.json", data.keys(), TEAM_CONFIG_FIELDS)
+                check_keys(
+                    f"teams/{team_name}/config.json",
+                    data.keys(),
+                    TEAM_CONFIG_REQUIRED,
+                    TEAM_CONFIG_OPTIONAL,
+                )
 
                 # Check members
                 members = data.get("members", [])

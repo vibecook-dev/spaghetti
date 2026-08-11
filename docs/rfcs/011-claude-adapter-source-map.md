@@ -1,13 +1,15 @@
 # RFC 011 Claude Code adapter source map
 
-Status: Phase 4 history/usage complete; Phase 5 delegation relation, native
-metadata snapshots, and parent-spawn correlation implemented on 2026-08-11
+Status: Phase 4 history/usage complete; Phase 5 delegation, native metadata,
+parent-spawn correlation, and team/config/inbox snapshots implemented on
+2026-08-11
 
 This survey defines the native inputs and semantic claims currently made by
 the Rust `claude-code` adapter. It is narrower than the legacy Claude parser on
 purpose: Phase 4 covers canonical transcript history, run lineage/activity,
-and native usage. Phase 5 now adds the first replaceable sidecar while richer
-runtime packs remain in progress.
+and native usage. Phase 5 now adds delegation joins plus authoritative team
+configuration and inbox snapshot families while richer runtime packs remain
+in progress.
 
 ## Installation and source identity
 
@@ -16,10 +18,11 @@ adapter canonicalizes each configured root and derives a binary-safe source
 instance key from that canonical path. Secrets and transcript content are not
 part of the instance key.
 
-The instance declares two confined roots:
+The instance declares three confined roots:
 
 - `home`: the configured Claude data root;
-- `projects`: `<home>/projects`.
+- `projects`: `<home>/projects`;
+- `teams`: `<home>/teams`.
 
 Ordinary path spelling differences therefore resolve to one instance. A root
 that is temporarily unavailable is a transient discovery error, not an empty
@@ -27,15 +30,17 @@ authoritative snapshot.
 
 ## Implemented streams
 
-| Stream                 | Selector relative to `projects`      | Driver                                           | Authority    | Scope   |
-| ---------------------- | ------------------------------------ | ------------------------------------------------ | ------------ | ------- |
-| `session-transcripts`  | `*/*.jsonl`                          | `AppendDelimitedFile` (`\n`, CRLF normalization) | Canonical    | Session |
-| `subagent-transcripts` | `*/*/subagents/**/agent-*.jsonl`     | `AppendDelimitedFile` (`\n`, CRLF normalization) | Canonical    | Run     |
-| `subagent-metadata`    | `*/*/subagents/**/agent-*.meta.json` | `ReplaceDocument` (64 KiB bound)                  | Supplemental | Run     |
+| Stream                 | Root       | Selector                             | Driver                                           | Authority    | Scope      |
+| ---------------------- | ---------- | ------------------------------------ | ------------------------------------------------ | ------------ | ---------- |
+| `session-transcripts`  | `projects` | `*/*.jsonl`                          | `AppendDelimitedFile` (`\n`, CRLF normalization) | Canonical    | Session    |
+| `subagent-transcripts` | `projects` | `*/*/subagents/**/agent-*.jsonl`     | `AppendDelimitedFile` (`\n`, CRLF normalization) | Canonical    | Run        |
+| `subagent-metadata`    | `projects` | `*/*/subagents/**/agent-*.meta.json` | `ReplaceDocument` (64 KiB bound)                  | Supplemental | Run        |
+| `team-configs`         | `teams`    | `*/config.json`                      | `ReplaceDocument` (1 MiB bound)                   | Canonical    | Team       |
+| `team-inboxes`         | `teams`    | `*/inboxes/*.json`                   | `ReplaceDocument` (4 MiB bound)                   | Canonical    | Team inbox |
 
 Transcript streams use incremental byte cursors and interactive priority. The
-metadata stream uses snapshot-replace consistency and foreground-repair
-priority. All three use `MirrorSource` deletion and full raw retention during
+three document streams use snapshot-replace consistency and foreground-repair
+priority. All five use `MirrorSource` deletion and full raw retention during
 shadow migration. Common drivers—not the adapter—own framing or stable reads,
 file identity, generations/revisions, checkpoints, watcher recovery, and
 scheduling.
@@ -47,10 +52,13 @@ object bootstrap rather than inventing an entity identity.
 
 The metadata stream derives the identical child key from the sibling
 `agent-<agent-id>.meta.json` path, including workflow scope when present.
+Team config identity comes from `<team>/config.json`; inbox identity comes from
+`<team>/inboxes/<recipient>.json`. Paths outside these exact shapes fail object
+bootstrap.
 
 ## Native record interpretation
 
-Each complete JSONL record is decoded once into common facts:
+Each complete native record or document is decoded once into common facts:
 
 - `SessionFact` with namespaced project/session identity and available cwd,
   branch, first-prompt, AI-title, and custom-title metadata;
@@ -66,6 +74,11 @@ Each complete JSONL record is decoded once into common facts:
 - `DelegationSpawnFact` for each parent `Task` or `Agent` tool call, preserving
   the parent run/message, session, native tool-use ID, requested label, prompt,
   and agent type without asserting that a child exists;
+- `TeamSnapshotFact` for each config, preserving native team/lead/session
+  identity plus the complete bounded member snapshot and native member fields;
+- `TeamInboxSnapshotFact` for each recipient file, preserving the complete
+  ordered message snapshot, native message IDs/versions when present, read
+  state, and qualified native timestamps;
 - `RunEvidenceFact::ActivityObserved` with `NativeActivity` strength;
 - `UsageFact` when the record contains non-zero native usage.
 
@@ -114,6 +127,23 @@ These facts are appended after all pre-existing transcript facts, preserving
 their identities, but historical parent transcript objects require targeted
 contract replay to materialize the new spawn assertions.
 
+The additive team config and inbox streams advance the adapter contract to
+version 5. They do not alter transcript or metadata fact identity, so existing
+objects in those streams do not require replay solely for this addition.
+
+Team identity comes from the native directory name. Member identity is scoped
+by team plus native member name, and an inbox is scoped by team plus recipient.
+Inbox messages prefer non-empty native `msg_id`. Older messages derive a
+deterministic fingerprint from sender, timestamp, and text plus an occurrence
+ordinal for exact duplicates. `read` is intentionally excluded, so marking a
+legacy message read updates the same entity instead of inventing a new one.
+
+Claude declares `runtime.teams` and `runtime.team_inbox` as native and live.
+Configuration membership is not activity evidence: tmux pane IDs, backend
+type, and config presence never create run state or completion. An inbox may
+remain canonical without a matching config, preserving orphan or partially
+written native state.
+
 The adapter declares activity only. It does not turn quiet files, missing
 watch events, or filesystem nesting into completion. Subagent layout provides
 parent-run lineage but no terminal evidence.
@@ -152,13 +182,21 @@ retracts the replaced generation. If either a matching metadata snapshot or
 spawn assertion disappears, canonical lineage falls back to the strongest
 remaining durable relation in the same transaction.
 
+Every committed team config or inbox revision replaces all assertions owned
+by that source object, including same-generation edits. Removed members or
+messages retract in the same commit. An empty inbox array retains the inbox
+with zero messages; confirmed file deletion removes the inbox itself.
+Duplicate authoritative objects remain competing assertions, use deterministic
+fact identity rather than callback order to select a canonical view, and
+publish durable conflict diagnostics.
+
 ## Remaining Phase 5 sources
 
 Legacy tool-result text that only mentions an agent ID is not used for native
 correlation. A future compatibility fallback must be classified
 `NativeIndirect`, not explicit. The adapter also does not yet declare
 `sessions-index.json`, memory, tool-result files,
-workflows, teams/config/inboxes, active PID presence, todos, tasks, plans, file
+workflows, active PID presence, todos, tasks, plans, file
 history, settings, or other sidecars. Those inputs need replace-document,
 directory-snapshot, or presence streams and reviewed capability semantics.
 Credentials, debug logs, telemetry, caches, and arbitrary symlink escapes
@@ -194,3 +232,9 @@ and transcript-first joins, two-fact decisive provenance, sidecar deletion,
 spawn generation retraction, layout fallback, and conflicting explicit parent
 matches. It also requires that spawn correlation creates no observed terminal
 state.
+
+The team/inbox trace covers native path/context decoding, bounded document
+preservation, stable native and legacy message identity, same-generation
+replacement, removed-child retraction, the distinction between `[]` and file
+deletion, orphan inboxes, competing config assertions, diagnostic clearing,
+and the invariant that config membership creates no observed run state.

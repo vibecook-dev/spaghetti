@@ -462,6 +462,14 @@ const RFC011_SCHEMA_TABLES = [
   'canonical_delegation_metadata',
   'delegation_spawn_assertions',
   'canonical_delegation_spawns',
+  'team_snapshot_assertions',
+  'team_member_assertions',
+  'canonical_teams',
+  'canonical_team_members',
+  'team_inbox_snapshot_assertions',
+  'team_inbox_message_assertions',
+  'canonical_team_inboxes',
+  'canonical_team_inbox_messages',
   'usage_contributions',
   'usage_totals',
 ] as const;
@@ -550,6 +558,40 @@ const TABLE_SPECS: TableSpec[] = [
   {
     name: 'canonical_delegation_spawns',
     orderBy: 'spawn_key',
+  },
+  {
+    name: 'team_snapshot_assertions',
+    orderBy: 'fact_id',
+  },
+  {
+    name: 'team_member_assertions',
+    orderBy: 'fact_id, member_ordinal',
+    jsonColumns: ['subscriptions_json'],
+  },
+  {
+    name: 'canonical_teams',
+    orderBy: 'team_key',
+  },
+  {
+    name: 'canonical_team_members',
+    orderBy: 'team_key, member_ordinal',
+    jsonColumns: ['subscriptions_json'],
+  },
+  {
+    name: 'team_inbox_snapshot_assertions',
+    orderBy: 'fact_id',
+  },
+  {
+    name: 'team_inbox_message_assertions',
+    orderBy: 'fact_id, message_ordinal',
+  },
+  {
+    name: 'canonical_team_inboxes',
+    orderBy: 'inbox_key',
+  },
+  {
+    name: 'canonical_team_inbox_messages',
+    orderBy: 'inbox_key, message_ordinal',
   },
   {
     name: 'usage_contributions',

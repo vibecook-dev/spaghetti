@@ -39,6 +39,12 @@ export interface InboxMessage {
   timestamp: string;
   color?: string;
   read: boolean;
+  /** Native stable identity on newer Claude inbox entries. */
+  msg_id?: string;
+  /** Native inbox message schema version (currently 1 when present). */
+  msgV?: number;
+  /** Native envelope kind (currently `message` when present). */
+  type?: string;
 }
 
 // Task assignment payload (embedded in inbox message text as JSON)

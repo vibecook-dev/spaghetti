@@ -172,14 +172,16 @@ The committed tests prove:
 - equal native task IDs from different parent runs remain conflicting rather
   than being ordered by arrival.
 
-The full Rust workspace suite contains 337 passing tests after these slices.
+The full Rust workspace suite contained 337 passing tests at completion of
+these slices; subsequent Phase 5 packs extend that suite.
 
 ## Deferred Phase 5 work
 
 This increment does not switch production live observation yet. Legacy
 tool-result content that merely mentions an agent ID remains deferred; if
 adopted, that heuristic must be represented as `NativeIndirect`, never as the
-explicit shared-key relation implemented here. The next Phase 5 slices are
-teams/config/inbox snapshots, active-session presence, and the
-task/plan/artifact packs whose semantics pass review. The observation
-coordinator and production cutover remain required for the Phase 5 exit gate.
+explicit shared-key relation implemented here. Teams/config/inbox snapshots
+are now implemented in the adjacent Phase 5 pack. The remaining slices are
+active-session presence and the task/plan/artifact packs whose semantics pass
+review. The observation coordinator and production cutover remain required
+for the Phase 5 exit gate.

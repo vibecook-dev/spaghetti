@@ -74,7 +74,9 @@ import type { SqliteService } from '../io/index.js';
 //
 // v21: native delegation spawn assertions and explicit spawn/metadata
 // correlation provenance.
-export const SCHEMA_VERSION = 21;
+// v22: authoritative Claude team configuration and inbox snapshots with
+// normalized membership/message projections and replacement provenance.
+export const SCHEMA_VERSION = 22;
 
 export const TOKEN_ACTIVITY_TRIGGER_NAMES = [
   'token_activity_messages_ai',
@@ -785,6 +787,160 @@ CREATE TABLE IF NOT EXISTS canonical_delegation_spawns (
   last_commit_seq INTEGER NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS team_snapshot_assertions (
+  fact_id BLOB PRIMARY KEY REFERENCES fact_records(fact_id) ON DELETE CASCADE,
+  team_key BLOB NOT NULL,
+  native_team_id TEXT NOT NULL,
+  name TEXT NOT NULL,
+  description TEXT,
+  created_at TEXT NOT NULL,
+  created_at_quality TEXT NOT NULL,
+  lead_member_key BLOB,
+  native_lead_agent_id TEXT NOT NULL,
+  lead_session_key BLOB NOT NULL,
+  native_lead_session_id TEXT NOT NULL,
+  snapshot_digest BLOB NOT NULL,
+  source_object_id INTEGER NOT NULL,
+  source_generation INTEGER NOT NULL,
+  cursor_end BLOB NOT NULL,
+  last_commit_seq INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS team_member_assertions (
+  fact_id BLOB NOT NULL REFERENCES team_snapshot_assertions(fact_id) ON DELETE CASCADE,
+  member_key BLOB NOT NULL,
+  team_key BLOB NOT NULL,
+  member_ordinal INTEGER NOT NULL,
+  native_agent_id TEXT NOT NULL,
+  native_name TEXT NOT NULL,
+  agent_type TEXT,
+  model TEXT,
+  prompt TEXT,
+  color TEXT,
+  plan_mode_required INTEGER,
+  joined_at TEXT NOT NULL,
+  joined_at_quality TEXT NOT NULL,
+  tmux_pane_id TEXT NOT NULL,
+  cwd TEXT NOT NULL,
+  subscriptions_json BLOB NOT NULL,
+  backend_type TEXT,
+  member_digest BLOB NOT NULL,
+  PRIMARY KEY (fact_id, member_key)
+);
+
+CREATE TABLE IF NOT EXISTS canonical_teams (
+  team_key BLOB PRIMARY KEY,
+  native_team_id TEXT NOT NULL,
+  name TEXT NOT NULL,
+  description TEXT,
+  created_at TEXT NOT NULL,
+  created_at_quality TEXT NOT NULL,
+  lead_member_key BLOB,
+  native_lead_agent_id TEXT NOT NULL,
+  lead_session_key BLOB NOT NULL,
+  native_lead_session_id TEXT NOT NULL,
+  config_status TEXT NOT NULL,
+  decisive_fact_id BLOB NOT NULL REFERENCES team_snapshot_assertions(fact_id) ON DELETE CASCADE,
+  assertion_count INTEGER NOT NULL,
+  competing_snapshot_count INTEGER NOT NULL,
+  member_count INTEGER NOT NULL,
+  last_commit_seq INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS canonical_team_members (
+  member_key BLOB PRIMARY KEY,
+  team_key BLOB NOT NULL,
+  member_ordinal INTEGER NOT NULL,
+  native_agent_id TEXT NOT NULL,
+  native_name TEXT NOT NULL,
+  agent_type TEXT,
+  model TEXT,
+  prompt TEXT,
+  color TEXT,
+  plan_mode_required INTEGER,
+  joined_at TEXT NOT NULL,
+  joined_at_quality TEXT NOT NULL,
+  tmux_pane_id TEXT NOT NULL,
+  cwd TEXT NOT NULL,
+  subscriptions_json BLOB NOT NULL,
+  backend_type TEXT,
+  membership_status TEXT NOT NULL,
+  decisive_fact_id BLOB NOT NULL REFERENCES team_snapshot_assertions(fact_id) ON DELETE CASCADE,
+  assertion_count INTEGER NOT NULL,
+  competing_membership_count INTEGER NOT NULL,
+  last_commit_seq INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS team_inbox_snapshot_assertions (
+  fact_id BLOB PRIMARY KEY REFERENCES fact_records(fact_id) ON DELETE CASCADE,
+  inbox_key BLOB NOT NULL,
+  team_key BLOB NOT NULL,
+  recipient_key BLOB NOT NULL,
+  native_team_id TEXT NOT NULL,
+  native_recipient_name TEXT NOT NULL,
+  snapshot_digest BLOB NOT NULL,
+  source_object_id INTEGER NOT NULL,
+  source_generation INTEGER NOT NULL,
+  cursor_end BLOB NOT NULL,
+  last_commit_seq INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS team_inbox_message_assertions (
+  fact_id BLOB NOT NULL REFERENCES team_inbox_snapshot_assertions(fact_id) ON DELETE CASCADE,
+  message_key BLOB NOT NULL,
+  inbox_key BLOB NOT NULL,
+  message_ordinal INTEGER NOT NULL,
+  sender_key BLOB NOT NULL,
+  native_message_id TEXT,
+  native_kind TEXT,
+  native_version INTEGER,
+  native_sender_name TEXT NOT NULL,
+  text TEXT NOT NULL,
+  summary TEXT,
+  color TEXT,
+  source_time TEXT NOT NULL,
+  source_time_quality TEXT NOT NULL,
+  read INTEGER NOT NULL,
+  message_digest BLOB NOT NULL,
+  PRIMARY KEY (fact_id, message_key)
+);
+
+CREATE TABLE IF NOT EXISTS canonical_team_inboxes (
+  inbox_key BLOB PRIMARY KEY,
+  team_key BLOB NOT NULL,
+  recipient_key BLOB NOT NULL,
+  native_team_id TEXT NOT NULL,
+  native_recipient_name TEXT NOT NULL,
+  inbox_status TEXT NOT NULL,
+  decisive_fact_id BLOB NOT NULL REFERENCES team_inbox_snapshot_assertions(fact_id) ON DELETE CASCADE,
+  assertion_count INTEGER NOT NULL,
+  competing_snapshot_count INTEGER NOT NULL,
+  message_count INTEGER NOT NULL,
+  last_commit_seq INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS canonical_team_inbox_messages (
+  message_key BLOB PRIMARY KEY,
+  inbox_key BLOB NOT NULL,
+  message_ordinal INTEGER NOT NULL,
+  sender_key BLOB NOT NULL,
+  native_message_id TEXT,
+  native_kind TEXT,
+  native_version INTEGER,
+  native_sender_name TEXT NOT NULL,
+  text TEXT NOT NULL,
+  summary TEXT,
+  color TEXT,
+  source_time TEXT NOT NULL,
+  source_time_quality TEXT NOT NULL,
+  read INTEGER NOT NULL,
+  message_status TEXT NOT NULL,
+  decisive_fact_id BLOB NOT NULL REFERENCES team_inbox_snapshot_assertions(fact_id) ON DELETE CASCADE,
+  assertion_count INTEGER NOT NULL,
+  competing_message_count INTEGER NOT NULL,
+  last_commit_seq INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS usage_contributions (
   fact_id BLOB PRIMARY KEY REFERENCES fact_records(fact_id) ON DELETE CASCADE,
   subject_key BLOB NOT NULL,
@@ -936,6 +1092,15 @@ CREATE INDEX IF NOT EXISTS idx_canonical_delegation_metadata_session ON canonica
 CREATE INDEX IF NOT EXISTS idx_delegation_spawn_assertions_task ON delegation_spawn_assertions(session_key, native_task_id, parent_run_key);
 CREATE INDEX IF NOT EXISTS idx_delegation_spawn_assertions_source ON delegation_spawn_assertions(source_object_id, spawn_key);
 CREATE INDEX IF NOT EXISTS idx_canonical_delegation_spawns_session ON canonical_delegation_spawns(session_key, native_task_id, spawn_key);
+CREATE INDEX IF NOT EXISTS idx_team_snapshot_assertions_team ON team_snapshot_assertions(team_key, fact_id);
+CREATE INDEX IF NOT EXISTS idx_team_snapshot_assertions_source ON team_snapshot_assertions(source_object_id, team_key);
+CREATE INDEX IF NOT EXISTS idx_team_member_assertions_team ON team_member_assertions(team_key, member_key);
+CREATE INDEX IF NOT EXISTS idx_canonical_team_members_team ON canonical_team_members(team_key, member_ordinal);
+CREATE INDEX IF NOT EXISTS idx_team_inbox_snapshot_assertions_inbox ON team_inbox_snapshot_assertions(inbox_key, fact_id);
+CREATE INDEX IF NOT EXISTS idx_team_inbox_snapshot_assertions_source ON team_inbox_snapshot_assertions(source_object_id, inbox_key);
+CREATE INDEX IF NOT EXISTS idx_team_inbox_message_assertions_inbox ON team_inbox_message_assertions(inbox_key, message_key);
+CREATE INDEX IF NOT EXISTS idx_canonical_team_inboxes_team ON canonical_team_inboxes(team_key, inbox_key);
+CREATE INDEX IF NOT EXISTS idx_canonical_team_inbox_messages_inbox ON canonical_team_inbox_messages(inbox_key, message_ordinal);
 CREATE INDEX IF NOT EXISTS idx_usage_contributions_session ON usage_contributions(session_key, fact_id);
 
 -- Persistent FTS5 (content-synced with messages)
@@ -1027,6 +1192,14 @@ const CURRENT_TABLES = [
   'canonical_delegation_spawns',
   'canonical_delegation_metadata',
   'canonical_delegations',
+  'canonical_team_inbox_messages',
+  'canonical_team_inboxes',
+  'team_inbox_message_assertions',
+  'team_inbox_snapshot_assertions',
+  'canonical_team_members',
+  'canonical_teams',
+  'team_member_assertions',
+  'team_snapshot_assertions',
   'delegation_spawn_assertions',
   'delegation_metadata_assertions',
   'delegation_assertions',

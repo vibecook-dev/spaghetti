@@ -118,7 +118,13 @@ describe('ConfigParser teams/', () => {
     const embedded = JSON.stringify({ type: 'idle_notification', from: 'architect', idleReason: 'available' });
     writeTeam('rust-rewrite', config, {
       'team-lead': [
-        inboxMessage('architect', { summary: 'review done', color: 'green' }),
+        inboxMessage('architect', {
+          summary: 'review done',
+          color: 'green',
+          msg_id: 'native-message-1',
+          msgV: 1,
+          type: 'message',
+        }),
         inboxMessage('architect', { text: embedded }),
       ],
       implementer: [inboxMessage('team-lead')],
@@ -139,6 +145,9 @@ describe('ConfigParser teams/', () => {
     assert.deepEqual(Object.keys(team.inboxes).sort(), ['implementer', 'team-lead']);
     assert.equal(team.inboxes['team-lead'].length, 2);
     assert.equal(team.inboxes['team-lead'][0].summary, 'review done');
+    assert.equal(team.inboxes['team-lead'][0].msg_id, 'native-message-1');
+    assert.equal(team.inboxes['team-lead'][0].msgV, 1);
+    assert.equal(team.inboxes['team-lead'][0].type, 'message');
     assert.equal(team.inboxes['team-lead'][1].summary, undefined);
     // Embedded JSON payloads stay raw strings.
     assert.equal(team.inboxes['team-lead'][1].text, embedded);

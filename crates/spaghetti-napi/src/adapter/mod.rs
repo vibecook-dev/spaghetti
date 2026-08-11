@@ -19,7 +19,8 @@ pub use facts::{
     ContentBlock, DelegationFact, DelegationKind, DelegationMetadataFact, DelegationSpawnFact,
     EntityKey, EvidenceKind, EvidenceStrength, Fact, FactBatch, FactEnvelope, FactId,
     FactProvenance, MessageFact, MessageRole, QualifiedTimestamp, RelationStrength,
-    RunEvidenceFact, RunFact, SessionFact, TimestampQuality, TokenUsage, UsageAccounting,
-    UsageFact, UsageScope, ValueQuality,
+    RunEvidenceFact, RunFact, SessionFact, TeamInboxMessageSnapshot, TeamInboxSnapshotFact,
+    TeamMemberSnapshot, TeamSnapshotFact, TimestampQuality, TokenUsage, UsageAccounting, UsageFact,
+    UsageScope, ValueQuality,
 };
 pub use registry::{AdapterRegistry, AdapterRegistryBuilder};

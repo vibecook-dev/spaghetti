@@ -282,6 +282,68 @@ pub struct DelegationSpawnFact {
     pub source_time: Option<QualifiedTimestamp>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TeamMemberSnapshot {
+    pub member: EntityKey,
+    pub native_agent_id: String,
+    pub native_name: String,
+    pub agent_type: Option<String>,
+    pub model: Option<String>,
+    pub prompt: Option<String>,
+    pub color: Option<String>,
+    pub plan_mode_required: Option<bool>,
+    pub joined_at: QualifiedTimestamp,
+    pub tmux_pane_id: String,
+    pub cwd: String,
+    pub subscriptions: Vec<String>,
+    pub backend_type: Option<String>,
+}
+
+/// One authoritative team configuration snapshot. Membership proves only
+/// configuration membership; runtime activity must come from separate run or
+/// presence evidence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TeamSnapshotFact {
+    pub team: EntityKey,
+    pub native_team_id: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub created_at: QualifiedTimestamp,
+    pub lead_member: Option<EntityKey>,
+    pub native_lead_agent_id: String,
+    pub lead_session: EntityKey,
+    pub native_lead_session_id: String,
+    pub members: Vec<TeamMemberSnapshot>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TeamInboxMessageSnapshot {
+    pub message: EntityKey,
+    pub sender: EntityKey,
+    pub native_message_id: Option<String>,
+    pub native_kind: Option<String>,
+    pub native_version: Option<u32>,
+    pub native_sender_name: String,
+    pub text: String,
+    pub summary: Option<String>,
+    pub color: Option<String>,
+    pub source_time: QualifiedTimestamp,
+    pub read: bool,
+}
+
+/// One whole-file team inbox snapshot. Missing messages in a replacement are
+/// retracted; a `read` change updates the stable message rather than creating
+/// a second message identity.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TeamInboxSnapshotFact {
+    pub inbox: EntityKey,
+    pub team: EntityKey,
+    pub recipient: EntityKey,
+    pub native_team_id: String,
+    pub native_recipient_name: String,
+    pub messages: Vec<TeamInboxMessageSnapshot>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EvidenceKind {
     RunDeclared,
@@ -374,6 +436,8 @@ pub enum Fact {
     Delegation(DelegationFact),
     DelegationMetadata(DelegationMetadataFact),
     DelegationSpawn(DelegationSpawnFact),
+    TeamSnapshot(TeamSnapshotFact),
+    TeamInboxSnapshot(TeamInboxSnapshotFact),
     RunEvidence(RunEvidenceFact),
     Usage(UsageFact),
     UnknownRecord {
@@ -392,6 +456,8 @@ impl Fact {
             Self::Delegation(_) => "delegation",
             Self::DelegationMetadata(_) => "delegation_metadata",
             Self::DelegationSpawn(_) => "delegation_spawn",
+            Self::TeamSnapshot(_) => "team_snapshot",
+            Self::TeamInboxSnapshot(_) => "team_inbox_snapshot",
             Self::RunEvidence(_) => "run_evidence",
             Self::Usage(_) => "usage",
             Self::UnknownRecord { .. } => "unknown_record",
@@ -406,6 +472,8 @@ impl Fact {
             Self::Delegation(fact) => Some(&fact.child_run),
             Self::DelegationMetadata(fact) => Some(&fact.child_run),
             Self::DelegationSpawn(fact) => Some(&fact.spawn),
+            Self::TeamSnapshot(fact) => Some(&fact.team),
+            Self::TeamInboxSnapshot(fact) => Some(&fact.inbox),
             Self::RunEvidence(fact) => Some(&fact.run),
             Self::Usage(fact) => Some(&fact.subject),
             Self::UnknownRecord { .. } => None,
