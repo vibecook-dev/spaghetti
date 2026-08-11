@@ -15,12 +15,19 @@ dependency in the tree that needs an install script to work.
 
 The whole production migration is **two files** — `io/sqlite-service.ts` and
 `io/sqlite-health.ts` — because the facade already exists and nothing outside it
-touches the raw handle. The one genuine hazard is that
-`data/ingest-service.ts` depends on `better-sqlite3` nesting transactions as
-savepoints; a naive `BEGIN`/`COMMIT` port throws on the live-ingest path. That is
-solved and prototyped below.
+touches the raw handle.
 
-The cost is the Node floor: `>=18` today, and `node:sqlite` needs 22.5+.
+Two hazards, both verified rather than reasoned about, and both of the shape
+where the code keeps looking right and stops doing anything:
+
+1. `data/ingest-service.ts` depends on `better-sqlite3` nesting transactions as
+   savepoints; a naive `BEGIN`/`COMMIT` port throws on the live-ingest path.
+2. `better-sqlite3` spells the option `readonly`; `node:sqlite` spells it
+   `readOnly` and ignores unknown options — so a copy-across port opens the
+   health checker's database **writable**.
+
+Both are solved below. The cost is the Node floor: `>=18` today, `>=22.13.0`
+recommended.
 
 ---
 
