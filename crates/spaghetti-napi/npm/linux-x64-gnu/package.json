@@ -1,6 +1,6 @@
 {
   "name": "@vibecook/spaghetti-sdk-native-linux-x64-gnu",
-  "version": "0.6.1",
+  "version": "0.6.2",
   "description": "Native (Rust) ingest core for @vibecook/spaghetti-sdk — linux-x64-gnu binary",
   "cpu": [
     "x64"
