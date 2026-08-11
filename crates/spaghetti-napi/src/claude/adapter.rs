@@ -14,8 +14,8 @@ use crate::adapter::{
     AdapterObjectContext, AgentAdapter, Availability, CapabilityDeclaration, CapabilityGranularity,
     CapabilityId, CapabilitySupport, ConsistencyPolicy, ContentBlock, DecodeContext,
     DecodeDisposition, DecoderId, DelegationFact, DelegationKind, DelegationMetadataFact,
-    DeletionPolicy, DiscoveryContext, DriverSpec, EntityKey, EntityScope, EvidenceKind,
-    EvidenceStrength, Fact, FactBatch, MessageFact, MessageRole, ObjectSelector,
+    DelegationSpawnFact, DeletionPolicy, DiscoveryContext, DriverSpec, EntityKey, EntityScope,
+    EvidenceKind, EvidenceStrength, Fact, FactBatch, MessageFact, MessageRole, ObjectSelector,
     QualifiedTimestamp, RawRetentionPolicy, RelationStrength, RunEvidenceFact, RunFact,
     SessionFact, SourceInstance, SourceInstanceKey, SourceInstanceSpec, SourceObjectDescriptor,
     SourceRoot, StreamAuthority, StreamId, StreamSpec, SupportLevel, TimestampQuality, TokenUsage,
@@ -67,7 +67,7 @@ impl ClaudeCodeAdapter {
                 id: AdapterId::new(ADAPTER_ID).expect("static Claude adapter id is valid"),
                 display_name: "Claude Code".to_string(),
                 adapter_version: env!("CARGO_PKG_VERSION").to_string(),
-                contract_version: 3,
+                contract_version: 4,
                 source_schema_versions: vec![
                     "claude-code-jsonl-v1".to_string(),
                     "claude-code-subagent-meta-v1".to_string(),
@@ -156,7 +156,7 @@ impl AgentAdapter for ClaudeCodeAdapter {
                 consistency: ConsistencyPolicy::IncrementalCursor,
                 deletion: DeletionPolicy::MirrorSource,
                 retention: RawRetentionPolicy::Full,
-                capabilities: transcript_capabilities(false),
+                capabilities: transcript_capabilities(),
             },
             StreamSpec {
                 id: StreamId::new(SUBAGENT_STREAM)?,
@@ -173,7 +173,7 @@ impl AgentAdapter for ClaudeCodeAdapter {
                 consistency: ConsistencyPolicy::IncrementalCursor,
                 deletion: DeletionPolicy::MirrorSource,
                 retention: RawRetentionPolicy::Full,
-                capabilities: transcript_capabilities(true),
+                capabilities: transcript_capabilities(),
             },
             StreamSpec {
                 id: StreamId::new(SUBAGENT_META_STREAM)?,
@@ -280,7 +280,7 @@ fn claude_capabilities() -> Vec<CapabilityDeclaration> {
             CapabilityGranularity::Run,
             Availability::Live,
             Some(
-                "child identity is native and metadata is supplemental; parent lineage currently comes from Claude's transcript layout; silence never implies completion",
+                "child identity is native; layout lineage remains durable and matching native spawn/metadata tool-use IDs strengthen it explicitly; silence never implies completion",
             ),
         ),
         live_native(USAGE_INPUT_TOKENS, CapabilityGranularity::Message),
@@ -310,8 +310,8 @@ fn capability(
     }
 }
 
-fn transcript_capabilities(include_subagents: bool) -> Vec<CapabilityId> {
-    let mut capabilities = vec![
+fn transcript_capabilities() -> Vec<CapabilityId> {
+    [
         HISTORY_SESSIONS,
         HISTORY_MESSAGES,
         HISTORY_CONTENT_BLOCKS,
@@ -321,17 +321,14 @@ fn transcript_capabilities(include_subagents: bool) -> Vec<CapabilityId> {
         USAGE_INPUT_TOKENS,
         USAGE_OUTPUT_TOKENS,
         USAGE_CACHE_TOKENS,
+        RUNTIME_SUBAGENTS,
         SOURCE_LIVE,
         SOURCE_RECONCILE,
         SOURCE_RESUME_CURSOR,
-    ];
-    if include_subagents {
-        capabilities.push(RUNTIME_SUBAGENTS);
-    }
-    capabilities
-        .into_iter()
-        .map(|id| CapabilityId::new(id).expect("static Claude stream capability id is valid"))
-        .collect()
+    ]
+    .into_iter()
+    .map(|id| CapabilityId::new(id).expect("static Claude stream capability id is valid"))
+    .collect()
 }
 
 fn subagent_metadata_capabilities() -> Vec<CapabilityId> {
@@ -652,7 +649,7 @@ fn decode_transcript_record(
         Fact::Run(RunFact {
             run: run.clone(),
             session: session.clone(),
-            native_run_id: run_native_key,
+            native_run_id: run_native_key.clone(),
             parent_run,
         }),
     )?;
@@ -705,6 +702,7 @@ fn decode_transcript_record(
             )
         }
     };
+    let spawn_descriptors = delegation_spawn_descriptors(&content);
     output.push(
         record,
         Fact::Message(MessageFact {
@@ -724,7 +722,7 @@ fn decode_transcript_record(
     output.push(
         record,
         Fact::RunEvidence(RunEvidenceFact {
-            run,
+            run: run.clone(),
             kind: EvidenceKind::ActivityObserved,
             strength: EvidenceStrength::NativeActivity,
             native_state: None,
@@ -742,18 +740,79 @@ fn decode_transcript_record(
         output.push(
             record,
             Fact::Usage(UsageFact {
-                subject: message,
-                session,
+                subject: message.clone(),
+                session: session.clone(),
                 scope: UsageScope::Message,
                 accounting: UsageAccounting::Delta,
                 quality: ValueQuality::NativeExact,
                 values: usage,
                 model,
-                source_time,
+                source_time: source_time.clone(),
+            }),
+        )?;
+    }
+    for descriptor in spawn_descriptors {
+        let mut native_spawn_key = Vec::new();
+        push_key_component(&mut native_spawn_key, run_native_key.as_bytes());
+        push_key_component(&mut native_spawn_key, descriptor.native_task_id.as_bytes());
+        output.push(
+            record,
+            Fact::DelegationSpawn(DelegationSpawnFact {
+                spawn: EntityKey::native(
+                    adapter_id,
+                    record.source_instance_id,
+                    "delegation_spawn",
+                    &native_spawn_key,
+                )?,
+                parent_run: run.clone(),
+                parent_message: message.clone(),
+                session: session.clone(),
+                native_task_id: descriptor.native_task_id,
+                tool_name: descriptor.tool_name,
+                label: descriptor.label,
+                prompt: descriptor.prompt,
+                requested_agent_type: descriptor.requested_agent_type,
+                source_time: source_time.clone(),
             }),
         )?;
     }
     Ok(DecodeDisposition::Applied)
+}
+
+struct DelegationSpawnDescriptor {
+    native_task_id: String,
+    tool_name: String,
+    label: Option<String>,
+    prompt: Option<String>,
+    requested_agent_type: Option<String>,
+}
+
+fn delegation_spawn_descriptors(content: &[ContentBlock]) -> Vec<DelegationSpawnDescriptor> {
+    content
+        .iter()
+        .filter_map(|block| {
+            let ContentBlock::ToolCall {
+                native_id,
+                name,
+                input,
+            } = block
+            else {
+                return None;
+            };
+            if !matches!(name.as_str(), "Task" | "Agent") || native_id.trim().is_empty() {
+                return None;
+            }
+            Some(DelegationSpawnDescriptor {
+                native_task_id: native_id.clone(),
+                tool_name: name.clone(),
+                label: nonempty_field(input, "description")
+                    .or_else(|| nonempty_field(input, "name")),
+                prompt: nonempty_field(input, "prompt"),
+                requested_agent_type: nonempty_field(input, "subagent_type")
+                    .or_else(|| nonempty_field(input, "agent_type")),
+            })
+        })
+        .collect()
 }
 
 fn preserve_unknown(
@@ -1080,7 +1139,7 @@ mod tests {
             })
             .unwrap();
         assert_eq!(streams.len(), 3);
-        assert_eq!(adapter.manifest().contract_version, 3);
+        assert_eq!(adapter.manifest().contract_version, 4);
         assert!(adapter
             .manifest()
             .source_schema_versions
@@ -1094,7 +1153,7 @@ mod tests {
         assert_eq!(streams[2].decoder.as_str(), SUBAGENT_META_DECODER);
         assert_eq!(streams[2].authority, StreamAuthority::Supplemental);
         assert_eq!(streams[2].consistency, ConsistencyPolicy::SnapshotReplace);
-        assert!(!streams[0]
+        assert!(streams[0]
             .capabilities
             .iter()
             .any(|capability| capability.as_str() == RUNTIME_SUBAGENTS));
@@ -1181,6 +1240,53 @@ mod tests {
         assert_eq!(usage.values.cache_read_tokens, 3);
         assert_eq!(usage.scope, UsageScope::Message);
         assert_eq!(usage.accounting, UsageAccounting::Delta);
+    }
+
+    #[test]
+    fn native_task_tool_call_emits_a_parent_scoped_spawn_fact() {
+        let root = TempDir::new().unwrap();
+        let adapter = ClaudeCodeAdapter::new();
+        let object_context = adapter
+            .bootstrap_object(
+                &instance(root.path()),
+                &object(PARENT_STREAM, &format!("project/{SESSION}.jsonl")),
+            )
+            .unwrap();
+        let task_record = record(
+            format!(
+                r#"{{"type":"assistant","uuid":"spawn-message","parentUuid":"u1","timestamp":"2026-08-11T00:00:00Z","sessionId":"{SESSION}","cwd":"/repo","version":"1","gitBranch":"main","isSidechain":false,"userType":"external","requestId":"r1","message":{{"model":"claude-sonnet","id":"api1","type":"message","role":"assistant","content":[{{"type":"tool_use","id":"tool-spawn-1","name":"Task","input":{{"description":"Map the parser","prompt":"Inspect the implementation","subagent_type":"Explore"}}}}]}}}}"#
+            )
+            .as_bytes(),
+        );
+        let mut batch = FactBatch::new(8, 4).unwrap();
+        adapter
+            .decode(
+                DecodeContext {
+                    decoder: &DecoderId::new(PARENT_DECODER).unwrap(),
+                    object_context: &object_context,
+                },
+                &task_record,
+                &mut batch,
+            )
+            .unwrap();
+        let spawn = fact_values(&batch)
+            .find_map(|fact| match fact {
+                Fact::DelegationSpawn(spawn) => Some(spawn),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(spawn.native_task_id, "tool-spawn-1");
+        assert_eq!(spawn.tool_name, "Task");
+        assert_eq!(spawn.label.as_deref(), Some("Map the parser"));
+        assert_eq!(spawn.prompt.as_deref(), Some("Inspect the implementation"));
+        assert_eq!(spawn.requested_agent_type.as_deref(), Some("Explore"));
+        let parent_run = fact_values(&batch)
+            .find_map(|fact| match fact {
+                Fact::Run(run) => Some(&run.run),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(&spawn.parent_run, parent_run);
     }
 
     #[test]

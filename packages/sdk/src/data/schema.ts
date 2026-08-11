@@ -71,7 +71,10 @@ import type { SqliteService } from '../io/index.js';
 //
 // v20: replaceable subagent metadata assertions and late-correlated canonical
 // delegation metadata.
-export const SCHEMA_VERSION = 20;
+//
+// v21: native delegation spawn assertions and explicit spawn/metadata
+// correlation provenance.
+export const SCHEMA_VERSION = 21;
 
 export const TOKEN_ACTIVITY_TRIGGER_NAMES = [
   'token_activity_messages_ai',
@@ -678,29 +681,6 @@ CREATE TABLE IF NOT EXISTS delegation_assertions (
   last_commit_seq INTEGER NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS canonical_delegations (
-  child_run_key BLOB PRIMARY KEY,
-  parent_run_key BLOB,
-  session_key BLOB NOT NULL,
-  relation_kind TEXT NOT NULL,
-  relation_strength TEXT NOT NULL,
-  relation_status TEXT NOT NULL,
-  native_child_id TEXT,
-  native_task_id TEXT,
-  label TEXT,
-  prompt TEXT,
-  cwd TEXT,
-  worktree_path TEXT,
-  source_time TEXT,
-  source_time_quality TEXT,
-  decisive_fact_id BLOB NOT NULL REFERENCES delegation_assertions(fact_id) ON DELETE CASCADE,
-  assertion_count INTEGER NOT NULL,
-  competing_relation_count INTEGER NOT NULL,
-  child_present INTEGER NOT NULL,
-  parent_present INTEGER NOT NULL,
-  last_commit_seq INTEGER NOT NULL
-);
-
 CREATE TABLE IF NOT EXISTS delegation_metadata_assertions (
   fact_id BLOB PRIMARY KEY REFERENCES fact_records(fact_id) ON DELETE CASCADE,
   child_run_key BLOB NOT NULL,
@@ -718,6 +698,55 @@ CREATE TABLE IF NOT EXISTS delegation_metadata_assertions (
   last_commit_seq INTEGER NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS delegation_spawn_assertions (
+  fact_id BLOB PRIMARY KEY REFERENCES fact_records(fact_id) ON DELETE CASCADE,
+  spawn_key BLOB NOT NULL,
+  parent_run_key BLOB NOT NULL,
+  parent_message_key BLOB NOT NULL,
+  session_key BLOB NOT NULL,
+  native_task_id TEXT NOT NULL,
+  tool_name TEXT NOT NULL,
+  label TEXT,
+  prompt TEXT,
+  requested_agent_type TEXT,
+  source_time TEXT,
+  source_time_quality TEXT,
+  source_object_id INTEGER NOT NULL,
+  source_generation INTEGER NOT NULL,
+  cursor_end BLOB NOT NULL,
+  last_commit_seq INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS canonical_delegations (
+  child_run_key BLOB PRIMARY KEY,
+  parent_run_key BLOB,
+  session_key BLOB NOT NULL,
+  relation_kind TEXT NOT NULL,
+  relation_strength TEXT NOT NULL,
+  relation_status TEXT NOT NULL,
+  native_child_id TEXT,
+  native_task_id TEXT,
+  label TEXT,
+  prompt TEXT,
+  cwd TEXT,
+  worktree_path TEXT,
+  source_time TEXT,
+  source_time_quality TEXT,
+  decisive_relation_fact_id BLOB REFERENCES delegation_assertions(fact_id) ON DELETE CASCADE,
+  decisive_spawn_fact_id BLOB REFERENCES delegation_spawn_assertions(fact_id) ON DELETE CASCADE,
+  decisive_metadata_fact_id BLOB REFERENCES delegation_metadata_assertions(fact_id) ON DELETE CASCADE,
+  assertion_count INTEGER NOT NULL,
+  competing_relation_count INTEGER NOT NULL,
+  child_present INTEGER NOT NULL,
+  parent_present INTEGER NOT NULL,
+  last_commit_seq INTEGER NOT NULL,
+  CHECK (
+    (decisive_relation_fact_id IS NOT NULL AND decisive_spawn_fact_id IS NULL AND decisive_metadata_fact_id IS NULL)
+    OR
+    (decisive_relation_fact_id IS NULL AND decisive_spawn_fact_id IS NOT NULL AND decisive_metadata_fact_id IS NOT NULL)
+  )
+);
+
 CREATE TABLE IF NOT EXISTS canonical_delegation_metadata (
   child_run_key BLOB PRIMARY KEY,
   session_key BLOB NOT NULL,
@@ -733,6 +762,26 @@ CREATE TABLE IF NOT EXISTS canonical_delegation_metadata (
   assertion_count INTEGER NOT NULL,
   competing_metadata_count INTEGER NOT NULL,
   run_present INTEGER NOT NULL,
+  last_commit_seq INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS canonical_delegation_spawns (
+  spawn_key BLOB PRIMARY KEY,
+  parent_run_key BLOB NOT NULL,
+  parent_message_key BLOB NOT NULL,
+  session_key BLOB NOT NULL,
+  native_task_id TEXT NOT NULL,
+  tool_name TEXT NOT NULL,
+  label TEXT,
+  prompt TEXT,
+  requested_agent_type TEXT,
+  source_time TEXT,
+  source_time_quality TEXT,
+  spawn_status TEXT NOT NULL,
+  decisive_fact_id BLOB NOT NULL REFERENCES delegation_spawn_assertions(fact_id) ON DELETE CASCADE,
+  assertion_count INTEGER NOT NULL,
+  competing_spawn_count INTEGER NOT NULL,
+  parent_present INTEGER NOT NULL,
   last_commit_seq INTEGER NOT NULL
 );
 
@@ -882,7 +931,11 @@ CREATE INDEX IF NOT EXISTS idx_delegation_assertions_parent ON delegation_assert
 CREATE INDEX IF NOT EXISTS idx_canonical_delegations_session ON canonical_delegations(session_key, child_run_key);
 CREATE INDEX IF NOT EXISTS idx_delegation_metadata_assertions_child ON delegation_metadata_assertions(child_run_key, fact_id);
 CREATE INDEX IF NOT EXISTS idx_delegation_metadata_assertions_source ON delegation_metadata_assertions(source_object_id, child_run_key);
+CREATE INDEX IF NOT EXISTS idx_delegation_metadata_assertions_task ON delegation_metadata_assertions(session_key, native_task_id, child_run_key);
 CREATE INDEX IF NOT EXISTS idx_canonical_delegation_metadata_session ON canonical_delegation_metadata(session_key, child_run_key);
+CREATE INDEX IF NOT EXISTS idx_delegation_spawn_assertions_task ON delegation_spawn_assertions(session_key, native_task_id, parent_run_key);
+CREATE INDEX IF NOT EXISTS idx_delegation_spawn_assertions_source ON delegation_spawn_assertions(source_object_id, spawn_key);
+CREATE INDEX IF NOT EXISTS idx_canonical_delegation_spawns_session ON canonical_delegation_spawns(session_key, native_task_id, spawn_key);
 CREATE INDEX IF NOT EXISTS idx_usage_contributions_session ON usage_contributions(session_key, fact_id);
 
 -- Persistent FTS5 (content-synced with messages)
@@ -971,9 +1024,11 @@ const LEGACY_TABLES = ['segments', 'search_index', 'schema_version'];
 const CURRENT_TABLES = [
   'search_fts',
   'subagent_search_fts',
+  'canonical_delegation_spawns',
   'canonical_delegation_metadata',
-  'delegation_metadata_assertions',
   'canonical_delegations',
+  'delegation_spawn_assertions',
+  'delegation_metadata_assertions',
   'delegation_assertions',
   'observed_run_states',
   'usage_totals',

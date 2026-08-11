@@ -1,7 +1,7 @@
 # RFC 011 Claude Code adapter source map
 
-Status: Phase 4 history/usage complete; Phase 5 delegation relation and native
-metadata snapshots implemented on 2026-08-11
+Status: Phase 4 history/usage complete; Phase 5 delegation relation, native
+metadata snapshots, and parent-spawn correlation implemented on 2026-08-11
 
 This survey defines the native inputs and semantic claims currently made by
 the Rust `claude-code` adapter. It is narrower than the legacy Claude parser on
@@ -63,6 +63,9 @@ Each complete JSONL record is decoded once into common facts:
 - `DelegationMetadataFact` for a metadata sidecar, preserving native free-form
   agent type, description, name, spawn depth, worktree path, and optional
   spawning tool-use ID without making a parent assertion;
+- `DelegationSpawnFact` for each parent `Task` or `Agent` tool call, preserving
+  the parent run/message, session, native tool-use ID, requested label, prompt,
+  and agent type without asserting that a child exists;
 - `RunEvidenceFact::ActivityObserved` with `NativeActivity` strength;
 - `UsageFact` when the record contains non-zero native usage.
 
@@ -89,12 +92,13 @@ commit times remain separate provenance. Source order is object generation
 plus cursor range; callback order is not used as causality.
 
 The adapter declares `runtime.subagents` as derived, run-granularity, and live.
-The child identity is native, while the current parent assertion comes from
-Claude's authoritative transcript layout and is therefore explicitly
-`Layout` strength. A child can be committed before its parent exists. The
-common delegation reducer retains the assertion as unresolved and resolves it
-when the parent run arrives; equal-strength disagreement is preserved and
-surfaced as a conflict rather than overwritten.
+The child identity is native. Transcript layout supplies a durable `Layout`
+parent assertion, while matching a metadata sidecar to a parent spawn by the
+same non-empty native tool-use ID and session supplies a `NativeExplicit`
+candidate. A child, sidecar, or spawn can be committed first. The common
+delegation reducer retains unresolved evidence, re-runs on either half's
+arrival or deletion, and preserves equal-strength disagreement as a conflict
+rather than overwriting it.
 
 Adding the delegation assertion advances the Claude semantic contract to
 version 2 because later facts in a subagent record receive new local ordinals.
@@ -104,6 +108,11 @@ version 3. Unlike the version-2 change, this additive stream does not alter
 existing transcript fact identities or meanings. The coordinator's future
 per-object decoder-version wiring should therefore avoid replaying transcript
 objects solely because the metadata stream was added.
+
+Parent `Task`/`Agent` spawn output advances the adapter contract to version 4.
+These facts are appended after all pre-existing transcript facts, preserving
+their identities, but historical parent transcript objects require targeted
+contract replay to materialize the new spawn assertions.
 
 The adapter declares activity only. It does not turn quiet files, missing
 watch events, or filesystem nesting into completion. Subagent layout provides
@@ -137,11 +146,18 @@ metadata row, and publishes a delete change atomically. Duplicate sidecars
 with different native values remain as competing assertions and produce a
 durable conflict diagnostic.
 
+Spawn assertions follow transcript generation ownership. Append continuation
+accumulates native calls, while truncation, rewrite, or contract replay
+retracts the replaced generation. If either a matching metadata snapshot or
+spawn assertion disappears, canonical lineage falls back to the strongest
+remaining durable relation in the same transaction.
+
 ## Remaining Phase 5 sources
 
-Parent spawn records still need native correlation before they can strengthen
-the layout-derived parent relation or supply task prompts. The adapter also
-does not yet declare `sessions-index.json`, memory, tool-result files,
+Legacy tool-result text that only mentions an agent ID is not used for native
+correlation. A future compatibility fallback must be classified
+`NativeIndirect`, not explicit. The adapter also does not yet declare
+`sessions-index.json`, memory, tool-result files,
 workflows, teams/config/inboxes, active PID presence, todos, tasks, plans, file
 history, settings, or other sidecars. Those inputs need replace-document,
 directory-snapshot, or presence streams and reviewed capability semantics.
@@ -172,3 +188,9 @@ The metadata trace covers sidecar-first and transcript-first arrival,
 same-generation replacement, confirmed deletion and recreation, stable child
 identity across workflow paths, and competing native sidecars whose ambiguity
 is retained and diagnosed.
+
+The native spawn trace covers parent `Task`/`Agent` decoding, metadata-first
+and transcript-first joins, two-fact decisive provenance, sidecar deletion,
+spawn generation retraction, layout fallback, and conflicting explicit parent
+matches. It also requires that spawn correlation creates no observed terminal
+state.

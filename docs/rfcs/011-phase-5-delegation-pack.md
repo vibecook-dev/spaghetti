@@ -1,7 +1,7 @@
 # RFC 011 Phase 5: delegation capability pack
 
-Status: delegation relation and native metadata slices implemented on
-2026-08-11
+Status: delegation relation, native metadata, and explicit parent-spawn
+correlation slices implemented on 2026-08-11
 
 This phase begins with delegation because Claude's Phase 4 transcript streams
 already provide stable child identity, session scope, and parent lineage. It
@@ -107,12 +107,45 @@ version 3. Existing transcript fact identities and meanings remain unchanged,
 so the coordinator's future per-object decoder-version wiring should avoid an
 unnecessary transcript replay for this additive stream.
 
+## Native spawn correlation and schema 21
+
+Claude parent transcripts now emit one `DelegationSpawnFact` for each native
+`Task` or `Agent` tool call. The fact owns a parent-scoped spawn key, parent run
+and message keys, session, native tool-use ID, tool name, requested label,
+prompt, agent type, and qualified source time. It does not claim that a child
+exists and does not add lifecycle evidence.
+
+Schema 21 adds provenance-bearing `delegation_spawn_assertions` and
+`canonical_delegation_spawns`. The common reducer joins a spawn assertion to a
+child metadata assertion only when both expose the same non-empty native
+tool-use ID inside the same session. That shared native key produces a
+`NativeExplicit` delegation candidate; no callback ordering or text search is
+used. The canonical delegation stores both decisive fact IDs, while a direct
+layout/native assertion stores its one decisive relation fact. This makes the
+join auditable and lets foreign-key retraction remove stale correlations.
+
+Metadata-first and transcript-first arrival converge because both source
+halves are persisted before delegation reduction. A sidecar rewrite or
+deletion removes the native candidate and falls back to durable layout
+evidence in the same commit. Transcript generation replay similarly retracts
+old spawn assertions before reducing the replacement. Multiple equally strong
+native matches to different parents remain `conflicting` and publish the
+existing delegation conflict diagnostic. Spawn rows separately publish
+`runtime.delegation-spawn.changed` and
+`diagnostic.runtime.delegation-spawn-conflict`.
+
+The new transcript output advances the Claude adapter contract to version 4.
+Spawn facts are appended after all previously emitted record facts, so their
+addition does not shift existing fact identities. Existing parent transcript
+objects still require a targeted contract replay to materialize historical
+spawn assertions.
+
 ## Conformance evidence
 
 The committed tests prove:
 
-- Claude advertises the pack at the declared quality on its subagent
-  transcript and metadata streams, but not the parent transcript stream;
+- Claude advertises the pack at the declared quality on parent/subagent
+  transcript and metadata streams;
 - a decoded subagent record emits layout-strength delegation evidence;
 - parent-first arrival resolves in the child commit;
 - child-first arrival remains queryable as unresolved and resolves when the
@@ -130,13 +163,23 @@ The committed tests prove:
   retracts and restores the canonical row;
 - conflicting native sidecars remain durable and publish a conflict diagnostic
   that clears when the competing snapshot is removed.
+- native `Task`/`Agent` calls emit parent-scoped spawn facts without emitting
+  child or terminal evidence;
+- metadata-first and transcript-first native task-ID joins converge to
+  explicit lineage with both decisive provenances;
+- sidecar deletion and spawn generation replacement atomically fall back to
+  layout lineage;
+- equal native task IDs from different parent runs remain conflicting rather
+  than being ordered by arrival.
 
-The full Rust workspace suite contains 334 passing tests after these slices.
+The full Rust workspace suite contains 337 passing tests after these slices.
 
 ## Deferred Phase 5 work
 
-This increment does not switch production live observation yet. The next
-delegation enrichment should add native parent-spawn correlation, followed by
+This increment does not switch production live observation yet. Legacy
+tool-result content that merely mentions an agent ID remains deferred; if
+adopted, that heuristic must be represented as `NativeIndirect`, never as the
+explicit shared-key relation implemented here. The next Phase 5 slices are
 teams/config/inbox snapshots, active-session presence, and the
 task/plan/artifact packs whose semantics pass review. The observation
 coordinator and production cutover remain required for the Phase 5 exit gate.

@@ -460,6 +460,8 @@ const RFC011_SCHEMA_TABLES = [
   'canonical_delegations',
   'delegation_metadata_assertions',
   'canonical_delegation_metadata',
+  'delegation_spawn_assertions',
+  'canonical_delegation_spawns',
   'usage_contributions',
   'usage_totals',
 ] as const;
@@ -540,6 +542,14 @@ const TABLE_SPECS: TableSpec[] = [
   {
     name: 'canonical_delegation_metadata',
     orderBy: 'child_run_key',
+  },
+  {
+    name: 'delegation_spawn_assertions',
+    orderBy: 'fact_id',
+  },
+  {
+    name: 'canonical_delegation_spawns',
+    orderBy: 'spawn_key',
   },
   {
     name: 'usage_contributions',

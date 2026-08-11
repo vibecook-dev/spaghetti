@@ -265,6 +265,23 @@ pub struct DelegationMetadataFact {
     pub native_task_id: Option<String>,
 }
 
+/// One native tool invocation that may spawn a delegated child. The child can
+/// arrive later through a metadata or result stream; the common reducer joins
+/// the stable native task id without assigning cross-object callback order.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DelegationSpawnFact {
+    pub spawn: EntityKey,
+    pub parent_run: EntityKey,
+    pub parent_message: EntityKey,
+    pub session: EntityKey,
+    pub native_task_id: String,
+    pub tool_name: String,
+    pub label: Option<String>,
+    pub prompt: Option<String>,
+    pub requested_agent_type: Option<String>,
+    pub source_time: Option<QualifiedTimestamp>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EvidenceKind {
     RunDeclared,
@@ -356,6 +373,7 @@ pub enum Fact {
     Run(RunFact),
     Delegation(DelegationFact),
     DelegationMetadata(DelegationMetadataFact),
+    DelegationSpawn(DelegationSpawnFact),
     RunEvidence(RunEvidenceFact),
     Usage(UsageFact),
     UnknownRecord {
@@ -373,6 +391,7 @@ impl Fact {
             Self::Run(_) => "run",
             Self::Delegation(_) => "delegation",
             Self::DelegationMetadata(_) => "delegation_metadata",
+            Self::DelegationSpawn(_) => "delegation_spawn",
             Self::RunEvidence(_) => "run_evidence",
             Self::Usage(_) => "usage",
             Self::UnknownRecord { .. } => "unknown_record",
@@ -386,6 +405,7 @@ impl Fact {
             Self::Run(fact) => Some(&fact.run),
             Self::Delegation(fact) => Some(&fact.child_run),
             Self::DelegationMetadata(fact) => Some(&fact.child_run),
+            Self::DelegationSpawn(fact) => Some(&fact.spawn),
             Self::RunEvidence(fact) => Some(&fact.run),
             Self::Usage(fact) => Some(&fact.subject),
             Self::UnknownRecord { .. } => None,
