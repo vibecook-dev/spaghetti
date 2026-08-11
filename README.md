@@ -61,13 +61,23 @@ that touches the index fails with `Could not locate the bindings file`.
 npm install -g --allow-scripts=better-sqlite3 @vibecook/spaghetti
 ```
 
-Already installed? Fetch the binding without reinstalling:
+Already installed? Approving records the permission but does **not** run the
+script — `rebuild` is what executes it, so you need both:
 
 ```bash
 npm install-scripts approve better-sqlite3
+npm rebuild better-sqlite3
 ```
 
-npm 11 and earlier run install scripts by default and need neither flag. pnpm
+Installing Spaghetti as a project dependency rather than globally? npm refuses
+the `--allow-scripts` flag there (`EALLOWSCRIPTS`); declare it in your
+`package.json` instead:
+
+```json
+"allowScripts": { "better-sqlite3": true }
+```
+
+npm 11 and earlier run install scripts by default and need none of this. pnpm
 users list it under `onlyBuiltDependencies` (this repo already does).
 
 ## What you get

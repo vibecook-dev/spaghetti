@@ -46,15 +46,31 @@ const VERSION = (_require('../package.json') as { version: string }).version;
  */
 export function initFailureHint(msg: string): string {
   if (/bindings file|better_sqlite3\.node|node-gyp|prebuild-install/i.test(msg)) {
+    // Every command below was run against a published build before being
+    // printed here. `0.6.2` shipped two that were not, and both failed in ways
+    // that look like success: `--allow-scripts` on a project-scoped install is
+    // a hard `EALLOWSCRIPTS` error, and `install-scripts approve` records the
+    // permission in package.json without ever running the script — so it
+    // reports "Approved" and changes nothing. Approve only grants; `rebuild`
+    // is what executes.
     return [
       "better-sqlite3's native binding is missing — its install script did not run.",
-      'npm 12 blocks install scripts by default. Re-install allowing this one:',
+      'npm 12 blocks install scripts by default.',
       '',
-      '  npm install --allow-scripts=better-sqlite3 @vibecook/spaghetti',
-      '',
-      'Already installed? Fetch the binding without a reinstall:',
+      'Fix an existing install (either kind):',
       '',
       '  npm install-scripts approve better-sqlite3',
+      '  npm rebuild better-sqlite3',
+      '',
+      'Or reinstall globally, allowing that one script:',
+      '',
+      '  npm install -g --allow-scripts=better-sqlite3 @vibecook/spaghetti',
+      '',
+      // The flag is rejected outright for project-scoped installs, so those
+      // have to declare it in the manifest instead.
+      'Installing as a project dependency? The flag is refused there — add to package.json:',
+      '',
+      '  "allowScripts": { "better-sqlite3": true }',
       '',
       'pnpm users: add better-sqlite3 to onlyBuiltDependencies in pnpm-workspace.yaml.',
     ].join('\n');
