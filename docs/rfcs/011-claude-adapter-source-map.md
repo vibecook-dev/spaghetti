@@ -1,6 +1,7 @@
 # RFC 011 Claude Code adapter source map
 
-Status: Phase 4 history/usage contract implemented on 2026-08-11
+Status: Phase 4 history/usage complete; Phase 5 delegation pack in progress on
+2026-08-11
 
 This survey defines the native inputs and semantic claims currently made by
 the Rust `claude-code` adapter. It is narrower than the legacy Claude parser on
@@ -51,6 +52,8 @@ Each complete JSONL record is decoded once into common facts:
   model, searchable text, verbatim raw JSON, and ordered structured content;
 - `RunFact` for the root or subagent run, including the parent run key for a
   subagent;
+- `DelegationFact` for a subagent, preserving the child run, layout-derived
+  parent assertion, native child ID, execution cwd, and relation quality;
 - `RunEvidenceFact::ActivityObserved` with `NativeActivity` strength;
 - `UsageFact` when the record contains non-zero native usage.
 
@@ -75,6 +78,18 @@ generation, and cursor range; it never generates a random ingest UUID.
 Claude's record timestamp is `NativeExact` when present. Observation and
 commit times remain separate provenance. Source order is object generation
 plus cursor range; callback order is not used as causality.
+
+The adapter declares `runtime.subagents` as derived, run-granularity, and live.
+The child identity is native, while the current parent assertion comes from
+Claude's authoritative transcript layout and is therefore explicitly
+`Layout` strength. A child can be committed before its parent exists. The
+common delegation reducer retains the assertion as unresolved and resolves it
+when the parent run arrives; equal-strength disagreement is preserved and
+surfaced as a conflict rather than overwritten.
+
+Adding the delegation assertion advances the Claude semantic contract to
+version 2 because later facts in a subagent record receive new local ordinals.
+Version-1 cursors require contract replay rather than append continuation.
 
 The adapter declares activity only. It does not turn quiet files, missing
 watch events, or filesystem nesting into completion. Subagent layout provides
@@ -101,14 +116,17 @@ Confirmed source deletion is declared `MirrorSource`; the future observation
 coordinator applies the same ownership retraction. Temporary source-root loss
 does not confirm deletion.
 
-## Deferred Phase 5 sources
+## Remaining Phase 5 sources
 
-The Phase 4 adapter intentionally does not yet declare `sessions-index.json`,
-memory, tool-result files, workflows, teams/config/inboxes, active PID
-presence, todos, tasks, plans, file history, settings, or other sidecars.
-Those inputs need replace-document, directory-snapshot, or presence streams
-and reviewed capability semantics. Credentials, debug logs, telemetry,
-caches, and arbitrary symlink escapes remain out of scope.
+The delegation pack currently uses transcript layout only. Subagent meta and
+parent spawn records still need snapshot/dependency streams before they can
+enrich task identity, labels, prompts, worktree paths, or stronger relation
+evidence. The adapter also does not yet declare `sessions-index.json`, memory,
+tool-result files, workflows, teams/config/inboxes, active PID presence,
+todos, tasks, plans, file history, settings, or other sidecars. Those inputs
+need replace-document, directory-snapshot, or presence streams and reviewed
+capability semantics. Credentials, debug logs, telemetry, caches, and
+arbitrary symlink escapes remain out of scope.
 
 ## Conformance evidence
 
@@ -124,3 +142,8 @@ appends, forces a full generation replay, and requires identical semantic
 sessions, messages, runs, observed state, and usage totals. It also checks
 that old facts/contributions are retracted and that a full audit rebuild
 produces the same totals as the hot-path deltas.
+
+The Phase 5 delegation conformance trace additionally covers parent-first and
+child-first arrival, late resolution, generation replay, equal-strength
+conflicts, durable conflict diagnostics, and the invariant that activity plus
+silence remains `Active` rather than becoming a fabricated completion.

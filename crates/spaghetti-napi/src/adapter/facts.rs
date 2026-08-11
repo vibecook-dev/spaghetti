@@ -215,6 +215,40 @@ pub struct RunFact {
     pub parent_run: Option<EntityKey>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DelegationKind {
+    VendorNativeSubagent,
+    ForkedConversation,
+    ChildProcess,
+    Other(String),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RelationStrength {
+    Layout,
+    NativeIndirect,
+    NativeExplicit,
+}
+
+/// One independently replayable assertion that a run is delegated from a
+/// parent. The referenced runs need not have arrived yet; the common reducer
+/// resolves them later without dropping child activity.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DelegationFact {
+    pub child_run: EntityKey,
+    pub parent_run: Option<EntityKey>,
+    pub session: EntityKey,
+    pub kind: DelegationKind,
+    pub relation_strength: RelationStrength,
+    pub native_child_id: Option<String>,
+    pub native_task_id: Option<String>,
+    pub label: Option<String>,
+    pub prompt: Option<String>,
+    pub cwd: Option<String>,
+    pub worktree_path: Option<String>,
+    pub source_time: Option<QualifiedTimestamp>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EvidenceKind {
     RunDeclared,
@@ -304,6 +338,7 @@ pub enum Fact {
     Session(SessionFact),
     Message(MessageFact),
     Run(RunFact),
+    Delegation(DelegationFact),
     RunEvidence(RunEvidenceFact),
     Usage(UsageFact),
     UnknownRecord {
@@ -319,6 +354,7 @@ impl Fact {
             Self::Session(_) => "session",
             Self::Message(_) => "message",
             Self::Run(_) => "run",
+            Self::Delegation(_) => "delegation",
             Self::RunEvidence(_) => "run_evidence",
             Self::Usage(_) => "usage",
             Self::UnknownRecord { .. } => "unknown_record",
@@ -330,6 +366,7 @@ impl Fact {
             Self::Session(fact) => Some(&fact.session),
             Self::Message(fact) => Some(&fact.message),
             Self::Run(fact) => Some(&fact.run),
+            Self::Delegation(fact) => Some(&fact.child_run),
             Self::RunEvidence(fact) => Some(&fact.run),
             Self::Usage(fact) => Some(&fact.subject),
             Self::UnknownRecord { .. } => None,

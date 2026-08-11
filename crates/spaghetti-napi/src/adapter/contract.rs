@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::fmt;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -57,6 +58,50 @@ macro_rules! string_id {
 string_id!(AdapterId, "adapter id");
 string_id!(StreamId, "stream id");
 string_id!(DecoderId, "decoder id");
+string_id!(CapabilityId, "capability id");
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SupportLevel {
+    Native,
+    Derived,
+    Estimated,
+    Unsupported,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CapabilityGranularity {
+    Record,
+    Message,
+    Turn,
+    Run,
+    Session,
+    Team,
+    Project,
+    Instance,
+    Custom(String),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Availability {
+    Live,
+    EventuallyLive,
+    CompletionOnly,
+    BackfillOnly,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CapabilitySupport {
+    pub level: SupportLevel,
+    pub granularity: CapabilityGranularity,
+    pub availability: Availability,
+    pub notes: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CapabilityDeclaration {
+    pub id: CapabilityId,
+    pub support: CapabilitySupport,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct SourceInstanceKey(Vec<u8>);
@@ -88,7 +133,7 @@ pub struct AdapterManifest {
     pub adapter_version: String,
     pub contract_version: u32,
     pub source_schema_versions: Vec<String>,
-    pub capabilities: Vec<String>,
+    pub capabilities: Vec<CapabilityDeclaration>,
 }
 
 impl AdapterManifest {
@@ -107,6 +152,15 @@ impl AdapterManifest {
             return Err(AdapterError::invalid_contract(
                 "adapter contract version must be greater than zero",
             ));
+        }
+        let mut capability_ids = BTreeSet::new();
+        for capability in &self.capabilities {
+            if !capability_ids.insert(capability.id.clone()) {
+                return Err(AdapterError::invalid_contract(format!(
+                    "adapter declares capability {} more than once",
+                    capability.id
+                )));
+            }
         }
         Ok(())
     }
@@ -228,7 +282,7 @@ pub struct StreamSpec {
     pub consistency: ConsistencyPolicy,
     pub deletion: DeletionPolicy,
     pub retention: RawRetentionPolicy,
-    pub capabilities: Vec<String>,
+    pub capabilities: Vec<CapabilityId>,
 }
 
 impl StreamSpec {
@@ -240,6 +294,15 @@ impl StreamSpec {
             )));
         }
         instance.root(&self.selector.root_name)?;
+        let mut capabilities = BTreeSet::new();
+        for capability in &self.capabilities {
+            if !capabilities.insert(capability.clone()) {
+                return Err(AdapterError::invalid_contract(format!(
+                    "stream {} declares capability {capability} more than once",
+                    self.id
+                )));
+            }
+        }
         Ok(())
     }
 }
@@ -402,5 +465,27 @@ mod tests {
         let context = AdapterObjectContext::new(2, b"opaque".to_vec()).unwrap();
         assert_eq!(context.version(), 2);
         assert_eq!(context.payload(), b"opaque");
+    }
+
+    #[test]
+    fn manifest_rejects_duplicate_capability_declarations() {
+        let capability = CapabilityDeclaration {
+            id: CapabilityId::new("runtime.subagents").unwrap(),
+            support: CapabilitySupport {
+                level: SupportLevel::Derived,
+                granularity: CapabilityGranularity::Run,
+                availability: Availability::Live,
+                notes: None,
+            },
+        };
+        let manifest = AdapterManifest {
+            id: AdapterId::new("fixture").unwrap(),
+            display_name: "Fixture".to_string(),
+            adapter_version: "1".to_string(),
+            contract_version: 1,
+            source_schema_versions: Vec::new(),
+            capabilities: vec![capability.clone(), capability],
+        };
+        assert!(manifest.validate().is_err());
     }
 }

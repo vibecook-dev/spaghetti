@@ -10,13 +10,15 @@ use serde_json::Value;
 
 use crate::adapter::{
     AdapterDiagnostic, AdapterError, AdapterErrorClass, AdapterId, AdapterManifest,
-    AdapterObjectContext, AgentAdapter, ConsistencyPolicy, ContentBlock, DecodeContext,
-    DecodeDisposition, DecoderId, DeletionPolicy, DiscoveryContext, DriverSpec, EntityKey,
-    EntityScope, EvidenceKind, EvidenceStrength, Fact, FactBatch, MessageFact, MessageRole,
-    ObjectSelector, QualifiedTimestamp, RawRetentionPolicy, RunEvidenceFact, RunFact, SessionFact,
-    SourceInstance, SourceInstanceKey, SourceInstanceSpec, SourceObjectDescriptor, SourceRoot,
-    StreamAuthority, StreamId, StreamSpec, TimestampQuality, TokenUsage, UsageAccounting,
-    UsageFact, UsageScope, ValueQuality,
+    AdapterObjectContext, AgentAdapter, Availability, CapabilityDeclaration, CapabilityGranularity,
+    CapabilityId, CapabilitySupport, ConsistencyPolicy, ContentBlock, DecodeContext,
+    DecodeDisposition, DecoderId, DelegationFact, DelegationKind, DeletionPolicy, DiscoveryContext,
+    DriverSpec, EntityKey, EntityScope, EvidenceKind, EvidenceStrength, Fact, FactBatch,
+    MessageFact, MessageRole, ObjectSelector, QualifiedTimestamp, RawRetentionPolicy,
+    RelationStrength, RunEvidenceFact, RunFact, SessionFact, SourceInstance, SourceInstanceKey,
+    SourceInstanceSpec, SourceObjectDescriptor, SourceRoot, StreamAuthority, StreamId, StreamSpec,
+    SupportLevel, TimestampQuality, TokenUsage, UsageAccounting, UsageFact, UsageScope,
+    ValueQuality,
 };
 use crate::claude::message_extractor;
 use crate::claude::session_metadata;
@@ -35,6 +37,20 @@ const PARENT_DECODER: &str = "claude-session-record";
 const SUBAGENT_DECODER: &str = "claude-subagent-record";
 const OBJECT_CONTEXT_VERSION: u32 = 1;
 
+const HISTORY_SESSIONS: &str = "history.sessions";
+const HISTORY_MESSAGES: &str = "history.messages";
+const HISTORY_CONTENT_BLOCKS: &str = "history.content_blocks";
+const HISTORY_TIMESTAMPS: &str = "history.timestamps";
+const HISTORY_MODEL_IDENTITY: &str = "history.model_identity";
+const RUNTIME_SESSION_ACTIVITY: &str = "runtime.session_activity";
+const RUNTIME_SUBAGENTS: &str = "runtime.subagents";
+const USAGE_INPUT_TOKENS: &str = "usage.input_tokens";
+const USAGE_OUTPUT_TOKENS: &str = "usage.output_tokens";
+const USAGE_CACHE_TOKENS: &str = "usage.cache_tokens";
+const SOURCE_LIVE: &str = "source.live";
+const SOURCE_RECONCILE: &str = "source.reconcile";
+const SOURCE_RESUME_CURSOR: &str = "source.resume_cursor";
+
 pub struct ClaudeCodeAdapter {
     manifest: AdapterManifest,
 }
@@ -46,9 +62,9 @@ impl ClaudeCodeAdapter {
                 id: AdapterId::new(ADAPTER_ID).expect("static Claude adapter id is valid"),
                 display_name: "Claude Code".to_string(),
                 adapter_version: env!("CARGO_PKG_VERSION").to_string(),
-                contract_version: 1,
+                contract_version: 2,
                 source_schema_versions: vec!["claude-code-jsonl-v1".to_string()],
-                capabilities: vec!["history".to_string(), "usage".to_string()],
+                capabilities: claude_capabilities(),
             },
         }
     }
@@ -132,7 +148,7 @@ impl AgentAdapter for ClaudeCodeAdapter {
                 consistency: ConsistencyPolicy::IncrementalCursor,
                 deletion: DeletionPolicy::MirrorSource,
                 retention: RawRetentionPolicy::Full,
-                capabilities: vec!["history".to_string(), "usage".to_string()],
+                capabilities: transcript_capabilities(false),
             },
             StreamSpec {
                 id: StreamId::new(SUBAGENT_STREAM)?,
@@ -149,7 +165,7 @@ impl AgentAdapter for ClaudeCodeAdapter {
                 consistency: ConsistencyPolicy::IncrementalCursor,
                 deletion: DeletionPolicy::MirrorSource,
                 retention: RawRetentionPolicy::Full,
-                capabilities: vec!["history".to_string(), "usage".to_string()],
+                capabilities: transcript_capabilities(true),
             },
         ];
         for stream in &streams {
@@ -203,6 +219,83 @@ impl AgentAdapter for ClaudeCodeAdapter {
         }
         decode_transcript_record(self.adapter_id(), &object_context, record, output)
     }
+}
+
+fn claude_capabilities() -> Vec<CapabilityDeclaration> {
+    let live_native = |id, granularity| {
+        capability(
+            id,
+            SupportLevel::Native,
+            granularity,
+            Availability::Live,
+            None,
+        )
+    };
+    vec![
+        live_native(HISTORY_SESSIONS, CapabilityGranularity::Session),
+        live_native(HISTORY_MESSAGES, CapabilityGranularity::Message),
+        live_native(HISTORY_CONTENT_BLOCKS, CapabilityGranularity::Message),
+        live_native(HISTORY_TIMESTAMPS, CapabilityGranularity::Message),
+        live_native(HISTORY_MODEL_IDENTITY, CapabilityGranularity::Message),
+        live_native(RUNTIME_SESSION_ACTIVITY, CapabilityGranularity::Run),
+        capability(
+            RUNTIME_SUBAGENTS,
+            SupportLevel::Derived,
+            CapabilityGranularity::Run,
+            Availability::Live,
+            Some(
+                "child identity and parent lineage come from Claude's transcript layout; silence never implies completion",
+            ),
+        ),
+        live_native(USAGE_INPUT_TOKENS, CapabilityGranularity::Message),
+        live_native(USAGE_OUTPUT_TOKENS, CapabilityGranularity::Message),
+        live_native(USAGE_CACHE_TOKENS, CapabilityGranularity::Message),
+        live_native(SOURCE_LIVE, CapabilityGranularity::Instance),
+        live_native(SOURCE_RECONCILE, CapabilityGranularity::Instance),
+        live_native(SOURCE_RESUME_CURSOR, CapabilityGranularity::Record),
+    ]
+}
+
+fn capability(
+    id: &'static str,
+    level: SupportLevel,
+    granularity: CapabilityGranularity,
+    availability: Availability,
+    notes: Option<&'static str>,
+) -> CapabilityDeclaration {
+    CapabilityDeclaration {
+        id: CapabilityId::new(id).expect("static Claude capability id is valid"),
+        support: CapabilitySupport {
+            level,
+            granularity,
+            availability,
+            notes: notes.map(str::to_owned),
+        },
+    }
+}
+
+fn transcript_capabilities(include_subagents: bool) -> Vec<CapabilityId> {
+    let mut capabilities = vec![
+        HISTORY_SESSIONS,
+        HISTORY_MESSAGES,
+        HISTORY_CONTENT_BLOCKS,
+        HISTORY_TIMESTAMPS,
+        HISTORY_MODEL_IDENTITY,
+        RUNTIME_SESSION_ACTIVITY,
+        USAGE_INPUT_TOKENS,
+        USAGE_OUTPUT_TOKENS,
+        USAGE_CACHE_TOKENS,
+        SOURCE_LIVE,
+        SOURCE_RECONCILE,
+        SOURCE_RESUME_CURSOR,
+    ];
+    if include_subagents {
+        capabilities.push(RUNTIME_SUBAGENTS);
+    }
+    capabilities
+        .into_iter()
+        .map(|id| CapabilityId::new(id).expect("static Claude stream capability id is valid"))
+        .collect()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -389,6 +482,7 @@ fn decode_transcript_record(
     } else {
         None
     };
+    let delegation_parent = parent_run.clone();
     output.push(
         record,
         Fact::Run(RunFact {
@@ -398,6 +492,25 @@ fn decode_transcript_record(
             parent_run,
         }),
     )?;
+    if let Some(agent_id) = &context.agent_id {
+        output.push(
+            record,
+            Fact::Delegation(DelegationFact {
+                child_run: run.clone(),
+                parent_run: delegation_parent,
+                session: session.clone(),
+                kind: DelegationKind::VendorNativeSubagent,
+                relation_strength: RelationStrength::Layout,
+                native_child_id: Some(agent_id.clone()),
+                native_task_id: None,
+                label: None,
+                prompt: None,
+                cwd: nonempty_field(&value, "cwd"),
+                worktree_path: None,
+                source_time: source_time.clone(),
+            }),
+        )?;
+    }
 
     let native_message_id = projection.uuid.filter(|value| !value.is_empty());
     let message_native_key = message_native_key(context, record, native_message_id.as_deref());
@@ -803,11 +916,29 @@ mod tests {
             })
             .unwrap();
         assert_eq!(streams.len(), 2);
+        assert_eq!(adapter.manifest().contract_version, 2);
         assert!(streams
             .iter()
             .all(|stream| matches!(stream.driver, DriverSpec::AppendDelimited(_))));
         assert_eq!(streams[0].decoder.as_str(), PARENT_DECODER);
         assert_eq!(streams[1].decoder.as_str(), SUBAGENT_DECODER);
+        assert!(!streams[0]
+            .capabilities
+            .iter()
+            .any(|capability| capability.as_str() == RUNTIME_SUBAGENTS));
+        assert!(streams[1]
+            .capabilities
+            .iter()
+            .any(|capability| capability.as_str() == RUNTIME_SUBAGENTS));
+        let support = adapter
+            .manifest()
+            .capabilities
+            .iter()
+            .find(|capability| capability.id.as_str() == RUNTIME_SUBAGENTS)
+            .unwrap();
+        assert_eq!(support.support.level, SupportLevel::Derived);
+        assert_eq!(support.support.granularity, CapabilityGranularity::Run);
+        assert_eq!(support.support.availability, Availability::Live);
     }
 
     #[test]
@@ -955,5 +1086,34 @@ mod tests {
         assert_eq!(decoded.session_id, SESSION);
         assert_eq!(decoded.agent_id.as_deref(), Some("a1"));
         assert_eq!(decoded.workflow_id.as_deref(), Some("w1"));
+
+        let record = record(
+            format!(
+                r#"{{"type":"user","uuid":"child-message","parentUuid":null,"timestamp":"2026-08-11T00:00:00Z","sessionId":"{SESSION}","cwd":"/repo/.worktrees/a1","version":"1","gitBranch":"main","isSidechain":false,"userType":"external","message":{{"role":"user","content":"inspect the parser"}}}}"#
+            )
+            .as_bytes(),
+        );
+        let mut batch = FactBatch::new(8, 4).unwrap();
+        adapter
+            .decode(
+                DecodeContext {
+                    decoder: &DecoderId::new(SUBAGENT_DECODER).unwrap(),
+                    object_context: &context,
+                },
+                &record,
+                &mut batch,
+            )
+            .unwrap();
+        let delegation = fact_values(&batch)
+            .find_map(|fact| match fact {
+                Fact::Delegation(delegation) => Some(delegation),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(delegation.kind, DelegationKind::VendorNativeSubagent);
+        assert_eq!(delegation.relation_strength, RelationStrength::Layout);
+        assert_eq!(delegation.native_child_id.as_deref(), Some("a1"));
+        assert_eq!(delegation.cwd.as_deref(), Some("/repo/.worktrees/a1"));
+        assert!(delegation.parent_run.is_some());
     }
 }

@@ -456,6 +456,8 @@ const RFC011_SCHEMA_TABLES = [
   'canonical_runs',
   'run_evidence',
   'observed_run_states',
+  'delegation_assertions',
+  'canonical_delegations',
   'usage_contributions',
   'usage_totals',
 ] as const;
@@ -520,6 +522,14 @@ const TABLE_SPECS: TableSpec[] = [
   {
     name: 'observed_run_states',
     orderBy: 'run_key',
+  },
+  {
+    name: 'delegation_assertions',
+    orderBy: 'fact_id',
+  },
+  {
+    name: 'canonical_delegations',
+    orderBy: 'child_run_key',
   },
   {
     name: 'usage_contributions',

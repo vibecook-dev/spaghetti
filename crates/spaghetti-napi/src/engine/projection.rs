@@ -3,14 +3,15 @@
 //! This is the only boundary that translates adapter facts into storage.
 //! Adapters never receive a SQLite handle, table name, or change-log topic.
 
+use std::cell::RefCell;
 use std::collections::BTreeSet;
 
 use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 
 use crate::adapter::{
-    EntityKey, EvidenceKind, EvidenceStrength, Fact, FactBatch, FactEnvelope, MessageRole,
-    QualifiedTimestamp, TimestampQuality, TokenUsage, UsageAccounting, UsageFact, UsageScope,
-    ValueQuality,
+    DelegationFact, DelegationKind, EntityKey, EvidenceKind, EvidenceStrength, Fact, FactBatch,
+    FactEnvelope, MessageRole, QualifiedTimestamp, RelationStrength, TimestampQuality, TokenUsage,
+    UsageAccounting, UsageFact, UsageScope, ValueQuality,
 };
 
 use super::commit::{
@@ -54,12 +55,16 @@ pub(super) fn apply_fact_observation_commit(
         }
         request.object.decoder_state = Some(next_decoder_state.to_vec());
     }
-    let projection = FactProjectionWork { batch };
+    let projection = FactProjectionWork {
+        batch,
+        retracted_run_keys: RefCell::new(BTreeSet::new()),
+    };
     apply_observation_commit_with_projection(connection, &request, &projection)
 }
 
 struct FactProjectionWork<'a> {
     batch: &'a FactBatch,
+    retracted_run_keys: RefCell<BTreeSet<Vec<u8>>>,
 }
 
 impl TransactionalProjectionWork for FactProjectionWork<'_> {
@@ -69,6 +74,12 @@ impl TransactionalProjectionWork for FactProjectionWork<'_> {
         context: &ProjectionCommitContext,
     ) -> Result<Vec<ChangeEntry>, EngineError> {
         validate_batch_provenance(self.batch, context)?;
+        self.retracted_run_keys.replace(old_generation_keys(
+            transaction,
+            "SELECT DISTINCT run_key FROM canonical_runs WHERE source_object_id = ?1 AND source_generation <> ?2",
+            context,
+            "read replaced canonical runs",
+        )?);
         let mut changes = retract_canonical_generation(transaction, context)?;
         for envelope in self.batch.facts() {
             persist_fact(transaction, context, envelope)?;
@@ -243,7 +254,7 @@ impl TransactionalProjectionWork for FactProjectionWork<'_> {
                     envelope.id.as_bytes(),
                     envelope,
                 )?),
-                Fact::RunEvidence(_) | Fact::Usage(_) => {}
+                Fact::Delegation(_) | Fact::RunEvidence(_) | Fact::Usage(_) => {}
             }
         }
         Ok(changes)
@@ -254,7 +265,7 @@ impl TransactionalProjectionWork for FactProjectionWork<'_> {
         transaction: &Transaction<'_>,
         context: &ProjectionCommitContext,
     ) -> Result<Vec<ChangeEntry>, EngineError> {
-        let mut affected = old_generation_keys(
+        let mut affected_states = old_generation_keys(
             transaction,
             "SELECT DISTINCT run_key FROM run_evidence WHERE source_object_id = ?1 AND source_generation <> ?2",
             context,
@@ -310,13 +321,65 @@ impl TransactionalProjectionWork for FactProjectionWork<'_> {
                     ],
                 )
                 .map_err(|error| sqlite_error("project run evidence", error))?;
-            affected.insert(fact.run.as_bytes().to_vec());
+            affected_states.insert(fact.run.as_bytes().to_vec());
         }
 
-        let mut changes = Vec::with_capacity(affected.len());
-        for run_key in affected {
+        let mut changes = Vec::with_capacity(affected_states.len());
+        for run_key in affected_states {
             let state = reduce_run_state(transaction, &run_key, context.commit_seq)?;
             changes.push(state_change(&run_key, state.as_deref())?);
+        }
+
+        let mut affected_delegations = old_generation_keys(
+            transaction,
+            "SELECT DISTINCT child_run_key FROM delegation_assertions WHERE source_object_id = ?1 AND source_generation <> ?2",
+            context,
+            "read replaced delegation assertions",
+        )?;
+        transaction
+            .execute(
+                "DELETE FROM delegation_assertions WHERE source_object_id = ?1 AND source_generation <> ?2",
+                params![
+                    sqlite_u64(context.source_object_id, "source object id")?,
+                    sqlite_u64(context.generation, "source generation")?,
+                ],
+            )
+            .map_err(|error| sqlite_error("retract replaced delegation assertions", error))?;
+
+        for envelope in self.batch.facts() {
+            let Fact::Delegation(fact) = &envelope.value else {
+                continue;
+            };
+            if let Some(previous_child) = transaction
+                .query_row(
+                    "SELECT child_run_key FROM delegation_assertions WHERE fact_id = ?1",
+                    [envelope.id.as_bytes().as_slice()],
+                    |row| row.get::<_, Vec<u8>>(0),
+                )
+                .optional()
+                .map_err(|error| sqlite_error("read prior delegation assertion", error))?
+            {
+                affected_delegations.insert(previous_child);
+            }
+            write_delegation_assertion(transaction, context, envelope, fact)?;
+            affected_delegations.insert(fact.child_run.as_bytes().to_vec());
+        }
+
+        let mut changed_runs = self.retracted_run_keys.borrow().clone();
+        changed_runs.extend(self.batch.facts().iter().filter_map(|envelope| {
+            let Fact::Run(fact) = &envelope.value else {
+                return None;
+            };
+            Some(fact.run.as_bytes().to_vec())
+        }));
+        for run_key in changed_runs {
+            affected_delegations.extend(delegation_children_for_run(transaction, &run_key)?);
+        }
+
+        for child_run_key in affected_delegations {
+            let reduction = reduce_delegation(transaction, &child_run_key, context.commit_seq)?;
+            changes.push(delegation_change(&child_run_key, &reduction)?);
+            changes.push(delegation_conflict_change(&child_run_key, &reduction)?);
         }
         Ok(changes)
     }
@@ -657,6 +720,292 @@ fn reduce_run_state(
     Ok(Some(state.to_string()))
 }
 
+fn write_delegation_assertion(
+    transaction: &Transaction<'_>,
+    context: &ProjectionCommitContext,
+    envelope: &FactEnvelope,
+    fact: &DelegationFact,
+) -> Result<(), EngineError> {
+    transaction
+        .execute(
+            r#"
+            INSERT INTO delegation_assertions (
+                fact_id, child_run_key, parent_run_key, session_key,
+                relation_kind, relation_strength, native_child_id,
+                native_task_id, label, prompt, cwd, worktree_path,
+                source_time, source_time_quality, source_object_id,
+                source_generation, cursor_end, last_commit_seq
+            ) VALUES (
+                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
+                ?13, ?14, ?15, ?16, ?17, ?18
+            )
+            ON CONFLICT(fact_id) DO UPDATE SET
+                child_run_key = excluded.child_run_key,
+                parent_run_key = excluded.parent_run_key,
+                session_key = excluded.session_key,
+                relation_kind = excluded.relation_kind,
+                relation_strength = excluded.relation_strength,
+                native_child_id = excluded.native_child_id,
+                native_task_id = excluded.native_task_id,
+                label = excluded.label,
+                prompt = excluded.prompt,
+                cwd = excluded.cwd,
+                worktree_path = excluded.worktree_path,
+                source_time = excluded.source_time,
+                source_time_quality = excluded.source_time_quality,
+                source_object_id = excluded.source_object_id,
+                source_generation = excluded.source_generation,
+                cursor_end = excluded.cursor_end,
+                last_commit_seq = excluded.last_commit_seq
+            "#,
+            params![
+                envelope.id.as_bytes().as_slice(),
+                fact.child_run.as_bytes(),
+                fact.parent_run.as_ref().map(EntityKey::as_bytes),
+                fact.session.as_bytes(),
+                delegation_kind(&fact.kind),
+                relation_strength(fact.relation_strength),
+                fact.native_child_id,
+                fact.native_task_id,
+                fact.label,
+                fact.prompt,
+                fact.cwd,
+                fact.worktree_path,
+                timestamp_value(fact.source_time.as_ref()),
+                timestamp_quality(fact.source_time.as_ref()),
+                sqlite_u64(context.source_object_id, "source object id")?,
+                sqlite_u64(context.generation, "source generation")?,
+                envelope.provenance.cursor_end,
+                sqlite_u64(context.commit_seq, "commit sequence")?,
+            ],
+        )
+        .map(|_| ())
+        .map_err(|error| sqlite_error("project delegation assertion", error))
+}
+
+fn delegation_children_for_run(
+    transaction: &Transaction<'_>,
+    run_key: &[u8],
+) -> Result<BTreeSet<Vec<u8>>, EngineError> {
+    let mut statement = transaction
+        .prepare(
+            r#"
+            SELECT DISTINCT child_run_key FROM delegation_assertions
+            WHERE child_run_key = ?1 OR parent_run_key = ?1
+            "#,
+        )
+        .map_err(|error| sqlite_error("prepare delegation run correlation", error))?;
+    let children = statement
+        .query_map([run_key], |row| row.get::<_, Vec<u8>>(0))
+        .map_err(|error| sqlite_error("read delegation run correlation", error))?
+        .collect::<Result<BTreeSet<_>, _>>()
+        .map_err(|error| sqlite_error("collect delegation run correlation", error))?;
+    Ok(children)
+}
+
+#[derive(Debug)]
+struct DelegationAssertionRow {
+    fact_id: Vec<u8>,
+    parent_run_key: Option<Vec<u8>>,
+    session_key: Vec<u8>,
+    relation_kind: String,
+    relation_strength: String,
+    native_child_id: Option<String>,
+    native_task_id: Option<String>,
+    label: Option<String>,
+    prompt: Option<String>,
+    cwd: Option<String>,
+    worktree_path: Option<String>,
+    source_time: Option<String>,
+    source_time_quality: Option<String>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct DelegationReduction {
+    status: Option<String>,
+    assertion_count: usize,
+    competing_relation_count: usize,
+}
+
+fn reduce_delegation(
+    transaction: &Transaction<'_>,
+    child_run_key: &[u8],
+    commit_seq: u64,
+) -> Result<DelegationReduction, EngineError> {
+    let mut statement = transaction
+        .prepare(
+            r#"
+            SELECT fact_id, parent_run_key, session_key, relation_kind,
+                   relation_strength, native_child_id, native_task_id,
+                   label, prompt, cwd, worktree_path, source_time,
+                   source_time_quality
+            FROM delegation_assertions
+            WHERE child_run_key = ?1
+            ORDER BY
+              CASE relation_strength
+                WHEN 'native_explicit' THEN 30
+                WHEN 'native_indirect' THEN 20
+                WHEN 'layout' THEN 10
+                ELSE 0
+              END DESC,
+              source_generation DESC, cursor_end DESC,
+              last_commit_seq DESC, fact_id DESC
+            "#,
+        )
+        .map_err(|error| sqlite_error("prepare delegation reduction", error))?;
+    let assertions = statement
+        .query_map([child_run_key], |row| {
+            Ok(DelegationAssertionRow {
+                fact_id: row.get(0)?,
+                parent_run_key: row.get(1)?,
+                session_key: row.get(2)?,
+                relation_kind: row.get(3)?,
+                relation_strength: row.get(4)?,
+                native_child_id: row.get(5)?,
+                native_task_id: row.get(6)?,
+                label: row.get(7)?,
+                prompt: row.get(8)?,
+                cwd: row.get(9)?,
+                worktree_path: row.get(10)?,
+                source_time: row.get(11)?,
+                source_time_quality: row.get(12)?,
+            })
+        })
+        .map_err(|error| sqlite_error("read delegation assertions", error))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| sqlite_error("collect delegation assertions", error))?;
+    drop(statement);
+
+    let Some(decisive) = assertions.first() else {
+        transaction
+            .execute(
+                "DELETE FROM canonical_delegations WHERE child_run_key = ?1",
+                [child_run_key],
+            )
+            .map_err(|error| sqlite_error("remove empty canonical delegation", error))?;
+        return Ok(DelegationReduction {
+            status: None,
+            assertion_count: 0,
+            competing_relation_count: 0,
+        });
+    };
+
+    let strongest_relations = assertions
+        .iter()
+        .filter(|assertion| assertion.relation_strength == decisive.relation_strength)
+        .map(|assertion| {
+            (
+                assertion.parent_run_key.clone(),
+                assertion.relation_kind.clone(),
+            )
+        })
+        .collect::<BTreeSet<_>>();
+    let competing_relation_count = strongest_relations.len().saturating_sub(1);
+    let child_present = canonical_run_exists(transaction, child_run_key)?;
+    let parent_present = decisive
+        .parent_run_key
+        .as_deref()
+        .map(|parent| canonical_run_exists(transaction, parent))
+        .transpose()?
+        .unwrap_or(false);
+    let status = if competing_relation_count > 0 {
+        "conflicting"
+    } else if !child_present {
+        "unresolved_child"
+    } else if decisive.parent_run_key.is_none() {
+        "unresolved_relation"
+    } else if !parent_present {
+        "unresolved_parent"
+    } else {
+        "resolved"
+    };
+    let assertion_count = i64::try_from(assertions.len()).map_err(|_| {
+        EngineError::InvalidCommit("delegation assertion count exceeds SQLite range".to_string())
+    })?;
+    let competing_count = i64::try_from(competing_relation_count).map_err(|_| {
+        EngineError::InvalidCommit("delegation conflict count exceeds SQLite range".to_string())
+    })?;
+    transaction
+        .execute(
+            r#"
+            INSERT INTO canonical_delegations (
+                child_run_key, parent_run_key, session_key, relation_kind,
+                relation_strength, relation_status, native_child_id,
+                native_task_id, label, prompt, cwd, worktree_path,
+                source_time, source_time_quality, decisive_fact_id,
+                assertion_count, competing_relation_count, child_present,
+                parent_present, last_commit_seq
+            ) VALUES (
+                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
+                ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20
+            )
+            ON CONFLICT(child_run_key) DO UPDATE SET
+                parent_run_key = excluded.parent_run_key,
+                session_key = excluded.session_key,
+                relation_kind = excluded.relation_kind,
+                relation_strength = excluded.relation_strength,
+                relation_status = excluded.relation_status,
+                native_child_id = excluded.native_child_id,
+                native_task_id = excluded.native_task_id,
+                label = excluded.label,
+                prompt = excluded.prompt,
+                cwd = excluded.cwd,
+                worktree_path = excluded.worktree_path,
+                source_time = excluded.source_time,
+                source_time_quality = excluded.source_time_quality,
+                decisive_fact_id = excluded.decisive_fact_id,
+                assertion_count = excluded.assertion_count,
+                competing_relation_count = excluded.competing_relation_count,
+                child_present = excluded.child_present,
+                parent_present = excluded.parent_present,
+                last_commit_seq = excluded.last_commit_seq
+            "#,
+            params![
+                child_run_key,
+                decisive.parent_run_key,
+                decisive.session_key,
+                decisive.relation_kind,
+                decisive.relation_strength,
+                status,
+                decisive.native_child_id,
+                decisive.native_task_id,
+                decisive.label,
+                decisive.prompt,
+                decisive.cwd,
+                decisive.worktree_path,
+                decisive.source_time,
+                decisive.source_time_quality,
+                decisive.fact_id,
+                assertion_count,
+                competing_count,
+                i64::from(child_present),
+                i64::from(parent_present),
+                sqlite_u64(commit_seq, "commit sequence")?,
+            ],
+        )
+        .map_err(|error| sqlite_error("write canonical delegation", error))?;
+    Ok(DelegationReduction {
+        status: Some(status.to_string()),
+        assertion_count: assertions.len(),
+        competing_relation_count,
+    })
+}
+
+fn canonical_run_exists(
+    transaction: &Transaction<'_>,
+    run_key: &[u8],
+) -> Result<bool, EngineError> {
+    transaction
+        .query_row(
+            "SELECT 1 FROM canonical_runs WHERE run_key = ?1",
+            [run_key],
+            |_| Ok(()),
+        )
+        .optional()
+        .map(|row| row.is_some())
+        .map_err(|error| sqlite_error("read delegation run presence", error))
+}
+
 #[derive(Debug, Clone)]
 struct UsageContribution {
     session_key: Vec<u8>,
@@ -963,6 +1312,53 @@ fn state_change(entity_key: &[u8], state: Option<&str>) -> Result<ChangeEntry, E
     })
 }
 
+fn delegation_change(
+    entity_key: &[u8],
+    reduction: &DelegationReduction,
+) -> Result<ChangeEntry, EngineError> {
+    let payload = serialize(
+        &serde_json::json!({
+            "status": reduction.status,
+            "assertion_count": reduction.assertion_count,
+            "competing_relation_count": reduction.competing_relation_count,
+        }),
+        "serialize delegation change",
+    )?;
+    Ok(ChangeEntry {
+        topic: "runtime.delegation.changed".to_string(),
+        schema_version: CHANGE_SCHEMA_VERSION,
+        entity_key: entity_key.to_vec(),
+        operation: if reduction.status.is_some() {
+            "upsert"
+        } else {
+            "delete"
+        }
+        .to_string(),
+        payload,
+    })
+}
+
+fn delegation_conflict_change(
+    entity_key: &[u8],
+    reduction: &DelegationReduction,
+) -> Result<ChangeEntry, EngineError> {
+    let conflicting = reduction.competing_relation_count > 0;
+    let payload = serialize(
+        &serde_json::json!({
+            "conflicting": conflicting,
+            "competing_relation_count": reduction.competing_relation_count,
+        }),
+        "serialize delegation conflict change",
+    )?;
+    Ok(ChangeEntry {
+        topic: "diagnostic.runtime.delegation-conflict".to_string(),
+        schema_version: CHANGE_SCHEMA_VERSION,
+        entity_key: entity_key.to_vec(),
+        operation: if conflicting { "upsert" } else { "delete" }.to_string(),
+        payload,
+    })
+}
+
 fn simple_change(
     topic: &'static str,
     entity_key: &[u8],
@@ -1051,6 +1447,23 @@ fn evidence_kind(kind: EvidenceKind) -> &'static str {
     }
 }
 
+fn delegation_kind(kind: &DelegationKind) -> String {
+    match kind {
+        DelegationKind::VendorNativeSubagent => "vendor_native_subagent".to_string(),
+        DelegationKind::ForkedConversation => "forked_conversation".to_string(),
+        DelegationKind::ChildProcess => "child_process".to_string(),
+        DelegationKind::Other(value) => format!("other:{value}"),
+    }
+}
+
+fn relation_strength(strength: RelationStrength) -> &'static str {
+    match strength {
+        RelationStrength::Layout => "layout",
+        RelationStrength::NativeIndirect => "native_indirect",
+        RelationStrength::NativeExplicit => "native_explicit",
+    }
+}
+
 fn evidence_strength(strength: EvidenceStrength) -> &'static str {
     match strength {
         EvidenceStrength::Layout => "layout",
@@ -1117,9 +1530,10 @@ mod tests {
     use walkdir::WalkDir;
 
     use crate::adapter::{
-        AdapterObjectContext, AgentAdapter, DecodeContext, DecoderId, FactBatch, SourceInstance,
-        SourceInstanceKey, SourceInstanceSpec as AdapterSourceInstanceSpec, SourceObjectDescriptor,
-        SourceRoot, StreamId,
+        AdapterId, AdapterObjectContext, AgentAdapter, DecodeContext, DecoderId, FactBatch,
+        RunEvidenceFact, RunFact, SourceInstance, SourceInstanceKey,
+        SourceInstanceSpec as AdapterSourceInstanceSpec, SourceObjectDescriptor, SourceRoot,
+        StreamId,
     };
     use crate::claude::ClaudeCodeAdapter;
     use crate::core::schema;
@@ -1194,7 +1608,7 @@ mod tests {
                 adapter_id: "claude-code".to_string(),
                 stable_key: b"fixture-root".to_vec(),
                 display_name: "Claude fixture".to_string(),
-                adapter_contract_version: 1,
+                adapter_contract_version: 2,
                 discovered_at: 1,
                 last_seen_at: started_at,
             },
@@ -1218,7 +1632,7 @@ mod tests {
                 decoder_state_version: None,
                 size_bytes: None,
                 mtime_ns: None,
-                decoder_contract_version: 1,
+                decoder_contract_version: 2,
                 state: "active".to_string(),
             },
             reason: "fixture".to_string(),
@@ -1253,6 +1667,57 @@ mod tests {
             source_timestamp_hint: None,
             media_type: SourceMediaType::new("application/x-ndjson").unwrap(),
         }
+    }
+
+    fn direct_record(
+        generation: u64,
+        start: u64,
+        end: u64,
+        observed_at: i64,
+        payload: &[u8],
+    ) -> SourceRecord {
+        SourceRecord::new(
+            &origin(observed_at),
+            generation,
+            SourceCursor::append_offset(start),
+            SourceCursor::append_offset(end),
+            0,
+            payload.to_vec(),
+        )
+    }
+
+    fn entity(kind: &str, native_key: &str) -> EntityKey {
+        EntityKey::native(
+            &AdapterId::new("claude-code").unwrap(),
+            1,
+            kind,
+            native_key.as_bytes(),
+        )
+        .unwrap()
+    }
+
+    fn commit_direct_batch(
+        connection: &mut Connection,
+        record: &SourceRecord,
+        expected_generation: u64,
+        expected_cursor: u64,
+        clock: i64,
+        batch: &FactBatch,
+    ) {
+        apply_fact_observation_commit(
+            connection,
+            &request(
+                ExpectedSourceCursor::At {
+                    generation: expected_generation,
+                    committed_cursor: SourceCursor::append_offset(expected_cursor).into_bytes(),
+                },
+                record.generation,
+                record.cursor_end.as_bytes().to_vec(),
+                clock,
+            ),
+            batch,
+        )
+        .unwrap();
     }
 
     fn decode_commit(
@@ -1471,7 +1936,7 @@ mod tests {
                 adapter_id: "claude-code".to_string(),
                 stable_key: b"phase4-shadow-fixture".to_vec(),
                 display_name: "Claude Phase 4 shadow fixture".to_string(),
-                adapter_contract_version: 1,
+                adapter_contract_version: 2,
                 discovered_at: 1,
                 last_seen_at: input.clock,
             },
@@ -1495,7 +1960,7 @@ mod tests {
                 decoder_state_version: None,
                 size_bytes: None,
                 mtime_ns: None,
-                decoder_contract_version: 1,
+                decoder_contract_version: 2,
                 state: "active".to_string(),
             },
             reason: "phase4_shadow".to_string(),
@@ -1947,6 +2412,333 @@ mod tests {
                         |row| row.get::<_, i64>(0),
                     )
                     .unwrap()
+        );
+    }
+
+    #[test]
+    fn delegation_child_first_late_correlates_and_replays_without_completion() {
+        let mut connection = database();
+        register_object(&mut connection);
+        let session = entity("session", SESSION);
+        let parent = entity("run", SESSION);
+        let child = entity("run", &format!("{SESSION}\0\0child"));
+
+        let child_record = direct_record(1, 0, 1, 20, b"child");
+        let mut child_batch = FactBatch::new(4, 2).unwrap();
+        child_batch
+            .push(
+                &child_record,
+                Fact::Run(RunFact {
+                    run: child.clone(),
+                    session: session.clone(),
+                    native_run_id: "child".to_string(),
+                    parent_run: Some(parent.clone()),
+                }),
+            )
+            .unwrap();
+        child_batch
+            .push(
+                &child_record,
+                Fact::Delegation(DelegationFact {
+                    child_run: child.clone(),
+                    parent_run: Some(parent.clone()),
+                    session: session.clone(),
+                    kind: DelegationKind::VendorNativeSubagent,
+                    relation_strength: RelationStrength::Layout,
+                    native_child_id: Some("child".to_string()),
+                    native_task_id: None,
+                    label: None,
+                    prompt: None,
+                    cwd: Some("/repo".to_string()),
+                    worktree_path: None,
+                    source_time: None,
+                }),
+            )
+            .unwrap();
+        child_batch
+            .push(
+                &child_record,
+                Fact::RunEvidence(RunEvidenceFact {
+                    run: child.clone(),
+                    kind: EvidenceKind::ActivityObserved,
+                    strength: EvidenceStrength::NativeActivity,
+                    native_state: None,
+                    source_time: None,
+                }),
+            )
+            .unwrap();
+        commit_direct_batch(&mut connection, &child_record, 1, 0, 21, &child_batch);
+        let unresolved: (String, i64, i64) = connection
+            .query_row(
+                "SELECT relation_status, child_present, parent_present FROM canonical_delegations WHERE child_run_key = ?1",
+                [child.as_bytes()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(unresolved, ("unresolved_parent".to_string(), 1, 0));
+
+        let parent_record = direct_record(1, 1, 2, 22, b"parent");
+        let mut parent_batch = FactBatch::new(2, 2).unwrap();
+        parent_batch
+            .push(
+                &parent_record,
+                Fact::Run(RunFact {
+                    run: parent.clone(),
+                    session: session.clone(),
+                    native_run_id: SESSION.to_string(),
+                    parent_run: None,
+                }),
+            )
+            .unwrap();
+        commit_direct_batch(&mut connection, &parent_record, 1, 1, 23, &parent_batch);
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT relation_status FROM canonical_delegations WHERE child_run_key = ?1",
+                    [child.as_bytes()],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "resolved"
+        );
+
+        let replay_child = direct_record(2, 0, 1, 24, b"child");
+        let mut replay_child_batch = FactBatch::new(4, 2).unwrap();
+        for fact in [
+            Fact::Run(RunFact {
+                run: child.clone(),
+                session: session.clone(),
+                native_run_id: "child".to_string(),
+                parent_run: Some(parent.clone()),
+            }),
+            Fact::Delegation(DelegationFact {
+                child_run: child.clone(),
+                parent_run: Some(parent.clone()),
+                session: session.clone(),
+                kind: DelegationKind::VendorNativeSubagent,
+                relation_strength: RelationStrength::Layout,
+                native_child_id: Some("child".to_string()),
+                native_task_id: None,
+                label: None,
+                prompt: None,
+                cwd: Some("/repo".to_string()),
+                worktree_path: None,
+                source_time: None,
+            }),
+            Fact::RunEvidence(RunEvidenceFact {
+                run: child.clone(),
+                kind: EvidenceKind::ActivityObserved,
+                strength: EvidenceStrength::NativeActivity,
+                native_state: None,
+                source_time: None,
+            }),
+        ] {
+            replay_child_batch.push(&replay_child, fact).unwrap();
+        }
+        commit_direct_batch(
+            &mut connection,
+            &replay_child,
+            1,
+            2,
+            25,
+            &replay_child_batch,
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT relation_status FROM canonical_delegations WHERE child_run_key = ?1",
+                    [child.as_bytes()],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "unresolved_parent"
+        );
+        let replay_parent = direct_record(2, 1, 2, 26, b"parent");
+        let mut replay_parent_batch = FactBatch::new(2, 2).unwrap();
+        replay_parent_batch
+            .push(
+                &replay_parent,
+                Fact::Run(RunFact {
+                    run: parent,
+                    session,
+                    native_run_id: SESSION.to_string(),
+                    parent_run: None,
+                }),
+            )
+            .unwrap();
+        commit_direct_batch(
+            &mut connection,
+            &replay_parent,
+            2,
+            1,
+            27,
+            &replay_parent_batch,
+        );
+        let final_state: (String, i64, i64, i64) = connection
+            .query_row(
+                r#"
+                SELECT cd.relation_status, cd.assertion_count,
+                       cd.competing_relation_count,
+                       (SELECT COUNT(*) FROM delegation_assertions)
+                FROM canonical_delegations cd WHERE child_run_key = ?1
+                "#,
+                [child.as_bytes()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(final_state, ("resolved".to_string(), 1, 0, 1));
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT state FROM observed_run_states WHERE run_key = ?1",
+                    [child.as_bytes()],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "active"
+        );
+    }
+
+    #[test]
+    fn delegation_parent_first_resolves_in_the_child_commit() {
+        let mut connection = database();
+        register_object(&mut connection);
+        let session = entity("session", SESSION);
+        let parent = entity("run", SESSION);
+        let child = entity("run", &format!("{SESSION}\0\0child"));
+
+        let parent_record = direct_record(1, 0, 1, 20, b"parent-first");
+        let mut parent_batch = FactBatch::new(2, 2).unwrap();
+        parent_batch
+            .push(
+                &parent_record,
+                Fact::Run(RunFact {
+                    run: parent.clone(),
+                    session: session.clone(),
+                    native_run_id: SESSION.to_string(),
+                    parent_run: None,
+                }),
+            )
+            .unwrap();
+        commit_direct_batch(&mut connection, &parent_record, 1, 0, 21, &parent_batch);
+
+        let child_record = direct_record(1, 1, 2, 22, b"child-second");
+        let mut child_batch = FactBatch::new(3, 2).unwrap();
+        child_batch
+            .push(
+                &child_record,
+                Fact::Run(RunFact {
+                    run: child.clone(),
+                    session: session.clone(),
+                    native_run_id: "child".to_string(),
+                    parent_run: Some(parent.clone()),
+                }),
+            )
+            .unwrap();
+        child_batch
+            .push(
+                &child_record,
+                Fact::Delegation(DelegationFact {
+                    child_run: child.clone(),
+                    parent_run: Some(parent),
+                    session,
+                    kind: DelegationKind::VendorNativeSubagent,
+                    relation_strength: RelationStrength::Layout,
+                    native_child_id: Some("child".to_string()),
+                    native_task_id: None,
+                    label: None,
+                    prompt: None,
+                    cwd: None,
+                    worktree_path: None,
+                    source_time: None,
+                }),
+            )
+            .unwrap();
+        commit_direct_batch(&mut connection, &child_record, 1, 1, 23, &child_batch);
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT relation_status FROM canonical_delegations WHERE child_run_key = ?1",
+                    [child.as_bytes()],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "resolved"
+        );
+    }
+
+    #[test]
+    fn equal_strength_delegation_conflicts_are_preserved_and_diagnosed() {
+        let mut connection = database();
+        register_object(&mut connection);
+        let session = entity("session", SESSION);
+        let child = entity("run", "conflicted-child");
+        let parent_a = entity("run", "parent-a");
+        let parent_b = entity("run", "parent-b");
+        let record = direct_record(1, 0, 1, 20, b"conflicting-relations");
+        let mut batch = FactBatch::new(6, 2).unwrap();
+        for (run, native_run_id) in [
+            (child.clone(), "child"),
+            (parent_a.clone(), "parent-a"),
+            (parent_b.clone(), "parent-b"),
+        ] {
+            batch
+                .push(
+                    &record,
+                    Fact::Run(RunFact {
+                        run,
+                        session: session.clone(),
+                        native_run_id: native_run_id.to_string(),
+                        parent_run: None,
+                    }),
+                )
+                .unwrap();
+        }
+        for parent in [parent_a, parent_b] {
+            batch
+                .push(
+                    &record,
+                    Fact::Delegation(DelegationFact {
+                        child_run: child.clone(),
+                        parent_run: Some(parent),
+                        session: session.clone(),
+                        kind: DelegationKind::VendorNativeSubagent,
+                        relation_strength: RelationStrength::NativeExplicit,
+                        native_child_id: Some("child".to_string()),
+                        native_task_id: None,
+                        label: None,
+                        prompt: None,
+                        cwd: None,
+                        worktree_path: None,
+                        source_time: None,
+                    }),
+                )
+                .unwrap();
+        }
+        commit_direct_batch(&mut connection, &record, 1, 0, 21, &batch);
+        let projected: (String, i64, i64) = connection
+            .query_row(
+                "SELECT relation_status, assertion_count, competing_relation_count FROM canonical_delegations WHERE child_run_key = ?1",
+                [child.as_bytes()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(projected, ("conflicting".to_string(), 2, 1));
+        assert_eq!(count(&connection, "delegation_assertions"), 2);
+        assert_eq!(
+            connection
+                .query_row(
+                    r#"
+                    SELECT operation FROM change_log
+                    WHERE topic = 'diagnostic.runtime.delegation-conflict'
+                      AND entity_key = ?1
+                    ORDER BY commit_seq DESC LIMIT 1
+                    "#,
+                    [child.as_bytes()],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "upsert"
         );
     }
 
