@@ -68,7 +68,10 @@ import type { SqliteService } from '../io/index.js';
 //
 // v19: RFC 011 delegation capability assertions and late-correlated canonical
 // subagent relations.
-export const SCHEMA_VERSION = 19;
+//
+// v20: replaceable subagent metadata assertions and late-correlated canonical
+// delegation metadata.
+export const SCHEMA_VERSION = 20;
 
 export const TOKEN_ACTIVITY_TRIGGER_NAMES = [
   'token_activity_messages_ai',
@@ -698,6 +701,41 @@ CREATE TABLE IF NOT EXISTS canonical_delegations (
   last_commit_seq INTEGER NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS delegation_metadata_assertions (
+  fact_id BLOB PRIMARY KEY REFERENCES fact_records(fact_id) ON DELETE CASCADE,
+  child_run_key BLOB NOT NULL,
+  session_key BLOB NOT NULL,
+  native_child_id TEXT NOT NULL,
+  agent_type TEXT NOT NULL,
+  description TEXT,
+  native_name TEXT,
+  spawn_depth INTEGER,
+  worktree_path TEXT,
+  native_task_id TEXT,
+  source_object_id INTEGER NOT NULL,
+  source_generation INTEGER NOT NULL,
+  cursor_end BLOB NOT NULL,
+  last_commit_seq INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS canonical_delegation_metadata (
+  child_run_key BLOB PRIMARY KEY,
+  session_key BLOB NOT NULL,
+  native_child_id TEXT NOT NULL,
+  agent_type TEXT NOT NULL,
+  description TEXT,
+  native_name TEXT,
+  spawn_depth INTEGER,
+  worktree_path TEXT,
+  native_task_id TEXT,
+  metadata_status TEXT NOT NULL,
+  decisive_fact_id BLOB NOT NULL REFERENCES delegation_metadata_assertions(fact_id) ON DELETE CASCADE,
+  assertion_count INTEGER NOT NULL,
+  competing_metadata_count INTEGER NOT NULL,
+  run_present INTEGER NOT NULL,
+  last_commit_seq INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS usage_contributions (
   fact_id BLOB PRIMARY KEY REFERENCES fact_records(fact_id) ON DELETE CASCADE,
   subject_key BLOB NOT NULL,
@@ -842,6 +880,9 @@ CREATE INDEX IF NOT EXISTS idx_run_evidence_run_order ON run_evidence(run_key, s
 CREATE INDEX IF NOT EXISTS idx_delegation_assertions_child_order ON delegation_assertions(child_run_key, relation_strength, source_generation, cursor_end);
 CREATE INDEX IF NOT EXISTS idx_delegation_assertions_parent ON delegation_assertions(parent_run_key, child_run_key);
 CREATE INDEX IF NOT EXISTS idx_canonical_delegations_session ON canonical_delegations(session_key, child_run_key);
+CREATE INDEX IF NOT EXISTS idx_delegation_metadata_assertions_child ON delegation_metadata_assertions(child_run_key, fact_id);
+CREATE INDEX IF NOT EXISTS idx_delegation_metadata_assertions_source ON delegation_metadata_assertions(source_object_id, child_run_key);
+CREATE INDEX IF NOT EXISTS idx_canonical_delegation_metadata_session ON canonical_delegation_metadata(session_key, child_run_key);
 CREATE INDEX IF NOT EXISTS idx_usage_contributions_session ON usage_contributions(session_key, fact_id);
 
 -- Persistent FTS5 (content-synced with messages)
@@ -930,6 +971,8 @@ const LEGACY_TABLES = ['segments', 'search_index', 'schema_version'];
 const CURRENT_TABLES = [
   'search_fts',
   'subagent_search_fts',
+  'canonical_delegation_metadata',
+  'delegation_metadata_assertions',
   'canonical_delegations',
   'delegation_assertions',
   'observed_run_states',

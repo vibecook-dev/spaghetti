@@ -9,9 +9,10 @@ use std::collections::BTreeSet;
 use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 
 use crate::adapter::{
-    DelegationFact, DelegationKind, EntityKey, EvidenceKind, EvidenceStrength, Fact, FactBatch,
-    FactEnvelope, MessageRole, QualifiedTimestamp, RelationStrength, TimestampQuality, TokenUsage,
-    UsageAccounting, UsageFact, UsageScope, ValueQuality,
+    DelegationFact, DelegationKind, DelegationMetadataFact, EntityKey, EvidenceKind,
+    EvidenceStrength, Fact, FactBatch, FactEnvelope, MessageRole, QualifiedTimestamp,
+    RelationStrength, TimestampQuality, TokenUsage, UsageAccounting, UsageFact, UsageScope,
+    ValueQuality,
 };
 
 use super::commit::{
@@ -254,7 +255,10 @@ impl TransactionalProjectionWork for FactProjectionWork<'_> {
                     envelope.id.as_bytes(),
                     envelope,
                 )?),
-                Fact::Delegation(_) | Fact::RunEvidence(_) | Fact::Usage(_) => {}
+                Fact::Delegation(_)
+                | Fact::DelegationMetadata(_)
+                | Fact::RunEvidence(_)
+                | Fact::Usage(_) => {}
             }
         }
         Ok(changes)
@@ -372,8 +376,8 @@ impl TransactionalProjectionWork for FactProjectionWork<'_> {
             };
             Some(fact.run.as_bytes().to_vec())
         }));
-        for run_key in changed_runs {
-            affected_delegations.extend(delegation_children_for_run(transaction, &run_key)?);
+        for run_key in &changed_runs {
+            affected_delegations.extend(delegation_children_for_run(transaction, run_key)?);
         }
 
         for child_run_key in affected_delegations {
@@ -381,6 +385,58 @@ impl TransactionalProjectionWork for FactProjectionWork<'_> {
             changes.push(delegation_change(&child_run_key, &reduction)?);
             changes.push(delegation_conflict_change(&child_run_key, &reduction)?);
         }
+
+        // Delegation metadata is a replaceable snapshot fact. Every commit for
+        // one source object replaces that object's prior metadata assertions,
+        // even when the source generation is unchanged or the replacement is
+        // empty because the sidecar was deleted.
+        let mut affected_metadata = source_object_keys(
+            transaction,
+            "SELECT DISTINCT child_run_key FROM delegation_metadata_assertions WHERE source_object_id = ?1",
+            context,
+            "read replaced delegation metadata",
+        )?;
+        transaction
+            .execute(
+                "DELETE FROM delegation_metadata_assertions WHERE source_object_id = ?1",
+                [sqlite_u64(context.source_object_id, "source object id")?],
+            )
+            .map_err(|error| sqlite_error("retract replaced delegation metadata", error))?;
+
+        for envelope in self.batch.facts() {
+            let Fact::DelegationMetadata(fact) = &envelope.value else {
+                continue;
+            };
+            write_delegation_metadata_assertion(transaction, context, envelope, fact)?;
+            affected_metadata.insert(fact.child_run.as_bytes().to_vec());
+        }
+        for run_key in &changed_runs {
+            affected_metadata.extend(delegation_metadata_children_for_run(transaction, run_key)?);
+        }
+        for child_run_key in affected_metadata {
+            let reduction =
+                reduce_delegation_metadata(transaction, &child_run_key, context.commit_seq)?;
+            changes.push(delegation_metadata_change(&child_run_key, &reduction)?);
+            changes.push(delegation_metadata_conflict_change(
+                &child_run_key,
+                &reduction,
+            )?);
+        }
+
+        transaction
+            .execute(
+                r#"
+                DELETE FROM fact_records
+                WHERE source_object_id = ?1
+                  AND fact_kind = 'delegation_metadata'
+                  AND last_commit_seq <> ?2
+                "#,
+                params![
+                    sqlite_u64(context.source_object_id, "source object id")?,
+                    sqlite_u64(context.commit_seq, "commit sequence")?,
+                ],
+            )
+            .map_err(|error| sqlite_error("retract replaced delegation metadata facts", error))?;
         Ok(changes)
     }
 
@@ -608,6 +664,26 @@ fn old_generation_keys(
                 sqlite_u64(context.source_object_id, "source object id")?,
                 sqlite_u64(context.generation, "source generation")?,
             ],
+            |row| row.get::<_, Vec<u8>>(0),
+        )
+        .map_err(|error| sqlite_error(operation, error))?
+        .collect::<Result<BTreeSet<_>, _>>()
+        .map_err(|error| sqlite_error(operation, error))?;
+    Ok(keys)
+}
+
+fn source_object_keys(
+    transaction: &Transaction<'_>,
+    sql: &str,
+    context: &ProjectionCommitContext,
+    operation: &'static str,
+) -> Result<BTreeSet<Vec<u8>>, EngineError> {
+    let mut statement = transaction
+        .prepare(sql)
+        .map_err(|error| sqlite_error(operation, error))?;
+    let keys = statement
+        .query_map(
+            [sqlite_u64(context.source_object_id, "source object id")?],
             |row| row.get::<_, Vec<u8>>(0),
         )
         .map_err(|error| sqlite_error(operation, error))?
@@ -991,6 +1067,231 @@ fn reduce_delegation(
     })
 }
 
+fn write_delegation_metadata_assertion(
+    transaction: &Transaction<'_>,
+    context: &ProjectionCommitContext,
+    envelope: &FactEnvelope,
+    fact: &DelegationMetadataFact,
+) -> Result<(), EngineError> {
+    transaction
+        .execute(
+            r#"
+            INSERT INTO delegation_metadata_assertions (
+                fact_id, child_run_key, session_key, native_child_id,
+                agent_type, description, native_name, spawn_depth,
+                worktree_path, native_task_id, source_object_id,
+                source_generation, cursor_end, last_commit_seq
+            ) VALUES (
+                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
+                ?13, ?14
+            )
+            ON CONFLICT(fact_id) DO UPDATE SET
+                child_run_key = excluded.child_run_key,
+                session_key = excluded.session_key,
+                native_child_id = excluded.native_child_id,
+                agent_type = excluded.agent_type,
+                description = excluded.description,
+                native_name = excluded.native_name,
+                spawn_depth = excluded.spawn_depth,
+                worktree_path = excluded.worktree_path,
+                native_task_id = excluded.native_task_id,
+                source_object_id = excluded.source_object_id,
+                source_generation = excluded.source_generation,
+                cursor_end = excluded.cursor_end,
+                last_commit_seq = excluded.last_commit_seq
+            "#,
+            params![
+                envelope.id.as_bytes().as_slice(),
+                fact.child_run.as_bytes(),
+                fact.session.as_bytes(),
+                fact.native_child_id,
+                fact.agent_type,
+                fact.description,
+                fact.name,
+                fact.spawn_depth.map(i64::from),
+                fact.worktree_path,
+                fact.native_task_id,
+                sqlite_u64(context.source_object_id, "source object id")?,
+                sqlite_u64(context.generation, "source generation")?,
+                envelope.provenance.cursor_end,
+                sqlite_u64(context.commit_seq, "commit sequence")?,
+            ],
+        )
+        .map(|_| ())
+        .map_err(|error| sqlite_error("project delegation metadata assertion", error))
+}
+
+fn delegation_metadata_children_for_run(
+    transaction: &Transaction<'_>,
+    run_key: &[u8],
+) -> Result<BTreeSet<Vec<u8>>, EngineError> {
+    let mut statement = transaction
+        .prepare(
+            "SELECT DISTINCT child_run_key FROM delegation_metadata_assertions WHERE child_run_key = ?1",
+        )
+        .map_err(|error| sqlite_error("prepare delegation metadata run correlation", error))?;
+    let children = statement
+        .query_map([run_key], |row| row.get::<_, Vec<u8>>(0))
+        .map_err(|error| sqlite_error("read delegation metadata run correlation", error))?
+        .collect::<Result<BTreeSet<_>, _>>()
+        .map_err(|error| sqlite_error("collect delegation metadata run correlation", error))?;
+    Ok(children)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct DelegationMetadataValue {
+    session_key: Vec<u8>,
+    native_child_id: String,
+    agent_type: String,
+    description: Option<String>,
+    native_name: Option<String>,
+    spawn_depth: Option<i64>,
+    worktree_path: Option<String>,
+    native_task_id: Option<String>,
+}
+
+#[derive(Debug)]
+struct DelegationMetadataAssertionRow {
+    fact_id: Vec<u8>,
+    value: DelegationMetadataValue,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct DelegationMetadataReduction {
+    status: Option<String>,
+    assertion_count: usize,
+    competing_metadata_count: usize,
+}
+
+fn reduce_delegation_metadata(
+    transaction: &Transaction<'_>,
+    child_run_key: &[u8],
+    commit_seq: u64,
+) -> Result<DelegationMetadataReduction, EngineError> {
+    let mut statement = transaction
+        .prepare(
+            r#"
+            SELECT fact_id, session_key, native_child_id, agent_type,
+                   description, native_name, spawn_depth, worktree_path,
+                   native_task_id
+            FROM delegation_metadata_assertions
+            WHERE child_run_key = ?1
+            ORDER BY fact_id DESC
+            "#,
+        )
+        .map_err(|error| sqlite_error("prepare delegation metadata reduction", error))?;
+    let assertions = statement
+        .query_map([child_run_key], |row| {
+            Ok(DelegationMetadataAssertionRow {
+                fact_id: row.get(0)?,
+                value: DelegationMetadataValue {
+                    session_key: row.get(1)?,
+                    native_child_id: row.get(2)?,
+                    agent_type: row.get(3)?,
+                    description: row.get(4)?,
+                    native_name: row.get(5)?,
+                    spawn_depth: row.get(6)?,
+                    worktree_path: row.get(7)?,
+                    native_task_id: row.get(8)?,
+                },
+            })
+        })
+        .map_err(|error| sqlite_error("read delegation metadata assertions", error))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| sqlite_error("collect delegation metadata assertions", error))?;
+    drop(statement);
+
+    let Some(decisive) = assertions.first() else {
+        transaction
+            .execute(
+                "DELETE FROM canonical_delegation_metadata WHERE child_run_key = ?1",
+                [child_run_key],
+            )
+            .map_err(|error| sqlite_error("remove empty canonical delegation metadata", error))?;
+        return Ok(DelegationMetadataReduction {
+            status: None,
+            assertion_count: 0,
+            competing_metadata_count: 0,
+        });
+    };
+    let distinct_values = assertions
+        .iter()
+        .map(|assertion| assertion.value.clone())
+        .collect::<BTreeSet<_>>();
+    let competing_metadata_count = distinct_values.len().saturating_sub(1);
+    let run_present = canonical_run_exists(transaction, child_run_key)?;
+    let status = if competing_metadata_count > 0 {
+        "conflicting"
+    } else if run_present {
+        "resolved"
+    } else {
+        "unresolved_run"
+    };
+    let assertion_count = i64::try_from(assertions.len()).map_err(|_| {
+        EngineError::InvalidCommit(
+            "delegation metadata assertion count exceeds SQLite range".to_string(),
+        )
+    })?;
+    let competing_count = i64::try_from(competing_metadata_count).map_err(|_| {
+        EngineError::InvalidCommit(
+            "delegation metadata conflict count exceeds SQLite range".to_string(),
+        )
+    })?;
+    transaction
+        .execute(
+            r#"
+            INSERT INTO canonical_delegation_metadata (
+                child_run_key, session_key, native_child_id, agent_type,
+                description, native_name, spawn_depth, worktree_path,
+                native_task_id, metadata_status, decisive_fact_id,
+                assertion_count, competing_metadata_count, run_present,
+                last_commit_seq
+            ) VALUES (
+                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
+                ?13, ?14, ?15
+            )
+            ON CONFLICT(child_run_key) DO UPDATE SET
+                session_key = excluded.session_key,
+                native_child_id = excluded.native_child_id,
+                agent_type = excluded.agent_type,
+                description = excluded.description,
+                native_name = excluded.native_name,
+                spawn_depth = excluded.spawn_depth,
+                worktree_path = excluded.worktree_path,
+                native_task_id = excluded.native_task_id,
+                metadata_status = excluded.metadata_status,
+                decisive_fact_id = excluded.decisive_fact_id,
+                assertion_count = excluded.assertion_count,
+                competing_metadata_count = excluded.competing_metadata_count,
+                run_present = excluded.run_present,
+                last_commit_seq = excluded.last_commit_seq
+            "#,
+            params![
+                child_run_key,
+                decisive.value.session_key,
+                decisive.value.native_child_id,
+                decisive.value.agent_type,
+                decisive.value.description,
+                decisive.value.native_name,
+                decisive.value.spawn_depth,
+                decisive.value.worktree_path,
+                decisive.value.native_task_id,
+                status,
+                decisive.fact_id,
+                assertion_count,
+                competing_count,
+                i64::from(run_present),
+                sqlite_u64(commit_seq, "commit sequence")?,
+            ],
+        )
+        .map_err(|error| sqlite_error("write canonical delegation metadata", error))?;
+    Ok(DelegationMetadataReduction {
+        status: Some(status.to_string()),
+        assertion_count: assertions.len(),
+        competing_metadata_count,
+    })
+}
+
 fn canonical_run_exists(
     transaction: &Transaction<'_>,
     run_key: &[u8],
@@ -1359,6 +1660,53 @@ fn delegation_conflict_change(
     })
 }
 
+fn delegation_metadata_change(
+    entity_key: &[u8],
+    reduction: &DelegationMetadataReduction,
+) -> Result<ChangeEntry, EngineError> {
+    let payload = serialize(
+        &serde_json::json!({
+            "status": reduction.status,
+            "assertion_count": reduction.assertion_count,
+            "competing_metadata_count": reduction.competing_metadata_count,
+        }),
+        "serialize delegation metadata change",
+    )?;
+    Ok(ChangeEntry {
+        topic: "runtime.delegation-metadata.changed".to_string(),
+        schema_version: CHANGE_SCHEMA_VERSION,
+        entity_key: entity_key.to_vec(),
+        operation: if reduction.status.is_some() {
+            "upsert"
+        } else {
+            "delete"
+        }
+        .to_string(),
+        payload,
+    })
+}
+
+fn delegation_metadata_conflict_change(
+    entity_key: &[u8],
+    reduction: &DelegationMetadataReduction,
+) -> Result<ChangeEntry, EngineError> {
+    let conflicting = reduction.competing_metadata_count > 0;
+    let payload = serialize(
+        &serde_json::json!({
+            "conflicting": conflicting,
+            "competing_metadata_count": reduction.competing_metadata_count,
+        }),
+        "serialize delegation metadata conflict change",
+    )?;
+    Ok(ChangeEntry {
+        topic: "diagnostic.runtime.delegation-metadata-conflict".to_string(),
+        schema_version: CHANGE_SCHEMA_VERSION,
+        entity_key: entity_key.to_vec(),
+        operation: if conflicting { "upsert" } else { "delete" }.to_string(),
+        payload,
+    })
+}
+
 fn simple_change(
     topic: &'static str,
     entity_key: &[u8],
@@ -1645,6 +1993,19 @@ mod tests {
         }
     }
 
+    fn request_for_object(
+        object_key: &[u8],
+        expected: ExpectedSourceCursor,
+        generation: u64,
+        committed_cursor: Vec<u8>,
+        started_at: i64,
+    ) -> ObservationCommit {
+        let mut request = request(expected, generation, committed_cursor, started_at);
+        request.object.object_key = object_key.to_vec();
+        request.object.display_path = Some(String::from_utf8_lossy(object_key).into_owned());
+        request
+    }
+
     fn register_object(connection: &mut Connection) {
         apply_observation_commit(
             connection,
@@ -1686,6 +2047,31 @@ mod tests {
         )
     }
 
+    fn object_record(
+        object_id: u64,
+        generation: u64,
+        cursor_start: SourceCursor,
+        cursor_end: SourceCursor,
+        observed_at: i64,
+        payload: &[u8],
+    ) -> SourceRecord {
+        SourceRecord::new(
+            &RecordOrigin {
+                source_instance_id: 1,
+                stream_id: 1,
+                object_id,
+                observed_at,
+                source_timestamp_hint: None,
+                media_type: SourceMediaType::new("application/json").unwrap(),
+            },
+            generation,
+            cursor_start,
+            cursor_end,
+            0,
+            payload.to_vec(),
+        )
+    }
+
     fn entity(kind: &str, native_key: &str) -> EntityKey {
         EntityKey::native(
             &AdapterId::new("claude-code").unwrap(),
@@ -1710,6 +2096,32 @@ mod tests {
                 ExpectedSourceCursor::At {
                     generation: expected_generation,
                     committed_cursor: SourceCursor::append_offset(expected_cursor).into_bytes(),
+                },
+                record.generation,
+                record.cursor_end.as_bytes().to_vec(),
+                clock,
+            ),
+            batch,
+        )
+        .unwrap();
+    }
+
+    fn commit_object_batch(
+        connection: &mut Connection,
+        object_key: &[u8],
+        record: &SourceRecord,
+        expected_generation: u64,
+        expected_cursor: Vec<u8>,
+        clock: i64,
+        batch: &FactBatch,
+    ) {
+        apply_fact_observation_commit(
+            connection,
+            &request_for_object(
+                object_key,
+                ExpectedSourceCursor::At {
+                    generation: expected_generation,
+                    committed_cursor: expected_cursor,
                 },
                 record.generation,
                 record.cursor_end.as_bytes().to_vec(),
@@ -2596,6 +3008,386 @@ mod tests {
                 )
                 .unwrap(),
             "active"
+        );
+    }
+
+    #[test]
+    fn delegation_metadata_replaces_sidecars_and_correlates_in_either_order() {
+        let mut connection = database();
+        register_object(&mut connection);
+        let session = entity("session", SESSION);
+        let child = entity("run", &format!("{SESSION}\0\0child-meta"));
+        let metadata_fact = |agent_type: &str, description: &str, worktree_path: &str| {
+            Fact::DelegationMetadata(DelegationMetadataFact {
+                child_run: child.clone(),
+                session: session.clone(),
+                native_child_id: "child-meta".to_string(),
+                agent_type: agent_type.to_string(),
+                description: Some(description.to_string()),
+                name: Some("metadata-child".to_string()),
+                spawn_depth: Some(1),
+                worktree_path: Some(worktree_path.to_string()),
+                native_task_id: Some("tool-meta".to_string()),
+            })
+        };
+
+        let initial_cursor = SourceCursor::append_offset(0);
+        let first_cursor = SourceCursor::snapshot(crate::source::Revision::digest(b"meta-one"));
+        let first_record = object_record(
+            1,
+            1,
+            initial_cursor.clone(),
+            first_cursor.clone(),
+            20,
+            b"meta-one",
+        );
+        let mut first_batch = FactBatch::new(2, 2).unwrap();
+        first_batch
+            .push(
+                &first_record,
+                metadata_fact("general-purpose", "first description", "/repo/first"),
+            )
+            .unwrap();
+        commit_object_batch(
+            &mut connection,
+            b"fixture-transcript",
+            &first_record,
+            1,
+            initial_cursor.as_bytes().to_vec(),
+            21,
+            &first_batch,
+        );
+        let sidecar_first: (String, String, i64) = connection
+            .query_row(
+                r#"
+                SELECT metadata_status, agent_type, run_present
+                FROM canonical_delegation_metadata WHERE child_run_key = ?1
+                "#,
+                [child.as_bytes()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            sidecar_first,
+            (
+                "unresolved_run".to_string(),
+                "general-purpose".to_string(),
+                0
+            )
+        );
+
+        let child_object_key = b"child-transcript";
+        apply_observation_commit(
+            &mut connection,
+            &request_for_object(
+                child_object_key,
+                ExpectedSourceCursor::Absent,
+                1,
+                SourceCursor::append_offset(0).into_bytes(),
+                22,
+            ),
+        )
+        .unwrap();
+        let child_record = object_record(
+            2,
+            1,
+            SourceCursor::append_offset(0),
+            SourceCursor::append_offset(1),
+            23,
+            b"child-run",
+        );
+        let mut child_batch = FactBatch::new(2, 2).unwrap();
+        child_batch
+            .push(
+                &child_record,
+                Fact::Run(RunFact {
+                    run: child.clone(),
+                    session: session.clone(),
+                    native_run_id: format!("{SESSION}\0\0child-meta"),
+                    parent_run: None,
+                }),
+            )
+            .unwrap();
+        commit_object_batch(
+            &mut connection,
+            child_object_key,
+            &child_record,
+            1,
+            SourceCursor::append_offset(0).into_bytes(),
+            24,
+            &child_batch,
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT metadata_status FROM canonical_delegation_metadata WHERE child_run_key = ?1",
+                    [child.as_bytes()],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "resolved"
+        );
+
+        let second_cursor = SourceCursor::snapshot(crate::source::Revision::digest(b"meta-two"));
+        let second_record = object_record(
+            1,
+            1,
+            first_cursor.clone(),
+            second_cursor.clone(),
+            25,
+            b"meta-two",
+        );
+        let mut second_batch = FactBatch::new(2, 2).unwrap();
+        second_batch
+            .push(
+                &second_record,
+                metadata_fact("Explore", "updated description", "/repo/updated"),
+            )
+            .unwrap();
+        commit_object_batch(
+            &mut connection,
+            b"fixture-transcript",
+            &second_record,
+            1,
+            first_cursor.as_bytes().to_vec(),
+            26,
+            &second_batch,
+        );
+        let replaced: (String, String, i64, i64) = connection
+            .query_row(
+                r#"
+                SELECT agent_type, worktree_path,
+                       (SELECT COUNT(*) FROM delegation_metadata_assertions),
+                       (SELECT COUNT(*) FROM fact_records WHERE fact_kind = 'delegation_metadata')
+                FROM canonical_delegation_metadata WHERE child_run_key = ?1
+                "#,
+                [child.as_bytes()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            replaced,
+            ("Explore".to_string(), "/repo/updated".to_string(), 1, 1)
+        );
+
+        let deleted_cursor =
+            SourceCursor::snapshot(crate::source::Revision::digest(b"meta-deleted"));
+        let empty_batch = FactBatch::new(2, 2).unwrap();
+        apply_fact_observation_commit(
+            &mut connection,
+            &request_for_object(
+                b"fixture-transcript",
+                ExpectedSourceCursor::At {
+                    generation: 1,
+                    committed_cursor: second_cursor.as_bytes().to_vec(),
+                },
+                1,
+                deleted_cursor.as_bytes().to_vec(),
+                27,
+            ),
+            &empty_batch,
+        )
+        .unwrap();
+        assert_eq!(count(&connection, "canonical_delegation_metadata"), 0);
+        assert_eq!(count(&connection, "delegation_metadata_assertions"), 0);
+        assert_eq!(
+            connection
+                .query_row(
+                    r#"
+                    SELECT operation FROM change_log
+                    WHERE topic = 'runtime.delegation-metadata.changed'
+                      AND entity_key = ?1
+                    ORDER BY commit_seq DESC LIMIT 1
+                    "#,
+                    [child.as_bytes()],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "delete"
+        );
+
+        let third_cursor = SourceCursor::snapshot(crate::source::Revision::digest(b"meta-three"));
+        let third_record = object_record(
+            1,
+            1,
+            deleted_cursor.clone(),
+            third_cursor,
+            28,
+            b"meta-three",
+        );
+        let mut third_batch = FactBatch::new(2, 2).unwrap();
+        third_batch
+            .push(
+                &third_record,
+                metadata_fact("Plan", "recreated after run", "/repo/recreated"),
+            )
+            .unwrap();
+        commit_object_batch(
+            &mut connection,
+            b"fixture-transcript",
+            &third_record,
+            1,
+            deleted_cursor.as_bytes().to_vec(),
+            29,
+            &third_batch,
+        );
+        let transcript_first: (String, String, i64) = connection
+            .query_row(
+                r#"
+                SELECT metadata_status, agent_type, run_present
+                FROM canonical_delegation_metadata WHERE child_run_key = ?1
+                "#,
+                [child.as_bytes()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            transcript_first,
+            ("resolved".to_string(), "Plan".to_string(), 1)
+        );
+    }
+
+    #[test]
+    fn conflicting_native_delegation_metadata_is_preserved_and_diagnosed() {
+        let mut connection = database();
+        register_object(&mut connection);
+        let session = entity("session", SESSION);
+        let child = entity("run", "metadata-conflict-child");
+        let metadata = |agent_type: &str| {
+            Fact::DelegationMetadata(DelegationMetadataFact {
+                child_run: child.clone(),
+                session: session.clone(),
+                native_child_id: "metadata-conflict-child".to_string(),
+                agent_type: agent_type.to_string(),
+                description: None,
+                name: None,
+                spawn_depth: None,
+                worktree_path: None,
+                native_task_id: None,
+            })
+        };
+
+        let initial_cursor = SourceCursor::append_offset(0);
+        let first_cursor = SourceCursor::snapshot(crate::source::Revision::digest(b"meta-a"));
+        let first_record = object_record(1, 1, initial_cursor.clone(), first_cursor, 20, b"meta-a");
+        let mut first_batch = FactBatch::new(2, 2).unwrap();
+        first_batch
+            .push(&first_record, metadata("Explore"))
+            .unwrap();
+        commit_object_batch(
+            &mut connection,
+            b"fixture-transcript",
+            &first_record,
+            1,
+            initial_cursor.as_bytes().to_vec(),
+            21,
+            &first_batch,
+        );
+
+        let second_key = b"duplicate-meta";
+        apply_observation_commit(
+            &mut connection,
+            &request_for_object(
+                second_key,
+                ExpectedSourceCursor::Absent,
+                1,
+                SourceCursor::append_offset(0).into_bytes(),
+                22,
+            ),
+        )
+        .unwrap();
+        let second_cursor = SourceCursor::snapshot(crate::source::Revision::digest(b"meta-b"));
+        let second_record = object_record(
+            2,
+            1,
+            SourceCursor::append_offset(0),
+            second_cursor.clone(),
+            23,
+            b"meta-b",
+        );
+        let mut second_batch = FactBatch::new(2, 2).unwrap();
+        second_batch.push(&second_record, metadata("Plan")).unwrap();
+        commit_object_batch(
+            &mut connection,
+            second_key,
+            &second_record,
+            1,
+            SourceCursor::append_offset(0).into_bytes(),
+            24,
+            &second_batch,
+        );
+
+        let conflict: (String, i64, i64) = connection
+            .query_row(
+                r#"
+                SELECT metadata_status, assertion_count, competing_metadata_count
+                FROM canonical_delegation_metadata WHERE child_run_key = ?1
+                "#,
+                [child.as_bytes()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(conflict, ("conflicting".to_string(), 2, 1));
+        assert_eq!(count(&connection, "delegation_metadata_assertions"), 2);
+        assert_eq!(
+            connection
+                .query_row(
+                    r#"
+                    SELECT operation FROM change_log
+                    WHERE topic = 'diagnostic.runtime.delegation-metadata-conflict'
+                      AND entity_key = ?1
+                    ORDER BY commit_seq DESC LIMIT 1
+                    "#,
+                    [child.as_bytes()],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "upsert"
+        );
+
+        let deleted_cursor =
+            SourceCursor::snapshot(crate::source::Revision::digest(b"meta-b-deleted"));
+        let empty_batch = FactBatch::new(2, 2).unwrap();
+        apply_fact_observation_commit(
+            &mut connection,
+            &request_for_object(
+                second_key,
+                ExpectedSourceCursor::At {
+                    generation: 1,
+                    committed_cursor: second_cursor.as_bytes().to_vec(),
+                },
+                1,
+                deleted_cursor.as_bytes().to_vec(),
+                25,
+            ),
+            &empty_batch,
+        )
+        .unwrap();
+        let resolved: (String, i64, i64) = connection
+            .query_row(
+                r#"
+                SELECT metadata_status, assertion_count, competing_metadata_count
+                FROM canonical_delegation_metadata WHERE child_run_key = ?1
+                "#,
+                [child.as_bytes()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(resolved, ("unresolved_run".to_string(), 1, 0));
+        assert_eq!(
+            connection
+                .query_row(
+                    r#"
+                    SELECT operation FROM change_log
+                    WHERE topic = 'diagnostic.runtime.delegation-metadata-conflict'
+                      AND entity_key = ?1
+                    ORDER BY commit_seq DESC LIMIT 1
+                    "#,
+                    [child.as_bytes()],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "delete"
         );
     }
 

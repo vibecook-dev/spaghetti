@@ -1,12 +1,13 @@
 # RFC 011 Claude Code adapter source map
 
-Status: Phase 4 history/usage complete; Phase 5 delegation pack in progress on
-2026-08-11
+Status: Phase 4 history/usage complete; Phase 5 delegation relation and native
+metadata snapshots implemented on 2026-08-11
 
 This survey defines the native inputs and semantic claims currently made by
 the Rust `claude-code` adapter. It is narrower than the legacy Claude parser on
 purpose: Phase 4 covers canonical transcript history, run lineage/activity,
-and native usage. Sidecars and richer runtime packs remain Phase 5 work.
+and native usage. Phase 5 now adds the first replaceable sidecar while richer
+runtime packs remain in progress.
 
 ## Installation and source identity
 
@@ -24,23 +25,28 @@ Ordinary path spelling differences therefore resolve to one instance. A root
 that is temporarily unavailable is a transient discovery error, not an empty
 authoritative snapshot.
 
-## Phase 4 streams
+## Implemented streams
 
-| Stream                 | Selector relative to `projects`  | Driver                                           | Authority | Scope   |
-| ---------------------- | -------------------------------- | ------------------------------------------------ | --------- | ------- |
-| `session-transcripts`  | `*/*.jsonl`                      | `AppendDelimitedFile` (`\n`, CRLF normalization) | Canonical | Session |
-| `subagent-transcripts` | `*/*/subagents/**/agent-*.jsonl` | `AppendDelimitedFile` (`\n`, CRLF normalization) | Canonical | Run     |
+| Stream                 | Selector relative to `projects`      | Driver                                           | Authority    | Scope   |
+| ---------------------- | ------------------------------------ | ------------------------------------------------ | ------------ | ------- |
+| `session-transcripts`  | `*/*.jsonl`                          | `AppendDelimitedFile` (`\n`, CRLF normalization) | Canonical    | Session |
+| `subagent-transcripts` | `*/*/subagents/**/agent-*.jsonl`     | `AppendDelimitedFile` (`\n`, CRLF normalization) | Canonical    | Run     |
+| `subagent-metadata`    | `*/*/subagents/**/agent-*.meta.json` | `ReplaceDocument` (64 KiB bound)                  | Supplemental | Run     |
 
-Both streams use incremental byte cursors, interactive priority,
-`MirrorSource` deletion, and full raw retention during shadow migration. The
-common driver—not the adapter—owns framing, partial suffix retry, file
-identity, prefix verification, generations, checkpoints, watcher recovery,
-and scheduling.
+Transcript streams use incremental byte cursors and interactive priority. The
+metadata stream uses snapshot-replace consistency and foreground-repair
+priority. All three use `MirrorSource` deletion and full raw retention during
+shadow migration. Common drivers—not the adapter—own framing or stable reads,
+file identity, generations/revisions, checkpoints, watcher recovery, and
+scheduling.
 
 Parent identity comes from `<project-slug>/<session-uuid>.jsonl`. Subagent
 identity preserves the parent session, optional `workflows/<workflow-id>`
 component, and `agent-<agent-id>.jsonl` name. Paths outside these shapes fail
 object bootstrap rather than inventing an entity identity.
+
+The metadata stream derives the identical child key from the sibling
+`agent-<agent-id>.meta.json` path, including workflow scope when present.
 
 ## Native record interpretation
 
@@ -54,6 +60,9 @@ Each complete JSONL record is decoded once into common facts:
   subagent;
 - `DelegationFact` for a subagent, preserving the child run, layout-derived
   parent assertion, native child ID, execution cwd, and relation quality;
+- `DelegationMetadataFact` for a metadata sidecar, preserving native free-form
+  agent type, description, name, spawn depth, worktree path, and optional
+  spawning tool-use ID without making a parent assertion;
 - `RunEvidenceFact::ActivityObserved` with `NativeActivity` strength;
 - `UsageFact` when the record contains non-zero native usage.
 
@@ -90,6 +99,11 @@ surfaced as a conflict rather than overwritten.
 Adding the delegation assertion advances the Claude semantic contract to
 version 2 because later facts in a subagent record receive new local ordinals.
 Version-1 cursors require contract replay rather than append continuation.
+Adding the declared metadata stream and fact advances the adapter contract to
+version 3. Unlike the version-2 change, this additive stream does not alter
+existing transcript fact identities or meanings. The coordinator's future
+per-object decoder-version wiring should therefore avoid replaying transcript
+objects solely because the metadata stream was added.
 
 The adapter declares activity only. It does not turn quiet files, missing
 watch events, or filesystem nesting into completion. Subagent layout provides
@@ -116,17 +130,23 @@ Confirmed source deletion is declared `MirrorSource`; the future observation
 coordinator applies the same ownership retraction. Temporary source-root loss
 does not confirm deletion.
 
+Each committed metadata revision replaces every prior metadata assertion
+owned by that source object, even when the file generation is unchanged. An
+empty confirmed replacement retracts the assertion, audit fact, canonical
+metadata row, and publishes a delete change atomically. Duplicate sidecars
+with different native values remain as competing assertions and produce a
+durable conflict diagnostic.
+
 ## Remaining Phase 5 sources
 
-The delegation pack currently uses transcript layout only. Subagent meta and
-parent spawn records still need snapshot/dependency streams before they can
-enrich task identity, labels, prompts, worktree paths, or stronger relation
-evidence. The adapter also does not yet declare `sessions-index.json`, memory,
-tool-result files, workflows, teams/config/inboxes, active PID presence,
-todos, tasks, plans, file history, settings, or other sidecars. Those inputs
-need replace-document, directory-snapshot, or presence streams and reviewed
-capability semantics. Credentials, debug logs, telemetry, caches, and
-arbitrary symlink escapes remain out of scope.
+Parent spawn records still need native correlation before they can strengthen
+the layout-derived parent relation or supply task prompts. The adapter also
+does not yet declare `sessions-index.json`, memory, tool-result files,
+workflows, teams/config/inboxes, active PID presence, todos, tasks, plans, file
+history, settings, or other sidecars. Those inputs need replace-document,
+directory-snapshot, or presence streams and reviewed capability semantics.
+Credentials, debug logs, telemetry, caches, and arbitrary symlink escapes
+remain out of scope.
 
 ## Conformance evidence
 
@@ -147,3 +167,8 @@ The Phase 5 delegation conformance trace additionally covers parent-first and
 child-first arrival, late resolution, generation replay, equal-strength
 conflicts, durable conflict diagnostics, and the invariant that activity plus
 silence remains `Active` rather than becoming a fabricated completion.
+
+The metadata trace covers sidecar-first and transcript-first arrival,
+same-generation replacement, confirmed deletion and recreation, stable child
+identity across workflow paths, and competing native sidecars whose ambiguity
+is retained and diagnosed.

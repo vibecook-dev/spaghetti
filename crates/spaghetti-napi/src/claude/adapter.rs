@@ -5,6 +5,7 @@
 
 use std::path::{Component, Path};
 
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -12,13 +13,13 @@ use crate::adapter::{
     AdapterDiagnostic, AdapterError, AdapterErrorClass, AdapterId, AdapterManifest,
     AdapterObjectContext, AgentAdapter, Availability, CapabilityDeclaration, CapabilityGranularity,
     CapabilityId, CapabilitySupport, ConsistencyPolicy, ContentBlock, DecodeContext,
-    DecodeDisposition, DecoderId, DelegationFact, DelegationKind, DeletionPolicy, DiscoveryContext,
-    DriverSpec, EntityKey, EntityScope, EvidenceKind, EvidenceStrength, Fact, FactBatch,
-    MessageFact, MessageRole, ObjectSelector, QualifiedTimestamp, RawRetentionPolicy,
-    RelationStrength, RunEvidenceFact, RunFact, SessionFact, SourceInstance, SourceInstanceKey,
-    SourceInstanceSpec, SourceObjectDescriptor, SourceRoot, StreamAuthority, StreamId, StreamSpec,
-    SupportLevel, TimestampQuality, TokenUsage, UsageAccounting, UsageFact, UsageScope,
-    ValueQuality,
+    DecodeDisposition, DecoderId, DelegationFact, DelegationKind, DelegationMetadataFact,
+    DeletionPolicy, DiscoveryContext, DriverSpec, EntityKey, EntityScope, EvidenceKind,
+    EvidenceStrength, Fact, FactBatch, MessageFact, MessageRole, ObjectSelector,
+    QualifiedTimestamp, RawRetentionPolicy, RelationStrength, RunEvidenceFact, RunFact,
+    SessionFact, SourceInstance, SourceInstanceKey, SourceInstanceSpec, SourceObjectDescriptor,
+    SourceRoot, StreamAuthority, StreamId, StreamSpec, SupportLevel, TimestampQuality, TokenUsage,
+    UsageAccounting, UsageFact, UsageScope, ValueQuality,
 };
 use crate::claude::message_extractor;
 use crate::claude::session_metadata;
@@ -27,15 +28,19 @@ use crate::claude::types::content::{
 };
 use crate::claude::types::SessionMessage;
 use crate::source::{
-    platform_path_key, AppendDelimitedConfig, IngestPriority, SourceDriverError, SourceRecord,
+    platform_path_key, AppendDelimitedConfig, IngestPriority, ReplaceDocumentConfig,
+    SourceDriverError, SourceRecord,
 };
 
 const ADAPTER_ID: &str = "claude-code";
 const PARENT_STREAM: &str = "session-transcripts";
 const SUBAGENT_STREAM: &str = "subagent-transcripts";
+const SUBAGENT_META_STREAM: &str = "subagent-metadata";
 const PARENT_DECODER: &str = "claude-session-record";
 const SUBAGENT_DECODER: &str = "claude-subagent-record";
+const SUBAGENT_META_DECODER: &str = "claude-subagent-metadata";
 const OBJECT_CONTEXT_VERSION: u32 = 1;
+const SUBAGENT_META_MAX_BYTES: usize = 64 * 1024;
 
 const HISTORY_SESSIONS: &str = "history.sessions";
 const HISTORY_MESSAGES: &str = "history.messages";
@@ -62,8 +67,11 @@ impl ClaudeCodeAdapter {
                 id: AdapterId::new(ADAPTER_ID).expect("static Claude adapter id is valid"),
                 display_name: "Claude Code".to_string(),
                 adapter_version: env!("CARGO_PKG_VERSION").to_string(),
-                contract_version: 2,
-                source_schema_versions: vec!["claude-code-jsonl-v1".to_string()],
+                contract_version: 3,
+                source_schema_versions: vec![
+                    "claude-code-jsonl-v1".to_string(),
+                    "claude-code-subagent-meta-v1".to_string(),
+                ],
                 capabilities: claude_capabilities(),
             },
         }
@@ -167,6 +175,25 @@ impl AgentAdapter for ClaudeCodeAdapter {
                 retention: RawRetentionPolicy::Full,
                 capabilities: transcript_capabilities(true),
             },
+            StreamSpec {
+                id: StreamId::new(SUBAGENT_META_STREAM)?,
+                driver: DriverSpec::ReplaceDocument(ReplaceDocumentConfig {
+                    max_document_bytes: SUBAGENT_META_MAX_BYTES,
+                }),
+                selector: ObjectSelector {
+                    root_name: "projects".to_string(),
+                    include: vec!["*/*/subagents/**/agent-*.meta.json".to_string()],
+                    exclude: Vec::new(),
+                },
+                decoder: DecoderId::new(SUBAGENT_META_DECODER)?,
+                authority: StreamAuthority::Supplemental,
+                entity_scope: EntityScope::Run,
+                priority: IngestPriority::ForegroundRepair,
+                consistency: ConsistencyPolicy::SnapshotReplace,
+                deletion: DeletionPolicy::MirrorSource,
+                retention: RawRetentionPolicy::Full,
+                capabilities: subagent_metadata_capabilities(),
+            },
         ];
         for stream in &streams {
             stream.validate(instance)?;
@@ -179,9 +206,16 @@ impl AgentAdapter for ClaudeCodeAdapter {
         _instance: &SourceInstance,
         object: &SourceObjectDescriptor,
     ) -> Result<AdapterObjectContext, AdapterError> {
-        let context = match object.stream_id.as_str() {
-            PARENT_STREAM => ClaudeTranscriptContext::parent(&object.relative_path)?,
-            SUBAGENT_STREAM => ClaudeTranscriptContext::subagent(&object.relative_path)?,
+        let payload = match object.stream_id.as_str() {
+            PARENT_STREAM => {
+                encode_object_context(&ClaudeTranscriptContext::parent(&object.relative_path)?)?
+            }
+            SUBAGENT_STREAM => {
+                encode_object_context(&ClaudeTranscriptContext::subagent(&object.relative_path)?)?
+            }
+            SUBAGENT_META_STREAM => encode_object_context(&ClaudeSubagentMetadataContext {
+                child: ClaudeTranscriptContext::subagent_meta(&object.relative_path)?,
+            })?,
             _ => {
                 return Err(AdapterError::new(
                     AdapterErrorClass::StreamFatal,
@@ -190,13 +224,6 @@ impl AgentAdapter for ClaudeCodeAdapter {
                 ));
             }
         };
-        let payload = serde_json::to_vec(&context).map_err(|error| {
-            AdapterError::new(
-                AdapterErrorClass::AdapterFatal,
-                "claude_context_encode",
-                error.to_string(),
-            )
-        })?;
         AdapterObjectContext::new(OBJECT_CONTEXT_VERSION, payload)
     }
 
@@ -206,18 +233,27 @@ impl AgentAdapter for ClaudeCodeAdapter {
         record: &SourceRecord,
         output: &mut FactBatch,
     ) -> Result<DecodeDisposition, AdapterError> {
-        if !matches!(context.decoder.as_str(), PARENT_DECODER | SUBAGENT_DECODER) {
-            return Err(AdapterError::unknown_decoder(context.decoder));
+        match context.decoder.as_str() {
+            PARENT_DECODER => {
+                let object_context = ClaudeTranscriptContext::decode(context.object_context)?;
+                if object_context.agent_id.is_some() {
+                    return Err(decoder_context_mismatch());
+                }
+                decode_transcript_record(self.adapter_id(), &object_context, record, output)
+            }
+            SUBAGENT_DECODER => {
+                let object_context = ClaudeTranscriptContext::decode(context.object_context)?;
+                if object_context.agent_id.is_none() {
+                    return Err(decoder_context_mismatch());
+                }
+                decode_transcript_record(self.adapter_id(), &object_context, record, output)
+            }
+            SUBAGENT_META_DECODER => {
+                let object_context = ClaudeSubagentMetadataContext::decode(context.object_context)?;
+                decode_subagent_metadata(self.adapter_id(), &object_context.child, record, output)
+            }
+            _ => Err(AdapterError::unknown_decoder(context.decoder)),
         }
-        let object_context = ClaudeTranscriptContext::decode(context.object_context)?;
-        if (context.decoder.as_str() == PARENT_DECODER) != object_context.agent_id.is_none() {
-            return Err(AdapterError::new(
-                AdapterErrorClass::InvalidContract,
-                "claude_decoder_context_mismatch",
-                "Claude decoder does not match bootstrapped transcript kind",
-            ));
-        }
-        decode_transcript_record(self.adapter_id(), &object_context, record, output)
     }
 }
 
@@ -244,7 +280,7 @@ fn claude_capabilities() -> Vec<CapabilityDeclaration> {
             CapabilityGranularity::Run,
             Availability::Live,
             Some(
-                "child identity and parent lineage come from Claude's transcript layout; silence never implies completion",
+                "child identity is native and metadata is supplemental; parent lineage currently comes from Claude's transcript layout; silence never implies completion",
             ),
         ),
         live_native(USAGE_INPUT_TOKENS, CapabilityGranularity::Message),
@@ -298,6 +334,18 @@ fn transcript_capabilities(include_subagents: bool) -> Vec<CapabilityId> {
         .collect()
 }
 
+fn subagent_metadata_capabilities() -> Vec<CapabilityId> {
+    [
+        RUNTIME_SUBAGENTS,
+        SOURCE_LIVE,
+        SOURCE_RECONCILE,
+        SOURCE_RESUME_CURSOR,
+    ]
+    .into_iter()
+    .map(|id| CapabilityId::new(id).expect("static Claude stream capability id is valid"))
+    .collect()
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct ClaudeTranscriptContext {
     project_slug: String,
@@ -331,23 +379,28 @@ impl ClaudeTranscriptContext {
     }
 
     fn subagent(relative_path: &Path) -> Result<Self, AdapterError> {
+        Self::subagent_object(relative_path, ".jsonl")
+    }
+
+    fn subagent_meta(relative_path: &Path) -> Result<Self, AdapterError> {
+        Self::subagent_object(relative_path, ".meta.json")
+    }
+
+    fn subagent_object(relative_path: &Path, suffix: &str) -> Result<Self, AdapterError> {
         let components = utf8_components(relative_path)?;
         if components.len() < 4 || components.get(2).map(String::as_str) != Some("subagents") {
             return Err(path_error(
                 relative_path,
-                "subagent transcript path does not match Claude layout",
+                "subagent object path does not match Claude layout",
             ));
         }
         let file_name = components.last().expect("minimum component count checked");
         let Some(agent_id) = file_name
             .strip_prefix("agent-")
-            .and_then(|name| name.strip_suffix(".jsonl"))
+            .and_then(|name| name.strip_suffix(suffix))
             .filter(|value| !value.is_empty())
         else {
-            return Err(path_error(
-                relative_path,
-                "invalid subagent transcript name",
-            ));
+            return Err(path_error(relative_path, "invalid subagent object name"));
         };
         let workflow_id = components.windows(2).find_map(|pair| {
             (pair[0] == "workflows" && !pair[1].is_empty()).then(|| pair[1].clone())
@@ -361,23 +414,7 @@ impl ClaudeTranscriptContext {
     }
 
     fn decode(context: &AdapterObjectContext) -> Result<Self, AdapterError> {
-        if context.version() != OBJECT_CONTEXT_VERSION {
-            return Err(AdapterError::new(
-                AdapterErrorClass::StreamFatal,
-                "claude_context_version",
-                format!(
-                    "unsupported Claude object context version {}",
-                    context.version()
-                ),
-            ));
-        }
-        serde_json::from_slice(context.payload()).map_err(|error| {
-            AdapterError::new(
-                AdapterErrorClass::StreamFatal,
-                "claude_context_decode",
-                error.to_string(),
-            )
-        })
+        decode_object_context(context)
     }
 
     fn run_native_key(&self) -> String {
@@ -391,6 +428,133 @@ impl ClaudeTranscriptContext {
             None => self.session_id.clone(),
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct ClaudeSubagentMetadataContext {
+    child: ClaudeTranscriptContext,
+}
+
+impl ClaudeSubagentMetadataContext {
+    fn decode(context: &AdapterObjectContext) -> Result<Self, AdapterError> {
+        decode_object_context(context)
+    }
+}
+
+fn encode_object_context<T: Serialize>(context: &T) -> Result<Vec<u8>, AdapterError> {
+    serde_json::to_vec(context).map_err(|error| {
+        AdapterError::new(
+            AdapterErrorClass::AdapterFatal,
+            "claude_context_encode",
+            error.to_string(),
+        )
+    })
+}
+
+fn decode_object_context<T: DeserializeOwned>(
+    context: &AdapterObjectContext,
+) -> Result<T, AdapterError> {
+    if context.version() != OBJECT_CONTEXT_VERSION {
+        return Err(AdapterError::new(
+            AdapterErrorClass::StreamFatal,
+            "claude_context_version",
+            format!(
+                "unsupported Claude object context version {}",
+                context.version()
+            ),
+        ));
+    }
+    serde_json::from_slice(context.payload()).map_err(|error| {
+        AdapterError::new(
+            AdapterErrorClass::StreamFatal,
+            "claude_context_decode",
+            error.to_string(),
+        )
+    })
+}
+
+fn decoder_context_mismatch() -> AdapterError {
+    AdapterError::new(
+        AdapterErrorClass::InvalidContract,
+        "claude_decoder_context_mismatch",
+        "Claude decoder does not match bootstrapped object kind",
+    )
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ClaudeSubagentMetadataDocument {
+    agent_type: String,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    spawn_depth: Option<u32>,
+    #[serde(default)]
+    worktree_path: Option<String>,
+    #[serde(default)]
+    tool_use_id: Option<String>,
+}
+
+fn decode_subagent_metadata(
+    adapter_id: &AdapterId,
+    context: &ClaudeTranscriptContext,
+    record: &SourceRecord,
+    output: &mut FactBatch,
+) -> Result<DecodeDisposition, AdapterError> {
+    let document: ClaudeSubagentMetadataDocument = match serde_json::from_slice(&record.payload) {
+        Ok(document) => document,
+        Err(error) => {
+            preserve_unknown(
+                record,
+                output,
+                Some("subagent_metadata".to_string()),
+                format!("Claude subagent metadata is not a supported JSON object: {error}"),
+            )?;
+            return Ok(DecodeDisposition::PreservedUnknown);
+        }
+    };
+    let Some(agent_type) = nonempty(&document.agent_type) else {
+        preserve_unknown(
+            record,
+            output,
+            Some("subagent_metadata".to_string()),
+            "Claude subagent metadata has an empty agentType".to_string(),
+        )?;
+        return Ok(DecodeDisposition::PreservedUnknown);
+    };
+    let agent_id = context.agent_id.as_deref().ok_or_else(|| {
+        AdapterError::invalid_contract("subagent metadata context has no native child id")
+    })?;
+    let session = EntityKey::native(
+        adapter_id,
+        record.source_instance_id,
+        "session",
+        context.session_id.as_bytes(),
+    )?;
+    let run_native_key = context.run_native_key();
+    let child_run = EntityKey::native(
+        adapter_id,
+        record.source_instance_id,
+        "run",
+        run_native_key.as_bytes(),
+    )?;
+    output.push(
+        record,
+        Fact::DelegationMetadata(DelegationMetadataFact {
+            child_run,
+            session,
+            native_child_id: agent_id.to_string(),
+            agent_type,
+            description: document.description.as_deref().and_then(nonempty),
+            name: document.name.as_deref().and_then(nonempty),
+            spawn_depth: document.spawn_depth,
+            worktree_path: document.worktree_path.as_deref().and_then(nonempty),
+            native_task_id: document.tool_use_id.as_deref().and_then(nonempty),
+        }),
+    )?;
+    Ok(DecodeDisposition::Applied)
 }
 
 fn decode_transcript_record(
@@ -898,7 +1062,7 @@ mod tests {
     }
 
     #[test]
-    fn discovery_and_streams_are_declarative_and_use_common_append_driver() {
+    fn discovery_and_streams_are_declarative_and_use_common_drivers() {
         let root = TempDir::new().unwrap();
         std::fs::create_dir(root.path().join("projects")).unwrap();
         let adapter = ClaudeCodeAdapter::new();
@@ -915,18 +1079,30 @@ mod tests {
                 spec: discovered[0].clone(),
             })
             .unwrap();
-        assert_eq!(streams.len(), 2);
-        assert_eq!(adapter.manifest().contract_version, 2);
-        assert!(streams
+        assert_eq!(streams.len(), 3);
+        assert_eq!(adapter.manifest().contract_version, 3);
+        assert!(adapter
+            .manifest()
+            .source_schema_versions
             .iter()
-            .all(|stream| matches!(stream.driver, DriverSpec::AppendDelimited(_))));
+            .any(|version| version == "claude-code-subagent-meta-v1"));
+        assert!(matches!(streams[0].driver, DriverSpec::AppendDelimited(_)));
+        assert!(matches!(streams[1].driver, DriverSpec::AppendDelimited(_)));
+        assert!(matches!(streams[2].driver, DriverSpec::ReplaceDocument(_)));
         assert_eq!(streams[0].decoder.as_str(), PARENT_DECODER);
         assert_eq!(streams[1].decoder.as_str(), SUBAGENT_DECODER);
+        assert_eq!(streams[2].decoder.as_str(), SUBAGENT_META_DECODER);
+        assert_eq!(streams[2].authority, StreamAuthority::Supplemental);
+        assert_eq!(streams[2].consistency, ConsistencyPolicy::SnapshotReplace);
         assert!(!streams[0]
             .capabilities
             .iter()
             .any(|capability| capability.as_str() == RUNTIME_SUBAGENTS));
         assert!(streams[1]
+            .capabilities
+            .iter()
+            .any(|capability| capability.as_str() == RUNTIME_SUBAGENTS));
+        assert!(streams[2]
             .capabilities
             .iter()
             .any(|capability| capability.as_str() == RUNTIME_SUBAGENTS));
@@ -1115,5 +1291,86 @@ mod tests {
         assert_eq!(delegation.native_child_id.as_deref(), Some("a1"));
         assert_eq!(delegation.cwd.as_deref(), Some("/repo/.worktrees/a1"));
         assert!(delegation.parent_run.is_some());
+    }
+
+    #[test]
+    fn subagent_metadata_uses_the_same_child_key_without_strengthening_lineage() {
+        let root = TempDir::new().unwrap();
+        let adapter = ClaudeCodeAdapter::new();
+        let relative =
+            format!("project/{SESSION}/subagents/workflows/w1/agents/agent-a1.meta.json");
+        let context = adapter
+            .bootstrap_object(
+                &instance(root.path()),
+                &object(SUBAGENT_META_STREAM, &relative),
+            )
+            .unwrap();
+        let decoded = ClaudeSubagentMetadataContext::decode(&context)
+            .unwrap()
+            .child;
+        assert_eq!(decoded.run_native_key(), format!("{SESSION}\0w1\0a1"));
+
+        let metadata_record = record(
+            br#"{"agentType":"Explore","description":"map the parser","name":"survey","spawnDepth":2,"worktreePath":"/repo/.worktrees/a1","toolUseId":"tool-7"}"#,
+        );
+        let mut mismatched_batch = FactBatch::new(4, 4).unwrap();
+        assert!(adapter
+            .decode(
+                DecodeContext {
+                    decoder: &DecoderId::new(SUBAGENT_DECODER).unwrap(),
+                    object_context: &context,
+                },
+                &metadata_record,
+                &mut mismatched_batch,
+            )
+            .is_err());
+        let mut batch = FactBatch::new(4, 4).unwrap();
+        let disposition = adapter
+            .decode(
+                DecodeContext {
+                    decoder: &DecoderId::new(SUBAGENT_META_DECODER).unwrap(),
+                    object_context: &context,
+                },
+                &metadata_record,
+                &mut batch,
+            )
+            .unwrap();
+        assert_eq!(disposition, DecodeDisposition::Applied);
+        let metadata = fact_values(&batch)
+            .find_map(|fact| match fact {
+                Fact::DelegationMetadata(metadata) => Some(metadata),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(metadata.native_child_id, "a1");
+        assert_eq!(metadata.agent_type, "Explore");
+        assert_eq!(metadata.description.as_deref(), Some("map the parser"));
+        assert_eq!(metadata.name.as_deref(), Some("survey"));
+        assert_eq!(metadata.spawn_depth, Some(2));
+        assert_eq!(
+            metadata.worktree_path.as_deref(),
+            Some("/repo/.worktrees/a1")
+        );
+        assert_eq!(metadata.native_task_id.as_deref(), Some("tool-7"));
+        assert!(!fact_values(&batch).any(|fact| matches!(fact, Fact::Delegation(_))));
+
+        let malformed = record(b"{}");
+        let mut unknown_batch = FactBatch::new(4, 4).unwrap();
+        let disposition = adapter
+            .decode(
+                DecodeContext {
+                    decoder: &DecoderId::new(SUBAGENT_META_DECODER).unwrap(),
+                    object_context: &context,
+                },
+                &malformed,
+                &mut unknown_batch,
+            )
+            .unwrap();
+        assert_eq!(disposition, DecodeDisposition::PreservedUnknown);
+        assert!(matches!(
+            unknown_batch.facts()[0].value,
+            Fact::UnknownRecord { .. }
+        ));
+        assert_eq!(unknown_batch.diagnostics().len(), 1);
     }
 }

@@ -249,6 +249,22 @@ pub struct DelegationFact {
     pub source_time: Option<QualifiedTimestamp>,
 }
 
+/// One replaceable native metadata snapshot for a delegated child run. This
+/// intentionally carries no parent relation: a sidecar can enrich a child
+/// without upgrading layout-derived lineage to native evidence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DelegationMetadataFact {
+    pub child_run: EntityKey,
+    pub session: EntityKey,
+    pub native_child_id: String,
+    pub agent_type: String,
+    pub description: Option<String>,
+    pub name: Option<String>,
+    pub spawn_depth: Option<u32>,
+    pub worktree_path: Option<String>,
+    pub native_task_id: Option<String>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EvidenceKind {
     RunDeclared,
@@ -339,6 +355,7 @@ pub enum Fact {
     Message(MessageFact),
     Run(RunFact),
     Delegation(DelegationFact),
+    DelegationMetadata(DelegationMetadataFact),
     RunEvidence(RunEvidenceFact),
     Usage(UsageFact),
     UnknownRecord {
@@ -355,6 +372,7 @@ impl Fact {
             Self::Message(_) => "message",
             Self::Run(_) => "run",
             Self::Delegation(_) => "delegation",
+            Self::DelegationMetadata(_) => "delegation_metadata",
             Self::RunEvidence(_) => "run_evidence",
             Self::Usage(_) => "usage",
             Self::UnknownRecord { .. } => "unknown_record",
@@ -367,6 +385,7 @@ impl Fact {
             Self::Message(fact) => Some(&fact.message),
             Self::Run(fact) => Some(&fact.run),
             Self::Delegation(fact) => Some(&fact.child_run),
+            Self::DelegationMetadata(fact) => Some(&fact.child_run),
             Self::RunEvidence(fact) => Some(&fact.run),
             Self::Usage(fact) => Some(&fact.subject),
             Self::UnknownRecord { .. } => None,

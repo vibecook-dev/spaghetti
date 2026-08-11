@@ -16,9 +16,9 @@ pub use contract::{
     SourceObjectDescriptor, SourceRoot, StreamAuthority, StreamId, StreamSpec, SupportLevel,
 };
 pub use facts::{
-    ContentBlock, DelegationFact, DelegationKind, EntityKey, EvidenceKind, EvidenceStrength, Fact,
-    FactBatch, FactEnvelope, FactId, FactProvenance, MessageFact, MessageRole, QualifiedTimestamp,
-    RelationStrength, RunEvidenceFact, RunFact, SessionFact, TimestampQuality, TokenUsage,
-    UsageAccounting, UsageFact, UsageScope, ValueQuality,
+    ContentBlock, DelegationFact, DelegationKind, DelegationMetadataFact, EntityKey, EvidenceKind,
+    EvidenceStrength, Fact, FactBatch, FactEnvelope, FactId, FactProvenance, MessageFact,
+    MessageRole, QualifiedTimestamp, RelationStrength, RunEvidenceFact, RunFact, SessionFact,
+    TimestampQuality, TokenUsage, UsageAccounting, UsageFact, UsageScope, ValueQuality,
 };
 pub use registry::{AdapterRegistry, AdapterRegistryBuilder};
