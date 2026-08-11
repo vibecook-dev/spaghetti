@@ -8,6 +8,7 @@
 - **Type:** Architecture / migration / adapter contract / public API
 - **Scope:** Rust ingest, live source observation, sole SQLite ownership, runtime-state projection, search and query, token usage, source adapters, durable subscriptions
 - **Numbering note:** `packages/sdk/src/io/sqlite-service.ts` already identifies the `better-sqlite3` → `node:sqlite` migration as RFC 010. This architecture therefore uses RFC 011.
+- **Phase records:** [Phase 0 baseline](./011-phase-0-baseline.md) · [Phase 1 engine shell](./011-phase-1-engine-shell.md) · [Phase 2 transactional catalog](./011-phase-2-transactional-catalog.md)
 - **Related documents:**
   - `docs/TWO-PLANE-INGEST-ARCHITECTURE.md`
   - `docs/rfcs/003-rust-ingest-core.md`

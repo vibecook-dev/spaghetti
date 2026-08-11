@@ -178,7 +178,7 @@ export interface SpaghettiEngineHealth {
 /** First typed read model exposed by the persistent engine. */
 export interface SpaghettiEngineOverview {
   schemaVersion: number;
-  /** Zero until RFC 011 Phase 2 introduces durable ingest commits. */
+  /** Latest durable ingest commit visible to the read-only query snapshot. */
   commitSeq: number;
   projects: number;
   sessions: number;

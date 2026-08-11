@@ -1,9 +1,8 @@
 //! Long-lived engine writer connection.
 //!
-//! Phase 1 only needs lifecycle and health commands; later phases add commit
-//! commands to this same actor. Keeping the `rusqlite::Connection` inside its
-//! dedicated thread makes single-writer ownership structural and keeps N-API
-//! objects `Send` without moving SQLite handles across runtimes.
+//! Keeping the `rusqlite::Connection` inside its dedicated thread makes
+//! single-writer ownership structural and keeps N-API objects `Send` without
+//! moving SQLite handles across runtimes.
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -16,6 +15,7 @@ use rusqlite::Connection;
 
 use crate::core::schema;
 
+use super::commit::{self, CommitReceipt, ObservationCommit};
 use super::EngineError;
 
 #[derive(Debug, Clone)]
@@ -26,6 +26,10 @@ pub struct WriterHealth {
 
 enum WriterCommand {
     Health(Sender<Result<WriterHealth, EngineError>>),
+    Commit {
+        request: Box<ObservationCommit>,
+        response: Sender<Result<CommitReceipt, EngineError>>,
+    },
     Shutdown,
 }
 
@@ -51,6 +55,25 @@ impl WriterClient {
 
     pub fn is_alive(&self) -> bool {
         self.alive.load(Ordering::Acquire)
+    }
+
+    pub fn commit_observation(
+        &self,
+        request: ObservationCommit,
+    ) -> Result<CommitReceipt, EngineError> {
+        if !self.alive.load(Ordering::Acquire) {
+            return Err(EngineError::WorkerUnavailable { worker: "writer" });
+        }
+        let (response_tx, response_rx) = bounded(1);
+        self.commands
+            .send(WriterCommand::Commit {
+                request: Box::new(request),
+                response: response_tx,
+            })
+            .map_err(|_| EngineError::WorkerUnavailable { worker: "writer" })?;
+        response_rx
+            .recv()
+            .map_err(|_| EngineError::WorkerUnavailable { worker: "writer" })?
     }
 }
 
@@ -122,7 +145,7 @@ fn writer_thread(
     ready: Sender<Result<(), EngineError>>,
     alive: Arc<AtomicBool>,
 ) {
-    let connection = match open_writer(&database_path) {
+    let mut connection = match open_writer(&database_path) {
         Ok(connection) => connection,
         Err(error) => {
             let _ = ready.send(Err(error));
@@ -140,6 +163,9 @@ fn writer_thread(
         match command {
             WriterCommand::Health(response) => {
                 let _ = response.send(read_health(&connection));
+            }
+            WriterCommand::Commit { request, response } => {
+                let _ = response.send(commit::apply_observation_commit(&mut connection, &request));
             }
             WriterCommand::Shutdown => break,
         }

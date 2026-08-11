@@ -7,7 +7,8 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use crossbeam_channel::{bounded, Receiver, Sender, TrySendError};
-use rusqlite::{Connection, OpenFlags};
+use rusqlite::types::Value;
+use rusqlite::{Connection, OpenFlags, OptionalExtension};
 
 use crate::core::schema;
 
@@ -18,7 +19,7 @@ const QUEUE_DEPTH_PER_WORKER: usize = 16;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QueryOverview {
     pub schema_version: u32,
-    pub commit_seq: u32,
+    pub commit_seq: u64,
     pub projects: u32,
     pub sessions: u32,
     pub messages: u32,
@@ -26,10 +27,59 @@ pub struct QueryOverview {
     pub read_only: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ChangeCursor {
+    pub commit_seq: u64,
+    pub ordinal: u32,
+}
+
+impl ChangeCursor {
+    /// A cursor positioned after every change in a committed query snapshot.
+    pub fn after_snapshot(commit_seq: u64) -> Self {
+        Self {
+            commit_seq,
+            ordinal: u32::MAX,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChangeReplayRequest {
+    pub after: Option<ChangeCursor>,
+    /// Empty means all stable topics.
+    pub topics: Vec<String>,
+    pub limit: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DurableChange {
+    pub cursor: ChangeCursor,
+    pub topic: String,
+    pub schema_version: u32,
+    pub entity_key: Vec<u8>,
+    pub operation: String,
+    pub payload: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChangeReplay {
+    /// Watermark read at the start of the same SQLite snapshot as `changes`.
+    pub at_commit_seq: u64,
+    pub oldest_available: Option<ChangeCursor>,
+    pub changes: Vec<DurableChange>,
+    pub next_cursor: Option<ChangeCursor>,
+    pub has_more: bool,
+}
+
 enum QueryCommand {
     Overview {
         cancellation_epoch: u64,
         response: Sender<Result<QueryOverview, EngineError>>,
+    },
+    ReplayChanges {
+        cancellation_epoch: u64,
+        request: ChangeReplayRequest,
+        response: Sender<Result<ChangeReplay, EngineError>>,
     },
     #[cfg(test)]
     Hold {
@@ -91,6 +141,34 @@ impl QueryClient {
         let (response_tx, response_rx) = bounded(1);
         match self.commands.try_send(QueryCommand::Overview {
             cancellation_epoch,
+            response: response_tx,
+        }) {
+            Ok(()) => {}
+            Err(TrySendError::Full(_)) => return Err(EngineError::QueryQueueFull),
+            Err(TrySendError::Disconnected(_)) => {
+                return Err(EngineError::WorkerUnavailable { worker: "query" });
+            }
+        }
+
+        response_rx
+            .recv()
+            .map_err(|_| EngineError::WorkerUnavailable { worker: "query" })?
+    }
+
+    pub fn replay_changes(
+        &self,
+        request: ChangeReplayRequest,
+    ) -> Result<ChangeReplay, EngineError> {
+        validate_replay_request(&request)?;
+        if self.control.stopping.load(Ordering::Acquire) {
+            return Err(EngineError::ShuttingDown);
+        }
+
+        let cancellation_epoch = self.control.cancellation_epoch.load(Ordering::Acquire);
+        let (response_tx, response_rx) = bounded(1);
+        match self.commands.try_send(QueryCommand::ReplayChanges {
+            cancellation_epoch,
+            request,
             response: response_tx,
         }) {
             Ok(()) => {}
@@ -297,6 +375,25 @@ fn query_thread(
                 });
                 let _ = response.send(result);
             }
+            QueryCommand::ReplayChanges {
+                cancellation_epoch,
+                request,
+                response,
+            } => {
+                if is_cancelled(&control, cancellation_epoch) {
+                    let _ = response.send(Err(EngineError::QueryCancelled));
+                    continue;
+                }
+                let _in_flight = InFlightGuard::enter(&control.in_flight);
+                let result = read_change_replay(&connection, &request).and_then(|replay| {
+                    if is_cancelled(&control, cancellation_epoch) {
+                        Err(EngineError::QueryCancelled)
+                    } else {
+                        Ok(replay)
+                    }
+                });
+                let _ = response.send(result);
+            }
             #[cfg(test)]
             QueryCommand::Hold { entered, release } => {
                 let _in_flight = InFlightGuard::enter(&control.in_flight);
@@ -351,30 +448,37 @@ fn open_reader(database_path: &PathBuf) -> Result<Connection, EngineError> {
 }
 
 fn read_overview(connection: &Connection) -> Result<QueryOverview, EngineError> {
-    let schema_version = schema::current_schema_version(connection)
+    let transaction = connection
+        .unchecked_transaction()
+        .map_err(|error| query_sqlite_error("begin overview snapshot", error))?;
+    let schema_version = schema::current_schema_version(&transaction)
         .map_err(|error| EngineError::Sqlite {
             operation: "read schema version",
             detail: error.to_string(),
         })?
         .unwrap_or(0);
-    let query_only: i64 = connection
+    let query_only: i64 = transaction
         .query_row("PRAGMA query_only", [], |row| row.get(0))
         .map_err(|error| EngineError::Sqlite {
             operation: "verify query_only",
             detail: error.to_string(),
         })?;
 
-    Ok(QueryOverview {
+    let overview = QueryOverview {
         schema_version,
-        commit_seq: read_commit_seq(connection)?,
-        projects: count_table(connection, "projects")?,
-        sessions: count_table(connection, "sessions")?,
-        messages: count_table(connection, "messages")?,
+        commit_seq: read_commit_seq(&transaction)?,
+        projects: count_table(&transaction, "projects")?,
+        sessions: count_table(&transaction, "sessions")?,
+        messages: count_table(&transaction, "messages")?,
         query_only: query_only != 0,
         // The connection was opened with SQLITE_OPEN_READ_ONLY. The write
         // rejection test below verifies this invariant on the actual handle.
         read_only: true,
-    })
+    };
+    transaction
+        .commit()
+        .map_err(|error| query_sqlite_error("finish overview snapshot", error))?;
+    Ok(overview)
 }
 
 fn count_table(connection: &Connection, table: &'static str) -> Result<u32, EngineError> {
@@ -393,7 +497,7 @@ fn count_table(connection: &Connection, table: &'static str) -> Result<u32, Engi
     Ok(u32::try_from(count).unwrap_or(u32::MAX))
 }
 
-fn read_commit_seq(connection: &Connection) -> Result<u32, EngineError> {
+fn read_commit_seq(connection: &Connection) -> Result<u64, EngineError> {
     let table_exists: i64 = connection
         .query_row(
             "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'ingest_commits'",
@@ -408,25 +512,266 @@ fn read_commit_seq(connection: &Connection) -> Result<u32, EngineError> {
         return Ok(0);
     }
 
-    let commit_seq: i64 = connection
+    read_committed_watermark(connection)
+}
+
+const MAX_REPLAY_CHANGES: u32 = 1_000;
+const MAX_REPLAY_TOPICS: usize = 64;
+
+fn validate_replay_request(request: &ChangeReplayRequest) -> Result<(), EngineError> {
+    if !(1..=MAX_REPLAY_CHANGES).contains(&request.limit) {
+        return Err(EngineError::InvalidQuery(format!(
+            "change replay limit must be between 1 and {MAX_REPLAY_CHANGES}, got {}",
+            request.limit
+        )));
+    }
+    if request.topics.iter().any(|topic| topic.trim().is_empty()) {
+        return Err(EngineError::InvalidQuery(
+            "change replay topics must not contain empty values".to_string(),
+        ));
+    }
+    if request.topics.len() > MAX_REPLAY_TOPICS {
+        return Err(EngineError::InvalidQuery(format!(
+            "change replay accepts at most {MAX_REPLAY_TOPICS} topics, got {}",
+            request.topics.len()
+        )));
+    }
+    Ok(())
+}
+
+fn read_change_replay(
+    connection: &Connection,
+    request: &ChangeReplayRequest,
+) -> Result<ChangeReplay, EngineError> {
+    let transaction = connection
+        .unchecked_transaction()
+        .map_err(|error| query_sqlite_error("begin change replay snapshot", error))?;
+    let watermark = read_committed_watermark(&transaction)?;
+    let oldest_available = transaction
         .query_row(
-            "SELECT COALESCE(MAX(commit_seq), 0) FROM ingest_commits",
+            r#"
+            SELECT commit_seq, ordinal
+            FROM change_log
+            WHERE commit_seq <= ?1
+            ORDER BY commit_seq, ordinal
+            LIMIT 1
+            "#,
+            [to_query_i64(watermark, "commit watermark")?],
+            |row| {
+                let commit_seq: i64 = row.get(0)?;
+                let ordinal: i64 = row.get(1)?;
+                Ok((commit_seq, ordinal))
+            },
+        )
+        .optional()
+        .map_err(|error| query_sqlite_error("read oldest durable change", error))?
+        .map(|(commit_seq, ordinal)| decode_cursor(commit_seq, ordinal))
+        .transpose()?;
+
+    let after = request.after.unwrap_or(ChangeCursor {
+        commit_seq: 0,
+        ordinal: 0,
+    });
+    let mut arguments = vec![
+        Value::Integer(to_query_i64(after.commit_seq, "change cursor sequence")?),
+        Value::Integer(i64::from(after.ordinal)),
+        Value::Integer(to_query_i64(watermark, "commit watermark")?),
+    ];
+    let mut sql = String::from(
+        r#"
+        SELECT commit_seq, ordinal, topic, schema_version, entity_key, operation, payload
+        FROM change_log
+        WHERE (commit_seq > ?1 OR (commit_seq = ?1 AND ordinal > ?2))
+          AND commit_seq <= ?3
+        "#,
+    );
+    if !request.topics.is_empty() {
+        sql.push_str(" AND topic IN (");
+        for (index, topic) in request.topics.iter().enumerate() {
+            if index > 0 {
+                sql.push_str(", ");
+            }
+            let parameter = arguments.len() + 1;
+            sql.push('?');
+            sql.push_str(&parameter.to_string());
+            arguments.push(Value::Text(topic.clone()));
+        }
+        sql.push(')');
+    }
+    let limit_parameter = arguments.len() + 1;
+    sql.push_str(" ORDER BY commit_seq, ordinal LIMIT ?");
+    sql.push_str(&limit_parameter.to_string());
+    arguments.push(Value::Integer(i64::from(request.limit) + 1));
+
+    let mut changes = {
+        let mut statement = transaction
+            .prepare(&sql)
+            .map_err(|error| query_sqlite_error("prepare change replay", error))?;
+        let mut rows = statement
+            .query(rusqlite::params_from_iter(arguments.iter()))
+            .map_err(|error| query_sqlite_error("execute change replay", error))?;
+        let mut changes = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .map_err(|error| query_sqlite_error("read durable change", error))?
+        {
+            let commit_seq: i64 = row
+                .get(0)
+                .map_err(|error| query_sqlite_error("decode change sequence", error))?;
+            let ordinal: i64 = row
+                .get(1)
+                .map_err(|error| query_sqlite_error("decode change ordinal", error))?;
+            let schema_version: i64 = row
+                .get(3)
+                .map_err(|error| query_sqlite_error("decode change schema version", error))?;
+            changes.push(DurableChange {
+                cursor: decode_cursor(commit_seq, ordinal)?,
+                topic: row
+                    .get(2)
+                    .map_err(|error| query_sqlite_error("decode change topic", error))?,
+                schema_version: u32::try_from(schema_version).map_err(|_| EngineError::Sqlite {
+                    operation: "decode change schema version",
+                    detail: format!("schema version was outside u32: {schema_version}"),
+                })?,
+                entity_key: row
+                    .get(4)
+                    .map_err(|error| query_sqlite_error("decode change entity key", error))?,
+                operation: row
+                    .get(5)
+                    .map_err(|error| query_sqlite_error("decode change operation", error))?,
+                payload: row
+                    .get(6)
+                    .map_err(|error| query_sqlite_error("decode change payload", error))?,
+            });
+        }
+        changes
+    };
+
+    transaction
+        .commit()
+        .map_err(|error| query_sqlite_error("finish change replay snapshot", error))?;
+
+    let has_more = changes.len() > request.limit as usize;
+    if has_more {
+        changes.truncate(request.limit as usize);
+    }
+    let next_cursor = changes.last().map(|change| change.cursor);
+    Ok(ChangeReplay {
+        at_commit_seq: watermark,
+        oldest_available,
+        changes,
+        next_cursor,
+        has_more,
+    })
+}
+
+fn read_committed_watermark(connection: &Connection) -> Result<u64, EngineError> {
+    let value: i64 = connection
+        .query_row(
+            "SELECT COALESCE(MAX(commit_seq), 0) FROM ingest_commits WHERE committed_at IS NOT NULL",
             [],
             |row| row.get(0),
         )
-        .map_err(|error| EngineError::Sqlite {
-            operation: "read commit watermark",
-            detail: error.to_string(),
-        })?;
-    Ok(u32::try_from(commit_seq).unwrap_or(u32::MAX))
+        .map_err(|error| query_sqlite_error("read committed snapshot watermark", error))?;
+    u64::try_from(value).map_err(|_| EngineError::Sqlite {
+        operation: "decode committed snapshot watermark",
+        detail: format!("commit watermark was negative: {value}"),
+    })
+}
+
+fn decode_cursor(commit_seq: i64, ordinal: i64) -> Result<ChangeCursor, EngineError> {
+    Ok(ChangeCursor {
+        commit_seq: u64::try_from(commit_seq).map_err(|_| EngineError::Sqlite {
+            operation: "decode durable change cursor",
+            detail: format!("commit sequence was negative: {commit_seq}"),
+        })?,
+        ordinal: u32::try_from(ordinal).map_err(|_| EngineError::Sqlite {
+            operation: "decode durable change cursor",
+            detail: format!("change ordinal was outside u32: {ordinal}"),
+        })?,
+    })
+}
+
+fn to_query_i64(value: u64, field: &'static str) -> Result<i64, EngineError> {
+    i64::try_from(value)
+        .map_err(|_| EngineError::InvalidQuery(format!("{field} exceeds SQLite integer range")))
+}
+
+fn query_sqlite_error(operation: &'static str, error: rusqlite::Error) -> EngineError {
+    EngineError::Sqlite {
+        operation,
+        detail: error.to_string(),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engine::commit::{
+        ChangeEntry, ExpectedSourceCursor, ObservationCommit, SourceInstanceSpec,
+        SourceObjectUpdate, SourceStreamSpec,
+    };
     use crate::engine::writer::WriterRuntime;
     use rusqlite::Connection;
     use tempfile::tempdir;
+
+    fn commit_request() -> ObservationCommit {
+        ObservationCommit {
+            source: SourceInstanceSpec {
+                adapter_id: "query-fixture".to_string(),
+                stable_key: b"root".to_vec(),
+                display_name: "Query fixture".to_string(),
+                adapter_contract_version: 1,
+                discovered_at: 10,
+                last_seen_at: 10,
+            },
+            stream: SourceStreamSpec {
+                stream_key: "history".to_string(),
+                driver_kind: "append_file".to_string(),
+                decoder_key: "fixture".to_string(),
+                stream_state: "available".to_string(),
+                last_reconciled_at: None,
+            },
+            object: SourceObjectUpdate {
+                object_key: b"object".to_vec(),
+                expected: ExpectedSourceCursor::Absent,
+                display_path: None,
+                native_identity: None,
+                generation: 1,
+                committed_cursor: b"cursor".to_vec(),
+                observed_revision: None,
+                adapter_object_context: None,
+                decoder_state: None,
+                decoder_state_version: None,
+                size_bytes: None,
+                mtime_ns: None,
+                decoder_contract_version: 1,
+                state: "active".to_string(),
+            },
+            reason: "test".to_string(),
+            started_at: 10,
+            committed_at: 11,
+            fact_count: 1,
+            projection_versions: Vec::new(),
+            record_errors: Vec::new(),
+            changes: vec![
+                ChangeEntry {
+                    topic: "history.session.changed".to_string(),
+                    schema_version: 1,
+                    entity_key: b"session".to_vec(),
+                    operation: "upsert".to_string(),
+                    payload: b"history".to_vec(),
+                },
+                ChangeEntry {
+                    topic: "runtime.session.changed".to_string(),
+                    schema_version: 1,
+                    entity_key: b"session".to_vec(),
+                    operation: "upsert".to_string(),
+                    payload: b"runtime".to_vec(),
+                },
+            ],
+        }
+    }
 
     #[test]
     fn overview_is_typed_read_only_and_does_not_change_database_content() {
@@ -489,5 +834,136 @@ mod tests {
 
         pool.shutdown().unwrap();
         writer.shutdown().unwrap();
+    }
+
+    #[test]
+    fn durable_change_replay_is_ordered_filtered_paginated_and_watermarked() {
+        let dir = tempdir().unwrap();
+        let database = dir.path().join("replay.db");
+        let mut writer = WriterRuntime::start(database.clone()).unwrap();
+        let receipt = writer
+            .client()
+            .commit_observation(commit_request())
+            .unwrap();
+        let mut pool = QueryPool::start(database, 2).unwrap();
+        let client = pool.client();
+
+        let first = client
+            .replay_changes(ChangeReplayRequest {
+                after: None,
+                topics: Vec::new(),
+                limit: 1,
+            })
+            .unwrap();
+        assert_eq!(first.at_commit_seq, receipt.commit_seq);
+        assert_eq!(
+            first.oldest_available,
+            Some(ChangeCursor {
+                commit_seq: 1,
+                ordinal: 0
+            })
+        );
+        assert_eq!(first.changes.len(), 1);
+        assert_eq!(first.changes[0].topic, "history.session.changed");
+        assert_eq!(
+            first.next_cursor,
+            Some(ChangeCursor {
+                commit_seq: 1,
+                ordinal: 0
+            })
+        );
+        assert!(first.has_more);
+
+        let remainder = client
+            .replay_changes(ChangeReplayRequest {
+                after: first.next_cursor,
+                topics: Vec::new(),
+                limit: 10,
+            })
+            .unwrap();
+        assert_eq!(remainder.changes.len(), 1);
+        assert_eq!(remainder.changes[0].cursor.ordinal, 1);
+        assert!(!remainder.has_more);
+
+        let runtime_only = client
+            .replay_changes(ChangeReplayRequest {
+                after: None,
+                topics: vec!["runtime.session.changed".to_string()],
+                limit: 10,
+            })
+            .unwrap();
+        assert_eq!(runtime_only.changes.len(), 1);
+        assert_eq!(runtime_only.changes[0].payload, b"runtime");
+
+        let after_snapshot = client
+            .replay_changes(ChangeReplayRequest {
+                after: Some(ChangeCursor::after_snapshot(receipt.commit_seq)),
+                topics: Vec::new(),
+                limit: 10,
+            })
+            .unwrap();
+        assert!(after_snapshot.changes.is_empty());
+
+        assert!(matches!(
+            client.replay_changes(ChangeReplayRequest {
+                after: None,
+                topics: Vec::new(),
+                limit: 0,
+            }),
+            Err(EngineError::InvalidQuery(_))
+        ));
+        assert!(matches!(
+            client.replay_changes(ChangeReplayRequest {
+                after: None,
+                topics: vec!["history.session.changed".to_string(); 65],
+                limit: 10,
+            }),
+            Err(EngineError::InvalidQuery(_))
+        ));
+
+        pool.shutdown().unwrap();
+        writer.shutdown().unwrap();
+    }
+
+    #[test]
+    fn restart_replays_changes_committed_before_in_memory_publication() {
+        let dir = tempdir().unwrap();
+        let database = dir.path().join("restart-replay.db");
+        let mut writer = WriterRuntime::start(database.clone()).unwrap();
+        writer
+            .client()
+            .commit_observation(commit_request())
+            .unwrap();
+        writer.shutdown().unwrap();
+
+        let mut restarted_writer = WriterRuntime::start(database.clone()).unwrap();
+        let mut restarted_queries = QueryPool::start(database, 1).unwrap();
+        let replay = restarted_queries
+            .client()
+            .replay_changes(ChangeReplayRequest {
+                after: None,
+                topics: Vec::new(),
+                limit: 10,
+            })
+            .unwrap();
+        assert_eq!(replay.at_commit_seq, 1);
+        assert_eq!(replay.changes.len(), 2);
+        assert_eq!(
+            replay.changes[0].cursor,
+            ChangeCursor {
+                commit_seq: 1,
+                ordinal: 0
+            }
+        );
+        assert_eq!(
+            replay.changes[1].cursor,
+            ChangeCursor {
+                commit_seq: 1,
+                ordinal: 1
+            }
+        );
+
+        restarted_queries.shutdown().unwrap();
+        restarted_writer.shutdown().unwrap();
     }
 }

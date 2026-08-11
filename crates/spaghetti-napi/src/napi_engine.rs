@@ -102,8 +102,8 @@ impl From<EngineHealthSnapshot> for EngineHealth {
 #[derive(Debug, Clone)]
 pub struct EngineOverviewResult {
     pub schema_version: u32,
-    /// Zero until RFC 011 Phase 2 introduces durable ingest commits.
-    pub commit_seq: u32,
+    /// Latest durable ingest commit visible to the read-only query snapshot.
+    pub commit_seq: f64,
     pub projects: u32,
     pub sessions: u32,
     pub messages: u32,
@@ -117,7 +117,7 @@ impl From<EngineOverview> for EngineOverviewResult {
     fn from(value: EngineOverview) -> Self {
         Self {
             schema_version: value.schema_version,
-            commit_seq: value.commit_seq,
+            commit_seq: value.commit_seq as f64,
             projects: value.projects,
             sessions: value.sessions,
             messages: value.messages,

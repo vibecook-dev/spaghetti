@@ -1,9 +1,10 @@
-//! Persistent observation/query engine lifecycle (RFC 011 Phase 1).
+//! Persistent observation/query engine lifecycle (RFC 011).
 //!
 //! This module is deliberately free of N-API types. The Node binding in
 //! `napi_engine` is one host adapter; a future daemon or embedded desktop host
 //! can own the same `SpaghettiEngineCore` and receive identical semantics.
 
+mod commit;
 mod owner_lock;
 mod query_pool;
 mod writer;
@@ -12,8 +13,12 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 
+use commit::{CommitReceipt, ObservationCommit};
 use owner_lock::DatabaseOwnerLock;
 pub use owner_lock::OwnerMetadata;
+pub use query_pool::{
+    ChangeCursor, ChangeReplay, ChangeReplayRequest, DurableChange, QueryOverview,
+};
 use query_pool::{QueryClient, QueryPool};
 use writer::{WriterClient, WriterRuntime};
 
@@ -63,6 +68,21 @@ pub enum EngineError {
 
     #[error("query queue is full")]
     QueryQueueFull,
+
+    #[error("invalid query: {0}")]
+    InvalidQuery(String),
+
+    #[error("invalid observation commit: {0}")]
+    InvalidCommit(String),
+
+    #[error("source cursor changed before commit for adapter {adapter_id}, stream {stream_key}")]
+    StaleSourceCursor {
+        adapter_id: String,
+        stream_key: String,
+    },
+
+    #[error("injected process failure at {stage}")]
+    InjectedFailure { stage: &'static str },
 }
 
 #[derive(Debug, Clone)]
@@ -122,7 +142,7 @@ pub struct EngineHealthSnapshot {
 #[derive(Debug, Clone)]
 pub struct EngineOverview {
     pub schema_version: u32,
-    pub commit_seq: u32,
+    pub commit_seq: u64,
     pub projects: u32,
     pub sessions: u32,
     pub messages: u32,
@@ -270,6 +290,26 @@ impl SpaghettiEngineCore {
             query_only: query.query_only,
             read_only: query.read_only,
         })
+    }
+
+    /// Atomically persist one decoded source range, advance its durable
+    /// cursor, update projection readiness, and append public changes.
+    pub(crate) fn commit_observation(
+        &self,
+        request: ObservationCommit,
+    ) -> Result<CommitReceipt, EngineError> {
+        let (writer, _) = self.clients()?;
+        writer.commit_observation(request)
+    }
+
+    /// Replay durable projection changes from a snapshot-consistent read-only
+    /// query lane. The returned watermark and page come from one transaction.
+    pub fn replay_changes(
+        &self,
+        request: ChangeReplayRequest,
+    ) -> Result<ChangeReplay, EngineError> {
+        let (_, queries) = self.clients()?;
+        queries.replay_changes(request)
     }
 
     pub fn cancel_pending_queries(&self) -> Result<u64, EngineError> {

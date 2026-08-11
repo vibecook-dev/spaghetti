@@ -2,6 +2,10 @@
 
 Status: first vertical slice implemented on 2026-08-11
 
+Follow-on: [Phase 2](./011-phase-2-transactional-catalog.md) now adds the
+transactional source catalog, commit watermark, and durable outbox. The text
+below records the boundary as it existed when Phase 1 landed.
+
 The native addon now exposes a library-first `SpaghettiEngineCore` through an
 async N-API/SDK opener:
 

@@ -58,7 +58,11 @@ import type { SqliteService } from '../io/index.js';
 // both the TS and Rust sides for a while but was dropped on the floor at write
 // time, so "which worktree is this agent working in" was unanswerable from the
 // database even though it sat in the meta sidecar on disk.
-export const SCHEMA_VERSION = 16;
+//
+// v17: RFC 011 source catalog, atomic ingest commits, projection readiness,
+// record diagnostics, and durable change-log outbox. This TS DDL is a
+// transitional migration mirror; Rust remains the target schema authority.
+export const SCHEMA_VERSION = 17;
 
 export const TOKEN_ACTIVITY_TRIGGER_NAMES = [
   'token_activity_messages_ai',
@@ -454,6 +458,102 @@ CREATE TABLE IF NOT EXISTS source_materializations (
   PRIMARY KEY (source_id, projection)
 );
 
+-- RFC 011 source catalog. Binary source keys and cursors are intentionally
+-- BLOB-capable: filesystem identities and adapter cursors are not universally
+-- UTF-8 strings or integers.
+CREATE TABLE IF NOT EXISTS source_instances (
+  source_instance_id INTEGER PRIMARY KEY,
+  adapter_id TEXT NOT NULL,
+  stable_key BLOB NOT NULL,
+  display_name TEXT NOT NULL,
+  adapter_contract_version INTEGER NOT NULL,
+  discovered_at INTEGER NOT NULL,
+  last_seen_at INTEGER NOT NULL,
+  UNIQUE(adapter_id, stable_key)
+);
+
+CREATE TABLE IF NOT EXISTS source_streams (
+  source_stream_id INTEGER PRIMARY KEY,
+  source_instance_id INTEGER NOT NULL REFERENCES source_instances(source_instance_id) ON DELETE CASCADE,
+  stream_key TEXT NOT NULL,
+  driver_kind TEXT NOT NULL,
+  decoder_key TEXT NOT NULL,
+  stream_state TEXT NOT NULL,
+  last_reconciled_at INTEGER,
+  last_commit_seq INTEGER,
+  UNIQUE(source_instance_id, stream_key)
+);
+
+CREATE TABLE IF NOT EXISTS source_objects (
+  source_object_id INTEGER PRIMARY KEY,
+  source_stream_id INTEGER NOT NULL REFERENCES source_streams(source_stream_id) ON DELETE CASCADE,
+  object_key BLOB NOT NULL,
+  display_path TEXT,
+  native_identity BLOB,
+  generation INTEGER NOT NULL,
+  committed_cursor BLOB NOT NULL,
+  observed_revision BLOB,
+  adapter_object_context BLOB,
+  decoder_state BLOB,
+  decoder_state_version INTEGER,
+  size_bytes INTEGER,
+  mtime_ns INTEGER,
+  decoder_contract_version INTEGER NOT NULL,
+  last_commit_seq INTEGER,
+  state TEXT NOT NULL,
+  UNIQUE(source_stream_id, object_key)
+);
+
+CREATE TABLE IF NOT EXISTS ingest_commits (
+  commit_seq INTEGER PRIMARY KEY AUTOINCREMENT,
+  source_instance_id INTEGER NOT NULL REFERENCES source_instances(source_instance_id) ON DELETE RESTRICT,
+  reason TEXT NOT NULL,
+  started_at INTEGER NOT NULL,
+  committed_at INTEGER,
+  fact_count INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS change_log (
+  commit_seq INTEGER NOT NULL REFERENCES ingest_commits(commit_seq) ON DELETE CASCADE,
+  ordinal INTEGER NOT NULL,
+  topic TEXT NOT NULL,
+  schema_version INTEGER NOT NULL,
+  entity_key BLOB NOT NULL,
+  operation TEXT NOT NULL,
+  payload BLOB NOT NULL,
+  PRIMARY KEY (commit_seq, ordinal)
+);
+
+CREATE TABLE IF NOT EXISTS projection_versions (
+  projection_id TEXT NOT NULL,
+  scope_key BLOB NOT NULL,
+  desired_version INTEGER NOT NULL,
+  completed_version INTEGER,
+  readiness TEXT NOT NULL,
+  last_commit_seq INTEGER,
+  updated_at INTEGER NOT NULL,
+  detail TEXT,
+  PRIMARY KEY (projection_id, scope_key)
+);
+
+CREATE TABLE IF NOT EXISTS source_record_errors (
+  source_object_id INTEGER NOT NULL REFERENCES source_objects(source_object_id) ON DELETE CASCADE,
+  generation INTEGER NOT NULL,
+  cursor_start BLOB NOT NULL,
+  cursor_end BLOB NOT NULL,
+  payload_hash BLOB NOT NULL,
+  media_type TEXT NOT NULL,
+  raw_payload BLOB,
+  error_class TEXT NOT NULL,
+  error_message TEXT NOT NULL,
+  adapter_version TEXT NOT NULL,
+  contract_version INTEGER NOT NULL,
+  first_commit_seq INTEGER NOT NULL,
+  last_retry_at INTEGER,
+  retry_count INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (source_object_id, generation, cursor_start, cursor_end)
+);
+
 CREATE TABLE IF NOT EXISTS workflows (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   project_slug TEXT,
@@ -548,6 +648,13 @@ CREATE INDEX IF NOT EXISTS idx_subagent_timeline_type ON subagent_timeline_messa
 CREATE INDEX IF NOT EXISTS idx_subagent_timeline_tool ON subagent_timeline_messages(source_id, session_id, tool_name);
 CREATE INDEX IF NOT EXISTS idx_tool_results_session ON tool_results(project_slug, session_id);
 CREATE INDEX IF NOT EXISTS idx_todos_session ON todos(session_id);
+CREATE INDEX IF NOT EXISTS idx_source_streams_instance_state ON source_streams(source_instance_id, stream_state);
+CREATE INDEX IF NOT EXISTS idx_source_objects_stream_state ON source_objects(source_stream_id, state);
+CREATE INDEX IF NOT EXISTS idx_source_objects_last_commit ON source_objects(last_commit_seq);
+CREATE INDEX IF NOT EXISTS idx_ingest_commits_source_seq ON ingest_commits(source_instance_id, commit_seq);
+CREATE INDEX IF NOT EXISTS idx_change_log_topic_cursor ON change_log(topic, commit_seq, ordinal);
+CREATE INDEX IF NOT EXISTS idx_projection_versions_readiness ON projection_versions(readiness, projection_id);
+CREATE INDEX IF NOT EXISTS idx_source_record_errors_commit ON source_record_errors(first_commit_seq);
 
 -- Persistent FTS5 (content-synced with messages)
 CREATE VIRTUAL TABLE IF NOT EXISTS search_fts USING fts5(text_content, content='messages', content_rowid='id');
@@ -635,6 +742,13 @@ const LEGACY_TABLES = ['segments', 'search_index', 'schema_version'];
 const CURRENT_TABLES = [
   'search_fts',
   'subagent_search_fts',
+  'source_record_errors',
+  'change_log',
+  'projection_versions',
+  'source_objects',
+  'source_streams',
+  'ingest_commits',
+  'source_instances',
   'source_files',
   'projects',
   'project_memories',

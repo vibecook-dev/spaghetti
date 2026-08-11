@@ -442,6 +442,16 @@ interface TableSpec {
   ignoreColumns?: string[];
 }
 
+const RFC011_SCHEMA_TABLES = [
+  'source_instances',
+  'source_streams',
+  'source_objects',
+  'ingest_commits',
+  'projection_versions',
+  'source_record_errors',
+  'change_log',
+] as const;
+
 const TABLE_SPECS: TableSpec[] = [
   {
     name: 'schema_meta',
@@ -450,6 +460,34 @@ const TABLE_SPECS: TableSpec[] = [
     // - heal_msg_index_v1: Claude TS one-shot heal
     // - *_extract_version: stamped by lifecycle attachShared after native returns
     where: "key NOT IN ('heal_msg_index_v1', 'grok_extract_version', 'codex_extract_version')",
+  },
+  {
+    name: 'source_instances',
+    orderBy: 'source_instance_id',
+  },
+  {
+    name: 'source_streams',
+    orderBy: 'source_stream_id',
+  },
+  {
+    name: 'source_objects',
+    orderBy: 'source_object_id',
+  },
+  {
+    name: 'ingest_commits',
+    orderBy: 'commit_seq',
+  },
+  {
+    name: 'projection_versions',
+    orderBy: 'projection_id, scope_key',
+  },
+  {
+    name: 'source_record_errors',
+    orderBy: 'source_object_id, generation, cursor_start, cursor_end',
+  },
+  {
+    name: 'change_log',
+    orderBy: 'commit_seq, ordinal',
   },
   {
     name: 'projects',
@@ -536,6 +574,18 @@ function dumpTable(db: DatabaseSync, spec: TableSpec): Row[] {
   const where = spec.where ? ` WHERE ${spec.where}` : '';
   const rows = db.prepare(`SELECT * FROM ${spec.name}${where} ORDER BY ${spec.orderBy}`).all() as Row[];
   return rows.map((row) => normaliseRow(row, spec));
+}
+
+function dumpSchemaShape(db: DatabaseSync, table: string): Row {
+  const plainRows = (rows: unknown[]): Row[] =>
+    rows.map((row) => Object.fromEntries(Object.entries(row as Record<string, unknown>)));
+  const columns = plainRows(db.prepare('SELECT * FROM pragma_table_info(?) ORDER BY cid').all(table));
+  const foreignKeys = plainRows(db.prepare('SELECT * FROM pragma_foreign_key_list(?) ORDER BY id, seq').all(table));
+  const indexes = plainRows(db.prepare('SELECT * FROM pragma_index_list(?) ORDER BY name').all(table)).map((index) => ({
+    ...index,
+    columns: plainRows(db.prepare('SELECT * FROM pragma_index_info(?) ORDER BY seqno').all(String(index.name))),
+  }));
+  return { columns, foreignKeys, indexes };
 }
 
 /**
@@ -827,6 +877,28 @@ async function main(): Promise<void> {
       } else {
         console.log(`  ✗ ${spec.name}: ${tableDiffs.length} diff(s)`);
         allDiffs.push(...tableDiffs);
+      }
+    }
+
+    // The RFC 011 tables are empty on both legacy ingest paths today, so row
+    // parity alone cannot catch a misspelled column, FK, uniqueness rule, or
+    // index in the transitional TS mirror. Compare SQLite's resolved schema
+    // metadata directly until Rust becomes the only migration authority.
+    for (const table of RFC011_SCHEMA_TABLES) {
+      const tsShape = dumpSchemaShape(tsDb, table);
+      const rustShape = dumpSchemaShape(rustDb, table);
+      if (deepEqual(tsShape, rustShape)) {
+        console.log(`  ✓ ${table} schema: clean`);
+      } else {
+        console.log(`  ✗ ${table} schema: differs`);
+        allDiffs.push({
+          table,
+          rowIndex: -1,
+          kind: 'field',
+          field: 'schema',
+          tsValue: tsShape,
+          rustValue: rustShape,
+        });
       }
     }
 

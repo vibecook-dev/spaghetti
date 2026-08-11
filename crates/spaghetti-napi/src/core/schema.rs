@@ -46,7 +46,9 @@ use thiserror::Error;
 /// v14: materialized Claude AI/custom session titles.
 /// v15: subagents.worktree_path — the meta sidecar's `worktreePath`, which
 /// both ingest paths parsed and then discarded at write time.
-pub const SCHEMA_VERSION: u32 = 16;
+/// v17: RFC 011 source catalog, atomic ingest commits, projection readiness,
+/// record diagnostics, and durable change-log outbox.
+pub const SCHEMA_VERSION: u32 = 17;
 
 /// Full DDL for the current schema — lifted verbatim from the TS `SCHEMA_SQL`
 /// template literal. Whitespace differs; structure does not.
@@ -285,6 +287,102 @@ CREATE TABLE IF NOT EXISTS source_materializations (
   PRIMARY KEY (source_id, projection)
 );
 
+-- RFC 011 source catalog. Binary source keys and cursors are intentionally
+-- BLOB-capable: filesystem identities and adapter cursors are not universally
+-- UTF-8 strings or integers.
+CREATE TABLE IF NOT EXISTS source_instances (
+  source_instance_id INTEGER PRIMARY KEY,
+  adapter_id TEXT NOT NULL,
+  stable_key BLOB NOT NULL,
+  display_name TEXT NOT NULL,
+  adapter_contract_version INTEGER NOT NULL,
+  discovered_at INTEGER NOT NULL,
+  last_seen_at INTEGER NOT NULL,
+  UNIQUE(adapter_id, stable_key)
+);
+
+CREATE TABLE IF NOT EXISTS source_streams (
+  source_stream_id INTEGER PRIMARY KEY,
+  source_instance_id INTEGER NOT NULL REFERENCES source_instances(source_instance_id) ON DELETE CASCADE,
+  stream_key TEXT NOT NULL,
+  driver_kind TEXT NOT NULL,
+  decoder_key TEXT NOT NULL,
+  stream_state TEXT NOT NULL,
+  last_reconciled_at INTEGER,
+  last_commit_seq INTEGER,
+  UNIQUE(source_instance_id, stream_key)
+);
+
+CREATE TABLE IF NOT EXISTS source_objects (
+  source_object_id INTEGER PRIMARY KEY,
+  source_stream_id INTEGER NOT NULL REFERENCES source_streams(source_stream_id) ON DELETE CASCADE,
+  object_key BLOB NOT NULL,
+  display_path TEXT,
+  native_identity BLOB,
+  generation INTEGER NOT NULL,
+  committed_cursor BLOB NOT NULL,
+  observed_revision BLOB,
+  adapter_object_context BLOB,
+  decoder_state BLOB,
+  decoder_state_version INTEGER,
+  size_bytes INTEGER,
+  mtime_ns INTEGER,
+  decoder_contract_version INTEGER NOT NULL,
+  last_commit_seq INTEGER,
+  state TEXT NOT NULL,
+  UNIQUE(source_stream_id, object_key)
+);
+
+CREATE TABLE IF NOT EXISTS ingest_commits (
+  commit_seq INTEGER PRIMARY KEY AUTOINCREMENT,
+  source_instance_id INTEGER NOT NULL REFERENCES source_instances(source_instance_id) ON DELETE RESTRICT,
+  reason TEXT NOT NULL,
+  started_at INTEGER NOT NULL,
+  committed_at INTEGER,
+  fact_count INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS change_log (
+  commit_seq INTEGER NOT NULL REFERENCES ingest_commits(commit_seq) ON DELETE CASCADE,
+  ordinal INTEGER NOT NULL,
+  topic TEXT NOT NULL,
+  schema_version INTEGER NOT NULL,
+  entity_key BLOB NOT NULL,
+  operation TEXT NOT NULL,
+  payload BLOB NOT NULL,
+  PRIMARY KEY (commit_seq, ordinal)
+);
+
+CREATE TABLE IF NOT EXISTS projection_versions (
+  projection_id TEXT NOT NULL,
+  scope_key BLOB NOT NULL,
+  desired_version INTEGER NOT NULL,
+  completed_version INTEGER,
+  readiness TEXT NOT NULL,
+  last_commit_seq INTEGER,
+  updated_at INTEGER NOT NULL,
+  detail TEXT,
+  PRIMARY KEY (projection_id, scope_key)
+);
+
+CREATE TABLE IF NOT EXISTS source_record_errors (
+  source_object_id INTEGER NOT NULL REFERENCES source_objects(source_object_id) ON DELETE CASCADE,
+  generation INTEGER NOT NULL,
+  cursor_start BLOB NOT NULL,
+  cursor_end BLOB NOT NULL,
+  payload_hash BLOB NOT NULL,
+  media_type TEXT NOT NULL,
+  raw_payload BLOB,
+  error_class TEXT NOT NULL,
+  error_message TEXT NOT NULL,
+  adapter_version TEXT NOT NULL,
+  contract_version INTEGER NOT NULL,
+  first_commit_seq INTEGER NOT NULL,
+  last_retry_at INTEGER,
+  retry_count INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (source_object_id, generation, cursor_start, cursor_end)
+);
+
 CREATE TABLE IF NOT EXISTS workflows (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   project_slug TEXT,
@@ -379,6 +477,13 @@ CREATE INDEX IF NOT EXISTS idx_subagent_timeline_type ON subagent_timeline_messa
 CREATE INDEX IF NOT EXISTS idx_subagent_timeline_tool ON subagent_timeline_messages(source_id, session_id, tool_name);
 CREATE INDEX IF NOT EXISTS idx_tool_results_session ON tool_results(project_slug, session_id);
 CREATE INDEX IF NOT EXISTS idx_todos_session ON todos(session_id);
+CREATE INDEX IF NOT EXISTS idx_source_streams_instance_state ON source_streams(source_instance_id, stream_state);
+CREATE INDEX IF NOT EXISTS idx_source_objects_stream_state ON source_objects(source_stream_id, state);
+CREATE INDEX IF NOT EXISTS idx_source_objects_last_commit ON source_objects(last_commit_seq);
+CREATE INDEX IF NOT EXISTS idx_ingest_commits_source_seq ON ingest_commits(source_instance_id, commit_seq);
+CREATE INDEX IF NOT EXISTS idx_change_log_topic_cursor ON change_log(topic, commit_seq, ordinal);
+CREATE INDEX IF NOT EXISTS idx_projection_versions_readiness ON projection_versions(readiness, projection_id);
+CREATE INDEX IF NOT EXISTS idx_source_record_errors_commit ON source_record_errors(first_commit_seq);
 
 -- Persistent FTS5 (content-synced with messages)
 CREATE VIRTUAL TABLE IF NOT EXISTS search_fts USING fts5(text_content, content='messages', content_rowid='id');
@@ -518,6 +623,13 @@ const LEGACY_TABLES: &[&str] = &["segments", "search_index", "schema_version"];
 const CURRENT_TABLES: &[&str] = &[
     "search_fts",
     "subagent_search_fts",
+    "source_record_errors",
+    "change_log",
+    "projection_versions",
+    "source_objects",
+    "source_streams",
+    "ingest_commits",
+    "source_instances",
     "source_files",
     "projects",
     "project_memories",
@@ -923,8 +1035,16 @@ mod tests {
         assert!(object_exists(&conn, "table", "source_files"));
         assert!(object_exists(&conn, "table", "session_summary_totals"));
         assert!(object_exists(&conn, "table", "source_materializations"));
+        assert!(object_exists(&conn, "table", "source_instances"));
+        assert!(object_exists(&conn, "table", "source_streams"));
+        assert!(object_exists(&conn, "table", "source_objects"));
+        assert!(object_exists(&conn, "table", "ingest_commits"));
+        assert!(object_exists(&conn, "table", "projection_versions"));
+        assert!(object_exists(&conn, "table", "source_record_errors"));
+        assert!(object_exists(&conn, "table", "change_log"));
         assert!(object_exists(&conn, "table", "search_fts")); // FTS5 virtual table
         assert!(object_exists(&conn, "index", "idx_messages_session"));
+        assert!(object_exists(&conn, "index", "idx_change_log_topic_cursor"));
         assert!(object_exists(&conn, "trigger", "messages_ai"));
         assert!(object_exists(&conn, "trigger", "messages_ad"));
         assert!(object_exists(&conn, "trigger", "messages_au"));
@@ -1067,6 +1187,69 @@ mod tests {
         assert!(object_exists(&conn, "table", "messages"));
         assert!(object_exists(&conn, "table", "search_fts"));
         assert!(object_exists(&conn, "trigger", "messages_ai"));
+    }
+
+    #[test]
+    fn stale_schema_drops_rfc011_foreign_key_graph_in_dependency_order() {
+        let conn = Connection::open_in_memory().expect("open in-memory db");
+        conn.pragma_update(None, "foreign_keys", "ON")
+            .expect("enable foreign keys");
+        initialize_schema(&conn).expect("first init");
+        conn.execute_batch(
+            r#"
+            INSERT INTO source_instances (
+              source_instance_id, adapter_id, stable_key, display_name,
+              adapter_contract_version, discovered_at, last_seen_at
+            ) VALUES (1, 'fixture', X'01', 'Fixture', 1, 1, 1);
+            INSERT INTO source_streams (
+              source_stream_id, source_instance_id, stream_key, driver_kind,
+              decoder_key, stream_state
+            ) VALUES (1, 1, 'history', 'append_file', 'fixture', 'available');
+            INSERT INTO source_objects (
+              source_object_id, source_stream_id, object_key, generation,
+              committed_cursor, decoder_contract_version, state
+            ) VALUES (1, 1, X'02', 1, X'03', 1, 'active');
+            INSERT INTO ingest_commits (
+              commit_seq, source_instance_id, reason, started_at, committed_at
+            ) VALUES (1, 1, 'fixture', 1, 2);
+            INSERT INTO change_log (
+              commit_seq, ordinal, topic, schema_version, entity_key,
+              operation, payload
+            ) VALUES (1, 0, 'history.session.changed', 1, X'04', 'upsert', X'05');
+            INSERT INTO source_record_errors (
+              source_object_id, generation, cursor_start, cursor_end,
+              payload_hash, media_type, error_class, error_message,
+              adapter_version, contract_version, first_commit_seq
+            ) VALUES (
+              1, 1, X'01', X'02', X'03', 'application/json', 'fixture',
+              'fixture', '1.0.0', 1, 1
+            );
+            "#,
+        )
+        .expect("seed RFC 011 graph");
+        conn.execute(
+            "UPDATE schema_meta SET value = ?1 WHERE key = 'version'",
+            [SCHEMA_VERSION.saturating_sub(1).to_string()],
+        )
+        .expect("mark schema stale");
+
+        initialize_schema(&conn).expect("wipe and rebuild RFC 011 graph");
+
+        for table in [
+            "source_instances",
+            "source_streams",
+            "source_objects",
+            "ingest_commits",
+            "change_log",
+            "source_record_errors",
+        ] {
+            let count: i64 = conn
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })
+                .expect("count rebuilt table");
+            assert_eq!(count, 0, "{table} should be rebuilt empty");
+        }
     }
 
     #[test]
