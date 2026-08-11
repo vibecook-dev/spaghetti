@@ -32,6 +32,7 @@ use crate::claude::types::{
 };
 use crate::core::event::IngestEvent;
 use crate::core::jsonl::read_jsonl_streaming;
+use crate::core::timefmt::epoch_ms_to_iso8601;
 
 // ─── Regex patterns — copied verbatim from project-parser.ts ────────────────
 
@@ -579,7 +580,10 @@ fn discover_session_entries(
             full_path: path.to_string_lossy().into_owned(),
             file_mtime,
             first_prompt,
-            summary: String::new(),
+            // `Some("")`, not `None` — a discovered entry carries an empty
+            // summary, which TS emits as `""`. `None` is reserved for the key
+            // being absent from an index file.
+            summary: Some(String::new()),
             message_count: 0,
             created: modified_iso.clone(),
             modified: modified_iso,
@@ -860,6 +864,17 @@ fn read_file_history(root_dir: &Path, session_id: &str) -> Option<FileHistorySes
     if snapshots.is_empty() {
         None
     } else {
+        // Sort by file name so the emitted order does not depend on the order
+        // `read_dir` happens to yield. Same class as the `sessions_index` fix:
+        // a directory walk that agrees across engines on one filesystem and
+        // disagrees on another. Here TS came out sorted in all 54 file-history
+        // sessions of the macOS corpus and Rust in 4, so every multi-snapshot
+        // session diverged until this sort landed.
+        //
+        // `file_name` is `<hex hash>@v<digits>` — pure ASCII, so Rust's byte
+        // ordering and JS's UTF-16 ordering are the same comparison.
+        snapshots.sort_by(|a, b| a.file_name.cmp(&b.file_name));
+
         Some(FileHistorySession {
             session_id: session_id.to_owned(),
             snapshots,
@@ -1089,32 +1104,6 @@ fn slug_to_path(slug: &str) -> String {
     }
 
     format!("{prefix}{resolved}")
-}
-
-/// Format an epoch-millisecond timestamp as an ISO 8601 string matching
-/// what JS `new Date(ms).toISOString()` produces (e.g. `2026-04-17T14:36:40.342Z`).
-/// Used to populate `created` / `modified` on discovered sessions so the
-/// SDK's sort-by-modified-at queries work when sessions-index.json is
-/// absent.
-fn epoch_ms_to_iso8601(ms: f64) -> String {
-    use time::format_description::well_known::{iso8601, Iso8601};
-
-    // Clamp to the representable range; negative or absurd values just
-    // fall back to the epoch, matching how JS rounds NaN → "Invalid Date".
-    let nanos = (ms * 1_000_000.0) as i128;
-    let dt = time::OffsetDateTime::from_unix_timestamp_nanos(nanos)
-        .unwrap_or(time::OffsetDateTime::UNIX_EPOCH);
-
-    // JS's toISOString() renders milliseconds (3 digits) in UTC with a
-    // trailing 'Z'. `Iso8601::DEFAULT` would emit nanoseconds, so use a
-    // 3-digit subsecond config to match JS byte-for-byte.
-    const CFG: iso8601::EncodedConfig = iso8601::Config::DEFAULT
-        .set_time_precision(iso8601::TimePrecision::Second {
-            decimal_digits: std::num::NonZeroU8::new(3),
-        })
-        .encode();
-    dt.format(&Iso8601::<CFG>)
-        .unwrap_or_else(|_| "1970-01-01T00:00:00.000Z".to_string())
 }
 
 /// Read the first genuine human prompt from a JSONL session file.
@@ -1752,5 +1741,43 @@ mod tests {
         // On Windows the temp root carries a drive letter, so re-encoding
         // yields the `C:-…` spelling; both shapes are handled.
         assert_eq!(slug_to_path(&slug), nested.to_str().unwrap());
+    }
+
+    // ── file-history snapshot ordering ────────────────────────────────────
+
+    #[test]
+    fn file_history_snapshots_come_back_sorted_by_name() {
+        // Regression: the emitted order used to be whatever `read_dir` gave.
+        // NTFS hands back sorted entries and APFS does not, so TS and Rust
+        // agreed on Windows and disagreed on macOS — 50 diverging rows, one
+        // per multi-snapshot session. Same class as the `sessions_index` fix.
+        //
+        // Written deliberately out of order; the assertion is that the output
+        // is sorted regardless of what the filesystem yields, which holds on
+        // every platform without depending on `read_dir`'s behaviour.
+        let dir = mk_tempdir();
+        let session = "sess-order";
+        let hist = dir.path().join("file-history").join(session);
+        fs::create_dir_all(&hist).unwrap();
+
+        let created = ["ff00aa11@v2", "0011bb22@v1", "aa55cc33@v3", "0011bb22@v2"];
+        for name in created {
+            fs::write(hist.join(name), format!("content of {name}")).unwrap();
+        }
+
+        let out = read_file_history(dir.path(), session).expect("file history present");
+        let names: Vec<&str> = out.snapshots.iter().map(|s| s.file_name.as_str()).collect();
+
+        let mut expected = created.to_vec();
+        expected.sort_unstable();
+        assert_eq!(names, expected, "snapshots must be sorted by file name");
+
+        // Guard the fixture itself: if creation order already equalled sorted
+        // order the test would pass while proving nothing.
+        assert_ne!(
+            created.to_vec(),
+            expected,
+            "fixture must be written out of order or it tests nothing"
+        );
     }
 }

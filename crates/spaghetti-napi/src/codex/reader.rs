@@ -455,7 +455,7 @@ fn session_entry(s: &SessionFile) -> SessionIndexEntry {
         } else {
             s.meta.first_prompt.clone()
         },
-        summary: String::new(),
+        summary: Some(String::new()),
         message_count: 0,
         created: s.meta.timestamp.clone().unwrap_or_else(|| modified.clone()),
         modified,

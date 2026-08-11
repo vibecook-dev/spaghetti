@@ -288,6 +288,99 @@ mod tests {
     }
 
     #[test]
+    fn numeric_image_paste_ids_do_not_null_the_fts_blob() {
+        // Regression: Claude Code writes `imagePasteIds` as NUMBERS, but the
+        // TS type said `string[]` and the Rust port mirrored it as
+        // `Vec<String>`. Serde failed the whole record, so a user message that
+        // pasted an image lost its text from `messages.text_content` (hence
+        // from search) and was dropped from subagent transcripts entirely.
+        // 21 messages + 54 subagent transcripts on a 113-project corpus.
+        let json = format!(
+            r#"{{
+                "type": "user",
+                {BASE},
+                "imagePasteIds": [1, 2],
+                "message": {{
+                    "role": "user",
+                    "content": [
+                        {{ "type": "text", "text": "look at this" }},
+                        {{ "type": "image", "source": {{
+                            "type": "base64", "media_type": "image/png", "data": "AA=="
+                        }}}}
+                    ]
+                }}
+            }}"#
+        );
+        let msg: SessionMessage =
+            serde_json::from_str(&json).expect("numeric imagePasteIds must still parse as user");
+        assert!(
+            matches!(msg, SessionMessage::User(_)),
+            "must be a User, not Unknown"
+        );
+        assert_eq!(extract_message_text(&msg), "look at this");
+    }
+
+    #[test]
+    fn string_image_paste_ids_still_parse() {
+        // The union is deliberate — older transcripts may carry strings.
+        let json = format!(
+            r#"{{
+                "type": "user",
+                {BASE},
+                "imagePasteIds": ["a", "b"],
+                "message": {{ "role": "user", "content": "hi" }}
+            }}"#
+        );
+        let msg: SessionMessage = serde_json::from_str(&json).expect("string ids must parse");
+        assert_eq!(extract_message_text(&msg), "hi");
+    }
+
+    #[test]
+    fn attachment_with_array_content_parses() {
+        // Regression: `attachment.content` is a string on most attachments and
+        // an array of content blocks on others. Typing it `Option<String>`
+        // failed 3,754 of 89,559 real corpus lines — silently, because the
+        // caller swallows the error. Attachments contribute no FTS text either
+        // way, so the damage was confined to transcripts that drop unparseable
+        // lines, but the failure mode is the same one as `imagePasteIds`.
+        let json = format!(
+            r#"{{
+                "type": "attachment",
+                {BASE},
+                "attachment": {{
+                    "type": "new_directory",
+                    "content": [
+                        {{ "type": "text", "text": "block one" }},
+                        {{ "type": "text", "text": "block two" }}
+                    ]
+                }}
+            }}"#
+        );
+        let msg: SessionMessage =
+            serde_json::from_str(&json).expect("array attachment content must parse");
+        assert!(
+            matches!(msg, SessionMessage::Attachment(_)),
+            "must be an Attachment, not Unknown"
+        );
+        // Attachments contribute nothing to FTS — the point is that the record
+        // parses at all, so the line is not dropped by callers.
+        assert_eq!(extract_message_text(&msg), "");
+    }
+
+    #[test]
+    fn attachment_with_string_content_still_parses() {
+        let json = format!(
+            r#"{{
+                "type": "attachment",
+                {BASE},
+                "attachment": {{ "type": "hook", "content": "plain string" }}
+            }}"#
+        );
+        let msg: SessionMessage = serde_json::from_str(&json).expect("string content must parse");
+        assert!(matches!(msg, SessionMessage::Attachment(_)));
+    }
+
+    #[test]
     fn extract_user_content_blocks() {
         // Mix text + tool_result (string) + tool_result (array of text blocks)
         // + image (ignored).

@@ -368,7 +368,7 @@ fn session_entry(s: &SessionFile) -> SessionIndexEntry {
         full_path: s.path.to_string_lossy().into_owned(),
         file_mtime: s.mtime_ms,
         first_prompt,
-        summary: s.meta.summary.clone(),
+        summary: Some(s.meta.summary.clone()),
         message_count: 0,
         created,
         modified,

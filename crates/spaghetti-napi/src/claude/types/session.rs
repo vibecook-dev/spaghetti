@@ -189,8 +189,11 @@ pub struct AttachmentPayload {
     pub tool_use_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hook_event: Option<String>,
+    /// Never read. String on most attachments but an array of content blocks
+    /// on others — `Option<String>` failed 3,754 of 89,559 real corpus lines
+    /// (4.2%), each one silently. Same reasoning as `image_paste_ids`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub content: Option<String>,
+    pub content: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stdout: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -279,8 +282,16 @@ pub struct UserMessage {
     pub prompt_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt_source: Option<String>,
+    /// Never read — carried only to mirror the JSONL shape.
+    ///
+    /// Declared `string[]` in `packages/sdk/src/types/claude/projects.ts`, but
+    /// Claude Code actually writes **numbers** (`"imagePasteIds": [1]`). TS
+    /// erases its types at runtime so the wrong annotation costs it nothing;
+    /// serde is strict, so `Vec<String>` failed the whole `user` record and
+    /// silently emptied its FTS blob and dropped it from subagent transcripts.
+    /// Untyped `Value` because an unread field must never fail a record.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub image_paste_ids: Option<Vec<String>>,
+    pub image_paste_ids: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub team_name: Option<String>,
 }
