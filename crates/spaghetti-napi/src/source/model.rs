@@ -223,6 +223,12 @@ impl SourceMediaType {
 }
 
 /// One raw, framed source record. The adapter owns interpretation of payload.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourceRecordState {
+    Present,
+    Absent,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceRecord {
     pub source_instance_id: u64,
@@ -235,6 +241,7 @@ pub struct SourceRecord {
     pub observed_at: i64,
     pub source_timestamp_hint: Option<i64>,
     pub media_type: SourceMediaType,
+    pub state: SourceRecordState,
     pub payload: Vec<u8>,
     pub payload_hash: RecordHash,
 }
@@ -246,6 +253,45 @@ impl SourceRecord {
         cursor_start: SourceCursor,
         cursor_end: SourceCursor,
         ordinal_in_batch: u32,
+        payload: Vec<u8>,
+    ) -> Self {
+        Self::with_state(
+            origin,
+            generation,
+            cursor_start,
+            cursor_end,
+            ordinal_in_batch,
+            SourceRecordState::Present,
+            payload,
+        )
+    }
+
+    pub(crate) fn absent(
+        origin: &RecordOrigin,
+        generation: u64,
+        cursor_start: SourceCursor,
+        cursor_end: SourceCursor,
+        ordinal_in_batch: u32,
+    ) -> Self {
+        Self::with_state(
+            origin,
+            generation,
+            cursor_start,
+            cursor_end,
+            ordinal_in_batch,
+            SourceRecordState::Absent,
+            Vec::new(),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn with_state(
+        origin: &RecordOrigin,
+        generation: u64,
+        cursor_start: SourceCursor,
+        cursor_end: SourceCursor,
+        ordinal_in_batch: u32,
+        state: SourceRecordState,
         payload: Vec<u8>,
     ) -> Self {
         let payload_hash = RecordHash::digest(&payload);
@@ -260,6 +306,7 @@ impl SourceRecord {
             observed_at: origin.observed_at,
             source_timestamp_hint: origin.source_timestamp_hint,
             media_type: origin.media_type.clone(),
+            state,
             payload,
             payload_hash,
         }
@@ -443,5 +490,36 @@ mod tests {
             b"{}".to_vec(),
         );
         assert_eq!(record.payload_hash, RecordHash::digest(b"{}"));
+        assert_eq!(record.state, SourceRecordState::Present);
+    }
+
+    #[test]
+    fn absent_records_are_distinct_from_present_empty_records() {
+        let origin = RecordOrigin {
+            source_instance_id: 1,
+            stream_id: 2,
+            object_id: 3,
+            observed_at: 4,
+            source_timestamp_hint: None,
+            media_type: SourceMediaType::new("application/json").unwrap(),
+        };
+        let absent = SourceRecord::absent(
+            &origin,
+            1,
+            SourceCursor::presence(Revision::ZERO),
+            SourceCursor::presence(Revision::digest(b"absent")),
+            0,
+        );
+        let present = SourceRecord::new(
+            &origin,
+            1,
+            SourceCursor::presence(Revision::ZERO),
+            SourceCursor::presence(Revision::digest(b"present")),
+            0,
+            Vec::new(),
+        );
+        assert_eq!(absent.state, SourceRecordState::Absent);
+        assert_eq!(present.state, SourceRecordState::Present);
+        assert_eq!(absent.payload_hash, present.payload_hash);
     }
 }

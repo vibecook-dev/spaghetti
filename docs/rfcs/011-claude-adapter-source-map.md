@@ -1,15 +1,15 @@
 # RFC 011 Claude Code adapter source map
 
 Status: Phase 4 history/usage complete; Phase 5 delegation, native metadata,
-parent-spawn correlation, and team/config/inbox snapshots implemented on
-2026-08-11
+parent-spawn correlation, team/config/inbox snapshots, and active-session
+presence implemented on 2026-08-11
 
 This survey defines the native inputs and semantic claims currently made by
 the Rust `claude-code` adapter. It is narrower than the legacy Claude parser on
 purpose: Phase 4 covers canonical transcript history, run lineage/activity,
-and native usage. Phase 5 now adds delegation joins plus authoritative team
-configuration and inbox snapshot families while richer runtime packs remain
-in progress.
+and native usage. Phase 5 now adds delegation joins, authoritative team and
+inbox snapshots, and native active-session registry presence while richer
+runtime packs remain in progress.
 
 ## Installation and source identity
 
@@ -18,11 +18,12 @@ adapter canonicalizes each configured root and derives a binary-safe source
 instance key from that canonical path. Secrets and transcript content are not
 part of the instance key.
 
-The instance declares three confined roots:
+The instance declares four confined roots:
 
 - `home`: the configured Claude data root;
 - `projects`: `<home>/projects`;
-- `teams`: `<home>/teams`.
+- `teams`: `<home>/teams`;
+- `sessions`: `<home>/sessions`.
 
 Ordinary path spelling differences therefore resolve to one instance. A root
 that is temporarily unavailable is a transient discovery error, not an empty
@@ -34,13 +35,15 @@ authoritative snapshot.
 | ---------------------- | ---------- | ------------------------------------ | ------------------------------------------------ | ------------ | ---------- |
 | `session-transcripts`  | `projects` | `*/*.jsonl`                          | `AppendDelimitedFile` (`\n`, CRLF normalization) | Canonical    | Session    |
 | `subagent-transcripts` | `projects` | `*/*/subagents/**/agent-*.jsonl`     | `AppendDelimitedFile` (`\n`, CRLF normalization) | Canonical    | Run        |
-| `subagent-metadata`    | `projects` | `*/*/subagents/**/agent-*.meta.json` | `ReplaceDocument` (64 KiB bound)                  | Supplemental | Run        |
-| `team-configs`         | `teams`    | `*/config.json`                      | `ReplaceDocument` (1 MiB bound)                   | Canonical    | Team       |
-| `team-inboxes`         | `teams`    | `*/inboxes/*.json`                   | `ReplaceDocument` (4 MiB bound)                   | Canonical    | Team inbox |
+| `subagent-metadata`    | `projects` | `*/*/subagents/**/agent-*.meta.json` | `ReplaceDocument` (64 KiB bound)                 | Supplemental | Run        |
+| `team-configs`         | `teams`    | `*/config.json`                      | `ReplaceDocument` (1 MiB bound)                  | Canonical    | Team       |
+| `team-inboxes`         | `teams`    | `*/inboxes/*.json`                   | `ReplaceDocument` (4 MiB bound)                  | Canonical    | Team inbox |
+| `active-sessions`      | `sessions` | `*.json`                             | `PresenceObject` (64 KiB content bound)          | Canonical    | Presence   |
 
 Transcript streams use incremental byte cursors and interactive priority. The
 three document streams use snapshot-replace consistency and foreground-repair
-priority. All five use `MirrorSource` deletion and full raw retention during
+priority. The presence stream uses snapshot replacement and interactive
+priority. All six use `MirrorSource` deletion and full raw retention during
 shadow migration. Common drivers—not the adapter—own framing or stable reads,
 file identity, generations/revisions, checkpoints, watcher recovery, and
 scheduling.
@@ -54,7 +57,8 @@ The metadata stream derives the identical child key from the sibling
 `agent-<agent-id>.meta.json` path, including workflow scope when present.
 Team config identity comes from `<team>/config.json`; inbox identity comes from
 `<team>/inboxes/<recipient>.json`. Paths outside these exact shapes fail object
-bootstrap.
+bootstrap. Active-session identity starts from exactly `<positive-pid>.json`;
+nested, non-numeric, or zero-PID names fail bootstrap.
 
 ## Native record interpretation
 
@@ -79,6 +83,9 @@ Each complete native record or document is decoded once into common facts:
 - `TeamInboxSnapshotFact` for each recipient file, preserving the complete
   ordered message snapshot, native message IDs/versions when present, read
   state, and qualified native timestamps;
+- `PresenceFact` for each present active-session registry object, preserving
+  session/run relation, process-incarnation identity, PID, cwd, native status,
+  timestamps, version/protocol, bridge, and messaging-socket fields;
 - `RunEvidenceFact::ActivityObserved` with `NativeActivity` strength;
 - `UsageFact` when the record contains non-zero native usage.
 
@@ -131,6 +138,10 @@ The additive team config and inbox streams advance the adapter contract to
 version 5. They do not alter transcript or metadata fact identity, so existing
 objects in those streams do not require replay solely for this addition.
 
+The additive active-session stream advances the adapter contract to version 6
+and declares `claude-code-active-session-v1`. Existing transcript,
+delegation, team, and inbox fact identities are unchanged.
+
 Team identity comes from the native directory name. Member identity is scoped
 by team plus native member name, and an inbox is scoped by team plus recipient.
 Inbox messages prefer non-empty native `msg_id`. Older messages derive a
@@ -144,9 +155,23 @@ type, and config presence never create run state or completion. An inbox may
 remain canonical without a matching config, preserving orphan or partially
 written native state.
 
-The adapter declares activity only. It does not turn quiet files, missing
-watch events, or filesystem nesting into completion. Subagent layout provides
-parent-run lineage but no terminal evidence.
+Claude declares `runtime.presence` as native and live at process-presence
+granularity. The payload PID must equal the path PID. Presence identity combines
+PID, native session ID, and native process-start marker, falling back to native
+session start time for older documents. Updates therefore replace one process
+incarnation while PID reuse remains distinct. Session and root-run keys permit
+late joins when the transcript has not arrived yet.
+
+The common driver stamps records as present or absent. Confirmed absence emits
+no presence fact and retracts the prior assertion; a present zero-byte file is
+instead preserved as malformed unknown content. The durable row proves registry
+presence only. Native status strings are retained, but neither they nor a host
+PID probe create durable run state, process-liveness history, or completion.
+
+The transcript decoder declares activity only. Neither it nor the presence
+pack turns quiet files, missing watch events, or filesystem nesting into
+completion. Subagent layout provides parent-run lineage but no terminal
+evidence.
 
 Claude assistant usage is emitted at `Message` scope with `Delta` accounting
 and `NativeExact` quality. Input, output, cache-creation, and cache-read values
@@ -190,15 +215,21 @@ Duplicate authoritative objects remain competing assertions, use deterministic
 fact identity rather than callback order to select a canonical view, and
 publish durable conflict diagnostics.
 
+Every committed active-session revision replaces the assertion owned by that
+source object, including same-generation status changes. Confirmed removal
+retracts the canonical row without changing a quiet transcript/run to a
+terminal state. Competing presence assertions are retained and diagnosed;
+removing the competitor resolves the deterministic canonical view.
+
 ## Remaining Phase 5 sources
 
 Legacy tool-result text that only mentions an agent ID is not used for native
 correlation. A future compatibility fallback must be classified
 `NativeIndirect`, not explicit. The adapter also does not yet declare
 `sessions-index.json`, memory, tool-result files,
-workflows, active PID presence, todos, tasks, plans, file
+workflows, todos, tasks, plans, file
 history, settings, or other sidecars. Those inputs need replace-document,
-directory-snapshot, or presence streams and reviewed capability semantics.
+directory-snapshot, or other reviewed stream and capability semantics.
 Credentials, debug logs, telemetry, caches, and arbitrary symlink escapes
 remain out of scope.
 
@@ -238,3 +269,9 @@ preservation, stable native and legacy message identity, same-generation
 replacement, removed-child retraction, the distinction between `[]` and file
 deletion, orphan inboxes, competing config assertions, diagnostic clearing,
 and the invariant that config membership creates no observed run state.
+
+The active-presence trace covers strict path/payload PID identity, full native
+field preservation, present-empty versus absent distinction, same-generation
+replacement, late transcript/run correlation, confirmed removal, competing
+assertions, diagnostic clearing, and the invariant that registry removal does
+not invent terminal run state.

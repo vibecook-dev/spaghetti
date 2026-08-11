@@ -181,7 +181,7 @@ This increment does not switch production live observation yet. Legacy
 tool-result content that merely mentions an agent ID remains deferred; if
 adopted, that heuristic must be represented as `NativeIndirect`, never as the
 explicit shared-key relation implemented here. Teams/config/inbox snapshots
-are now implemented in the adjacent Phase 5 pack. The remaining slices are
-active-session presence and the task/plan/artifact packs whose semantics pass
-review. The observation coordinator and production cutover remain required
-for the Phase 5 exit gate.
+and active-session presence are now implemented in adjacent Phase 5 packs. The
+remaining slices are task/plan/artifact and other reviewed snapshot packs. The
+observation coordinator and production cutover remain required for the Phase
+5 exit gate.

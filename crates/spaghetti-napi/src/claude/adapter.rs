@@ -17,11 +17,11 @@ use crate::adapter::{
     DecodeDisposition, DecoderId, DelegationFact, DelegationKind, DelegationMetadataFact,
     DelegationSpawnFact, DeletionPolicy, DiscoveryContext, DriverSpec, EntityKey, EntityScope,
     EvidenceKind, EvidenceStrength, Fact, FactBatch, MessageFact, MessageRole, ObjectSelector,
-    QualifiedTimestamp, RawRetentionPolicy, RelationStrength, RunEvidenceFact, RunFact,
-    SessionFact, SourceInstance, SourceInstanceKey, SourceInstanceSpec, SourceObjectDescriptor,
-    SourceRoot, StreamAuthority, StreamId, StreamSpec, SupportLevel, TeamInboxMessageSnapshot,
-    TeamInboxSnapshotFact, TeamMemberSnapshot, TeamSnapshotFact, TimestampQuality, TokenUsage,
-    UsageAccounting, UsageFact, UsageScope, ValueQuality,
+    PresenceFact, QualifiedTimestamp, RawRetentionPolicy, RelationStrength, RunEvidenceFact,
+    RunFact, SessionFact, SourceInstance, SourceInstanceKey, SourceInstanceSpec,
+    SourceObjectDescriptor, SourceRoot, StreamAuthority, StreamId, StreamSpec, SupportLevel,
+    TeamInboxMessageSnapshot, TeamInboxSnapshotFact, TeamMemberSnapshot, TeamSnapshotFact,
+    TimestampQuality, TokenUsage, UsageAccounting, UsageFact, UsageScope, ValueQuality,
 };
 use crate::claude::message_extractor;
 use crate::claude::session_metadata;
@@ -30,8 +30,8 @@ use crate::claude::types::content::{
 };
 use crate::claude::types::SessionMessage;
 use crate::source::{
-    platform_path_key, AppendDelimitedConfig, IngestPriority, ReplaceDocumentConfig,
-    SourceDriverError, SourceRecord,
+    platform_path_key, AppendDelimitedConfig, IngestPriority, PresenceObjectConfig,
+    ReplaceDocumentConfig, SourceDriverError, SourceRecord, SourceRecordState,
 };
 
 const ADAPTER_ID: &str = "claude-code";
@@ -40,15 +40,18 @@ const SUBAGENT_STREAM: &str = "subagent-transcripts";
 const SUBAGENT_META_STREAM: &str = "subagent-metadata";
 const TEAM_CONFIG_STREAM: &str = "team-configs";
 const TEAM_INBOX_STREAM: &str = "team-inboxes";
+const ACTIVE_SESSION_STREAM: &str = "active-sessions";
 const PARENT_DECODER: &str = "claude-session-record";
 const SUBAGENT_DECODER: &str = "claude-subagent-record";
 const SUBAGENT_META_DECODER: &str = "claude-subagent-metadata";
 const TEAM_CONFIG_DECODER: &str = "claude-team-config";
 const TEAM_INBOX_DECODER: &str = "claude-team-inbox";
+const ACTIVE_SESSION_DECODER: &str = "claude-active-session";
 const OBJECT_CONTEXT_VERSION: u32 = 1;
 const SUBAGENT_META_MAX_BYTES: usize = 64 * 1024;
 const TEAM_CONFIG_MAX_BYTES: usize = 1024 * 1024;
 const TEAM_INBOX_MAX_BYTES: usize = 4 * 1024 * 1024;
+const ACTIVE_SESSION_MAX_BYTES: usize = 64 * 1024;
 const TEAM_MEMBER_LIMIT: usize = 256;
 const TEAM_INBOX_MESSAGE_LIMIT: usize = 4_096;
 
@@ -61,6 +64,7 @@ const RUNTIME_SESSION_ACTIVITY: &str = "runtime.session_activity";
 const RUNTIME_SUBAGENTS: &str = "runtime.subagents";
 const RUNTIME_TEAMS: &str = "runtime.teams";
 const RUNTIME_TEAM_INBOX: &str = "runtime.team_inbox";
+const RUNTIME_PRESENCE: &str = "runtime.presence";
 const USAGE_INPUT_TOKENS: &str = "usage.input_tokens";
 const USAGE_OUTPUT_TOKENS: &str = "usage.output_tokens";
 const USAGE_CACHE_TOKENS: &str = "usage.cache_tokens";
@@ -79,12 +83,13 @@ impl ClaudeCodeAdapter {
                 id: AdapterId::new(ADAPTER_ID).expect("static Claude adapter id is valid"),
                 display_name: "Claude Code".to_string(),
                 adapter_version: env!("CARGO_PKG_VERSION").to_string(),
-                contract_version: 5,
+                contract_version: 6,
                 source_schema_versions: vec![
                     "claude-code-jsonl-v1".to_string(),
                     "claude-code-subagent-meta-v1".to_string(),
                     "claude-code-team-config-v1".to_string(),
                     "claude-code-team-inbox-v2".to_string(),
+                    "claude-code-active-session-v1".to_string(),
                 ],
                 capabilities: claude_capabilities(),
             },
@@ -149,6 +154,10 @@ impl AgentAdapter for ClaudeCodeAdapter {
                     SourceRoot {
                         name: "teams".to_string(),
                         path: canonical.join("teams"),
+                    },
+                    SourceRoot {
+                        name: "sessions".to_string(),
+                        path: canonical.join("sessions"),
                     },
                 ],
                 discovery_reason: "configured Claude Code data root".to_string(),
@@ -250,6 +259,26 @@ impl AgentAdapter for ClaudeCodeAdapter {
                 retention: RawRetentionPolicy::Full,
                 capabilities: team_inbox_capabilities(),
             },
+            StreamSpec {
+                id: StreamId::new(ACTIVE_SESSION_STREAM)?,
+                driver: DriverSpec::Presence(PresenceObjectConfig {
+                    include_content: true,
+                    max_content_bytes: ACTIVE_SESSION_MAX_BYTES,
+                }),
+                selector: ObjectSelector {
+                    root_name: "sessions".to_string(),
+                    include: vec!["*.json".to_string()],
+                    exclude: Vec::new(),
+                },
+                decoder: DecoderId::new(ACTIVE_SESSION_DECODER)?,
+                authority: StreamAuthority::Canonical,
+                entity_scope: EntityScope::Custom("process_presence".to_string()),
+                priority: IngestPriority::Interactive,
+                consistency: ConsistencyPolicy::SnapshotReplace,
+                deletion: DeletionPolicy::MirrorSource,
+                retention: RawRetentionPolicy::Full,
+                capabilities: presence_capabilities(),
+            },
         ];
         for stream in &streams {
             stream.validate(instance)?;
@@ -278,6 +307,9 @@ impl AgentAdapter for ClaudeCodeAdapter {
             TEAM_INBOX_STREAM => {
                 encode_object_context(&ClaudeTeamInboxContext::from_path(&object.relative_path)?)?
             }
+            ACTIVE_SESSION_STREAM => encode_object_context(
+                &ClaudeActiveSessionContext::from_path(&object.relative_path)?,
+            )?,
             _ => {
                 return Err(AdapterError::new(
                     AdapterErrorClass::StreamFatal,
@@ -322,6 +354,10 @@ impl AgentAdapter for ClaudeCodeAdapter {
                 let object_context = ClaudeTeamInboxContext::decode(context.object_context)?;
                 decode_team_inbox(self.adapter_id(), &object_context, record, output)
             }
+            ACTIVE_SESSION_DECODER => {
+                let object_context = ClaudeActiveSessionContext::decode(context.object_context)?;
+                decode_active_session(self.adapter_id(), &object_context, record, output)
+            }
             _ => Err(AdapterError::unknown_decoder(context.decoder)),
         }
     }
@@ -355,6 +391,15 @@ fn claude_capabilities() -> Vec<CapabilityDeclaration> {
         ),
         live_native(RUNTIME_TEAMS, CapabilityGranularity::Team),
         live_native(RUNTIME_TEAM_INBOX, CapabilityGranularity::Message),
+        capability(
+            RUNTIME_PRESENCE,
+            SupportLevel::Native,
+            CapabilityGranularity::Custom("process_presence".to_string()),
+            Availability::Live,
+            Some(
+                "agent-owned registry presence is durable; host PID liveness and time-based freshness remain transient assessments",
+            ),
+        ),
         live_native(USAGE_INPUT_TOKENS, CapabilityGranularity::Message),
         live_native(USAGE_OUTPUT_TOKENS, CapabilityGranularity::Message),
         live_native(USAGE_CACHE_TOKENS, CapabilityGranularity::Message),
@@ -406,6 +451,18 @@ fn transcript_capabilities() -> Vec<CapabilityId> {
 fn subagent_metadata_capabilities() -> Vec<CapabilityId> {
     [
         RUNTIME_SUBAGENTS,
+        SOURCE_LIVE,
+        SOURCE_RECONCILE,
+        SOURCE_RESUME_CURSOR,
+    ]
+    .into_iter()
+    .map(|id| CapabilityId::new(id).expect("static Claude stream capability id is valid"))
+    .collect()
+}
+
+fn presence_capabilities() -> Vec<CapabilityId> {
+    [
+        RUNTIME_PRESENCE,
         SOURCE_LIVE,
         SOURCE_RECONCILE,
         SOURCE_RESUME_CURSOR,
@@ -566,6 +623,42 @@ impl ClaudeTeamInboxContext {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct ClaudeActiveSessionContext {
+    native_pid: u32,
+}
+
+impl ClaudeActiveSessionContext {
+    fn from_path(relative_path: &Path) -> Result<Self, AdapterError> {
+        let components = utf8_components(relative_path)?;
+        if components.len() != 1 {
+            return Err(path_error(
+                relative_path,
+                "active session path must be <pid>.json",
+            ));
+        }
+        let Some(stem) = components[0]
+            .strip_suffix(".json")
+            .filter(|stem| !stem.is_empty() && stem.bytes().all(|byte| byte.is_ascii_digit()))
+        else {
+            return Err(path_error(
+                relative_path,
+                "active session file name must contain a numeric pid",
+            ));
+        };
+        let native_pid = stem
+            .parse::<u32>()
+            .ok()
+            .filter(|pid| *pid > 0)
+            .ok_or_else(|| path_error(relative_path, "active session pid is out of range"))?;
+        Ok(Self { native_pid })
+    }
+
+    fn decode(context: &AdapterObjectContext) -> Result<Self, AdapterError> {
+        decode_object_context(context)
+    }
+}
+
 fn encode_object_context<T: Serialize>(context: &T) -> Result<Vec<u8>, AdapterError> {
     serde_json::to_vec(context).map_err(|error| {
         AdapterError::new(
@@ -673,6 +766,39 @@ struct ClaudeTeamInboxMessageDocument {
     message_version: Option<u32>,
     #[serde(default, rename = "type")]
     kind: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ClaudeActiveSessionDocument {
+    pid: u32,
+    session_id: String,
+    cwd: String,
+    started_at: i64,
+    #[serde(default)]
+    kind: Option<String>,
+    #[serde(default)]
+    entrypoint: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(default)]
+    updated_at: Option<i64>,
+    #[serde(default)]
+    status_updated_at: Option<i64>,
+    #[serde(default)]
+    proc_start: Option<String>,
+    #[serde(default)]
+    version: Option<String>,
+    #[serde(default)]
+    peer_protocol: Option<u32>,
+    #[serde(default)]
+    name_source: Option<String>,
+    #[serde(default)]
+    bridge_session_id: Option<String>,
+    #[serde(default)]
+    messaging_socket_path: Option<String>,
 }
 
 fn decode_team_config(
@@ -933,6 +1059,122 @@ fn preserve_team_inbox_contract_loss(
         output,
         Some("team_inbox".to_string()),
         format!("Claude team inbox {detail}"),
+    )?;
+    Ok(DecodeDisposition::PreservedUnknown)
+}
+
+fn decode_active_session(
+    adapter_id: &AdapterId,
+    context: &ClaudeActiveSessionContext,
+    record: &SourceRecord,
+    output: &mut FactBatch,
+) -> Result<DecodeDisposition, AdapterError> {
+    if record.state == SourceRecordState::Absent {
+        return Ok(DecodeDisposition::IgnoredKnown);
+    }
+    let document: ClaudeActiveSessionDocument = match serde_json::from_slice(&record.payload) {
+        Ok(document) => document,
+        Err(error) => {
+            preserve_unknown(
+                record,
+                output,
+                Some("active_session".to_string()),
+                format!("Claude active session is not a supported JSON object: {error}"),
+            )?;
+            return Ok(DecodeDisposition::PreservedUnknown);
+        }
+    };
+    if document.pid == 0 || document.pid != context.native_pid {
+        return preserve_active_session_contract_loss(
+            record,
+            output,
+            "payload pid does not match the source file name",
+        );
+    }
+    let Some(native_session_id) = nonempty(&document.session_id) else {
+        return preserve_active_session_contract_loss(record, output, "session id is empty");
+    };
+    let Some(cwd) = nonempty(&document.cwd) else {
+        return preserve_active_session_contract_loss(record, output, "cwd is empty");
+    };
+    if document.started_at < 0
+        || document.updated_at.is_some_and(|value| value < 0)
+        || document.status_updated_at.is_some_and(|value| value < 0)
+    {
+        return preserve_active_session_contract_loss(
+            record,
+            output,
+            "contains a negative epoch-millisecond timestamp",
+        );
+    }
+
+    let native_process_started_at = document.proc_start.as_deref().and_then(nonempty);
+    let mut native_presence_key = Vec::new();
+    push_key_component(&mut native_presence_key, &document.pid.to_be_bytes());
+    push_key_component(&mut native_presence_key, native_session_id.as_bytes());
+    match &native_process_started_at {
+        Some(process_start) => {
+            push_key_component(&mut native_presence_key, b"proc-start");
+            push_key_component(&mut native_presence_key, process_start.as_bytes());
+        }
+        None => {
+            push_key_component(&mut native_presence_key, b"session-start");
+            push_key_component(&mut native_presence_key, &document.started_at.to_be_bytes());
+        }
+    }
+
+    output.push(
+        record,
+        Fact::Presence(PresenceFact {
+            presence: EntityKey::native(
+                adapter_id,
+                record.source_instance_id,
+                "presence",
+                &native_presence_key,
+            )?,
+            session: EntityKey::native(
+                adapter_id,
+                record.source_instance_id,
+                "session",
+                native_session_id.as_bytes(),
+            )?,
+            run: EntityKey::native(
+                adapter_id,
+                record.source_instance_id,
+                "run",
+                native_session_id.as_bytes(),
+            )?,
+            native_session_id,
+            native_pid: document.pid,
+            cwd,
+            started_at: epoch_millis_timestamp(document.started_at),
+            native_kind: document.kind.as_deref().and_then(nonempty),
+            entrypoint: document.entrypoint.as_deref().and_then(nonempty),
+            name: document.name.as_deref().and_then(nonempty),
+            native_status: document.status.as_deref().and_then(nonempty),
+            updated_at: document.updated_at.map(epoch_millis_timestamp),
+            status_updated_at: document.status_updated_at.map(epoch_millis_timestamp),
+            native_process_started_at,
+            version: document.version.as_deref().and_then(nonempty),
+            peer_protocol: document.peer_protocol,
+            name_source: document.name_source.as_deref().and_then(nonempty),
+            bridge_session_id: document.bridge_session_id.as_deref().and_then(nonempty),
+            messaging_socket_path: document.messaging_socket_path.as_deref().and_then(nonempty),
+        }),
+    )?;
+    Ok(DecodeDisposition::Applied)
+}
+
+fn preserve_active_session_contract_loss(
+    record: &SourceRecord,
+    output: &mut FactBatch,
+    detail: &str,
+) -> Result<DecodeDisposition, AdapterError> {
+    preserve_unknown(
+        record,
+        output,
+        Some("active_session".to_string()),
+        format!("Claude active session {detail}"),
     )?;
     Ok(DecodeDisposition::PreservedUnknown)
 }
@@ -1608,6 +1850,41 @@ mod tests {
         )
     }
 
+    fn presence_record(payload: &[u8]) -> SourceRecord {
+        SourceRecord::new(
+            &RecordOrigin {
+                source_instance_id: 7,
+                stream_id: 8,
+                object_id: 9,
+                observed_at: 10,
+                source_timestamp_hint: None,
+                media_type: SourceMediaType::new("application/json").unwrap(),
+            },
+            1,
+            crate::source::SourceCursor::presence(crate::source::Revision::ZERO),
+            crate::source::SourceCursor::presence(crate::source::Revision::digest(payload)),
+            0,
+            payload.to_vec(),
+        )
+    }
+
+    fn absent_presence_record() -> SourceRecord {
+        SourceRecord::absent(
+            &RecordOrigin {
+                source_instance_id: 7,
+                stream_id: 8,
+                object_id: 9,
+                observed_at: 10,
+                source_timestamp_hint: None,
+                media_type: SourceMediaType::new("application/json").unwrap(),
+            },
+            1,
+            crate::source::SourceCursor::presence(crate::source::Revision::digest(b"present")),
+            crate::source::SourceCursor::presence(crate::source::Revision::digest(b"absent")),
+            0,
+        )
+    }
+
     fn fact_values(batch: &FactBatch) -> impl Iterator<Item = &Fact> {
         batch.facts().iter().map(|FactEnvelope { value, .. }| value)
     }
@@ -1630,14 +1907,19 @@ mod tests {
                 spec: discovered[0].clone(),
             })
             .unwrap();
-        assert_eq!(discovered[0].roots.len(), 3);
+        assert_eq!(discovered[0].roots.len(), 4);
         assert_eq!(discovered[0].roots[2].name, "teams");
         assert_eq!(
             discovered[0].roots[2].path,
             std::fs::canonicalize(root.path()).unwrap().join("teams")
         );
-        assert_eq!(streams.len(), 5);
-        assert_eq!(adapter.manifest().contract_version, 5);
+        assert_eq!(discovered[0].roots[3].name, "sessions");
+        assert_eq!(
+            discovered[0].roots[3].path,
+            std::fs::canonicalize(root.path()).unwrap().join("sessions")
+        );
+        assert_eq!(streams.len(), 6);
+        assert_eq!(adapter.manifest().contract_version, 6);
         assert!(adapter
             .manifest()
             .source_schema_versions
@@ -1653,6 +1935,11 @@ mod tests {
             .source_schema_versions
             .iter()
             .any(|version| version == "claude-code-team-inbox-v2"));
+        assert!(adapter
+            .manifest()
+            .source_schema_versions
+            .iter()
+            .any(|version| version == "claude-code-active-session-v1"));
         assert!(matches!(streams[0].driver, DriverSpec::AppendDelimited(_)));
         assert!(matches!(streams[1].driver, DriverSpec::AppendDelimited(_)));
         assert!(matches!(streams[2].driver, DriverSpec::ReplaceDocument(_)));
@@ -1668,17 +1955,28 @@ mod tests {
                 max_document_bytes: TEAM_INBOX_MAX_BYTES
             })
         ));
+        assert!(matches!(
+            streams[5].driver,
+            DriverSpec::Presence(PresenceObjectConfig {
+                include_content: true,
+                max_content_bytes: ACTIVE_SESSION_MAX_BYTES
+            })
+        ));
         assert_eq!(streams[0].decoder.as_str(), PARENT_DECODER);
         assert_eq!(streams[1].decoder.as_str(), SUBAGENT_DECODER);
         assert_eq!(streams[2].decoder.as_str(), SUBAGENT_META_DECODER);
         assert_eq!(streams[3].decoder.as_str(), TEAM_CONFIG_DECODER);
         assert_eq!(streams[4].decoder.as_str(), TEAM_INBOX_DECODER);
+        assert_eq!(streams[5].decoder.as_str(), ACTIVE_SESSION_DECODER);
         assert_eq!(streams[2].authority, StreamAuthority::Supplemental);
         assert_eq!(streams[2].consistency, ConsistencyPolicy::SnapshotReplace);
         assert_eq!(streams[3].authority, StreamAuthority::Canonical);
         assert_eq!(streams[3].consistency, ConsistencyPolicy::SnapshotReplace);
         assert_eq!(streams[4].authority, StreamAuthority::Canonical);
         assert_eq!(streams[4].consistency, ConsistencyPolicy::SnapshotReplace);
+        assert_eq!(streams[5].authority, StreamAuthority::Canonical);
+        assert_eq!(streams[5].priority, IngestPriority::Interactive);
+        assert_eq!(streams[5].consistency, ConsistencyPolicy::SnapshotReplace);
         assert!(streams[0]
             .capabilities
             .iter()
@@ -1699,6 +1997,10 @@ mod tests {
             .capabilities
             .iter()
             .any(|capability| capability.as_str() == RUNTIME_TEAM_INBOX));
+        assert!(streams[5]
+            .capabilities
+            .iter()
+            .any(|capability| capability.as_str() == RUNTIME_PRESENCE));
         let support = adapter
             .manifest()
             .capabilities
@@ -1724,6 +2026,18 @@ mod tests {
             .unwrap();
         assert_eq!(inbox.support.level, SupportLevel::Native);
         assert_eq!(inbox.support.granularity, CapabilityGranularity::Message);
+        let presence = adapter
+            .manifest()
+            .capabilities
+            .iter()
+            .find(|capability| capability.id.as_str() == RUNTIME_PRESENCE)
+            .unwrap();
+        assert_eq!(presence.support.level, SupportLevel::Native);
+        assert_eq!(
+            presence.support.granularity,
+            CapabilityGranularity::Custom("process_presence".to_string())
+        );
+        assert_eq!(presence.support.availability, Availability::Live);
     }
 
     #[test]
@@ -1740,6 +2054,185 @@ mod tests {
         assert_eq!(decoded.project_slug, "project");
         assert_eq!(decoded.session_id, SESSION);
         assert!(decoded.agent_id.is_none());
+    }
+
+    #[test]
+    fn active_session_context_requires_one_positive_numeric_pid_component() {
+        let root = TempDir::new().unwrap();
+        let adapter = ClaudeCodeAdapter::new();
+        let context = adapter
+            .bootstrap_object(
+                &instance(root.path()),
+                &object(ACTIVE_SESSION_STREAM, "4242.json"),
+            )
+            .unwrap();
+        assert_eq!(
+            ClaudeActiveSessionContext::decode(&context).unwrap(),
+            ClaudeActiveSessionContext { native_pid: 4242 }
+        );
+        for invalid in ["0.json", "pid.json", "4242.txt", "nested/4242.json"] {
+            assert!(adapter
+                .bootstrap_object(
+                    &instance(root.path()),
+                    &object(ACTIVE_SESSION_STREAM, invalid),
+                )
+                .is_err());
+        }
+    }
+
+    #[test]
+    fn active_session_presence_preserves_native_fields_without_host_liveness() {
+        let root = TempDir::new().unwrap();
+        let adapter = ClaudeCodeAdapter::new();
+        let object_context = adapter
+            .bootstrap_object(
+                &instance(root.path()),
+                &object(ACTIVE_SESSION_STREAM, "4242.json"),
+            )
+            .unwrap();
+        let record = presence_record(
+            br#"{
+              "pid":4242,
+              "sessionId":"01234567-89ab-cdef-0123-456789abcdef",
+              "cwd":"/repo",
+              "startedAt":1786468310233,
+              "kind":"interactive",
+              "entrypoint":"cli",
+              "name":"engine work",
+              "status":"idle",
+              "updatedAt":1786471704949,
+              "statusUpdatedAt":1786471704000,
+              "procStart":"Tue Aug 11 17:11:48 2026",
+              "version":"2.1.227",
+              "peerProtocol":1,
+              "nameSource":"derived",
+              "bridgeSessionId":"bridge-1",
+              "messagingSocketPath":"/tmp/claude-4242.sock"
+            }"#,
+        );
+        let mut batch = FactBatch::new(4, 4).unwrap();
+        let disposition = adapter
+            .decode(
+                DecodeContext {
+                    decoder: &DecoderId::new(ACTIVE_SESSION_DECODER).unwrap(),
+                    object_context: &object_context,
+                },
+                &record,
+                &mut batch,
+            )
+            .unwrap();
+        assert_eq!(disposition, DecodeDisposition::Applied);
+        assert_eq!(batch.facts().len(), 1);
+        let Fact::Presence(presence) = &batch.facts()[0].value else {
+            panic!("expected active-session presence fact");
+        };
+        assert_eq!(presence.native_pid, 4242);
+        assert_eq!(presence.native_session_id, SESSION);
+        assert_eq!(presence.cwd, "/repo");
+        assert_eq!(presence.started_at.quality, TimestampQuality::NativeExact);
+        assert_eq!(presence.native_kind.as_deref(), Some("interactive"));
+        assert_eq!(presence.entrypoint.as_deref(), Some("cli"));
+        assert_eq!(presence.name.as_deref(), Some("engine work"));
+        assert_eq!(presence.native_status.as_deref(), Some("idle"));
+        assert_eq!(
+            presence.native_process_started_at.as_deref(),
+            Some("Tue Aug 11 17:11:48 2026")
+        );
+        assert_eq!(presence.version.as_deref(), Some("2.1.227"));
+        assert_eq!(presence.peer_protocol, Some(1));
+        assert_eq!(presence.name_source.as_deref(), Some("derived"));
+        assert_eq!(presence.bridge_session_id.as_deref(), Some("bridge-1"));
+        assert_eq!(
+            presence.messaging_socket_path.as_deref(),
+            Some("/tmp/claude-4242.sock")
+        );
+        assert!(!fact_values(&batch).any(|fact| matches!(fact, Fact::RunEvidence(_))));
+
+        let changed = presence_record(
+            br#"{
+              "pid":4242,
+              "sessionId":"01234567-89ab-cdef-0123-456789abcdef",
+              "cwd":"/repo",
+              "startedAt":1786468310233,
+              "status":"working",
+              "updatedAt":1786471800000,
+              "procStart":"Tue Aug 11 17:11:48 2026"
+            }"#,
+        );
+        let mut changed_batch = FactBatch::new(4, 4).unwrap();
+        adapter
+            .decode(
+                DecodeContext {
+                    decoder: &DecoderId::new(ACTIVE_SESSION_DECODER).unwrap(),
+                    object_context: &object_context,
+                },
+                &changed,
+                &mut changed_batch,
+            )
+            .unwrap();
+        let Fact::Presence(changed_presence) = &changed_batch.facts()[0].value else {
+            panic!("expected updated presence fact");
+        };
+        assert_eq!(changed_presence.presence, presence.presence);
+    }
+
+    #[test]
+    fn active_session_absence_and_invalid_present_content_stay_distinct() {
+        let root = TempDir::new().unwrap();
+        let adapter = ClaudeCodeAdapter::new();
+        let object_context = adapter
+            .bootstrap_object(
+                &instance(root.path()),
+                &object(ACTIVE_SESSION_STREAM, "4242.json"),
+            )
+            .unwrap();
+        let decoder = DecoderId::new(ACTIVE_SESSION_DECODER).unwrap();
+
+        let mut absent_batch = FactBatch::new(2, 2).unwrap();
+        let absent = adapter
+            .decode(
+                DecodeContext {
+                    decoder: &decoder,
+                    object_context: &object_context,
+                },
+                &absent_presence_record(),
+                &mut absent_batch,
+            )
+            .unwrap();
+        assert_eq!(absent, DecodeDisposition::IgnoredKnown);
+        assert!(absent_batch.facts().is_empty());
+
+        let mut empty_batch = FactBatch::new(2, 2).unwrap();
+        let empty = adapter
+            .decode(
+                DecodeContext {
+                    decoder: &decoder,
+                    object_context: &object_context,
+                },
+                &presence_record(b""),
+                &mut empty_batch,
+            )
+            .unwrap();
+        assert_eq!(empty, DecodeDisposition::PreservedUnknown);
+        assert!(matches!(
+            empty_batch.facts()[0].value,
+            Fact::UnknownRecord { .. }
+        ));
+
+        let mismatch_record =
+            presence_record(br#"{"pid":9,"sessionId":"session","cwd":"/repo","startedAt":1}"#);
+        let mut mismatch_batch = FactBatch::new(2, 2).unwrap();
+        let mismatch = adapter
+            .decode(
+                DecodeContext {
+                    decoder: &decoder,
+                    object_context: &object_context,
+                },
+                &mismatch_record,
+                &mut mismatch_batch,
+            )
+            .unwrap();
+        assert_eq!(mismatch, DecodeDisposition::PreservedUnknown);
     }
 
     #[test]

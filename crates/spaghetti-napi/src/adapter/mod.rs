@@ -18,7 +18,7 @@ pub use contract::{
 pub use facts::{
     ContentBlock, DelegationFact, DelegationKind, DelegationMetadataFact, DelegationSpawnFact,
     EntityKey, EvidenceKind, EvidenceStrength, Fact, FactBatch, FactEnvelope, FactId,
-    FactProvenance, MessageFact, MessageRole, QualifiedTimestamp, RelationStrength,
+    FactProvenance, MessageFact, MessageRole, PresenceFact, QualifiedTimestamp, RelationStrength,
     RunEvidenceFact, RunFact, SessionFact, TeamInboxMessageSnapshot, TeamInboxSnapshotFact,
     TeamMemberSnapshot, TeamSnapshotFact, TimestampQuality, TokenUsage, UsageAccounting, UsageFact,
     UsageScope, ValueQuality,

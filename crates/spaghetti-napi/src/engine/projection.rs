@@ -19,6 +19,7 @@ use super::commit::{
     apply_observation_commit_with_projection, ChangeEntry, CommitReceipt, ObservationCommit,
     ProjectionCommitContext, TransactionalProjectionWork,
 };
+use super::presence_projection::apply_presence_facts;
 use super::team_projection::apply_team_snapshots;
 use super::EngineError;
 
@@ -261,6 +262,7 @@ impl TransactionalProjectionWork for FactProjectionWork<'_> {
                 | Fact::DelegationSpawn(_)
                 | Fact::TeamSnapshot(_)
                 | Fact::TeamInboxSnapshot(_)
+                | Fact::Presence(_)
                 | Fact::RunEvidence(_)
                 | Fact::Usage(_) => {}
             }
@@ -498,6 +500,7 @@ impl TransactionalProjectionWork for FactProjectionWork<'_> {
             changes.push(delegation_conflict_change(&child_run_key, &reduction)?);
         }
 
+        changes.extend(apply_presence_facts(transaction, context, self.batch)?);
         changes.extend(apply_team_snapshots(transaction, context, self.batch)?);
 
         transaction
@@ -2373,7 +2376,7 @@ mod tests {
 
     use crate::adapter::{
         AdapterId, AdapterObjectContext, AgentAdapter, DecodeContext, DecoderId, FactBatch,
-        RunEvidenceFact, RunFact, SourceInstance, SourceInstanceKey,
+        PresenceFact, RunEvidenceFact, RunFact, SourceInstance, SourceInstanceKey,
         SourceInstanceSpec as AdapterSourceInstanceSpec, SourceObjectDescriptor, SourceRoot,
         StreamId, TeamInboxMessageSnapshot, TeamInboxSnapshotFact, TeamMemberSnapshot,
         TeamSnapshotFact,
@@ -2581,6 +2584,30 @@ mod tests {
         QualifiedTimestamp {
             value: value.to_string(),
             quality: TimestampQuality::NativeExact,
+        }
+    }
+
+    fn presence_fact(native_status: &str, cwd: &str) -> PresenceFact {
+        PresenceFact {
+            presence: entity("presence", "4242/session/proc-start"),
+            session: entity("session", SESSION),
+            run: entity("run", SESSION),
+            native_session_id: SESSION.to_string(),
+            native_pid: 4242,
+            cwd: cwd.to_string(),
+            started_at: exact("2026-08-11T17:11:50.233Z"),
+            native_kind: Some("interactive".to_string()),
+            entrypoint: Some("cli".to_string()),
+            name: Some("engine work".to_string()),
+            native_status: Some(native_status.to_string()),
+            updated_at: Some(exact("2026-08-11T18:08:24.949Z")),
+            status_updated_at: Some(exact("2026-08-11T18:08:24.000Z")),
+            native_process_started_at: Some("Tue Aug 11 17:11:48 2026".to_string()),
+            version: Some("2.1.227".to_string()),
+            peer_protocol: Some(1),
+            name_source: Some("derived".to_string()),
+            bridge_session_id: None,
+            messaging_socket_path: Some("/tmp/claude-4242.sock".to_string()),
         }
     }
 
@@ -4563,6 +4590,280 @@ mod tests {
                 )
                 .unwrap(),
             "upsert"
+        );
+    }
+
+    #[test]
+    fn presence_replaces_in_place_retracts_on_absence_and_joins_late_history() {
+        let mut connection = database();
+        register_object(&mut connection);
+        let presence_key = entity("presence", "4242/session/proc-start");
+        let session_key = entity("session", SESSION);
+        let run_key = entity("run", SESSION);
+
+        let first_record = direct_record(1, 0, 1, 20, b"presence-idle");
+        let mut first = FactBatch::new(2, 1).unwrap();
+        first
+            .push(
+                &first_record,
+                Fact::Presence(presence_fact("idle", "/fixture/project")),
+            )
+            .unwrap();
+        commit_direct_batch(&mut connection, &first_record, 1, 0, 21, &first);
+
+        let initial: (String, String, i64, i64) = connection
+            .query_row(
+                "SELECT presence_status, native_status, assertion_count, competing_assertion_count FROM canonical_presences WHERE presence_key = ?1",
+                [presence_key.as_bytes()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(initial, ("resolved".to_string(), "idle".to_string(), 1, 0));
+        assert_eq!(count(&connection, "canonical_sessions"), 0);
+        assert_eq!(count(&connection, "canonical_runs"), 0);
+        assert_eq!(count(&connection, "observed_run_states"), 0);
+
+        // Presence is independently queryable before history. A later run
+        // joins through stable keys without rewriting the presence assertion.
+        let history_object_key = b"late-history";
+        apply_observation_commit(
+            &mut connection,
+            &request_for_object(
+                history_object_key,
+                ExpectedSourceCursor::Absent,
+                1,
+                SourceCursor::append_offset(0).into_bytes(),
+                25,
+            ),
+        )
+        .unwrap();
+        let history_record = object_record(
+            2,
+            1,
+            SourceCursor::append_offset(0),
+            SourceCursor::append_offset(1),
+            26,
+            b"late-history-run",
+        );
+        let mut history = FactBatch::new(2, 1).unwrap();
+        history
+            .push(
+                &history_record,
+                Fact::Run(RunFact {
+                    run: run_key.clone(),
+                    session: session_key,
+                    native_run_id: SESSION.to_string(),
+                    parent_run: None,
+                }),
+            )
+            .unwrap();
+        commit_object_batch(
+            &mut connection,
+            history_object_key,
+            &history_record,
+            1,
+            SourceCursor::append_offset(0).into_bytes(),
+            27,
+            &history,
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM canonical_presences AS presence JOIN canonical_runs AS run ON run.run_key = presence.run_key WHERE presence.presence_key = ?1",
+                    [presence_key.as_bytes()],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            1
+        );
+        assert_eq!(count(&connection, "observed_run_states"), 0);
+
+        let updated_record = direct_record(1, 1, 2, 30, b"presence-working");
+        let mut updated = FactBatch::new(2, 1).unwrap();
+        updated
+            .push(
+                &updated_record,
+                Fact::Presence(presence_fact("working", "/fixture/renamed")),
+            )
+            .unwrap();
+        commit_direct_batch(&mut connection, &updated_record, 1, 1, 31, &updated);
+        let replaced: (String, String, i64) = connection
+            .query_row(
+                "SELECT native_status, cwd, assertion_count FROM canonical_presences WHERE presence_key = ?1",
+                [presence_key.as_bytes()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            replaced,
+            ("working".to_string(), "/fixture/renamed".to_string(), 1)
+        );
+        assert_eq!(count(&connection, "presence_assertions"), 1);
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM fact_records WHERE fact_kind = 'presence'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            1
+        );
+
+        let absent_record = direct_record(1, 2, 3, 40, b"presence-absent");
+        let absent = FactBatch::new(1, 1).unwrap();
+        commit_direct_batch(&mut connection, &absent_record, 1, 2, 41, &absent);
+        assert_eq!(count(&connection, "canonical_presences"), 0);
+        assert_eq!(count(&connection, "presence_assertions"), 0);
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM fact_records WHERE fact_kind = 'presence'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            0
+        );
+        assert_eq!(count(&connection, "canonical_runs"), 1);
+        assert_eq!(count(&connection, "observed_run_states"), 0);
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT operation FROM change_log WHERE topic = 'runtime.presence.changed' AND entity_key = ?1 ORDER BY commit_seq DESC LIMIT 1",
+                    [presence_key.as_bytes()],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "delete"
+        );
+    }
+
+    #[test]
+    fn competing_presence_assertions_are_diagnosed_and_resolve_on_retraction() {
+        let mut connection = database();
+        register_object(&mut connection);
+        let second_object_key = b"presence-secondary";
+        apply_observation_commit(
+            &mut connection,
+            &request_for_object(
+                second_object_key,
+                ExpectedSourceCursor::Absent,
+                1,
+                SourceCursor::append_offset(0).into_bytes(),
+                12,
+            ),
+        )
+        .unwrap();
+        let presence_key = entity("presence", "4242/session/proc-start");
+
+        let primary_record = direct_record(1, 0, 1, 20, b"presence-primary");
+        let mut primary = FactBatch::new(2, 1).unwrap();
+        primary
+            .push(
+                &primary_record,
+                Fact::Presence(presence_fact("idle", "/primary")),
+            )
+            .unwrap();
+        commit_direct_batch(&mut connection, &primary_record, 1, 0, 21, &primary);
+
+        let secondary_record = object_record(
+            2,
+            1,
+            SourceCursor::append_offset(0),
+            SourceCursor::append_offset(1),
+            30,
+            b"presence-secondary",
+        );
+        let mut secondary = FactBatch::new(2, 1).unwrap();
+        secondary
+            .push(
+                &secondary_record,
+                Fact::Presence(presence_fact("working", "/secondary")),
+            )
+            .unwrap();
+        commit_object_batch(
+            &mut connection,
+            second_object_key,
+            &secondary_record,
+            1,
+            SourceCursor::append_offset(0).into_bytes(),
+            31,
+            &secondary,
+        );
+
+        let conflicting: (String, i64, i64) = connection
+            .query_row(
+                "SELECT presence_status, assertion_count, competing_assertion_count FROM canonical_presences WHERE presence_key = ?1",
+                [presence_key.as_bytes()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(conflicting, ("conflicting".to_string(), 2, 1));
+        assert_eq!(count(&connection, "presence_assertions"), 2);
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT operation FROM change_log WHERE topic = 'diagnostic.runtime.presence-conflict' AND entity_key = ?1 ORDER BY commit_seq DESC LIMIT 1",
+                    [presence_key.as_bytes()],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "upsert"
+        );
+
+        let retracted_record = object_record(
+            2,
+            1,
+            SourceCursor::append_offset(1),
+            SourceCursor::append_offset(2),
+            40,
+            b"presence-secondary-absent",
+        );
+        let retracted = FactBatch::new(1, 1).unwrap();
+        commit_object_batch(
+            &mut connection,
+            second_object_key,
+            &retracted_record,
+            1,
+            SourceCursor::append_offset(1).into_bytes(),
+            41,
+            &retracted,
+        );
+        let resolved: (String, i64, i64, String, String) = connection
+            .query_row(
+                "SELECT presence_status, assertion_count, competing_assertion_count, native_status, cwd FROM canonical_presences WHERE presence_key = ?1",
+                [presence_key.as_bytes()],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            resolved,
+            (
+                "resolved".to_string(),
+                1,
+                0,
+                "idle".to_string(),
+                "/primary".to_string(),
+            )
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT operation FROM change_log WHERE topic = 'diagnostic.runtime.presence-conflict' AND entity_key = ?1 ORDER BY commit_seq DESC LIMIT 1",
+                    [presence_key.as_bytes()],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "delete"
         );
     }
 

@@ -184,14 +184,7 @@ impl PresenceObject {
             previous.map_or(SourceCursor::presence(Revision::ZERO), |old| old.cursor());
         Ok(PresenceRead::Observation {
             kind,
-            record: SourceRecord::new(
-                origin,
-                generation,
-                cursor_start,
-                checkpoint.cursor(),
-                0,
-                Vec::new(),
-            ),
+            record: SourceRecord::absent(origin, generation, cursor_start, checkpoint.cursor(), 0),
             checkpoint,
             content_omitted: true,
         })
@@ -277,7 +270,7 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
-    use crate::source::SourceMediaType;
+    use crate::source::{SourceMediaType, SourceRecordState};
 
     fn origin() -> RecordOrigin {
         RecordOrigin {
@@ -314,9 +307,10 @@ mod tests {
     fn initial_absence_is_an_observation_then_becomes_unchanged() {
         let directory = TempDir::new().unwrap();
         let path = directory.path().join("active.lock");
-        let (kind, _, checkpoint) =
+        let (kind, record, checkpoint) =
             observation(driver(false).read(&path, None, &origin()).unwrap());
         assert_eq!(kind, PresenceKind::InitialAbsent);
+        assert_eq!(record.state, SourceRecordState::Absent);
         assert!(!checkpoint.present);
         assert!(matches!(
             driver(false)
@@ -335,13 +329,15 @@ mod tests {
         let (kind, record, present) =
             observation(driver(true).read(&path, Some(&absent), &origin()).unwrap());
         assert_eq!(kind, PresenceKind::Created);
+        assert_eq!(record.state, SourceRecordState::Present);
         assert_eq!(record.payload, b"first");
         assert_eq!(present.generation, absent.generation + 1);
 
         std::fs::remove_file(&path).unwrap();
-        let (kind, _, removed) =
+        let (kind, record, removed) =
             observation(driver(true).read(&path, Some(&present), &origin()).unwrap());
         assert_eq!(kind, PresenceKind::Removed);
+        assert_eq!(record.state, SourceRecordState::Absent);
         assert_eq!(removed.generation, present.generation);
 
         std::fs::write(&path, b"second").unwrap();

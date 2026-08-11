@@ -27,7 +27,7 @@ pub use directory_snapshot::{
 pub use file::platform_path_key;
 pub use model::{
     DriverQuarantine, FileIdentity, RecordHash, RecordOrigin, Revision, SourceCursor,
-    SourceDriverError, SourceMediaType, SourceRecord,
+    SourceDriverError, SourceMediaType, SourceRecord, SourceRecordState,
 };
 pub use presence_object::{
     PresenceCheckpoint, PresenceKind, PresenceObject, PresenceObjectConfig, PresenceRead,

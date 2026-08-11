@@ -344,6 +344,32 @@ pub struct TeamInboxSnapshotFact {
     pub messages: Vec<TeamInboxMessageSnapshot>,
 }
 
+/// One currently materialized native presence object. The fact proves that
+/// the agent-owned registry entry exists; it does not prove that the host PID
+/// is still alive or turn silence into completion evidence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PresenceFact {
+    pub presence: EntityKey,
+    pub session: EntityKey,
+    pub run: EntityKey,
+    pub native_session_id: String,
+    pub native_pid: u32,
+    pub cwd: String,
+    pub started_at: QualifiedTimestamp,
+    pub native_kind: Option<String>,
+    pub entrypoint: Option<String>,
+    pub name: Option<String>,
+    pub native_status: Option<String>,
+    pub updated_at: Option<QualifiedTimestamp>,
+    pub status_updated_at: Option<QualifiedTimestamp>,
+    pub native_process_started_at: Option<String>,
+    pub version: Option<String>,
+    pub peer_protocol: Option<u32>,
+    pub name_source: Option<String>,
+    pub bridge_session_id: Option<String>,
+    pub messaging_socket_path: Option<String>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EvidenceKind {
     RunDeclared,
@@ -438,6 +464,7 @@ pub enum Fact {
     DelegationSpawn(DelegationSpawnFact),
     TeamSnapshot(TeamSnapshotFact),
     TeamInboxSnapshot(TeamInboxSnapshotFact),
+    Presence(PresenceFact),
     RunEvidence(RunEvidenceFact),
     Usage(UsageFact),
     UnknownRecord {
@@ -458,6 +485,7 @@ impl Fact {
             Self::DelegationSpawn(_) => "delegation_spawn",
             Self::TeamSnapshot(_) => "team_snapshot",
             Self::TeamInboxSnapshot(_) => "team_inbox_snapshot",
+            Self::Presence(_) => "presence",
             Self::RunEvidence(_) => "run_evidence",
             Self::Usage(_) => "usage",
             Self::UnknownRecord { .. } => "unknown_record",
@@ -474,6 +502,7 @@ impl Fact {
             Self::DelegationSpawn(fact) => Some(&fact.spawn),
             Self::TeamSnapshot(fact) => Some(&fact.team),
             Self::TeamInboxSnapshot(fact) => Some(&fact.inbox),
+            Self::Presence(fact) => Some(&fact.presence),
             Self::RunEvidence(fact) => Some(&fact.run),
             Self::Usage(fact) => Some(&fact.subject),
             Self::UnknownRecord { .. } => None,

@@ -54,6 +54,7 @@ function parseActiveSessionFile(raw: string, fallbackPid?: number): ActiveSessio
       peerProtocol: parsed.peerProtocol,
       nameSource: parsed.nameSource,
       bridgeSessionId: parsed.bridgeSessionId,
+      messagingSocketPath: parsed.messagingSocketPath,
     };
   } catch {
     return null;

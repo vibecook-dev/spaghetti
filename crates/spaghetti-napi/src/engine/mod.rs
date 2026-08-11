@@ -6,6 +6,7 @@
 
 mod commit;
 mod owner_lock;
+mod presence_projection;
 mod projection;
 mod query_pool;
 mod team_projection;

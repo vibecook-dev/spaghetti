@@ -76,7 +76,9 @@ import type { SqliteService } from '../io/index.js';
 // correlation provenance.
 // v22: authoritative Claude team configuration and inbox snapshots with
 // normalized membership/message projections and replacement provenance.
-export const SCHEMA_VERSION = 22;
+// v23: Claude active-session presence assertions, canonical current rows,
+// process-incarnation identity, and conflict provenance.
+export const SCHEMA_VERSION = 23;
 
 export const TOKEN_ACTIVITY_TRIGGER_NAMES = [
   'token_activity_messages_ai',
@@ -662,6 +664,69 @@ CREATE TABLE IF NOT EXISTS observed_run_states (
   last_commit_seq INTEGER NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS presence_assertions (
+  fact_id BLOB PRIMARY KEY REFERENCES fact_records(fact_id) ON DELETE CASCADE,
+  presence_key BLOB NOT NULL,
+  session_key BLOB NOT NULL,
+  run_key BLOB NOT NULL,
+  native_session_id TEXT NOT NULL,
+  native_pid INTEGER NOT NULL,
+  cwd TEXT NOT NULL,
+  started_at TEXT NOT NULL,
+  started_at_quality TEXT NOT NULL,
+  native_kind TEXT,
+  entrypoint TEXT,
+  name TEXT,
+  native_status TEXT,
+  updated_at TEXT,
+  updated_at_quality TEXT,
+  status_updated_at TEXT,
+  status_updated_at_quality TEXT,
+  native_process_started_at TEXT,
+  version TEXT,
+  peer_protocol INTEGER,
+  name_source TEXT,
+  bridge_session_id TEXT,
+  messaging_socket_path TEXT,
+  presence_digest BLOB NOT NULL,
+  source_object_id INTEGER NOT NULL,
+  source_generation INTEGER NOT NULL,
+  cursor_end BLOB NOT NULL,
+  last_commit_seq INTEGER NOT NULL,
+  CHECK (native_pid > 0)
+);
+
+CREATE TABLE IF NOT EXISTS canonical_presences (
+  presence_key BLOB PRIMARY KEY,
+  session_key BLOB NOT NULL,
+  run_key BLOB NOT NULL,
+  native_session_id TEXT NOT NULL,
+  native_pid INTEGER NOT NULL,
+  cwd TEXT NOT NULL,
+  started_at TEXT NOT NULL,
+  started_at_quality TEXT NOT NULL,
+  native_kind TEXT,
+  entrypoint TEXT,
+  name TEXT,
+  native_status TEXT,
+  updated_at TEXT,
+  updated_at_quality TEXT,
+  status_updated_at TEXT,
+  status_updated_at_quality TEXT,
+  native_process_started_at TEXT,
+  version TEXT,
+  peer_protocol INTEGER,
+  name_source TEXT,
+  bridge_session_id TEXT,
+  messaging_socket_path TEXT,
+  presence_status TEXT NOT NULL,
+  decisive_fact_id BLOB NOT NULL REFERENCES presence_assertions(fact_id) ON DELETE CASCADE,
+  assertion_count INTEGER NOT NULL,
+  competing_assertion_count INTEGER NOT NULL,
+  last_commit_seq INTEGER NOT NULL,
+  CHECK (native_pid > 0)
+);
+
 CREATE TABLE IF NOT EXISTS delegation_assertions (
   fact_id BLOB PRIMARY KEY REFERENCES fact_records(fact_id) ON DELETE CASCADE,
   child_run_key BLOB NOT NULL,
@@ -1082,6 +1147,11 @@ CREATE INDEX IF NOT EXISTS idx_canonical_sessions_project ON canonical_sessions(
 CREATE INDEX IF NOT EXISTS idx_canonical_messages_session_order ON canonical_messages(session_key, source_generation, cursor_start);
 CREATE INDEX IF NOT EXISTS idx_canonical_runs_session ON canonical_runs(session_key, run_key);
 CREATE INDEX IF NOT EXISTS idx_run_evidence_run_order ON run_evidence(run_key, source_generation, cursor_end);
+CREATE INDEX IF NOT EXISTS idx_presence_assertions_presence ON presence_assertions(presence_key, fact_id);
+CREATE INDEX IF NOT EXISTS idx_presence_assertions_source ON presence_assertions(source_object_id, presence_key);
+CREATE INDEX IF NOT EXISTS idx_presence_assertions_session ON presence_assertions(session_key, presence_key);
+CREATE INDEX IF NOT EXISTS idx_canonical_presences_session ON canonical_presences(session_key, presence_key);
+CREATE INDEX IF NOT EXISTS idx_canonical_presences_run ON canonical_presences(run_key, presence_key);
 CREATE INDEX IF NOT EXISTS idx_delegation_assertions_child_order ON delegation_assertions(child_run_key, relation_strength, source_generation, cursor_end);
 CREATE INDEX IF NOT EXISTS idx_delegation_assertions_parent ON delegation_assertions(parent_run_key, child_run_key);
 CREATE INDEX IF NOT EXISTS idx_canonical_delegations_session ON canonical_delegations(session_key, child_run_key);
@@ -1203,6 +1273,8 @@ const CURRENT_TABLES = [
   'delegation_spawn_assertions',
   'delegation_metadata_assertions',
   'delegation_assertions',
+  'canonical_presences',
+  'presence_assertions',
   'observed_run_states',
   'usage_totals',
   'usage_contributions',

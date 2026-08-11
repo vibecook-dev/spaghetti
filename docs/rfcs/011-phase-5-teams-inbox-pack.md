@@ -94,8 +94,9 @@ Team membership proves configuration membership only. The projector does not:
 - infer waiting, success, failure, cancellation, or completion from silence;
 - discard an inbox because its config is absent or malformed.
 
-Those lifecycle claims require future presence or native event evidence with
-their own capability declarations.
+Those lifecycle claims require separate presence or native event evidence with
+their own capability declarations. The adjacent presence pack now supplies
+registry-object evidence without turning it into lifecycle completion.
 
 ## Conformance evidence
 
@@ -119,7 +120,7 @@ remain the release gate for the commit.
 
 ## Remaining Phase 5 work
 
-The next source families are active-session/process presence and reviewed
-tasks, plans, todos, file-history, workflow, settings, and artifact packs. The
-observation coordinator and production live cutover are still required for the
-Phase 5 exit gate.
+Active-session presence is now implemented in the adjacent Phase 5 pack. The
+remaining source families are reviewed tasks, plans, todos, file-history,
+workflow, settings, and artifacts. The observation coordinator and production
+live cutover are still required for the Phase 5 exit gate.

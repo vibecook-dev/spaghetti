@@ -150,7 +150,7 @@ export interface ActiveSessionFile {
   kind?: string;
   entrypoint?: string;
   name?: string;
-  // Fields Claude Code now always writes (2026-07 audit); still no reader.
+  // Fields Claude Code now writes in the active-session registry.
   status?: string;
   updatedAt?: number;
   statusUpdatedAt?: number;
@@ -159,6 +159,7 @@ export interface ActiveSessionFile {
   peerProtocol?: number;
   nameSource?: string;
   bridgeSessionId?: string;
+  messagingSocketPath?: string;
 }
 
 export interface TopLevelFiles {

@@ -456,6 +456,8 @@ const RFC011_SCHEMA_TABLES = [
   'canonical_runs',
   'run_evidence',
   'observed_run_states',
+  'presence_assertions',
+  'canonical_presences',
   'delegation_assertions',
   'canonical_delegations',
   'delegation_metadata_assertions',
@@ -534,6 +536,14 @@ const TABLE_SPECS: TableSpec[] = [
   {
     name: 'observed_run_states',
     orderBy: 'run_key',
+  },
+  {
+    name: 'presence_assertions',
+    orderBy: 'fact_id',
+  },
+  {
+    name: 'canonical_presences',
+    orderBy: 'presence_key',
   },
   {
     name: 'delegation_assertions',
