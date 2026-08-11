@@ -1,6 +1,6 @@
 {
   "name": "@vibecook/spaghetti-sdk-native-darwin-arm64",
-  "version": "0.6.1",
+  "version": "0.6.2",
   "description": "Native (Rust) ingest core for @vibecook/spaghetti-sdk — darwin-arm64 binary",
   "cpu": [
     "arm64"

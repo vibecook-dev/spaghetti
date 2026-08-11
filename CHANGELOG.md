@@ -36,6 +36,15 @@ git history at `211f4b1` if they are ever wanted back.
 
 <!-- End standing notice. -->
 
+## [0.6.2](https://github.com/vibecook-dev/spaghetti/compare/spaghetti-v0.6.1...spaghetti-v0.6.2) (2026-08-11)
+
+
+### Bug Fixes
+
+* **napi:** close every non-accepted RFC 008 divergence found on macOS ([#115](https://github.com/vibecook-dev/spaghetti/issues/115)) ([456bf28](https://github.com/vibecook-dev/spaghetti/commit/456bf2816e9b2a96ffda2773659858a63c42b46a))
+* **napi:** report a typed-parse failure that costs indexed text ([#116](https://github.com/vibecook-dev/spaghetti/issues/116)) ([4df448c](https://github.com/vibecook-dev/spaghetti/commit/4df448c80b45836ee57140a4024b4bc3a3c38283))
+* **napi:** strip the carriage return from CRLF plan titles ([#111](https://github.com/vibecook-dev/spaghetti/issues/111)) ([cd5efda](https://github.com/vibecook-dev/spaghetti/commit/cd5efda08ed533175fb11f31534f618324b6984c))
+
 ## [0.6.1](https://github.com/vibecook-dev/spaghetti/compare/spaghetti-v0.6.0...spaghetti-v0.6.1) (2026-08-10)
 
 
