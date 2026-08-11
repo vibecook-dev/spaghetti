@@ -112,42 +112,68 @@ create virtual table f using fts5(body)  →  ✅ matches returned
 | `.iterate()`            |    2 | ✅                                                    |
 
 Also confirmed present: `db.function()` for user-defined functions, `backup`,
-and the `readonly` / `timeout` open options. No `ExperimentalWarning` is emitted
-on 26.5.
+and the `readOnly` / `timeout` open options — note the spelling, which is a trap
+in its own right (below). No `ExperimentalWarning` is emitted on 26.5.
 
 **`db.inTransaction` does not exist** on `node:sqlite`. It is not used in this
 codebase — the `beginTransaction()` hits in `lifecycle-owner.ts` are an
 unrelated `IngestService` method — but the facade needs its own depth counter
 (below), so this matters to the implementation rather than to callers.
 
-### `node:sqlite` ignores unknown open options — silently
+### The open-options trap: `readonly` is not `readOnly`
 
-`DatabaseSync` accepts `{ totallyBogusOption: 1 }` without complaint. It does
-not validate the options bag, so **`fileMustExist` and `verbose` are accepted
-and then ignored** rather than rejected. Measured:
+`DatabaseSync` does not validate its options bag — it accepts
+`{ totallyBogusOption: 1 }` without complaint. Combined with a one-character
+spelling difference from `better-sqlite3`, that produces the most dangerous
+finding in this RFC.
 
-| Open on a *missing* file             | `better-sqlite3`                  | `node:sqlite`        |
-| ------------------------------------ | --------------------------------- | -------------------- |
-| `{ fileMustExist: true }`            | **throws** `unable to open database file` | creates it, no error |
-| `{ readonly: true }`                 | **throws**                        | no error             |
+**`better-sqlite3` spells it `readonly`. `node:sqlite` spells it `readOnly`.**
+The lowercase form is therefore an unknown option, silently ignored, and the
+database opens **read-write**. Measured, not inferred:
 
-This matters because of exactly where those options are used —
-`sqlite-health.ts:103`:
+| Option passed          | Missing file        | Write to an existing DB              |
+| ---------------------- | ------------------- | ------------------------------------ |
+| `{ readonly: true }`   | opens, no error     | **write SUCCEEDS — not read-only**   |
+| `{ readOnly: true }`   | **throws**          | blocked ✅ `attempt to write a readonly database` |
+
+`fileMustExist` does not exist in `node:sqlite` at all (also silently ignored),
+but note the second column: **`readOnly: true` already throws on a missing
+file**, so it covers what `fileMustExist` was there for.
+
+This lands squarely on `sqlite-health.ts:103`:
 
 ```ts
 db = new Database(dbPath, { readonly: true, fileMustExist: true });
 ```
 
 That is the health checker, whose entire purpose is to notice a missing or
-corrupt database. Ported naively it would stop throwing on a missing file and
-quietly create an empty one — a component designed to detect problems acquiring
-a silent failure mode of its own. `sqlite-service.ts` passes the same option
-through from config.
+corrupt database. Copy that line across unchanged and it keeps compiling, keeps
+running, and silently opens the user's database **writable** — in the one
+component whose job is to inspect a suspect file without touching it.
 
-**Phase 1 must replace both guards with an explicit `existsSync` check before
-open**, and a test that pins "missing file is an error, not an empty database."
+**Phase 1 must:**
+
+- rename `readonly` → `readOnly` at both call sites, and grep for any other
+  option name assumed to carry over;
+- add an explicit `existsSync` check where `fileMustExist` was load-bearing on a
+  read-write open (`sqlite-service.ts`), since `readOnly` only covers the
+  read path;
+- pin both with tests — "missing file is an error, not an empty database" and
+  "a read-only handle rejects writes."
+
 This is the same shape as every other defect in this program: the option is
-still there, still spelled correctly, and no longer does anything.
+still there, still looks right, and no longer does anything.
+
+### Two smaller differences
+
+- **`foreign_keys` is already on.** `enableForeignKeyConstraints` defaults to
+  `true`, and a fresh `DatabaseSync` reports `PRAGMA foreign_keys = 1`. The
+  explicit `pragma('foreign_keys = ON')` in `sqlite-service.ts:101` becomes
+  redundant — keep it as documentation or drop it, but do not assume it is what
+  turns the constraint on.
+- **`verbose` has no equivalent** and is silently ignored. It is plumbed through
+  `SqliteConfig` but never set by any caller; drop it from the config type
+  rather than leaving a dead option that looks live.
 
 ---
 
@@ -237,21 +263,29 @@ the recommended path.
 ## The Node floor
 
 `package.json`, `packages/sdk`, and `packages/cli` all declare `"node": ">=18"`.
-`node:sqlite` requires 22.5+, and its stability level has moved across releases —
-**confirm the exact version at which it is no longer experimental before
-committing to a floor**; that is the one claim in this RFC not verified locally.
+Per the Node documentation, `node:sqlite`'s history is:
 
-Options:
+| Node version         | Status                                             |
+| -------------------- | -------------------------------------------------- |
+| v22.5.0              | module added, behind `--experimental-sqlite`       |
+| v22.13.0 / v23.4.0   | flag removed; still marked experimental            |
+| v25.7.0              | **Stability 1.2 — Release Candidate** (current)    |
 
-1. **Bump the floor to the first stable-`node:sqlite` release.** Simplest, and
-   Node 18 and 20 are both out of support. Recommended.
-2. **Keep `better-sqlite3` as an optional fallback** behind the existing facade,
-   selected at open time. Preserves the old floor at the cost of keeping the
-   dependency — which defeats the purpose, since the install script returns with
-   it.
+**It is a release candidate, not Stable (2).** That is the honest status and it
+should inform the decision rather than be smoothed over — though in practice
+the API this project needs is the oldest and most exercised part of it, and
+`0.6.x` already requires a native module that fails outright on the current npm.
 
-Option 1 unless there is a known consumer pinned below the threshold. This is a
-product decision, not a technical one.
+Recommended floor: **`>=22.13.0`**, the first release where no flag is needed.
+Node 18 and 20 are both out of support, so this excludes only unsupported
+runtimes. Setting `>=24` instead would buy a longer-baked module at the cost of
+a narrower audience.
+
+The alternative — keeping `better-sqlite3` as a fallback behind the facade —
+defeats the purpose, because the install script comes back with it.
+
+This is a product decision, not a technical one. **Phase 0 is exactly this
+choice and nothing else.**
 
 ---
 
@@ -259,9 +293,10 @@ product decision, not a technical one.
 
 ### Phase 0 — Decide and pin
 
-Confirm the stable `node:sqlite` version; set the floor in all three
-`package.json` files; confirm no consumer is pinned lower. **Exit:** the floor
-is agreed and written down.
+Choose the floor — `>=22.13.0` recommended, `>=24` if the release-candidate
+status argues for a longer-baked module — and set it in all three
+`package.json` files. **Exit:** the floor is agreed and written down. No code
+moves before this.
 
 ### Phase 1 — Port the facade
 
@@ -307,7 +342,7 @@ published artifact, then sign §9.
 | Risk | Mitigation |
 | --- | --- |
 | Nested-transaction semantics differ | Prototyped above; Phase 1 exit requires the three-case test. The live-ingest path is fixture-covered. |
-| **Silently-ignored open options** | Named above. `fileMustExist` and `readonly` stop guarding. Replaced with an explicit existence check plus a test. Assume any other option is ignored until proven otherwise — the bag is not validated. |
+| **Silently-ignored open options** | `readonly` → `readOnly` is a one-character rename that, missed, opens the DB writable in the health checker. `fileMustExist` does not exist. Both pinned by tests in Phase 1. Assume any option is ignored until proven otherwise — the bag is not validated. |
 | `node:sqlite` API drifts while young | It is a Node builtin under semver; the facade is the single point of contact if it does. |
 | Node floor excludes a consumer | Phase 0 decides this before any code moves. |
 | A behavioural difference the fixtures miss | The real-corpus audit is the backstop — it is what found the data loss RFC 008 shipped with. Run it in Phase 1, not only Phase 3. |
