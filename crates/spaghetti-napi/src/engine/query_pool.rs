@@ -15,6 +15,14 @@ use serde::{Deserialize, Serialize};
 
 use crate::core::schema;
 
+use super::capability_query::{
+    read_artifact_page, read_memory_document_page, read_plan_page, read_task_collection_page,
+    read_task_page, read_tool_result_page, validate_artifact_page, validate_memory_document_page,
+    validate_plan_page, validate_task_collection_page, validate_task_page,
+    validate_tool_result_page, ArtifactPage, ArtifactPageRequest, MemoryDocumentPage,
+    MemoryDocumentPageRequest, PlanPage, PlanPageRequest, TaskCollectionPage,
+    TaskCollectionPageRequest, TaskPage, TaskPageRequest, ToolResultPage, ToolResultPageRequest,
+};
 use super::detail_query::{
     read_canonical_stats, read_message_page, read_session_details, read_source_page,
     validate_message_page, validate_session_details, validate_source_page, CanonicalStats,
@@ -282,6 +290,42 @@ enum QueryCommand {
         cancellation: QueryCancellationToken,
         request: MessagePageRequest,
         response: Sender<Result<MessagePage, EngineError>>,
+    },
+    MemoryDocuments {
+        cancellation_epoch: u64,
+        cancellation: QueryCancellationToken,
+        request: MemoryDocumentPageRequest,
+        response: Sender<Result<MemoryDocumentPage, EngineError>>,
+    },
+    TaskCollections {
+        cancellation_epoch: u64,
+        cancellation: QueryCancellationToken,
+        request: TaskCollectionPageRequest,
+        response: Sender<Result<TaskCollectionPage, EngineError>>,
+    },
+    Tasks {
+        cancellation_epoch: u64,
+        cancellation: QueryCancellationToken,
+        request: TaskPageRequest,
+        response: Sender<Result<TaskPage, EngineError>>,
+    },
+    Plans {
+        cancellation_epoch: u64,
+        cancellation: QueryCancellationToken,
+        request: PlanPageRequest,
+        response: Sender<Result<PlanPage, EngineError>>,
+    },
+    ToolResults {
+        cancellation_epoch: u64,
+        cancellation: QueryCancellationToken,
+        request: ToolResultPageRequest,
+        response: Sender<Result<ToolResultPage, EngineError>>,
+    },
+    Artifacts {
+        cancellation_epoch: u64,
+        cancellation: QueryCancellationToken,
+        request: ArtifactPageRequest,
+        response: Sender<Result<ArtifactPage, EngineError>>,
     },
     UsageTotals {
         cancellation_epoch: u64,
@@ -567,6 +611,108 @@ impl QueryClient {
         self.send_cancellable(
             cancellation,
             |cancellation_epoch, cancellation, response| QueryCommand::Messages {
+                cancellation_epoch,
+                cancellation,
+                request,
+                response,
+            },
+        )
+    }
+
+    pub fn memory_documents_cancellable(
+        &self,
+        request: MemoryDocumentPageRequest,
+        cancellation: QueryCancellationToken,
+    ) -> Result<MemoryDocumentPage, EngineError> {
+        validate_memory_document_page(&request)?;
+        self.send_cancellable(
+            cancellation,
+            |cancellation_epoch, cancellation, response| QueryCommand::MemoryDocuments {
+                cancellation_epoch,
+                cancellation,
+                request,
+                response,
+            },
+        )
+    }
+
+    pub fn task_collections_cancellable(
+        &self,
+        request: TaskCollectionPageRequest,
+        cancellation: QueryCancellationToken,
+    ) -> Result<TaskCollectionPage, EngineError> {
+        validate_task_collection_page(&request)?;
+        self.send_cancellable(
+            cancellation,
+            |cancellation_epoch, cancellation, response| QueryCommand::TaskCollections {
+                cancellation_epoch,
+                cancellation,
+                request,
+                response,
+            },
+        )
+    }
+
+    pub fn tasks_cancellable(
+        &self,
+        request: TaskPageRequest,
+        cancellation: QueryCancellationToken,
+    ) -> Result<TaskPage, EngineError> {
+        validate_task_page(&request)?;
+        self.send_cancellable(
+            cancellation,
+            |cancellation_epoch, cancellation, response| QueryCommand::Tasks {
+                cancellation_epoch,
+                cancellation,
+                request,
+                response,
+            },
+        )
+    }
+
+    pub fn plans_cancellable(
+        &self,
+        request: PlanPageRequest,
+        cancellation: QueryCancellationToken,
+    ) -> Result<PlanPage, EngineError> {
+        validate_plan_page(&request)?;
+        self.send_cancellable(
+            cancellation,
+            |cancellation_epoch, cancellation, response| QueryCommand::Plans {
+                cancellation_epoch,
+                cancellation,
+                request,
+                response,
+            },
+        )
+    }
+
+    pub fn tool_results_cancellable(
+        &self,
+        request: ToolResultPageRequest,
+        cancellation: QueryCancellationToken,
+    ) -> Result<ToolResultPage, EngineError> {
+        validate_tool_result_page(&request)?;
+        self.send_cancellable(
+            cancellation,
+            |cancellation_epoch, cancellation, response| QueryCommand::ToolResults {
+                cancellation_epoch,
+                cancellation,
+                request,
+                response,
+            },
+        )
+    }
+
+    pub fn artifacts_cancellable(
+        &self,
+        request: ArtifactPageRequest,
+        cancellation: QueryCancellationToken,
+    ) -> Result<ArtifactPage, EngineError> {
+        validate_artifact_page(&request)?;
+        self.send_cancellable(
+            cancellation,
+            |cancellation_epoch, cancellation, response| QueryCommand::Artifacts {
                 cancellation_epoch,
                 cancellation,
                 request,
@@ -1177,6 +1323,102 @@ fn query_thread(
                     cancellation_epoch,
                     &cancellation,
                     || read_message_page(&connection, &request),
+                );
+                let _ = response.send(result);
+            }
+            QueryCommand::MemoryDocuments {
+                cancellation_epoch,
+                cancellation,
+                request,
+                response,
+            } => {
+                let _in_flight = InFlightGuard::enter(&control.in_flight);
+                let result = run_cancellable_query(
+                    &connection,
+                    &control,
+                    cancellation_epoch,
+                    &cancellation,
+                    || read_memory_document_page(&connection, &request),
+                );
+                let _ = response.send(result);
+            }
+            QueryCommand::TaskCollections {
+                cancellation_epoch,
+                cancellation,
+                request,
+                response,
+            } => {
+                let _in_flight = InFlightGuard::enter(&control.in_flight);
+                let result = run_cancellable_query(
+                    &connection,
+                    &control,
+                    cancellation_epoch,
+                    &cancellation,
+                    || read_task_collection_page(&connection, &request),
+                );
+                let _ = response.send(result);
+            }
+            QueryCommand::Tasks {
+                cancellation_epoch,
+                cancellation,
+                request,
+                response,
+            } => {
+                let _in_flight = InFlightGuard::enter(&control.in_flight);
+                let result = run_cancellable_query(
+                    &connection,
+                    &control,
+                    cancellation_epoch,
+                    &cancellation,
+                    || read_task_page(&connection, &request),
+                );
+                let _ = response.send(result);
+            }
+            QueryCommand::Plans {
+                cancellation_epoch,
+                cancellation,
+                request,
+                response,
+            } => {
+                let _in_flight = InFlightGuard::enter(&control.in_flight);
+                let result = run_cancellable_query(
+                    &connection,
+                    &control,
+                    cancellation_epoch,
+                    &cancellation,
+                    || read_plan_page(&connection, &request),
+                );
+                let _ = response.send(result);
+            }
+            QueryCommand::ToolResults {
+                cancellation_epoch,
+                cancellation,
+                request,
+                response,
+            } => {
+                let _in_flight = InFlightGuard::enter(&control.in_flight);
+                let result = run_cancellable_query(
+                    &connection,
+                    &control,
+                    cancellation_epoch,
+                    &cancellation,
+                    || read_tool_result_page(&connection, &request),
+                );
+                let _ = response.send(result);
+            }
+            QueryCommand::Artifacts {
+                cancellation_epoch,
+                cancellation,
+                request,
+                response,
+            } => {
+                let _in_flight = InFlightGuard::enter(&control.in_flight);
+                let result = run_cancellable_query(
+                    &connection,
+                    &control,
+                    cancellation_epoch,
+                    &cancellation,
+                    || read_artifact_page(&connection, &request),
                 );
                 let _ = response.send(result);
             }
@@ -2804,7 +3046,7 @@ mod tests {
         let messages = client
             .messages(MessagePageRequest {
                 project_id: missing_project_id.clone(),
-                session_id: missing_session_id,
+                session_id: missing_session_id.clone(),
                 cursor: None,
                 limit: DEFAULT_HISTORY_PAGE_LIMIT,
             })
@@ -2832,7 +3074,7 @@ mod tests {
             .unwrap();
         let usage_activity = client
             .usage_activity(UsageActivityRequest {
-                project_id: missing_project_id,
+                project_id: missing_project_id.clone(),
                 session_id: None,
                 from: "2026-08-12".to_string(),
                 to: "2026-08-12".to_string(),
@@ -2851,6 +3093,71 @@ mod tests {
                 cursor: None,
                 limit: DEFAULT_HISTORY_PAGE_LIMIT,
             })
+            .unwrap();
+        let memory_documents = client
+            .memory_documents_cancellable(
+                MemoryDocumentPageRequest {
+                    project_id: missing_project_id.clone(),
+                    cursor: None,
+                    limit: DEFAULT_HISTORY_PAGE_LIMIT,
+                },
+                QueryCancellationToken::default(),
+            )
+            .unwrap();
+        let task_collections = client
+            .task_collections_cancellable(
+                TaskCollectionPageRequest {
+                    session_id: None,
+                    run_id: None,
+                    team_id: None,
+                    cursor: None,
+                    limit: DEFAULT_HISTORY_PAGE_LIMIT,
+                },
+                QueryCancellationToken::default(),
+            )
+            .unwrap();
+        let tasks = client
+            .tasks_cancellable(
+                TaskPageRequest {
+                    collection_id: encode_entity_id(
+                        super::super::query_identity::TASK_COLLECTION_ID_PREFIX,
+                        b"missing-collection",
+                    ),
+                    cursor: None,
+                    limit: DEFAULT_HISTORY_PAGE_LIMIT,
+                },
+                QueryCancellationToken::default(),
+            )
+            .unwrap();
+        let plans = client
+            .plans_cancellable(
+                PlanPageRequest {
+                    cursor: None,
+                    limit: DEFAULT_HISTORY_PAGE_LIMIT,
+                },
+                QueryCancellationToken::default(),
+            )
+            .unwrap();
+        let tool_results = client
+            .tool_results_cancellable(
+                ToolResultPageRequest {
+                    project_id: missing_project_id,
+                    session_id: missing_session_id.clone(),
+                    cursor: None,
+                    limit: DEFAULT_HISTORY_PAGE_LIMIT,
+                },
+                QueryCancellationToken::default(),
+            )
+            .unwrap_err();
+        let artifacts = client
+            .artifacts_cancellable(
+                ArtifactPageRequest {
+                    session_id: missing_session_id,
+                    cursor: None,
+                    limit: DEFAULT_HISTORY_PAGE_LIMIT,
+                },
+                QueryCancellationToken::default(),
+            )
             .unwrap();
         let after: i64 = probe
             .query_row("PRAGMA data_version", [], |row| row.get(0))
@@ -2887,6 +3194,17 @@ mod tests {
         assert!(runtime.entries.is_empty());
         assert_eq!(teams.at_commit_seq, overview.commit_seq);
         assert!(teams.items.is_empty());
+        assert_eq!(memory_documents.at_commit_seq, overview.commit_seq);
+        assert!(memory_documents.items.is_empty());
+        assert_eq!(task_collections.at_commit_seq, overview.commit_seq);
+        assert!(task_collections.items.is_empty());
+        assert_eq!(tasks.at_commit_seq, overview.commit_seq);
+        assert!(tasks.items.is_empty());
+        assert_eq!(plans.at_commit_seq, overview.commit_seq);
+        assert!(plans.items.is_empty());
+        assert!(matches!(tool_results, EngineError::InvalidQuery(_)));
+        assert_eq!(artifacts.at_commit_seq, overview.commit_seq);
+        assert!(artifacts.items.is_empty());
         assert!(overview.query_only && overview.read_only);
         assert_eq!(before, after, "a query must not advance database content");
         assert!(client.probe_write_rejected());
@@ -3021,6 +3339,32 @@ mod tests {
         assert!(matches!(
             client.teams_cancellable(
                 TeamPageRequest {
+                    cursor: None,
+                    limit: DEFAULT_HISTORY_PAGE_LIMIT,
+                },
+                cancellation,
+            ),
+            Err(EngineError::QueryCancelled)
+        ));
+        assert!(client.commands.is_empty());
+
+        pool.shutdown().unwrap();
+        writer.shutdown().unwrap();
+    }
+
+    #[test]
+    fn pre_cancelled_capability_request_never_enters_the_worker_queue() {
+        let dir = tempdir().unwrap();
+        let database = dir.path().join("capability-cancel.db");
+        let mut writer = WriterRuntime::start(database.clone()).unwrap();
+        let mut pool = QueryPool::start(database, 1).unwrap();
+        let client = pool.client();
+        let cancellation = QueryCancellationToken::default();
+        cancellation.cancel();
+
+        assert!(matches!(
+            client.plans_cancellable(
+                PlanPageRequest {
                     cursor: None,
                     limit: DEFAULT_HISTORY_PAGE_LIMIT,
                 },

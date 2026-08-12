@@ -7,21 +7,26 @@ use napi::bindgen_prelude::{AbortSignal, AsyncTask, Env, Error, Result, Status, 
 use napi_derive::napi;
 
 use crate::engine::{
-    CanonicalStats, EngineHealthSnapshot, EngineOptions, EngineOverview, EngineStatusSnapshot,
-    HistoryProjectIndexSummary, HistoryProjectPage, HistoryProjectPageRequest,
-    HistoryProjectSummary, HistorySessionIndexSummary, HistorySessionPage,
-    HistorySessionPageRequest, HistorySessionSummary, MessageDetail, MessagePage,
-    MessagePageRequest, NamedCount, ObservationStatusSnapshot, ObservationSupervisorOptions,
-    OwnerMetadata, QueryCancellationToken, ReconcileOutcome, ReconcileRequest, RunStateLookup,
-    RunStateRequest, RuntimePresenceSnapshot, RuntimeRunEvidence, RuntimeRunSnapshot,
-    RuntimeSnapshot, RuntimeSnapshotRequest, SessionDetail, SessionDetails, SessionDetailsRequest,
+    ArtifactDetail, ArtifactPage, ArtifactPageRequest, CanonicalStats, EngineHealthSnapshot,
+    EngineOptions, EngineOverview, EngineStatusSnapshot, HistoryProjectIndexSummary,
+    HistoryProjectPage, HistoryProjectPageRequest, HistoryProjectSummary,
+    HistorySessionIndexSummary, HistorySessionPage, HistorySessionPageRequest,
+    HistorySessionSummary, MemoryDocument, MemoryDocumentPage, MemoryDocumentPageRequest,
+    MessageDetail, MessagePage, MessagePageRequest, NamedCount, ObservationStatusSnapshot,
+    ObservationSupervisorOptions, OwnerMetadata, PlanDetail, PlanPage, PlanPageRequest,
+    QueryCancellationToken, ReconcileOutcome, ReconcileRequest, RunStateLookup, RunStateRequest,
+    RuntimePresenceSnapshot, RuntimeRunEvidence, RuntimeRunSnapshot, RuntimeSnapshot,
+    RuntimeSnapshotRequest, SessionDetail, SessionDetails, SessionDetailsRequest,
     SessionIndexDetail, SourcePage, SourcePageRequest, SourceSummary, SpaghettiEngineCore,
-    TeamConfigSummary, TeamDetails, TeamDetailsRequest, TeamInboxMessage, TeamInboxMessagePage,
-    TeamInboxMessagePageRequest, TeamInboxPage, TeamInboxPageRequest, TeamInboxSummary, TeamMember,
-    TeamPage, TeamPageRequest, TeamSummary, UntimedUsageSummary, UsageActivityDay,
+    TaskCollectionPage, TaskCollectionPageRequest, TaskCollectionSummary, TaskDetail, TaskPage,
+    TaskPageRequest, TeamConfigSummary, TeamDetails, TeamDetailsRequest, TeamInboxMessage,
+    TeamInboxMessagePage, TeamInboxMessagePageRequest, TeamInboxPage, TeamInboxPageRequest,
+    TeamInboxSummary, TeamMember, TeamPage, TeamPageRequest, TeamSummary, ToolResultDetail,
+    ToolResultPage, ToolResultPageRequest, UntimedUsageSummary, UsageActivityDay,
     UsageActivityReport, UsageActivityRequest, UsageAggregate, UsageCoverageSummary,
-    UsageScopeRequest, UsageTokenValues, UsageTotalsReport, DEFAULT_DETAIL_PAGE_LIMIT,
-    DEFAULT_HISTORY_PAGE_LIMIT, DEFAULT_RUNTIME_PAGE_LIMIT, DEFAULT_TEAM_PAGE_LIMIT,
+    UsageScopeRequest, UsageTokenValues, UsageTotalsReport, DEFAULT_CAPABILITY_PAGE_LIMIT,
+    DEFAULT_DETAIL_PAGE_LIMIT, DEFAULT_HISTORY_PAGE_LIMIT, DEFAULT_RUNTIME_PAGE_LIMIT,
+    DEFAULT_TEAM_PAGE_LIMIT,
 };
 
 #[napi(object)]
@@ -594,6 +599,576 @@ impl From<MessagePage> for EngineMessagePage {
             contract_version: value.contract_version,
             at_commit_seq: value.at_commit_seq as f64,
             project_id: value.project_id,
+            session_id: value.session_id,
+            items: value.items.into_iter().map(Into::into).collect(),
+            payload_bytes: value.payload_bytes as f64,
+            payload_byte_limit: value.payload_byte_limit as f64,
+            next_cursor: value.next_cursor,
+        }
+    }
+}
+
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct EngineCapabilityPageOptions {
+    pub cursor: Option<String>,
+    /// Page size. Defaults to 50 and is capped by the Rust query engine.
+    pub limit: Option<u32>,
+}
+
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct EngineMemoryDocumentPageOptions {
+    pub project_id: String,
+    pub cursor: Option<String>,
+    /// Page size. Defaults to 50 and is capped by the Rust query engine.
+    pub limit: Option<u32>,
+}
+
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct EngineMemoryDocument {
+    pub document_id: String,
+    pub project_id: String,
+    pub adapter_id: String,
+    pub source_instance_id: f64,
+    pub native_project_key: String,
+    pub native_document_path: String,
+    pub title: String,
+    pub content: String,
+    pub size_bytes: f64,
+    pub is_index: bool,
+    pub resolution_status: String,
+    pub decisive_fact_id: String,
+    pub assertion_count: f64,
+    pub competing_document_count: f64,
+    pub observed_at_unix_ms: f64,
+    pub source_object_id: f64,
+    pub source_generation: f64,
+    pub last_commit_seq: f64,
+}
+
+impl From<MemoryDocument> for EngineMemoryDocument {
+    fn from(value: MemoryDocument) -> Self {
+        Self {
+            document_id: value.document_id,
+            project_id: value.project_id,
+            adapter_id: value.adapter_id,
+            source_instance_id: value.source_instance_id as f64,
+            native_project_key: value.native_project_key,
+            native_document_path: value.native_document_path,
+            title: value.title,
+            content: value.content,
+            size_bytes: value.size_bytes as f64,
+            is_index: value.is_index,
+            resolution_status: value.resolution_status,
+            decisive_fact_id: value.decisive_fact_id,
+            assertion_count: value.assertion_count as f64,
+            competing_document_count: value.competing_document_count as f64,
+            observed_at_unix_ms: value.observed_at_unix_ms as f64,
+            source_object_id: value.source_object_id as f64,
+            source_generation: value.source_generation as f64,
+            last_commit_seq: value.last_commit_seq as f64,
+        }
+    }
+}
+
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct EngineMemoryDocumentPage {
+    pub contract_version: u32,
+    pub at_commit_seq: f64,
+    pub project_id: String,
+    pub items: Vec<EngineMemoryDocument>,
+    pub payload_bytes: f64,
+    pub payload_byte_limit: f64,
+    pub next_cursor: Option<String>,
+}
+
+impl From<MemoryDocumentPage> for EngineMemoryDocumentPage {
+    fn from(value: MemoryDocumentPage) -> Self {
+        Self {
+            contract_version: value.contract_version,
+            at_commit_seq: value.at_commit_seq as f64,
+            project_id: value.project_id,
+            items: value.items.into_iter().map(Into::into).collect(),
+            payload_bytes: value.payload_bytes as f64,
+            payload_byte_limit: value.payload_byte_limit as f64,
+            next_cursor: value.next_cursor,
+        }
+    }
+}
+
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct EngineTaskCollectionPageOptions {
+    pub session_id: Option<String>,
+    pub run_id: Option<String>,
+    pub team_id: Option<String>,
+    pub cursor: Option<String>,
+    /// Page size. Defaults to 50 and is capped by the Rust query engine.
+    pub limit: Option<u32>,
+}
+
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct EngineTaskCollection {
+    pub collection_id: String,
+    pub project_id: Option<String>,
+    pub session_id: Option<String>,
+    pub run_id: Option<String>,
+    pub team_id: Option<String>,
+    pub adapter_id: String,
+    pub source_instance_id: f64,
+    pub native_collection_id: String,
+    pub native_owner_id: Option<String>,
+    pub collection_kind: String,
+    pub native_collection_kind: String,
+    pub resolution_status: String,
+    pub decisive_fact_id: String,
+    pub assertion_count: f64,
+    pub competing_metadata_count: f64,
+    pub complete_snapshot_count: f64,
+    pub item_document_count: f64,
+    pub item_count: f64,
+    pub observed_at_unix_ms: f64,
+    pub source_object_id: f64,
+    pub source_generation: f64,
+    pub last_commit_seq: f64,
+}
+
+impl From<TaskCollectionSummary> for EngineTaskCollection {
+    fn from(value: TaskCollectionSummary) -> Self {
+        Self {
+            collection_id: value.collection_id,
+            project_id: value.project_id,
+            session_id: value.session_id,
+            run_id: value.run_id,
+            team_id: value.team_id,
+            adapter_id: value.adapter_id,
+            source_instance_id: value.source_instance_id as f64,
+            native_collection_id: value.native_collection_id,
+            native_owner_id: value.native_owner_id,
+            collection_kind: value.collection_kind,
+            native_collection_kind: value.native_collection_kind,
+            resolution_status: value.resolution_status,
+            decisive_fact_id: value.decisive_fact_id,
+            assertion_count: value.assertion_count as f64,
+            competing_metadata_count: value.competing_metadata_count as f64,
+            complete_snapshot_count: value.complete_snapshot_count as f64,
+            item_document_count: value.item_document_count as f64,
+            item_count: value.item_count as f64,
+            observed_at_unix_ms: value.observed_at_unix_ms as f64,
+            source_object_id: value.source_object_id as f64,
+            source_generation: value.source_generation as f64,
+            last_commit_seq: value.last_commit_seq as f64,
+        }
+    }
+}
+
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct EngineTaskCollectionPage {
+    pub contract_version: u32,
+    pub at_commit_seq: f64,
+    pub session_id: Option<String>,
+    pub run_id: Option<String>,
+    pub team_id: Option<String>,
+    pub items: Vec<EngineTaskCollection>,
+    pub next_cursor: Option<String>,
+}
+
+impl From<TaskCollectionPage> for EngineTaskCollectionPage {
+    fn from(value: TaskCollectionPage) -> Self {
+        Self {
+            contract_version: value.contract_version,
+            at_commit_seq: value.at_commit_seq as f64,
+            session_id: value.session_id,
+            run_id: value.run_id,
+            team_id: value.team_id,
+            items: value.items.into_iter().map(Into::into).collect(),
+            next_cursor: value.next_cursor,
+        }
+    }
+}
+
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct EngineTaskPageOptions {
+    pub collection_id: String,
+    pub cursor: Option<String>,
+    /// Page size. Defaults to 50 and is capped by the Rust query engine.
+    pub limit: Option<u32>,
+}
+
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct EngineTask {
+    pub task_id: String,
+    pub collection_id: String,
+    pub adapter_id: String,
+    pub source_instance_id: f64,
+    pub item_ordinal: f64,
+    pub native_task_id: Option<String>,
+    pub subject: String,
+    pub description: Option<String>,
+    pub active_form: Option<String>,
+    pub native_owner: Option<String>,
+    pub task_status: String,
+    pub native_status: String,
+    pub blocks: Vec<String>,
+    pub blocked_by: Vec<String>,
+    pub resolution_status: String,
+    pub decisive_fact_id: String,
+    pub assertion_count: f64,
+    pub competing_item_count: f64,
+    pub observed_at_unix_ms: f64,
+    pub source_object_id: f64,
+    pub source_generation: f64,
+    pub last_commit_seq: f64,
+}
+
+impl From<TaskDetail> for EngineTask {
+    fn from(value: TaskDetail) -> Self {
+        Self {
+            task_id: value.task_id,
+            collection_id: value.collection_id,
+            adapter_id: value.adapter_id,
+            source_instance_id: value.source_instance_id as f64,
+            item_ordinal: value.item_ordinal as f64,
+            native_task_id: value.native_task_id,
+            subject: value.subject,
+            description: value.description,
+            active_form: value.active_form,
+            native_owner: value.native_owner,
+            task_status: value.task_status,
+            native_status: value.native_status,
+            blocks: value.blocks,
+            blocked_by: value.blocked_by,
+            resolution_status: value.resolution_status,
+            decisive_fact_id: value.decisive_fact_id,
+            assertion_count: value.assertion_count as f64,
+            competing_item_count: value.competing_item_count as f64,
+            observed_at_unix_ms: value.observed_at_unix_ms as f64,
+            source_object_id: value.source_object_id as f64,
+            source_generation: value.source_generation as f64,
+            last_commit_seq: value.last_commit_seq as f64,
+        }
+    }
+}
+
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct EngineTaskPage {
+    pub contract_version: u32,
+    pub at_commit_seq: f64,
+    pub collection_id: String,
+    pub items: Vec<EngineTask>,
+    pub payload_bytes: f64,
+    pub payload_byte_limit: f64,
+    pub next_cursor: Option<String>,
+}
+
+impl From<TaskPage> for EngineTaskPage {
+    fn from(value: TaskPage) -> Self {
+        Self {
+            contract_version: value.contract_version,
+            at_commit_seq: value.at_commit_seq as f64,
+            collection_id: value.collection_id,
+            items: value.items.into_iter().map(Into::into).collect(),
+            payload_bytes: value.payload_bytes as f64,
+            payload_byte_limit: value.payload_byte_limit as f64,
+            next_cursor: value.next_cursor,
+        }
+    }
+}
+
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct EnginePlan {
+    pub plan_id: String,
+    pub adapter_id: String,
+    pub source_instance_id: f64,
+    pub native_plan_id: String,
+    pub title: String,
+    pub content: String,
+    pub size_bytes: f64,
+    pub source_time: Option<String>,
+    pub source_time_quality: Option<String>,
+    pub resolution_status: String,
+    pub decisive_fact_id: String,
+    pub assertion_count: f64,
+    pub competing_plan_count: f64,
+    pub observed_at_unix_ms: f64,
+    pub source_object_id: f64,
+    pub source_generation: f64,
+    pub last_commit_seq: f64,
+}
+
+impl From<PlanDetail> for EnginePlan {
+    fn from(value: PlanDetail) -> Self {
+        Self {
+            plan_id: value.plan_id,
+            adapter_id: value.adapter_id,
+            source_instance_id: value.source_instance_id as f64,
+            native_plan_id: value.native_plan_id,
+            title: value.title,
+            content: value.content,
+            size_bytes: value.size_bytes as f64,
+            source_time: value.source_time,
+            source_time_quality: value.source_time_quality,
+            resolution_status: value.resolution_status,
+            decisive_fact_id: value.decisive_fact_id,
+            assertion_count: value.assertion_count as f64,
+            competing_plan_count: value.competing_plan_count as f64,
+            observed_at_unix_ms: value.observed_at_unix_ms as f64,
+            source_object_id: value.source_object_id as f64,
+            source_generation: value.source_generation as f64,
+            last_commit_seq: value.last_commit_seq as f64,
+        }
+    }
+}
+
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct EnginePlanPage {
+    pub contract_version: u32,
+    pub at_commit_seq: f64,
+    pub items: Vec<EnginePlan>,
+    pub payload_bytes: f64,
+    pub payload_byte_limit: f64,
+    pub next_cursor: Option<String>,
+}
+
+impl From<PlanPage> for EnginePlanPage {
+    fn from(value: PlanPage) -> Self {
+        Self {
+            contract_version: value.contract_version,
+            at_commit_seq: value.at_commit_seq as f64,
+            items: value.items.into_iter().map(Into::into).collect(),
+            payload_bytes: value.payload_bytes as f64,
+            payload_byte_limit: value.payload_byte_limit as f64,
+            next_cursor: value.next_cursor,
+        }
+    }
+}
+
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct EngineToolResultPageOptions {
+    pub project_id: String,
+    pub session_id: String,
+    pub cursor: Option<String>,
+    /// Page size. Defaults to 50 and is capped by the Rust query engine.
+    pub limit: Option<u32>,
+}
+
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct EngineToolResult {
+    pub result_id: String,
+    pub project_id: String,
+    pub session_id: String,
+    pub adapter_id: String,
+    pub source_instance_id: f64,
+    pub native_project_key: String,
+    pub native_session_id: String,
+    pub native_tool_use_id: String,
+    pub native_document_path: String,
+    pub content: String,
+    pub size_bytes: f64,
+    pub resolution_status: String,
+    pub correlation_status: String,
+    pub tool_call_message_id: Option<String>,
+    pub tool_result_message_id: Option<String>,
+    pub decisive_fact_id: String,
+    pub assertion_count: f64,
+    pub competing_result_count: f64,
+    pub tool_call_match_count: f64,
+    pub tool_result_match_count: f64,
+    pub join_conflict: bool,
+    pub observed_at_unix_ms: f64,
+    pub source_object_id: f64,
+    pub source_generation: f64,
+    pub last_commit_seq: f64,
+}
+
+impl From<ToolResultDetail> for EngineToolResult {
+    fn from(value: ToolResultDetail) -> Self {
+        Self {
+            result_id: value.result_id,
+            project_id: value.project_id,
+            session_id: value.session_id,
+            adapter_id: value.adapter_id,
+            source_instance_id: value.source_instance_id as f64,
+            native_project_key: value.native_project_key,
+            native_session_id: value.native_session_id,
+            native_tool_use_id: value.native_tool_use_id,
+            native_document_path: value.native_document_path,
+            content: value.content,
+            size_bytes: value.size_bytes as f64,
+            resolution_status: value.resolution_status,
+            correlation_status: value.correlation_status,
+            tool_call_message_id: value.tool_call_message_id,
+            tool_result_message_id: value.tool_result_message_id,
+            decisive_fact_id: value.decisive_fact_id,
+            assertion_count: value.assertion_count as f64,
+            competing_result_count: value.competing_result_count as f64,
+            tool_call_match_count: value.tool_call_match_count as f64,
+            tool_result_match_count: value.tool_result_match_count as f64,
+            join_conflict: value.join_conflict,
+            observed_at_unix_ms: value.observed_at_unix_ms as f64,
+            source_object_id: value.source_object_id as f64,
+            source_generation: value.source_generation as f64,
+            last_commit_seq: value.last_commit_seq as f64,
+        }
+    }
+}
+
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct EngineToolResultPage {
+    pub contract_version: u32,
+    pub at_commit_seq: f64,
+    pub project_id: String,
+    pub session_id: String,
+    pub items: Vec<EngineToolResult>,
+    pub payload_bytes: f64,
+    pub payload_byte_limit: f64,
+    pub next_cursor: Option<String>,
+}
+
+impl From<ToolResultPage> for EngineToolResultPage {
+    fn from(value: ToolResultPage) -> Self {
+        Self {
+            contract_version: value.contract_version,
+            at_commit_seq: value.at_commit_seq as f64,
+            project_id: value.project_id,
+            session_id: value.session_id,
+            items: value.items.into_iter().map(Into::into).collect(),
+            payload_bytes: value.payload_bytes as f64,
+            payload_byte_limit: value.payload_byte_limit as f64,
+            next_cursor: value.next_cursor,
+        }
+    }
+}
+
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct EngineArtifactPageOptions {
+    pub session_id: String,
+    pub cursor: Option<String>,
+    /// Page size. Defaults to 50 and is capped by the Rust query engine.
+    pub limit: Option<u32>,
+}
+
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct EngineArtifact {
+    pub artifact_id: String,
+    pub session_id: String,
+    pub project_id: Option<String>,
+    pub native_artifact_id: Option<String>,
+    pub native_file_hash: Option<String>,
+    pub version: f64,
+    pub tracking_path: Option<String>,
+    pub real_parent_dir: Option<String>,
+    pub backup_time: Option<String>,
+    pub backup_time_quality: Option<String>,
+    pub capture_status: String,
+    pub content_base64: Option<String>,
+    pub size_bytes: Option<f64>,
+    pub content_digest_base64url: Option<String>,
+    pub content_status: String,
+    pub resolution_status: String,
+    pub metadata_fact_id: Option<String>,
+    pub content_fact_id: Option<String>,
+    pub metadata_adapter_id: Option<String>,
+    pub metadata_source_instance_id: Option<f64>,
+    pub metadata_observed_at_unix_ms: Option<f64>,
+    pub metadata_source_object_id: Option<f64>,
+    pub metadata_source_generation: Option<f64>,
+    pub content_adapter_id: Option<String>,
+    pub content_source_instance_id: Option<f64>,
+    pub content_observed_at_unix_ms: Option<f64>,
+    pub content_source_object_id: Option<f64>,
+    pub content_source_generation: Option<f64>,
+    pub metadata_assertion_count: f64,
+    pub competing_metadata_count: f64,
+    pub content_assertion_count: f64,
+    pub competing_content_count: f64,
+    pub join_conflict: bool,
+    pub last_commit_seq: f64,
+}
+
+impl From<ArtifactDetail> for EngineArtifact {
+    fn from(value: ArtifactDetail) -> Self {
+        Self {
+            artifact_id: value.artifact_id,
+            session_id: value.session_id,
+            project_id: value.project_id,
+            native_artifact_id: value.native_artifact_id,
+            native_file_hash: value.native_file_hash,
+            version: value.version as f64,
+            tracking_path: value.tracking_path,
+            real_parent_dir: value.real_parent_dir,
+            backup_time: value.backup_time,
+            backup_time_quality: value.backup_time_quality,
+            capture_status: value.capture_status,
+            content_base64: value.content_base64,
+            size_bytes: value.size_bytes.map(|number| number as f64),
+            content_digest_base64url: value.content_digest_base64url,
+            content_status: value.content_status,
+            resolution_status: value.resolution_status,
+            metadata_fact_id: value.metadata_fact_id,
+            content_fact_id: value.content_fact_id,
+            metadata_adapter_id: value.metadata_adapter_id,
+            metadata_source_instance_id: value
+                .metadata_source_instance_id
+                .map(|number| number as f64),
+            metadata_observed_at_unix_ms: value
+                .metadata_observed_at_unix_ms
+                .map(|number| number as f64),
+            metadata_source_object_id: value.metadata_source_object_id.map(|number| number as f64),
+            metadata_source_generation: value
+                .metadata_source_generation
+                .map(|number| number as f64),
+            content_adapter_id: value.content_adapter_id,
+            content_source_instance_id: value
+                .content_source_instance_id
+                .map(|number| number as f64),
+            content_observed_at_unix_ms: value
+                .content_observed_at_unix_ms
+                .map(|number| number as f64),
+            content_source_object_id: value.content_source_object_id.map(|number| number as f64),
+            content_source_generation: value.content_source_generation.map(|number| number as f64),
+            metadata_assertion_count: value.metadata_assertion_count as f64,
+            competing_metadata_count: value.competing_metadata_count as f64,
+            content_assertion_count: value.content_assertion_count as f64,
+            competing_content_count: value.competing_content_count as f64,
+            join_conflict: value.join_conflict,
+            last_commit_seq: value.last_commit_seq as f64,
+        }
+    }
+}
+
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct EngineArtifactPage {
+    pub contract_version: u32,
+    pub at_commit_seq: f64,
+    pub session_id: String,
+    pub items: Vec<EngineArtifact>,
+    pub payload_bytes: f64,
+    pub payload_byte_limit: f64,
+    pub next_cursor: Option<String>,
+}
+
+impl From<ArtifactPage> for EngineArtifactPage {
+    fn from(value: ArtifactPage) -> Self {
+        Self {
+            contract_version: value.contract_version,
+            at_commit_seq: value.at_commit_seq as f64,
             session_id: value.session_id,
             items: value.items.into_iter().map(Into::into).collect(),
             payload_bytes: value.payload_bytes as f64,
@@ -1716,6 +2291,116 @@ impl SpaghettiEngine {
         )
     }
 
+    /// Page canonical project-memory documents. Exact UTF-8 content and row
+    /// count are bounded in Rust.
+    #[napi(ts_return_type = "Promise<EngineMemoryDocumentPage>")]
+    pub fn list_memory_documents(
+        &self,
+        options: EngineMemoryDocumentPageOptions,
+        signal: Option<AbortSignal>,
+    ) -> AsyncTask<MemoryDocumentsTask> {
+        let cancellation = cancellation_for_signal(signal.as_ref());
+        AsyncTask::with_optional_signal(
+            MemoryDocumentsTask {
+                engine: Arc::clone(&self.inner),
+                options,
+                cancellation,
+            },
+            signal,
+        )
+    }
+
+    /// Page canonical task collections globally or under one trusted scope.
+    #[napi(ts_return_type = "Promise<EngineTaskCollectionPage>")]
+    pub fn list_task_collections(
+        &self,
+        options: Option<EngineTaskCollectionPageOptions>,
+        signal: Option<AbortSignal>,
+    ) -> AsyncTask<TaskCollectionsTask> {
+        let cancellation = cancellation_for_signal(signal.as_ref());
+        AsyncTask::with_optional_signal(
+            TaskCollectionsTask {
+                engine: Arc::clone(&self.inner),
+                options,
+                cancellation,
+            },
+            signal,
+        )
+    }
+
+    /// Page canonical task items for one opaque collection identity.
+    #[napi(ts_return_type = "Promise<EngineTaskPage>")]
+    pub fn list_tasks(
+        &self,
+        options: EngineTaskPageOptions,
+        signal: Option<AbortSignal>,
+    ) -> AsyncTask<TasksTask> {
+        let cancellation = cancellation_for_signal(signal.as_ref());
+        AsyncTask::with_optional_signal(
+            TasksTask {
+                engine: Arc::clone(&self.inner),
+                options,
+                cancellation,
+            },
+            signal,
+        )
+    }
+
+    /// Page global plan documents. No session relation is fabricated.
+    #[napi(ts_return_type = "Promise<EnginePlanPage>")]
+    pub fn list_plans(
+        &self,
+        options: Option<EngineCapabilityPageOptions>,
+        signal: Option<AbortSignal>,
+    ) -> AsyncTask<PlansTask> {
+        let cancellation = cancellation_for_signal(signal.as_ref());
+        AsyncTask::with_optional_signal(
+            PlansTask {
+                engine: Arc::clone(&self.inner),
+                options,
+                cancellation,
+            },
+            signal,
+        )
+    }
+
+    /// Page persisted tool-result sidecars for one verified session.
+    #[napi(ts_return_type = "Promise<EngineToolResultPage>")]
+    pub fn list_tool_results(
+        &self,
+        options: EngineToolResultPageOptions,
+        signal: Option<AbortSignal>,
+    ) -> AsyncTask<ToolResultsTask> {
+        let cancellation = cancellation_for_signal(signal.as_ref());
+        AsyncTask::with_optional_signal(
+            ToolResultsTask {
+                engine: Arc::clone(&self.inner),
+                options,
+                cancellation,
+            },
+            signal,
+        )
+    }
+
+    /// Page session-scoped file-history artifacts. Arbitrary content is
+    /// represented as base64 and bounded by Rust before crossing N-API.
+    #[napi(ts_return_type = "Promise<EngineArtifactPage>")]
+    pub fn list_artifacts(
+        &self,
+        options: EngineArtifactPageOptions,
+        signal: Option<AbortSignal>,
+    ) -> AsyncTask<ArtifactsTask> {
+        let cancellation = cancellation_for_signal(signal.as_ref());
+        AsyncTask::with_optional_signal(
+            ArtifactsTask {
+                engine: Arc::clone(&self.inner),
+                options,
+                cancellation,
+            },
+            signal,
+        )
+    }
+
     /// List configured source instances and their durable ingest inventory.
     #[napi(ts_return_type = "Promise<EngineSourcePage>")]
     pub fn list_sources(
@@ -2061,6 +2746,42 @@ pub struct MessagesTask {
     cancellation: QueryCancellationToken,
 }
 
+pub struct MemoryDocumentsTask {
+    engine: Arc<SpaghettiEngineCore>,
+    options: EngineMemoryDocumentPageOptions,
+    cancellation: QueryCancellationToken,
+}
+
+pub struct TaskCollectionsTask {
+    engine: Arc<SpaghettiEngineCore>,
+    options: Option<EngineTaskCollectionPageOptions>,
+    cancellation: QueryCancellationToken,
+}
+
+pub struct TasksTask {
+    engine: Arc<SpaghettiEngineCore>,
+    options: EngineTaskPageOptions,
+    cancellation: QueryCancellationToken,
+}
+
+pub struct PlansTask {
+    engine: Arc<SpaghettiEngineCore>,
+    options: Option<EngineCapabilityPageOptions>,
+    cancellation: QueryCancellationToken,
+}
+
+pub struct ToolResultsTask {
+    engine: Arc<SpaghettiEngineCore>,
+    options: EngineToolResultPageOptions,
+    cancellation: QueryCancellationToken,
+}
+
+pub struct ArtifactsTask {
+    engine: Arc<SpaghettiEngineCore>,
+    options: EngineArtifactPageOptions,
+    cancellation: QueryCancellationToken,
+}
+
 pub struct SourcesTask {
     engine: Arc<SpaghettiEngineCore>,
     options: Option<EngineHistoryPageOptions>,
@@ -2305,6 +3026,160 @@ impl Task for MessagesTask {
                     session_id: self.options.session_id.clone(),
                     cursor: self.options.cursor.clone(),
                     limit: self.options.limit.unwrap_or(DEFAULT_DETAIL_PAGE_LIMIT),
+                },
+                self.cancellation.clone(),
+            )
+            .map(Into::into)
+            .map_err(napi_error)
+    }
+
+    fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
+        Ok(output)
+    }
+}
+
+impl Task for MemoryDocumentsTask {
+    type Output = EngineMemoryDocumentPage;
+    type JsValue = EngineMemoryDocumentPage;
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        self.engine
+            .memory_documents_cancellable(
+                MemoryDocumentPageRequest {
+                    project_id: self.options.project_id.clone(),
+                    cursor: self.options.cursor.clone(),
+                    limit: self.options.limit.unwrap_or(DEFAULT_CAPABILITY_PAGE_LIMIT),
+                },
+                self.cancellation.clone(),
+            )
+            .map(Into::into)
+            .map_err(napi_error)
+    }
+
+    fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
+        Ok(output)
+    }
+}
+
+impl Task for TaskCollectionsTask {
+    type Output = EngineTaskCollectionPage;
+    type JsValue = EngineTaskCollectionPage;
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        let options = self
+            .options
+            .clone()
+            .unwrap_or(EngineTaskCollectionPageOptions {
+                session_id: None,
+                run_id: None,
+                team_id: None,
+                cursor: None,
+                limit: None,
+            });
+        self.engine
+            .task_collections_cancellable(
+                TaskCollectionPageRequest {
+                    session_id: options.session_id,
+                    run_id: options.run_id,
+                    team_id: options.team_id,
+                    cursor: options.cursor,
+                    limit: options.limit.unwrap_or(DEFAULT_CAPABILITY_PAGE_LIMIT),
+                },
+                self.cancellation.clone(),
+            )
+            .map(Into::into)
+            .map_err(napi_error)
+    }
+
+    fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
+        Ok(output)
+    }
+}
+
+impl Task for TasksTask {
+    type Output = EngineTaskPage;
+    type JsValue = EngineTaskPage;
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        self.engine
+            .tasks_cancellable(
+                TaskPageRequest {
+                    collection_id: self.options.collection_id.clone(),
+                    cursor: self.options.cursor.clone(),
+                    limit: self.options.limit.unwrap_or(DEFAULT_CAPABILITY_PAGE_LIMIT),
+                },
+                self.cancellation.clone(),
+            )
+            .map(Into::into)
+            .map_err(napi_error)
+    }
+
+    fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
+        Ok(output)
+    }
+}
+
+impl Task for PlansTask {
+    type Output = EnginePlanPage;
+    type JsValue = EnginePlanPage;
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        let options = self.options.clone().unwrap_or(EngineCapabilityPageOptions {
+            cursor: None,
+            limit: None,
+        });
+        self.engine
+            .plans_cancellable(
+                PlanPageRequest {
+                    cursor: options.cursor,
+                    limit: options.limit.unwrap_or(DEFAULT_CAPABILITY_PAGE_LIMIT),
+                },
+                self.cancellation.clone(),
+            )
+            .map(Into::into)
+            .map_err(napi_error)
+    }
+
+    fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
+        Ok(output)
+    }
+}
+
+impl Task for ToolResultsTask {
+    type Output = EngineToolResultPage;
+    type JsValue = EngineToolResultPage;
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        self.engine
+            .tool_results_cancellable(
+                ToolResultPageRequest {
+                    project_id: self.options.project_id.clone(),
+                    session_id: self.options.session_id.clone(),
+                    cursor: self.options.cursor.clone(),
+                    limit: self.options.limit.unwrap_or(DEFAULT_CAPABILITY_PAGE_LIMIT),
+                },
+                self.cancellation.clone(),
+            )
+            .map(Into::into)
+            .map_err(napi_error)
+    }
+
+    fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
+        Ok(output)
+    }
+}
+
+impl Task for ArtifactsTask {
+    type Output = EngineArtifactPage;
+    type JsValue = EngineArtifactPage;
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        self.engine
+            .artifacts_cancellable(
+                ArtifactPageRequest {
+                    session_id: self.options.session_id.clone(),
+                    cursor: self.options.cursor.clone(),
+                    limit: self.options.limit.unwrap_or(DEFAULT_CAPABILITY_PAGE_LIMIT),
                 },
                 self.cancellation.clone(),
             )

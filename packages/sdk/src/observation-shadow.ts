@@ -13,6 +13,7 @@ import { basename, dirname, extname, join, resolve } from 'node:path';
 import {
   openSpaghettiEngine,
   type SpaghettiEngine,
+  type SpaghettiEngineArtifactPage,
   type SpaghettiEngineCanonicalStats,
   type SpaghettiEngineHealth,
   type SpaghettiEngineHistoryPageOptions,
@@ -20,21 +21,27 @@ import {
   type SpaghettiEngineHistoryProjectPage,
   type SpaghettiEngineHistorySession,
   type SpaghettiEngineHistorySessionPage,
+  type SpaghettiEngineMemoryDocumentPage,
   type SpaghettiEngineMessagePage,
   type SpaghettiEngineMessagePageOptions,
   type SpaghettiEngineOverview,
+  type SpaghettiEnginePlanPage,
   type SpaghettiEngineRunStateLookup,
   type SpaghettiEngineRuntimeSnapshot,
   type SpaghettiEngineRuntimeSnapshotOptions,
   type SpaghettiEngineSessionDetails,
   type SpaghettiEngineSourcePage,
   type SpaghettiEngineStatus,
+  type SpaghettiEngineTaskCollectionPage,
+  type SpaghettiEngineTaskCollectionPageOptions,
+  type SpaghettiEngineTaskPage,
   type SpaghettiEngineTeamDetails,
   type SpaghettiEngineTeamInboxMessagePage,
   type SpaghettiEngineTeamInboxMessagePageOptions,
   type SpaghettiEngineTeamInboxPage,
   type SpaghettiEngineTeamPage,
   type SpaghettiEngineTeamPageOptions,
+  type SpaghettiEngineToolResultPage,
   type SpaghettiEngineUsageActivity,
   type SpaghettiEngineUsageActivityOptions,
   type SpaghettiEngineUsageScopeOptions,
@@ -229,6 +236,38 @@ export interface ClaudeObservationShadow {
     options?: SpaghettiEngineHistoryPageOptions,
     signal?: AbortSignal,
   ): Promise<SpaghettiEngineMessagePage>;
+  /** Page canonical project-memory documents, index first, with exact content. */
+  listMemoryDocuments(
+    projectId: string,
+    options?: SpaghettiEngineHistoryPageOptions,
+    signal?: AbortSignal,
+  ): Promise<SpaghettiEngineMemoryDocumentPage>;
+  /** Page task collections globally or under one trusted session/run/team relation. */
+  listTaskCollections(
+    options?: SpaghettiEngineTaskCollectionPageOptions,
+    signal?: AbortSignal,
+  ): Promise<SpaghettiEngineTaskCollectionPage>;
+  /** Page canonical task items for one opaque collection. */
+  listTasks(
+    collectionId: string,
+    options?: SpaghettiEngineHistoryPageOptions,
+    signal?: AbortSignal,
+  ): Promise<SpaghettiEngineTaskPage>;
+  /** Page global plan documents without inventing session ownership. */
+  listPlans(options?: SpaghettiEngineHistoryPageOptions, signal?: AbortSignal): Promise<SpaghettiEnginePlanPage>;
+  /** Page persisted tool-result sidecars for one verified project/session. */
+  listToolResults(
+    projectId: string,
+    sessionId: string,
+    options?: SpaghettiEngineHistoryPageOptions,
+    signal?: AbortSignal,
+  ): Promise<SpaghettiEngineToolResultPage>;
+  /** Page binary-safe file-history artifacts for one session. */
+  listArtifacts(
+    sessionId: string,
+    options?: SpaghettiEngineHistoryPageOptions,
+    signal?: AbortSignal,
+  ): Promise<SpaghettiEngineArtifactPage>;
   /** List configured source instances and their durable ingest inventory. */
   listSources(options?: SpaghettiEngineHistoryPageOptions, signal?: AbortSignal): Promise<SpaghettiEngineSourcePage>;
   /** Return canonical/catalog statistics, excluding compatibility-cache rows. */
@@ -571,6 +610,50 @@ class NativeClaudeObservationShadow implements ClaudeObservationShadow {
   ): Promise<SpaghettiEngineMessagePage> {
     const nativeOptions: SpaghettiEngineMessagePageOptions = { projectId, sessionId, ...options };
     return this.engine.getMessages(nativeOptions, signal);
+  }
+
+  listMemoryDocuments(
+    projectId: string,
+    options?: SpaghettiEngineHistoryPageOptions,
+    signal?: AbortSignal,
+  ): Promise<SpaghettiEngineMemoryDocumentPage> {
+    return this.engine.listMemoryDocuments({ projectId, ...options }, signal);
+  }
+
+  listTaskCollections(
+    options?: SpaghettiEngineTaskCollectionPageOptions,
+    signal?: AbortSignal,
+  ): Promise<SpaghettiEngineTaskCollectionPage> {
+    return this.engine.listTaskCollections(options, signal);
+  }
+
+  listTasks(
+    collectionId: string,
+    options?: SpaghettiEngineHistoryPageOptions,
+    signal?: AbortSignal,
+  ): Promise<SpaghettiEngineTaskPage> {
+    return this.engine.listTasks({ collectionId, ...options }, signal);
+  }
+
+  listPlans(options?: SpaghettiEngineHistoryPageOptions, signal?: AbortSignal): Promise<SpaghettiEnginePlanPage> {
+    return this.engine.listPlans(options, signal);
+  }
+
+  listToolResults(
+    projectId: string,
+    sessionId: string,
+    options?: SpaghettiEngineHistoryPageOptions,
+    signal?: AbortSignal,
+  ): Promise<SpaghettiEngineToolResultPage> {
+    return this.engine.listToolResults({ projectId, sessionId, ...options }, signal);
+  }
+
+  listArtifacts(
+    sessionId: string,
+    options?: SpaghettiEngineHistoryPageOptions,
+    signal?: AbortSignal,
+  ): Promise<SpaghettiEngineArtifactPage> {
+    return this.engine.listArtifacts({ sessionId, ...options }, signal);
   }
 
   listSources(options?: SpaghettiEngineHistoryPageOptions, signal?: AbortSignal): Promise<SpaghettiEngineSourcePage> {

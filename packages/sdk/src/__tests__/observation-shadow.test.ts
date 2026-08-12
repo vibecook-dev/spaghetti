@@ -749,6 +749,107 @@ describe('Claude observation shadow native lifecycle', { skip: !native }, () => 
     await assert.rejects(shadow.listTeamInboxes(teamId, { cursor: runtime.nextCursor }), /cursor/i);
   });
 
+  test('queries memory, tasks, plans, tool results, and binary artifacts through Rust-owned pages', async () => {
+    const directory = mkdtempSync(path.join(tmpdir(), 'spaghetti-shadow-capabilities-'));
+    tempDirs.push(directory);
+    const productionDb = path.join(directory, 'legacy.db');
+    const legacy = createSpaghettiService({
+      rootDir: SMALL_CLAUDE_FIXTURE,
+      dbPath: productionDb,
+      engine: 'ts',
+    });
+    legacyServices.push(legacy);
+    await legacy.initialize();
+    const shadow = await openClaudeObservationShadow({
+      productionDbPath: productionDb,
+      roots: [SMALL_CLAUDE_FIXTURE],
+      ownerLabel: 'sdk-shadow-capability-query-test',
+    });
+    shadows.push(shadow);
+
+    const projects = await allCanonicalProjects(shadow);
+    const sessions = await allCanonicalSessions(shadow, projects);
+    const memoryProject = projects.find((project) => project.hasMemoryIndex);
+    assert.ok(memoryProject);
+    const memory = await shadow.listMemoryDocuments(memoryProject.projectId, { limit: 1 });
+    assert.equal(memory.contractVersion, 1);
+    assert.equal(memory.items[0]?.isIndex, true);
+    assert.equal(memory.items[0]?.content, legacy.getProjectMemory(memoryProject.nativeProjectKey));
+    assert.ok(memory.payloadBytes <= memory.payloadByteLimit);
+
+    const todoSession = sessions.find((session) => session.nativeSessionId === '03ddf851-127d-6cfe-a095-f121d263f759');
+    assert.ok(todoSession);
+    const taskCollections = await shadow.listTaskCollections({ sessionId: todoSession.sessionId, limit: 1 });
+    assert.equal(taskCollections.items.length, 1);
+    assert.equal(taskCollections.items[0]?.collectionKind, 'todo_list');
+    assert.equal(taskCollections.items[0]?.itemCount, 3);
+    const tasks = await shadow.listTasks(taskCollections.items[0]!.collectionId, { limit: 2 });
+    assert.equal(tasks.items.length, 2);
+    assert.ok(tasks.nextCursor);
+    const remainingTasks = await shadow.listTasks(taskCollections.items[0]!.collectionId, {
+      limit: 2,
+      cursor: tasks.nextCursor,
+    });
+    assert.deepEqual(
+      [...tasks.items, ...remainingTasks.items].map((task) => [task.subject, task.taskStatus]),
+      [
+        ['Write the parser', 'completed'],
+        ['Port the writer', 'in_progress'],
+        ['Add the diff harness', 'pending'],
+      ],
+    );
+
+    const firstPlan = await shadow.listPlans({ limit: 1 });
+    assert.equal(firstPlan.items.length, 1);
+    assert.equal(firstPlan.items[0]?.nativePlanId, 'fixture-refactor');
+    assert.equal(firstPlan.items[0]?.content, '# Fixture Refactor Plan\n\n1. Extract the parser.\n2. Ship it.\n');
+    assert.ok(firstPlan.nextCursor);
+    const secondPlan = await shadow.listPlans({ limit: 1, cursor: firstPlan.nextCursor });
+    assert.equal(secondPlan.items[0]?.nativePlanId, 'untitled-notes');
+
+    const toolSession = sessions.find((session) => session.nativeSessionId === '54770fec-7aff-bc2f-0c2e-10170aa2987b');
+    assert.ok(toolSession);
+    const toolResults = await shadow.listToolResults(toolSession.projectId, toolSession.sessionId, { limit: 1 });
+    assert.equal(toolResults.items.length, 1);
+    assert.equal(
+      toolResults.items[0]?.content,
+      legacy.getToolResult(
+        toolResults.items[0]!.nativeProjectKey,
+        toolResults.items[0]!.nativeSessionId,
+        toolResults.items[0]!.nativeToolUseId,
+      ),
+    );
+
+    const artifactSession = sessions.find(
+      (session) => session.nativeSessionId === '40f26ec0-7084-ef15-b183-2d832ca4ecd6',
+    );
+    assert.ok(artifactSession);
+    const artifacts = await shadow.listArtifacts(artifactSession.sessionId, { limit: 1 });
+    assert.equal(artifacts.items.length, 1);
+    assert.equal(Buffer.from(artifacts.items[0]!.contentBase64!, 'base64').toString(), 'first snapshot contents\n');
+    assert.ok(artifacts.payloadBytes <= artifacts.payloadByteLimit);
+
+    assert.equal(memory.atCommitSeq, taskCollections.atCommitSeq);
+    assert.equal(taskCollections.atCommitSeq, firstPlan.atCommitSeq);
+    assert.equal(firstPlan.atCommitSeq, toolResults.atCommitSeq);
+    assert.equal(toolResults.atCommitSeq, artifacts.atCommitSeq);
+    await assert.rejects(shadow.listMemoryDocuments('not-a-project'), /memory document project id/i);
+    await assert.rejects(
+      shadow.listTaskCollections({ sessionId: todoSession.sessionId, runId: 'run_v1_cnVu' }),
+      /at most one/i,
+    );
+    await assert.rejects(shadow.listTasks('not-a-collection'), /task collection id/i);
+    await assert.rejects(shadow.listPlans({ limit: 0 }), /plan page limit/i);
+    await assert.rejects(
+      shadow.listToolResults(
+        projects.find((project) => project.projectId !== todoSession.projectId)!.projectId,
+        todoSession.sessionId,
+      ),
+      /does not identify a current session/i,
+    );
+    await assert.rejects(shadow.listArtifacts('not-a-session'), /artifact session id/i);
+  });
+
   test('matches normalized project/session summaries from the committed TypeScript oracle', async () => {
     const directory = mkdtempSync(path.join(tmpdir(), 'spaghetti-shadow-parity-'));
     tempDirs.push(directory);

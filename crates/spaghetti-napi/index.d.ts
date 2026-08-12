@@ -37,6 +37,24 @@ export declare class SpaghettiEngine {
    * Both row count and decoded JSON payload bytes are bounded in Rust.
    */
   getMessages(options: EngineMessagePageOptions, signal?: AbortSignal | undefined | null): Promise<EngineMessagePage>
+  /**
+   * Page canonical project-memory documents. Exact UTF-8 content and row
+   * count are bounded in Rust.
+   */
+  listMemoryDocuments(options: EngineMemoryDocumentPageOptions, signal?: AbortSignal | undefined | null): Promise<EngineMemoryDocumentPage>
+  /** Page canonical task collections globally or under one trusted scope. */
+  listTaskCollections(options?: EngineTaskCollectionPageOptions | undefined | null, signal?: AbortSignal | undefined | null): Promise<EngineTaskCollectionPage>
+  /** Page canonical task items for one opaque collection identity. */
+  listTasks(options: EngineTaskPageOptions, signal?: AbortSignal | undefined | null): Promise<EngineTaskPage>
+  /** Page global plan documents. No session relation is fabricated. */
+  listPlans(options?: EngineCapabilityPageOptions | undefined | null, signal?: AbortSignal | undefined | null): Promise<EnginePlanPage>
+  /** Page persisted tool-result sidecars for one verified session. */
+  listToolResults(options: EngineToolResultPageOptions, signal?: AbortSignal | undefined | null): Promise<EngineToolResultPage>
+  /**
+   * Page session-scoped file-history artifacts. Arbitrary content is
+   * represented as base64 and bounded by Rust before crossing N-API.
+   */
+  listArtifacts(options: EngineArtifactPageOptions, signal?: AbortSignal | undefined | null): Promise<EngineArtifactPage>
   /** List configured source instances and their durable ingest inventory. */
   listSources(options?: EngineHistoryPageOptions | undefined | null, signal?: AbortSignal | undefined | null): Promise<EngineSourcePage>
   /**
@@ -95,6 +113,60 @@ export declare class SpaghettiEngine {
   dispose(): Promise<EngineStatus>
 }
 
+export interface EngineArtifact {
+  artifactId: string
+  sessionId: string
+  projectId?: string
+  nativeArtifactId?: string
+  nativeFileHash?: string
+  version: number
+  trackingPath?: string
+  realParentDir?: string
+  backupTime?: string
+  backupTimeQuality?: string
+  captureStatus: string
+  contentBase64?: string
+  sizeBytes?: number
+  contentDigestBase64Url?: string
+  contentStatus: string
+  resolutionStatus: string
+  metadataFactId?: string
+  contentFactId?: string
+  metadataAdapterId?: string
+  metadataSourceInstanceId?: number
+  metadataObservedAtUnixMs?: number
+  metadataSourceObjectId?: number
+  metadataSourceGeneration?: number
+  contentAdapterId?: string
+  contentSourceInstanceId?: number
+  contentObservedAtUnixMs?: number
+  contentSourceObjectId?: number
+  contentSourceGeneration?: number
+  metadataAssertionCount: number
+  competingMetadataCount: number
+  contentAssertionCount: number
+  competingContentCount: number
+  joinConflict: boolean
+  lastCommitSeq: number
+}
+
+export interface EngineArtifactPage {
+  contractVersion: number
+  atCommitSeq: number
+  sessionId: string
+  items: Array<EngineArtifact>
+  payloadBytes: number
+  payloadByteLimit: number
+  nextCursor?: string
+}
+
+export interface EngineArtifactPageOptions {
+  sessionId: string
+  cursor?: string
+  /** Page size. Defaults to 50 and is capped by the Rust query engine. */
+  limit?: number
+}
+
 export interface EngineCanonicalStats {
   contractVersion: number
   atCommitSeq: number
@@ -113,6 +185,12 @@ export interface EngineCanonicalStats {
   databasePageCount: number
   databasePageSizeBytes: number
   allocatedDatabaseBytes: number
+}
+
+export interface EngineCapabilityPageOptions {
+  cursor?: string
+  /** Page size. Defaults to 50 and is capped by the Rust query engine. */
+  limit?: number
 }
 
 export interface EngineHealth {
@@ -214,6 +292,44 @@ export interface EngineHistorySessionPageOptions {
   /** Opaque project identity returned by `listHistoryProjects`. */
   projectId: string
   /** Opaque keyset cursor returned by the preceding page. */
+  cursor?: string
+  /** Page size. Defaults to 50 and is capped by the Rust query engine. */
+  limit?: number
+}
+
+export interface EngineMemoryDocument {
+  documentId: string
+  projectId: string
+  adapterId: string
+  sourceInstanceId: number
+  nativeProjectKey: string
+  nativeDocumentPath: string
+  title: string
+  content: string
+  sizeBytes: number
+  isIndex: boolean
+  resolutionStatus: string
+  decisiveFactId: string
+  assertionCount: number
+  competingDocumentCount: number
+  observedAtUnixMs: number
+  sourceObjectId: number
+  sourceGeneration: number
+  lastCommitSeq: number
+}
+
+export interface EngineMemoryDocumentPage {
+  contractVersion: number
+  atCommitSeq: number
+  projectId: string
+  items: Array<EngineMemoryDocument>
+  payloadBytes: number
+  payloadByteLimit: number
+  nextCursor?: string
+}
+
+export interface EngineMemoryDocumentPageOptions {
+  projectId: string
   cursor?: string
   /** Page size. Defaults to 50 and is capped by the Rust query engine. */
   limit?: number
@@ -333,6 +449,35 @@ export interface EngineOwnerMetadata {
   executable?: string
   hostname?: string
   engineVersion: string
+}
+
+export interface EnginePlan {
+  planId: string
+  adapterId: string
+  sourceInstanceId: number
+  nativePlanId: string
+  title: string
+  content: string
+  sizeBytes: number
+  sourceTime?: string
+  sourceTimeQuality?: string
+  resolutionStatus: string
+  decisiveFactId: string
+  assertionCount: number
+  competingPlanCount: number
+  observedAtUnixMs: number
+  sourceObjectId: number
+  sourceGeneration: number
+  lastCommitSeq: number
+}
+
+export interface EnginePlanPage {
+  contractVersion: number
+  atCommitSeq: number
+  items: Array<EnginePlan>
+  payloadBytes: number
+  payloadByteLimit: number
+  nextCursor?: string
 }
 
 export interface EngineReconcileOptions {
@@ -537,6 +682,92 @@ export interface EngineStatus {
   owner?: EngineOwnerMetadata
 }
 
+export interface EngineTask {
+  taskId: string
+  collectionId: string
+  adapterId: string
+  sourceInstanceId: number
+  itemOrdinal: number
+  nativeTaskId?: string
+  subject: string
+  description?: string
+  activeForm?: string
+  nativeOwner?: string
+  taskStatus: string
+  nativeStatus: string
+  blocks: Array<string>
+  blockedBy: Array<string>
+  resolutionStatus: string
+  decisiveFactId: string
+  assertionCount: number
+  competingItemCount: number
+  observedAtUnixMs: number
+  sourceObjectId: number
+  sourceGeneration: number
+  lastCommitSeq: number
+}
+
+export interface EngineTaskCollection {
+  collectionId: string
+  projectId?: string
+  sessionId?: string
+  runId?: string
+  teamId?: string
+  adapterId: string
+  sourceInstanceId: number
+  nativeCollectionId: string
+  nativeOwnerId?: string
+  collectionKind: string
+  nativeCollectionKind: string
+  resolutionStatus: string
+  decisiveFactId: string
+  assertionCount: number
+  competingMetadataCount: number
+  completeSnapshotCount: number
+  itemDocumentCount: number
+  itemCount: number
+  observedAtUnixMs: number
+  sourceObjectId: number
+  sourceGeneration: number
+  lastCommitSeq: number
+}
+
+export interface EngineTaskCollectionPage {
+  contractVersion: number
+  atCommitSeq: number
+  sessionId?: string
+  runId?: string
+  teamId?: string
+  items: Array<EngineTaskCollection>
+  nextCursor?: string
+}
+
+export interface EngineTaskCollectionPageOptions {
+  sessionId?: string
+  runId?: string
+  teamId?: string
+  cursor?: string
+  /** Page size. Defaults to 50 and is capped by the Rust query engine. */
+  limit?: number
+}
+
+export interface EngineTaskPage {
+  contractVersion: number
+  atCommitSeq: number
+  collectionId: string
+  items: Array<EngineTask>
+  payloadBytes: number
+  payloadByteLimit: number
+  nextCursor?: string
+}
+
+export interface EngineTaskPageOptions {
+  collectionId: string
+  cursor?: string
+  /** Page size. Defaults to 50 and is capped by the Rust query engine. */
+  limit?: number
+}
+
 export interface EngineTeamConfig {
   name: string
   description?: string
@@ -682,6 +913,53 @@ export interface EngineTeamSummary {
   conflictingInboxCount: number
   conflictingMessageCount: number
   lastCommitSeq: number
+}
+
+export interface EngineToolResult {
+  resultId: string
+  projectId: string
+  sessionId: string
+  adapterId: string
+  sourceInstanceId: number
+  nativeProjectKey: string
+  nativeSessionId: string
+  nativeToolUseId: string
+  nativeDocumentPath: string
+  content: string
+  sizeBytes: number
+  resolutionStatus: string
+  correlationStatus: string
+  toolCallMessageId?: string
+  toolResultMessageId?: string
+  decisiveFactId: string
+  assertionCount: number
+  competingResultCount: number
+  toolCallMatchCount: number
+  toolResultMatchCount: number
+  joinConflict: boolean
+  observedAtUnixMs: number
+  sourceObjectId: number
+  sourceGeneration: number
+  lastCommitSeq: number
+}
+
+export interface EngineToolResultPage {
+  contractVersion: number
+  atCommitSeq: number
+  projectId: string
+  sessionId: string
+  items: Array<EngineToolResult>
+  payloadBytes: number
+  payloadByteLimit: number
+  nextCursor?: string
+}
+
+export interface EngineToolResultPageOptions {
+  projectId: string
+  sessionId: string
+  cursor?: string
+  /** Page size. Defaults to 50 and is capped by the Rust query engine. */
+  limit?: number
 }
 
 export interface EngineUntimedUsage {

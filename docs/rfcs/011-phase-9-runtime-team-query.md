@@ -9,10 +9,9 @@ production client cutover. TypeScript does not open the shadow database, join
 runtime tables, reduce evidence, or assemble team/inbox rows.
 
 RFC 011 lists runtime snapshots and teams sixth in the Phase 9 port order. This
-record closes that independently testable query slice; search, timeline,
-subagent/workflow, and capability-detail packs remain open. The core detail
-and statistics slice is recorded separately. It does not claim the Phase 9
-exit gate.
+record closes that independently testable query slice; search, timeline, and
+subagent/workflow packs remain open. The core and capability-detail slices are
+recorded separately. It does not claim the Phase 9 exit gate.
 
 ## Query contract
 

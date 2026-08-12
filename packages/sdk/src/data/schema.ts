@@ -1723,9 +1723,14 @@ CREATE INDEX IF NOT EXISTS idx_task_snapshot_assertions_session ON task_snapshot
 CREATE INDEX IF NOT EXISTS idx_task_item_assertions_collection ON task_item_assertions(collection_key, task_key);
 CREATE INDEX IF NOT EXISTS idx_task_item_assertions_task ON task_item_assertions(task_key, fact_id);
 CREATE INDEX IF NOT EXISTS idx_canonical_task_collections_session ON canonical_task_collections(session_key, collection_key);
+CREATE INDEX IF NOT EXISTS idx_canonical_task_collections_session_native ON canonical_task_collections(session_key, native_collection_id, collection_key);
+CREATE INDEX IF NOT EXISTS idx_canonical_task_collections_run ON canonical_task_collections(run_key, native_collection_id, collection_key);
+CREATE INDEX IF NOT EXISTS idx_canonical_task_collections_team ON canonical_task_collections(team_key, native_collection_id, collection_key);
+CREATE INDEX IF NOT EXISTS idx_canonical_task_collections_native ON canonical_task_collections(native_collection_id, collection_key);
 CREATE INDEX IF NOT EXISTS idx_canonical_tasks_collection ON canonical_tasks(collection_key, item_ordinal);
 CREATE INDEX IF NOT EXISTS idx_plan_assertions_plan ON plan_assertions(plan_key, fact_id);
 CREATE INDEX IF NOT EXISTS idx_plan_assertions_source ON plan_assertions(source_object_id, plan_key);
+CREATE INDEX IF NOT EXISTS idx_canonical_plans_native ON canonical_plans(native_plan_id, plan_key);
 CREATE INDEX IF NOT EXISTS idx_artifact_snapshot_assertions_source ON artifact_snapshot_assertions(source_object_id, source_generation);
 CREATE INDEX IF NOT EXISTS idx_artifact_snapshot_assertions_session ON artifact_snapshot_assertions(session_key, fact_id);
 CREATE INDEX IF NOT EXISTS idx_artifact_metadata_assertions_artifact ON artifact_metadata_assertions(artifact_key, fact_id);

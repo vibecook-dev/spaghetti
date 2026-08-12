@@ -405,6 +405,251 @@ export interface SpaghettiEngineMessagePage {
   nextCursor?: string;
 }
 
+export type SpaghettiEngineCapabilityPageOptions = SpaghettiEngineHistoryPageOptions;
+
+export interface SpaghettiEngineMemoryDocumentPageOptions extends SpaghettiEngineHistoryPageOptions {
+  projectId: string;
+}
+
+export interface SpaghettiEngineMemoryDocument {
+  documentId: string;
+  projectId: string;
+  adapterId: string;
+  sourceInstanceId: number;
+  nativeProjectKey: string;
+  nativeDocumentPath: string;
+  title: string;
+  content: string;
+  sizeBytes: number;
+  isIndex: boolean;
+  resolutionStatus: string;
+  decisiveFactId: string;
+  assertionCount: number;
+  competingDocumentCount: number;
+  observedAtUnixMs: number;
+  sourceObjectId: number;
+  sourceGeneration: number;
+  lastCommitSeq: number;
+}
+
+export interface SpaghettiEngineMemoryDocumentPage {
+  contractVersion: number;
+  atCommitSeq: number;
+  projectId: string;
+  items: SpaghettiEngineMemoryDocument[];
+  /** UTF-8 bytes in returned document content. */
+  payloadBytes: number;
+  payloadByteLimit: number;
+  nextCursor?: string;
+}
+
+export interface SpaghettiEngineTaskCollectionPageOptions extends SpaghettiEngineHistoryPageOptions {
+  /** At most one scope identity may be supplied. Omit all three for global discovery. */
+  sessionId?: string;
+  runId?: string;
+  teamId?: string;
+}
+
+export interface SpaghettiEngineTaskCollection {
+  collectionId: string;
+  projectId?: string;
+  sessionId?: string;
+  runId?: string;
+  teamId?: string;
+  adapterId: string;
+  sourceInstanceId: number;
+  nativeCollectionId: string;
+  nativeOwnerId?: string;
+  collectionKind: string;
+  nativeCollectionKind: string;
+  resolutionStatus: string;
+  decisiveFactId: string;
+  assertionCount: number;
+  competingMetadataCount: number;
+  completeSnapshotCount: number;
+  itemDocumentCount: number;
+  itemCount: number;
+  observedAtUnixMs: number;
+  sourceObjectId: number;
+  sourceGeneration: number;
+  lastCommitSeq: number;
+}
+
+export interface SpaghettiEngineTaskCollectionPage {
+  contractVersion: number;
+  atCommitSeq: number;
+  sessionId?: string;
+  runId?: string;
+  teamId?: string;
+  items: SpaghettiEngineTaskCollection[];
+  nextCursor?: string;
+}
+
+export interface SpaghettiEngineTaskPageOptions extends SpaghettiEngineHistoryPageOptions {
+  collectionId: string;
+}
+
+export interface SpaghettiEngineTask {
+  taskId: string;
+  collectionId: string;
+  adapterId: string;
+  sourceInstanceId: number;
+  itemOrdinal: number;
+  nativeTaskId?: string;
+  subject: string;
+  description?: string;
+  activeForm?: string;
+  nativeOwner?: string;
+  taskStatus: string;
+  nativeStatus: string;
+  blocks: string[];
+  blockedBy: string[];
+  resolutionStatus: string;
+  decisiveFactId: string;
+  assertionCount: number;
+  competingItemCount: number;
+  observedAtUnixMs: number;
+  sourceObjectId: number;
+  sourceGeneration: number;
+  lastCommitSeq: number;
+}
+
+export interface SpaghettiEngineTaskPage {
+  contractVersion: number;
+  atCommitSeq: number;
+  collectionId: string;
+  items: SpaghettiEngineTask[];
+  payloadBytes: number;
+  payloadByteLimit: number;
+  nextCursor?: string;
+}
+
+export interface SpaghettiEnginePlan {
+  planId: string;
+  adapterId: string;
+  sourceInstanceId: number;
+  nativePlanId: string;
+  title: string;
+  content: string;
+  sizeBytes: number;
+  sourceTime?: string;
+  sourceTimeQuality?: SpaghettiEngineTimestampQuality;
+  resolutionStatus: string;
+  decisiveFactId: string;
+  assertionCount: number;
+  competingPlanCount: number;
+  observedAtUnixMs: number;
+  sourceObjectId: number;
+  sourceGeneration: number;
+  lastCommitSeq: number;
+}
+
+export interface SpaghettiEnginePlanPage {
+  contractVersion: number;
+  atCommitSeq: number;
+  items: SpaghettiEnginePlan[];
+  payloadBytes: number;
+  payloadByteLimit: number;
+  nextCursor?: string;
+}
+
+export interface SpaghettiEngineToolResultPageOptions extends SpaghettiEngineHistoryPageOptions {
+  projectId: string;
+  sessionId: string;
+}
+
+export interface SpaghettiEngineToolResult {
+  resultId: string;
+  projectId: string;
+  sessionId: string;
+  adapterId: string;
+  sourceInstanceId: number;
+  nativeProjectKey: string;
+  nativeSessionId: string;
+  nativeToolUseId: string;
+  nativeDocumentPath: string;
+  content: string;
+  sizeBytes: number;
+  resolutionStatus: string;
+  correlationStatus: string;
+  toolCallMessageId?: string;
+  toolResultMessageId?: string;
+  decisiveFactId: string;
+  assertionCount: number;
+  competingResultCount: number;
+  toolCallMatchCount: number;
+  toolResultMatchCount: number;
+  joinConflict: boolean;
+  observedAtUnixMs: number;
+  sourceObjectId: number;
+  sourceGeneration: number;
+  lastCommitSeq: number;
+}
+
+export interface SpaghettiEngineToolResultPage {
+  contractVersion: number;
+  atCommitSeq: number;
+  projectId: string;
+  sessionId: string;
+  items: SpaghettiEngineToolResult[];
+  payloadBytes: number;
+  payloadByteLimit: number;
+  nextCursor?: string;
+}
+
+export interface SpaghettiEngineArtifactPageOptions extends SpaghettiEngineHistoryPageOptions {
+  sessionId: string;
+}
+
+export interface SpaghettiEngineArtifact {
+  artifactId: string;
+  sessionId: string;
+  projectId?: string;
+  nativeArtifactId?: string;
+  nativeFileHash?: string;
+  version: number;
+  trackingPath?: string;
+  realParentDir?: string;
+  backupTime?: string;
+  backupTimeQuality?: SpaghettiEngineTimestampQuality;
+  captureStatus: string;
+  /** Exact arbitrary bytes, encoded only for the JS transport. */
+  contentBase64?: string;
+  sizeBytes?: number;
+  contentDigestBase64url?: string;
+  contentStatus: string;
+  resolutionStatus: string;
+  metadataFactId?: string;
+  contentFactId?: string;
+  metadataAdapterId?: string;
+  metadataSourceInstanceId?: number;
+  metadataObservedAtUnixMs?: number;
+  metadataSourceObjectId?: number;
+  metadataSourceGeneration?: number;
+  contentAdapterId?: string;
+  contentSourceInstanceId?: number;
+  contentObservedAtUnixMs?: number;
+  contentSourceObjectId?: number;
+  contentSourceGeneration?: number;
+  metadataAssertionCount: number;
+  competingMetadataCount: number;
+  contentAssertionCount: number;
+  competingContentCount: number;
+  joinConflict: boolean;
+  lastCommitSeq: number;
+}
+
+export interface SpaghettiEngineArtifactPage {
+  contractVersion: number;
+  atCommitSeq: number;
+  sessionId: string;
+  items: SpaghettiEngineArtifact[];
+  /** Base64 text bytes returned by this page. */
+  payloadBytes: number;
+  payloadByteLimit: number;
+  nextCursor?: string;
+}
+
 export interface SpaghettiEngineSourceSummary {
   sourceId: string;
   sourceInstanceId: number;
@@ -845,6 +1090,24 @@ export interface SpaghettiEngine {
   ): Promise<SpaghettiEngineHistorySessionPage>;
   getSession(sessionId: string, signal?: AbortSignal): Promise<SpaghettiEngineSessionDetails>;
   getMessages(options: SpaghettiEngineMessagePageOptions, signal?: AbortSignal): Promise<SpaghettiEngineMessagePage>;
+  listMemoryDocuments(
+    options: SpaghettiEngineMemoryDocumentPageOptions,
+    signal?: AbortSignal,
+  ): Promise<SpaghettiEngineMemoryDocumentPage>;
+  listTaskCollections(
+    options?: SpaghettiEngineTaskCollectionPageOptions,
+    signal?: AbortSignal,
+  ): Promise<SpaghettiEngineTaskCollectionPage>;
+  listTasks(options: SpaghettiEngineTaskPageOptions, signal?: AbortSignal): Promise<SpaghettiEngineTaskPage>;
+  listPlans(options?: SpaghettiEngineCapabilityPageOptions, signal?: AbortSignal): Promise<SpaghettiEnginePlanPage>;
+  listToolResults(
+    options: SpaghettiEngineToolResultPageOptions,
+    signal?: AbortSignal,
+  ): Promise<SpaghettiEngineToolResultPage>;
+  listArtifacts(
+    options: SpaghettiEngineArtifactPageOptions,
+    signal?: AbortSignal,
+  ): Promise<SpaghettiEngineArtifactPage>;
   listSources(options?: SpaghettiEngineHistoryPageOptions, signal?: AbortSignal): Promise<SpaghettiEngineSourcePage>;
   getStats(signal?: AbortSignal): Promise<SpaghettiEngineCanonicalStats>;
   getUsage(options: SpaghettiEngineUsageScopeOptions, signal?: AbortSignal): Promise<SpaghettiEngineUsageTotals>;

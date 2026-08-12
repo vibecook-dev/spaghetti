@@ -5,6 +5,7 @@
 //! can own the same `SpaghettiEngineCore` and receive identical semantics.
 
 mod artifact_projection;
+mod capability_query;
 mod commit;
 mod coordinator;
 mod detail_query;
@@ -33,6 +34,13 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 
 use crate::adapter::FactBatch;
 use crate::claude::ClaudeCodeAdapter;
+pub use capability_query::{
+    ArtifactDetail, ArtifactPage, ArtifactPageRequest, MemoryDocument, MemoryDocumentPage,
+    MemoryDocumentPageRequest, PlanDetail, PlanPage, PlanPageRequest, TaskCollectionPage,
+    TaskCollectionPageRequest, TaskCollectionSummary, TaskDetail, TaskPage, TaskPageRequest,
+    ToolResultDetail, ToolResultPage, ToolResultPageRequest, CAPABILITY_QUERY_CONTRACT_VERSION,
+    DEFAULT_CAPABILITY_PAGE_LIMIT, MAX_CAPABILITY_PAGE_PAYLOAD_BYTES,
+};
 use commit::{CommitReceipt, ObservationCommit};
 pub use coordinator::{ObservationCoordinator, ReconcileOutcome, ReconcileRequest};
 pub use detail_query::{
@@ -441,6 +449,69 @@ impl SpaghettiEngineCore {
     ) -> Result<MessagePage, EngineError> {
         let (_, queries) = self.clients()?;
         queries.messages_cancellable(request, cancellation)
+    }
+
+    /// Page canonical project-memory documents, including exact content and
+    /// decisive provenance, under Rust-enforced row and byte bounds.
+    pub fn memory_documents_cancellable(
+        &self,
+        request: MemoryDocumentPageRequest,
+        cancellation: QueryCancellationToken,
+    ) -> Result<MemoryDocumentPage, EngineError> {
+        let (_, queries) = self.clients()?;
+        queries.memory_documents_cancellable(request, cancellation)
+    }
+
+    /// Page canonical task collections globally or under one trustworthy
+    /// session, run, or team relation.
+    pub fn task_collections_cancellable(
+        &self,
+        request: TaskCollectionPageRequest,
+        cancellation: QueryCancellationToken,
+    ) -> Result<TaskCollectionPage, EngineError> {
+        let (_, queries) = self.clients()?;
+        queries.task_collections_cancellable(request, cancellation)
+    }
+
+    /// Page canonical task items for one opaque collection identity.
+    pub fn tasks_cancellable(
+        &self,
+        request: TaskPageRequest,
+        cancellation: QueryCancellationToken,
+    ) -> Result<TaskPage, EngineError> {
+        let (_, queries) = self.clients()?;
+        queries.tasks_cancellable(request, cancellation)
+    }
+
+    /// Page global canonical plan documents. Plans remain unscoped until a
+    /// native source supplies a trustworthy relation.
+    pub fn plans_cancellable(
+        &self,
+        request: PlanPageRequest,
+        cancellation: QueryCancellationToken,
+    ) -> Result<PlanPage, EngineError> {
+        let (_, queries) = self.clients()?;
+        queries.plans_cancellable(request, cancellation)
+    }
+
+    /// Page persisted tool-result sidecars for one verified project/session.
+    pub fn tool_results_cancellable(
+        &self,
+        request: ToolResultPageRequest,
+        cancellation: QueryCancellationToken,
+    ) -> Result<ToolResultPage, EngineError> {
+        let (_, queries) = self.clients()?;
+        queries.tool_results_cancellable(request, cancellation)
+    }
+
+    /// Page session-scoped file-history artifacts and optional base64 content.
+    pub fn artifacts_cancellable(
+        &self,
+        request: ArtifactPageRequest,
+        cancellation: QueryCancellationToken,
+    ) -> Result<ArtifactPage, EngineError> {
+        let (_, queries) = self.clients()?;
+        queries.artifacts_cancellable(request, cancellation)
     }
 
     /// Return all-time canonical usage totals for one project or one verified
