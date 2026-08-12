@@ -456,6 +456,8 @@ const RFC011_SCHEMA_TABLES = [
   'session_index_entry_assertions',
   'canonical_session_indexes',
   'canonical_session_index_entries',
+  'project_memory_document_assertions',
+  'canonical_project_memory_documents',
   'canonical_messages',
   'canonical_runs',
   'run_evidence',
@@ -556,6 +558,14 @@ const TABLE_SPECS: TableSpec[] = [
   {
     name: 'canonical_session_index_entries',
     orderBy: 'project_key, entry_ordinal',
+  },
+  {
+    name: 'project_memory_document_assertions',
+    orderBy: 'project_key, native_document_path, fact_id',
+  },
+  {
+    name: 'canonical_project_memory_documents',
+    orderBy: 'project_key, is_index DESC, native_document_path',
   },
   {
     name: 'canonical_messages',

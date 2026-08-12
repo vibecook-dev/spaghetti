@@ -202,6 +202,21 @@ pub struct SessionIndexSnapshotFact {
     pub native_snapshot: Value,
 }
 
+/// One independently replaceable project-memory document. An adapter may mark
+/// a native index document, while links and other embedded references remain
+/// content rather than asserted entity relationships.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectMemoryDocumentFact {
+    pub document: EntityKey,
+    pub project: EntityKey,
+    pub native_project_key: String,
+    pub native_document_path: String,
+    pub title: String,
+    pub content: String,
+    pub size_bytes: u64,
+    pub is_index: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MessageRole {
     User,
@@ -698,6 +713,7 @@ pub struct UsageFact {
 pub enum Fact {
     Session(SessionFact),
     SessionIndexSnapshot(SessionIndexSnapshotFact),
+    ProjectMemoryDocument(ProjectMemoryDocumentFact),
     Message(MessageFact),
     Run(RunFact),
     Delegation(DelegationFact),
@@ -726,6 +742,7 @@ impl Fact {
         match self {
             Self::Session(_) => "session",
             Self::SessionIndexSnapshot(_) => "session_index_snapshot",
+            Self::ProjectMemoryDocument(_) => "project_memory_document",
             Self::Message(_) => "message",
             Self::Run(_) => "run",
             Self::Delegation(_) => "delegation",
@@ -750,6 +767,7 @@ impl Fact {
         match self {
             Self::Session(fact) => Some(&fact.session),
             Self::SessionIndexSnapshot(fact) => Some(&fact.project),
+            Self::ProjectMemoryDocument(fact) => Some(&fact.document),
             Self::Message(fact) => Some(&fact.message),
             Self::Run(fact) => Some(&fact.run),
             Self::Delegation(fact) => Some(&fact.child_run),

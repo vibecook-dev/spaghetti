@@ -86,7 +86,9 @@ import type { SqliteService } from '../io/index.js';
 // workflow/member conflict provenance.
 // v27: replaceable Claude session-index snapshots, normalized entry metadata,
 // transcript late joins, and project/entry conflict provenance.
-export const SCHEMA_VERSION = 27;
+// v28: independently replaceable project-memory Markdown documents, native
+// index classification, and deterministic conflict provenance.
+export const SCHEMA_VERSION = 28;
 
 export const TOKEN_ACTIVITY_TRIGGER_NAMES = [
   'token_activity_messages_ai',
@@ -690,6 +692,39 @@ CREATE TABLE IF NOT EXISTS canonical_session_index_entries (
   competing_entry_count INTEGER NOT NULL,
   identity_conflict INTEGER NOT NULL,
   join_conflict INTEGER NOT NULL,
+  last_commit_seq INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS project_memory_document_assertions (
+  fact_id BLOB PRIMARY KEY REFERENCES fact_records(fact_id) ON DELETE CASCADE,
+  document_key BLOB NOT NULL,
+  project_key BLOB NOT NULL,
+  native_project_key TEXT NOT NULL,
+  native_document_path TEXT NOT NULL,
+  title TEXT NOT NULL,
+  content TEXT NOT NULL,
+  size_bytes INTEGER NOT NULL,
+  is_index INTEGER NOT NULL,
+  document_digest BLOB NOT NULL,
+  source_object_id INTEGER NOT NULL,
+  source_generation INTEGER NOT NULL,
+  cursor_end BLOB NOT NULL,
+  last_commit_seq INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS canonical_project_memory_documents (
+  document_key BLOB PRIMARY KEY,
+  project_key BLOB NOT NULL,
+  native_project_key TEXT NOT NULL,
+  native_document_path TEXT NOT NULL,
+  title TEXT NOT NULL,
+  content TEXT NOT NULL,
+  size_bytes INTEGER NOT NULL,
+  is_index INTEGER NOT NULL,
+  resolution_status TEXT NOT NULL,
+  decisive_fact_id BLOB NOT NULL REFERENCES project_memory_document_assertions(fact_id) ON DELETE CASCADE,
+  assertion_count INTEGER NOT NULL,
+  competing_document_count INTEGER NOT NULL,
   last_commit_seq INTEGER NOT NULL
 );
 
@@ -1528,6 +1563,10 @@ CREATE INDEX IF NOT EXISTS idx_session_index_entry_assertions_project ON session
 CREATE INDEX IF NOT EXISTS idx_session_index_entry_assertions_session ON session_index_entry_assertions(session_key, project_key);
 CREATE INDEX IF NOT EXISTS idx_canonical_session_index_entries_project ON canonical_session_index_entries(project_key, entry_ordinal);
 CREATE INDEX IF NOT EXISTS idx_canonical_session_index_entries_transcript ON canonical_session_index_entries(transcript_status, session_key);
+CREATE INDEX IF NOT EXISTS idx_project_memory_document_assertions_document ON project_memory_document_assertions(document_key, fact_id);
+CREATE INDEX IF NOT EXISTS idx_project_memory_document_assertions_source ON project_memory_document_assertions(source_object_id, document_key);
+CREATE INDEX IF NOT EXISTS idx_project_memory_document_assertions_project ON project_memory_document_assertions(project_key, native_document_path);
+CREATE INDEX IF NOT EXISTS idx_canonical_project_memory_documents_project ON canonical_project_memory_documents(project_key, is_index DESC, native_document_path);
 CREATE INDEX IF NOT EXISTS idx_canonical_messages_session_order ON canonical_messages(session_key, source_generation, cursor_start);
 CREATE INDEX IF NOT EXISTS idx_canonical_runs_session ON canonical_runs(session_key, run_key);
 CREATE INDEX IF NOT EXISTS idx_run_evidence_run_order ON run_evidence(run_key, source_generation, cursor_end);
@@ -1673,6 +1712,8 @@ const CURRENT_TABLES = [
   'canonical_session_indexes',
   'session_index_entry_assertions',
   'session_index_snapshot_assertions',
+  'canonical_project_memory_documents',
+  'project_memory_document_assertions',
   'canonical_artifacts',
   'artifact_content_assertions',
   'artifact_metadata_assertions',

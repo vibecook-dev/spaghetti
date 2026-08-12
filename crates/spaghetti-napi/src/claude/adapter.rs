@@ -18,15 +18,15 @@ use crate::adapter::{
     ConsistencyPolicy, ContentBlock, DecodeContext, DecodeDisposition, DecoderId, DelegationFact,
     DelegationKind, DelegationMetadataFact, DelegationSpawnFact, DeletionPolicy, DiscoveryContext,
     DriverSpec, EntityKey, EntityScope, EvidenceKind, EvidenceStrength, Fact, FactBatch,
-    MessageFact, MessageRole, ObjectSelector, PlanSnapshotFact, PresenceFact, QualifiedTimestamp,
-    RawRetentionPolicy, RelationStrength, RunEvidenceFact, RunFact, SessionFact,
-    SessionIndexEntrySnapshot, SessionIndexSnapshotFact, SourceInstance, SourceInstanceKey,
-    SourceInstanceSpec, SourceObjectDescriptor, SourceRoot, StreamAuthority, StreamId, StreamSpec,
-    SupportLevel, TaskCollectionKind, TaskItemSnapshot, TaskSnapshotCoverage, TaskSnapshotFact,
-    TaskStatus, TeamInboxMessageSnapshot, TeamInboxSnapshotFact, TeamMemberSnapshot,
-    TeamSnapshotFact, TimestampQuality, TokenUsage, UsageAccounting, UsageFact, UsageScope,
-    ValueQuality, WorkflowMemberEventFact, WorkflowMemberEventKind, WorkflowSnapshotFact,
-    WorkflowStatus,
+    MessageFact, MessageRole, ObjectSelector, PlanSnapshotFact, PresenceFact,
+    ProjectMemoryDocumentFact, QualifiedTimestamp, RawRetentionPolicy, RelationStrength,
+    RunEvidenceFact, RunFact, SessionFact, SessionIndexEntrySnapshot, SessionIndexSnapshotFact,
+    SourceInstance, SourceInstanceKey, SourceInstanceSpec, SourceObjectDescriptor, SourceRoot,
+    StreamAuthority, StreamId, StreamSpec, SupportLevel, TaskCollectionKind, TaskItemSnapshot,
+    TaskSnapshotCoverage, TaskSnapshotFact, TaskStatus, TeamInboxMessageSnapshot,
+    TeamInboxSnapshotFact, TeamMemberSnapshot, TeamSnapshotFact, TimestampQuality, TokenUsage,
+    UsageAccounting, UsageFact, UsageScope, ValueQuality, WorkflowMemberEventFact,
+    WorkflowMemberEventKind, WorkflowSnapshotFact, WorkflowStatus,
 };
 use crate::claude::message_extractor;
 use crate::claude::session_metadata;
@@ -53,6 +53,7 @@ const ARTIFACT_CONTENT_STREAM: &str = "file-history-blobs";
 const WORKFLOW_RUN_STREAM: &str = "workflow-runs";
 const WORKFLOW_JOURNAL_STREAM: &str = "workflow-journals";
 const SESSION_INDEX_STREAM: &str = "session-indexes";
+const PROJECT_MEMORY_STREAM: &str = "project-memory-documents";
 const PARENT_DECODER: &str = "claude-session-record";
 const SUBAGENT_DECODER: &str = "claude-subagent-record";
 const SUBAGENT_META_DECODER: &str = "claude-subagent-metadata";
@@ -66,6 +67,7 @@ const ARTIFACT_CONTENT_DECODER: &str = "claude-file-history-blob";
 const WORKFLOW_RUN_DECODER: &str = "claude-workflow-run";
 const WORKFLOW_JOURNAL_DECODER: &str = "claude-workflow-journal";
 const SESSION_INDEX_DECODER: &str = "claude-session-index";
+const PROJECT_MEMORY_DECODER: &str = "claude-project-memory-document";
 const OBJECT_CONTEXT_VERSION: u32 = 1;
 const SUBAGENT_META_MAX_BYTES: usize = 64 * 1024;
 const TEAM_CONFIG_MAX_BYTES: usize = 1024 * 1024;
@@ -77,6 +79,7 @@ const PLAN_MAX_BYTES: usize = 4 * 1024 * 1024;
 const ARTIFACT_CONTENT_MAX_BYTES: usize = 1024 * 1024;
 const WORKFLOW_RUN_MAX_BYTES: usize = 1024 * 1024;
 const SESSION_INDEX_MAX_BYTES: usize = 1024 * 1024;
+const PROJECT_MEMORY_MAX_BYTES: usize = 1024 * 1024;
 const TEAM_MEMBER_LIMIT: usize = 256;
 const TEAM_INBOX_MESSAGE_LIMIT: usize = 4_096;
 const TODO_ITEM_LIMIT: usize = 4_096;
@@ -96,6 +99,7 @@ const RUNTIME_PRESENCE: &str = "runtime.presence";
 const RUNTIME_TASKS: &str = "runtime.tasks";
 const RUNTIME_ARTIFACTS: &str = "runtime.artifacts";
 const RUNTIME_WORKFLOWS: &str = "runtime.workflows";
+const CONTEXT_PROJECT_MEMORY: &str = "context.project_memory";
 const USAGE_INPUT_TOKENS: &str = "usage.input_tokens";
 const USAGE_OUTPUT_TOKENS: &str = "usage.output_tokens";
 const USAGE_CACHE_TOKENS: &str = "usage.cache_tokens";
@@ -114,7 +118,7 @@ impl ClaudeCodeAdapter {
                 id: AdapterId::new(ADAPTER_ID).expect("static Claude adapter id is valid"),
                 display_name: "Claude Code".to_string(),
                 adapter_version: env!("CARGO_PKG_VERSION").to_string(),
-                contract_version: 10,
+                contract_version: 11,
                 source_schema_versions: vec![
                     "claude-code-jsonl-v1".to_string(),
                     "claude-code-subagent-meta-v1".to_string(),
@@ -127,6 +131,7 @@ impl ClaudeCodeAdapter {
                     "claude-code-file-history-v1".to_string(),
                     "claude-code-workflow-v1".to_string(),
                     "claude-code-session-index-v1".to_string(),
+                    "claude-code-project-memory-v1".to_string(),
                 ],
                 capabilities: claude_capabilities(),
             },
@@ -447,6 +452,25 @@ impl AgentAdapter for ClaudeCodeAdapter {
                 retention: RawRetentionPolicy::Full,
                 capabilities: session_index_capabilities(),
             },
+            StreamSpec {
+                id: StreamId::new(PROJECT_MEMORY_STREAM)?,
+                driver: DriverSpec::ReplaceDocument(ReplaceDocumentConfig {
+                    max_document_bytes: PROJECT_MEMORY_MAX_BYTES,
+                }),
+                selector: ObjectSelector {
+                    root_name: "projects".to_string(),
+                    include: vec!["*/memory/*.md".to_string()],
+                    exclude: Vec::new(),
+                },
+                decoder: DecoderId::new(PROJECT_MEMORY_DECODER)?,
+                authority: StreamAuthority::Canonical,
+                entity_scope: EntityScope::Project,
+                priority: IngestPriority::Interactive,
+                consistency: ConsistencyPolicy::SnapshotReplace,
+                deletion: DeletionPolicy::MirrorSource,
+                retention: RawRetentionPolicy::Full,
+                capabilities: project_memory_capabilities(),
+            },
         ];
         for stream in &streams {
             stream.validate(instance)?;
@@ -499,6 +523,9 @@ impl AgentAdapter for ClaudeCodeAdapter {
             SESSION_INDEX_STREAM => encode_object_context(&ClaudeSessionIndexContext::from_path(
                 &object.relative_path,
             )?)?,
+            PROJECT_MEMORY_STREAM => encode_object_context(
+                &ClaudeProjectMemoryContext::from_path(&object.relative_path)?,
+            )?,
             _ => {
                 return Err(AdapterError::new(
                     AdapterErrorClass::StreamFatal,
@@ -575,6 +602,10 @@ impl AgentAdapter for ClaudeCodeAdapter {
                 let object_context = ClaudeSessionIndexContext::decode(context.object_context)?;
                 decode_session_index(self.adapter_id(), &object_context, record, output)
             }
+            PROJECT_MEMORY_DECODER => {
+                let object_context = ClaudeProjectMemoryContext::decode(context.object_context)?;
+                decode_project_memory_document(self.adapter_id(), &object_context, record, output)
+            }
             _ => Err(AdapterError::unknown_decoder(context.decoder)),
         }
     }
@@ -642,6 +673,15 @@ fn claude_capabilities() -> Vec<CapabilityDeclaration> {
             Availability::EventuallyLive,
             Some(
                 "workflow summaries and append journals preserve native workflow/member state; workflow terminal status never implies terminal child-run state",
+            ),
+        ),
+        capability(
+            CONTEXT_PROJECT_MEMORY,
+            SupportLevel::Native,
+            CapabilityGranularity::Custom("memory_document".to_string()),
+            Availability::Live,
+            Some(
+                "project memory is a set of independently replaceable Markdown documents; MEMORY.md is the native index and links do not assert relations",
             ),
         ),
         live_native(USAGE_INPUT_TOKENS, CapabilityGranularity::Message),
@@ -757,6 +797,18 @@ fn session_index_capabilities() -> Vec<CapabilityId> {
     [
         HISTORY_SESSIONS,
         HISTORY_TIMESTAMPS,
+        SOURCE_LIVE,
+        SOURCE_RECONCILE,
+        SOURCE_RESUME_CURSOR,
+    ]
+    .into_iter()
+    .map(|id| CapabilityId::new(id).expect("static Claude stream capability id is valid"))
+    .collect()
+}
+
+fn project_memory_capabilities() -> Vec<CapabilityId> {
+    [
+        CONTEXT_PROJECT_MEMORY,
         SOURCE_LIVE,
         SOURCE_RECONCILE,
         SOURCE_RESUME_CURSOR,
@@ -1132,6 +1184,45 @@ impl ClaudeSessionIndexContext {
         }
         Ok(Self {
             project_slug: components[0].clone(),
+        })
+    }
+
+    fn decode(context: &AdapterObjectContext) -> Result<Self, AdapterError> {
+        decode_object_context(context)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct ClaudeProjectMemoryContext {
+    project_slug: String,
+    native_document_path: String,
+    is_index: bool,
+}
+
+impl ClaudeProjectMemoryContext {
+    fn from_path(relative_path: &Path) -> Result<Self, AdapterError> {
+        let components = utf8_components(relative_path)?;
+        if components.len() != 3 || components[0].is_empty() || components[1] != "memory" {
+            return Err(path_error(
+                relative_path,
+                "project memory path must be <project>/memory/<document>.md",
+            ));
+        }
+        let file_name = &components[2];
+        if file_name == ".md"
+            || !file_name.ends_with(".md")
+            || file_name.contains('/')
+            || file_name.contains('\\')
+        {
+            return Err(path_error(
+                relative_path,
+                "project memory document must be a non-empty Markdown file",
+            ));
+        }
+        Ok(Self {
+            project_slug: components[0].clone(),
+            native_document_path: format!("memory/{file_name}"),
+            is_index: file_name == "MEMORY.md",
         })
     }
 
@@ -2504,6 +2595,67 @@ fn decode_session_index(
     Ok(DecodeDisposition::Applied)
 }
 
+fn decode_project_memory_document(
+    adapter_id: &AdapterId,
+    context: &ClaudeProjectMemoryContext,
+    record: &SourceRecord,
+    output: &mut FactBatch,
+) -> Result<DecodeDisposition, AdapterError> {
+    if record.state == SourceRecordState::Absent {
+        return Ok(DecodeDisposition::IgnoredKnown);
+    }
+    let content = match std::str::from_utf8(&record.payload) {
+        Ok(content) => content.to_string(),
+        Err(error) => {
+            preserve_unknown(
+                record,
+                output,
+                Some("project_memory_document".to_string()),
+                format!("Claude project memory document is not valid UTF-8: {error}"),
+            )?;
+            return Ok(DecodeDisposition::PreservedUnknown);
+        }
+    };
+    let file_name = context
+        .native_document_path
+        .strip_prefix("memory/")
+        .expect("validated project memory context");
+    let fallback_title = file_name
+        .strip_suffix(".md")
+        .expect("validated project memory Markdown path");
+    let title = first_markdown_heading(&content).unwrap_or_else(|| fallback_title.to_string());
+    let mut document_native_key = Vec::new();
+    push_key_component(&mut document_native_key, context.project_slug.as_bytes());
+    push_key_component(
+        &mut document_native_key,
+        context.native_document_path.as_bytes(),
+    );
+    output.push(
+        record,
+        Fact::ProjectMemoryDocument(ProjectMemoryDocumentFact {
+            document: EntityKey::native(
+                adapter_id,
+                record.source_instance_id,
+                "project_memory_document",
+                &document_native_key,
+            )?,
+            project: EntityKey::native(
+                adapter_id,
+                record.source_instance_id,
+                "project",
+                context.project_slug.as_bytes(),
+            )?,
+            native_project_key: context.project_slug.clone(),
+            native_document_path: context.native_document_path.clone(),
+            title,
+            content,
+            size_bytes: record.payload.len() as u64,
+            is_index: context.is_index,
+        }),
+    )?;
+    Ok(DecodeDisposition::Applied)
+}
+
 fn preserve_session_index_contract_loss(
     record: &SourceRecord,
     output: &mut FactBatch,
@@ -3578,8 +3730,8 @@ mod tests {
             discovered[0].roots[3].path,
             std::fs::canonicalize(root.path()).unwrap().join("sessions")
         );
-        assert_eq!(streams.len(), 13);
-        assert_eq!(adapter.manifest().contract_version, 10);
+        assert_eq!(streams.len(), 14);
+        assert_eq!(adapter.manifest().contract_version, 11);
         assert!(adapter
             .manifest()
             .source_schema_versions
@@ -3630,6 +3782,11 @@ mod tests {
             .source_schema_versions
             .iter()
             .any(|version| version == "claude-code-session-index-v1"));
+        assert!(adapter
+            .manifest()
+            .source_schema_versions
+            .iter()
+            .any(|version| version == "claude-code-project-memory-v1"));
         assert!(matches!(streams[0].driver, DriverSpec::AppendDelimited(_)));
         assert!(matches!(streams[1].driver, DriverSpec::AppendDelimited(_)));
         assert!(matches!(streams[2].driver, DriverSpec::ReplaceDocument(_)));
@@ -3689,6 +3846,12 @@ mod tests {
                 max_document_bytes: SESSION_INDEX_MAX_BYTES
             })
         ));
+        assert!(matches!(
+            streams[13].driver,
+            DriverSpec::ReplaceDocument(ReplaceDocumentConfig {
+                max_document_bytes: PROJECT_MEMORY_MAX_BYTES
+            })
+        ));
         assert_eq!(streams[0].decoder.as_str(), PARENT_DECODER);
         assert_eq!(streams[1].decoder.as_str(), SUBAGENT_DECODER);
         assert_eq!(streams[2].decoder.as_str(), SUBAGENT_META_DECODER);
@@ -3702,6 +3865,7 @@ mod tests {
         assert_eq!(streams[10].decoder.as_str(), WORKFLOW_RUN_DECODER);
         assert_eq!(streams[11].decoder.as_str(), WORKFLOW_JOURNAL_DECODER);
         assert_eq!(streams[12].decoder.as_str(), SESSION_INDEX_DECODER);
+        assert_eq!(streams[13].decoder.as_str(), PROJECT_MEMORY_DECODER);
         assert_eq!(streams[2].authority, StreamAuthority::Supplemental);
         assert_eq!(streams[2].consistency, ConsistencyPolicy::SnapshotReplace);
         assert_eq!(streams[3].authority, StreamAuthority::Canonical);
@@ -3749,6 +3913,13 @@ mod tests {
             .capabilities
             .iter()
             .any(|capability| capability.as_str() == HISTORY_SESSIONS));
+        assert_eq!(streams[13].authority, StreamAuthority::Canonical);
+        assert_eq!(streams[13].priority, IngestPriority::Interactive);
+        assert_eq!(streams[13].consistency, ConsistencyPolicy::SnapshotReplace);
+        assert!(streams[13]
+            .capabilities
+            .iter()
+            .any(|capability| capability.as_str() == CONTEXT_PROJECT_MEMORY));
         assert!(streams[0]
             .capabilities
             .iter()
@@ -3855,6 +4026,18 @@ mod tests {
             .notes
             .as_deref()
             .is_some_and(|notes| notes.contains("never implies terminal child-run state")));
+        let memory = adapter
+            .manifest()
+            .capabilities
+            .iter()
+            .find(|capability| capability.id.as_str() == CONTEXT_PROJECT_MEMORY)
+            .unwrap();
+        assert_eq!(memory.support.level, SupportLevel::Native);
+        assert_eq!(
+            memory.support.granularity,
+            CapabilityGranularity::Custom("memory_document".to_string())
+        );
+        assert_eq!(memory.support.availability, Availability::Live);
     }
 
     #[test]
@@ -4081,6 +4264,179 @@ mod tests {
                 )
                 .is_err());
         }
+    }
+
+    #[test]
+    fn project_memory_context_requires_one_immediate_markdown_document() {
+        let root = TempDir::new().unwrap();
+        let adapter = ClaudeCodeAdapter::new();
+        let index = adapter
+            .bootstrap_object(
+                &instance(root.path()),
+                &object(PROJECT_MEMORY_STREAM, "project/memory/MEMORY.md"),
+            )
+            .unwrap();
+        assert_eq!(
+            ClaudeProjectMemoryContext::decode(&index).unwrap(),
+            ClaudeProjectMemoryContext {
+                project_slug: "project".to_string(),
+                native_document_path: "memory/MEMORY.md".to_string(),
+                is_index: true,
+            }
+        );
+        let topic = adapter
+            .bootstrap_object(
+                &instance(root.path()),
+                &object(PROJECT_MEMORY_STREAM, "project/memory/build-notes.md"),
+            )
+            .unwrap();
+        assert_eq!(
+            ClaudeProjectMemoryContext::decode(&topic).unwrap(),
+            ClaudeProjectMemoryContext {
+                project_slug: "project".to_string(),
+                native_document_path: "memory/build-notes.md".to_string(),
+                is_index: false,
+            }
+        );
+        for invalid in [
+            "memory/MEMORY.md",
+            "project/MEMORY.md",
+            "project/memory/.md",
+            "project/memory/topic.txt",
+            "project/memory/nested/topic.md",
+        ] {
+            assert!(adapter
+                .bootstrap_object(
+                    &instance(root.path()),
+                    &object(PROJECT_MEMORY_STREAM, invalid),
+                )
+                .is_err());
+        }
+    }
+
+    #[test]
+    fn project_memory_decoder_preserves_index_and_topic_documents_without_runtime_facts() {
+        let root = TempDir::new().unwrap();
+        let adapter = ClaudeCodeAdapter::new();
+        let object_context = adapter
+            .bootstrap_object(
+                &instance(root.path()),
+                &object(PROJECT_MEMORY_STREAM, "project/memory/MEMORY.md"),
+            )
+            .unwrap();
+        let source = document_record(b"# Memory index\n\n- [Build notes](build-notes.md)\n");
+        let mut batch = FactBatch::new(2, 2).unwrap();
+        assert_eq!(
+            adapter
+                .decode(
+                    DecodeContext {
+                        decoder: &DecoderId::new(PROJECT_MEMORY_DECODER).unwrap(),
+                        object_context: &object_context,
+                    },
+                    &source,
+                    &mut batch,
+                )
+                .unwrap(),
+            DecodeDisposition::Applied
+        );
+        let Fact::ProjectMemoryDocument(memory) = &batch.facts()[0].value else {
+            panic!("expected project memory document");
+        };
+        assert_eq!(memory.native_project_key, "project");
+        assert_eq!(memory.native_document_path, "memory/MEMORY.md");
+        assert_eq!(memory.title, "Memory index");
+        assert_eq!(memory.content.as_bytes(), source.payload);
+        assert_eq!(memory.size_bytes, source.payload.len() as u64);
+        assert!(memory.is_index);
+        assert!(fact_values(&batch).all(|fact| {
+            !matches!(
+                fact,
+                Fact::Session(_) | Fact::Message(_) | Fact::Run(_) | Fact::RunEvidence(_)
+            )
+        }));
+
+        let topic_context = adapter
+            .bootstrap_object(
+                &instance(root.path()),
+                &object(PROJECT_MEMORY_STREAM, "project/memory/build-notes.md"),
+            )
+            .unwrap();
+        let topic_source = document_record(b"No heading here.\n");
+        let mut topic_batch = FactBatch::new(2, 2).unwrap();
+        adapter
+            .decode(
+                DecodeContext {
+                    decoder: &DecoderId::new(PROJECT_MEMORY_DECODER).unwrap(),
+                    object_context: &topic_context,
+                },
+                &topic_source,
+                &mut topic_batch,
+            )
+            .unwrap();
+        let Fact::ProjectMemoryDocument(topic) = &topic_batch.facts()[0].value else {
+            panic!("expected topic memory document");
+        };
+        assert_eq!(topic.title, "build-notes");
+        assert!(!topic.is_index);
+
+        let empty_source = document_record(b"");
+        let mut empty_batch = FactBatch::new(2, 2).unwrap();
+        assert_eq!(
+            adapter
+                .decode(
+                    DecodeContext {
+                        decoder: &DecoderId::new(PROJECT_MEMORY_DECODER).unwrap(),
+                        object_context: &topic_context,
+                    },
+                    &empty_source,
+                    &mut empty_batch,
+                )
+                .unwrap(),
+            DecodeDisposition::Applied
+        );
+        let Fact::ProjectMemoryDocument(empty) = &empty_batch.facts()[0].value else {
+            panic!("expected empty project memory document");
+        };
+        assert_eq!(empty.title, "build-notes");
+        assert_eq!(empty.size_bytes, 0);
+        assert!(empty.content.is_empty());
+
+        let invalid = document_record(&[0xff]);
+        let mut invalid_batch = FactBatch::new(2, 2).unwrap();
+        assert_eq!(
+            adapter
+                .decode(
+                    DecodeContext {
+                        decoder: &DecoderId::new(PROJECT_MEMORY_DECODER).unwrap(),
+                        object_context: &topic_context,
+                    },
+                    &invalid,
+                    &mut invalid_batch,
+                )
+                .unwrap(),
+            DecodeDisposition::PreservedUnknown
+        );
+        assert!(matches!(
+            invalid_batch.facts()[0].value,
+            Fact::UnknownRecord { .. }
+        ));
+
+        let absent = absent_document_record();
+        let mut absent_batch = FactBatch::new(2, 2).unwrap();
+        assert_eq!(
+            adapter
+                .decode(
+                    DecodeContext {
+                        decoder: &DecoderId::new(PROJECT_MEMORY_DECODER).unwrap(),
+                        object_context: &topic_context,
+                    },
+                    &absent,
+                    &mut absent_batch,
+                )
+                .unwrap(),
+            DecodeDisposition::IgnoredKnown
+        );
+        assert!(absent_batch.facts().is_empty());
     }
 
     #[test]

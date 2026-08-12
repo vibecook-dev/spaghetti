@@ -6,6 +6,7 @@
 
 mod artifact_projection;
 mod commit;
+mod memory_projection;
 mod owner_lock;
 mod presence_projection;
 mod projection;

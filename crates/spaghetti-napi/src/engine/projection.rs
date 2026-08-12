@@ -20,6 +20,7 @@ use super::commit::{
     apply_observation_commit_with_projection, ChangeEntry, CommitReceipt, ObservationCommit,
     ProjectionCommitContext, TransactionalProjectionWork,
 };
+use super::memory_projection::apply_project_memory_facts;
 use super::presence_projection::apply_presence_facts;
 use super::session_index_projection::apply_session_index_facts;
 use super::task_projection::apply_task_snapshots;
@@ -270,6 +271,7 @@ impl TransactionalProjectionWork for FactProjectionWork<'_> {
                 )?),
                 Fact::Delegation(_)
                 | Fact::SessionIndexSnapshot(_)
+                | Fact::ProjectMemoryDocument(_)
                 | Fact::DelegationMetadata(_)
                 | Fact::DelegationSpawn(_)
                 | Fact::TeamSnapshot(_)
@@ -290,6 +292,11 @@ impl TransactionalProjectionWork for FactProjectionWork<'_> {
             context,
             self.batch,
             &changed_session_keys,
+        )?);
+        changes.extend(apply_project_memory_facts(
+            transaction,
+            context,
+            self.batch,
         )?);
         Ok(changes)
     }
@@ -2404,13 +2411,14 @@ mod tests {
     use crate::adapter::{
         AdapterId, AdapterObjectContext, AgentAdapter, ArtifactCapture, ArtifactContentFact,
         ArtifactMetadataEntry, ArtifactMetadataSnapshotFact, ArtifactObservationKind,
-        DecodeContext, DecoderId, FactBatch, PlanSnapshotFact, PresenceFact, RunEvidenceFact,
-        RunFact, SessionFact, SessionIndexEntrySnapshot, SessionIndexSnapshotFact, SourceInstance,
-        SourceInstanceKey, SourceInstanceSpec as AdapterSourceInstanceSpec, SourceObjectDescriptor,
-        SourceRoot, StreamId, TaskCollectionKind, TaskItemSnapshot, TaskSnapshotCoverage,
-        TaskSnapshotFact, TaskStatus, TeamInboxMessageSnapshot, TeamInboxSnapshotFact,
-        TeamMemberSnapshot, TeamSnapshotFact, WorkflowMemberEventFact, WorkflowMemberEventKind,
-        WorkflowSnapshotFact, WorkflowStatus,
+        DecodeContext, DecoderId, FactBatch, PlanSnapshotFact, PresenceFact,
+        ProjectMemoryDocumentFact, RunEvidenceFact, RunFact, SessionFact,
+        SessionIndexEntrySnapshot, SessionIndexSnapshotFact, SourceInstance, SourceInstanceKey,
+        SourceInstanceSpec as AdapterSourceInstanceSpec, SourceObjectDescriptor, SourceRoot,
+        StreamId, TaskCollectionKind, TaskItemSnapshot, TaskSnapshotCoverage, TaskSnapshotFact,
+        TaskStatus, TeamInboxMessageSnapshot, TeamInboxSnapshotFact, TeamMemberSnapshot,
+        TeamSnapshotFact, WorkflowMemberEventFact, WorkflowMemberEventKind, WorkflowSnapshotFact,
+        WorkflowStatus,
     };
     use crate::claude::ClaudeCodeAdapter;
     use crate::core::schema;
@@ -2856,6 +2864,27 @@ mod tests {
                 "entryCount": entries.len(),
             }),
             entries,
+        }
+    }
+
+    fn project_memory_fact(
+        native_document_path: &str,
+        title: &str,
+        content: &str,
+        is_index: bool,
+    ) -> ProjectMemoryDocumentFact {
+        ProjectMemoryDocumentFact {
+            document: entity(
+                "project_memory_document",
+                &format!("{PROJECT}/{native_document_path}"),
+            ),
+            project: entity("project", PROJECT),
+            native_project_key: PROJECT.to_string(),
+            native_document_path: native_document_path.to_string(),
+            title: title.to_string(),
+            content: content.to_string(),
+            size_bytes: content.len() as u64,
+            is_index,
         }
     }
 
@@ -7738,6 +7767,240 @@ mod tests {
                 )
                 .unwrap(),
             "delete"
+        );
+    }
+
+    #[test]
+    fn project_memory_documents_replace_independently_conflict_and_never_create_runtime_state() {
+        let mut connection = database();
+        register_object(&mut connection);
+        let index_object = b"memory-index";
+        let topic_object = b"memory-topic";
+        let competitor_object = b"memory-topic-competitor";
+        register_object_key(&mut connection, index_object, 12);
+        register_object_key(&mut connection, topic_object, 13);
+        register_object_key(&mut connection, competitor_object, 14);
+
+        let index_record = object_record(
+            2,
+            1,
+            SourceCursor::append_offset(0),
+            SourceCursor::append_offset(1),
+            20,
+            b"memory-index",
+        );
+        let mut index = FactBatch::new(2, 1).unwrap();
+        index
+            .push(
+                &index_record,
+                Fact::ProjectMemoryDocument(project_memory_fact(
+                    "memory/MEMORY.md",
+                    "Memory index",
+                    "# Memory index\n\n- [Build](build.md)\n",
+                    true,
+                )),
+            )
+            .unwrap();
+        commit_object_batch(
+            &mut connection,
+            index_object,
+            &index_record,
+            1,
+            SourceCursor::append_offset(0).into_bytes(),
+            21,
+            &index,
+        );
+
+        let topic_record = object_record(
+            3,
+            1,
+            SourceCursor::append_offset(0),
+            SourceCursor::append_offset(1),
+            30,
+            b"memory-topic",
+        );
+        let mut topic = FactBatch::new(2, 1).unwrap();
+        topic
+            .push(
+                &topic_record,
+                Fact::ProjectMemoryDocument(project_memory_fact(
+                    "memory/build.md",
+                    "Build",
+                    "# Build\n\nUse cargo.\n",
+                    false,
+                )),
+            )
+            .unwrap();
+        commit_object_batch(
+            &mut connection,
+            topic_object,
+            &topic_record,
+            1,
+            SourceCursor::append_offset(0).into_bytes(),
+            31,
+            &topic,
+        );
+        assert_eq!(count(&connection, "canonical_project_memory_documents"), 2);
+        assert_eq!(count(&connection, "canonical_sessions"), 0);
+        assert_eq!(count(&connection, "canonical_runs"), 0);
+        assert_eq!(count(&connection, "run_evidence"), 0);
+        assert_eq!(count(&connection, "observed_run_states"), 0);
+
+        let replacement_record = object_record(
+            3,
+            1,
+            SourceCursor::append_offset(1),
+            SourceCursor::append_offset(2),
+            40,
+            b"memory-topic-replaced",
+        );
+        let mut replacement = FactBatch::new(2, 1).unwrap();
+        replacement
+            .push(
+                &replacement_record,
+                Fact::ProjectMemoryDocument(project_memory_fact(
+                    "memory/build.md",
+                    "Build v2",
+                    "# Build v2\n\nUse cargo test.\n",
+                    false,
+                )),
+            )
+            .unwrap();
+        commit_object_batch(
+            &mut connection,
+            topic_object,
+            &replacement_record,
+            1,
+            SourceCursor::append_offset(1).into_bytes(),
+            41,
+            &replacement,
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT title FROM canonical_project_memory_documents WHERE native_document_path = 'memory/build.md'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "Build v2"
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM fact_records WHERE fact_kind = 'project_memory_document'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            2
+        );
+
+        let competitor_record = object_record(
+            4,
+            1,
+            SourceCursor::append_offset(0),
+            SourceCursor::append_offset(1),
+            50,
+            b"memory-topic-competitor",
+        );
+        let mut competitor = FactBatch::new(2, 1).unwrap();
+        competitor
+            .push(
+                &competitor_record,
+                Fact::ProjectMemoryDocument(project_memory_fact(
+                    "memory/build.md",
+                    "Competing build",
+                    "# Competing build\n",
+                    false,
+                )),
+            )
+            .unwrap();
+        commit_object_batch(
+            &mut connection,
+            competitor_object,
+            &competitor_record,
+            1,
+            SourceCursor::append_offset(0).into_bytes(),
+            51,
+            &competitor,
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT resolution_status || ':' || assertion_count || ':' || competing_document_count FROM canonical_project_memory_documents WHERE native_document_path = 'memory/build.md'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "conflicting:2:1"
+        );
+
+        let competitor_deleted = object_record(
+            4,
+            1,
+            SourceCursor::append_offset(1),
+            SourceCursor::append_offset(2),
+            60,
+            b"memory-topic-competitor-deleted",
+        );
+        commit_object_batch(
+            &mut connection,
+            competitor_object,
+            &competitor_deleted,
+            1,
+            SourceCursor::append_offset(1).into_bytes(),
+            61,
+            &FactBatch::new(1, 1).unwrap(),
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT resolution_status || ':' || assertion_count || ':' || competing_document_count FROM canonical_project_memory_documents WHERE native_document_path = 'memory/build.md'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "resolved:1:0"
+        );
+
+        let topic_deleted = object_record(
+            3,
+            1,
+            SourceCursor::append_offset(2),
+            SourceCursor::append_offset(3),
+            70,
+            b"memory-topic-deleted",
+        );
+        commit_object_batch(
+            &mut connection,
+            topic_object,
+            &topic_deleted,
+            1,
+            SourceCursor::append_offset(2).into_bytes(),
+            71,
+            &FactBatch::new(1, 1).unwrap(),
+        );
+        assert_eq!(count(&connection, "canonical_project_memory_documents"), 1);
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT is_index FROM canonical_project_memory_documents",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM fact_records WHERE fact_kind = 'project_memory_document'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            1
         );
     }
 
