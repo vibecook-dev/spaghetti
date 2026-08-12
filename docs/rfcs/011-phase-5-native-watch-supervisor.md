@@ -81,19 +81,23 @@ Tests prove:
 - a native path marks only its owning source instance;
 - native rescan and backend failures force adapter-wide recovery;
 - a real filesystem rewrite is observed and reconciled after watch-before-scan;
+- a deterministic decoder gate injects a source mutation and callback after
+  the initial scan has framed the prior bytes, and startup drains the surviving
+  dirty marker before reporting readiness;
 - duplicate start is rejected, stop is idempotently observable, and status
   reports one supervisor/instance/root;
+- after engine shutdown, a fresh supervisor preserves the durable source
+  instance and resumes an append stream from its committed cursor;
 - SDK start, explicit refresh, stop, and post-stop error behavior work through
   the rebuilt native addon;
 - engine shutdown owns watcher cleanup before database-worker teardown.
 
-The slice passes 413 Rust tests, clippy with warnings denied, TypeScript
+The slice passes 415 Rust tests, clippy with warnings denied, TypeScript
 typechecking, the production build, the RFC 011 ownership ratchet, and the
 focused five-test persistent-engine SDK suite.
 
 ## Next coordinator slice
 
-Add deterministic callback/scan race injection and supervisor restart tests,
-then begin the production cutover: route persistent-engine hosts through this
-Rust supervisor, shadow parity against the legacy TypeScript live plane, and
-retire source-specific watcher/writer services only after zero-diff acceptance.
+Begin the production cutover: route persistent-engine hosts through this Rust
+supervisor, shadow parity against the legacy TypeScript live plane, and retire
+source-specific watcher/writer services only after zero-diff acceptance.

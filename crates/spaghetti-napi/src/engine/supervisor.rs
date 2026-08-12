@@ -734,12 +734,20 @@ fn supervisor_error(operation: &'static str, error: impl std::fmt::Display) -> E
 #[cfg(test)]
 mod tests {
     use std::io::Write;
+    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+    use std::sync::{Condvar, Mutex};
 
     use rusqlite::{Connection, OpenFlags};
     use tempfile::TempDir;
 
+    use crate::adapter::{
+        AdapterError, AdapterManifest, AdapterObjectContext, DecodeContext, DecodeDisposition,
+        DiscoveryContext, FactBatch, SourceInstance, SourceInstanceSpec, SourceObjectDescriptor,
+        StreamSpec,
+    };
     use crate::claude::ClaudeCodeAdapter;
     use crate::engine::EngineOptions;
+    use crate::source::{platform_path_key, SourceCursor, SourceRecord};
 
     use super::*;
 
@@ -846,6 +854,59 @@ mod tests {
     }
 
     #[test]
+    fn callback_admitted_inside_initial_scan_is_reconciled_before_ready() {
+        const WAIT: Duration = Duration::from_secs(15);
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().join("source");
+        std::fs::create_dir_all(&root).unwrap();
+        let settings = root.join("settings.json");
+        std::fs::write(&settings, br#"{"model":"claude-sonnet"}"#).unwrap();
+        let database = temp.path().join("race.db");
+        let engine = open_engine(database.clone());
+        let gate = Arc::new(DecodeGate::default());
+        let adapter = GatedClaudeAdapter::new(Arc::clone(&gate));
+        let starting_engine = Arc::clone(&engine);
+        let starting_root = root.clone();
+        let start = thread::spawn(move || {
+            starting_engine.start_observation_supervisor(
+                adapter,
+                ObservationSupervisorOptions::new(vec![starting_root]),
+            )
+        });
+
+        gate.wait_until_blocked(WAIT);
+        assert!(engine.status().observation.reconcile_in_flight);
+        std::fs::write(&settings, br#"{"model":"claude-opus"}"#).unwrap();
+        let topology =
+            discover_topology(&ClaudeCodeAdapter::new(), std::slice::from_ref(&root)).unwrap();
+        route_ingress(
+            &engine,
+            SpaghettiEngineCore::CLAUDE_ADAPTER_ID,
+            &topology,
+            WatchIngress::Event(
+                Event::new(notify::event::EventKind::Modify(
+                    notify::event::ModifyKind::Any,
+                ))
+                .add_path(settings),
+            ),
+        );
+        let during_scan = engine.status().observation;
+        assert!(
+            during_scan.dirty_instances == 1 || during_scan.full_reconcile_required,
+            "{during_scan:?}"
+        );
+        gate.release();
+
+        start.join().unwrap().unwrap();
+        let ready = engine.status().observation;
+        assert_eq!(ready.state, "live", "{ready:?}");
+        assert_eq!(ready.dirty_instances, 0, "{ready:?}");
+        assert!(ready.reconciles_total >= 2, "{ready:?}");
+        assert_eq!(effective_settings_model(&database), "claude-opus");
+        engine.shutdown().unwrap();
+    }
+
+    #[test]
     fn native_supervisor_registers_before_scan_and_reconciles_changes() {
         const WAIT: Duration = Duration::from_secs(15);
         let temp = TempDir::new().unwrap();
@@ -924,6 +985,163 @@ mod tests {
         assert_eq!(stopped.observation.supervisors_running, 0);
     }
 
+    #[test]
+    fn supervisor_restart_resumes_the_durable_append_cursor() {
+        const WAIT: Duration = Duration::from_secs(15);
+        const PROJECT: &str = "-Users-fixture-project";
+        const SESSION: &str = "01234567-89ab-cdef-0123-456789abcdef";
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().join("source");
+        let project = root.join(format!("projects/{PROJECT}"));
+        std::fs::create_dir_all(&project).unwrap();
+        let transcript = project.join(format!("{SESSION}.jsonl"));
+        std::fs::write(&transcript, transcript_line(SESSION, "m1", "first")).unwrap();
+        let database = temp.path().join("restart.db");
+
+        let first = open_engine(database.clone());
+        first
+            .start_observation_supervisor(
+                ClaudeCodeAdapter::new(),
+                ObservationSupervisorOptions::new(vec![root.clone()]),
+            )
+            .unwrap();
+        assert_eq!(count_messages(&database), 1);
+        let first_instance_id = source_instance_id(&database);
+        let first_cursor = transcript_cursor(&first, &root);
+        assert_eq!(
+            first_cursor.append_offset_value(),
+            Some(file_len(&transcript))
+        );
+        first.shutdown().unwrap();
+
+        let mut append = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&transcript)
+            .unwrap();
+        append
+            .write_all(&transcript_line(SESSION, "m2", "second"))
+            .unwrap();
+        append.flush().unwrap();
+        drop(append);
+
+        let restarted = open_engine(database.clone());
+        restarted
+            .start_observation_supervisor(
+                ClaudeCodeAdapter::new(),
+                ObservationSupervisorOptions::new(vec![root.clone()]),
+            )
+            .unwrap();
+        wait_until(
+            WAIT,
+            || count_messages(&database) == 2,
+            || format!("{:?}", restarted.status().observation),
+        );
+        assert_eq!(source_instance_id(&database), first_instance_id);
+        let resumed_cursor = transcript_cursor(&restarted, &root);
+        assert_eq!(
+            resumed_cursor.append_offset_value(),
+            Some(file_len(&transcript))
+        );
+        assert!(resumed_cursor.append_offset_value() > first_cursor.append_offset_value());
+        assert_eq!(restarted.status().observation.state, "live");
+        restarted.shutdown().unwrap();
+    }
+
+    #[derive(Default)]
+    struct DecodeGate {
+        calls: AtomicUsize,
+        state: Mutex<GateState>,
+        changed: Condvar,
+    }
+
+    #[derive(Default)]
+    struct GateState {
+        blocked: bool,
+        released: bool,
+    }
+
+    impl DecodeGate {
+        fn enter(&self) {
+            if self.calls.fetch_add(1, AtomicOrdering::AcqRel) != 0 {
+                return;
+            }
+            let mut state = self.state.lock().unwrap();
+            state.blocked = true;
+            self.changed.notify_all();
+            while !state.released {
+                state = self.changed.wait(state).unwrap();
+            }
+        }
+
+        fn wait_until_blocked(&self, timeout: Duration) {
+            let deadline = Instant::now() + timeout;
+            let mut state = self.state.lock().unwrap();
+            while !state.blocked {
+                let remaining = deadline
+                    .checked_duration_since(Instant::now())
+                    .expect("initial reconcile did not reach the decode gate");
+                let (next, timed_out) = self.changed.wait_timeout(state, remaining).unwrap();
+                state = next;
+                assert!(!timed_out.timed_out(), "initial reconcile decode timed out");
+            }
+        }
+
+        fn release(&self) {
+            let mut state = self.state.lock().unwrap();
+            state.released = true;
+            self.changed.notify_all();
+        }
+    }
+
+    struct GatedClaudeAdapter {
+        inner: ClaudeCodeAdapter,
+        gate: Arc<DecodeGate>,
+    }
+
+    impl GatedClaudeAdapter {
+        fn new(gate: Arc<DecodeGate>) -> Self {
+            Self {
+                inner: ClaudeCodeAdapter::new(),
+                gate,
+            }
+        }
+    }
+
+    impl AgentAdapter for GatedClaudeAdapter {
+        fn manifest(&self) -> &AdapterManifest {
+            self.inner.manifest()
+        }
+
+        fn discover(
+            &self,
+            context: &DiscoveryContext,
+        ) -> Result<Vec<SourceInstanceSpec>, AdapterError> {
+            self.inner.discover(context)
+        }
+
+        fn streams(&self, instance: &SourceInstance) -> Result<Vec<StreamSpec>, AdapterError> {
+            self.inner.streams(instance)
+        }
+
+        fn bootstrap_object(
+            &self,
+            instance: &SourceInstance,
+            object: &SourceObjectDescriptor,
+        ) -> Result<AdapterObjectContext, AdapterError> {
+            self.inner.bootstrap_object(instance, object)
+        }
+
+        fn decode(
+            &self,
+            context: DecodeContext<'_>,
+            record: &SourceRecord,
+            output: &mut FactBatch,
+        ) -> Result<DecodeDisposition, AdapterError> {
+            self.gate.enter();
+            self.inner.decode(context, record, output)
+        }
+    }
+
     fn open_engine(database_path: PathBuf) -> Arc<SpaghettiEngineCore> {
         SpaghettiEngineCore::open(EngineOptions {
             database_path,
@@ -943,6 +1161,70 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap()
+    }
+
+    fn effective_settings_model(database: &Path) -> String {
+        let connection =
+            Connection::open_with_flags(database, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+        let json: Vec<u8> = connection
+            .query_row(
+                "SELECT effective_settings_json FROM canonical_effective_interpretation_settings",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        serde_json::from_slice::<serde_json::Value>(&json).unwrap()["model"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    }
+
+    fn transcript_line(session: &str, message_id: &str, body: &str) -> Vec<u8> {
+        let mut line = format!(
+            r#"{{"type":"assistant","uuid":"{message_id}","timestamp":"2026-08-12T00:00:00Z","sessionId":"{session}","cwd":"/fixture/project","version":"1","gitBranch":"main","isSidechain":false,"userType":"external","requestId":"request-{message_id}","message":{{"model":"claude-sonnet","id":"api-{message_id}","type":"message","role":"assistant","content":[{{"type":"text","text":"{body}"}}],"usage":{{"input_tokens":1,"output_tokens":1}}}}}}"#
+        )
+        .into_bytes();
+        line.push(b'\n');
+        line
+    }
+
+    fn count_messages(database: &Path) -> i64 {
+        let connection =
+            Connection::open_with_flags(database, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+        connection
+            .query_row("SELECT COUNT(*) FROM canonical_messages", [], |row| {
+                row.get(0)
+            })
+            .unwrap()
+    }
+
+    fn source_instance_id(database: &Path) -> u64 {
+        let connection =
+            Connection::open_with_flags(database, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+        connection
+            .query_row(
+                "SELECT source_instance_id FROM source_instances LIMIT 1",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .map(|value| u64::try_from(value).unwrap())
+            .unwrap()
+    }
+
+    fn transcript_cursor(engine: &SpaghettiEngineCore, root: &Path) -> SourceCursor {
+        let stable_key = platform_path_key(&root.canonicalize().unwrap());
+        let object = engine
+            .source_catalog(SpaghettiEngineCore::CLAUDE_ADAPTER_ID, &stable_key)
+            .unwrap()
+            .objects
+            .into_iter()
+            .find(|object| object.stream_key == "session-transcripts")
+            .unwrap();
+        SourceCursor::from_opaque(object.committed_cursor).unwrap()
+    }
+
+    fn file_len(path: &Path) -> u64 {
+        std::fs::metadata(path).unwrap().len()
     }
 
     fn wait_until(
