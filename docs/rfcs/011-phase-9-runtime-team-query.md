@@ -119,13 +119,16 @@ their authoritative ordinals. The additive indexes are mirrored in Rust and
 the temporary TypeScript schema authority without changing schema version 31;
 same-version initialization reruns `CREATE INDEX IF NOT EXISTS` statements.
 
-## Remaining Phase 9 work
+## Remaining cutover work
 
-This is a shadow query surface, not production `SpaghettiClient` cutover. The
-remaining gates include large-corpus latency and boundary-size benchmarks,
-shared IPC/domain DTO generation, and Phase 10 production client migration.
-Search, delegation/workflow, and capability details are recorded separately.
-The core detail/statistics slice is recorded in the
-[detail/statistics query pack](./011-phase-9-detail-stats-query.md). Until then,
-the legacy TypeScript query service remains the production read owner and the
+Search, delegation/workflow, capability details, and core statistics are
+recorded in their separate query packs. The consolidated N-API gate adds a
+non-empty runtime presence, team, inbox, and inbox-message probe and walks a
+runtime snapshot beyond 200 entries; see the
+[Phase 9 query gate](./011-phase-9-query-conformance-benchmark.md).
+
+This remains a shadow query surface until Phase 10. Shared IPC/domain DTOs
+and topology benchmarks, operational scale-50/private-corpus soak evidence,
+production client migration, and TypeScript SQLite retirement remain. Until
+that cutover, the legacy service remains the production read owner and the
 Rust observation database remains isolated.

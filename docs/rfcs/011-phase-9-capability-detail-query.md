@@ -93,17 +93,16 @@ relevant indexes. DDL is mirrored in Rust and the temporary TypeScript schema
 authority without changing schema version 31; same-version initialization
 reruns `CREATE INDEX IF NOT EXISTS` statements.
 
-## Remaining Phase 9 work
+## Remaining cutover work
 
-This is a shadow query surface, not production `SpaghettiClient` cutover. The
-remaining gates include:
+The other query packs and consolidated N-API conformance and benchmark
+evidence are recorded in the
+[Phase 9 query gate](./011-phase-9-query-conformance-benchmark.md). That gate
+returns twelve valid 1 MiB memory documents in one page, asserts exact bytes,
+and exercises 75% of the 16 MiB native payload limit.
 
-- timeline/facet and canonical FTS packs are recorded separately;
-- delegation/workflow queries are recorded separately;
-- large-corpus latency, boundary-size, and concurrent-ingest benchmarks;
-- shared IPC/domain DTO generation beyond the current N-API shadow seam;
-- production client migration and retirement of TypeScript SQLite query
-  ownership in Phase 10.
-
-Until those gates pass, the legacy TypeScript query service remains the
-production read owner and the Rust observation database remains isolated.
+This remains a shadow query surface until Phase 10. Shared IPC/domain DTOs
+and topology benchmarks, operational scale-50/private-corpus soak evidence,
+production client migration, and TypeScript SQLite retirement remain. Until
+that cutover, the legacy service remains the production read owner and the
+Rust observation database remains isolated.

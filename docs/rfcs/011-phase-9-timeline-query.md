@@ -123,15 +123,15 @@ The Claude shadow fixture exercises timeline search, delegated metadata,
 facets, paging, cursor misuse, payload bounds, and pre-aborted cancellation
 end to end through generated N-API declarations and the SDK facade.
 
-## Remaining Phase 9 work
+## Remaining cutover work
 
-The remaining gates include:
+Delegation/workflow queries are recorded in their separate pack. The
+consolidated N-API gate measures timeline, facets, total, payload conversion,
+ten readers, and concurrent refresh on the scaled history corpus; see the
+[Phase 9 query gate](./011-phase-9-query-conformance-benchmark.md).
 
-- delegation/workflow queries are recorded in their separate Phase 9 slice;
-- large-corpus timeline latency and concurrent-ingest benchmarks;
-- shared IPC/domain DTO generation beyond the current N-API shadow seam;
-- production client migration and retirement of TypeScript SQLite query
-  ownership in Phase 10.
-
-Until those gates pass, the legacy TypeScript timeline remains the production
-surface and the Rust observation database remains isolated.
+This remains a shadow query surface until Phase 10. Shared IPC/domain DTOs
+and topology benchmarks, operational scale-50/private-corpus soak evidence,
+production client migration, and TypeScript SQLite retirement remain. Until
+that cutover, the legacy TypeScript timeline remains the production surface
+and the Rust observation database remains isolated.

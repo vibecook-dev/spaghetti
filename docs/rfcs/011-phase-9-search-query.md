@@ -96,16 +96,15 @@ exact total with the committed TypeScript compatibility oracle, walks a
 multi-page shared search, rejects cross-scope cursors, and exercises both
 invalid input and a pre-aborted signal.
 
-## Remaining Phase 9 work
+## Remaining cutover work
 
-The remaining gates include:
+Timeline and orchestration are recorded in their separate query packs. The
+consolidated N-API gate measures a 325-hit parent-plus-delegated search on
+11,394 messages, rapid cancellation, ten readers, and concurrent refresh;
+see the [Phase 9 query gate](./011-phase-9-query-conformance-benchmark.md).
 
-- timeline/branch/facet queries are recorded in their separate Phase 9 slice;
-- dedicated delegation/workflow queries are recorded separately;
-- large-corpus search latency and concurrent-ingest benchmarks;
-- shared IPC/domain DTO generation beyond the current N-API shadow seam;
-- production client migration and retirement of TypeScript SQLite query
-  ownership in Phase 10.
-
-Until those gates pass, the legacy TypeScript search remains the production
-surface and the Rust observation database remains isolated.
+This remains a shadow query surface until Phase 10. Shared IPC/domain DTOs
+and topology benchmarks, operational scale-50/private-corpus soak evidence,
+production client migration, and TypeScript SQLite retirement remain. Until
+that cutover, legacy TypeScript search remains the production surface and the
+Rust observation database remains isolated.

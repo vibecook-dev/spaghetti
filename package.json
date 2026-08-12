@@ -25,7 +25,8 @@
     "build": "pnpm -r build",
     "clean": "pnpm -r clean",
     "prepare": "node scripts/setup-git-hooks.mjs",
-    "typecheck": "pnpm -r typecheck",
+    "typecheck": "pnpm -r typecheck && pnpm typecheck:scripts",
+    "typecheck:scripts": "pnpm --dir packages/sdk exec tsc --noEmit --module NodeNext --moduleResolution NodeNext --target ES2022 --types node --skipLibCheck ../../scripts/bench-queries.ts",
     "validate": "bash scripts/validate-all.sh",
     "coverage:scan": "python3 scripts/coverage/run_scan.py all",
     "coverage:validate": "python3 scripts/coverage/validate_claim.py all",
@@ -36,11 +37,13 @@
     "test:ingest-diff:medium": "tsx scripts/ingest-diff.ts --fixture crates/spaghetti-napi/fixtures/medium/.claude",
     "test:ingest-diff:grok": "tsx scripts/ingest-diff.ts --source=grok",
     "test:ingest-diff:codex": "tsx scripts/ingest-diff.ts --source=codex",
+    "test:query-conformance": "node --import tsx scripts/bench-queries.ts --mode conformance",
     "bench:ingest": "tsx scripts/bench-ingest.ts",
+    "bench:queries": "node --import tsx scripts/bench-queries.ts",
     "test": "pnpm typecheck && pnpm validate && pnpm test:packages",
-    "lint": "eslint \"packages/*/src/**/*.{ts,tsx}\" \"apps/*/src/**/*.{ts,tsx}\"",
-    "format:check": "prettier --check \"packages/*/src/**/*.{ts,tsx}\" \"apps/*/src/**/*.{ts,tsx}\"",
-    "format": "prettier --write \"packages/*/src/**/*.{ts,tsx}\" \"apps/*/src/**/*.{ts,tsx}\""
+    "lint": "eslint \"packages/*/src/**/*.{ts,tsx}\" \"apps/*/src/**/*.{ts,tsx}\" \"scripts/bench-queries.ts\"",
+    "format:check": "prettier --check \"packages/*/src/**/*.{ts,tsx}\" \"apps/*/src/**/*.{ts,tsx}\" \"scripts/bench-queries.ts\"",
+    "format": "prettier --write \"packages/*/src/**/*.{ts,tsx}\" \"apps/*/src/**/*.{ts,tsx}\" \"scripts/bench-queries.ts\""
   },
   "engines": {
     "node": ">=22.13.0"

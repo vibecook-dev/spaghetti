@@ -142,13 +142,14 @@ pre-aborted workflow request.
 ## Remaining Phase 9 and cutover work
 
 Every named production-query category in the Phase 9 port list now has a Rust
-shadow implementation. The remaining exit/cutover work is:
+shadow implementation. The consolidated N-API conformance, scaled-history,
+payload-boundary, cancellation, and concurrent-refresh evidence is recorded
+in the [Phase 9 query gate](./011-phase-9-query-conformance-benchmark.md).
 
-- large-corpus latency, payload-boundary, and concurrent-ingest benchmarks;
-- a consolidated query-conformance run across the complete Rust surface;
-- shared IPC/domain DTO generation beyond the current N-API shadow seam;
-- Phase 10 production-client migration and retirement of TypeScript SQLite
-  query ownership.
+The remaining work is shared IPC/domain DTO generation, benchmarking the
+selected IPC topology, operational scale-50/private-corpus soak evidence, and
+Phase 10 production-client migration plus retirement of TypeScript SQLite
+query ownership.
 
 Until those gates pass, the legacy TypeScript query service remains the
 production read owner and the Rust observation database remains isolated.

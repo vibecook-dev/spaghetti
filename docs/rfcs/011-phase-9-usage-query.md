@@ -147,17 +147,16 @@ temporary TypeScript schema authorities. Schema version 31 does not change
 because same-version initialization reruns all `CREATE INDEX IF NOT EXISTS`
 statements.
 
-## Remaining Phase 9 work
+## Remaining cutover work
 
-This is a shadow query surface, not production `SpaghettiClient` cutover. The
-remaining gates include:
+The other query packs and consolidated N-API conformance and benchmark
+evidence are recorded in the
+[Phase 9 query gate](./011-phase-9-query-conformance-benchmark.md). Its scaled
+baseline identifies usage activity as the clearest query-optimization lead.
 
-- timeline/facet and canonical FTS packs are recorded separately;
-- delegation/workflow and capability-detail packs are recorded separately;
-- large-corpus latency, boundary-size, and concurrent-ingest benchmarks;
-- IPC/domain DTO sharing beyond the current N-API shadow seam;
-- production client migration and retirement of TypeScript SQLite query
-  ownership in Phase 10.
-
-Until those gates pass, the legacy TypeScript query service remains the
-production read owner and the Rust observation database remains isolated.
+This remains a shadow query surface until Phase 10. Remaining work includes
+profiling that usage path, shared IPC/domain DTOs and topology benchmarks,
+operational scale-50 and private-corpus soak evidence, production client
+migration, and retirement of TypeScript SQLite query ownership. Until that
+cutover, the legacy service remains the production read owner and the Rust
+observation database remains isolated.
