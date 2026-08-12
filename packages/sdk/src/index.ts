@@ -56,6 +56,9 @@ export {
 // API
 export * from './api.js';
 
+// RFC 011 asynchronous canonical client + transport contract
+export * from './client/index.js';
+
 // Factory
 export { createSpaghettiService, type SpaghettiServiceOptions } from './create.js';
 export { createSpaghettiAppService } from './app-service.js';
