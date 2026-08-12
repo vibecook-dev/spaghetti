@@ -30,7 +30,7 @@ pub use owner_lock::OwnerMetadata;
 pub use query_pool::{
     ChangeCursor, ChangeReplay, ChangeReplayRequest, DurableChange, QueryOverview,
 };
-use query_pool::{QueryClient, QueryPool};
+use query_pool::{QueryClient, QueryPool, SourceCatalogSnapshot};
 use writer::{WriterClient, WriterRuntime};
 
 const DEFAULT_QUERY_WORKERS: usize = 2;
@@ -332,6 +332,18 @@ impl SpaghettiEngineCore {
     ) -> Result<ChangeReplay, EngineError> {
         let (_, queries) = self.clients()?;
         queries.replay_changes(request)
+    }
+
+    /// Hydrate one adapter instance's durable common-source state through the
+    /// bounded read-only lane. The observation coordinator uses this to resume
+    /// common drivers; it is intentionally not part of the public query API.
+    pub(crate) fn source_catalog(
+        &self,
+        adapter_id: &str,
+        stable_key: &[u8],
+    ) -> Result<SourceCatalogSnapshot, EngineError> {
+        let (_, queries) = self.clients()?;
+        queries.source_catalog(adapter_id, stable_key)
     }
 
     pub fn cancel_pending_queries(&self) -> Result<u64, EngineError> {

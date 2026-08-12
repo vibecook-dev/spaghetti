@@ -92,7 +92,9 @@ import type { SqliteService } from '../io/index.js';
 // correlation, and explicit join/conflict state.
 // v30: redacted interpretation-settings assertions, document health, and
 // native global/local effective-setting reduction.
-export const SCHEMA_VERSION = 30;
+// v31: separately versioned common-driver checkpoints for restart-safe source
+// resume without conflating driver state with adapter decoder state.
+export const SCHEMA_VERSION = 31;
 
 export const TOKEN_ACTIVITY_TRIGGER_NAMES = [
   'token_activity_messages_ai',
@@ -524,6 +526,8 @@ CREATE TABLE IF NOT EXISTS source_objects (
   committed_cursor BLOB NOT NULL,
   observed_revision BLOB,
   adapter_object_context BLOB,
+  driver_checkpoint BLOB,
+  driver_checkpoint_version INTEGER,
   decoder_state BLOB,
   decoder_state_version INTEGER,
   size_bytes INTEGER,

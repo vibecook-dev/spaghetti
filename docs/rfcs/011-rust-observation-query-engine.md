@@ -8,7 +8,7 @@
 - **Type:** Architecture / migration / adapter contract / public API
 - **Scope:** Rust ingest, live source observation, sole SQLite ownership, runtime-state projection, search and query, token usage, source adapters, durable subscriptions
 - **Numbering note:** `packages/sdk/src/io/sqlite-service.ts` already identifies the `better-sqlite3` → `node:sqlite` migration as RFC 010. This architecture therefore uses RFC 011.
-- **Phase records:** [Phase 0 baseline](./011-phase-0-baseline.md) · [Phase 1 engine shell](./011-phase-1-engine-shell.md) · [Phase 2 transactional catalog](./011-phase-2-transactional-catalog.md) · [Phase 4 Claude history/usage](./011-phase-4-claude-history-usage.md) · [Phase 5 delegation pack](./011-phase-5-delegation-pack.md) · [Phase 5 teams/inbox pack](./011-phase-5-teams-inbox-pack.md) · [Phase 5 presence pack](./011-phase-5-presence-pack.md) · [Phase 5 tasks/plans pack](./011-phase-5-tasks-plans-pack.md) · [Phase 5 artifacts pack](./011-phase-5-artifacts-pack.md) · [Phase 5 workflows pack](./011-phase-5-workflows-pack.md) · [Phase 5 session-index pack](./011-phase-5-session-index-pack.md) · [Phase 5 project-memory pack](./011-phase-5-project-memory-pack.md) · [Phase 5 persisted tool-results pack](./011-phase-5-tool-results-pack.md) · [Phase 5 interpretation-settings pack](./011-phase-5-settings-pack.md)
+- **Phase records:** [Phase 0 baseline](./011-phase-0-baseline.md) · [Phase 1 engine shell](./011-phase-1-engine-shell.md) · [Phase 2 transactional catalog](./011-phase-2-transactional-catalog.md) · [Phase 4 Claude history/usage](./011-phase-4-claude-history-usage.md) · [Phase 5 delegation pack](./011-phase-5-delegation-pack.md) · [Phase 5 teams/inbox pack](./011-phase-5-teams-inbox-pack.md) · [Phase 5 presence pack](./011-phase-5-presence-pack.md) · [Phase 5 tasks/plans pack](./011-phase-5-tasks-plans-pack.md) · [Phase 5 artifacts pack](./011-phase-5-artifacts-pack.md) · [Phase 5 workflows pack](./011-phase-5-workflows-pack.md) · [Phase 5 session-index pack](./011-phase-5-session-index-pack.md) · [Phase 5 project-memory pack](./011-phase-5-project-memory-pack.md) · [Phase 5 persisted tool-results pack](./011-phase-5-tool-results-pack.md) · [Phase 5 interpretation-settings pack](./011-phase-5-settings-pack.md) · [Phase 5 coordinator foundation](./011-phase-5-coordinator-foundation.md)
 - **Related documents:**
   - `docs/TWO-PLANE-INGEST-ARCHITECTURE.md`
   - `docs/rfcs/003-rust-ingest-core.md`
@@ -1683,6 +1683,8 @@ CREATE TABLE source_objects (
     committed_cursor BLOB NOT NULL,
     observed_revision BLOB,
     adapter_object_context BLOB,
+    driver_checkpoint BLOB,
+    driver_checkpoint_version INTEGER,
     decoder_state BLOB,
     decoder_state_version INTEGER,
     size_bytes INTEGER,
@@ -1694,7 +1696,7 @@ CREATE TABLE source_objects (
 );
 ```
 
-`object_key`, `native_identity`, and `committed_cursor` are BLOB-capable because paths and source cursors are not universally UTF-8 strings or integers.
+`object_key`, `native_identity`, and `committed_cursor` are BLOB-capable because paths and source cursors are not universally UTF-8 strings or integers. The separately versioned `driver_checkpoint` belongs to the common source driver; `decoder_state` belongs to the adapter. They advance atomically but are never multiplexed into one opaque blob.
 
 ### 19.2 Commit and outbox
 

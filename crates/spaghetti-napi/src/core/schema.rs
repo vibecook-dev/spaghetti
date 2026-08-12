@@ -74,7 +74,9 @@ use thiserror::Error;
 /// correlation, and explicit join/conflict state.
 /// v30: redacted interpretation-settings assertions, document health, and
 /// native global/local effective-setting reduction.
-pub const SCHEMA_VERSION: u32 = 30;
+/// v31: separately versioned common-driver checkpoints for restart-safe source
+/// resume without conflating driver state with adapter decoder state.
+pub const SCHEMA_VERSION: u32 = 31;
 
 /// Full DDL for the current schema — lifted verbatim from the TS `SCHEMA_SQL`
 /// template literal. Whitespace differs; structure does not.
@@ -349,6 +351,8 @@ CREATE TABLE IF NOT EXISTS source_objects (
   committed_cursor BLOB NOT NULL,
   observed_revision BLOB,
   adapter_object_context BLOB,
+  driver_checkpoint BLOB,
+  driver_checkpoint_version INTEGER,
   decoder_state BLOB,
   decoder_state_version INTEGER,
   size_bytes INTEGER,
@@ -2158,6 +2162,16 @@ mod tests {
         assert!(object_exists(&conn, "table", "source_instances"));
         assert!(object_exists(&conn, "table", "source_streams"));
         assert!(object_exists(&conn, "table", "source_objects"));
+        for column in ["driver_checkpoint", "driver_checkpoint_version"] {
+            let present: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM pragma_table_info('source_objects') WHERE name = ?1",
+                    [column],
+                    |row| row.get(0),
+                )
+                .expect("inspect source object schema");
+            assert_eq!(present, 1, "missing source_objects.{column}");
+        }
         assert!(object_exists(&conn, "table", "ingest_commits"));
         assert!(object_exists(&conn, "table", "projection_versions"));
         assert!(object_exists(&conn, "table", "source_record_errors"));

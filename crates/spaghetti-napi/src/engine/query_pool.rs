@@ -27,6 +27,51 @@ pub struct QueryOverview {
     pub read_only: bool,
 }
 
+/// Snapshot-consistent durable source state used by the common observation
+/// coordinator to resume drivers after restart. This is not a public semantic
+/// query: it exposes only common catalog state inside the Rust engine.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceCatalogSnapshot {
+    pub source_instance_id: Option<u64>,
+    pub adapter_contract_version: Option<u32>,
+    pub streams: Vec<SourceCatalogStream>,
+    pub objects: Vec<SourceCatalogObject>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceCatalogStream {
+    pub source_stream_id: u64,
+    pub stream_key: String,
+    pub driver_kind: String,
+    pub decoder_key: String,
+    pub stream_state: String,
+    pub last_reconciled_at: Option<i64>,
+    pub last_commit_seq: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceCatalogObject {
+    pub source_stream_id: u64,
+    pub source_object_id: u64,
+    pub stream_key: String,
+    pub object_key: Vec<u8>,
+    pub display_path: Option<String>,
+    pub native_identity: Option<Vec<u8>>,
+    pub generation: u64,
+    pub committed_cursor: Vec<u8>,
+    pub observed_revision: Option<Vec<u8>>,
+    pub adapter_object_context: Option<Vec<u8>>,
+    pub driver_checkpoint: Option<Vec<u8>>,
+    pub driver_checkpoint_version: Option<u32>,
+    pub decoder_state: Option<Vec<u8>>,
+    pub decoder_state_version: Option<u32>,
+    pub size_bytes: Option<u64>,
+    pub mtime_ns: Option<i64>,
+    pub decoder_contract_version: u32,
+    pub last_commit_seq: Option<u64>,
+    pub state: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ChangeCursor {
     pub commit_seq: u64,
@@ -80,6 +125,12 @@ enum QueryCommand {
         cancellation_epoch: u64,
         request: ChangeReplayRequest,
         response: Sender<Result<ChangeReplay, EngineError>>,
+    },
+    SourceCatalog {
+        cancellation_epoch: u64,
+        adapter_id: String,
+        stable_key: Vec<u8>,
+        response: Sender<Result<SourceCatalogSnapshot, EngineError>>,
     },
     #[cfg(test)]
     Hold {
@@ -169,6 +220,40 @@ impl QueryClient {
         match self.commands.try_send(QueryCommand::ReplayChanges {
             cancellation_epoch,
             request,
+            response: response_tx,
+        }) {
+            Ok(()) => {}
+            Err(TrySendError::Full(_)) => return Err(EngineError::QueryQueueFull),
+            Err(TrySendError::Disconnected(_)) => {
+                return Err(EngineError::WorkerUnavailable { worker: "query" });
+            }
+        }
+
+        response_rx
+            .recv()
+            .map_err(|_| EngineError::WorkerUnavailable { worker: "query" })?
+    }
+
+    pub fn source_catalog(
+        &self,
+        adapter_id: &str,
+        stable_key: &[u8],
+    ) -> Result<SourceCatalogSnapshot, EngineError> {
+        if adapter_id.trim().is_empty() || stable_key.is_empty() {
+            return Err(EngineError::InvalidQuery(
+                "source catalog requires a non-empty adapter id and stable key".to_string(),
+            ));
+        }
+        if self.control.stopping.load(Ordering::Acquire) {
+            return Err(EngineError::ShuttingDown);
+        }
+
+        let cancellation_epoch = self.control.cancellation_epoch.load(Ordering::Acquire);
+        let (response_tx, response_rx) = bounded(1);
+        match self.commands.try_send(QueryCommand::SourceCatalog {
+            cancellation_epoch,
+            adapter_id: adapter_id.to_string(),
+            stable_key: stable_key.to_vec(),
             response: response_tx,
         }) {
             Ok(()) => {}
@@ -394,6 +479,28 @@ fn query_thread(
                 });
                 let _ = response.send(result);
             }
+            QueryCommand::SourceCatalog {
+                cancellation_epoch,
+                adapter_id,
+                stable_key,
+                response,
+            } => {
+                if is_cancelled(&control, cancellation_epoch) {
+                    let _ = response.send(Err(EngineError::QueryCancelled));
+                    continue;
+                }
+                let _in_flight = InFlightGuard::enter(&control.in_flight);
+                let result = read_source_catalog(&connection, &adapter_id, &stable_key).and_then(
+                    |catalog| {
+                        if is_cancelled(&control, cancellation_epoch) {
+                            Err(EngineError::QueryCancelled)
+                        } else {
+                            Ok(catalog)
+                        }
+                    },
+                );
+                let _ = response.send(result);
+            }
             #[cfg(test)]
             QueryCommand::Hold { entered, release } => {
                 let _in_flight = InFlightGuard::enter(&control.in_flight);
@@ -479,6 +586,214 @@ fn read_overview(connection: &Connection) -> Result<QueryOverview, EngineError> 
         .commit()
         .map_err(|error| query_sqlite_error("finish overview snapshot", error))?;
     Ok(overview)
+}
+
+fn read_source_catalog(
+    connection: &Connection,
+    adapter_id: &str,
+    stable_key: &[u8],
+) -> Result<SourceCatalogSnapshot, EngineError> {
+    let transaction = connection
+        .unchecked_transaction()
+        .map_err(|error| query_sqlite_error("begin source catalog snapshot", error))?;
+    let instance = transaction
+        .query_row(
+            r#"
+            SELECT source_instance_id, adapter_contract_version
+            FROM source_instances
+            WHERE adapter_id = ?1 AND stable_key = ?2
+            "#,
+            rusqlite::params![adapter_id, stable_key],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+        )
+        .optional()
+        .map_err(|error| query_sqlite_error("read source catalog instance", error))?;
+
+    let Some((source_instance_id, adapter_contract_version)) = instance else {
+        transaction
+            .commit()
+            .map_err(|error| query_sqlite_error("finish empty source catalog snapshot", error))?;
+        return Ok(SourceCatalogSnapshot {
+            source_instance_id: None,
+            adapter_contract_version: None,
+            streams: Vec::new(),
+            objects: Vec::new(),
+        });
+    };
+    let source_instance_id = decode_nonnegative_u64(source_instance_id, "source instance id")?;
+    let adapter_contract_version =
+        decode_nonnegative_u32(adapter_contract_version, "adapter contract version")?;
+
+    let streams = {
+        let mut statement = transaction
+            .prepare(
+                r#"
+                SELECT source_stream_id, stream_key, driver_kind, decoder_key,
+                       stream_state, last_reconciled_at, last_commit_seq
+                FROM source_streams
+                WHERE source_instance_id = ?1
+                ORDER BY stream_key
+                "#,
+            )
+            .map_err(|error| query_sqlite_error("prepare source catalog streams", error))?;
+        let rows = statement
+            .query_map(
+                [to_query_i64(source_instance_id, "source instance id")?],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, Option<i64>>(5)?,
+                        row.get::<_, Option<i64>>(6)?,
+                    ))
+                },
+            )
+            .map_err(|error| query_sqlite_error("read source catalog streams", error))?;
+        let mut streams = Vec::new();
+        for row in rows {
+            let (id, stream_key, driver_kind, decoder_key, stream_state, reconciled, commit) =
+                row.map_err(|error| query_sqlite_error("decode source catalog stream", error))?;
+            streams.push(SourceCatalogStream {
+                source_stream_id: decode_nonnegative_u64(id, "source stream id")?,
+                stream_key,
+                driver_kind,
+                decoder_key,
+                stream_state,
+                last_reconciled_at: reconciled,
+                last_commit_seq: decode_optional_u64(commit, "source stream commit sequence")?,
+            });
+        }
+        streams
+    };
+
+    let objects = {
+        let mut statement = transaction
+            .prepare(
+                r#"
+                SELECT so.source_stream_id, so.source_object_id, ss.stream_key,
+                       so.object_key, so.display_path, so.native_identity,
+                       so.generation, so.committed_cursor, so.observed_revision,
+                       so.adapter_object_context, so.driver_checkpoint,
+                       so.driver_checkpoint_version, so.decoder_state,
+                       so.decoder_state_version, so.size_bytes, so.mtime_ns,
+                       so.decoder_contract_version, so.last_commit_seq, so.state
+                FROM source_objects so
+                JOIN source_streams ss ON ss.source_stream_id = so.source_stream_id
+                WHERE ss.source_instance_id = ?1
+                ORDER BY ss.stream_key, so.object_key
+                "#,
+            )
+            .map_err(|error| query_sqlite_error("prepare source catalog objects", error))?;
+        let mut rows = statement
+            .query([to_query_i64(source_instance_id, "source instance id")?])
+            .map_err(|error| query_sqlite_error("read source catalog objects", error))?;
+        let mut objects = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .map_err(|error| query_sqlite_error("advance source catalog objects", error))?
+        {
+            let driver_checkpoint = row
+                .get::<_, Option<Vec<u8>>>(10)
+                .map_err(|error| query_sqlite_error("decode driver checkpoint", error))?;
+            let driver_checkpoint_version = decode_optional_u32(
+                row.get::<_, Option<i64>>(11).map_err(|error| {
+                    query_sqlite_error("decode driver checkpoint version", error)
+                })?,
+                "driver checkpoint version",
+            )?;
+            if driver_checkpoint.is_some() != driver_checkpoint_version.is_some() {
+                return Err(EngineError::Sqlite {
+                    operation: "validate source catalog driver checkpoint",
+                    detail: "driver checkpoint and version presence disagree".to_string(),
+                });
+            }
+            objects.push(SourceCatalogObject {
+                source_stream_id: decode_nonnegative_u64(
+                    row.get(0)
+                        .map_err(|error| query_sqlite_error("decode source stream id", error))?,
+                    "source stream id",
+                )?,
+                source_object_id: decode_nonnegative_u64(
+                    row.get(1)
+                        .map_err(|error| query_sqlite_error("decode source object id", error))?,
+                    "source object id",
+                )?,
+                stream_key: row
+                    .get(2)
+                    .map_err(|error| query_sqlite_error("decode source stream key", error))?,
+                object_key: row
+                    .get(3)
+                    .map_err(|error| query_sqlite_error("decode source object key", error))?,
+                display_path: row
+                    .get(4)
+                    .map_err(|error| query_sqlite_error("decode source display path", error))?,
+                native_identity: row
+                    .get(5)
+                    .map_err(|error| query_sqlite_error("decode native identity", error))?,
+                generation: decode_nonnegative_u64(
+                    row.get(6)
+                        .map_err(|error| query_sqlite_error("decode source generation", error))?,
+                    "source generation",
+                )?,
+                committed_cursor: row
+                    .get(7)
+                    .map_err(|error| query_sqlite_error("decode committed cursor", error))?,
+                observed_revision: row
+                    .get(8)
+                    .map_err(|error| query_sqlite_error("decode observed revision", error))?,
+                adapter_object_context: row
+                    .get(9)
+                    .map_err(|error| query_sqlite_error("decode adapter object context", error))?,
+                driver_checkpoint,
+                driver_checkpoint_version,
+                decoder_state: row
+                    .get(12)
+                    .map_err(|error| query_sqlite_error("decode adapter state", error))?,
+                decoder_state_version: decode_optional_u32(
+                    row.get(13).map_err(|error| {
+                        query_sqlite_error("decode adapter state version", error)
+                    })?,
+                    "adapter state version",
+                )?,
+                size_bytes: decode_optional_u64(
+                    row.get(14)
+                        .map_err(|error| query_sqlite_error("decode source size", error))?,
+                    "source size",
+                )?,
+                mtime_ns: row
+                    .get(15)
+                    .map_err(|error| query_sqlite_error("decode source mtime", error))?,
+                decoder_contract_version: decode_nonnegative_u32(
+                    row.get(16).map_err(|error| {
+                        query_sqlite_error("decode decoder contract version", error)
+                    })?,
+                    "decoder contract version",
+                )?,
+                last_commit_seq: decode_optional_u64(
+                    row.get(17)
+                        .map_err(|error| query_sqlite_error("decode source commit", error))?,
+                    "source commit sequence",
+                )?,
+                state: row
+                    .get(18)
+                    .map_err(|error| query_sqlite_error("decode source state", error))?,
+            });
+        }
+        objects
+    };
+
+    transaction
+        .commit()
+        .map_err(|error| query_sqlite_error("finish source catalog snapshot", error))?;
+    Ok(SourceCatalogSnapshot {
+        source_instance_id: Some(source_instance_id),
+        adapter_contract_version: Some(adapter_contract_version),
+        streams,
+        objects,
+    })
 }
 
 fn count_table(connection: &Connection, table: &'static str) -> Result<u32, EngineError> {
@@ -692,6 +1007,38 @@ fn decode_cursor(commit_seq: i64, ordinal: i64) -> Result<ChangeCursor, EngineEr
     })
 }
 
+fn decode_nonnegative_u64(value: i64, field: &'static str) -> Result<u64, EngineError> {
+    u64::try_from(value).map_err(|_| EngineError::Sqlite {
+        operation: "decode source catalog integer",
+        detail: format!("{field} was negative: {value}"),
+    })
+}
+
+fn decode_nonnegative_u32(value: i64, field: &'static str) -> Result<u32, EngineError> {
+    u32::try_from(value).map_err(|_| EngineError::Sqlite {
+        operation: "decode source catalog integer",
+        detail: format!("{field} was outside u32: {value}"),
+    })
+}
+
+fn decode_optional_u64(
+    value: Option<i64>,
+    field: &'static str,
+) -> Result<Option<u64>, EngineError> {
+    value
+        .map(|value| decode_nonnegative_u64(value, field))
+        .transpose()
+}
+
+fn decode_optional_u32(
+    value: Option<i64>,
+    field: &'static str,
+) -> Result<Option<u32>, EngineError> {
+    value
+        .map(|value| decode_nonnegative_u32(value, field))
+        .transpose()
+}
+
 fn to_query_i64(value: u64, field: &'static str) -> Result<i64, EngineError> {
     i64::try_from(value)
         .map_err(|_| EngineError::InvalidQuery(format!("{field} exceeds SQLite integer range")))
@@ -741,6 +1088,8 @@ mod tests {
                 committed_cursor: b"cursor".to_vec(),
                 observed_revision: None,
                 adapter_object_context: None,
+                driver_checkpoint: None,
+                driver_checkpoint_version: None,
                 decoder_state: None,
                 decoder_state_version: None,
                 size_bytes: None,
@@ -965,5 +1314,61 @@ mod tests {
 
         restarted_queries.shutdown().unwrap();
         restarted_writer.shutdown().unwrap();
+    }
+
+    #[test]
+    fn catalog_snapshot_hydrates_driver_and_decoder_state_after_restart() {
+        let dir = tempdir().unwrap();
+        let database = dir.path().join("catalog-restart.db");
+        let mut writer = WriterRuntime::start(database.clone()).unwrap();
+        let mut request = commit_request();
+        request.object.driver_checkpoint = Some(b"driver-v1".to_vec());
+        request.object.driver_checkpoint_version = Some(1);
+        request.object.decoder_state = Some(b"adapter-v7".to_vec());
+        request.object.decoder_state_version = Some(7);
+        let receipt = writer.client().commit_observation(request).unwrap();
+        writer.shutdown().unwrap();
+
+        let mut restarted_queries = QueryPool::start(database, 1).unwrap();
+        let missing = restarted_queries
+            .client()
+            .source_catalog("query-fixture", b"missing")
+            .unwrap();
+        assert_eq!(missing.source_instance_id, None);
+        assert!(missing.streams.is_empty() && missing.objects.is_empty());
+
+        let catalog = restarted_queries
+            .client()
+            .source_catalog("query-fixture", b"root")
+            .unwrap();
+        assert_eq!(catalog.source_instance_id, Some(receipt.source_instance_id));
+        assert_eq!(catalog.adapter_contract_version, Some(1));
+        assert_eq!(catalog.streams.len(), 1);
+        assert_eq!(
+            catalog.streams[0].source_stream_id,
+            receipt.source_stream_id
+        );
+        assert_eq!(catalog.objects.len(), 1);
+        let object = &catalog.objects[0];
+        assert_eq!(object.source_object_id, receipt.source_object_id);
+        assert_eq!(object.committed_cursor, b"cursor");
+        assert_eq!(
+            object.driver_checkpoint.as_deref(),
+            Some(b"driver-v1".as_slice())
+        );
+        assert_eq!(object.driver_checkpoint_version, Some(1));
+        assert_eq!(
+            object.decoder_state.as_deref(),
+            Some(b"adapter-v7".as_slice())
+        );
+        assert_eq!(object.decoder_state_version, Some(7));
+        assert_eq!(object.last_commit_seq, Some(receipt.commit_seq));
+        assert_eq!(object.state, "active");
+
+        assert!(matches!(
+            restarted_queries.client().source_catalog("", b"root"),
+            Err(EngineError::InvalidQuery(_))
+        ));
+        restarted_queries.shutdown().unwrap();
     }
 }

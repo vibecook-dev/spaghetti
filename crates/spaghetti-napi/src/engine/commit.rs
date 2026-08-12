@@ -9,6 +9,8 @@ use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBe
 
 use super::EngineError;
 
+const MAX_DRIVER_CHECKPOINT_BYTES: usize = 64 * 1024 * 1024;
+
 /// Stable schema version for a change payload. This is independent from the
 /// SQLite schema version and is supplied by the projector that owns a topic.
 pub type ChangeSchemaVersion = u32;
@@ -54,6 +56,8 @@ pub struct SourceObjectUpdate {
     pub committed_cursor: Vec<u8>,
     pub observed_revision: Option<Vec<u8>>,
     pub adapter_object_context: Option<Vec<u8>>,
+    pub driver_checkpoint: Option<Vec<u8>>,
+    pub driver_checkpoint_version: Option<u32>,
     pub decoder_state: Option<Vec<u8>>,
     pub decoder_state_version: Option<u32>,
     pub size_bytes: Option<u64>,
@@ -379,6 +383,30 @@ fn validate_commit(request: &ObservationCommit) -> Result<(), EngineError> {
     if let Some(size) = request.object.size_bytes {
         to_i64(size, "source object size")?;
     }
+    match (
+        request.object.driver_checkpoint.as_deref(),
+        request.object.driver_checkpoint_version,
+    ) {
+        (Some(checkpoint), Some(version)) => {
+            require_bytes("object.driver_checkpoint", checkpoint)?;
+            if checkpoint.len() > MAX_DRIVER_CHECKPOINT_BYTES {
+                return Err(EngineError::InvalidCommit(format!(
+                    "driver checkpoint exceeds {MAX_DRIVER_CHECKPOINT_BYTES} bytes"
+                )));
+            }
+            if version == 0 {
+                return Err(EngineError::InvalidCommit(
+                    "driver checkpoint version must be greater than zero".to_string(),
+                ));
+            }
+        }
+        (None, None) => {}
+        _ => {
+            return Err(EngineError::InvalidCommit(
+                "driver checkpoint and version must be present together".to_string(),
+            ));
+        }
+    }
     if request.committed_at < request.started_at {
         return Err(EngineError::InvalidCommit(
             "committed_at must not precede started_at".to_string(),
@@ -661,11 +689,12 @@ fn finalize_source_object(
             UPDATE source_objects SET
                 display_path = ?1, native_identity = ?2, generation = ?3,
                 committed_cursor = ?4, observed_revision = ?5,
-                adapter_object_context = ?6, decoder_state = ?7,
-                decoder_state_version = ?8, size_bytes = ?9, mtime_ns = ?10,
-                decoder_contract_version = ?11, last_commit_seq = ?12,
-                state = ?13
-            WHERE source_object_id = ?14
+                adapter_object_context = ?6, driver_checkpoint = ?7,
+                driver_checkpoint_version = ?8, decoder_state = ?9,
+                decoder_state_version = ?10, size_bytes = ?11, mtime_ns = ?12,
+                decoder_contract_version = ?13, last_commit_seq = ?14,
+                state = ?15
+            WHERE source_object_id = ?16
             "#,
             params![
                 object.display_path,
@@ -674,6 +703,8 @@ fn finalize_source_object(
                 object.committed_cursor,
                 object.observed_revision,
                 object.adapter_object_context,
+                object.driver_checkpoint,
+                object.driver_checkpoint_version.map(i64::from),
                 object.decoder_state,
                 object.decoder_state_version.map(i64::from),
                 size_bytes,
@@ -978,6 +1009,8 @@ mod tests {
                 committed_cursor: b"byte:128".to_vec(),
                 observed_revision: Some(b"rev:1".to_vec()),
                 adapter_object_context: Some(b"context".to_vec()),
+                driver_checkpoint: Some(b"append-checkpoint".to_vec()),
+                driver_checkpoint_version: Some(1),
                 decoder_state: Some(b"decoder".to_vec()),
                 decoder_state_version: Some(2),
                 size_bytes: Some(128),
@@ -1104,6 +1137,21 @@ mod tests {
             )
             .unwrap();
         assert_eq!(cursor, (1, b"byte:128".to_vec(), 1));
+        let opaque_state: (Vec<u8>, i64, Vec<u8>, i64) = connection
+            .query_row(
+                r#"
+                SELECT driver_checkpoint, driver_checkpoint_version,
+                       decoder_state, decoder_state_version
+                FROM source_objects
+                "#,
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            opaque_state,
+            (b"append-checkpoint".to_vec(), 1, b"decoder".to_vec(), 2)
+        );
         let projection: (i64, String, i64) = connection
             .query_row(
                 "SELECT completed_version, readiness, last_commit_seq FROM projection_versions",
@@ -1141,6 +1189,28 @@ mod tests {
         assert_eq!(receipt.source_stream_id, 1);
         assert_eq!(receipt.source_object_id, 1);
         assert_eq!(count(&connection, "ingest_commits"), 2);
+    }
+
+    #[test]
+    fn driver_checkpoint_requires_a_nonzero_paired_version_before_writes() {
+        for (checkpoint, version) in [
+            (Some(b"checkpoint".to_vec()), None),
+            (None, Some(1)),
+            (Some(b"checkpoint".to_vec()), Some(0)),
+            (Some(vec![0; MAX_DRIVER_CHECKPOINT_BYTES + 1]), Some(1)),
+        ] {
+            let mut connection = database();
+            let mut invalid = request();
+            invalid.object.driver_checkpoint = checkpoint;
+            invalid.object.driver_checkpoint_version = version;
+            assert!(matches!(
+                apply_observation_commit(&mut connection, &invalid),
+                Err(EngineError::InvalidCommit(_))
+            ));
+            assert_eq!(count(&connection, "source_instances"), 0);
+            assert_eq!(count(&connection, "source_objects"), 0);
+            assert_eq!(count(&connection, "ingest_commits"), 0);
+        }
     }
 
     #[test]
