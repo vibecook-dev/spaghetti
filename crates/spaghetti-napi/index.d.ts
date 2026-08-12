@@ -35,6 +35,22 @@ export declare class SpaghettiEngine {
    */
   getUsageActivity(options: EngineUsageActivityOptions, signal?: AbortSignal | undefined | null): Promise<EngineUsageActivity>
   /**
+   * Return durable run-state and current registry-presence evidence. This
+   * intentionally does not probe PIDs or synthesize freshness assessments.
+   */
+  getRuntimeSnapshot(options?: EngineRuntimeSnapshotOptions | undefined | null, signal?: AbortSignal | undefined | null): Promise<EngineRuntimeSnapshot>
+  /** List current canonical teams, including inbox-only team identities. */
+  listTeams(options?: EngineTeamPageOptions | undefined | null, signal?: AbortSignal | undefined | null): Promise<EngineTeamPage>
+  /** Read one current team configuration and its bounded member snapshot. */
+  getTeam(teamId: string, signal?: AbortSignal | undefined | null): Promise<EngineTeamDetails>
+  /**
+   * Page inbox summaries without returning potentially sensitive message
+   * bodies in a directory listing.
+   */
+  listTeamInboxes(options: EngineTeamScopedPageOptions, signal?: AbortSignal | undefined | null): Promise<EngineTeamInboxPage>
+  /** Page one inbox's messages in native snapshot order. */
+  listTeamInboxMessages(options: EngineTeamInboxMessagePageOptions, signal?: AbortSignal | undefined | null): Promise<EngineTeamInboxMessagePage>
+  /**
    * Reconcile the adapter-declared Claude source map through the common
    * Rust drivers, decoders, projections, and durable cursor transaction.
    */
@@ -248,6 +264,106 @@ export interface EngineReconcileResult {
   lastCommitSeq?: number
 }
 
+export interface EngineRuntimeEntry {
+  kind: string
+  run?: EngineRuntimeRun
+  presence?: EngineRuntimePresence
+}
+
+export interface EngineRuntimePresence {
+  presenceId: string
+  sessionId: string
+  runId: string
+  projectId?: string
+  adapterId: string
+  sourceInstanceId: number
+  nativeSessionId: string
+  nativePid: number
+  cwd: string
+  startedAt: string
+  startedAtQuality: string
+  nativeKind?: string
+  entrypoint?: string
+  name?: string
+  nativeStatus?: string
+  updatedAt?: string
+  updatedAtQuality?: string
+  statusUpdatedAt?: string
+  statusUpdatedAtQuality?: string
+  nativeProcessStartedAt?: string
+  version?: string
+  peerProtocol?: number
+  nameSource?: string
+  bridgeSessionId?: string
+  messagingSocketPath?: string
+  presenceStatus: string
+  decisiveFactId: string
+  assertionCount: number
+  competingAssertionCount: number
+  observedAtUnixMs: number
+  sessionPresent: boolean
+  runPresent: boolean
+  lastCommitSeq: number
+}
+
+export interface EngineRuntimeRun {
+  runId: string
+  sessionId: string
+  projectId?: string
+  adapterId: string
+  sourceInstanceId: number
+  nativeRunId: string
+  parentRunId?: string
+  nativeSessionId?: string
+  nativeProjectKey?: string
+  sessionPresent: boolean
+  state?: string
+  decisiveEvidence?: EngineRuntimeRunEvidence
+  evidenceCount: number
+  lastActivityAt?: string
+  terminalAt?: string
+  presenceCount: number
+  conflictingPresenceCount: number
+  lastCommitSeq: number
+}
+
+export interface EngineRuntimeRunEvidence {
+  evidenceId: string
+  kind: string
+  strength: string
+  nativeState?: string
+  sourceTime?: string
+  sourceTimeQuality?: string
+  observedAtUnixMs: number
+  sourceObjectId: number
+  lastCommitSeq: number
+}
+
+export interface EngineRuntimeSnapshot {
+  contractVersion: number
+  atCommitSeq: number
+  projectId?: string
+  sessionId?: string
+  entries: Array<EngineRuntimeEntry>
+  nextCursor?: string
+}
+
+export interface EngineRuntimeSnapshotOptions {
+  /**
+   * Optional opaque project identity. When omitted, orphan presence/run
+   * evidence remains visible rather than being silently dropped.
+   */
+  projectId?: string
+  /**
+   * Optional opaque session identity. With `projectId`, membership is
+   * validated before querying.
+   */
+  sessionId?: string
+  cursor?: string
+  /** Page size. Defaults to 50 and is capped by the Rust query engine. */
+  limit?: number
+}
+
 export interface EngineStatus {
   state: string
   databasePath: string
@@ -258,6 +374,153 @@ export interface EngineStatus {
   inFlightQueries: number
   observation: EngineObservationStatus
   owner?: EngineOwnerMetadata
+}
+
+export interface EngineTeamConfig {
+  name: string
+  description?: string
+  createdAt: string
+  createdAtQuality: string
+  leadMemberId?: string
+  leadMemberPresent: boolean
+  nativeLeadAgentId: string
+  leadSessionId: string
+  leadSessionPresent: boolean
+  nativeLeadSessionId: string
+  configStatus: string
+  decisiveFactId: string
+  assertionCount: number
+  competingSnapshotCount: number
+  memberCount: number
+  lastCommitSeq: number
+}
+
+export interface EngineTeamDetails {
+  contractVersion: number
+  atCommitSeq: number
+  team: EngineTeamSummary
+  members: Array<EngineTeamMember>
+}
+
+export interface EngineTeamInbox {
+  inboxId: string
+  teamId: string
+  recipientId: string
+  recipientPresent: boolean
+  nativeTeamId: string
+  nativeRecipientName: string
+  inboxStatus: string
+  decisiveFactId: string
+  assertionCount: number
+  competingSnapshotCount: number
+  messageCount: number
+  unreadMessageCount: number
+  conflictingMessageCount: number
+  lastCommitSeq: number
+}
+
+export interface EngineTeamInboxMessage {
+  messageId: string
+  inboxId: string
+  senderId: string
+  senderPresent: boolean
+  messageOrdinal: number
+  nativeMessageId?: string
+  nativeKind?: string
+  nativeVersion?: number
+  nativeSenderName: string
+  text: string
+  summary?: string
+  color?: string
+  sourceTime: string
+  sourceTimeQuality: string
+  read: boolean
+  messageStatus: string
+  decisiveFactId: string
+  assertionCount: number
+  competingMessageCount: number
+  lastCommitSeq: number
+}
+
+export interface EngineTeamInboxMessagePage {
+  contractVersion: number
+  atCommitSeq: number
+  inboxId: string
+  teamId: string
+  nativeTeamId: string
+  nativeRecipientName: string
+  items: Array<EngineTeamInboxMessage>
+  nextCursor?: string
+}
+
+export interface EngineTeamInboxMessagePageOptions {
+  inboxId: string
+  cursor?: string
+  limit?: number
+}
+
+export interface EngineTeamInboxPage {
+  contractVersion: number
+  atCommitSeq: number
+  teamId: string
+  items: Array<EngineTeamInbox>
+  nextCursor?: string
+}
+
+export interface EngineTeamMember {
+  memberId: string
+  teamId: string
+  memberOrdinal: number
+  nativeAgentId: string
+  nativeName: string
+  agentType?: string
+  model?: string
+  prompt?: string
+  color?: string
+  planModeRequired?: boolean
+  joinedAt: string
+  joinedAtQuality: string
+  tmuxPaneId: string
+  cwd: string
+  subscriptions: Array<string>
+  backendType?: string
+  membershipStatus: string
+  decisiveFactId: string
+  assertionCount: number
+  competingMembershipCount: number
+  lastCommitSeq: number
+}
+
+export interface EngineTeamPage {
+  contractVersion: number
+  atCommitSeq: number
+  items: Array<EngineTeamSummary>
+  nextCursor?: string
+}
+
+export interface EngineTeamPageOptions {
+  cursor?: string
+  limit?: number
+}
+
+export interface EngineTeamScopedPageOptions {
+  teamId: string
+  cursor?: string
+  limit?: number
+}
+
+export interface EngineTeamSummary {
+  teamId: string
+  adapterId: string
+  sourceInstanceId: number
+  nativeTeamId: string
+  config?: EngineTeamConfig
+  inboxCount: number
+  messageCount: number
+  unreadMessageCount: number
+  conflictingInboxCount: number
+  conflictingMessageCount: number
+  lastCommitSeq: number
 }
 
 export interface EngineUntimedUsage {

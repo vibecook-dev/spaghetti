@@ -20,7 +20,15 @@ import {
   type SpaghettiEngineHistorySession,
   type SpaghettiEngineHistorySessionPage,
   type SpaghettiEngineOverview,
+  type SpaghettiEngineRuntimeSnapshot,
+  type SpaghettiEngineRuntimeSnapshotOptions,
   type SpaghettiEngineStatus,
+  type SpaghettiEngineTeamDetails,
+  type SpaghettiEngineTeamInboxMessagePage,
+  type SpaghettiEngineTeamInboxMessagePageOptions,
+  type SpaghettiEngineTeamInboxPage,
+  type SpaghettiEngineTeamPage,
+  type SpaghettiEngineTeamPageOptions,
   type SpaghettiEngineUsageActivity,
   type SpaghettiEngineUsageActivityOptions,
   type SpaghettiEngineUsageScopeOptions,
@@ -213,6 +221,27 @@ export interface ClaudeObservationShadow {
     options: SpaghettiEngineUsageActivityOptions,
     signal?: AbortSignal,
   ): Promise<SpaghettiEngineUsageActivity>;
+  /** Query durable run state and registry presence without PID liveness inference. */
+  getRuntimeSnapshot(
+    options?: SpaghettiEngineRuntimeSnapshotOptions,
+    signal?: AbortSignal,
+  ): Promise<SpaghettiEngineRuntimeSnapshot>;
+  /** List canonical teams, including inbox-only team identities. */
+  listTeams(options?: SpaghettiEngineTeamPageOptions, signal?: AbortSignal): Promise<SpaghettiEngineTeamPage>;
+  /** Read one team config/member snapshot. */
+  getTeam(teamId: string, signal?: AbortSignal): Promise<SpaghettiEngineTeamDetails>;
+  /** Page inbox metadata without returning message bodies. */
+  listTeamInboxes(
+    teamId: string,
+    options?: SpaghettiEngineHistoryPageOptions,
+    signal?: AbortSignal,
+  ): Promise<SpaghettiEngineTeamInboxPage>;
+  /** Page one inbox's messages in native snapshot order. */
+  listTeamInboxMessages(
+    inboxId: string,
+    options?: SpaghettiEngineHistoryPageOptions,
+    signal?: AbortSignal,
+  ): Promise<SpaghettiEngineTeamInboxMessagePage>;
   refresh(signal?: AbortSignal): Promise<SpaghettiEngineStatus>;
   dispose(): Promise<SpaghettiEngineStatus>;
 }
@@ -518,6 +547,38 @@ class NativeClaudeObservationShadow implements ClaudeObservationShadow {
     signal?: AbortSignal,
   ): Promise<SpaghettiEngineUsageActivity> {
     return this.engine.getUsageActivity(options, signal);
+  }
+
+  getRuntimeSnapshot(
+    options?: SpaghettiEngineRuntimeSnapshotOptions,
+    signal?: AbortSignal,
+  ): Promise<SpaghettiEngineRuntimeSnapshot> {
+    return this.engine.getRuntimeSnapshot(options, signal);
+  }
+
+  listTeams(options?: SpaghettiEngineTeamPageOptions, signal?: AbortSignal): Promise<SpaghettiEngineTeamPage> {
+    return this.engine.listTeams(options, signal);
+  }
+
+  getTeam(teamId: string, signal?: AbortSignal): Promise<SpaghettiEngineTeamDetails> {
+    return this.engine.getTeam(teamId, signal);
+  }
+
+  listTeamInboxes(
+    teamId: string,
+    options?: SpaghettiEngineHistoryPageOptions,
+    signal?: AbortSignal,
+  ): Promise<SpaghettiEngineTeamInboxPage> {
+    return this.engine.listTeamInboxes({ teamId, ...options }, signal);
+  }
+
+  listTeamInboxMessages(
+    inboxId: string,
+    options?: SpaghettiEngineHistoryPageOptions,
+    signal?: AbortSignal,
+  ): Promise<SpaghettiEngineTeamInboxMessagePage> {
+    const nativeOptions: SpaghettiEngineTeamInboxMessagePageOptions = { inboxId, ...options };
+    return this.engine.listTeamInboxMessages(nativeOptions, signal);
   }
 
   refresh(signal?: AbortSignal): Promise<SpaghettiEngineStatus> {

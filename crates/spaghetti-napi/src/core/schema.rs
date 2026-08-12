@@ -1511,6 +1511,7 @@ CREATE INDEX IF NOT EXISTS idx_message_tool_references_source ON message_tool_re
 CREATE INDEX IF NOT EXISTS idx_canonical_messages_session_order ON canonical_messages(session_key, source_generation, cursor_start);
 CREATE INDEX IF NOT EXISTS idx_canonical_messages_session_activity ON canonical_messages(session_key, source_time, message_key, source_time_quality, last_commit_seq);
 CREATE INDEX IF NOT EXISTS idx_canonical_runs_session ON canonical_runs(session_key, run_key);
+CREATE INDEX IF NOT EXISTS idx_canonical_runs_commit ON canonical_runs(last_commit_seq DESC, run_key DESC);
 CREATE INDEX IF NOT EXISTS idx_usage_contributions_session_time ON usage_contributions(session_key, source_time, fact_id);
 CREATE INDEX IF NOT EXISTS idx_run_evidence_run_order ON run_evidence(run_key, source_generation, cursor_end);
 CREATE INDEX IF NOT EXISTS idx_presence_assertions_presence ON presence_assertions(presence_key, fact_id);
@@ -1518,6 +1519,7 @@ CREATE INDEX IF NOT EXISTS idx_presence_assertions_source ON presence_assertions
 CREATE INDEX IF NOT EXISTS idx_presence_assertions_session ON presence_assertions(session_key, presence_key);
 CREATE INDEX IF NOT EXISTS idx_canonical_presences_session ON canonical_presences(session_key, presence_key);
 CREATE INDEX IF NOT EXISTS idx_canonical_presences_run ON canonical_presences(run_key, presence_key);
+CREATE INDEX IF NOT EXISTS idx_canonical_presences_commit ON canonical_presences(last_commit_seq DESC, presence_key DESC);
 CREATE INDEX IF NOT EXISTS idx_delegation_assertions_child_order ON delegation_assertions(child_run_key, relation_strength, source_generation, cursor_end);
 CREATE INDEX IF NOT EXISTS idx_delegation_assertions_parent ON delegation_assertions(parent_run_key, child_run_key);
 CREATE INDEX IF NOT EXISTS idx_canonical_delegations_session ON canonical_delegations(session_key, child_run_key);
@@ -1532,10 +1534,12 @@ CREATE INDEX IF NOT EXISTS idx_team_snapshot_assertions_team ON team_snapshot_as
 CREATE INDEX IF NOT EXISTS idx_team_snapshot_assertions_source ON team_snapshot_assertions(source_object_id, team_key);
 CREATE INDEX IF NOT EXISTS idx_team_member_assertions_team ON team_member_assertions(team_key, member_key);
 CREATE INDEX IF NOT EXISTS idx_canonical_team_members_team ON canonical_team_members(team_key, member_ordinal);
+CREATE INDEX IF NOT EXISTS idx_canonical_teams_native ON canonical_teams(native_team_id, team_key);
 CREATE INDEX IF NOT EXISTS idx_team_inbox_snapshot_assertions_inbox ON team_inbox_snapshot_assertions(inbox_key, fact_id);
 CREATE INDEX IF NOT EXISTS idx_team_inbox_snapshot_assertions_source ON team_inbox_snapshot_assertions(source_object_id, inbox_key);
 CREATE INDEX IF NOT EXISTS idx_team_inbox_message_assertions_inbox ON team_inbox_message_assertions(inbox_key, message_key);
 CREATE INDEX IF NOT EXISTS idx_canonical_team_inboxes_team ON canonical_team_inboxes(team_key, inbox_key);
+CREATE INDEX IF NOT EXISTS idx_canonical_team_inboxes_recipient ON canonical_team_inboxes(team_key, native_recipient_name, inbox_key);
 CREATE INDEX IF NOT EXISTS idx_canonical_team_inbox_messages_inbox ON canonical_team_inbox_messages(inbox_key, message_ordinal);
 CREATE INDEX IF NOT EXISTS idx_task_snapshot_assertions_collection ON task_snapshot_assertions(collection_key, fact_id);
 CREATE INDEX IF NOT EXISTS idx_task_snapshot_assertions_source ON task_snapshot_assertions(source_object_id, collection_key);
@@ -2331,6 +2335,18 @@ mod tests {
             &conn,
             "index",
             "idx_canonical_presences_session"
+        ));
+        assert!(object_exists(&conn, "index", "idx_canonical_runs_commit"));
+        assert!(object_exists(
+            &conn,
+            "index",
+            "idx_canonical_presences_commit"
+        ));
+        assert!(object_exists(&conn, "index", "idx_canonical_teams_native"));
+        assert!(object_exists(
+            &conn,
+            "index",
+            "idx_canonical_team_inboxes_recipient"
         ));
         assert!(object_exists(
             &conn,

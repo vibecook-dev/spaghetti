@@ -18,6 +18,15 @@ use crate::core::schema;
 use super::query_identity::{
     decode_entity_id, encode_entity_id, PROJECT_ID_PREFIX, SESSION_ID_PREFIX,
 };
+use super::runtime_query::{
+    read_runtime_snapshot, validate_runtime_request, RuntimeSnapshot, RuntimeSnapshotRequest,
+};
+use super::team_query::{
+    read_team_details, read_team_inbox_page, read_team_message_page, read_team_page,
+    validate_team_details, validate_team_inbox_page, validate_team_message_page,
+    validate_team_page, TeamDetails, TeamDetailsRequest, TeamInboxMessagePage,
+    TeamInboxMessagePageRequest, TeamInboxPage, TeamInboxPageRequest, TeamPage, TeamPageRequest,
+};
 use super::usage_query::{
     read_usage_activity, read_usage_totals, validate_usage_activity, validate_usage_scope,
     UsageActivityReport, UsageActivityRequest, UsageScopeRequest, UsageTotalsReport,
@@ -266,6 +275,36 @@ enum QueryCommand {
         cancellation: QueryCancellationToken,
         request: UsageActivityRequest,
         response: Sender<Result<UsageActivityReport, EngineError>>,
+    },
+    RuntimeSnapshot {
+        cancellation_epoch: u64,
+        cancellation: QueryCancellationToken,
+        request: RuntimeSnapshotRequest,
+        response: Sender<Result<RuntimeSnapshot, EngineError>>,
+    },
+    Teams {
+        cancellation_epoch: u64,
+        cancellation: QueryCancellationToken,
+        request: TeamPageRequest,
+        response: Sender<Result<TeamPage, EngineError>>,
+    },
+    TeamDetails {
+        cancellation_epoch: u64,
+        cancellation: QueryCancellationToken,
+        request: TeamDetailsRequest,
+        response: Sender<Result<TeamDetails, EngineError>>,
+    },
+    TeamInboxes {
+        cancellation_epoch: u64,
+        cancellation: QueryCancellationToken,
+        request: TeamInboxPageRequest,
+        response: Sender<Result<TeamInboxPage, EngineError>>,
+    },
+    TeamInboxMessages {
+        cancellation_epoch: u64,
+        cancellation: QueryCancellationToken,
+        request: TeamInboxMessagePageRequest,
+        response: Sender<Result<TeamInboxMessagePage, EngineError>>,
     },
     ReplayChanges {
         cancellation_epoch: u64,
@@ -519,6 +558,150 @@ impl QueryClient {
             }
         }
 
+        response_rx
+            .recv()
+            .map_err(|_| EngineError::WorkerUnavailable { worker: "query" })?
+    }
+
+    pub fn runtime_snapshot(
+        &self,
+        request: RuntimeSnapshotRequest,
+    ) -> Result<RuntimeSnapshot, EngineError> {
+        self.runtime_snapshot_cancellable(request, QueryCancellationToken::default())
+    }
+
+    pub fn runtime_snapshot_cancellable(
+        &self,
+        request: RuntimeSnapshotRequest,
+        cancellation: QueryCancellationToken,
+    ) -> Result<RuntimeSnapshot, EngineError> {
+        validate_runtime_request(&request)?;
+        self.send_cancellable(
+            cancellation,
+            |cancellation_epoch, cancellation, response| QueryCommand::RuntimeSnapshot {
+                cancellation_epoch,
+                cancellation,
+                request,
+                response,
+            },
+        )
+    }
+
+    pub fn teams(&self, request: TeamPageRequest) -> Result<TeamPage, EngineError> {
+        self.teams_cancellable(request, QueryCancellationToken::default())
+    }
+
+    pub fn teams_cancellable(
+        &self,
+        request: TeamPageRequest,
+        cancellation: QueryCancellationToken,
+    ) -> Result<TeamPage, EngineError> {
+        validate_team_page(&request)?;
+        self.send_cancellable(
+            cancellation,
+            |cancellation_epoch, cancellation, response| QueryCommand::Teams {
+                cancellation_epoch,
+                cancellation,
+                request,
+                response,
+            },
+        )
+    }
+
+    pub fn team_details(&self, request: TeamDetailsRequest) -> Result<TeamDetails, EngineError> {
+        self.team_details_cancellable(request, QueryCancellationToken::default())
+    }
+
+    pub fn team_details_cancellable(
+        &self,
+        request: TeamDetailsRequest,
+        cancellation: QueryCancellationToken,
+    ) -> Result<TeamDetails, EngineError> {
+        validate_team_details(&request)?;
+        self.send_cancellable(
+            cancellation,
+            |cancellation_epoch, cancellation, response| QueryCommand::TeamDetails {
+                cancellation_epoch,
+                cancellation,
+                request,
+                response,
+            },
+        )
+    }
+
+    pub fn team_inboxes(
+        &self,
+        request: TeamInboxPageRequest,
+    ) -> Result<TeamInboxPage, EngineError> {
+        self.team_inboxes_cancellable(request, QueryCancellationToken::default())
+    }
+
+    pub fn team_inboxes_cancellable(
+        &self,
+        request: TeamInboxPageRequest,
+        cancellation: QueryCancellationToken,
+    ) -> Result<TeamInboxPage, EngineError> {
+        validate_team_inbox_page(&request)?;
+        self.send_cancellable(
+            cancellation,
+            |cancellation_epoch, cancellation, response| QueryCommand::TeamInboxes {
+                cancellation_epoch,
+                cancellation,
+                request,
+                response,
+            },
+        )
+    }
+
+    pub fn team_inbox_messages(
+        &self,
+        request: TeamInboxMessagePageRequest,
+    ) -> Result<TeamInboxMessagePage, EngineError> {
+        self.team_inbox_messages_cancellable(request, QueryCancellationToken::default())
+    }
+
+    pub fn team_inbox_messages_cancellable(
+        &self,
+        request: TeamInboxMessagePageRequest,
+        cancellation: QueryCancellationToken,
+    ) -> Result<TeamInboxMessagePage, EngineError> {
+        validate_team_message_page(&request)?;
+        self.send_cancellable(
+            cancellation,
+            |cancellation_epoch, cancellation, response| QueryCommand::TeamInboxMessages {
+                cancellation_epoch,
+                cancellation,
+                request,
+                response,
+            },
+        )
+    }
+
+    fn send_cancellable<T>(
+        &self,
+        cancellation: QueryCancellationToken,
+        command: impl FnOnce(
+            u64,
+            QueryCancellationToken,
+            Sender<Result<T, EngineError>>,
+        ) -> QueryCommand,
+    ) -> Result<T, EngineError> {
+        self.ensure_running()?;
+        if cancellation.is_cancelled() {
+            return Err(EngineError::QueryCancelled);
+        }
+        let cancellation_epoch = self.control.cancellation_epoch.load(Ordering::Acquire);
+        let (response_tx, response_rx) = bounded(1);
+        match self
+            .commands
+            .try_send(command(cancellation_epoch, cancellation, response_tx))
+        {
+            Ok(()) => {}
+            Err(TrySendError::Full(_)) => return Err(EngineError::QueryQueueFull),
+            Err(TrySendError::Disconnected(_)) => {
+                return Err(EngineError::WorkerUnavailable { worker: "query" });
+            }
+        }
         response_rx
             .recv()
             .map_err(|_| EngineError::WorkerUnavailable { worker: "query" })?
@@ -853,6 +1036,86 @@ fn query_thread(
                     cancellation_epoch,
                     &cancellation,
                     || read_usage_activity(&connection, &request),
+                );
+                let _ = response.send(result);
+            }
+            QueryCommand::RuntimeSnapshot {
+                cancellation_epoch,
+                cancellation,
+                request,
+                response,
+            } => {
+                let _in_flight = InFlightGuard::enter(&control.in_flight);
+                let result = run_cancellable_query(
+                    &connection,
+                    &control,
+                    cancellation_epoch,
+                    &cancellation,
+                    || read_runtime_snapshot(&connection, &request),
+                );
+                let _ = response.send(result);
+            }
+            QueryCommand::Teams {
+                cancellation_epoch,
+                cancellation,
+                request,
+                response,
+            } => {
+                let _in_flight = InFlightGuard::enter(&control.in_flight);
+                let result = run_cancellable_query(
+                    &connection,
+                    &control,
+                    cancellation_epoch,
+                    &cancellation,
+                    || read_team_page(&connection, &request),
+                );
+                let _ = response.send(result);
+            }
+            QueryCommand::TeamDetails {
+                cancellation_epoch,
+                cancellation,
+                request,
+                response,
+            } => {
+                let _in_flight = InFlightGuard::enter(&control.in_flight);
+                let result = run_cancellable_query(
+                    &connection,
+                    &control,
+                    cancellation_epoch,
+                    &cancellation,
+                    || read_team_details(&connection, &request),
+                );
+                let _ = response.send(result);
+            }
+            QueryCommand::TeamInboxes {
+                cancellation_epoch,
+                cancellation,
+                request,
+                response,
+            } => {
+                let _in_flight = InFlightGuard::enter(&control.in_flight);
+                let result = run_cancellable_query(
+                    &connection,
+                    &control,
+                    cancellation_epoch,
+                    &cancellation,
+                    || read_team_inbox_page(&connection, &request),
+                );
+                let _ = response.send(result);
+            }
+            QueryCommand::TeamInboxMessages {
+                cancellation_epoch,
+                cancellation,
+                request,
+                response,
+            } => {
+                let _in_flight = InFlightGuard::enter(&control.in_flight);
+                let result = run_cancellable_query(
+                    &connection,
+                    &control,
+                    cancellation_epoch,
+                    &cancellation,
+                    || read_team_message_page(&connection, &request),
                 );
                 let _ = response.send(result);
             }
@@ -2326,6 +2589,20 @@ mod tests {
                 to: "2026-08-12".to_string(),
             })
             .unwrap();
+        let runtime = client
+            .runtime_snapshot(RuntimeSnapshotRequest {
+                project_id: None,
+                session_id: None,
+                cursor: None,
+                limit: DEFAULT_HISTORY_PAGE_LIMIT,
+            })
+            .unwrap();
+        let teams = client
+            .teams(TeamPageRequest {
+                cursor: None,
+                limit: DEFAULT_HISTORY_PAGE_LIMIT,
+            })
+            .unwrap();
         let after: i64 = probe
             .query_row("PRAGMA data_version", [], |row| row.get(0))
             .unwrap();
@@ -2348,6 +2625,10 @@ mod tests {
         assert!(usage_activity.days.is_empty());
         assert_eq!(usage_activity.aggregate.contribution_count, 0);
         assert_eq!(usage_activity.untimed.aggregate.contribution_count, 0);
+        assert_eq!(runtime.at_commit_seq, overview.commit_seq);
+        assert!(runtime.entries.is_empty());
+        assert_eq!(teams.at_commit_seq, overview.commit_seq);
+        assert!(teams.items.is_empty());
         assert!(overview.query_only && overview.read_only);
         assert_eq!(before, after, "a query must not advance database content");
         assert!(client.probe_write_rejected());
@@ -2427,6 +2708,69 @@ mod tests {
             queued.join().unwrap(),
             Err(EngineError::QueryCancelled)
         ));
+
+        pool.shutdown().unwrap();
+        writer.shutdown().unwrap();
+    }
+
+    #[test]
+    fn cancellation_epoch_rejects_queued_runtime_work() {
+        let dir = tempdir().unwrap();
+        let database = dir.path().join("runtime-cancel.db");
+        let mut writer = WriterRuntime::start(database.clone()).unwrap();
+        let mut pool = QueryPool::start(database, 1).unwrap();
+        let client = pool.client();
+
+        let (entered_tx, entered_rx) = bounded(1);
+        let (release_tx, release_rx) = bounded(1);
+        client.hold_worker(entered_tx, release_rx);
+        entered_rx.recv().unwrap();
+
+        let queued_client = client.clone();
+        let queued = thread::spawn(move || {
+            queued_client.runtime_snapshot(RuntimeSnapshotRequest {
+                project_id: None,
+                session_id: None,
+                cursor: None,
+                limit: DEFAULT_HISTORY_PAGE_LIMIT,
+            })
+        });
+        while client.commands.is_empty() {
+            thread::yield_now();
+        }
+        client.cancel_pending();
+        release_tx.send(()).unwrap();
+
+        assert!(matches!(
+            queued.join().unwrap(),
+            Err(EngineError::QueryCancelled)
+        ));
+
+        pool.shutdown().unwrap();
+        writer.shutdown().unwrap();
+    }
+
+    #[test]
+    fn pre_cancelled_team_request_never_enters_the_worker_queue() {
+        let dir = tempdir().unwrap();
+        let database = dir.path().join("team-cancel.db");
+        let mut writer = WriterRuntime::start(database.clone()).unwrap();
+        let mut pool = QueryPool::start(database, 1).unwrap();
+        let client = pool.client();
+        let cancellation = QueryCancellationToken::default();
+        cancellation.cancel();
+
+        assert!(matches!(
+            client.teams_cancellable(
+                TeamPageRequest {
+                    cursor: None,
+                    limit: DEFAULT_HISTORY_PAGE_LIMIT,
+                },
+                cancellation,
+            ),
+            Err(EngineError::QueryCancelled)
+        ));
+        assert!(client.commands.is_empty());
 
         pool.shutdown().unwrap();
         writer.shutdown().unwrap();

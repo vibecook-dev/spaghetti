@@ -11,12 +11,14 @@ import {
   compareClaudeObservationUsage,
   createSpaghettiService,
   defaultClaudeObservationShadowDbPath,
+  listActiveSessionsFromDir,
   loadNativeAddon,
   openClaudeObservationShadow,
   type ClaudeObservationShadow,
   type SpaghettiEngineHistoryProject,
   type SpaghettiEngineHistorySession,
   type SpaghettiEngineOverview,
+  type TeamDirectory,
 } from '../index.js';
 
 const native = loadNativeAddon();
@@ -25,6 +27,7 @@ const SMALL_CLAUDE_FIXTURE = path.resolve(here, '../../../../crates/spaghetti-na
 const SESSION_ID = '11111111-2222-3333-4444-555555555555';
 const SECOND_SESSION_ID = '22222222-3333-4444-5555-666666666666';
 const shadows: ClaudeObservationShadow[] = [];
+const legacyServices: Array<{ dispose(): Promise<void> }> = [];
 const tempDirs: string[] = [];
 
 function fixture(): { directory: string; productionDb: string; root: string; transcript: string } {
@@ -86,6 +89,61 @@ function sessionIndex(sessionId: string, modified: string): string {
   });
 }
 
+function writeTeamFixture(root: string): TeamDirectory {
+  const teamId = 'alpha-team';
+  const teamRoot = path.join(root, 'teams', teamId);
+  const inboxRoot = path.join(teamRoot, 'inboxes');
+  mkdirSync(inboxRoot, { recursive: true });
+  const config = {
+    name: 'Alpha Team',
+    description: 'shadow query fixture',
+    createdAt: 1_786_507_200_000,
+    leadAgentId: `lead@${teamId}`,
+    leadSessionId: SESSION_ID,
+    members: [
+      {
+        agentId: `lead@${teamId}`,
+        name: 'lead',
+        agentType: 'team-lead',
+        model: 'claude-test',
+        prompt: 'coordinate',
+        color: 'blue',
+        planModeRequired: true,
+        joinedAt: 1_786_507_200_000,
+        tmuxPaneId: 'leader',
+        cwd: '/tmp/shadow-project',
+        subscriptions: ['changes'],
+        backendType: 'in-process',
+      },
+    ],
+  };
+  const messages = [
+    {
+      from: 'worker',
+      text: 'first message',
+      summary: 'first',
+      timestamp: '2026-08-12T01:00:00.000Z',
+      color: 'green',
+      read: false,
+      msg_id: 'message-1',
+      msgV: 1,
+      type: 'message',
+    },
+    {
+      from: 'lead',
+      text: 'second message',
+      timestamp: '2026-08-12T02:00:00.000Z',
+      read: true,
+      msg_id: 'message-2',
+      msgV: 1,
+      type: 'message',
+    },
+  ];
+  writeFileSync(path.join(teamRoot, 'config.json'), JSON.stringify(config));
+  writeFileSync(path.join(inboxRoot, 'lead.json'), JSON.stringify(messages));
+  return { teamId, config, inboxes: { lead: messages } };
+}
+
 async function allCanonicalProjects(shadow: ClaudeObservationShadow): Promise<SpaghettiEngineHistoryProject[]> {
   const items: SpaghettiEngineHistoryProject[] = [];
   let cursor: string | undefined;
@@ -115,6 +173,7 @@ async function allCanonicalSessions(
 
 afterEach(async () => {
   for (const shadow of shadows.splice(0)) await shadow.dispose();
+  for (const service of legacyServices.splice(0)) await service.dispose();
   for (const directory of tempDirs.splice(0)) {
     rmSync(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   }
@@ -547,6 +606,100 @@ describe('Claude observation shadow native lifecycle', { skip: !native }, () => 
     );
     await shadow.refresh();
     await assert.rejects(shadow.listHistoryProjects({ limit: 2, cursor: first.nextCursor }), /cursor expired/i);
+  });
+
+  test('queries durable runtime presence and bounded team/inbox snapshots', async () => {
+    const { productionDb, root, transcript } = fixture();
+    writeFileSync(transcript, message('aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee', 'user', 'runtime fixture'));
+    mkdirSync(path.join(root, 'sessions'), { recursive: true });
+    writeFileSync(
+      path.join(root, 'sessions', '4242.json'),
+      JSON.stringify({
+        pid: 4242,
+        sessionId: SESSION_ID,
+        cwd: '/tmp/shadow-project',
+        startedAt: 1_786_507_200_000,
+        kind: 'local',
+        entrypoint: 'cli',
+        name: 'fixture',
+        status: 'working',
+        updatedAt: 1_786_507_201_000,
+        statusUpdatedAt: 1_786_507_201_000,
+        procStart: 'process-start',
+        version: '1.0.0',
+        peerProtocol: 7,
+        nameSource: 'native',
+        bridgeSessionId: 'bridge',
+        messagingSocketPath: '/tmp/shadow.sock',
+      }),
+    );
+    const writtenTeam = writeTeamFixture(root);
+
+    const legacy = createSpaghettiService({ rootDir: root, dbPath: productionDb, engine: 'ts' });
+    legacyServices.push(legacy);
+    await legacy.initialize();
+    const legacyTeam = legacy.getTeams()[0];
+    const legacyPresence = listActiveSessionsFromDir(path.join(root, 'sessions'), { requireAlive: false })[0];
+    assert.deepEqual(legacyTeam, writtenTeam);
+    assert.ok(legacyPresence);
+
+    const shadow = await openClaudeObservationShadow({ productionDbPath: productionDb, roots: [root] });
+    shadows.push(shadow);
+
+    const runtime = await shadow.getRuntimeSnapshot({ limit: 1 });
+    assert.equal(runtime.contractVersion, 1);
+    assert.equal(runtime.entries.length, 1);
+    assert.equal(runtime.entries[0]?.kind, 'presence');
+    assert.equal(runtime.entries[0]?.presence.nativePid, legacyPresence.pid);
+    assert.equal(runtime.entries[0]?.presence.nativeStatus, legacyPresence.status);
+    assert.equal(runtime.entries[0]?.presence.nativeSessionId, legacyPresence.sessionId);
+    assert.equal(runtime.entries[0]?.presence.cwd, legacyPresence.cwd);
+    assert.equal(runtime.entries[0]?.presence.sessionPresent, true);
+    assert.equal(runtime.entries[0]?.presence.runPresent, true);
+    assert.equal(runtime.entries[0]?.presence.presenceStatus, 'resolved');
+    assert.ok(runtime.nextCursor);
+    const runtimeRest = await shadow.getRuntimeSnapshot({ limit: 10, cursor: runtime.nextCursor });
+    assert.equal(
+      runtimeRest.entries.some((entry) => entry.kind === 'run' && entry.run.state === 'active'),
+      true,
+    );
+
+    const teamPage = await shadow.listTeams({ limit: 1 });
+    assert.equal(teamPage.contractVersion, 1);
+    assert.equal(teamPage.items.length, 1);
+    assert.equal(teamPage.items[0]?.nativeTeamId, legacyTeam?.teamId);
+    assert.equal(teamPage.items[0]?.config?.name, legacyTeam?.config?.name);
+    assert.equal(teamPage.items[0]?.inboxCount, 1);
+    assert.equal(teamPage.items[0]?.messageCount, 2);
+    assert.equal(teamPage.items[0]?.unreadMessageCount, 1);
+    const teamId = teamPage.items[0]?.teamId;
+    assert.ok(teamId);
+    const details = await shadow.getTeam(teamId);
+    assert.equal(details.members.length, 1);
+    assert.equal(details.members[0]?.nativeName, 'lead');
+    assert.deepEqual(details.members[0]?.subscriptions, ['changes']);
+    assert.equal(details.team.config?.leadSessionPresent, true);
+
+    const inboxes = await shadow.listTeamInboxes(teamId, { limit: 1 });
+    assert.equal(inboxes.items.length, 1);
+    assert.equal(inboxes.items[0]?.nativeRecipientName, 'lead');
+    const inboxId = inboxes.items[0]?.inboxId;
+    assert.ok(inboxId);
+    const firstMessage = await shadow.listTeamInboxMessages(inboxId, { limit: 1 });
+    assert.equal(firstMessage.items[0]?.text, legacyTeam?.inboxes.lead?.[0]?.text);
+    assert.equal(firstMessage.items[0]?.nativeMessageId, 'message-1');
+    assert.ok(firstMessage.nextCursor);
+    const secondMessage = await shadow.listTeamInboxMessages(inboxId, {
+      limit: 1,
+      cursor: firstMessage.nextCursor,
+    });
+    assert.equal(secondMessage.items[0]?.text, legacyTeam?.inboxes.lead?.[1]?.text);
+    assert.equal(secondMessage.nextCursor, undefined);
+
+    await assert.rejects(shadow.getRuntimeSnapshot({ limit: 0 }), /runtime page limit/i);
+    await assert.rejects(shadow.listTeams({ limit: 0 }), /team page limit/i);
+    await assert.rejects(shadow.getTeam('not-a-team'), /team id/i);
+    await assert.rejects(shadow.listTeamInboxes(teamId, { cursor: runtime.nextCursor }), /cursor/i);
   });
 
   test('matches normalized project/session summaries from the committed TypeScript oracle', async () => {

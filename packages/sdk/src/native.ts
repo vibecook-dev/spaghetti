@@ -420,6 +420,245 @@ export interface SpaghettiEngineUsageActivity {
   lastCommitSeq?: number;
 }
 
+export interface SpaghettiEngineRuntimeSnapshotOptions extends SpaghettiEngineHistoryPageOptions {
+  /** Optional project scope. Omit it to retain orphan run/presence evidence. */
+  projectId?: string;
+  /** Optional session scope. Membership is validated when projectId is also supplied. */
+  sessionId?: string;
+}
+
+export type SpaghettiEngineRunState =
+  | 'declared'
+  | 'active'
+  | 'waiting'
+  | 'succeeded'
+  | 'failed'
+  | 'cancelled'
+  | 'unknown';
+
+export interface SpaghettiEngineRuntimeRunEvidence {
+  evidenceId: string;
+  kind: string;
+  strength: string;
+  nativeState?: string;
+  sourceTime?: string;
+  sourceTimeQuality?: SpaghettiEngineTimestampQuality;
+  observedAtUnixMs: number;
+  sourceObjectId: number;
+  lastCommitSeq: number;
+}
+
+export interface SpaghettiEngineRuntimeRun {
+  runId: string;
+  sessionId: string;
+  projectId?: string;
+  adapterId: string;
+  sourceInstanceId: number;
+  nativeRunId: string;
+  parentRunId?: string;
+  nativeSessionId?: string;
+  nativeProjectKey?: string;
+  sessionPresent: boolean;
+  state?: SpaghettiEngineRunState;
+  decisiveEvidence?: SpaghettiEngineRuntimeRunEvidence;
+  evidenceCount: number;
+  lastActivityAt?: string;
+  terminalAt?: string;
+  /** Current registry-object evidence count, not a PID-liveness claim. */
+  presenceCount: number;
+  conflictingPresenceCount: number;
+  lastCommitSeq: number;
+}
+
+export interface SpaghettiEngineRuntimePresence {
+  presenceId: string;
+  sessionId: string;
+  runId: string;
+  projectId?: string;
+  adapterId: string;
+  sourceInstanceId: number;
+  nativeSessionId: string;
+  nativePid: number;
+  cwd: string;
+  startedAt: string;
+  startedAtQuality: SpaghettiEngineTimestampQuality;
+  nativeKind?: string;
+  entrypoint?: string;
+  name?: string;
+  nativeStatus?: string;
+  updatedAt?: string;
+  updatedAtQuality?: SpaghettiEngineTimestampQuality;
+  statusUpdatedAt?: string;
+  statusUpdatedAtQuality?: SpaghettiEngineTimestampQuality;
+  nativeProcessStartedAt?: string;
+  version?: string;
+  peerProtocol?: number;
+  nameSource?: string;
+  bridgeSessionId?: string;
+  messagingSocketPath?: string;
+  presenceStatus: 'resolved' | 'conflicting';
+  decisiveFactId: string;
+  assertionCount: number;
+  competingAssertionCount: number;
+  observedAtUnixMs: number;
+  sessionPresent: boolean;
+  runPresent: boolean;
+  lastCommitSeq: number;
+}
+
+export type SpaghettiEngineRuntimeEntry =
+  | { kind: 'run'; run: SpaghettiEngineRuntimeRun; presence?: never }
+  | { kind: 'presence'; run?: never; presence: SpaghettiEngineRuntimePresence };
+
+export interface SpaghettiEngineRuntimeSnapshot {
+  contractVersion: number;
+  atCommitSeq: number;
+  projectId?: string;
+  sessionId?: string;
+  entries: SpaghettiEngineRuntimeEntry[];
+  nextCursor?: string;
+}
+
+export type SpaghettiEngineTeamPageOptions = SpaghettiEngineHistoryPageOptions;
+
+export interface SpaghettiEngineTeamScopedPageOptions extends SpaghettiEngineHistoryPageOptions {
+  teamId: string;
+}
+
+export interface SpaghettiEngineTeamInboxMessagePageOptions extends SpaghettiEngineHistoryPageOptions {
+  inboxId: string;
+}
+
+export interface SpaghettiEngineTeamConfig {
+  name: string;
+  description?: string;
+  createdAt: string;
+  createdAtQuality: SpaghettiEngineTimestampQuality;
+  leadMemberId?: string;
+  leadMemberPresent: boolean;
+  nativeLeadAgentId: string;
+  leadSessionId: string;
+  leadSessionPresent: boolean;
+  nativeLeadSessionId: string;
+  configStatus: 'resolved' | 'conflicting';
+  decisiveFactId: string;
+  assertionCount: number;
+  competingSnapshotCount: number;
+  memberCount: number;
+  lastCommitSeq: number;
+}
+
+export interface SpaghettiEngineTeamSummary {
+  teamId: string;
+  adapterId: string;
+  sourceInstanceId: number;
+  nativeTeamId: string;
+  config?: SpaghettiEngineTeamConfig;
+  inboxCount: number;
+  messageCount: number;
+  unreadMessageCount: number;
+  conflictingInboxCount: number;
+  conflictingMessageCount: number;
+  lastCommitSeq: number;
+}
+
+export interface SpaghettiEngineTeamPage {
+  contractVersion: number;
+  atCommitSeq: number;
+  items: SpaghettiEngineTeamSummary[];
+  nextCursor?: string;
+}
+
+export interface SpaghettiEngineTeamMember {
+  memberId: string;
+  teamId: string;
+  memberOrdinal: number;
+  nativeAgentId: string;
+  nativeName: string;
+  agentType?: string;
+  model?: string;
+  prompt?: string;
+  color?: string;
+  planModeRequired?: boolean;
+  joinedAt: string;
+  joinedAtQuality: SpaghettiEngineTimestampQuality;
+  tmuxPaneId: string;
+  cwd: string;
+  subscriptions: string[];
+  backendType?: string;
+  membershipStatus: 'resolved' | 'conflicting';
+  decisiveFactId: string;
+  assertionCount: number;
+  competingMembershipCount: number;
+  lastCommitSeq: number;
+}
+
+export interface SpaghettiEngineTeamDetails {
+  contractVersion: number;
+  atCommitSeq: number;
+  team: SpaghettiEngineTeamSummary;
+  members: SpaghettiEngineTeamMember[];
+}
+
+export interface SpaghettiEngineTeamInbox {
+  inboxId: string;
+  teamId: string;
+  recipientId: string;
+  recipientPresent: boolean;
+  nativeTeamId: string;
+  nativeRecipientName: string;
+  inboxStatus: 'resolved' | 'conflicting';
+  decisiveFactId: string;
+  assertionCount: number;
+  competingSnapshotCount: number;
+  messageCount: number;
+  unreadMessageCount: number;
+  conflictingMessageCount: number;
+  lastCommitSeq: number;
+}
+
+export interface SpaghettiEngineTeamInboxPage {
+  contractVersion: number;
+  atCommitSeq: number;
+  teamId: string;
+  items: SpaghettiEngineTeamInbox[];
+  nextCursor?: string;
+}
+
+export interface SpaghettiEngineTeamInboxMessage {
+  messageId: string;
+  inboxId: string;
+  senderId: string;
+  senderPresent: boolean;
+  messageOrdinal: number;
+  nativeMessageId?: string;
+  nativeKind?: string;
+  nativeVersion?: number;
+  nativeSenderName: string;
+  text: string;
+  summary?: string;
+  color?: string;
+  sourceTime: string;
+  sourceTimeQuality: SpaghettiEngineTimestampQuality;
+  read: boolean;
+  messageStatus: 'resolved' | 'conflicting';
+  decisiveFactId: string;
+  assertionCount: number;
+  competingMessageCount: number;
+  lastCommitSeq: number;
+}
+
+export interface SpaghettiEngineTeamInboxMessagePage {
+  contractVersion: number;
+  atCommitSeq: number;
+  inboxId: string;
+  teamId: string;
+  nativeTeamId: string;
+  nativeRecipientName: string;
+  items: SpaghettiEngineTeamInboxMessage[];
+  nextCursor?: string;
+}
+
 export interface SpaghettiEngineReconcileOptions {
   /** Configured Claude Code data roots, such as `~/.claude`. */
   roots: string[];
@@ -468,6 +707,20 @@ export interface SpaghettiEngine {
     options: SpaghettiEngineUsageActivityOptions,
     signal?: AbortSignal,
   ): Promise<SpaghettiEngineUsageActivity>;
+  getRuntimeSnapshot(
+    options?: SpaghettiEngineRuntimeSnapshotOptions,
+    signal?: AbortSignal,
+  ): Promise<SpaghettiEngineRuntimeSnapshot>;
+  listTeams(options?: SpaghettiEngineTeamPageOptions, signal?: AbortSignal): Promise<SpaghettiEngineTeamPage>;
+  getTeam(teamId: string, signal?: AbortSignal): Promise<SpaghettiEngineTeamDetails>;
+  listTeamInboxes(
+    options: SpaghettiEngineTeamScopedPageOptions,
+    signal?: AbortSignal,
+  ): Promise<SpaghettiEngineTeamInboxPage>;
+  listTeamInboxMessages(
+    options: SpaghettiEngineTeamInboxMessagePageOptions,
+    signal?: AbortSignal,
+  ): Promise<SpaghettiEngineTeamInboxMessagePage>;
   reconcileClaude(
     options: SpaghettiEngineReconcileOptions,
     signal?: AbortSignal,

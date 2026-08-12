@@ -6,6 +6,13 @@ use super::EngineError;
 const MAX_OPAQUE_ID_BYTES: usize = 32 * 1024;
 pub(super) const PROJECT_ID_PREFIX: &str = "project_v1_";
 pub(super) const SESSION_ID_PREFIX: &str = "session_v1_";
+pub(super) const RUN_ID_PREFIX: &str = "run_v1_";
+pub(super) const PRESENCE_ID_PREFIX: &str = "presence_v1_";
+pub(super) const TEAM_ID_PREFIX: &str = "team_v1_";
+pub(super) const TEAM_MEMBER_ID_PREFIX: &str = "team_member_v1_";
+pub(super) const TEAM_INBOX_ID_PREFIX: &str = "team_inbox_v1_";
+pub(super) const TEAM_INBOX_MESSAGE_ID_PREFIX: &str = "team_inbox_message_v1_";
+pub(super) const FACT_ID_PREFIX: &str = "fact_v1_";
 
 pub(super) fn encode_entity_id(prefix: &str, key: &[u8]) -> String {
     format!("{prefix}{}", URL_SAFE_NO_PAD.encode(key))

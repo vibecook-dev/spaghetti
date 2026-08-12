@@ -12,9 +12,13 @@ use crate::engine::{
     HistoryProjectSummary, HistorySessionIndexSummary, HistorySessionPage,
     HistorySessionPageRequest, HistorySessionSummary, ObservationStatusSnapshot,
     ObservationSupervisorOptions, OwnerMetadata, QueryCancellationToken, ReconcileOutcome,
-    ReconcileRequest, SpaghettiEngineCore, UntimedUsageSummary, UsageActivityDay,
-    UsageActivityReport, UsageActivityRequest, UsageAggregate, UsageCoverageSummary,
-    UsageScopeRequest, UsageTokenValues, UsageTotalsReport, DEFAULT_HISTORY_PAGE_LIMIT,
+    ReconcileRequest, RuntimePresenceSnapshot, RuntimeRunEvidence, RuntimeRunSnapshot,
+    RuntimeSnapshot, RuntimeSnapshotRequest, SpaghettiEngineCore, TeamConfigSummary, TeamDetails,
+    TeamDetailsRequest, TeamInboxMessage, TeamInboxMessagePage, TeamInboxMessagePageRequest,
+    TeamInboxPage, TeamInboxPageRequest, TeamInboxSummary, TeamMember, TeamPage, TeamPageRequest,
+    TeamSummary, UntimedUsageSummary, UsageActivityDay, UsageActivityReport, UsageActivityRequest,
+    UsageAggregate, UsageCoverageSummary, UsageScopeRequest, UsageTokenValues, UsageTotalsReport,
+    DEFAULT_HISTORY_PAGE_LIMIT, DEFAULT_RUNTIME_PAGE_LIMIT, DEFAULT_TEAM_PAGE_LIMIT,
 };
 
 #[napi(object)]
@@ -613,6 +617,553 @@ impl From<UsageActivityReport> for EngineUsageActivity {
 
 #[napi(object)]
 #[derive(Debug, Clone)]
+pub struct EngineRuntimeSnapshotOptions {
+    /// Optional opaque project identity. When omitted, orphan presence/run
+    /// evidence remains visible rather than being silently dropped.
+    pub project_id: Option<String>,
+    /// Optional opaque session identity. With `projectId`, membership is
+    /// validated before querying.
+    pub session_id: Option<String>,
+    pub cursor: Option<String>,
+    /// Page size. Defaults to 50 and is capped by the Rust query engine.
+    pub limit: Option<u32>,
+}
+
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct EngineRuntimeRunEvidence {
+    pub evidence_id: String,
+    pub kind: String,
+    pub strength: String,
+    pub native_state: Option<String>,
+    pub source_time: Option<String>,
+    pub source_time_quality: Option<String>,
+    pub observed_at_unix_ms: f64,
+    pub source_object_id: f64,
+    pub last_commit_seq: f64,
+}
+
+impl From<RuntimeRunEvidence> for EngineRuntimeRunEvidence {
+    fn from(value: RuntimeRunEvidence) -> Self {
+        Self {
+            evidence_id: value.evidence_id,
+            kind: value.kind,
+            strength: value.strength,
+            native_state: value.native_state,
+            source_time: value.source_time,
+            source_time_quality: value.source_time_quality,
+            observed_at_unix_ms: value.observed_at_unix_ms as f64,
+            source_object_id: value.source_object_id as f64,
+            last_commit_seq: value.last_commit_seq as f64,
+        }
+    }
+}
+
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct EngineRuntimeRun {
+    pub run_id: String,
+    pub session_id: String,
+    pub project_id: Option<String>,
+    pub adapter_id: String,
+    pub source_instance_id: f64,
+    pub native_run_id: String,
+    pub parent_run_id: Option<String>,
+    pub native_session_id: Option<String>,
+    pub native_project_key: Option<String>,
+    pub session_present: bool,
+    pub state: Option<String>,
+    pub decisive_evidence: Option<EngineRuntimeRunEvidence>,
+    pub evidence_count: f64,
+    pub last_activity_at: Option<String>,
+    pub terminal_at: Option<String>,
+    pub presence_count: f64,
+    pub conflicting_presence_count: f64,
+    pub last_commit_seq: f64,
+}
+
+impl From<RuntimeRunSnapshot> for EngineRuntimeRun {
+    fn from(value: RuntimeRunSnapshot) -> Self {
+        Self {
+            run_id: value.run_id,
+            session_id: value.session_id,
+            project_id: value.project_id,
+            adapter_id: value.adapter_id,
+            source_instance_id: value.source_instance_id as f64,
+            native_run_id: value.native_run_id,
+            parent_run_id: value.parent_run_id,
+            native_session_id: value.native_session_id,
+            native_project_key: value.native_project_key,
+            session_present: value.session_present,
+            state: value.state,
+            decisive_evidence: value.decisive_evidence.map(Into::into),
+            evidence_count: value.evidence_count as f64,
+            last_activity_at: value.last_activity_at,
+            terminal_at: value.terminal_at,
+            presence_count: value.presence_count as f64,
+            conflicting_presence_count: value.conflicting_presence_count as f64,
+            last_commit_seq: value.last_commit_seq as f64,
+        }
+    }
+}
+
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct EngineRuntimePresence {
+    pub presence_id: String,
+    pub session_id: String,
+    pub run_id: String,
+    pub project_id: Option<String>,
+    pub adapter_id: String,
+    pub source_instance_id: f64,
+    pub native_session_id: String,
+    pub native_pid: u32,
+    pub cwd: String,
+    pub started_at: String,
+    pub started_at_quality: String,
+    pub native_kind: Option<String>,
+    pub entrypoint: Option<String>,
+    pub name: Option<String>,
+    pub native_status: Option<String>,
+    pub updated_at: Option<String>,
+    pub updated_at_quality: Option<String>,
+    pub status_updated_at: Option<String>,
+    pub status_updated_at_quality: Option<String>,
+    pub native_process_started_at: Option<String>,
+    pub version: Option<String>,
+    pub peer_protocol: Option<u32>,
+    pub name_source: Option<String>,
+    pub bridge_session_id: Option<String>,
+    pub messaging_socket_path: Option<String>,
+    pub presence_status: String,
+    pub decisive_fact_id: String,
+    pub assertion_count: f64,
+    pub competing_assertion_count: f64,
+    pub observed_at_unix_ms: f64,
+    pub session_present: bool,
+    pub run_present: bool,
+    pub last_commit_seq: f64,
+}
+
+impl From<RuntimePresenceSnapshot> for EngineRuntimePresence {
+    fn from(value: RuntimePresenceSnapshot) -> Self {
+        Self {
+            presence_id: value.presence_id,
+            session_id: value.session_id,
+            run_id: value.run_id,
+            project_id: value.project_id,
+            adapter_id: value.adapter_id,
+            source_instance_id: value.source_instance_id as f64,
+            native_session_id: value.native_session_id,
+            native_pid: value.native_pid,
+            cwd: value.cwd,
+            started_at: value.started_at,
+            started_at_quality: value.started_at_quality,
+            native_kind: value.native_kind,
+            entrypoint: value.entrypoint,
+            name: value.name,
+            native_status: value.native_status,
+            updated_at: value.updated_at,
+            updated_at_quality: value.updated_at_quality,
+            status_updated_at: value.status_updated_at,
+            status_updated_at_quality: value.status_updated_at_quality,
+            native_process_started_at: value.native_process_started_at,
+            version: value.version,
+            peer_protocol: value.peer_protocol,
+            name_source: value.name_source,
+            bridge_session_id: value.bridge_session_id,
+            messaging_socket_path: value.messaging_socket_path,
+            presence_status: value.presence_status,
+            decisive_fact_id: value.decisive_fact_id,
+            assertion_count: value.assertion_count as f64,
+            competing_assertion_count: value.competing_assertion_count as f64,
+            observed_at_unix_ms: value.observed_at_unix_ms as f64,
+            session_present: value.session_present,
+            run_present: value.run_present,
+            last_commit_seq: value.last_commit_seq as f64,
+        }
+    }
+}
+
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct EngineRuntimeEntry {
+    pub kind: String,
+    pub run: Option<EngineRuntimeRun>,
+    pub presence: Option<EngineRuntimePresence>,
+}
+
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct EngineRuntimeSnapshot {
+    pub contract_version: u32,
+    pub at_commit_seq: f64,
+    pub project_id: Option<String>,
+    pub session_id: Option<String>,
+    pub entries: Vec<EngineRuntimeEntry>,
+    pub next_cursor: Option<String>,
+}
+
+impl From<RuntimeSnapshot> for EngineRuntimeSnapshot {
+    fn from(value: RuntimeSnapshot) -> Self {
+        Self {
+            contract_version: value.contract_version,
+            at_commit_seq: value.at_commit_seq as f64,
+            project_id: value.project_id,
+            session_id: value.session_id,
+            entries: value
+                .entries
+                .into_iter()
+                .map(|entry| EngineRuntimeEntry {
+                    kind: entry.kind,
+                    run: entry.run.map(Into::into),
+                    presence: entry.presence.map(Into::into),
+                })
+                .collect(),
+            next_cursor: value.next_cursor,
+        }
+    }
+}
+
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct EngineTeamPageOptions {
+    pub cursor: Option<String>,
+    pub limit: Option<u32>,
+}
+
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct EngineTeamScopedPageOptions {
+    pub team_id: String,
+    pub cursor: Option<String>,
+    pub limit: Option<u32>,
+}
+
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct EngineTeamInboxMessagePageOptions {
+    pub inbox_id: String,
+    pub cursor: Option<String>,
+    pub limit: Option<u32>,
+}
+
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct EngineTeamConfig {
+    pub name: String,
+    pub description: Option<String>,
+    pub created_at: String,
+    pub created_at_quality: String,
+    pub lead_member_id: Option<String>,
+    pub lead_member_present: bool,
+    pub native_lead_agent_id: String,
+    pub lead_session_id: String,
+    pub lead_session_present: bool,
+    pub native_lead_session_id: String,
+    pub config_status: String,
+    pub decisive_fact_id: String,
+    pub assertion_count: f64,
+    pub competing_snapshot_count: f64,
+    pub member_count: f64,
+    pub last_commit_seq: f64,
+}
+
+impl From<TeamConfigSummary> for EngineTeamConfig {
+    fn from(value: TeamConfigSummary) -> Self {
+        Self {
+            name: value.name,
+            description: value.description,
+            created_at: value.created_at,
+            created_at_quality: value.created_at_quality,
+            lead_member_id: value.lead_member_id,
+            lead_member_present: value.lead_member_present,
+            native_lead_agent_id: value.native_lead_agent_id,
+            lead_session_id: value.lead_session_id,
+            lead_session_present: value.lead_session_present,
+            native_lead_session_id: value.native_lead_session_id,
+            config_status: value.config_status,
+            decisive_fact_id: value.decisive_fact_id,
+            assertion_count: value.assertion_count as f64,
+            competing_snapshot_count: value.competing_snapshot_count as f64,
+            member_count: value.member_count as f64,
+            last_commit_seq: value.last_commit_seq as f64,
+        }
+    }
+}
+
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct EngineTeamSummary {
+    pub team_id: String,
+    pub adapter_id: String,
+    pub source_instance_id: f64,
+    pub native_team_id: String,
+    pub config: Option<EngineTeamConfig>,
+    pub inbox_count: f64,
+    pub message_count: f64,
+    pub unread_message_count: f64,
+    pub conflicting_inbox_count: f64,
+    pub conflicting_message_count: f64,
+    pub last_commit_seq: f64,
+}
+
+impl From<TeamSummary> for EngineTeamSummary {
+    fn from(value: TeamSummary) -> Self {
+        Self {
+            team_id: value.team_id,
+            adapter_id: value.adapter_id,
+            source_instance_id: value.source_instance_id as f64,
+            native_team_id: value.native_team_id,
+            config: value.config.map(Into::into),
+            inbox_count: value.inbox_count as f64,
+            message_count: value.message_count as f64,
+            unread_message_count: value.unread_message_count as f64,
+            conflicting_inbox_count: value.conflicting_inbox_count as f64,
+            conflicting_message_count: value.conflicting_message_count as f64,
+            last_commit_seq: value.last_commit_seq as f64,
+        }
+    }
+}
+
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct EngineTeamPage {
+    pub contract_version: u32,
+    pub at_commit_seq: f64,
+    pub items: Vec<EngineTeamSummary>,
+    pub next_cursor: Option<String>,
+}
+
+impl From<TeamPage> for EngineTeamPage {
+    fn from(value: TeamPage) -> Self {
+        Self {
+            contract_version: value.contract_version,
+            at_commit_seq: value.at_commit_seq as f64,
+            items: value.items.into_iter().map(Into::into).collect(),
+            next_cursor: value.next_cursor,
+        }
+    }
+}
+
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct EngineTeamMember {
+    pub member_id: String,
+    pub team_id: String,
+    pub member_ordinal: u32,
+    pub native_agent_id: String,
+    pub native_name: String,
+    pub agent_type: Option<String>,
+    pub model: Option<String>,
+    pub prompt: Option<String>,
+    pub color: Option<String>,
+    pub plan_mode_required: Option<bool>,
+    pub joined_at: String,
+    pub joined_at_quality: String,
+    pub tmux_pane_id: String,
+    pub cwd: String,
+    pub subscriptions: Vec<String>,
+    pub backend_type: Option<String>,
+    pub membership_status: String,
+    pub decisive_fact_id: String,
+    pub assertion_count: f64,
+    pub competing_membership_count: f64,
+    pub last_commit_seq: f64,
+}
+
+impl From<TeamMember> for EngineTeamMember {
+    fn from(value: TeamMember) -> Self {
+        Self {
+            member_id: value.member_id,
+            team_id: value.team_id,
+            member_ordinal: value.member_ordinal,
+            native_agent_id: value.native_agent_id,
+            native_name: value.native_name,
+            agent_type: value.agent_type,
+            model: value.model,
+            prompt: value.prompt,
+            color: value.color,
+            plan_mode_required: value.plan_mode_required,
+            joined_at: value.joined_at,
+            joined_at_quality: value.joined_at_quality,
+            tmux_pane_id: value.tmux_pane_id,
+            cwd: value.cwd,
+            subscriptions: value.subscriptions,
+            backend_type: value.backend_type,
+            membership_status: value.membership_status,
+            decisive_fact_id: value.decisive_fact_id,
+            assertion_count: value.assertion_count as f64,
+            competing_membership_count: value.competing_membership_count as f64,
+            last_commit_seq: value.last_commit_seq as f64,
+        }
+    }
+}
+
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct EngineTeamDetails {
+    pub contract_version: u32,
+    pub at_commit_seq: f64,
+    pub team: EngineTeamSummary,
+    pub members: Vec<EngineTeamMember>,
+}
+
+impl From<TeamDetails> for EngineTeamDetails {
+    fn from(value: TeamDetails) -> Self {
+        Self {
+            contract_version: value.contract_version,
+            at_commit_seq: value.at_commit_seq as f64,
+            team: value.team.into(),
+            members: value.members.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct EngineTeamInbox {
+    pub inbox_id: String,
+    pub team_id: String,
+    pub recipient_id: String,
+    pub recipient_present: bool,
+    pub native_team_id: String,
+    pub native_recipient_name: String,
+    pub inbox_status: String,
+    pub decisive_fact_id: String,
+    pub assertion_count: f64,
+    pub competing_snapshot_count: f64,
+    pub message_count: f64,
+    pub unread_message_count: f64,
+    pub conflicting_message_count: f64,
+    pub last_commit_seq: f64,
+}
+
+impl From<TeamInboxSummary> for EngineTeamInbox {
+    fn from(value: TeamInboxSummary) -> Self {
+        Self {
+            inbox_id: value.inbox_id,
+            team_id: value.team_id,
+            recipient_id: value.recipient_id,
+            recipient_present: value.recipient_present,
+            native_team_id: value.native_team_id,
+            native_recipient_name: value.native_recipient_name,
+            inbox_status: value.inbox_status,
+            decisive_fact_id: value.decisive_fact_id,
+            assertion_count: value.assertion_count as f64,
+            competing_snapshot_count: value.competing_snapshot_count as f64,
+            message_count: value.message_count as f64,
+            unread_message_count: value.unread_message_count as f64,
+            conflicting_message_count: value.conflicting_message_count as f64,
+            last_commit_seq: value.last_commit_seq as f64,
+        }
+    }
+}
+
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct EngineTeamInboxPage {
+    pub contract_version: u32,
+    pub at_commit_seq: f64,
+    pub team_id: String,
+    pub items: Vec<EngineTeamInbox>,
+    pub next_cursor: Option<String>,
+}
+
+impl From<TeamInboxPage> for EngineTeamInboxPage {
+    fn from(value: TeamInboxPage) -> Self {
+        Self {
+            contract_version: value.contract_version,
+            at_commit_seq: value.at_commit_seq as f64,
+            team_id: value.team_id,
+            items: value.items.into_iter().map(Into::into).collect(),
+            next_cursor: value.next_cursor,
+        }
+    }
+}
+
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct EngineTeamInboxMessage {
+    pub message_id: String,
+    pub inbox_id: String,
+    pub sender_id: String,
+    pub sender_present: bool,
+    pub message_ordinal: u32,
+    pub native_message_id: Option<String>,
+    pub native_kind: Option<String>,
+    pub native_version: Option<u32>,
+    pub native_sender_name: String,
+    pub text: String,
+    pub summary: Option<String>,
+    pub color: Option<String>,
+    pub source_time: String,
+    pub source_time_quality: String,
+    pub read: bool,
+    pub message_status: String,
+    pub decisive_fact_id: String,
+    pub assertion_count: f64,
+    pub competing_message_count: f64,
+    pub last_commit_seq: f64,
+}
+
+impl From<TeamInboxMessage> for EngineTeamInboxMessage {
+    fn from(value: TeamInboxMessage) -> Self {
+        Self {
+            message_id: value.message_id,
+            inbox_id: value.inbox_id,
+            sender_id: value.sender_id,
+            sender_present: value.sender_present,
+            message_ordinal: value.message_ordinal,
+            native_message_id: value.native_message_id,
+            native_kind: value.native_kind,
+            native_version: value.native_version,
+            native_sender_name: value.native_sender_name,
+            text: value.text,
+            summary: value.summary,
+            color: value.color,
+            source_time: value.source_time,
+            source_time_quality: value.source_time_quality,
+            read: value.read,
+            message_status: value.message_status,
+            decisive_fact_id: value.decisive_fact_id,
+            assertion_count: value.assertion_count as f64,
+            competing_message_count: value.competing_message_count as f64,
+            last_commit_seq: value.last_commit_seq as f64,
+        }
+    }
+}
+
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct EngineTeamInboxMessagePage {
+    pub contract_version: u32,
+    pub at_commit_seq: f64,
+    pub inbox_id: String,
+    pub team_id: String,
+    pub native_team_id: String,
+    pub native_recipient_name: String,
+    pub items: Vec<EngineTeamInboxMessage>,
+    pub next_cursor: Option<String>,
+}
+
+impl From<TeamInboxMessagePage> for EngineTeamInboxMessagePage {
+    fn from(value: TeamInboxMessagePage) -> Self {
+        Self {
+            contract_version: value.contract_version,
+            at_commit_seq: value.at_commit_seq as f64,
+            inbox_id: value.inbox_id,
+            team_id: value.team_id,
+            native_team_id: value.native_team_id,
+            native_recipient_name: value.native_recipient_name,
+            items: value.items.into_iter().map(Into::into).collect(),
+            next_cursor: value.next_cursor,
+        }
+    }
+}
+
+#[napi(object)]
+#[derive(Debug, Clone)]
 pub struct EngineReconcileOptions {
     /// Configured native data roots understood by the selected adapter.
     pub roots: Vec<String>,
@@ -812,6 +1363,98 @@ impl SpaghettiEngine {
         )
     }
 
+    /// Return durable run-state and current registry-presence evidence. This
+    /// intentionally does not probe PIDs or synthesize freshness assessments.
+    #[napi(ts_return_type = "Promise<EngineRuntimeSnapshot>")]
+    pub fn get_runtime_snapshot(
+        &self,
+        options: Option<EngineRuntimeSnapshotOptions>,
+        signal: Option<AbortSignal>,
+    ) -> AsyncTask<RuntimeSnapshotTask> {
+        let cancellation = cancellation_for_signal(signal.as_ref());
+        AsyncTask::with_optional_signal(
+            RuntimeSnapshotTask {
+                engine: Arc::clone(&self.inner),
+                options,
+                cancellation,
+            },
+            signal,
+        )
+    }
+
+    /// List current canonical teams, including inbox-only team identities.
+    #[napi(ts_return_type = "Promise<EngineTeamPage>")]
+    pub fn list_teams(
+        &self,
+        options: Option<EngineTeamPageOptions>,
+        signal: Option<AbortSignal>,
+    ) -> AsyncTask<TeamsTask> {
+        let cancellation = cancellation_for_signal(signal.as_ref());
+        AsyncTask::with_optional_signal(
+            TeamsTask {
+                engine: Arc::clone(&self.inner),
+                options,
+                cancellation,
+            },
+            signal,
+        )
+    }
+
+    /// Read one current team configuration and its bounded member snapshot.
+    #[napi(ts_return_type = "Promise<EngineTeamDetails>")]
+    pub fn get_team(
+        &self,
+        team_id: String,
+        signal: Option<AbortSignal>,
+    ) -> AsyncTask<TeamDetailsTask> {
+        let cancellation = cancellation_for_signal(signal.as_ref());
+        AsyncTask::with_optional_signal(
+            TeamDetailsTask {
+                engine: Arc::clone(&self.inner),
+                team_id,
+                cancellation,
+            },
+            signal,
+        )
+    }
+
+    /// Page inbox summaries without returning potentially sensitive message
+    /// bodies in a directory listing.
+    #[napi(ts_return_type = "Promise<EngineTeamInboxPage>")]
+    pub fn list_team_inboxes(
+        &self,
+        options: EngineTeamScopedPageOptions,
+        signal: Option<AbortSignal>,
+    ) -> AsyncTask<TeamInboxesTask> {
+        let cancellation = cancellation_for_signal(signal.as_ref());
+        AsyncTask::with_optional_signal(
+            TeamInboxesTask {
+                engine: Arc::clone(&self.inner),
+                options,
+                cancellation,
+            },
+            signal,
+        )
+    }
+
+    /// Page one inbox's messages in native snapshot order.
+    #[napi(ts_return_type = "Promise<EngineTeamInboxMessagePage>")]
+    pub fn list_team_inbox_messages(
+        &self,
+        options: EngineTeamInboxMessagePageOptions,
+        signal: Option<AbortSignal>,
+    ) -> AsyncTask<TeamInboxMessagesTask> {
+        let cancellation = cancellation_for_signal(signal.as_ref());
+        AsyncTask::with_optional_signal(
+            TeamInboxMessagesTask {
+                engine: Arc::clone(&self.inner),
+                options,
+                cancellation,
+            },
+            signal,
+        )
+    }
+
     /// Reconcile the adapter-declared Claude source map through the common
     /// Rust drivers, decoders, projections, and durable cursor transaction.
     #[napi(ts_return_type = "Promise<EngineReconcileResult>")]
@@ -966,6 +1609,36 @@ pub struct UsageTotalsTask {
 pub struct UsageActivityTask {
     engine: Arc<SpaghettiEngineCore>,
     options: EngineUsageActivityOptions,
+    cancellation: QueryCancellationToken,
+}
+
+pub struct RuntimeSnapshotTask {
+    engine: Arc<SpaghettiEngineCore>,
+    options: Option<EngineRuntimeSnapshotOptions>,
+    cancellation: QueryCancellationToken,
+}
+
+pub struct TeamsTask {
+    engine: Arc<SpaghettiEngineCore>,
+    options: Option<EngineTeamPageOptions>,
+    cancellation: QueryCancellationToken,
+}
+
+pub struct TeamDetailsTask {
+    engine: Arc<SpaghettiEngineCore>,
+    team_id: String,
+    cancellation: QueryCancellationToken,
+}
+
+pub struct TeamInboxesTask {
+    engine: Arc<SpaghettiEngineCore>,
+    options: EngineTeamScopedPageOptions,
+    cancellation: QueryCancellationToken,
+}
+
+pub struct TeamInboxMessagesTask {
+    engine: Arc<SpaghettiEngineCore>,
+    options: EngineTeamInboxMessagePageOptions,
     cancellation: QueryCancellationToken,
 }
 
@@ -1167,6 +1840,132 @@ impl Task for UsageActivityTask {
     }
 }
 
+impl Task for RuntimeSnapshotTask {
+    type Output = EngineRuntimeSnapshot;
+    type JsValue = EngineRuntimeSnapshot;
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        let options = self
+            .options
+            .clone()
+            .unwrap_or(EngineRuntimeSnapshotOptions {
+                project_id: None,
+                session_id: None,
+                cursor: None,
+                limit: None,
+            });
+        self.engine
+            .runtime_snapshot_cancellable(
+                RuntimeSnapshotRequest {
+                    project_id: options.project_id,
+                    session_id: options.session_id,
+                    cursor: options.cursor,
+                    limit: options.limit.unwrap_or(DEFAULT_RUNTIME_PAGE_LIMIT),
+                },
+                self.cancellation.clone(),
+            )
+            .map(Into::into)
+            .map_err(napi_error)
+    }
+
+    fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
+        Ok(output)
+    }
+}
+
+impl Task for TeamsTask {
+    type Output = EngineTeamPage;
+    type JsValue = EngineTeamPage;
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        let options = self.options.clone().unwrap_or(EngineTeamPageOptions {
+            cursor: None,
+            limit: None,
+        });
+        self.engine
+            .teams_cancellable(
+                TeamPageRequest {
+                    cursor: options.cursor,
+                    limit: options.limit.unwrap_or(DEFAULT_TEAM_PAGE_LIMIT),
+                },
+                self.cancellation.clone(),
+            )
+            .map(Into::into)
+            .map_err(napi_error)
+    }
+
+    fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
+        Ok(output)
+    }
+}
+
+impl Task for TeamDetailsTask {
+    type Output = EngineTeamDetails;
+    type JsValue = EngineTeamDetails;
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        self.engine
+            .team_details_cancellable(
+                TeamDetailsRequest {
+                    team_id: self.team_id.clone(),
+                },
+                self.cancellation.clone(),
+            )
+            .map(Into::into)
+            .map_err(napi_error)
+    }
+
+    fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
+        Ok(output)
+    }
+}
+
+impl Task for TeamInboxesTask {
+    type Output = EngineTeamInboxPage;
+    type JsValue = EngineTeamInboxPage;
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        self.engine
+            .team_inboxes_cancellable(
+                TeamInboxPageRequest {
+                    team_id: self.options.team_id.clone(),
+                    cursor: self.options.cursor.clone(),
+                    limit: self.options.limit.unwrap_or(DEFAULT_TEAM_PAGE_LIMIT),
+                },
+                self.cancellation.clone(),
+            )
+            .map(Into::into)
+            .map_err(napi_error)
+    }
+
+    fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
+        Ok(output)
+    }
+}
+
+impl Task for TeamInboxMessagesTask {
+    type Output = EngineTeamInboxMessagePage;
+    type JsValue = EngineTeamInboxMessagePage;
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        self.engine
+            .team_inbox_messages_cancellable(
+                TeamInboxMessagePageRequest {
+                    inbox_id: self.options.inbox_id.clone(),
+                    cursor: self.options.cursor.clone(),
+                    limit: self.options.limit.unwrap_or(DEFAULT_TEAM_PAGE_LIMIT),
+                },
+                self.cancellation.clone(),
+            )
+            .map(Into::into)
+            .map_err(napi_error)
+    }
+
+    fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
+        Ok(output)
+    }
+}
+
 pub struct DisposeTask {
     engine: Arc<SpaghettiEngineCore>,
 }
@@ -1187,6 +1986,15 @@ impl Task for DisposeTask {
 
 fn napi_error(error: impl std::fmt::Display) -> Error {
     Error::new(Status::GenericFailure, error.to_string())
+}
+
+fn cancellation_for_signal(signal: Option<&AbortSignal>) -> QueryCancellationToken {
+    let cancellation = QueryCancellationToken::default();
+    if let Some(signal) = signal {
+        let abort_cancellation = cancellation.clone();
+        signal.on_abort(move || abort_cancellation.cancel());
+    }
+    cancellation
 }
 
 fn validate_roots(roots: &[String], operation: &str) -> Result<()> {

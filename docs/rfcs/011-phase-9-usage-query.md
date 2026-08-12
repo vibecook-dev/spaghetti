@@ -10,8 +10,9 @@ rows, or assign quality.
 
 RFC 011 lists usage activity and totals fifth in the Phase 9 port order. This
 record closes that independently testable query slice; search, timeline,
-subagent/workflow, runtime/team, detail, and statistics packs remain open. It
-does not claim the Phase 9 exit gate.
+subagent/workflow, detail, and statistics packs remain open. The runtime/team
+pack is recorded separately as complete. This does not claim the Phase 9 exit
+gate.
 
 ## Query contract
 
@@ -152,7 +153,7 @@ This is a shadow query surface, not production `SpaghettiClient` cutover. The
 remaining gates include:
 
 - FTS search/rank merging and timeline/facet packs;
-- subagent/workflow, runtime/team, detail, and statistics packs;
+- subagent/workflow, detail, and statistics packs;
 - large-corpus latency, boundary-size, and concurrent-ingest benchmarks;
 - IPC/domain DTO sharing beyond the current N-API shadow seam;
 - production client migration and retirement of TypeScript SQLite query

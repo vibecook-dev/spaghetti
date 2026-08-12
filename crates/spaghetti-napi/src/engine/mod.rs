@@ -14,11 +14,13 @@ mod presence_projection;
 mod projection;
 mod query_identity;
 mod query_pool;
+mod runtime_query;
 mod session_index_projection;
 mod settings_projection;
 mod supervisor;
 mod task_projection;
 mod team_projection;
+mod team_query;
 mod tool_result_projection;
 mod usage_query;
 mod workflow_projection;
@@ -44,8 +46,18 @@ pub use query_pool::{
     HISTORY_QUERY_CONTRACT_VERSION,
 };
 use query_pool::{QueryClient, QueryPool, SourceCatalogSnapshot};
+pub use runtime_query::{
+    RuntimePresenceSnapshot, RuntimeRunEvidence, RuntimeRunSnapshot, RuntimeSnapshot,
+    RuntimeSnapshotEntry, RuntimeSnapshotRequest, DEFAULT_RUNTIME_PAGE_LIMIT,
+    RUNTIME_QUERY_CONTRACT_VERSION,
+};
 use supervisor::ObservationSupervisor;
 pub use supervisor::ObservationSupervisorOptions;
+pub use team_query::{
+    TeamConfigSummary, TeamDetails, TeamDetailsRequest, TeamInboxMessage, TeamInboxMessagePage,
+    TeamInboxMessagePageRequest, TeamInboxPage, TeamInboxPageRequest, TeamInboxSummary, TeamMember,
+    TeamPage, TeamPageRequest, TeamSummary, DEFAULT_TEAM_PAGE_LIMIT, TEAM_QUERY_CONTRACT_VERSION,
+};
 pub use usage_query::{
     UntimedUsageSummary, UsageActivityDay, UsageActivityReport, UsageActivityRequest,
     UsageAggregate, UsageCoverageSummary, UsageScopeRequest, UsageTokenValues, UsageTotalsReport,
@@ -425,6 +437,87 @@ impl SpaghettiEngineCore {
     ) -> Result<UsageActivityReport, EngineError> {
         let (_, queries) = self.clients()?;
         queries.usage_activity_cancellable(request, cancellation)
+    }
+
+    /// Return one keyset-paged snapshot of durable run state and current
+    /// native presence evidence. No process liveness is assessed here.
+    pub fn runtime_snapshot(
+        &self,
+        request: RuntimeSnapshotRequest,
+    ) -> Result<RuntimeSnapshot, EngineError> {
+        let (_, queries) = self.clients()?;
+        queries.runtime_snapshot(request)
+    }
+
+    pub fn runtime_snapshot_cancellable(
+        &self,
+        request: RuntimeSnapshotRequest,
+        cancellation: QueryCancellationToken,
+    ) -> Result<RuntimeSnapshot, EngineError> {
+        let (_, queries) = self.clients()?;
+        queries.runtime_snapshot_cancellable(request, cancellation)
+    }
+
+    pub fn teams(&self, request: TeamPageRequest) -> Result<TeamPage, EngineError> {
+        let (_, queries) = self.clients()?;
+        queries.teams(request)
+    }
+
+    pub fn teams_cancellable(
+        &self,
+        request: TeamPageRequest,
+        cancellation: QueryCancellationToken,
+    ) -> Result<TeamPage, EngineError> {
+        let (_, queries) = self.clients()?;
+        queries.teams_cancellable(request, cancellation)
+    }
+
+    pub fn team_details(&self, request: TeamDetailsRequest) -> Result<TeamDetails, EngineError> {
+        let (_, queries) = self.clients()?;
+        queries.team_details(request)
+    }
+
+    pub fn team_details_cancellable(
+        &self,
+        request: TeamDetailsRequest,
+        cancellation: QueryCancellationToken,
+    ) -> Result<TeamDetails, EngineError> {
+        let (_, queries) = self.clients()?;
+        queries.team_details_cancellable(request, cancellation)
+    }
+
+    pub fn team_inboxes(
+        &self,
+        request: TeamInboxPageRequest,
+    ) -> Result<TeamInboxPage, EngineError> {
+        let (_, queries) = self.clients()?;
+        queries.team_inboxes(request)
+    }
+
+    pub fn team_inboxes_cancellable(
+        &self,
+        request: TeamInboxPageRequest,
+        cancellation: QueryCancellationToken,
+    ) -> Result<TeamInboxPage, EngineError> {
+        let (_, queries) = self.clients()?;
+        queries.team_inboxes_cancellable(request, cancellation)
+    }
+
+    pub fn team_inbox_messages(
+        &self,
+        request: TeamInboxMessagePageRequest,
+    ) -> Result<TeamInboxMessagePage, EngineError> {
+        let (_, queries) = self.clients()?;
+        queries.team_inbox_messages(request)
+    }
+
+    pub fn team_inbox_messages_cancellable(
+        &self,
+        request: TeamInboxMessagePageRequest,
+        cancellation: QueryCancellationToken,
+    ) -> Result<TeamInboxMessagePage, EngineError> {
+        let (_, queries) = self.clients()?;
+        queries.team_inbox_messages_cancellable(request, cancellation)
     }
 
     /// Atomically persist one decoded source range, advance its durable
