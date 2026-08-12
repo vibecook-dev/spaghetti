@@ -66,7 +66,9 @@ use thiserror::Error;
 /// content, late-join availability, and conflict provenance.
 /// v26: workflow run snapshots, append journal member events, late joins, and
 /// workflow/member conflict provenance.
-pub const SCHEMA_VERSION: u32 = 26;
+/// v27: replaceable Claude session-index snapshots, normalized entry metadata,
+/// transcript late joins, and project/entry conflict provenance.
+pub const SCHEMA_VERSION: u32 = 27;
 
 /// Full DDL for the current schema — lifted verbatim from the TS `SCHEMA_SQL`
 /// template literal. Whitespace differs; structure does not.
@@ -436,6 +438,83 @@ CREATE TABLE IF NOT EXISTS canonical_sessions (
   source_object_id INTEGER NOT NULL,
   source_generation INTEGER NOT NULL,
   cursor_end BLOB NOT NULL,
+  last_commit_seq INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS session_index_snapshot_assertions (
+  fact_id BLOB PRIMARY KEY REFERENCES fact_records(fact_id) ON DELETE CASCADE,
+  project_key BLOB NOT NULL,
+  native_project_key TEXT NOT NULL,
+  native_version INTEGER NOT NULL,
+  original_path TEXT,
+  native_snapshot_json BLOB NOT NULL,
+  snapshot_digest BLOB NOT NULL,
+  source_object_id INTEGER NOT NULL,
+  source_generation INTEGER NOT NULL,
+  cursor_end BLOB NOT NULL,
+  last_commit_seq INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS session_index_entry_assertions (
+  fact_id BLOB NOT NULL REFERENCES session_index_snapshot_assertions(fact_id) ON DELETE CASCADE,
+  session_key BLOB NOT NULL,
+  project_key BLOB NOT NULL,
+  entry_ordinal INTEGER NOT NULL,
+  native_session_id TEXT NOT NULL,
+  full_path TEXT NOT NULL,
+  file_mtime_ms INTEGER NOT NULL,
+  first_prompt TEXT NOT NULL,
+  summary TEXT,
+  message_count INTEGER NOT NULL,
+  created_at TEXT NOT NULL,
+  created_at_quality TEXT NOT NULL,
+  modified_at TEXT NOT NULL,
+  modified_at_quality TEXT NOT NULL,
+  git_branch TEXT NOT NULL,
+  project_path TEXT NOT NULL,
+  is_sidechain INTEGER NOT NULL,
+  entry_digest BLOB NOT NULL,
+  PRIMARY KEY (fact_id, session_key)
+);
+
+CREATE TABLE IF NOT EXISTS canonical_session_indexes (
+  project_key BLOB PRIMARY KEY,
+  native_project_key TEXT NOT NULL,
+  native_version INTEGER NOT NULL,
+  original_path TEXT,
+  native_snapshot_json BLOB NOT NULL,
+  index_status TEXT NOT NULL,
+  decisive_fact_id BLOB NOT NULL REFERENCES session_index_snapshot_assertions(fact_id) ON DELETE CASCADE,
+  assertion_count INTEGER NOT NULL,
+  competing_snapshot_count INTEGER NOT NULL,
+  entry_count INTEGER NOT NULL,
+  last_commit_seq INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS canonical_session_index_entries (
+  session_key BLOB PRIMARY KEY,
+  project_key BLOB NOT NULL,
+  entry_ordinal INTEGER NOT NULL,
+  native_session_id TEXT NOT NULL,
+  full_path TEXT NOT NULL,
+  file_mtime_ms INTEGER NOT NULL,
+  first_prompt TEXT NOT NULL,
+  summary TEXT,
+  message_count INTEGER NOT NULL,
+  created_at TEXT NOT NULL,
+  created_at_quality TEXT NOT NULL,
+  modified_at TEXT NOT NULL,
+  modified_at_quality TEXT NOT NULL,
+  git_branch TEXT NOT NULL,
+  project_path TEXT NOT NULL,
+  is_sidechain INTEGER NOT NULL,
+  transcript_status TEXT NOT NULL,
+  resolution_status TEXT NOT NULL,
+  decisive_fact_id BLOB NOT NULL REFERENCES session_index_snapshot_assertions(fact_id) ON DELETE CASCADE,
+  assertion_count INTEGER NOT NULL,
+  competing_entry_count INTEGER NOT NULL,
+  identity_conflict INTEGER NOT NULL,
+  join_conflict INTEGER NOT NULL,
   last_commit_seq INTEGER NOT NULL
 );
 
@@ -1268,6 +1347,12 @@ CREATE INDEX IF NOT EXISTS idx_source_record_errors_commit ON source_record_erro
 CREATE INDEX IF NOT EXISTS idx_fact_records_object_generation ON fact_records(source_object_id, source_generation);
 CREATE INDEX IF NOT EXISTS idx_fact_records_entity_kind ON fact_records(entity_key, fact_kind);
 CREATE INDEX IF NOT EXISTS idx_canonical_sessions_project ON canonical_sessions(project_key, session_key);
+CREATE INDEX IF NOT EXISTS idx_session_index_snapshot_assertions_project ON session_index_snapshot_assertions(project_key, fact_id);
+CREATE INDEX IF NOT EXISTS idx_session_index_snapshot_assertions_source ON session_index_snapshot_assertions(source_object_id, project_key);
+CREATE INDEX IF NOT EXISTS idx_session_index_entry_assertions_project ON session_index_entry_assertions(project_key, entry_ordinal);
+CREATE INDEX IF NOT EXISTS idx_session_index_entry_assertions_session ON session_index_entry_assertions(session_key, project_key);
+CREATE INDEX IF NOT EXISTS idx_canonical_session_index_entries_project ON canonical_session_index_entries(project_key, entry_ordinal);
+CREATE INDEX IF NOT EXISTS idx_canonical_session_index_entries_transcript ON canonical_session_index_entries(transcript_status, session_key);
 CREATE INDEX IF NOT EXISTS idx_canonical_messages_session_order ON canonical_messages(session_key, source_generation, cursor_start);
 CREATE INDEX IF NOT EXISTS idx_canonical_runs_session ON canonical_runs(session_key, run_key);
 CREATE INDEX IF NOT EXISTS idx_run_evidence_run_order ON run_evidence(run_key, source_generation, cursor_end);
@@ -1461,6 +1546,10 @@ const CURRENT_TABLES: &[&str] = &[
     "canonical_workflows",
     "workflow_member_event_assertions",
     "workflow_snapshot_assertions",
+    "canonical_session_index_entries",
+    "canonical_session_indexes",
+    "session_index_entry_assertions",
+    "session_index_snapshot_assertions",
     "canonical_artifacts",
     "artifact_content_assertions",
     "artifact_metadata_assertions",
@@ -1916,6 +2005,22 @@ mod tests {
         assert!(object_exists(&conn, "table", "change_log"));
         assert!(object_exists(&conn, "table", "fact_records"));
         assert!(object_exists(&conn, "table", "canonical_sessions"));
+        assert!(object_exists(
+            &conn,
+            "table",
+            "session_index_snapshot_assertions"
+        ));
+        assert!(object_exists(
+            &conn,
+            "table",
+            "session_index_entry_assertions"
+        ));
+        assert!(object_exists(&conn, "table", "canonical_session_indexes"));
+        assert!(object_exists(
+            &conn,
+            "table",
+            "canonical_session_index_entries"
+        ));
         assert!(object_exists(&conn, "table", "canonical_messages"));
         assert!(object_exists(&conn, "table", "canonical_runs"));
         assert!(object_exists(&conn, "table", "run_evidence"));
@@ -2015,6 +2120,11 @@ mod tests {
             &conn,
             "index",
             "idx_canonical_workflow_members_workflow"
+        ));
+        assert!(object_exists(
+            &conn,
+            "index",
+            "idx_session_index_entry_assertions_session"
         ));
         assert!(object_exists(&conn, "trigger", "messages_ai"));
         assert!(object_exists(&conn, "trigger", "messages_ad"));

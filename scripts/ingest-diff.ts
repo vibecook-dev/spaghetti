@@ -452,6 +452,10 @@ const RFC011_SCHEMA_TABLES = [
   'change_log',
   'fact_records',
   'canonical_sessions',
+  'session_index_snapshot_assertions',
+  'session_index_entry_assertions',
+  'canonical_session_indexes',
+  'canonical_session_index_entries',
   'canonical_messages',
   'canonical_runs',
   'run_evidence',
@@ -534,6 +538,24 @@ const TABLE_SPECS: TableSpec[] = [
   {
     name: 'canonical_sessions',
     orderBy: 'session_key',
+  },
+  {
+    name: 'session_index_snapshot_assertions',
+    orderBy: 'project_key, fact_id',
+    jsonColumns: ['native_snapshot_json'],
+  },
+  {
+    name: 'session_index_entry_assertions',
+    orderBy: 'project_key, entry_ordinal',
+  },
+  {
+    name: 'canonical_session_indexes',
+    orderBy: 'project_key',
+    jsonColumns: ['native_snapshot_json'],
+  },
+  {
+    name: 'canonical_session_index_entries',
+    orderBy: 'project_key, entry_ordinal',
   },
   {
     name: 'canonical_messages',

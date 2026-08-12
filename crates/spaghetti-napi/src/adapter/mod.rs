@@ -21,9 +21,10 @@ pub use facts::{
     DelegationSpawnFact, EntityKey, EvidenceKind, EvidenceStrength, Fact, FactBatch, FactEnvelope,
     FactId, FactProvenance, MessageFact, MessageRole, PlanSnapshotFact, PresenceFact,
     QualifiedTimestamp, RelationStrength, RunEvidenceFact, RunFact, SessionFact,
-    TaskCollectionKind, TaskItemSnapshot, TaskSnapshotCoverage, TaskSnapshotFact, TaskStatus,
-    TeamInboxMessageSnapshot, TeamInboxSnapshotFact, TeamMemberSnapshot, TeamSnapshotFact,
-    TimestampQuality, TokenUsage, UsageAccounting, UsageFact, UsageScope, ValueQuality,
-    WorkflowMemberEventFact, WorkflowMemberEventKind, WorkflowSnapshotFact, WorkflowStatus,
+    SessionIndexEntrySnapshot, SessionIndexSnapshotFact, TaskCollectionKind, TaskItemSnapshot,
+    TaskSnapshotCoverage, TaskSnapshotFact, TaskStatus, TeamInboxMessageSnapshot,
+    TeamInboxSnapshotFact, TeamMemberSnapshot, TeamSnapshotFact, TimestampQuality, TokenUsage,
+    UsageAccounting, UsageFact, UsageScope, ValueQuality, WorkflowMemberEventFact,
+    WorkflowMemberEventKind, WorkflowSnapshotFact, WorkflowStatus,
 };
 pub use registry::{AdapterRegistry, AdapterRegistryBuilder};

@@ -2,8 +2,8 @@
 
 Status: Phase 4 history/usage complete; Phase 5 delegation, native metadata,
 parent-spawn correlation, team/config/inbox snapshots, active-session
-presence, task/todo/plan snapshots, file-history artifacts, and workflow
-summaries/journals implemented on 2026-08-11
+presence, task/todo/plan snapshots, file-history artifacts, workflow
+summaries/journals, and session-index metadata implemented on 2026-08-11
 
 This survey defines the native inputs and semantic claims currently made by
 the Rust `claude-code` adapter. It is narrower than the legacy Claude parser on
@@ -11,8 +11,9 @@ purpose: Phase 4 covers canonical transcript history, run lineage/activity,
 and native usage. Phase 5 now adds delegation joins, authoritative team and
 inbox snapshots, native active-session registry presence, replaceable task,
 todo, and plan documents, joined file-history metadata/content, and native
-workflow containers/member events while richer runtime packs remain in
-progress.
+workflow containers/member events. Phase 5 also preserves replaceable
+session-index metadata without treating the index as transcript history, while
+richer runtime packs remain in progress.
 
 ## Installation and source identity
 
@@ -48,15 +49,17 @@ authoritative snapshot.
 | `file-history-blobs`   | `home`     | `file-history/*/*@v*`                     | `ReplaceDocument` (1 MiB bound)                  | Canonical    | Artifact   |
 | `workflow-runs`        | `projects` | `*/*/workflows/wf_*.json`                 | `ReplaceDocument` (1 MiB bound)                  | Canonical    | Workflow   |
 | `workflow-journals`    | `projects` | `*/*/subagents/workflows/*/journal.jsonl` | `AppendDelimitedFile` (`\n`, CRLF normalization) | Canonical    | Member     |
+| `session-indexes`      | `projects` | `*/sessions-index.json`                   | `ReplaceDocument` (1 MiB bound)                  | Supplemental | Project    |
 
 Transcript streams use incremental byte cursors and interactive priority. The
 team/metadata, artifact, and workflow-run document streams use snapshot-replace
 consistency and foreground-repair priority. The presence, task, todo, and plan
 streams use snapshot replacement and interactive priority. Workflow journals
-use incremental byte cursors and interactive priority. All twelve use `MirrorSource`
+use incremental byte cursors and interactive priority. Session indexes use
+snapshot replacement and interactive priority. All thirteen use `MirrorSource`
 deletion and full raw retention during shadow migration. Common drivers—not
-the adapter—own framing or stable reads, file identity,
-generations/revisions, checkpoints, watcher recovery, and scheduling.
+the adapter—own framing or stable reads, file identity, generations/revisions,
+checkpoints, watcher recovery, and scheduling.
 
 Parent identity comes from `<project-slug>/<session-uuid>.jsonl`. Subagent
 identity preserves the parent session, optional `workflows/<workflow-id>`
@@ -84,6 +87,12 @@ Workflow paths are confined to exact
 `<project>/<session-uuid>/workflows/<wf_id>.json` and
 `<project>/<session-uuid>/subagents/workflows/<wf_id>/journal.jsonl` shapes.
 Run IDs must start with `wf_`, and a run payload ID must match its filename.
+
+Session-index paths are confined to exact
+`<project>/sessions-index.json` shapes. The project directory supplies the
+source object identity; the document retains its native `projectPath` and each
+entry's transcript path as metadata rather than using either to escape the
+configured root.
 
 ## Native record interpretation
 
@@ -128,6 +137,9 @@ Each complete native record or document is decoded once into common facts:
 - `WorkflowMemberEventFact` for each valid journal start or result, preserving
   workflow/member/event identity, result JSON, and the workflow-aware child
   run key used by nested subagent transcripts;
+- `SessionIndexSnapshotFact` for each complete index, preserving its native
+  version, project path, ordered entries, optional summary/original path,
+  timestamps, counts, sidechain marker, and complete forward-compatible JSON;
 - `RunEvidenceFact::ActivityObserved` with `NativeActivity` strength;
 - `UsageFact` when the record contains non-zero native usage.
 
@@ -199,6 +211,10 @@ The additive workflow run and journal streams advance the adapter contract to
 version 9 and declare `claude-code-workflow-v1`. Earlier stream fact identities
 and meanings remain unchanged.
 
+The additive session-index stream advances the adapter contract to version 10
+and declares `claude-code-session-index-v1`. Earlier stream fact identities and
+meanings remain unchanged.
+
 Team identity comes from the native directory name. Member identity is scoped
 by team plus native member name, and an inbox is scoped by team plus recipient.
 Inbox messages prefer non-empty native `msg_id`. Older messages derive a
@@ -246,6 +262,12 @@ granularity. Workflow summaries may settle separately from append journals.
 Container status applies only to the workflow. Journal starts/results prove
 membership and native event observation; neither workflow completion nor a
 result payload determines child-run terminal state.
+
+Claude declares session-index data as supplemental project metadata. A valid
+entry can join a canonical transcript by native session identity, but it never
+creates a `Session`, `Message`, `Run`, activity observation, or lifecycle
+evidence. Index files can outlive their referenced transcripts, and native
+`created`/`modified` values are retained even when their ordering is surprising.
 
 The transcript decoder declares activity only. Neither it nor the presence
 pack turns quiet files, missing watch events, or filesystem nesting into
@@ -323,14 +345,23 @@ journal-first arrival converge. Membership count disagreement remains explicit
 but is not a conflict; competing snapshots/events and cross-half identity
 disagreement are retained and diagnosed.
 
+Each committed session-index revision replaces the complete assertion owned by
+that source object. Missing entries retract in the same commit, while an empty
+entry array retains the project index itself. Multiple complete snapshots for
+one project compete deterministically; omission from a competing snapshot is
+also disagreement. Index-first and transcript-first arrival converge, and a
+transcript found under a different project remains an explicit join conflict.
+Confirmed index deletion retracts its assertions without deleting transcript
+history.
+
 ## Remaining Phase 5 sources
 
 Legacy tool-result text that only mentions an agent ID is not used for native
 correlation. A future compatibility fallback must be classified
 `NativeIndirect`, not explicit. The adapter also does not yet declare
-`sessions-index.json`, memory, tool-result files, settings, or other
-sidecars. Those inputs need replace-document,
-directory-snapshot, or other reviewed stream and capability semantics.
+memory, tool-result files, settings, or other sidecars. Those inputs need
+replace-document, directory-snapshot, or other reviewed stream and capability
+semantics.
 Credentials, debug logs, telemetry, caches, and arbitrary symlink escapes
 remain out of scope.
 
@@ -397,3 +428,10 @@ container-status normalization, exact nested-child correlation, journal-first
 late joins, started/result accumulation, summary and journal retraction,
 membership count mismatch, deterministic conflicts and clearing, audit cleanup,
 and the invariant that workflow completion does not complete a child run.
+
+The session-index trace covers strict paths and version/UUID bounds, complete
+native snapshot preservation, absent optional summaries and paths, index-first
+and transcript-first joins, empty replacement and confirmed deletion,
+competing complete snapshots including omission disagreement, cross-project
+identity/join conflicts and clearing, audit cleanup, and the invariant that
+index metadata never fabricates transcript history or lifecycle evidence.

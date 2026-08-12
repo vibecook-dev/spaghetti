@@ -154,7 +154,7 @@ gate for the commit.
 
 ## Remaining Phase 5 work
 
-Workflows are now implemented in the adjacent Phase 5 pack. Sessions-index,
-memory, tool-result, settings, and other reviewed sidecar packs remain. The
-observation coordinator and production Rust live cutover are also required for
-the Phase 5 exit gate.
+Workflows and session-index metadata are now implemented in adjacent Phase 5
+packs. Memory, tool-result, settings, and other reviewed sidecar packs remain.
+The observation coordinator and production Rust live cutover are also required
+for the Phase 5 exit gate.

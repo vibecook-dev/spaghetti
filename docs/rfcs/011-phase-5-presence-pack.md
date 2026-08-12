@@ -116,8 +116,8 @@ remain the release gate for the commit.
 
 ## Remaining Phase 5 work
 
-Tasks, todos, plans, file-history artifacts, and workflows are now implemented
-in adjacent Phase 5 packs. Sessions-index, memory, tool-result, and settings
-packs remain. The observation coordinator, optional volatile process
-assessment API, and production live cutover are also still required for the
-Phase 5 exit gate.
+Tasks, todos, plans, file-history artifacts, workflows, and session-index
+metadata are now implemented in adjacent Phase 5 packs. Memory, tool-result,
+and settings packs remain. The observation coordinator, optional volatile
+process assessment API, and production live cutover are also still required
+for the Phase 5 exit gate.

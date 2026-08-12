@@ -170,6 +170,38 @@ pub struct SessionFact {
     pub source_time: Option<QualifiedTimestamp>,
 }
 
+/// One native entry from a project-level `sessions-index.json` snapshot.
+/// The entry is metadata about a possible transcript, not proof that the
+/// transcript object or any message history is currently available.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionIndexEntrySnapshot {
+    pub session: EntityKey,
+    pub native_session_id: String,
+    pub full_path: String,
+    pub file_mtime_ms: u64,
+    pub first_prompt: String,
+    pub summary: Option<String>,
+    pub message_count: u64,
+    pub created_at: QualifiedTimestamp,
+    pub modified_at: QualifiedTimestamp,
+    pub git_branch: String,
+    pub project_path: String,
+    pub is_sidechain: bool,
+}
+
+/// One complete, replaceable project session-index document. The original
+/// native snapshot is retained for forward-compatible inspection while the
+/// normalized entries support deterministic joins and conflict reduction.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionIndexSnapshotFact {
+    pub project: EntityKey,
+    pub native_project_key: String,
+    pub native_version: u64,
+    pub original_path: Option<String>,
+    pub entries: Vec<SessionIndexEntrySnapshot>,
+    pub native_snapshot: Value,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MessageRole {
     User,
@@ -665,6 +697,7 @@ pub struct UsageFact {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Fact {
     Session(SessionFact),
+    SessionIndexSnapshot(SessionIndexSnapshotFact),
     Message(MessageFact),
     Run(RunFact),
     Delegation(DelegationFact),
@@ -692,6 +725,7 @@ impl Fact {
     pub fn kind(&self) -> &'static str {
         match self {
             Self::Session(_) => "session",
+            Self::SessionIndexSnapshot(_) => "session_index_snapshot",
             Self::Message(_) => "message",
             Self::Run(_) => "run",
             Self::Delegation(_) => "delegation",
@@ -715,6 +749,7 @@ impl Fact {
     pub fn entity_key(&self) -> Option<&EntityKey> {
         match self {
             Self::Session(fact) => Some(&fact.session),
+            Self::SessionIndexSnapshot(fact) => Some(&fact.project),
             Self::Message(fact) => Some(&fact.message),
             Self::Run(fact) => Some(&fact.run),
             Self::Delegation(fact) => Some(&fact.child_run),

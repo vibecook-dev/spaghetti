@@ -21,6 +21,7 @@ use super::commit::{
     ProjectionCommitContext, TransactionalProjectionWork,
 };
 use super::presence_projection::apply_presence_facts;
+use super::session_index_projection::apply_session_index_facts;
 use super::task_projection::apply_task_snapshots;
 use super::team_projection::apply_team_snapshots;
 use super::workflow_projection::apply_workflow_facts;
@@ -86,11 +87,18 @@ impl TransactionalProjectionWork for FactProjectionWork<'_> {
             context,
             "read replaced canonical runs",
         )?);
+        let mut changed_session_keys = old_generation_keys(
+            transaction,
+            "SELECT DISTINCT session_key FROM canonical_sessions WHERE source_object_id = ?1 AND source_generation <> ?2",
+            context,
+            "read replaced canonical sessions",
+        )?;
         let mut changes = retract_canonical_generation(transaction, context)?;
         for envelope in self.batch.facts() {
             persist_fact(transaction, context, envelope)?;
             match &envelope.value {
                 Fact::Session(fact) => {
+                    changed_session_keys.insert(fact.session.as_bytes().to_vec());
                     transaction
                         .execute(
                             r#"
@@ -261,6 +269,7 @@ impl TransactionalProjectionWork for FactProjectionWork<'_> {
                     envelope,
                 )?),
                 Fact::Delegation(_)
+                | Fact::SessionIndexSnapshot(_)
                 | Fact::DelegationMetadata(_)
                 | Fact::DelegationSpawn(_)
                 | Fact::TeamSnapshot(_)
@@ -276,6 +285,12 @@ impl TransactionalProjectionWork for FactProjectionWork<'_> {
                 | Fact::Usage(_) => {}
             }
         }
+        changes.extend(apply_session_index_facts(
+            transaction,
+            context,
+            self.batch,
+            &changed_session_keys,
+        )?);
         Ok(changes)
     }
 
@@ -2390,12 +2405,12 @@ mod tests {
         AdapterId, AdapterObjectContext, AgentAdapter, ArtifactCapture, ArtifactContentFact,
         ArtifactMetadataEntry, ArtifactMetadataSnapshotFact, ArtifactObservationKind,
         DecodeContext, DecoderId, FactBatch, PlanSnapshotFact, PresenceFact, RunEvidenceFact,
-        RunFact, SessionFact, SourceInstance, SourceInstanceKey,
-        SourceInstanceSpec as AdapterSourceInstanceSpec, SourceObjectDescriptor, SourceRoot,
-        StreamId, TaskCollectionKind, TaskItemSnapshot, TaskSnapshotCoverage, TaskSnapshotFact,
-        TaskStatus, TeamInboxMessageSnapshot, TeamInboxSnapshotFact, TeamMemberSnapshot,
-        TeamSnapshotFact, WorkflowMemberEventFact, WorkflowMemberEventKind, WorkflowSnapshotFact,
-        WorkflowStatus,
+        RunFact, SessionFact, SessionIndexEntrySnapshot, SessionIndexSnapshotFact, SourceInstance,
+        SourceInstanceKey, SourceInstanceSpec as AdapterSourceInstanceSpec, SourceObjectDescriptor,
+        SourceRoot, StreamId, TaskCollectionKind, TaskItemSnapshot, TaskSnapshotCoverage,
+        TaskSnapshotFact, TaskStatus, TeamInboxMessageSnapshot, TeamInboxSnapshotFact,
+        TeamMemberSnapshot, TeamSnapshotFact, WorkflowMemberEventFact, WorkflowMemberEventKind,
+        WorkflowSnapshotFact, WorkflowStatus,
     };
     use crate::claude::ClaudeCodeAdapter;
     use crate::core::schema;
@@ -2800,6 +2815,47 @@ mod tests {
             native_event_key: native_event_key.to_string(),
             kind,
             result,
+        }
+    }
+
+    fn session_index_entry(
+        session: EntityKey,
+        native_session_id: &str,
+        prompt: &str,
+        summary: Option<&str>,
+    ) -> SessionIndexEntrySnapshot {
+        SessionIndexEntrySnapshot {
+            session,
+            native_session_id: native_session_id.to_string(),
+            full_path: format!("/fixture/project/{native_session_id}.jsonl"),
+            file_mtime_ms: 1_770_000_000_123,
+            first_prompt: prompt.to_string(),
+            summary: summary.map(str::to_string),
+            message_count: 7,
+            created_at: exact("2026-02-02T00:00:00.000Z"),
+            modified_at: exact("2026-02-02T00:01:00.000Z"),
+            git_branch: "main".to_string(),
+            project_path: "/fixture/project".to_string(),
+            is_sidechain: false,
+        }
+    }
+
+    fn session_index_fact(
+        project: EntityKey,
+        native_project_key: &str,
+        entries: Vec<SessionIndexEntrySnapshot>,
+    ) -> SessionIndexSnapshotFact {
+        SessionIndexSnapshotFact {
+            project,
+            native_project_key: native_project_key.to_string(),
+            native_version: 1,
+            original_path: Some("/fixture/project".to_string()),
+            native_snapshot: serde_json::json!({
+                "version": 1,
+                "originalPath": "/fixture/project",
+                "entryCount": entries.len(),
+            }),
+            entries,
         }
     }
 
@@ -7270,6 +7326,418 @@ mod tests {
                 )
                 .unwrap(),
             0
+        );
+    }
+
+    #[test]
+    fn session_index_first_and_transcript_first_converge_without_fabricating_history() {
+        let index_object = b"session-index";
+        let index_key = entity("project", PROJECT);
+        let session_key = entity("session", SESSION);
+
+        let run_index_first = || {
+            let mut connection = database();
+            register_object(&mut connection);
+            register_object_key(&mut connection, index_object, 12);
+            let index_record = object_record(
+                2,
+                1,
+                SourceCursor::append_offset(0),
+                SourceCursor::append_offset(1),
+                20,
+                b"session-index",
+            );
+            let mut index = FactBatch::new(2, 1).unwrap();
+            index
+                .push(
+                    &index_record,
+                    Fact::SessionIndexSnapshot(session_index_fact(
+                        index_key.clone(),
+                        PROJECT,
+                        vec![session_index_entry(
+                            session_key.clone(),
+                            SESSION,
+                            "Build the index pack",
+                            Some("Index pack"),
+                        )],
+                    )),
+                )
+                .unwrap();
+            commit_object_batch(
+                &mut connection,
+                index_object,
+                &index_record,
+                1,
+                SourceCursor::append_offset(0).into_bytes(),
+                21,
+                &index,
+            );
+            assert_eq!(count(&connection, "canonical_sessions"), 0);
+            assert_eq!(count(&connection, "canonical_messages"), 0);
+            assert_eq!(
+                connection
+                    .query_row(
+                        "SELECT transcript_status FROM canonical_session_index_entries WHERE session_key = ?1",
+                        [session_key.as_bytes()],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .unwrap(),
+                "missing"
+            );
+
+            let transcript_record = direct_record(1, 0, 1, 30, b"transcript-session");
+            let mut transcript = FactBatch::new(2, 1).unwrap();
+            transcript
+                .push(
+                    &transcript_record,
+                    Fact::Session(SessionFact {
+                        session: session_key.clone(),
+                        project: index_key.clone(),
+                        native_session_id: SESSION.to_string(),
+                        native_project_key: PROJECT.to_string(),
+                        cwd: Some("/fixture/project".to_string()),
+                        git_branch: Some("main".to_string()),
+                        first_prompt: Some("Transcript prompt".to_string()),
+                        ai_title: None,
+                        custom_title: None,
+                        source_time: Some(exact("2026-02-02T00:00:30.000Z")),
+                    }),
+                )
+                .unwrap();
+            commit_direct_batch(&mut connection, &transcript_record, 1, 0, 31, &transcript);
+            connection
+        };
+
+        let mut index_first = run_index_first();
+        assert_eq!(
+            index_first
+                .query_row(
+                    "SELECT transcript_status || ':' || resolution_status FROM canonical_session_index_entries WHERE session_key = ?1",
+                    [session_key.as_bytes()],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "present:resolved"
+        );
+
+        let mut transcript_first = database();
+        register_object(&mut transcript_first);
+        register_object_key(&mut transcript_first, index_object, 12);
+        let transcript_record = direct_record(1, 0, 1, 20, b"transcript-session");
+        let mut transcript = FactBatch::new(2, 1).unwrap();
+        transcript
+            .push(
+                &transcript_record,
+                Fact::Session(SessionFact {
+                    session: session_key.clone(),
+                    project: index_key.clone(),
+                    native_session_id: SESSION.to_string(),
+                    native_project_key: PROJECT.to_string(),
+                    cwd: Some("/fixture/project".to_string()),
+                    git_branch: Some("main".to_string()),
+                    first_prompt: Some("Transcript prompt".to_string()),
+                    ai_title: None,
+                    custom_title: None,
+                    source_time: Some(exact("2026-02-02T00:00:30.000Z")),
+                }),
+            )
+            .unwrap();
+        commit_direct_batch(
+            &mut transcript_first,
+            &transcript_record,
+            1,
+            0,
+            21,
+            &transcript,
+        );
+        let index_record = object_record(
+            2,
+            1,
+            SourceCursor::append_offset(0),
+            SourceCursor::append_offset(1),
+            30,
+            b"session-index",
+        );
+        let mut index = FactBatch::new(2, 1).unwrap();
+        index
+            .push(
+                &index_record,
+                Fact::SessionIndexSnapshot(session_index_fact(
+                    index_key,
+                    PROJECT,
+                    vec![session_index_entry(
+                        session_key.clone(),
+                        SESSION,
+                        "Build the index pack",
+                        Some("Index pack"),
+                    )],
+                )),
+            )
+            .unwrap();
+        commit_object_batch(
+            &mut transcript_first,
+            index_object,
+            &index_record,
+            1,
+            SourceCursor::append_offset(0).into_bytes(),
+            31,
+            &index,
+        );
+        let canonical = |connection: &Connection| {
+            connection
+                .query_row(
+                    r#"
+                    SELECT native_session_id, first_prompt, summary,
+                           transcript_status, resolution_status,
+                           assertion_count, competing_entry_count, join_conflict
+                    FROM canonical_session_index_entries WHERE session_key = ?1
+                    "#,
+                    [session_key.as_bytes()],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, Option<String>>(2)?,
+                            row.get::<_, String>(3)?,
+                            row.get::<_, String>(4)?,
+                            row.get::<_, i64>(5)?,
+                            row.get::<_, i64>(6)?,
+                            row.get::<_, i64>(7)?,
+                        ))
+                    },
+                )
+                .unwrap()
+        };
+        assert_eq!(canonical(&index_first), canonical(&transcript_first));
+
+        let replacement_record = object_record(
+            2,
+            1,
+            SourceCursor::append_offset(1),
+            SourceCursor::append_offset(2),
+            40,
+            b"session-index-empty",
+        );
+        let mut replacement = FactBatch::new(2, 1).unwrap();
+        replacement
+            .push(
+                &replacement_record,
+                Fact::SessionIndexSnapshot(session_index_fact(
+                    entity("project", PROJECT),
+                    PROJECT,
+                    Vec::new(),
+                )),
+            )
+            .unwrap();
+        commit_object_batch(
+            &mut index_first,
+            index_object,
+            &replacement_record,
+            1,
+            SourceCursor::append_offset(1).into_bytes(),
+            41,
+            &replacement,
+        );
+        assert_eq!(count(&index_first, "canonical_session_index_entries"), 0);
+        assert_eq!(count(&index_first, "canonical_sessions"), 1);
+        assert_eq!(
+            index_first
+                .query_row(
+                    "SELECT entry_count FROM canonical_session_indexes WHERE project_key = ?1",
+                    [entity("project", PROJECT).as_bytes()],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            index_first
+                .query_row(
+                    "SELECT COUNT(*) FROM fact_records WHERE fact_kind = 'session_index_snapshot'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn competing_session_indexes_and_cross_project_transcript_are_explicit_conflicts() {
+        let mut connection = database();
+        register_object(&mut connection);
+        let primary_object = b"session-index-primary";
+        let secondary_object = b"session-index-secondary";
+        register_object_key(&mut connection, primary_object, 12);
+        register_object_key(&mut connection, secondary_object, 13);
+        let project_key = entity("project", PROJECT);
+        let session_key = entity("session", SESSION);
+
+        let primary_record = object_record(
+            2,
+            1,
+            SourceCursor::append_offset(0),
+            SourceCursor::append_offset(1),
+            20,
+            b"index-primary",
+        );
+        let mut primary = FactBatch::new(2, 1).unwrap();
+        primary
+            .push(
+                &primary_record,
+                Fact::SessionIndexSnapshot(session_index_fact(
+                    project_key.clone(),
+                    PROJECT,
+                    vec![session_index_entry(
+                        session_key.clone(),
+                        SESSION,
+                        "Primary prompt",
+                        Some("Primary"),
+                    )],
+                )),
+            )
+            .unwrap();
+        commit_object_batch(
+            &mut connection,
+            primary_object,
+            &primary_record,
+            1,
+            SourceCursor::append_offset(0).into_bytes(),
+            21,
+            &primary,
+        );
+
+        let secondary_record = object_record(
+            3,
+            1,
+            SourceCursor::append_offset(0),
+            SourceCursor::append_offset(1),
+            30,
+            b"index-secondary",
+        );
+        let mut secondary = FactBatch::new(2, 1).unwrap();
+        secondary
+            .push(
+                &secondary_record,
+                Fact::SessionIndexSnapshot(session_index_fact(
+                    project_key.clone(),
+                    PROJECT,
+                    vec![session_index_entry(
+                        session_key.clone(),
+                        SESSION,
+                        "Secondary prompt",
+                        Some("Secondary"),
+                    )],
+                )),
+            )
+            .unwrap();
+        commit_object_batch(
+            &mut connection,
+            secondary_object,
+            &secondary_record,
+            1,
+            SourceCursor::append_offset(0).into_bytes(),
+            31,
+            &secondary,
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT index_status || ':' || assertion_count || ':' || competing_snapshot_count FROM canonical_session_indexes WHERE project_key = ?1",
+                    [project_key.as_bytes()],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "conflicting:2:1"
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT resolution_status || ':' || assertion_count || ':' || competing_entry_count FROM canonical_session_index_entries WHERE session_key = ?1",
+                    [session_key.as_bytes()],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "conflicting:2:1"
+        );
+
+        let transcript_record = direct_record(1, 0, 1, 40, b"wrong-project-transcript");
+        let mut transcript = FactBatch::new(2, 1).unwrap();
+        transcript
+            .push(
+                &transcript_record,
+                Fact::Session(SessionFact {
+                    session: session_key.clone(),
+                    project: entity("project", "different-project"),
+                    native_session_id: SESSION.to_string(),
+                    native_project_key: "different-project".to_string(),
+                    cwd: Some("/different".to_string()),
+                    git_branch: None,
+                    first_prompt: None,
+                    ai_title: None,
+                    custom_title: None,
+                    source_time: None,
+                }),
+            )
+            .unwrap();
+        commit_direct_batch(&mut connection, &transcript_record, 1, 0, 41, &transcript);
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT transcript_status || ':' || join_conflict FROM canonical_session_index_entries WHERE session_key = ?1",
+                    [session_key.as_bytes()],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "different_project:1"
+        );
+
+        let retracted_record = object_record(
+            3,
+            1,
+            SourceCursor::append_offset(1),
+            SourceCursor::append_offset(2),
+            50,
+            b"secondary-deleted",
+        );
+        commit_object_batch(
+            &mut connection,
+            secondary_object,
+            &retracted_record,
+            1,
+            SourceCursor::append_offset(1).into_bytes(),
+            51,
+            &FactBatch::new(1, 1).unwrap(),
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT index_status || ':' || competing_snapshot_count FROM canonical_session_indexes WHERE project_key = ?1",
+                    [project_key.as_bytes()],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "resolved:0"
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT resolution_status || ':' || competing_entry_count || ':' || join_conflict FROM canonical_session_index_entries WHERE session_key = ?1",
+                    [session_key.as_bytes()],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "conflicting:0:1"
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT operation FROM change_log WHERE topic = 'diagnostic.history.session-index-conflict' AND entity_key = ?1 ORDER BY commit_seq DESC LIMIT 1",
+                    [project_key.as_bytes()],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "delete"
         );
     }
 

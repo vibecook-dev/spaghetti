@@ -19,13 +19,14 @@ use crate::adapter::{
     DelegationKind, DelegationMetadataFact, DelegationSpawnFact, DeletionPolicy, DiscoveryContext,
     DriverSpec, EntityKey, EntityScope, EvidenceKind, EvidenceStrength, Fact, FactBatch,
     MessageFact, MessageRole, ObjectSelector, PlanSnapshotFact, PresenceFact, QualifiedTimestamp,
-    RawRetentionPolicy, RelationStrength, RunEvidenceFact, RunFact, SessionFact, SourceInstance,
-    SourceInstanceKey, SourceInstanceSpec, SourceObjectDescriptor, SourceRoot, StreamAuthority,
-    StreamId, StreamSpec, SupportLevel, TaskCollectionKind, TaskItemSnapshot, TaskSnapshotCoverage,
-    TaskSnapshotFact, TaskStatus, TeamInboxMessageSnapshot, TeamInboxSnapshotFact,
-    TeamMemberSnapshot, TeamSnapshotFact, TimestampQuality, TokenUsage, UsageAccounting, UsageFact,
-    UsageScope, ValueQuality, WorkflowMemberEventFact, WorkflowMemberEventKind,
-    WorkflowSnapshotFact, WorkflowStatus,
+    RawRetentionPolicy, RelationStrength, RunEvidenceFact, RunFact, SessionFact,
+    SessionIndexEntrySnapshot, SessionIndexSnapshotFact, SourceInstance, SourceInstanceKey,
+    SourceInstanceSpec, SourceObjectDescriptor, SourceRoot, StreamAuthority, StreamId, StreamSpec,
+    SupportLevel, TaskCollectionKind, TaskItemSnapshot, TaskSnapshotCoverage, TaskSnapshotFact,
+    TaskStatus, TeamInboxMessageSnapshot, TeamInboxSnapshotFact, TeamMemberSnapshot,
+    TeamSnapshotFact, TimestampQuality, TokenUsage, UsageAccounting, UsageFact, UsageScope,
+    ValueQuality, WorkflowMemberEventFact, WorkflowMemberEventKind, WorkflowSnapshotFact,
+    WorkflowStatus,
 };
 use crate::claude::message_extractor;
 use crate::claude::session_metadata;
@@ -51,6 +52,7 @@ const PLAN_STREAM: &str = "plan-documents";
 const ARTIFACT_CONTENT_STREAM: &str = "file-history-blobs";
 const WORKFLOW_RUN_STREAM: &str = "workflow-runs";
 const WORKFLOW_JOURNAL_STREAM: &str = "workflow-journals";
+const SESSION_INDEX_STREAM: &str = "session-indexes";
 const PARENT_DECODER: &str = "claude-session-record";
 const SUBAGENT_DECODER: &str = "claude-subagent-record";
 const SUBAGENT_META_DECODER: &str = "claude-subagent-metadata";
@@ -63,6 +65,7 @@ const PLAN_DECODER: &str = "claude-plan-document";
 const ARTIFACT_CONTENT_DECODER: &str = "claude-file-history-blob";
 const WORKFLOW_RUN_DECODER: &str = "claude-workflow-run";
 const WORKFLOW_JOURNAL_DECODER: &str = "claude-workflow-journal";
+const SESSION_INDEX_DECODER: &str = "claude-session-index";
 const OBJECT_CONTEXT_VERSION: u32 = 1;
 const SUBAGENT_META_MAX_BYTES: usize = 64 * 1024;
 const TEAM_CONFIG_MAX_BYTES: usize = 1024 * 1024;
@@ -73,10 +76,12 @@ const TASK_ITEM_MAX_BYTES: usize = 256 * 1024;
 const PLAN_MAX_BYTES: usize = 4 * 1024 * 1024;
 const ARTIFACT_CONTENT_MAX_BYTES: usize = 1024 * 1024;
 const WORKFLOW_RUN_MAX_BYTES: usize = 1024 * 1024;
+const SESSION_INDEX_MAX_BYTES: usize = 1024 * 1024;
 const TEAM_MEMBER_LIMIT: usize = 256;
 const TEAM_INBOX_MESSAGE_LIMIT: usize = 4_096;
 const TODO_ITEM_LIMIT: usize = 4_096;
 const ARTIFACT_METADATA_LIMIT: usize = 512;
+const SESSION_INDEX_ENTRY_LIMIT: usize = 4_096;
 
 const HISTORY_SESSIONS: &str = "history.sessions";
 const HISTORY_MESSAGES: &str = "history.messages";
@@ -109,7 +114,7 @@ impl ClaudeCodeAdapter {
                 id: AdapterId::new(ADAPTER_ID).expect("static Claude adapter id is valid"),
                 display_name: "Claude Code".to_string(),
                 adapter_version: env!("CARGO_PKG_VERSION").to_string(),
-                contract_version: 9,
+                contract_version: 10,
                 source_schema_versions: vec![
                     "claude-code-jsonl-v1".to_string(),
                     "claude-code-subagent-meta-v1".to_string(),
@@ -121,6 +126,7 @@ impl ClaudeCodeAdapter {
                     "claude-code-plan-v1".to_string(),
                     "claude-code-file-history-v1".to_string(),
                     "claude-code-workflow-v1".to_string(),
+                    "claude-code-session-index-v1".to_string(),
                 ],
                 capabilities: claude_capabilities(),
             },
@@ -422,6 +428,25 @@ impl AgentAdapter for ClaudeCodeAdapter {
                 retention: RawRetentionPolicy::Full,
                 capabilities: workflow_capabilities(),
             },
+            StreamSpec {
+                id: StreamId::new(SESSION_INDEX_STREAM)?,
+                driver: DriverSpec::ReplaceDocument(ReplaceDocumentConfig {
+                    max_document_bytes: SESSION_INDEX_MAX_BYTES,
+                }),
+                selector: ObjectSelector {
+                    root_name: "projects".to_string(),
+                    include: vec!["*/sessions-index.json".to_string()],
+                    exclude: Vec::new(),
+                },
+                decoder: DecoderId::new(SESSION_INDEX_DECODER)?,
+                authority: StreamAuthority::Supplemental,
+                entity_scope: EntityScope::Project,
+                priority: IngestPriority::Interactive,
+                consistency: ConsistencyPolicy::SnapshotReplace,
+                deletion: DeletionPolicy::MirrorSource,
+                retention: RawRetentionPolicy::Full,
+                capabilities: session_index_capabilities(),
+            },
         ];
         for stream in &streams {
             stream.validate(instance)?;
@@ -471,6 +496,9 @@ impl AgentAdapter for ClaudeCodeAdapter {
             WORKFLOW_JOURNAL_STREAM => encode_object_context(
                 &ClaudeWorkflowContext::journal_from_path(&object.relative_path)?,
             )?,
+            SESSION_INDEX_STREAM => encode_object_context(&ClaudeSessionIndexContext::from_path(
+                &object.relative_path,
+            )?)?,
             _ => {
                 return Err(AdapterError::new(
                     AdapterErrorClass::StreamFatal,
@@ -542,6 +570,10 @@ impl AgentAdapter for ClaudeCodeAdapter {
             WORKFLOW_JOURNAL_DECODER => {
                 let object_context = ClaudeWorkflowContext::decode(context.object_context)?;
                 decode_workflow_journal(self.adapter_id(), &object_context, record, output)
+            }
+            SESSION_INDEX_DECODER => {
+                let object_context = ClaudeSessionIndexContext::decode(context.object_context)?;
+                decode_session_index(self.adapter_id(), &object_context, record, output)
             }
             _ => Err(AdapterError::unknown_decoder(context.decoder)),
         }
@@ -712,6 +744,19 @@ fn artifact_capabilities() -> Vec<CapabilityId> {
 fn workflow_capabilities() -> Vec<CapabilityId> {
     [
         RUNTIME_WORKFLOWS,
+        SOURCE_LIVE,
+        SOURCE_RECONCILE,
+        SOURCE_RESUME_CURSOR,
+    ]
+    .into_iter()
+    .map(|id| CapabilityId::new(id).expect("static Claude stream capability id is valid"))
+    .collect()
+}
+
+fn session_index_capabilities() -> Vec<CapabilityId> {
+    [
+        HISTORY_SESSIONS,
+        HISTORY_TIMESTAMPS,
         SOURCE_LIVE,
         SOURCE_RECONCILE,
         SOURCE_RESUME_CURSOR,
@@ -1068,6 +1113,33 @@ struct ClaudeWorkflowContext {
     native_workflow_id: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct ClaudeSessionIndexContext {
+    project_slug: String,
+}
+
+impl ClaudeSessionIndexContext {
+    fn from_path(relative_path: &Path) -> Result<Self, AdapterError> {
+        let components = utf8_components(relative_path)?;
+        if components.len() != 2
+            || components[0].is_empty()
+            || components[1] != "sessions-index.json"
+        {
+            return Err(path_error(
+                relative_path,
+                "session index path must be <project>/sessions-index.json",
+            ));
+        }
+        Ok(Self {
+            project_slug: components[0].clone(),
+        })
+    }
+
+    fn decode(context: &AdapterObjectContext) -> Result<Self, AdapterError> {
+        decode_object_context(context)
+    }
+}
+
 impl ClaudeWorkflowContext {
     fn run_from_path(relative_path: &Path) -> Result<Self, AdapterError> {
         let components = utf8_components(relative_path)?;
@@ -1378,6 +1450,32 @@ struct ClaudeWorkflowJournalDocument {
     kind: String,
     agent_id: String,
     key: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ClaudeSessionIndexDocument {
+    version: u64,
+    #[serde(default)]
+    original_path: Option<String>,
+    entries: Vec<ClaudeSessionIndexEntryDocument>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ClaudeSessionIndexEntryDocument {
+    session_id: String,
+    full_path: String,
+    file_mtime: u64,
+    first_prompt: String,
+    #[serde(default)]
+    summary: Option<String>,
+    message_count: u64,
+    created: String,
+    modified: String,
+    git_branch: String,
+    project_path: String,
+    is_sidechain: bool,
 }
 
 fn decode_team_config(
@@ -2280,6 +2378,144 @@ fn decode_workflow_journal(
         }),
     )?;
     Ok(DecodeDisposition::Applied)
+}
+
+fn decode_session_index(
+    adapter_id: &AdapterId,
+    context: &ClaudeSessionIndexContext,
+    record: &SourceRecord,
+    output: &mut FactBatch,
+) -> Result<DecodeDisposition, AdapterError> {
+    if record.state == SourceRecordState::Absent {
+        return Ok(DecodeDisposition::IgnoredKnown);
+    }
+    let native_snapshot: Value = match serde_json::from_slice(&record.payload) {
+        Ok(value) => value,
+        Err(error) => {
+            return preserve_session_index_contract_loss(
+                record,
+                output,
+                &format!("is not valid JSON: {error}"),
+            );
+        }
+    };
+    let document: ClaudeSessionIndexDocument = match serde_json::from_value(native_snapshot.clone())
+    {
+        Ok(document) => document,
+        Err(error) => {
+            return preserve_session_index_contract_loss(
+                record,
+                output,
+                &format!("is not a supported document: {error}"),
+            );
+        }
+    };
+    if document.version != 1 {
+        return preserve_session_index_contract_loss(
+            record,
+            output,
+            "has an unsupported native version",
+        );
+    }
+    if document.entries.len() > SESSION_INDEX_ENTRY_LIMIT {
+        return preserve_session_index_contract_loss(
+            record,
+            output,
+            &format!("exceeds the {SESSION_INDEX_ENTRY_LIMIT} entry bound"),
+        );
+    }
+    if document
+        .original_path
+        .as_deref()
+        .is_some_and(|path| path.trim().is_empty())
+    {
+        return preserve_session_index_contract_loss(record, output, "has an empty originalPath");
+    }
+
+    let mut session_ids = BTreeSet::new();
+    let mut entries = Vec::with_capacity(document.entries.len());
+    for entry in document.entries {
+        if !is_uuid(&entry.session_id) {
+            return preserve_session_index_contract_loss(
+                record,
+                output,
+                "contains a non-UUID sessionId",
+            );
+        }
+        if !session_ids.insert(entry.session_id.clone()) {
+            return preserve_session_index_contract_loss(
+                record,
+                output,
+                "contains duplicate sessionId entries",
+            );
+        }
+        for (field, value) in [
+            ("fullPath", entry.full_path.as_str()),
+            ("firstPrompt", entry.first_prompt.as_str()),
+            ("created", entry.created.as_str()),
+            ("modified", entry.modified.as_str()),
+            ("projectPath", entry.project_path.as_str()),
+        ] {
+            if value.trim().is_empty() {
+                return preserve_session_index_contract_loss(
+                    record,
+                    output,
+                    &format!("contains an entry with empty {field}"),
+                );
+            }
+        }
+        entries.push(SessionIndexEntrySnapshot {
+            session: EntityKey::native(
+                adapter_id,
+                record.source_instance_id,
+                "session",
+                entry.session_id.as_bytes(),
+            )?,
+            native_session_id: entry.session_id,
+            full_path: entry.full_path,
+            file_mtime_ms: entry.file_mtime,
+            first_prompt: entry.first_prompt,
+            summary: entry.summary,
+            message_count: entry.message_count,
+            created_at: native_timestamp(&entry.created),
+            modified_at: native_timestamp(&entry.modified),
+            git_branch: entry.git_branch,
+            project_path: entry.project_path,
+            is_sidechain: entry.is_sidechain,
+        });
+    }
+
+    output.push(
+        record,
+        Fact::SessionIndexSnapshot(SessionIndexSnapshotFact {
+            project: EntityKey::native(
+                adapter_id,
+                record.source_instance_id,
+                "project",
+                context.project_slug.as_bytes(),
+            )?,
+            native_project_key: context.project_slug.clone(),
+            native_version: document.version,
+            original_path: document.original_path,
+            entries,
+            native_snapshot,
+        }),
+    )?;
+    Ok(DecodeDisposition::Applied)
+}
+
+fn preserve_session_index_contract_loss(
+    record: &SourceRecord,
+    output: &mut FactBatch,
+    detail: &str,
+) -> Result<DecodeDisposition, AdapterError> {
+    preserve_unknown(
+        record,
+        output,
+        Some("session_index".to_string()),
+        format!("Claude session index {detail}"),
+    )?;
+    Ok(DecodeDisposition::PreservedUnknown)
 }
 
 fn preserve_workflow_contract_loss(
@@ -3342,8 +3578,8 @@ mod tests {
             discovered[0].roots[3].path,
             std::fs::canonicalize(root.path()).unwrap().join("sessions")
         );
-        assert_eq!(streams.len(), 12);
-        assert_eq!(adapter.manifest().contract_version, 9);
+        assert_eq!(streams.len(), 13);
+        assert_eq!(adapter.manifest().contract_version, 10);
         assert!(adapter
             .manifest()
             .source_schema_versions
@@ -3389,6 +3625,11 @@ mod tests {
             .source_schema_versions
             .iter()
             .any(|version| version == "claude-code-workflow-v1"));
+        assert!(adapter
+            .manifest()
+            .source_schema_versions
+            .iter()
+            .any(|version| version == "claude-code-session-index-v1"));
         assert!(matches!(streams[0].driver, DriverSpec::AppendDelimited(_)));
         assert!(matches!(streams[1].driver, DriverSpec::AppendDelimited(_)));
         assert!(matches!(streams[2].driver, DriverSpec::ReplaceDocument(_)));
@@ -3442,6 +3683,12 @@ mod tests {
             })
         ));
         assert!(matches!(streams[11].driver, DriverSpec::AppendDelimited(_)));
+        assert!(matches!(
+            streams[12].driver,
+            DriverSpec::ReplaceDocument(ReplaceDocumentConfig {
+                max_document_bytes: SESSION_INDEX_MAX_BYTES
+            })
+        ));
         assert_eq!(streams[0].decoder.as_str(), PARENT_DECODER);
         assert_eq!(streams[1].decoder.as_str(), SUBAGENT_DECODER);
         assert_eq!(streams[2].decoder.as_str(), SUBAGENT_META_DECODER);
@@ -3454,6 +3701,7 @@ mod tests {
         assert_eq!(streams[9].decoder.as_str(), ARTIFACT_CONTENT_DECODER);
         assert_eq!(streams[10].decoder.as_str(), WORKFLOW_RUN_DECODER);
         assert_eq!(streams[11].decoder.as_str(), WORKFLOW_JOURNAL_DECODER);
+        assert_eq!(streams[12].decoder.as_str(), SESSION_INDEX_DECODER);
         assert_eq!(streams[2].authority, StreamAuthority::Supplemental);
         assert_eq!(streams[2].consistency, ConsistencyPolicy::SnapshotReplace);
         assert_eq!(streams[3].authority, StreamAuthority::Canonical);
@@ -3494,6 +3742,13 @@ mod tests {
                 .iter()
                 .any(|capability| capability.as_str() == RUNTIME_WORKFLOWS));
         }
+        assert_eq!(streams[12].authority, StreamAuthority::Supplemental);
+        assert_eq!(streams[12].priority, IngestPriority::Interactive);
+        assert_eq!(streams[12].consistency, ConsistencyPolicy::SnapshotReplace);
+        assert!(streams[12]
+            .capabilities
+            .iter()
+            .any(|capability| capability.as_str() == HISTORY_SESSIONS));
         assert!(streams[0]
             .capabilities
             .iter()
@@ -3794,6 +4049,141 @@ mod tests {
             assert!(adapter
                 .bootstrap_object(&instance(root.path()), &object(stream, invalid))
                 .is_err());
+        }
+    }
+
+    #[test]
+    fn session_index_context_requires_exact_project_path() {
+        let root = TempDir::new().unwrap();
+        let adapter = ClaudeCodeAdapter::new();
+        let context = adapter
+            .bootstrap_object(
+                &instance(root.path()),
+                &object(SESSION_INDEX_STREAM, "project/sessions-index.json"),
+            )
+            .unwrap();
+        assert_eq!(
+            ClaudeSessionIndexContext::decode(&context).unwrap(),
+            ClaudeSessionIndexContext {
+                project_slug: "project".to_string(),
+            }
+        );
+        for invalid in [
+            "sessions-index.json",
+            "/sessions-index.json",
+            "project/session-index.json",
+            "project/nested/sessions-index.json",
+        ] {
+            assert!(adapter
+                .bootstrap_object(
+                    &instance(root.path()),
+                    &object(SESSION_INDEX_STREAM, invalid),
+                )
+                .is_err());
+        }
+    }
+
+    #[test]
+    fn session_index_decoder_preserves_native_snapshot_and_metadata_only_entries() {
+        let root = TempDir::new().unwrap();
+        let adapter = ClaudeCodeAdapter::new();
+        let object_context = adapter
+            .bootstrap_object(
+                &instance(root.path()),
+                &object(SESSION_INDEX_STREAM, "project/sessions-index.json"),
+            )
+            .unwrap();
+        let payload = format!(
+            r#"{{
+              "version":1,
+              "originalPath":"/fixture/project",
+              "futureNativeField":{{"retained":true}},
+              "entries":[{{
+                "sessionId":"{SESSION}",
+                "fullPath":"/fixture/project/{SESSION}.jsonl",
+                "fileMtime":1770000000123,
+                "firstPrompt":"Build the index pack",
+                "messageCount":7,
+                "created":"2026-02-02T00:00:00.000Z",
+                "modified":"2026-02-02T00:01:00.000Z",
+                "gitBranch":"main",
+                "projectPath":"/fixture/project",
+                "isSidechain":false
+              }}]
+            }}"#
+        );
+        let source = document_record(payload.as_bytes());
+        let mut batch = FactBatch::new(2, 2).unwrap();
+        let disposition = adapter
+            .decode(
+                DecodeContext {
+                    decoder: &DecoderId::new(SESSION_INDEX_DECODER).unwrap(),
+                    object_context: &object_context,
+                },
+                &source,
+                &mut batch,
+            )
+            .unwrap();
+        assert_eq!(disposition, DecodeDisposition::Applied);
+        let Fact::SessionIndexSnapshot(snapshot) = &batch.facts()[0].value else {
+            panic!("expected session index snapshot");
+        };
+        assert_eq!(snapshot.native_project_key, "project");
+        assert_eq!(snapshot.native_version, 1);
+        assert_eq!(snapshot.original_path.as_deref(), Some("/fixture/project"));
+        assert_eq!(snapshot.entries.len(), 1);
+        assert_eq!(snapshot.entries[0].native_session_id, SESSION);
+        assert_eq!(snapshot.entries[0].summary, None);
+        assert_eq!(snapshot.entries[0].message_count, 7);
+        assert_eq!(snapshot.entries[0].file_mtime_ms, 1_770_000_000_123);
+        assert_eq!(
+            snapshot
+                .native_snapshot
+                .pointer("/futureNativeField/retained")
+                .and_then(Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            batch.facts().len(),
+            1,
+            "index metadata creates no history fact"
+        );
+    }
+
+    #[test]
+    fn malformed_session_index_documents_are_preserved_unknown() {
+        let root = TempDir::new().unwrap();
+        let adapter = ClaudeCodeAdapter::new();
+        let object_context = adapter
+            .bootstrap_object(
+                &instance(root.path()),
+                &object(SESSION_INDEX_STREAM, "project/sessions-index.json"),
+            )
+            .unwrap();
+        let payloads = vec![
+            br#"{"version":2,"entries":[]}"#.to_vec(),
+            br#"{"version":1,"entries":[{"sessionId":"not-a-uuid"}]}"#.to_vec(),
+            format!(
+                r#"{{"version":1,"entries":[{{"sessionId":"{SESSION}","fullPath":"/one","fileMtime":1,"firstPrompt":"one","messageCount":1,"created":"c","modified":"m","gitBranch":"","projectPath":"/p","isSidechain":false}},{{"sessionId":"{SESSION}","fullPath":"/two","fileMtime":2,"firstPrompt":"two","messageCount":2,"created":"c","modified":"m","gitBranch":"","projectPath":"/p","isSidechain":false}}]}}"#
+            )
+            .into_bytes(),
+        ];
+        for payload in payloads {
+            let source = document_record(&payload);
+            let mut batch = FactBatch::new(2, 2).unwrap();
+            let disposition = adapter
+                .decode(
+                    DecodeContext {
+                        decoder: &DecoderId::new(SESSION_INDEX_DECODER).unwrap(),
+                        object_context: &object_context,
+                    },
+                    &source,
+                    &mut batch,
+                )
+                .unwrap();
+            assert_eq!(disposition, DecodeDisposition::PreservedUnknown);
+            assert!(matches!(batch.facts()[0].value, Fact::UnknownRecord { .. }));
+            assert_eq!(batch.diagnostics().len(), 1);
         }
     }
 
