@@ -31,6 +31,7 @@ import type {
   TokenActivityQuery,
   TokenActivityResult,
 } from '@vibecook/spaghetti-sdk';
+import type { SpaghettiClientResponseMap } from '@vibecook/spaghetti-sdk/client';
 import type {
   ClaudeObservationHistoryParity,
   ClaudeObservationShadowSnapshot,
@@ -41,11 +42,17 @@ import type {
   StoreStats,
 } from '@vibecook/spaghetti-sdk';
 
+export interface ObservationOwnerStatus {
+  enabled: boolean;
+  state: 'disabled' | 'starting' | 'running' | 'failed' | 'stopped';
+  error?: string;
+}
+
 export interface ObservationShadowReport {
   enabled: boolean;
-  state: 'disabled' | 'starting' | 'running' | 'degraded' | 'failed' | 'stopped';
-  databasePath?: string;
+  state: ObservationOwnerStatus['state'] | 'degraded';
   error?: string;
+  databasePath?: string;
   parityError?: string;
   snapshot?: ClaudeObservationShadowSnapshot;
   historyParity?: ClaudeObservationHistoryParity;
@@ -131,6 +138,10 @@ export interface SpaghettiIPC {
   getEngine(): Promise<'rs' | 'ts'>;
   /** Opt-in RFC 011 shadow health and Claude-scoped history parity. */
   getObservationShadowStatus(): Promise<ObservationShadowReport>;
+  /** Lightweight owner availability; unlike the full report, runs no queries. */
+  getObservationOwnerStatus(): Promise<ObservationOwnerStatus>;
+  /** Canonical catalog statistics read through the framed utility client. */
+  getCanonicalStats(): Promise<SpaghettiClientResponseMap['getStats']>;
 
   // Projects ----------------------------------------------------------------
   getProjectList(): Promise<ProjectListItem[]>;
@@ -216,6 +227,8 @@ export const IPC_CHANNELS = {
   retryInit: 'spaghetti:retryInit',
   getEngine: 'spaghetti:getEngine',
   getObservationShadowStatus: 'spaghetti:getObservationShadowStatus',
+  getObservationOwnerStatus: 'spaghetti:getObservationOwnerStatus',
+  getCanonicalStats: 'spaghetti:getCanonicalStats',
   getProjectList: 'spaghetti:getProjectList',
   getProjectTokenActivity: 'spaghetti:getProjectTokenActivity',
   getProjectMemory: 'spaghetti:getProjectMemory',

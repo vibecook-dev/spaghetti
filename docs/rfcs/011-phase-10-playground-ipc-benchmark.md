@@ -90,6 +90,9 @@ reproducible report format; one host run does not establish release thresholds.
 
 Remaining rollout evidence includes scale-50 and accepted private-corpus runs,
 reviewed regression limits, and deeper native queue/SQLite/conversion telemetry.
-The product still needs reversible renderer DTO migration, public subscription
-topic mapping, promotion of the Rust utility-process owner out of opt-in shadow
-mode, and eventual retirement of the legacy TypeScript SQLite service.
+The first reversible
+[renderer DTO read](./011-phase-10-playground-canonical-stats.md) subsequently
+landed for canonical statistics. Broader renderer migration, public
+subscription topic mapping, promotion of the Rust utility-process owner out of
+opt-in shadow mode, and eventual retirement of the legacy TypeScript SQLite
+service remain.

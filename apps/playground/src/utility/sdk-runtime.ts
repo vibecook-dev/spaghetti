@@ -24,7 +24,12 @@ import {
   type SpaghettiAPI,
   type TimelinePageRequest,
 } from '@vibecook/spaghetti-sdk';
-import type { ActiveSessionChange, ObservationShadowReport, SessionStreamSnapshot } from '../shared/ipc.js';
+import type {
+  ActiveSessionChange,
+  ObservationOwnerStatus,
+  ObservationShadowReport,
+  SessionStreamSnapshot,
+} from '../shared/ipc.js';
 import { attachPlaygroundEventForwarding } from './live-forwarding.js';
 
 export interface SdkRuntimeOptions {
@@ -95,7 +100,7 @@ export class SdkRuntime {
   private observationShadow: ClaudeObservationShadow | null = null;
   private observationShadowStart: Promise<void> | null = null;
   private observationShadowStartAbort: AbortController | null = null;
-  private observationShadowState: ObservationShadowReport['state'];
+  private observationShadowState: ObservationOwnerStatus['state'];
   private observationShadowError: string | null = null;
 
   constructor(
@@ -147,19 +152,18 @@ export class SdkRuntime {
   }
 
   async getObservationShadowStatus(): Promise<ObservationShadowReport> {
-    if (!this.options.observationShadow) return { enabled: false, state: 'disabled' };
+    const owner = this.getObservationOwnerStatus();
+    if (!owner.enabled) return owner;
     const databasePath = this.observationShadowDatabasePath();
     if (this.observationShadowState === 'failed') {
       return {
-        enabled: true,
-        state: 'failed',
+        ...owner,
         databasePath,
-        ...(this.observationShadowError ? { error: this.observationShadowError } : {}),
       };
     }
     const shadow = this.observationShadow;
     if (!shadow) {
-      return { enabled: true, state: this.observationShadowState, databasePath };
+      return { ...owner, databasePath };
     }
 
     let snapshot;
@@ -188,6 +192,16 @@ export class SdkRuntime {
       report.parityError = String(error);
     }
     return report;
+  }
+
+  /** Report lifecycle only; this performs no canonical or legacy database reads. */
+  getObservationOwnerStatus(): ObservationOwnerStatus {
+    if (!this.options.observationShadow) return { enabled: false, state: 'disabled' };
+    return {
+      enabled: true,
+      state: this.observationShadowState,
+      ...(this.observationShadowError ? { error: this.observationShadowError } : {}),
+    };
   }
 
   /** Attach one negotiated framed client to the Rust owner in this utility process. */

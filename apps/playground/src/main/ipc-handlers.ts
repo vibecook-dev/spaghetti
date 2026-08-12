@@ -4,6 +4,7 @@ import { ipcMain } from 'electron';
 import type { ProjectReference } from '@vibecook/spaghetti-sdk';
 import { IPC_CHANNELS } from '../shared/ipc.js';
 import type { SdkHostClient } from './sdk-host-client.js';
+import { readCanonicalStats } from './canonical-queries.js';
 import { listWorktrees } from './worktrees.js';
 
 export function registerIpcHandlers(client: SdkHostClient): void {
@@ -13,6 +14,8 @@ export function registerIpcHandlers(client: SdkHostClient): void {
   ipcMain.handle(IPC_CHANNELS.retryInit, () => client.request('retryInit'));
   ipcMain.handle(IPC_CHANNELS.getEngine, () => client.request('getEngine'));
   ipcMain.handle(IPC_CHANNELS.getObservationShadowStatus, () => client.request('getObservationShadowStatus'));
+  ipcMain.handle(IPC_CHANNELS.getObservationOwnerStatus, () => client.request('getObservationOwnerStatus'));
+  ipcMain.handle(IPC_CHANNELS.getCanonicalStats, () => readCanonicalStats(client));
 
   // Projects ----------------------------------------------------------------
   ipcMain.handle(IPC_CHANNELS.getProjectList, () => client.request('getProjectList'));

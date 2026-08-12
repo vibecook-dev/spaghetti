@@ -3,7 +3,10 @@
 import type { ActiveSessionChange, SpaghettiIPC } from './ipc.js';
 import type { InitProgress, SegmentChangeBatch } from '@vibecook/spaghetti-sdk';
 
-export type SdkRpcMethod = keyof SpaghettiIPC;
+/** Renderer methods answered by Electron main rather than the SDK utility. */
+export type MainProcessRpcMethod = 'getCanonicalStats' | 'getProjectWorktrees';
+
+export type SdkRpcMethod = Exclude<keyof SpaghettiIPC, MainProcessRpcMethod>;
 
 export type SdkRpcArgs<K extends SdkRpcMethod> = Parameters<SpaghettiIPC[K]>;
 export type SdkRpcResult<K extends SdkRpcMethod> = Awaited<ReturnType<SpaghettiIPC[K]>>;

@@ -38,6 +38,7 @@ ADAPTER_STORAGE_FORBIDDEN_RE = re.compile(
     r"|rusqlite|napi)(?:::|\b)"
 )
 MIGRATED_CLIENT_CONSUMERS = (
+    "apps/playground/src/main/canonical-queries.ts",
     "packages/sdk/src/observation-shadow.ts",
 )
 DIRECT_ENGINE_QUERY_RE = re.compile(

@@ -75,6 +75,8 @@ export class SdkHostClient {
   private shuttingDown = false;
   private restartAttempts = 0;
   private restartTimer: ReturnType<typeof setTimeout> | null = null;
+  private observationClient: SpaghettiClient | null = null;
+  private observationClientPromise: Promise<SpaghettiClient> | null = null;
 
   constructor(private readonly options: SdkHostClientOptions) {}
 
@@ -167,6 +169,34 @@ export class SdkHostClient {
     });
   }
 
+  /**
+   * Reuse one negotiated canonical connection for product reads. A benchmark
+   * or lifecycle test that needs an independently owned connection should use
+   * openObservationClient() instead.
+   */
+  getObservationClient(options: OpenObservationClientOptions = {}): Promise<SpaghettiClient> {
+    if (this.observationClient) return Promise.resolve(this.observationClient);
+    if (this.observationClientPromise) return this.observationClientPromise;
+
+    const tracked: Promise<SpaghettiClient> = this.openObservationClient(options)
+      .then(async (client) => {
+        // A utility exit or app shutdown can invalidate the opener while its
+        // port attachment/negotiation is still settling.
+        if (this.observationClientPromise !== tracked || this.shuttingDown) {
+          await client.dispose().catch(() => undefined);
+          throw new Error('SDK utility canonical client was invalidated while opening');
+        }
+        this.observationClient = client;
+        return client;
+      })
+      .catch((error: unknown) => {
+        if (this.observationClientPromise === tracked) this.observationClientPromise = null;
+        throw error;
+      });
+    this.observationClientPromise = tracked;
+    return tracked;
+  }
+
   async getHostDiagnostics(): Promise<SdkHostDiagnostics> {
     await this.start();
     const proc = this.process;
@@ -225,6 +255,7 @@ export class SdkHostClient {
       clearTimeout(this.restartTimer);
       this.restartTimer = null;
     }
+    await this.invalidateObservationClient();
     const proc = this.process;
     if (!proc) return;
 
@@ -253,6 +284,7 @@ export class SdkHostClient {
     this.shuttingDown = true;
     if (this.restartTimer) clearTimeout(this.restartTimer);
     this.restartTimer = null;
+    void this.invalidateObservationClient();
     try {
       this.process?.kill();
     } catch {
@@ -294,6 +326,7 @@ export class SdkHostClient {
   private handleExit(proc: UtilityProcess, code: number | null): void {
     if (proc !== this.process) return;
     this.process = null;
+    void this.invalidateObservationClient();
     const error = new Error(`SDK utility exited${code === null ? '' : ` with code ${code}`}`);
     this.rejectStart?.(error);
     this.resolveStart = null;
@@ -342,5 +375,12 @@ export class SdkHostClient {
       clearTimeout(entry.timer);
       entry.reject(error);
     }
+  }
+
+  private async invalidateObservationClient(): Promise<void> {
+    const client = this.observationClient;
+    this.observationClient = null;
+    this.observationClientPromise = null;
+    await client?.dispose().catch(() => undefined);
   }
 }

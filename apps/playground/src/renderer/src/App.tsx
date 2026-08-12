@@ -3,6 +3,8 @@ import { Library, Moon, PanelLeft, Search, Settings, Sun } from 'lucide-react';
 import { TrafficLights } from './components/TrafficLights.js';
 import { SpaghettiProvider, type SpaghettiProviderProps } from '@vibecook/spaghetti-sdk/react';
 import type { ProjectListItem, SegmentChangeBatch, SessionListItem, StoreStats } from '@vibecook/spaghetti-sdk';
+import type { SpaghettiClientResponseMap } from '@vibecook/spaghetti-sdk/client';
+import type { ObservationOwnerStatus } from '@shared/ipc';
 import { createIpcApi } from './ipc-api.js';
 import { LoadingScreen } from './components/LoadingScreen.js';
 import { SourceBadge, SourceBadges } from './components/SourceBadge.js';
@@ -106,6 +108,10 @@ function PlaygroundShell() {
   const [projectChangeNonce, setProjectChangeNonce] = useState(0);
   const [sessionChangeNonce, setSessionChangeNonce] = useState(0);
   const [stats, setStats] = useState<StoreStats | null>(null);
+  const [observationStatus, setObservationStatus] = useState<ObservationOwnerStatus | null>(null);
+  const [canonicalStats, setCanonicalStats] = useState<SpaghettiClientResponseMap['getStats'] | null>(null);
+  const [canonicalStatsLoading, setCanonicalStatsLoading] = useState(false);
+  const [canonicalStatsError, setCanonicalStatsError] = useState<string | null>(null);
   const [sessionSourceFilter, setSessionSourceFilter] = useState<string | null>(null);
   const [searchOpen, setSearchOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -408,6 +414,33 @@ function PlaygroundShell() {
       .then(setStats)
       .catch(() => setStats(null));
   }, [ready, projectChangeNonce, debugSession]);
+
+  useEffect(() => {
+    if (!ready || !settingsOpen) return;
+    let cancelled = false;
+    setCanonicalStatsLoading(true);
+    setCanonicalStatsError(null);
+
+    void (async () => {
+      try {
+        const report = await window.spaghetti.getObservationOwnerStatus();
+        if (cancelled) return;
+        setObservationStatus(report);
+        setCanonicalStats(null);
+        if (!report.enabled || report.state === 'failed' || report.state === 'stopped') return;
+        const next = await window.spaghetti.getCanonicalStats();
+        if (!cancelled) setCanonicalStats(next);
+      } catch (queryError: unknown) {
+        if (!cancelled) setCanonicalStatsError(String(queryError));
+      } finally {
+        if (!cancelled) setCanonicalStatsLoading(false);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [ready, settingsOpen, projectChangeNonce]);
 
   useEffect(() => {
     if (!selected) {
@@ -964,6 +997,10 @@ function PlaygroundShell() {
         rebuilding={rebuilding}
         engine={engine}
         stats={stats}
+        observationStatus={observationStatus}
+        canonicalStats={canonicalStats}
+        canonicalStatsLoading={canonicalStatsLoading}
+        canonicalStatsError={canonicalStatsError}
       />
     </div>
   );

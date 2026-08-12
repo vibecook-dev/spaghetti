@@ -133,12 +133,21 @@ describe('observation shadow host status', () => {
   test('is explicitly disabled unless configured', async () => {
     const runtime = new SdkRuntime({ dbPath: '/tmp/not-opened.db', engine: 'ts' }, sink());
 
+    assert.deepEqual(runtime.getObservationOwnerStatus(), { enabled: false, state: 'disabled' });
     assert.deepEqual(await runtime.getObservationShadowStatus(), { enabled: false, state: 'disabled' });
     const ports = new MessageChannel();
     const peerClosed = once(ports.port1, 'close');
     await assert.rejects(runtime.attachObservationClient(ports.port2), /shadow is disabled/);
     await peerClosed;
     await runtime.dispose();
+
+    const configured = new SdkRuntime(
+      { dbPath: '/tmp/not-opened.db', engine: 'ts', observationShadow: { dbPath: '/tmp/not-opened-shadow.db' } },
+      sink(),
+    );
+    assert.deepEqual(configured.getObservationOwnerStatus(), { enabled: true, state: 'starting' });
+    await configured.dispose();
+    assert.deepEqual(configured.getObservationOwnerStatus(), { enabled: true, state: 'stopped' });
   });
 
   test('owns an isolated Rust shadow after legacy readiness', { skip: !native }, async () => {
@@ -188,6 +197,7 @@ describe('observation shadow host status', () => {
       assert.deepEqual(errors, []);
       assert.equal(runtime.isReady(), true);
       assert.equal(report.state, 'running', report.error);
+      assert.deepEqual(runtime.getObservationOwnerStatus(), { enabled: true, state: 'running' });
       assert.equal(report.snapshot?.status.observation.supervisorsRunning, 1);
       assert.deepEqual(
         [report.snapshot?.overview.canonicalSessions, report.snapshot?.overview.canonicalMessages],

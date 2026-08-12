@@ -109,8 +109,9 @@ renderer -> preload -> Electron main broker -> SDK UtilityProcess
 - With `SPAGHETTI_OBSERVATION_SHADOW=1`, that utility also owns the isolated
   RFC 011 Rust observation engine. Electron main can negotiate a canonical
   `SpaghettiClient` over a transferred, versioned framed `MessagePort` using
-  the storage-free `@vibecook/spaghetti-sdk/client` entry; the renderer remains
-  on compatibility RPC until each product DTO is migrated.
+  the storage-free `@vibecook/spaghetti-sdk/client` entry. The Settings dialog
+  reads canonical catalog statistics through that client; other renderer
+  surfaces remain on compatibility RPC until each product DTO is migrated.
 - **preload** exposes `window.spaghetti` (`src/shared/ipc.ts`).
 - **renderer** uses the **archive / paper** design (EB Garamond, ink on
   cream or ink-black paper, light/dark toggle). Multi-source project

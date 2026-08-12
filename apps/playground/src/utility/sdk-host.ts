@@ -64,6 +64,8 @@ async function dispatch(request: SdkRpcRequest): Promise<unknown> {
       return runtime.engine;
     case 'getObservationShadowStatus':
       return runtime.getObservationShadowStatus();
+    case 'getObservationOwnerStatus':
+      return runtime.getObservationOwnerStatus();
     case 'getProjectList':
       return runtime.read((sdk) => sdk.getProjectList());
     case 'getProjectTokenActivity': {
@@ -136,6 +138,8 @@ async function dispatch(request: SdkRpcRequest): Promise<unknown> {
     case 'getStats':
       return runtime.read((sdk) => sdk.getStats());
   }
+  const exhaustive: never = request;
+  return exhaustive;
 }
 
 async function handleCommand(command: SdkHostCommand, port?: MessagePortMain): Promise<void> {

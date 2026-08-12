@@ -64,11 +64,15 @@ and compares the client facade rather than a direct engine shortcut.
 
 ## Remaining work
 
-- migrate a user-facing CLI or playground read whose canonical DTO already
-  preserves its product contract;
+- continue the first
+  [user-facing playground read](./011-phase-10-playground-canonical-stats.md)
+  with project/session/search surfaces whose canonical DTOs preserve their
+  product contracts;
 - replace legacy playground change forwarding with durable client
   subscriptions once topic payloads have a public invalidation mapping;
-- benchmark the connected playground utility-process endpoint and promote its
-  Rust owner out of opt-in shadow mode;
+- use the completed
+  [utility-process benchmark](./011-phase-10-playground-ipc-benchmark.md) to
+  establish rollout thresholds and promote its Rust owner out of opt-in shadow
+  mode;
 - remove each migrated module from the legacy ownership allowlists and retire
   TypeScript SQLite only after no production read bypass remains.

@@ -19,6 +19,7 @@ import { parseArgs } from 'node:util';
 import { app } from 'electron';
 import type { SpaghettiClient } from '@vibecook/spaghetti-sdk/client';
 import type { SdkHostDiagnostics } from '../shared/sdk-protocol.js';
+import { readCanonicalStats } from '../main/canonical-queries.js';
 import { SdkHostClient } from '../main/sdk-host-client.js';
 
 process.once('uncaughtException', fatalStartupError);
@@ -279,25 +280,33 @@ async function run(): Promise<void> {
 
   try {
     const coldStarted = performance.now();
-    client = await host.openObservationClient({
-      clientName: 'playground-ipc-topology-benchmark',
-      onFrame: ({ direction, byteLength }) => {
-        if (direction === 'sent') {
-          frames.sentCount += 1;
-          frames.sentBytes += byteLength;
-        } else {
-          frames.receivedCount += 1;
-          frames.receivedBytes += byteLength;
-        }
-      },
-    });
+    const [openedClient, concurrentClient] = await Promise.all([
+      host.getObservationClient({
+        clientName: 'playground-ipc-topology-benchmark',
+        onFrame: ({ direction, byteLength }) => {
+          if (direction === 'sent') {
+            frames.sentCount += 1;
+            frames.sentBytes += byteLength;
+          } else {
+            frames.receivedCount += 1;
+            frames.receivedBytes += byteLength;
+          }
+        },
+      }),
+      host.getObservationClient(),
+    ]);
+    client = openedClient;
+    assert.equal(concurrentClient, client, 'concurrent product reads must share one client opener');
+    assert.equal(await host.getObservationClient(), client, 'product reads must reuse one negotiated client');
     const coldStartMs = round(performance.now() - coldStarted);
     const handshakeFrames = frameMeasurement(frames, 1);
     const memoryBefore = await host.getHostDiagnostics();
     const overview = await client.getOverview();
+    const canonicalStats = await readCanonicalStats(host);
     const projects = await client.listProjects({ limit: 50 });
     const search = await client.search({ text: searchText, limit: 50 });
     assert.equal(overview.canonicalSessions > 0, true);
+    assert.equal(canonicalStats.atCommitSeq, overview.commitSeq);
     assert.equal(projects.items.length > 0, true);
     const project = projects.items.find((item) => item.messageCount > 0);
     assert.ok(project, 'fixture needs a project with canonical messages');

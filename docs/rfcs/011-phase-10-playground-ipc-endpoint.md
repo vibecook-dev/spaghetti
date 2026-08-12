@@ -20,7 +20,7 @@ the owner SDK bundle.
 
 ```text
 Electron main
-  `- SdkHostClient.openObservationClient()
+  `- SdkHostClient.getObservationClient()
        |- MessageChannelMain.port2
        |- MessagePortIpcChannel -> IpcTransport -> SpaghettiClient
        `- transfer port1 with attach-spaghetti-client
@@ -78,8 +78,9 @@ explicit new negotiation after the utility host restarts.
 
 - establish reviewed regression thresholds with scaled and accepted private
   corpora using the committed topology report format;
-- expose only product-compatible canonical reads to the renderer and migrate
-  them in reversible slices;
+- continue the first
+  [product-compatible renderer read](./011-phase-10-playground-canonical-stats.md)
+  with project/session/search surfaces in reversible slices;
 - use durable client subscriptions for invalidation after public topic mapping
   is defined;
 - promote the Rust observation owner out of opt-in shadow mode before retiring

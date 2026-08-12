@@ -95,8 +95,10 @@ read and does not change the legacy production surface.
   [playground utility-process benchmark](./011-phase-10-playground-ipc-benchmark.md)
   to establish rollout thresholds, then promote the owner out of opt-in shadow
   mode;
-- migrate CLI/TUI, playground/Electron, React hooks, and SDK examples in
-  reversible slices with stale-result tests;
+- continue the first
+  [playground/Electron renderer read](./011-phase-10-playground-canonical-stats.md),
+  then migrate CLI/TUI, React hooks, and SDK examples in reversible slices with
+  stale-result tests;
 - deprecate compatibility APIs, move the TypeScript oracle to test-only code,
   then remove production `node:sqlite`, query repair, schema, and SQL ownership;
 - add the final architecture gate rejecting production bypasses around
