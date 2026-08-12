@@ -21,6 +21,10 @@ import {
   type SpaghettiEngineHistorySessionPage,
   type SpaghettiEngineOverview,
   type SpaghettiEngineStatus,
+  type SpaghettiEngineUsageActivity,
+  type SpaghettiEngineUsageActivityOptions,
+  type SpaghettiEngineUsageScopeOptions,
+  type SpaghettiEngineUsageTotals,
 } from './native.js';
 
 const OWNER_LOCK_SUFFIX = '.owner-lock.sqlite3';
@@ -128,6 +132,63 @@ export interface ClaudeObservationHistoryQueryParity {
   acceptedDifferences: readonly ['canonical_message_count_includes_subagents'];
 }
 
+/** Source-native Claude token fields with equivalent legacy/canonical meaning. */
+export interface ClaudeLegacyUsageValues {
+  inputTokens: number;
+  outputTokens: number;
+  cacheCreationTokens: number;
+  cacheReadTokens: number;
+}
+
+export interface ClaudeLegacyUsageDay {
+  date: string;
+  tokenUsage: ClaudeLegacyUsageValues;
+  /** Legacy sessions with any transcript row; not a usage-contributor count. */
+  sessionCount: number;
+}
+
+export interface ClaudeLegacyUsageReport {
+  totals: ClaudeLegacyUsageValues;
+  days: readonly ClaudeLegacyUsageDay[];
+}
+
+export interface ClaudeObservationUsageParity {
+  exact: boolean;
+  scope: {
+    mismatchedFields: string[];
+  };
+  totals: {
+    mismatchedFields: string[];
+    unexpectedEstimatedContributionCount: number;
+    unexpectedEstimatedFields: string[];
+  };
+  activity: {
+    compared: number;
+    /** Legacy transcript days with no token evidence have no canonical usage row. */
+    acceptedLegacyZeroUsageDays: string[];
+    missingCanonical: string[];
+    unexpectedCanonical: string[];
+    mismatched: Array<{
+      date: string;
+      fields: string[];
+    }>;
+    unexpectedEstimatedContributionCount: number;
+    unexpectedEstimatedFields: string[];
+    unexpectedUntimedContributionCount: number;
+    unexpectedUntimedFields: string[];
+  };
+  /**
+   * Legacy provider totals and transcript-row counts have no source-neutral
+   * equality claim against the canonical component/contribution fields.
+   */
+  acceptedDifferences: readonly [
+    'canonical_component_total_is_not_provider_billing_total',
+    'canonical_contribution_count_is_not_legacy_message_count',
+    'canonical_session_count_is_not_legacy_transcript_session_count',
+    'canonical_days_require_usage_evidence',
+  ];
+}
+
 export interface ClaudeObservationShadow {
   readonly databasePath: string;
   readonly roots: readonly string[];
@@ -145,6 +206,13 @@ export interface ClaudeObservationShadow {
     options?: SpaghettiEngineHistoryPageOptions,
     signal?: AbortSignal,
   ): Promise<SpaghettiEngineHistorySessionPage>;
+  /** Query canonical all-time usage for one project or verified session. */
+  getUsage(options: SpaghettiEngineUsageScopeOptions, signal?: AbortSignal): Promise<SpaghettiEngineUsageTotals>;
+  /** Query inclusive daily usage plus separately reported untimed contributions. */
+  getUsageActivity(
+    options: SpaghettiEngineUsageActivityOptions,
+    signal?: AbortSignal,
+  ): Promise<SpaghettiEngineUsageActivity>;
   refresh(signal?: AbortSignal): Promise<SpaghettiEngineStatus>;
   dispose(): Promise<SpaghettiEngineStatus>;
 }
@@ -276,6 +344,95 @@ export function compareClaudeObservationHistoryQueries(
   };
 }
 
+/**
+ * Compare Claude's four additive native token components across query engines.
+ *
+ * This deliberately does not compare legacy `totalTokens` or `messageCount`:
+ * those fields encode provider normalization and transcript rows respectively,
+ * while the canonical API exposes a component sum and usage contributions.
+ */
+export function compareClaudeObservationUsage(
+  canonicalTotals: SpaghettiEngineUsageTotals,
+  canonicalActivity: SpaghettiEngineUsageActivity,
+  legacy: ClaudeLegacyUsageReport,
+): ClaudeObservationUsageParity {
+  assertLegacyUsageValues('totals', legacy.totals);
+  const allLegacyDays = uniqueBy(legacy.days, (day) => day.date, 'legacy usage day');
+  const canonicalDays = uniqueBy(canonicalActivity.days, (day) => day.date, 'canonical usage day');
+  const scopeMismatch: string[] = [];
+  if (canonicalTotals.projectId !== canonicalActivity.projectId) scopeMismatch.push('projectId');
+  if ((canonicalTotals.sessionId ?? null) !== (canonicalActivity.sessionId ?? null)) scopeMismatch.push('sessionId');
+  const totalMismatch = usageValueMismatches(canonicalTotals.aggregate.exact, legacy.totals);
+  const activityMismatch: ClaudeObservationUsageParity['activity']['mismatched'] = [];
+
+  for (const [date, legacyDay] of allLegacyDays) {
+    assertIsoDate('legacy usage day', date);
+    assertLegacyUsageValues(`day ${date}`, legacyDay.tokenUsage);
+    assertCount(`usage day ${date} sessionCount`, legacyDay.sessionCount);
+  }
+  const acceptedLegacyZeroUsageDays = [...allLegacyDays.entries()]
+    .filter(([, day]) => usageValuesAreZero(day.tokenUsage))
+    .map(([date]) => date)
+    .sort();
+  const legacyDays = new Map([...allLegacyDays.entries()].filter(([, day]) => !usageValuesAreZero(day.tokenUsage)));
+
+  for (const [date, legacyDay] of legacyDays) {
+    const canonicalDay = canonicalDays.get(date);
+    if (!canonicalDay) continue;
+    const fields = usageValueMismatches(canonicalDay.aggregate.exact, legacyDay.tokenUsage);
+    if (fields.length > 0) activityMismatch.push({ date, fields });
+  }
+  for (const date of canonicalDays.keys()) assertIsoDate('canonical usage day', date);
+
+  const missingCanonical = [...legacyDays.keys()].filter((date) => !canonicalDays.has(date)).sort();
+  const unexpectedCanonical = [...canonicalDays.keys()].filter((date) => !legacyDays.has(date)).sort();
+  const totalsEstimated = canonicalTotals.aggregate.estimatedContributionCount;
+  const totalsEstimatedFields = nonzeroUsageFields(canonicalTotals.aggregate.estimated);
+  const activityEstimated = canonicalActivity.aggregate.estimatedContributionCount;
+  const activityEstimatedFields = nonzeroUsageFields(canonicalActivity.aggregate.estimated);
+  const untimed = canonicalActivity.untimed.aggregate.contributionCount;
+  const untimedFields = nonzeroUsageFields(canonicalActivity.untimed.aggregate.combined);
+  const exact =
+    scopeMismatch.length === 0 &&
+    totalMismatch.length === 0 &&
+    totalsEstimated === 0 &&
+    totalsEstimatedFields.length === 0 &&
+    missingCanonical.length === 0 &&
+    unexpectedCanonical.length === 0 &&
+    activityMismatch.length === 0 &&
+    activityEstimated === 0 &&
+    activityEstimatedFields.length === 0 &&
+    untimed === 0 &&
+    untimedFields.length === 0;
+
+  return {
+    exact,
+    scope: { mismatchedFields: scopeMismatch },
+    totals: {
+      mismatchedFields: totalMismatch,
+      unexpectedEstimatedContributionCount: totalsEstimated,
+      unexpectedEstimatedFields: totalsEstimatedFields,
+    },
+    activity: {
+      compared: legacyDays.size,
+      acceptedLegacyZeroUsageDays,
+      missingCanonical,
+      unexpectedCanonical,
+      mismatched: activityMismatch,
+      unexpectedEstimatedContributionCount: activityEstimated,
+      unexpectedEstimatedFields: activityEstimatedFields,
+      unexpectedUntimedContributionCount: untimed,
+      unexpectedUntimedFields: untimedFields,
+    },
+    acceptedDifferences: [
+      'canonical_component_total_is_not_provider_billing_total',
+      'canonical_contribution_count_is_not_legacy_message_count',
+      'canonical_session_count_is_not_legacy_transcript_session_count',
+      'canonical_days_require_usage_evidence',
+    ],
+  };
+}
+
 /** Open one isolated engine, register watchers, then complete the initial scan. */
 export async function openClaudeObservationShadow(
   options: ClaudeObservationShadowOptions,
@@ -350,6 +507,17 @@ class NativeClaudeObservationShadow implements ClaudeObservationShadow {
     signal?: AbortSignal,
   ): Promise<SpaghettiEngineHistorySessionPage> {
     return this.engine.listHistorySessions({ projectId, ...options }, signal);
+  }
+
+  getUsage(options: SpaghettiEngineUsageScopeOptions, signal?: AbortSignal): Promise<SpaghettiEngineUsageTotals> {
+    return this.engine.getUsage(options, signal);
+  }
+
+  getUsageActivity(
+    options: SpaghettiEngineUsageActivityOptions,
+    signal?: AbortSignal,
+  ): Promise<SpaghettiEngineUsageActivity> {
+    return this.engine.getUsageActivity(options, signal);
   }
 
   refresh(signal?: AbortSignal): Promise<SpaghettiEngineStatus> {
@@ -447,6 +615,47 @@ function assertCount(label: string, value: number): void {
   if (!Number.isSafeInteger(value) || value < 0) {
     throw new Error(`Claude legacy ${label} count must be a non-negative safe integer.`);
   }
+}
+
+function assertLegacyUsageValues(label: string, values: ClaudeLegacyUsageValues): void {
+  assertCount(`${label} inputTokens`, values.inputTokens);
+  assertCount(`${label} outputTokens`, values.outputTokens);
+  assertCount(`${label} cacheCreationTokens`, values.cacheCreationTokens);
+  assertCount(`${label} cacheReadTokens`, values.cacheReadTokens);
+}
+
+function usageValueMismatches(
+  canonical: SpaghettiEngineUsageTotals['aggregate']['exact'],
+  legacy: ClaudeLegacyUsageValues,
+): string[] {
+  const fields: string[] = [];
+  if (canonical.inputTokens !== legacy.inputTokens) fields.push('inputTokens');
+  if (canonical.outputTokens !== legacy.outputTokens) fields.push('outputTokens');
+  if (canonical.cacheCreationTokens !== legacy.cacheCreationTokens) fields.push('cacheCreationTokens');
+  if (canonical.cacheReadTokens !== legacy.cacheReadTokens) fields.push('cacheReadTokens');
+  return fields;
+}
+
+function usageValuesAreZero(values: ClaudeLegacyUsageValues): boolean {
+  return (
+    values.inputTokens === 0 &&
+    values.outputTokens === 0 &&
+    values.cacheCreationTokens === 0 &&
+    values.cacheReadTokens === 0
+  );
+}
+
+function nonzeroUsageFields(values: ClaudeLegacyUsageValues): string[] {
+  const fields: string[] = [];
+  if (values.inputTokens !== 0) fields.push('inputTokens');
+  if (values.outputTokens !== 0) fields.push('outputTokens');
+  if (values.cacheCreationTokens !== 0) fields.push('cacheCreationTokens');
+  if (values.cacheReadTokens !== 0) fields.push('cacheReadTokens');
+  return fields;
+}
+
+function assertIsoDate(label: string, value: string): void {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) throw new Error(`${label} must use YYYY-MM-DD form: ${value}`);
 }
 
 function uniqueBy<T>(values: readonly T[], keyOf: (value: T) => string, label: string): Map<string, T> {

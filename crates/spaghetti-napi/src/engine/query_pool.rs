@@ -15,6 +15,13 @@ use serde::{Deserialize, Serialize};
 
 use crate::core::schema;
 
+use super::query_identity::{
+    decode_entity_id, encode_entity_id, PROJECT_ID_PREFIX, SESSION_ID_PREFIX,
+};
+use super::usage_query::{
+    read_usage_activity, read_usage_totals, validate_usage_activity, validate_usage_scope,
+    UsageActivityReport, UsageActivityRequest, UsageScopeRequest, UsageTotalsReport,
+};
 use super::EngineError;
 
 const QUEUE_DEPTH_PER_WORKER: usize = 16;
@@ -22,8 +29,6 @@ pub const HISTORY_QUERY_CONTRACT_VERSION: u32 = 1;
 pub const DEFAULT_HISTORY_PAGE_LIMIT: u32 = 50;
 const MAX_HISTORY_PAGE_LIMIT: u32 = 200;
 const MAX_HISTORY_TOKEN_BYTES: usize = 32 * 1024;
-const PROJECT_ID_PREFIX: &str = "project_v1_";
-const SESSION_ID_PREFIX: &str = "session_v1_";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QueryOverview {
@@ -250,6 +255,18 @@ enum QueryCommand {
         request: HistorySessionPageRequest,
         response: Sender<Result<HistorySessionPage, EngineError>>,
     },
+    UsageTotals {
+        cancellation_epoch: u64,
+        cancellation: QueryCancellationToken,
+        request: UsageScopeRequest,
+        response: Sender<Result<UsageTotalsReport, EngineError>>,
+    },
+    UsageActivity {
+        cancellation_epoch: u64,
+        cancellation: QueryCancellationToken,
+        request: UsageActivityRequest,
+        response: Sender<Result<UsageActivityReport, EngineError>>,
+    },
     ReplayChanges {
         cancellation_epoch: u64,
         request: ChangeReplayRequest,
@@ -276,6 +293,22 @@ struct QueryControl {
     stopping: AtomicBool,
     alive_workers: AtomicUsize,
     in_flight: AtomicUsize,
+}
+
+/// Transport-neutral, request-scoped cancellation observed by query workers.
+#[derive(Clone, Default)]
+pub struct QueryCancellationToken {
+    cancelled: Arc<AtomicBool>,
+}
+
+impl QueryCancellationToken {
+    pub fn cancel(&self) {
+        self.cancelled.store(true, Ordering::Release);
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::Acquire)
+    }
 }
 
 impl QueryControl {
@@ -401,6 +434,82 @@ impl QueryClient {
                     .transpose()?,
                 limit: request.limit,
             },
+            response: response_tx,
+        }) {
+            Ok(()) => {}
+            Err(TrySendError::Full(_)) => return Err(EngineError::QueryQueueFull),
+            Err(TrySendError::Disconnected(_)) => {
+                return Err(EngineError::WorkerUnavailable { worker: "query" });
+            }
+        }
+
+        response_rx
+            .recv()
+            .map_err(|_| EngineError::WorkerUnavailable { worker: "query" })?
+    }
+
+    pub fn usage_totals(
+        &self,
+        request: UsageScopeRequest,
+    ) -> Result<UsageTotalsReport, EngineError> {
+        self.usage_totals_cancellable(request, QueryCancellationToken::default())
+    }
+
+    pub fn usage_totals_cancellable(
+        &self,
+        request: UsageScopeRequest,
+        cancellation: QueryCancellationToken,
+    ) -> Result<UsageTotalsReport, EngineError> {
+        validate_usage_scope(&request)?;
+        self.ensure_running()?;
+        if cancellation.is_cancelled() {
+            return Err(EngineError::QueryCancelled);
+        }
+
+        let cancellation_epoch = self.control.cancellation_epoch.load(Ordering::Acquire);
+        let (response_tx, response_rx) = bounded(1);
+        match self.commands.try_send(QueryCommand::UsageTotals {
+            cancellation_epoch,
+            cancellation,
+            request,
+            response: response_tx,
+        }) {
+            Ok(()) => {}
+            Err(TrySendError::Full(_)) => return Err(EngineError::QueryQueueFull),
+            Err(TrySendError::Disconnected(_)) => {
+                return Err(EngineError::WorkerUnavailable { worker: "query" });
+            }
+        }
+
+        response_rx
+            .recv()
+            .map_err(|_| EngineError::WorkerUnavailable { worker: "query" })?
+    }
+
+    pub fn usage_activity(
+        &self,
+        request: UsageActivityRequest,
+    ) -> Result<UsageActivityReport, EngineError> {
+        self.usage_activity_cancellable(request, QueryCancellationToken::default())
+    }
+
+    pub fn usage_activity_cancellable(
+        &self,
+        request: UsageActivityRequest,
+        cancellation: QueryCancellationToken,
+    ) -> Result<UsageActivityReport, EngineError> {
+        validate_usage_activity(&request)?;
+        self.ensure_running()?;
+        if cancellation.is_cancelled() {
+            return Err(EngineError::QueryCancelled);
+        }
+
+        let cancellation_epoch = self.control.cancellation_epoch.load(Ordering::Acquire);
+        let (response_tx, response_rx) = bounded(1);
+        match self.commands.try_send(QueryCommand::UsageActivity {
+            cancellation_epoch,
+            cancellation,
+            request,
             response: response_tx,
         }) {
             Ok(()) => {}
@@ -715,6 +824,38 @@ fn query_thread(
                 });
                 let _ = response.send(result);
             }
+            QueryCommand::UsageTotals {
+                cancellation_epoch,
+                cancellation,
+                request,
+                response,
+            } => {
+                let _in_flight = InFlightGuard::enter(&control.in_flight);
+                let result = run_cancellable_query(
+                    &connection,
+                    &control,
+                    cancellation_epoch,
+                    &cancellation,
+                    || read_usage_totals(&connection, &request),
+                );
+                let _ = response.send(result);
+            }
+            QueryCommand::UsageActivity {
+                cancellation_epoch,
+                cancellation,
+                request,
+                response,
+            } => {
+                let _in_flight = InFlightGuard::enter(&control.in_flight);
+                let result = run_cancellable_query(
+                    &connection,
+                    &control,
+                    cancellation_epoch,
+                    &cancellation,
+                    || read_usage_activity(&connection, &request),
+                );
+                let _ = response.send(result);
+            }
             QueryCommand::ReplayChanges {
                 cancellation_epoch,
                 request,
@@ -779,6 +920,34 @@ fn query_thread(
 fn is_cancelled(control: &QueryControl, epoch: u64) -> bool {
     control.stopping.load(Ordering::Acquire)
         || control.cancellation_epoch.load(Ordering::Acquire) != epoch
+}
+
+fn run_cancellable_query<T>(
+    connection: &Connection,
+    control: &Arc<QueryControl>,
+    cancellation_epoch: u64,
+    cancellation: &QueryCancellationToken,
+    query: impl FnOnce() -> Result<T, EngineError>,
+) -> Result<T, EngineError> {
+    if is_cancelled(control, cancellation_epoch) || cancellation.is_cancelled() {
+        return Err(EngineError::QueryCancelled);
+    }
+    let progress_control = Arc::clone(control);
+    let progress_cancellation = cancellation.clone();
+    connection.progress_handler(
+        1_000,
+        Some(move || {
+            is_cancelled(&progress_control, cancellation_epoch)
+                || progress_cancellation.is_cancelled()
+        }),
+    );
+    let result = query();
+    connection.progress_handler(0, None::<fn() -> bool>);
+    if is_cancelled(control, cancellation_epoch) || cancellation.is_cancelled() {
+        Err(EngineError::QueryCancelled)
+    } else {
+        result
+    }
 }
 
 fn open_reader(database_path: &PathBuf) -> Result<Connection, EngineError> {
@@ -846,32 +1015,6 @@ fn validate_history_page_limit(limit: u32) -> Result<(), EngineError> {
         )));
     }
     Ok(())
-}
-
-fn encode_entity_id(prefix: &str, key: &[u8]) -> String {
-    format!("{prefix}{}", URL_SAFE_NO_PAD.encode(key))
-}
-
-fn decode_entity_id(
-    value: &str,
-    prefix: &'static str,
-    label: &'static str,
-) -> Result<Vec<u8>, EngineError> {
-    if value.len() > MAX_HISTORY_TOKEN_BYTES || !value.starts_with(prefix) {
-        return Err(EngineError::InvalidQuery(format!(
-            "{label} is not a supported opaque identifier"
-        )));
-    }
-    let encoded = &value[prefix.len()..];
-    let key = URL_SAFE_NO_PAD.decode(encoded).map_err(|_| {
-        EngineError::InvalidQuery(format!("{label} is not a supported opaque identifier"))
-    })?;
-    if key.is_empty() || key.len() > MAX_HISTORY_TOKEN_BYTES {
-        return Err(EngineError::InvalidQuery(format!(
-            "{label} is not a supported opaque identifier"
-        )));
-    }
-    Ok(key)
 }
 
 fn encode_history_cursor(cursor: &HistoryCursorPayload) -> Result<String, EngineError> {
@@ -2000,7 +2143,7 @@ fn read_change_replay(
     })
 }
 
-fn read_committed_watermark(connection: &Connection) -> Result<u64, EngineError> {
+pub(super) fn read_committed_watermark(connection: &Connection) -> Result<u64, EngineError> {
     let value: i64 = connection
         .query_row(
             "SELECT COALESCE(MAX(commit_seq), 0) FROM ingest_commits WHERE committed_at IS NOT NULL",
@@ -2161,11 +2304,26 @@ mod tests {
                 limit: DEFAULT_HISTORY_PAGE_LIMIT,
             })
             .unwrap();
+        let missing_project_id = encode_entity_id(PROJECT_ID_PREFIX, b"missing-project");
         let sessions = client
             .history_sessions(HistorySessionPageRequest {
-                project_id: encode_entity_id(PROJECT_ID_PREFIX, b"missing-project"),
+                project_id: missing_project_id.clone(),
                 cursor: None,
                 limit: DEFAULT_HISTORY_PAGE_LIMIT,
+            })
+            .unwrap();
+        let usage = client
+            .usage_totals(UsageScopeRequest {
+                project_id: missing_project_id.clone(),
+                session_id: None,
+            })
+            .unwrap();
+        let usage_activity = client
+            .usage_activity(UsageActivityRequest {
+                project_id: missing_project_id,
+                session_id: None,
+                from: "2026-08-12".to_string(),
+                to: "2026-08-12".to_string(),
             })
             .unwrap();
         let after: i64 = probe
@@ -2182,6 +2340,14 @@ mod tests {
         assert!(projects.items.is_empty());
         assert_eq!(sessions.at_commit_seq, overview.commit_seq);
         assert!(sessions.items.is_empty());
+        assert_eq!(usage.at_commit_seq, overview.commit_seq);
+        assert_eq!(usage.aggregate.quality, "unavailable");
+        assert_eq!(usage.aggregate.contribution_count, 0);
+        assert!(usage.coverage.is_empty());
+        assert_eq!(usage_activity.at_commit_seq, overview.commit_seq);
+        assert!(usage_activity.days.is_empty());
+        assert_eq!(usage_activity.aggregate.contribution_count, 0);
+        assert_eq!(usage_activity.untimed.aggregate.contribution_count, 0);
         assert!(overview.query_only && overview.read_only);
         assert_eq!(before, after, "a query must not advance database content");
         assert!(client.probe_write_rejected());
@@ -2227,6 +2393,81 @@ mod tests {
 
         pool.shutdown().unwrap();
         writer.shutdown().unwrap();
+    }
+
+    #[test]
+    fn cancellation_epoch_rejects_queued_usage_work() {
+        let dir = tempdir().unwrap();
+        let database = dir.path().join("usage-cancel.db");
+        let mut writer = WriterRuntime::start(database.clone()).unwrap();
+        let mut pool = QueryPool::start(database, 1).unwrap();
+        let client = pool.client();
+
+        let (entered_tx, entered_rx) = bounded(1);
+        let (release_tx, release_rx) = bounded(1);
+        client.hold_worker(entered_tx, release_rx);
+        entered_rx.recv().unwrap();
+
+        let queued_client = client.clone();
+        let queued = thread::spawn(move || {
+            queued_client.usage_activity(UsageActivityRequest {
+                project_id: encode_entity_id(PROJECT_ID_PREFIX, b"project"),
+                session_id: None,
+                from: "2026-01-01".to_string(),
+                to: "2026-12-31".to_string(),
+            })
+        });
+        while client.commands.is_empty() {
+            thread::yield_now();
+        }
+        client.cancel_pending();
+        release_tx.send(()).unwrap();
+
+        assert!(matches!(
+            queued.join().unwrap(),
+            Err(EngineError::QueryCancelled)
+        ));
+
+        pool.shutdown().unwrap();
+        writer.shutdown().unwrap();
+    }
+
+    #[test]
+    fn request_cancellation_interrupts_running_sqlite_usage_work() {
+        let connection = Connection::open_in_memory().unwrap();
+        let control = Arc::new(QueryControl::new());
+        let cancellation = QueryCancellationToken::default();
+        let completed = Arc::new(AtomicBool::new(false));
+        let query_completed = Arc::clone(&completed);
+
+        let result = run_cancellable_query(&connection, &control, 0, &cancellation, || {
+            // Cancellation happens after the preflight check and before this
+            // deliberately expensive statement, so only SQLite's registered
+            // progress handler can stop the running phase.
+            cancellation.cancel();
+            let value = connection
+                .query_row(
+                    r#"
+                    WITH RECURSIVE values_under_test(value) AS (
+                        SELECT 1
+                        UNION ALL
+                        SELECT value + 1 FROM values_under_test WHERE value < 1000000
+                    )
+                    SELECT SUM(value) FROM values_under_test
+                    "#,
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .map_err(|error| query_sqlite_error("run cancellable usage test", error))?;
+            query_completed.store(true, Ordering::Release);
+            Ok(value)
+        });
+
+        assert!(matches!(result, Err(EngineError::QueryCancelled)));
+        assert!(
+            !completed.load(Ordering::Acquire),
+            "the recursive statement must be interrupted before completion"
+        );
     }
 
     #[test]

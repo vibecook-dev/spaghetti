@@ -128,7 +128,8 @@ This is a shadow query surface, not production `SpaghettiClient` cutover. The
 remaining gates include:
 
 - FTS search/rank merging and timeline/facet packs;
-- subagent/workflow, usage, runtime/team, detail, and statistics packs;
+- subagent/workflow, runtime/team, detail, and statistics packs (usage is
+  recorded separately in the [usage query pack](./011-phase-9-usage-query.md));
 - real-corpus latency and boundary-size benchmarks;
 - IPC/domain DTO sharing beyond the current N-API shadow seam;
 - production client migration and retirement of TypeScript SQLite query

@@ -322,6 +322,104 @@ export interface SpaghettiEngineHistorySessionPage {
   nextCursor?: string;
 }
 
+export interface SpaghettiEngineUsageScopeOptions {
+  /** Opaque project identity returned by {@link SpaghettiEngine.listHistoryProjects}. */
+  projectId: string;
+  /** Optional opaque session identity returned by {@link SpaghettiEngine.listHistorySessions}. */
+  sessionId?: string;
+}
+
+export interface SpaghettiEngineUsageActivityOptions extends SpaghettiEngineUsageScopeOptions {
+  /** Inclusive calendar date in YYYY-MM-DD form. */
+  from: string;
+  /** Inclusive calendar date in YYYY-MM-DD form. */
+  to: string;
+}
+
+export interface SpaghettiEngineUsageTokenValues {
+  inputTokens: number;
+  outputTokens: number;
+  cacheCreationTokens: number;
+  cacheReadTokens: number;
+  /** Arithmetic sum of preserved components, not a provider billing normalization. */
+  componentTotalTokens: number;
+}
+
+export type SpaghettiEngineUsageQuality = 'exact' | 'estimated' | 'mixed' | 'unavailable';
+export type SpaghettiEngineUsageScope = 'record' | 'message' | 'turn' | 'run' | 'session' | 'team' | 'project';
+export type SpaghettiEngineUsageAccounting = 'delta' | 'cumulative' | 'snapshot';
+export type SpaghettiEngineValueQuality = 'native_exact' | 'native_approximate' | 'derived_exact' | 'estimated';
+
+export interface SpaghettiEngineUsageAggregate {
+  exact: SpaghettiEngineUsageTokenValues;
+  estimated: SpaghettiEngineUsageTokenValues;
+  combined: SpaghettiEngineUsageTokenValues;
+  quality: SpaghettiEngineUsageQuality;
+  exactContributionCount: number;
+  estimatedContributionCount: number;
+  contributionCount: number;
+  sessionCount: number;
+}
+
+export interface SpaghettiEngineUsageCoverage {
+  scope: SpaghettiEngineUsageScope;
+  accounting: SpaghettiEngineUsageAccounting;
+  valueQuality: SpaghettiEngineValueQuality;
+  qualityBucket: 'exact' | 'estimated';
+  model?: string;
+  sourceTimeQuality?: SpaghettiEngineTimestampQuality;
+  contributionCount: number;
+  tokens: SpaghettiEngineUsageTokenValues;
+}
+
+export interface SpaghettiEngineUsageTotals {
+  contractVersion: number;
+  atCommitSeq: number;
+  projectId: string;
+  sessionId?: string;
+  aggregate: SpaghettiEngineUsageAggregate;
+  coverage: SpaghettiEngineUsageCoverage[];
+  firstSourceTime?: string;
+  lastSourceTime?: string;
+  firstObservedAtUnixMs?: number;
+  lastObservedAtUnixMs?: number;
+  lastCommitSeq?: number;
+}
+
+export interface SpaghettiEngineUsageActivityDay {
+  date: string;
+  aggregate: SpaghettiEngineUsageAggregate;
+  firstSourceTime: string;
+  lastSourceTime: string;
+  firstObservedAtUnixMs: number;
+  lastObservedAtUnixMs: number;
+  lastCommitSeq: number;
+}
+
+export interface SpaghettiEngineUntimedUsage {
+  aggregate: SpaghettiEngineUsageAggregate;
+  coverage: SpaghettiEngineUsageCoverage[];
+  firstObservedAtUnixMs?: number;
+  lastObservedAtUnixMs?: number;
+  lastCommitSeq?: number;
+}
+
+export interface SpaghettiEngineUsageActivity {
+  contractVersion: number;
+  atCommitSeq: number;
+  projectId: string;
+  sessionId?: string;
+  from: string;
+  to: string;
+  days: SpaghettiEngineUsageActivityDay[];
+  aggregate: SpaghettiEngineUsageAggregate;
+  coverage: SpaghettiEngineUsageCoverage[];
+  untimed: SpaghettiEngineUntimedUsage;
+  firstObservedAtUnixMs?: number;
+  lastObservedAtUnixMs?: number;
+  lastCommitSeq?: number;
+}
+
 export interface SpaghettiEngineReconcileOptions {
   /** Configured Claude Code data roots, such as `~/.claude`. */
   roots: string[];
@@ -365,6 +463,11 @@ export interface SpaghettiEngine {
     options: SpaghettiEngineHistorySessionPageOptions,
     signal?: AbortSignal,
   ): Promise<SpaghettiEngineHistorySessionPage>;
+  getUsage(options: SpaghettiEngineUsageScopeOptions, signal?: AbortSignal): Promise<SpaghettiEngineUsageTotals>;
+  getUsageActivity(
+    options: SpaghettiEngineUsageActivityOptions,
+    signal?: AbortSignal,
+  ): Promise<SpaghettiEngineUsageActivity>;
   reconcileClaude(
     options: SpaghettiEngineReconcileOptions,
     signal?: AbortSignal,

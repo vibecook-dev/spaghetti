@@ -28,7 +28,7 @@ serde_json  = "1"
 base64      = "0.22"
 
 # SQLite
-rusqlite = { version = "0.31", features = ["bundled", "trace"] }
+rusqlite = { version = "0.31", features = ["bundled", "hooks", "trace"] }
 
 # Concurrency
 crossbeam-channel = "0.5"

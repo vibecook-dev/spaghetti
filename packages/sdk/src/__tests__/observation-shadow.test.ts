@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 import {
   compareClaudeObservationHistory,
   compareClaudeObservationHistoryQueries,
+  compareClaudeObservationUsage,
   createSpaghettiService,
   defaultClaudeObservationShadowDbPath,
   loadNativeAddon,
@@ -227,6 +228,101 @@ describe('Claude observation shadow', () => {
       ).exact,
       false,
     );
+  });
+
+  test('normalizes Claude usage components without equating legacy row counts or provider totals', () => {
+    const zeroTokens = {
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheCreationTokens: 0,
+      cacheReadTokens: 0,
+      componentTotalTokens: 0,
+    };
+    const exact = {
+      inputTokens: 10,
+      outputTokens: 2,
+      cacheCreationTokens: 3,
+      cacheReadTokens: 4,
+      componentTotalTokens: 19,
+    };
+    const aggregate = {
+      exact,
+      estimated: zeroTokens,
+      combined: exact,
+      quality: 'exact' as const,
+      exactContributionCount: 1,
+      estimatedContributionCount: 0,
+      contributionCount: 1,
+      sessionCount: 1,
+    };
+    const parity = compareClaudeObservationUsage(
+      { aggregate } as never,
+      {
+        aggregate,
+        days: [{ date: '2026-08-12', aggregate }],
+        untimed: {
+          aggregate: {
+            ...aggregate,
+            exact: zeroTokens,
+            combined: zeroTokens,
+            quality: 'unavailable',
+            exactContributionCount: 0,
+            contributionCount: 0,
+            sessionCount: 0,
+          },
+        },
+      } as never,
+      {
+        totals: exact,
+        days: [{ date: '2026-08-12', tokenUsage: exact, sessionCount: 1 }],
+      },
+    );
+    assert.equal(parity.exact, true);
+    assert.deepEqual(parity.acceptedDifferences, [
+      'canonical_component_total_is_not_provider_billing_total',
+      'canonical_contribution_count_is_not_legacy_message_count',
+      'canonical_session_count_is_not_legacy_transcript_session_count',
+      'canonical_days_require_usage_evidence',
+    ]);
+
+    const mismatch = compareClaudeObservationUsage(
+      { aggregate } as never,
+      {
+        aggregate,
+        days: [{ date: '2026-08-12', aggregate }],
+        untimed: { aggregate: { ...aggregate, contributionCount: 1 } },
+      } as never,
+      {
+        totals: { ...exact, outputTokens: 3 },
+        days: [
+          { date: '2026-08-10', tokenUsage: zeroTokens, sessionCount: 7 },
+          { date: '2026-08-11', tokenUsage: exact, sessionCount: 99 },
+        ],
+      },
+    );
+    assert.equal(mismatch.exact, false);
+    assert.deepEqual(mismatch.totals.mismatchedFields, ['outputTokens']);
+    assert.deepEqual(mismatch.activity.missingCanonical, ['2026-08-11']);
+    assert.deepEqual(mismatch.activity.unexpectedCanonical, ['2026-08-12']);
+    assert.deepEqual(mismatch.activity.acceptedLegacyZeroUsageDays, ['2026-08-10']);
+    assert.equal(mismatch.activity.unexpectedUntimedContributionCount, 1);
+
+    const scopeMismatch = compareClaudeObservationUsage(
+      { projectId: 'project-a', aggregate } as never,
+      {
+        projectId: 'project-b',
+        aggregate: { ...aggregate, estimated: { ...zeroTokens, inputTokens: 1 } },
+        days: [{ date: '2026-08-12', aggregate }],
+        untimed: { aggregate: { ...aggregate, contributionCount: 0 } },
+      } as never,
+      {
+        totals: exact,
+        days: [{ date: '2026-08-12', tokenUsage: exact, sessionCount: 42 }],
+      },
+    );
+    assert.equal(scopeMismatch.exact, false);
+    assert.deepEqual(scopeMismatch.scope.mismatchedFields, ['projectId']);
+    assert.deepEqual(scopeMismatch.activity.unexpectedEstimatedFields, ['inputTokens']);
   });
 });
 
@@ -512,6 +608,33 @@ describe('Claude observation shadow native lifecycle', { skip: !native }, () => 
       assert.equal(parity.sessions.compared, legacySessions.length);
       assert.deepEqual(parity.projects.unexpectedCanonicalOnly, []);
       assert.deepEqual(parity.sessions.unexpectedCanonicalOnly, []);
+
+      for (const legacyProject of legacyProjects) {
+        const canonicalProject = canonicalProjects.find((project) => project.nativeProjectKey === legacyProject.slug);
+        assert.ok(canonicalProject, `missing canonical usage project ${legacyProject.slug}`);
+        const [canonicalTotals, canonicalActivity] = await Promise.all([
+          shadow.getUsage({ projectId: canonicalProject.projectId }),
+          shadow.getUsageActivity({
+            projectId: canonicalProject.projectId,
+            from: '2026-01-01',
+            to: '2026-12-31',
+          }),
+        ]);
+        const legacyActivity = legacy.getProjectTokenActivity(legacyProject, {
+          sourceId: 'claude-code',
+          from: '2026-01-01',
+          to: '2026-12-31',
+        });
+        const usageParity = compareClaudeObservationUsage(canonicalTotals, canonicalActivity, {
+          totals: legacyProject.tokenUsage,
+          days: legacyActivity.days,
+        });
+        assert.equal(usageParity.exact, true, `${legacyProject.slug}: ${JSON.stringify(usageParity)}`);
+        assert.equal(
+          usageParity.activity.compared + usageParity.activity.acceptedLegacyZeroUsageDays.length,
+          legacyActivity.days.length,
+        );
+      }
     } finally {
       await legacy.dispose();
     }

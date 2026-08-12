@@ -11,8 +11,10 @@ use crate::engine::{
     HistoryProjectIndexSummary, HistoryProjectPage, HistoryProjectPageRequest,
     HistoryProjectSummary, HistorySessionIndexSummary, HistorySessionPage,
     HistorySessionPageRequest, HistorySessionSummary, ObservationStatusSnapshot,
-    ObservationSupervisorOptions, OwnerMetadata, ReconcileOutcome, ReconcileRequest,
-    SpaghettiEngineCore, DEFAULT_HISTORY_PAGE_LIMIT,
+    ObservationSupervisorOptions, OwnerMetadata, QueryCancellationToken, ReconcileOutcome,
+    ReconcileRequest, SpaghettiEngineCore, UntimedUsageSummary, UsageActivityDay,
+    UsageActivityReport, UsageActivityRequest, UsageAggregate, UsageCoverageSummary,
+    UsageScopeRequest, UsageTokenValues, UsageTotalsReport, DEFAULT_HISTORY_PAGE_LIMIT,
 };
 
 #[napi(object)]
@@ -389,6 +391,228 @@ impl From<HistorySessionPage> for EngineHistorySessionPage {
 
 #[napi(object)]
 #[derive(Debug, Clone)]
+pub struct EngineUsageScopeOptions {
+    /// Opaque project identity returned by `listHistoryProjects`.
+    pub project_id: String,
+    /// Optional opaque session identity returned by `listHistorySessions`.
+    pub session_id: Option<String>,
+}
+
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct EngineUsageActivityOptions {
+    /// Opaque project identity returned by `listHistoryProjects`.
+    pub project_id: String,
+    /// Optional opaque session identity returned by `listHistorySessions`.
+    pub session_id: Option<String>,
+    /// Inclusive calendar date in YYYY-MM-DD form.
+    pub from: String,
+    /// Inclusive calendar date in YYYY-MM-DD form.
+    pub to: String,
+}
+
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct EngineUsageTokenValues {
+    pub input_tokens: f64,
+    pub output_tokens: f64,
+    pub cache_creation_tokens: f64,
+    pub cache_read_tokens: f64,
+    /// Arithmetic sum of the four preserved native components. This is not a
+    /// provider billing normalization.
+    pub component_total_tokens: f64,
+}
+
+impl From<UsageTokenValues> for EngineUsageTokenValues {
+    fn from(value: UsageTokenValues) -> Self {
+        Self {
+            input_tokens: value.input_tokens as f64,
+            output_tokens: value.output_tokens as f64,
+            cache_creation_tokens: value.cache_creation_tokens as f64,
+            cache_read_tokens: value.cache_read_tokens as f64,
+            component_total_tokens: value.component_total_tokens as f64,
+        }
+    }
+}
+
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct EngineUsageAggregate {
+    pub exact: EngineUsageTokenValues,
+    pub estimated: EngineUsageTokenValues,
+    pub combined: EngineUsageTokenValues,
+    pub quality: String,
+    pub exact_contribution_count: f64,
+    pub estimated_contribution_count: f64,
+    pub contribution_count: f64,
+    pub session_count: f64,
+}
+
+impl From<UsageAggregate> for EngineUsageAggregate {
+    fn from(value: UsageAggregate) -> Self {
+        Self {
+            exact: value.exact.into(),
+            estimated: value.estimated.into(),
+            combined: value.combined.into(),
+            quality: value.quality,
+            exact_contribution_count: value.exact_contribution_count as f64,
+            estimated_contribution_count: value.estimated_contribution_count as f64,
+            contribution_count: value.contribution_count as f64,
+            session_count: value.session_count as f64,
+        }
+    }
+}
+
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct EngineUsageCoverage {
+    pub scope: String,
+    pub accounting: String,
+    pub value_quality: String,
+    pub quality_bucket: String,
+    pub model: Option<String>,
+    pub source_time_quality: Option<String>,
+    pub contribution_count: f64,
+    pub tokens: EngineUsageTokenValues,
+}
+
+impl From<UsageCoverageSummary> for EngineUsageCoverage {
+    fn from(value: UsageCoverageSummary) -> Self {
+        Self {
+            scope: value.scope,
+            accounting: value.accounting,
+            value_quality: value.value_quality,
+            quality_bucket: value.quality_bucket,
+            model: value.model,
+            source_time_quality: value.source_time_quality,
+            contribution_count: value.contribution_count as f64,
+            tokens: value.tokens.into(),
+        }
+    }
+}
+
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct EngineUsageTotals {
+    pub contract_version: u32,
+    pub at_commit_seq: f64,
+    pub project_id: String,
+    pub session_id: Option<String>,
+    pub aggregate: EngineUsageAggregate,
+    pub coverage: Vec<EngineUsageCoverage>,
+    pub first_source_time: Option<String>,
+    pub last_source_time: Option<String>,
+    pub first_observed_at_unix_ms: Option<f64>,
+    pub last_observed_at_unix_ms: Option<f64>,
+    pub last_commit_seq: Option<f64>,
+}
+
+impl From<UsageTotalsReport> for EngineUsageTotals {
+    fn from(value: UsageTotalsReport) -> Self {
+        Self {
+            contract_version: value.contract_version,
+            at_commit_seq: value.at_commit_seq as f64,
+            project_id: value.project_id,
+            session_id: value.session_id,
+            aggregate: value.aggregate.into(),
+            coverage: value.coverage.into_iter().map(Into::into).collect(),
+            first_source_time: value.first_source_time,
+            last_source_time: value.last_source_time,
+            first_observed_at_unix_ms: value.first_observed_at_unix_ms.map(|value| value as f64),
+            last_observed_at_unix_ms: value.last_observed_at_unix_ms.map(|value| value as f64),
+            last_commit_seq: value.last_commit_seq.map(|value| value as f64),
+        }
+    }
+}
+
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct EngineUsageActivityDay {
+    pub date: String,
+    pub aggregate: EngineUsageAggregate,
+    pub first_source_time: String,
+    pub last_source_time: String,
+    pub first_observed_at_unix_ms: f64,
+    pub last_observed_at_unix_ms: f64,
+    pub last_commit_seq: f64,
+}
+
+impl From<UsageActivityDay> for EngineUsageActivityDay {
+    fn from(value: UsageActivityDay) -> Self {
+        Self {
+            date: value.date,
+            aggregate: value.aggregate.into(),
+            first_source_time: value.first_source_time,
+            last_source_time: value.last_source_time,
+            first_observed_at_unix_ms: value.first_observed_at_unix_ms as f64,
+            last_observed_at_unix_ms: value.last_observed_at_unix_ms as f64,
+            last_commit_seq: value.last_commit_seq as f64,
+        }
+    }
+}
+
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct EngineUntimedUsage {
+    pub aggregate: EngineUsageAggregate,
+    pub coverage: Vec<EngineUsageCoverage>,
+    pub first_observed_at_unix_ms: Option<f64>,
+    pub last_observed_at_unix_ms: Option<f64>,
+    pub last_commit_seq: Option<f64>,
+}
+
+impl From<UntimedUsageSummary> for EngineUntimedUsage {
+    fn from(value: UntimedUsageSummary) -> Self {
+        Self {
+            aggregate: value.aggregate.into(),
+            coverage: value.coverage.into_iter().map(Into::into).collect(),
+            first_observed_at_unix_ms: value.first_observed_at_unix_ms.map(|value| value as f64),
+            last_observed_at_unix_ms: value.last_observed_at_unix_ms.map(|value| value as f64),
+            last_commit_seq: value.last_commit_seq.map(|value| value as f64),
+        }
+    }
+}
+
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct EngineUsageActivity {
+    pub contract_version: u32,
+    pub at_commit_seq: f64,
+    pub project_id: String,
+    pub session_id: Option<String>,
+    pub from: String,
+    pub to: String,
+    pub days: Vec<EngineUsageActivityDay>,
+    pub aggregate: EngineUsageAggregate,
+    pub coverage: Vec<EngineUsageCoverage>,
+    pub untimed: EngineUntimedUsage,
+    pub first_observed_at_unix_ms: Option<f64>,
+    pub last_observed_at_unix_ms: Option<f64>,
+    pub last_commit_seq: Option<f64>,
+}
+
+impl From<UsageActivityReport> for EngineUsageActivity {
+    fn from(value: UsageActivityReport) -> Self {
+        Self {
+            contract_version: value.contract_version,
+            at_commit_seq: value.at_commit_seq as f64,
+            project_id: value.project_id,
+            session_id: value.session_id,
+            from: value.from,
+            to: value.to,
+            days: value.days.into_iter().map(Into::into).collect(),
+            aggregate: value.aggregate.into(),
+            coverage: value.coverage.into_iter().map(Into::into).collect(),
+            untimed: value.untimed.into(),
+            first_observed_at_unix_ms: value.first_observed_at_unix_ms.map(|value| value as f64),
+            last_observed_at_unix_ms: value.last_observed_at_unix_ms.map(|value| value as f64),
+            last_commit_seq: value.last_commit_seq.map(|value| value as f64),
+        }
+    }
+}
+
+#[napi(object)]
+#[derive(Debug, Clone)]
 pub struct EngineReconcileOptions {
     /// Configured native data roots understood by the selected adapter.
     pub roots: Vec<String>,
@@ -543,6 +767,51 @@ impl SpaghettiEngine {
         )
     }
 
+    /// Return canonical usage totals for one project or one verified session.
+    #[napi(ts_return_type = "Promise<EngineUsageTotals>")]
+    pub fn get_usage(
+        &self,
+        options: EngineUsageScopeOptions,
+        signal: Option<AbortSignal>,
+    ) -> AsyncTask<UsageTotalsTask> {
+        let cancellation = QueryCancellationToken::default();
+        if let Some(signal) = signal.as_ref() {
+            let abort_cancellation = cancellation.clone();
+            signal.on_abort(move || abort_cancellation.cancel());
+        }
+        AsyncTask::with_optional_signal(
+            UsageTotalsTask {
+                engine: Arc::clone(&self.inner),
+                options,
+                cancellation,
+            },
+            signal,
+        )
+    }
+
+    /// Return inclusive daily usage activity and separately surfaced untimed
+    /// contributions for one canonical project/session scope.
+    #[napi(ts_return_type = "Promise<EngineUsageActivity>")]
+    pub fn get_usage_activity(
+        &self,
+        options: EngineUsageActivityOptions,
+        signal: Option<AbortSignal>,
+    ) -> AsyncTask<UsageActivityTask> {
+        let cancellation = QueryCancellationToken::default();
+        if let Some(signal) = signal.as_ref() {
+            let abort_cancellation = cancellation.clone();
+            signal.on_abort(move || abort_cancellation.cancel());
+        }
+        AsyncTask::with_optional_signal(
+            UsageActivityTask {
+                engine: Arc::clone(&self.inner),
+                options,
+                cancellation,
+            },
+            signal,
+        )
+    }
+
     /// Reconcile the adapter-declared Claude source map through the common
     /// Rust drivers, decoders, projections, and durable cursor transaction.
     #[napi(ts_return_type = "Promise<EngineReconcileResult>")]
@@ -688,6 +957,18 @@ pub struct HistorySessionsTask {
     options: EngineHistorySessionPageOptions,
 }
 
+pub struct UsageTotalsTask {
+    engine: Arc<SpaghettiEngineCore>,
+    options: EngineUsageScopeOptions,
+    cancellation: QueryCancellationToken,
+}
+
+pub struct UsageActivityTask {
+    engine: Arc<SpaghettiEngineCore>,
+    options: EngineUsageActivityOptions,
+    cancellation: QueryCancellationToken,
+}
+
 pub struct ReconcileClaudeTask {
     engine: Arc<SpaghettiEngineCore>,
     options: EngineReconcileOptions,
@@ -831,6 +1112,52 @@ impl Task for HistorySessionsTask {
                 cursor: self.options.cursor.clone(),
                 limit: self.options.limit.unwrap_or(DEFAULT_HISTORY_PAGE_LIMIT),
             })
+            .map(Into::into)
+            .map_err(napi_error)
+    }
+
+    fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
+        Ok(output)
+    }
+}
+
+impl Task for UsageTotalsTask {
+    type Output = EngineUsageTotals;
+    type JsValue = EngineUsageTotals;
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        self.engine
+            .usage_totals_cancellable(
+                UsageScopeRequest {
+                    project_id: self.options.project_id.clone(),
+                    session_id: self.options.session_id.clone(),
+                },
+                self.cancellation.clone(),
+            )
+            .map(Into::into)
+            .map_err(napi_error)
+    }
+
+    fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
+        Ok(output)
+    }
+}
+
+impl Task for UsageActivityTask {
+    type Output = EngineUsageActivity;
+    type JsValue = EngineUsageActivity;
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        self.engine
+            .usage_activity_cancellable(
+                UsageActivityRequest {
+                    project_id: self.options.project_id.clone(),
+                    session_id: self.options.session_id.clone(),
+                    from: self.options.from.clone(),
+                    to: self.options.to.clone(),
+                },
+                self.cancellation.clone(),
+            )
             .map(Into::into)
             .map_err(napi_error)
     }

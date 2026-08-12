@@ -12,6 +12,7 @@ mod observation;
 mod owner_lock;
 mod presence_projection;
 mod projection;
+mod query_identity;
 mod query_pool;
 mod session_index_projection;
 mod settings_projection;
@@ -19,6 +20,7 @@ mod supervisor;
 mod task_projection;
 mod team_projection;
 mod tool_result_projection;
+mod usage_query;
 mod workflow_projection;
 mod writer;
 
@@ -38,12 +40,17 @@ pub use query_pool::{
     ChangeCursor, ChangeReplay, ChangeReplayRequest, DurableChange, HistoryProjectIndexSummary,
     HistoryProjectPage, HistoryProjectPageRequest, HistoryProjectSummary,
     HistorySessionIndexSummary, HistorySessionPage, HistorySessionPageRequest,
-    HistorySessionSummary, QueryOverview, DEFAULT_HISTORY_PAGE_LIMIT,
+    HistorySessionSummary, QueryCancellationToken, QueryOverview, DEFAULT_HISTORY_PAGE_LIMIT,
     HISTORY_QUERY_CONTRACT_VERSION,
 };
 use query_pool::{QueryClient, QueryPool, SourceCatalogSnapshot};
 use supervisor::ObservationSupervisor;
 pub use supervisor::ObservationSupervisorOptions;
+pub use usage_query::{
+    UntimedUsageSummary, UsageActivityDay, UsageActivityReport, UsageActivityRequest,
+    UsageAggregate, UsageCoverageSummary, UsageScopeRequest, UsageTokenValues, UsageTotalsReport,
+    MAX_USAGE_ACTIVITY_DAYS, USAGE_QUERY_CONTRACT_VERSION,
+};
 use writer::{WriterClient, WriterRuntime};
 
 const DEFAULT_QUERY_WORKERS: usize = 2;
@@ -380,6 +387,44 @@ impl SpaghettiEngineCore {
     ) -> Result<HistorySessionPage, EngineError> {
         let (_, queries) = self.clients()?;
         queries.history_sessions(request)
+    }
+
+    /// Return all-time canonical usage totals for one project or one verified
+    /// session within that project.
+    pub fn usage_totals(
+        &self,
+        request: UsageScopeRequest,
+    ) -> Result<UsageTotalsReport, EngineError> {
+        let (_, queries) = self.clients()?;
+        queries.usage_totals(request)
+    }
+
+    pub fn usage_totals_cancellable(
+        &self,
+        request: UsageScopeRequest,
+        cancellation: QueryCancellationToken,
+    ) -> Result<UsageTotalsReport, EngineError> {
+        let (_, queries) = self.clients()?;
+        queries.usage_totals_cancellable(request, cancellation)
+    }
+
+    /// Return inclusive daily canonical usage activity plus separately
+    /// reported contributions that have no valid source date.
+    pub fn usage_activity(
+        &self,
+        request: UsageActivityRequest,
+    ) -> Result<UsageActivityReport, EngineError> {
+        let (_, queries) = self.clients()?;
+        queries.usage_activity(request)
+    }
+
+    pub fn usage_activity_cancellable(
+        &self,
+        request: UsageActivityRequest,
+        cancellation: QueryCancellationToken,
+    ) -> Result<UsageActivityReport, EngineError> {
+        let (_, queries) = self.clients()?;
+        queries.usage_activity_cancellable(request, cancellation)
     }
 
     /// Atomically persist one decoded source range, advance its durable

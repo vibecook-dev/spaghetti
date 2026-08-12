@@ -27,6 +27,13 @@ export declare class SpaghettiEngine {
    * session-index metadata is returned as explicitly sourced enrichment.
    */
   listHistorySessions(options: EngineHistorySessionPageOptions, signal?: AbortSignal | undefined | null): Promise<EngineHistorySessionPage>
+  /** Return canonical usage totals for one project or one verified session. */
+  getUsage(options: EngineUsageScopeOptions, signal?: AbortSignal | undefined | null): Promise<EngineUsageTotals>
+  /**
+   * Return inclusive daily usage activity and separately surfaced untimed
+   * contributions for one canonical project/session scope.
+   */
+  getUsageActivity(options: EngineUsageActivityOptions, signal?: AbortSignal | undefined | null): Promise<EngineUsageActivity>
   /**
    * Reconcile the adapter-declared Claude source map through the common
    * Rust drivers, decoders, projections, and durable cursor transaction.
@@ -251,6 +258,106 @@ export interface EngineStatus {
   inFlightQueries: number
   observation: EngineObservationStatus
   owner?: EngineOwnerMetadata
+}
+
+export interface EngineUntimedUsage {
+  aggregate: EngineUsageAggregate
+  coverage: Array<EngineUsageCoverage>
+  firstObservedAtUnixMs?: number
+  lastObservedAtUnixMs?: number
+  lastCommitSeq?: number
+}
+
+export interface EngineUsageActivity {
+  contractVersion: number
+  atCommitSeq: number
+  projectId: string
+  sessionId?: string
+  from: string
+  to: string
+  days: Array<EngineUsageActivityDay>
+  aggregate: EngineUsageAggregate
+  coverage: Array<EngineUsageCoverage>
+  untimed: EngineUntimedUsage
+  firstObservedAtUnixMs?: number
+  lastObservedAtUnixMs?: number
+  lastCommitSeq?: number
+}
+
+export interface EngineUsageActivityDay {
+  date: string
+  aggregate: EngineUsageAggregate
+  firstSourceTime: string
+  lastSourceTime: string
+  firstObservedAtUnixMs: number
+  lastObservedAtUnixMs: number
+  lastCommitSeq: number
+}
+
+export interface EngineUsageActivityOptions {
+  /** Opaque project identity returned by `listHistoryProjects`. */
+  projectId: string
+  /** Optional opaque session identity returned by `listHistorySessions`. */
+  sessionId?: string
+  /** Inclusive calendar date in YYYY-MM-DD form. */
+  from: string
+  /** Inclusive calendar date in YYYY-MM-DD form. */
+  to: string
+}
+
+export interface EngineUsageAggregate {
+  exact: EngineUsageTokenValues
+  estimated: EngineUsageTokenValues
+  combined: EngineUsageTokenValues
+  quality: string
+  exactContributionCount: number
+  estimatedContributionCount: number
+  contributionCount: number
+  sessionCount: number
+}
+
+export interface EngineUsageCoverage {
+  scope: string
+  accounting: string
+  valueQuality: string
+  qualityBucket: string
+  model?: string
+  sourceTimeQuality?: string
+  contributionCount: number
+  tokens: EngineUsageTokenValues
+}
+
+export interface EngineUsageScopeOptions {
+  /** Opaque project identity returned by `listHistoryProjects`. */
+  projectId: string
+  /** Optional opaque session identity returned by `listHistorySessions`. */
+  sessionId?: string
+}
+
+export interface EngineUsageTokenValues {
+  inputTokens: number
+  outputTokens: number
+  cacheCreationTokens: number
+  cacheReadTokens: number
+  /**
+   * Arithmetic sum of the four preserved native components. This is not a
+   * provider billing normalization.
+   */
+  componentTotalTokens: number
+}
+
+export interface EngineUsageTotals {
+  contractVersion: number
+  atCommitSeq: number
+  projectId: string
+  sessionId?: string
+  aggregate: EngineUsageAggregate
+  coverage: Array<EngineUsageCoverage>
+  firstSourceTime?: string
+  lastSourceTime?: string
+  firstObservedAtUnixMs?: number
+  lastObservedAtUnixMs?: number
+  lastCommitSeq?: number
 }
 
 /**
