@@ -4,7 +4,6 @@ import {
   type SpaghettiClientErrorCode,
   type SpaghettiProtocolError,
 } from './protocol.js';
-import { EngineUnavailableError } from '../native.js';
 
 const CURSOR_SCOPE = /scope|filter|project|session|workflow|inbox/i;
 
@@ -27,7 +26,7 @@ export function protocolMismatchError(reason: string): SpaghettiProtocolError {
 /** Convert transport-specific failures without exposing raw internal details. */
 export function normalizeTransportError(error: unknown, diagnosticId: string): SpaghettiProtocolError {
   if (error instanceof SpaghettiClientError) return protocolErrorFromClient(error);
-  if (error instanceof EngineUnavailableError) {
+  if (error instanceof Error && error.name === 'EngineUnavailableError') {
     return {
       code: 'transport_unavailable',
       message: 'The embedded Spaghetti engine is unavailable on this host.',

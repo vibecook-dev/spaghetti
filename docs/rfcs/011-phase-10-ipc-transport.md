@@ -1,6 +1,7 @@
 # RFC 011 Phase 10: framed IPC transport and host bridge
 
-Status: transport slice complete on 2026-08-12; consumer and native-host cutover remains
+Status: transport and playground utility endpoint complete on 2026-08-12;
+production-owner cutover remains
 
 This slice adds the second transport for the asynchronous `SpaghettiClient`.
 It preserves the Phase 10 protocol and all accepted Rust query DTOs while
@@ -104,14 +105,15 @@ verifies that an invalid cursor retains the same public `cursor_invalid`
 classification.
 
 This is semantic and lifecycle evidence for the portable MessagePort bridge,
-not a field-native/daemon performance claim. The selected native IPC endpoint
-still needs same-host encoded-byte, latency, event-loop-delay, heap/RSS, and
-cancellation-burst benchmark evidence before production cutover.
+not a field-native/daemon performance claim. The selected playground
+utility-process endpoint now exists, but it still needs same-host encoded-byte,
+latency, event-loop-delay, heap/RSS, and cancellation-burst benchmark evidence
+before production cutover.
 
 ## Remaining Phase 10 work
 
-- connect this channel contract to the selected field-native/daemon endpoint
-  and add IPC topology measurements to the canonical query benchmark;
+- add the selected playground utility-process topology to the canonical query
+  benchmark and promote the Rust owner out of opt-in shadow mode;
 - migrate CLI/TUI, playground/Electron, React hooks, and SDK examples in
   reversible slices with stale-result tests;
 - deprecate compatibility APIs, move the TypeScript oracle to test-only code,

@@ -21,17 +21,12 @@ import {
   normalizeTransportError,
   protocolMismatchError,
 } from './errors.js';
-import { openNapiTransport, type OpenNapiTransportOptions } from './napi-transport.js';
 
 export interface OpenSpaghettiClientOptions {
   transport: SpaghettiClientTransport;
   clientName?: string;
   protocolVersions?: readonly number[];
   queryContractVersions?: readonly number[];
-}
-
-export interface OpenEmbeddedSpaghettiClientOptions extends OpenNapiTransportOptions {
-  clientName?: string;
 }
 
 interface SupersessionEntry {
@@ -428,19 +423,6 @@ export async function openSpaghettiClient(options: OpenSpaghettiClientOptions): 
     await options.transport.dispose().catch(() => undefined);
     if (error instanceof SpaghettiClientError) throw error;
     throw clientError(normalizeTransportError(error, `${options.transport.kind}-connect`));
-  }
-}
-
-export async function openEmbeddedSpaghettiClient(
-  options: OpenEmbeddedSpaghettiClientOptions,
-): Promise<SpaghettiClient> {
-  const { clientName, ...transportOptions } = options;
-  try {
-    const transport = await openNapiTransport(transportOptions);
-    return await openSpaghettiClient({ transport, clientName });
-  } catch (error) {
-    if (error instanceof SpaghettiClientError) throw error;
-    throw clientError(normalizeTransportError(error, 'napi-open'));
   }
 }
 

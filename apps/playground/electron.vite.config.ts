@@ -10,6 +10,7 @@ const __dirname = fileURLToPath(new URL('.', import.meta.url));
 const mainExternals = [
   '@parcel/watcher',
   '@vibecook/spaghetti-sdk',
+  '@vibecook/spaghetti-sdk/client',
   '@vibecook/spaghetti-sdk-native',
   '@vibecook/mille',
   '@vibecook/mille/host',

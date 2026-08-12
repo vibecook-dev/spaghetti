@@ -48,6 +48,19 @@ DIRECT_ENGINE_QUERY_RE = re.compile(
     r"getRunState|listTeams|getTeam|listTeamInboxes|listTeamInboxMessages"
     r")\s*\("
 )
+RUNTIME_MODULE_RE = re.compile(
+    r"^\s*(?:"
+    r"import\s+(?!type\b)(?:[^;'\"]*?\sfrom\s+)?"
+    r"|export\s+(?!type\b)[^;'\"]*?\sfrom\s+"
+    r")[\'\"]([^\'\"]+)[\'\"]",
+    re.MULTILINE,
+)
+PORTABLE_CLIENT_ENTRY = REPO_ROOT / "packages/sdk/src/client/portable.ts"
+PORTABLE_FORBIDDEN_EXTERNAL_RE = re.compile(
+    r"^(?:node:sqlite|better-sqlite3|chokidar)$"
+    r"|^@parcel/watcher(?:$|[-/])"
+    r"|^@vibecook/spaghetti-sdk-native(?:$|[-/])"
+)
 
 
 def repo_path(path: Path) -> str:
@@ -165,6 +178,45 @@ def discover_migrated_client_direct_engine_queries() -> set[str]:
     }
 
 
+def discover_portable_client_runtime_boundary_violations() -> set[str]:
+    """The Electron/client entry cannot pull storage, watchers, or N-API at runtime."""
+    client_root = PORTABLE_CLIENT_ENTRY.parent.resolve()
+    pending = [PORTABLE_CLIENT_ENTRY]
+    visited: set[Path] = set()
+    violations: set[str] = set()
+    while pending:
+        path = pending.pop().resolve()
+        if path in visited:
+            continue
+        visited.add(path)
+        for specifier in RUNTIME_MODULE_RE.findall(read(path)):
+            edge = f"{repo_path(path)} -> {specifier}"
+            if not specifier.startswith("."):
+                if PORTABLE_FORBIDDEN_EXTERNAL_RE.search(specifier):
+                    violations.add(edge)
+                continue
+            target = (path.parent / specifier).resolve()
+            if target.suffix in {".js", ".jsx"}:
+                target = target.with_suffix(".ts" if target.suffix == ".js" else ".tsx")
+            if not target.is_relative_to(client_root) or not target.exists():
+                violations.add(edge)
+                continue
+            pending.append(target)
+    return violations
+
+
+def discover_playground_main_sdk_owner_bypasses() -> set[str]:
+    """Electron brokers may use portable clients but cannot load the owner SDK."""
+    found: set[str] = set()
+    for directory in ("apps/playground/src/main", "apps/playground/src/preload"):
+        for path in sorted((REPO_ROOT / directory).rglob("*.ts")):
+            if "__tests__" in path.parts:
+                continue
+            if "@vibecook/spaghetti-sdk" in RUNTIME_MODULE_RE.findall(read(path)):
+                found.add(repo_path(path))
+    return found
+
+
 DISCOVERERS: dict[str, Callable[[], set[str]]] = {
     "typescript_sql_authorities": discover_typescript_sql_authorities,
     "typescript_sql_drivers": discover_typescript_sql_drivers,
@@ -174,6 +226,8 @@ DISCOVERERS: dict[str, Callable[[], set[str]]] = {
     "rust_source_boundary_violations": discover_rust_source_boundary_violations,
     "rust_adapter_storage_boundary_violations": discover_rust_adapter_storage_boundary_violations,
     "migrated_client_direct_engine_queries": discover_migrated_client_direct_engine_queries,
+    "portable_client_runtime_boundary_violations": discover_portable_client_runtime_boundary_violations,
+    "playground_main_sdk_owner_bypasses": discover_playground_main_sdk_owner_bypasses,
 }
 
 

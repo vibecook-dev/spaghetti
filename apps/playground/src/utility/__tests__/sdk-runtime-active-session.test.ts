@@ -1,10 +1,18 @@
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
+import { once } from 'node:events';
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { MessageChannel } from 'node:worker_threads';
 
-import { loadNativeAddon } from '@vibecook/spaghetti-sdk';
+import {
+  IpcTransport,
+  loadNativeAddon,
+  MessagePortIpcChannel,
+  openSpaghettiClient,
+  type SpaghettiClient,
+} from '@vibecook/spaghetti-sdk';
 import { activeSessionChangeForBatch, SdkRuntime, type ActiveStreamIdentity } from '../sdk-runtime.js';
 
 const native = loadNativeAddon();
@@ -126,6 +134,10 @@ describe('observation shadow host status', () => {
     const runtime = new SdkRuntime({ dbPath: '/tmp/not-opened.db', engine: 'ts' }, sink());
 
     assert.deepEqual(await runtime.getObservationShadowStatus(), { enabled: false, state: 'disabled' });
+    const ports = new MessageChannel();
+    const peerClosed = once(ports.port1, 'close');
+    await assert.rejects(runtime.attachObservationClient(ports.port2), /shadow is disabled/);
+    await peerClosed;
     await runtime.dispose();
   });
 
@@ -161,9 +173,17 @@ describe('observation shadow host status', () => {
       },
       { ...sink(), initError: (message) => errors.push(message) },
     );
+    let client: SpaghettiClient | undefined;
 
     try {
-      runtime.start();
+      const ports = new MessageChannel();
+      const attached = runtime.attachObservationClient(ports.port2);
+      const opened = openSpaghettiClient({
+        transport: new IpcTransport({ channel: new MessagePortIpcChannel(ports.port1) }),
+        clientName: 'playground-utility-test',
+      });
+      [, client] = await Promise.all([attached, opened]);
+
       const report = await waitForShadow(runtime);
       assert.deepEqual(errors, []);
       assert.equal(runtime.isReady(), true);
@@ -177,7 +197,12 @@ describe('observation shadow host status', () => {
       assert.equal(existsSync(productionDb), true);
       assert.equal(existsSync(shadowDb), true);
       assert.notEqual(report.databasePath, productionDb);
+      assert.equal(client.info.transportKind, 'playground-utility');
+      const [overview, projects] = await Promise.all([client.getOverview(), client.listProjects({ limit: 10 })]);
+      assert.deepEqual([overview.canonicalSessions, overview.canonicalMessages], [1, 1]);
+      assert.equal(projects.items[0]?.nativeProjectKey, '-tmp-shadow-project');
     } finally {
+      await client?.dispose();
       await runtime.dispose();
       rmSync(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
     }

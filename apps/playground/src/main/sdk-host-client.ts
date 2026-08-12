@@ -1,10 +1,16 @@
 /** Thin Electron-main broker for the SDK UtilityProcess. No SDK/SQLite work runs here. */
 
-import { utilityProcess, type UtilityProcess } from 'electron';
+import { MessageChannelMain, utilityProcess, type MessagePortMain, type UtilityProcess } from 'electron';
 import { existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { IngestEngine } from '@vibecook/spaghetti-sdk';
+import {
+  IpcTransport,
+  MessagePortIpcChannel,
+  openSpaghettiClient,
+  type SpaghettiClient,
+} from '@vibecook/spaghetti-sdk/client';
 import {
   deserializeError,
   isSdkHostMessage,
@@ -119,6 +125,48 @@ export class SdkHostClient {
       this.rejectPending(id, error);
     }
     return (await result) as SdkRpcResult<K>;
+  }
+
+  /** Open a negotiated canonical client backed by the utility-process owner. */
+  async openObservationClient(clientName = 'spaghetti-playground-main'): Promise<SpaghettiClient> {
+    const port = await this.openSpaghettiClientPort();
+    return await openSpaghettiClient({
+      transport: new IpcTransport({
+        channel: new MessagePortIpcChannel(port, 'playground-main'),
+      }),
+      clientName,
+    });
+  }
+
+  private async openSpaghettiClientPort(): Promise<MessagePortMain> {
+    await this.start();
+    const proc = this.process;
+    if (!proc) throw new Error('SDK utility is unavailable');
+
+    const id = this.nextRequestId++;
+    const { port1, port2 } = new MessageChannelMain();
+    const attached = new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pending.delete(id);
+        reject(new Error('SDK utility client attachment timed out'));
+      }, MAINTENANCE_TIMEOUT_MS);
+      this.pending.set(id, { resolve: () => resolve(), reject, timer });
+    });
+
+    try {
+      proc.postMessage({ type: 'attach-spaghetti-client', id } satisfies SdkHostCommand, [port1]);
+      await attached;
+      return port2;
+    } catch (error) {
+      this.rejectPending(id, error);
+      try {
+        port1.close();
+      } catch {
+        /* already transferred or closed */
+      }
+      port2.close();
+      throw error;
+    }
   }
 
   async dispose(): Promise<void> {

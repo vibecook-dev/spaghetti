@@ -12,6 +12,7 @@ import {
   defaultClaudeObservationShadowDbPath,
   defaultGrokDir,
   isSqliteCorruptError,
+  MessagePortIpcChannel,
   openClaudeObservationShadow,
   wipeSqliteCacheFiles,
   type AgentSource,
@@ -19,6 +20,7 @@ import {
   type IngestEngine,
   type InitProgress,
   type SegmentChangeBatch,
+  type SpaghettiMessagePort,
   type SpaghettiAPI,
   type TimelinePageRequest,
 } from '@vibecook/spaghetti-sdk';
@@ -186,6 +188,33 @@ export class SdkRuntime {
       report.parityError = String(error);
     }
     return report;
+  }
+
+  /** Attach one negotiated framed client to the Rust owner in this utility process. */
+  async attachObservationClient(port: SpaghettiMessagePort): Promise<void> {
+    let channel: MessagePortIpcChannel | undefined;
+    try {
+      if (!this.options.observationShadow) throw new Error('RFC 011 observation shadow is disabled.');
+      if (this.disposed) throw new Error('SDK utility is shutting down.');
+
+      // The utility announces its control transport before cold ingest begins.
+      // Starting here is idempotent and closes that short attachment race.
+      this.start();
+      if (this.initPromise) await this.initPromise;
+      if (this.observationShadowStart) await this.observationShadowStart;
+      const shadow = this.observationShadow;
+      if (!shadow) {
+        throw new Error(this.observationShadowError ?? 'RFC 011 observation shadow is unavailable.');
+      }
+      // Leave the raw port paused while cold ingest runs. MessagePort queues
+      // the client's connect frame until the channel installs its listener.
+      channel = new MessagePortIpcChannel(port, 'playground-utility');
+      shadow.serveIpc(channel, 'playground-utility');
+    } catch (error) {
+      if (channel) await channel.close().catch(() => undefined);
+      else port.close?.();
+      throw error;
+    }
   }
 
   async openSessionStream(

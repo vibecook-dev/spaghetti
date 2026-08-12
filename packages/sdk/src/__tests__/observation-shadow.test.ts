@@ -4,6 +4,7 @@ import { appendFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { MessageChannel } from 'node:worker_threads';
 
 import {
   compareClaudeObservationHistory,
@@ -11,9 +12,12 @@ import {
   compareClaudeObservationUsage,
   createSpaghettiService,
   defaultClaudeObservationShadowDbPath,
+  IpcTransport,
   listActiveSessionsFromDir,
   loadNativeAddon,
+  MessagePortIpcChannel,
   openClaudeObservationShadow,
+  openSpaghettiClient,
   SPAGHETTI_CLIENT_METHODS,
   SpaghettiClientError,
   type ClaudeObservationShadow,
@@ -487,6 +491,51 @@ describe('Claude observation shadow native lifecycle', { skip: !native }, () => 
     assert.deepEqual([resumed.overview.canonicalSessions, resumed.overview.canonicalMessages], [1, 2]);
     assert.equal(resumed.status.owner?.ownerLabel, 'sdk-shadow-restart-test');
     assert.equal((await reopened.dispose()).state, 'stopped');
+  });
+
+  test('serves independent framed IPC clients from the same observation owner', async () => {
+    const { productionDb, root, transcript } = fixture();
+    writeFileSync(transcript, message('aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee', 'user', 'framed query'));
+    const shadow = await openClaudeObservationShadow({ productionDbPath: productionDb, roots: [root] });
+    shadows.push(shadow);
+
+    const ports = new MessageChannel();
+    const host = shadow.serveIpc(new MessagePortIpcChannel(ports.port2), 'test-utility');
+    const client = await openSpaghettiClient({
+      transport: new IpcTransport({ channel: new MessagePortIpcChannel(ports.port1) }),
+      clientName: 'shadow-ipc-test',
+    });
+    const secondPorts = new MessageChannel();
+    const secondHost = shadow.serveIpc(new MessagePortIpcChannel(secondPorts.port2), 'test-utility');
+    const secondClient = await openSpaghettiClient({
+      transport: new IpcTransport({ channel: new MessagePortIpcChannel(secondPorts.port1) }),
+      clientName: 'shadow-ipc-test-2',
+    });
+
+    try {
+      assert.equal(client.info.transportKind, 'test-utility');
+      assert.deepEqual(client.info.methods, SPAGHETTI_CLIENT_METHODS);
+      const [overview, projects, replay] = await Promise.all([
+        client.getOverview(),
+        client.listProjects({ limit: 10 }),
+        client.replayChanges({ limit: 10 }),
+      ]);
+      assert.deepEqual([overview.canonicalSessions, overview.canonicalMessages], [1, 1]);
+      assert.equal(projects.items[0]?.nativeProjectKey, '-tmp-shadow-project');
+      assert.ok(replay.changes.length > 0);
+      assert.equal(projects.atCommitSeq, overview.commitSeq);
+      assert.equal(replay.atCommitSeq, overview.commitSeq);
+      await client.dispose();
+      await host.dispose();
+      assert.equal((await secondClient.getOverview()).commitSeq, overview.commitSeq);
+      assert.equal((await shadow.dispose()).state, 'stopped');
+      await assert.rejects(secondClient.getOverview(), (error) => expectClientError(error, 'transport_closed'));
+    } finally {
+      await client.dispose();
+      await host.dispose();
+      await secondClient.dispose();
+      await secondHost.dispose();
+    }
   });
 
   test('queries canonical projects and sessions with Rust-owned ordering, pagination, and enrichment', async () => {

@@ -1,6 +1,7 @@
 /** UtilityProcess entrypoint: typed RPC host for the entire Spaghetti SDK. */
 
 import type { IngestEngine } from '@vibecook/spaghetti-sdk';
+import type { MessagePortMain } from 'electron';
 import type { SdkHostCommand, SdkHostEvent, SdkHostMessage, SdkRpcRequest } from '../shared/sdk-protocol.js';
 import { serializeError } from '../shared/sdk-protocol.js';
 import { SdkRuntime } from './sdk-runtime.js';
@@ -136,7 +137,7 @@ async function dispatch(request: SdkRpcRequest): Promise<unknown> {
   }
 }
 
-async function handleCommand(command: SdkHostCommand): Promise<void> {
+async function handleCommand(command: SdkHostCommand, port?: MessagePortMain): Promise<void> {
   if (command.type === 'shutdown') {
     if (shuttingDown) return;
     shuttingDown = true;
@@ -157,6 +158,12 @@ async function handleCommand(command: SdkHostCommand): Promise<void> {
   }
 
   try {
+    if (command.type === 'attach-spaghetti-client') {
+      if (!port) throw new Error('attach-spaghetti-client requires one transferred MessagePort.');
+      await runtime.attachObservationClient(port);
+      post({ type: 'response', id: command.id, ok: true, result: { ok: true } });
+      return;
+    }
     const result = await dispatch(command);
     post({ type: 'response', id: command.id, ok: true, result });
   } catch (error) {
@@ -165,7 +172,7 @@ async function handleCommand(command: SdkHostCommand): Promise<void> {
 }
 
 parentPort.on('message', (message) => {
-  void handleCommand(message.data as SdkHostCommand);
+  void handleCommand(message.data as SdkHostCommand, message.ports[0]);
 });
 
 process.on('uncaughtException', (error) => {

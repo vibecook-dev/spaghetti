@@ -60,8 +60,11 @@ import {
 import {
   NapiTransport,
   openSpaghettiClient,
+  serveSpaghettiIpc,
   type SpaghettiClient,
   type SpaghettiClientInfo,
+  type SpaghettiIpcChannel,
+  type SpaghettiIpcHost,
   type SpaghettiQueryOptions,
 } from './client/index.js';
 
@@ -233,6 +236,8 @@ export interface ClaudeObservationShadow {
   readonly status: SpaghettiEngineStatus;
   /** Negotiated query boundary used by every shadow read. */
   readonly clientInfo: SpaghettiClientInfo;
+  /** Serve one framed IPC client without transferring ownership of the Rust engine. */
+  serveIpc(channel: SpaghettiIpcChannel, transportKind?: string): SpaghettiIpcHost;
   snapshot(signal?: AbortSignal): Promise<ClaudeObservationShadowSnapshot>;
   compareHistory(legacy: ClaudeLegacyHistoryCounts, signal?: AbortSignal): Promise<ClaudeObservationHistoryParity>;
   /** Query Rust-owned canonical project summaries without opening either database in TypeScript. */
@@ -597,6 +602,7 @@ export async function openClaudeObservationShadow(
 class NativeClaudeObservationShadow implements ClaudeObservationShadow {
   readonly databasePath: string;
   readonly roots: readonly string[];
+  private readonly ipcHosts = new Set<SpaghettiIpcHost>();
   private disposePromise: Promise<SpaghettiEngineStatus> | null = null;
 
   constructor(
@@ -614,6 +620,31 @@ class NativeClaudeObservationShadow implements ClaudeObservationShadow {
 
   get clientInfo(): SpaghettiClientInfo {
     return this.client.info;
+  }
+
+  serveIpc(channel: SpaghettiIpcChannel, transportKind = 'ipc'): SpaghettiIpcHost {
+    if (this.disposePromise) throw new Error('Claude observation shadow is stopping.');
+
+    let host: SpaghettiIpcHost | undefined;
+    let unsubscribeClose = (): void => undefined;
+    unsubscribeClose = channel.onClose(() => {
+      if (host) this.ipcHosts.delete(host);
+      unsubscribeClose();
+    });
+    try {
+      host = serveSpaghettiIpc({
+        channel,
+        transport: new NapiTransport({ engine: this.engine, ownsEngine: false }),
+        ownsTransport: true,
+        transportKind,
+      });
+      this.ipcHosts.add(host);
+      return host;
+    } catch (error) {
+      unsubscribeClose();
+      void channel.close().catch(() => undefined);
+      throw error;
+    }
   }
 
   async snapshot(signal?: AbortSignal): Promise<ClaudeObservationShadowSnapshot> {
@@ -808,6 +839,9 @@ class NativeClaudeObservationShadow implements ClaudeObservationShadow {
   async dispose(): Promise<SpaghettiEngineStatus> {
     if (!this.disposePromise) {
       this.disposePromise = (async () => {
+        const ipcHosts = [...this.ipcHosts];
+        this.ipcHosts.clear();
+        await Promise.allSettled(ipcHosts.map((host) => host.dispose()));
         await this.client.dispose();
         return await this.engine.dispose();
       })();

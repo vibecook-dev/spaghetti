@@ -55,6 +55,12 @@ running, degraded, failed, or stopped state; engine health; owner/watcher
 status; the durable commit watermark; canonical history counts; and a
 Claude-scoped history parity report.
 
+The Phase 10 endpoint now also accepts a transferred `MessagePort` on the
+utility control plane. Electron main can call `openObservationClient()` to
+negotiate the framed canonical API against this same Rust owner. Canonical DTOs
+do not pass through the legacy RPC switch; the attachment acknowledgement only
+establishes the dedicated bounded channel.
+
 Parity deliberately compares:
 
 - canonical sessions to Claude compatibility sessions;
@@ -77,12 +83,12 @@ independent shadow owner.
 
 ## Evidence and remaining cutover gate
 
-Tests prove path/sidecar isolation, symlink-alias rejection, negotiated client
-capabilities, initial canonical observation, watched append plus explicit
-refresh, exact fixture history parity, stable public error codes, concurrent
-idempotent disposal, and durable reopen. The persistent engine overview test
-separately proves canonical counts are visible while legacy compatibility
-counts stay zero.
+Tests prove path/sidecar isolation, symlink-alias rejection, negotiated N-API
+and utility-process client capabilities, initial canonical observation,
+watched append plus explicit refresh, exact fixture history parity, stable
+public error codes, concurrent idempotent disposal, framed-client shutdown,
+and durable reopen. The persistent engine overview test separately proves
+canonical counts are visible while legacy compatibility counts stay zero.
 
 This is not Phase 8 sole-writer cutover. The first typed Rust project/session
 query pack is now recorded in

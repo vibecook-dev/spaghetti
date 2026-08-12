@@ -1,6 +1,7 @@
 # RFC 011 Phase 10: asynchronous client and N-API transport foundation
 
-Status: foundation complete on 2026-08-12; consumer cutover remains
+Status: foundation and first consumer/utility endpoint complete on 2026-08-12;
+broad consumer cutover remains
 
 This slice introduces the public transport-neutral client boundary required
 before production TypeScript consumers can stop depending on synchronous
@@ -21,6 +22,10 @@ database ownership yet.
 - `NapiTransport`, where one logical client query invokes one asynchronous
   method on the persistent Rust engine;
 - `openEmbeddedSpaghettiClient()`, which opens and owns that engine.
+
+`@vibecook/spaghetti-sdk/client` is the portable IPC/client package entry. It
+intentionally excludes engine opening and N-API so non-owner processes do not
+load the SDK's storage or watcher graph merely to connect to an existing host.
 
 The protocol reuses the accepted Phase 9 canonical Rust DTOs. Domain identity,
 ordering, ranking, pagination, totals, watermarks, and capability behavior are
@@ -86,8 +91,8 @@ read and does not change the legacy production surface.
 
 ## Remaining Phase 10 work
 
-- connect the framed IPC transport to the selected
-  field-native/daemon endpoint and add topology benchmark evidence;
+- benchmark the selected playground utility-process endpoint, then promote the
+  owner out of opt-in shadow mode;
 - migrate CLI/TUI, playground/Electron, React hooks, and SDK examples in
   reversible slices with stale-result tests;
 - deprecate compatibility APIs, move the TypeScript oracle to test-only code,

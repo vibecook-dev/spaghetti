@@ -211,6 +211,16 @@ describe('SpaghettiClient protocol', () => {
     });
   });
 
+  test('classifies an unavailable embedded engine without importing it into the portable client', () => {
+    const unavailable = new Error('platform-specific install details');
+    unavailable.name = 'EngineUnavailableError';
+    assert.deepEqual(normalizeTransportError(unavailable, 'portable-connect'), {
+      code: 'transport_unavailable',
+      message: 'The embedded Spaghetti engine is unavailable on this host.',
+      reason: 'native_addon_unavailable',
+    });
+  });
+
   test('maps N-API status codes onto stable transport-neutral errors', () => {
     const nativeError = (code: string, message: string): Error => Object.assign(new Error(message), { code });
 

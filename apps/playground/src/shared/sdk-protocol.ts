@@ -24,7 +24,10 @@ export interface SerializedError {
   code?: string;
 }
 
-export type SdkHostCommand = SdkRpcRequest | { type: 'shutdown'; id: number };
+export type SdkHostCommand =
+  | SdkRpcRequest
+  | { type: 'attach-spaghetti-client'; id: number }
+  | { type: 'shutdown'; id: number };
 
 export type SdkHostEvent =
   | { event: 'progress'; payload: InitProgress }

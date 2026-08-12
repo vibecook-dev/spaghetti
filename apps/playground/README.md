@@ -86,23 +86,23 @@ from source if the prebuild isn't available.
 
 ## Architecture
 
-```
-┌──────────────┐   ipcMain.handle   ┌──────────────────────────────────┐
-│   renderer   │ ─────────────────▶ │              main                 │
-│  React 19    │  window.spaghetti  │   SpaghettiService               │
-│  SDK /react  │ ◀───── events ──── │   sources: ~/.claude (+ codex/   │
-│  mille-ui    │  window.mille      │   db: <userData>/cache           │
-└──────────────┘                    │   live: true → safeBulk bulk    │
-        ▲           contextBridge   │                                  │
-        │                           │   utilityProcess → fx-host       │
-        │ MessagePort (fx-port)     │     @vibecook/mille FileExplorer │
-        └─ preload (typed) ─────────┴──────────────────────────────────┘
+```text
+renderer -> preload -> Electron main broker -> SDK UtilityProcess
+                         |                    |- legacy SpaghettiService
+                         |                    `- opt-in Rust observation owner
+                         |                         `- framed SpaghettiClient port
+                         `-> file-explorer UtilityProcess -> mille MessagePort
 ```
 
-- **main** owns a single `SpaghettiService` with `live: true` (and thus
-  crash-safer bulk SQLite settings). Primary source is Claude Code;
-  Codex / Grok are auto-detected. Progress/ready/change events go to all
-  renderer windows. Quit uses `dispose()`.
+- **SDK UtilityProcess** owns the live compatibility `SpaghettiService` and
+  its SQLite lifecycle. Primary source is Claude Code; Codex / Grok are
+  auto-detected. Progress/ready/change events return through the main broker,
+  and quit awaits utility disposal.
+- With `SPAGHETTI_OBSERVATION_SHADOW=1`, that utility also owns the isolated
+  RFC 011 Rust observation engine. Electron main can negotiate a canonical
+  `SpaghettiClient` over a transferred, versioned framed `MessagePort` using
+  the storage-free `@vibecook/spaghetti-sdk/client` entry; the renderer remains
+  on compatibility RPC until each product DTO is migrated.
 - **preload** exposes `window.spaghetti` (`src/shared/ipc.ts`).
 - **renderer** uses the **archive / paper** design (EB Garamond, ink on
   cream or ink-black paper, light/dark toggle). Multi-source project

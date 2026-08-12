@@ -68,6 +68,14 @@
     "migrated_client_direct_engine_queries": {
       "description": "Consumers already migrated to SpaghettiClient may keep native engine lifecycle ownership but cannot resume direct N-API query calls.",
       "allowed": []
+    },
+    "portable_client_runtime_boundary_violations": {
+      "description": "The portable client entry used outside the owner process cannot runtime-import storage, watcher, embedded N-API, or unresolved non-client modules.",
+      "allowed": []
+    },
+    "playground_main_sdk_owner_bypasses": {
+      "description": "Electron main and preload may import the portable client but cannot runtime-import the owner SDK bundle with SQLite, watchers, and N-API.",
+      "allowed": []
     }
   }
 }

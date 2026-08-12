@@ -68,6 +68,7 @@ and compares the client facade rather than a direct engine shortcut.
   preserves its product contract;
 - replace legacy playground change forwarding with durable client
   subscriptions once topic payloads have a public invalidation mapping;
-- connect the framed transport to the selected field-native/daemon endpoint;
+- benchmark the connected playground utility-process endpoint and promote its
+  Rust owner out of opt-in shadow mode;
 - remove each migrated module from the legacy ownership allowlists and retire
   TypeScript SQLite only after no production read bypass remains.

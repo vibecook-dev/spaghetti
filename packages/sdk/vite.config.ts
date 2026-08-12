@@ -4,14 +4,12 @@ import dts from 'vite-plugin-dts';
 import { resolve } from 'path';
 
 export default defineConfig({
-  plugins: [
-    react(),
-    dts({ entryRoot: 'src', insertTypesEntry: true, rollupTypes: false }),
-  ],
+  plugins: [react(), dts({ entryRoot: 'src', insertTypesEntry: true, rollupTypes: false })],
   build: {
     lib: {
       entry: {
         index: resolve(__dirname, 'src/index.ts'),
+        client: resolve(__dirname, 'src/client/portable.ts'),
         react: resolve(__dirname, 'src/react/index.ts'),
         // Emitted so `dist/parse-worker.js` sits next to `dist/index.js`,
         // which is where WorkerPool looks for it. Without this entry the
