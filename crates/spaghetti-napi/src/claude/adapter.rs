@@ -12,17 +12,19 @@ use serde_json::Value;
 
 use crate::adapter::{
     AdapterDiagnostic, AdapterError, AdapterErrorClass, AdapterId, AdapterManifest,
-    AdapterObjectContext, AgentAdapter, Availability, CapabilityDeclaration, CapabilityGranularity,
-    CapabilityId, CapabilitySupport, ConsistencyPolicy, ContentBlock, DecodeContext,
-    DecodeDisposition, DecoderId, DelegationFact, DelegationKind, DelegationMetadataFact,
-    DelegationSpawnFact, DeletionPolicy, DiscoveryContext, DriverSpec, EntityKey, EntityScope,
-    EvidenceKind, EvidenceStrength, Fact, FactBatch, MessageFact, MessageRole, ObjectSelector,
-    PlanSnapshotFact, PresenceFact, QualifiedTimestamp, RawRetentionPolicy, RelationStrength,
-    RunEvidenceFact, RunFact, SessionFact, SourceInstance, SourceInstanceKey, SourceInstanceSpec,
-    SourceObjectDescriptor, SourceRoot, StreamAuthority, StreamId, StreamSpec, SupportLevel,
-    TaskCollectionKind, TaskItemSnapshot, TaskSnapshotCoverage, TaskSnapshotFact, TaskStatus,
-    TeamInboxMessageSnapshot, TeamInboxSnapshotFact, TeamMemberSnapshot, TeamSnapshotFact,
-    TimestampQuality, TokenUsage, UsageAccounting, UsageFact, UsageScope, ValueQuality,
+    AdapterObjectContext, AgentAdapter, ArtifactCapture, ArtifactContentFact,
+    ArtifactMetadataEntry, ArtifactMetadataSnapshotFact, ArtifactObservationKind, Availability,
+    CapabilityDeclaration, CapabilityGranularity, CapabilityId, CapabilitySupport,
+    ConsistencyPolicy, ContentBlock, DecodeContext, DecodeDisposition, DecoderId, DelegationFact,
+    DelegationKind, DelegationMetadataFact, DelegationSpawnFact, DeletionPolicy, DiscoveryContext,
+    DriverSpec, EntityKey, EntityScope, EvidenceKind, EvidenceStrength, Fact, FactBatch,
+    MessageFact, MessageRole, ObjectSelector, PlanSnapshotFact, PresenceFact, QualifiedTimestamp,
+    RawRetentionPolicy, RelationStrength, RunEvidenceFact, RunFact, SessionFact, SourceInstance,
+    SourceInstanceKey, SourceInstanceSpec, SourceObjectDescriptor, SourceRoot, StreamAuthority,
+    StreamId, StreamSpec, SupportLevel, TaskCollectionKind, TaskItemSnapshot, TaskSnapshotCoverage,
+    TaskSnapshotFact, TaskStatus, TeamInboxMessageSnapshot, TeamInboxSnapshotFact,
+    TeamMemberSnapshot, TeamSnapshotFact, TimestampQuality, TokenUsage, UsageAccounting, UsageFact,
+    UsageScope, ValueQuality,
 };
 use crate::claude::message_extractor;
 use crate::claude::session_metadata;
@@ -45,6 +47,7 @@ const ACTIVE_SESSION_STREAM: &str = "active-sessions";
 const TODO_STREAM: &str = "todo-snapshots";
 const TASK_ITEM_STREAM: &str = "task-items";
 const PLAN_STREAM: &str = "plan-documents";
+const ARTIFACT_CONTENT_STREAM: &str = "file-history-blobs";
 const PARENT_DECODER: &str = "claude-session-record";
 const SUBAGENT_DECODER: &str = "claude-subagent-record";
 const SUBAGENT_META_DECODER: &str = "claude-subagent-metadata";
@@ -54,6 +57,7 @@ const ACTIVE_SESSION_DECODER: &str = "claude-active-session";
 const TODO_DECODER: &str = "claude-todo-snapshot";
 const TASK_ITEM_DECODER: &str = "claude-task-item";
 const PLAN_DECODER: &str = "claude-plan-document";
+const ARTIFACT_CONTENT_DECODER: &str = "claude-file-history-blob";
 const OBJECT_CONTEXT_VERSION: u32 = 1;
 const SUBAGENT_META_MAX_BYTES: usize = 64 * 1024;
 const TEAM_CONFIG_MAX_BYTES: usize = 1024 * 1024;
@@ -62,9 +66,11 @@ const ACTIVE_SESSION_MAX_BYTES: usize = 64 * 1024;
 const TODO_MAX_BYTES: usize = 1024 * 1024;
 const TASK_ITEM_MAX_BYTES: usize = 256 * 1024;
 const PLAN_MAX_BYTES: usize = 4 * 1024 * 1024;
+const ARTIFACT_CONTENT_MAX_BYTES: usize = 1024 * 1024;
 const TEAM_MEMBER_LIMIT: usize = 256;
 const TEAM_INBOX_MESSAGE_LIMIT: usize = 4_096;
 const TODO_ITEM_LIMIT: usize = 4_096;
+const ARTIFACT_METADATA_LIMIT: usize = 512;
 
 const HISTORY_SESSIONS: &str = "history.sessions";
 const HISTORY_MESSAGES: &str = "history.messages";
@@ -77,6 +83,7 @@ const RUNTIME_TEAMS: &str = "runtime.teams";
 const RUNTIME_TEAM_INBOX: &str = "runtime.team_inbox";
 const RUNTIME_PRESENCE: &str = "runtime.presence";
 const RUNTIME_TASKS: &str = "runtime.tasks";
+const RUNTIME_ARTIFACTS: &str = "runtime.artifacts";
 const USAGE_INPUT_TOKENS: &str = "usage.input_tokens";
 const USAGE_OUTPUT_TOKENS: &str = "usage.output_tokens";
 const USAGE_CACHE_TOKENS: &str = "usage.cache_tokens";
@@ -95,7 +102,7 @@ impl ClaudeCodeAdapter {
                 id: AdapterId::new(ADAPTER_ID).expect("static Claude adapter id is valid"),
                 display_name: "Claude Code".to_string(),
                 adapter_version: env!("CARGO_PKG_VERSION").to_string(),
-                contract_version: 7,
+                contract_version: 8,
                 source_schema_versions: vec![
                     "claude-code-jsonl-v1".to_string(),
                     "claude-code-subagent-meta-v1".to_string(),
@@ -105,6 +112,7 @@ impl ClaudeCodeAdapter {
                     "claude-code-todo-v1".to_string(),
                     "claude-code-task-item-v1".to_string(),
                     "claude-code-plan-v1".to_string(),
+                    "claude-code-file-history-v1".to_string(),
                 ],
                 capabilities: claude_capabilities(),
             },
@@ -351,6 +359,25 @@ impl AgentAdapter for ClaudeCodeAdapter {
                 retention: RawRetentionPolicy::Full,
                 capabilities: task_capabilities(),
             },
+            StreamSpec {
+                id: StreamId::new(ARTIFACT_CONTENT_STREAM)?,
+                driver: DriverSpec::ReplaceDocument(ReplaceDocumentConfig {
+                    max_document_bytes: ARTIFACT_CONTENT_MAX_BYTES,
+                }),
+                selector: ObjectSelector {
+                    root_name: "home".to_string(),
+                    include: vec!["file-history/*/*@v*".to_string()],
+                    exclude: Vec::new(),
+                },
+                decoder: DecoderId::new(ARTIFACT_CONTENT_DECODER)?,
+                authority: StreamAuthority::Canonical,
+                entity_scope: EntityScope::Custom("artifact".to_string()),
+                priority: IngestPriority::ForegroundRepair,
+                consistency: ConsistencyPolicy::SnapshotReplace,
+                deletion: DeletionPolicy::MirrorSource,
+                retention: RawRetentionPolicy::Full,
+                capabilities: artifact_capabilities(),
+            },
         ];
         for stream in &streams {
             stream.validate(instance)?;
@@ -391,6 +418,9 @@ impl AgentAdapter for ClaudeCodeAdapter {
             PLAN_STREAM => {
                 encode_object_context(&ClaudePlanContext::from_path(&object.relative_path)?)?
             }
+            ARTIFACT_CONTENT_STREAM => encode_object_context(
+                &ClaudeArtifactContentContext::from_path(&object.relative_path)?,
+            )?,
             _ => {
                 return Err(AdapterError::new(
                     AdapterErrorClass::StreamFatal,
@@ -451,6 +481,10 @@ impl AgentAdapter for ClaudeCodeAdapter {
                 let object_context = ClaudePlanContext::decode(context.object_context)?;
                 decode_plan_document(self.adapter_id(), &object_context, record, output)
             }
+            ARTIFACT_CONTENT_DECODER => {
+                let object_context = ClaudeArtifactContentContext::decode(context.object_context)?;
+                decode_artifact_content(self.adapter_id(), &object_context, record, output)
+            }
             _ => Err(AdapterError::unknown_decoder(context.decoder)),
         }
     }
@@ -502,6 +536,15 @@ fn claude_capabilities() -> Vec<CapabilityDeclaration> {
                 "todo files are complete snapshots, numbered task files are item documents, and task status never implies run completion",
             ),
         ),
+        capability(
+            RUNTIME_ARTIFACTS,
+            SupportLevel::Native,
+            CapabilityGranularity::Custom("artifact".to_string()),
+            Availability::Live,
+            Some(
+                "file-history metadata and backup blobs are joined by native session and backup name; capture is session-attributed and never implies that a run produced the tracked file",
+            ),
+        ),
         live_native(USAGE_INPUT_TOKENS, CapabilityGranularity::Message),
         live_native(USAGE_OUTPUT_TOKENS, CapabilityGranularity::Message),
         live_native(USAGE_CACHE_TOKENS, CapabilityGranularity::Message),
@@ -541,6 +584,7 @@ fn transcript_capabilities() -> Vec<CapabilityId> {
         USAGE_OUTPUT_TOKENS,
         USAGE_CACHE_TOKENS,
         RUNTIME_SUBAGENTS,
+        RUNTIME_ARTIFACTS,
         SOURCE_LIVE,
         SOURCE_RECONCILE,
         SOURCE_RESUME_CURSOR,
@@ -577,6 +621,18 @@ fn presence_capabilities() -> Vec<CapabilityId> {
 fn task_capabilities() -> Vec<CapabilityId> {
     [
         RUNTIME_TASKS,
+        SOURCE_LIVE,
+        SOURCE_RECONCILE,
+        SOURCE_RESUME_CURSOR,
+    ]
+    .into_iter()
+    .map(|id| CapabilityId::new(id).expect("static Claude stream capability id is valid"))
+    .collect()
+}
+
+fn artifact_capabilities() -> Vec<CapabilityId> {
+    [
+        RUNTIME_ARTIFACTS,
         SOURCE_LIVE,
         SOURCE_RECONCILE,
         SOURCE_RESUME_CURSOR,
@@ -884,6 +940,48 @@ impl ClaudePlanContext {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct ClaudeArtifactContentContext {
+    native_session_id: String,
+    native_artifact_id: String,
+    native_file_hash: String,
+    version: u64,
+}
+
+impl ClaudeArtifactContentContext {
+    fn from_path(relative_path: &Path) -> Result<Self, AdapterError> {
+        let components = utf8_components(relative_path)?;
+        if components.len() != 3 || components[0] != "file-history" {
+            return Err(path_error(
+                relative_path,
+                "artifact content path must be file-history/<session>/<hash>@v<version>",
+            ));
+        }
+        if !is_uuid(&components[1]) {
+            return Err(path_error(
+                relative_path,
+                "artifact content session directory is not a UUID",
+            ));
+        }
+        let Some((native_file_hash, version)) = parse_artifact_file_name(&components[2]) else {
+            return Err(path_error(
+                relative_path,
+                "artifact content name must be lowercase-hex@v<canonical-positive-version>",
+            ));
+        };
+        Ok(Self {
+            native_session_id: components[1].clone(),
+            native_artifact_id: components[2].clone(),
+            native_file_hash,
+            version,
+        })
+    }
+
+    fn decode(context: &AdapterObjectContext) -> Result<Self, AdapterError> {
+        decode_object_context(context)
+    }
+}
+
 fn encode_object_context<T: Serialize>(context: &T) -> Result<Vec<u8>, AdapterError> {
     serde_json::to_vec(context).map_err(|error| {
         AdapterError::new(
@@ -1050,6 +1148,45 @@ struct ClaudeTaskItemDocument {
     blocks: Vec<String>,
     #[serde(default)]
     blocked_by: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ClaudeArtifactCheckpointDocument {
+    message_id: String,
+    timestamp: String,
+    #[serde(default)]
+    tracked_file_backups: BTreeMap<String, ClaudeArtifactBackupDocument>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ClaudeArtifactSnapshotDocument {
+    message_id: String,
+    #[serde(default)]
+    is_snapshot_update: bool,
+    snapshot: ClaudeArtifactCheckpointDocument,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ClaudeArtifactDeltaDocument {
+    message_id: String,
+    snapshot_message_id: String,
+    #[serde(default)]
+    timestamp: Option<String>,
+    tracking_path: String,
+    backup: ClaudeArtifactBackupDocument,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ClaudeArtifactBackupDocument {
+    backup_file_name: Value,
+    version: u64,
+    backup_time: String,
+    #[serde(default)]
+    real_parent_dir: Option<String>,
 }
 
 fn decode_team_config(
@@ -1686,6 +1823,44 @@ fn decode_plan_document(
     Ok(DecodeDisposition::Applied)
 }
 
+fn decode_artifact_content(
+    adapter_id: &AdapterId,
+    context: &ClaudeArtifactContentContext,
+    record: &SourceRecord,
+    output: &mut FactBatch,
+) -> Result<DecodeDisposition, AdapterError> {
+    if record.state == SourceRecordState::Absent {
+        return Ok(DecodeDisposition::IgnoredKnown);
+    }
+    let session = EntityKey::native(
+        adapter_id,
+        record.source_instance_id,
+        "session",
+        context.native_session_id.as_bytes(),
+    )?;
+    output.push(
+        record,
+        Fact::ArtifactContent(ArtifactContentFact {
+            artifact: artifact_key(
+                adapter_id,
+                record.source_instance_id,
+                &context.native_session_id,
+                Some(&context.native_artifact_id),
+                None,
+                context.version,
+                None,
+            )?,
+            session,
+            native_artifact_id: context.native_artifact_id.clone(),
+            native_file_hash: context.native_file_hash.clone(),
+            version: context.version,
+            size_bytes: record.payload.len() as u64,
+            content: record.payload.clone(),
+        }),
+    )?;
+    Ok(DecodeDisposition::Applied)
+}
+
 fn preserve_task_contract_loss(
     record: &SourceRecord,
     output: &mut FactBatch,
@@ -2027,7 +2202,160 @@ fn decode_transcript_record(
             }),
         )?;
     }
+    match artifact_metadata_snapshot(
+        adapter_id,
+        record.source_instance_id,
+        context,
+        session,
+        &value,
+    ) {
+        Ok(Some(fact)) => {
+            output.push(record, Fact::ArtifactMetadataSnapshot(fact))?;
+        }
+        Ok(None) => {}
+        Err(detail) => {
+            output.push_diagnostic(AdapterDiagnostic {
+                class: AdapterErrorClass::RecordPermanent,
+                code: "claude_artifact_projection_loss".to_string(),
+                message: detail,
+            })?;
+        }
+    }
     Ok(DecodeDisposition::Applied)
+}
+
+fn artifact_metadata_snapshot(
+    adapter_id: &AdapterId,
+    source_instance_id: u64,
+    context: &ClaudeTranscriptContext,
+    session: EntityKey,
+    value: &Value,
+) -> Result<Option<ArtifactMetadataSnapshotFact>, String> {
+    let native_kind = value.get("type").and_then(Value::as_str);
+    let (
+        native_message_id,
+        native_snapshot_message_id,
+        observation_kind,
+        is_snapshot_update,
+        source_time,
+        documents,
+    ) = match native_kind {
+        Some("file-history-snapshot") => {
+            let document: ClaudeArtifactSnapshotDocument = serde_json::from_value(value.clone())
+                .map_err(|error| {
+                    format!("Claude file-history snapshot is not supported: {error}")
+                })?;
+            let documents = document
+                .snapshot
+                .tracked_file_backups
+                .into_iter()
+                .collect::<Vec<_>>();
+            (
+                document.message_id,
+                document.snapshot.message_id,
+                ArtifactObservationKind::Checkpoint,
+                document.is_snapshot_update,
+                nonempty(&document.snapshot.timestamp).map(|value| native_timestamp(&value)),
+                documents,
+            )
+        }
+        Some("file-history-delta") => {
+            let document: ClaudeArtifactDeltaDocument = serde_json::from_value(value.clone())
+                .map_err(|error| format!("Claude file-history delta is not supported: {error}"))?;
+            let source_time = document
+                .timestamp
+                .as_deref()
+                .and_then(nonempty)
+                .map(|value| native_timestamp(&value));
+            (
+                document.message_id,
+                document.snapshot_message_id,
+                ArtifactObservationKind::Delta,
+                false,
+                source_time,
+                vec![(document.tracking_path, document.backup)],
+            )
+        }
+        _ => return Ok(None),
+    };
+    let native_message_id = nonempty(&native_message_id)
+        .ok_or_else(|| "Claude file-history message id is empty".to_string())?;
+    let native_snapshot_message_id = nonempty(&native_snapshot_message_id)
+        .ok_or_else(|| "Claude file-history snapshot message id is empty".to_string())?;
+    if documents.len() > ARTIFACT_METADATA_LIMIT {
+        return Err(format!(
+            "Claude file-history observation exceeds the {ARTIFACT_METADATA_LIMIT} item bound"
+        ));
+    }
+
+    let mut artifact_keys = BTreeSet::new();
+    let mut artifacts = Vec::with_capacity(documents.len());
+    for (tracking_path, document) in documents {
+        let tracking_path = nonempty(&tracking_path)
+            .ok_or_else(|| "Claude file-history tracking path is empty".to_string())?;
+        if document.version == 0 {
+            return Err("Claude file-history version must be positive".to_string());
+        }
+        let backup_time = nonempty(&document.backup_time)
+            .ok_or_else(|| "Claude file-history backup time is empty".to_string())?;
+        let (native_artifact_id, capture) = match document.backup_file_name {
+            Value::String(file_name) => {
+                let file_name = nonempty(&file_name)
+                    .ok_or_else(|| "Claude file-history backup file name is empty".to_string())?;
+                let Some((_, file_version)) = parse_artifact_file_name(&file_name) else {
+                    return Err(format!(
+                        "Claude file-history backup file name is invalid: {file_name}"
+                    ));
+                };
+                if file_version != document.version {
+                    return Err(format!(
+                        "Claude file-history backup version {} disagrees with {file_name}",
+                        document.version
+                    ));
+                }
+                (Some(file_name), ArtifactCapture::ContentExpected)
+            }
+            Value::Null => (None, ArtifactCapture::NotCaptured),
+            _ => {
+                return Err(
+                    "Claude file-history backup file name must be a string or null".to_string(),
+                );
+            }
+        };
+        let artifact = artifact_key(
+            adapter_id,
+            source_instance_id,
+            &context.session_id,
+            native_artifact_id.as_deref(),
+            Some(&tracking_path),
+            document.version,
+            Some(&backup_time),
+        )
+        .map_err(|error| format!("Claude file-history artifact identity is invalid: {error}"))?;
+        if !artifact_keys.insert(artifact.clone()) {
+            return Err(
+                "Claude file-history observation maps multiple paths to one artifact".to_string(),
+            );
+        }
+        artifacts.push(ArtifactMetadataEntry {
+            artifact,
+            native_artifact_id,
+            tracking_path,
+            real_parent_dir: document.real_parent_dir.as_deref().and_then(nonempty),
+            version: document.version,
+            backup_time: native_timestamp(&backup_time),
+            capture,
+        });
+    }
+    Ok(Some(ArtifactMetadataSnapshotFact {
+        session,
+        native_message_id,
+        native_snapshot_message_id,
+        observation_kind,
+        is_snapshot_update,
+        source_time,
+        artifacts,
+    }))
 }
 
 struct DelegationSpawnDescriptor {
@@ -2266,6 +2594,58 @@ fn push_key_component(output: &mut Vec<u8>, value: &[u8]) {
     output.extend_from_slice(value);
 }
 
+fn parse_artifact_file_name(file_name: &str) -> Option<(String, u64)> {
+    let (native_file_hash, version_text) = file_name.rsplit_once("@v")?;
+    if native_file_hash.is_empty()
+        || !native_file_hash
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return None;
+    }
+    let version = version_text
+        .parse::<u64>()
+        .ok()
+        .filter(|value| *value > 0)?;
+    (version.to_string() == version_text).then(|| (native_file_hash.to_string(), version))
+}
+
+fn artifact_key(
+    adapter_id: &AdapterId,
+    source_instance_id: u64,
+    native_session_id: &str,
+    native_artifact_id: Option<&str>,
+    tracking_path: Option<&str>,
+    version: u64,
+    backup_time: Option<&str>,
+) -> Result<EntityKey, AdapterError> {
+    let mut native_key = Vec::new();
+    push_key_component(&mut native_key, native_session_id.as_bytes());
+    match native_artifact_id {
+        Some(native_artifact_id) => {
+            push_key_component(&mut native_key, b"named-backup");
+            push_key_component(&mut native_key, native_artifact_id.as_bytes());
+        }
+        None => {
+            push_key_component(&mut native_key, b"not-captured");
+            push_key_component(
+                &mut native_key,
+                tracking_path
+                    .expect("unbacked artifact requires a tracking path")
+                    .as_bytes(),
+            );
+            push_key_component(&mut native_key, &version.to_be_bytes());
+            push_key_component(
+                &mut native_key,
+                backup_time
+                    .expect("unbacked artifact requires a backup time")
+                    .as_bytes(),
+            );
+        }
+    }
+    EntityKey::native(adapter_id, source_instance_id, "artifact", &native_key)
+}
+
 fn role_from_kind(kind: &str) -> MessageRole {
     match kind {
         "user" => MessageRole::User,
@@ -2445,6 +2825,23 @@ mod tests {
         )
     }
 
+    fn absent_document_record() -> SourceRecord {
+        SourceRecord::absent(
+            &RecordOrigin {
+                source_instance_id: 7,
+                stream_id: 8,
+                object_id: 9,
+                observed_at: 10,
+                source_timestamp_hint: None,
+                media_type: SourceMediaType::new("text/plain").unwrap(),
+            },
+            1,
+            crate::source::SourceCursor::snapshot(crate::source::Revision::digest(b"present")),
+            crate::source::SourceCursor::snapshot(crate::source::Revision::digest(b"absent")),
+            0,
+        )
+    }
+
     fn fact_values(batch: &FactBatch) -> impl Iterator<Item = &Fact> {
         batch.facts().iter().map(|FactEnvelope { value, .. }| value)
     }
@@ -2478,8 +2875,8 @@ mod tests {
             discovered[0].roots[3].path,
             std::fs::canonicalize(root.path()).unwrap().join("sessions")
         );
-        assert_eq!(streams.len(), 9);
-        assert_eq!(adapter.manifest().contract_version, 7);
+        assert_eq!(streams.len(), 10);
+        assert_eq!(adapter.manifest().contract_version, 8);
         assert!(adapter
             .manifest()
             .source_schema_versions
@@ -2515,6 +2912,11 @@ mod tests {
             .source_schema_versions
             .iter()
             .any(|version| version == "claude-code-plan-v1"));
+        assert!(adapter
+            .manifest()
+            .source_schema_versions
+            .iter()
+            .any(|version| version == "claude-code-file-history-v1"));
         assert!(matches!(streams[0].driver, DriverSpec::AppendDelimited(_)));
         assert!(matches!(streams[1].driver, DriverSpec::AppendDelimited(_)));
         assert!(matches!(streams[2].driver, DriverSpec::ReplaceDocument(_)));
@@ -2555,6 +2957,12 @@ mod tests {
                 max_document_bytes: PLAN_MAX_BYTES
             })
         ));
+        assert!(matches!(
+            streams[9].driver,
+            DriverSpec::ReplaceDocument(ReplaceDocumentConfig {
+                max_document_bytes: ARTIFACT_CONTENT_MAX_BYTES
+            })
+        ));
         assert_eq!(streams[0].decoder.as_str(), PARENT_DECODER);
         assert_eq!(streams[1].decoder.as_str(), SUBAGENT_DECODER);
         assert_eq!(streams[2].decoder.as_str(), SUBAGENT_META_DECODER);
@@ -2564,6 +2972,7 @@ mod tests {
         assert_eq!(streams[6].decoder.as_str(), TODO_DECODER);
         assert_eq!(streams[7].decoder.as_str(), TASK_ITEM_DECODER);
         assert_eq!(streams[8].decoder.as_str(), PLAN_DECODER);
+        assert_eq!(streams[9].decoder.as_str(), ARTIFACT_CONTENT_DECODER);
         assert_eq!(streams[2].authority, StreamAuthority::Supplemental);
         assert_eq!(streams[2].consistency, ConsistencyPolicy::SnapshotReplace);
         assert_eq!(streams[3].authority, StreamAuthority::Canonical);
@@ -2582,6 +2991,13 @@ mod tests {
                 .iter()
                 .any(|capability| capability.as_str() == RUNTIME_TASKS));
         }
+        assert_eq!(streams[9].authority, StreamAuthority::Canonical);
+        assert_eq!(streams[9].priority, IngestPriority::ForegroundRepair);
+        assert_eq!(streams[9].consistency, ConsistencyPolicy::SnapshotReplace);
+        assert!(streams[9]
+            .capabilities
+            .iter()
+            .any(|capability| capability.as_str() == RUNTIME_ARTIFACTS));
         assert!(streams[0]
             .capabilities
             .iter()
@@ -2590,6 +3006,10 @@ mod tests {
             .capabilities
             .iter()
             .any(|capability| capability.as_str() == RUNTIME_SUBAGENTS));
+        assert!(streams[0]
+            .capabilities
+            .iter()
+            .any(|capability| capability.as_str() == RUNTIME_ARTIFACTS));
         assert!(streams[2]
             .capabilities
             .iter()
@@ -2655,6 +3075,18 @@ mod tests {
             CapabilityGranularity::Custom("task".to_string())
         );
         assert_eq!(tasks.support.availability, Availability::Live);
+        let artifacts = adapter
+            .manifest()
+            .capabilities
+            .iter()
+            .find(|capability| capability.id.as_str() == RUNTIME_ARTIFACTS)
+            .unwrap();
+        assert_eq!(artifacts.support.level, SupportLevel::Native);
+        assert_eq!(
+            artifacts.support.granularity,
+            CapabilityGranularity::Custom("artifact".to_string())
+        );
+        assert_eq!(artifacts.support.availability, Availability::Live);
     }
 
     #[test]
@@ -2740,6 +3172,24 @@ mod tests {
                 native_plan_id: "ship-it".to_string(),
             }
         );
+        let artifact = adapter
+            .bootstrap_object(
+                &instance(root.path()),
+                &object(
+                    ARTIFACT_CONTENT_STREAM,
+                    &format!("file-history/{SESSION}/71f902cd51ee4c6e@v12"),
+                ),
+            )
+            .unwrap();
+        assert_eq!(
+            ClaudeArtifactContentContext::decode(&artifact).unwrap(),
+            ClaudeArtifactContentContext {
+                native_session_id: SESSION.to_string(),
+                native_artifact_id: "71f902cd51ee4c6e@v12".to_string(),
+                native_file_hash: "71f902cd51ee4c6e".to_string(),
+                version: 12,
+            }
+        );
 
         for (stream, invalid) in [
             (TODO_STREAM, "todos/no-agent-.json"),
@@ -2749,6 +3199,22 @@ mod tests {
             (TASK_ITEM_STREAM, "tasks/list/id.json"),
             (PLAN_STREAM, "plans/.md"),
             (PLAN_STREAM, "plans/nested/plan.md"),
+            (
+                ARTIFACT_CONTENT_STREAM,
+                "file-history/not-a-session/hash@v1",
+            ),
+            (
+                ARTIFACT_CONTENT_STREAM,
+                "file-history/01234567-89ab-cdef-0123-456789abcdef/HASH@v1",
+            ),
+            (
+                ARTIFACT_CONTENT_STREAM,
+                "file-history/01234567-89ab-cdef-0123-456789abcdef/hash@v01",
+            ),
+            (
+                ARTIFACT_CONTENT_STREAM,
+                "nested/file-history/01234567-89ab-cdef-0123-456789abcdef/hash@v1",
+            ),
         ] {
             assert!(adapter
                 .bootstrap_object(&instance(root.path()), &object(stream, invalid))
@@ -2964,6 +3430,336 @@ mod tests {
                 .unwrap(),
             DecodeDisposition::PreservedUnknown
         );
+    }
+
+    #[test]
+    fn file_history_checkpoint_and_delta_emit_joinable_session_artifacts() {
+        let root = TempDir::new().unwrap();
+        let adapter = ClaudeCodeAdapter::new();
+        let object_context = adapter
+            .bootstrap_object(
+                &instance(root.path()),
+                &object(PARENT_STREAM, &format!("project/{SESSION}.jsonl")),
+            )
+            .unwrap();
+        let checkpoint = record(
+            br#"{
+              "type":"file-history-snapshot",
+              "messageId":"checkpoint-update",
+              "isSnapshotUpdate":true,
+              "snapshot":{
+                "messageId":"checkpoint-root",
+                "timestamp":"2026-08-11T20:00:00.000Z",
+                "trackedFileBackups":{
+                  "src/lib.rs":{
+                    "backupFileName":"71f902cd51ee4c6e@v2",
+                    "version":2,
+                    "backupTime":"2026-08-11T20:01:00.000Z",
+                    "realParentDir":"/repo/src"
+                  },
+                  "src/new.rs":{
+                    "backupFileName":null,
+                    "version":1,
+                    "backupTime":"2026-08-11T20:02:00.000Z",
+                    "realParentDir":"/repo/src"
+                  }
+                }
+              }
+            }"#,
+        );
+        let mut batch = FactBatch::new(16, 8).unwrap();
+        assert_eq!(
+            adapter
+                .decode(
+                    DecodeContext {
+                        decoder: &DecoderId::new(PARENT_DECODER).unwrap(),
+                        object_context: &object_context,
+                    },
+                    &checkpoint,
+                    &mut batch,
+                )
+                .unwrap(),
+            DecodeDisposition::Applied
+        );
+        let metadata = fact_values(&batch)
+            .find_map(|fact| match fact {
+                Fact::ArtifactMetadataSnapshot(fact) => Some(fact),
+                _ => None,
+            })
+            .expect("checkpoint should emit artifact metadata");
+        assert_eq!(
+            metadata.observation_kind,
+            ArtifactObservationKind::Checkpoint
+        );
+        assert!(metadata.is_snapshot_update);
+        assert_eq!(metadata.native_message_id, "checkpoint-update");
+        assert_eq!(metadata.native_snapshot_message_id, "checkpoint-root");
+        assert_eq!(
+            metadata
+                .source_time
+                .as_ref()
+                .map(|time| time.value.as_str()),
+            Some("2026-08-11T20:00:00.000Z")
+        );
+        assert_eq!(metadata.artifacts.len(), 2);
+        let named = metadata
+            .artifacts
+            .iter()
+            .find(|artifact| artifact.tracking_path == "src/lib.rs")
+            .unwrap();
+        assert_eq!(
+            named.native_artifact_id.as_deref(),
+            Some("71f902cd51ee4c6e@v2")
+        );
+        assert_eq!(named.capture, ArtifactCapture::ContentExpected);
+        assert_eq!(named.real_parent_dir.as_deref(), Some("/repo/src"));
+        assert_eq!(named.version, 2);
+        let named_key = named.artifact.clone();
+        let unbacked = metadata
+            .artifacts
+            .iter()
+            .find(|artifact| artifact.tracking_path == "src/new.rs")
+            .unwrap();
+        assert!(unbacked.native_artifact_id.is_none());
+        assert_eq!(unbacked.capture, ArtifactCapture::NotCaptured);
+        assert_ne!(unbacked.artifact, named_key);
+
+        let delta = record(
+            br#"{
+              "type":"file-history-delta",
+              "messageId":"delta-1",
+              "snapshotMessageId":"checkpoint-root",
+              "timestamp":"2026-08-11T20:03:00.000Z",
+              "trackingPath":"src/lib.rs",
+              "backup":{
+                "backupFileName":"71f902cd51ee4c6e@v2",
+                "version":2,
+                "backupTime":"2026-08-11T20:01:00.000Z",
+                "realParentDir":"/repo/src"
+              }
+            }"#,
+        );
+        let mut delta_batch = FactBatch::new(16, 8).unwrap();
+        adapter
+            .decode(
+                DecodeContext {
+                    decoder: &DecoderId::new(PARENT_DECODER).unwrap(),
+                    object_context: &object_context,
+                },
+                &delta,
+                &mut delta_batch,
+            )
+            .unwrap();
+        let delta_metadata = fact_values(&delta_batch)
+            .find_map(|fact| match fact {
+                Fact::ArtifactMetadataSnapshot(fact) => Some(fact),
+                _ => None,
+            })
+            .expect("delta should emit artifact metadata");
+        assert_eq!(
+            delta_metadata.observation_kind,
+            ArtifactObservationKind::Delta
+        );
+        assert!(!delta_metadata.is_snapshot_update);
+        assert_eq!(delta_metadata.native_message_id, "delta-1");
+        assert_eq!(delta_metadata.artifacts[0].artifact, named_key);
+        assert_eq!(
+            delta_metadata
+                .source_time
+                .as_ref()
+                .map(|time| time.value.as_str()),
+            Some("2026-08-11T20:03:00.000Z")
+        );
+        assert!(!fact_values(&delta_batch).any(|fact| matches!(
+            fact,
+            Fact::Delegation(_) | Fact::DelegationSpawn(_) | Fact::DelegationMetadata(_)
+        )));
+    }
+
+    #[test]
+    fn malformed_file_history_metadata_is_diagnosed_without_losing_the_message() {
+        let root = TempDir::new().unwrap();
+        let adapter = ClaudeCodeAdapter::new();
+        let object_context = adapter
+            .bootstrap_object(
+                &instance(root.path()),
+                &object(PARENT_STREAM, &format!("project/{SESSION}.jsonl")),
+            )
+            .unwrap();
+        let mismatched = record(
+            br#"{
+              "type":"file-history-delta",
+              "messageId":"delta-bad",
+              "snapshotMessageId":"checkpoint",
+              "trackingPath":"src/lib.rs",
+              "backup":{
+                "backupFileName":"71f902cd51ee4c6e@v2",
+                "version":3,
+                "backupTime":"2026-08-11T20:01:00.000Z"
+              }
+            }"#,
+        );
+        let mut batch = FactBatch::new(16, 8).unwrap();
+        assert_eq!(
+            adapter
+                .decode(
+                    DecodeContext {
+                        decoder: &DecoderId::new(PARENT_DECODER).unwrap(),
+                        object_context: &object_context,
+                    },
+                    &mismatched,
+                    &mut batch,
+                )
+                .unwrap(),
+            DecodeDisposition::Applied
+        );
+        assert!(fact_values(&batch).any(|fact| matches!(fact, Fact::Message(_))));
+        assert!(!fact_values(&batch).any(|fact| matches!(fact, Fact::ArtifactMetadataSnapshot(_))));
+        assert!(batch
+            .diagnostics()
+            .iter()
+            .any(|diagnostic| diagnostic.code == "claude_artifact_projection_loss"));
+
+        // Missing is not equivalent to the native format's explicit null:
+        // silently accepting it would manufacture positive non-capture.
+        let missing_capture_marker = record(
+            br#"{
+              "type":"file-history-delta",
+              "messageId":"delta-missing-capture",
+              "snapshotMessageId":"checkpoint",
+              "trackingPath":"src/new.rs",
+              "backup":{
+                "version":1,
+                "backupTime":"2026-08-11T20:02:00.000Z"
+              }
+            }"#,
+        );
+        let mut missing_batch = FactBatch::new(16, 8).unwrap();
+        adapter
+            .decode(
+                DecodeContext {
+                    decoder: &DecoderId::new(PARENT_DECODER).unwrap(),
+                    object_context: &object_context,
+                },
+                &missing_capture_marker,
+                &mut missing_batch,
+            )
+            .unwrap();
+        assert!(fact_values(&missing_batch).any(|fact| matches!(fact, Fact::Message(_))));
+        assert!(!fact_values(&missing_batch)
+            .any(|fact| matches!(fact, Fact::ArtifactMetadataSnapshot(_))));
+        assert!(missing_batch
+            .diagnostics()
+            .iter()
+            .any(|diagnostic| diagnostic.code == "claude_artifact_projection_loss"));
+    }
+
+    #[test]
+    fn file_history_blob_preserves_exact_content_and_absence_semantics() {
+        let root = TempDir::new().unwrap();
+        let adapter = ClaudeCodeAdapter::new();
+        let object_context = adapter
+            .bootstrap_object(
+                &instance(root.path()),
+                &object(
+                    ARTIFACT_CONTENT_STREAM,
+                    &format!("file-history/{SESSION}/71f902cd51ee4c6e@v2"),
+                ),
+            )
+            .unwrap();
+        let decoder = DecoderId::new(ARTIFACT_CONTENT_DECODER).unwrap();
+        let content = document_record(b"before edit\r\n");
+        let mut batch = FactBatch::new(4, 4).unwrap();
+        assert_eq!(
+            adapter
+                .decode(
+                    DecodeContext {
+                        decoder: &decoder,
+                        object_context: &object_context,
+                    },
+                    &content,
+                    &mut batch,
+                )
+                .unwrap(),
+            DecodeDisposition::Applied
+        );
+        let Fact::ArtifactContent(artifact) = &batch.facts()[0].value else {
+            panic!("expected artifact content");
+        };
+        assert_eq!(
+            artifact.session,
+            EntityKey::native(adapter.adapter_id(), 7, "session", SESSION.as_bytes()).unwrap()
+        );
+        assert_eq!(artifact.native_artifact_id, "71f902cd51ee4c6e@v2");
+        assert_eq!(artifact.native_file_hash, "71f902cd51ee4c6e");
+        assert_eq!(artifact.version, 2);
+        assert_eq!(artifact.content, content.payload);
+        assert_eq!(artifact.size_bytes, content.payload.len() as u64);
+        assert_eq!(
+            artifact.artifact,
+            artifact_key(
+                adapter.adapter_id(),
+                7,
+                SESSION,
+                Some("71f902cd51ee4c6e@v2"),
+                None,
+                2,
+                None,
+            )
+            .unwrap()
+        );
+
+        let mut absent_batch = FactBatch::new(2, 2).unwrap();
+        assert_eq!(
+            adapter
+                .decode(
+                    DecodeContext {
+                        decoder: &decoder,
+                        object_context: &object_context,
+                    },
+                    &absent_document_record(),
+                    &mut absent_batch,
+                )
+                .unwrap(),
+            DecodeDisposition::IgnoredKnown
+        );
+        assert!(absent_batch.facts().is_empty());
+
+        let mut empty_batch = FactBatch::new(2, 2).unwrap();
+        adapter
+            .decode(
+                DecodeContext {
+                    decoder: &decoder,
+                    object_context: &object_context,
+                },
+                &document_record(b""),
+                &mut empty_batch,
+            )
+            .unwrap();
+        let Fact::ArtifactContent(empty) = &empty_batch.facts()[0].value else {
+            panic!("expected present empty artifact content");
+        };
+        assert!(empty.content.is_empty());
+        assert_eq!(empty.size_bytes, 0);
+
+        let mut binary_batch = FactBatch::new(2, 2).unwrap();
+        assert_eq!(
+            adapter
+                .decode(
+                    DecodeContext {
+                        decoder: &decoder,
+                        object_context: &object_context,
+                    },
+                    &document_record(&[0xff]),
+                    &mut binary_batch,
+                )
+                .unwrap(),
+            DecodeDisposition::Applied
+        );
+        let Fact::ArtifactContent(binary) = &binary_batch.facts()[0].value else {
+            panic!("expected byte-exact binary artifact content");
+        };
+        assert_eq!(binary.content, [0xff]);
     }
 
     #[test]

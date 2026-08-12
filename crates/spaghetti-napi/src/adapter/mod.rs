@@ -16,12 +16,13 @@ pub use contract::{
     SourceObjectDescriptor, SourceRoot, StreamAuthority, StreamId, StreamSpec, SupportLevel,
 };
 pub use facts::{
-    ContentBlock, DelegationFact, DelegationKind, DelegationMetadataFact, DelegationSpawnFact,
-    EntityKey, EvidenceKind, EvidenceStrength, Fact, FactBatch, FactEnvelope, FactId,
-    FactProvenance, MessageFact, MessageRole, PlanSnapshotFact, PresenceFact, QualifiedTimestamp,
-    RelationStrength, RunEvidenceFact, RunFact, SessionFact, TaskCollectionKind, TaskItemSnapshot,
-    TaskSnapshotCoverage, TaskSnapshotFact, TaskStatus, TeamInboxMessageSnapshot,
-    TeamInboxSnapshotFact, TeamMemberSnapshot, TeamSnapshotFact, TimestampQuality, TokenUsage,
-    UsageAccounting, UsageFact, UsageScope, ValueQuality,
+    ArtifactCapture, ArtifactContentFact, ArtifactMetadataEntry, ArtifactMetadataSnapshotFact,
+    ArtifactObservationKind, ContentBlock, DelegationFact, DelegationKind, DelegationMetadataFact,
+    DelegationSpawnFact, EntityKey, EvidenceKind, EvidenceStrength, Fact, FactBatch, FactEnvelope,
+    FactId, FactProvenance, MessageFact, MessageRole, PlanSnapshotFact, PresenceFact,
+    QualifiedTimestamp, RelationStrength, RunEvidenceFact, RunFact, SessionFact,
+    TaskCollectionKind, TaskItemSnapshot, TaskSnapshotCoverage, TaskSnapshotFact, TaskStatus,
+    TeamInboxMessageSnapshot, TeamInboxSnapshotFact, TeamMemberSnapshot, TeamSnapshotFact,
+    TimestampQuality, TokenUsage, UsageAccounting, UsageFact, UsageScope, ValueQuality,
 };
 pub use registry::{AdapterRegistry, AdapterRegistryBuilder};

@@ -4,6 +4,7 @@
 //! `napi_engine` is one host adapter; a future daemon or embedded desktop host
 //! can own the same `SpaghettiEngineCore` and receive identical semantics.
 
+mod artifact_projection;
 mod commit;
 mod owner_lock;
 mod presence_projection;

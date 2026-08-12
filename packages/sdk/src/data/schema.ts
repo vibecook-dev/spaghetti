@@ -80,7 +80,9 @@ import type { SqliteService } from '../io/index.js';
 // process-incarnation identity, and conflict provenance.
 // v24: replaceable task/todo/plan assertions with explicit snapshot coverage,
 // canonical current rows, and conflict provenance.
-export const SCHEMA_VERSION = 24;
+// v25: transcript artifact metadata, independently replaceable file-history
+// content, late-join availability, and conflict provenance.
+export const SCHEMA_VERSION = 25;
 
 export const TOKEN_ACTIVITY_TRIGGER_NAMES = [
   'token_activity_messages_ai',
@@ -1114,6 +1116,79 @@ CREATE TABLE IF NOT EXISTS canonical_plans (
   last_commit_seq INTEGER NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS artifact_snapshot_assertions (
+  fact_id BLOB PRIMARY KEY REFERENCES fact_records(fact_id) ON DELETE CASCADE,
+  session_key BLOB NOT NULL,
+  native_message_id TEXT NOT NULL,
+  native_snapshot_message_id TEXT NOT NULL,
+  observation_kind TEXT NOT NULL,
+  is_snapshot_update INTEGER NOT NULL,
+  source_time TEXT,
+  source_time_quality TEXT,
+  source_object_id INTEGER NOT NULL,
+  source_generation INTEGER NOT NULL,
+  cursor_end BLOB NOT NULL,
+  last_commit_seq INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS artifact_metadata_assertions (
+  fact_id BLOB NOT NULL REFERENCES artifact_snapshot_assertions(fact_id) ON DELETE CASCADE,
+  artifact_key BLOB NOT NULL,
+  session_key BLOB NOT NULL,
+  native_artifact_id TEXT,
+  tracking_path TEXT NOT NULL,
+  real_parent_dir TEXT,
+  version INTEGER NOT NULL,
+  backup_time TEXT NOT NULL,
+  backup_time_quality TEXT NOT NULL,
+  capture_status TEXT NOT NULL,
+  metadata_digest BLOB NOT NULL,
+  PRIMARY KEY (fact_id, artifact_key)
+);
+
+CREATE TABLE IF NOT EXISTS artifact_content_assertions (
+  fact_id BLOB PRIMARY KEY REFERENCES fact_records(fact_id) ON DELETE CASCADE,
+  artifact_key BLOB NOT NULL,
+  session_key BLOB NOT NULL,
+  native_artifact_id TEXT NOT NULL,
+  native_file_hash TEXT NOT NULL,
+  version INTEGER NOT NULL,
+  content BLOB NOT NULL,
+  size_bytes INTEGER NOT NULL,
+  content_digest BLOB NOT NULL,
+  assertion_digest BLOB NOT NULL,
+  source_object_id INTEGER NOT NULL,
+  source_generation INTEGER NOT NULL,
+  cursor_end BLOB NOT NULL,
+  last_commit_seq INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS canonical_artifacts (
+  artifact_key BLOB PRIMARY KEY,
+  session_key BLOB NOT NULL,
+  native_artifact_id TEXT,
+  native_file_hash TEXT,
+  version INTEGER NOT NULL,
+  tracking_path TEXT,
+  real_parent_dir TEXT,
+  backup_time TEXT,
+  backup_time_quality TEXT,
+  capture_status TEXT NOT NULL,
+  content BLOB,
+  size_bytes INTEGER,
+  content_digest BLOB,
+  content_status TEXT NOT NULL,
+  resolution_status TEXT NOT NULL,
+  decisive_metadata_fact_id BLOB REFERENCES artifact_snapshot_assertions(fact_id) ON DELETE CASCADE,
+  decisive_content_fact_id BLOB REFERENCES artifact_content_assertions(fact_id) ON DELETE CASCADE,
+  metadata_assertion_count INTEGER NOT NULL,
+  competing_metadata_count INTEGER NOT NULL,
+  content_assertion_count INTEGER NOT NULL,
+  competing_content_count INTEGER NOT NULL,
+  join_conflict INTEGER NOT NULL,
+  last_commit_seq INTEGER NOT NULL
+);
+
 
 CREATE TABLE IF NOT EXISTS usage_contributions (
   fact_id BLOB PRIMARY KEY REFERENCES fact_records(fact_id) ON DELETE CASCADE,
@@ -1289,6 +1364,12 @@ CREATE INDEX IF NOT EXISTS idx_canonical_task_collections_session ON canonical_t
 CREATE INDEX IF NOT EXISTS idx_canonical_tasks_collection ON canonical_tasks(collection_key, item_ordinal);
 CREATE INDEX IF NOT EXISTS idx_plan_assertions_plan ON plan_assertions(plan_key, fact_id);
 CREATE INDEX IF NOT EXISTS idx_plan_assertions_source ON plan_assertions(source_object_id, plan_key);
+CREATE INDEX IF NOT EXISTS idx_artifact_snapshot_assertions_source ON artifact_snapshot_assertions(source_object_id, source_generation);
+CREATE INDEX IF NOT EXISTS idx_artifact_snapshot_assertions_session ON artifact_snapshot_assertions(session_key, fact_id);
+CREATE INDEX IF NOT EXISTS idx_artifact_metadata_assertions_artifact ON artifact_metadata_assertions(artifact_key, fact_id);
+CREATE INDEX IF NOT EXISTS idx_artifact_content_assertions_artifact ON artifact_content_assertions(artifact_key, fact_id);
+CREATE INDEX IF NOT EXISTS idx_artifact_content_assertions_source ON artifact_content_assertions(source_object_id, artifact_key);
+CREATE INDEX IF NOT EXISTS idx_canonical_artifacts_session ON canonical_artifacts(session_key, backup_time, artifact_key);
 CREATE INDEX IF NOT EXISTS idx_usage_contributions_session ON usage_contributions(session_key, fact_id);
 
 -- Persistent FTS5 (content-synced with messages)
@@ -1377,6 +1458,10 @@ const LEGACY_TABLES = ['segments', 'search_index', 'schema_version'];
 const CURRENT_TABLES = [
   'search_fts',
   'subagent_search_fts',
+  'canonical_artifacts',
+  'artifact_content_assertions',
+  'artifact_metadata_assertions',
+  'artifact_snapshot_assertions',
   'canonical_plans',
   'plan_assertions',
   'canonical_tasks',

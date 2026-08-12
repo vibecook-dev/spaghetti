@@ -478,6 +478,10 @@ const RFC011_SCHEMA_TABLES = [
   'canonical_tasks',
   'plan_assertions',
   'canonical_plans',
+  'artifact_snapshot_assertions',
+  'artifact_metadata_assertions',
+  'artifact_content_assertions',
+  'canonical_artifacts',
   'usage_contributions',
   'usage_totals',
 ] as const;
@@ -634,6 +638,22 @@ const TABLE_SPECS: TableSpec[] = [
   {
     name: 'canonical_plans',
     orderBy: 'plan_key',
+  },
+  {
+    name: 'artifact_snapshot_assertions',
+    orderBy: 'fact_id',
+  },
+  {
+    name: 'artifact_metadata_assertions',
+    orderBy: 'artifact_key, fact_id',
+  },
+  {
+    name: 'artifact_content_assertions',
+    orderBy: 'artifact_key, fact_id',
+  },
+  {
+    name: 'canonical_artifacts',
+    orderBy: 'artifact_key',
   },
   {
     name: 'usage_contributions',

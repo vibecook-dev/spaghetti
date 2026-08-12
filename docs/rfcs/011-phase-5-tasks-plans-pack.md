@@ -142,6 +142,7 @@ remain the release gate for the commit.
 
 ## Remaining Phase 5 work
 
-File-history/artifact, workflow, sessions-index, memory, tool-result, and
-settings sources still need reviewed semantics. The observation coordinator
-and production Rust live cutover are also required for the Phase 5 exit gate.
+File-history/artifacts are now implemented in the adjacent Phase 5 pack.
+Workflow, sessions-index, memory, tool-result, and settings sources still need
+reviewed semantics. The observation coordinator and production Rust live
+cutover are also required for the Phase 5 exit gate.

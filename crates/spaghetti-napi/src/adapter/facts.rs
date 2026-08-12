@@ -11,6 +11,27 @@ use super::{AdapterDiagnostic, AdapterError, AdapterId};
 const FACT_HASH_BYTES: usize = 32;
 const MAX_ENTITY_KEY_BYTES: usize = 8 * 1024;
 
+mod base64_bytes {
+    use base64::engine::general_purpose::STANDARD;
+    use base64::Engine;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S>(value: &[u8], serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&STANDARD.encode(value))
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Vec<u8>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        STANDARD.decode(value).map_err(serde::de::Error::custom)
+    }
+}
+
 #[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct EntityKey(Vec<u8>);
 
@@ -435,6 +456,65 @@ pub struct PlanSnapshotFact {
     pub source_time: Option<QualifiedTimestamp>,
 }
 
+/// Whether native artifact metadata came from a complete checkpoint record or
+/// an incremental update to an earlier checkpoint. Both are historical
+/// observations: `Checkpoint` does not retract artifacts from older records.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ArtifactObservationKind {
+    Checkpoint,
+    Delta,
+}
+
+/// Whether the native record names a content blob. A `NotCaptured` artifact
+/// is positive native evidence that a path was newly created without a backup;
+/// it is distinct from a named blob that has not arrived yet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ArtifactCapture {
+    ContentExpected,
+    NotCaptured,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArtifactMetadataEntry {
+    pub artifact: EntityKey,
+    pub native_artifact_id: Option<String>,
+    pub tracking_path: String,
+    pub real_parent_dir: Option<String>,
+    pub version: u64,
+    pub backup_time: QualifiedTimestamp,
+    pub capture: ArtifactCapture,
+}
+
+/// Artifact metadata carried by one transcript checkpoint or delta. The fact
+/// is session-scoped and deliberately does not assert that a run produced the
+/// tracked file. Content may arrive independently through an artifact blob
+/// stream and is joined by the stable native backup name.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArtifactMetadataSnapshotFact {
+    pub session: EntityKey,
+    pub native_message_id: String,
+    pub native_snapshot_message_id: String,
+    pub observation_kind: ArtifactObservationKind,
+    pub is_snapshot_update: bool,
+    pub source_time: Option<QualifiedTimestamp>,
+    pub artifacts: Vec<ArtifactMetadataEntry>,
+}
+
+/// One independently replaceable native artifact-content blob. Its path
+/// supplies session, native hash, and version but not a tracked path or run;
+/// those relations remain pending until transcript metadata arrives.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArtifactContentFact {
+    pub artifact: EntityKey,
+    pub session: EntityKey,
+    pub native_artifact_id: String,
+    pub native_file_hash: String,
+    pub version: u64,
+    #[serde(with = "base64_bytes")]
+    pub content: Vec<u8>,
+    pub size_bytes: u64,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EvidenceKind {
     RunDeclared,
@@ -532,6 +612,8 @@ pub enum Fact {
     Presence(PresenceFact),
     TaskSnapshot(TaskSnapshotFact),
     PlanSnapshot(PlanSnapshotFact),
+    ArtifactMetadataSnapshot(ArtifactMetadataSnapshotFact),
+    ArtifactContent(ArtifactContentFact),
     RunEvidence(RunEvidenceFact),
     Usage(UsageFact),
     UnknownRecord {
@@ -555,6 +637,8 @@ impl Fact {
             Self::Presence(_) => "presence",
             Self::TaskSnapshot(_) => "task_snapshot",
             Self::PlanSnapshot(_) => "plan_snapshot",
+            Self::ArtifactMetadataSnapshot(_) => "artifact_metadata_snapshot",
+            Self::ArtifactContent(_) => "artifact_content",
             Self::RunEvidence(_) => "run_evidence",
             Self::Usage(_) => "usage",
             Self::UnknownRecord { .. } => "unknown_record",
@@ -574,6 +658,8 @@ impl Fact {
             Self::Presence(fact) => Some(&fact.presence),
             Self::TaskSnapshot(fact) => Some(&fact.collection),
             Self::PlanSnapshot(fact) => Some(&fact.plan),
+            Self::ArtifactMetadataSnapshot(fact) => Some(&fact.session),
+            Self::ArtifactContent(fact) => Some(&fact.artifact),
             Self::RunEvidence(fact) => Some(&fact.run),
             Self::Usage(fact) => Some(&fact.subject),
             Self::UnknownRecord { .. } => None,
@@ -821,5 +907,25 @@ mod tests {
         assert!(batch
             .set_next_decoder_state(vec![0; FactBatch::MAX_DECODER_STATE_BYTES + 1])
             .is_err());
+    }
+
+    #[test]
+    fn artifact_content_json_round_trip_preserves_arbitrary_bytes() {
+        let adapter_id = AdapterId::new("test-adapter").unwrap();
+        let artifact = EntityKey::native(&adapter_id, 1, "artifact", b"backup@v1").unwrap();
+        let session = EntityKey::native(&adapter_id, 1, "session", b"session-1").unwrap();
+        let fact = Fact::ArtifactContent(ArtifactContentFact {
+            artifact,
+            session,
+            native_artifact_id: "backup@v1".to_string(),
+            native_file_hash: "backup".to_string(),
+            version: 1,
+            content: vec![0, 0xff, b'\n'],
+            size_bytes: 3,
+        });
+
+        let encoded = serde_json::to_value(&fact).unwrap();
+        assert_eq!(encoded["ArtifactContent"]["content"], "AP8K");
+        assert_eq!(serde_json::from_value::<Fact>(encoded).unwrap(), fact);
     }
 }

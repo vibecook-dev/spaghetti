@@ -1,16 +1,17 @@
 # RFC 011 Claude Code adapter source map
 
 Status: Phase 4 history/usage complete; Phase 5 delegation, native metadata,
-parent-spawn correlation, team/config/inbox snapshots, and active-session
-presence plus task/todo/plan snapshots implemented on 2026-08-11
+parent-spawn correlation, team/config/inbox snapshots, active-session
+presence, task/todo/plan snapshots, and file-history artifacts implemented on
+2026-08-11
 
 This survey defines the native inputs and semantic claims currently made by
 the Rust `claude-code` adapter. It is narrower than the legacy Claude parser on
 purpose: Phase 4 covers canonical transcript history, run lineage/activity,
 and native usage. Phase 5 now adds delegation joins, authoritative team and
-inbox snapshots, and native active-session registry presence while richer
-runtime packs remain in progress. Replaceable task, todo, and plan documents
-now use the same fact/projection path.
+inbox snapshots, native active-session registry presence, replaceable task,
+todo, and plan documents, and joined file-history metadata/content while
+richer runtime packs remain in progress.
 
 ## Installation and source identity
 
@@ -43,11 +44,12 @@ authoritative snapshot.
 | `todo-snapshots`       | `home`     | `todos/*-agent-*.json`               | `ReplaceDocument` (1 MiB bound)                  | Canonical    | Task list  |
 | `task-items`           | `home`     | `tasks/*/*.json`                     | `ReplaceDocument` (256 KiB bound)                | Canonical    | Task       |
 | `plan-documents`       | `home`     | `plans/*.md`                         | `ReplaceDocument` (4 MiB bound)                  | Canonical    | Plan       |
+| `file-history-blobs`   | `home`     | `file-history/*/*@v*`                | `ReplaceDocument` (1 MiB bound)                  | Canonical    | Artifact   |
 
 Transcript streams use incremental byte cursors and interactive priority. The
-team/metadata document streams use snapshot-replace consistency and
-foreground-repair priority. The presence, task, todo, and plan streams use
-snapshot replacement and interactive priority. All nine use `MirrorSource`
+team/metadata and artifact document streams use snapshot-replace consistency
+and foreground-repair priority. The presence, task, todo, and plan streams use
+snapshot replacement and interactive priority. All ten use `MirrorSource`
 deletion and full raw retention during shadow migration. Common drivers—not
 the adapter—own framing or stable reads, file identity,
 generations/revisions, checkpoints, watcher recovery, and scheduling.
@@ -68,6 +70,11 @@ Todo, task, and plan paths are rooted at `home` but confined to exact
 `todos/<session>-agent-<agent>.json`,
 `tasks/<collection>/<canonical-positive-id>.json`, and `plans/<slug>.md`
 shapes. A task payload ID must match its path ID.
+
+Artifact-content paths are confined to exact
+`file-history/<session-uuid>/<lowercase-hex>@v<canonical-positive-version>`
+shapes. Session, native backup name, hash, and version come from that path;
+paths that only resemble the shape fail bootstrap.
 
 ## Native record interpretation
 
@@ -100,6 +107,12 @@ Each complete native record or document is decoded once into common facts:
   dependency fields, and stable item identity;
 - `PlanSnapshotFact` for each plan markdown document, preserving native slug,
   heading-derived title, exact content, and byte size;
+- `ArtifactMetadataSnapshotFact` for each transcript file-history checkpoint or
+  delta, preserving session/message identity, observation kind, tracked paths,
+  optional real parent directories, versions, backup times, and explicit
+  content-expected versus not-captured state;
+- `ArtifactContentFact` for each present backup blob, preserving the native
+  backup name, file hash, version, exact bytes, and byte size;
 - `RunEvidenceFact::ActivityObserved` with `NativeActivity` strength;
 - `UsageFact` when the record contains non-zero native usage.
 
@@ -161,6 +174,12 @@ version 7 and declare `claude-code-todo-v1`,
 `claude-code-task-item-v1`, and `claude-code-plan-v1`. Existing facts in all
 earlier streams keep their identity and meaning.
 
+The file-history capability advances the adapter contract to version 8 and
+declares `claude-code-file-history-v1`. The blob stream is additive. Metadata
+facts are appended after earlier facts in matching transcript records, so
+existing fact IDs remain stable; historical file-history records require
+targeted replay to materialize the new assertions.
+
 Team identity comes from the native directory name. Member identity is scoped
 by team plus native member name, and an inbox is scoped by team plus recipient.
 Inbox messages prefer non-empty native `msg_id`. Older messages derive a
@@ -195,6 +214,13 @@ and item IDs. A task-directory name is not assumed to be a session or team
 because the native corpus uses both and other scopes. Plans use their native
 slug and remain standalone until separate evidence supplies a trustworthy
 relation. Task completion is never run completion evidence.
+
+Claude declares `runtime.artifacts` as native and live at artifact
+granularity. Transcript metadata and backup blobs join only by native session
+and backup name. A null backup filename is explicit non-capture, distinct from
+a named backup whose blob is missing. Content remains arbitrary bytes. The
+native formats prove session scope but do not prove that any run produced,
+created, or edited the tracked file.
 
 The transcript decoder declares activity only. Neither it nor the presence
 pack turns quiet files, missing watch events, or filesystem nesting into
@@ -256,13 +282,22 @@ documents merge into one collection, while distinct assertions for the same
 task or plan remain conflicting and diagnosed. Superseded audit facts retract
 only after canonical foreign keys move to the current decisive assertions.
 
+File-history checkpoints and deltas accumulate as historical metadata within
+one transcript append generation; a later checkpoint does not retract older
+artifact observations. Transcript generation replacement retracts the old
+metadata generation. Each backup blob is independently replaceable within its
+current generation, and confirmed deletion retracts its content assertion.
+Metadata-first and content-first arrival converge to `captured`,
+`not_captured`, `missing_content`, or `orphan_content`. Competing assertions or
+cross-half identity disagreement remain durable and diagnosed.
+
 ## Remaining Phase 5 sources
 
 Legacy tool-result text that only mentions an agent ID is not used for native
 correlation. A future compatibility fallback must be classified
 `NativeIndirect`, not explicit. The adapter also does not yet declare
-`sessions-index.json`, memory, tool-result files, workflows, file history,
-settings, or other sidecars. Those inputs need replace-document,
+`sessions-index.json`, memory, tool-result files, workflows, settings, or other
+sidecars. Those inputs need replace-document,
 directory-snapshot, or other reviewed stream and capability semantics.
 Credentials, debug logs, telemetry, caches, and arbitrary symlink escapes
 remain out of scope.
@@ -316,3 +351,11 @@ preservation, ambiguous-scope non-attribution, Markdown title fallback,
 same-generation replacement, removed-child and file retraction, item merging,
 late session correlation, deterministic conflicts and clearing, audit cleanup,
 and the invariant that completed tasks do not create terminal run state.
+
+The file-history trace covers strict backup paths, checkpoint and delta
+metadata, explicit non-capture, arbitrary blob bytes, metadata-first and
+content-first joins, all four content states, same-generation blob replacement,
+transcript-generation and confirmed-deletion retraction, competing assertions,
+cross-half conflicts and clearing, audit cleanup, and the invariant that
+artifact facts add no lifecycle evidence beyond a transcript record's existing
+generic activity observation.

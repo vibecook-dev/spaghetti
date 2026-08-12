@@ -15,6 +15,7 @@ use crate::adapter::{
     ValueQuality,
 };
 
+use super::artifact_projection::apply_artifact_facts;
 use super::commit::{
     apply_observation_commit_with_projection, ChangeEntry, CommitReceipt, ObservationCommit,
     ProjectionCommitContext, TransactionalProjectionWork,
@@ -266,6 +267,8 @@ impl TransactionalProjectionWork for FactProjectionWork<'_> {
                 | Fact::Presence(_)
                 | Fact::TaskSnapshot(_)
                 | Fact::PlanSnapshot(_)
+                | Fact::ArtifactMetadataSnapshot(_)
+                | Fact::ArtifactContent(_)
                 | Fact::RunEvidence(_)
                 | Fact::Usage(_) => {}
             }
@@ -506,6 +509,7 @@ impl TransactionalProjectionWork for FactProjectionWork<'_> {
         changes.extend(apply_presence_facts(transaction, context, self.batch)?);
         changes.extend(apply_team_snapshots(transaction, context, self.batch)?);
         changes.extend(apply_task_snapshots(transaction, context, self.batch)?);
+        changes.extend(apply_artifact_facts(transaction, context, self.batch)?);
 
         transaction
             .execute(
@@ -2379,12 +2383,14 @@ mod tests {
     use walkdir::WalkDir;
 
     use crate::adapter::{
-        AdapterId, AdapterObjectContext, AgentAdapter, DecodeContext, DecoderId, FactBatch,
-        PlanSnapshotFact, PresenceFact, RunEvidenceFact, RunFact, SessionFact, SourceInstance,
-        SourceInstanceKey, SourceInstanceSpec as AdapterSourceInstanceSpec, SourceObjectDescriptor,
-        SourceRoot, StreamId, TaskCollectionKind, TaskItemSnapshot, TaskSnapshotCoverage,
-        TaskSnapshotFact, TaskStatus, TeamInboxMessageSnapshot, TeamInboxSnapshotFact,
-        TeamMemberSnapshot, TeamSnapshotFact,
+        AdapterId, AdapterObjectContext, AgentAdapter, ArtifactCapture, ArtifactContentFact,
+        ArtifactMetadataEntry, ArtifactMetadataSnapshotFact, ArtifactObservationKind,
+        DecodeContext, DecoderId, FactBatch, PlanSnapshotFact, PresenceFact, RunEvidenceFact,
+        RunFact, SessionFact, SourceInstance, SourceInstanceKey,
+        SourceInstanceSpec as AdapterSourceInstanceSpec, SourceObjectDescriptor, SourceRoot,
+        StreamId, TaskCollectionKind, TaskItemSnapshot, TaskSnapshotCoverage, TaskSnapshotFact,
+        TaskStatus, TeamInboxMessageSnapshot, TeamInboxSnapshotFact, TeamMemberSnapshot,
+        TeamSnapshotFact,
     };
     use crate::claude::ClaudeCodeAdapter;
     use crate::core::schema;
@@ -2517,6 +2523,20 @@ mod tests {
                 1,
                 SourceCursor::append_offset(0).into_bytes(),
                 10,
+            ),
+        )
+        .unwrap();
+    }
+
+    fn register_object_key(connection: &mut Connection, object_key: &[u8], clock: i64) {
+        apply_observation_commit(
+            connection,
+            &request_for_object(
+                object_key,
+                ExpectedSourceCursor::Absent,
+                1,
+                SourceCursor::append_offset(0).into_bytes(),
+                clock,
             ),
         )
         .unwrap();
@@ -2666,6 +2686,51 @@ mod tests {
             content: content.to_string(),
             size_bytes: content.len() as u64,
             source_time: None,
+        }
+    }
+
+    fn artifact_metadata_fact(
+        message_id: &str,
+        artifacts: Vec<ArtifactMetadataEntry>,
+    ) -> ArtifactMetadataSnapshotFact {
+        ArtifactMetadataSnapshotFact {
+            session: entity("session", SESSION),
+            native_message_id: message_id.to_string(),
+            native_snapshot_message_id: "checkpoint".to_string(),
+            observation_kind: ArtifactObservationKind::Delta,
+            is_snapshot_update: false,
+            source_time: Some(exact("2026-08-11T00:00:02.000Z")),
+            artifacts,
+        }
+    }
+
+    fn artifact_metadata_entry(
+        artifact: EntityKey,
+        native_artifact_id: Option<&str>,
+        tracking_path: &str,
+        backup_time: &str,
+        capture: ArtifactCapture,
+    ) -> ArtifactMetadataEntry {
+        ArtifactMetadataEntry {
+            artifact,
+            native_artifact_id: native_artifact_id.map(str::to_string),
+            tracking_path: tracking_path.to_string(),
+            real_parent_dir: Some("/fixture/project/src".to_string()),
+            version: 1,
+            backup_time: exact(backup_time),
+            capture,
+        }
+    }
+
+    fn artifact_content_fact(artifact: EntityKey, content: &str) -> ArtifactContentFact {
+        ArtifactContentFact {
+            artifact,
+            session: entity("session", SESSION),
+            native_artifact_id: "71f902cd51ee4c6e@v1".to_string(),
+            native_file_hash: "71f902cd51ee4c6e".to_string(),
+            version: 1,
+            content: content.as_bytes().to_vec(),
+            size_bytes: content.len() as u64,
         }
     }
 
@@ -5859,6 +5924,654 @@ mod tests {
         assert_eq!(
             resolved,
             ("resolved".to_string(), 1, 0, "primary".to_string())
+        );
+    }
+
+    #[test]
+    fn artifact_metadata_and_replaceable_content_join_retract_and_clean_audit_facts() {
+        let mut connection = database();
+        register_object(&mut connection);
+        let content_object = b"artifact-content";
+        register_object_key(&mut connection, content_object, 12);
+        let artifact_key = entity("artifact", "named-backup");
+
+        let metadata_record = direct_record(1, 0, 1, 20, b"artifact-metadata");
+        let mut metadata_batch = FactBatch::new(2, 1).unwrap();
+        metadata_batch
+            .push(
+                &metadata_record,
+                Fact::ArtifactMetadataSnapshot(artifact_metadata_fact(
+                    "delta-1",
+                    vec![artifact_metadata_entry(
+                        artifact_key.clone(),
+                        Some("71f902cd51ee4c6e@v1"),
+                        "src/lib.rs",
+                        "2026-08-11T00:00:01.000Z",
+                        ArtifactCapture::ContentExpected,
+                    )],
+                )),
+            )
+            .unwrap();
+        commit_direct_batch(&mut connection, &metadata_record, 1, 0, 21, &metadata_batch);
+        let missing: (String, String, String, i64, i64) = connection
+            .query_row(
+                "SELECT resolution_status, content_status, capture_status, metadata_assertion_count, content_assertion_count FROM canonical_artifacts WHERE artifact_key = ?1",
+                [artifact_key.as_bytes()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            missing,
+            (
+                "incomplete".to_string(),
+                "missing_content".to_string(),
+                "content_expected".to_string(),
+                1,
+                0,
+            )
+        );
+
+        // Repeated checkpoints commonly restate the same backup. They retain
+        // both provenance assertions without manufacturing a conflict.
+        let repeated_metadata_record = direct_record(1, 1, 2, 25, b"artifact-metadata-repeat");
+        let mut repeated_metadata_batch = FactBatch::new(2, 1).unwrap();
+        repeated_metadata_batch
+            .push(
+                &repeated_metadata_record,
+                Fact::ArtifactMetadataSnapshot(artifact_metadata_fact(
+                    "checkpoint-repeat",
+                    vec![artifact_metadata_entry(
+                        artifact_key.clone(),
+                        Some("71f902cd51ee4c6e@v1"),
+                        "src/lib.rs",
+                        "2026-08-11T00:00:01.000Z",
+                        ArtifactCapture::ContentExpected,
+                    )],
+                )),
+            )
+            .unwrap();
+        commit_direct_batch(
+            &mut connection,
+            &repeated_metadata_record,
+            1,
+            1,
+            26,
+            &repeated_metadata_batch,
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT metadata_assertion_count * 10 + competing_metadata_count FROM canonical_artifacts WHERE artifact_key = ?1",
+                    [artifact_key.as_bytes()],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            20
+        );
+
+        let content_record = object_record(
+            2,
+            1,
+            SourceCursor::append_offset(0),
+            SourceCursor::append_offset(1),
+            30,
+            b"content-v1",
+        );
+        let mut content_batch = FactBatch::new(2, 1).unwrap();
+        content_batch
+            .push(
+                &content_record,
+                Fact::ArtifactContent(artifact_content_fact(artifact_key.clone(), "before edit\n")),
+            )
+            .unwrap();
+        commit_object_batch(
+            &mut connection,
+            content_object,
+            &content_record,
+            1,
+            SourceCursor::append_offset(0).into_bytes(),
+            31,
+            &content_batch,
+        );
+        let captured: (String, String, Vec<u8>, i64, i64) = connection
+            .query_row(
+                "SELECT resolution_status, content_status, content, metadata_assertion_count, content_assertion_count FROM canonical_artifacts WHERE artifact_key = ?1",
+                [artifact_key.as_bytes()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            captured,
+            (
+                "resolved".to_string(),
+                "captured".to_string(),
+                b"before edit\n".to_vec(),
+                2,
+                1,
+            )
+        );
+
+        let replacement_record = object_record(
+            2,
+            1,
+            SourceCursor::append_offset(1),
+            SourceCursor::append_offset(2),
+            40,
+            b"content-v2",
+        );
+        let mut replacement_batch = FactBatch::new(2, 1).unwrap();
+        replacement_batch
+            .push(
+                &replacement_record,
+                Fact::ArtifactContent(artifact_content_fact(
+                    artifact_key.clone(),
+                    "earlier content\n",
+                )),
+            )
+            .unwrap();
+        commit_object_batch(
+            &mut connection,
+            content_object,
+            &replacement_record,
+            1,
+            SourceCursor::append_offset(1).into_bytes(),
+            41,
+            &replacement_batch,
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT content FROM canonical_artifacts WHERE artifact_key = ?1",
+                    [artifact_key.as_bytes()],
+                    |row| row.get::<_, Vec<u8>>(0),
+                )
+                .unwrap(),
+            b"earlier content\n"
+        );
+        assert_eq!(count(&connection, "artifact_content_assertions"), 1);
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM fact_records WHERE fact_kind = 'artifact_content'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            1
+        );
+
+        let deleted_content_record = object_record(
+            2,
+            1,
+            SourceCursor::append_offset(2),
+            SourceCursor::append_offset(3),
+            50,
+            b"content-deleted",
+        );
+        commit_object_batch(
+            &mut connection,
+            content_object,
+            &deleted_content_record,
+            1,
+            SourceCursor::append_offset(2).into_bytes(),
+            51,
+            &FactBatch::new(1, 1).unwrap(),
+        );
+        let after_content_delete: (String, String, i64) = connection
+            .query_row(
+                "SELECT resolution_status, content_status, content_assertion_count FROM canonical_artifacts WHERE artifact_key = ?1",
+                [artifact_key.as_bytes()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            after_content_delete,
+            ("incomplete".to_string(), "missing_content".to_string(), 0,)
+        );
+
+        let rewritten_metadata_record = direct_record(2, 0, 1, 60, b"metadata-rewritten");
+        commit_direct_batch(
+            &mut connection,
+            &rewritten_metadata_record,
+            1,
+            2,
+            61,
+            &FactBatch::new(1, 1).unwrap(),
+        );
+        assert_eq!(count(&connection, "canonical_artifacts"), 0);
+        assert_eq!(count(&connection, "artifact_snapshot_assertions"), 0);
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM fact_records WHERE fact_kind IN ('artifact_metadata_snapshot', 'artifact_content')",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn artifact_content_first_and_explicit_no_backup_states_converge_without_run_state() {
+        let mut connection = database();
+        register_object(&mut connection);
+        let metadata_object = b"artifact-metadata";
+        register_object_key(&mut connection, metadata_object, 12);
+        let named_key = entity("artifact", "named-backup");
+        let unbacked_key = entity("artifact", "not-captured");
+
+        let content_record = direct_record(1, 0, 1, 20, b"orphan-content");
+        let mut content_batch = FactBatch::new(2, 1).unwrap();
+        content_batch
+            .push(
+                &content_record,
+                Fact::ArtifactContent(artifact_content_fact(named_key.clone(), "orphan first\n")),
+            )
+            .unwrap();
+        commit_direct_batch(&mut connection, &content_record, 1, 0, 21, &content_batch);
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT resolution_status || ':' || content_status FROM canonical_artifacts WHERE artifact_key = ?1",
+                    [named_key.as_bytes()],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "incomplete:orphan_content"
+        );
+
+        let metadata_record = object_record(
+            2,
+            1,
+            SourceCursor::append_offset(0),
+            SourceCursor::append_offset(1),
+            30,
+            b"late-metadata",
+        );
+        let mut metadata_batch = FactBatch::new(2, 1).unwrap();
+        metadata_batch
+            .push(
+                &metadata_record,
+                Fact::ArtifactMetadataSnapshot(artifact_metadata_fact(
+                    "checkpoint-late",
+                    vec![
+                        artifact_metadata_entry(
+                            named_key.clone(),
+                            Some("71f902cd51ee4c6e@v1"),
+                            "src/lib.rs",
+                            "2026-08-11T00:00:01.000Z",
+                            ArtifactCapture::ContentExpected,
+                        ),
+                        artifact_metadata_entry(
+                            unbacked_key.clone(),
+                            None,
+                            "src/new.rs",
+                            "2026-08-11T00:00:03.000Z",
+                            ArtifactCapture::NotCaptured,
+                        ),
+                    ],
+                )),
+            )
+            .unwrap();
+        commit_object_batch(
+            &mut connection,
+            metadata_object,
+            &metadata_record,
+            1,
+            SourceCursor::append_offset(0).into_bytes(),
+            31,
+            &metadata_batch,
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT resolution_status || ':' || content_status FROM canonical_artifacts WHERE artifact_key = ?1",
+                    [named_key.as_bytes()],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "resolved:captured"
+        );
+        let unbacked: (String, String, String, Option<String>, Option<Vec<u8>>) = connection
+            .query_row(
+                "SELECT resolution_status, content_status, capture_status, native_artifact_id, content FROM canonical_artifacts WHERE artifact_key = ?1",
+                [unbacked_key.as_bytes()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            unbacked,
+            (
+                "resolved".to_string(),
+                "not_captured".to_string(),
+                "not_captured".to_string(),
+                None,
+                None,
+            )
+        );
+        assert_eq!(count(&connection, "observed_run_states"), 0);
+        assert_eq!(count(&connection, "canonical_runs"), 0);
+    }
+
+    #[test]
+    fn artifact_join_mismatch_is_explicit_and_correctable_by_blob_replacement() {
+        let mut connection = database();
+        register_object(&mut connection);
+        let content_object = b"artifact-content";
+        register_object_key(&mut connection, content_object, 12);
+        let artifact_key = entity("artifact", "join-check");
+
+        let metadata_record = direct_record(1, 0, 1, 20, b"join-metadata");
+        let mut metadata = FactBatch::new(2, 1).unwrap();
+        metadata
+            .push(
+                &metadata_record,
+                Fact::ArtifactMetadataSnapshot(artifact_metadata_fact(
+                    "join-metadata",
+                    vec![artifact_metadata_entry(
+                        artifact_key.clone(),
+                        Some("71f902cd51ee4c6e@v1"),
+                        "src/lib.rs",
+                        "2026-08-11T00:00:01.000Z",
+                        ArtifactCapture::ContentExpected,
+                    )],
+                )),
+            )
+            .unwrap();
+        commit_direct_batch(&mut connection, &metadata_record, 1, 0, 21, &metadata);
+
+        let mismatched_record = object_record(
+            2,
+            1,
+            SourceCursor::append_offset(0),
+            SourceCursor::append_offset(1),
+            30,
+            b"join-mismatch",
+        );
+        let mut mismatched_fact = artifact_content_fact(artifact_key.clone(), "content");
+        mismatched_fact.session = entity("session", "different-session");
+        let mut mismatched = FactBatch::new(2, 1).unwrap();
+        mismatched
+            .push(&mismatched_record, Fact::ArtifactContent(mismatched_fact))
+            .unwrap();
+        commit_object_batch(
+            &mut connection,
+            content_object,
+            &mismatched_record,
+            1,
+            SourceCursor::append_offset(0).into_bytes(),
+            31,
+            &mismatched,
+        );
+        let conflicting: (String, i64) = connection
+            .query_row(
+                "SELECT resolution_status, join_conflict FROM canonical_artifacts WHERE artifact_key = ?1",
+                [artifact_key.as_bytes()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(conflicting, ("conflicting".to_string(), 1));
+
+        let corrected_record = object_record(
+            2,
+            1,
+            SourceCursor::append_offset(1),
+            SourceCursor::append_offset(2),
+            40,
+            b"join-corrected",
+        );
+        let mut corrected = FactBatch::new(2, 1).unwrap();
+        corrected
+            .push(
+                &corrected_record,
+                Fact::ArtifactContent(artifact_content_fact(artifact_key.clone(), "content")),
+            )
+            .unwrap();
+        commit_object_batch(
+            &mut connection,
+            content_object,
+            &corrected_record,
+            1,
+            SourceCursor::append_offset(1).into_bytes(),
+            41,
+            &corrected,
+        );
+        let resolved: (String, String, i64) = connection
+            .query_row(
+                "SELECT resolution_status, content_status, join_conflict FROM canonical_artifacts WHERE artifact_key = ?1",
+                [artifact_key.as_bytes()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            resolved,
+            ("resolved".to_string(), "captured".to_string(), 0)
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT operation FROM change_log WHERE topic = 'diagnostic.runtime.artifact-conflict' AND entity_key = ?1 ORDER BY commit_seq DESC LIMIT 1",
+                    [artifact_key.as_bytes()],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "delete"
+        );
+    }
+
+    #[test]
+    fn competing_artifact_metadata_and_content_are_diagnosed_and_resolve() {
+        let mut connection = database();
+        register_object(&mut connection);
+        let metadata_secondary = b"metadata-secondary";
+        let content_primary = b"content-primary";
+        let content_secondary = b"content-secondary";
+        register_object_key(&mut connection, metadata_secondary, 12);
+        register_object_key(&mut connection, content_primary, 13);
+        register_object_key(&mut connection, content_secondary, 14);
+        let artifact_key = entity("artifact", "named-backup");
+
+        let primary_record = direct_record(1, 0, 1, 20, b"metadata-primary");
+        let mut primary = FactBatch::new(2, 1).unwrap();
+        primary
+            .push(
+                &primary_record,
+                Fact::ArtifactMetadataSnapshot(artifact_metadata_fact(
+                    "primary",
+                    vec![artifact_metadata_entry(
+                        artifact_key.clone(),
+                        Some("71f902cd51ee4c6e@v1"),
+                        "src/lib.rs",
+                        "2026-08-11T00:00:01.000Z",
+                        ArtifactCapture::ContentExpected,
+                    )],
+                )),
+            )
+            .unwrap();
+        commit_direct_batch(&mut connection, &primary_record, 1, 0, 21, &primary);
+
+        let secondary_record = object_record(
+            2,
+            1,
+            SourceCursor::append_offset(0),
+            SourceCursor::append_offset(1),
+            30,
+            b"metadata-secondary",
+        );
+        let mut secondary = FactBatch::new(2, 1).unwrap();
+        secondary
+            .push(
+                &secondary_record,
+                Fact::ArtifactMetadataSnapshot(artifact_metadata_fact(
+                    "secondary",
+                    vec![artifact_metadata_entry(
+                        artifact_key.clone(),
+                        Some("71f902cd51ee4c6e@v1"),
+                        "src/renamed.rs",
+                        "2026-08-11T00:00:01.000Z",
+                        ArtifactCapture::ContentExpected,
+                    )],
+                )),
+            )
+            .unwrap();
+        commit_object_batch(
+            &mut connection,
+            metadata_secondary,
+            &secondary_record,
+            1,
+            SourceCursor::append_offset(0).into_bytes(),
+            31,
+            &secondary,
+        );
+        let metadata_conflict: (String, i64, i64) = connection
+            .query_row(
+                "SELECT resolution_status, metadata_assertion_count, competing_metadata_count FROM canonical_artifacts WHERE artifact_key = ?1",
+                [artifact_key.as_bytes()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(metadata_conflict, ("conflicting".to_string(), 2, 1));
+
+        let metadata_retracted = object_record(
+            2,
+            2,
+            SourceCursor::append_offset(0),
+            SourceCursor::append_offset(1),
+            40,
+            b"metadata-secondary-rewritten",
+        );
+        commit_object_batch(
+            &mut connection,
+            metadata_secondary,
+            &metadata_retracted,
+            1,
+            SourceCursor::append_offset(1).into_bytes(),
+            41,
+            &FactBatch::new(1, 1).unwrap(),
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT competing_metadata_count FROM canonical_artifacts WHERE artifact_key = ?1",
+                    [artifact_key.as_bytes()],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            0
+        );
+
+        let content_primary_record = object_record(
+            3,
+            1,
+            SourceCursor::append_offset(0),
+            SourceCursor::append_offset(1),
+            50,
+            b"content-primary",
+        );
+        let mut primary_content = FactBatch::new(2, 1).unwrap();
+        primary_content
+            .push(
+                &content_primary_record,
+                Fact::ArtifactContent(artifact_content_fact(
+                    artifact_key.clone(),
+                    "primary content",
+                )),
+            )
+            .unwrap();
+        commit_object_batch(
+            &mut connection,
+            content_primary,
+            &content_primary_record,
+            1,
+            SourceCursor::append_offset(0).into_bytes(),
+            51,
+            &primary_content,
+        );
+
+        let content_secondary_record = object_record(
+            4,
+            1,
+            SourceCursor::append_offset(0),
+            SourceCursor::append_offset(1),
+            60,
+            b"content-secondary",
+        );
+        let mut secondary_content = FactBatch::new(2, 1).unwrap();
+        secondary_content
+            .push(
+                &content_secondary_record,
+                Fact::ArtifactContent(artifact_content_fact(
+                    artifact_key.clone(),
+                    "secondary content",
+                )),
+            )
+            .unwrap();
+        commit_object_batch(
+            &mut connection,
+            content_secondary,
+            &content_secondary_record,
+            1,
+            SourceCursor::append_offset(0).into_bytes(),
+            61,
+            &secondary_content,
+        );
+        let content_conflict: (String, i64, i64) = connection
+            .query_row(
+                "SELECT resolution_status, content_assertion_count, competing_content_count FROM canonical_artifacts WHERE artifact_key = ?1",
+                [artifact_key.as_bytes()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(content_conflict, ("conflicting".to_string(), 2, 1));
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT operation FROM change_log WHERE topic = 'diagnostic.runtime.artifact-conflict' AND entity_key = ?1 ORDER BY commit_seq DESC LIMIT 1",
+                    [artifact_key.as_bytes()],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "upsert"
+        );
+
+        let content_retracted = object_record(
+            4,
+            1,
+            SourceCursor::append_offset(1),
+            SourceCursor::append_offset(2),
+            70,
+            b"content-secondary-deleted",
+        );
+        commit_object_batch(
+            &mut connection,
+            content_secondary,
+            &content_retracted,
+            1,
+            SourceCursor::append_offset(1).into_bytes(),
+            71,
+            &FactBatch::new(1, 1).unwrap(),
+        );
+        let resolved: (String, String, i64, i64) = connection
+            .query_row(
+                "SELECT resolution_status, content_status, content_assertion_count, competing_content_count FROM canonical_artifacts WHERE artifact_key = ?1",
+                [artifact_key.as_bytes()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            resolved,
+            ("resolved".to_string(), "captured".to_string(), 1, 0)
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT operation FROM change_log WHERE topic = 'diagnostic.runtime.artifact-conflict' AND entity_key = ?1 ORDER BY commit_seq DESC LIMIT 1",
+                    [artifact_key.as_bytes()],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "delete"
         );
     }
 
