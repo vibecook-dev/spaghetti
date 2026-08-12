@@ -18,15 +18,15 @@ use crate::adapter::{
     ConsistencyPolicy, ContentBlock, DecodeContext, DecodeDisposition, DecoderId, DelegationFact,
     DelegationKind, DelegationMetadataFact, DelegationSpawnFact, DeletionPolicy, DiscoveryContext,
     DriverSpec, EntityKey, EntityScope, EvidenceKind, EvidenceStrength, Fact, FactBatch,
-    MessageFact, MessageRole, ObjectSelector, PlanSnapshotFact, PresenceFact,
-    ProjectMemoryDocumentFact, QualifiedTimestamp, RawRetentionPolicy, RelationStrength,
-    RunEvidenceFact, RunFact, SessionFact, SessionIndexEntrySnapshot, SessionIndexSnapshotFact,
-    SourceInstance, SourceInstanceKey, SourceInstanceSpec, SourceObjectDescriptor, SourceRoot,
-    StreamAuthority, StreamId, StreamSpec, SupportLevel, TaskCollectionKind, TaskItemSnapshot,
-    TaskSnapshotCoverage, TaskSnapshotFact, TaskStatus, TeamInboxMessageSnapshot,
-    TeamInboxSnapshotFact, TeamMemberSnapshot, TeamSnapshotFact, TimestampQuality, TokenUsage,
-    UsageAccounting, UsageFact, UsageScope, ValueQuality, WorkflowMemberEventFact,
-    WorkflowMemberEventKind, WorkflowSnapshotFact, WorkflowStatus,
+    MessageFact, MessageRole, ObjectSelector, PersistedToolResultFact, PlanSnapshotFact,
+    PresenceFact, ProjectMemoryDocumentFact, QualifiedTimestamp, RawRetentionPolicy,
+    RelationStrength, RunEvidenceFact, RunFact, SessionFact, SessionIndexEntrySnapshot,
+    SessionIndexSnapshotFact, SourceInstance, SourceInstanceKey, SourceInstanceSpec,
+    SourceObjectDescriptor, SourceRoot, StreamAuthority, StreamId, StreamSpec, SupportLevel,
+    TaskCollectionKind, TaskItemSnapshot, TaskSnapshotCoverage, TaskSnapshotFact, TaskStatus,
+    TeamInboxMessageSnapshot, TeamInboxSnapshotFact, TeamMemberSnapshot, TeamSnapshotFact,
+    TimestampQuality, TokenUsage, UsageAccounting, UsageFact, UsageScope, ValueQuality,
+    WorkflowMemberEventFact, WorkflowMemberEventKind, WorkflowSnapshotFact, WorkflowStatus,
 };
 use crate::claude::message_extractor;
 use crate::claude::session_metadata;
@@ -54,6 +54,7 @@ const WORKFLOW_RUN_STREAM: &str = "workflow-runs";
 const WORKFLOW_JOURNAL_STREAM: &str = "workflow-journals";
 const SESSION_INDEX_STREAM: &str = "session-indexes";
 const PROJECT_MEMORY_STREAM: &str = "project-memory-documents";
+const PERSISTED_TOOL_RESULT_STREAM: &str = "persisted-tool-results";
 const PARENT_DECODER: &str = "claude-session-record";
 const SUBAGENT_DECODER: &str = "claude-subagent-record";
 const SUBAGENT_META_DECODER: &str = "claude-subagent-metadata";
@@ -68,6 +69,7 @@ const WORKFLOW_RUN_DECODER: &str = "claude-workflow-run";
 const WORKFLOW_JOURNAL_DECODER: &str = "claude-workflow-journal";
 const SESSION_INDEX_DECODER: &str = "claude-session-index";
 const PROJECT_MEMORY_DECODER: &str = "claude-project-memory-document";
+const PERSISTED_TOOL_RESULT_DECODER: &str = "claude-persisted-tool-result";
 const OBJECT_CONTEXT_VERSION: u32 = 1;
 const SUBAGENT_META_MAX_BYTES: usize = 64 * 1024;
 const TEAM_CONFIG_MAX_BYTES: usize = 1024 * 1024;
@@ -80,6 +82,7 @@ const ARTIFACT_CONTENT_MAX_BYTES: usize = 1024 * 1024;
 const WORKFLOW_RUN_MAX_BYTES: usize = 1024 * 1024;
 const SESSION_INDEX_MAX_BYTES: usize = 1024 * 1024;
 const PROJECT_MEMORY_MAX_BYTES: usize = 1024 * 1024;
+const PERSISTED_TOOL_RESULT_MAX_BYTES: usize = 16 * 1024 * 1024;
 const TEAM_MEMBER_LIMIT: usize = 256;
 const TEAM_INBOX_MESSAGE_LIMIT: usize = 4_096;
 const TODO_ITEM_LIMIT: usize = 4_096;
@@ -100,6 +103,7 @@ const RUNTIME_TASKS: &str = "runtime.tasks";
 const RUNTIME_ARTIFACTS: &str = "runtime.artifacts";
 const RUNTIME_WORKFLOWS: &str = "runtime.workflows";
 const CONTEXT_PROJECT_MEMORY: &str = "context.project_memory";
+const HISTORY_PERSISTED_TOOL_RESULTS: &str = "history.persisted_tool_results";
 const USAGE_INPUT_TOKENS: &str = "usage.input_tokens";
 const USAGE_OUTPUT_TOKENS: &str = "usage.output_tokens";
 const USAGE_CACHE_TOKENS: &str = "usage.cache_tokens";
@@ -118,7 +122,7 @@ impl ClaudeCodeAdapter {
                 id: AdapterId::new(ADAPTER_ID).expect("static Claude adapter id is valid"),
                 display_name: "Claude Code".to_string(),
                 adapter_version: env!("CARGO_PKG_VERSION").to_string(),
-                contract_version: 11,
+                contract_version: 12,
                 source_schema_versions: vec![
                     "claude-code-jsonl-v1".to_string(),
                     "claude-code-subagent-meta-v1".to_string(),
@@ -132,6 +136,7 @@ impl ClaudeCodeAdapter {
                     "claude-code-workflow-v1".to_string(),
                     "claude-code-session-index-v1".to_string(),
                     "claude-code-project-memory-v1".to_string(),
+                    "claude-code-persisted-tool-result-v1".to_string(),
                 ],
                 capabilities: claude_capabilities(),
             },
@@ -471,6 +476,25 @@ impl AgentAdapter for ClaudeCodeAdapter {
                 retention: RawRetentionPolicy::Full,
                 capabilities: project_memory_capabilities(),
             },
+            StreamSpec {
+                id: StreamId::new(PERSISTED_TOOL_RESULT_STREAM)?,
+                driver: DriverSpec::ReplaceDocument(ReplaceDocumentConfig {
+                    max_document_bytes: PERSISTED_TOOL_RESULT_MAX_BYTES,
+                }),
+                selector: ObjectSelector {
+                    root_name: "projects".to_string(),
+                    include: vec!["*/*/tool-results/*.txt".to_string()],
+                    exclude: Vec::new(),
+                },
+                decoder: DecoderId::new(PERSISTED_TOOL_RESULT_DECODER)?,
+                authority: StreamAuthority::Supplemental,
+                entity_scope: EntityScope::Custom("persisted_tool_result".to_string()),
+                priority: IngestPriority::Interactive,
+                consistency: ConsistencyPolicy::SnapshotReplace,
+                deletion: DeletionPolicy::MirrorSource,
+                retention: RawRetentionPolicy::Full,
+                capabilities: persisted_tool_result_capabilities(),
+            },
         ];
         for stream in &streams {
             stream.validate(instance)?;
@@ -525,6 +549,9 @@ impl AgentAdapter for ClaudeCodeAdapter {
             )?)?,
             PROJECT_MEMORY_STREAM => encode_object_context(
                 &ClaudeProjectMemoryContext::from_path(&object.relative_path)?,
+            )?,
+            PERSISTED_TOOL_RESULT_STREAM => encode_object_context(
+                &ClaudePersistedToolResultContext::from_path(&object.relative_path)?,
             )?,
             _ => {
                 return Err(AdapterError::new(
@@ -606,6 +633,11 @@ impl AgentAdapter for ClaudeCodeAdapter {
                 let object_context = ClaudeProjectMemoryContext::decode(context.object_context)?;
                 decode_project_memory_document(self.adapter_id(), &object_context, record, output)
             }
+            PERSISTED_TOOL_RESULT_DECODER => {
+                let object_context =
+                    ClaudePersistedToolResultContext::decode(context.object_context)?;
+                decode_persisted_tool_result(self.adapter_id(), &object_context, record, output)
+            }
             _ => Err(AdapterError::unknown_decoder(context.decoder)),
         }
     }
@@ -682,6 +714,15 @@ fn claude_capabilities() -> Vec<CapabilityDeclaration> {
             Availability::Live,
             Some(
                 "project memory is a set of independently replaceable Markdown documents; MEMORY.md is the native index and links do not assert relations",
+            ),
+        ),
+        capability(
+            HISTORY_PERSISTED_TOOL_RESULTS,
+            SupportLevel::Native,
+            CapabilityGranularity::Custom("persisted_tool_result".to_string()),
+            Availability::Live,
+            Some(
+                "immediate UTF-8 tool-results/*.txt documents supplement transcript content; filename stems are native identifiers but do not always denote a model tool call",
             ),
         ),
         live_native(USAGE_INPUT_TOKENS, CapabilityGranularity::Message),
@@ -809,6 +850,18 @@ fn session_index_capabilities() -> Vec<CapabilityId> {
 fn project_memory_capabilities() -> Vec<CapabilityId> {
     [
         CONTEXT_PROJECT_MEMORY,
+        SOURCE_LIVE,
+        SOURCE_RECONCILE,
+        SOURCE_RESUME_CURSOR,
+    ]
+    .into_iter()
+    .map(|id| CapabilityId::new(id).expect("static Claude stream capability id is valid"))
+    .collect()
+}
+
+fn persisted_tool_result_capabilities() -> Vec<CapabilityId> {
+    [
+        HISTORY_PERSISTED_TOOL_RESULTS,
         SOURCE_LIVE,
         SOURCE_RECONCILE,
         SOURCE_RESUME_CURSOR,
@@ -1197,6 +1250,49 @@ struct ClaudeProjectMemoryContext {
     project_slug: String,
     native_document_path: String,
     is_index: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct ClaudePersistedToolResultContext {
+    project_slug: String,
+    native_session_id: String,
+    native_tool_use_id: String,
+    native_document_path: String,
+}
+
+impl ClaudePersistedToolResultContext {
+    fn from_path(relative_path: &Path) -> Result<Self, AdapterError> {
+        let components = utf8_components(relative_path)?;
+        if components.len() != 4
+            || components[0].is_empty()
+            || !is_uuid(&components[1])
+            || components[2] != "tool-results"
+        {
+            return Err(path_error(
+                relative_path,
+                "persisted tool result path must be <project>/<session>/tool-results/<id>.txt",
+            ));
+        }
+        let Some(native_tool_use_id) = components[3]
+            .strip_suffix(".txt")
+            .filter(|value| !value.is_empty())
+        else {
+            return Err(path_error(
+                relative_path,
+                "persisted tool result must be a non-empty .txt document",
+            ));
+        };
+        Ok(Self {
+            project_slug: components[0].clone(),
+            native_session_id: components[1].clone(),
+            native_tool_use_id: native_tool_use_id.to_string(),
+            native_document_path: format!("tool-results/{}", components[3]),
+        })
+    }
+
+    fn decode(context: &AdapterObjectContext) -> Result<Self, AdapterError> {
+        decode_object_context(context)
+    }
 }
 
 impl ClaudeProjectMemoryContext {
@@ -2656,6 +2752,65 @@ fn decode_project_memory_document(
     Ok(DecodeDisposition::Applied)
 }
 
+fn decode_persisted_tool_result(
+    adapter_id: &AdapterId,
+    context: &ClaudePersistedToolResultContext,
+    record: &SourceRecord,
+    output: &mut FactBatch,
+) -> Result<DecodeDisposition, AdapterError> {
+    if record.state == SourceRecordState::Absent {
+        return Ok(DecodeDisposition::IgnoredKnown);
+    }
+    let content = match std::str::from_utf8(&record.payload) {
+        Ok(content) => content.to_string(),
+        Err(error) => {
+            preserve_unknown(
+                record,
+                output,
+                Some("persisted_tool_result".to_string()),
+                format!("Claude persisted tool result is not valid UTF-8: {error}"),
+            )?;
+            return Ok(DecodeDisposition::PreservedUnknown);
+        }
+    };
+    let mut result_native_key = Vec::new();
+    push_key_component(&mut result_native_key, context.native_session_id.as_bytes());
+    push_key_component(
+        &mut result_native_key,
+        context.native_tool_use_id.as_bytes(),
+    );
+    output.push(
+        record,
+        Fact::PersistedToolResult(PersistedToolResultFact {
+            result: EntityKey::native(
+                adapter_id,
+                record.source_instance_id,
+                "persisted_tool_result",
+                &result_native_key,
+            )?,
+            session: EntityKey::native(
+                adapter_id,
+                record.source_instance_id,
+                "session",
+                context.native_session_id.as_bytes(),
+            )?,
+            project: EntityKey::native(
+                adapter_id,
+                record.source_instance_id,
+                "project",
+                context.project_slug.as_bytes(),
+            )?,
+            native_project_key: context.project_slug.clone(),
+            native_session_id: context.native_session_id.clone(),
+            native_tool_use_id: context.native_tool_use_id.clone(),
+            native_document_path: context.native_document_path.clone(),
+            content,
+            size_bytes: record.payload.len() as u64,
+        }),
+    )?;
+    Ok(DecodeDisposition::Applied)
+}
+
 fn preserve_session_index_contract_loss(
     record: &SourceRecord,
     output: &mut FactBatch,
@@ -3730,8 +3885,8 @@ mod tests {
             discovered[0].roots[3].path,
             std::fs::canonicalize(root.path()).unwrap().join("sessions")
         );
-        assert_eq!(streams.len(), 14);
-        assert_eq!(adapter.manifest().contract_version, 11);
+        assert_eq!(streams.len(), 15);
+        assert_eq!(adapter.manifest().contract_version, 12);
         assert!(adapter
             .manifest()
             .source_schema_versions
@@ -3787,6 +3942,11 @@ mod tests {
             .source_schema_versions
             .iter()
             .any(|version| version == "claude-code-project-memory-v1"));
+        assert!(adapter
+            .manifest()
+            .source_schema_versions
+            .iter()
+            .any(|version| version == "claude-code-persisted-tool-result-v1"));
         assert!(matches!(streams[0].driver, DriverSpec::AppendDelimited(_)));
         assert!(matches!(streams[1].driver, DriverSpec::AppendDelimited(_)));
         assert!(matches!(streams[2].driver, DriverSpec::ReplaceDocument(_)));
@@ -3852,6 +4012,12 @@ mod tests {
                 max_document_bytes: PROJECT_MEMORY_MAX_BYTES
             })
         ));
+        assert!(matches!(
+            streams[14].driver,
+            DriverSpec::ReplaceDocument(ReplaceDocumentConfig {
+                max_document_bytes: PERSISTED_TOOL_RESULT_MAX_BYTES
+            })
+        ));
         assert_eq!(streams[0].decoder.as_str(), PARENT_DECODER);
         assert_eq!(streams[1].decoder.as_str(), SUBAGENT_DECODER);
         assert_eq!(streams[2].decoder.as_str(), SUBAGENT_META_DECODER);
@@ -3866,6 +4032,7 @@ mod tests {
         assert_eq!(streams[11].decoder.as_str(), WORKFLOW_JOURNAL_DECODER);
         assert_eq!(streams[12].decoder.as_str(), SESSION_INDEX_DECODER);
         assert_eq!(streams[13].decoder.as_str(), PROJECT_MEMORY_DECODER);
+        assert_eq!(streams[14].decoder.as_str(), PERSISTED_TOOL_RESULT_DECODER);
         assert_eq!(streams[2].authority, StreamAuthority::Supplemental);
         assert_eq!(streams[2].consistency, ConsistencyPolicy::SnapshotReplace);
         assert_eq!(streams[3].authority, StreamAuthority::Canonical);
@@ -3920,6 +4087,14 @@ mod tests {
             .capabilities
             .iter()
             .any(|capability| capability.as_str() == CONTEXT_PROJECT_MEMORY));
+        assert_eq!(streams[14].authority, StreamAuthority::Supplemental);
+        assert_eq!(streams[14].priority, IngestPriority::Interactive);
+        assert_eq!(streams[14].consistency, ConsistencyPolicy::SnapshotReplace);
+        assert_eq!(streams[14].selector.include, vec!["*/*/tool-results/*.txt"]);
+        assert!(streams[14]
+            .capabilities
+            .iter()
+            .any(|capability| capability.as_str() == HISTORY_PERSISTED_TOOL_RESULTS));
         assert!(streams[0]
             .capabilities
             .iter()
@@ -4038,6 +4213,21 @@ mod tests {
             CapabilityGranularity::Custom("memory_document".to_string())
         );
         assert_eq!(memory.support.availability, Availability::Live);
+        let persisted_tool_results = adapter
+            .manifest()
+            .capabilities
+            .iter()
+            .find(|capability| capability.id.as_str() == HISTORY_PERSISTED_TOOL_RESULTS)
+            .unwrap();
+        assert_eq!(persisted_tool_results.support.level, SupportLevel::Native);
+        assert_eq!(
+            persisted_tool_results.support.granularity,
+            CapabilityGranularity::Custom("persisted_tool_result".to_string())
+        );
+        assert_eq!(
+            persisted_tool_results.support.availability,
+            Availability::Live
+        );
     }
 
     #[test]
@@ -4312,6 +4502,154 @@ mod tests {
                 )
                 .is_err());
         }
+    }
+
+    #[test]
+    fn persisted_tool_result_context_requires_one_immediate_text_document() {
+        let root = TempDir::new().unwrap();
+        let adapter = ClaudeCodeAdapter::new();
+        for native_id in ["toolu_01abc", "bawkb4wxt", "hook-id-stdout"] {
+            let context = adapter
+                .bootstrap_object(
+                    &instance(root.path()),
+                    &object(
+                        PERSISTED_TOOL_RESULT_STREAM,
+                        &format!("project/{SESSION}/tool-results/{native_id}.txt"),
+                    ),
+                )
+                .unwrap();
+            assert_eq!(
+                ClaudePersistedToolResultContext::decode(&context).unwrap(),
+                ClaudePersistedToolResultContext {
+                    project_slug: "project".to_string(),
+                    native_session_id: SESSION.to_string(),
+                    native_tool_use_id: native_id.to_string(),
+                    native_document_path: format!("tool-results/{native_id}.txt"),
+                }
+            );
+        }
+        for invalid in [
+            &format!("project/{SESSION}/tool-results/.txt"),
+            &format!("project/{SESSION}/tool-results/toolu_1.json"),
+            &format!("project/{SESSION}/tool-results/nested/toolu_1.txt"),
+            "project/tool-results/toolu_1.txt",
+            "project/not-a-session/tool-results/toolu_1.txt",
+            &format!("project/{SESSION}/results/toolu_1.txt"),
+        ] {
+            assert!(adapter
+                .bootstrap_object(
+                    &instance(root.path()),
+                    &object(PERSISTED_TOOL_RESULT_STREAM, invalid),
+                )
+                .is_err());
+        }
+    }
+
+    #[test]
+    fn persisted_tool_result_decoder_preserves_exact_text_without_history_fabrication() {
+        let root = TempDir::new().unwrap();
+        let adapter = ClaudeCodeAdapter::new();
+        let object_context = adapter
+            .bootstrap_object(
+                &instance(root.path()),
+                &object(
+                    PERSISTED_TOOL_RESULT_STREAM,
+                    &format!("project/{SESSION}/tool-results/bawkb4wxt.txt"),
+                ),
+            )
+            .unwrap();
+        let source = document_record(b"stdout\n\nexact trailing newline\n");
+        let mut batch = FactBatch::new(2, 2).unwrap();
+        assert_eq!(
+            adapter
+                .decode(
+                    DecodeContext {
+                        decoder: &DecoderId::new(PERSISTED_TOOL_RESULT_DECODER).unwrap(),
+                        object_context: &object_context,
+                    },
+                    &source,
+                    &mut batch,
+                )
+                .unwrap(),
+            DecodeDisposition::Applied
+        );
+        let Fact::PersistedToolResult(result) = &batch.facts()[0].value else {
+            panic!("expected persisted tool result");
+        };
+        assert_eq!(result.native_project_key, "project");
+        assert_eq!(result.native_session_id, SESSION);
+        assert_eq!(result.native_tool_use_id, "bawkb4wxt");
+        assert_eq!(result.native_document_path, "tool-results/bawkb4wxt.txt");
+        assert_eq!(result.content.as_bytes(), source.payload);
+        assert_eq!(result.size_bytes, source.payload.len() as u64);
+        assert!(fact_values(&batch).all(|fact| {
+            !matches!(
+                fact,
+                Fact::Session(_) | Fact::Message(_) | Fact::Run(_) | Fact::RunEvidence(_)
+            )
+        }));
+
+        let empty = document_record(b"");
+        let mut empty_batch = FactBatch::new(2, 2).unwrap();
+        assert_eq!(
+            adapter
+                .decode(
+                    DecodeContext {
+                        decoder: &DecoderId::new(PERSISTED_TOOL_RESULT_DECODER).unwrap(),
+                        object_context: &object_context,
+                    },
+                    &empty,
+                    &mut empty_batch,
+                )
+                .unwrap(),
+            DecodeDisposition::Applied
+        );
+        let Fact::PersistedToolResult(empty) = &empty_batch.facts()[0].value else {
+            panic!("expected empty persisted tool result");
+        };
+        assert!(empty.content.is_empty());
+        assert_eq!(empty.size_bytes, 0);
+
+        let invalid = document_record(&[0xff]);
+        let mut invalid_batch = FactBatch::new(2, 2).unwrap();
+        assert_eq!(
+            adapter
+                .decode(
+                    DecodeContext {
+                        decoder: &DecoderId::new(PERSISTED_TOOL_RESULT_DECODER).unwrap(),
+                        object_context: &object_context,
+                    },
+                    &invalid,
+                    &mut invalid_batch,
+                )
+                .unwrap(),
+            DecodeDisposition::PreservedUnknown
+        );
+        assert!(matches!(
+            invalid_batch.facts()[0].value,
+            Fact::UnknownRecord { .. }
+        ));
+        assert_eq!(
+            invalid_batch.diagnostics()[0].class,
+            AdapterErrorClass::RecordPermanent
+        );
+
+        let absent = absent_document_record();
+        let mut absent_batch = FactBatch::new(2, 2).unwrap();
+        assert_eq!(
+            adapter
+                .decode(
+                    DecodeContext {
+                        decoder: &DecoderId::new(PERSISTED_TOOL_RESULT_DECODER).unwrap(),
+                        object_context: &object_context,
+                    },
+                    &absent,
+                    &mut absent_batch,
+                )
+                .unwrap(),
+            DecodeDisposition::IgnoredKnown
+        );
+        assert!(absent_batch.facts().is_empty());
     }
 
     #[test]

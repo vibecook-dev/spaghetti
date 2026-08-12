@@ -25,6 +25,9 @@ use super::presence_projection::apply_presence_facts;
 use super::session_index_projection::apply_session_index_facts;
 use super::task_projection::apply_task_snapshots;
 use super::team_projection::apply_team_snapshots;
+use super::tool_result_projection::{
+    apply_persisted_tool_result_facts, replace_message_references, replaced_message_reference_keys,
+};
 use super::workflow_projection::apply_workflow_facts;
 use super::EngineError;
 
@@ -94,6 +97,7 @@ impl TransactionalProjectionWork for FactProjectionWork<'_> {
             context,
             "read replaced canonical sessions",
         )?;
+        let mut changed_tool_references = replaced_message_reference_keys(transaction, context)?;
         let mut changes = retract_canonical_generation(transaction, context)?;
         for envelope in self.batch.facts() {
             persist_fact(transaction, context, envelope)?;
@@ -225,6 +229,13 @@ impl TransactionalProjectionWork for FactProjectionWork<'_> {
                         fact.message.as_bytes(),
                         envelope,
                     )?);
+                    changed_tool_references.extend(replace_message_references(
+                        transaction,
+                        context,
+                        fact.message.as_bytes(),
+                        fact.session.as_bytes(),
+                        &fact.content,
+                    )?);
                 }
                 Fact::Run(fact) => {
                     transaction
@@ -272,6 +283,7 @@ impl TransactionalProjectionWork for FactProjectionWork<'_> {
                 Fact::Delegation(_)
                 | Fact::SessionIndexSnapshot(_)
                 | Fact::ProjectMemoryDocument(_)
+                | Fact::PersistedToolResult(_)
                 | Fact::DelegationMetadata(_)
                 | Fact::DelegationSpawn(_)
                 | Fact::TeamSnapshot(_)
@@ -297,6 +309,12 @@ impl TransactionalProjectionWork for FactProjectionWork<'_> {
             transaction,
             context,
             self.batch,
+        )?);
+        changes.extend(apply_persisted_tool_result_facts(
+            transaction,
+            context,
+            self.batch,
+            &changed_tool_references,
         )?);
         Ok(changes)
     }
@@ -2410,15 +2428,15 @@ mod tests {
 
     use crate::adapter::{
         AdapterId, AdapterObjectContext, AgentAdapter, ArtifactCapture, ArtifactContentFact,
-        ArtifactMetadataEntry, ArtifactMetadataSnapshotFact, ArtifactObservationKind,
-        DecodeContext, DecoderId, FactBatch, PlanSnapshotFact, PresenceFact,
-        ProjectMemoryDocumentFact, RunEvidenceFact, RunFact, SessionFact,
-        SessionIndexEntrySnapshot, SessionIndexSnapshotFact, SourceInstance, SourceInstanceKey,
-        SourceInstanceSpec as AdapterSourceInstanceSpec, SourceObjectDescriptor, SourceRoot,
-        StreamId, TaskCollectionKind, TaskItemSnapshot, TaskSnapshotCoverage, TaskSnapshotFact,
-        TaskStatus, TeamInboxMessageSnapshot, TeamInboxSnapshotFact, TeamMemberSnapshot,
-        TeamSnapshotFact, WorkflowMemberEventFact, WorkflowMemberEventKind, WorkflowSnapshotFact,
-        WorkflowStatus,
+        ArtifactMetadataEntry, ArtifactMetadataSnapshotFact, ArtifactObservationKind, ContentBlock,
+        DecodeContext, DecoderId, FactBatch, MessageFact, PersistedToolResultFact,
+        PlanSnapshotFact, PresenceFact, ProjectMemoryDocumentFact, RunEvidenceFact, RunFact,
+        SessionFact, SessionIndexEntrySnapshot, SessionIndexSnapshotFact, SourceInstance,
+        SourceInstanceKey, SourceInstanceSpec as AdapterSourceInstanceSpec, SourceObjectDescriptor,
+        SourceRoot, StreamId, TaskCollectionKind, TaskItemSnapshot, TaskSnapshotCoverage,
+        TaskSnapshotFact, TaskStatus, TeamInboxMessageSnapshot, TeamInboxSnapshotFact,
+        TeamMemberSnapshot, TeamSnapshotFact, WorkflowMemberEventFact, WorkflowMemberEventKind,
+        WorkflowSnapshotFact, WorkflowStatus,
     };
     use crate::claude::ClaudeCodeAdapter;
     use crate::core::schema;
@@ -2885,6 +2903,51 @@ mod tests {
             content: content.to_string(),
             size_bytes: content.len() as u64,
             is_index,
+        }
+    }
+
+    fn persisted_tool_result_fact(
+        native_tool_use_id: &str,
+        content: &str,
+    ) -> PersistedToolResultFact {
+        PersistedToolResultFact {
+            result: entity(
+                "persisted_tool_result",
+                &format!("{SESSION}/{native_tool_use_id}"),
+            ),
+            session: entity("session", SESSION),
+            project: entity("project", PROJECT),
+            native_project_key: PROJECT.to_string(),
+            native_session_id: SESSION.to_string(),
+            native_tool_use_id: native_tool_use_id.to_string(),
+            native_document_path: format!("tool-results/{native_tool_use_id}.txt"),
+            content: content.to_string(),
+            size_bytes: content.len() as u64,
+        }
+    }
+
+    fn tool_message(
+        native_message_id: &str,
+        role: MessageRole,
+        content: Vec<ContentBlock>,
+    ) -> MessageFact {
+        MessageFact {
+            message: entity("message", native_message_id),
+            session: entity("session", SESSION),
+            native_message_id: Some(native_message_id.to_string()),
+            native_kind: match &role {
+                MessageRole::Assistant => "assistant",
+                MessageRole::User => "user",
+                _ => "fixture",
+            }
+            .to_string(),
+            role,
+            content,
+            source_time: None,
+            parent_native_message_id: None,
+            model: None,
+            search_text: None,
+            raw_json: b"{}".to_vec(),
         }
     }
 
@@ -8001,6 +8064,520 @@ mod tests {
                 )
                 .unwrap(),
             1
+        );
+    }
+
+    #[test]
+    fn persisted_tool_results_late_join_replace_retract_and_never_create_history() {
+        let mut connection = database();
+        register_object(&mut connection);
+        let sidecar_object = b"tool-result-main";
+        register_object_key(&mut connection, sidecar_object, 12);
+        let native_tool_id = "toolu_result_1";
+
+        // Sidecar-first arrival is a durable result document, not fabricated
+        // transcript history or run evidence.
+        let initial_record = object_record(
+            2,
+            1,
+            SourceCursor::append_offset(0),
+            SourceCursor::append_offset(1),
+            20,
+            b"persisted-result-v1",
+        );
+        let mut initial = FactBatch::new(2, 1).unwrap();
+        initial
+            .push(
+                &initial_record,
+                Fact::PersistedToolResult(persisted_tool_result_fact(
+                    native_tool_id,
+                    "persisted result v1\n",
+                )),
+            )
+            .unwrap();
+        commit_object_batch(
+            &mut connection,
+            sidecar_object,
+            &initial_record,
+            1,
+            SourceCursor::append_offset(0).into_bytes(),
+            21,
+            &initial,
+        );
+        assert_eq!(count(&connection, "canonical_persisted_tool_results"), 1);
+        assert_eq!(count(&connection, "canonical_messages"), 0);
+        assert_eq!(count(&connection, "canonical_sessions"), 0);
+        assert_eq!(count(&connection, "canonical_runs"), 0);
+        assert_eq!(count(&connection, "run_evidence"), 0);
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT resolution_status || ':' || correlation_status || ':' || tool_call_match_count || ':' || tool_result_match_count FROM canonical_persisted_tool_results",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "resolved:unlinked:0:0"
+        );
+
+        let call_record = object_record(
+            1,
+            1,
+            SourceCursor::append_offset(0),
+            SourceCursor::append_offset(1),
+            30,
+            b"tool-call-message",
+        );
+        let mut call = FactBatch::new(2, 1).unwrap();
+        call.push(
+            &call_record,
+            Fact::Message(tool_message(
+                "call-message",
+                MessageRole::Assistant,
+                vec![ContentBlock::ToolCall {
+                    native_id: native_tool_id.to_string(),
+                    name: "Read".to_string(),
+                    input: serde_json::json!({"file_path": "/fixture/file"}),
+                }],
+            )),
+        )
+        .unwrap();
+        commit_object_batch(
+            &mut connection,
+            b"fixture-transcript",
+            &call_record,
+            1,
+            SourceCursor::append_offset(0).into_bytes(),
+            31,
+            &call,
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT correlation_status || ':' || tool_call_match_count || ':' || tool_result_match_count FROM canonical_persisted_tool_results",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "call_only:1:0"
+        );
+
+        let result_record = object_record(
+            1,
+            1,
+            SourceCursor::append_offset(1),
+            SourceCursor::append_offset(2),
+            40,
+            b"tool-result-message",
+        );
+        let mut result = FactBatch::new(2, 1).unwrap();
+        result
+            .push(
+                &result_record,
+                Fact::Message(tool_message(
+                    "result-message",
+                    MessageRole::User,
+                    vec![ContentBlock::ToolResult {
+                        native_call_id: native_tool_id.to_string(),
+                        content: serde_json::json!("compact inline result"),
+                        is_error: false,
+                    }],
+                )),
+            )
+            .unwrap();
+        commit_object_batch(
+            &mut connection,
+            b"fixture-transcript",
+            &result_record,
+            1,
+            SourceCursor::append_offset(1).into_bytes(),
+            41,
+            &result,
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT correlation_status || ':' || tool_call_match_count || ':' || tool_result_match_count FROM canonical_persisted_tool_results",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "linked:1:1"
+        );
+        assert_eq!(count(&connection, "message_tool_references"), 2);
+
+        // Same-generation replacement owns the current file rather than
+        // retaining both revisions as competing assertions.
+        let replacement_record = object_record(
+            2,
+            1,
+            SourceCursor::append_offset(1),
+            SourceCursor::append_offset(2),
+            50,
+            b"persisted-result-v2",
+        );
+        let mut replacement = FactBatch::new(2, 1).unwrap();
+        replacement
+            .push(
+                &replacement_record,
+                Fact::PersistedToolResult(persisted_tool_result_fact(
+                    native_tool_id,
+                    "persisted result v2\n",
+                )),
+            )
+            .unwrap();
+        commit_object_batch(
+            &mut connection,
+            sidecar_object,
+            &replacement_record,
+            1,
+            SourceCursor::append_offset(1).into_bytes(),
+            51,
+            &replacement,
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT content FROM canonical_persisted_tool_results",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "persisted result v2\n"
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM fact_records WHERE fact_kind = 'persisted_tool_result'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            1
+        );
+
+        // A transcript generation replacement retracts both old references
+        // before indexing the new message; the sidecar becomes result-only.
+        let generation_record = object_record(
+            1,
+            2,
+            SourceCursor::append_offset(0),
+            SourceCursor::append_offset(1),
+            60,
+            b"replacement-result-message",
+        );
+        let mut generation = FactBatch::new(2, 1).unwrap();
+        generation
+            .push(
+                &generation_record,
+                Fact::Message(tool_message(
+                    "replacement-result-message",
+                    MessageRole::User,
+                    vec![ContentBlock::ToolResult {
+                        native_call_id: native_tool_id.to_string(),
+                        content: serde_json::json!("new generation inline result"),
+                        is_error: false,
+                    }],
+                )),
+            )
+            .unwrap();
+        commit_object_batch(
+            &mut connection,
+            b"fixture-transcript",
+            &generation_record,
+            1,
+            SourceCursor::append_offset(2).into_bytes(),
+            61,
+            &generation,
+        );
+        assert_eq!(count(&connection, "canonical_messages"), 1);
+        assert_eq!(count(&connection, "message_tool_references"), 1);
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT correlation_status || ':' || tool_call_match_count || ':' || tool_result_match_count FROM canonical_persisted_tool_results",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "result_only:0:1"
+        );
+
+        let deleted_record = object_record(
+            2,
+            1,
+            SourceCursor::append_offset(2),
+            SourceCursor::append_offset(3),
+            70,
+            b"persisted-result-deleted",
+        );
+        commit_object_batch(
+            &mut connection,
+            sidecar_object,
+            &deleted_record,
+            1,
+            SourceCursor::append_offset(2).into_bytes(),
+            71,
+            &FactBatch::new(1, 1).unwrap(),
+        );
+        assert_eq!(count(&connection, "canonical_persisted_tool_results"), 0);
+
+        // Transcript-first arrival reaches the same result-only state when a
+        // file later reappears, and confirmed absence retracts it again.
+        let reappeared_record = object_record(
+            2,
+            1,
+            SourceCursor::append_offset(3),
+            SourceCursor::append_offset(4),
+            80,
+            b"persisted-result-reappeared",
+        );
+        let mut reappeared = FactBatch::new(2, 1).unwrap();
+        reappeared
+            .push(
+                &reappeared_record,
+                Fact::PersistedToolResult(persisted_tool_result_fact(
+                    native_tool_id,
+                    "reappeared\n",
+                )),
+            )
+            .unwrap();
+        commit_object_batch(
+            &mut connection,
+            sidecar_object,
+            &reappeared_record,
+            1,
+            SourceCursor::append_offset(3).into_bytes(),
+            81,
+            &reappeared,
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT correlation_status FROM canonical_persisted_tool_results",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "result_only"
+        );
+        let final_deleted_record = object_record(
+            2,
+            1,
+            SourceCursor::append_offset(4),
+            SourceCursor::append_offset(5),
+            90,
+            b"persisted-result-final-delete",
+        );
+        commit_object_batch(
+            &mut connection,
+            sidecar_object,
+            &final_deleted_record,
+            1,
+            SourceCursor::append_offset(4).into_bytes(),
+            91,
+            &FactBatch::new(1, 1).unwrap(),
+        );
+        assert_eq!(count(&connection, "canonical_persisted_tool_results"), 0);
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM fact_records WHERE fact_kind = 'persisted_tool_result'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn persisted_tool_result_duplicate_content_and_join_conflicts_are_explicit() {
+        let mut connection = database();
+        register_object(&mut connection);
+        let main_object = b"tool-result-main";
+        let competitor_object = b"tool-result-competitor";
+        register_object_key(&mut connection, main_object, 12);
+        register_object_key(&mut connection, competitor_object, 13);
+        let native_tool_id = "toolu_conflict";
+
+        let main_record = object_record(
+            2,
+            1,
+            SourceCursor::append_offset(0),
+            SourceCursor::append_offset(1),
+            20,
+            b"main",
+        );
+        let mut main = FactBatch::new(2, 1).unwrap();
+        main.push(
+            &main_record,
+            Fact::PersistedToolResult(persisted_tool_result_fact(native_tool_id, "same\n")),
+        )
+        .unwrap();
+        commit_object_batch(
+            &mut connection,
+            main_object,
+            &main_record,
+            1,
+            SourceCursor::append_offset(0).into_bytes(),
+            21,
+            &main,
+        );
+
+        let duplicate_record = object_record(
+            3,
+            1,
+            SourceCursor::append_offset(0),
+            SourceCursor::append_offset(1),
+            30,
+            b"duplicate",
+        );
+        let mut duplicate = FactBatch::new(2, 1).unwrap();
+        duplicate
+            .push(
+                &duplicate_record,
+                Fact::PersistedToolResult(persisted_tool_result_fact(native_tool_id, "same\n")),
+            )
+            .unwrap();
+        commit_object_batch(
+            &mut connection,
+            competitor_object,
+            &duplicate_record,
+            1,
+            SourceCursor::append_offset(0).into_bytes(),
+            31,
+            &duplicate,
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT resolution_status || ':' || assertion_count || ':' || competing_result_count FROM canonical_persisted_tool_results",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "resolved:2:0"
+        );
+
+        let competing_record = object_record(
+            3,
+            1,
+            SourceCursor::append_offset(1),
+            SourceCursor::append_offset(2),
+            40,
+            b"competing",
+        );
+        let mut competing = FactBatch::new(2, 1).unwrap();
+        competing
+            .push(
+                &competing_record,
+                Fact::PersistedToolResult(persisted_tool_result_fact(
+                    native_tool_id,
+                    "different\n",
+                )),
+            )
+            .unwrap();
+        commit_object_batch(
+            &mut connection,
+            competitor_object,
+            &competing_record,
+            1,
+            SourceCursor::append_offset(1).into_bytes(),
+            41,
+            &competing,
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT resolution_status || ':' || competing_result_count FROM canonical_persisted_tool_results",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "conflicting:1"
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT operation FROM change_log WHERE topic = 'diagnostic.history.persisted-tool-result-conflict' ORDER BY commit_seq DESC LIMIT 1",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "upsert"
+        );
+
+        let duplicate_calls_record = object_record(
+            1,
+            1,
+            SourceCursor::append_offset(0),
+            SourceCursor::append_offset(1),
+            50,
+            b"duplicate-calls",
+        );
+        let duplicate_call = ContentBlock::ToolCall {
+            native_id: native_tool_id.to_string(),
+            name: "Read".to_string(),
+            input: serde_json::json!({}),
+        };
+        let mut duplicate_calls = FactBatch::new(2, 1).unwrap();
+        duplicate_calls
+            .push(
+                &duplicate_calls_record,
+                Fact::Message(tool_message(
+                    "duplicate-call-message",
+                    MessageRole::Assistant,
+                    vec![duplicate_call.clone(), duplicate_call],
+                )),
+            )
+            .unwrap();
+        commit_object_batch(
+            &mut connection,
+            b"fixture-transcript",
+            &duplicate_calls_record,
+            1,
+            SourceCursor::append_offset(0).into_bytes(),
+            51,
+            &duplicate_calls,
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT correlation_status || ':' || tool_call_match_count || ':' || join_conflict FROM canonical_persisted_tool_results",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "ambiguous:2:1"
+        );
+
+        let competitor_deleted_record = object_record(
+            3,
+            1,
+            SourceCursor::append_offset(2),
+            SourceCursor::append_offset(3),
+            60,
+            b"competitor-deleted",
+        );
+        commit_object_batch(
+            &mut connection,
+            competitor_object,
+            &competitor_deleted_record,
+            1,
+            SourceCursor::append_offset(2).into_bytes(),
+            61,
+            &FactBatch::new(1, 1).unwrap(),
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT resolution_status || ':' || competing_result_count || ':' || correlation_status FROM canonical_persisted_tool_results",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "resolved:0:ambiguous"
         );
     }
 

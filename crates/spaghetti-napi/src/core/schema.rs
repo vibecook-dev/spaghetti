@@ -70,7 +70,9 @@ use thiserror::Error;
 /// transcript late joins, and project/entry conflict provenance.
 /// v28: independently replaceable project-memory Markdown documents, native
 /// index classification, and deterministic conflict provenance.
-pub const SCHEMA_VERSION: u32 = 28;
+/// v29: persisted tool-result text assertions, deterministic transcript block
+/// correlation, and explicit join/conflict state.
+pub const SCHEMA_VERSION: u32 = 29;
 
 /// Full DDL for the current schema — lifted verbatim from the TS `SCHEMA_SQL`
 /// template literal. Whitespace differs; structure does not.
@@ -553,6 +555,47 @@ CREATE TABLE IF NOT EXISTS canonical_project_memory_documents (
   last_commit_seq INTEGER NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS persisted_tool_result_assertions (
+  fact_id BLOB PRIMARY KEY REFERENCES fact_records(fact_id) ON DELETE CASCADE,
+  result_key BLOB NOT NULL,
+  session_key BLOB NOT NULL,
+  project_key BLOB NOT NULL,
+  native_project_key TEXT NOT NULL,
+  native_session_id TEXT NOT NULL,
+  native_tool_use_id TEXT NOT NULL,
+  native_document_path TEXT NOT NULL,
+  content TEXT NOT NULL,
+  size_bytes INTEGER NOT NULL,
+  result_digest BLOB NOT NULL,
+  source_object_id INTEGER NOT NULL,
+  source_generation INTEGER NOT NULL,
+  cursor_end BLOB NOT NULL,
+  last_commit_seq INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS canonical_persisted_tool_results (
+  result_key BLOB PRIMARY KEY,
+  session_key BLOB NOT NULL,
+  project_key BLOB NOT NULL,
+  native_project_key TEXT NOT NULL,
+  native_session_id TEXT NOT NULL,
+  native_tool_use_id TEXT NOT NULL,
+  native_document_path TEXT NOT NULL,
+  content TEXT NOT NULL,
+  size_bytes INTEGER NOT NULL,
+  resolution_status TEXT NOT NULL,
+  correlation_status TEXT NOT NULL,
+  tool_call_message_key BLOB,
+  tool_result_message_key BLOB,
+  decisive_fact_id BLOB NOT NULL REFERENCES persisted_tool_result_assertions(fact_id) ON DELETE CASCADE,
+  assertion_count INTEGER NOT NULL,
+  competing_result_count INTEGER NOT NULL,
+  tool_call_match_count INTEGER NOT NULL,
+  tool_result_match_count INTEGER NOT NULL,
+  join_conflict INTEGER NOT NULL,
+  last_commit_seq INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS canonical_messages (
   message_key BLOB PRIMARY KEY,
   session_key BLOB NOT NULL,
@@ -572,6 +615,17 @@ CREATE TABLE IF NOT EXISTS canonical_messages (
   cursor_start BLOB NOT NULL,
   cursor_end BLOB NOT NULL,
   last_commit_seq INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS message_tool_references (
+  message_key BLOB NOT NULL REFERENCES canonical_messages(message_key) ON DELETE CASCADE,
+  session_key BLOB NOT NULL,
+  native_tool_use_id TEXT NOT NULL,
+  reference_kind TEXT NOT NULL,
+  block_ordinal INTEGER NOT NULL,
+  source_object_id INTEGER NOT NULL,
+  source_generation INTEGER NOT NULL,
+  PRIMARY KEY (message_key, reference_kind, block_ordinal)
 );
 
 CREATE TABLE IF NOT EXISTS canonical_runs (
@@ -1392,6 +1446,12 @@ CREATE INDEX IF NOT EXISTS idx_project_memory_document_assertions_document ON pr
 CREATE INDEX IF NOT EXISTS idx_project_memory_document_assertions_source ON project_memory_document_assertions(source_object_id, document_key);
 CREATE INDEX IF NOT EXISTS idx_project_memory_document_assertions_project ON project_memory_document_assertions(project_key, native_document_path);
 CREATE INDEX IF NOT EXISTS idx_canonical_project_memory_documents_project ON canonical_project_memory_documents(project_key, is_index DESC, native_document_path);
+CREATE INDEX IF NOT EXISTS idx_persisted_tool_result_assertions_result ON persisted_tool_result_assertions(result_key, fact_id);
+CREATE INDEX IF NOT EXISTS idx_persisted_tool_result_assertions_source ON persisted_tool_result_assertions(source_object_id, result_key);
+CREATE INDEX IF NOT EXISTS idx_persisted_tool_result_assertions_native ON persisted_tool_result_assertions(session_key, native_tool_use_id, result_key);
+CREATE INDEX IF NOT EXISTS idx_canonical_persisted_tool_results_session ON canonical_persisted_tool_results(session_key, native_tool_use_id, result_key);
+CREATE INDEX IF NOT EXISTS idx_message_tool_references_native ON message_tool_references(session_key, native_tool_use_id, reference_kind, message_key);
+CREATE INDEX IF NOT EXISTS idx_message_tool_references_source ON message_tool_references(source_object_id, source_generation, session_key, native_tool_use_id);
 CREATE INDEX IF NOT EXISTS idx_canonical_messages_session_order ON canonical_messages(session_key, source_generation, cursor_start);
 CREATE INDEX IF NOT EXISTS idx_canonical_runs_session ON canonical_runs(session_key, run_key);
 CREATE INDEX IF NOT EXISTS idx_run_evidence_run_order ON run_evidence(run_key, source_generation, cursor_end);
@@ -1591,6 +1651,9 @@ const CURRENT_TABLES: &[&str] = &[
     "session_index_snapshot_assertions",
     "canonical_project_memory_documents",
     "project_memory_document_assertions",
+    "canonical_persisted_tool_results",
+    "persisted_tool_result_assertions",
+    "message_tool_references",
     "canonical_artifacts",
     "artifact_content_assertions",
     "artifact_metadata_assertions",
@@ -2076,6 +2139,22 @@ mod tests {
             &conn,
             "index",
             "idx_canonical_project_memory_documents_project"
+        ));
+        assert!(object_exists(
+            &conn,
+            "table",
+            "persisted_tool_result_assertions"
+        ));
+        assert!(object_exists(
+            &conn,
+            "table",
+            "canonical_persisted_tool_results"
+        ));
+        assert!(object_exists(&conn, "table", "message_tool_references"));
+        assert!(object_exists(
+            &conn,
+            "index",
+            "idx_message_tool_references_native"
         ));
         assert!(object_exists(&conn, "table", "canonical_messages"));
         assert!(object_exists(&conn, "table", "canonical_runs"));

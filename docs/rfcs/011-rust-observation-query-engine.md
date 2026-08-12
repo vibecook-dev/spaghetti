@@ -8,7 +8,7 @@
 - **Type:** Architecture / migration / adapter contract / public API
 - **Scope:** Rust ingest, live source observation, sole SQLite ownership, runtime-state projection, search and query, token usage, source adapters, durable subscriptions
 - **Numbering note:** `packages/sdk/src/io/sqlite-service.ts` already identifies the `better-sqlite3` → `node:sqlite` migration as RFC 010. This architecture therefore uses RFC 011.
-- **Phase records:** [Phase 0 baseline](./011-phase-0-baseline.md) · [Phase 1 engine shell](./011-phase-1-engine-shell.md) · [Phase 2 transactional catalog](./011-phase-2-transactional-catalog.md) · [Phase 4 Claude history/usage](./011-phase-4-claude-history-usage.md) · [Phase 5 delegation pack](./011-phase-5-delegation-pack.md) · [Phase 5 teams/inbox pack](./011-phase-5-teams-inbox-pack.md) · [Phase 5 presence pack](./011-phase-5-presence-pack.md) · [Phase 5 tasks/plans pack](./011-phase-5-tasks-plans-pack.md) · [Phase 5 artifacts pack](./011-phase-5-artifacts-pack.md) · [Phase 5 workflows pack](./011-phase-5-workflows-pack.md) · [Phase 5 session-index pack](./011-phase-5-session-index-pack.md) · [Phase 5 project-memory pack](./011-phase-5-project-memory-pack.md)
+- **Phase records:** [Phase 0 baseline](./011-phase-0-baseline.md) · [Phase 1 engine shell](./011-phase-1-engine-shell.md) · [Phase 2 transactional catalog](./011-phase-2-transactional-catalog.md) · [Phase 4 Claude history/usage](./011-phase-4-claude-history-usage.md) · [Phase 5 delegation pack](./011-phase-5-delegation-pack.md) · [Phase 5 teams/inbox pack](./011-phase-5-teams-inbox-pack.md) · [Phase 5 presence pack](./011-phase-5-presence-pack.md) · [Phase 5 tasks/plans pack](./011-phase-5-tasks-plans-pack.md) · [Phase 5 artifacts pack](./011-phase-5-artifacts-pack.md) · [Phase 5 workflows pack](./011-phase-5-workflows-pack.md) · [Phase 5 session-index pack](./011-phase-5-session-index-pack.md) · [Phase 5 project-memory pack](./011-phase-5-project-memory-pack.md) · [Phase 5 persisted tool-results pack](./011-phase-5-tool-results-pack.md)
 - **Related documents:**
   - `docs/TWO-PLANE-INGEST-ARCHITECTURE.md`
   - `docs/rfcs/003-rust-ingest-core.md`
@@ -3214,6 +3214,7 @@ Migration is staged so every phase has one owner, a differential oracle, and a r
 - Add workflow summaries and append journals without inferring child terminal state.
 - Add replaceable session-index metadata without fabricating transcript history.
 - Add independently replaceable project-memory documents without inventing runtime evidence.
+- Add persisted tool-result text with typed transcript late correlation and explicit conflicts.
 - Add late-correlation and conflict tests.
 - Switch Claude live observation to the Rust engine.
 

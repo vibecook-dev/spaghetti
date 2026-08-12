@@ -217,6 +217,24 @@ pub struct ProjectMemoryDocumentFact {
     pub is_index: bool,
 }
 
+/// One independently replaceable persisted tool-result text document.
+///
+/// The native file may supplement a transcript tool call or inline result,
+/// but its presence alone is not message or run evidence. Correlation is
+/// performed by the common projector using the session-scoped native tool ID.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PersistedToolResultFact {
+    pub result: EntityKey,
+    pub session: EntityKey,
+    pub project: EntityKey,
+    pub native_project_key: String,
+    pub native_session_id: String,
+    pub native_tool_use_id: String,
+    pub native_document_path: String,
+    pub content: String,
+    pub size_bytes: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MessageRole {
     User,
@@ -714,6 +732,7 @@ pub enum Fact {
     Session(SessionFact),
     SessionIndexSnapshot(SessionIndexSnapshotFact),
     ProjectMemoryDocument(ProjectMemoryDocumentFact),
+    PersistedToolResult(PersistedToolResultFact),
     Message(MessageFact),
     Run(RunFact),
     Delegation(DelegationFact),
@@ -743,6 +762,7 @@ impl Fact {
             Self::Session(_) => "session",
             Self::SessionIndexSnapshot(_) => "session_index_snapshot",
             Self::ProjectMemoryDocument(_) => "project_memory_document",
+            Self::PersistedToolResult(_) => "persisted_tool_result",
             Self::Message(_) => "message",
             Self::Run(_) => "run",
             Self::Delegation(_) => "delegation",
@@ -768,6 +788,7 @@ impl Fact {
             Self::Session(fact) => Some(&fact.session),
             Self::SessionIndexSnapshot(fact) => Some(&fact.project),
             Self::ProjectMemoryDocument(fact) => Some(&fact.document),
+            Self::PersistedToolResult(fact) => Some(&fact.result),
             Self::Message(fact) => Some(&fact.message),
             Self::Run(fact) => Some(&fact.run),
             Self::Delegation(fact) => Some(&fact.child_run),

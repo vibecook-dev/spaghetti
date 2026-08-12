@@ -14,6 +14,7 @@ mod query_pool;
 mod session_index_projection;
 mod task_projection;
 mod team_projection;
+mod tool_result_projection;
 mod workflow_projection;
 mod writer;
 

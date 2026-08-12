@@ -123,7 +123,7 @@ report zero differences.
 
 ## Remaining Phase 5 work
 
-Project memory is now implemented in the adjacent Phase 5 pack. Standalone
-tool-result, settings, and other reviewed sidecar packs remain. The observation
+Project memory and persisted tool results are now implemented in adjacent Phase
+5 packs. Settings and other reviewed sidecar packs remain. The observation
 coordinator and production Rust live cutover are also required for the Phase 5
 exit gate.

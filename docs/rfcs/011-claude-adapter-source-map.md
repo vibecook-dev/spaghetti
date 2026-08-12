@@ -3,8 +3,8 @@
 Status: Phase 4 history/usage complete; Phase 5 delegation, native metadata,
 parent-spawn correlation, team/config/inbox snapshots, active-session
 presence, task/todo/plan snapshots, file-history artifacts, workflow
-summaries/journals, session-index metadata, and project-memory documents
-implemented on 2026-08-11
+summaries/journals, session-index metadata, project-memory documents, and
+persisted tool-result text implemented on 2026-08-11
 
 This survey defines the native inputs and semantic claims currently made by
 the Rust `claude-code` adapter. It is narrower than the legacy Claude parser on
@@ -14,8 +14,10 @@ inbox snapshots, native active-session registry presence, replaceable task,
 todo, and plan documents, joined file-history metadata/content, and native
 workflow containers/member events. Phase 5 also preserves replaceable
 session-index metadata without treating the index as transcript history, while
-preserving each native project-memory Markdown document independently. Richer
-runtime packs remain in progress.
+preserving each native project-memory Markdown document independently. It also
+retains persisted tool-result text as supplemental output and correlates it to
+typed transcript blocks without fabricating history. Richer runtime packs
+remain in progress.
 
 ## Installation and source identity
 
@@ -37,22 +39,23 @@ authoritative snapshot.
 
 ## Implemented streams
 
-| Stream                     | Root       | Selector                                  | Driver                                           | Authority    | Scope      |
-| -------------------------- | ---------- | ----------------------------------------- | ------------------------------------------------ | ------------ | ---------- |
-| `session-transcripts`      | `projects` | `*/*.jsonl`                               | `AppendDelimitedFile` (`\n`, CRLF normalization) | Canonical    | Session    |
-| `subagent-transcripts`     | `projects` | `*/*/subagents/**/agent-*.jsonl`          | `AppendDelimitedFile` (`\n`, CRLF normalization) | Canonical    | Run        |
-| `subagent-metadata`        | `projects` | `*/*/subagents/**/agent-*.meta.json`      | `ReplaceDocument` (64 KiB bound)                 | Supplemental | Run        |
-| `team-configs`             | `teams`    | `*/config.json`                           | `ReplaceDocument` (1 MiB bound)                  | Canonical    | Team       |
-| `team-inboxes`             | `teams`    | `*/inboxes/*.json`                        | `ReplaceDocument` (4 MiB bound)                  | Canonical    | Team inbox |
-| `active-sessions`          | `sessions` | `*.json`                                  | `PresenceObject` (64 KiB content bound)          | Canonical    | Presence   |
-| `todo-snapshots`           | `home`     | `todos/*-agent-*.json`                    | `ReplaceDocument` (1 MiB bound)                  | Canonical    | Task list  |
-| `task-items`               | `home`     | `tasks/*/*.json`                          | `ReplaceDocument` (256 KiB bound)                | Canonical    | Task       |
-| `plan-documents`           | `home`     | `plans/*.md`                              | `ReplaceDocument` (4 MiB bound)                  | Canonical    | Plan       |
-| `file-history-blobs`       | `home`     | `file-history/*/*@v*`                     | `ReplaceDocument` (1 MiB bound)                  | Canonical    | Artifact   |
-| `workflow-runs`            | `projects` | `*/*/workflows/wf_*.json`                 | `ReplaceDocument` (1 MiB bound)                  | Canonical    | Workflow   |
-| `workflow-journals`        | `projects` | `*/*/subagents/workflows/*/journal.jsonl` | `AppendDelimitedFile` (`\n`, CRLF normalization) | Canonical    | Member     |
-| `session-indexes`          | `projects` | `*/sessions-index.json`                   | `ReplaceDocument` (1 MiB bound)                  | Supplemental | Project    |
-| `project-memory-documents` | `projects` | `*/memory/*.md`                           | `ReplaceDocument` (1 MiB bound)                  | Canonical    | Project    |
+| Stream                     | Root       | Selector                                  | Driver                                           | Authority    | Scope       |
+| -------------------------- | ---------- | ----------------------------------------- | ------------------------------------------------ | ------------ | ----------- |
+| `session-transcripts`      | `projects` | `*/*.jsonl`                               | `AppendDelimitedFile` (`\n`, CRLF normalization) | Canonical    | Session     |
+| `subagent-transcripts`     | `projects` | `*/*/subagents/**/agent-*.jsonl`          | `AppendDelimitedFile` (`\n`, CRLF normalization) | Canonical    | Run         |
+| `subagent-metadata`        | `projects` | `*/*/subagents/**/agent-*.meta.json`      | `ReplaceDocument` (64 KiB bound)                 | Supplemental | Run         |
+| `team-configs`             | `teams`    | `*/config.json`                           | `ReplaceDocument` (1 MiB bound)                  | Canonical    | Team        |
+| `team-inboxes`             | `teams`    | `*/inboxes/*.json`                        | `ReplaceDocument` (4 MiB bound)                  | Canonical    | Team inbox  |
+| `active-sessions`          | `sessions` | `*.json`                                  | `PresenceObject` (64 KiB content bound)          | Canonical    | Presence    |
+| `todo-snapshots`           | `home`     | `todos/*-agent-*.json`                    | `ReplaceDocument` (1 MiB bound)                  | Canonical    | Task list   |
+| `task-items`               | `home`     | `tasks/*/*.json`                          | `ReplaceDocument` (256 KiB bound)                | Canonical    | Task        |
+| `plan-documents`           | `home`     | `plans/*.md`                              | `ReplaceDocument` (4 MiB bound)                  | Canonical    | Plan        |
+| `file-history-blobs`       | `home`     | `file-history/*/*@v*`                     | `ReplaceDocument` (1 MiB bound)                  | Canonical    | Artifact    |
+| `workflow-runs`            | `projects` | `*/*/workflows/wf_*.json`                 | `ReplaceDocument` (1 MiB bound)                  | Canonical    | Workflow    |
+| `workflow-journals`        | `projects` | `*/*/subagents/workflows/*/journal.jsonl` | `AppendDelimitedFile` (`\n`, CRLF normalization) | Canonical    | Member      |
+| `session-indexes`          | `projects` | `*/sessions-index.json`                   | `ReplaceDocument` (1 MiB bound)                  | Supplemental | Project     |
+| `project-memory-documents` | `projects` | `*/memory/*.md`                           | `ReplaceDocument` (1 MiB bound)                  | Canonical    | Project     |
+| `persisted-tool-results`   | `projects` | `*/*/tool-results/*.txt`                  | `ReplaceDocument` (16 MiB bound)                 | Supplemental | Tool result |
 
 Transcript streams use incremental byte cursors and interactive priority. The
 team/metadata, artifact, and workflow-run document streams use snapshot-replace
@@ -60,7 +63,8 @@ consistency and foreground-repair priority. The presence, task, todo, and plan
 streams use snapshot replacement and interactive priority. Workflow journals
 use incremental byte cursors and interactive priority. Session indexes use
 snapshot replacement and interactive priority. Project-memory documents also
-use snapshot replacement and interactive priority. All fourteen use
+use snapshot replacement and interactive priority. Persisted tool results use
+snapshot replacement and interactive priority. All fifteen use
 `MirrorSource` deletion and full raw retention during shadow migration. Common
 drivers—not the adapter—own framing or stable reads, file identity,
 generations/revisions, checkpoints, watcher recovery, and scheduling.
@@ -103,6 +107,12 @@ Project-memory paths are confined to exact
 an independent source object. `MEMORY.md` is classified as the native index,
 but sibling topic documents have equal content authority; nested and
 non-Markdown lookalikes fail bootstrap.
+
+Persisted tool-result paths are confined to exact
+`<project>/<session-uuid>/tool-results/<non-empty-id>.txt` shapes. Filename
+stems are opaque native identifiers: model-style `toolu_*`, short generated,
+and hook stdout IDs are all valid. Immediate JSON/PDF siblings and nested
+rendered descendants are excluded for separate binary-artifact semantics.
 
 ## Native record interpretation
 
@@ -153,6 +163,9 @@ Each complete native record or document is decoded once into common facts:
 - `ProjectMemoryDocumentFact` for each present Markdown file, preserving
   project/document identity, native path, index classification, heading-derived
   title, exact content, and byte size;
+- `PersistedToolResultFact` for each valid immediate text sidecar, preserving
+  result/session/project identity, native tool ID and path, exact content, and
+  byte size without creating transcript or runtime facts;
 - `RunEvidenceFact::ActivityObserved` with `NativeActivity` strength;
 - `UsageFact` when the record contains non-zero native usage.
 
@@ -232,6 +245,10 @@ The additive project-memory stream advances the adapter contract to version 11
 and declares `claude-code-project-memory-v1`. Earlier stream fact identities and
 meanings remain unchanged.
 
+The additive persisted-tool-result stream advances the adapter contract to
+version 12 and declares `claude-code-persisted-tool-result-v1`. Earlier stream
+fact identities and meanings remain unchanged.
+
 Team identity comes from the native directory name. Member identity is scoped
 by team plus native member name, and an inbox is scoped by team plus recipient.
 Inbox messages prefer non-empty native `msg_id`. Older messages derive a
@@ -291,6 +308,13 @@ granularity. `MEMORY.md` is a native index convention, not a complete snapshot
 of the directory. Sibling topic files remain independently queryable. Markdown
 links are retained as content and do not assert joins, sessions, runs, activity,
 or lifecycle evidence.
+
+Claude declares `history.persisted_tool_results` as native and live at
+persisted-tool-result granularity. The document is supplemental full output,
+not a replacement for an inline transcript block. The common projector joins
+only on the stable session key plus typed native tool ID and records
+`unlinked`, `call_only`, `result_only`, `linked`, or `ambiguous` state. Text
+that happens to mention an agent ID is not delegation evidence.
 
 The transcript decoder declares activity only. Neither it nor the presence
 pack turns quiet files, missing watch events, or filesystem nesting into
@@ -384,14 +408,21 @@ assertions with deterministic selection and durable diagnostics. A present
 zero-byte document is distinct from confirmed absence. Superseded audit facts
 retract after canonical foreign keys move to the current assertion.
 
+Every persisted tool-result file is independently replaceable. Same-generation
+edits replace that source object's assertion, and confirmed deletion retracts
+only that output. Agreeing duplicate objects increase assertion count without
+a content conflict; byte-different outputs remain competing and diagnosed.
+Transcript-first and sidecar-first arrival converge through an indexed common
+tool-reference projection. Transcript generation replacement refreshes all
+affected joins in the same transaction.
+
 ## Remaining Phase 5 sources
 
-Legacy tool-result text that only mentions an agent ID is not used for native
-correlation. A future compatibility fallback must be classified
-`NativeIndirect`, not explicit. The adapter also does not yet declare
-tool-result files, settings, or other sidecars. Those inputs need
-replace-document, directory-snapshot, or other reviewed stream and capability
-semantics.
+Persisted tool-result text that only mentions an agent ID is not used for
+native delegation correlation. A future compatibility fallback must be
+classified `NativeIndirect`, not explicit. The adapter does not yet declare
+settings or other remaining sidecars. Those inputs need replace-document,
+directory-snapshot, or other reviewed stream and capability semantics.
 Credentials, debug logs, telemetry, caches, and arbitrary symlink escapes
 remain out of scope.
 
@@ -471,3 +502,10 @@ classification, UTF-8 and zero-byte semantics, exact content/title retention,
 independent same-generation replacement and deletion, deterministic conflicts
 and clearing, audit cleanup, and the invariant that memory content creates no
 history or runtime evidence.
+
+The persisted-tool-result trace covers exact immediate text paths across all
+observed ID families, UTF-8 and empty/absent semantics, exact content retention,
+sidecar-first and transcript-first correlation, every explicit join state,
+same-generation and transcript-generation replacement, agreeing and competing
+assertions, duplicate-block ambiguity, diagnostic clearing, audit cleanup, and
+the invariant that a sidecar creates no transcript or lifecycle evidence.

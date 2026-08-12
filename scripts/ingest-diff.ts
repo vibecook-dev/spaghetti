@@ -458,6 +458,9 @@ const RFC011_SCHEMA_TABLES = [
   'canonical_session_index_entries',
   'project_memory_document_assertions',
   'canonical_project_memory_documents',
+  'persisted_tool_result_assertions',
+  'canonical_persisted_tool_results',
+  'message_tool_references',
   'canonical_messages',
   'canonical_runs',
   'run_evidence',
@@ -566,6 +569,18 @@ const TABLE_SPECS: TableSpec[] = [
   {
     name: 'canonical_project_memory_documents',
     orderBy: 'project_key, is_index DESC, native_document_path',
+  },
+  {
+    name: 'persisted_tool_result_assertions',
+    orderBy: 'session_key, native_tool_use_id, fact_id',
+  },
+  {
+    name: 'canonical_persisted_tool_results',
+    orderBy: 'session_key, native_tool_use_id, result_key',
+  },
+  {
+    name: 'message_tool_references',
+    orderBy: 'session_key, native_tool_use_id, reference_kind, message_key, block_ordinal',
   },
   {
     name: 'canonical_messages',

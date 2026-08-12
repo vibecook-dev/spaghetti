@@ -148,7 +148,7 @@ gate for the commit.
 
 ## Remaining Phase 5 work
 
-Session-index metadata and project memory are now implemented in adjacent Phase
-5 packs. Standalone tool-result, settings, and other reviewed sidecar packs
-remain. The observation coordinator and production Rust live cutover are also
-required for the Phase 5 exit gate.
+Session-index metadata, project memory, and persisted tool results are now
+implemented in adjacent Phase 5 packs. Settings and other reviewed sidecar
+packs remain. The observation coordinator and production Rust live cutover are
+also required for the Phase 5 exit gate.
