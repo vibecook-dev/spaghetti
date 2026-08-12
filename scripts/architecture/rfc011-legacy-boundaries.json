@@ -64,6 +64,10 @@
     "rust_adapter_storage_boundary_violations": {
       "description": "Rust adapter contracts and vendor adapters cannot depend on Spaghetti storage, writer/event internals, orchestration, or N-API.",
       "allowed": []
+    },
+    "migrated_client_direct_engine_queries": {
+      "description": "Consumers already migrated to SpaghettiClient may keep native engine lifecycle ownership but cannot resume direct N-API query calls.",
+      "allowed": []
     }
   }
 }

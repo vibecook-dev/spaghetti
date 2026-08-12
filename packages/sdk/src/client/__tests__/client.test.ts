@@ -211,6 +211,34 @@ describe('SpaghettiClient protocol', () => {
     });
   });
 
+  test('maps N-API status codes onto stable transport-neutral errors', () => {
+    const nativeError = (code: string, message: string): Error => Object.assign(new Error(message), { code });
+
+    assert.deepEqual(normalizeTransportError(nativeError('InvalidArg', 'native validation detail'), 'napi-1'), {
+      code: 'invalid_request',
+      message: 'The query request is invalid.',
+      reason: 'validation_failed',
+    });
+    assert.deepEqual(normalizeTransportError(nativeError('QueueFull', 'native queue detail'), 'napi-2'), {
+      code: 'database_busy',
+      message: 'The Spaghetti query queue is full.',
+      reason: 'query_queue_full',
+    });
+    assert.deepEqual(normalizeTransportError(nativeError('Closing', 'native close detail'), 'napi-3'), {
+      code: 'engine_stopping',
+      message: 'The Spaghetti engine is stopping.',
+    });
+    assert.deepEqual(normalizeTransportError(nativeError('Cancelled', 'native cancellation detail'), 'napi-4'), {
+      code: 'cancelled',
+      message: 'The query was cancelled.',
+    });
+    assert.equal(
+      normalizeTransportError(nativeError('InvalidArg', 'history cursor expired'), 'napi-5').code,
+      'cursor_invalid',
+      'cursor classification remains more specific than InvalidArg',
+    );
+  });
+
   test('rejects pre-aborted and post-disposal requests without dispatch', async () => {
     const transport = new FakeTransport();
     const client = await openSpaghettiClient({ transport });

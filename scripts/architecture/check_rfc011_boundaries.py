@@ -37,6 +37,17 @@ ADAPTER_STORAGE_FORBIDDEN_RE = re.compile(
     r"\b(?:crate::(?:engine|orchestrate|napi_engine|core::(?:schema|writer|event))"
     r"|rusqlite|napi)(?:::|\b)"
 )
+MIGRATED_CLIENT_CONSUMERS = (
+    "packages/sdk/src/observation-shadow.ts",
+)
+DIRECT_ENGINE_QUERY_RE = re.compile(
+    r"\b(?:this\.)?engine\.(?:"
+    r"health|overview|replayChanges|listHistoryProjects|listHistorySessions|getSession|getMessages|search|getTimeline|"
+    r"listDelegations|listWorkflows|getWorkflow|listWorkflowMembers|listMemoryDocuments|listTaskCollections|listTasks|"
+    r"listPlans|listToolResults|listArtifacts|listSources|getStats|getUsage|getUsageActivity|getRuntimeSnapshot|"
+    r"getRunState|listTeams|getTeam|listTeamInboxes|listTeamInboxMessages"
+    r")\s*\("
+)
 
 
 def repo_path(path: Path) -> str:
@@ -145,6 +156,15 @@ def discover_rust_adapter_storage_boundary_violations() -> set[str]:
     }
 
 
+def discover_migrated_client_direct_engine_queries() -> set[str]:
+    """Once a consumer moves to SpaghettiClient, direct N-API reads cannot return."""
+    return {
+        relative
+        for relative in MIGRATED_CLIENT_CONSUMERS
+        if DIRECT_ENGINE_QUERY_RE.search(read(REPO_ROOT / relative))
+    }
+
+
 DISCOVERERS: dict[str, Callable[[], set[str]]] = {
     "typescript_sql_authorities": discover_typescript_sql_authorities,
     "typescript_sql_drivers": discover_typescript_sql_drivers,
@@ -153,6 +173,7 @@ DISCOVERERS: dict[str, Callable[[], set[str]]] = {
     "rust_common_source_dispatch": discover_rust_common_source_dispatch,
     "rust_source_boundary_violations": discover_rust_source_boundary_violations,
     "rust_adapter_storage_boundary_violations": discover_rust_adapter_storage_boundary_violations,
+    "migrated_client_direct_engine_queries": discover_migrated_client_direct_engine_queries,
 }
 
 

@@ -57,6 +57,13 @@ import {
   type SpaghettiEngineWorkflowPage,
   type SpaghettiEngineWorkflowPageOptions,
 } from './native.js';
+import {
+  NapiTransport,
+  openSpaghettiClient,
+  type SpaghettiClient,
+  type SpaghettiClientInfo,
+  type SpaghettiQueryOptions,
+} from './client/index.js';
 
 const OWNER_LOCK_SUFFIX = '.owner-lock.sqlite3';
 const OWNER_METADATA_SUFFIX = '.owner.json';
@@ -224,6 +231,8 @@ export interface ClaudeObservationShadow {
   readonly databasePath: string;
   readonly roots: readonly string[];
   readonly status: SpaghettiEngineStatus;
+  /** Negotiated query boundary used by every shadow read. */
+  readonly clientInfo: SpaghettiClientInfo;
   snapshot(signal?: AbortSignal): Promise<ClaudeObservationShadowSnapshot>;
   compareHistory(legacy: ClaudeLegacyHistoryCounts, signal?: AbortSignal): Promise<ClaudeObservationHistoryParity>;
   /** Query Rust-owned canonical project summaries without opening either database in TypeScript. */
@@ -570,10 +579,16 @@ export async function openClaudeObservationShadow(
     queryWorkers: options.queryWorkers ?? 1,
     ownerLabel: options.ownerLabel ?? 'sdk-claude-observation-shadow',
   });
+  let client: SpaghettiClient | undefined;
   try {
     await engine.startClaudeObservation({ roots, reason: 'shadow_observation' }, options.signal);
-    return new NativeClaudeObservationShadow(engine, roots);
+    client = await openSpaghettiClient({
+      transport: new NapiTransport({ engine, ownsEngine: false }),
+      clientName: 'claude-observation-shadow',
+    });
+    return new NativeClaudeObservationShadow(engine, client, roots);
   } catch (error) {
+    await client?.dispose().catch(() => undefined);
     await engine.dispose();
     throw error;
   }
@@ -586,6 +601,7 @@ class NativeClaudeObservationShadow implements ClaudeObservationShadow {
 
   constructor(
     private readonly engine: SpaghettiEngine,
+    private readonly client: SpaghettiClient,
     roots: string[],
   ) {
     this.databasePath = engine.status.databasePath;
@@ -596,8 +612,16 @@ class NativeClaudeObservationShadow implements ClaudeObservationShadow {
     return this.engine.status;
   }
 
+  get clientInfo(): SpaghettiClientInfo {
+    return this.client.info;
+  }
+
   async snapshot(signal?: AbortSignal): Promise<ClaudeObservationShadowSnapshot> {
-    const [health, overview] = await Promise.all([this.engine.health(signal), this.engine.overview(signal)]);
+    const queryOptions = clientQueryOptions(signal);
+    const [health, overview] = await Promise.all([
+      this.client.getHealth(queryOptions),
+      this.client.getOverview(queryOptions),
+    ]);
     return {
       mode: 'shadow',
       databasePath: this.databasePath,
@@ -612,14 +636,14 @@ class NativeClaudeObservationShadow implements ClaudeObservationShadow {
     legacy: ClaudeLegacyHistoryCounts,
     signal?: AbortSignal,
   ): Promise<ClaudeObservationHistoryParity> {
-    return compareClaudeObservationHistory(await this.engine.overview(signal), legacy);
+    return compareClaudeObservationHistory(await this.client.getOverview(clientQueryOptions(signal)), legacy);
   }
 
   listHistoryProjects(
     options?: SpaghettiEngineHistoryPageOptions,
     signal?: AbortSignal,
   ): Promise<SpaghettiEngineHistoryProjectPage> {
-    return this.engine.listHistoryProjects(options, signal);
+    return this.client.listProjects(options, clientQueryOptions(signal));
   }
 
   listHistorySessions(
@@ -627,11 +651,11 @@ class NativeClaudeObservationShadow implements ClaudeObservationShadow {
     options?: SpaghettiEngineHistoryPageOptions,
     signal?: AbortSignal,
   ): Promise<SpaghettiEngineHistorySessionPage> {
-    return this.engine.listHistorySessions({ projectId, ...options }, signal);
+    return this.client.listSessions({ projectId, ...options }, clientQueryOptions(signal));
   }
 
   getSession(sessionId: string, signal?: AbortSignal): Promise<SpaghettiEngineSessionDetails> {
-    return this.engine.getSession(sessionId, signal);
+    return this.client.getSession({ sessionId }, clientQueryOptions(signal));
   }
 
   getMessages(
@@ -641,33 +665,33 @@ class NativeClaudeObservationShadow implements ClaudeObservationShadow {
     signal?: AbortSignal,
   ): Promise<SpaghettiEngineMessagePage> {
     const nativeOptions: SpaghettiEngineMessagePageOptions = { projectId, sessionId, ...options };
-    return this.engine.getMessages(nativeOptions, signal);
+    return this.client.getMessages(nativeOptions, clientQueryOptions(signal));
   }
 
   search(options: SpaghettiEngineSearchPageOptions, signal?: AbortSignal): Promise<SpaghettiEngineSearchPage> {
-    return this.engine.search(options, signal);
+    return this.client.search(options, clientQueryOptions(signal));
   }
 
   getTimeline(options: SpaghettiEngineTimelinePageOptions, signal?: AbortSignal): Promise<SpaghettiEngineTimelinePage> {
-    return this.engine.getTimeline(options, signal);
+    return this.client.getTimeline(options, clientQueryOptions(signal));
   }
 
   listDelegations(
     options: SpaghettiEngineDelegationPageOptions,
     signal?: AbortSignal,
   ): Promise<SpaghettiEngineDelegationPage> {
-    return this.engine.listDelegations(options, signal);
+    return this.client.listDelegations(options, clientQueryOptions(signal));
   }
 
   listWorkflows(
     options: SpaghettiEngineWorkflowPageOptions,
     signal?: AbortSignal,
   ): Promise<SpaghettiEngineWorkflowPage> {
-    return this.engine.listWorkflows(options, signal);
+    return this.client.listWorkflows(options, clientQueryOptions(signal));
   }
 
   getWorkflow(workflowId: string, signal?: AbortSignal): Promise<SpaghettiEngineWorkflowDetails> {
-    return this.engine.getWorkflow(workflowId, signal);
+    return this.client.getWorkflow({ workflowId }, clientQueryOptions(signal));
   }
 
   listWorkflowMembers(
@@ -675,7 +699,7 @@ class NativeClaudeObservationShadow implements ClaudeObservationShadow {
     options?: SpaghettiEngineHistoryPageOptions,
     signal?: AbortSignal,
   ): Promise<SpaghettiEngineWorkflowMemberPage> {
-    return this.engine.listWorkflowMembers({ workflowId, ...options }, signal);
+    return this.client.listWorkflowMembers({ workflowId, ...options }, clientQueryOptions(signal));
   }
 
   listMemoryDocuments(
@@ -683,14 +707,14 @@ class NativeClaudeObservationShadow implements ClaudeObservationShadow {
     options?: SpaghettiEngineHistoryPageOptions,
     signal?: AbortSignal,
   ): Promise<SpaghettiEngineMemoryDocumentPage> {
-    return this.engine.listMemoryDocuments({ projectId, ...options }, signal);
+    return this.client.listMemoryDocuments({ projectId, ...options }, clientQueryOptions(signal));
   }
 
   listTaskCollections(
     options?: SpaghettiEngineTaskCollectionPageOptions,
     signal?: AbortSignal,
   ): Promise<SpaghettiEngineTaskCollectionPage> {
-    return this.engine.listTaskCollections(options, signal);
+    return this.client.listTaskCollections(options, clientQueryOptions(signal));
   }
 
   listTasks(
@@ -698,11 +722,11 @@ class NativeClaudeObservationShadow implements ClaudeObservationShadow {
     options?: SpaghettiEngineHistoryPageOptions,
     signal?: AbortSignal,
   ): Promise<SpaghettiEngineTaskPage> {
-    return this.engine.listTasks({ collectionId, ...options }, signal);
+    return this.client.listTasks({ collectionId, ...options }, clientQueryOptions(signal));
   }
 
   listPlans(options?: SpaghettiEngineHistoryPageOptions, signal?: AbortSignal): Promise<SpaghettiEnginePlanPage> {
-    return this.engine.listPlans(options, signal);
+    return this.client.listPlans(options, clientQueryOptions(signal));
   }
 
   listToolResults(
@@ -711,7 +735,7 @@ class NativeClaudeObservationShadow implements ClaudeObservationShadow {
     options?: SpaghettiEngineHistoryPageOptions,
     signal?: AbortSignal,
   ): Promise<SpaghettiEngineToolResultPage> {
-    return this.engine.listToolResults({ projectId, sessionId, ...options }, signal);
+    return this.client.listToolResults({ projectId, sessionId, ...options }, clientQueryOptions(signal));
   }
 
   listArtifacts(
@@ -719,45 +743,45 @@ class NativeClaudeObservationShadow implements ClaudeObservationShadow {
     options?: SpaghettiEngineHistoryPageOptions,
     signal?: AbortSignal,
   ): Promise<SpaghettiEngineArtifactPage> {
-    return this.engine.listArtifacts({ sessionId, ...options }, signal);
+    return this.client.listArtifacts({ sessionId, ...options }, clientQueryOptions(signal));
   }
 
   listSources(options?: SpaghettiEngineHistoryPageOptions, signal?: AbortSignal): Promise<SpaghettiEngineSourcePage> {
-    return this.engine.listSources(options, signal);
+    return this.client.listSources(options, clientQueryOptions(signal));
   }
 
   getStats(signal?: AbortSignal): Promise<SpaghettiEngineCanonicalStats> {
-    return this.engine.getStats(signal);
+    return this.client.getStats(clientQueryOptions(signal));
   }
 
   getUsage(options: SpaghettiEngineUsageScopeOptions, signal?: AbortSignal): Promise<SpaghettiEngineUsageTotals> {
-    return this.engine.getUsage(options, signal);
+    return this.client.getUsage(options, clientQueryOptions(signal));
   }
 
   getUsageActivity(
     options: SpaghettiEngineUsageActivityOptions,
     signal?: AbortSignal,
   ): Promise<SpaghettiEngineUsageActivity> {
-    return this.engine.getUsageActivity(options, signal);
+    return this.client.getUsageActivity(options, clientQueryOptions(signal));
   }
 
   getRuntimeSnapshot(
     options?: SpaghettiEngineRuntimeSnapshotOptions,
     signal?: AbortSignal,
   ): Promise<SpaghettiEngineRuntimeSnapshot> {
-    return this.engine.getRuntimeSnapshot(options, signal);
+    return this.client.getRuntimeSnapshot(options, clientQueryOptions(signal));
   }
 
   getRunState(runId: string, signal?: AbortSignal): Promise<SpaghettiEngineRunStateLookup> {
-    return this.engine.getRunState(runId, signal);
+    return this.client.getRunState({ runId }, clientQueryOptions(signal));
   }
 
   listTeams(options?: SpaghettiEngineTeamPageOptions, signal?: AbortSignal): Promise<SpaghettiEngineTeamPage> {
-    return this.engine.listTeams(options, signal);
+    return this.client.listTeams(options, clientQueryOptions(signal));
   }
 
   getTeam(teamId: string, signal?: AbortSignal): Promise<SpaghettiEngineTeamDetails> {
-    return this.engine.getTeam(teamId, signal);
+    return this.client.getTeam({ teamId }, clientQueryOptions(signal));
   }
 
   listTeamInboxes(
@@ -765,7 +789,7 @@ class NativeClaudeObservationShadow implements ClaudeObservationShadow {
     options?: SpaghettiEngineHistoryPageOptions,
     signal?: AbortSignal,
   ): Promise<SpaghettiEngineTeamInboxPage> {
-    return this.engine.listTeamInboxes({ teamId, ...options }, signal);
+    return this.client.listTeamInboxes({ teamId, ...options }, clientQueryOptions(signal));
   }
 
   listTeamInboxMessages(
@@ -774,7 +798,7 @@ class NativeClaudeObservationShadow implements ClaudeObservationShadow {
     signal?: AbortSignal,
   ): Promise<SpaghettiEngineTeamInboxMessagePage> {
     const nativeOptions: SpaghettiEngineTeamInboxMessagePageOptions = { inboxId, ...options };
-    return this.engine.listTeamInboxMessages(nativeOptions, signal);
+    return this.client.listTeamInboxMessages(nativeOptions, clientQueryOptions(signal));
   }
 
   refresh(signal?: AbortSignal): Promise<SpaghettiEngineStatus> {
@@ -782,9 +806,18 @@ class NativeClaudeObservationShadow implements ClaudeObservationShadow {
   }
 
   async dispose(): Promise<SpaghettiEngineStatus> {
-    if (!this.disposePromise) this.disposePromise = this.engine.dispose();
+    if (!this.disposePromise) {
+      this.disposePromise = (async () => {
+        await this.client.dispose();
+        return await this.engine.dispose();
+      })();
+    }
     return await this.disposePromise;
   }
+}
+
+function clientQueryOptions(signal: AbortSignal | undefined): SpaghettiQueryOptions | undefined {
+  return signal ? { signal } : undefined;
 }
 
 function normalizeRoots(roots: string[]): string[] {

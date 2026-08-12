@@ -11,7 +11,7 @@ use napi_derive::napi;
 use crate::engine::{
     ArtifactDetail, ArtifactPage, ArtifactPageRequest, CanonicalStats, ChangeCursor, ChangeReplay,
     ChangeReplayRequest, DelegationPage, DelegationPageRequest, DelegationSummary, DurableChange,
-    EngineHealthSnapshot, EngineOptions, EngineOverview, EngineStatusSnapshot,
+    EngineError, EngineHealthSnapshot, EngineOptions, EngineOverview, EngineStatusSnapshot,
     HistoryProjectIndexSummary, HistoryProjectPage, HistoryProjectPageRequest,
     HistoryProjectSummary, HistorySessionIndexSummary, HistorySessionPage,
     HistorySessionPageRequest, HistorySessionSummary, MemoryDocument, MemoryDocumentPage,
@@ -4596,8 +4596,17 @@ impl Task for DisposeTask {
     }
 }
 
-fn napi_error(error: impl std::fmt::Display) -> Error {
-    Error::new(Status::GenericFailure, error.to_string())
+fn napi_error(error: EngineError) -> Error {
+    let status = match &error {
+        EngineError::InvalidConfig(_)
+        | EngineError::InvalidQuery(_)
+        | EngineError::InvalidCommit(_) => Status::InvalidArg,
+        EngineError::QueryCancelled => Status::Cancelled,
+        EngineError::QueryQueueFull => Status::QueueFull,
+        EngineError::ShuttingDown => Status::Closing,
+        _ => Status::GenericFailure,
+    };
+    Error::new(status, error.to_string())
 }
 
 fn cancellation_for_signal(signal: Option<&AbortSignal>) -> QueryCancellationToken {

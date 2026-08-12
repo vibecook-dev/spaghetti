@@ -50,8 +50,14 @@ export function normalizeTransportError(error: unknown, diagnosticId: string): S
   const name = error instanceof Error ? error.name : '';
   const raw = error instanceof Error ? error.message : String(error);
   const lower = raw.toLowerCase();
+  const nativeStatus =
+    error && typeof error === 'object' && typeof (error as { code?: unknown }).code === 'string'
+      ? (error as { code: string }).code
+      : undefined;
 
-  if (name === 'AbortError' || /\babort|\bcancel/.test(lower)) return cancelledProtocolError();
+  if (name === 'AbortError' || nativeStatus === 'Cancelled' || /\babort|\bcancel/.test(lower)) {
+    return cancelledProtocolError();
+  }
   if (/cursor/.test(lower)) {
     const reason = /expired/.test(lower)
       ? 'expired'
@@ -71,13 +77,26 @@ export function normalizeTransportError(error: unknown, diagnosticId: string): S
   if (/deadline|timed? out|timeout/.test(lower)) {
     return { code: 'deadline_exceeded', message: 'The query deadline was exceeded.' };
   }
-  if (/shutting down|stopping|stopped|not accepting quer|(?:query|worker pool|engine).*closed/.test(lower)) {
+  if (
+    nativeStatus === 'Closing' ||
+    /shutting down|stopping|stopped|not accepting quer|(?:query|worker pool|engine).*closed/.test(lower)
+  ) {
     return { code: 'engine_stopping', message: 'The Spaghetti engine is stopping.' };
+  }
+  if (nativeStatus === 'QueueFull') {
+    return {
+      code: 'database_busy',
+      message: 'The Spaghetti query queue is full.',
+      reason: 'query_queue_full',
+    };
   }
   if (/database.*(?:busy|locked|already owned)|already owned by|sqlite_busy|sqlite_locked/.test(lower)) {
     return { code: 'database_busy', message: 'The Spaghetti database is busy.' };
   }
-  if (/invalid|required|must be|must not|out of range|unknown .* id|not-a-/.test(lower)) {
+  if (
+    nativeStatus === 'InvalidArg' ||
+    /invalid|required|must be|must not|out of range|unknown .* id|not-a-/.test(lower)
+  ) {
     return { code: 'invalid_request', message: 'The query request is invalid.', reason: 'validation_failed' };
   }
   return {

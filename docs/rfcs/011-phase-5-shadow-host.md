@@ -26,7 +26,10 @@ Claude source root
 
 `openClaudeObservationShadow()` owns one persistent Rust engine, registers
 watchers before its initial scan, exposes typed health/overview/refresh calls,
-and disposes the supervisor and owner lock deterministically. It canonicalizes
+and disposes the supervisor and owner lock deterministically. As of the Phase
+10 client cutover, all shadow reads cross the negotiated `SpaghettiClient`
+N-API transport; only observation lifecycle and status remain on the owner
+handle. It canonicalizes
 existing path ancestors and refuses collisions between either database and
 the other's SQLite WAL, journal, owner-lock, or owner-metadata artifacts. Its
 default database is a sibling such as
@@ -74,11 +77,12 @@ independent shadow owner.
 
 ## Evidence and remaining cutover gate
 
-Tests prove path/sidecar isolation, symlink-alias rejection, initial canonical
-observation, watched append plus explicit refresh, exact fixture history
-parity, concurrent idempotent disposal, and durable reopen. The persistent
-engine overview test separately proves canonical counts are visible while
-legacy compatibility counts stay zero.
+Tests prove path/sidecar isolation, symlink-alias rejection, negotiated client
+capabilities, initial canonical observation, watched append plus explicit
+refresh, exact fixture history parity, stable public error codes, concurrent
+idempotent disposal, and durable reopen. The persistent engine overview test
+separately proves canonical counts are visible while legacy compatibility
+counts stay zero.
 
 This is not Phase 8 sole-writer cutover. The first typed Rust project/session
 query pack is now recorded in

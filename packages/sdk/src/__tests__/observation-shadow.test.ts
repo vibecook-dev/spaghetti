@@ -14,6 +14,8 @@ import {
   listActiveSessionsFromDir,
   loadNativeAddon,
   openClaudeObservationShadow,
+  SPAGHETTI_CLIENT_METHODS,
+  SpaghettiClientError,
   type ClaudeObservationShadow,
   type SpaghettiEngineHistoryProject,
   type SpaghettiEngineHistorySession,
@@ -29,6 +31,13 @@ const SECOND_SESSION_ID = '22222222-3333-4444-5555-666666666666';
 const shadows: ClaudeObservationShadow[] = [];
 const legacyServices: Array<{ dispose(): Promise<void> }> = [];
 const tempDirs: string[] = [];
+
+function expectClientError(error: unknown, code: SpaghettiClientError['code'], reason?: string): boolean {
+  assert.ok(error instanceof SpaghettiClientError);
+  assert.equal(error.code, code);
+  if (reason !== undefined) assert.equal(error.reason, reason);
+  return true;
+}
 
 function fixture(): { directory: string; productionDb: string; root: string; transcript: string } {
   const directory = mkdtempSync(path.join(tmpdir(), 'spaghetti-shadow-'));
@@ -447,6 +456,8 @@ describe('Claude observation shadow native lifecycle', { skip: !native }, () => 
     assert.equal(existsSync(productionDb), false, 'shadow startup must not touch production storage');
     assert.equal(shadow.status.observation.supervisorsRunning, 1);
     assert.equal(path.basename(shadow.databasePath), 'production.observation-shadow.db');
+    assert.equal(shadow.clientInfo.transportKind, 'napi');
+    assert.deepEqual(shadow.clientInfo.methods, SPAGHETTI_CLIENT_METHODS);
 
     const initial = await shadow.snapshot();
     assert.equal(initial.mode, 'shadow');
@@ -589,10 +600,18 @@ describe('Claude observation shadow native lifecycle', { skip: !native }, () => 
     );
     assert.equal(remainingSessions.nextCursor, undefined);
 
-    await assert.rejects(shadow.listHistoryProjects({ limit: 0 }), /limit must be between 1 and 200/i);
-    await assert.rejects(shadow.listHistoryProjects({ cursor: 'not-a-cursor' }), /cursor/i);
-    await assert.rejects(shadow.listHistorySessions(recent.projectId, { cursor: first.nextCursor }), /cursor/i);
-    await assert.rejects(shadow.listHistorySessions('not-a-project'), /project id/i);
+    await assert.rejects(shadow.listHistoryProjects({ limit: 0 }), (error) =>
+      expectClientError(error, 'invalid_request'),
+    );
+    await assert.rejects(shadow.listHistoryProjects({ cursor: 'not-a-cursor' }), (error) =>
+      expectClientError(error, 'cursor_invalid'),
+    );
+    await assert.rejects(shadow.listHistorySessions(recent.projectId, { cursor: first.nextCursor }), (error) =>
+      expectClientError(error, 'cursor_invalid'),
+    );
+    await assert.rejects(shadow.listHistorySessions('not-a-project'), (error) =>
+      expectClientError(error, 'invalid_request'),
+    );
 
     appendFileSync(
       path.join(recentProject, `${SESSION_ID}.jsonl`),
@@ -605,7 +624,9 @@ describe('Claude observation shadow native lifecycle', { skip: !native }, () => 
       ),
     );
     await shadow.refresh();
-    await assert.rejects(shadow.listHistoryProjects({ limit: 2, cursor: first.nextCursor }), /cursor expired/i);
+    await assert.rejects(shadow.listHistoryProjects({ limit: 2, cursor: first.nextCursor }), (error) =>
+      expectClientError(error, 'cursor_invalid', 'expired'),
+    );
   });
 
   test('queries durable runtime presence and bounded team/inbox snapshots', async () => {
@@ -739,14 +760,20 @@ describe('Claude observation shadow native lifecycle', { skip: !native }, () => 
     assert.equal(secondMessage.items[0]?.text, legacyTeam?.inboxes.lead?.[1]?.text);
     assert.equal(secondMessage.nextCursor, undefined);
 
-    await assert.rejects(shadow.getRuntimeSnapshot({ limit: 0 }), /runtime page limit/i);
-    await assert.rejects(shadow.getSession('not-a-session'), /session detail id/i);
-    await assert.rejects(shadow.getMessages(project.projectId, session.sessionId, { limit: 0 }), /message page limit/i);
-    await assert.rejects(shadow.getRunState('not-a-run'), /run state id/i);
-    await assert.rejects(shadow.listSources({ limit: 0 }), /source page limit/i);
-    await assert.rejects(shadow.listTeams({ limit: 0 }), /team page limit/i);
-    await assert.rejects(shadow.getTeam('not-a-team'), /team id/i);
-    await assert.rejects(shadow.listTeamInboxes(teamId, { cursor: runtime.nextCursor }), /cursor/i);
+    await assert.rejects(shadow.getRuntimeSnapshot({ limit: 0 }), (error) =>
+      expectClientError(error, 'invalid_request'),
+    );
+    await assert.rejects(shadow.getSession('not-a-session'), (error) => expectClientError(error, 'invalid_request'));
+    await assert.rejects(shadow.getMessages(project.projectId, session.sessionId, { limit: 0 }), (error) =>
+      expectClientError(error, 'invalid_request'),
+    );
+    await assert.rejects(shadow.getRunState('not-a-run'), (error) => expectClientError(error, 'invalid_request'));
+    await assert.rejects(shadow.listSources({ limit: 0 }), (error) => expectClientError(error, 'invalid_request'));
+    await assert.rejects(shadow.listTeams({ limit: 0 }), (error) => expectClientError(error, 'invalid_request'));
+    await assert.rejects(shadow.getTeam('not-a-team'), (error) => expectClientError(error, 'invalid_request'));
+    await assert.rejects(shadow.listTeamInboxes(teamId, { cursor: runtime.nextCursor }), (error) =>
+      expectClientError(error, 'cursor_invalid'),
+    );
   });
 
   test('queries memory, tasks, plans, tool results, and binary artifacts through Rust-owned pages', async () => {
@@ -833,21 +860,23 @@ describe('Claude observation shadow native lifecycle', { skip: !native }, () => 
     assert.equal(taskCollections.atCommitSeq, firstPlan.atCommitSeq);
     assert.equal(firstPlan.atCommitSeq, toolResults.atCommitSeq);
     assert.equal(toolResults.atCommitSeq, artifacts.atCommitSeq);
-    await assert.rejects(shadow.listMemoryDocuments('not-a-project'), /memory document project id/i);
+    await assert.rejects(shadow.listMemoryDocuments('not-a-project'), (error) =>
+      expectClientError(error, 'invalid_request'),
+    );
     await assert.rejects(
       shadow.listTaskCollections({ sessionId: todoSession.sessionId, runId: 'run_v1_cnVu' }),
-      /at most one/i,
+      (error) => expectClientError(error, 'invalid_request'),
     );
-    await assert.rejects(shadow.listTasks('not-a-collection'), /task collection id/i);
-    await assert.rejects(shadow.listPlans({ limit: 0 }), /plan page limit/i);
+    await assert.rejects(shadow.listTasks('not-a-collection'), (error) => expectClientError(error, 'invalid_request'));
+    await assert.rejects(shadow.listPlans({ limit: 0 }), (error) => expectClientError(error, 'invalid_request'));
     await assert.rejects(
       shadow.listToolResults(
         projects.find((project) => project.projectId !== todoSession.projectId)!.projectId,
         todoSession.sessionId,
       ),
-      /does not identify a current session/i,
+      (error) => expectClientError(error, 'invalid_request'),
     );
-    await assert.rejects(shadow.listArtifacts('not-a-session'), /artifact session id/i);
+    await assert.rejects(shadow.listArtifacts('not-a-session'), (error) => expectClientError(error, 'invalid_request'));
   });
 
   test('searches parent and delegated messages in one canonical FTS score domain', async () => {
@@ -924,7 +953,7 @@ describe('Claude observation shadow native lifecycle', { skip: !native }, () => 
         limit: 1,
         cursor: timelineFirst.nextCursor,
       }),
-      /cursor/i,
+      (error) => expectClientError(error, 'cursor_invalid'),
     );
 
     assert.ok(markerHit.nativeProjectKey);
@@ -1000,7 +1029,7 @@ describe('Claude observation shadow native lifecycle', { skip: !native }, () => 
         workflowId: workflow.workflowId,
         standaloneOnly: true,
       }),
-      /cannot be combined/i,
+      (error) => expectClientError(error, 'invalid_request'),
     );
 
     const all = await shadow.search({ text: 'Add error handling to the parser', limit: 1 });
@@ -1018,19 +1047,21 @@ describe('Claude observation shadow native lifecycle', { skip: !native }, () => 
 
     await assert.rejects(
       shadow.search({ text: 'searchable-wf-marker', branchKind: 'root', cursor: all.nextCursor }),
-      /cursor/i,
+      (error) => expectClientError(error, 'cursor_invalid'),
     );
-    await assert.rejects(shadow.search({ text: '   ' }), /search text/i);
+    await assert.rejects(shadow.search({ text: '   ' }), (error) => expectClientError(error, 'invalid_request'));
     const controller = new AbortController();
     controller.abort();
-    await assert.rejects(shadow.search({ text: 'searchable-wf-marker' }, controller.signal), /abort|cancel/i);
+    await assert.rejects(shadow.search({ text: 'searchable-wf-marker' }, controller.signal), (error) =>
+      expectClientError(error, 'cancelled'),
+    );
     await assert.rejects(
       shadow.getTimeline({ projectId: markerHit.projectId, sessionId: markerHit.sessionId }, controller.signal),
-      /abort|cancel/i,
+      (error) => expectClientError(error, 'cancelled'),
     );
     await assert.rejects(
       shadow.listWorkflows({ projectId: markerHit.projectId, sessionId: markerHit.sessionId }, controller.signal),
-      /abort|cancel/i,
+      (error) => expectClientError(error, 'cancelled'),
     );
   });
 
