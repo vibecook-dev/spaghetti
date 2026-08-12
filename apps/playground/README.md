@@ -12,7 +12,15 @@ Node 24 (see root `.nvmrc`). `nvm use` before working in this directory.
 pnpm -F @vibecook/spaghetti-playground dev     # run in dev (Vite HMR + Electron)
 pnpm -F @vibecook/spaghetti-playground build   # produce out/{main,preload,renderer}
 pnpm -F @vibecook/spaghetti-playground start   # preview a built bundle
+pnpm bench:query-topology                      # measure the real canonical IPC topology
 ```
+
+The topology benchmark copies the committed fixture to scratch storage, builds
+the production Electron entries, and measures canonical queries across
+`MessageChannelMain` and the SDK UtilityProcess. Pass
+`-- --report-json /tmp/spaghetti-ipc.json` for the complete machine-readable
+report; see the
+[Phase 10 benchmark record](../../docs/rfcs/011-phase-10-playground-ipc-benchmark.md).
 
 ## Where the index lives
 

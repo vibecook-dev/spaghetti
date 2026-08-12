@@ -1,7 +1,7 @@
 # RFC 011 Phase 10: playground utility-process IPC endpoint
 
-Status: opt-in canonical endpoint complete on 2026-08-12; topology benchmark
-and production-owner cutover remain
+Status: opt-in canonical endpoint and topology benchmark complete on
+2026-08-12; production-owner cutover remains
 
 This slice connects the Phase 10 framed transport to the existing Electron
 utility-process ownership boundary. It gives Electron main a real negotiated
@@ -68,12 +68,16 @@ explicit new negotiation after the utility host restarts.
 - disabled mode rejects and closes an attempted attachment;
 - SDK and playground typechecks plus the Electron production build cover the
   Node/Electron `MessagePort` boundary; the built portable entry is free of
-  SQLite, watcher, and native-addon imports.
+  SQLite, watcher, and native-addon imports;
+- the [selected-topology benchmark](./011-phase-10-playground-ipc-benchmark.md)
+  exercises the production-built `MessageChannelMain`/UtilityProcess boundary,
+  exact encoded frame bytes, latency, event-loop delay, utility RSS/heap,
+  cancellation, recovery, and a 12.6 MiB bounded response.
 
 ## Remaining work
 
-- add latency, encoded-byte, event-loop-delay, heap/RSS, and cancellation-burst
-  measurements for this actual utility-process topology;
+- establish reviewed regression thresholds with scaled and accepted private
+  corpora using the committed topology report format;
 - expose only product-compatible canonical reads to the renderer and migrate
   them in reversible slices;
 - use durable client subscriptions for invalidation after public topic mapping

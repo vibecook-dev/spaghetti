@@ -13,4 +13,9 @@ export {
 } from './client.js';
 export * from './ipc-channel.js';
 export * from './ipc-framing.js';
-export { IpcTransport, SPAGHETTI_IPC_CONNECT_TIMEOUT_MS, type IpcTransportOptions } from './ipc-transport.js';
+export {
+  IpcTransport,
+  SPAGHETTI_IPC_CONNECT_TIMEOUT_MS,
+  type IpcTransportOptions,
+  type SpaghettiIpcFrameObservation,
+} from './ipc-transport.js';

@@ -91,8 +91,10 @@ read and does not change the legacy production surface.
 
 ## Remaining Phase 10 work
 
-- benchmark the selected playground utility-process endpoint, then promote the
-  owner out of opt-in shadow mode;
+- use the completed
+  [playground utility-process benchmark](./011-phase-10-playground-ipc-benchmark.md)
+  to establish rollout thresholds, then promote the owner out of opt-in shadow
+  mode;
 - migrate CLI/TUI, playground/Electron, React hooks, and SDK examples in
   reversible slices with stale-result tests;
 - deprecate compatibility APIs, move the TypeScript oracle to test-only code,

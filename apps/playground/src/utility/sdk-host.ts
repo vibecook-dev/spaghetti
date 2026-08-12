@@ -1,10 +1,9 @@
 /** UtilityProcess entrypoint: typed RPC host for the entire Spaghetti SDK. */
 
-import type { IngestEngine } from '@vibecook/spaghetti-sdk';
 import type { MessagePortMain } from 'electron';
 import type { SdkHostCommand, SdkHostEvent, SdkHostMessage, SdkRpcRequest } from '../shared/sdk-protocol.js';
 import { serializeError } from '../shared/sdk-protocol.js';
-import { SdkRuntime } from './sdk-runtime.js';
+import { SdkRuntime, type SdkRuntimeOptions } from './sdk-runtime.js';
 
 const parentPort = process.parentPort;
 let shuttingDown = false;
@@ -17,12 +16,7 @@ function event(data: SdkHostEvent): void {
   post({ type: 'event', data });
 }
 
-function readConfig(): {
-  dbPath: string;
-  engine: IngestEngine;
-  rootDir?: string;
-  observationShadow?: { dbPath?: string };
-} {
+function readConfig(): SdkRuntimeOptions {
   const dbPath = process.env.SPAGHETTI_DB_PATH;
   const rawEngine = process.env.SPAGHETTI_ENGINE;
   if (!dbPath) throw new Error('SPAGHETTI_DB_PATH is required');
@@ -34,10 +28,17 @@ function readConfig(): {
   }
   const shadowEnabled = rawShadow === '1' || rawShadow?.toLowerCase() === 'true';
   const shadowDbPath = process.env.SPAGHETTI_OBSERVATION_SHADOW_DB_PATH;
+  const rawDetectAdditional = process.env.SPAGHETTI_DETECT_ADDITIONAL_SOURCES;
+  if (rawDetectAdditional && !['0', '1', 'false', 'true'].includes(rawDetectAdditional.toLowerCase())) {
+    throw new Error('SPAGHETTI_DETECT_ADDITIONAL_SOURCES must be 0, 1, false, or true');
+  }
+  const detectAdditionalSources =
+    rawDetectAdditional === undefined || rawDetectAdditional === '1' || rawDetectAdditional.toLowerCase() === 'true';
   return {
     dbPath,
     engine: rawEngine,
     ...(rootDir ? { rootDir } : {}),
+    ...(!detectAdditionalSources ? { additionalSources: [] } : {}),
     ...(shadowEnabled ? { observationShadow: shadowDbPath ? { dbPath: shadowDbPath } : {} } : {}),
   };
 }
@@ -158,6 +159,19 @@ async function handleCommand(command: SdkHostCommand, port?: MessagePortMain): P
   }
 
   try {
+    if (command.type === 'diagnostics') {
+      post({
+        type: 'response',
+        id: command.id,
+        ok: true,
+        result: {
+          pid: process.pid,
+          uptimeSeconds: process.uptime(),
+          memory: process.memoryUsage(),
+        },
+      });
+      return;
+    }
     if (command.type === 'attach-spaghetti-client') {
       if (!port) throw new Error('attach-spaghetti-client requires one transferred MessagePort.');
       await runtime.attachObservationClient(port);

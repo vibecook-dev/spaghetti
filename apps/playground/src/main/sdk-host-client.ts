@@ -10,11 +10,13 @@ import {
   MessagePortIpcChannel,
   openSpaghettiClient,
   type SpaghettiClient,
+  type SpaghettiIpcFrameObservation,
 } from '@vibecook/spaghetti-sdk/client';
 import {
   deserializeError,
   isSdkHostMessage,
   type SdkHostCommand,
+  type SdkHostDiagnostics,
   type SdkHostEvent,
   type SdkRpcArgs,
   type SdkRpcMethod,
@@ -37,11 +39,26 @@ export interface SdkHostClientOptions {
   dbPath: string;
   engine: IngestEngine;
   rootDir?: string;
+  observationShadow?: { dbPath?: string };
+  /** Defaults to utility-host auto-detection. Benchmarks can disable it. */
+  detectAdditionalSources?: boolean;
   onEvent(event: SdkHostEvent): void;
 }
 
+export interface OpenObservationClientOptions {
+  clientName?: string;
+  onFrame?(observation: SpaghettiIpcFrameObservation): void;
+}
+
 function resolveSdkHostPath(): string {
-  const candidates = [join(__dirname, 'sdk-host.mjs'), join(__dirname, 'sdk-host.js')];
+  const candidates = [
+    join(__dirname, 'sdk-host.mjs'),
+    join(__dirname, 'sdk-host.js'),
+    // Rollup can move this shared broker into out/main/chunks while keeping
+    // utility entrypoints in out/main.
+    join(__dirname, '..', 'sdk-host.mjs'),
+    join(__dirname, '..', 'sdk-host.js'),
+  ];
   for (const candidate of candidates) {
     if (existsSync(candidate)) return candidate;
   }
@@ -85,6 +102,17 @@ export class SdkHostClient {
           SPAGHETTI_DB_PATH: this.options.dbPath,
           SPAGHETTI_ENGINE: this.options.engine,
           ...(this.options.rootDir ? { SPAGHETTI_ROOT_DIR: this.options.rootDir } : {}),
+          ...(this.options.observationShadow
+            ? {
+                SPAGHETTI_OBSERVATION_SHADOW: '1',
+                ...(this.options.observationShadow.dbPath
+                  ? { SPAGHETTI_OBSERVATION_SHADOW_DB_PATH: this.options.observationShadow.dbPath }
+                  : {}),
+              }
+            : {}),
+          ...(this.options.detectAdditionalSources !== undefined
+            ? { SPAGHETTI_DETECT_ADDITIONAL_SOURCES: this.options.detectAdditionalSources ? '1' : '0' }
+            : {}),
         },
       });
     } catch (error) {
@@ -128,14 +156,35 @@ export class SdkHostClient {
   }
 
   /** Open a negotiated canonical client backed by the utility-process owner. */
-  async openObservationClient(clientName = 'spaghetti-playground-main'): Promise<SpaghettiClient> {
+  async openObservationClient(options: OpenObservationClientOptions = {}): Promise<SpaghettiClient> {
     const port = await this.openSpaghettiClientPort();
     return await openSpaghettiClient({
       transport: new IpcTransport({
         channel: new MessagePortIpcChannel(port, 'playground-main'),
+        onFrame: options.onFrame,
       }),
-      clientName,
+      clientName: options.clientName ?? 'spaghetti-playground-main',
     });
+  }
+
+  async getHostDiagnostics(): Promise<SdkHostDiagnostics> {
+    await this.start();
+    const proc = this.process;
+    if (!proc) throw new Error('SDK utility is unavailable');
+    const id = this.nextRequestId++;
+    const result = new Promise<unknown>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pending.delete(id);
+        reject(new Error('SDK utility diagnostics timed out'));
+      }, DEFAULT_REQUEST_TIMEOUT_MS);
+      this.pending.set(id, { resolve, reject, timer });
+    });
+    try {
+      proc.postMessage({ type: 'diagnostics', id } satisfies SdkHostCommand);
+    } catch (error) {
+      this.rejectPending(id, error);
+    }
+    return (await result) as SdkHostDiagnostics;
   }
 
   private async openSpaghettiClientPort(): Promise<MessagePortMain> {

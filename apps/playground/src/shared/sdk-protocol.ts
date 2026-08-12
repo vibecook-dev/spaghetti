@@ -24,9 +24,22 @@ export interface SerializedError {
   code?: string;
 }
 
+export interface SdkHostDiagnostics {
+  pid: number;
+  uptimeSeconds: number;
+  memory: {
+    rss: number;
+    heapTotal: number;
+    heapUsed: number;
+    external: number;
+    arrayBuffers: number;
+  };
+}
+
 export type SdkHostCommand =
   | SdkRpcRequest
   | { type: 'attach-spaghetti-client'; id: number }
+  | { type: 'diagnostics'; id: number }
   | { type: 'shutdown'; id: number };
 
 export type SdkHostEvent =

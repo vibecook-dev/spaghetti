@@ -105,15 +105,16 @@ verifies that an invalid cursor retains the same public `cursor_invalid`
 classification.
 
 This is semantic and lifecycle evidence for the portable MessagePort bridge,
-not a field-native/daemon performance claim. The selected playground
-utility-process endpoint now exists, but it still needs same-host encoded-byte,
-latency, event-loop-delay, heap/RSS, and cancellation-burst benchmark evidence
-before production cutover.
+not a field-native/daemon performance claim. The
+[selected-topology benchmark](./011-phase-10-playground-ipc-benchmark.md) now
+records same-host encoded bytes, latency, event-loop delay, utility heap/RSS,
+cancellation, recovery, and a bounded 12.6 MiB response through the real
+production-built Electron endpoint.
 
 ## Remaining Phase 10 work
 
-- add the selected playground utility-process topology to the canonical query
-  benchmark and promote the Rust owner out of opt-in shadow mode;
+- establish reviewed regression thresholds with scaled and accepted private
+  corpora, then promote the Rust owner out of opt-in shadow mode;
 - migrate CLI/TUI, playground/Electron, React hooks, and SDK examples in
   reversible slices with stale-result tests;
 - deprecate compatibility APIs, move the TypeScript oracle to test-only code,

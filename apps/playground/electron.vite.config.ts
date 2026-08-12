@@ -25,6 +25,7 @@ export default defineConfig({
         input: {
           index: resolve(__dirname, 'src/main/index.ts'),
           'fx-host': resolve(__dirname, 'src/utility/fx-host.ts'),
+          'query-topology-benchmark': resolve(__dirname, 'src/benchmark/query-topology.ts'),
           'sdk-host': resolve(__dirname, 'src/utility/sdk-host.ts'),
         },
         external: mainExternals,

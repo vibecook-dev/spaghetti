@@ -185,6 +185,38 @@ describe('Spaghetti IPC framing', () => {
 });
 
 describe('IpcTransport and SpaghettiIpcHost', () => {
+  test('reports exact encoded frame directions and byte lengths without affecting queries', async () => {
+    const backend = new FakeBackend();
+    const ports = new MessageChannel();
+    const host = serveSpaghettiIpc({
+      channel: new MessagePortIpcChannel(ports.port2),
+      transport: backend,
+    });
+    const observations: Array<{ direction: 'sent' | 'received'; byteLength: number }> = [];
+    const client = await openSpaghettiClient({
+      transport: new IpcTransport({
+        channel: new MessagePortIpcChannel(ports.port1),
+        onFrame: (observation) => {
+          observations.push(observation);
+          if (observations.length % 2 === 0) throw new Error('diagnostic observer failure');
+        },
+      }),
+    });
+
+    await client.getOverview();
+    assert.deepEqual(
+      observations.map((observation) => observation.direction),
+      ['sent', 'received', 'sent', 'received'],
+    );
+    assert.equal(
+      observations.every(({ byteLength }) => byteLength >= 10),
+      true,
+    );
+
+    await client.dispose();
+    await host.dispose();
+  });
+
   test('negotiates once and correlates concurrent out-of-order responses', async () => {
     const resolvers = new Map<number, (response: SpaghettiProtocolResponse) => void>();
     const backend = new FakeBackend(

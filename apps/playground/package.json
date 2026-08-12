@@ -9,6 +9,7 @@
     "prestart": "pnpm -F @vibecook/spaghetti-sdk build && node scripts/ensure-electron.mjs",
     "dev": "electron-vite dev",
     "build": "pnpm -F @vibecook/spaghetti-sdk build && node scripts/ensure-electron.mjs && electron-vite build",
+    "bench:query-topology": "pnpm build && electron out/main/query-topology-benchmark.js",
     "start": "electron-vite preview",
     "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
     "clean": "rm -rf out",

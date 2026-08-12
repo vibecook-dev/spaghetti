@@ -40,6 +40,7 @@
     "test:query-conformance": "node --import tsx scripts/bench-queries.ts --mode conformance",
     "bench:ingest": "tsx scripts/bench-ingest.ts",
     "bench:queries": "node --import tsx scripts/bench-queries.ts",
+    "bench:query-topology": "pnpm --filter @vibecook/spaghetti-playground bench:query-topology",
     "test": "pnpm typecheck && pnpm validate && pnpm test:packages",
     "lint": "eslint \"packages/*/src/**/*.{ts,tsx}\" \"apps/*/src/**/*.{ts,tsx}\" \"scripts/bench-queries.ts\"",
     "format:check": "prettier --check \"packages/*/src/**/*.{ts,tsx}\" \"apps/*/src/**/*.{ts,tsx}\" \"scripts/bench-queries.ts\"",

@@ -107,9 +107,10 @@ The ten-reader workload intentionally reports ten calls.
 Heap/RSS deltas are process observations without forced garbage collection;
 they are diagnostic rather than allocation counts. SQLite time, worker-queue
 time, Rust allocation, and conversion sub-timings require native telemetry
-that the current surface does not expose. IPC is also unmeasured because the
-Phase 10 field-native/daemon transport does not exist. The harness says so in
-every JSON report instead of fabricating those metrics.
+that the current surface does not expose. At this Phase 9 boundary IPC was
+also unmeasured because no selected endpoint existed, so the harness says so
+instead of fabricating those metrics. Phase 10 subsequently recorded the real
+[playground utility-process topology](./011-phase-10-playground-ipc-benchmark.md).
 
 ## Release-build evidence
 
@@ -194,7 +195,8 @@ shadow topology.
 
 The remaining work is deliberately Phase 10 or rollout hardening:
 
-- define shared domain/transport DTOs and benchmark the selected IPC topology;
+- carry the now-defined shared transport DTOs and measured selected IPC
+  topology into product-consumer migration;
 - introduce and migrate the asynchronous `SpaghettiClient` consumers;
 - retire TypeScript SQLite read ownership only after the client cutover;
 - run scale-50 and accepted private-real-corpus soak reports;

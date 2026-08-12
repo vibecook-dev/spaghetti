@@ -17,10 +17,17 @@ import { encodedRequestBytes } from './encoding.js';
 
 export const SPAGHETTI_IPC_CONNECT_TIMEOUT_MS = 10_000;
 
+export interface SpaghettiIpcFrameObservation {
+  direction: 'sent' | 'received';
+  byteLength: number;
+}
+
 export interface IpcTransportOptions {
   channel: SpaghettiIpcChannel;
   /** Maximum handshake wait. Defaults to 10 seconds. */
   connectTimeoutMs?: number;
+  /** Optional encoded-frame telemetry for diagnostics and topology benchmarks. */
+  onFrame?(observation: SpaghettiIpcFrameObservation): void;
 }
 
 interface PendingConnect {
@@ -42,6 +49,7 @@ export class IpcTransport implements SpaghettiClientTransport {
   readonly kind = 'ipc';
   private readonly channel: SpaghettiIpcChannel;
   private readonly connectTimeoutMs: number;
+  private readonly onFrame: IpcTransportOptions['onFrame'];
   private readonly pendingRequests = new Map<number, PendingRequest>();
   private readonly unsubscribeMessage: () => void;
   private readonly unsubscribeClose: () => void;
@@ -57,6 +65,7 @@ export class IpcTransport implements SpaghettiClientTransport {
     }
     this.channel = options.channel;
     this.connectTimeoutMs = timeout;
+    this.onFrame = options.onFrame;
     this.unsubscribeMessage = this.channel.onMessage(this.handleMessage);
     this.unsubscribeClose = this.channel.onClose(this.handleChannelClose);
   }
@@ -196,6 +205,7 @@ export class IpcTransport implements SpaghettiClientTransport {
 
   private readonly handleMessage = (encoded: Uint8Array): void => {
     if (this.state === 'closed') return;
+    this.observeFrame('received', encoded.byteLength);
     let frame: SpaghettiIpcFrame;
     try {
       frame = decodeSpaghettiIpcFrame(encoded);
@@ -286,7 +296,17 @@ export class IpcTransport implements SpaghettiClientTransport {
   }
 
   private sendFrame(frame: SpaghettiIpcFrame): Promise<void> {
-    return this.channel.send(encodeSpaghettiIpcFrame(frame));
+    const encoded = encodeSpaghettiIpcFrame(frame);
+    this.observeFrame('sent', encoded.byteLength);
+    return this.channel.send(encoded);
+  }
+
+  private observeFrame(direction: SpaghettiIpcFrameObservation['direction'], byteLength: number): void {
+    try {
+      this.onFrame?.({ direction, byteLength });
+    } catch {
+      // Diagnostic observers cannot alter transport behavior.
+    }
   }
 }
 
