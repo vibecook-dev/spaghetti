@@ -379,6 +379,7 @@ describe('N-API and IPC semantic parity', { skip: !native }, () => {
 
     try {
       assert.deepEqual(await ipc.getOverview(), await direct.getOverview());
+      assert.deepEqual(await ipc.replayChanges(), await direct.replayChanges());
       assert.deepEqual(await ipc.listProjects(), await direct.listProjects());
       assert.deepEqual(await ipc.getStats(), await direct.getStats());
       await assert.rejects(ipc.listProjects({ cursor: 'not-a-cursor' }), (error) =>

@@ -18,6 +18,11 @@ export declare class SpaghettiEngine {
   /** Execute the first typed, read-only Rust query. */
   overview(signal?: AbortSignal | undefined | null): Promise<EngineOverviewResult>
   /**
+   * Replay one bounded, snapshot-consistent page of durable projection
+   * changes. Binary keys and payloads remain lossless base64 strings.
+   */
+  replayChanges(options?: EngineChangeReplayOptions | undefined | null, signal?: AbortSignal | undefined | null): Promise<EngineChangeReplay>
+  /**
    * List canonical projects in Rust-defined activity order. The cursor is
    * opaque, versioned, and valid only for this query.
    */
@@ -211,6 +216,31 @@ export interface EngineCapabilityPageOptions {
   limit?: number
 }
 
+export interface EngineChangeCursor {
+  commitSeq: number
+  ordinal: number
+}
+
+export interface EngineChangeReplay {
+  contractVersion: number
+  atCommitSeq: number
+  oldestAvailable?: EngineChangeCursor
+  changes: Array<EngineDurableChange>
+  nextCursor?: EngineChangeCursor
+  hasMore: boolean
+  payloadBytes: number
+  payloadByteLimit: number
+}
+
+export interface EngineChangeReplayOptions {
+  /** Return changes strictly after this durable cursor. */
+  after?: EngineChangeCursor
+  /** Empty or omitted means all stable topics. */
+  topics?: Array<string>
+  /** Page size. Defaults to 100 and is capped at 1,000 in Rust. */
+  limit?: number
+}
+
 export interface EngineDelegationPage {
   contractVersion: number
   atCommitSeq: number
@@ -274,6 +304,15 @@ export interface EngineDelegationSummary {
   sourceObjectId: number
   sourceGeneration: number
   lastCommitSeq: number
+}
+
+export interface EngineDurableChange {
+  cursor: EngineChangeCursor
+  topic: string
+  schemaVersion: number
+  entityKeyBase64Url: string
+  operation: string
+  payloadBase64: string
 }
 
 export interface EngineHealth {

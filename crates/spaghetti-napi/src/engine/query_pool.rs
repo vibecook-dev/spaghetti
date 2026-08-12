@@ -267,13 +267,20 @@ pub struct DurableChange {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChangeReplay {
+    pub contract_version: u32,
     /// Watermark read at the start of the same SQLite snapshot as `changes`.
     pub at_commit_seq: u64,
     pub oldest_available: Option<ChangeCursor>,
     pub changes: Vec<DurableChange>,
     pub next_cursor: Option<ChangeCursor>,
     pub has_more: bool,
+    pub payload_bytes: u64,
+    pub payload_byte_limit: u64,
 }
+
+pub const CHANGE_REPLAY_CONTRACT_VERSION: u32 = 1;
+pub const DEFAULT_CHANGE_REPLAY_LIMIT: u32 = 100;
+pub const MAX_CHANGE_REPLAY_PAYLOAD_BYTES: u64 = 12 * 1024 * 1024;
 
 enum QueryCommand {
     Overview {
@@ -435,6 +442,7 @@ enum QueryCommand {
     },
     ReplayChanges {
         cancellation_epoch: u64,
+        cancellation: QueryCancellationToken,
         request: ChangeReplayRequest,
         response: Sender<Result<ChangeReplay, EngineError>>,
     },
@@ -1147,28 +1155,24 @@ impl QueryClient {
         &self,
         request: ChangeReplayRequest,
     ) -> Result<ChangeReplay, EngineError> {
+        self.replay_changes_cancellable(request, QueryCancellationToken::default())
+    }
+
+    pub fn replay_changes_cancellable(
+        &self,
+        request: ChangeReplayRequest,
+        cancellation: QueryCancellationToken,
+    ) -> Result<ChangeReplay, EngineError> {
         validate_replay_request(&request)?;
-        if self.control.stopping.load(Ordering::Acquire) {
-            return Err(EngineError::ShuttingDown);
-        }
-
-        let cancellation_epoch = self.control.cancellation_epoch.load(Ordering::Acquire);
-        let (response_tx, response_rx) = bounded(1);
-        match self.commands.try_send(QueryCommand::ReplayChanges {
-            cancellation_epoch,
-            request,
-            response: response_tx,
-        }) {
-            Ok(()) => {}
-            Err(TrySendError::Full(_)) => return Err(EngineError::QueryQueueFull),
-            Err(TrySendError::Disconnected(_)) => {
-                return Err(EngineError::WorkerUnavailable { worker: "query" });
-            }
-        }
-
-        response_rx
-            .recv()
-            .map_err(|_| EngineError::WorkerUnavailable { worker: "query" })?
+        self.send_cancellable(
+            cancellation,
+            |cancellation_epoch, cancellation, response| QueryCommand::ReplayChanges {
+                cancellation_epoch,
+                cancellation,
+                request,
+                response,
+            },
+        )
     }
 
     pub fn source_catalog(
@@ -1828,21 +1832,18 @@ fn query_thread(
             }
             QueryCommand::ReplayChanges {
                 cancellation_epoch,
+                cancellation,
                 request,
                 response,
             } => {
-                if is_cancelled(&control, cancellation_epoch) {
-                    let _ = response.send(Err(EngineError::QueryCancelled));
-                    continue;
-                }
                 let _in_flight = InFlightGuard::enter(&control.in_flight);
-                let result = read_change_replay(&connection, &request).and_then(|replay| {
-                    if is_cancelled(&control, cancellation_epoch) {
-                        Err(EngineError::QueryCancelled)
-                    } else {
-                        Ok(replay)
-                    }
-                });
+                let result = run_cancellable_query(
+                    &connection,
+                    &control,
+                    cancellation_epoch,
+                    &cancellation,
+                    || read_change_replay(&connection, &request),
+                );
                 let _ = response.send(result);
             }
             QueryCommand::SourceCatalog {
@@ -3051,7 +3052,7 @@ fn read_change_replay(
     sql.push_str(&limit_parameter.to_string());
     arguments.push(Value::Integer(i64::from(request.limit) + 1));
 
-    let mut changes = {
+    let (changes, payload_bytes, has_more) = {
         let mut statement = transaction
             .prepare(&sql)
             .map_err(|error| query_sqlite_error("prepare change replay", error))?;
@@ -3059,10 +3060,16 @@ fn read_change_replay(
             .query(rusqlite::params_from_iter(arguments.iter()))
             .map_err(|error| query_sqlite_error("execute change replay", error))?;
         let mut changes = Vec::new();
+        let mut payload_bytes = 0_u64;
+        let mut has_more = false;
         while let Some(row) = rows
             .next()
             .map_err(|error| query_sqlite_error("read durable change", error))?
         {
+            if changes.len() >= request.limit as usize {
+                has_more = true;
+                break;
+            }
             let commit_seq: i64 = row
                 .get(0)
                 .map_err(|error| query_sqlite_error("decode change sequence", error))?;
@@ -3072,7 +3079,7 @@ fn read_change_replay(
             let schema_version: i64 = row
                 .get(3)
                 .map_err(|error| query_sqlite_error("decode change schema version", error))?;
-            changes.push(DurableChange {
+            let change = DurableChange {
                 cursor: decode_cursor(commit_seq, ordinal)?,
                 topic: row
                     .get(2)
@@ -3090,26 +3097,67 @@ fn read_change_replay(
                 payload: row
                     .get(6)
                     .map_err(|error| query_sqlite_error("decode change payload", error))?,
-            });
+            };
+            let change_bytes = change_payload_bytes(&change)?;
+            let next_bytes =
+                payload_bytes
+                    .checked_add(change_bytes)
+                    .ok_or_else(|| EngineError::Sqlite {
+                        operation: "bound change replay payload",
+                        detail: "change replay payload byte total overflowed u64".to_string(),
+                    })?;
+            if next_bytes > MAX_CHANGE_REPLAY_PAYLOAD_BYTES {
+                if changes.is_empty() {
+                    return Err(EngineError::Sqlite {
+                        operation: "bound change replay payload",
+                        detail: format!(
+                            "one durable change requires {change_bytes} payload bytes; maximum is {MAX_CHANGE_REPLAY_PAYLOAD_BYTES}"
+                        ),
+                    });
+                }
+                has_more = true;
+                break;
+            }
+            payload_bytes = next_bytes;
+            changes.push(change);
         }
-        changes
+        (changes, payload_bytes, has_more)
     };
 
     transaction
         .commit()
         .map_err(|error| query_sqlite_error("finish change replay snapshot", error))?;
 
-    let has_more = changes.len() > request.limit as usize;
-    if has_more {
-        changes.truncate(request.limit as usize);
-    }
     let next_cursor = changes.last().map(|change| change.cursor);
     Ok(ChangeReplay {
+        contract_version: CHANGE_REPLAY_CONTRACT_VERSION,
         at_commit_seq: watermark,
         oldest_available,
         changes,
         next_cursor,
         has_more,
+        payload_bytes,
+        payload_byte_limit: MAX_CHANGE_REPLAY_PAYLOAD_BYTES,
+    })
+}
+
+fn change_payload_bytes(change: &DurableChange) -> Result<u64, EngineError> {
+    [
+        change.topic.len(),
+        change.entity_key.len(),
+        change.operation.len(),
+        change.payload.len(),
+    ]
+    .into_iter()
+    .try_fold(0_u64, |total, bytes| {
+        let bytes = u64::try_from(bytes).map_err(|_| EngineError::Sqlite {
+            operation: "bound change replay payload",
+            detail: "change replay field length exceeded u64".to_string(),
+        })?;
+        total.checked_add(bytes).ok_or_else(|| EngineError::Sqlite {
+            operation: "bound change replay payload",
+            detail: "change replay row payload byte total overflowed u64".to_string(),
+        })
     })
 }
 
@@ -3617,6 +3665,33 @@ mod tests {
     }
 
     #[test]
+    fn pre_cancelled_change_replay_never_enters_the_worker_queue() {
+        let dir = tempdir().unwrap();
+        let database = dir.path().join("change-replay-cancel.db");
+        let mut writer = WriterRuntime::start(database.clone()).unwrap();
+        let mut pool = QueryPool::start(database, 1).unwrap();
+        let client = pool.client();
+        let cancellation = QueryCancellationToken::default();
+        cancellation.cancel();
+
+        assert!(matches!(
+            client.replay_changes_cancellable(
+                ChangeReplayRequest {
+                    after: None,
+                    topics: Vec::new(),
+                    limit: DEFAULT_CHANGE_REPLAY_LIMIT,
+                },
+                cancellation,
+            ),
+            Err(EngineError::QueryCancelled)
+        ));
+        assert!(client.commands.is_empty());
+
+        pool.shutdown().unwrap();
+        writer.shutdown().unwrap();
+    }
+
+    #[test]
     fn pre_cancelled_capability_request_never_enters_the_worker_queue() {
         let dir = tempdir().unwrap();
         let database = dir.path().join("capability-cancel.db");
@@ -3888,6 +3963,7 @@ mod tests {
                 limit: 1,
             })
             .unwrap();
+        assert_eq!(first.contract_version, CHANGE_REPLAY_CONTRACT_VERSION);
         assert_eq!(first.at_commit_seq, receipt.commit_seq);
         assert_eq!(
             first.oldest_available,
@@ -3906,6 +3982,12 @@ mod tests {
             })
         );
         assert!(first.has_more);
+        assert_eq!(
+            first.payload_bytes,
+            change_payload_bytes(&first.changes[0]).unwrap()
+        );
+        assert_eq!(first.payload_byte_limit, MAX_CHANGE_REPLAY_PAYLOAD_BYTES);
+        assert!(first.payload_bytes <= first.payload_byte_limit);
 
         let remainder = client
             .replay_changes(ChangeReplayRequest {
@@ -3953,6 +4035,46 @@ mod tests {
             }),
             Err(EngineError::InvalidQuery(_))
         ));
+
+        pool.shutdown().unwrap();
+        writer.shutdown().unwrap();
+    }
+
+    #[test]
+    fn durable_change_replay_splits_pages_at_the_payload_byte_limit() {
+        let dir = tempdir().unwrap();
+        let database = dir.path().join("replay-payload-bound.db");
+        let mut writer = WriterRuntime::start(database.clone()).unwrap();
+        let mut request = commit_request();
+        let payload_len = usize::try_from(MAX_CHANGE_REPLAY_PAYLOAD_BYTES / 2).unwrap();
+        for (index, change) in request.changes.iter_mut().enumerate() {
+            change.payload = vec![u8::try_from(index).unwrap(); payload_len];
+        }
+        writer.client().commit_observation(request).unwrap();
+        let mut pool = QueryPool::start(database, 1).unwrap();
+        let client = pool.client();
+
+        let first = client
+            .replay_changes(ChangeReplayRequest {
+                after: None,
+                topics: Vec::new(),
+                limit: 10,
+            })
+            .unwrap();
+        assert_eq!(first.changes.len(), 1);
+        assert!(first.has_more);
+        assert!(first.payload_bytes <= MAX_CHANGE_REPLAY_PAYLOAD_BYTES);
+
+        let second = client
+            .replay_changes(ChangeReplayRequest {
+                after: first.next_cursor,
+                topics: Vec::new(),
+                limit: 10,
+            })
+            .unwrap();
+        assert_eq!(second.changes.len(), 1);
+        assert!(!second.has_more);
+        assert!(second.payload_bytes <= MAX_CHANGE_REPLAY_PAYLOAD_BYTES);
 
         pool.shutdown().unwrap();
         writer.shutdown().unwrap();

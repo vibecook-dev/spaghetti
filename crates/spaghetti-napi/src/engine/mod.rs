@@ -67,8 +67,9 @@ pub use query_pool::{
     ChangeCursor, ChangeReplay, ChangeReplayRequest, DurableChange, HistoryProjectIndexSummary,
     HistoryProjectPage, HistoryProjectPageRequest, HistoryProjectSummary,
     HistorySessionIndexSummary, HistorySessionPage, HistorySessionPageRequest,
-    HistorySessionSummary, QueryCancellationToken, QueryOverview, DEFAULT_HISTORY_PAGE_LIMIT,
-    HISTORY_QUERY_CONTRACT_VERSION,
+    HistorySessionSummary, QueryCancellationToken, QueryOverview, CHANGE_REPLAY_CONTRACT_VERSION,
+    DEFAULT_CHANGE_REPLAY_LIMIT, DEFAULT_HISTORY_PAGE_LIMIT, HISTORY_QUERY_CONTRACT_VERSION,
+    MAX_CHANGE_REPLAY_PAYLOAD_BYTES,
 };
 use query_pool::{QueryClient, QueryPool, SourceCatalogSnapshot};
 pub use runtime_query::{
@@ -798,6 +799,15 @@ impl SpaghettiEngineCore {
     ) -> Result<ChangeReplay, EngineError> {
         let (_, queries) = self.clients()?;
         queries.replay_changes(request)
+    }
+
+    pub fn replay_changes_cancellable(
+        &self,
+        request: ChangeReplayRequest,
+        cancellation: QueryCancellationToken,
+    ) -> Result<ChangeReplay, EngineError> {
+        let (_, queries) = self.clients()?;
+        queries.replay_changes_cancellable(request, cancellation)
     }
 
     /// Hydrate one adapter instance's durable common-source state through the

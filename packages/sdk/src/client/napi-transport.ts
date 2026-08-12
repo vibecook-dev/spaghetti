@@ -192,6 +192,8 @@ async function executeEngineRequest(
       return engine.health(signal);
     case 'getOverview':
       return engine.overview(signal);
+    case 'replayChanges':
+      return engine.replayChanges(request.payload, signal);
     case 'listProjects':
       return engine.listHistoryProjects(request.payload, signal);
     case 'listSessions':

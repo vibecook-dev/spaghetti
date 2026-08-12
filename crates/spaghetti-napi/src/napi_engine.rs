@@ -3,22 +3,25 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
+use base64::Engine as _;
 use napi::bindgen_prelude::{AbortSignal, AsyncTask, Env, Error, Result, Status, Task};
 use napi_derive::napi;
 
 use crate::engine::{
-    ArtifactDetail, ArtifactPage, ArtifactPageRequest, CanonicalStats, DelegationPage,
-    DelegationPageRequest, DelegationSummary, EngineHealthSnapshot, EngineOptions, EngineOverview,
-    EngineStatusSnapshot, HistoryProjectIndexSummary, HistoryProjectPage,
-    HistoryProjectPageRequest, HistoryProjectSummary, HistorySessionIndexSummary,
-    HistorySessionPage, HistorySessionPageRequest, HistorySessionSummary, MemoryDocument,
-    MemoryDocumentPage, MemoryDocumentPageRequest, MessageDetail, MessagePage, MessagePageRequest,
-    NamedCount, ObservationStatusSnapshot, ObservationSupervisorOptions, OwnerMetadata, PlanDetail,
-    PlanPage, PlanPageRequest, QueryCancellationToken, ReconcileOutcome, ReconcileRequest,
-    RunStateLookup, RunStateRequest, RuntimePresenceSnapshot, RuntimeRunEvidence,
-    RuntimeRunSnapshot, RuntimeSnapshot, RuntimeSnapshotRequest, SearchHit, SearchPage,
-    SearchPageRequest, SessionDetail, SessionDetails, SessionDetailsRequest, SessionIndexDetail,
-    SourcePage, SourcePageRequest, SourceSummary, SpaghettiEngineCore, TaskCollectionPage,
+    ArtifactDetail, ArtifactPage, ArtifactPageRequest, CanonicalStats, ChangeCursor, ChangeReplay,
+    ChangeReplayRequest, DelegationPage, DelegationPageRequest, DelegationSummary, DurableChange,
+    EngineHealthSnapshot, EngineOptions, EngineOverview, EngineStatusSnapshot,
+    HistoryProjectIndexSummary, HistoryProjectPage, HistoryProjectPageRequest,
+    HistoryProjectSummary, HistorySessionIndexSummary, HistorySessionPage,
+    HistorySessionPageRequest, HistorySessionSummary, MemoryDocument, MemoryDocumentPage,
+    MemoryDocumentPageRequest, MessageDetail, MessagePage, MessagePageRequest, NamedCount,
+    ObservationStatusSnapshot, ObservationSupervisorOptions, OwnerMetadata, PlanDetail, PlanPage,
+    PlanPageRequest, QueryCancellationToken, ReconcileOutcome, ReconcileRequest, RunStateLookup,
+    RunStateRequest, RuntimePresenceSnapshot, RuntimeRunEvidence, RuntimeRunSnapshot,
+    RuntimeSnapshot, RuntimeSnapshotRequest, SearchHit, SearchPage, SearchPageRequest,
+    SessionDetail, SessionDetails, SessionDetailsRequest, SessionIndexDetail, SourcePage,
+    SourcePageRequest, SourceSummary, SpaghettiEngineCore, TaskCollectionPage,
     TaskCollectionPageRequest, TaskCollectionSummary, TaskDetail, TaskPage, TaskPageRequest,
     TeamConfigSummary, TeamDetails, TeamDetailsRequest, TeamInboxMessage, TeamInboxMessagePage,
     TeamInboxMessagePageRequest, TeamInboxPage, TeamInboxPageRequest, TeamInboxSummary, TeamMember,
@@ -28,9 +31,10 @@ use crate::engine::{
     UsageAggregate, UsageCoverageSummary, UsageScopeRequest, UsageTokenValues, UsageTotalsReport,
     WorkflowDetails, WorkflowDetailsRequest, WorkflowMember, WorkflowMemberPage,
     WorkflowMemberPageRequest, WorkflowPage, WorkflowPageRequest, WorkflowSummary,
-    DEFAULT_CAPABILITY_PAGE_LIMIT, DEFAULT_DETAIL_PAGE_LIMIT, DEFAULT_HISTORY_PAGE_LIMIT,
-    DEFAULT_ORCHESTRATION_PAGE_LIMIT, DEFAULT_RUNTIME_PAGE_LIMIT, DEFAULT_SEARCH_PAGE_LIMIT,
-    DEFAULT_TEAM_PAGE_LIMIT, DEFAULT_TIMELINE_PAGE_LIMIT,
+    CHANGE_REPLAY_CONTRACT_VERSION, DEFAULT_CAPABILITY_PAGE_LIMIT, DEFAULT_CHANGE_REPLAY_LIMIT,
+    DEFAULT_DETAIL_PAGE_LIMIT, DEFAULT_HISTORY_PAGE_LIMIT, DEFAULT_ORCHESTRATION_PAGE_LIMIT,
+    DEFAULT_RUNTIME_PAGE_LIMIT, DEFAULT_SEARCH_PAGE_LIMIT, DEFAULT_TEAM_PAGE_LIMIT,
+    DEFAULT_TIMELINE_PAGE_LIMIT, MAX_CHANGE_REPLAY_PAYLOAD_BYTES,
 };
 
 #[napi(object)]
@@ -183,6 +187,87 @@ pub struct EngineOverviewResult {
     pub journal_mode: String,
     pub query_only: bool,
     pub read_only: bool,
+}
+
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct EngineChangeCursor {
+    pub commit_seq: f64,
+    pub ordinal: u32,
+}
+
+impl From<ChangeCursor> for EngineChangeCursor {
+    fn from(value: ChangeCursor) -> Self {
+        Self {
+            commit_seq: value.commit_seq as f64,
+            ordinal: value.ordinal,
+        }
+    }
+}
+
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct EngineChangeReplayOptions {
+    /// Return changes strictly after this durable cursor.
+    pub after: Option<EngineChangeCursor>,
+    /// Empty or omitted means all stable topics.
+    pub topics: Option<Vec<String>>,
+    /// Page size. Defaults to 100 and is capped at 1,000 in Rust.
+    pub limit: Option<u32>,
+}
+
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct EngineDurableChange {
+    pub cursor: EngineChangeCursor,
+    pub topic: String,
+    pub schema_version: u32,
+    pub entity_key_base64url: String,
+    pub operation: String,
+    pub payload_base64: String,
+}
+
+impl From<DurableChange> for EngineDurableChange {
+    fn from(value: DurableChange) -> Self {
+        Self {
+            cursor: value.cursor.into(),
+            topic: value.topic,
+            schema_version: value.schema_version,
+            entity_key_base64url: URL_SAFE_NO_PAD.encode(value.entity_key),
+            operation: value.operation,
+            payload_base64: STANDARD.encode(value.payload),
+        }
+    }
+}
+
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct EngineChangeReplay {
+    pub contract_version: u32,
+    pub at_commit_seq: f64,
+    pub oldest_available: Option<EngineChangeCursor>,
+    pub changes: Vec<EngineDurableChange>,
+    pub next_cursor: Option<EngineChangeCursor>,
+    pub has_more: bool,
+    pub payload_bytes: f64,
+    pub payload_byte_limit: f64,
+}
+
+impl From<ChangeReplay> for EngineChangeReplay {
+    fn from(value: ChangeReplay) -> Self {
+        debug_assert_eq!(value.contract_version, CHANGE_REPLAY_CONTRACT_VERSION);
+        debug_assert_eq!(value.payload_byte_limit, MAX_CHANGE_REPLAY_PAYLOAD_BYTES);
+        Self {
+            contract_version: value.contract_version,
+            at_commit_seq: value.at_commit_seq as f64,
+            oldest_available: value.oldest_available.map(Into::into),
+            changes: value.changes.into_iter().map(Into::into).collect(),
+            next_cursor: value.next_cursor.map(Into::into),
+            has_more: value.has_more,
+            payload_bytes: value.payload_bytes as f64,
+            payload_byte_limit: value.payload_byte_limit as f64,
+        }
+    }
 }
 
 #[napi(object)]
@@ -2913,6 +2998,25 @@ impl SpaghettiEngine {
         )
     }
 
+    /// Replay one bounded, snapshot-consistent page of durable projection
+    /// changes. Binary keys and payloads remain lossless base64 strings.
+    #[napi(ts_return_type = "Promise<EngineChangeReplay>")]
+    pub fn replay_changes(
+        &self,
+        options: Option<EngineChangeReplayOptions>,
+        signal: Option<AbortSignal>,
+    ) -> AsyncTask<ChangeReplayTask> {
+        let cancellation = cancellation_for_signal(signal.as_ref());
+        AsyncTask::with_optional_signal(
+            ChangeReplayTask {
+                engine: Arc::clone(&self.inner),
+                options,
+                cancellation,
+            },
+            signal,
+        )
+    }
+
     /// List canonical projects in Rust-defined activity order. The cursor is
     /// opaque, versioned, and valid only for this query.
     #[napi(ts_return_type = "Promise<EngineHistoryProjectPage>")]
@@ -3528,6 +3632,12 @@ pub struct OverviewTask {
     engine: Arc<SpaghettiEngineCore>,
 }
 
+pub struct ChangeReplayTask {
+    engine: Arc<SpaghettiEngineCore>,
+    options: Option<EngineChangeReplayOptions>,
+    cancellation: QueryCancellationToken,
+}
+
 pub struct HistoryProjectsTask {
     engine: Arc<SpaghettiEngineCore>,
     options: Option<EngineHistoryPageOptions>,
@@ -3783,6 +3893,35 @@ impl Task for OverviewTask {
 
     fn compute(&mut self) -> Result<Self::Output> {
         self.engine.overview().map(Into::into).map_err(napi_error)
+    }
+
+    fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
+        Ok(output)
+    }
+}
+
+impl Task for ChangeReplayTask {
+    type Output = EngineChangeReplay;
+    type JsValue = EngineChangeReplay;
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        let options = self.options.clone().unwrap_or(EngineChangeReplayOptions {
+            after: None,
+            topics: None,
+            limit: None,
+        });
+        let after = options.after.map(change_cursor_from_js).transpose()?;
+        self.engine
+            .replay_changes_cancellable(
+                ChangeReplayRequest {
+                    after,
+                    topics: options.topics.unwrap_or_default(),
+                    limit: options.limit.unwrap_or(DEFAULT_CHANGE_REPLAY_LIMIT),
+                },
+                self.cancellation.clone(),
+            )
+            .map(Into::into)
+            .map_err(napi_error)
     }
 
     fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
@@ -4468,6 +4607,23 @@ fn cancellation_for_signal(signal: Option<&AbortSignal>) -> QueryCancellationTok
         signal.on_abort(move || abort_cancellation.cancel());
     }
     cancellation
+}
+
+fn change_cursor_from_js(value: EngineChangeCursor) -> Result<ChangeCursor> {
+    const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
+    if !value.commit_seq.is_finite()
+        || value.commit_seq.fract() != 0.0
+        || !(0.0..=MAX_SAFE_INTEGER).contains(&value.commit_seq)
+    {
+        return Err(Error::new(
+            Status::InvalidArg,
+            "change cursor commitSeq must be a non-negative safe integer",
+        ));
+    }
+    Ok(ChangeCursor {
+        commit_seq: value.commit_seq as u64,
+        ordinal: value.ordinal,
+    })
 }
 
 fn validate_roots(roots: &[String], operation: &str) -> Result<()> {

@@ -9,7 +9,10 @@ import {
   type SpaghettiClientRequestMap,
   type SpaghettiClientResponseMap,
   type SpaghettiClientTransport,
+  type SpaghettiCommittedChangeBatch,
   type SpaghettiQueryOptions,
+  type SpaghettiSubscribeOptions,
+  type SpaghettiSubscribeRequest,
 } from './protocol.js';
 import {
   cancelledProtocolError,
@@ -36,6 +39,11 @@ interface SupersessionEntry {
   controller: AbortController;
 }
 
+export const SPAGHETTI_SUBSCRIPTION_POLL_INTERVAL_MS = 250;
+
+const MAX_CHANGE_ORDINAL = 0xffff_ffff;
+const MAX_TIMER_DELAY_MS = 0x7fff_ffff;
+
 class DefaultSpaghettiClient implements SpaghettiClient {
   readonly info: SpaghettiClientInfo;
   private nextRequestId = 1;
@@ -43,6 +51,7 @@ class DefaultSpaghettiClient implements SpaghettiClient {
   private disposePromise: Promise<void> | undefined;
   private readonly supersession = new Map<string, SupersessionEntry>();
   private readonly inFlight = new Map<number, AbortController>();
+  private readonly subscriptions = new Set<AbortController>();
 
   constructor(
     private readonly transport: SpaghettiClientTransport,
@@ -57,6 +66,13 @@ class DefaultSpaghettiClient implements SpaghettiClient {
 
   getOverview(options?: SpaghettiQueryOptions): Promise<SpaghettiClientResponseMap['getOverview']> {
     return this.query('getOverview', undefined, options);
+  }
+
+  replayChanges(
+    request?: Exclude<SpaghettiClientRequestMap['replayChanges'], undefined>,
+    options?: SpaghettiQueryOptions,
+  ): Promise<SpaghettiClientResponseMap['replayChanges']> {
+    return this.query('replayChanges', request, options);
   }
 
   listProjects(
@@ -238,14 +254,92 @@ class DefaultSpaghettiClient implements SpaghettiClient {
     return this.query('listTeamInboxMessages', request, options);
   }
 
+  subscribe(
+    request: SpaghettiSubscribeRequest = {},
+    options: SpaghettiSubscribeOptions = {},
+  ): AsyncIterable<SpaghettiCommittedChangeBatch> {
+    if (this.closed) throw clientError(closedProtocolError());
+    if (options.signal?.aborted) throw clientError(cancelledProtocolError());
+
+    const pollIntervalMs = options.pollIntervalMs ?? SPAGHETTI_SUBSCRIPTION_POLL_INTERVAL_MS;
+    if (!Number.isSafeInteger(pollIntervalMs) || pollIntervalMs < 1 || pollIntervalMs > MAX_TIMER_DELAY_MS) {
+      throw clientError({
+        code: 'invalid_request',
+        message: `pollIntervalMs must be an integer between 1 and ${MAX_TIMER_DELAY_MS}.`,
+        field: 'pollIntervalMs',
+      });
+    }
+    if (
+      request.batchSize !== undefined &&
+      (!Number.isSafeInteger(request.batchSize) || request.batchSize < 1 || request.batchSize > 1_000)
+    ) {
+      throw clientError({
+        code: 'invalid_request',
+        message: 'batchSize must be an integer between 1 and 1000.',
+        field: 'batchSize',
+      });
+    }
+
+    const initialCursor = request.from ? { ...request.from } : undefined;
+    const topics = request.topics ? [...request.topics] : undefined;
+    const batchSize = request.batchSize;
+    return this.subscription(initialCursor, topics, batchSize, pollIntervalMs, options.signal);
+  }
+
   dispose(): Promise<void> {
     if (this.disposePromise) return this.disposePromise;
     this.closed = true;
+    for (const controller of this.subscriptions) controller.abort(cancelledProtocolError());
+    this.subscriptions.clear();
     for (const controller of this.inFlight.values()) controller.abort(cancelledProtocolError());
     this.inFlight.clear();
     this.supersession.clear();
     this.disposePromise = Promise.resolve().then(() => this.transport.dispose());
     return this.disposePromise;
+  }
+
+  private async *subscription(
+    initialCursor: SpaghettiSubscribeRequest['from'],
+    topics: string[] | undefined,
+    batchSize: number | undefined,
+    pollIntervalMs: number,
+    callerSignal: AbortSignal | undefined,
+  ): AsyncGenerator<SpaghettiCommittedChangeBatch> {
+    const controller = new AbortController();
+    const signal = combineSignals(callerSignal, controller.signal);
+    let cursor = initialCursor;
+    this.subscriptions.add(controller);
+
+    try {
+      while (!signal?.aborted) {
+        const page = await this.replayChanges(
+          {
+            ...(cursor ? { after: cursor } : {}),
+            ...(topics ? { topics } : {}),
+            ...(batchSize !== undefined ? { limit: batchSize } : {}),
+          },
+          signal ? { signal } : undefined,
+        );
+        if (signal?.aborted) return;
+        assertReplayProgress(page, cursor);
+
+        if (page.changes.length > 0) yield page;
+
+        if (page.hasMore) {
+          cursor = page.nextCursor;
+          continue;
+        }
+
+        cursor = { commitSeq: page.atCommitSeq, ordinal: MAX_CHANGE_ORDINAL };
+        if (!(await abortableDelay(pollIntervalMs, signal))) return;
+      }
+    } catch (error) {
+      if (signal?.aborted && error instanceof SpaghettiClientError && error.code === 'cancelled') return;
+      throw error;
+    } finally {
+      controller.abort(cancelledProtocolError());
+      this.subscriptions.delete(controller);
+    }
   }
 
   private async query<M extends SpaghettiClientMethod>(
@@ -379,6 +473,63 @@ function assertResultContract(result: unknown, expected: number, requestId: numb
   }
 }
 
+function assertReplayProgress(page: SpaghettiCommittedChangeBatch, after: SpaghettiSubscribeRequest['from']): void {
+  if (!Number.isSafeInteger(page.atCommitSeq) || page.atCommitSeq < 0) {
+    throw clientError(protocolMismatchError('change replay returned an invalid snapshot watermark'));
+  }
+  if (after && page.atCommitSeq < after.commitSeq) {
+    throw clientError({
+      code: 'cursor_invalid',
+      message: 'The change cursor is ahead of the current durable watermark.',
+      reason: 'ahead_of_watermark',
+    });
+  }
+  if (page.hasMore && page.changes.length === 0) {
+    throw clientError(protocolMismatchError('change replay reported more pages without making cursor progress'));
+  }
+  if (page.changes.length === 0) {
+    if (page.nextCursor !== undefined) {
+      throw clientError(protocolMismatchError('empty change replay returned a next cursor'));
+    }
+    return;
+  }
+
+  let previous = after;
+  for (const change of page.changes) {
+    assertChangeCursor(change.cursor);
+    if (previous && compareChangeCursors(change.cursor, previous) <= 0) {
+      throw clientError(protocolMismatchError('change replay cursors are not strictly increasing'));
+    }
+    if (change.cursor.commitSeq > page.atCommitSeq) {
+      throw clientError(protocolMismatchError('change replay cursor exceeds its snapshot watermark'));
+    }
+    previous = change.cursor;
+  }
+  if (!page.nextCursor || compareChangeCursors(page.nextCursor, page.changes.at(-1)!.cursor) !== 0) {
+    throw clientError(protocolMismatchError('change replay next cursor does not match its final change'));
+  }
+}
+
+function assertChangeCursor(cursor: SpaghettiSubscribeRequest['from']): void {
+  if (
+    !cursor ||
+    !Number.isSafeInteger(cursor.commitSeq) ||
+    cursor.commitSeq < 0 ||
+    !Number.isInteger(cursor.ordinal) ||
+    cursor.ordinal < 0 ||
+    cursor.ordinal > MAX_CHANGE_ORDINAL
+  ) {
+    throw clientError(protocolMismatchError('change replay returned an invalid durable cursor'));
+  }
+}
+
+function compareChangeCursors(
+  left: NonNullable<SpaghettiSubscribeRequest['from']>,
+  right: NonNullable<SpaghettiSubscribeRequest['from']>,
+): number {
+  return left.commitSeq === right.commitSeq ? left.ordinal - right.ordinal : left.commitSeq - right.commitSeq;
+}
+
 function combineSignals(...candidates: Array<AbortSignal | undefined>): AbortSignal | undefined {
   const signals = candidates.filter((signal): signal is AbortSignal => signal !== undefined);
   if (signals.length === 0) return undefined;
@@ -411,5 +562,22 @@ function abortableRequest<T>(request: Promise<T>, signal: AbortSignal | undefine
         reject(error);
       },
     );
+  });
+}
+
+function abortableDelay(delayMs: number, signal: AbortSignal | undefined): Promise<boolean> {
+  if (signal?.aborted) return Promise.resolve(false);
+  return new Promise<boolean>((resolve) => {
+    let settled = false;
+    const finish = (completed: boolean): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort);
+      resolve(completed);
+    };
+    const onAbort = (): void => finish(false);
+    const timer = setTimeout(() => finish(true), delayMs);
+    signal?.addEventListener('abort', onAbort, { once: true });
   });
 }

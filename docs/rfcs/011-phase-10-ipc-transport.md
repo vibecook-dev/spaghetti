@@ -33,8 +33,10 @@ vocabularies, so those boundaries cannot drift independently.
 
 The JSON body is the first portable encoding for MessagePort deployment. The
 fixed header and wire-version byte allow a later measured encoding change
-without changing query semantics. Large exports and committed-change replay
-remain streaming work; they must not raise the ordinary-frame bound.
+without changing query semantics. Durable replay now uses bounded pages whose
+raw change payload is capped at 12 MiB, leaving room for base64 expansion and
+JSON metadata below the ordinary frame bound. Large exports remain streaming
+work; they must not raise that bound.
 
 ## Channel and host topology
 
@@ -96,9 +98,10 @@ transport exactly once when it owns it.
   persistent Rust engine;
 - structured cursor-error parity across the two transports.
 
-The real-engine parity case compares overview, project-page, and statistics
-DTOs field-for-field at the JavaScript object boundary. It then verifies that an
-invalid cursor retains the same public `cursor_invalid` classification.
+The real-engine parity case compares overview, durable-replay, project-page,
+and statistics DTOs field-for-field at the JavaScript object boundary. It then
+verifies that an invalid cursor retains the same public `cursor_invalid`
+classification.
 
 This is semantic and lifecycle evidence for the portable MessagePort bridge,
 not a field-native/daemon performance claim. The selected native IPC endpoint
@@ -109,7 +112,6 @@ cancellation-burst benchmark evidence before production cutover.
 
 - connect this channel contract to the selected field-native/daemon endpoint
   and add IPC topology measurements to the canonical query benchmark;
-- expose committed-change replay and `SpaghettiClient.subscribe()`;
 - migrate CLI/TUI, playground/Electron, React hooks, and SDK examples in
   reversible slices with stale-result tests;
 - deprecate compatibility APIs, move the TypeScript oracle to test-only code,

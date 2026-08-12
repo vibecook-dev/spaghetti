@@ -216,6 +216,44 @@ export interface SpaghettiEngineOverview {
   readOnly: boolean;
 }
 
+/** Exact durable position in the ordered projection change log. */
+export interface SpaghettiEngineChangeCursor {
+  commitSeq: number;
+  ordinal: number;
+}
+
+export interface SpaghettiEngineChangeReplayOptions {
+  /** Return changes strictly after this cursor. Omit to start at retained history. */
+  after?: SpaghettiEngineChangeCursor;
+  /** Empty or omitted means all stable change topics. */
+  topics?: string[];
+  /** Defaults to 100 and must be between 1 and 1,000. */
+  limit?: number;
+}
+
+/** Lossless projection-level change; binary fields stay explicitly encoded. */
+export interface SpaghettiEngineDurableChange {
+  cursor: SpaghettiEngineChangeCursor;
+  topic: string;
+  schemaVersion: number;
+  entityKeyBase64Url: string;
+  operation: string;
+  payloadBase64: string;
+}
+
+export interface SpaghettiEngineChangeReplay {
+  contractVersion: number;
+  /** Watermark read in the same SQLite snapshot as this page. */
+  atCommitSeq: number;
+  oldestAvailable?: SpaghettiEngineChangeCursor;
+  changes: SpaghettiEngineDurableChange[];
+  /** Cursor of the last returned change, including on a final non-empty page. */
+  nextCursor?: SpaghettiEngineChangeCursor;
+  hasMore: boolean;
+  payloadBytes: number;
+  payloadByteLimit: number;
+}
+
 export interface SpaghettiEngineHistoryPageOptions {
   /** Opaque keyset cursor returned by the preceding page. */
   cursor?: string;
@@ -1428,6 +1466,10 @@ export interface SpaghettiEngine {
   readonly status: SpaghettiEngineStatus;
   health(signal?: AbortSignal): Promise<SpaghettiEngineHealth>;
   overview(signal?: AbortSignal): Promise<SpaghettiEngineOverview>;
+  replayChanges(
+    options?: SpaghettiEngineChangeReplayOptions,
+    signal?: AbortSignal,
+  ): Promise<SpaghettiEngineChangeReplay>;
   listHistoryProjects(
     options?: SpaghettiEngineHistoryPageOptions,
     signal?: AbortSignal,

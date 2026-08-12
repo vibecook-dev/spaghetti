@@ -160,6 +160,26 @@ describe('persistent SpaghettiEngine', { skip: !native }, () => {
 
     assert.deepEqual([overview.projects, overview.sessions, overview.messages], [0, 0, 0]);
     assert.deepEqual([overview.canonicalSessions, overview.canonicalMessages], [1, 1]);
+
+    const replay = await engine.replayChanges({ limit: 1 });
+    assert.equal(replay.contractVersion, 1);
+    assert.equal(replay.atCommitSeq, overview.commitSeq);
+    assert.equal(replay.changes.length, 1);
+    assert.equal(replay.hasMore, true);
+    assert.deepEqual(replay.nextCursor, replay.changes[0]?.cursor);
+    assert.match(replay.changes[0]?.entityKeyBase64Url ?? '', /^[A-Za-z0-9_-]*$/);
+    assert.match(
+      replay.changes[0]?.payloadBase64 ?? '',
+      /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/,
+    );
+    assert.equal(replay.payloadBytes > 0, true);
+    assert.equal(replay.payloadBytes <= replay.payloadByteLimit, true);
+
+    const afterSnapshot = await engine.replayChanges({
+      after: { commitSeq: replay.atCommitSeq, ordinal: 0xffff_ffff },
+    });
+    assert.deepEqual(afterSnapshot.changes, []);
+    assert.equal(afterSnapshot.hasMore, false);
   });
 
   test('starts, refreshes, and stops native Claude observation', async () => {

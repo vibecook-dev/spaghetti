@@ -1,6 +1,6 @@
 # RFC 011 Phase 10: asynchronous client and N-API transport foundation
 
-Status: foundation complete on 2026-08-12; consumer and IPC cutover remains
+Status: foundation complete on 2026-08-12; consumer cutover remains
 
 This slice introduces the public transport-neutral client boundary required
 before production TypeScript consumers can stop depending on synchronous
@@ -12,11 +12,11 @@ database ownership yet.
 `packages/sdk/src/client/` now defines:
 
 - `SpaghettiClient`, the asynchronous semantic query facade;
-- one exhaustive request/result map for all 28 canonical Rust query methods;
+- one exhaustive request/result map for all 29 canonical Rust read/replay methods;
 - versioned request/response envelopes with monotonic request IDs;
 - explicit transport and query-contract negotiation;
 - a bounded 64 KiB request envelope;
-- `SpaghettiClientTransport`, shared by embedded and future IPC hosts;
+- `SpaghettiClientTransport`, shared by embedded and IPC hosts;
 - structured, transport-neutral public errors;
 - `NapiTransport`, where one logical client query invokes one asynchronous
   method on the persistent Rust engine;
@@ -76,7 +76,7 @@ the IPC implementation and consumer tests use without importing N-API.
 - response-envelope and result-contract mismatch;
 - structured error propagation and internal-error sanitization;
 - pre-dispatch abort, request supersession, and in-flight disposal;
-- exhaustive one-call N-API dispatch for all 28 canonical methods;
+- exhaustive one-call N-API dispatch for all 29 canonical methods;
 - a real persistent Rust engine open/query/dispose lifecycle;
 - native validation, cursor, and request-payload error mapping.
 
@@ -86,9 +86,8 @@ read and does not change the legacy production surface.
 
 ## Remaining Phase 10 work
 
-- connect the completed framed IPC transport to the selected
+- connect the framed IPC transport to the selected
   field-native/daemon endpoint and add topology benchmark evidence;
-- expose committed-change replay and `SpaghettiClient.subscribe()`;
 - migrate CLI/TUI, playground/Electron, React hooks, and SDK examples in
   reversible slices with stale-result tests;
 - deprecate compatibility APIs, move the TypeScript oracle to test-only code,

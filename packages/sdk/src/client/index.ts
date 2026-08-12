@@ -9,6 +9,7 @@ export {
 export {
   openSpaghettiClient,
   openEmbeddedSpaghettiClient,
+  SPAGHETTI_SUBSCRIPTION_POLL_INTERVAL_MS,
   type OpenSpaghettiClientOptions,
   type OpenEmbeddedSpaghettiClientOptions,
 } from './client.js';

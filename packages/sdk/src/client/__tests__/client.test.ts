@@ -237,6 +237,133 @@ describe('SpaghettiClient protocol', () => {
     await assert.rejects(pending, (error) => errorCode(error, 'cancelled'));
     assert.equal(transport.requestSignals[0]?.aborted, true);
   });
+
+  test('subscribes through ordered replay pages and advances empty polling to the snapshot watermark', async () => {
+    const firstPage = {
+      contractVersion: 1,
+      atCommitSeq: 2,
+      changes: [
+        {
+          cursor: { commitSeq: 1, ordinal: 0 },
+          topic: 'history.session.changed',
+          schemaVersion: 1,
+          entityKeyBase64Url: 'c2Vzc2lvbg',
+          operation: 'upsert',
+          payloadBase64: 'e30=',
+        },
+      ],
+      nextCursor: { commitSeq: 1, ordinal: 0 },
+      hasMore: true,
+      payloadBytes: 39,
+      payloadByteLimit: 12 * 1024 * 1024,
+    };
+    const finalPage = {
+      ...firstPage,
+      changes: [{ ...firstPage.changes[0]!, cursor: { commitSeq: 2, ordinal: 0 } }],
+      nextCursor: { commitSeq: 2, ordinal: 0 },
+      hasMore: false,
+    };
+    let replayCalls = 0;
+    let markThirdStarted: (() => void) | undefined;
+    const thirdStarted = new Promise<void>((resolve) => {
+      markThirdStarted = resolve;
+    });
+    const transport = new FakeTransport((request) => {
+      assert.equal(request.method, 'replayChanges');
+      replayCalls += 1;
+      if (replayCalls === 1) return success(request, firstPage);
+      if (replayCalls === 2) return success(request, finalPage);
+      markThirdStarted?.();
+      return new Promise(() => undefined);
+    });
+    const client = await openSpaghettiClient({ transport });
+    const cancellation = new AbortController();
+    const subscription = client.subscribe(
+      {
+        from: { commitSeq: 0, ordinal: 0 },
+        topics: ['history.session.changed'],
+        batchSize: 1,
+      },
+      { signal: cancellation.signal, pollIntervalMs: 1 },
+    );
+    const iterator = subscription[Symbol.asyncIterator]();
+
+    assert.deepEqual(await iterator.next(), { value: firstPage, done: false });
+    assert.deepEqual(await iterator.next(), { value: finalPage, done: false });
+    const waiting = iterator.next();
+    await thirdStarted;
+
+    assert.deepEqual(
+      transport.requests.map((request) => request.payload),
+      [
+        {
+          after: { commitSeq: 0, ordinal: 0 },
+          topics: ['history.session.changed'],
+          limit: 1,
+        },
+        {
+          after: { commitSeq: 1, ordinal: 0 },
+          topics: ['history.session.changed'],
+          limit: 1,
+        },
+        {
+          after: { commitSeq: 2, ordinal: 0xffff_ffff },
+          topics: ['history.session.changed'],
+          limit: 1,
+        },
+      ],
+    );
+    cancellation.abort();
+    assert.deepEqual(await waiting, { value: undefined, done: true });
+    assert.equal(transport.requestSignals[2]?.aborted, true);
+    await client.dispose();
+  });
+
+  test('rejects replay pages that cannot make durable cursor progress', async () => {
+    const transport = new FakeTransport((request) =>
+      success(request, {
+        contractVersion: 1,
+        atCommitSeq: 1,
+        changes: [],
+        hasMore: true,
+        payloadBytes: 0,
+        payloadByteLimit: 12 * 1024 * 1024,
+      }),
+    );
+    const client = await openSpaghettiClient({ transport });
+    const iterator = client.subscribe(undefined, { pollIntervalMs: 1 })[Symbol.asyncIterator]();
+
+    await assert.rejects(iterator.next(), (error) => errorCode(error, 'protocol_mismatch'));
+    await client.dispose();
+  });
+
+  test('validates subscription bounds and ends a pending subscription on disposal', async () => {
+    let markStarted: (() => void) | undefined;
+    const started = new Promise<void>((resolve) => {
+      markStarted = resolve;
+    });
+    const transport = new FakeTransport(() => {
+      markStarted?.();
+      return new Promise(() => undefined);
+    });
+    const client = await openSpaghettiClient({ transport });
+
+    assert.throws(
+      () => client.subscribe({ batchSize: 0 }),
+      (error) => errorCode(error, 'invalid_request'),
+    );
+    assert.throws(
+      () => client.subscribe(undefined, { pollIntervalMs: 0 }),
+      (error) => errorCode(error, 'invalid_request'),
+    );
+
+    const iterator = client.subscribe()[Symbol.asyncIterator]();
+    const pending = iterator.next();
+    await started;
+    await client.dispose();
+    assert.deepEqual(await pending, { value: undefined, done: true });
+    assert.equal(transport.requestSignals[0]?.aborted, true);
+  });
 });
 
 describe('NapiTransport dispatch', () => {
@@ -263,6 +390,7 @@ describe('NapiTransport dispatch', () => {
 
     await client.getHealth();
     await client.getOverview();
+    await client.replayChanges();
     await client.listProjects({ limit: 1 });
     await client.listSessions({ projectId: 'project' });
     await client.getSession({ sessionId: 'session' });
@@ -295,6 +423,7 @@ describe('NapiTransport dispatch', () => {
       [
         'health',
         'overview',
+        'replayChanges',
         'listHistoryProjects',
         'listHistorySessions',
         'getSession',
@@ -354,12 +483,20 @@ describe('embedded SpaghettiClient', { skip: !native }, () => {
     const overview = await client.getOverview();
     assert.equal(overview.commitSeq, 0);
     assert.equal(overview.queryOnly, true);
+    const replay = await client.replayChanges();
+    assert.equal(replay.contractVersion, 1);
+    assert.equal(replay.atCommitSeq, 0);
+    assert.deepEqual(replay.changes, []);
+    assert.equal(replay.hasMore, false);
+    assert.equal(replay.payloadBytes, 0);
+    assert.equal(replay.payloadByteLimit, 12 * 1024 * 1024);
     const projects = await client.listProjects();
     assert.equal(projects.contractVersion, 1);
     assert.equal(projects.atCommitSeq, 0);
     assert.deepEqual(projects.items, []);
 
     await assert.rejects(client.listProjects({ limit: 0 }), (error) => errorCode(error, 'invalid_request'));
+    await assert.rejects(client.replayChanges({ limit: 0 }), (error) => errorCode(error, 'invalid_request'));
     await assert.rejects(client.listProjects({ cursor: 'not-a-cursor' }), (error) =>
       errorCode(error, 'cursor_invalid'),
     );

@@ -39,6 +39,7 @@ export interface GetTeamRequest {
 export interface SpaghettiClientRequestMap {
   getHealth: undefined;
   getOverview: undefined;
+  replayChanges: EngineRequest<'replayChanges'>;
   listProjects: EngineRequest<'listHistoryProjects'>;
   listSessions: EngineRequest<'listHistorySessions'>;
   getSession: GetSessionRequest;
@@ -71,6 +72,7 @@ export interface SpaghettiClientRequestMap {
 export interface SpaghettiClientResponseMap {
   getHealth: EngineResult<'health'>;
   getOverview: EngineResult<'overview'>;
+  replayChanges: EngineResult<'replayChanges'>;
   listProjects: EngineResult<'listHistoryProjects'>;
   listSessions: EngineResult<'listHistorySessions'>;
   getSession: EngineResult<'getSession'>;
@@ -104,6 +106,7 @@ export type SpaghettiClientMethod = keyof SpaghettiClientRequestMap & keyof Spag
 export const SPAGHETTI_CLIENT_METHODS = completeMethodList([
   'getHealth',
   'getOverview',
+  'replayChanges',
   'listProjects',
   'listSessions',
   'getSession',
@@ -238,7 +241,7 @@ export interface SpaghettiTransportRequestOptions {
   signal?: AbortSignal;
 }
 
-/** Implemented by both the embedded N-API path and the future IPC path. */
+/** Implemented by both the embedded N-API and framed IPC paths. */
 export interface SpaghettiClientTransport {
   readonly kind: string;
   connect(
@@ -263,11 +266,32 @@ export interface SpaghettiQueryOptions {
   supersessionKey?: string;
 }
 
+export interface SpaghettiSubscribeRequest {
+  /** Start strictly after this durable cursor. Omit to replay retained history. */
+  from?: Exclude<SpaghettiClientRequestMap['replayChanges'], undefined>['after'];
+  /** Empty or omitted means all stable projection topics. */
+  topics?: readonly string[];
+  /** Changes per replay page. Defaults to 100; Rust caps it at 1,000. */
+  batchSize?: number;
+}
+
+export interface SpaghettiSubscribeOptions {
+  signal?: AbortSignal;
+  /** Delay between empty replay pages. Defaults to 250 ms. */
+  pollIntervalMs?: number;
+}
+
+export type SpaghettiCommittedChangeBatch = SpaghettiClientResponseMap['replayChanges'];
+
 /** The new asynchronous, transport-neutral canonical query surface. */
 export interface SpaghettiClient {
   readonly info: SpaghettiClientInfo;
   getHealth(options?: SpaghettiQueryOptions): Promise<SpaghettiClientResponseMap['getHealth']>;
   getOverview(options?: SpaghettiQueryOptions): Promise<SpaghettiClientResponseMap['getOverview']>;
+  replayChanges(
+    request?: Exclude<SpaghettiClientRequestMap['replayChanges'], undefined>,
+    options?: SpaghettiQueryOptions,
+  ): Promise<SpaghettiClientResponseMap['replayChanges']>;
   listProjects(
     request?: Exclude<SpaghettiClientRequestMap['listProjects'], undefined>,
     options?: SpaghettiQueryOptions,
@@ -369,6 +393,10 @@ export interface SpaghettiClient {
     request: SpaghettiClientRequestMap['listTeamInboxMessages'],
     options?: SpaghettiQueryOptions,
   ): Promise<SpaghettiClientResponseMap['listTeamInboxMessages']>;
+  subscribe(
+    request?: SpaghettiSubscribeRequest,
+    options?: SpaghettiSubscribeOptions,
+  ): AsyncIterable<SpaghettiCommittedChangeBatch>;
   dispose(): Promise<void>;
 }
 
