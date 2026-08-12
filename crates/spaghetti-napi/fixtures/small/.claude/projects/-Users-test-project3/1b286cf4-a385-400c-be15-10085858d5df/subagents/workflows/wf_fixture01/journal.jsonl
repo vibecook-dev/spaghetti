@@ -1,2 +1,2 @@
-{"type":"started","agentId":"afixture01","timestamp":"2026-04-01T00:20:00.000Z"}
-{"type":"result","agentId":"afixture01","result":{"summary":"did the thing"},"timestamp":"2026-04-01T00:20:05.000Z"}
+{"type":"started","agentId":"afixture01","key":"fixture-member-01","timestamp":"2026-04-01T00:20:00.000Z"}
+{"type":"result","agentId":"afixture01","key":"fixture-member-01","result":{"summary":"did the thing"},"timestamp":"2026-04-01T00:20:05.000Z"}

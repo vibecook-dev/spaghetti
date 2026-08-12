@@ -927,6 +927,82 @@ describe('Claude observation shadow native lifecycle', { skip: !native }, () => 
       /cursor/i,
     );
 
+    assert.ok(markerHit.nativeProjectKey);
+    assert.ok(markerHit.nativeSessionId);
+    const legacyWorkflows = legacy.getSessionWorkflows(markerHit.nativeProjectKey, markerHit.nativeSessionId);
+    assert.equal(legacyWorkflows.length, 1);
+    const legacyWorkflow = legacyWorkflows[0]!;
+    const workflows = await shadow.listWorkflows({
+      projectId: markerHit.projectId,
+      sessionId: markerHit.sessionId,
+      limit: 1,
+    });
+    assert.equal(workflows.contractVersion, 1);
+    assert.equal(workflows.items.length, 1);
+    const workflow = workflows.items[0]!;
+    assert.match(workflow.workflowId, /^workflow_v1_/);
+    assert.equal(workflow.nativeWorkflowId, legacyWorkflow.workflowId);
+    assert.equal(workflow.name, legacyWorkflow.name);
+    assert.equal(workflow.nativeStatus, legacyWorkflow.status);
+    assert.equal(workflow.agentCount, legacyWorkflow.agentCount);
+    assert.equal(workflow.totalTokens, legacyWorkflow.totalTokens);
+    assert.equal(workflow.totalToolCalls, legacyWorkflow.totalToolCalls);
+    assert.equal(workflow.durationMs, legacyWorkflow.durationMs);
+    assert.equal(workflow.snapshotStatus, 'present');
+    assert.equal(workflow.resolutionStatus, 'resolved');
+    assert.equal(workflow.observedMemberCount, 1);
+    assert.equal(workflow.membershipCountStatus, 'different');
+
+    const workflowDetails = await shadow.getWorkflow(workflow.workflowId);
+    assert.equal(workflowDetails.workflow.workflowId, workflow.workflowId);
+    assert.equal(workflowDetails.defaultModel, 'claude-test');
+    assert.equal(workflowDetails.script, 'fixture-audit');
+    assert.equal((workflowDetails.nativeSnapshot as { runId?: string })?.runId, legacyWorkflow.workflowId);
+    assert.ok(workflowDetails.payloadBytes <= workflowDetails.payloadByteLimit);
+
+    const legacyMembers = legacy.getWorkflowSubagents(
+      markerHit.nativeProjectKey,
+      markerHit.nativeSessionId,
+      legacyWorkflow.workflowId,
+    );
+    assert.equal(legacyMembers.length, 1);
+    const members = await shadow.listWorkflowMembers(workflow.workflowId, { limit: 1 });
+    assert.equal(members.contractVersion, 1);
+    assert.equal(members.items.length, 1);
+    assert.equal(members.items[0]?.nativeAgentId, legacyMembers[0]?.agentId);
+    assert.equal(members.items[0]?.messageCount, legacyMembers[0]?.messageCount);
+    assert.equal(members.items[0]?.memberStatus, 'result_observed');
+    assert.deepEqual(members.items[0]?.result, { summary: 'did the thing' });
+    assert.equal(members.items[0]?.childRunPresent, true);
+    assert.ok(members.payloadBytes <= members.payloadByteLimit);
+
+    const workflowDelegations = await shadow.listDelegations({
+      projectId: markerHit.projectId,
+      sessionId: markerHit.sessionId,
+      workflowId: workflow.workflowId,
+      limit: 1,
+    });
+    assert.equal(workflowDelegations.contractVersion, 1);
+    assert.equal(workflowDelegations.items.length, 1);
+    assert.equal(workflowDelegations.items[0]?.nativeChildId, legacyMembers[0]?.agentId);
+    assert.equal(workflowDelegations.items[0]?.messageCount, legacyMembers[0]?.messageCount);
+    assert.equal(workflowDelegations.items[0]?.workflowMemberCount, 1);
+    const standaloneDelegations = await shadow.listDelegations({
+      projectId: markerHit.projectId,
+      sessionId: markerHit.sessionId,
+      standaloneOnly: true,
+    });
+    assert.equal(standaloneDelegations.items.length, 0);
+    await assert.rejects(
+      shadow.listDelegations({
+        projectId: markerHit.projectId,
+        sessionId: markerHit.sessionId,
+        workflowId: workflow.workflowId,
+        standaloneOnly: true,
+      }),
+      /cannot be combined/i,
+    );
+
     const all = await shadow.search({ text: 'Add error handling to the parser', limit: 1 });
     assert.ok(all.total > 1);
     assert.equal(all.items.length, 1);
@@ -950,6 +1026,10 @@ describe('Claude observation shadow native lifecycle', { skip: !native }, () => 
     await assert.rejects(shadow.search({ text: 'searchable-wf-marker' }, controller.signal), /abort|cancel/i);
     await assert.rejects(
       shadow.getTimeline({ projectId: markerHit.projectId, sessionId: markerHit.sessionId }, controller.signal),
+      /abort|cancel/i,
+    );
+    await assert.rejects(
+      shadow.listWorkflows({ projectId: markerHit.projectId, sessionId: markerHit.sessionId }, controller.signal),
       /abort|cancel/i,
     );
   });

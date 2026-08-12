@@ -11,6 +11,7 @@ mod coordinator;
 mod detail_query;
 mod memory_projection;
 mod observation;
+mod orchestration_query;
 mod owner_lock;
 mod presence_projection;
 mod projection;
@@ -54,6 +55,12 @@ pub use detail_query::{
 };
 pub use observation::ObservationStatusSnapshot;
 use observation::{ObservationLease, ObservationRuntime, PendingObservationWork};
+pub use orchestration_query::{
+    DelegationPage, DelegationPageRequest, DelegationSummary, WorkflowDetails,
+    WorkflowDetailsRequest, WorkflowMember, WorkflowMemberPage, WorkflowMemberPageRequest,
+    WorkflowPage, WorkflowPageRequest, WorkflowSummary, DEFAULT_ORCHESTRATION_PAGE_LIMIT,
+    MAX_ORCHESTRATION_PAGE_PAYLOAD_BYTES, ORCHESTRATION_QUERY_CONTRACT_VERSION,
+};
 use owner_lock::DatabaseOwnerLock;
 pub use owner_lock::OwnerMetadata;
 pub use query_pool::{
@@ -482,6 +489,47 @@ impl SpaghettiEngineCore {
     ) -> Result<TimelinePage, EngineError> {
         let (_, queries) = self.clients()?;
         queries.timeline_cancellable(request, cancellation)
+    }
+
+    /// Page current child-run delegation relations for one verified session.
+    pub fn delegations_cancellable(
+        &self,
+        request: DelegationPageRequest,
+        cancellation: QueryCancellationToken,
+    ) -> Result<DelegationPage, EngineError> {
+        let (_, queries) = self.clients()?;
+        queries.delegations_cancellable(request, cancellation)
+    }
+
+    /// Page canonical workflow containers for one verified session.
+    pub fn workflows_cancellable(
+        &self,
+        request: WorkflowPageRequest,
+        cancellation: QueryCancellationToken,
+    ) -> Result<WorkflowPage, EngineError> {
+        let (_, queries) = self.clients()?;
+        queries.workflows_cancellable(request, cancellation)
+    }
+
+    /// Read one canonical workflow container and its bounded native snapshot.
+    pub fn workflow_details_cancellable(
+        &self,
+        request: WorkflowDetailsRequest,
+        cancellation: QueryCancellationToken,
+    ) -> Result<WorkflowDetails, EngineError> {
+        let (_, queries) = self.clients()?;
+        queries.workflow_details_cancellable(request, cancellation)
+    }
+
+    /// Page current workflow-member evidence without inferring child terminal
+    /// state from orchestration completion or result payloads.
+    pub fn workflow_members_cancellable(
+        &self,
+        request: WorkflowMemberPageRequest,
+        cancellation: QueryCancellationToken,
+    ) -> Result<WorkflowMemberPage, EngineError> {
+        let (_, queries) = self.clients()?;
+        queries.workflow_members_cancellable(request, cancellation)
     }
 
     /// Page canonical project-memory documents, including exact content and

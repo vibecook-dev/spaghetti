@@ -9,10 +9,9 @@ does not open the shadow database, know canonical table names, execute SQL, or
 merge and sort native rows.
 
 RFC 011 lists project/session summaries fourth in the Phase 9 port order. This
-slice starts that independently testable pack. Canonical FTS search is
-and timeline packs are recorded separately; subagent/workflow queries remain
-open. It does not claim the Phase 9 exit gate or reorder the production
-cutover.
+slice starts that independently testable pack. Canonical FTS, timeline, and
+delegation/workflow packs are recorded separately. It does not claim the
+Phase 9 exit gate or reorder the production cutover.
 
 ## Query contract
 
@@ -129,8 +128,8 @@ This is a shadow query surface, not production `SpaghettiClient` cutover. The
 remaining gates include:
 
 - timeline/facet and canonical FTS packs are recorded separately;
-- subagent/workflow queries (usage, runtime/team, core details/statistics, and
-  capability details are recorded in their separate Phase 9 records);
+- delegation/workflow, usage, runtime/team, core details/statistics, and
+  capability details are recorded in their separate Phase 9 records;
 - real-corpus latency and boundary-size benchmarks;
 - IPC/domain DTO sharing beyond the current N-API shadow seam;
 - production client migration and retirement of TypeScript SQLite query

@@ -9,11 +9,9 @@ production client cutover. TypeScript does not open the shadow database, join
 runtime tables, reduce evidence, or assemble team/inbox rows.
 
 RFC 011 lists runtime snapshots and teams sixth in the Phase 9 port order. This
-record closes that independently testable query slice. Canonical FTS search is
-recorded separately; timeline is now recorded separately and the dedicated
-subagent/workflow pack remains open. The
-core and capability-detail slices are also recorded separately. It does not
-claim the Phase 9 exit gate.
+record closes that independently testable query slice. Canonical FTS, timeline,
+delegation/workflow, core, and capability-detail slices are recorded
+separately. It does not claim the Phase 9 exit gate.
 
 ## Query contract
 
@@ -124,10 +122,10 @@ same-version initialization reruns `CREATE INDEX IF NOT EXISTS` statements.
 ## Remaining Phase 9 work
 
 This is a shadow query surface, not production `SpaghettiClient` cutover. The
-remaining gates include subagent/workflow, large-corpus
-latency and boundary-size benchmarks, shared IPC/domain DTO generation, and
-Phase 10 production client migration. Search and capability details are
-recorded separately. The core detail/statistics slice is recorded in the
+remaining gates include large-corpus latency and boundary-size benchmarks,
+shared IPC/domain DTO generation, and Phase 10 production client migration.
+Search, delegation/workflow, and capability details are recorded separately.
+The core detail/statistics slice is recorded in the
 [detail/statistics query pack](./011-phase-9-detail-stats-query.md). Until then,
 the legacy TypeScript query service remains the production read owner and the
 Rust observation database remains isolated.

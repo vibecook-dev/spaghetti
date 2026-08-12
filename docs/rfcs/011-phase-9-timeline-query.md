@@ -9,8 +9,8 @@ transaction. It is available through the persistent engine and isolated
 Claude observation shadow; the production compatibility client is not cut
 over yet.
 
-Dedicated subagent/workflow discovery remains open, so this record does not
-claim the Phase 9 exit gate.
+Dedicated delegation/workflow discovery is recorded in its separate Phase 9
+slice. This record alone does not claim the Phase 9 exit gate.
 
 ## Query contract
 
@@ -127,7 +127,7 @@ end to end through generated N-API declarations and the SDK facade.
 
 The remaining gates include:
 
-- dedicated subagent/workflow queries;
+- delegation/workflow queries are recorded in their separate Phase 9 slice;
 - large-corpus timeline latency and concurrent-ingest benchmarks;
 - shared IPC/domain DTO generation beyond the current N-API shadow seam;
 - production client migration and retirement of TypeScript SQLite query

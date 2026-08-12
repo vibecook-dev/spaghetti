@@ -29,6 +29,13 @@ use super::detail_query::{
     MessagePage, MessagePageRequest, SessionDetails, SessionDetailsRequest, SourcePage,
     SourcePageRequest,
 };
+use super::orchestration_query::{
+    read_delegation_page, read_workflow_details, read_workflow_member_page, read_workflow_page,
+    validate_delegation_page, validate_workflow_details, validate_workflow_member_page,
+    validate_workflow_page, DelegationPage, DelegationPageRequest, WorkflowDetails,
+    WorkflowDetailsRequest, WorkflowMemberPage, WorkflowMemberPageRequest, WorkflowPage,
+    WorkflowPageRequest,
+};
 use super::query_identity::{
     decode_entity_id, encode_entity_id, PROJECT_ID_PREFIX, SESSION_ID_PREFIX,
 };
@@ -306,6 +313,30 @@ enum QueryCommand {
         cancellation: QueryCancellationToken,
         request: TimelinePageRequest,
         response: Sender<Result<TimelinePage, EngineError>>,
+    },
+    Delegations {
+        cancellation_epoch: u64,
+        cancellation: QueryCancellationToken,
+        request: DelegationPageRequest,
+        response: Sender<Result<DelegationPage, EngineError>>,
+    },
+    Workflows {
+        cancellation_epoch: u64,
+        cancellation: QueryCancellationToken,
+        request: WorkflowPageRequest,
+        response: Sender<Result<WorkflowPage, EngineError>>,
+    },
+    WorkflowDetails {
+        cancellation_epoch: u64,
+        cancellation: QueryCancellationToken,
+        request: WorkflowDetailsRequest,
+        response: Sender<Result<WorkflowDetails, EngineError>>,
+    },
+    WorkflowMembers {
+        cancellation_epoch: u64,
+        cancellation: QueryCancellationToken,
+        request: WorkflowMemberPageRequest,
+        response: Sender<Result<WorkflowMemberPage, EngineError>>,
     },
     MemoryDocuments {
         cancellation_epoch: u64,
@@ -661,6 +692,74 @@ impl QueryClient {
         self.send_cancellable(
             cancellation,
             |cancellation_epoch, cancellation, response| QueryCommand::Timeline {
+                cancellation_epoch,
+                cancellation,
+                request,
+                response,
+            },
+        )
+    }
+
+    pub fn delegations_cancellable(
+        &self,
+        request: DelegationPageRequest,
+        cancellation: QueryCancellationToken,
+    ) -> Result<DelegationPage, EngineError> {
+        validate_delegation_page(&request)?;
+        self.send_cancellable(
+            cancellation,
+            |cancellation_epoch, cancellation, response| QueryCommand::Delegations {
+                cancellation_epoch,
+                cancellation,
+                request,
+                response,
+            },
+        )
+    }
+
+    pub fn workflows_cancellable(
+        &self,
+        request: WorkflowPageRequest,
+        cancellation: QueryCancellationToken,
+    ) -> Result<WorkflowPage, EngineError> {
+        validate_workflow_page(&request)?;
+        self.send_cancellable(
+            cancellation,
+            |cancellation_epoch, cancellation, response| QueryCommand::Workflows {
+                cancellation_epoch,
+                cancellation,
+                request,
+                response,
+            },
+        )
+    }
+
+    pub fn workflow_details_cancellable(
+        &self,
+        request: WorkflowDetailsRequest,
+        cancellation: QueryCancellationToken,
+    ) -> Result<WorkflowDetails, EngineError> {
+        validate_workflow_details(&request)?;
+        self.send_cancellable(
+            cancellation,
+            |cancellation_epoch, cancellation, response| QueryCommand::WorkflowDetails {
+                cancellation_epoch,
+                cancellation,
+                request,
+                response,
+            },
+        )
+    }
+
+    pub fn workflow_members_cancellable(
+        &self,
+        request: WorkflowMemberPageRequest,
+        cancellation: QueryCancellationToken,
+    ) -> Result<WorkflowMemberPage, EngineError> {
+        validate_workflow_member_page(&request)?;
+        self.send_cancellable(
+            cancellation,
+            |cancellation_epoch, cancellation, response| QueryCommand::WorkflowMembers {
                 cancellation_epoch,
                 cancellation,
                 request,
@@ -1405,6 +1504,70 @@ fn query_thread(
                     cancellation_epoch,
                     &cancellation,
                     || read_timeline_page(&connection, &request),
+                );
+                let _ = response.send(result);
+            }
+            QueryCommand::Delegations {
+                cancellation_epoch,
+                cancellation,
+                request,
+                response,
+            } => {
+                let _in_flight = InFlightGuard::enter(&control.in_flight);
+                let result = run_cancellable_query(
+                    &connection,
+                    &control,
+                    cancellation_epoch,
+                    &cancellation,
+                    || read_delegation_page(&connection, &request),
+                );
+                let _ = response.send(result);
+            }
+            QueryCommand::Workflows {
+                cancellation_epoch,
+                cancellation,
+                request,
+                response,
+            } => {
+                let _in_flight = InFlightGuard::enter(&control.in_flight);
+                let result = run_cancellable_query(
+                    &connection,
+                    &control,
+                    cancellation_epoch,
+                    &cancellation,
+                    || read_workflow_page(&connection, &request),
+                );
+                let _ = response.send(result);
+            }
+            QueryCommand::WorkflowDetails {
+                cancellation_epoch,
+                cancellation,
+                request,
+                response,
+            } => {
+                let _in_flight = InFlightGuard::enter(&control.in_flight);
+                let result = run_cancellable_query(
+                    &connection,
+                    &control,
+                    cancellation_epoch,
+                    &cancellation,
+                    || read_workflow_details(&connection, &request),
+                );
+                let _ = response.send(result);
+            }
+            QueryCommand::WorkflowMembers {
+                cancellation_epoch,
+                cancellation,
+                request,
+                response,
+            } => {
+                let _in_flight = InFlightGuard::enter(&control.in_flight);
+                let result = run_cancellable_query(
+                    &connection,
+                    &control,
+                    cancellation_epoch,
+                    &cancellation,
+                    || read_workflow_member_page(&connection, &request),
                 );
                 let _ = response.send(result);
             }
@@ -3535,6 +3698,34 @@ mod tests {
                     exclude_tool_names: Vec::new(),
                     search: None,
                     branch_kind: None,
+                    cursor: None,
+                    limit: DEFAULT_HISTORY_PAGE_LIMIT,
+                },
+                cancellation,
+            ),
+            Err(EngineError::QueryCancelled)
+        ));
+        assert!(client.commands.is_empty());
+
+        pool.shutdown().unwrap();
+        writer.shutdown().unwrap();
+    }
+
+    #[test]
+    fn pre_cancelled_orchestration_request_never_enters_the_worker_queue() {
+        let dir = tempdir().unwrap();
+        let database = dir.path().join("orchestration-cancel.db");
+        let mut writer = WriterRuntime::start(database.clone()).unwrap();
+        let mut pool = QueryPool::start(database, 1).unwrap();
+        let client = pool.client();
+        let cancellation = QueryCancellationToken::default();
+        cancellation.cancel();
+
+        assert!(matches!(
+            client.workflows_cancellable(
+                WorkflowPageRequest {
+                    project_id: encode_entity_id(PROJECT_ID_PREFIX, b"project"),
+                    session_id: encode_entity_id(SESSION_ID_PREFIX, b"session"),
                     cursor: None,
                     limit: DEFAULT_HISTORY_PAGE_LIMIT,
                 },

@@ -7,27 +7,30 @@ use napi::bindgen_prelude::{AbortSignal, AsyncTask, Env, Error, Result, Status, 
 use napi_derive::napi;
 
 use crate::engine::{
-    ArtifactDetail, ArtifactPage, ArtifactPageRequest, CanonicalStats, EngineHealthSnapshot,
-    EngineOptions, EngineOverview, EngineStatusSnapshot, HistoryProjectIndexSummary,
-    HistoryProjectPage, HistoryProjectPageRequest, HistoryProjectSummary,
-    HistorySessionIndexSummary, HistorySessionPage, HistorySessionPageRequest,
-    HistorySessionSummary, MemoryDocument, MemoryDocumentPage, MemoryDocumentPageRequest,
-    MessageDetail, MessagePage, MessagePageRequest, NamedCount, ObservationStatusSnapshot,
-    ObservationSupervisorOptions, OwnerMetadata, PlanDetail, PlanPage, PlanPageRequest,
-    QueryCancellationToken, ReconcileOutcome, ReconcileRequest, RunStateLookup, RunStateRequest,
-    RuntimePresenceSnapshot, RuntimeRunEvidence, RuntimeRunSnapshot, RuntimeSnapshot,
-    RuntimeSnapshotRequest, SearchHit, SearchPage, SearchPageRequest, SessionDetail,
-    SessionDetails, SessionDetailsRequest, SessionIndexDetail, SourcePage, SourcePageRequest,
-    SourceSummary, SpaghettiEngineCore, TaskCollectionPage, TaskCollectionPageRequest,
-    TaskCollectionSummary, TaskDetail, TaskPage, TaskPageRequest, TeamConfigSummary, TeamDetails,
-    TeamDetailsRequest, TeamInboxMessage, TeamInboxMessagePage, TeamInboxMessagePageRequest,
-    TeamInboxPage, TeamInboxPageRequest, TeamInboxSummary, TeamMember, TeamPage, TeamPageRequest,
-    TeamSummary, TimelineFacets, TimelineMessage, TimelinePage, TimelinePageRequest,
-    ToolResultDetail, ToolResultPage, ToolResultPageRequest, UntimedUsageSummary, UsageActivityDay,
-    UsageActivityReport, UsageActivityRequest, UsageAggregate, UsageCoverageSummary,
-    UsageScopeRequest, UsageTokenValues, UsageTotalsReport, DEFAULT_CAPABILITY_PAGE_LIMIT,
-    DEFAULT_DETAIL_PAGE_LIMIT, DEFAULT_HISTORY_PAGE_LIMIT, DEFAULT_RUNTIME_PAGE_LIMIT,
-    DEFAULT_SEARCH_PAGE_LIMIT, DEFAULT_TEAM_PAGE_LIMIT, DEFAULT_TIMELINE_PAGE_LIMIT,
+    ArtifactDetail, ArtifactPage, ArtifactPageRequest, CanonicalStats, DelegationPage,
+    DelegationPageRequest, DelegationSummary, EngineHealthSnapshot, EngineOptions, EngineOverview,
+    EngineStatusSnapshot, HistoryProjectIndexSummary, HistoryProjectPage,
+    HistoryProjectPageRequest, HistoryProjectSummary, HistorySessionIndexSummary,
+    HistorySessionPage, HistorySessionPageRequest, HistorySessionSummary, MemoryDocument,
+    MemoryDocumentPage, MemoryDocumentPageRequest, MessageDetail, MessagePage, MessagePageRequest,
+    NamedCount, ObservationStatusSnapshot, ObservationSupervisorOptions, OwnerMetadata, PlanDetail,
+    PlanPage, PlanPageRequest, QueryCancellationToken, ReconcileOutcome, ReconcileRequest,
+    RunStateLookup, RunStateRequest, RuntimePresenceSnapshot, RuntimeRunEvidence,
+    RuntimeRunSnapshot, RuntimeSnapshot, RuntimeSnapshotRequest, SearchHit, SearchPage,
+    SearchPageRequest, SessionDetail, SessionDetails, SessionDetailsRequest, SessionIndexDetail,
+    SourcePage, SourcePageRequest, SourceSummary, SpaghettiEngineCore, TaskCollectionPage,
+    TaskCollectionPageRequest, TaskCollectionSummary, TaskDetail, TaskPage, TaskPageRequest,
+    TeamConfigSummary, TeamDetails, TeamDetailsRequest, TeamInboxMessage, TeamInboxMessagePage,
+    TeamInboxMessagePageRequest, TeamInboxPage, TeamInboxPageRequest, TeamInboxSummary, TeamMember,
+    TeamPage, TeamPageRequest, TeamSummary, TimelineFacets, TimelineMessage, TimelinePage,
+    TimelinePageRequest, ToolResultDetail, ToolResultPage, ToolResultPageRequest,
+    UntimedUsageSummary, UsageActivityDay, UsageActivityReport, UsageActivityRequest,
+    UsageAggregate, UsageCoverageSummary, UsageScopeRequest, UsageTokenValues, UsageTotalsReport,
+    WorkflowDetails, WorkflowDetailsRequest, WorkflowMember, WorkflowMemberPage,
+    WorkflowMemberPageRequest, WorkflowPage, WorkflowPageRequest, WorkflowSummary,
+    DEFAULT_CAPABILITY_PAGE_LIMIT, DEFAULT_DETAIL_PAGE_LIMIT, DEFAULT_HISTORY_PAGE_LIMIT,
+    DEFAULT_ORCHESTRATION_PAGE_LIMIT, DEFAULT_RUNTIME_PAGE_LIMIT, DEFAULT_SEARCH_PAGE_LIMIT,
+    DEFAULT_TEAM_PAGE_LIMIT, DEFAULT_TIMELINE_PAGE_LIMIT,
 };
 
 #[napi(object)]
@@ -883,6 +886,414 @@ impl From<TimelinePage> for EngineTimelinePage {
             total_is_exact: value.total_is_exact,
             total: value.total as f64,
             facets: value.facets.into(),
+            items: value.items.into_iter().map(Into::into).collect(),
+            payload_bytes: value.payload_bytes as f64,
+            payload_byte_limit: value.payload_byte_limit as f64,
+            next_cursor: value.next_cursor,
+        }
+    }
+}
+
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct EngineDelegationPageOptions {
+    pub project_id: String,
+    pub session_id: String,
+    pub workflow_id: Option<String>,
+    pub standalone_only: Option<bool>,
+    pub cursor: Option<String>,
+    pub limit: Option<u32>,
+}
+
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct EngineDelegationSummary {
+    pub run_id: String,
+    pub parent_run_id: Option<String>,
+    pub project_id: String,
+    pub session_id: String,
+    pub adapter_id: String,
+    pub source_instance_id: f64,
+    pub native_run_id: Option<String>,
+    pub native_child_id: Option<String>,
+    pub native_task_id: Option<String>,
+    pub agent_type: Option<String>,
+    pub description: Option<String>,
+    pub native_name: Option<String>,
+    pub spawn_depth: Option<u32>,
+    pub label: Option<String>,
+    pub prompt: Option<String>,
+    pub cwd: Option<String>,
+    pub worktree_path: Option<String>,
+    pub relation_kind: String,
+    pub relation_strength: String,
+    pub relation_status: String,
+    pub metadata_status: Option<String>,
+    pub spawn_status: Option<String>,
+    pub branch_tool_name: Option<String>,
+    pub requested_agent_type: Option<String>,
+    pub branch_anchor_message_id: Option<String>,
+    pub child_present: bool,
+    pub parent_present: bool,
+    pub metadata_run_present: Option<bool>,
+    pub observed_run_state: Option<String>,
+    pub message_count: f64,
+    pub workflow_member_count: f64,
+    pub source_time: Option<String>,
+    pub source_time_quality: Option<String>,
+    pub decisive_relation_fact_id: Option<String>,
+    pub decisive_spawn_fact_id: Option<String>,
+    pub decisive_metadata_fact_id: Option<String>,
+    pub assertion_count: f64,
+    pub competing_relation_count: f64,
+    pub observed_at_unix_ms: f64,
+    pub source_object_id: f64,
+    pub source_generation: f64,
+    pub last_commit_seq: f64,
+}
+
+impl From<DelegationSummary> for EngineDelegationSummary {
+    fn from(value: DelegationSummary) -> Self {
+        Self {
+            run_id: value.run_id,
+            parent_run_id: value.parent_run_id,
+            project_id: value.project_id,
+            session_id: value.session_id,
+            adapter_id: value.adapter_id,
+            source_instance_id: value.source_instance_id as f64,
+            native_run_id: value.native_run_id,
+            native_child_id: value.native_child_id,
+            native_task_id: value.native_task_id,
+            agent_type: value.agent_type,
+            description: value.description,
+            native_name: value.native_name,
+            spawn_depth: value.spawn_depth,
+            label: value.label,
+            prompt: value.prompt,
+            cwd: value.cwd,
+            worktree_path: value.worktree_path,
+            relation_kind: value.relation_kind,
+            relation_strength: value.relation_strength,
+            relation_status: value.relation_status,
+            metadata_status: value.metadata_status,
+            spawn_status: value.spawn_status,
+            branch_tool_name: value.branch_tool_name,
+            requested_agent_type: value.requested_agent_type,
+            branch_anchor_message_id: value.branch_anchor_message_id,
+            child_present: value.child_present,
+            parent_present: value.parent_present,
+            metadata_run_present: value.metadata_run_present,
+            observed_run_state: value.observed_run_state,
+            message_count: value.message_count as f64,
+            workflow_member_count: value.workflow_member_count as f64,
+            source_time: value.source_time,
+            source_time_quality: value.source_time_quality,
+            decisive_relation_fact_id: value.decisive_relation_fact_id,
+            decisive_spawn_fact_id: value.decisive_spawn_fact_id,
+            decisive_metadata_fact_id: value.decisive_metadata_fact_id,
+            assertion_count: value.assertion_count as f64,
+            competing_relation_count: value.competing_relation_count as f64,
+            observed_at_unix_ms: value.observed_at_unix_ms as f64,
+            source_object_id: value.source_object_id as f64,
+            source_generation: value.source_generation as f64,
+            last_commit_seq: value.last_commit_seq as f64,
+        }
+    }
+}
+
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct EngineDelegationPage {
+    pub contract_version: u32,
+    pub at_commit_seq: f64,
+    pub project_id: String,
+    pub session_id: String,
+    pub workflow_id: Option<String>,
+    pub standalone_only: bool,
+    pub items: Vec<EngineDelegationSummary>,
+    pub next_cursor: Option<String>,
+}
+
+impl From<DelegationPage> for EngineDelegationPage {
+    fn from(value: DelegationPage) -> Self {
+        Self {
+            contract_version: value.contract_version,
+            at_commit_seq: value.at_commit_seq as f64,
+            project_id: value.project_id,
+            session_id: value.session_id,
+            workflow_id: value.workflow_id,
+            standalone_only: value.standalone_only,
+            items: value.items.into_iter().map(Into::into).collect(),
+            next_cursor: value.next_cursor,
+        }
+    }
+}
+
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct EngineWorkflowPageOptions {
+    pub project_id: String,
+    pub session_id: String,
+    pub cursor: Option<String>,
+    pub limit: Option<u32>,
+}
+
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct EngineWorkflowSummary {
+    pub workflow_id: String,
+    pub project_id: String,
+    pub session_id: String,
+    pub adapter_id: String,
+    pub source_instance_id: f64,
+    pub native_workflow_id: String,
+    pub native_task_id: Option<String>,
+    pub name: Option<String>,
+    pub native_status: Option<String>,
+    pub workflow_status: Option<String>,
+    pub started_at: Option<String>,
+    pub started_at_quality: Option<String>,
+    pub finished_at: Option<String>,
+    pub finished_at_quality: Option<String>,
+    pub duration_ms: Option<f64>,
+    pub agent_count: Option<f64>,
+    pub total_tokens: Option<f64>,
+    pub total_tool_calls: Option<f64>,
+    pub snapshot_status: String,
+    pub resolution_status: String,
+    pub decisive_snapshot_fact_id: Option<String>,
+    pub provenance_fact_id: String,
+    pub snapshot_assertion_count: f64,
+    pub competing_snapshot_count: f64,
+    pub observed_member_count: f64,
+    pub started_member_count: f64,
+    pub result_member_count: f64,
+    pub unresolved_member_count: f64,
+    pub conflicting_member_count: f64,
+    pub membership_count_status: String,
+    pub join_conflict: bool,
+    pub observed_at_unix_ms: f64,
+    pub source_object_id: f64,
+    pub source_generation: f64,
+    pub last_commit_seq: f64,
+}
+
+impl From<WorkflowSummary> for EngineWorkflowSummary {
+    fn from(value: WorkflowSummary) -> Self {
+        Self {
+            workflow_id: value.workflow_id,
+            project_id: value.project_id,
+            session_id: value.session_id,
+            adapter_id: value.adapter_id,
+            source_instance_id: value.source_instance_id as f64,
+            native_workflow_id: value.native_workflow_id,
+            native_task_id: value.native_task_id,
+            name: value.name,
+            native_status: value.native_status,
+            workflow_status: value.workflow_status,
+            started_at: value.started_at,
+            started_at_quality: value.started_at_quality,
+            finished_at: value.finished_at,
+            finished_at_quality: value.finished_at_quality,
+            duration_ms: value.duration_ms.map(|value| value as f64),
+            agent_count: value.agent_count.map(|value| value as f64),
+            total_tokens: value.total_tokens.map(|value| value as f64),
+            total_tool_calls: value.total_tool_calls.map(|value| value as f64),
+            snapshot_status: value.snapshot_status,
+            resolution_status: value.resolution_status,
+            decisive_snapshot_fact_id: value.decisive_snapshot_fact_id,
+            provenance_fact_id: value.provenance_fact_id,
+            snapshot_assertion_count: value.snapshot_assertion_count as f64,
+            competing_snapshot_count: value.competing_snapshot_count as f64,
+            observed_member_count: value.observed_member_count as f64,
+            started_member_count: value.started_member_count as f64,
+            result_member_count: value.result_member_count as f64,
+            unresolved_member_count: value.unresolved_member_count as f64,
+            conflicting_member_count: value.conflicting_member_count as f64,
+            membership_count_status: value.membership_count_status,
+            join_conflict: value.join_conflict,
+            observed_at_unix_ms: value.observed_at_unix_ms as f64,
+            source_object_id: value.source_object_id as f64,
+            source_generation: value.source_generation as f64,
+            last_commit_seq: value.last_commit_seq as f64,
+        }
+    }
+}
+
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct EngineWorkflowPage {
+    pub contract_version: u32,
+    pub at_commit_seq: f64,
+    pub project_id: String,
+    pub session_id: String,
+    pub items: Vec<EngineWorkflowSummary>,
+    pub next_cursor: Option<String>,
+}
+
+impl From<WorkflowPage> for EngineWorkflowPage {
+    fn from(value: WorkflowPage) -> Self {
+        Self {
+            contract_version: value.contract_version,
+            at_commit_seq: value.at_commit_seq as f64,
+            project_id: value.project_id,
+            session_id: value.session_id,
+            items: value.items.into_iter().map(Into::into).collect(),
+            next_cursor: value.next_cursor,
+        }
+    }
+}
+
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct EngineWorkflowDetails {
+    pub contract_version: u32,
+    pub at_commit_seq: f64,
+    pub workflow: EngineWorkflowSummary,
+    pub default_model: Option<String>,
+    pub script: Option<String>,
+    pub script_path: Option<String>,
+    pub args: Option<String>,
+    pub summary: Option<String>,
+    pub error: Option<String>,
+    pub native_snapshot: Option<serde_json::Value>,
+    pub payload_bytes: f64,
+    pub payload_byte_limit: f64,
+}
+
+impl From<WorkflowDetails> for EngineWorkflowDetails {
+    fn from(value: WorkflowDetails) -> Self {
+        Self {
+            contract_version: value.contract_version,
+            at_commit_seq: value.at_commit_seq as f64,
+            workflow: value.workflow.into(),
+            default_model: value.default_model,
+            script: value.script,
+            script_path: value.script_path,
+            args: value.args,
+            summary: value.summary,
+            error: value.error,
+            native_snapshot: value.native_snapshot,
+            payload_bytes: value.payload_bytes as f64,
+            payload_byte_limit: value.payload_byte_limit as f64,
+        }
+    }
+}
+
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct EngineWorkflowMemberPageOptions {
+    pub workflow_id: String,
+    pub cursor: Option<String>,
+    pub limit: Option<u32>,
+}
+
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct EngineWorkflowMember {
+    pub member_id: String,
+    pub workflow_id: String,
+    pub project_id: String,
+    pub session_id: String,
+    pub child_run_id: String,
+    pub child_run_present: bool,
+    pub adapter_id: String,
+    pub source_instance_id: f64,
+    pub native_workflow_id: String,
+    pub native_agent_id: String,
+    pub native_event_key: String,
+    pub native_run_id: Option<String>,
+    pub agent_type: Option<String>,
+    pub description: Option<String>,
+    pub native_name: Option<String>,
+    pub worktree_path: Option<String>,
+    pub member_status: String,
+    pub result: Option<serde_json::Value>,
+    pub resolution_status: String,
+    pub observed_run_state: Option<String>,
+    pub delegation_status: Option<String>,
+    pub message_count: f64,
+    pub decisive_started_fact_id: Option<String>,
+    pub decisive_result_fact_id: Option<String>,
+    pub started_observed_at_unix_ms: Option<f64>,
+    pub result_observed_at_unix_ms: Option<f64>,
+    pub started_assertion_count: f64,
+    pub competing_started_count: f64,
+    pub result_assertion_count: f64,
+    pub competing_result_count: f64,
+    pub event_key_conflict: bool,
+    pub identity_conflict: bool,
+    pub source_object_id: f64,
+    pub source_generation: f64,
+    pub last_commit_seq: f64,
+}
+
+impl From<WorkflowMember> for EngineWorkflowMember {
+    fn from(value: WorkflowMember) -> Self {
+        Self {
+            member_id: value.member_id,
+            workflow_id: value.workflow_id,
+            project_id: value.project_id,
+            session_id: value.session_id,
+            child_run_id: value.child_run_id,
+            child_run_present: value.child_run_present,
+            adapter_id: value.adapter_id,
+            source_instance_id: value.source_instance_id as f64,
+            native_workflow_id: value.native_workflow_id,
+            native_agent_id: value.native_agent_id,
+            native_event_key: value.native_event_key,
+            native_run_id: value.native_run_id,
+            agent_type: value.agent_type,
+            description: value.description,
+            native_name: value.native_name,
+            worktree_path: value.worktree_path,
+            member_status: value.member_status,
+            result: value.result,
+            resolution_status: value.resolution_status,
+            observed_run_state: value.observed_run_state,
+            delegation_status: value.delegation_status,
+            message_count: value.message_count as f64,
+            decisive_started_fact_id: value.decisive_started_fact_id,
+            decisive_result_fact_id: value.decisive_result_fact_id,
+            started_observed_at_unix_ms: value
+                .started_observed_at_unix_ms
+                .map(|value| value as f64),
+            result_observed_at_unix_ms: value.result_observed_at_unix_ms.map(|value| value as f64),
+            started_assertion_count: value.started_assertion_count as f64,
+            competing_started_count: value.competing_started_count as f64,
+            result_assertion_count: value.result_assertion_count as f64,
+            competing_result_count: value.competing_result_count as f64,
+            event_key_conflict: value.event_key_conflict,
+            identity_conflict: value.identity_conflict,
+            source_object_id: value.source_object_id as f64,
+            source_generation: value.source_generation as f64,
+            last_commit_seq: value.last_commit_seq as f64,
+        }
+    }
+}
+
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct EngineWorkflowMemberPage {
+    pub contract_version: u32,
+    pub at_commit_seq: f64,
+    pub workflow_id: String,
+    pub project_id: String,
+    pub session_id: String,
+    pub items: Vec<EngineWorkflowMember>,
+    pub payload_bytes: f64,
+    pub payload_byte_limit: f64,
+    pub next_cursor: Option<String>,
+}
+
+impl From<WorkflowMemberPage> for EngineWorkflowMemberPage {
+    fn from(value: WorkflowMemberPage) -> Self {
+        Self {
+            contract_version: value.contract_version,
+            at_commit_seq: value.at_commit_seq as f64,
+            workflow_id: value.workflow_id,
+            project_id: value.project_id,
+            session_id: value.session_id,
             items: value.items.into_iter().map(Into::into).collect(),
             payload_bytes: value.payload_bytes as f64,
             payload_byte_limit: value.payload_byte_limit as f64,
@@ -2612,6 +3023,78 @@ impl SpaghettiEngine {
         )
     }
 
+    /// Page current child-run delegation relations for one canonical session.
+    #[napi(ts_return_type = "Promise<EngineDelegationPage>")]
+    pub fn list_delegations(
+        &self,
+        options: EngineDelegationPageOptions,
+        signal: Option<AbortSignal>,
+    ) -> AsyncTask<DelegationsTask> {
+        let cancellation = cancellation_for_signal(signal.as_ref());
+        AsyncTask::with_optional_signal(
+            DelegationsTask {
+                engine: Arc::clone(&self.inner),
+                options,
+                cancellation,
+            },
+            signal,
+        )
+    }
+
+    /// Page canonical workflow containers for one canonical session.
+    #[napi(ts_return_type = "Promise<EngineWorkflowPage>")]
+    pub fn list_workflows(
+        &self,
+        options: EngineWorkflowPageOptions,
+        signal: Option<AbortSignal>,
+    ) -> AsyncTask<WorkflowsTask> {
+        let cancellation = cancellation_for_signal(signal.as_ref());
+        AsyncTask::with_optional_signal(
+            WorkflowsTask {
+                engine: Arc::clone(&self.inner),
+                options,
+                cancellation,
+            },
+            signal,
+        )
+    }
+
+    /// Read one workflow container and its bounded native snapshot.
+    #[napi(ts_return_type = "Promise<EngineWorkflowDetails>")]
+    pub fn get_workflow(
+        &self,
+        workflow_id: String,
+        signal: Option<AbortSignal>,
+    ) -> AsyncTask<WorkflowDetailsTask> {
+        let cancellation = cancellation_for_signal(signal.as_ref());
+        AsyncTask::with_optional_signal(
+            WorkflowDetailsTask {
+                engine: Arc::clone(&self.inner),
+                workflow_id,
+                cancellation,
+            },
+            signal,
+        )
+    }
+
+    /// Page native workflow members and their explicit journal evidence.
+    #[napi(ts_return_type = "Promise<EngineWorkflowMemberPage>")]
+    pub fn list_workflow_members(
+        &self,
+        options: EngineWorkflowMemberPageOptions,
+        signal: Option<AbortSignal>,
+    ) -> AsyncTask<WorkflowMembersTask> {
+        let cancellation = cancellation_for_signal(signal.as_ref());
+        AsyncTask::with_optional_signal(
+            WorkflowMembersTask {
+                engine: Arc::clone(&self.inner),
+                options,
+                cancellation,
+            },
+            signal,
+        )
+    }
+
     /// Page canonical project-memory documents. Exact UTF-8 content and row
     /// count are bounded in Rust.
     #[napi(ts_return_type = "Promise<EngineMemoryDocumentPage>")]
@@ -3079,6 +3562,30 @@ pub struct TimelineTask {
     cancellation: QueryCancellationToken,
 }
 
+pub struct DelegationsTask {
+    engine: Arc<SpaghettiEngineCore>,
+    options: EngineDelegationPageOptions,
+    cancellation: QueryCancellationToken,
+}
+
+pub struct WorkflowsTask {
+    engine: Arc<SpaghettiEngineCore>,
+    options: EngineWorkflowPageOptions,
+    cancellation: QueryCancellationToken,
+}
+
+pub struct WorkflowDetailsTask {
+    engine: Arc<SpaghettiEngineCore>,
+    workflow_id: String,
+    cancellation: QueryCancellationToken,
+}
+
+pub struct WorkflowMembersTask {
+    engine: Arc<SpaghettiEngineCore>,
+    options: EngineWorkflowMemberPageOptions,
+    cancellation: QueryCancellationToken,
+}
+
 pub struct MemoryDocumentsTask {
     engine: Arc<SpaghettiEngineCore>,
     options: EngineMemoryDocumentPageOptions,
@@ -3428,6 +3935,109 @@ impl Task for TimelineTask {
                     branch_kind: self.options.branch_kind.clone(),
                     cursor: self.options.cursor.clone(),
                     limit: self.options.limit.unwrap_or(DEFAULT_TIMELINE_PAGE_LIMIT),
+                },
+                self.cancellation.clone(),
+            )
+            .map(Into::into)
+            .map_err(napi_error)
+    }
+
+    fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
+        Ok(output)
+    }
+}
+
+impl Task for DelegationsTask {
+    type Output = EngineDelegationPage;
+    type JsValue = EngineDelegationPage;
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        self.engine
+            .delegations_cancellable(
+                DelegationPageRequest {
+                    project_id: self.options.project_id.clone(),
+                    session_id: self.options.session_id.clone(),
+                    workflow_id: self.options.workflow_id.clone(),
+                    standalone_only: self.options.standalone_only.unwrap_or(false),
+                    cursor: self.options.cursor.clone(),
+                    limit: self
+                        .options
+                        .limit
+                        .unwrap_or(DEFAULT_ORCHESTRATION_PAGE_LIMIT),
+                },
+                self.cancellation.clone(),
+            )
+            .map(Into::into)
+            .map_err(napi_error)
+    }
+
+    fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
+        Ok(output)
+    }
+}
+
+impl Task for WorkflowsTask {
+    type Output = EngineWorkflowPage;
+    type JsValue = EngineWorkflowPage;
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        self.engine
+            .workflows_cancellable(
+                WorkflowPageRequest {
+                    project_id: self.options.project_id.clone(),
+                    session_id: self.options.session_id.clone(),
+                    cursor: self.options.cursor.clone(),
+                    limit: self
+                        .options
+                        .limit
+                        .unwrap_or(DEFAULT_ORCHESTRATION_PAGE_LIMIT),
+                },
+                self.cancellation.clone(),
+            )
+            .map(Into::into)
+            .map_err(napi_error)
+    }
+
+    fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
+        Ok(output)
+    }
+}
+
+impl Task for WorkflowDetailsTask {
+    type Output = EngineWorkflowDetails;
+    type JsValue = EngineWorkflowDetails;
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        self.engine
+            .workflow_details_cancellable(
+                WorkflowDetailsRequest {
+                    workflow_id: self.workflow_id.clone(),
+                },
+                self.cancellation.clone(),
+            )
+            .map(Into::into)
+            .map_err(napi_error)
+    }
+
+    fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
+        Ok(output)
+    }
+}
+
+impl Task for WorkflowMembersTask {
+    type Output = EngineWorkflowMemberPage;
+    type JsValue = EngineWorkflowMemberPage;
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        self.engine
+            .workflow_members_cancellable(
+                WorkflowMemberPageRequest {
+                    workflow_id: self.options.workflow_id.clone(),
+                    cursor: self.options.cursor.clone(),
+                    limit: self
+                        .options
+                        .limit
+                        .unwrap_or(DEFAULT_ORCHESTRATION_PAGE_LIMIT),
                 },
                 self.cancellation.clone(),
             )

@@ -10,9 +10,9 @@ not open the shadow database, assemble these rows, or infer relationships that
 the committed projections do not contain.
 
 RFC 011 groups these reads under details and optional capability packs. This
-record closes that independently testable surface. Canonical FTS search is
-and timeline packs are recorded separately; subagent/workflow queries remain
-open, so this does not claim the Phase 9 exit gate.
+record closes that independently testable surface. Canonical FTS, timeline,
+and delegation/workflow packs are recorded separately, so this record alone
+does not claim the Phase 9 exit gate.
 
 ## Query contract
 
@@ -99,7 +99,7 @@ This is a shadow query surface, not production `SpaghettiClient` cutover. The
 remaining gates include:
 
 - timeline/facet and canonical FTS packs are recorded separately;
-- subagent/workflow queries;
+- delegation/workflow queries are recorded separately;
 - large-corpus latency, boundary-size, and concurrent-ingest benchmarks;
 - shared IPC/domain DTO generation beyond the current N-API shadow seam;
 - production client migration and retirement of TypeScript SQLite query

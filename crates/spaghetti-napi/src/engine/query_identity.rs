@@ -20,6 +20,8 @@ pub(super) const TEAM_ID_PREFIX: &str = "team_v1_";
 pub(super) const TEAM_MEMBER_ID_PREFIX: &str = "team_member_v1_";
 pub(super) const TEAM_INBOX_ID_PREFIX: &str = "team_inbox_v1_";
 pub(super) const TEAM_INBOX_MESSAGE_ID_PREFIX: &str = "team_inbox_message_v1_";
+pub(super) const WORKFLOW_ID_PREFIX: &str = "workflow_v1_";
+pub(super) const WORKFLOW_MEMBER_ID_PREFIX: &str = "workflow_member_v1_";
 pub(super) const FACT_ID_PREFIX: &str = "fact_v1_";
 
 pub(super) fn encode_entity_id(prefix: &str, key: &[u8]) -> String {

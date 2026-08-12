@@ -9,9 +9,8 @@ client is not cut over yet. TypeScript neither opens the canonical database
 nor queries two indexes, repairs subagent projections, merges scores, sorts,
 or slices results.
 
-Timeline/facets are recorded in their separate Phase 9 slice. Dedicated
-subagent/workflow reads remain open, so this record does not claim the Phase
-9 exit gate.
+Timeline/facets and delegation/workflow reads are recorded in their separate
+Phase 9 slices. This record alone does not claim the Phase 9 exit gate.
 
 ## Query contract
 
@@ -102,7 +101,7 @@ invalid input and a pre-aborted signal.
 The remaining gates include:
 
 - timeline/branch/facet queries are recorded in their separate Phase 9 slice;
-- dedicated subagent/workflow queries;
+- dedicated delegation/workflow queries are recorded separately;
 - large-corpus search latency and concurrent-ingest benchmarks;
 - shared IPC/domain DTO generation beyond the current N-API shadow seam;
 - production client migration and retirement of TypeScript SQLite query

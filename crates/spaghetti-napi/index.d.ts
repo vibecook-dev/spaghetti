@@ -47,6 +47,14 @@ export declare class SpaghettiEngine {
    * facets in a single SQLite snapshot.
    */
   getTimeline(options: EngineTimelinePageOptions, signal?: AbortSignal | undefined | null): Promise<EngineTimelinePage>
+  /** Page current child-run delegation relations for one canonical session. */
+  listDelegations(options: EngineDelegationPageOptions, signal?: AbortSignal | undefined | null): Promise<EngineDelegationPage>
+  /** Page canonical workflow containers for one canonical session. */
+  listWorkflows(options: EngineWorkflowPageOptions, signal?: AbortSignal | undefined | null): Promise<EngineWorkflowPage>
+  /** Read one workflow container and its bounded native snapshot. */
+  getWorkflow(workflowId: string, signal?: AbortSignal | undefined | null): Promise<EngineWorkflowDetails>
+  /** Page native workflow members and their explicit journal evidence. */
+  listWorkflowMembers(options: EngineWorkflowMemberPageOptions, signal?: AbortSignal | undefined | null): Promise<EngineWorkflowMemberPage>
   /**
    * Page canonical project-memory documents. Exact UTF-8 content and row
    * count are bounded in Rust.
@@ -201,6 +209,71 @@ export interface EngineCapabilityPageOptions {
   cursor?: string
   /** Page size. Defaults to 50 and is capped by the Rust query engine. */
   limit?: number
+}
+
+export interface EngineDelegationPage {
+  contractVersion: number
+  atCommitSeq: number
+  projectId: string
+  sessionId: string
+  workflowId?: string
+  standaloneOnly: boolean
+  items: Array<EngineDelegationSummary>
+  nextCursor?: string
+}
+
+export interface EngineDelegationPageOptions {
+  projectId: string
+  sessionId: string
+  workflowId?: string
+  standaloneOnly?: boolean
+  cursor?: string
+  limit?: number
+}
+
+export interface EngineDelegationSummary {
+  runId: string
+  parentRunId?: string
+  projectId: string
+  sessionId: string
+  adapterId: string
+  sourceInstanceId: number
+  nativeRunId?: string
+  nativeChildId?: string
+  nativeTaskId?: string
+  agentType?: string
+  description?: string
+  nativeName?: string
+  spawnDepth?: number
+  label?: string
+  prompt?: string
+  cwd?: string
+  worktreePath?: string
+  relationKind: string
+  relationStrength: string
+  relationStatus: string
+  metadataStatus?: string
+  spawnStatus?: string
+  branchToolName?: string
+  requestedAgentType?: string
+  branchAnchorMessageId?: string
+  childPresent: boolean
+  parentPresent: boolean
+  metadataRunPresent?: boolean
+  observedRunState?: string
+  messageCount: number
+  workflowMemberCount: number
+  sourceTime?: string
+  sourceTimeQuality?: string
+  decisiveRelationFactId?: string
+  decisiveSpawnFactId?: string
+  decisiveMetadataFactId?: string
+  assertionCount: number
+  competingRelationCount: number
+  observedAtUnixMs: number
+  sourceObjectId: number
+  sourceGeneration: number
+  lastCommitSeq: number
 }
 
 export interface EngineHealth {
@@ -1212,6 +1285,131 @@ export interface EngineUsageTotals {
   firstObservedAtUnixMs?: number
   lastObservedAtUnixMs?: number
   lastCommitSeq?: number
+}
+
+export interface EngineWorkflowDetails {
+  contractVersion: number
+  atCommitSeq: number
+  workflow: EngineWorkflowSummary
+  defaultModel?: string
+  script?: string
+  scriptPath?: string
+  args?: string
+  summary?: string
+  error?: string
+  nativeSnapshot?: any
+  payloadBytes: number
+  payloadByteLimit: number
+}
+
+export interface EngineWorkflowMember {
+  memberId: string
+  workflowId: string
+  projectId: string
+  sessionId: string
+  childRunId: string
+  childRunPresent: boolean
+  adapterId: string
+  sourceInstanceId: number
+  nativeWorkflowId: string
+  nativeAgentId: string
+  nativeEventKey: string
+  nativeRunId?: string
+  agentType?: string
+  description?: string
+  nativeName?: string
+  worktreePath?: string
+  memberStatus: string
+  result?: any
+  resolutionStatus: string
+  observedRunState?: string
+  delegationStatus?: string
+  messageCount: number
+  decisiveStartedFactId?: string
+  decisiveResultFactId?: string
+  startedObservedAtUnixMs?: number
+  resultObservedAtUnixMs?: number
+  startedAssertionCount: number
+  competingStartedCount: number
+  resultAssertionCount: number
+  competingResultCount: number
+  eventKeyConflict: boolean
+  identityConflict: boolean
+  sourceObjectId: number
+  sourceGeneration: number
+  lastCommitSeq: number
+}
+
+export interface EngineWorkflowMemberPage {
+  contractVersion: number
+  atCommitSeq: number
+  workflowId: string
+  projectId: string
+  sessionId: string
+  items: Array<EngineWorkflowMember>
+  payloadBytes: number
+  payloadByteLimit: number
+  nextCursor?: string
+}
+
+export interface EngineWorkflowMemberPageOptions {
+  workflowId: string
+  cursor?: string
+  limit?: number
+}
+
+export interface EngineWorkflowPage {
+  contractVersion: number
+  atCommitSeq: number
+  projectId: string
+  sessionId: string
+  items: Array<EngineWorkflowSummary>
+  nextCursor?: string
+}
+
+export interface EngineWorkflowPageOptions {
+  projectId: string
+  sessionId: string
+  cursor?: string
+  limit?: number
+}
+
+export interface EngineWorkflowSummary {
+  workflowId: string
+  projectId: string
+  sessionId: string
+  adapterId: string
+  sourceInstanceId: number
+  nativeWorkflowId: string
+  nativeTaskId?: string
+  name?: string
+  nativeStatus?: string
+  workflowStatus?: string
+  startedAt?: string
+  startedAtQuality?: string
+  finishedAt?: string
+  finishedAtQuality?: string
+  durationMs?: number
+  agentCount?: number
+  totalTokens?: number
+  totalToolCalls?: number
+  snapshotStatus: string
+  resolutionStatus: string
+  decisiveSnapshotFactId?: string
+  provenanceFactId: string
+  snapshotAssertionCount: number
+  competingSnapshotCount: number
+  observedMemberCount: number
+  startedMemberCount: number
+  resultMemberCount: number
+  unresolvedMemberCount: number
+  conflictingMemberCount: number
+  membershipCountStatus: string
+  joinConflict: boolean
+  observedAtUnixMs: number
+  sourceObjectId: number
+  sourceGeneration: number
+  lastCommitSeq: number
 }
 
 /**

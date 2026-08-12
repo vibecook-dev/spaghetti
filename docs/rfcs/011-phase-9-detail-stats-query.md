@@ -10,10 +10,9 @@ the shadow database, assemble rows, or calculate canonical counts.
 
 RFC 011 lists details, statistics, and simple lookups seventh in the Phase 9
 port order. This record closes the core history/runtime/catalog portion of
-that item. The adjacent capability-detail and canonical FTS surfaces are
-recorded separately; timeline is now recorded separately and
-subagent/workflow queries remain open. It does not claim the Phase 9 exit
-gate.
+that item. The adjacent capability-detail, canonical FTS, timeline, and
+delegation/workflow surfaces are recorded separately. It does not claim the
+Phase 9 exit gate.
 
 ## Query contract
 
@@ -118,7 +117,7 @@ This is a shadow query surface, not production `SpaghettiClient` cutover. The
 remaining gates include:
 
 - timeline/facet and canonical FTS packs are recorded separately;
-- subagent/workflow queries;
+- delegation/workflow queries are recorded separately;
 - the separately recorded capability-detail surface is complete;
 - large-corpus latency, boundary-size, and concurrent-ingest benchmarks;
 - shared IPC/domain DTO generation beyond the current N-API shadow seam;

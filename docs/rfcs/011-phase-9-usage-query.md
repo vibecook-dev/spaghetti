@@ -9,9 +9,8 @@ not open the shadow database, read canonical usage tables, aggregate token
 rows, or assign quality.
 
 RFC 011 lists usage activity and totals fifth in the Phase 9 port order. This
-record closes that independently testable query slice. Canonical FTS search is
-recorded separately; timeline is now recorded separately and the dedicated
-subagent/workflow pack remains open.
+record closes that independently testable query slice. Canonical FTS, timeline,
+and delegation/workflow packs are recorded separately.
 Runtime/team, capability details, and core details/statistics are recorded
 separately as complete slices. This does not claim the Phase 9 exit gate.
 
@@ -154,8 +153,7 @@ This is a shadow query surface, not production `SpaghettiClient` cutover. The
 remaining gates include:
 
 - timeline/facet and canonical FTS packs are recorded separately;
-- subagent/workflow queries (the capability-detail pack is recorded
-  separately);
+- delegation/workflow and capability-detail packs are recorded separately;
 - large-corpus latency, boundary-size, and concurrent-ingest benchmarks;
 - IPC/domain DTO sharing beyond the current N-API shadow seam;
 - production client migration and retirement of TypeScript SQLite query

@@ -564,6 +564,195 @@ export interface SpaghettiEngineTimelinePage {
   nextCursor?: string;
 }
 
+export interface SpaghettiEngineDelegationPageOptions extends SpaghettiEngineHistoryPageOptions {
+  projectId: string;
+  sessionId: string;
+  /** Include only delegations named by this canonical workflow. */
+  workflowId?: string;
+  /** Exclude delegations that are current members of any workflow. */
+  standaloneOnly?: boolean;
+}
+
+export interface SpaghettiEngineDelegation {
+  runId: string;
+  parentRunId?: string;
+  projectId: string;
+  sessionId: string;
+  adapterId: string;
+  sourceInstanceId: number;
+  nativeRunId?: string;
+  nativeChildId?: string;
+  nativeTaskId?: string;
+  agentType?: string;
+  description?: string;
+  nativeName?: string;
+  spawnDepth?: number;
+  label?: string;
+  prompt?: string;
+  cwd?: string;
+  worktreePath?: string;
+  relationKind: string;
+  relationStrength: string;
+  relationStatus: string;
+  metadataStatus?: string;
+  spawnStatus?: string;
+  branchToolName?: string;
+  requestedAgentType?: string;
+  branchAnchorMessageId?: string;
+  childPresent: boolean;
+  parentPresent: boolean;
+  metadataRunPresent?: boolean;
+  observedRunState?: SpaghettiEngineRunState;
+  messageCount: number;
+  workflowMemberCount: number;
+  sourceTime?: string;
+  sourceTimeQuality?: SpaghettiEngineTimestampQuality;
+  decisiveRelationFactId?: string;
+  decisiveSpawnFactId?: string;
+  decisiveMetadataFactId?: string;
+  assertionCount: number;
+  competingRelationCount: number;
+  observedAtUnixMs: number;
+  sourceObjectId: number;
+  sourceGeneration: number;
+  lastCommitSeq: number;
+}
+
+export interface SpaghettiEngineDelegationPage {
+  contractVersion: number;
+  atCommitSeq: number;
+  projectId: string;
+  sessionId: string;
+  workflowId?: string;
+  standaloneOnly: boolean;
+  items: SpaghettiEngineDelegation[];
+  nextCursor?: string;
+}
+
+export interface SpaghettiEngineWorkflowPageOptions extends SpaghettiEngineHistoryPageOptions {
+  projectId: string;
+  sessionId: string;
+}
+
+export interface SpaghettiEngineWorkflowSummary {
+  workflowId: string;
+  projectId: string;
+  sessionId: string;
+  adapterId: string;
+  sourceInstanceId: number;
+  nativeWorkflowId: string;
+  nativeTaskId?: string;
+  name?: string;
+  nativeStatus?: string;
+  /** Container state only; never inherited by member child runs. */
+  workflowStatus?: 'pending' | 'running' | 'succeeded' | 'failed' | 'cancelled' | 'other';
+  startedAt?: string;
+  startedAtQuality?: SpaghettiEngineTimestampQuality;
+  finishedAt?: string;
+  finishedAtQuality?: SpaghettiEngineTimestampQuality;
+  durationMs?: number;
+  agentCount?: number;
+  totalTokens?: number;
+  totalToolCalls?: number;
+  snapshotStatus: 'present' | 'missing';
+  resolutionStatus: 'resolved' | 'incomplete' | 'conflicting';
+  decisiveSnapshotFactId?: string;
+  /** Snapshot fact, or one deterministic member fact for journal-only rows. */
+  provenanceFactId: string;
+  snapshotAssertionCount: number;
+  competingSnapshotCount: number;
+  observedMemberCount: number;
+  startedMemberCount: number;
+  resultMemberCount: number;
+  unresolvedMemberCount: number;
+  conflictingMemberCount: number;
+  membershipCountStatus: 'unobserved' | 'snapshot_missing' | 'matched' | 'different';
+  joinConflict: boolean;
+  observedAtUnixMs: number;
+  sourceObjectId: number;
+  sourceGeneration: number;
+  lastCommitSeq: number;
+}
+
+export interface SpaghettiEngineWorkflowPage {
+  contractVersion: number;
+  atCommitSeq: number;
+  projectId: string;
+  sessionId: string;
+  items: SpaghettiEngineWorkflowSummary[];
+  nextCursor?: string;
+}
+
+export interface SpaghettiEngineWorkflowDetails {
+  contractVersion: number;
+  atCommitSeq: number;
+  workflow: SpaghettiEngineWorkflowSummary;
+  defaultModel?: string;
+  script?: string;
+  scriptPath?: string;
+  args?: string;
+  summary?: string;
+  error?: string;
+  nativeSnapshot?: unknown;
+  payloadBytes: number;
+  payloadByteLimit: number;
+}
+
+export interface SpaghettiEngineWorkflowMemberPageOptions extends SpaghettiEngineHistoryPageOptions {
+  workflowId: string;
+}
+
+export interface SpaghettiEngineWorkflowMember {
+  memberId: string;
+  workflowId: string;
+  projectId: string;
+  sessionId: string;
+  childRunId: string;
+  childRunPresent: boolean;
+  adapterId: string;
+  sourceInstanceId: number;
+  nativeWorkflowId: string;
+  nativeAgentId: string;
+  nativeEventKey: string;
+  nativeRunId?: string;
+  agentType?: string;
+  description?: string;
+  nativeName?: string;
+  worktreePath?: string;
+  memberStatus: 'started' | 'result_observed' | 'orphan_result';
+  /** Native result value; it is not child success/failure evidence. */
+  result?: unknown;
+  resolutionStatus: 'resolved' | 'conflicting';
+  observedRunState?: SpaghettiEngineRunState;
+  delegationStatus?: string;
+  messageCount: number;
+  decisiveStartedFactId?: string;
+  decisiveResultFactId?: string;
+  startedObservedAtUnixMs?: number;
+  resultObservedAtUnixMs?: number;
+  startedAssertionCount: number;
+  competingStartedCount: number;
+  resultAssertionCount: number;
+  competingResultCount: number;
+  eventKeyConflict: boolean;
+  identityConflict: boolean;
+  sourceObjectId: number;
+  sourceGeneration: number;
+  lastCommitSeq: number;
+}
+
+export interface SpaghettiEngineWorkflowMemberPage {
+  contractVersion: number;
+  atCommitSeq: number;
+  workflowId: string;
+  projectId: string;
+  sessionId: string;
+  items: SpaghettiEngineWorkflowMember[];
+  payloadBytes: number;
+  payloadByteLimit: number;
+  nextCursor?: string;
+}
+
 export type SpaghettiEngineCapabilityPageOptions = SpaghettiEngineHistoryPageOptions;
 
 export interface SpaghettiEngineMemoryDocumentPageOptions extends SpaghettiEngineHistoryPageOptions {
@@ -1251,6 +1440,19 @@ export interface SpaghettiEngine {
   getMessages(options: SpaghettiEngineMessagePageOptions, signal?: AbortSignal): Promise<SpaghettiEngineMessagePage>;
   search(options: SpaghettiEngineSearchPageOptions, signal?: AbortSignal): Promise<SpaghettiEngineSearchPage>;
   getTimeline(options: SpaghettiEngineTimelinePageOptions, signal?: AbortSignal): Promise<SpaghettiEngineTimelinePage>;
+  listDelegations(
+    options: SpaghettiEngineDelegationPageOptions,
+    signal?: AbortSignal,
+  ): Promise<SpaghettiEngineDelegationPage>;
+  listWorkflows(
+    options: SpaghettiEngineWorkflowPageOptions,
+    signal?: AbortSignal,
+  ): Promise<SpaghettiEngineWorkflowPage>;
+  getWorkflow(workflowId: string, signal?: AbortSignal): Promise<SpaghettiEngineWorkflowDetails>;
+  listWorkflowMembers(
+    options: SpaghettiEngineWorkflowMemberPageOptions,
+    signal?: AbortSignal,
+  ): Promise<SpaghettiEngineWorkflowMemberPage>;
   listMemoryDocuments(
     options: SpaghettiEngineMemoryDocumentPageOptions,
     signal?: AbortSignal,

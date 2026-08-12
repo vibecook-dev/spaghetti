@@ -15,6 +15,8 @@ import {
   type SpaghettiEngine,
   type SpaghettiEngineArtifactPage,
   type SpaghettiEngineCanonicalStats,
+  type SpaghettiEngineDelegationPage,
+  type SpaghettiEngineDelegationPageOptions,
   type SpaghettiEngineHealth,
   type SpaghettiEngineHistoryPageOptions,
   type SpaghettiEngineHistoryProject,
@@ -50,6 +52,10 @@ import {
   type SpaghettiEngineUsageActivityOptions,
   type SpaghettiEngineUsageScopeOptions,
   type SpaghettiEngineUsageTotals,
+  type SpaghettiEngineWorkflowDetails,
+  type SpaghettiEngineWorkflowMemberPage,
+  type SpaghettiEngineWorkflowPage,
+  type SpaghettiEngineWorkflowPageOptions,
 } from './native.js';
 
 const OWNER_LOCK_SUFFIX = '.owner-lock.sqlite3';
@@ -244,6 +250,24 @@ export interface ClaudeObservationShadow {
   search(options: SpaghettiEngineSearchPageOptions, signal?: AbortSignal): Promise<SpaghettiEngineSearchPage>;
   /** Read root and delegated canonical messages plus exact session facets. */
   getTimeline(options: SpaghettiEngineTimelinePageOptions, signal?: AbortSignal): Promise<SpaghettiEngineTimelinePage>;
+  /** Page current child-run delegation relations for one verified session. */
+  listDelegations(
+    options: SpaghettiEngineDelegationPageOptions,
+    signal?: AbortSignal,
+  ): Promise<SpaghettiEngineDelegationPage>;
+  /** Page canonical workflow containers for one verified session. */
+  listWorkflows(
+    options: SpaghettiEngineWorkflowPageOptions,
+    signal?: AbortSignal,
+  ): Promise<SpaghettiEngineWorkflowPage>;
+  /** Read one workflow plus its bounded native snapshot. */
+  getWorkflow(workflowId: string, signal?: AbortSignal): Promise<SpaghettiEngineWorkflowDetails>;
+  /** Page explicit workflow-member journal evidence. */
+  listWorkflowMembers(
+    workflowId: string,
+    options?: SpaghettiEngineHistoryPageOptions,
+    signal?: AbortSignal,
+  ): Promise<SpaghettiEngineWorkflowMemberPage>;
   /** Page canonical project-memory documents, index first, with exact content. */
   listMemoryDocuments(
     projectId: string,
@@ -626,6 +650,32 @@ class NativeClaudeObservationShadow implements ClaudeObservationShadow {
 
   getTimeline(options: SpaghettiEngineTimelinePageOptions, signal?: AbortSignal): Promise<SpaghettiEngineTimelinePage> {
     return this.engine.getTimeline(options, signal);
+  }
+
+  listDelegations(
+    options: SpaghettiEngineDelegationPageOptions,
+    signal?: AbortSignal,
+  ): Promise<SpaghettiEngineDelegationPage> {
+    return this.engine.listDelegations(options, signal);
+  }
+
+  listWorkflows(
+    options: SpaghettiEngineWorkflowPageOptions,
+    signal?: AbortSignal,
+  ): Promise<SpaghettiEngineWorkflowPage> {
+    return this.engine.listWorkflows(options, signal);
+  }
+
+  getWorkflow(workflowId: string, signal?: AbortSignal): Promise<SpaghettiEngineWorkflowDetails> {
+    return this.engine.getWorkflow(workflowId, signal);
+  }
+
+  listWorkflowMembers(
+    workflowId: string,
+    options?: SpaghettiEngineHistoryPageOptions,
+    signal?: AbortSignal,
+  ): Promise<SpaghettiEngineWorkflowMemberPage> {
+    return this.engine.listWorkflowMembers({ workflowId, ...options }, signal);
   }
 
   listMemoryDocuments(
