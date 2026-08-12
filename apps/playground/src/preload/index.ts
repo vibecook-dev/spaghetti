@@ -15,6 +15,7 @@ const bridge: SpaghettiBridge = {
   rebuildIndex: () => ipcRenderer.invoke(IPC_CHANNELS.rebuildIndex),
   retryInit: () => ipcRenderer.invoke(IPC_CHANNELS.retryInit),
   getEngine: () => ipcRenderer.invoke(IPC_CHANNELS.getEngine),
+  getObservationShadowStatus: () => ipcRenderer.invoke(IPC_CHANNELS.getObservationShadowStatus),
 
   // Projects ----------------------------------------------------------------
   getProjectList: () => ipcRenderer.invoke(IPC_CHANNELS.getProjectList),

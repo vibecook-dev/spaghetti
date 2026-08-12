@@ -85,9 +85,13 @@ export interface EngineOverviewResult {
   schemaVersion: number
   /** Latest durable ingest commit visible to the read-only query snapshot. */
   commitSeq: number
+  /** Transitional compatibility-table counts. */
   projects: number
   sessions: number
   messages: number
+  /** Canonical history materialized by RFC 011 observation commits. */
+  canonicalSessions: number
+  canonicalMessages: number
   writerDataVersion: number
   journalMode: string
   queryOnly: boolean

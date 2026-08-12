@@ -173,9 +173,13 @@ pub struct EngineHealthSnapshot {
 pub struct EngineOverview {
     pub schema_version: u32,
     pub commit_seq: u64,
+    /// Transitional compatibility-table counts.
     pub projects: u32,
     pub sessions: u32,
     pub messages: u32,
+    /// Canonical history materialized by RFC 011 observation commits.
+    pub canonical_sessions: u32,
+    pub canonical_messages: u32,
     pub writer_data_version: u32,
     pub journal_mode: String,
     pub query_only: bool,
@@ -345,6 +349,8 @@ impl SpaghettiEngineCore {
             projects: query.projects,
             sessions: query.sessions,
             messages: query.messages,
+            canonical_sessions: query.canonical_sessions,
+            canonical_messages: query.canonical_messages,
             writer_data_version: writer_health.data_version,
             journal_mode: writer_health.journal_mode,
             query_only: query.query_only,

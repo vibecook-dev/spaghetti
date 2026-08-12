@@ -20,9 +20,14 @@ const QUEUE_DEPTH_PER_WORKER: usize = 16;
 pub struct QueryOverview {
     pub schema_version: u32,
     pub commit_seq: u64,
+    /// Transitional compatibility-table counts. New RFC 011 observation
+    /// commits intentionally do not populate these tables.
     pub projects: u32,
     pub sessions: u32,
     pub messages: u32,
+    /// Canonical history materialized by the common observation coordinator.
+    pub canonical_sessions: u32,
+    pub canonical_messages: u32,
     pub query_only: bool,
     pub read_only: bool,
 }
@@ -577,6 +582,8 @@ fn read_overview(connection: &Connection) -> Result<QueryOverview, EngineError> 
         projects: count_table(&transaction, "projects")?,
         sessions: count_table(&transaction, "sessions")?,
         messages: count_table(&transaction, "messages")?,
+        canonical_sessions: count_table(&transaction, "canonical_sessions")?,
+        canonical_messages: count_table(&transaction, "canonical_messages")?,
         query_only: query_only != 0,
         // The connection was opened with SQLITE_OPEN_READ_ONLY. The write
         // rejection test below verifies this invariant on the actual handle.
@@ -801,6 +808,8 @@ fn count_table(connection: &Connection, table: &'static str) -> Result<u32, Engi
         "projects" => "SELECT COUNT(*) FROM projects",
         "sessions" => "SELECT COUNT(*) FROM sessions",
         "messages" => "SELECT COUNT(*) FROM messages",
+        "canonical_sessions" => "SELECT COUNT(*) FROM canonical_sessions",
+        "canonical_messages" => "SELECT COUNT(*) FROM canonical_messages",
         _ => unreachable!("count_table only accepts fixed schema names"),
     };
     let count: i64 = connection
@@ -1143,6 +1152,8 @@ mod tests {
         assert_eq!(overview.projects, 0);
         assert_eq!(overview.sessions, 0);
         assert_eq!(overview.messages, 0);
+        assert_eq!(overview.canonical_sessions, 0);
+        assert_eq!(overview.canonical_messages, 0);
         assert!(overview.query_only && overview.read_only);
         assert_eq!(before, after, "a query must not advance database content");
         assert!(client.probe_write_rejected());

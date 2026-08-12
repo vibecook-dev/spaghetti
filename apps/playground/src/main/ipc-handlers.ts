@@ -12,6 +12,7 @@ export function registerIpcHandlers(client: SdkHostClient): void {
   ipcMain.handle(IPC_CHANNELS.rebuildIndex, () => client.request('rebuildIndex'));
   ipcMain.handle(IPC_CHANNELS.retryInit, () => client.request('retryInit'));
   ipcMain.handle(IPC_CHANNELS.getEngine, () => client.request('getEngine'));
+  ipcMain.handle(IPC_CHANNELS.getObservationShadowStatus, () => client.request('getObservationShadowStatus'));
 
   // Projects ----------------------------------------------------------------
   ipcMain.handle(IPC_CHANNELS.getProjectList, () => client.request('getProjectList'));

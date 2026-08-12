@@ -203,9 +203,13 @@ export interface SpaghettiEngineOverview {
   schemaVersion: number;
   /** Latest durable ingest commit visible to the read-only query snapshot. */
   commitSeq: number;
+  /** Transitional compatibility-table counts; not populated by RFC 011 observation. */
   projects: number;
   sessions: number;
   messages: number;
+  /** Canonical history materialized by RFC 011 observation commits. */
+  canonicalSessions: number;
+  canonicalMessages: number;
   writerDataVersion: number;
   journalMode: string;
   queryOnly: boolean;
@@ -413,9 +417,9 @@ export function loadNativeAddon(): NativeAddon | null {
 /**
  * Open the persistent Rust observation/query engine.
  *
- * This is the Phase 1 lifecycle surface, not yet a replacement for
- * {@link createSpaghettiService}. The existing service remains the explicit
- * legacy ingest/query mode while query parity is built behind this handle.
+ * This is the low-level persistent lifecycle surface, not yet a replacement
+ * for {@link createSpaghettiService}. Use `openClaudeObservationShadow()` for
+ * the isolated staged-observation mode while query parity is built.
  */
 export function openSpaghettiEngine(options: SpaghettiEngineOpenOptions): Promise<SpaghettiEngine> {
   const addon = loadNativeAddon();

@@ -151,9 +151,13 @@ pub struct EngineOverviewResult {
     pub schema_version: u32,
     /// Latest durable ingest commit visible to the read-only query snapshot.
     pub commit_seq: f64,
+    /// Transitional compatibility-table counts.
     pub projects: u32,
     pub sessions: u32,
     pub messages: u32,
+    /// Canonical history materialized by RFC 011 observation commits.
+    pub canonical_sessions: u32,
+    pub canonical_messages: u32,
     pub writer_data_version: u32,
     pub journal_mode: String,
     pub query_only: bool,
@@ -224,6 +228,8 @@ impl From<EngineOverview> for EngineOverviewResult {
             projects: value.projects,
             sessions: value.sessions,
             messages: value.messages,
+            canonical_sessions: value.canonical_sessions,
+            canonical_messages: value.canonical_messages,
             writer_data_version: value.writer_data_version,
             journal_mode: value.journal_mode,
             query_only: value.query_only,

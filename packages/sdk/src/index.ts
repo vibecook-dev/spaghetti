@@ -132,6 +132,18 @@ export {
   type SpaghettiEngineObservationOptions,
 } from './native.js';
 
+// RFC 011 staged cutover: isolated Rust observation for parity evidence.
+export {
+  compareClaudeObservationHistory,
+  defaultClaudeObservationShadowDbPath,
+  openClaudeObservationShadow,
+  type ClaudeLegacyHistoryCounts,
+  type ClaudeObservationHistoryParity,
+  type ClaudeObservationShadow,
+  type ClaudeObservationShadowOptions,
+  type ClaudeObservationShadowSnapshot,
+} from './observation-shadow.js';
+
 export { reportIngestErrors, summarizeIngestErrors } from './data/ingest-error-report.js';
 
 // Settings (engine selection, etc.)

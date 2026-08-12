@@ -32,12 +32,24 @@ import type {
   TokenActivityResult,
 } from '@vibecook/spaghetti-sdk';
 import type {
+  ClaudeObservationHistoryParity,
+  ClaudeObservationShadowSnapshot,
   InitProgress,
   SearchQuery,
   SearchResultSet,
   SegmentChangeBatch,
   StoreStats,
 } from '@vibecook/spaghetti-sdk';
+
+export interface ObservationShadowReport {
+  enabled: boolean;
+  state: 'disabled' | 'starting' | 'running' | 'degraded' | 'failed' | 'stopped';
+  databasePath?: string;
+  error?: string;
+  parityError?: string;
+  snapshot?: ClaudeObservationShadowSnapshot;
+  historyParity?: ClaudeObservationHistoryParity;
+}
 
 /**
  * One entry from `git worktree list --porcelain`.
@@ -117,6 +129,8 @@ export interface SpaghettiIPC {
   retryInit(): Promise<{ ok: true }>;
   /** Resolved ingest engine: `'rs'` (native Rust) or `'ts'` (TypeScript). */
   getEngine(): Promise<'rs' | 'ts'>;
+  /** Opt-in RFC 011 shadow health and Claude-scoped history parity. */
+  getObservationShadowStatus(): Promise<ObservationShadowReport>;
 
   // Projects ----------------------------------------------------------------
   getProjectList(): Promise<ProjectListItem[]>;
@@ -201,6 +215,7 @@ export const IPC_CHANNELS = {
   rebuildIndex: 'spaghetti:rebuildIndex',
   retryInit: 'spaghetti:retryInit',
   getEngine: 'spaghetti:getEngine',
+  getObservationShadowStatus: 'spaghetti:getObservationShadowStatus',
   getProjectList: 'spaghetti:getProjectList',
   getProjectTokenActivity: 'spaghetti:getProjectTokenActivity',
   getProjectMemory: 'spaghetti:getProjectMemory',

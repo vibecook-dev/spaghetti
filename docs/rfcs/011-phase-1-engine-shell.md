@@ -47,10 +47,12 @@ under concurrent callers.
 
 ## First typed query
 
-`overview()` returns schema version, the future commit watermark, canonical
+`overview()` originally returned schema version, compatibility
 project/session/message counts, writer `data_version`/journal mode, and query
-confinement flags. `commitSeq` is intentionally zero until Phase 2 adds
-durable ingest commits.
+confinement flags. Phase 2 made `commitSeq` a durable ingest watermark. The
+later observation-shadow slice added separately named `canonicalSessions` and
+`canonicalMessages`; the compatibility counts remain unchanged so a populated
+RFC 011 projection cannot be confused with legacy read-table state.
 
 The query-purity test runs the real pool connection, verifies `data_version`
 does not advance, and proves a DDL write is rejected on that same handle.

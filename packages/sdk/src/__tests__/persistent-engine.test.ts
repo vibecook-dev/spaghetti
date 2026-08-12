@@ -17,6 +17,7 @@ import { loadNativeAddon, openSpaghettiEngine, type SpaghettiEngine } from '../i
 const native = loadNativeAddon();
 const engines: SpaghettiEngine[] = [];
 const tempDirs: string[] = [];
+const SESSION_ID = '11111111-2222-3333-4444-555555555555';
 
 function temporaryDatabase(): string {
   const dir = mkdtempSync(path.join(tmpdir(), 'spaghetti-engine-'));
@@ -59,6 +60,7 @@ describe('persistent SpaghettiEngine', { skip: !native }, () => {
     assert.equal(overview.schemaVersion > 0, true);
     assert.equal(overview.commitSeq, 0);
     assert.deepEqual([overview.projects, overview.sessions, overview.messages], [0, 0, 0]);
+    assert.deepEqual([overview.canonicalSessions, overview.canonicalMessages], [0, 0]);
     assert.equal(overview.journalMode, 'wal');
     assert.equal(overview.queryOnly, true);
     assert.equal(overview.readOnly, true);
@@ -117,6 +119,10 @@ describe('persistent SpaghettiEngine', { skip: !native }, () => {
     assert.equal(engine.status.observation.lastCommitSeq, first.lastCommitSeq);
     assert.equal(engine.status.observation.lastError, undefined);
 
+    const overview = await engine.overview();
+    assert.equal(overview.canonicalSessions, 0);
+    assert.equal(overview.canonicalMessages, 0);
+
     const unchanged = await engine.reconcileClaude({ roots: [root] });
     assert.equal(unchanged.objectsRegistered, 0);
     assert.equal(unchanged.recordsDecoded, 0);
@@ -127,6 +133,33 @@ describe('persistent SpaghettiEngine', { skip: !native }, () => {
     assert.equal(engine.status.observation.dirtyInstances, 0);
     assert.equal(engine.status.observation.fullReconcileRequired, false);
     assert.equal(engine.status.observation.recoveryRequired, false);
+  });
+
+  test('reports canonical observation history separately from compatibility tables', async () => {
+    const dbPath = temporaryDatabase();
+    const root = path.join(path.dirname(dbPath), 'claude-history');
+    const project = path.join(root, 'projects', '-tmp-shadow-project');
+    mkdirSync(project, { recursive: true });
+    writeFileSync(
+      path.join(project, `${SESSION_ID}.jsonl`),
+      `${JSON.stringify({
+        type: 'user',
+        uuid: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+        parentUuid: null,
+        timestamp: '2026-08-12T00:00:00.000Z',
+        sessionId: SESSION_ID,
+        cwd: '/tmp/shadow-project',
+        gitBranch: 'main',
+        message: { role: 'user', content: 'observe me' },
+      })}\n`,
+    );
+    const engine = await openTracked(dbPath, 'sdk-overview-test');
+
+    await engine.reconcileClaude({ roots: [root], reason: 'sdk_overview_fixture' });
+    const overview = await engine.overview();
+
+    assert.deepEqual([overview.projects, overview.sessions, overview.messages], [0, 0, 0]);
+    assert.deepEqual([overview.canonicalSessions, overview.canonicalMessages], [1, 1]);
   });
 
   test('starts, refreshes, and stops native Claude observation', async () => {

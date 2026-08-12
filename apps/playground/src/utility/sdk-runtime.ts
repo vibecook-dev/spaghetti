@@ -6,24 +6,33 @@ import {
   createCodexSource,
   createGrokSource,
   createSpaghettiService,
+  compareClaudeObservationHistory,
   defaultCodexDir,
+  defaultClaudeDir,
+  defaultClaudeObservationShadowDbPath,
   defaultGrokDir,
   isSqliteCorruptError,
+  openClaudeObservationShadow,
   wipeSqliteCacheFiles,
   type AgentSource,
+  type ClaudeObservationShadow,
   type IngestEngine,
   type InitProgress,
   type SegmentChangeBatch,
   type SpaghettiAPI,
   type TimelinePageRequest,
 } from '@vibecook/spaghetti-sdk';
-import type { ActiveSessionChange, SessionStreamSnapshot } from '../shared/ipc.js';
+import type { ActiveSessionChange, ObservationShadowReport, SessionStreamSnapshot } from '../shared/ipc.js';
 import { attachPlaygroundEventForwarding } from './live-forwarding.js';
 
 export interface SdkRuntimeOptions {
   dbPath: string;
   engine: IngestEngine;
   rootDir?: string;
+  /** Override auto-detected secondary sources (primarily for host conformance). */
+  additionalSources?: AgentSource[];
+  /** Opt-in RFC 011 parity owner. Its database is always isolated. */
+  observationShadow?: { dbPath?: string };
 }
 
 export interface SdkRuntimeEventSink {
@@ -81,11 +90,18 @@ export class SdkRuntime {
   private disposed = false;
   private nextStreamId = 1;
   private activeStream: ActiveStreamIdentity | null = null;
+  private observationShadow: ClaudeObservationShadow | null = null;
+  private observationShadowStart: Promise<void> | null = null;
+  private observationShadowStartAbort: AbortController | null = null;
+  private observationShadowState: ObservationShadowReport['state'];
+  private observationShadowError: string | null = null;
 
   constructor(
     private readonly options: SdkRuntimeOptions,
     private readonly sink: SdkRuntimeEventSink,
-  ) {}
+  ) {
+    this.observationShadowState = options.observationShadow ? 'starting' : 'disabled';
+  }
 
   get engine(): IngestEngine {
     return this.options.engine;
@@ -103,7 +119,7 @@ export class SdkRuntime {
     this.attachEvents(service);
     const init = service.initialize();
     const trackedInit = init
-      .then(() => undefined)
+      .then(() => this.startObservationShadow())
       .catch((err: unknown) => {
         this.sink.initError(String(err));
         throw err;
@@ -126,6 +142,50 @@ export class SdkRuntime {
       await this.recoverFromCorruption();
       return await operation(this.requireService());
     }
+  }
+
+  async getObservationShadowStatus(): Promise<ObservationShadowReport> {
+    if (!this.options.observationShadow) return { enabled: false, state: 'disabled' };
+    const databasePath = this.observationShadowDatabasePath();
+    if (this.observationShadowState === 'failed') {
+      return {
+        enabled: true,
+        state: 'failed',
+        databasePath,
+        ...(this.observationShadowError ? { error: this.observationShadowError } : {}),
+      };
+    }
+    const shadow = this.observationShadow;
+    if (!shadow) {
+      return { enabled: true, state: this.observationShadowState, databasePath };
+    }
+
+    let snapshot;
+    try {
+      snapshot = await shadow.snapshot();
+    } catch (error) {
+      return {
+        enabled: true,
+        state: 'degraded',
+        databasePath: shadow.databasePath,
+        error: String(error),
+      };
+    }
+    const report: ObservationShadowReport = {
+      enabled: true,
+      state: snapshot.health.healthy ? 'running' : 'degraded',
+      databasePath: shadow.databasePath,
+      ...(!snapshot.health.healthy && snapshot.health.detail ? { error: snapshot.health.detail } : {}),
+      snapshot,
+    };
+    try {
+      report.historyParity = compareClaudeObservationHistory(snapshot.overview, this.collectClaudeHistoryCounts());
+    } catch (error) {
+      // The legacy oracle can be unavailable during its own maintenance while
+      // the isolated Rust observation engine remains healthy.
+      report.parityError = String(error);
+    }
+    return report;
   }
 
   async openSessionStream(
@@ -185,6 +245,7 @@ export class SdkRuntime {
   async dispose(): Promise<void> {
     if (this.disposed) return;
     this.disposed = true;
+    this.observationShadowStartAbort?.abort();
     if (this.recoveryPromise) {
       try {
         await this.recoveryPromise;
@@ -206,6 +267,7 @@ export class SdkRuntime {
         /* dispose the failed instance below */
       }
     }
+    await this.disposeObservationShadow();
     await this.disposeService();
   }
 
@@ -214,7 +276,7 @@ export class SdkRuntime {
       dbPath: this.options.dbPath,
       engine: this.options.engine,
       live: true,
-      additionalSources: detectAdditionalSources(),
+      additionalSources: this.options.additionalSources ?? detectAdditionalSources(),
       ...(this.options.rootDir ? { rootDir: this.options.rootDir } : {}),
     });
   }
@@ -273,6 +335,7 @@ export class SdkRuntime {
     this.attachEvents(service);
     try {
       await service.initialize();
+      await this.startObservationShadow();
     } catch (err) {
       this.sink.initError(String(err));
       throw err;
@@ -296,5 +359,86 @@ export class SdkRuntime {
         /* already stopped */
       }
     }
+  }
+
+  private async startObservationShadow(): Promise<void> {
+    if (!this.options.observationShadow || this.observationShadow || this.disposed) return;
+    if (this.observationShadowStart) return await this.observationShadowStart;
+    this.observationShadowState = 'starting';
+    this.observationShadowError = null;
+    const abort = new AbortController();
+    this.observationShadowStartAbort = abort;
+    const work = (async () => {
+      try {
+        const shadow = await openClaudeObservationShadow({
+          productionDbPath: this.options.dbPath,
+          shadowDbPath: this.options.observationShadow?.dbPath,
+          roots: [this.options.rootDir ?? defaultClaudeDir()],
+          ownerLabel: 'playground-utility-shadow',
+          signal: abort.signal,
+        });
+        if (this.disposed) {
+          await shadow.dispose();
+          this.observationShadowState = 'stopped';
+          return;
+        }
+        this.observationShadow = shadow;
+        this.observationShadowState = 'running';
+        console.info(`[sdk-host] RFC 011 observation shadow ready at ${shadow.databasePath}`);
+      } catch (error) {
+        this.observationShadowState = this.disposed && abort.signal.aborted ? 'stopped' : 'failed';
+        this.observationShadowError = this.observationShadowState === 'failed' ? String(error) : null;
+        // Shadow mode is an oracle, not the production path. Keep the legacy
+        // service ready and expose this failure through its diagnostic RPC.
+        if (this.observationShadowState === 'failed') {
+          console.error('[sdk-host] RFC 011 observation shadow failed', error);
+        }
+      }
+    })();
+    const tracked = work.finally(() => {
+      if (this.observationShadowStart === tracked) this.observationShadowStart = null;
+      if (this.observationShadowStartAbort === abort) this.observationShadowStartAbort = null;
+    });
+    this.observationShadowStart = tracked;
+    await tracked;
+  }
+
+  private async disposeObservationShadow(): Promise<void> {
+    if (this.observationShadowStart) await this.observationShadowStart;
+    const shadow = this.observationShadow;
+    this.observationShadow = null;
+    this.observationShadowState = 'stopped';
+    if (!shadow) return;
+    try {
+      await shadow.dispose();
+    } catch (error) {
+      console.error('[sdk-host] RFC 011 observation shadow dispose failed', error);
+    }
+  }
+
+  private observationShadowDatabasePath(): string {
+    return (
+      this.observationShadow?.databasePath ??
+      this.options.observationShadow?.dbPath ??
+      defaultClaudeObservationShadowDbPath(this.options.dbPath)
+    );
+  }
+
+  private collectClaudeHistoryCounts(): { sessions: number; messages: number; subagentMessages: number } {
+    const service = this.requireService();
+    const projects = service.getProjectList({ sourceId: 'claude-code' });
+    const sessions = projects.flatMap((project) => service.getSessionList(project, { sourceId: 'claude-code' }));
+    let messages = 0;
+    let subagentMessages = 0;
+    for (const session of sessions) {
+      messages += session.messageCount;
+      for (const subagent of service.getSessionSubagents(session.projectSlug, session.sessionId, {
+        sourceId: 'claude-code',
+        includeNested: true,
+      })) {
+        subagentMessages += subagent.messageCount;
+      }
+    }
+    return { sessions: sessions.length, messages, subagentMessages };
   }
 }
