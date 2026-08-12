@@ -235,6 +235,76 @@ pub struct PersistedToolResultFact {
     pub size_bytes: u64,
 }
 
+/// The precedence layer represented by one interpretation-settings document.
+///
+/// The common pack deliberately models only the source instance's global and
+/// local documents. Managed policy, command-line overrides, and project roots
+/// outside the configured source instance are not inferred.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InterpretationSettingsLayer {
+    Global,
+    Local,
+}
+
+/// Whether the current source document could be interpreted safely.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InterpretationSettingsDocumentStatus {
+    Valid,
+    Invalid,
+}
+
+/// Redacted hook metadata retained without command, prompt, URL, or agent
+/// bodies. Counts describe declarations, not successful hook executions.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HookEventSummary {
+    pub declared_matcher_count: u64,
+    pub declared_hook_count: u64,
+}
+
+/// Allowlisted settings that materially affect source interpretation.
+///
+/// Arbitrary native keys, environment values, hook bodies, status-line
+/// commands, marketplace locations, and UI preferences are intentionally not
+/// represented. Optional collections distinguish an absent field from an
+/// explicitly present empty collection so scope merging stays truthful.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InterpretationSettingsSnapshot {
+    pub agent: Option<String>,
+    pub model: Option<String>,
+    pub effort_level: Option<String>,
+    pub plans_directory: Option<String>,
+    pub always_thinking_enabled: Option<bool>,
+    pub auto_compact_enabled: Option<bool>,
+    pub skip_auto_permission_prompt: Option<bool>,
+    pub permission_default_mode: Option<String>,
+    pub disable_bypass_permissions_mode: Option<String>,
+    pub disable_auto_mode: Option<String>,
+    pub permission_allow: Option<Vec<String>>,
+    pub permission_ask: Option<Vec<String>>,
+    pub permission_deny: Option<Vec<String>>,
+    pub enabled_plugins: Option<BTreeMap<String, bool>>,
+    pub hook_events: Option<BTreeMap<String, HookEventSummary>>,
+}
+
+/// One independently replaceable interpretation-settings document.
+///
+/// Invalid documents retain only redacted health evidence. They never become
+/// an empty or last-known-good settings layer, which prevents stale permission
+/// state from being silently presented as current.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InterpretationSettingsFact {
+    pub document: EntityKey,
+    pub scope: EntityKey,
+    pub layer: InterpretationSettingsLayer,
+    pub native_document_path: String,
+    pub document_status: InterpretationSettingsDocumentStatus,
+    pub settings: Option<InterpretationSettingsSnapshot>,
+    pub error_code: Option<String>,
+    pub size_bytes: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MessageRole {
     User,
@@ -733,6 +803,7 @@ pub enum Fact {
     SessionIndexSnapshot(SessionIndexSnapshotFact),
     ProjectMemoryDocument(ProjectMemoryDocumentFact),
     PersistedToolResult(PersistedToolResultFact),
+    InterpretationSettings(InterpretationSettingsFact),
     Message(MessageFact),
     Run(RunFact),
     Delegation(DelegationFact),
@@ -763,6 +834,7 @@ impl Fact {
             Self::SessionIndexSnapshot(_) => "session_index_snapshot",
             Self::ProjectMemoryDocument(_) => "project_memory_document",
             Self::PersistedToolResult(_) => "persisted_tool_result",
+            Self::InterpretationSettings(_) => "interpretation_settings",
             Self::Message(_) => "message",
             Self::Run(_) => "run",
             Self::Delegation(_) => "delegation",
@@ -789,6 +861,7 @@ impl Fact {
             Self::SessionIndexSnapshot(fact) => Some(&fact.project),
             Self::ProjectMemoryDocument(fact) => Some(&fact.document),
             Self::PersistedToolResult(fact) => Some(&fact.result),
+            Self::InterpretationSettings(fact) => Some(&fact.document),
             Self::Message(fact) => Some(&fact.message),
             Self::Run(fact) => Some(&fact.run),
             Self::Delegation(fact) => Some(&fact.child_run),

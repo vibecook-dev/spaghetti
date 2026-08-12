@@ -121,5 +121,6 @@ matrices each report zero differences.
 
 ## Remaining Phase 5 work
 
-Settings and other reviewed sidecar packs remain. The observation coordinator
-and production Rust live cutover are also required for the Phase 5 exit gate.
+Interpretation settings are implemented in an adjacent Phase 5 pack. Other
+reviewed sidecars may remain. The observation coordinator and production Rust
+live cutover are also required for the Phase 5 exit gate.

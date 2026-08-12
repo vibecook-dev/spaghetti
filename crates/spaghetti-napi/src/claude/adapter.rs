@@ -18,15 +18,17 @@ use crate::adapter::{
     ConsistencyPolicy, ContentBlock, DecodeContext, DecodeDisposition, DecoderId, DelegationFact,
     DelegationKind, DelegationMetadataFact, DelegationSpawnFact, DeletionPolicy, DiscoveryContext,
     DriverSpec, EntityKey, EntityScope, EvidenceKind, EvidenceStrength, Fact, FactBatch,
-    MessageFact, MessageRole, ObjectSelector, PersistedToolResultFact, PlanSnapshotFact,
-    PresenceFact, ProjectMemoryDocumentFact, QualifiedTimestamp, RawRetentionPolicy,
-    RelationStrength, RunEvidenceFact, RunFact, SessionFact, SessionIndexEntrySnapshot,
-    SessionIndexSnapshotFact, SourceInstance, SourceInstanceKey, SourceInstanceSpec,
-    SourceObjectDescriptor, SourceRoot, StreamAuthority, StreamId, StreamSpec, SupportLevel,
-    TaskCollectionKind, TaskItemSnapshot, TaskSnapshotCoverage, TaskSnapshotFact, TaskStatus,
-    TeamInboxMessageSnapshot, TeamInboxSnapshotFact, TeamMemberSnapshot, TeamSnapshotFact,
-    TimestampQuality, TokenUsage, UsageAccounting, UsageFact, UsageScope, ValueQuality,
-    WorkflowMemberEventFact, WorkflowMemberEventKind, WorkflowSnapshotFact, WorkflowStatus,
+    HookEventSummary, InterpretationSettingsDocumentStatus, InterpretationSettingsFact,
+    InterpretationSettingsLayer, InterpretationSettingsSnapshot, MessageFact, MessageRole,
+    ObjectSelector, PersistedToolResultFact, PlanSnapshotFact, PresenceFact,
+    ProjectMemoryDocumentFact, QualifiedTimestamp, RawRetentionPolicy, RelationStrength,
+    RunEvidenceFact, RunFact, SessionFact, SessionIndexEntrySnapshot, SessionIndexSnapshotFact,
+    SourceInstance, SourceInstanceKey, SourceInstanceSpec, SourceObjectDescriptor, SourceRoot,
+    StreamAuthority, StreamId, StreamSpec, SupportLevel, TaskCollectionKind, TaskItemSnapshot,
+    TaskSnapshotCoverage, TaskSnapshotFact, TaskStatus, TeamInboxMessageSnapshot,
+    TeamInboxSnapshotFact, TeamMemberSnapshot, TeamSnapshotFact, TimestampQuality, TokenUsage,
+    UsageAccounting, UsageFact, UsageScope, ValueQuality, WorkflowMemberEventFact,
+    WorkflowMemberEventKind, WorkflowSnapshotFact, WorkflowStatus,
 };
 use crate::claude::message_extractor;
 use crate::claude::session_metadata;
@@ -55,6 +57,7 @@ const WORKFLOW_JOURNAL_STREAM: &str = "workflow-journals";
 const SESSION_INDEX_STREAM: &str = "session-indexes";
 const PROJECT_MEMORY_STREAM: &str = "project-memory-documents";
 const PERSISTED_TOOL_RESULT_STREAM: &str = "persisted-tool-results";
+const INTERPRETATION_SETTINGS_STREAM: &str = "interpretation-settings";
 const PARENT_DECODER: &str = "claude-session-record";
 const SUBAGENT_DECODER: &str = "claude-subagent-record";
 const SUBAGENT_META_DECODER: &str = "claude-subagent-metadata";
@@ -70,6 +73,7 @@ const WORKFLOW_JOURNAL_DECODER: &str = "claude-workflow-journal";
 const SESSION_INDEX_DECODER: &str = "claude-session-index";
 const PROJECT_MEMORY_DECODER: &str = "claude-project-memory-document";
 const PERSISTED_TOOL_RESULT_DECODER: &str = "claude-persisted-tool-result";
+const INTERPRETATION_SETTINGS_DECODER: &str = "claude-interpretation-settings";
 const OBJECT_CONTEXT_VERSION: u32 = 1;
 const SUBAGENT_META_MAX_BYTES: usize = 64 * 1024;
 const TEAM_CONFIG_MAX_BYTES: usize = 1024 * 1024;
@@ -83,11 +87,14 @@ const WORKFLOW_RUN_MAX_BYTES: usize = 1024 * 1024;
 const SESSION_INDEX_MAX_BYTES: usize = 1024 * 1024;
 const PROJECT_MEMORY_MAX_BYTES: usize = 1024 * 1024;
 const PERSISTED_TOOL_RESULT_MAX_BYTES: usize = 16 * 1024 * 1024;
+const INTERPRETATION_SETTINGS_MAX_BYTES: usize = 1024 * 1024;
 const TEAM_MEMBER_LIMIT: usize = 256;
 const TEAM_INBOX_MESSAGE_LIMIT: usize = 4_096;
 const TODO_ITEM_LIMIT: usize = 4_096;
 const ARTIFACT_METADATA_LIMIT: usize = 512;
 const SESSION_INDEX_ENTRY_LIMIT: usize = 4_096;
+const SETTINGS_COLLECTION_LIMIT: usize = 4_096;
+const SETTINGS_STRING_MAX_BYTES: usize = 16 * 1024;
 
 const HISTORY_SESSIONS: &str = "history.sessions";
 const HISTORY_MESSAGES: &str = "history.messages";
@@ -104,6 +111,7 @@ const RUNTIME_ARTIFACTS: &str = "runtime.artifacts";
 const RUNTIME_WORKFLOWS: &str = "runtime.workflows";
 const CONTEXT_PROJECT_MEMORY: &str = "context.project_memory";
 const HISTORY_PERSISTED_TOOL_RESULTS: &str = "history.persisted_tool_results";
+const CONFIGURATION_INTERPRETATION_SETTINGS: &str = "configuration.interpretation_settings";
 const USAGE_INPUT_TOKENS: &str = "usage.input_tokens";
 const USAGE_OUTPUT_TOKENS: &str = "usage.output_tokens";
 const USAGE_CACHE_TOKENS: &str = "usage.cache_tokens";
@@ -122,7 +130,7 @@ impl ClaudeCodeAdapter {
                 id: AdapterId::new(ADAPTER_ID).expect("static Claude adapter id is valid"),
                 display_name: "Claude Code".to_string(),
                 adapter_version: env!("CARGO_PKG_VERSION").to_string(),
-                contract_version: 12,
+                contract_version: 13,
                 source_schema_versions: vec![
                     "claude-code-jsonl-v1".to_string(),
                     "claude-code-subagent-meta-v1".to_string(),
@@ -137,6 +145,7 @@ impl ClaudeCodeAdapter {
                     "claude-code-session-index-v1".to_string(),
                     "claude-code-project-memory-v1".to_string(),
                     "claude-code-persisted-tool-result-v1".to_string(),
+                    "claude-code-interpretation-settings-v1".to_string(),
                 ],
                 capabilities: claude_capabilities(),
             },
@@ -495,6 +504,28 @@ impl AgentAdapter for ClaudeCodeAdapter {
                 retention: RawRetentionPolicy::Full,
                 capabilities: persisted_tool_result_capabilities(),
             },
+            StreamSpec {
+                id: StreamId::new(INTERPRETATION_SETTINGS_STREAM)?,
+                driver: DriverSpec::ReplaceDocument(ReplaceDocumentConfig {
+                    max_document_bytes: INTERPRETATION_SETTINGS_MAX_BYTES,
+                }),
+                selector: ObjectSelector {
+                    root_name: "home".to_string(),
+                    include: vec![
+                        "settings.json".to_string(),
+                        "settings.local.json".to_string(),
+                    ],
+                    exclude: Vec::new(),
+                },
+                decoder: DecoderId::new(INTERPRETATION_SETTINGS_DECODER)?,
+                authority: StreamAuthority::Canonical,
+                entity_scope: EntityScope::Instance,
+                priority: IngestPriority::Interactive,
+                consistency: ConsistencyPolicy::SnapshotReplace,
+                deletion: DeletionPolicy::MirrorSource,
+                retention: RawRetentionPolicy::HashOnly,
+                capabilities: interpretation_settings_capabilities(),
+            },
         ];
         for stream in &streams {
             stream.validate(instance)?;
@@ -552,6 +583,9 @@ impl AgentAdapter for ClaudeCodeAdapter {
             )?,
             PERSISTED_TOOL_RESULT_STREAM => encode_object_context(
                 &ClaudePersistedToolResultContext::from_path(&object.relative_path)?,
+            )?,
+            INTERPRETATION_SETTINGS_STREAM => encode_object_context(
+                &ClaudeInterpretationSettingsContext::from_path(&object.relative_path)?,
             )?,
             _ => {
                 return Err(AdapterError::new(
@@ -638,6 +672,11 @@ impl AgentAdapter for ClaudeCodeAdapter {
                     ClaudePersistedToolResultContext::decode(context.object_context)?;
                 decode_persisted_tool_result(self.adapter_id(), &object_context, record, output)
             }
+            INTERPRETATION_SETTINGS_DECODER => {
+                let object_context =
+                    ClaudeInterpretationSettingsContext::decode(context.object_context)?;
+                decode_interpretation_settings(self.adapter_id(), &object_context, record, output)
+            }
             _ => Err(AdapterError::unknown_decoder(context.decoder)),
         }
     }
@@ -723,6 +762,15 @@ fn claude_capabilities() -> Vec<CapabilityDeclaration> {
             Availability::Live,
             Some(
                 "immediate UTF-8 tool-results/*.txt documents supplement transcript content; filename stems are native identifiers but do not always denote a model tool call",
+            ),
+        ),
+        capability(
+            CONFIGURATION_INTERPRETATION_SETTINGS,
+            SupportLevel::Native,
+            CapabilityGranularity::Instance,
+            Availability::Live,
+            Some(
+                "global and local root settings are reduced with native scalar precedence and array merging; sensitive values and command bodies are excluded",
             ),
         ),
         live_native(USAGE_INPUT_TOKENS, CapabilityGranularity::Message),
@@ -862,6 +910,18 @@ fn project_memory_capabilities() -> Vec<CapabilityId> {
 fn persisted_tool_result_capabilities() -> Vec<CapabilityId> {
     [
         HISTORY_PERSISTED_TOOL_RESULTS,
+        SOURCE_LIVE,
+        SOURCE_RECONCILE,
+        SOURCE_RESUME_CURSOR,
+    ]
+    .into_iter()
+    .map(|id| CapabilityId::new(id).expect("static Claude stream capability id is valid"))
+    .collect()
+}
+
+fn interpretation_settings_capabilities() -> Vec<CapabilityId> {
+    [
+        CONFIGURATION_INTERPRETATION_SETTINGS,
         SOURCE_LIVE,
         SOURCE_RECONCILE,
         SOURCE_RESUME_CURSOR,
@@ -1258,6 +1318,42 @@ struct ClaudePersistedToolResultContext {
     native_session_id: String,
     native_tool_use_id: String,
     native_document_path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct ClaudeInterpretationSettingsContext {
+    layer: InterpretationSettingsLayer,
+    native_document_path: String,
+}
+
+impl ClaudeInterpretationSettingsContext {
+    fn from_path(relative_path: &Path) -> Result<Self, AdapterError> {
+        let components = utf8_components(relative_path)?;
+        let [file_name] = components.as_slice() else {
+            return Err(path_error(
+                relative_path,
+                "interpretation settings must be one root document",
+            ));
+        };
+        let layer = match file_name.as_str() {
+            "settings.json" => InterpretationSettingsLayer::Global,
+            "settings.local.json" => InterpretationSettingsLayer::Local,
+            _ => {
+                return Err(path_error(
+                    relative_path,
+                    "interpretation settings path must be settings.json or settings.local.json",
+                ));
+            }
+        };
+        Ok(Self {
+            layer,
+            native_document_path: file_name.clone(),
+        })
+    }
+
+    fn decode(context: &AdapterObjectContext) -> Result<Self, AdapterError> {
+        decode_object_context(context)
+    }
 }
 
 impl ClaudePersistedToolResultContext {
@@ -2811,6 +2907,357 @@ fn decode_persisted_tool_result(
     Ok(DecodeDisposition::Applied)
 }
 
+fn decode_interpretation_settings(
+    adapter_id: &AdapterId,
+    context: &ClaudeInterpretationSettingsContext,
+    record: &SourceRecord,
+    output: &mut FactBatch,
+) -> Result<DecodeDisposition, AdapterError> {
+    if record.state == SourceRecordState::Absent {
+        return Ok(DecodeDisposition::IgnoredKnown);
+    }
+
+    let decoded = decode_interpretation_settings_snapshot(&record.payload);
+    let (document_status, settings, error_code, disposition) = match decoded {
+        Ok(settings) => (
+            InterpretationSettingsDocumentStatus::Valid,
+            Some(settings),
+            None,
+            DecodeDisposition::Applied,
+        ),
+        Err(failure) => {
+            output.push_diagnostic(AdapterDiagnostic {
+                class: AdapterErrorClass::RecordPermanent,
+                code: failure.code.to_string(),
+                message: format!(
+                    "Claude {} could not be interpreted: {}",
+                    context.native_document_path, failure.message
+                ),
+            })?;
+            (
+                InterpretationSettingsDocumentStatus::Invalid,
+                None,
+                Some(failure.code.to_string()),
+                DecodeDisposition::PreservedUnknown,
+            )
+        }
+    };
+
+    output.push(
+        record,
+        Fact::InterpretationSettings(InterpretationSettingsFact {
+            document: EntityKey::native(
+                adapter_id,
+                record.source_instance_id,
+                "interpretation_settings_document",
+                context.native_document_path.as_bytes(),
+            )?,
+            scope: EntityKey::native(
+                adapter_id,
+                record.source_instance_id,
+                "interpretation_settings_scope",
+                b"root",
+            )?,
+            layer: context.layer,
+            native_document_path: context.native_document_path.clone(),
+            document_status,
+            settings,
+            error_code,
+            size_bytes: record.payload.len() as u64,
+        }),
+    )?;
+    Ok(disposition)
+}
+
+#[derive(Debug)]
+struct InterpretationSettingsDecodeFailure {
+    code: &'static str,
+    message: String,
+}
+
+impl InterpretationSettingsDecodeFailure {
+    fn shape(message: impl Into<String>) -> Self {
+        Self {
+            code: "claude_settings_invalid_shape",
+            message: message.into(),
+        }
+    }
+
+    fn bounds(message: impl Into<String>) -> Self {
+        Self {
+            code: "claude_settings_bounds",
+            message: message.into(),
+        }
+    }
+}
+
+fn decode_interpretation_settings_snapshot(
+    payload: &[u8],
+) -> Result<InterpretationSettingsSnapshot, InterpretationSettingsDecodeFailure> {
+    let value: Value =
+        serde_json::from_slice(payload).map_err(|error| InterpretationSettingsDecodeFailure {
+            code: "claude_settings_invalid_json",
+            message: format!(
+                "invalid JSON at line {}, column {}",
+                error.line(),
+                error.column()
+            ),
+        })?;
+    let object = value.as_object().ok_or_else(|| {
+        InterpretationSettingsDecodeFailure::shape("document root must be an object")
+    })?;
+
+    let permissions = match object.get("permissions") {
+        None => None,
+        Some(Value::Object(permissions)) => Some(permissions),
+        Some(_) => {
+            return Err(InterpretationSettingsDecodeFailure::shape(
+                "permissions must be an object",
+            ));
+        }
+    };
+
+    Ok(InterpretationSettingsSnapshot {
+        agent: optional_settings_string(object, "agent", "agent")?,
+        model: optional_settings_string(object, "model", "model")?,
+        effort_level: optional_settings_string(object, "effortLevel", "effortLevel")?,
+        plans_directory: optional_settings_string(object, "plansDirectory", "plansDirectory")?,
+        always_thinking_enabled: optional_settings_bool(
+            object,
+            "alwaysThinkingEnabled",
+            "alwaysThinkingEnabled",
+        )?,
+        auto_compact_enabled: optional_settings_bool(
+            object,
+            "autoCompactEnabled",
+            "autoCompactEnabled",
+        )?,
+        skip_auto_permission_prompt: optional_settings_bool(
+            object,
+            "skipAutoPermissionPrompt",
+            "skipAutoPermissionPrompt",
+        )?,
+        permission_default_mode: optional_nested_settings_string(
+            permissions,
+            "defaultMode",
+            "permissions.defaultMode",
+        )?,
+        disable_bypass_permissions_mode: optional_nested_settings_string(
+            permissions,
+            "disableBypassPermissionsMode",
+            "permissions.disableBypassPermissionsMode",
+        )?,
+        disable_auto_mode: optional_nested_settings_string(
+            permissions,
+            "disableAutoMode",
+            "permissions.disableAutoMode",
+        )?,
+        permission_allow: optional_nested_settings_string_array(
+            permissions,
+            "allow",
+            "permissions.allow",
+        )?,
+        permission_ask: optional_nested_settings_string_array(
+            permissions,
+            "ask",
+            "permissions.ask",
+        )?,
+        permission_deny: optional_nested_settings_string_array(
+            permissions,
+            "deny",
+            "permissions.deny",
+        )?,
+        enabled_plugins: optional_settings_bool_map(object, "enabledPlugins")?,
+        hook_events: optional_hook_event_summaries(object)?,
+    })
+}
+
+fn optional_settings_string(
+    object: &serde_json::Map<String, Value>,
+    key: &str,
+    field: &str,
+) -> Result<Option<String>, InterpretationSettingsDecodeFailure> {
+    match object.get(key) {
+        None => Ok(None),
+        Some(Value::String(value)) => {
+            validate_settings_string(value, field)?;
+            Ok(Some(value.clone()))
+        }
+        Some(_) => Err(InterpretationSettingsDecodeFailure::shape(format!(
+            "{field} must be a string"
+        ))),
+    }
+}
+
+fn optional_nested_settings_string(
+    object: Option<&serde_json::Map<String, Value>>,
+    key: &str,
+    field: &str,
+) -> Result<Option<String>, InterpretationSettingsDecodeFailure> {
+    match object {
+        Some(object) => optional_settings_string(object, key, field),
+        None => Ok(None),
+    }
+}
+
+fn optional_settings_bool(
+    object: &serde_json::Map<String, Value>,
+    key: &str,
+    field: &str,
+) -> Result<Option<bool>, InterpretationSettingsDecodeFailure> {
+    match object.get(key) {
+        None => Ok(None),
+        Some(Value::Bool(value)) => Ok(Some(*value)),
+        Some(_) => Err(InterpretationSettingsDecodeFailure::shape(format!(
+            "{field} must be a boolean"
+        ))),
+    }
+}
+
+fn optional_nested_settings_string_array(
+    object: Option<&serde_json::Map<String, Value>>,
+    key: &str,
+    field: &str,
+) -> Result<Option<Vec<String>>, InterpretationSettingsDecodeFailure> {
+    let Some(object) = object else {
+        return Ok(None);
+    };
+    let Some(value) = object.get(key) else {
+        return Ok(None);
+    };
+    let Value::Array(values) = value else {
+        return Err(InterpretationSettingsDecodeFailure::shape(format!(
+            "{field} must be an array"
+        )));
+    };
+    if values.len() > SETTINGS_COLLECTION_LIMIT {
+        return Err(InterpretationSettingsDecodeFailure::bounds(format!(
+            "{field} exceeds {SETTINGS_COLLECTION_LIMIT} entries"
+        )));
+    }
+    values
+        .iter()
+        .enumerate()
+        .map(|(index, value)| {
+            let Value::String(value) = value else {
+                return Err(InterpretationSettingsDecodeFailure::shape(format!(
+                    "{field}[{index}] must be a string"
+                )));
+            };
+            validate_settings_string(value, field)?;
+            Ok(value.clone())
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map(Some)
+}
+
+fn optional_settings_bool_map(
+    object: &serde_json::Map<String, Value>,
+    key: &str,
+) -> Result<Option<BTreeMap<String, bool>>, InterpretationSettingsDecodeFailure> {
+    let Some(value) = object.get(key) else {
+        return Ok(None);
+    };
+    let Value::Object(values) = value else {
+        return Err(InterpretationSettingsDecodeFailure::shape(
+            "enabledPlugins must be an object",
+        ));
+    };
+    if values.len() > SETTINGS_COLLECTION_LIMIT {
+        return Err(InterpretationSettingsDecodeFailure::bounds(format!(
+            "enabledPlugins exceeds {SETTINGS_COLLECTION_LIMIT} entries"
+        )));
+    }
+    values
+        .iter()
+        .map(|(plugin, enabled)| {
+            validate_settings_string(plugin, "enabledPlugins key")?;
+            let Value::Bool(enabled) = enabled else {
+                return Err(InterpretationSettingsDecodeFailure::shape(format!(
+                    "enabledPlugins.{plugin} must be a boolean"
+                )));
+            };
+            Ok((plugin.clone(), *enabled))
+        })
+        .collect::<Result<BTreeMap<_, _>, _>>()
+        .map(Some)
+}
+
+fn optional_hook_event_summaries(
+    object: &serde_json::Map<String, Value>,
+) -> Result<Option<BTreeMap<String, HookEventSummary>>, InterpretationSettingsDecodeFailure> {
+    let Some(value) = object.get("hooks") else {
+        return Ok(None);
+    };
+    let Value::Object(events) = value else {
+        return Err(InterpretationSettingsDecodeFailure::shape(
+            "hooks must be an object",
+        ));
+    };
+    if events.len() > SETTINGS_COLLECTION_LIMIT {
+        return Err(InterpretationSettingsDecodeFailure::bounds(format!(
+            "hooks exceeds {SETTINGS_COLLECTION_LIMIT} events"
+        )));
+    }
+    let mut summaries = BTreeMap::new();
+    for (event, value) in events {
+        validate_settings_string(event, "hooks event")?;
+        let Value::Array(matchers) = value else {
+            return Err(InterpretationSettingsDecodeFailure::shape(format!(
+                "hooks.{event} must be an array"
+            )));
+        };
+        if matchers.len() > SETTINGS_COLLECTION_LIMIT {
+            return Err(InterpretationSettingsDecodeFailure::bounds(format!(
+                "hooks.{event} exceeds {SETTINGS_COLLECTION_LIMIT} matchers"
+            )));
+        }
+        let mut hook_count = 0usize;
+        for (index, matcher) in matchers.iter().enumerate() {
+            let Value::Object(matcher) = matcher else {
+                return Err(InterpretationSettingsDecodeFailure::shape(format!(
+                    "hooks.{event}[{index}] must be an object"
+                )));
+            };
+            let Some(Value::Array(hooks)) = matcher.get("hooks") else {
+                return Err(InterpretationSettingsDecodeFailure::shape(format!(
+                    "hooks.{event}[{index}].hooks must be an array"
+                )));
+            };
+            hook_count = hook_count.checked_add(hooks.len()).ok_or_else(|| {
+                InterpretationSettingsDecodeFailure::bounds(format!(
+                    "hooks.{event} hook count exceeds platform limits"
+                ))
+            })?;
+            if hook_count > SETTINGS_COLLECTION_LIMIT {
+                return Err(InterpretationSettingsDecodeFailure::bounds(format!(
+                    "hooks.{event} exceeds {SETTINGS_COLLECTION_LIMIT} hooks"
+                )));
+            }
+        }
+        summaries.insert(
+            event.clone(),
+            HookEventSummary {
+                declared_matcher_count: matchers.len() as u64,
+                declared_hook_count: hook_count as u64,
+            },
+        );
+    }
+    Ok(Some(summaries))
+}
+
+fn validate_settings_string(
+    value: &str,
+    field: &str,
+) -> Result<(), InterpretationSettingsDecodeFailure> {
+    if value.len() > SETTINGS_STRING_MAX_BYTES {
+        return Err(InterpretationSettingsDecodeFailure::bounds(format!(
+            "{field} exceeds {SETTINGS_STRING_MAX_BYTES} bytes"
+        )));
+    }
+    Ok(())
+}
+
 fn preserve_session_index_contract_loss(
     record: &SourceRecord,
     output: &mut FactBatch,
@@ -3885,8 +4332,8 @@ mod tests {
             discovered[0].roots[3].path,
             std::fs::canonicalize(root.path()).unwrap().join("sessions")
         );
-        assert_eq!(streams.len(), 15);
-        assert_eq!(adapter.manifest().contract_version, 12);
+        assert_eq!(streams.len(), 16);
+        assert_eq!(adapter.manifest().contract_version, 13);
         assert!(adapter
             .manifest()
             .source_schema_versions
@@ -3947,6 +4394,11 @@ mod tests {
             .source_schema_versions
             .iter()
             .any(|version| version == "claude-code-persisted-tool-result-v1"));
+        assert!(adapter
+            .manifest()
+            .source_schema_versions
+            .iter()
+            .any(|version| version == "claude-code-interpretation-settings-v1"));
         assert!(matches!(streams[0].driver, DriverSpec::AppendDelimited(_)));
         assert!(matches!(streams[1].driver, DriverSpec::AppendDelimited(_)));
         assert!(matches!(streams[2].driver, DriverSpec::ReplaceDocument(_)));
@@ -4018,6 +4470,12 @@ mod tests {
                 max_document_bytes: PERSISTED_TOOL_RESULT_MAX_BYTES
             })
         ));
+        assert!(matches!(
+            streams[15].driver,
+            DriverSpec::ReplaceDocument(ReplaceDocumentConfig {
+                max_document_bytes: INTERPRETATION_SETTINGS_MAX_BYTES
+            })
+        ));
         assert_eq!(streams[0].decoder.as_str(), PARENT_DECODER);
         assert_eq!(streams[1].decoder.as_str(), SUBAGENT_DECODER);
         assert_eq!(streams[2].decoder.as_str(), SUBAGENT_META_DECODER);
@@ -4033,6 +4491,10 @@ mod tests {
         assert_eq!(streams[12].decoder.as_str(), SESSION_INDEX_DECODER);
         assert_eq!(streams[13].decoder.as_str(), PROJECT_MEMORY_DECODER);
         assert_eq!(streams[14].decoder.as_str(), PERSISTED_TOOL_RESULT_DECODER);
+        assert_eq!(
+            streams[15].decoder.as_str(),
+            INTERPRETATION_SETTINGS_DECODER
+        );
         assert_eq!(streams[2].authority, StreamAuthority::Supplemental);
         assert_eq!(streams[2].consistency, ConsistencyPolicy::SnapshotReplace);
         assert_eq!(streams[3].authority, StreamAuthority::Canonical);
@@ -4095,6 +4557,18 @@ mod tests {
             .capabilities
             .iter()
             .any(|capability| capability.as_str() == HISTORY_PERSISTED_TOOL_RESULTS));
+        assert_eq!(streams[15].authority, StreamAuthority::Canonical);
+        assert_eq!(streams[15].priority, IngestPriority::Interactive);
+        assert_eq!(streams[15].consistency, ConsistencyPolicy::SnapshotReplace);
+        assert_eq!(streams[15].retention, RawRetentionPolicy::HashOnly);
+        assert_eq!(
+            streams[15].selector.include,
+            vec!["settings.json", "settings.local.json"]
+        );
+        assert!(streams[15]
+            .capabilities
+            .iter()
+            .any(|capability| capability.as_str() == CONFIGURATION_INTERPRETATION_SETTINGS));
         assert!(streams[0]
             .capabilities
             .iter()
@@ -4226,6 +4700,21 @@ mod tests {
         );
         assert_eq!(
             persisted_tool_results.support.availability,
+            Availability::Live
+        );
+        let interpretation_settings = adapter
+            .manifest()
+            .capabilities
+            .iter()
+            .find(|capability| capability.id.as_str() == CONFIGURATION_INTERPRETATION_SETTINGS)
+            .unwrap();
+        assert_eq!(interpretation_settings.support.level, SupportLevel::Native);
+        assert_eq!(
+            interpretation_settings.support.granularity,
+            CapabilityGranularity::Instance
+        );
+        assert_eq!(
+            interpretation_settings.support.availability,
             Availability::Live
         );
     }
@@ -4543,6 +5032,193 @@ mod tests {
                 )
                 .is_err());
         }
+    }
+
+    #[test]
+    fn interpretation_settings_context_accepts_only_the_two_root_documents() {
+        let root = TempDir::new().unwrap();
+        let adapter = ClaudeCodeAdapter::new();
+        for (path, layer) in [
+            ("settings.json", InterpretationSettingsLayer::Global),
+            ("settings.local.json", InterpretationSettingsLayer::Local),
+        ] {
+            let context = adapter
+                .bootstrap_object(
+                    &instance(root.path()),
+                    &object(INTERPRETATION_SETTINGS_STREAM, path),
+                )
+                .unwrap();
+            assert_eq!(
+                ClaudeInterpretationSettingsContext::decode(&context).unwrap(),
+                ClaudeInterpretationSettingsContext {
+                    layer,
+                    native_document_path: path.to_string(),
+                }
+            );
+        }
+        for invalid in [
+            "settings.json.bak",
+            "project/settings.json",
+            "settings.local.json/nested",
+            "managed-settings.json",
+        ] {
+            assert!(adapter
+                .bootstrap_object(
+                    &instance(root.path()),
+                    &object(INTERPRETATION_SETTINGS_STREAM, invalid),
+                )
+                .is_err());
+        }
+    }
+
+    #[test]
+    fn interpretation_settings_decoder_redacts_sensitive_values_and_preserves_shape() {
+        let root = TempDir::new().unwrap();
+        let adapter = ClaudeCodeAdapter::new();
+        let object_context = adapter
+            .bootstrap_object(
+                &instance(root.path()),
+                &object(INTERPRETATION_SETTINGS_STREAM, "settings.json"),
+            )
+            .unwrap();
+        let payload = br#"{
+          "agent":"reviewer",
+          "model":"opus[1m]",
+          "effortLevel":"high",
+          "plansDirectory":"./plans",
+          "alwaysThinkingEnabled":true,
+          "autoCompactEnabled":false,
+          "skipAutoPermissionPrompt":true,
+          "permissions":{
+            "defaultMode":"plan",
+            "disableBypassPermissionsMode":"disable",
+            "disableAutoMode":"disable",
+            "allow":["Read","Bash(git status)"],
+            "ask":[],
+            "deny":["Read(.env)"]
+          },
+          "enabledPlugins":{"review@official":true,"unsafe@local":false},
+          "hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"SECRET_HOOK_COMMAND"}]}]},
+          "env":{"SECRET_TOKEN":"SECRET_ENV_VALUE"},
+          "statusLine":{"type":"command","command":"SECRET_STATUS_COMMAND"},
+          "extraKnownMarketplaces":{"private":{"source":{"source":"github","repo":"SECRET_REPO"}}},
+          "unknownSecret":"SECRET_UNKNOWN"
+        }"#;
+        let source = document_record(payload);
+        let mut batch = FactBatch::new(2, 2).unwrap();
+        assert_eq!(
+            adapter
+                .decode(
+                    DecodeContext {
+                        decoder: &DecoderId::new(INTERPRETATION_SETTINGS_DECODER).unwrap(),
+                        object_context: &object_context,
+                    },
+                    &source,
+                    &mut batch,
+                )
+                .unwrap(),
+            DecodeDisposition::Applied
+        );
+        let Fact::InterpretationSettings(settings) = &batch.facts()[0].value else {
+            panic!("expected interpretation settings");
+        };
+        assert_eq!(settings.layer, InterpretationSettingsLayer::Global);
+        assert_eq!(settings.native_document_path, "settings.json");
+        assert_eq!(
+            settings.document_status,
+            InterpretationSettingsDocumentStatus::Valid
+        );
+        assert_eq!(settings.error_code, None);
+        assert_eq!(settings.size_bytes, payload.len() as u64);
+        let normalized = settings.settings.as_ref().unwrap();
+        assert_eq!(normalized.agent.as_deref(), Some("reviewer"));
+        assert_eq!(normalized.model.as_deref(), Some("opus[1m]"));
+        assert_eq!(normalized.effort_level.as_deref(), Some("high"));
+        assert_eq!(normalized.permission_default_mode.as_deref(), Some("plan"));
+        assert_eq!(normalized.permission_ask, Some(Vec::new()));
+        assert_eq!(
+            normalized.hook_events.as_ref().unwrap()["PreToolUse"],
+            HookEventSummary {
+                declared_matcher_count: 1,
+                declared_hook_count: 1,
+            }
+        );
+        let audit = serde_json::to_string(&batch.facts()[0].value).unwrap();
+        for secret in [
+            "SECRET_HOOK_COMMAND",
+            "SECRET_ENV_VALUE",
+            "SECRET_STATUS_COMMAND",
+            "SECRET_REPO",
+            "SECRET_UNKNOWN",
+        ] {
+            assert!(!audit.contains(secret));
+        }
+        assert!(fact_values(&batch).all(|fact| {
+            !matches!(
+                fact,
+                Fact::Session(_) | Fact::Message(_) | Fact::Run(_) | Fact::RunEvidence(_)
+            )
+        }));
+    }
+
+    #[test]
+    fn malformed_interpretation_settings_are_redacted_health_facts() {
+        let root = TempDir::new().unwrap();
+        let adapter = ClaudeCodeAdapter::new();
+        let object_context = adapter
+            .bootstrap_object(
+                &instance(root.path()),
+                &object(INTERPRETATION_SETTINGS_STREAM, "settings.local.json"),
+            )
+            .unwrap();
+        for payload in [b"not json".as_slice(), br#"{"permissions":"secret"}"#] {
+            let source = document_record(payload);
+            let mut batch = FactBatch::new(2, 2).unwrap();
+            assert_eq!(
+                adapter
+                    .decode(
+                        DecodeContext {
+                            decoder: &DecoderId::new(INTERPRETATION_SETTINGS_DECODER).unwrap(),
+                            object_context: &object_context,
+                        },
+                        &source,
+                        &mut batch,
+                    )
+                    .unwrap(),
+                DecodeDisposition::PreservedUnknown
+            );
+            let Fact::InterpretationSettings(settings) = &batch.facts()[0].value else {
+                panic!("expected invalid interpretation settings");
+            };
+            assert_eq!(settings.layer, InterpretationSettingsLayer::Local);
+            assert_eq!(
+                settings.document_status,
+                InterpretationSettingsDocumentStatus::Invalid
+            );
+            assert!(settings.settings.is_none());
+            assert!(settings.error_code.is_some());
+            let audit = serde_json::to_string(&batch.facts()[0].value).unwrap();
+            assert!(!audit.contains("not json"));
+            assert!(!audit.contains("secret"));
+            assert_eq!(batch.diagnostics().len(), 1);
+        }
+
+        let absent = absent_document_record();
+        let mut absent_batch = FactBatch::new(2, 2).unwrap();
+        assert_eq!(
+            adapter
+                .decode(
+                    DecodeContext {
+                        decoder: &DecoderId::new(INTERPRETATION_SETTINGS_DECODER).unwrap(),
+                        object_context: &object_context,
+                    },
+                    &absent,
+                    &mut absent_batch,
+                )
+                .unwrap(),
+            DecodeDisposition::IgnoredKnown
+        );
+        assert!(absent_batch.facts().is_empty());
     }
 
     #[test]

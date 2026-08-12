@@ -23,6 +23,7 @@ use super::commit::{
 use super::memory_projection::apply_project_memory_facts;
 use super::presence_projection::apply_presence_facts;
 use super::session_index_projection::apply_session_index_facts;
+use super::settings_projection::apply_interpretation_settings_facts;
 use super::task_projection::apply_task_snapshots;
 use super::team_projection::apply_team_snapshots;
 use super::tool_result_projection::{
@@ -284,6 +285,7 @@ impl TransactionalProjectionWork for FactProjectionWork<'_> {
                 | Fact::SessionIndexSnapshot(_)
                 | Fact::ProjectMemoryDocument(_)
                 | Fact::PersistedToolResult(_)
+                | Fact::InterpretationSettings(_)
                 | Fact::DelegationMetadata(_)
                 | Fact::DelegationSpawn(_)
                 | Fact::TeamSnapshot(_)
@@ -315,6 +317,11 @@ impl TransactionalProjectionWork for FactProjectionWork<'_> {
             context,
             self.batch,
             &changed_tool_references,
+        )?);
+        changes.extend(apply_interpretation_settings_facts(
+            transaction,
+            context,
+            self.batch,
         )?);
         Ok(changes)
     }
@@ -2420,6 +2427,7 @@ fn sqlite_error(operation: &'static str, error: rusqlite::Error) -> EngineError 
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::io::Write;
     use std::path::Path;
 
@@ -2429,14 +2437,16 @@ mod tests {
     use crate::adapter::{
         AdapterId, AdapterObjectContext, AgentAdapter, ArtifactCapture, ArtifactContentFact,
         ArtifactMetadataEntry, ArtifactMetadataSnapshotFact, ArtifactObservationKind, ContentBlock,
-        DecodeContext, DecoderId, FactBatch, MessageFact, PersistedToolResultFact,
-        PlanSnapshotFact, PresenceFact, ProjectMemoryDocumentFact, RunEvidenceFact, RunFact,
-        SessionFact, SessionIndexEntrySnapshot, SessionIndexSnapshotFact, SourceInstance,
-        SourceInstanceKey, SourceInstanceSpec as AdapterSourceInstanceSpec, SourceObjectDescriptor,
-        SourceRoot, StreamId, TaskCollectionKind, TaskItemSnapshot, TaskSnapshotCoverage,
-        TaskSnapshotFact, TaskStatus, TeamInboxMessageSnapshot, TeamInboxSnapshotFact,
-        TeamMemberSnapshot, TeamSnapshotFact, WorkflowMemberEventFact, WorkflowMemberEventKind,
-        WorkflowSnapshotFact, WorkflowStatus,
+        DecodeContext, DecoderId, FactBatch, HookEventSummary,
+        InterpretationSettingsDocumentStatus, InterpretationSettingsFact,
+        InterpretationSettingsLayer, InterpretationSettingsSnapshot, MessageFact,
+        PersistedToolResultFact, PlanSnapshotFact, PresenceFact, ProjectMemoryDocumentFact,
+        RunEvidenceFact, RunFact, SessionFact, SessionIndexEntrySnapshot, SessionIndexSnapshotFact,
+        SourceInstance, SourceInstanceKey, SourceInstanceSpec as AdapterSourceInstanceSpec,
+        SourceObjectDescriptor, SourceRoot, StreamId, TaskCollectionKind, TaskItemSnapshot,
+        TaskSnapshotCoverage, TaskSnapshotFact, TaskStatus, TeamInboxMessageSnapshot,
+        TeamInboxSnapshotFact, TeamMemberSnapshot, TeamSnapshotFact, WorkflowMemberEventFact,
+        WorkflowMemberEventKind, WorkflowSnapshotFact, WorkflowStatus,
     };
     use crate::claude::ClaudeCodeAdapter;
     use crate::core::schema;
@@ -2923,6 +2933,28 @@ mod tests {
             native_document_path: format!("tool-results/{native_tool_use_id}.txt"),
             content: content.to_string(),
             size_bytes: content.len() as u64,
+        }
+    }
+
+    fn interpretation_settings_fact(
+        layer: InterpretationSettingsLayer,
+        status: InterpretationSettingsDocumentStatus,
+        settings: Option<InterpretationSettingsSnapshot>,
+        error_code: Option<&str>,
+    ) -> InterpretationSettingsFact {
+        let native_document_path = match layer {
+            InterpretationSettingsLayer::Global => "settings.json",
+            InterpretationSettingsLayer::Local => "settings.local.json",
+        };
+        InterpretationSettingsFact {
+            document: entity("interpretation_settings_document", native_document_path),
+            scope: entity("interpretation_settings_scope", "root"),
+            layer,
+            native_document_path: native_document_path.to_string(),
+            document_status: status,
+            settings,
+            error_code: error_code.map(str::to_string),
+            size_bytes: 128,
         }
     }
 
@@ -8578,6 +8610,490 @@ mod tests {
                 )
                 .unwrap(),
             "resolved:0:ambiguous"
+        );
+    }
+
+    #[test]
+    fn interpretation_settings_merge_replace_invalidate_and_retract_transactionally() {
+        let mut connection = database();
+        let global_object = b"settings-global";
+        let local_object = b"settings-local";
+        register_object_key(&mut connection, global_object, 10);
+        register_object_key(&mut connection, local_object, 11);
+
+        let global_record = object_record(
+            1,
+            1,
+            SourceCursor::append_offset(0),
+            SourceCursor::append_offset(1),
+            20,
+            b"global-settings",
+        );
+        let mut global_plugins = BTreeMap::new();
+        global_plugins.insert("review@official".to_string(), true);
+        global_plugins.insert("local@fixture".to_string(), true);
+        let mut global_hooks = BTreeMap::new();
+        global_hooks.insert(
+            "PreToolUse".to_string(),
+            HookEventSummary {
+                declared_matcher_count: 1,
+                declared_hook_count: 2,
+            },
+        );
+        let global_settings = InterpretationSettingsSnapshot {
+            model: Some("sonnet".to_string()),
+            effort_level: Some("medium".to_string()),
+            always_thinking_enabled: Some(false),
+            permission_default_mode: Some("default".to_string()),
+            permission_allow: Some(vec!["Read".to_string(), "Bash(test)".to_string()]),
+            permission_deny: Some(vec!["Read(.env)".to_string()]),
+            enabled_plugins: Some(global_plugins),
+            hook_events: Some(global_hooks),
+            ..InterpretationSettingsSnapshot::default()
+        };
+        let mut global_batch = FactBatch::new(2, 1).unwrap();
+        global_batch
+            .push(
+                &global_record,
+                Fact::InterpretationSettings(interpretation_settings_fact(
+                    InterpretationSettingsLayer::Global,
+                    InterpretationSettingsDocumentStatus::Valid,
+                    Some(global_settings.clone()),
+                    None,
+                )),
+            )
+            .unwrap();
+        commit_object_batch(
+            &mut connection,
+            global_object,
+            &global_record,
+            1,
+            SourceCursor::append_offset(0).into_bytes(),
+            21,
+            &global_batch,
+        );
+        assert_eq!(
+            count(&connection, "canonical_interpretation_settings_documents"),
+            1
+        );
+        assert_eq!(
+            count(&connection, "canonical_effective_interpretation_settings"),
+            1
+        );
+        assert_eq!(count(&connection, "canonical_sessions"), 0);
+        assert_eq!(count(&connection, "canonical_runs"), 0);
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT global_document_status || ':' || local_document_status || ':' || resolution_status FROM canonical_effective_interpretation_settings",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "valid:absent:resolved"
+        );
+
+        let local_record = object_record(
+            2,
+            1,
+            SourceCursor::append_offset(0),
+            SourceCursor::append_offset(1),
+            30,
+            b"local-settings",
+        );
+        let mut local_plugins = BTreeMap::new();
+        local_plugins.insert("local@fixture".to_string(), false);
+        local_plugins.insert("extra@fixture".to_string(), true);
+        let mut local_hooks = BTreeMap::new();
+        local_hooks.insert(
+            "PreToolUse".to_string(),
+            HookEventSummary {
+                declared_matcher_count: 2,
+                declared_hook_count: 3,
+            },
+        );
+        local_hooks.insert(
+            "Stop".to_string(),
+            HookEventSummary {
+                declared_matcher_count: 1,
+                declared_hook_count: 1,
+            },
+        );
+        let local_settings = InterpretationSettingsSnapshot {
+            model: Some("opus".to_string()),
+            always_thinking_enabled: Some(true),
+            permission_default_mode: Some("plan".to_string()),
+            permission_allow: Some(vec!["Bash(test)".to_string(), "Edit".to_string()]),
+            permission_ask: Some(Vec::new()),
+            enabled_plugins: Some(local_plugins),
+            hook_events: Some(local_hooks),
+            ..InterpretationSettingsSnapshot::default()
+        };
+        let mut local_batch = FactBatch::new(2, 1).unwrap();
+        local_batch
+            .push(
+                &local_record,
+                Fact::InterpretationSettings(interpretation_settings_fact(
+                    InterpretationSettingsLayer::Local,
+                    InterpretationSettingsDocumentStatus::Valid,
+                    Some(local_settings),
+                    None,
+                )),
+            )
+            .unwrap();
+        commit_object_batch(
+            &mut connection,
+            local_object,
+            &local_record,
+            1,
+            SourceCursor::append_offset(0).into_bytes(),
+            31,
+            &local_batch,
+        );
+        let effective_json: Vec<u8> = connection
+            .query_row(
+                "SELECT effective_settings_json FROM canonical_effective_interpretation_settings",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let effective: InterpretationSettingsSnapshot =
+            serde_json::from_slice(&effective_json).unwrap();
+        assert_eq!(effective.model.as_deref(), Some("opus"));
+        assert_eq!(effective.effort_level.as_deref(), Some("medium"));
+        assert_eq!(effective.always_thinking_enabled, Some(true));
+        assert_eq!(effective.permission_default_mode.as_deref(), Some("plan"));
+        assert_eq!(
+            effective.permission_allow,
+            Some(vec![
+                "Read".to_string(),
+                "Bash(test)".to_string(),
+                "Edit".to_string(),
+            ])
+        );
+        assert_eq!(effective.permission_ask, Some(Vec::new()));
+        assert_eq!(effective.permission_deny, global_settings.permission_deny);
+        assert!(!effective.enabled_plugins.as_ref().unwrap()["local@fixture"]);
+        assert!(effective.enabled_plugins.as_ref().unwrap()["review@official"]);
+        assert_eq!(
+            effective.hook_events.as_ref().unwrap()["PreToolUse"],
+            HookEventSummary {
+                declared_matcher_count: 3,
+                declared_hook_count: 5,
+            }
+        );
+
+        // A malformed current local document replaces the valid layer and
+        // marks effective interpretation unhealthy instead of serving stale
+        // local permissions.
+        let invalid_record = object_record(
+            2,
+            1,
+            SourceCursor::append_offset(1),
+            SourceCursor::append_offset(2),
+            40,
+            b"invalid-local-settings-secret",
+        );
+        let mut invalid_batch = FactBatch::new(2, 1).unwrap();
+        invalid_batch
+            .push(
+                &invalid_record,
+                Fact::InterpretationSettings(interpretation_settings_fact(
+                    InterpretationSettingsLayer::Local,
+                    InterpretationSettingsDocumentStatus::Invalid,
+                    None,
+                    Some("claude_settings_invalid_json"),
+                )),
+            )
+            .unwrap();
+        commit_object_batch(
+            &mut connection,
+            local_object,
+            &invalid_record,
+            1,
+            SourceCursor::append_offset(1).into_bytes(),
+            41,
+            &invalid_batch,
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT global_document_status || ':' || local_document_status || ':' || resolution_status FROM canonical_effective_interpretation_settings",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "valid:invalid:invalid"
+        );
+        let invalid_effective_json: Vec<u8> = connection
+            .query_row(
+                "SELECT effective_settings_json FROM canonical_effective_interpretation_settings",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let invalid_effective: InterpretationSettingsSnapshot =
+            serde_json::from_slice(&invalid_effective_json).unwrap();
+        assert_eq!(invalid_effective.model.as_deref(), Some("sonnet"));
+        assert_eq!(
+            invalid_effective.permission_allow,
+            global_settings.permission_allow
+        );
+        let audit_payload: Vec<u8> = connection
+            .query_row(
+                "SELECT payload_json FROM fact_records WHERE fact_kind = 'interpretation_settings' AND source_object_id = 2",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(!String::from_utf8(audit_payload)
+            .unwrap()
+            .contains("invalid-local-settings-secret"));
+
+        // Confirmed deletion removes only the local layer and clears health.
+        let deleted_record = object_record(
+            2,
+            1,
+            SourceCursor::append_offset(2),
+            SourceCursor::append_offset(3),
+            50,
+            b"local-deleted",
+        );
+        commit_object_batch(
+            &mut connection,
+            local_object,
+            &deleted_record,
+            1,
+            SourceCursor::append_offset(2).into_bytes(),
+            51,
+            &FactBatch::new(1, 1).unwrap(),
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT global_document_status || ':' || local_document_status || ':' || resolution_status FROM canonical_effective_interpretation_settings",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "valid:absent:resolved"
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM fact_records WHERE fact_kind = 'interpretation_settings'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            1
+        );
+
+        let global_deleted_record = object_record(
+            1,
+            1,
+            SourceCursor::append_offset(1),
+            SourceCursor::append_offset(2),
+            60,
+            b"global-deleted",
+        );
+        commit_object_batch(
+            &mut connection,
+            global_object,
+            &global_deleted_record,
+            1,
+            SourceCursor::append_offset(1).into_bytes(),
+            61,
+            &FactBatch::new(1, 1).unwrap(),
+        );
+        assert_eq!(
+            count(&connection, "canonical_effective_interpretation_settings"),
+            0
+        );
+        assert_eq!(
+            count(&connection, "canonical_interpretation_settings_documents"),
+            0
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT operation FROM change_log WHERE topic = 'configuration.interpretation-settings.changed' ORDER BY commit_seq DESC LIMIT 1",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "delete"
+        );
+    }
+
+    #[test]
+    fn interpretation_settings_duplicates_agree_or_conflict_deterministically() {
+        let mut connection = database();
+        let primary_object = b"settings-primary";
+        let secondary_object = b"settings-secondary";
+        register_object_key(&mut connection, primary_object, 10);
+        register_object_key(&mut connection, secondary_object, 11);
+        let settings = InterpretationSettingsSnapshot {
+            model: Some("sonnet".to_string()),
+            permission_allow: Some(vec!["Read".to_string()]),
+            ..InterpretationSettingsSnapshot::default()
+        };
+
+        for (object_id, object_key, observed_at) in [
+            (1, primary_object.as_slice(), 20),
+            (2, secondary_object.as_slice(), 30),
+        ] {
+            let record = object_record(
+                object_id,
+                1,
+                SourceCursor::append_offset(0),
+                SourceCursor::append_offset(1),
+                observed_at,
+                b"same-settings",
+            );
+            let mut batch = FactBatch::new(2, 1).unwrap();
+            batch
+                .push(
+                    &record,
+                    Fact::InterpretationSettings(interpretation_settings_fact(
+                        InterpretationSettingsLayer::Global,
+                        InterpretationSettingsDocumentStatus::Valid,
+                        Some(settings.clone()),
+                        None,
+                    )),
+                )
+                .unwrap();
+            commit_object_batch(
+                &mut connection,
+                object_key,
+                &record,
+                1,
+                SourceCursor::append_offset(0).into_bytes(),
+                observed_at + 1,
+                &batch,
+            );
+        }
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT resolution_status || ':' || assertion_count || ':' || competing_settings_count FROM canonical_interpretation_settings_documents",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "resolved:2:0"
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT global_document_status || ':' || resolution_status FROM canonical_effective_interpretation_settings",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "valid:resolved"
+        );
+
+        let competing_record = object_record(
+            2,
+            1,
+            SourceCursor::append_offset(1),
+            SourceCursor::append_offset(2),
+            40,
+            b"different-settings",
+        );
+        let mut competing_batch = FactBatch::new(2, 1).unwrap();
+        competing_batch
+            .push(
+                &competing_record,
+                Fact::InterpretationSettings(interpretation_settings_fact(
+                    InterpretationSettingsLayer::Global,
+                    InterpretationSettingsDocumentStatus::Valid,
+                    Some(InterpretationSettingsSnapshot {
+                        model: Some("opus".to_string()),
+                        permission_allow: Some(vec!["Read".to_string()]),
+                        ..InterpretationSettingsSnapshot::default()
+                    }),
+                    None,
+                )),
+            )
+            .unwrap();
+        commit_object_batch(
+            &mut connection,
+            secondary_object,
+            &competing_record,
+            1,
+            SourceCursor::append_offset(1).into_bytes(),
+            41,
+            &competing_batch,
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT resolution_status || ':' || competing_settings_count FROM canonical_interpretation_settings_documents",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "conflicting:1"
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT global_document_status || ':' || resolution_status FROM canonical_effective_interpretation_settings",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "conflicting:conflicting"
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT operation FROM change_log WHERE topic = 'diagnostic.configuration.interpretation-settings-conflict' ORDER BY commit_seq DESC LIMIT 1",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "upsert"
+        );
+
+        let deleted_record = object_record(
+            2,
+            1,
+            SourceCursor::append_offset(2),
+            SourceCursor::append_offset(3),
+            50,
+            b"secondary-deleted",
+        );
+        commit_object_batch(
+            &mut connection,
+            secondary_object,
+            &deleted_record,
+            1,
+            SourceCursor::append_offset(2).into_bytes(),
+            51,
+            &FactBatch::new(1, 1).unwrap(),
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT resolution_status || ':' || assertion_count || ':' || competing_settings_count FROM canonical_interpretation_settings_documents",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "resolved:1:0"
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT operation FROM change_log WHERE topic = 'diagnostic.configuration.interpretation-settings-conflict' ORDER BY commit_seq DESC LIMIT 1",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "delete"
         );
     }
 

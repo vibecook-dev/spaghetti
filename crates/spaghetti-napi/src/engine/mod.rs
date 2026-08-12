@@ -12,6 +12,7 @@ mod presence_projection;
 mod projection;
 mod query_pool;
 mod session_index_projection;
+mod settings_projection;
 mod task_projection;
 mod team_projection;
 mod tool_result_projection;

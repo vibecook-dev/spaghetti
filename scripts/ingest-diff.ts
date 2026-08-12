@@ -460,6 +460,9 @@ const RFC011_SCHEMA_TABLES = [
   'canonical_project_memory_documents',
   'persisted_tool_result_assertions',
   'canonical_persisted_tool_results',
+  'interpretation_settings_assertions',
+  'canonical_interpretation_settings_documents',
+  'canonical_effective_interpretation_settings',
   'message_tool_references',
   'canonical_messages',
   'canonical_runs',
@@ -577,6 +580,21 @@ const TABLE_SPECS: TableSpec[] = [
   {
     name: 'canonical_persisted_tool_results',
     orderBy: 'session_key, native_tool_use_id, result_key',
+  },
+  {
+    name: 'interpretation_settings_assertions',
+    orderBy: 'scope_key, layer, document_key, fact_id',
+    jsonColumns: ['settings_json'],
+  },
+  {
+    name: 'canonical_interpretation_settings_documents',
+    orderBy: 'scope_key, layer, document_key',
+    jsonColumns: ['settings_json'],
+  },
+  {
+    name: 'canonical_effective_interpretation_settings',
+    orderBy: 'scope_key',
+    jsonColumns: ['effective_settings_json'],
   },
   {
     name: 'message_tool_references',

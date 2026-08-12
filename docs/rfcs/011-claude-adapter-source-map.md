@@ -3,8 +3,9 @@
 Status: Phase 4 history/usage complete; Phase 5 delegation, native metadata,
 parent-spawn correlation, team/config/inbox snapshots, active-session
 presence, task/todo/plan snapshots, file-history artifacts, workflow
-summaries/journals, session-index metadata, project-memory documents, and
-persisted tool-result text implemented on 2026-08-11
+summaries/journals, session-index metadata, project-memory documents,
+persisted tool-result text, and redacted interpretation settings implemented
+on 2026-08-11
 
 This survey defines the native inputs and semantic claims currently made by
 the Rust `claude-code` adapter. It is narrower than the legacy Claude parser on
@@ -16,8 +17,10 @@ workflow containers/member events. Phase 5 also preserves replaceable
 session-index metadata without treating the index as transcript history, while
 preserving each native project-memory Markdown document independently. It also
 retains persisted tool-result text as supplemental output and correlates it to
-typed transcript blocks without fabricating history. Richer runtime packs
-remain in progress.
+typed transcript blocks without fabricating history. Root global/local
+settings now provide redacted configuration evidence without exporting
+environment values or executable command bodies. Richer runtime packs remain
+in progress.
 
 ## Installation and source identity
 
@@ -56,6 +59,7 @@ authoritative snapshot.
 | `session-indexes`          | `projects` | `*/sessions-index.json`                   | `ReplaceDocument` (1 MiB bound)                  | Supplemental | Project     |
 | `project-memory-documents` | `projects` | `*/memory/*.md`                           | `ReplaceDocument` (1 MiB bound)                  | Canonical    | Project     |
 | `persisted-tool-results`   | `projects` | `*/*/tool-results/*.txt`                  | `ReplaceDocument` (16 MiB bound)                 | Supplemental | Tool result |
+| `interpretation-settings`  | `home`     | `settings.json`, `settings.local.json`    | `ReplaceDocument` (1 MiB bound)                  | Canonical    | Instance    |
 
 Transcript streams use incremental byte cursors and interactive priority. The
 team/metadata, artifact, and workflow-run document streams use snapshot-replace
@@ -63,10 +67,11 @@ consistency and foreground-repair priority. The presence, task, todo, and plan
 streams use snapshot replacement and interactive priority. Workflow journals
 use incremental byte cursors and interactive priority. Session indexes use
 snapshot replacement and interactive priority. Project-memory documents also
-use snapshot replacement and interactive priority. Persisted tool results use
-snapshot replacement and interactive priority. All fifteen use
-`MirrorSource` deletion and full raw retention during shadow migration. Common
-drivers—not the adapter—own framing or stable reads, file identity,
+use snapshot replacement and interactive priority. Persisted tool results and
+interpretation settings use snapshot replacement and interactive priority.
+All sixteen use `MirrorSource` deletion. The settings stream uses hash-only raw
+retention; the other streams retain full raw input during shadow migration.
+Common drivers—not the adapter—own framing or stable reads, file identity,
 generations/revisions, checkpoints, watcher recovery, and scheduling.
 
 Parent identity comes from `<project-slug>/<session-uuid>.jsonl`. Subagent
@@ -113,6 +118,11 @@ Persisted tool-result paths are confined to exact
 stems are opaque native identifiers: model-style `toolu_*`, short generated,
 and hook stdout IDs are all valid. Immediate JSON/PDF siblings and nested
 rendered descendants are excluded for separate binary-artifact semantics.
+
+Interpretation-settings paths are confined to exactly root `settings.json`
+and `settings.local.json`. Backup, renamed, nested, and managed-policy
+lookalikes fail bootstrap. The adapter does not search project directories or
+infer command-line/managed layers from these two source-instance documents.
 
 ## Native record interpretation
 
@@ -166,6 +176,9 @@ Each complete native record or document is decoded once into common facts:
 - `PersistedToolResultFact` for each valid immediate text sidecar, preserving
   result/session/project identity, native tool ID and path, exact content, and
   byte size without creating transcript or runtime facts;
+- `InterpretationSettingsFact` for each global/local root document, preserving
+  current document health plus allowlisted model, behavior, permission,
+  plugin, and redacted hook-declaration metadata;
 - `RunEvidenceFact::ActivityObserved` with `NativeActivity` strength;
 - `UsageFact` when the record contains non-zero native usage.
 
@@ -174,11 +187,22 @@ and unknown native blocks retain their order. Image/document base64 is reduced
 to a BLAKE3 hash in the structured content projection; the full native record
 remains available under the stream's current raw-retention policy.
 
-A complete invalid UTF-8 or invalid JSON record becomes an `UnknownRecord`
-plus a permanent diagnostic and may advance. An unterminated JSON fragment is
-never passed to the decoder and cannot advance. A valid JSON record that no
-longer fits the typed Claude model is still projected from its loose native
-fields, with an explicit typed-projection diagnostic.
+The settings fact intentionally excludes environment values, hook matcher
+text and executable bodies, status-line commands, marketplace paths, UI
+preferences, and unknown fields. Invalid settings emit a redacted invalid
+health fact rather than copying raw bytes into the typed audit store. Global
+and local scalar values use local precedence; array values concatenate and
+de-duplicate; plugin booleans override per key; hook declaration counts add by
+event. Invalid or conflicting current documents keep the effective view
+explicitly unhealthy rather than silently serving stale configuration.
+
+For content-bearing streams, a complete invalid UTF-8 or invalid JSON record
+becomes an `UnknownRecord` plus a permanent diagnostic and may advance. The
+interpretation-settings stream instead emits its redacted invalid health fact,
+so secret settings bytes cannot enter the typed audit payload. An unterminated
+JSON fragment is never passed to a line decoder and cannot advance. A valid
+JSON record that no longer fits the typed Claude model is still projected from
+its loose native fields, with an explicit typed-projection diagnostic.
 
 ## Identity, time, lineage, and usage claims
 
@@ -248,6 +272,10 @@ meanings remain unchanged.
 The additive persisted-tool-result stream advances the adapter contract to
 version 12 and declares `claude-code-persisted-tool-result-v1`. Earlier stream
 fact identities and meanings remain unchanged.
+
+The additive interpretation-settings stream advances the adapter contract to
+version 13 and declares `claude-code-interpretation-settings-v1`. Earlier
+stream fact identities and meanings remain unchanged.
 
 Team identity comes from the native directory name. Member identity is scoped
 by team plus native member name, and an inbox is scoped by team plus recipient.
@@ -416,13 +444,19 @@ Transcript-first and sidecar-first arrival converge through an indexed common
 tool-reference projection. Transcript generation replacement refreshes all
 affected joins in the same transaction.
 
+Every global/local settings revision replaces the assertion owned by that
+source object. Confirmed deletion retracts only that layer. Agreeing duplicate
+assertions increase provenance count, while normalized disagreement, validity
+disagreement, and byte-distinct invalid payloads remain conflicting and
+diagnosed. The effective instance row re-reduces in the same transaction.
+
 ## Remaining Phase 5 sources
 
 Persisted tool-result text that only mentions an agent ID is not used for
 native delegation correlation. A future compatibility fallback must be
-classified `NativeIndirect`, not explicit. The adapter does not yet declare
-settings or other remaining sidecars. Those inputs need replace-document,
-directory-snapshot, or other reviewed stream and capability semantics.
+classified `NativeIndirect`, not explicit. Other remaining sidecars need
+replace-document, directory-snapshot, or other reviewed stream and capability
+semantics.
 Credentials, debug logs, telemetry, caches, and arbitrary symlink escapes
 remain out of scope.
 

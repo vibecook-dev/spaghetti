@@ -72,7 +72,9 @@ use thiserror::Error;
 /// index classification, and deterministic conflict provenance.
 /// v29: persisted tool-result text assertions, deterministic transcript block
 /// correlation, and explicit join/conflict state.
-pub const SCHEMA_VERSION: u32 = 29;
+/// v30: redacted interpretation-settings assertions, document health, and
+/// native global/local effective-setting reduction.
+pub const SCHEMA_VERSION: u32 = 30;
 
 /// Full DDL for the current schema — lifted verbatim from the TS `SCHEMA_SQL`
 /// template literal. Whitespace differs; structure does not.
@@ -593,6 +595,52 @@ CREATE TABLE IF NOT EXISTS canonical_persisted_tool_results (
   tool_call_match_count INTEGER NOT NULL,
   tool_result_match_count INTEGER NOT NULL,
   join_conflict INTEGER NOT NULL,
+  last_commit_seq INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS interpretation_settings_assertions (
+  fact_id BLOB PRIMARY KEY REFERENCES fact_records(fact_id) ON DELETE CASCADE,
+  document_key BLOB NOT NULL,
+  scope_key BLOB NOT NULL,
+  layer TEXT NOT NULL,
+  native_document_path TEXT NOT NULL,
+  document_status TEXT NOT NULL,
+  settings_json BLOB,
+  error_code TEXT,
+  size_bytes INTEGER NOT NULL,
+  settings_digest BLOB NOT NULL,
+  source_object_id INTEGER NOT NULL,
+  source_generation INTEGER NOT NULL,
+  cursor_end BLOB NOT NULL,
+  last_commit_seq INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS canonical_interpretation_settings_documents (
+  document_key BLOB PRIMARY KEY,
+  scope_key BLOB NOT NULL,
+  layer TEXT NOT NULL,
+  native_document_path TEXT NOT NULL,
+  document_status TEXT NOT NULL,
+  settings_json BLOB,
+  error_code TEXT,
+  size_bytes INTEGER NOT NULL,
+  resolution_status TEXT NOT NULL,
+  decisive_fact_id BLOB NOT NULL REFERENCES interpretation_settings_assertions(fact_id) ON DELETE CASCADE,
+  assertion_count INTEGER NOT NULL,
+  competing_settings_count INTEGER NOT NULL,
+  last_commit_seq INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS canonical_effective_interpretation_settings (
+  scope_key BLOB PRIMARY KEY,
+  effective_settings_json BLOB NOT NULL,
+  global_document_status TEXT NOT NULL,
+  local_document_status TEXT NOT NULL,
+  resolution_status TEXT NOT NULL,
+  global_decisive_fact_id BLOB REFERENCES interpretation_settings_assertions(fact_id) ON DELETE SET NULL,
+  local_decisive_fact_id BLOB REFERENCES interpretation_settings_assertions(fact_id) ON DELETE SET NULL,
+  document_count INTEGER NOT NULL,
+  assertion_count INTEGER NOT NULL,
   last_commit_seq INTEGER NOT NULL
 );
 
@@ -1450,6 +1498,10 @@ CREATE INDEX IF NOT EXISTS idx_persisted_tool_result_assertions_result ON persis
 CREATE INDEX IF NOT EXISTS idx_persisted_tool_result_assertions_source ON persisted_tool_result_assertions(source_object_id, result_key);
 CREATE INDEX IF NOT EXISTS idx_persisted_tool_result_assertions_native ON persisted_tool_result_assertions(session_key, native_tool_use_id, result_key);
 CREATE INDEX IF NOT EXISTS idx_canonical_persisted_tool_results_session ON canonical_persisted_tool_results(session_key, native_tool_use_id, result_key);
+CREATE INDEX IF NOT EXISTS idx_interpretation_settings_assertions_document ON interpretation_settings_assertions(document_key, fact_id);
+CREATE INDEX IF NOT EXISTS idx_interpretation_settings_assertions_source ON interpretation_settings_assertions(source_object_id, document_key);
+CREATE INDEX IF NOT EXISTS idx_interpretation_settings_assertions_scope ON interpretation_settings_assertions(scope_key, layer, document_key);
+CREATE INDEX IF NOT EXISTS idx_canonical_interpretation_settings_documents_scope ON canonical_interpretation_settings_documents(scope_key, layer, document_key);
 CREATE INDEX IF NOT EXISTS idx_message_tool_references_native ON message_tool_references(session_key, native_tool_use_id, reference_kind, message_key);
 CREATE INDEX IF NOT EXISTS idx_message_tool_references_source ON message_tool_references(source_object_id, source_generation, session_key, native_tool_use_id);
 CREATE INDEX IF NOT EXISTS idx_canonical_messages_session_order ON canonical_messages(session_key, source_generation, cursor_start);
@@ -1651,6 +1703,9 @@ const CURRENT_TABLES: &[&str] = &[
     "session_index_snapshot_assertions",
     "canonical_project_memory_documents",
     "project_memory_document_assertions",
+    "canonical_effective_interpretation_settings",
+    "canonical_interpretation_settings_documents",
+    "interpretation_settings_assertions",
     "canonical_persisted_tool_results",
     "persisted_tool_result_assertions",
     "message_tool_references",
@@ -2149,6 +2204,26 @@ mod tests {
             &conn,
             "table",
             "canonical_persisted_tool_results"
+        ));
+        assert!(object_exists(
+            &conn,
+            "table",
+            "interpretation_settings_assertions"
+        ));
+        assert!(object_exists(
+            &conn,
+            "table",
+            "canonical_interpretation_settings_documents"
+        ));
+        assert!(object_exists(
+            &conn,
+            "table",
+            "canonical_effective_interpretation_settings"
+        ));
+        assert!(object_exists(
+            &conn,
+            "index",
+            "idx_canonical_interpretation_settings_documents_scope"
         ));
         assert!(object_exists(&conn, "table", "message_tool_references"));
         assert!(object_exists(

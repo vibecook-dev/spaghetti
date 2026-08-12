@@ -102,6 +102,7 @@ each report zero differences.
 
 ## Remaining Phase 5 work
 
-Persisted tool results are now implemented in the adjacent Phase 5 pack.
-Settings and other reviewed sidecar packs remain. The observation coordinator
-and production Rust live cutover are also required for the Phase 5 exit gate.
+Persisted tool results and interpretation settings are now implemented in
+adjacent Phase 5 packs. Other reviewed sidecars may remain. The observation
+coordinator and production Rust live cutover are also required for the Phase 5
+exit gate.
