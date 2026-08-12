@@ -8,6 +8,7 @@ mod artifact_projection;
 mod commit;
 mod coordinator;
 mod memory_projection;
+mod observation;
 mod owner_lock;
 mod presence_projection;
 mod projection;
@@ -27,6 +28,8 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use crate::adapter::FactBatch;
 use commit::{CommitReceipt, ObservationCommit};
 pub use coordinator::{ObservationCoordinator, ReconcileOutcome, ReconcileRequest};
+pub use observation::ObservationStatusSnapshot;
+use observation::{ObservationLease, ObservationRuntime};
 use owner_lock::DatabaseOwnerLock;
 pub use owner_lock::OwnerMetadata;
 pub use query_pool::{
@@ -94,6 +97,9 @@ pub enum EngineError {
         detail: String,
     },
 
+    #[error("observation reconcile is already in progress; the requested scope was marked dirty")]
+    ObservationBusy,
+
     #[error("source cursor changed before commit for adapter {adapter_id}, stream {stream_key}")]
     StaleSourceCursor {
         adapter_id: String,
@@ -148,6 +154,7 @@ pub struct EngineStatusSnapshot {
     pub configured_query_workers: u32,
     pub alive_query_workers: u32,
     pub in_flight_queries: u32,
+    pub observation: ObservationStatusSnapshot,
     pub owner: Option<OwnerMetadata>,
 }
 
@@ -176,6 +183,7 @@ pub struct SpaghettiEngineCore {
     database_path: PathBuf,
     owner: OwnerMetadata,
     query_workers: usize,
+    observation: Arc<ObservationRuntime>,
     lifecycle: Mutex<Lifecycle>,
     stopped: Condvar,
 }
@@ -203,6 +211,7 @@ impl SpaghettiEngineCore {
             database_path,
             owner,
             query_workers,
+            observation: ObservationRuntime::new(),
             lifecycle: Mutex::new(Lifecycle {
                 phase: LifecyclePhase::Running,
                 runtime: Some(EngineRuntime {
@@ -240,6 +249,7 @@ impl SpaghettiEngineCore {
             configured_query_workers: usize_to_u32(self.query_workers),
             alive_query_workers: usize_to_u32(alive_query_workers),
             in_flight_queries: usize_to_u32(in_flight_queries),
+            observation: self.observation.snapshot(),
             owner: (lifecycle.phase != LifecyclePhase::Stopped).then(|| self.owner.clone()),
         }
     }
@@ -276,12 +286,7 @@ impl SpaghettiEngineCore {
             status.writer_alive && status.alive_query_workers == status.configured_query_workers;
 
         match result {
-            Ok(()) if worker_counts_healthy => EngineHealthSnapshot {
-                status,
-                healthy: true,
-                detail: None,
-            },
-            Ok(()) => EngineHealthSnapshot {
+            Ok(()) if !worker_counts_healthy => EngineHealthSnapshot {
                 status,
                 healthy: false,
                 detail: Some("one or more persistent workers are unavailable".to_string()),
@@ -290,6 +295,20 @@ impl SpaghettiEngineCore {
                 status,
                 healthy: false,
                 detail: Some(error.to_string()),
+            },
+            Ok(()) if status.observation.recovery_required => EngineHealthSnapshot {
+                detail: status
+                    .observation
+                    .last_error
+                    .clone()
+                    .or_else(|| Some("observation reconcile requires recovery".to_string())),
+                status,
+                healthy: false,
+            },
+            Ok(()) => EngineHealthSnapshot {
+                status,
+                healthy: true,
+                detail: None,
             },
         }
     }
@@ -369,6 +388,29 @@ impl SpaghettiEngineCore {
         Ok(queries.cancel_pending())
     }
 
+    /// Retain a lossless, bounded dirty marker for one discovered instance.
+    /// Native watchers and polling supervisors use this before attempting the
+    /// same coordinator entry point used by explicit reconcile requests.
+    pub(crate) fn mark_observation_instance_dirty(
+        &self,
+        adapter_id: &str,
+        stable_key: &[u8],
+        reason: crate::source::DirtyReason,
+    ) -> Result<(), EngineError> {
+        self.observation
+            .mark_instance_dirty(adapter_id, stable_key, reason)
+    }
+
+    /// Escalate an adapter to a full discovery/reconcile pass. Overflow and
+    /// watcher-backend failure must use this instead of dropping invalidation.
+    pub(crate) fn require_observation_reconcile(
+        &self,
+        adapter_id: &str,
+        reason: crate::source::DirtyReason,
+    ) -> Result<(), EngineError> {
+        self.observation.mark_adapter_dirty(adapter_id, reason)
+    }
+
     /// Stop accepting work, cancel queued queries, join readers, join the
     /// writer, then release ownership. Concurrent callers wait for the first
     /// disposer and observe the same stopped state.
@@ -395,6 +437,8 @@ impl SpaghettiEngineCore {
             .take()
             .expect("running engine must own its runtime");
         drop(lifecycle);
+
+        self.observation.stop_and_wait();
 
         let mut first_error = None;
         if let Err(error) = runtime.queries.shutdown() {
@@ -428,6 +472,24 @@ impl SpaghettiEngineCore {
             .as_ref()
             .expect("running engine must own its runtime");
         Ok((runtime.writer.client(), runtime.queries.client()))
+    }
+
+    pub(crate) fn begin_full_reconcile(
+        &self,
+        adapter_id: &str,
+        started_at_unix_ms: i64,
+    ) -> Result<ObservationLease, EngineError> {
+        self.observation.begin_full(adapter_id, started_at_unix_ms)
+    }
+
+    pub(crate) fn begin_instance_reconcile(
+        &self,
+        adapter_id: &str,
+        stable_key: &[u8],
+        started_at_unix_ms: i64,
+    ) -> Result<ObservationLease, EngineError> {
+        self.observation
+            .begin_instance(adapter_id, stable_key, started_at_unix_ms)
     }
 
     fn lock_lifecycle(&self) -> MutexGuard<'_, Lifecycle> {
@@ -522,6 +584,7 @@ mod tests {
         assert_eq!(status.state, "running");
         assert!(status.accepting_queries && status.writer_alive);
         assert_eq!(status.alive_query_workers, 2);
+        assert_eq!(status.observation.state, "idle");
         assert_eq!(status.owner.unwrap().owner_label, "engine-test");
 
         let health = engine.health();
@@ -533,6 +596,7 @@ mod tests {
         engine.shutdown().unwrap();
         let stopped = engine.status();
         assert_eq!(stopped.state, "stopped");
+        assert_eq!(stopped.observation.state, "stopped");
         assert!(!stopped.writer_alive);
         assert_eq!(stopped.alive_query_workers, 0);
         assert!(matches!(engine.overview(), Err(EngineError::ShuttingDown)));

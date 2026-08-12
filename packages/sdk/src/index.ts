@@ -124,6 +124,7 @@ export {
   type SpaghettiEngineOpenOptions,
   type SpaghettiEngineOwner,
   type SpaghettiEngineStatus,
+  type SpaghettiEngineObservationStatus,
   type SpaghettiEngineHealth,
   type SpaghettiEngineOverview,
   type SpaghettiEngineReconcileOptions,

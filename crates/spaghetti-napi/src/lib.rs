@@ -37,9 +37,9 @@ pub mod source;
 // Re-export NAPI entrypoints at the crate root so existing bindings and
 // docs that name `ingest` / `live_ingest_batch` keep resolving.
 pub use napi_engine::{
-    open_spaghetti_engine, EngineHealth, EngineOpenOptions, EngineOverviewResult,
-    EngineOwnerMetadata, EngineReconcileOptions, EngineReconcileResult, EngineStatus,
-    SpaghettiEngine,
+    open_spaghetti_engine, EngineHealth, EngineObservationStatus, EngineOpenOptions,
+    EngineOverviewResult, EngineOwnerMetadata, EngineReconcileOptions, EngineReconcileResult,
+    EngineStatus, SpaghettiEngine,
 };
 pub use orchestrate::ingest::{
     ingest, IngestError, IngestOptions, IngestProgress, IngestStats, IngestTask,

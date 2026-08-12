@@ -46,6 +46,10 @@ describe('persistent SpaghettiEngine', { skip: !native }, () => {
     assert.equal(engine.status.state, 'running');
     assert.equal(engine.status.writerAlive, true);
     assert.equal(engine.status.aliveQueryWorkers, 2);
+    assert.equal(engine.status.observation.state, 'idle');
+    assert.equal(engine.status.observation.reconcileInFlight, false);
+    assert.equal(engine.status.observation.recoveryRequired, false);
+    assert.equal(engine.status.observation.reconcilesTotal, 0);
     assert.equal(engine.status.owner?.ownerLabel, 'sdk-lifecycle-test');
 
     const health = await engine.health();
@@ -67,6 +71,7 @@ describe('persistent SpaghettiEngine', { skip: !native }, () => {
     assert.equal(stopped.state, 'stopped');
     assert.equal(stopped.writerAlive, false);
     assert.equal(stopped.aliveQueryWorkers, 0);
+    assert.equal(stopped.observation.state, 'stopped');
     assert.equal((await engine.health()).healthy, false);
     await assert.rejects(engine.overview(), /shutting down|stopped/i);
   });
@@ -107,11 +112,20 @@ describe('persistent SpaghettiEngine', { skip: !native }, () => {
     assert.equal(first.recordsDecoded, 1);
     assert.equal(first.commits, 2);
     assert.equal((first.lastCommitSeq ?? 0) > 0, true);
+    assert.equal(engine.status.observation.state, 'live');
+    assert.equal(engine.status.observation.reconcilesTotal, 1);
+    assert.equal(engine.status.observation.lastCommitSeq, first.lastCommitSeq);
+    assert.equal(engine.status.observation.lastError, undefined);
 
     const unchanged = await engine.reconcileClaude({ roots: [root] });
     assert.equal(unchanged.objectsRegistered, 0);
     assert.equal(unchanged.recordsDecoded, 0);
     assert.equal(unchanged.objectsUnchanged, 1);
     assert.equal(unchanged.commits, 0);
+    assert.equal(engine.status.observation.state, 'live');
+    assert.equal(engine.status.observation.reconcilesTotal, 2);
+    assert.equal(engine.status.observation.dirtyInstances, 0);
+    assert.equal(engine.status.observation.fullReconcileRequired, false);
+    assert.equal(engine.status.observation.recoveryRequired, false);
   });
 });

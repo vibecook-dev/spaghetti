@@ -37,6 +37,22 @@ export interface EngineHealth {
   detail?: string
 }
 
+export interface EngineObservationStatus {
+  state: string
+  reconcileInFlight: boolean
+  dirtyInstances: number
+  fullReconcileRequired: boolean
+  recoveryRequired: boolean
+  reconcilesTotal: number
+  failedReconcilesTotal: number
+  retrySignalsTotal: number
+  queueOverflowsTotal: number
+  lastCommitSeq?: number
+  lastStartedAtUnixMs?: number
+  lastFinishedAtUnixMs?: number
+  lastError?: string
+}
+
 export interface EngineOpenOptions {
   /** Canonical SQLite database owned by this engine instance. */
   dbPath: string
@@ -102,6 +118,7 @@ export interface EngineStatus {
   configuredQueryWorkers: number
   aliveQueryWorkers: number
   inFlightQueries: number
+  observation: EngineObservationStatus
   owner?: EngineOwnerMetadata
 }
 

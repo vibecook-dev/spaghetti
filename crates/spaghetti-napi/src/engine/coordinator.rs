@@ -86,32 +86,39 @@ impl ObservationCoordinator {
         request: ReconcileRequest,
     ) -> Result<ReconcileOutcome, EngineError> {
         validate_request(&request)?;
-        adapter
-            .manifest()
+        let manifest = adapter.manifest();
+        manifest
             .validate()
             .map_err(|error| adapter_error("validate adapter manifest", error))?;
         let started_at = now_unix_ms()?;
-        let instances = adapter
-            .discover(&DiscoveryContext {
-                configured_roots: request.configured_roots,
-                observed_at: started_at,
-            })
-            .map_err(|error| adapter_error("discover source instances", error))?;
-        let mut outcome = ReconcileOutcome {
-            instances_discovered: bounded_u32(instances.len()),
-            ..ReconcileOutcome::default()
-        };
-        let mut instance_keys = BTreeSet::new();
-        for spec in instances {
-            if !instance_keys.insert(spec.stable_key.as_bytes().to_vec()) {
-                return Err(observation_error(
-                    "validate discovered source instances",
-                    "adapter discovered the same stable instance key more than once",
-                ));
+        let lease = self
+            .engine
+            .begin_full_reconcile(manifest.id.as_str(), started_at)?;
+        let result = (|| {
+            let instances = adapter
+                .discover(&DiscoveryContext {
+                    configured_roots: request.configured_roots,
+                    observed_at: started_at,
+                })
+                .map_err(|error| adapter_error("discover source instances", error))?;
+            let mut outcome = ReconcileOutcome {
+                instances_discovered: bounded_u32(instances.len()),
+                ..ReconcileOutcome::default()
+            };
+            let mut instance_keys = BTreeSet::new();
+            lease.begin_reconciling();
+            for spec in instances {
+                if !instance_keys.insert(spec.stable_key.as_bytes().to_vec()) {
+                    return Err(observation_error(
+                        "validate discovered source instances",
+                        "adapter discovered the same stable instance key more than once",
+                    ));
+                }
+                self.reconcile_instance(adapter, spec, &request.reason, started_at, &mut outcome)?;
             }
-            self.reconcile_instance(adapter, spec, &request.reason, started_at, &mut outcome)?;
-        }
-        Ok(outcome)
+            Ok(outcome)
+        })();
+        self.finish_reconcile(lease, result, started_at)
     }
 
     /// Reconcile one already-discovered source instance. Watcher and polling
@@ -123,8 +130,8 @@ impl ObservationCoordinator {
         spec: AdapterSourceInstanceSpec,
         reason: impl Into<String>,
     ) -> Result<ReconcileOutcome, EngineError> {
-        adapter
-            .manifest()
+        let manifest = adapter.manifest();
+        manifest
             .validate()
             .map_err(|error| adapter_error("validate adapter manifest", error))?;
         let reason = reason.into();
@@ -134,12 +141,45 @@ impl ObservationCoordinator {
             ));
         }
         let started_at = now_unix_ms()?;
-        let mut outcome = ReconcileOutcome {
-            instances_discovered: 1,
-            ..ReconcileOutcome::default()
-        };
-        self.reconcile_instance(adapter, spec, &reason, started_at, &mut outcome)?;
-        Ok(outcome)
+        let lease = self.engine.begin_instance_reconcile(
+            manifest.id.as_str(),
+            spec.stable_key.as_bytes(),
+            started_at,
+        )?;
+        let result = (|| {
+            let mut outcome = ReconcileOutcome {
+                instances_discovered: 1,
+                ..ReconcileOutcome::default()
+            };
+            self.reconcile_instance(adapter, spec, &reason, started_at, &mut outcome)?;
+            Ok(outcome)
+        })();
+        self.finish_reconcile(lease, result, started_at)
+    }
+
+    fn finish_reconcile(
+        &self,
+        lease: super::ObservationLease,
+        result: Result<ReconcileOutcome, EngineError>,
+        started_at: i64,
+    ) -> Result<ReconcileOutcome, EngineError> {
+        let finished_at = now_unix_ms().unwrap_or(started_at);
+        match result {
+            Ok(outcome) => match self.engine.overview() {
+                Ok(overview) => {
+                    lease.complete(&outcome, overview.commit_seq, finished_at);
+                    Ok(outcome)
+                }
+                Err(error) => {
+                    lease.fail(&error, finished_at);
+                    Err(error)
+                }
+            },
+            Err(error) => {
+                lease.fail(&error, finished_at);
+                Err(error)
+            }
+        }
     }
 
     fn reconcile_instance<A: AgentAdapter + ?Sized>(
@@ -1941,6 +1981,48 @@ mod tests {
         let present = catalog_object(&engine, &fixture.root, "session-transcripts");
         assert_eq!(present.generation, empty.generation);
         assert_eq!(present.state, "active");
+    }
+
+    #[test]
+    fn reconcile_lifecycle_reports_live_retry_and_failure_states() {
+        let fixture = ClaudeFixture::new();
+        let transcript = fixture.transcript_path();
+        std::fs::write(&transcript, transcript_line("m1", "complete")).unwrap();
+        let engine = fixture.open_engine();
+
+        assert_eq!(engine.status().observation.state, "idle");
+        let live = fixture.reconcile(&engine);
+        let live_status = engine.status().observation;
+        assert_eq!(live_status.state, "live");
+        assert_eq!(live_status.reconciles_total, 1);
+        assert_eq!(live_status.last_commit_seq, live.last_commit_seq);
+
+        let mut append = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&transcript)
+            .unwrap();
+        append.write_all(br#"{"type":"assistant"}"#).unwrap();
+        append.flush().unwrap();
+        let retry = fixture.reconcile(&engine);
+        assert_eq!(retry.retries_required, 1);
+        let degraded = engine.status().observation;
+        assert_eq!(degraded.state, "degraded");
+        assert!(degraded.full_reconcile_required);
+        assert_eq!(degraded.retry_signals_total, 1);
+        assert!(!engine.health().healthy);
+
+        let missing = fixture.root.join("missing-root");
+        let error = ObservationCoordinator::new(Arc::clone(&engine))
+            .reconcile(
+                &ClaudeCodeAdapter::new(),
+                ReconcileRequest::manual(vec![missing]),
+            )
+            .unwrap_err();
+        assert!(matches!(error, EngineError::Observation { .. }));
+        let failed = engine.status().observation;
+        assert_eq!(failed.state, "degraded");
+        assert_eq!(failed.failed_reconciles_total, 1);
+        assert!(failed.last_error.is_some());
     }
 
     struct ClaudeFixture {

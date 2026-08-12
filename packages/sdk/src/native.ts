@@ -158,6 +158,24 @@ export interface SpaghettiEngineOwner {
   engineVersion: string;
 }
 
+/** Engine-owned observation lifecycle and bounded recovery backlog. */
+export interface SpaghettiEngineObservationStatus {
+  state: 'idle' | 'scanning' | 'reconciling' | 'live' | 'dirty' | 'degraded' | 'stopped';
+  reconcileInFlight: boolean;
+  dirtyInstances: number;
+  fullReconcileRequired: boolean;
+  /** A known-loss or retry condition remains, even during an active repair pass. */
+  recoveryRequired: boolean;
+  reconcilesTotal: number;
+  failedReconcilesTotal: number;
+  retrySignalsTotal: number;
+  queueOverflowsTotal: number;
+  lastCommitSeq?: number;
+  lastStartedAtUnixMs?: number;
+  lastFinishedAtUnixMs?: number;
+  lastError?: string;
+}
+
 export interface SpaghettiEngineStatus {
   state: 'running' | 'stopping' | 'stopped';
   databasePath: string;
@@ -166,6 +184,7 @@ export interface SpaghettiEngineStatus {
   configuredQueryWorkers: number;
   aliveQueryWorkers: number;
   inFlightQueries: number;
+  observation: SpaghettiEngineObservationStatus;
   owner?: SpaghettiEngineOwner;
 }
 

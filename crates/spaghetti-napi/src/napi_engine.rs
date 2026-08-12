@@ -8,7 +8,8 @@ use napi_derive::napi;
 
 use crate::engine::{
     EngineHealthSnapshot, EngineOptions, EngineOverview, EngineStatusSnapshot,
-    ObservationCoordinator, OwnerMetadata, ReconcileOutcome, ReconcileRequest, SpaghettiEngineCore,
+    ObservationCoordinator, ObservationStatusSnapshot, OwnerMetadata, ReconcileOutcome,
+    ReconcileRequest, SpaghettiEngineCore,
 };
 
 #[napi(object)]
@@ -54,6 +55,44 @@ impl From<OwnerMetadata> for EngineOwnerMetadata {
 
 #[napi(object)]
 #[derive(Debug, Clone)]
+pub struct EngineObservationStatus {
+    pub state: String,
+    pub reconcile_in_flight: bool,
+    pub dirty_instances: u32,
+    pub full_reconcile_required: bool,
+    pub recovery_required: bool,
+    pub reconciles_total: f64,
+    pub failed_reconciles_total: f64,
+    pub retry_signals_total: f64,
+    pub queue_overflows_total: f64,
+    pub last_commit_seq: Option<f64>,
+    pub last_started_at_unix_ms: Option<f64>,
+    pub last_finished_at_unix_ms: Option<f64>,
+    pub last_error: Option<String>,
+}
+
+impl From<ObservationStatusSnapshot> for EngineObservationStatus {
+    fn from(value: ObservationStatusSnapshot) -> Self {
+        Self {
+            state: value.state,
+            reconcile_in_flight: value.reconcile_in_flight,
+            dirty_instances: value.dirty_instances,
+            full_reconcile_required: value.full_reconcile_required,
+            recovery_required: value.recovery_required,
+            reconciles_total: value.reconciles_total as f64,
+            failed_reconciles_total: value.failed_reconciles_total as f64,
+            retry_signals_total: value.retry_signals_total as f64,
+            queue_overflows_total: value.queue_overflows_total as f64,
+            last_commit_seq: value.last_commit_seq.map(|number| number as f64),
+            last_started_at_unix_ms: value.last_started_at_unix_ms.map(|number| number as f64),
+            last_finished_at_unix_ms: value.last_finished_at_unix_ms.map(|number| number as f64),
+            last_error: value.last_error,
+        }
+    }
+}
+
+#[napi(object)]
+#[derive(Debug, Clone)]
 pub struct EngineStatus {
     pub state: String,
     pub database_path: String,
@@ -62,6 +101,7 @@ pub struct EngineStatus {
     pub configured_query_workers: u32,
     pub alive_query_workers: u32,
     pub in_flight_queries: u32,
+    pub observation: EngineObservationStatus,
     pub owner: Option<EngineOwnerMetadata>,
 }
 
@@ -75,6 +115,7 @@ impl From<EngineStatusSnapshot> for EngineStatus {
             configured_query_workers: value.configured_query_workers,
             alive_query_workers: value.alive_query_workers,
             in_flight_queries: value.in_flight_queries,
+            observation: value.observation.into(),
             owner: value.owner.map(Into::into),
         }
     }
