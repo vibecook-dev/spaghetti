@@ -482,6 +482,10 @@ const RFC011_SCHEMA_TABLES = [
   'artifact_metadata_assertions',
   'artifact_content_assertions',
   'canonical_artifacts',
+  'workflow_snapshot_assertions',
+  'workflow_member_event_assertions',
+  'canonical_workflows',
+  'canonical_workflow_members',
   'usage_contributions',
   'usage_totals',
 ] as const;
@@ -654,6 +658,22 @@ const TABLE_SPECS: TableSpec[] = [
   {
     name: 'canonical_artifacts',
     orderBy: 'artifact_key',
+  },
+  {
+    name: 'workflow_snapshot_assertions',
+    orderBy: 'workflow_key, fact_id',
+  },
+  {
+    name: 'workflow_member_event_assertions',
+    orderBy: 'workflow_key, member_key, fact_id',
+  },
+  {
+    name: 'canonical_workflows',
+    orderBy: 'workflow_key',
+  },
+  {
+    name: 'canonical_workflow_members',
+    orderBy: 'workflow_key, native_agent_id',
   },
   {
     name: 'usage_contributions',

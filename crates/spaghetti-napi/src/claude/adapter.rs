@@ -24,7 +24,8 @@ use crate::adapter::{
     StreamId, StreamSpec, SupportLevel, TaskCollectionKind, TaskItemSnapshot, TaskSnapshotCoverage,
     TaskSnapshotFact, TaskStatus, TeamInboxMessageSnapshot, TeamInboxSnapshotFact,
     TeamMemberSnapshot, TeamSnapshotFact, TimestampQuality, TokenUsage, UsageAccounting, UsageFact,
-    UsageScope, ValueQuality,
+    UsageScope, ValueQuality, WorkflowMemberEventFact, WorkflowMemberEventKind,
+    WorkflowSnapshotFact, WorkflowStatus,
 };
 use crate::claude::message_extractor;
 use crate::claude::session_metadata;
@@ -48,6 +49,8 @@ const TODO_STREAM: &str = "todo-snapshots";
 const TASK_ITEM_STREAM: &str = "task-items";
 const PLAN_STREAM: &str = "plan-documents";
 const ARTIFACT_CONTENT_STREAM: &str = "file-history-blobs";
+const WORKFLOW_RUN_STREAM: &str = "workflow-runs";
+const WORKFLOW_JOURNAL_STREAM: &str = "workflow-journals";
 const PARENT_DECODER: &str = "claude-session-record";
 const SUBAGENT_DECODER: &str = "claude-subagent-record";
 const SUBAGENT_META_DECODER: &str = "claude-subagent-metadata";
@@ -58,6 +61,8 @@ const TODO_DECODER: &str = "claude-todo-snapshot";
 const TASK_ITEM_DECODER: &str = "claude-task-item";
 const PLAN_DECODER: &str = "claude-plan-document";
 const ARTIFACT_CONTENT_DECODER: &str = "claude-file-history-blob";
+const WORKFLOW_RUN_DECODER: &str = "claude-workflow-run";
+const WORKFLOW_JOURNAL_DECODER: &str = "claude-workflow-journal";
 const OBJECT_CONTEXT_VERSION: u32 = 1;
 const SUBAGENT_META_MAX_BYTES: usize = 64 * 1024;
 const TEAM_CONFIG_MAX_BYTES: usize = 1024 * 1024;
@@ -67,6 +72,7 @@ const TODO_MAX_BYTES: usize = 1024 * 1024;
 const TASK_ITEM_MAX_BYTES: usize = 256 * 1024;
 const PLAN_MAX_BYTES: usize = 4 * 1024 * 1024;
 const ARTIFACT_CONTENT_MAX_BYTES: usize = 1024 * 1024;
+const WORKFLOW_RUN_MAX_BYTES: usize = 1024 * 1024;
 const TEAM_MEMBER_LIMIT: usize = 256;
 const TEAM_INBOX_MESSAGE_LIMIT: usize = 4_096;
 const TODO_ITEM_LIMIT: usize = 4_096;
@@ -84,6 +90,7 @@ const RUNTIME_TEAM_INBOX: &str = "runtime.team_inbox";
 const RUNTIME_PRESENCE: &str = "runtime.presence";
 const RUNTIME_TASKS: &str = "runtime.tasks";
 const RUNTIME_ARTIFACTS: &str = "runtime.artifacts";
+const RUNTIME_WORKFLOWS: &str = "runtime.workflows";
 const USAGE_INPUT_TOKENS: &str = "usage.input_tokens";
 const USAGE_OUTPUT_TOKENS: &str = "usage.output_tokens";
 const USAGE_CACHE_TOKENS: &str = "usage.cache_tokens";
@@ -102,7 +109,7 @@ impl ClaudeCodeAdapter {
                 id: AdapterId::new(ADAPTER_ID).expect("static Claude adapter id is valid"),
                 display_name: "Claude Code".to_string(),
                 adapter_version: env!("CARGO_PKG_VERSION").to_string(),
-                contract_version: 8,
+                contract_version: 9,
                 source_schema_versions: vec![
                     "claude-code-jsonl-v1".to_string(),
                     "claude-code-subagent-meta-v1".to_string(),
@@ -113,6 +120,7 @@ impl ClaudeCodeAdapter {
                     "claude-code-task-item-v1".to_string(),
                     "claude-code-plan-v1".to_string(),
                     "claude-code-file-history-v1".to_string(),
+                    "claude-code-workflow-v1".to_string(),
                 ],
                 capabilities: claude_capabilities(),
             },
@@ -378,6 +386,42 @@ impl AgentAdapter for ClaudeCodeAdapter {
                 retention: RawRetentionPolicy::Full,
                 capabilities: artifact_capabilities(),
             },
+            StreamSpec {
+                id: StreamId::new(WORKFLOW_RUN_STREAM)?,
+                driver: DriverSpec::ReplaceDocument(ReplaceDocumentConfig {
+                    max_document_bytes: WORKFLOW_RUN_MAX_BYTES,
+                }),
+                selector: ObjectSelector {
+                    root_name: "projects".to_string(),
+                    include: vec!["*/*/workflows/wf_*.json".to_string()],
+                    exclude: Vec::new(),
+                },
+                decoder: DecoderId::new(WORKFLOW_RUN_DECODER)?,
+                authority: StreamAuthority::Canonical,
+                entity_scope: EntityScope::Custom("workflow".to_string()),
+                priority: IngestPriority::ForegroundRepair,
+                consistency: ConsistencyPolicy::SnapshotReplace,
+                deletion: DeletionPolicy::MirrorSource,
+                retention: RawRetentionPolicy::Full,
+                capabilities: workflow_capabilities(),
+            },
+            StreamSpec {
+                id: StreamId::new(WORKFLOW_JOURNAL_STREAM)?,
+                driver: DriverSpec::AppendDelimited(AppendDelimitedConfig::json_lines()),
+                selector: ObjectSelector {
+                    root_name: "projects".to_string(),
+                    include: vec!["*/*/subagents/workflows/*/journal.jsonl".to_string()],
+                    exclude: Vec::new(),
+                },
+                decoder: DecoderId::new(WORKFLOW_JOURNAL_DECODER)?,
+                authority: StreamAuthority::Canonical,
+                entity_scope: EntityScope::Custom("workflow_member".to_string()),
+                priority: IngestPriority::Interactive,
+                consistency: ConsistencyPolicy::IncrementalCursor,
+                deletion: DeletionPolicy::MirrorSource,
+                retention: RawRetentionPolicy::Full,
+                capabilities: workflow_capabilities(),
+            },
         ];
         for stream in &streams {
             stream.validate(instance)?;
@@ -420,6 +464,12 @@ impl AgentAdapter for ClaudeCodeAdapter {
             }
             ARTIFACT_CONTENT_STREAM => encode_object_context(
                 &ClaudeArtifactContentContext::from_path(&object.relative_path)?,
+            )?,
+            WORKFLOW_RUN_STREAM => encode_object_context(&ClaudeWorkflowContext::run_from_path(
+                &object.relative_path,
+            )?)?,
+            WORKFLOW_JOURNAL_STREAM => encode_object_context(
+                &ClaudeWorkflowContext::journal_from_path(&object.relative_path)?,
             )?,
             _ => {
                 return Err(AdapterError::new(
@@ -485,6 +535,14 @@ impl AgentAdapter for ClaudeCodeAdapter {
                 let object_context = ClaudeArtifactContentContext::decode(context.object_context)?;
                 decode_artifact_content(self.adapter_id(), &object_context, record, output)
             }
+            WORKFLOW_RUN_DECODER => {
+                let object_context = ClaudeWorkflowContext::decode(context.object_context)?;
+                decode_workflow_run(self.adapter_id(), &object_context, record, output)
+            }
+            WORKFLOW_JOURNAL_DECODER => {
+                let object_context = ClaudeWorkflowContext::decode(context.object_context)?;
+                decode_workflow_journal(self.adapter_id(), &object_context, record, output)
+            }
             _ => Err(AdapterError::unknown_decoder(context.decoder)),
         }
     }
@@ -543,6 +601,15 @@ fn claude_capabilities() -> Vec<CapabilityDeclaration> {
             Availability::Live,
             Some(
                 "file-history metadata and backup blobs are joined by native session and backup name; capture is session-attributed and never implies that a run produced the tracked file",
+            ),
+        ),
+        capability(
+            RUNTIME_WORKFLOWS,
+            SupportLevel::Native,
+            CapabilityGranularity::Custom("workflow".to_string()),
+            Availability::EventuallyLive,
+            Some(
+                "workflow summaries and append journals preserve native workflow/member state; workflow terminal status never implies terminal child-run state",
             ),
         ),
         live_native(USAGE_INPUT_TOKENS, CapabilityGranularity::Message),
@@ -633,6 +700,18 @@ fn task_capabilities() -> Vec<CapabilityId> {
 fn artifact_capabilities() -> Vec<CapabilityId> {
     [
         RUNTIME_ARTIFACTS,
+        SOURCE_LIVE,
+        SOURCE_RECONCILE,
+        SOURCE_RESUME_CURSOR,
+    ]
+    .into_iter()
+    .map(|id| CapabilityId::new(id).expect("static Claude stream capability id is valid"))
+    .collect()
+}
+
+fn workflow_capabilities() -> Vec<CapabilityId> {
+    [
+        RUNTIME_WORKFLOWS,
         SOURCE_LIVE,
         SOURCE_RECONCILE,
         SOURCE_RESUME_CURSOR,
@@ -982,6 +1061,86 @@ impl ClaudeArtifactContentContext {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct ClaudeWorkflowContext {
+    project_slug: String,
+    native_session_id: String,
+    native_workflow_id: String,
+}
+
+impl ClaudeWorkflowContext {
+    fn run_from_path(relative_path: &Path) -> Result<Self, AdapterError> {
+        let components = utf8_components(relative_path)?;
+        if components.len() != 4 || components[2] != "workflows" {
+            return Err(path_error(
+                relative_path,
+                "workflow run path must be <project>/<session>/workflows/<workflow>.json",
+            ));
+        }
+        let native_workflow_id = components[3]
+            .strip_suffix(".json")
+            .ok_or_else(|| path_error(relative_path, "workflow run must be a JSON document"))?;
+        Self::validate(
+            relative_path,
+            &components[0],
+            &components[1],
+            native_workflow_id,
+        )
+    }
+
+    fn journal_from_path(relative_path: &Path) -> Result<Self, AdapterError> {
+        let components = utf8_components(relative_path)?;
+        if components.len() != 6
+            || components[2] != "subagents"
+            || components[3] != "workflows"
+            || components[5] != "journal.jsonl"
+        {
+            return Err(path_error(
+                relative_path,
+                "workflow journal path must be <project>/<session>/subagents/workflows/<workflow>/journal.jsonl",
+            ));
+        }
+        Self::validate(
+            relative_path,
+            &components[0],
+            &components[1],
+            &components[4],
+        )
+    }
+
+    fn validate(
+        path: &Path,
+        project_slug: &str,
+        native_session_id: &str,
+        native_workflow_id: &str,
+    ) -> Result<Self, AdapterError> {
+        if project_slug.is_empty() {
+            return Err(path_error(path, "workflow project slug must not be empty"));
+        }
+        if !is_uuid(native_session_id) {
+            return Err(path_error(path, "workflow session is not a UUID"));
+        }
+        if !native_workflow_id
+            .strip_prefix("wf_")
+            .is_some_and(|suffix| !suffix.is_empty())
+        {
+            return Err(path_error(
+                path,
+                "workflow identity must start with wf_ and include a suffix",
+            ));
+        }
+        Ok(Self {
+            project_slug: project_slug.to_string(),
+            native_session_id: native_session_id.to_string(),
+            native_workflow_id: native_workflow_id.to_string(),
+        })
+    }
+
+    fn decode(context: &AdapterObjectContext) -> Result<Self, AdapterError> {
+        decode_object_context(context)
+    }
+}
+
 fn encode_object_context<T: Serialize>(context: &T) -> Result<Vec<u8>, AdapterError> {
     serde_json::to_vec(context).map_err(|error| {
         AdapterError::new(
@@ -1187,6 +1346,38 @@ struct ClaudeArtifactBackupDocument {
     backup_time: String,
     #[serde(default)]
     real_parent_dir: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ClaudeWorkflowRunDocument {
+    run_id: String,
+    timestamp: String,
+    task_id: String,
+    script: String,
+    script_path: String,
+    #[serde(default)]
+    args: Option<String>,
+    agent_count: u64,
+    duration_ms: u64,
+    summary: String,
+    workflow_name: String,
+    status: String,
+    start_time: u64,
+    default_model: String,
+    total_tokens: u64,
+    total_tool_calls: u64,
+    #[serde(default)]
+    error: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ClaudeWorkflowJournalDocument {
+    #[serde(rename = "type")]
+    kind: String,
+    agent_id: String,
+    key: String,
 }
 
 fn decode_team_config(
@@ -1859,6 +2050,251 @@ fn decode_artifact_content(
         }),
     )?;
     Ok(DecodeDisposition::Applied)
+}
+
+fn decode_workflow_run(
+    adapter_id: &AdapterId,
+    context: &ClaudeWorkflowContext,
+    record: &SourceRecord,
+    output: &mut FactBatch,
+) -> Result<DecodeDisposition, AdapterError> {
+    if record.state == SourceRecordState::Absent {
+        return Ok(DecodeDisposition::IgnoredKnown);
+    }
+    let native_snapshot: Value = match serde_json::from_slice(&record.payload) {
+        Ok(value) => value,
+        Err(error) => {
+            return preserve_workflow_contract_loss(
+                record,
+                output,
+                "workflow_run",
+                &format!("is not valid JSON: {error}"),
+            );
+        }
+    };
+    let document: ClaudeWorkflowRunDocument = match serde_json::from_value(native_snapshot.clone())
+    {
+        Ok(document) => document,
+        Err(error) => {
+            return preserve_workflow_contract_loss(
+                record,
+                output,
+                "workflow_run",
+                &format!("is not a supported run document: {error}"),
+            );
+        }
+    };
+    if document.run_id != context.native_workflow_id {
+        return preserve_workflow_contract_loss(
+            record,
+            output,
+            "workflow_run",
+            "payload runId does not match the source file name",
+        );
+    }
+    for (field, value) in [
+        ("taskId", document.task_id.as_str()),
+        ("workflowName", document.workflow_name.as_str()),
+        ("status", document.status.as_str()),
+        ("defaultModel", document.default_model.as_str()),
+        ("script", document.script.as_str()),
+        ("scriptPath", document.script_path.as_str()),
+        ("summary", document.summary.as_str()),
+        ("timestamp", document.timestamp.as_str()),
+    ] {
+        if value.trim().is_empty() {
+            return preserve_workflow_contract_loss(
+                record,
+                output,
+                "workflow_run",
+                &format!("has an empty {field}"),
+            );
+        }
+    }
+    let Ok(start_time) = i64::try_from(document.start_time) else {
+        return preserve_workflow_contract_loss(
+            record,
+            output,
+            "workflow_run",
+            "startTime exceeds the supported epoch-millisecond range",
+        );
+    };
+    let workflow = workflow_key(adapter_id, record.source_instance_id, context)?;
+    output.push(
+        record,
+        Fact::WorkflowSnapshot(WorkflowSnapshotFact {
+            workflow,
+            session: EntityKey::native(
+                adapter_id,
+                record.source_instance_id,
+                "session",
+                context.native_session_id.as_bytes(),
+            )?,
+            project: EntityKey::native(
+                adapter_id,
+                record.source_instance_id,
+                "project",
+                context.project_slug.as_bytes(),
+            )?,
+            native_workflow_id: document.run_id,
+            native_task_id: document.task_id,
+            name: document.workflow_name,
+            native_status: document.status.clone(),
+            status: workflow_status(&document.status),
+            default_model: document.default_model,
+            script: document.script,
+            script_path: document.script_path,
+            args: document.args,
+            summary: document.summary,
+            error: document.error,
+            started_at: epoch_millis_timestamp(start_time),
+            finished_at: native_timestamp(&document.timestamp),
+            duration_ms: document.duration_ms,
+            agent_count: document.agent_count,
+            total_tokens: document.total_tokens,
+            total_tool_calls: document.total_tool_calls,
+            native_snapshot,
+        }),
+    )?;
+    Ok(DecodeDisposition::Applied)
+}
+
+fn decode_workflow_journal(
+    adapter_id: &AdapterId,
+    context: &ClaudeWorkflowContext,
+    record: &SourceRecord,
+    output: &mut FactBatch,
+) -> Result<DecodeDisposition, AdapterError> {
+    if record.state == SourceRecordState::Absent {
+        return Ok(DecodeDisposition::IgnoredKnown);
+    }
+    let value: Value = match serde_json::from_slice(&record.payload) {
+        Ok(value) => value,
+        Err(error) => {
+            return preserve_workflow_contract_loss(
+                record,
+                output,
+                "workflow_journal",
+                &format!("record is not valid JSON: {error}"),
+            );
+        }
+    };
+    let document: ClaudeWorkflowJournalDocument = match serde_json::from_value(value.clone()) {
+        Ok(document) => document,
+        Err(error) => {
+            return preserve_workflow_contract_loss(
+                record,
+                output,
+                "workflow_journal",
+                &format!("record is not supported: {error}"),
+            );
+        }
+    };
+    let Some(native_agent_id) = nonempty(&document.agent_id) else {
+        return preserve_workflow_contract_loss(
+            record,
+            output,
+            "workflow_journal",
+            "record has an empty agentId",
+        );
+    };
+    let Some(native_event_key) = nonempty(&document.key) else {
+        return preserve_workflow_contract_loss(
+            record,
+            output,
+            "workflow_journal",
+            "record has an empty key",
+        );
+    };
+    let (kind, result) = match document.kind.as_str() {
+        "started" if value.get("result").is_none() => (WorkflowMemberEventKind::Started, None),
+        "result" => {
+            let Some(result) = value.get("result").cloned() else {
+                return preserve_workflow_contract_loss(
+                    record,
+                    output,
+                    "workflow_journal",
+                    "result record is missing its result value",
+                );
+            };
+            (WorkflowMemberEventKind::Result, Some(result))
+        }
+        "started" => {
+            return preserve_workflow_contract_loss(
+                record,
+                output,
+                "workflow_journal",
+                "started record unexpectedly contains a result value",
+            );
+        }
+        _ => {
+            return preserve_workflow_contract_loss(
+                record,
+                output,
+                "workflow_journal",
+                "record has an unsupported event type",
+            );
+        }
+    };
+
+    let workflow = workflow_key(adapter_id, record.source_instance_id, context)?;
+    let mut member_native_key = workflow_native_key(context);
+    push_key_component(&mut member_native_key, native_agent_id.as_bytes());
+    let child_run_native_key = format!(
+        "{}\0{}\0{}",
+        context.native_session_id, context.native_workflow_id, native_agent_id
+    );
+    output.push(
+        record,
+        Fact::WorkflowMemberEvent(WorkflowMemberEventFact {
+            workflow,
+            member: EntityKey::native(
+                adapter_id,
+                record.source_instance_id,
+                "workflow_member",
+                &member_native_key,
+            )?,
+            child_run: EntityKey::native(
+                adapter_id,
+                record.source_instance_id,
+                "run",
+                child_run_native_key.as_bytes(),
+            )?,
+            session: EntityKey::native(
+                adapter_id,
+                record.source_instance_id,
+                "session",
+                context.native_session_id.as_bytes(),
+            )?,
+            project: EntityKey::native(
+                adapter_id,
+                record.source_instance_id,
+                "project",
+                context.project_slug.as_bytes(),
+            )?,
+            native_workflow_id: context.native_workflow_id.clone(),
+            native_agent_id,
+            native_event_key,
+            kind,
+            result,
+        }),
+    )?;
+    Ok(DecodeDisposition::Applied)
+}
+
+fn preserve_workflow_contract_loss(
+    record: &SourceRecord,
+    output: &mut FactBatch,
+    native_kind: &str,
+    detail: &str,
+) -> Result<DecodeDisposition, AdapterError> {
+    preserve_unknown(
+        record,
+        output,
+        Some(native_kind.to_string()),
+        format!("Claude {native_kind} {detail}"),
+    )?;
+    Ok(DecodeDisposition::PreservedUnknown)
 }
 
 fn preserve_task_contract_loss(
@@ -2646,6 +3082,37 @@ fn artifact_key(
     EntityKey::native(adapter_id, source_instance_id, "artifact", &native_key)
 }
 
+fn workflow_native_key(context: &ClaudeWorkflowContext) -> Vec<u8> {
+    let mut native_key = Vec::new();
+    push_key_component(&mut native_key, context.native_session_id.as_bytes());
+    push_key_component(&mut native_key, context.native_workflow_id.as_bytes());
+    native_key
+}
+
+fn workflow_key(
+    adapter_id: &AdapterId,
+    source_instance_id: u64,
+    context: &ClaudeWorkflowContext,
+) -> Result<EntityKey, AdapterError> {
+    EntityKey::native(
+        adapter_id,
+        source_instance_id,
+        "workflow",
+        &workflow_native_key(context),
+    )
+}
+
+fn workflow_status(native_status: &str) -> WorkflowStatus {
+    match native_status {
+        "pending" | "queued" => WorkflowStatus::Pending,
+        "running" | "in_progress" => WorkflowStatus::Running,
+        "completed" => WorkflowStatus::Succeeded,
+        "failed" => WorkflowStatus::Failed,
+        "cancelled" | "canceled" | "killed" => WorkflowStatus::Cancelled,
+        other => WorkflowStatus::Other(other.to_string()),
+    }
+}
+
 fn role_from_kind(kind: &str) -> MessageRole {
     match kind {
         "user" => MessageRole::User,
@@ -2875,8 +3342,8 @@ mod tests {
             discovered[0].roots[3].path,
             std::fs::canonicalize(root.path()).unwrap().join("sessions")
         );
-        assert_eq!(streams.len(), 10);
-        assert_eq!(adapter.manifest().contract_version, 8);
+        assert_eq!(streams.len(), 12);
+        assert_eq!(adapter.manifest().contract_version, 9);
         assert!(adapter
             .manifest()
             .source_schema_versions
@@ -2917,6 +3384,11 @@ mod tests {
             .source_schema_versions
             .iter()
             .any(|version| version == "claude-code-file-history-v1"));
+        assert!(adapter
+            .manifest()
+            .source_schema_versions
+            .iter()
+            .any(|version| version == "claude-code-workflow-v1"));
         assert!(matches!(streams[0].driver, DriverSpec::AppendDelimited(_)));
         assert!(matches!(streams[1].driver, DriverSpec::AppendDelimited(_)));
         assert!(matches!(streams[2].driver, DriverSpec::ReplaceDocument(_)));
@@ -2963,6 +3435,13 @@ mod tests {
                 max_document_bytes: ARTIFACT_CONTENT_MAX_BYTES
             })
         ));
+        assert!(matches!(
+            streams[10].driver,
+            DriverSpec::ReplaceDocument(ReplaceDocumentConfig {
+                max_document_bytes: WORKFLOW_RUN_MAX_BYTES
+            })
+        ));
+        assert!(matches!(streams[11].driver, DriverSpec::AppendDelimited(_)));
         assert_eq!(streams[0].decoder.as_str(), PARENT_DECODER);
         assert_eq!(streams[1].decoder.as_str(), SUBAGENT_DECODER);
         assert_eq!(streams[2].decoder.as_str(), SUBAGENT_META_DECODER);
@@ -2973,6 +3452,8 @@ mod tests {
         assert_eq!(streams[7].decoder.as_str(), TASK_ITEM_DECODER);
         assert_eq!(streams[8].decoder.as_str(), PLAN_DECODER);
         assert_eq!(streams[9].decoder.as_str(), ARTIFACT_CONTENT_DECODER);
+        assert_eq!(streams[10].decoder.as_str(), WORKFLOW_RUN_DECODER);
+        assert_eq!(streams[11].decoder.as_str(), WORKFLOW_JOURNAL_DECODER);
         assert_eq!(streams[2].authority, StreamAuthority::Supplemental);
         assert_eq!(streams[2].consistency, ConsistencyPolicy::SnapshotReplace);
         assert_eq!(streams[3].authority, StreamAuthority::Canonical);
@@ -2998,6 +3479,21 @@ mod tests {
             .capabilities
             .iter()
             .any(|capability| capability.as_str() == RUNTIME_ARTIFACTS));
+        assert_eq!(streams[10].authority, StreamAuthority::Canonical);
+        assert_eq!(streams[10].priority, IngestPriority::ForegroundRepair);
+        assert_eq!(streams[10].consistency, ConsistencyPolicy::SnapshotReplace);
+        assert_eq!(streams[11].authority, StreamAuthority::Canonical);
+        assert_eq!(streams[11].priority, IngestPriority::Interactive);
+        assert_eq!(
+            streams[11].consistency,
+            ConsistencyPolicy::IncrementalCursor
+        );
+        for stream in &streams[10..=11] {
+            assert!(stream
+                .capabilities
+                .iter()
+                .any(|capability| capability.as_str() == RUNTIME_WORKFLOWS));
+        }
         assert!(streams[0]
             .capabilities
             .iter()
@@ -3087,6 +3583,23 @@ mod tests {
             CapabilityGranularity::Custom("artifact".to_string())
         );
         assert_eq!(artifacts.support.availability, Availability::Live);
+        let workflows = adapter
+            .manifest()
+            .capabilities
+            .iter()
+            .find(|capability| capability.id.as_str() == RUNTIME_WORKFLOWS)
+            .unwrap();
+        assert_eq!(workflows.support.level, SupportLevel::Native);
+        assert_eq!(
+            workflows.support.granularity,
+            CapabilityGranularity::Custom("workflow".to_string())
+        );
+        assert_eq!(workflows.support.availability, Availability::EventuallyLive);
+        assert!(workflows
+            .support
+            .notes
+            .as_deref()
+            .is_some_and(|notes| notes.contains("never implies terminal child-run state")));
     }
 
     #[test]
@@ -3214,6 +3727,68 @@ mod tests {
             (
                 ARTIFACT_CONTENT_STREAM,
                 "nested/file-history/01234567-89ab-cdef-0123-456789abcdef/hash@v1",
+            ),
+        ] {
+            assert!(adapter
+                .bootstrap_object(&instance(root.path()), &object(stream, invalid))
+                .is_err());
+        }
+    }
+
+    #[test]
+    fn workflow_contexts_require_exact_native_paths() {
+        let root = TempDir::new().unwrap();
+        let adapter = ClaudeCodeAdapter::new();
+        let run = adapter
+            .bootstrap_object(
+                &instance(root.path()),
+                &object(
+                    WORKFLOW_RUN_STREAM,
+                    &format!("project/{SESSION}/workflows/wf_main.json"),
+                ),
+            )
+            .unwrap();
+        let journal = adapter
+            .bootstrap_object(
+                &instance(root.path()),
+                &object(
+                    WORKFLOW_JOURNAL_STREAM,
+                    &format!("project/{SESSION}/subagents/workflows/wf_main/journal.jsonl"),
+                ),
+            )
+            .unwrap();
+        let expected = ClaudeWorkflowContext {
+            project_slug: "project".to_string(),
+            native_session_id: SESSION.to_string(),
+            native_workflow_id: "wf_main".to_string(),
+        };
+        assert_eq!(ClaudeWorkflowContext::decode(&run).unwrap(), expected);
+        assert_eq!(ClaudeWorkflowContext::decode(&journal).unwrap(), expected);
+
+        for (stream, invalid) in [
+            (
+                WORKFLOW_RUN_STREAM,
+                "project/not-a-session/workflows/wf_main.json",
+            ),
+            (
+                WORKFLOW_RUN_STREAM,
+                &format!("project/{SESSION}/workflows/wf_.json"),
+            ),
+            (
+                WORKFLOW_RUN_STREAM,
+                &format!("project/{SESSION}/workflows/main.json"),
+            ),
+            (
+                WORKFLOW_RUN_STREAM,
+                &format!("project/{SESSION}/nested/workflows/wf_main.json"),
+            ),
+            (
+                WORKFLOW_JOURNAL_STREAM,
+                &format!("project/{SESSION}/workflows/wf_main/journal.jsonl"),
+            ),
+            (
+                WORKFLOW_JOURNAL_STREAM,
+                &format!("project/{SESSION}/subagents/workflows/wf_main/events.jsonl"),
             ),
         ] {
             assert!(adapter
@@ -3760,6 +4335,223 @@ mod tests {
             panic!("expected byte-exact binary artifact content");
         };
         assert_eq!(binary.content, [0xff]);
+    }
+
+    #[test]
+    fn workflow_run_decoder_preserves_native_snapshot_and_normalizes_container_status() {
+        let root = TempDir::new().unwrap();
+        let adapter = ClaudeCodeAdapter::new();
+        let object_context = adapter
+            .bootstrap_object(
+                &instance(root.path()),
+                &object(
+                    WORKFLOW_RUN_STREAM,
+                    &format!("project/{SESSION}/workflows/wf_main.json"),
+                ),
+            )
+            .unwrap();
+        let decoder = DecoderId::new(WORKFLOW_RUN_DECODER).unwrap();
+        let payload = br#"{
+          "runId":"wf_main",
+          "timestamp":"2026-08-11T00:00:01.005Z",
+          "taskId":"task-main",
+          "script":"await run({ task: 'inspect' });",
+          "scriptPath":"/repo/workflows/main.js",
+          "args":"--careful",
+          "agentCount":1,
+          "durationMs":1005,
+          "summary":"inspection complete",
+          "workflowName":"Inspect",
+          "status":"completed",
+          "startTime":1786406400000,
+          "defaultModel":"claude-sonnet",
+          "totalTokens":123,
+          "totalToolCalls":4,
+          "phases":[{"name":"inspect","status":"completed"}],
+          "futureField":{"kept":true}
+        }"#;
+        let record = document_record(payload);
+        let mut batch = FactBatch::new(4, 2).unwrap();
+        assert_eq!(
+            adapter
+                .decode(
+                    DecodeContext {
+                        decoder: &decoder,
+                        object_context: &object_context,
+                    },
+                    &record,
+                    &mut batch,
+                )
+                .unwrap(),
+            DecodeDisposition::Applied
+        );
+        let Fact::WorkflowSnapshot(workflow) = &batch.facts()[0].value else {
+            panic!("expected workflow snapshot");
+        };
+        assert_eq!(workflow.native_workflow_id, "wf_main");
+        assert_eq!(workflow.native_task_id, "task-main");
+        assert_eq!(workflow.name, "Inspect");
+        assert_eq!(workflow.native_status, "completed");
+        assert_eq!(workflow.status, WorkflowStatus::Succeeded);
+        assert_eq!(workflow.default_model, "claude-sonnet");
+        assert_eq!(workflow.args.as_deref(), Some("--careful"));
+        assert_eq!(workflow.agent_count, 1);
+        assert_eq!(workflow.duration_ms, 1005);
+        assert_eq!(workflow.total_tokens, 123);
+        assert_eq!(workflow.total_tool_calls, 4);
+        assert_eq!(
+            workflow.started_at,
+            epoch_millis_timestamp(1_786_406_400_000)
+        );
+        assert_eq!(workflow.finished_at.value, "2026-08-11T00:00:01.005Z");
+        assert_eq!(
+            workflow.native_snapshot["futureField"],
+            serde_json::json!({"kept": true})
+        );
+        assert_eq!(
+            workflow.workflow,
+            workflow_key(
+                adapter.adapter_id(),
+                7,
+                &ClaudeWorkflowContext::decode(&object_context).unwrap()
+            )
+            .unwrap()
+        );
+
+        let mut absent = FactBatch::new(1, 1).unwrap();
+        assert_eq!(
+            adapter
+                .decode(
+                    DecodeContext {
+                        decoder: &decoder,
+                        object_context: &object_context,
+                    },
+                    &absent_document_record(),
+                    &mut absent,
+                )
+                .unwrap(),
+            DecodeDisposition::IgnoredKnown
+        );
+
+        let mut mismatched_value = serde_json::from_slice::<serde_json::Value>(payload).unwrap();
+        mismatched_value["runId"] = serde_json::json!("wf_other");
+        let mismatched_payload = serde_json::to_vec(&mismatched_value).unwrap();
+        let mismatched = document_record(&mismatched_payload);
+        let mut mismatched_batch = FactBatch::new(2, 2).unwrap();
+        assert_eq!(
+            adapter
+                .decode(
+                    DecodeContext {
+                        decoder: &decoder,
+                        object_context: &object_context,
+                    },
+                    &mismatched,
+                    &mut mismatched_batch,
+                )
+                .unwrap(),
+            DecodeDisposition::PreservedUnknown
+        );
+        assert!(matches!(
+            mismatched_batch.facts()[0].value,
+            Fact::UnknownRecord { .. }
+        ));
+    }
+
+    #[test]
+    fn workflow_journal_decoder_correlates_child_runs_and_preserves_contract_loss() {
+        let root = TempDir::new().unwrap();
+        let adapter = ClaudeCodeAdapter::new();
+        let object_context = adapter
+            .bootstrap_object(
+                &instance(root.path()),
+                &object(
+                    WORKFLOW_JOURNAL_STREAM,
+                    &format!("project/{SESSION}/subagents/workflows/wf_main/journal.jsonl"),
+                ),
+            )
+            .unwrap();
+        let decoder = DecoderId::new(WORKFLOW_JOURNAL_DECODER).unwrap();
+        let started_record = record(br#"{"type":"started","agentId":"a1","key":"step-1"}"#);
+        let mut started_batch = FactBatch::new(2, 2).unwrap();
+        adapter
+            .decode(
+                DecodeContext {
+                    decoder: &decoder,
+                    object_context: &object_context,
+                },
+                &started_record,
+                &mut started_batch,
+            )
+            .unwrap();
+        let Fact::WorkflowMemberEvent(started) = &started_batch.facts()[0].value else {
+            panic!("expected workflow member start");
+        };
+        assert_eq!(started.native_workflow_id, "wf_main");
+        assert_eq!(started.native_agent_id, "a1");
+        assert_eq!(started.native_event_key, "step-1");
+        assert_eq!(started.kind, WorkflowMemberEventKind::Started);
+        assert!(started.result.is_none());
+        let child_context = ClaudeTranscriptContext::subagent(Path::new(&format!(
+            "project/{SESSION}/subagents/workflows/wf_main/agents/agent-a1.jsonl"
+        )))
+        .unwrap();
+        assert_eq!(
+            started.child_run,
+            EntityKey::native(
+                adapter.adapter_id(),
+                7,
+                "run",
+                child_context.run_native_key().as_bytes(),
+            )
+            .unwrap()
+        );
+
+        let result_record =
+            record(br#"{"type":"result","agentId":"a1","key":"step-1","result":{"answer":42}}"#);
+        let mut result_batch = FactBatch::new(2, 2).unwrap();
+        adapter
+            .decode(
+                DecodeContext {
+                    decoder: &decoder,
+                    object_context: &object_context,
+                },
+                &result_record,
+                &mut result_batch,
+            )
+            .unwrap();
+        let Fact::WorkflowMemberEvent(result) = &result_batch.facts()[0].value else {
+            panic!("expected workflow member result");
+        };
+        assert_eq!(result.kind, WorkflowMemberEventKind::Result);
+        assert_eq!(result.member, started.member);
+        assert_eq!(result.child_run, started.child_run);
+        assert_eq!(result.result, Some(serde_json::json!({"answer": 42})));
+
+        for invalid in [
+            br#"{"type":"result","agentId":"a1","key":"step-1"}"#.as_slice(),
+            br#"{"type":"started","agentId":"a1","key":"step-1","result":null}"#.as_slice(),
+            br#"{"type":"future","agentId":"a1","key":"step-1"}"#.as_slice(),
+            br#"{"type":"result","agentId":"","key":"step-1","result":"x"}"#.as_slice(),
+        ] {
+            let mut invalid_batch = FactBatch::new(2, 2).unwrap();
+            assert_eq!(
+                adapter
+                    .decode(
+                        DecodeContext {
+                            decoder: &decoder,
+                            object_context: &object_context,
+                        },
+                        &record(invalid),
+                        &mut invalid_batch,
+                    )
+                    .unwrap(),
+                DecodeDisposition::PreservedUnknown
+            );
+            assert!(matches!(
+                invalid_batch.facts()[0].value,
+                Fact::UnknownRecord { .. }
+            ));
+        }
     }
 
     #[test]

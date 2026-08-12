@@ -23,6 +23,7 @@ use super::commit::{
 use super::presence_projection::apply_presence_facts;
 use super::task_projection::apply_task_snapshots;
 use super::team_projection::apply_team_snapshots;
+use super::workflow_projection::apply_workflow_facts;
 use super::EngineError;
 
 const CHANGE_SCHEMA_VERSION: u32 = 1;
@@ -269,6 +270,8 @@ impl TransactionalProjectionWork for FactProjectionWork<'_> {
                 | Fact::PlanSnapshot(_)
                 | Fact::ArtifactMetadataSnapshot(_)
                 | Fact::ArtifactContent(_)
+                | Fact::WorkflowSnapshot(_)
+                | Fact::WorkflowMemberEvent(_)
                 | Fact::RunEvidence(_)
                 | Fact::Usage(_) => {}
             }
@@ -510,6 +513,7 @@ impl TransactionalProjectionWork for FactProjectionWork<'_> {
         changes.extend(apply_team_snapshots(transaction, context, self.batch)?);
         changes.extend(apply_task_snapshots(transaction, context, self.batch)?);
         changes.extend(apply_artifact_facts(transaction, context, self.batch)?);
+        changes.extend(apply_workflow_facts(transaction, context, self.batch)?);
 
         transaction
             .execute(
@@ -2390,7 +2394,8 @@ mod tests {
         SourceInstanceSpec as AdapterSourceInstanceSpec, SourceObjectDescriptor, SourceRoot,
         StreamId, TaskCollectionKind, TaskItemSnapshot, TaskSnapshotCoverage, TaskSnapshotFact,
         TaskStatus, TeamInboxMessageSnapshot, TeamInboxSnapshotFact, TeamMemberSnapshot,
-        TeamSnapshotFact,
+        TeamSnapshotFact, WorkflowMemberEventFact, WorkflowMemberEventKind, WorkflowSnapshotFact,
+        WorkflowStatus,
     };
     use crate::claude::ClaudeCodeAdapter;
     use crate::core::schema;
@@ -2731,6 +2736,70 @@ mod tests {
             version: 1,
             content: content.as_bytes().to_vec(),
             size_bytes: content.len() as u64,
+        }
+    }
+
+    fn workflow_snapshot_fact(
+        native_status: &str,
+        agent_count: u64,
+        summary: &str,
+    ) -> WorkflowSnapshotFact {
+        WorkflowSnapshotFact {
+            workflow: entity("workflow", "workflow-main"),
+            session: entity("session", SESSION),
+            project: entity("project", PROJECT),
+            native_workflow_id: "wf_main".to_string(),
+            native_task_id: "task-main".to_string(),
+            name: "Main workflow".to_string(),
+            native_status: native_status.to_string(),
+            status: match native_status {
+                "completed" => WorkflowStatus::Succeeded,
+                "failed" => WorkflowStatus::Failed,
+                "killed" => WorkflowStatus::Cancelled,
+                "running" => WorkflowStatus::Running,
+                other => WorkflowStatus::Other(other.to_string()),
+            },
+            default_model: "claude-sonnet".to_string(),
+            script: "await run({ task: 'work' });".to_string(),
+            script_path: "/fixture/workflows/main.js".to_string(),
+            args: Some("--fixture".to_string()),
+            summary: summary.to_string(),
+            error: None,
+            started_at: exact("2026-08-11T00:00:00.000Z"),
+            finished_at: exact("2026-08-11T00:00:01.000Z"),
+            duration_ms: 1_000,
+            agent_count,
+            total_tokens: 42,
+            total_tool_calls: 3,
+            native_snapshot: serde_json::json!({
+                "runId": "wf_main",
+                "status": native_status,
+                "summary": summary,
+                "agentCount": agent_count,
+            }),
+        }
+    }
+
+    fn workflow_member_fact(
+        native_agent_id: &str,
+        native_event_key: &str,
+        kind: WorkflowMemberEventKind,
+        result: Option<serde_json::Value>,
+    ) -> WorkflowMemberEventFact {
+        WorkflowMemberEventFact {
+            workflow: entity("workflow", "workflow-main"),
+            member: entity(
+                "workflow_member",
+                &format!("workflow-main/{native_agent_id}"),
+            ),
+            child_run: entity("run", &format!("{SESSION}\0wf_main\0{native_agent_id}")),
+            session: entity("session", SESSION),
+            project: entity("project", PROJECT),
+            native_workflow_id: "wf_main".to_string(),
+            native_agent_id: native_agent_id.to_string(),
+            native_event_key: native_event_key.to_string(),
+            kind,
+            result,
         }
     }
 
@@ -6572,6 +6641,635 @@ mod tests {
                 )
                 .unwrap(),
             "delete"
+        );
+    }
+
+    #[test]
+    fn workflow_journal_first_late_snapshot_and_rewrites_preserve_evidence_boundaries() {
+        let mut connection = database();
+        register_object(&mut connection);
+        let snapshot_object = b"workflow-snapshot";
+        register_object_key(&mut connection, snapshot_object, 12);
+        let workflow_key = entity("workflow", "workflow-main");
+        let member_key = entity("workflow_member", "workflow-main/agent-a");
+
+        let started_record = direct_record(1, 0, 1, 20, b"workflow-started");
+        let mut started = FactBatch::new(2, 1).unwrap();
+        started
+            .push(
+                &started_record,
+                Fact::WorkflowMemberEvent(workflow_member_fact(
+                    "agent-a",
+                    "member-1",
+                    WorkflowMemberEventKind::Started,
+                    None,
+                )),
+            )
+            .unwrap();
+        commit_direct_batch(&mut connection, &started_record, 1, 0, 21, &started);
+
+        let placeholder: (String, String, String, i64, i64) = connection
+            .query_row(
+                "SELECT snapshot_status, resolution_status, membership_count_status, observed_member_count, unresolved_member_count FROM canonical_workflows WHERE workflow_key = ?1",
+                [workflow_key.as_bytes()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            placeholder,
+            (
+                "missing".to_string(),
+                "incomplete".to_string(),
+                "snapshot_missing".to_string(),
+                1,
+                1,
+            )
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT member_status FROM canonical_workflow_members WHERE member_key = ?1",
+                    [member_key.as_bytes()],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "started"
+        );
+
+        let result_record = direct_record(1, 1, 2, 30, b"workflow-result");
+        let mut result = FactBatch::new(2, 1).unwrap();
+        result
+            .push(
+                &result_record,
+                Fact::WorkflowMemberEvent(workflow_member_fact(
+                    "agent-a",
+                    "member-1",
+                    WorkflowMemberEventKind::Result,
+                    Some(serde_json::json!({"answer": 42})),
+                )),
+            )
+            .unwrap();
+        commit_direct_batch(&mut connection, &result_record, 1, 1, 31, &result);
+        let member: (String, String, Vec<u8>, i64, i64) = connection
+            .query_row(
+                "SELECT member_status, resolution_status, result_json, started_assertion_count, result_assertion_count FROM canonical_workflow_members WHERE member_key = ?1",
+                [member_key.as_bytes()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+            )
+            .unwrap();
+        assert_eq!(member.0, "result_observed");
+        assert_eq!(member.1, "resolved");
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&member.2).unwrap(),
+            serde_json::json!({"answer": 42})
+        );
+        assert_eq!((member.3, member.4), (1, 1));
+
+        let snapshot_record = object_record(
+            2,
+            1,
+            SourceCursor::append_offset(0),
+            SourceCursor::append_offset(1),
+            40,
+            b"workflow-snapshot",
+        );
+        let mut snapshot = FactBatch::new(2, 1).unwrap();
+        snapshot
+            .push(
+                &snapshot_record,
+                Fact::WorkflowSnapshot(workflow_snapshot_fact("completed", 1, "done")),
+            )
+            .unwrap();
+        commit_object_batch(
+            &mut connection,
+            snapshot_object,
+            &snapshot_record,
+            1,
+            SourceCursor::append_offset(0).into_bytes(),
+            41,
+            &snapshot,
+        );
+        let joined: (String, String, String, String, i64, i64) = connection
+            .query_row(
+                "SELECT snapshot_status, resolution_status, workflow_status, membership_count_status, observed_member_count, result_member_count FROM canonical_workflows WHERE workflow_key = ?1",
+                [workflow_key.as_bytes()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            joined,
+            (
+                "present".to_string(),
+                "resolved".to_string(),
+                "succeeded".to_string(),
+                "matched".to_string(),
+                1,
+                1,
+            )
+        );
+        assert_eq!(count(&connection, "canonical_runs"), 0);
+        assert_eq!(count(&connection, "observed_run_states"), 0);
+
+        let deleted_snapshot_record = object_record(
+            2,
+            1,
+            SourceCursor::append_offset(1),
+            SourceCursor::append_offset(2),
+            50,
+            b"workflow-snapshot-deleted",
+        );
+        commit_object_batch(
+            &mut connection,
+            snapshot_object,
+            &deleted_snapshot_record,
+            1,
+            SourceCursor::append_offset(1).into_bytes(),
+            51,
+            &FactBatch::new(1, 1).unwrap(),
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT snapshot_status || ':' || resolution_status FROM canonical_workflows WHERE workflow_key = ?1",
+                    [workflow_key.as_bytes()],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "missing:incomplete"
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM fact_records WHERE fact_kind = 'workflow_snapshot'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            0
+        );
+
+        let rewritten_journal = direct_record(2, 0, 1, 60, b"workflow-journal-rewritten");
+        commit_direct_batch(
+            &mut connection,
+            &rewritten_journal,
+            1,
+            2,
+            61,
+            &FactBatch::new(1, 1).unwrap(),
+        );
+        assert_eq!(count(&connection, "canonical_workflow_members"), 0);
+        assert_eq!(count(&connection, "canonical_workflows"), 0);
+        assert_eq!(count(&connection, "workflow_member_event_assertions"), 0);
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM fact_records WHERE fact_kind IN ('workflow_snapshot', 'workflow_member_event')",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn completed_workflow_count_mismatch_does_not_complete_child_runs_or_conflict() {
+        let mut connection = database();
+        register_object(&mut connection);
+        let journal_object = b"workflow-journal";
+        register_object_key(&mut connection, journal_object, 12);
+        let workflow_key = entity("workflow", "workflow-main");
+        let member_key = entity("workflow_member", "workflow-main/agent-a");
+
+        let snapshot_record = direct_record(1, 0, 1, 20, b"completed-workflow");
+        let mut snapshot = FactBatch::new(2, 1).unwrap();
+        snapshot
+            .push(
+                &snapshot_record,
+                Fact::WorkflowSnapshot(workflow_snapshot_fact("completed", 2, "done")),
+            )
+            .unwrap();
+        commit_direct_batch(&mut connection, &snapshot_record, 1, 0, 21, &snapshot);
+
+        let started_record = object_record(
+            2,
+            1,
+            SourceCursor::append_offset(0),
+            SourceCursor::append_offset(1),
+            30,
+            b"only-one-member",
+        );
+        let mut started = FactBatch::new(2, 1).unwrap();
+        started
+            .push(
+                &started_record,
+                Fact::WorkflowMemberEvent(workflow_member_fact(
+                    "agent-a",
+                    "member-1",
+                    WorkflowMemberEventKind::Started,
+                    None,
+                )),
+            )
+            .unwrap();
+        commit_object_batch(
+            &mut connection,
+            journal_object,
+            &started_record,
+            1,
+            SourceCursor::append_offset(0).into_bytes(),
+            31,
+            &started,
+        );
+
+        let workflow: (String, String, String, i64, i64) = connection
+            .query_row(
+                "SELECT workflow_status, resolution_status, membership_count_status, join_conflict, competing_snapshot_count FROM canonical_workflows WHERE workflow_key = ?1",
+                [workflow_key.as_bytes()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            workflow,
+            (
+                "succeeded".to_string(),
+                "resolved".to_string(),
+                "different".to_string(),
+                0,
+                0,
+            )
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT member_status FROM canonical_workflow_members WHERE member_key = ?1",
+                    [member_key.as_bytes()],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "started"
+        );
+        assert_eq!(count(&connection, "canonical_runs"), 0);
+        assert_eq!(count(&connection, "observed_run_states"), 0);
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT operation FROM change_log WHERE topic = 'diagnostic.runtime.workflow-conflict' AND entity_key = ?1 ORDER BY commit_seq DESC LIMIT 1",
+                    [workflow_key.as_bytes()],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "delete"
+        );
+    }
+
+    #[test]
+    fn competing_workflow_snapshots_and_member_results_resolve_after_retraction() {
+        let mut connection = database();
+        register_object(&mut connection);
+        let snapshot_secondary = b"workflow-snapshot-secondary";
+        let journal_primary = b"workflow-journal-primary";
+        let journal_secondary = b"workflow-journal-secondary";
+        register_object_key(&mut connection, snapshot_secondary, 12);
+        register_object_key(&mut connection, journal_primary, 13);
+        register_object_key(&mut connection, journal_secondary, 14);
+        let workflow_key = entity("workflow", "workflow-main");
+        let member_key = entity("workflow_member", "workflow-main/agent-a");
+
+        let primary_snapshot_record = direct_record(1, 0, 1, 20, b"snapshot-primary");
+        let mut primary_snapshot = FactBatch::new(2, 1).unwrap();
+        primary_snapshot
+            .push(
+                &primary_snapshot_record,
+                Fact::WorkflowSnapshot(workflow_snapshot_fact("completed", 1, "primary")),
+            )
+            .unwrap();
+        commit_direct_batch(
+            &mut connection,
+            &primary_snapshot_record,
+            1,
+            0,
+            21,
+            &primary_snapshot,
+        );
+
+        let secondary_snapshot_record = object_record(
+            2,
+            1,
+            SourceCursor::append_offset(0),
+            SourceCursor::append_offset(1),
+            30,
+            b"snapshot-secondary",
+        );
+        let mut secondary_snapshot = FactBatch::new(2, 1).unwrap();
+        secondary_snapshot
+            .push(
+                &secondary_snapshot_record,
+                Fact::WorkflowSnapshot(workflow_snapshot_fact("failed", 1, "secondary")),
+            )
+            .unwrap();
+        commit_object_batch(
+            &mut connection,
+            snapshot_secondary,
+            &secondary_snapshot_record,
+            1,
+            SourceCursor::append_offset(0).into_bytes(),
+            31,
+            &secondary_snapshot,
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT resolution_status || ':' || snapshot_assertion_count || ':' || competing_snapshot_count FROM canonical_workflows WHERE workflow_key = ?1",
+                    [workflow_key.as_bytes()],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "conflicting:2:1"
+        );
+
+        let retracted_snapshot_record = object_record(
+            2,
+            1,
+            SourceCursor::append_offset(1),
+            SourceCursor::append_offset(2),
+            40,
+            b"snapshot-secondary-deleted",
+        );
+        commit_object_batch(
+            &mut connection,
+            snapshot_secondary,
+            &retracted_snapshot_record,
+            1,
+            SourceCursor::append_offset(1).into_bytes(),
+            41,
+            &FactBatch::new(1, 1).unwrap(),
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT resolution_status || ':' || competing_snapshot_count FROM canonical_workflows WHERE workflow_key = ?1",
+                    [workflow_key.as_bytes()],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "resolved:0"
+        );
+
+        let primary_result_record = object_record(
+            3,
+            1,
+            SourceCursor::append_offset(0),
+            SourceCursor::append_offset(1),
+            50,
+            b"member-result-primary",
+        );
+        let mut primary_result = FactBatch::new(2, 1).unwrap();
+        primary_result
+            .push(
+                &primary_result_record,
+                Fact::WorkflowMemberEvent(workflow_member_fact(
+                    "agent-a",
+                    "member-1",
+                    WorkflowMemberEventKind::Result,
+                    Some(serde_json::json!({"answer": "primary"})),
+                )),
+            )
+            .unwrap();
+        commit_object_batch(
+            &mut connection,
+            journal_primary,
+            &primary_result_record,
+            1,
+            SourceCursor::append_offset(0).into_bytes(),
+            51,
+            &primary_result,
+        );
+
+        let secondary_result_record = object_record(
+            4,
+            1,
+            SourceCursor::append_offset(0),
+            SourceCursor::append_offset(1),
+            60,
+            b"member-result-secondary",
+        );
+        let mut secondary_result = FactBatch::new(2, 1).unwrap();
+        secondary_result
+            .push(
+                &secondary_result_record,
+                Fact::WorkflowMemberEvent(workflow_member_fact(
+                    "agent-a",
+                    "member-other-key",
+                    WorkflowMemberEventKind::Result,
+                    Some(serde_json::json!({"answer": "secondary"})),
+                )),
+            )
+            .unwrap();
+        commit_object_batch(
+            &mut connection,
+            journal_secondary,
+            &secondary_result_record,
+            1,
+            SourceCursor::append_offset(0).into_bytes(),
+            61,
+            &secondary_result,
+        );
+        let conflicting_member: (String, i64, i64, i64) = connection
+            .query_row(
+                "SELECT resolution_status, result_assertion_count, competing_result_count, event_key_conflict FROM canonical_workflow_members WHERE member_key = ?1",
+                [member_key.as_bytes()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(conflicting_member, ("conflicting".to_string(), 2, 1, 1));
+
+        let retracted_result_record = object_record(
+            4,
+            2,
+            SourceCursor::append_offset(0),
+            SourceCursor::append_offset(1),
+            70,
+            b"member-result-secondary-rewritten",
+        );
+        commit_object_batch(
+            &mut connection,
+            journal_secondary,
+            &retracted_result_record,
+            1,
+            SourceCursor::append_offset(1).into_bytes(),
+            71,
+            &FactBatch::new(1, 1).unwrap(),
+        );
+        let resolved_member: (String, String, i64, i64, i64) = connection
+            .query_row(
+                "SELECT member_status, resolution_status, result_assertion_count, competing_result_count, event_key_conflict FROM canonical_workflow_members WHERE member_key = ?1",
+                [member_key.as_bytes()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            resolved_member,
+            ("orphan_result".to_string(), "resolved".to_string(), 1, 0, 0)
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT operation FROM change_log WHERE topic = 'diagnostic.runtime.workflow-member-conflict' AND entity_key = ?1 ORDER BY commit_seq DESC LIMIT 1",
+                    [member_key.as_bytes()],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "delete"
+        );
+    }
+
+    #[test]
+    fn retracting_a_decisive_member_identity_conflict_refreshes_both_workflows() {
+        let mut connection = database();
+        register_object(&mut connection);
+        let primary_object = b"workflow-member-primary";
+        let secondary_object = b"workflow-member-secondary";
+        register_object_key(&mut connection, primary_object, 12);
+        register_object_key(&mut connection, secondary_object, 13);
+        let primary_workflow = entity("workflow", "workflow-main");
+        let secondary_workflow = entity("workflow", "workflow-other");
+        let member_key = entity("workflow_member", "workflow-main/agent-a");
+
+        let primary_record = object_record(
+            2,
+            1,
+            SourceCursor::append_offset(0),
+            SourceCursor::append_offset(1),
+            20,
+            b"member-primary",
+        );
+        let mut primary = FactBatch::new(2, 1).unwrap();
+        primary
+            .push(
+                &primary_record,
+                Fact::WorkflowMemberEvent(workflow_member_fact(
+                    "agent-a",
+                    "member-1",
+                    WorkflowMemberEventKind::Started,
+                    None,
+                )),
+            )
+            .unwrap();
+        commit_object_batch(
+            &mut connection,
+            primary_object,
+            &primary_record,
+            1,
+            SourceCursor::append_offset(0).into_bytes(),
+            21,
+            &primary,
+        );
+
+        let secondary_record = object_record(
+            3,
+            1,
+            SourceCursor::append_offset(0),
+            SourceCursor::append_offset(1),
+            30,
+            b"member-secondary",
+        );
+        let mut competing_fact = workflow_member_fact(
+            "agent-a",
+            "member-1",
+            WorkflowMemberEventKind::Started,
+            None,
+        );
+        competing_fact.workflow = secondary_workflow.clone();
+        competing_fact.native_workflow_id = "wf_other".to_string();
+        let mut secondary = FactBatch::new(2, 1).unwrap();
+        secondary
+            .push(&secondary_record, Fact::WorkflowMemberEvent(competing_fact))
+            .unwrap();
+        commit_object_batch(
+            &mut connection,
+            secondary_object,
+            &secondary_record,
+            1,
+            SourceCursor::append_offset(0).into_bytes(),
+            31,
+            &secondary,
+        );
+
+        let (decisive_object_id, decisive_workflow): (i64, Vec<u8>) = connection
+            .query_row(
+                r#"
+                SELECT assertion.source_object_id, member.workflow_key
+                FROM canonical_workflow_members AS member
+                JOIN workflow_member_event_assertions AS assertion
+                  ON assertion.fact_id = member.decisive_started_fact_id
+                WHERE member.member_key = ?1
+                "#,
+                [member_key.as_bytes()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT identity_conflict FROM canonical_workflow_members WHERE member_key = ?1",
+                    [member_key.as_bytes()],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            1
+        );
+
+        let (removed_object, remaining_workflow) = if decisive_object_id == 2 {
+            (primary_object.as_slice(), secondary_workflow.as_bytes())
+        } else {
+            assert_eq!(decisive_object_id, 3);
+            (secondary_object.as_slice(), primary_workflow.as_bytes())
+        };
+        let rewritten = object_record(
+            decisive_object_id as u64,
+            2,
+            SourceCursor::append_offset(0),
+            SourceCursor::append_offset(1),
+            40,
+            b"decisive-member-retracted",
+        );
+        commit_object_batch(
+            &mut connection,
+            removed_object,
+            &rewritten,
+            1,
+            SourceCursor::append_offset(1).into_bytes(),
+            41,
+            &FactBatch::new(1, 1).unwrap(),
+        );
+
+        let canonical_member: (Vec<u8>, i64) = connection
+            .query_row(
+                "SELECT workflow_key, identity_conflict FROM canonical_workflow_members WHERE member_key = ?1",
+                [member_key.as_bytes()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(canonical_member, (remaining_workflow.to_vec(), 0));
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT observed_member_count FROM canonical_workflows WHERE workflow_key = ?1",
+                    [remaining_workflow],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM canonical_workflows WHERE workflow_key = ?1",
+                    [decisive_workflow],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            0
         );
     }
 

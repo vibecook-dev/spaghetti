@@ -515,6 +515,69 @@ pub struct ArtifactContentFact {
     pub size_bytes: u64,
 }
 
+/// Normalized workflow-container status. This status applies only to the
+/// workflow orchestration record; it is never copied onto member child runs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WorkflowStatus {
+    Pending,
+    Running,
+    Succeeded,
+    Failed,
+    Cancelled,
+    Other(String),
+}
+
+/// One independently replaceable native workflow run summary. The full
+/// snapshot remains available for forward-compatible query while the common
+/// fields provide stable indexing and conflict reduction.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkflowSnapshotFact {
+    pub workflow: EntityKey,
+    pub session: EntityKey,
+    pub project: EntityKey,
+    pub native_workflow_id: String,
+    pub native_task_id: String,
+    pub name: String,
+    pub native_status: String,
+    pub status: WorkflowStatus,
+    pub default_model: String,
+    pub script: String,
+    pub script_path: String,
+    pub args: Option<String>,
+    pub summary: String,
+    pub error: Option<String>,
+    pub started_at: QualifiedTimestamp,
+    pub finished_at: QualifiedTimestamp,
+    pub duration_ms: u64,
+    pub agent_count: u64,
+    pub total_tokens: u64,
+    pub total_tool_calls: u64,
+    pub native_snapshot: Value,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WorkflowMemberEventKind {
+    Started,
+    Result,
+}
+
+/// One append-only workflow journal event. It proves membership and native
+/// start/result observation, but a result does not by itself classify the
+/// child run as succeeded or failed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkflowMemberEventFact {
+    pub workflow: EntityKey,
+    pub member: EntityKey,
+    pub child_run: EntityKey,
+    pub session: EntityKey,
+    pub project: EntityKey,
+    pub native_workflow_id: String,
+    pub native_agent_id: String,
+    pub native_event_key: String,
+    pub kind: WorkflowMemberEventKind,
+    pub result: Option<Value>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EvidenceKind {
     RunDeclared,
@@ -614,6 +677,8 @@ pub enum Fact {
     PlanSnapshot(PlanSnapshotFact),
     ArtifactMetadataSnapshot(ArtifactMetadataSnapshotFact),
     ArtifactContent(ArtifactContentFact),
+    WorkflowSnapshot(WorkflowSnapshotFact),
+    WorkflowMemberEvent(WorkflowMemberEventFact),
     RunEvidence(RunEvidenceFact),
     Usage(UsageFact),
     UnknownRecord {
@@ -639,6 +704,8 @@ impl Fact {
             Self::PlanSnapshot(_) => "plan_snapshot",
             Self::ArtifactMetadataSnapshot(_) => "artifact_metadata_snapshot",
             Self::ArtifactContent(_) => "artifact_content",
+            Self::WorkflowSnapshot(_) => "workflow_snapshot",
+            Self::WorkflowMemberEvent(_) => "workflow_member_event",
             Self::RunEvidence(_) => "run_evidence",
             Self::Usage(_) => "usage",
             Self::UnknownRecord { .. } => "unknown_record",
@@ -660,6 +727,8 @@ impl Fact {
             Self::PlanSnapshot(fact) => Some(&fact.plan),
             Self::ArtifactMetadataSnapshot(fact) => Some(&fact.session),
             Self::ArtifactContent(fact) => Some(&fact.artifact),
+            Self::WorkflowSnapshot(fact) => Some(&fact.workflow),
+            Self::WorkflowMemberEvent(fact) => Some(&fact.member),
             Self::RunEvidence(fact) => Some(&fact.run),
             Self::Usage(fact) => Some(&fact.subject),
             Self::UnknownRecord { .. } => None,

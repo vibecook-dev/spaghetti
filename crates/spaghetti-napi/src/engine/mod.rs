@@ -12,6 +12,7 @@ mod projection;
 mod query_pool;
 mod task_projection;
 mod team_projection;
+mod workflow_projection;
 mod writer;
 
 use std::fs;

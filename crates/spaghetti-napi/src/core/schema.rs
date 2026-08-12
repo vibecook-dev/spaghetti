@@ -64,7 +64,9 @@ use thiserror::Error;
 /// coverage, canonical current rows, and conflict provenance.
 /// v25: transcript artifact metadata, independently replaceable file-history
 /// content, late-join availability, and conflict provenance.
-pub const SCHEMA_VERSION: u32 = 25;
+/// v26: workflow run snapshots, append journal member events, late joins, and
+/// workflow/member conflict provenance.
+pub const SCHEMA_VERSION: u32 = 26;
 
 /// Full DDL for the current schema — lifted verbatim from the TS `SCHEMA_SQL`
 /// template literal. Whitespace differs; structure does not.
@@ -1014,6 +1016,119 @@ CREATE TABLE IF NOT EXISTS canonical_artifacts (
   last_commit_seq INTEGER NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS workflow_snapshot_assertions (
+  fact_id BLOB PRIMARY KEY REFERENCES fact_records(fact_id) ON DELETE CASCADE,
+  workflow_key BLOB NOT NULL,
+  session_key BLOB NOT NULL,
+  project_key BLOB NOT NULL,
+  native_workflow_id TEXT NOT NULL,
+  native_task_id TEXT NOT NULL,
+  name TEXT NOT NULL,
+  native_status TEXT NOT NULL,
+  workflow_status TEXT NOT NULL,
+  default_model TEXT NOT NULL,
+  script TEXT NOT NULL,
+  script_path TEXT NOT NULL,
+  args TEXT,
+  summary TEXT NOT NULL,
+  error TEXT,
+  started_at TEXT NOT NULL,
+  started_at_quality TEXT NOT NULL,
+  finished_at TEXT NOT NULL,
+  finished_at_quality TEXT NOT NULL,
+  duration_ms INTEGER NOT NULL,
+  agent_count INTEGER NOT NULL,
+  total_tokens INTEGER NOT NULL,
+  total_tool_calls INTEGER NOT NULL,
+  native_snapshot_json BLOB NOT NULL,
+  snapshot_digest BLOB NOT NULL,
+  source_object_id INTEGER NOT NULL,
+  source_generation INTEGER NOT NULL,
+  cursor_end BLOB NOT NULL,
+  last_commit_seq INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS workflow_member_event_assertions (
+  fact_id BLOB PRIMARY KEY REFERENCES fact_records(fact_id) ON DELETE CASCADE,
+  workflow_key BLOB NOT NULL,
+  member_key BLOB NOT NULL,
+  child_run_key BLOB NOT NULL,
+  session_key BLOB NOT NULL,
+  project_key BLOB NOT NULL,
+  native_workflow_id TEXT NOT NULL,
+  native_agent_id TEXT NOT NULL,
+  native_event_key TEXT NOT NULL,
+  event_kind TEXT NOT NULL,
+  result_json BLOB,
+  event_digest BLOB NOT NULL,
+  source_object_id INTEGER NOT NULL,
+  source_generation INTEGER NOT NULL,
+  cursor_end BLOB NOT NULL,
+  last_commit_seq INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS canonical_workflows (
+  workflow_key BLOB PRIMARY KEY,
+  session_key BLOB NOT NULL,
+  project_key BLOB NOT NULL,
+  native_workflow_id TEXT NOT NULL,
+  native_task_id TEXT,
+  name TEXT,
+  native_status TEXT,
+  workflow_status TEXT,
+  default_model TEXT,
+  script TEXT,
+  script_path TEXT,
+  args TEXT,
+  summary TEXT,
+  error TEXT,
+  started_at TEXT,
+  started_at_quality TEXT,
+  finished_at TEXT,
+  finished_at_quality TEXT,
+  duration_ms INTEGER,
+  agent_count INTEGER,
+  total_tokens INTEGER,
+  total_tool_calls INTEGER,
+  native_snapshot_json BLOB,
+  snapshot_status TEXT NOT NULL,
+  resolution_status TEXT NOT NULL,
+  decisive_snapshot_fact_id BLOB REFERENCES workflow_snapshot_assertions(fact_id) ON DELETE CASCADE,
+  snapshot_assertion_count INTEGER NOT NULL,
+  competing_snapshot_count INTEGER NOT NULL,
+  observed_member_count INTEGER NOT NULL,
+  started_member_count INTEGER NOT NULL,
+  result_member_count INTEGER NOT NULL,
+  unresolved_member_count INTEGER NOT NULL,
+  conflicting_member_count INTEGER NOT NULL,
+  membership_count_status TEXT NOT NULL,
+  join_conflict INTEGER NOT NULL,
+  last_commit_seq INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS canonical_workflow_members (
+  member_key BLOB PRIMARY KEY,
+  workflow_key BLOB NOT NULL,
+  child_run_key BLOB NOT NULL,
+  session_key BLOB NOT NULL,
+  project_key BLOB NOT NULL,
+  native_workflow_id TEXT NOT NULL,
+  native_agent_id TEXT NOT NULL,
+  native_event_key TEXT NOT NULL,
+  member_status TEXT NOT NULL,
+  result_json BLOB,
+  resolution_status TEXT NOT NULL,
+  decisive_started_fact_id BLOB REFERENCES workflow_member_event_assertions(fact_id) ON DELETE CASCADE,
+  decisive_result_fact_id BLOB REFERENCES workflow_member_event_assertions(fact_id) ON DELETE CASCADE,
+  started_assertion_count INTEGER NOT NULL,
+  competing_started_count INTEGER NOT NULL,
+  result_assertion_count INTEGER NOT NULL,
+  competing_result_count INTEGER NOT NULL,
+  event_key_conflict INTEGER NOT NULL,
+  identity_conflict INTEGER NOT NULL,
+  last_commit_seq INTEGER NOT NULL
+);
+
 
 CREATE TABLE IF NOT EXISTS usage_contributions (
   fact_id BLOB PRIMARY KEY REFERENCES fact_records(fact_id) ON DELETE CASCADE,
@@ -1195,6 +1310,13 @@ CREATE INDEX IF NOT EXISTS idx_artifact_metadata_assertions_artifact ON artifact
 CREATE INDEX IF NOT EXISTS idx_artifact_content_assertions_artifact ON artifact_content_assertions(artifact_key, fact_id);
 CREATE INDEX IF NOT EXISTS idx_artifact_content_assertions_source ON artifact_content_assertions(source_object_id, artifact_key);
 CREATE INDEX IF NOT EXISTS idx_canonical_artifacts_session ON canonical_artifacts(session_key, backup_time, artifact_key);
+CREATE INDEX IF NOT EXISTS idx_workflow_snapshot_assertions_workflow ON workflow_snapshot_assertions(workflow_key, fact_id);
+CREATE INDEX IF NOT EXISTS idx_workflow_snapshot_assertions_source ON workflow_snapshot_assertions(source_object_id, workflow_key);
+CREATE INDEX IF NOT EXISTS idx_workflow_member_event_assertions_member ON workflow_member_event_assertions(member_key, fact_id);
+CREATE INDEX IF NOT EXISTS idx_workflow_member_event_assertions_workflow ON workflow_member_event_assertions(workflow_key, member_key);
+CREATE INDEX IF NOT EXISTS idx_workflow_member_event_assertions_source ON workflow_member_event_assertions(source_object_id, source_generation);
+CREATE INDEX IF NOT EXISTS idx_canonical_workflows_session ON canonical_workflows(session_key, finished_at, workflow_key);
+CREATE INDEX IF NOT EXISTS idx_canonical_workflow_members_workflow ON canonical_workflow_members(workflow_key, native_agent_id);
 CREATE INDEX IF NOT EXISTS idx_usage_contributions_session ON usage_contributions(session_key, fact_id);
 
 -- Persistent FTS5 (content-synced with messages)
@@ -1335,6 +1457,10 @@ const LEGACY_TABLES: &[&str] = &["segments", "search_index", "schema_version"];
 const CURRENT_TABLES: &[&str] = &[
     "search_fts",
     "subagent_search_fts",
+    "canonical_workflow_members",
+    "canonical_workflows",
+    "workflow_member_event_assertions",
+    "workflow_snapshot_assertions",
     "canonical_artifacts",
     "artifact_content_assertions",
     "artifact_metadata_assertions",
@@ -1848,6 +1974,18 @@ mod tests {
         ));
         assert!(object_exists(&conn, "table", "artifact_content_assertions"));
         assert!(object_exists(&conn, "table", "canonical_artifacts"));
+        assert!(object_exists(
+            &conn,
+            "table",
+            "workflow_snapshot_assertions"
+        ));
+        assert!(object_exists(
+            &conn,
+            "table",
+            "workflow_member_event_assertions"
+        ));
+        assert!(object_exists(&conn, "table", "canonical_workflows"));
+        assert!(object_exists(&conn, "table", "canonical_workflow_members"));
         assert!(object_exists(&conn, "table", "usage_contributions"));
         assert!(object_exists(&conn, "table", "usage_totals"));
         assert!(object_exists(&conn, "table", "search_fts")); // FTS5 virtual table
@@ -1867,6 +2005,16 @@ mod tests {
             &conn,
             "index",
             "idx_canonical_tasks_collection"
+        ));
+        assert!(object_exists(
+            &conn,
+            "index",
+            "idx_workflow_member_event_assertions_workflow"
+        ));
+        assert!(object_exists(
+            &conn,
+            "index",
+            "idx_canonical_workflow_members_workflow"
         ));
         assert!(object_exists(&conn, "trigger", "messages_ai"));
         assert!(object_exists(&conn, "trigger", "messages_ad"));

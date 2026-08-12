@@ -24,5 +24,6 @@ pub use facts::{
     TaskCollectionKind, TaskItemSnapshot, TaskSnapshotCoverage, TaskSnapshotFact, TaskStatus,
     TeamInboxMessageSnapshot, TeamInboxSnapshotFact, TeamMemberSnapshot, TeamSnapshotFact,
     TimestampQuality, TokenUsage, UsageAccounting, UsageFact, UsageScope, ValueQuality,
+    WorkflowMemberEventFact, WorkflowMemberEventKind, WorkflowSnapshotFact, WorkflowStatus,
 };
 pub use registry::{AdapterRegistry, AdapterRegistryBuilder};

@@ -120,8 +120,8 @@ remain the release gate for the commit.
 
 ## Remaining Phase 5 work
 
-Active-session presence, tasks/todos/plans, and file-history artifacts are now
-implemented in adjacent Phase 5 packs. The remaining source families are
-workflows, sessions-index, memory, tool results, and settings. The observation
+Active-session presence, tasks/todos/plans, file-history artifacts, and
+workflows are now implemented in adjacent Phase 5 packs. The remaining source
+families are sessions-index, memory, tool results, and settings. The observation
 coordinator and production live cutover are still required for the Phase 5
 exit gate.
