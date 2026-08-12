@@ -36,6 +36,7 @@ use super::runtime_query::{
     read_run_state, read_runtime_snapshot, validate_run_state_request, validate_runtime_request,
     RunStateLookup, RunStateRequest, RuntimeSnapshot, RuntimeSnapshotRequest,
 };
+use super::search_query::{read_search_page, validate_search_page, SearchPage, SearchPageRequest};
 use super::team_query::{
     read_team_details, read_team_inbox_page, read_team_message_page, read_team_page,
     validate_team_details, validate_team_inbox_page, validate_team_message_page,
@@ -290,6 +291,12 @@ enum QueryCommand {
         cancellation: QueryCancellationToken,
         request: MessagePageRequest,
         response: Sender<Result<MessagePage, EngineError>>,
+    },
+    Search {
+        cancellation_epoch: u64,
+        cancellation: QueryCancellationToken,
+        request: SearchPageRequest,
+        response: Sender<Result<SearchPage, EngineError>>,
     },
     MemoryDocuments {
         cancellation_epoch: u64,
@@ -611,6 +618,23 @@ impl QueryClient {
         self.send_cancellable(
             cancellation,
             |cancellation_epoch, cancellation, response| QueryCommand::Messages {
+                cancellation_epoch,
+                cancellation,
+                request,
+                response,
+            },
+        )
+    }
+
+    pub fn search_cancellable(
+        &self,
+        request: SearchPageRequest,
+        cancellation: QueryCancellationToken,
+    ) -> Result<SearchPage, EngineError> {
+        validate_search_page(&request)?;
+        self.send_cancellable(
+            cancellation,
+            |cancellation_epoch, cancellation, response| QueryCommand::Search {
                 cancellation_epoch,
                 cancellation,
                 request,
@@ -1323,6 +1347,22 @@ fn query_thread(
                     cancellation_epoch,
                     &cancellation,
                     || read_message_page(&connection, &request),
+                );
+                let _ = response.send(result);
+            }
+            QueryCommand::Search {
+                cancellation_epoch,
+                cancellation,
+                request,
+                response,
+            } => {
+                let _in_flight = InFlightGuard::enter(&control.in_flight);
+                let result = run_cancellable_query(
+                    &connection,
+                    &control,
+                    cancellation_epoch,
+                    &cancellation,
+                    || read_search_page(&connection, &request),
                 );
                 let _ = response.send(result);
             }
@@ -3051,6 +3091,22 @@ mod tests {
                 limit: DEFAULT_HISTORY_PAGE_LIMIT,
             })
             .unwrap_err();
+        let search = client
+            .search_cancellable(
+                SearchPageRequest {
+                    text: "missing phrase".to_string(),
+                    project_id: None,
+                    session_id: None,
+                    adapter_ids: Vec::new(),
+                    roles: Vec::new(),
+                    native_kinds: Vec::new(),
+                    branch_kind: None,
+                    cursor: None,
+                    limit: DEFAULT_HISTORY_PAGE_LIMIT,
+                },
+                QueryCancellationToken::default(),
+            )
+            .unwrap();
         let sources = client
             .sources(SourcePageRequest {
                 cursor: None,
@@ -3176,6 +3232,9 @@ mod tests {
         assert_eq!(session_details.at_commit_seq, overview.commit_seq);
         assert!(session_details.session.is_none());
         assert!(matches!(messages, EngineError::InvalidQuery(_)));
+        assert_eq!(search.at_commit_seq, overview.commit_seq);
+        assert_eq!(search.total, 0);
+        assert!(search.items.is_empty());
         assert_eq!(sources.at_commit_seq, overview.commit_seq);
         assert!(sources.items.is_empty());
         assert_eq!(canonical_stats.at_commit_seq, overview.commit_seq);
@@ -3365,6 +3424,39 @@ mod tests {
         assert!(matches!(
             client.plans_cancellable(
                 PlanPageRequest {
+                    cursor: None,
+                    limit: DEFAULT_HISTORY_PAGE_LIMIT,
+                },
+                cancellation,
+            ),
+            Err(EngineError::QueryCancelled)
+        ));
+        assert!(client.commands.is_empty());
+
+        pool.shutdown().unwrap();
+        writer.shutdown().unwrap();
+    }
+
+    #[test]
+    fn pre_cancelled_search_request_never_enters_the_worker_queue() {
+        let dir = tempdir().unwrap();
+        let database = dir.path().join("search-cancel.db");
+        let mut writer = WriterRuntime::start(database.clone()).unwrap();
+        let mut pool = QueryPool::start(database, 1).unwrap();
+        let client = pool.client();
+        let cancellation = QueryCancellationToken::default();
+        cancellation.cancel();
+
+        assert!(matches!(
+            client.search_cancellable(
+                SearchPageRequest {
+                    text: "cancel me".to_string(),
+                    project_id: None,
+                    session_id: None,
+                    adapter_ids: Vec::new(),
+                    roles: Vec::new(),
+                    native_kinds: Vec::new(),
+                    branch_kind: None,
                     cursor: None,
                     limit: DEFAULT_HISTORY_PAGE_LIMIT,
                 },

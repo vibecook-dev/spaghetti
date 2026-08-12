@@ -38,6 +38,11 @@ export declare class SpaghettiEngine {
    */
   getMessages(options: EngineMessagePageOptions, signal?: AbortSignal | undefined | null): Promise<EngineMessagePage>
   /**
+   * Search all canonical root and delegated messages in one FTS score
+   * domain. Exact totals, filtering, snippets, and paging are Rust-owned.
+   */
+  search(options: EngineSearchPageOptions, signal?: AbortSignal | undefined | null): Promise<EngineSearchPage>
+  /**
    * Page canonical project-memory documents. Exact UTF-8 content and row
    * count are bounded in Rust.
    */
@@ -604,6 +609,66 @@ export interface EngineRuntimeSnapshotOptions {
    * validated before querying.
    */
   sessionId?: string
+  cursor?: string
+  /** Page size. Defaults to 50 and is capped by the Rust query engine. */
+  limit?: number
+}
+
+export interface EngineSearchHit {
+  messageId: string
+  projectId?: string
+  sessionId: string
+  runId: string
+  parentRunId?: string
+  branchKind: string
+  adapterId: string
+  sourceInstanceId: number
+  nativeProjectKey?: string
+  nativeSessionId?: string
+  nativeRunId?: string
+  nativeChildId?: string
+  nativeTaskId?: string
+  delegationStatus?: string
+  nativeMessageId?: string
+  nativeKind: string
+  role: string
+  model?: string
+  sourceTime?: string
+  sourceTimeQuality?: string
+  snippet: string
+  /** SQLite FTS5 BM25 rank. Lower values sort first. */
+  score: number
+  decisiveFactId: string
+  observedAtUnixMs: number
+  sourceObjectId: number
+  sourceGeneration: number
+  lastCommitSeq: number
+}
+
+export interface EngineSearchPage {
+  contractVersion: number
+  atCommitSeq: number
+  querySyntax: string
+  scoreDirection: string
+  totalIsExact: boolean
+  total: number
+  items: Array<EngineSearchHit>
+  payloadBytes: number
+  payloadByteLimit: number
+  nextCursor?: string
+}
+
+export interface EngineSearchPageOptions {
+  /** Search text interpreted as one literal FTS phrase. */
+  text: string
+  projectId?: string
+  sessionId?: string
+  adapterIds?: Array<string>
+  roles?: Array<string>
+  nativeKinds?: Array<string>
+  /** `all` (default), `root`, `delegated`, or `unknown`. */
+  branchKind?: string
+  /** Opaque rank/keyset cursor returned by the preceding page. */
   cursor?: string
   /** Page size. Defaults to 50 and is capped by the Rust query engine. */
   limit?: number

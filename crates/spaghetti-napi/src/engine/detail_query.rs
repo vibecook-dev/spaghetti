@@ -1260,18 +1260,20 @@ mod tests {
             .execute(
                 r#"
                 INSERT INTO canonical_messages (
-                    message_key, session_key, native_message_id, native_kind,
-                    role, content_json, source_time, source_time_quality,
-                    parent_native_message_id, model, search_text, raw_json,
-                    fact_id, source_object_id, source_generation,
-                    cursor_start, cursor_end, last_commit_seq
-                ) VALUES (?1, ?2, ?3, 'user', 'user', ?4, ?5,
-                          CASE WHEN ?5 IS NULL THEN NULL ELSE 'native_exact' END,
-                          NULL, NULL, ?6, ?7, ?8, 1, 1, ?9, ?10, 1)
+                    message_key, session_key, run_key, native_message_id,
+                    native_kind, role, content_json, source_time,
+                    source_time_quality, parent_native_message_id, model,
+                    search_text, raw_json, fact_id, source_object_id,
+                    source_generation, cursor_start, cursor_end,
+                    last_commit_seq
+                ) VALUES (?1, ?2, ?3, ?4, 'user', 'user', ?5, ?6,
+                          CASE WHEN ?6 IS NULL THEN NULL ELSE 'native_exact' END,
+                          NULL, NULL, ?7, ?8, ?9, 1, 1, ?10, ?11, 1)
                 "#,
                 params![
                     key,
                     b"session".as_slice(),
+                    b"run".as_slice(),
                     native_id,
                     content.as_bytes(),
                     source_time,

@@ -94,7 +94,10 @@ import type { SqliteService } from '../io/index.js';
 // native global/local effective-setting reduction.
 // v31: separately versioned common-driver checkpoints for restart-safe source
 // resume without conflating driver state with adapter decoder state.
-export const SCHEMA_VERSION = 31;
+// v32: message-to-run identity plus a writer-maintained canonical-message
+// FTS5 projection. Existing databases rebuild so every canonical row is
+// guaranteed to have both its relation and search index entry.
+export const SCHEMA_VERSION = 32;
 
 export const TOKEN_ACTIVITY_TRIGGER_NAMES = [
   'token_activity_messages_ai',
@@ -826,6 +829,7 @@ CREATE TABLE IF NOT EXISTS canonical_effective_interpretation_settings (
 CREATE TABLE IF NOT EXISTS canonical_messages (
   message_key BLOB PRIMARY KEY,
   session_key BLOB NOT NULL,
+  run_key BLOB NOT NULL,
   native_message_id TEXT,
   native_kind TEXT NOT NULL,
   role TEXT NOT NULL,
@@ -1686,6 +1690,7 @@ CREATE INDEX IF NOT EXISTS idx_message_tool_references_native ON message_tool_re
 CREATE INDEX IF NOT EXISTS idx_message_tool_references_source ON message_tool_references(source_object_id, source_generation, session_key, native_tool_use_id);
 CREATE INDEX IF NOT EXISTS idx_canonical_messages_session_order ON canonical_messages(session_key, source_generation, cursor_start);
 CREATE INDEX IF NOT EXISTS idx_canonical_messages_session_activity ON canonical_messages(session_key, source_time, message_key, source_time_quality, last_commit_seq);
+CREATE INDEX IF NOT EXISTS idx_canonical_messages_run_activity ON canonical_messages(run_key, source_time, message_key);
 CREATE INDEX IF NOT EXISTS idx_canonical_runs_session ON canonical_runs(session_key, run_key);
 CREATE INDEX IF NOT EXISTS idx_canonical_runs_commit ON canonical_runs(last_commit_seq DESC, run_key DESC);
 CREATE INDEX IF NOT EXISTS idx_usage_contributions_session_time ON usage_contributions(session_key, source_time, fact_id);
@@ -1749,6 +1754,7 @@ CREATE INDEX IF NOT EXISTS idx_usage_contributions_session ON usage_contribution
 -- Persistent FTS5 (content-synced with messages)
 CREATE VIRTUAL TABLE IF NOT EXISTS search_fts USING fts5(text_content, content='messages', content_rowid='id');
 CREATE VIRTUAL TABLE IF NOT EXISTS subagent_search_fts USING fts5(search_text, content='subagent_timeline_messages', content_rowid='id');
+CREATE VIRTUAL TABLE IF NOT EXISTS canonical_message_search_fts USING fts5(search_text, content='canonical_messages', content_rowid='rowid');
 
 -- Auto-sync triggers
 CREATE TRIGGER IF NOT EXISTS messages_ai AFTER INSERT ON messages BEGIN
@@ -1771,6 +1777,23 @@ END;
 CREATE TRIGGER IF NOT EXISTS subagent_timeline_au AFTER UPDATE ON subagent_timeline_messages BEGIN
   INSERT INTO subagent_search_fts(subagent_search_fts, rowid, search_text) VALUES ('delete', old.id, old.search_text);
   INSERT INTO subagent_search_fts(rowid, search_text) VALUES (new.id, new.search_text);
+END;
+CREATE TRIGGER IF NOT EXISTS canonical_messages_search_ai AFTER INSERT ON canonical_messages
+WHEN new.search_text IS NOT NULL AND trim(new.search_text) <> '' BEGIN
+  INSERT INTO canonical_message_search_fts(rowid, search_text) VALUES (new.rowid, new.search_text);
+END;
+CREATE TRIGGER IF NOT EXISTS canonical_messages_search_ad AFTER DELETE ON canonical_messages
+WHEN old.search_text IS NOT NULL AND trim(old.search_text) <> '' BEGIN
+  INSERT INTO canonical_message_search_fts(canonical_message_search_fts, rowid, search_text)
+  VALUES ('delete', old.rowid, old.search_text);
+END;
+CREATE TRIGGER IF NOT EXISTS canonical_messages_search_au AFTER UPDATE OF search_text ON canonical_messages BEGIN
+  INSERT INTO canonical_message_search_fts(canonical_message_search_fts, rowid, search_text)
+  SELECT 'delete', old.rowid, old.search_text
+  WHERE old.search_text IS NOT NULL AND trim(old.search_text) <> '';
+  INSERT INTO canonical_message_search_fts(rowid, search_text)
+  SELECT new.rowid, new.search_text
+  WHERE new.search_text IS NOT NULL AND trim(new.search_text) <> '';
 END;
 
 -- Raw rows are canonical. Any mutation invalidates the materialized display
@@ -1832,6 +1855,7 @@ const LEGACY_TABLES = ['segments', 'search_index', 'schema_version'];
 const CURRENT_TABLES = [
   'search_fts',
   'subagent_search_fts',
+  'canonical_message_search_fts',
   'canonical_workflow_members',
   'canonical_workflows',
   'workflow_member_event_assertions',
@@ -1968,6 +1992,9 @@ export function initializeSchema(db: SqliteService): void {
       /* ignore */
     }
     for (const trigger of [
+      'canonical_messages_search_ai',
+      'canonical_messages_search_ad',
+      'canonical_messages_search_au',
       'timeline_dirty_ai',
       'timeline_dirty_ad',
       'timeline_dirty_au',

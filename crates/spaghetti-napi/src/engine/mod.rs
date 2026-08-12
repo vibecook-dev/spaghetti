@@ -17,6 +17,7 @@ mod projection;
 mod query_identity;
 mod query_pool;
 mod runtime_query;
+mod search_query;
 mod session_index_projection;
 mod settings_projection;
 mod supervisor;
@@ -65,6 +66,10 @@ pub use runtime_query::{
     RunStateLookup, RunStateRequest, RuntimePresenceSnapshot, RuntimeRunEvidence,
     RuntimeRunSnapshot, RuntimeSnapshot, RuntimeSnapshotEntry, RuntimeSnapshotRequest,
     DEFAULT_RUNTIME_PAGE_LIMIT, RUNTIME_QUERY_CONTRACT_VERSION,
+};
+pub use search_query::{
+    SearchHit, SearchPage, SearchPageRequest, DEFAULT_SEARCH_PAGE_LIMIT,
+    MAX_SEARCH_PAGE_PAYLOAD_BYTES, SEARCH_QUERY_CONTRACT_VERSION,
 };
 use supervisor::ObservationSupervisor;
 pub use supervisor::ObservationSupervisorOptions;
@@ -449,6 +454,17 @@ impl SpaghettiEngineCore {
     ) -> Result<MessagePage, EngineError> {
         let (_, queries) = self.clients()?;
         queries.messages_cancellable(request, cancellation)
+    }
+
+    /// Search one writer-maintained canonical FTS projection across root and
+    /// delegated messages with one score domain and exact totals.
+    pub fn search_cancellable(
+        &self,
+        request: SearchPageRequest,
+        cancellation: QueryCancellationToken,
+    ) -> Result<SearchPage, EngineError> {
+        let (_, queries) = self.clients()?;
+        queries.search_cancellable(request, cancellation)
     }
 
     /// Page canonical project-memory documents, including exact content and

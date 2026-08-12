@@ -76,7 +76,10 @@ use thiserror::Error;
 /// native global/local effective-setting reduction.
 /// v31: separately versioned common-driver checkpoints for restart-safe source
 /// resume without conflating driver state with adapter decoder state.
-pub const SCHEMA_VERSION: u32 = 31;
+/// v32: message-to-run identity plus a writer-maintained canonical-message
+/// FTS5 projection. This intentionally forces a rebuild so pre-existing
+/// canonical messages cannot appear searchable without index entries.
+pub const SCHEMA_VERSION: u32 = 32;
 
 /// Full DDL for the current schema — lifted verbatim from the TS `SCHEMA_SQL`
 /// template literal. Whitespace differs; structure does not.
@@ -651,6 +654,7 @@ CREATE TABLE IF NOT EXISTS canonical_effective_interpretation_settings (
 CREATE TABLE IF NOT EXISTS canonical_messages (
   message_key BLOB PRIMARY KEY,
   session_key BLOB NOT NULL,
+  run_key BLOB NOT NULL,
   native_message_id TEXT,
   native_kind TEXT NOT NULL,
   role TEXT NOT NULL,
@@ -1511,6 +1515,7 @@ CREATE INDEX IF NOT EXISTS idx_message_tool_references_native ON message_tool_re
 CREATE INDEX IF NOT EXISTS idx_message_tool_references_source ON message_tool_references(source_object_id, source_generation, session_key, native_tool_use_id);
 CREATE INDEX IF NOT EXISTS idx_canonical_messages_session_order ON canonical_messages(session_key, source_generation, cursor_start);
 CREATE INDEX IF NOT EXISTS idx_canonical_messages_session_activity ON canonical_messages(session_key, source_time, message_key, source_time_quality, last_commit_seq);
+CREATE INDEX IF NOT EXISTS idx_canonical_messages_run_activity ON canonical_messages(run_key, source_time, message_key);
 CREATE INDEX IF NOT EXISTS idx_canonical_runs_session ON canonical_runs(session_key, run_key);
 CREATE INDEX IF NOT EXISTS idx_canonical_runs_commit ON canonical_runs(last_commit_seq DESC, run_key DESC);
 CREATE INDEX IF NOT EXISTS idx_usage_contributions_session_time ON usage_contributions(session_key, source_time, fact_id);
@@ -1574,6 +1579,7 @@ CREATE INDEX IF NOT EXISTS idx_usage_contributions_session ON usage_contribution
 -- Persistent FTS5 (content-synced with messages)
 CREATE VIRTUAL TABLE IF NOT EXISTS search_fts USING fts5(text_content, content='messages', content_rowid='id');
 CREATE VIRTUAL TABLE IF NOT EXISTS subagent_search_fts USING fts5(search_text, content='subagent_timeline_messages', content_rowid='id');
+CREATE VIRTUAL TABLE IF NOT EXISTS canonical_message_search_fts USING fts5(search_text, content='canonical_messages', content_rowid='rowid');
 
 -- Auto-sync triggers
 CREATE TRIGGER IF NOT EXISTS messages_ai AFTER INSERT ON messages BEGIN
@@ -1595,6 +1601,23 @@ END;
 CREATE TRIGGER IF NOT EXISTS subagent_timeline_au AFTER UPDATE ON subagent_timeline_messages BEGIN
   INSERT INTO subagent_search_fts(subagent_search_fts, rowid, search_text) VALUES ('delete', old.id, old.search_text);
   INSERT INTO subagent_search_fts(rowid, search_text) VALUES (new.id, new.search_text);
+END;
+CREATE TRIGGER IF NOT EXISTS canonical_messages_search_ai AFTER INSERT ON canonical_messages
+WHEN new.search_text IS NOT NULL AND trim(new.search_text) <> '' BEGIN
+  INSERT INTO canonical_message_search_fts(rowid, search_text) VALUES (new.rowid, new.search_text);
+END;
+CREATE TRIGGER IF NOT EXISTS canonical_messages_search_ad AFTER DELETE ON canonical_messages
+WHEN old.search_text IS NOT NULL AND trim(old.search_text) <> '' BEGIN
+  INSERT INTO canonical_message_search_fts(canonical_message_search_fts, rowid, search_text)
+  VALUES ('delete', old.rowid, old.search_text);
+END;
+CREATE TRIGGER IF NOT EXISTS canonical_messages_search_au AFTER UPDATE OF search_text ON canonical_messages BEGIN
+  INSERT INTO canonical_message_search_fts(canonical_message_search_fts, rowid, search_text)
+  SELECT 'delete', old.rowid, old.search_text
+  WHERE old.search_text IS NOT NULL AND trim(old.search_text) <> '';
+  INSERT INTO canonical_message_search_fts(rowid, search_text)
+  SELECT new.rowid, new.search_text
+  WHERE new.search_text IS NOT NULL AND trim(new.search_text) <> '';
 END;
 CREATE TRIGGER IF NOT EXISTS timeline_dirty_ai AFTER INSERT ON messages BEGIN
   INSERT INTO timeline_dirty_sessions(session_id, source_id, project_slug)
@@ -1709,6 +1732,7 @@ const LEGACY_TABLES: &[&str] = &["segments", "search_index", "schema_version"];
 const CURRENT_TABLES: &[&str] = &[
     "search_fts",
     "subagent_search_fts",
+    "canonical_message_search_fts",
     "canonical_workflow_members",
     "canonical_workflows",
     "workflow_member_event_assertions",
@@ -1798,7 +1822,14 @@ const CURRENT_TABLES: &[&str] = &[
 /// Triggers that are explicitly dropped during a wipe. `DROP TABLE` on their
 /// owning table removes them, but we drop defensively in case the table is
 /// already gone from a partial legacy state.
-const CURRENT_TRIGGERS: &[&str] = &["messages_ai", "messages_ad", "messages_au"];
+const CURRENT_TRIGGERS: &[&str] = &[
+    "messages_ai",
+    "messages_ad",
+    "messages_au",
+    "canonical_messages_search_ai",
+    "canonical_messages_search_ad",
+    "canonical_messages_search_au",
+];
 
 const TOKEN_ACTIVITY_TRIGGERS: &[&str] = &[
     "token_activity_messages_ai",
@@ -2258,6 +2289,11 @@ mod tests {
             "idx_message_tool_references_native"
         ));
         assert!(object_exists(&conn, "table", "canonical_messages"));
+        assert!(object_exists(
+            &conn,
+            "table",
+            "canonical_message_search_fts"
+        ));
         assert!(object_exists(&conn, "table", "canonical_runs"));
         assert!(object_exists(&conn, "table", "run_evidence"));
         assert!(object_exists(&conn, "table", "observed_run_states"));
@@ -2346,6 +2382,11 @@ mod tests {
         assert!(object_exists(
             &conn,
             "index",
+            "idx_canonical_messages_run_activity"
+        ));
+        assert!(object_exists(
+            &conn,
+            "index",
             "idx_canonical_presences_commit"
         ));
         assert!(object_exists(&conn, "index", "idx_canonical_teams_native"));
@@ -2377,6 +2418,21 @@ mod tests {
         assert!(object_exists(&conn, "trigger", "messages_ai"));
         assert!(object_exists(&conn, "trigger", "messages_ad"));
         assert!(object_exists(&conn, "trigger", "messages_au"));
+        assert!(object_exists(
+            &conn,
+            "trigger",
+            "canonical_messages_search_ai"
+        ));
+        assert!(object_exists(
+            &conn,
+            "trigger",
+            "canonical_messages_search_ad"
+        ));
+        assert!(object_exists(
+            &conn,
+            "trigger",
+            "canonical_messages_search_au"
+        ));
         assert!(object_exists(
             &conn,
             "trigger",

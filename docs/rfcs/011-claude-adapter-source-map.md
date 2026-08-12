@@ -130,8 +130,9 @@ Each complete native record or document is decoded once into common facts:
 
 - `SessionFact` with namespaced project/session identity and available cwd,
   branch, first-prompt, AI-title, and custom-title metadata;
-- `MessageFact` with native type/UUID, role, timestamp quality, parent UUID,
-  model, searchable text, verbatim raw JSON, and ordered structured content;
+- `MessageFact` with the explicit emitting run relation, native type/UUID,
+  role, timestamp quality, parent UUID, model, searchable text, verbatim raw
+  JSON, and ordered structured content;
 - `RunFact` for the root or subagent run, including the parent run key for a
   subagent;
 - `DelegationFact` for a subagent, preserving the child run, layout-derived
@@ -276,6 +277,12 @@ fact identities and meanings remain unchanged.
 The additive interpretation-settings stream advances the adapter contract to
 version 13 and declares `claude-code-interpretation-settings-v1`. Earlier
 stream fact identities and meanings remain unchanged.
+
+The explicit message-to-run relation advances the adapter contract to version
+14. Fact ordinals and entity identities remain stable, but every historical
+transcript message fact gains a new common semantic field; transcript objects
+therefore require contract replay before canonical search can classify root,
+delegated, and unresolved branches without path inference.
 
 Team identity comes from the native directory name. Member identity is scoped
 by team plus native member name, and an inbox is scoped by team plus recipient.

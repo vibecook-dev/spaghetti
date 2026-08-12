@@ -405,6 +405,66 @@ export interface SpaghettiEngineMessagePage {
   nextCursor?: string;
 }
 
+export type SpaghettiEngineSearchBranchKind = 'all' | 'root' | 'delegated' | 'unknown';
+
+export interface SpaghettiEngineSearchPageOptions extends SpaghettiEngineHistoryPageOptions {
+  /** Search text is treated as one literal FTS phrase, not as raw FTS syntax. */
+  text: string;
+  projectId?: string;
+  sessionId?: string;
+  adapterIds?: string[];
+  roles?: string[];
+  nativeKinds?: string[];
+  branchKind?: SpaghettiEngineSearchBranchKind;
+}
+
+export interface SpaghettiEngineSearchHit {
+  messageId: string;
+  /** Absent while the referenced canonical session endpoint is unresolved. */
+  projectId?: string;
+  sessionId: string;
+  runId: string;
+  parentRunId?: string;
+  branchKind: Exclude<SpaghettiEngineSearchBranchKind, 'all'>;
+  adapterId: string;
+  sourceInstanceId: number;
+  nativeProjectKey?: string;
+  nativeSessionId?: string;
+  nativeRunId?: string;
+  nativeChildId?: string;
+  nativeTaskId?: string;
+  delegationStatus?: string;
+  nativeMessageId?: string;
+  nativeKind: string;
+  role: string;
+  model?: string;
+  sourceTime?: string;
+  sourceTimeQuality?: SpaghettiEngineTimestampQuality;
+  /** Plain text with excerpts separated by ` … `; the engine adds no markup. */
+  snippet: string;
+  /** SQLite FTS5 BM25 rank. Lower values sort first. */
+  score: number;
+  decisiveFactId: string;
+  observedAtUnixMs: number;
+  sourceObjectId: number;
+  sourceGeneration: number;
+  lastCommitSeq: number;
+}
+
+export interface SpaghettiEngineSearchPage {
+  contractVersion: number;
+  atCommitSeq: number;
+  querySyntax: 'literal_phrase_v1';
+  scoreDirection: 'lower_is_better';
+  totalIsExact: true;
+  total: number;
+  items: SpaghettiEngineSearchHit[];
+  /** UTF-8 bytes in returned snippets. */
+  payloadBytes: number;
+  payloadByteLimit: number;
+  nextCursor?: string;
+}
+
 export type SpaghettiEngineCapabilityPageOptions = SpaghettiEngineHistoryPageOptions;
 
 export interface SpaghettiEngineMemoryDocumentPageOptions extends SpaghettiEngineHistoryPageOptions {
@@ -1090,6 +1150,7 @@ export interface SpaghettiEngine {
   ): Promise<SpaghettiEngineHistorySessionPage>;
   getSession(sessionId: string, signal?: AbortSignal): Promise<SpaghettiEngineSessionDetails>;
   getMessages(options: SpaghettiEngineMessagePageOptions, signal?: AbortSignal): Promise<SpaghettiEngineMessagePage>;
+  search(options: SpaghettiEngineSearchPageOptions, signal?: AbortSignal): Promise<SpaghettiEngineSearchPage>;
   listMemoryDocuments(
     options: SpaghettiEngineMemoryDocumentPageOptions,
     signal?: AbortSignal,
@@ -1307,7 +1368,38 @@ export function openSpaghettiEngine(options: SpaghettiEngineOpenOptions): Promis
     if (failure) throw failure;
     throw new Error('Persistent SpaghettiEngine requires the native addon, but it could not be loaded.');
   }
-  return addon.openSpaghettiEngine(options);
+  return addon.openSpaghettiEngine(options).then(withAbortSignalPreflight);
+}
+
+/**
+ * NAPI-RS observes abort events after a task is created, but an already
+ * aborted signal has no future event to deliver. Keep that transport detail
+ * out of every query method by rejecting it once at the SDK boundary.
+ */
+function withAbortSignalPreflight(engine: SpaghettiEngine): SpaghettiEngine {
+  return new Proxy(engine, {
+    get(target, property) {
+      const value: unknown = Reflect.get(target, property, target);
+      if (typeof value !== 'function') return value;
+      return (...args: unknown[]) => {
+        const aborted = args.find(isAbortedSignal);
+        if (aborted) return Promise.reject(aborted.reason ?? abortError());
+        return Reflect.apply(value, target, args);
+      };
+    },
+  });
+}
+
+function isAbortedSignal(value: unknown): value is AbortSignal {
+  if (typeof value !== 'object' || value === null) return false;
+  const candidate = value as Partial<AbortSignal>;
+  return candidate.aborted === true && typeof candidate.addEventListener === 'function';
+}
+
+function abortError(): Error {
+  const error = new Error('The operation was aborted.');
+  error.name = 'AbortError';
+  return error;
 }
 
 /**

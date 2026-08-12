@@ -352,6 +352,9 @@ pub enum ContentBlock {
 pub struct MessageFact {
     pub message: EntityKey,
     pub session: EntityKey,
+    /// Run that emitted the message. This is an explicit common relation,
+    /// not inferred later from source paths or callback ordering.
+    pub run: EntityKey,
     pub native_message_id: Option<String>,
     pub native_kind: String,
     pub role: MessageRole,

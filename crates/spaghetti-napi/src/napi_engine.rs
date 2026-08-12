@@ -16,17 +16,17 @@ use crate::engine::{
     ObservationSupervisorOptions, OwnerMetadata, PlanDetail, PlanPage, PlanPageRequest,
     QueryCancellationToken, ReconcileOutcome, ReconcileRequest, RunStateLookup, RunStateRequest,
     RuntimePresenceSnapshot, RuntimeRunEvidence, RuntimeRunSnapshot, RuntimeSnapshot,
-    RuntimeSnapshotRequest, SessionDetail, SessionDetails, SessionDetailsRequest,
-    SessionIndexDetail, SourcePage, SourcePageRequest, SourceSummary, SpaghettiEngineCore,
-    TaskCollectionPage, TaskCollectionPageRequest, TaskCollectionSummary, TaskDetail, TaskPage,
-    TaskPageRequest, TeamConfigSummary, TeamDetails, TeamDetailsRequest, TeamInboxMessage,
-    TeamInboxMessagePage, TeamInboxMessagePageRequest, TeamInboxPage, TeamInboxPageRequest,
-    TeamInboxSummary, TeamMember, TeamPage, TeamPageRequest, TeamSummary, ToolResultDetail,
-    ToolResultPage, ToolResultPageRequest, UntimedUsageSummary, UsageActivityDay,
-    UsageActivityReport, UsageActivityRequest, UsageAggregate, UsageCoverageSummary,
-    UsageScopeRequest, UsageTokenValues, UsageTotalsReport, DEFAULT_CAPABILITY_PAGE_LIMIT,
-    DEFAULT_DETAIL_PAGE_LIMIT, DEFAULT_HISTORY_PAGE_LIMIT, DEFAULT_RUNTIME_PAGE_LIMIT,
-    DEFAULT_TEAM_PAGE_LIMIT,
+    RuntimeSnapshotRequest, SearchHit, SearchPage, SearchPageRequest, SessionDetail,
+    SessionDetails, SessionDetailsRequest, SessionIndexDetail, SourcePage, SourcePageRequest,
+    SourceSummary, SpaghettiEngineCore, TaskCollectionPage, TaskCollectionPageRequest,
+    TaskCollectionSummary, TaskDetail, TaskPage, TaskPageRequest, TeamConfigSummary, TeamDetails,
+    TeamDetailsRequest, TeamInboxMessage, TeamInboxMessagePage, TeamInboxMessagePageRequest,
+    TeamInboxPage, TeamInboxPageRequest, TeamInboxSummary, TeamMember, TeamPage, TeamPageRequest,
+    TeamSummary, ToolResultDetail, ToolResultPage, ToolResultPageRequest, UntimedUsageSummary,
+    UsageActivityDay, UsageActivityReport, UsageActivityRequest, UsageAggregate,
+    UsageCoverageSummary, UsageScopeRequest, UsageTokenValues, UsageTotalsReport,
+    DEFAULT_CAPABILITY_PAGE_LIMIT, DEFAULT_DETAIL_PAGE_LIMIT, DEFAULT_HISTORY_PAGE_LIMIT,
+    DEFAULT_RUNTIME_PAGE_LIMIT, DEFAULT_SEARCH_PAGE_LIMIT, DEFAULT_TEAM_PAGE_LIMIT,
 };
 
 #[napi(object)]
@@ -600,6 +600,123 @@ impl From<MessagePage> for EngineMessagePage {
             at_commit_seq: value.at_commit_seq as f64,
             project_id: value.project_id,
             session_id: value.session_id,
+            items: value.items.into_iter().map(Into::into).collect(),
+            payload_bytes: value.payload_bytes as f64,
+            payload_byte_limit: value.payload_byte_limit as f64,
+            next_cursor: value.next_cursor,
+        }
+    }
+}
+
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct EngineSearchPageOptions {
+    /// Search text interpreted as one literal FTS phrase.
+    pub text: String,
+    pub project_id: Option<String>,
+    pub session_id: Option<String>,
+    pub adapter_ids: Option<Vec<String>>,
+    pub roles: Option<Vec<String>>,
+    pub native_kinds: Option<Vec<String>>,
+    /// `all` (default), `root`, `delegated`, or `unknown`.
+    pub branch_kind: Option<String>,
+    /// Opaque rank/keyset cursor returned by the preceding page.
+    pub cursor: Option<String>,
+    /// Page size. Defaults to 50 and is capped by the Rust query engine.
+    pub limit: Option<u32>,
+}
+
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct EngineSearchHit {
+    pub message_id: String,
+    pub project_id: Option<String>,
+    pub session_id: String,
+    pub run_id: String,
+    pub parent_run_id: Option<String>,
+    pub branch_kind: String,
+    pub adapter_id: String,
+    pub source_instance_id: f64,
+    pub native_project_key: Option<String>,
+    pub native_session_id: Option<String>,
+    pub native_run_id: Option<String>,
+    pub native_child_id: Option<String>,
+    pub native_task_id: Option<String>,
+    pub delegation_status: Option<String>,
+    pub native_message_id: Option<String>,
+    pub native_kind: String,
+    pub role: String,
+    pub model: Option<String>,
+    pub source_time: Option<String>,
+    pub source_time_quality: Option<String>,
+    pub snippet: String,
+    /// SQLite FTS5 BM25 rank. Lower values sort first.
+    pub score: f64,
+    pub decisive_fact_id: String,
+    pub observed_at_unix_ms: f64,
+    pub source_object_id: f64,
+    pub source_generation: f64,
+    pub last_commit_seq: f64,
+}
+
+impl From<SearchHit> for EngineSearchHit {
+    fn from(value: SearchHit) -> Self {
+        Self {
+            message_id: value.message_id,
+            project_id: value.project_id,
+            session_id: value.session_id,
+            run_id: value.run_id,
+            parent_run_id: value.parent_run_id,
+            branch_kind: value.branch_kind,
+            adapter_id: value.adapter_id,
+            source_instance_id: value.source_instance_id as f64,
+            native_project_key: value.native_project_key,
+            native_session_id: value.native_session_id,
+            native_run_id: value.native_run_id,
+            native_child_id: value.native_child_id,
+            native_task_id: value.native_task_id,
+            delegation_status: value.delegation_status,
+            native_message_id: value.native_message_id,
+            native_kind: value.native_kind,
+            role: value.role,
+            model: value.model,
+            source_time: value.source_time,
+            source_time_quality: value.source_time_quality,
+            snippet: value.snippet,
+            score: value.score,
+            decisive_fact_id: value.decisive_fact_id,
+            observed_at_unix_ms: value.observed_at_unix_ms as f64,
+            source_object_id: value.source_object_id as f64,
+            source_generation: value.source_generation as f64,
+            last_commit_seq: value.last_commit_seq as f64,
+        }
+    }
+}
+
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct EngineSearchPage {
+    pub contract_version: u32,
+    pub at_commit_seq: f64,
+    pub query_syntax: String,
+    pub score_direction: String,
+    pub total_is_exact: bool,
+    pub total: f64,
+    pub items: Vec<EngineSearchHit>,
+    pub payload_bytes: f64,
+    pub payload_byte_limit: f64,
+    pub next_cursor: Option<String>,
+}
+
+impl From<SearchPage> for EngineSearchPage {
+    fn from(value: SearchPage) -> Self {
+        Self {
+            contract_version: value.contract_version,
+            at_commit_seq: value.at_commit_seq as f64,
+            query_syntax: value.query_syntax,
+            score_direction: value.score_direction,
+            total_is_exact: value.total_is_exact,
+            total: value.total as f64,
             items: value.items.into_iter().map(Into::into).collect(),
             payload_bytes: value.payload_bytes as f64,
             payload_byte_limit: value.payload_byte_limit as f64,
@@ -2291,6 +2408,25 @@ impl SpaghettiEngine {
         )
     }
 
+    /// Search all canonical root and delegated messages in one FTS score
+    /// domain. Exact totals, filtering, snippets, and paging are Rust-owned.
+    #[napi(ts_return_type = "Promise<EngineSearchPage>")]
+    pub fn search(
+        &self,
+        options: EngineSearchPageOptions,
+        signal: Option<AbortSignal>,
+    ) -> AsyncTask<SearchTask> {
+        let cancellation = cancellation_for_signal(signal.as_ref());
+        AsyncTask::with_optional_signal(
+            SearchTask {
+                engine: Arc::clone(&self.inner),
+                options,
+                cancellation,
+            },
+            signal,
+        )
+    }
+
     /// Page canonical project-memory documents. Exact UTF-8 content and row
     /// count are bounded in Rust.
     #[napi(ts_return_type = "Promise<EngineMemoryDocumentPage>")]
@@ -2746,6 +2882,12 @@ pub struct MessagesTask {
     cancellation: QueryCancellationToken,
 }
 
+pub struct SearchTask {
+    engine: Arc<SpaghettiEngineCore>,
+    options: EngineSearchPageOptions,
+    cancellation: QueryCancellationToken,
+}
+
 pub struct MemoryDocumentsTask {
     engine: Arc<SpaghettiEngineCore>,
     options: EngineMemoryDocumentPageOptions,
@@ -3026,6 +3168,35 @@ impl Task for MessagesTask {
                     session_id: self.options.session_id.clone(),
                     cursor: self.options.cursor.clone(),
                     limit: self.options.limit.unwrap_or(DEFAULT_DETAIL_PAGE_LIMIT),
+                },
+                self.cancellation.clone(),
+            )
+            .map(Into::into)
+            .map_err(napi_error)
+    }
+
+    fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
+        Ok(output)
+    }
+}
+
+impl Task for SearchTask {
+    type Output = EngineSearchPage;
+    type JsValue = EngineSearchPage;
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        self.engine
+            .search_cancellable(
+                SearchPageRequest {
+                    text: self.options.text.clone(),
+                    project_id: self.options.project_id.clone(),
+                    session_id: self.options.session_id.clone(),
+                    adapter_ids: self.options.adapter_ids.clone().unwrap_or_default(),
+                    roles: self.options.roles.clone().unwrap_or_default(),
+                    native_kinds: self.options.native_kinds.clone().unwrap_or_default(),
+                    branch_kind: self.options.branch_kind.clone(),
+                    cursor: self.options.cursor.clone(),
+                    limit: self.options.limit.unwrap_or(DEFAULT_SEARCH_PAGE_LIMIT),
                 },
                 self.cancellation.clone(),
             )

@@ -850,6 +850,59 @@ describe('Claude observation shadow native lifecycle', { skip: !native }, () => 
     await assert.rejects(shadow.listArtifacts('not-a-session'), /artifact session id/i);
   });
 
+  test('searches parent and delegated messages in one canonical FTS score domain', async () => {
+    const directory = mkdtempSync(path.join(tmpdir(), 'spaghetti-shadow-search-'));
+    tempDirs.push(directory);
+    const productionDb = path.join(directory, 'legacy.db');
+    const legacy = createSpaghettiService({
+      rootDir: SMALL_CLAUDE_FIXTURE,
+      dbPath: productionDb,
+      engine: 'ts',
+    });
+    legacyServices.push(legacy);
+    await legacy.initialize();
+    const shadow = await openClaudeObservationShadow({
+      productionDbPath: productionDb,
+      roots: [SMALL_CLAUDE_FIXTURE],
+      ownerLabel: 'sdk-shadow-search-query-test',
+    });
+    shadows.push(shadow);
+
+    const marker = await shadow.search({ text: 'searchable-wf-marker', branchKind: 'delegated', limit: 1 });
+    assert.equal(marker.contractVersion, 1);
+    assert.equal(marker.querySyntax, 'literal_phrase_v1');
+    assert.equal(marker.scoreDirection, 'lower_is_better');
+    assert.equal(marker.totalIsExact, true);
+    assert.equal(marker.total, legacy.search({ text: 'searchable-wf-marker' }).total);
+    assert.equal(marker.items.length, 1);
+    assert.equal(marker.items[0]?.branchKind, 'delegated');
+    assert.equal(marker.items[0]?.nativeChildId, 'afixture01');
+    assert.match(marker.items[0]!.snippet, /searchable-wf-marker/);
+    assert.ok(marker.payloadBytes <= marker.payloadByteLimit);
+
+    const all = await shadow.search({ text: 'Add error handling to the parser', limit: 1 });
+    assert.ok(all.total > 1);
+    assert.equal(all.items.length, 1);
+    assert.ok(all.nextCursor);
+    const next = await shadow.search({
+      text: 'Add error handling to the parser',
+      limit: 1,
+      cursor: all.nextCursor,
+    });
+    assert.equal(next.total, all.total);
+    assert.notEqual(next.items[0]?.messageId, all.items[0]?.messageId);
+    assert.equal(next.atCommitSeq, all.atCommitSeq);
+
+    await assert.rejects(
+      shadow.search({ text: 'searchable-wf-marker', branchKind: 'root', cursor: all.nextCursor }),
+      /cursor/i,
+    );
+    await assert.rejects(shadow.search({ text: '   ' }), /search text/i);
+    const controller = new AbortController();
+    controller.abort();
+    await assert.rejects(shadow.search({ text: 'searchable-wf-marker' }, controller.signal), /abort|cancel/i);
+  });
+
   test('matches normalized project/session summaries from the committed TypeScript oracle', async () => {
     const directory = mkdtempSync(path.join(tmpdir(), 'spaghetti-shadow-parity-'));
     tempDirs.push(directory);

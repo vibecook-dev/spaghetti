@@ -130,7 +130,7 @@ impl ClaudeCodeAdapter {
                 id: AdapterId::new(ADAPTER_ID).expect("static Claude adapter id is valid"),
                 display_name: "Claude Code".to_string(),
                 adapter_version: env!("CARGO_PKG_VERSION").to_string(),
-                contract_version: 13,
+                contract_version: 14,
                 source_schema_versions: vec![
                     "claude-code-jsonl-v1".to_string(),
                     "claude-code-subagent-meta-v1".to_string(),
@@ -3560,6 +3560,7 @@ fn decode_transcript_record(
         Fact::Message(MessageFact {
             message: message.clone(),
             session: session.clone(),
+            run: run.clone(),
             native_message_id,
             native_kind: projection.msg_type,
             role,
@@ -4333,7 +4334,7 @@ mod tests {
             std::fs::canonicalize(root.path()).unwrap().join("sessions")
         );
         assert_eq!(streams.len(), 16);
-        assert_eq!(adapter.manifest().contract_version, 13);
+        assert_eq!(adapter.manifest().contract_version, 14);
         assert!(adapter
             .manifest()
             .source_schema_versions

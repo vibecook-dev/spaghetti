@@ -174,18 +174,21 @@ impl TransactionalProjectionWork for FactProjectionWork<'_> {
                         .execute(
                             r#"
                             INSERT INTO canonical_messages (
-                                message_key, session_key, native_message_id,
-                                native_kind, role, content_json, source_time,
-                                source_time_quality, parent_native_message_id,
-                                model, search_text, raw_json, fact_id,
-                                source_object_id, source_generation, cursor_start,
-                                cursor_end, last_commit_seq
+                                message_key, session_key, run_key,
+                                native_message_id, native_kind, role,
+                                content_json, source_time, source_time_quality,
+                                parent_native_message_id, model, search_text,
+                                raw_json, fact_id, source_object_id,
+                                source_generation, cursor_start, cursor_end,
+                                last_commit_seq
                             ) VALUES (
                                 ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
-                                ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18
+                                ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18,
+                                ?19
                             )
                             ON CONFLICT(message_key) DO UPDATE SET
                                 session_key = excluded.session_key,
+                                run_key = excluded.run_key,
                                 native_message_id = excluded.native_message_id,
                                 native_kind = excluded.native_kind,
                                 role = excluded.role,
@@ -206,6 +209,7 @@ impl TransactionalProjectionWork for FactProjectionWork<'_> {
                             params![
                                 fact.message.as_bytes(),
                                 fact.session.as_bytes(),
+                                fact.run.as_bytes(),
                                 fact.native_message_id,
                                 fact.native_kind,
                                 message_role(&fact.role),
@@ -2968,6 +2972,7 @@ mod tests {
         MessageFact {
             message: entity("message", native_message_id),
             session: entity("session", SESSION),
+            run: entity("run", SESSION),
             native_message_id: Some(native_message_id.to_string()),
             native_kind: match &role {
                 MessageRole::Assistant => "assistant",

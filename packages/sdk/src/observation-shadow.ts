@@ -30,6 +30,8 @@ import {
   type SpaghettiEngineRuntimeSnapshot,
   type SpaghettiEngineRuntimeSnapshotOptions,
   type SpaghettiEngineSessionDetails,
+  type SpaghettiEngineSearchPage,
+  type SpaghettiEngineSearchPageOptions,
   type SpaghettiEngineSourcePage,
   type SpaghettiEngineStatus,
   type SpaghettiEngineTaskCollectionPage,
@@ -236,6 +238,8 @@ export interface ClaudeObservationShadow {
     options?: SpaghettiEngineHistoryPageOptions,
     signal?: AbortSignal,
   ): Promise<SpaghettiEngineMessagePage>;
+  /** Search root and delegated canonical messages in one Rust-owned score domain. */
+  search(options: SpaghettiEngineSearchPageOptions, signal?: AbortSignal): Promise<SpaghettiEngineSearchPage>;
   /** Page canonical project-memory documents, index first, with exact content. */
   listMemoryDocuments(
     projectId: string,
@@ -610,6 +614,10 @@ class NativeClaudeObservationShadow implements ClaudeObservationShadow {
   ): Promise<SpaghettiEngineMessagePage> {
     const nativeOptions: SpaghettiEngineMessagePageOptions = { projectId, sessionId, ...options };
     return this.engine.getMessages(nativeOptions, signal);
+  }
+
+  search(options: SpaghettiEngineSearchPageOptions, signal?: AbortSignal): Promise<SpaghettiEngineSearchPage> {
+    return this.engine.search(options, signal);
   }
 
   listMemoryDocuments(
