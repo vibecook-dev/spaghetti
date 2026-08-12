@@ -43,6 +43,9 @@ use super::team_query::{
     validate_team_page, TeamDetails, TeamDetailsRequest, TeamInboxMessagePage,
     TeamInboxMessagePageRequest, TeamInboxPage, TeamInboxPageRequest, TeamPage, TeamPageRequest,
 };
+use super::timeline_query::{
+    read_timeline_page, validate_timeline_page, TimelinePage, TimelinePageRequest,
+};
 use super::usage_query::{
     read_usage_activity, read_usage_totals, validate_usage_activity, validate_usage_scope,
     UsageActivityReport, UsageActivityRequest, UsageScopeRequest, UsageTotalsReport,
@@ -297,6 +300,12 @@ enum QueryCommand {
         cancellation: QueryCancellationToken,
         request: SearchPageRequest,
         response: Sender<Result<SearchPage, EngineError>>,
+    },
+    Timeline {
+        cancellation_epoch: u64,
+        cancellation: QueryCancellationToken,
+        request: TimelinePageRequest,
+        response: Sender<Result<TimelinePage, EngineError>>,
     },
     MemoryDocuments {
         cancellation_epoch: u64,
@@ -635,6 +644,23 @@ impl QueryClient {
         self.send_cancellable(
             cancellation,
             |cancellation_epoch, cancellation, response| QueryCommand::Search {
+                cancellation_epoch,
+                cancellation,
+                request,
+                response,
+            },
+        )
+    }
+
+    pub fn timeline_cancellable(
+        &self,
+        request: TimelinePageRequest,
+        cancellation: QueryCancellationToken,
+    ) -> Result<TimelinePage, EngineError> {
+        validate_timeline_page(&request)?;
+        self.send_cancellable(
+            cancellation,
+            |cancellation_epoch, cancellation, response| QueryCommand::Timeline {
                 cancellation_epoch,
                 cancellation,
                 request,
@@ -1363,6 +1389,22 @@ fn query_thread(
                     cancellation_epoch,
                     &cancellation,
                     || read_search_page(&connection, &request),
+                );
+                let _ = response.send(result);
+            }
+            QueryCommand::Timeline {
+                cancellation_epoch,
+                cancellation,
+                request,
+                response,
+            } => {
+                let _in_flight = InFlightGuard::enter(&control.in_flight);
+                let result = run_cancellable_query(
+                    &connection,
+                    &control,
+                    cancellation_epoch,
+                    &cancellation,
+                    || read_timeline_page(&connection, &request),
                 );
                 let _ = response.send(result);
             }
@@ -3456,6 +3498,42 @@ mod tests {
                     adapter_ids: Vec::new(),
                     roles: Vec::new(),
                     native_kinds: Vec::new(),
+                    branch_kind: None,
+                    cursor: None,
+                    limit: DEFAULT_HISTORY_PAGE_LIMIT,
+                },
+                cancellation,
+            ),
+            Err(EngineError::QueryCancelled)
+        ));
+        assert!(client.commands.is_empty());
+
+        pool.shutdown().unwrap();
+        writer.shutdown().unwrap();
+    }
+
+    #[test]
+    fn pre_cancelled_timeline_request_never_enters_the_worker_queue() {
+        let dir = tempdir().unwrap();
+        let database = dir.path().join("timeline-cancel.db");
+        let mut writer = WriterRuntime::start(database.clone()).unwrap();
+        let mut pool = QueryPool::start(database, 1).unwrap();
+        let client = pool.client();
+        let cancellation = QueryCancellationToken::default();
+        cancellation.cancel();
+
+        assert!(matches!(
+            client.timeline_cancellable(
+                TimelinePageRequest {
+                    project_id: encode_entity_id(PROJECT_ID_PREFIX, b"project"),
+                    session_id: encode_entity_id(SESSION_ID_PREFIX, b"session"),
+                    roles: Vec::new(),
+                    native_kinds: Vec::new(),
+                    include_content_kinds: Vec::new(),
+                    include_tool_names: Vec::new(),
+                    exclude_content_kinds: Vec::new(),
+                    exclude_tool_names: Vec::new(),
+                    search: None,
                     branch_kind: None,
                     cursor: None,
                     limit: DEFAULT_HISTORY_PAGE_LIMIT,

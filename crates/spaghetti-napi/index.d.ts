@@ -43,6 +43,11 @@ export declare class SpaghettiEngine {
    */
   search(options: EngineSearchPageOptions, signal?: AbortSignal | undefined | null): Promise<EngineSearchPage>
   /**
+   * Read one root-and-delegated canonical timeline page plus exact session
+   * facets in a single SQLite snapshot.
+   */
+  getTimeline(options: EngineTimelinePageOptions, signal?: AbortSignal | undefined | null): Promise<EngineTimelinePage>
+  /**
    * Page canonical project-memory documents. Exact UTF-8 content and row
    * count are bounded in Rust.
    */
@@ -978,6 +983,88 @@ export interface EngineTeamSummary {
   conflictingInboxCount: number
   conflictingMessageCount: number
   lastCommitSeq: number
+}
+
+export interface EngineTimelineFacets {
+  totalMessages: number
+  roles: Array<EngineNamedCount>
+  nativeKinds: Array<EngineNamedCount>
+  contentKinds: Array<EngineNamedCount>
+  toolNames: Array<EngineNamedCount>
+  branchKinds: Array<EngineNamedCount>
+}
+
+export interface EngineTimelineMessage {
+  messageId: string
+  projectId: string
+  sessionId: string
+  runId: string
+  parentRunId?: string
+  branchKind: string
+  branchAnchorMessageId?: string
+  adapterId: string
+  sourceInstanceId: number
+  nativeProjectKey: string
+  nativeSessionId: string
+  nativeRunId?: string
+  nativeChildId?: string
+  nativeTaskId?: string
+  delegationKind?: string
+  delegationStrength?: string
+  delegationStatus?: string
+  branchToolName?: string
+  branchLabel?: string
+  requestedAgentType?: string
+  nativeMessageId?: string
+  nativeKind: string
+  role: string
+  content: any
+  contentKinds: Array<string>
+  toolNames: Array<string>
+  sourceTime?: string
+  sourceTimeQuality?: string
+  parentNativeMessageId?: string
+  model?: string
+  decisiveFactId: string
+  observedAtUnixMs: number
+  sourceObjectId: number
+  sourceGeneration: number
+  lastCommitSeq: number
+}
+
+export interface EngineTimelinePage {
+  contractVersion: number
+  atCommitSeq: number
+  projectId: string
+  sessionId: string
+  order: string
+  searchSyntax: string
+  totalIsExact: boolean
+  total: number
+  facets: EngineTimelineFacets
+  items: Array<EngineTimelineMessage>
+  payloadBytes: number
+  payloadByteLimit: number
+  nextCursor?: string
+}
+
+export interface EngineTimelinePageOptions {
+  projectId: string
+  sessionId: string
+  roles?: Array<string>
+  nativeKinds?: Array<string>
+  includeContentKinds?: Array<string>
+  includeToolNames?: Array<string>
+  excludeContentKinds?: Array<string>
+  excludeToolNames?: Array<string>
+  /** Optional literal FTS phrase. Blank strings disable search filtering. */
+  search?: string
+  /** `all` (default), `root`, `delegated`, or `unknown`. */
+  branchKind?: string
+  /** Opaque newest-first message keyset cursor. */
+  cursor?: string
+  /** Page size. Defaults to 30 and is capped by the Rust query engine. */
+  limit?: number
 }
 
 export interface EngineToolResult {

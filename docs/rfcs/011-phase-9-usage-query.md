@@ -10,7 +10,8 @@ rows, or assign quality.
 
 RFC 011 lists usage activity and totals fifth in the Phase 9 port order. This
 record closes that independently testable query slice. Canonical FTS search is
-recorded separately; timeline and subagent/workflow packs remain open.
+recorded separately; timeline is now recorded separately and the dedicated
+subagent/workflow pack remains open.
 Runtime/team, capability details, and core details/statistics are recorded
 separately as complete slices. This does not claim the Phase 9 exit gate.
 
@@ -152,7 +153,7 @@ statements.
 This is a shadow query surface, not production `SpaghettiClient` cutover. The
 remaining gates include:
 
-- timeline/facet packs (canonical FTS search is recorded separately);
+- timeline/facet and canonical FTS packs are recorded separately;
 - subagent/workflow queries (the capability-detail pack is recorded
   separately);
 - large-corpus latency, boundary-size, and concurrent-ingest benchmarks;

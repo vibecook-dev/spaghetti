@@ -79,7 +79,10 @@ use thiserror::Error;
 /// v32: message-to-run identity plus a writer-maintained canonical-message
 /// FTS5 projection. This intentionally forces a rebuild so pre-existing
 /// canonical messages cannot appear searchable without index entries.
-pub const SCHEMA_VERSION: u32 = 32;
+/// v33: writer-maintained common content-block metadata for canonical timeline
+/// filters and facets. Canonical content remains authoritative on the message;
+/// this narrow index avoids decoding JSON arrays during aggregate queries.
+pub const SCHEMA_VERSION: u32 = 33;
 
 /// Full DDL for the current schema — lifted verbatim from the TS `SCHEMA_SQL`
 /// template literal. Whitespace differs; structure does not.
@@ -682,6 +685,17 @@ CREATE TABLE IF NOT EXISTS message_tool_references (
   source_object_id INTEGER NOT NULL,
   source_generation INTEGER NOT NULL,
   PRIMARY KEY (message_key, reference_kind, block_ordinal)
+);
+
+CREATE TABLE IF NOT EXISTS canonical_message_content_blocks (
+  message_key BLOB NOT NULL REFERENCES canonical_messages(message_key) ON DELETE CASCADE,
+  session_key BLOB NOT NULL,
+  run_key BLOB NOT NULL,
+  block_ordinal INTEGER NOT NULL,
+  content_kind TEXT NOT NULL,
+  tool_name TEXT,
+  native_tool_call_id TEXT,
+  PRIMARY KEY (message_key, block_ordinal)
 );
 
 CREATE TABLE IF NOT EXISTS canonical_runs (
@@ -1513,6 +1527,9 @@ CREATE INDEX IF NOT EXISTS idx_interpretation_settings_assertions_scope ON inter
 CREATE INDEX IF NOT EXISTS idx_canonical_interpretation_settings_documents_scope ON canonical_interpretation_settings_documents(scope_key, layer, document_key);
 CREATE INDEX IF NOT EXISTS idx_message_tool_references_native ON message_tool_references(session_key, native_tool_use_id, reference_kind, message_key);
 CREATE INDEX IF NOT EXISTS idx_message_tool_references_source ON message_tool_references(source_object_id, source_generation, session_key, native_tool_use_id);
+CREATE INDEX IF NOT EXISTS idx_canonical_message_blocks_session_kind ON canonical_message_content_blocks(session_key, content_kind, message_key);
+CREATE INDEX IF NOT EXISTS idx_canonical_message_blocks_session_tool ON canonical_message_content_blocks(session_key, tool_name, message_key) WHERE tool_name IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_canonical_message_blocks_run ON canonical_message_content_blocks(run_key, message_key, block_ordinal);
 CREATE INDEX IF NOT EXISTS idx_canonical_messages_session_order ON canonical_messages(session_key, source_generation, cursor_start);
 CREATE INDEX IF NOT EXISTS idx_canonical_messages_session_activity ON canonical_messages(session_key, source_time, message_key, source_time_quality, last_commit_seq);
 CREATE INDEX IF NOT EXISTS idx_canonical_messages_run_activity ON canonical_messages(run_key, source_time, message_key);
@@ -1748,6 +1765,7 @@ const CURRENT_TABLES: &[&str] = &[
     "interpretation_settings_assertions",
     "canonical_persisted_tool_results",
     "persisted_tool_result_assertions",
+    "canonical_message_content_blocks",
     "message_tool_references",
     "canonical_artifacts",
     "artifact_content_assertions",
@@ -2285,8 +2303,18 @@ mod tests {
         assert!(object_exists(&conn, "table", "message_tool_references"));
         assert!(object_exists(
             &conn,
+            "table",
+            "canonical_message_content_blocks"
+        ));
+        assert!(object_exists(
+            &conn,
             "index",
             "idx_message_tool_references_native"
+        ));
+        assert!(object_exists(
+            &conn,
+            "index",
+            "idx_canonical_message_blocks_session_kind"
         ));
         assert!(object_exists(&conn, "table", "canonical_messages"));
         assert!(object_exists(

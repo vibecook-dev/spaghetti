@@ -463,6 +463,7 @@ const RFC011_SCHEMA_TABLES = [
   'interpretation_settings_assertions',
   'canonical_interpretation_settings_documents',
   'canonical_effective_interpretation_settings',
+  'canonical_message_content_blocks',
   'message_tool_references',
   'canonical_messages',
   'canonical_runs',
@@ -595,6 +596,10 @@ const TABLE_SPECS: TableSpec[] = [
     name: 'canonical_effective_interpretation_settings',
     orderBy: 'scope_key',
     jsonColumns: ['effective_settings_json'],
+  },
+  {
+    name: 'canonical_message_content_blocks',
+    orderBy: 'message_key, block_ordinal',
   },
   {
     name: 'message_tool_references',

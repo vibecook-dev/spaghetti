@@ -10,7 +10,8 @@ runtime tables, reduce evidence, or assemble team/inbox rows.
 
 RFC 011 lists runtime snapshots and teams sixth in the Phase 9 port order. This
 record closes that independently testable query slice. Canonical FTS search is
-recorded separately; timeline and subagent/workflow packs remain open. The
+recorded separately; timeline is now recorded separately and the dedicated
+subagent/workflow pack remains open. The
 core and capability-detail slices are also recorded separately. It does not
 claim the Phase 9 exit gate.
 
@@ -123,7 +124,7 @@ same-version initialization reruns `CREATE INDEX IF NOT EXISTS` statements.
 ## Remaining Phase 9 work
 
 This is a shadow query surface, not production `SpaghettiClient` cutover. The
-remaining gates include timeline/facets, subagent/workflow, large-corpus
+remaining gates include subagent/workflow, large-corpus
 latency and boundary-size benchmarks, shared IPC/domain DTO generation, and
 Phase 10 production client migration. Search and capability details are
 recorded separately. The core detail/statistics slice is recorded in the

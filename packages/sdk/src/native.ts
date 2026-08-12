@@ -465,6 +465,105 @@ export interface SpaghettiEngineSearchPage {
   nextCursor?: string;
 }
 
+export type SpaghettiEngineTimelineContentKind =
+  | 'text'
+  | 'thinking'
+  | 'tool_call'
+  | 'tool_result'
+  | 'image'
+  | 'document'
+  | 'native';
+
+export interface SpaghettiEngineTimelinePageOptions extends SpaghettiEngineHistoryPageOptions {
+  projectId: string;
+  sessionId: string;
+  roles?: string[];
+  nativeKinds?: string[];
+  /** Content-kind and tool-name includes are ORed within one solo filter. */
+  includeContentKinds?: SpaghettiEngineTimelineContentKind[];
+  includeToolNames?: string[];
+  /** A message is excluded if any block matches either exclusion dimension. */
+  excludeContentKinds?: SpaghettiEngineTimelineContentKind[];
+  excludeToolNames?: string[];
+  /** Blank text disables search; other text is one literal FTS phrase. */
+  search?: string;
+  branchKind?: SpaghettiEngineSearchBranchKind;
+}
+
+export interface SpaghettiEngineTimelineFacets {
+  /** Unfiltered canonical message envelopes in the verified session. */
+  totalMessages: number;
+  /** Message-envelope counts. */
+  roles: SpaghettiEngineNamedCount[];
+  /** Message-envelope counts. */
+  nativeKinds: SpaghettiEngineNamedCount[];
+  /** Canonical content-block counts. */
+  contentKinds: SpaghettiEngineNamedCount[];
+  /** Canonical tool-call block counts. */
+  toolNames: SpaghettiEngineNamedCount[];
+  /** Message-envelope counts. */
+  branchKinds: SpaghettiEngineNamedCount[];
+}
+
+export interface SpaghettiEngineTimelineMessage {
+  messageId: string;
+  projectId: string;
+  sessionId: string;
+  runId: string;
+  parentRunId?: string;
+  branchKind: Exclude<SpaghettiEngineSearchBranchKind, 'all'>;
+  /** Exact parent message from the decisive native spawn correlation. */
+  branchAnchorMessageId?: string;
+  adapterId: string;
+  sourceInstanceId: number;
+  nativeProjectKey: string;
+  nativeSessionId: string;
+  nativeRunId?: string;
+  nativeChildId?: string;
+  nativeTaskId?: string;
+  delegationKind?: string;
+  delegationStrength?: string;
+  delegationStatus?: string;
+  branchToolName?: string;
+  branchLabel?: string;
+  requestedAgentType?: string;
+  nativeMessageId?: string;
+  nativeKind: string;
+  role: string;
+  /** Ordered canonical common blocks; raw/native payload is a detail concern. */
+  content: unknown;
+  contentKinds: SpaghettiEngineTimelineContentKind[];
+  toolNames: string[];
+  sourceTime?: string;
+  sourceTimeQuality?: SpaghettiEngineTimestampQuality;
+  parentNativeMessageId?: string;
+  model?: string;
+  decisiveFactId: string;
+  observedAtUnixMs: number;
+  sourceObjectId: number;
+  sourceGeneration: number;
+  lastCommitSeq: number;
+}
+
+export interface SpaghettiEngineTimelinePage {
+  contractVersion: number;
+  atCommitSeq: number;
+  projectId: string;
+  sessionId: string;
+  order: 'newest_first';
+  searchSyntax: 'literal_phrase_v1';
+  totalIsExact: true;
+  /** Filtered messages before cursor pagination. */
+  total: number;
+  /** Always describes the unfiltered verified session. */
+  facets: SpaghettiEngineTimelineFacets;
+  items: SpaghettiEngineTimelineMessage[];
+  /** UTF-8 bytes in returned canonical content JSON. */
+  payloadBytes: number;
+  payloadByteLimit: number;
+  nextCursor?: string;
+}
+
 export type SpaghettiEngineCapabilityPageOptions = SpaghettiEngineHistoryPageOptions;
 
 export interface SpaghettiEngineMemoryDocumentPageOptions extends SpaghettiEngineHistoryPageOptions {
@@ -1151,6 +1250,7 @@ export interface SpaghettiEngine {
   getSession(sessionId: string, signal?: AbortSignal): Promise<SpaghettiEngineSessionDetails>;
   getMessages(options: SpaghettiEngineMessagePageOptions, signal?: AbortSignal): Promise<SpaghettiEngineMessagePage>;
   search(options: SpaghettiEngineSearchPageOptions, signal?: AbortSignal): Promise<SpaghettiEngineSearchPage>;
+  getTimeline(options: SpaghettiEngineTimelinePageOptions, signal?: AbortSignal): Promise<SpaghettiEngineTimelinePage>;
   listMemoryDocuments(
     options: SpaghettiEngineMemoryDocumentPageOptions,
     signal?: AbortSignal,

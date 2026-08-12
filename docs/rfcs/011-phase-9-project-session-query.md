@@ -10,8 +10,9 @@ merge and sort native rows.
 
 RFC 011 lists project/session summaries fourth in the Phase 9 port order. This
 slice starts that independently testable pack. Canonical FTS search is
-recorded separately; timeline and subagent/workflow query packs remain open.
-It does not claim the Phase 9 exit gate or reorder the production cutover.
+and timeline packs are recorded separately; subagent/workflow queries remain
+open. It does not claim the Phase 9 exit gate or reorder the production
+cutover.
 
 ## Query contract
 
@@ -127,7 +128,7 @@ does not change because same-version initialization reruns all
 This is a shadow query surface, not production `SpaghettiClient` cutover. The
 remaining gates include:
 
-- timeline/facet packs (canonical FTS search is recorded separately);
+- timeline/facet and canonical FTS packs are recorded separately;
 - subagent/workflow queries (usage, runtime/team, core details/statistics, and
   capability details are recorded in their separate Phase 9 records);
 - real-corpus latency and boundary-size benchmarks;

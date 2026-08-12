@@ -24,6 +24,8 @@ mod supervisor;
 mod task_projection;
 mod team_projection;
 mod team_query;
+mod timeline_projection;
+mod timeline_query;
 mod tool_result_projection;
 mod usage_query;
 mod workflow_projection;
@@ -77,6 +79,10 @@ pub use team_query::{
     TeamConfigSummary, TeamDetails, TeamDetailsRequest, TeamInboxMessage, TeamInboxMessagePage,
     TeamInboxMessagePageRequest, TeamInboxPage, TeamInboxPageRequest, TeamInboxSummary, TeamMember,
     TeamPage, TeamPageRequest, TeamSummary, DEFAULT_TEAM_PAGE_LIMIT, TEAM_QUERY_CONTRACT_VERSION,
+};
+pub use timeline_query::{
+    TimelineFacets, TimelineMessage, TimelinePage, TimelinePageRequest,
+    DEFAULT_TIMELINE_PAGE_LIMIT, MAX_TIMELINE_PAGE_PAYLOAD_BYTES, TIMELINE_QUERY_CONTRACT_VERSION,
 };
 pub use usage_query::{
     UntimedUsageSummary, UsageActivityDay, UsageActivityReport, UsageActivityRequest,
@@ -465,6 +471,17 @@ impl SpaghettiEngineCore {
     ) -> Result<SearchPage, EngineError> {
         let (_, queries) = self.clients()?;
         queries.search_cancellable(request, cancellation)
+    }
+
+    /// Page a verified session's canonical root and delegated messages with
+    /// exact session facets and decisive parent-message branch anchors.
+    pub fn timeline_cancellable(
+        &self,
+        request: TimelinePageRequest,
+        cancellation: QueryCancellationToken,
+    ) -> Result<TimelinePage, EngineError> {
+        let (_, queries) = self.clients()?;
+        queries.timeline_cancellable(request, cancellation)
     }
 
     /// Page canonical project-memory documents, including exact content and

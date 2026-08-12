@@ -880,6 +880,53 @@ describe('Claude observation shadow native lifecycle', { skip: !native }, () => 
     assert.match(marker.items[0]!.snippet, /searchable-wf-marker/);
     assert.ok(marker.payloadBytes <= marker.payloadByteLimit);
 
+    const markerHit = marker.items[0]!;
+    assert.ok(markerHit.projectId);
+    const timeline = await shadow.getTimeline({
+      projectId: markerHit.projectId,
+      sessionId: markerHit.sessionId,
+      branchKind: 'delegated',
+      search: 'searchable-wf-marker',
+      limit: 1,
+    });
+    assert.equal(timeline.contractVersion, 1);
+    assert.equal(timeline.order, 'newest_first');
+    assert.equal(timeline.searchSyntax, 'literal_phrase_v1');
+    assert.equal(timeline.totalIsExact, true);
+    assert.equal(timeline.total, 1);
+    assert.ok(timeline.facets.totalMessages > timeline.total, 'facets describe the unfiltered session');
+    assert.equal(timeline.items[0]?.messageId, markerHit.messageId);
+    assert.equal(timeline.items[0]?.branchKind, 'delegated');
+    assert.equal(timeline.items[0]?.nativeChildId, 'afixture01');
+    assert.deepEqual(timeline.items[0]?.contentKinds, ['text']);
+    assert.ok(timeline.payloadBytes <= timeline.payloadByteLimit);
+
+    const timelineFirst = await shadow.getTimeline({
+      projectId: markerHit.projectId,
+      sessionId: markerHit.sessionId,
+      limit: 1,
+    });
+    assert.ok(timelineFirst.nextCursor);
+    const timelineNext = await shadow.getTimeline({
+      projectId: markerHit.projectId,
+      sessionId: markerHit.sessionId,
+      limit: 1,
+      cursor: timelineFirst.nextCursor,
+    });
+    assert.equal(timelineNext.atCommitSeq, timelineFirst.atCommitSeq);
+    assert.equal(timelineNext.total, timelineFirst.total);
+    assert.notEqual(timelineNext.items[0]?.messageId, timelineFirst.items[0]?.messageId);
+    await assert.rejects(
+      shadow.getTimeline({
+        projectId: markerHit.projectId,
+        sessionId: markerHit.sessionId,
+        branchKind: 'root',
+        limit: 1,
+        cursor: timelineFirst.nextCursor,
+      }),
+      /cursor/i,
+    );
+
     const all = await shadow.search({ text: 'Add error handling to the parser', limit: 1 });
     assert.ok(all.total > 1);
     assert.equal(all.items.length, 1);
@@ -901,6 +948,10 @@ describe('Claude observation shadow native lifecycle', { skip: !native }, () => 
     const controller = new AbortController();
     controller.abort();
     await assert.rejects(shadow.search({ text: 'searchable-wf-marker' }, controller.signal), /abort|cancel/i);
+    await assert.rejects(
+      shadow.getTimeline({ projectId: markerHit.projectId, sessionId: markerHit.sessionId }, controller.signal),
+      /abort|cancel/i,
+    );
   });
 
   test('matches normalized project/session summaries from the committed TypeScript oracle', async () => {

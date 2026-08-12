@@ -26,6 +26,7 @@ use super::session_index_projection::apply_session_index_facts;
 use super::settings_projection::apply_interpretation_settings_facts;
 use super::task_projection::apply_task_snapshots;
 use super::team_projection::apply_team_snapshots;
+use super::timeline_projection::replace_message_content_blocks;
 use super::tool_result_projection::{
     apply_persisted_tool_result_facts, replace_message_references, replaced_message_reference_keys,
 };
@@ -241,6 +242,13 @@ impl TransactionalProjectionWork for FactProjectionWork<'_> {
                         fact.session.as_bytes(),
                         &fact.content,
                     )?);
+                    replace_message_content_blocks(
+                        transaction,
+                        fact.message.as_bytes(),
+                        fact.session.as_bytes(),
+                        fact.run.as_bytes(),
+                        &fact.content,
+                    )?;
                 }
                 Fact::Run(fact) => {
                     transaction
@@ -8278,6 +8286,27 @@ mod tests {
             "linked:1:1"
         );
         assert_eq!(count(&connection, "message_tool_references"), 2);
+        assert_eq!(count(&connection, "canonical_message_content_blocks"), 2);
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM canonical_message_content_blocks WHERE content_kind = 'tool_call'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM canonical_message_content_blocks WHERE content_kind = 'tool_result'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            1
+        );
 
         // Same-generation replacement owns the current file rather than
         // retaining both revisions as competing assertions.
@@ -8365,6 +8394,17 @@ mod tests {
         );
         assert_eq!(count(&connection, "canonical_messages"), 1);
         assert_eq!(count(&connection, "message_tool_references"), 1);
+        assert_eq!(count(&connection, "canonical_message_content_blocks"), 1);
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT content_kind FROM canonical_message_content_blocks",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "tool_result"
+        );
         assert_eq!(
             connection
                 .query_row(
