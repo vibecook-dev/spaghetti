@@ -13,15 +13,21 @@ import { basename, dirname, extname, join, resolve } from 'node:path';
 import {
   openSpaghettiEngine,
   type SpaghettiEngine,
+  type SpaghettiEngineCanonicalStats,
   type SpaghettiEngineHealth,
   type SpaghettiEngineHistoryPageOptions,
   type SpaghettiEngineHistoryProject,
   type SpaghettiEngineHistoryProjectPage,
   type SpaghettiEngineHistorySession,
   type SpaghettiEngineHistorySessionPage,
+  type SpaghettiEngineMessagePage,
+  type SpaghettiEngineMessagePageOptions,
   type SpaghettiEngineOverview,
+  type SpaghettiEngineRunStateLookup,
   type SpaghettiEngineRuntimeSnapshot,
   type SpaghettiEngineRuntimeSnapshotOptions,
+  type SpaghettiEngineSessionDetails,
+  type SpaghettiEngineSourcePage,
   type SpaghettiEngineStatus,
   type SpaghettiEngineTeamDetails,
   type SpaghettiEngineTeamInboxMessagePage,
@@ -214,6 +220,19 @@ export interface ClaudeObservationShadow {
     options?: SpaghettiEngineHistoryPageOptions,
     signal?: AbortSignal,
   ): Promise<SpaghettiEngineHistorySessionPage>;
+  /** Read one canonical session by its opaque identity. */
+  getSession(sessionId: string, signal?: AbortSignal): Promise<SpaghettiEngineSessionDetails>;
+  /** Page one canonical session's messages with bounded payload bytes. */
+  getMessages(
+    projectId: string,
+    sessionId: string,
+    options?: SpaghettiEngineHistoryPageOptions,
+    signal?: AbortSignal,
+  ): Promise<SpaghettiEngineMessagePage>;
+  /** List configured source instances and their durable ingest inventory. */
+  listSources(options?: SpaghettiEngineHistoryPageOptions, signal?: AbortSignal): Promise<SpaghettiEngineSourcePage>;
+  /** Return canonical/catalog statistics, excluding compatibility-cache rows. */
+  getStats(signal?: AbortSignal): Promise<SpaghettiEngineCanonicalStats>;
   /** Query canonical all-time usage for one project or verified session. */
   getUsage(options: SpaghettiEngineUsageScopeOptions, signal?: AbortSignal): Promise<SpaghettiEngineUsageTotals>;
   /** Query inclusive daily usage plus separately reported untimed contributions. */
@@ -226,6 +245,8 @@ export interface ClaudeObservationShadow {
     options?: SpaghettiEngineRuntimeSnapshotOptions,
     signal?: AbortSignal,
   ): Promise<SpaghettiEngineRuntimeSnapshot>;
+  /** Read one canonical run without PID-liveness inference. */
+  getRunState(runId: string, signal?: AbortSignal): Promise<SpaghettiEngineRunStateLookup>;
   /** List canonical teams, including inbox-only team identities. */
   listTeams(options?: SpaghettiEngineTeamPageOptions, signal?: AbortSignal): Promise<SpaghettiEngineTeamPage>;
   /** Read one team config/member snapshot. */
@@ -538,6 +559,28 @@ class NativeClaudeObservationShadow implements ClaudeObservationShadow {
     return this.engine.listHistorySessions({ projectId, ...options }, signal);
   }
 
+  getSession(sessionId: string, signal?: AbortSignal): Promise<SpaghettiEngineSessionDetails> {
+    return this.engine.getSession(sessionId, signal);
+  }
+
+  getMessages(
+    projectId: string,
+    sessionId: string,
+    options?: SpaghettiEngineHistoryPageOptions,
+    signal?: AbortSignal,
+  ): Promise<SpaghettiEngineMessagePage> {
+    const nativeOptions: SpaghettiEngineMessagePageOptions = { projectId, sessionId, ...options };
+    return this.engine.getMessages(nativeOptions, signal);
+  }
+
+  listSources(options?: SpaghettiEngineHistoryPageOptions, signal?: AbortSignal): Promise<SpaghettiEngineSourcePage> {
+    return this.engine.listSources(options, signal);
+  }
+
+  getStats(signal?: AbortSignal): Promise<SpaghettiEngineCanonicalStats> {
+    return this.engine.getStats(signal);
+  }
+
   getUsage(options: SpaghettiEngineUsageScopeOptions, signal?: AbortSignal): Promise<SpaghettiEngineUsageTotals> {
     return this.engine.getUsage(options, signal);
   }
@@ -554,6 +597,10 @@ class NativeClaudeObservationShadow implements ClaudeObservationShadow {
     signal?: AbortSignal,
   ): Promise<SpaghettiEngineRuntimeSnapshot> {
     return this.engine.getRuntimeSnapshot(options, signal);
+  }
+
+  getRunState(runId: string, signal?: AbortSignal): Promise<SpaghettiEngineRunStateLookup> {
+    return this.engine.getRunState(runId, signal);
   }
 
   listTeams(options?: SpaghettiEngineTeamPageOptions, signal?: AbortSignal): Promise<SpaghettiEngineTeamPage> {

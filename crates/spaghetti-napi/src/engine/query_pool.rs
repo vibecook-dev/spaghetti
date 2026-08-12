@@ -15,11 +15,18 @@ use serde::{Deserialize, Serialize};
 
 use crate::core::schema;
 
+use super::detail_query::{
+    read_canonical_stats, read_message_page, read_session_details, read_source_page,
+    validate_message_page, validate_session_details, validate_source_page, CanonicalStats,
+    MessagePage, MessagePageRequest, SessionDetails, SessionDetailsRequest, SourcePage,
+    SourcePageRequest,
+};
 use super::query_identity::{
     decode_entity_id, encode_entity_id, PROJECT_ID_PREFIX, SESSION_ID_PREFIX,
 };
 use super::runtime_query::{
-    read_runtime_snapshot, validate_runtime_request, RuntimeSnapshot, RuntimeSnapshotRequest,
+    read_run_state, read_runtime_snapshot, validate_run_state_request, validate_runtime_request,
+    RunStateLookup, RunStateRequest, RuntimeSnapshot, RuntimeSnapshotRequest,
 };
 use super::team_query::{
     read_team_details, read_team_inbox_page, read_team_message_page, read_team_page,
@@ -264,6 +271,18 @@ enum QueryCommand {
         request: HistorySessionPageRequest,
         response: Sender<Result<HistorySessionPage, EngineError>>,
     },
+    SessionDetails {
+        cancellation_epoch: u64,
+        cancellation: QueryCancellationToken,
+        request: SessionDetailsRequest,
+        response: Sender<Result<SessionDetails, EngineError>>,
+    },
+    Messages {
+        cancellation_epoch: u64,
+        cancellation: QueryCancellationToken,
+        request: MessagePageRequest,
+        response: Sender<Result<MessagePage, EngineError>>,
+    },
     UsageTotals {
         cancellation_epoch: u64,
         cancellation: QueryCancellationToken,
@@ -281,6 +300,23 @@ enum QueryCommand {
         cancellation: QueryCancellationToken,
         request: RuntimeSnapshotRequest,
         response: Sender<Result<RuntimeSnapshot, EngineError>>,
+    },
+    RunState {
+        cancellation_epoch: u64,
+        cancellation: QueryCancellationToken,
+        request: RunStateRequest,
+        response: Sender<Result<RunStateLookup, EngineError>>,
+    },
+    Sources {
+        cancellation_epoch: u64,
+        cancellation: QueryCancellationToken,
+        request: SourcePageRequest,
+        response: Sender<Result<SourcePage, EngineError>>,
+    },
+    CanonicalStats {
+        cancellation_epoch: u64,
+        cancellation: QueryCancellationToken,
+        response: Sender<Result<CanonicalStats, EngineError>>,
     },
     Teams {
         cancellation_epoch: u64,
@@ -494,6 +530,51 @@ impl QueryClient {
         self.usage_totals_cancellable(request, QueryCancellationToken::default())
     }
 
+    pub fn session_details(
+        &self,
+        request: SessionDetailsRequest,
+    ) -> Result<SessionDetails, EngineError> {
+        self.session_details_cancellable(request, QueryCancellationToken::default())
+    }
+
+    pub fn session_details_cancellable(
+        &self,
+        request: SessionDetailsRequest,
+        cancellation: QueryCancellationToken,
+    ) -> Result<SessionDetails, EngineError> {
+        validate_session_details(&request)?;
+        self.send_cancellable(
+            cancellation,
+            |cancellation_epoch, cancellation, response| QueryCommand::SessionDetails {
+                cancellation_epoch,
+                cancellation,
+                request,
+                response,
+            },
+        )
+    }
+
+    pub fn messages(&self, request: MessagePageRequest) -> Result<MessagePage, EngineError> {
+        self.messages_cancellable(request, QueryCancellationToken::default())
+    }
+
+    pub fn messages_cancellable(
+        &self,
+        request: MessagePageRequest,
+        cancellation: QueryCancellationToken,
+    ) -> Result<MessagePage, EngineError> {
+        validate_message_page(&request)?;
+        self.send_cancellable(
+            cancellation,
+            |cancellation_epoch, cancellation, response| QueryCommand::Messages {
+                cancellation_epoch,
+                cancellation,
+                request,
+                response,
+            },
+        )
+    }
+
     pub fn usage_totals_cancellable(
         &self,
         request: UsageScopeRequest,
@@ -568,6 +649,66 @@ impl QueryClient {
         request: RuntimeSnapshotRequest,
     ) -> Result<RuntimeSnapshot, EngineError> {
         self.runtime_snapshot_cancellable(request, QueryCancellationToken::default())
+    }
+
+    pub fn run_state(&self, request: RunStateRequest) -> Result<RunStateLookup, EngineError> {
+        self.run_state_cancellable(request, QueryCancellationToken::default())
+    }
+
+    pub fn run_state_cancellable(
+        &self,
+        request: RunStateRequest,
+        cancellation: QueryCancellationToken,
+    ) -> Result<RunStateLookup, EngineError> {
+        validate_run_state_request(&request)?;
+        self.send_cancellable(
+            cancellation,
+            |cancellation_epoch, cancellation, response| QueryCommand::RunState {
+                cancellation_epoch,
+                cancellation,
+                request,
+                response,
+            },
+        )
+    }
+
+    pub fn sources(&self, request: SourcePageRequest) -> Result<SourcePage, EngineError> {
+        self.sources_cancellable(request, QueryCancellationToken::default())
+    }
+
+    pub fn sources_cancellable(
+        &self,
+        request: SourcePageRequest,
+        cancellation: QueryCancellationToken,
+    ) -> Result<SourcePage, EngineError> {
+        validate_source_page(&request)?;
+        self.send_cancellable(
+            cancellation,
+            |cancellation_epoch, cancellation, response| QueryCommand::Sources {
+                cancellation_epoch,
+                cancellation,
+                request,
+                response,
+            },
+        )
+    }
+
+    pub fn canonical_stats(&self) -> Result<CanonicalStats, EngineError> {
+        self.canonical_stats_cancellable(QueryCancellationToken::default())
+    }
+
+    pub fn canonical_stats_cancellable(
+        &self,
+        cancellation: QueryCancellationToken,
+    ) -> Result<CanonicalStats, EngineError> {
+        self.send_cancellable(
+            cancellation,
+            |cancellation_epoch, cancellation, response| QueryCommand::CanonicalStats {
+                cancellation_epoch,
+                cancellation,
+                response,
+            },
+        )
     }
 
     pub fn runtime_snapshot_cancellable(
@@ -1007,6 +1148,38 @@ fn query_thread(
                 });
                 let _ = response.send(result);
             }
+            QueryCommand::SessionDetails {
+                cancellation_epoch,
+                cancellation,
+                request,
+                response,
+            } => {
+                let _in_flight = InFlightGuard::enter(&control.in_flight);
+                let result = run_cancellable_query(
+                    &connection,
+                    &control,
+                    cancellation_epoch,
+                    &cancellation,
+                    || read_session_details(&connection, &request),
+                );
+                let _ = response.send(result);
+            }
+            QueryCommand::Messages {
+                cancellation_epoch,
+                cancellation,
+                request,
+                response,
+            } => {
+                let _in_flight = InFlightGuard::enter(&control.in_flight);
+                let result = run_cancellable_query(
+                    &connection,
+                    &control,
+                    cancellation_epoch,
+                    &cancellation,
+                    || read_message_page(&connection, &request),
+                );
+                let _ = response.send(result);
+            }
             QueryCommand::UsageTotals {
                 cancellation_epoch,
                 cancellation,
@@ -1052,6 +1225,53 @@ fn query_thread(
                     cancellation_epoch,
                     &cancellation,
                     || read_runtime_snapshot(&connection, &request),
+                );
+                let _ = response.send(result);
+            }
+            QueryCommand::RunState {
+                cancellation_epoch,
+                cancellation,
+                request,
+                response,
+            } => {
+                let _in_flight = InFlightGuard::enter(&control.in_flight);
+                let result = run_cancellable_query(
+                    &connection,
+                    &control,
+                    cancellation_epoch,
+                    &cancellation,
+                    || read_run_state(&connection, &request),
+                );
+                let _ = response.send(result);
+            }
+            QueryCommand::Sources {
+                cancellation_epoch,
+                cancellation,
+                request,
+                response,
+            } => {
+                let _in_flight = InFlightGuard::enter(&control.in_flight);
+                let result = run_cancellable_query(
+                    &connection,
+                    &control,
+                    cancellation_epoch,
+                    &cancellation,
+                    || read_source_page(&connection, &request),
+                );
+                let _ = response.send(result);
+            }
+            QueryCommand::CanonicalStats {
+                cancellation_epoch,
+                cancellation,
+                response,
+            } => {
+                let _in_flight = InFlightGuard::enter(&control.in_flight);
+                let result = run_cancellable_query(
+                    &connection,
+                    &control,
+                    cancellation_epoch,
+                    &cancellation,
+                    || read_canonical_stats(&connection),
                 );
                 let _ = response.send(result);
             }
@@ -2575,6 +2795,35 @@ mod tests {
                 limit: DEFAULT_HISTORY_PAGE_LIMIT,
             })
             .unwrap();
+        let missing_session_id = encode_entity_id(SESSION_ID_PREFIX, b"missing-session");
+        let session_details = client
+            .session_details(SessionDetailsRequest {
+                session_id: missing_session_id.clone(),
+            })
+            .unwrap();
+        let messages = client
+            .messages(MessagePageRequest {
+                project_id: missing_project_id.clone(),
+                session_id: missing_session_id,
+                cursor: None,
+                limit: DEFAULT_HISTORY_PAGE_LIMIT,
+            })
+            .unwrap_err();
+        let sources = client
+            .sources(SourcePageRequest {
+                cursor: None,
+                limit: DEFAULT_HISTORY_PAGE_LIMIT,
+            })
+            .unwrap();
+        let canonical_stats = client.canonical_stats().unwrap();
+        let run_state = client
+            .run_state(RunStateRequest {
+                run_id: encode_entity_id(
+                    super::super::query_identity::RUN_ID_PREFIX,
+                    b"missing-run",
+                ),
+            })
+            .unwrap();
         let usage = client
             .usage_totals(UsageScopeRequest {
                 project_id: missing_project_id.clone(),
@@ -2617,6 +2866,15 @@ mod tests {
         assert!(projects.items.is_empty());
         assert_eq!(sessions.at_commit_seq, overview.commit_seq);
         assert!(sessions.items.is_empty());
+        assert_eq!(session_details.at_commit_seq, overview.commit_seq);
+        assert!(session_details.session.is_none());
+        assert!(matches!(messages, EngineError::InvalidQuery(_)));
+        assert_eq!(sources.at_commit_seq, overview.commit_seq);
+        assert!(sources.items.is_empty());
+        assert_eq!(canonical_stats.at_commit_seq, overview.commit_seq);
+        assert_eq!(canonical_stats.source_instances, 0);
+        assert_eq!(run_state.at_commit_seq, overview.commit_seq);
+        assert!(run_state.run.is_none());
         assert_eq!(usage.at_commit_seq, overview.commit_seq);
         assert_eq!(usage.aggregate.quality, "unavailable");
         assert_eq!(usage.aggregate.contribution_count, 0);

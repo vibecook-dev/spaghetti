@@ -322,6 +322,140 @@ export interface SpaghettiEngineHistorySessionPage {
   nextCursor?: string;
 }
 
+export interface SpaghettiEngineMessagePageOptions extends SpaghettiEngineHistoryPageOptions {
+  /** Opaque project identity returned by {@link SpaghettiEngine.listHistoryProjects}. */
+  projectId: string;
+  /** Opaque session identity returned by {@link SpaghettiEngine.listHistorySessions}. */
+  sessionId: string;
+}
+
+/** Exact transcript-backed session lookup plus counts from one committed snapshot. */
+export interface SpaghettiEngineSessionDetail {
+  sessionId: string;
+  projectId: string;
+  adapterId: string;
+  sourceInstanceId: number;
+  nativeSessionId: string;
+  nativeProjectKey: string;
+  cwd?: string;
+  gitBranch?: string;
+  firstPrompt?: string;
+  aiTitle?: string;
+  customTitle?: string;
+  sourceTime?: string;
+  sourceTimeQuality?: SpaghettiEngineTimestampQuality;
+  messageCount: number;
+  runCount: number;
+  presenceCount: number;
+  taskCollectionCount: number;
+  artifactCount: number;
+  workflowCount: number;
+  persistedToolResultCount: number;
+  projectMemoryDocumentCount: number;
+  index?: SpaghettiEngineHistorySessionIndex;
+  decisiveFactId: string;
+  observedAtUnixMs: number;
+  sourceObjectId: number;
+  sourceGeneration: number;
+  lastCommitSeq: number;
+}
+
+export interface SpaghettiEngineSessionDetails {
+  contractVersion: number;
+  atCommitSeq: number;
+  /** Absent when a well-formed opaque identity is not present. */
+  session?: SpaghettiEngineSessionDetail;
+}
+
+/** Canonical message fields with the lossless source record kept separately. */
+export interface SpaghettiEngineMessageDetail {
+  messageId: string;
+  sessionId: string;
+  projectId: string;
+  adapterId: string;
+  sourceInstanceId: number;
+  nativeSessionId: string;
+  nativeProjectKey: string;
+  nativeMessageId?: string;
+  nativeKind: string;
+  role: string;
+  content: unknown;
+  nativePayload: unknown;
+  sourceTime?: string;
+  sourceTimeQuality?: SpaghettiEngineTimestampQuality;
+  parentNativeMessageId?: string;
+  model?: string;
+  searchText?: string;
+  decisiveFactId: string;
+  observedAtUnixMs: number;
+  sourceObjectId: number;
+  sourceGeneration: number;
+  lastCommitSeq: number;
+}
+
+export interface SpaghettiEngineMessagePage {
+  contractVersion: number;
+  atCommitSeq: number;
+  projectId: string;
+  sessionId: string;
+  items: SpaghettiEngineMessageDetail[];
+  /** UTF-8 bytes in canonical content JSON plus native payload JSON. */
+  payloadBytes: number;
+  payloadByteLimit: number;
+  nextCursor?: string;
+}
+
+export interface SpaghettiEngineSourceSummary {
+  sourceId: string;
+  sourceInstanceId: number;
+  adapterId: string;
+  displayName: string;
+  adapterContractVersion: number;
+  discoveredAtUnixMs: number;
+  lastSeenAtUnixMs: number;
+  streamCount: number;
+  unavailableStreamCount: number;
+  objectCount: number;
+  activeObjectCount: number;
+  recordErrorCount: number;
+  factCount: number;
+  commitCount: number;
+  lastCommitSeq?: number;
+}
+
+export interface SpaghettiEngineSourcePage {
+  contractVersion: number;
+  atCommitSeq: number;
+  items: SpaghettiEngineSourceSummary[];
+  nextCursor?: string;
+}
+
+export interface SpaghettiEngineNamedCount {
+  name: string;
+  count: number;
+}
+
+/** Canonical/catalog statistics; compatibility-cache tables are excluded. */
+export interface SpaghettiEngineCanonicalStats {
+  contractVersion: number;
+  atCommitSeq: number;
+  schemaVersion: number;
+  sourceInstances: number;
+  sourceStreams: number;
+  sourceObjects: number;
+  activeSourceObjects: number;
+  sourceRecordErrors: number;
+  ingestCommits: number;
+  factRecords: number;
+  searchableMessages: number;
+  entities: SpaghettiEngineNamedCount[];
+  sourceStreamStates: SpaghettiEngineNamedCount[];
+  projectionReadiness: SpaghettiEngineNamedCount[];
+  databasePageCount: number;
+  databasePageSizeBytes: number;
+  allocatedDatabaseBytes: number;
+}
+
 export interface SpaghettiEngineUsageScopeOptions {
   /** Opaque project identity returned by {@link SpaghettiEngine.listHistoryProjects}. */
   projectId: string;
@@ -519,6 +653,13 @@ export interface SpaghettiEngineRuntimeSnapshot {
   nextCursor?: string;
 }
 
+export interface SpaghettiEngineRunStateLookup {
+  contractVersion: number;
+  atCommitSeq: number;
+  /** Absent when a well-formed opaque identity is not present. */
+  run?: SpaghettiEngineRuntimeRun;
+}
+
 export type SpaghettiEngineTeamPageOptions = SpaghettiEngineHistoryPageOptions;
 
 export interface SpaghettiEngineTeamScopedPageOptions extends SpaghettiEngineHistoryPageOptions {
@@ -702,6 +843,10 @@ export interface SpaghettiEngine {
     options: SpaghettiEngineHistorySessionPageOptions,
     signal?: AbortSignal,
   ): Promise<SpaghettiEngineHistorySessionPage>;
+  getSession(sessionId: string, signal?: AbortSignal): Promise<SpaghettiEngineSessionDetails>;
+  getMessages(options: SpaghettiEngineMessagePageOptions, signal?: AbortSignal): Promise<SpaghettiEngineMessagePage>;
+  listSources(options?: SpaghettiEngineHistoryPageOptions, signal?: AbortSignal): Promise<SpaghettiEngineSourcePage>;
+  getStats(signal?: AbortSignal): Promise<SpaghettiEngineCanonicalStats>;
   getUsage(options: SpaghettiEngineUsageScopeOptions, signal?: AbortSignal): Promise<SpaghettiEngineUsageTotals>;
   getUsageActivity(
     options: SpaghettiEngineUsageActivityOptions,
@@ -711,6 +856,7 @@ export interface SpaghettiEngine {
     options?: SpaghettiEngineRuntimeSnapshotOptions,
     signal?: AbortSignal,
   ): Promise<SpaghettiEngineRuntimeSnapshot>;
+  getRunState(runId: string, signal?: AbortSignal): Promise<SpaghettiEngineRunStateLookup>;
   listTeams(options?: SpaghettiEngineTeamPageOptions, signal?: AbortSignal): Promise<SpaghettiEngineTeamPage>;
   getTeam(teamId: string, signal?: AbortSignal): Promise<SpaghettiEngineTeamDetails>;
   listTeamInboxes(

@@ -27,6 +27,23 @@ export declare class SpaghettiEngine {
    * session-index metadata is returned as explicitly sourced enrichment.
    */
   listHistorySessions(options: EngineHistorySessionPageOptions, signal?: AbortSignal | undefined | null): Promise<EngineHistorySessionPage>
+  /**
+   * Read one transcript-backed canonical session and its projection counts.
+   * A well-formed unknown identity returns an absent `session`.
+   */
+  getSession(sessionId: string, signal?: AbortSignal | undefined | null): Promise<EngineSessionDetails>
+  /**
+   * Page canonical messages for one verified project/session membership.
+   * Both row count and decoded JSON payload bytes are bounded in Rust.
+   */
+  getMessages(options: EngineMessagePageOptions, signal?: AbortSignal | undefined | null): Promise<EngineMessagePage>
+  /** List configured source instances and their durable ingest inventory. */
+  listSources(options?: EngineHistoryPageOptions | undefined | null, signal?: AbortSignal | undefined | null): Promise<EngineSourcePage>
+  /**
+   * Return one snapshot-consistent set of canonical and source-catalog
+   * counts. Compatibility-cache tables are intentionally excluded.
+   */
+  getStats(signal?: AbortSignal | undefined | null): Promise<EngineCanonicalStats>
   /** Return canonical usage totals for one project or one verified session. */
   getUsage(options: EngineUsageScopeOptions, signal?: AbortSignal | undefined | null): Promise<EngineUsageTotals>
   /**
@@ -39,6 +56,11 @@ export declare class SpaghettiEngine {
    * intentionally does not probe PIDs or synthesize freshness assessments.
    */
   getRuntimeSnapshot(options?: EngineRuntimeSnapshotOptions | undefined | null, signal?: AbortSignal | undefined | null): Promise<EngineRuntimeSnapshot>
+  /**
+   * Look up one canonical run without probing process liveness. A
+   * well-formed unknown identity returns an absent `run`.
+   */
+  getRunState(runId: string, signal?: AbortSignal | undefined | null): Promise<EngineRunStateLookup>
   /** List current canonical teams, including inbox-only team identities. */
   listTeams(options?: EngineTeamPageOptions | undefined | null, signal?: AbortSignal | undefined | null): Promise<EngineTeamPage>
   /** Read one current team configuration and its bounded member snapshot. */
@@ -71,6 +93,26 @@ export declare class SpaghettiEngine {
   cancelPendingQueries(): number
   /** Deterministically stop readers, stop the writer, and release ownership. */
   dispose(): Promise<EngineStatus>
+}
+
+export interface EngineCanonicalStats {
+  contractVersion: number
+  atCommitSeq: number
+  schemaVersion: number
+  sourceInstances: number
+  sourceStreams: number
+  sourceObjects: number
+  activeSourceObjects: number
+  sourceRecordErrors: number
+  ingestCommits: number
+  factRecords: number
+  searchableMessages: number
+  entities: Array<EngineNamedCount>
+  sourceStreamStates: Array<EngineNamedCount>
+  projectionReadiness: Array<EngineNamedCount>
+  databasePageCount: number
+  databasePageSizeBytes: number
+  allocatedDatabaseBytes: number
 }
 
 export interface EngineHealth {
@@ -177,6 +219,58 @@ export interface EngineHistorySessionPageOptions {
   limit?: number
 }
 
+export interface EngineMessageDetail {
+  messageId: string
+  sessionId: string
+  projectId: string
+  adapterId: string
+  sourceInstanceId: number
+  nativeSessionId: string
+  nativeProjectKey: string
+  nativeMessageId?: string
+  nativeKind: string
+  role: string
+  content: any
+  nativePayload: any
+  sourceTime?: string
+  sourceTimeQuality?: string
+  parentNativeMessageId?: string
+  model?: string
+  searchText?: string
+  decisiveFactId: string
+  observedAtUnixMs: number
+  sourceObjectId: number
+  sourceGeneration: number
+  lastCommitSeq: number
+}
+
+export interface EngineMessagePage {
+  contractVersion: number
+  atCommitSeq: number
+  projectId: string
+  sessionId: string
+  items: Array<EngineMessageDetail>
+  payloadBytes: number
+  payloadByteLimit: number
+  nextCursor?: string
+}
+
+export interface EngineMessagePageOptions {
+  /** Opaque project identity returned by `listHistoryProjects`. */
+  projectId: string
+  /** Opaque session identity returned by `listHistorySessions`. */
+  sessionId: string
+  /** Opaque keyset cursor returned by the preceding page. */
+  cursor?: string
+  /** Page size. Defaults to 50 and is capped by the Rust query engine. */
+  limit?: number
+}
+
+export interface EngineNamedCount {
+  name: string
+  count: number
+}
+
 export interface EngineObservationOptions {
   /** Configured native data roots understood by the selected adapter. */
   roots: Array<string>
@@ -262,6 +356,12 @@ export interface EngineReconcileResult {
   retriesRequired: number
   commits: number
   lastCommitSeq?: number
+}
+
+export interface EngineRunStateLookup {
+  contractVersion: number
+  atCommitSeq: number
+  run?: EngineRuntimeRun
 }
 
 export interface EngineRuntimeEntry {
@@ -362,6 +462,67 @@ export interface EngineRuntimeSnapshotOptions {
   cursor?: string
   /** Page size. Defaults to 50 and is capped by the Rust query engine. */
   limit?: number
+}
+
+export interface EngineSessionDetail {
+  sessionId: string
+  projectId: string
+  adapterId: string
+  sourceInstanceId: number
+  nativeSessionId: string
+  nativeProjectKey: string
+  cwd?: string
+  gitBranch?: string
+  firstPrompt?: string
+  aiTitle?: string
+  customTitle?: string
+  sourceTime?: string
+  sourceTimeQuality?: string
+  messageCount: number
+  runCount: number
+  presenceCount: number
+  taskCollectionCount: number
+  artifactCount: number
+  workflowCount: number
+  persistedToolResultCount: number
+  projectMemoryDocumentCount: number
+  index?: EngineHistorySessionIndex
+  decisiveFactId: string
+  observedAtUnixMs: number
+  sourceObjectId: number
+  sourceGeneration: number
+  lastCommitSeq: number
+}
+
+export interface EngineSessionDetails {
+  contractVersion: number
+  atCommitSeq: number
+  session?: EngineSessionDetail
+}
+
+export interface EngineSourcePage {
+  contractVersion: number
+  atCommitSeq: number
+  items: Array<EngineSourceSummary>
+  nextCursor?: string
+}
+
+export interface EngineSourceSummary {
+  sourceId: string
+  sourceInstanceId: number
+  adapterId: string
+  displayName: string
+  adapterContractVersion: number
+  discoveredAtUnixMs: number
+  lastSeenAtUnixMs: number
+  streamCount: number
+  unavailableStreamCount: number
+  objectCount: number
+  activeObjectCount: number
+  recordErrorCount: number
+  factCount: number
+  commitCount: number
+  lastCommitSeq?: number
 }
 
 export interface EngineStatus {

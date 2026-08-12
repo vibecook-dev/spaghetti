@@ -10,8 +10,9 @@ runtime tables, reduce evidence, or assemble team/inbox rows.
 
 RFC 011 lists runtime snapshots and teams sixth in the Phase 9 port order. This
 record closes that independently testable query slice; search, timeline,
-subagent/workflow, detail, and statistics packs remain open. It does not claim
-the Phase 9 exit gate.
+subagent/workflow, and capability-detail packs remain open. The core detail
+and statistics slice is recorded separately. It does not claim the Phase 9
+exit gate.
 
 ## Query contract
 
@@ -123,7 +124,9 @@ same-version initialization reruns `CREATE INDEX IF NOT EXISTS` statements.
 
 This is a shadow query surface, not production `SpaghettiClient` cutover. The
 remaining gates include search/rank merging, timeline/facets,
-subagent/workflow, details/statistics, large-corpus latency and boundary-size
+subagent/workflow, capability details, large-corpus latency and boundary-size
 benchmarks, shared IPC/domain DTO generation, and Phase 10 production client
-migration. Until then, the legacy TypeScript query service remains the
-production read owner and the Rust observation database remains isolated.
+migration. The core detail/statistics slice is recorded in the
+[detail/statistics query pack](./011-phase-9-detail-stats-query.md). Until then,
+the legacy TypeScript query service remains the production read owner and the
+Rust observation database remains isolated.

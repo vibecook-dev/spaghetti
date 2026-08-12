@@ -659,10 +659,53 @@ describe('Claude observation shadow native lifecycle', { skip: !native }, () => 
     assert.equal(runtime.entries[0]?.presence.presenceStatus, 'resolved');
     assert.ok(runtime.nextCursor);
     const runtimeRest = await shadow.getRuntimeSnapshot({ limit: 10, cursor: runtime.nextCursor });
-    assert.equal(
-      runtimeRest.entries.some((entry) => entry.kind === 'run' && entry.run.state === 'active'),
-      true,
+    const activeRun = runtimeRest.entries.find((entry) => entry.kind === 'run' && entry.run.state === 'active');
+    assert.ok(activeRun?.run);
+    const exactRun = await shadow.getRunState(activeRun.run.runId);
+    assert.equal(exactRun.atCommitSeq, runtime.atCommitSeq);
+    assert.equal(exactRun.run?.nativeRunId, activeRun.run.nativeRunId);
+    assert.equal(exactRun.run?.state, 'active');
+
+    const projectPage = await shadow.listHistoryProjects({ limit: 1 });
+    const project = projectPage.items[0];
+    assert.ok(project);
+    const sessionPage = await shadow.listHistorySessions(project.projectId, { limit: 1 });
+    const session = sessionPage.items[0];
+    assert.ok(session);
+    const sessionDetails = await shadow.getSession(session.sessionId);
+    assert.equal(sessionDetails.atCommitSeq, runtime.atCommitSeq);
+    assert.equal(sessionDetails.session?.nativeSessionId, SESSION_ID);
+    assert.equal(sessionDetails.session?.messageCount, 1);
+    assert.equal(sessionDetails.session?.runCount, 1);
+    assert.equal(sessionDetails.session?.presenceCount, 1);
+
+    const canonicalMessages = await shadow.getMessages(project.projectId, session.sessionId, { limit: 1 });
+    const legacyMessages = legacy.getSessionMessages('-tmp-shadow-project', SESSION_ID, 1, 0, {
+      sourceId: 'claude-code',
+    });
+    assert.equal(canonicalMessages.contractVersion, 1);
+    assert.equal(canonicalMessages.atCommitSeq, runtime.atCommitSeq);
+    assert.equal(canonicalMessages.items.length, 1);
+    assert.deepEqual(canonicalMessages.items[0]?.nativePayload, legacyMessages.messages[0]);
+    assert.ok(canonicalMessages.payloadBytes > 0);
+    assert.ok(canonicalMessages.payloadBytes <= canonicalMessages.payloadByteLimit);
+
+    const sources = await shadow.listSources({ limit: 1 });
+    assert.equal(sources.items.length, 1);
+    assert.equal(sources.items[0]?.adapterId, 'claude-code');
+    assert.deepEqual(
+      sources.items.map((source) => source.adapterId),
+      legacy.getSourceIds(),
     );
+    assert.ok(sources.items[0]?.factCount);
+
+    const stats = await shadow.getStats();
+    assert.equal(stats.atCommitSeq, runtime.atCommitSeq);
+    assert.equal(stats.sourceInstances, 1);
+    assert.equal(stats.sourceObjects > 0, true);
+    assert.equal(stats.searchableMessages, 1);
+    assert.equal(stats.entities.find((count) => count.name === 'messages')?.count, 1);
+    assert.equal(stats.allocatedDatabaseBytes, stats.databasePageCount * stats.databasePageSizeBytes);
 
     const teamPage = await shadow.listTeams({ limit: 1 });
     assert.equal(teamPage.contractVersion, 1);
@@ -697,6 +740,10 @@ describe('Claude observation shadow native lifecycle', { skip: !native }, () => 
     assert.equal(secondMessage.nextCursor, undefined);
 
     await assert.rejects(shadow.getRuntimeSnapshot({ limit: 0 }), /runtime page limit/i);
+    await assert.rejects(shadow.getSession('not-a-session'), /session detail id/i);
+    await assert.rejects(shadow.getMessages(project.projectId, session.sessionId, { limit: 0 }), /message page limit/i);
+    await assert.rejects(shadow.getRunState('not-a-run'), /run state id/i);
+    await assert.rejects(shadow.listSources({ limit: 0 }), /source page limit/i);
     await assert.rejects(shadow.listTeams({ limit: 0 }), /team page limit/i);
     await assert.rejects(shadow.getTeam('not-a-team'), /team id/i);
     await assert.rejects(shadow.listTeamInboxes(teamId, { cursor: runtime.nextCursor }), /cursor/i);

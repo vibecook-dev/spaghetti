@@ -7,17 +7,20 @@ use napi::bindgen_prelude::{AbortSignal, AsyncTask, Env, Error, Result, Status, 
 use napi_derive::napi;
 
 use crate::engine::{
-    EngineHealthSnapshot, EngineOptions, EngineOverview, EngineStatusSnapshot,
+    CanonicalStats, EngineHealthSnapshot, EngineOptions, EngineOverview, EngineStatusSnapshot,
     HistoryProjectIndexSummary, HistoryProjectPage, HistoryProjectPageRequest,
     HistoryProjectSummary, HistorySessionIndexSummary, HistorySessionPage,
-    HistorySessionPageRequest, HistorySessionSummary, ObservationStatusSnapshot,
-    ObservationSupervisorOptions, OwnerMetadata, QueryCancellationToken, ReconcileOutcome,
-    ReconcileRequest, RuntimePresenceSnapshot, RuntimeRunEvidence, RuntimeRunSnapshot,
-    RuntimeSnapshot, RuntimeSnapshotRequest, SpaghettiEngineCore, TeamConfigSummary, TeamDetails,
-    TeamDetailsRequest, TeamInboxMessage, TeamInboxMessagePage, TeamInboxMessagePageRequest,
-    TeamInboxPage, TeamInboxPageRequest, TeamInboxSummary, TeamMember, TeamPage, TeamPageRequest,
-    TeamSummary, UntimedUsageSummary, UsageActivityDay, UsageActivityReport, UsageActivityRequest,
-    UsageAggregate, UsageCoverageSummary, UsageScopeRequest, UsageTokenValues, UsageTotalsReport,
+    HistorySessionPageRequest, HistorySessionSummary, MessageDetail, MessagePage,
+    MessagePageRequest, NamedCount, ObservationStatusSnapshot, ObservationSupervisorOptions,
+    OwnerMetadata, QueryCancellationToken, ReconcileOutcome, ReconcileRequest, RunStateLookup,
+    RunStateRequest, RuntimePresenceSnapshot, RuntimeRunEvidence, RuntimeRunSnapshot,
+    RuntimeSnapshot, RuntimeSnapshotRequest, SessionDetail, SessionDetails, SessionDetailsRequest,
+    SessionIndexDetail, SourcePage, SourcePageRequest, SourceSummary, SpaghettiEngineCore,
+    TeamConfigSummary, TeamDetails, TeamDetailsRequest, TeamInboxMessage, TeamInboxMessagePage,
+    TeamInboxMessagePageRequest, TeamInboxPage, TeamInboxPageRequest, TeamInboxSummary, TeamMember,
+    TeamPage, TeamPageRequest, TeamSummary, UntimedUsageSummary, UsageActivityDay,
+    UsageActivityReport, UsageActivityRequest, UsageAggregate, UsageCoverageSummary,
+    UsageScopeRequest, UsageTokenValues, UsageTotalsReport, DEFAULT_DETAIL_PAGE_LIMIT,
     DEFAULT_HISTORY_PAGE_LIMIT, DEFAULT_RUNTIME_PAGE_LIMIT, DEFAULT_TEAM_PAGE_LIMIT,
 };
 
@@ -323,6 +326,32 @@ impl From<HistorySessionIndexSummary> for EngineHistorySessionIndex {
     }
 }
 
+impl From<SessionIndexDetail> for EngineHistorySessionIndex {
+    fn from(value: SessionIndexDetail) -> Self {
+        Self {
+            full_path: value.full_path,
+            file_mtime_ms: value.file_mtime_ms as f64,
+            first_prompt: value.first_prompt,
+            summary: value.summary,
+            message_count: value.message_count as f64,
+            created_at: value.created_at,
+            created_at_quality: value.created_at_quality,
+            modified_at: value.modified_at,
+            modified_at_quality: value.modified_at_quality,
+            git_branch: value.git_branch,
+            project_path: value.project_path,
+            is_sidechain: value.is_sidechain,
+            transcript_status: value.transcript_status,
+            resolution_status: value.resolution_status,
+            assertion_count: value.assertion_count as f64,
+            competing_entry_count: value.competing_entry_count as f64,
+            identity_conflict: value.identity_conflict,
+            join_conflict: value.join_conflict,
+            last_commit_seq: value.last_commit_seq as f64,
+        }
+    }
+}
+
 #[napi(object)]
 #[derive(Debug, Clone)]
 pub struct EngineHistorySession {
@@ -389,6 +418,319 @@ impl From<HistorySessionPage> for EngineHistorySessionPage {
             project_id: value.project_id,
             items: value.items.into_iter().map(Into::into).collect(),
             next_cursor: value.next_cursor,
+        }
+    }
+}
+
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct EngineMessagePageOptions {
+    /// Opaque project identity returned by `listHistoryProjects`.
+    pub project_id: String,
+    /// Opaque session identity returned by `listHistorySessions`.
+    pub session_id: String,
+    /// Opaque keyset cursor returned by the preceding page.
+    pub cursor: Option<String>,
+    /// Page size. Defaults to 50 and is capped by the Rust query engine.
+    pub limit: Option<u32>,
+}
+
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct EngineSessionDetail {
+    pub session_id: String,
+    pub project_id: String,
+    pub adapter_id: String,
+    pub source_instance_id: f64,
+    pub native_session_id: String,
+    pub native_project_key: String,
+    pub cwd: Option<String>,
+    pub git_branch: Option<String>,
+    pub first_prompt: Option<String>,
+    pub ai_title: Option<String>,
+    pub custom_title: Option<String>,
+    pub source_time: Option<String>,
+    pub source_time_quality: Option<String>,
+    pub message_count: f64,
+    pub run_count: f64,
+    pub presence_count: f64,
+    pub task_collection_count: f64,
+    pub artifact_count: f64,
+    pub workflow_count: f64,
+    pub persisted_tool_result_count: f64,
+    pub project_memory_document_count: f64,
+    pub index: Option<EngineHistorySessionIndex>,
+    pub decisive_fact_id: String,
+    pub observed_at_unix_ms: f64,
+    pub source_object_id: f64,
+    pub source_generation: f64,
+    pub last_commit_seq: f64,
+}
+
+impl From<SessionDetail> for EngineSessionDetail {
+    fn from(value: SessionDetail) -> Self {
+        Self {
+            session_id: value.session_id,
+            project_id: value.project_id,
+            adapter_id: value.adapter_id,
+            source_instance_id: value.source_instance_id as f64,
+            native_session_id: value.native_session_id,
+            native_project_key: value.native_project_key,
+            cwd: value.cwd,
+            git_branch: value.git_branch,
+            first_prompt: value.first_prompt,
+            ai_title: value.ai_title,
+            custom_title: value.custom_title,
+            source_time: value.source_time,
+            source_time_quality: value.source_time_quality,
+            message_count: value.message_count as f64,
+            run_count: value.run_count as f64,
+            presence_count: value.presence_count as f64,
+            task_collection_count: value.task_collection_count as f64,
+            artifact_count: value.artifact_count as f64,
+            workflow_count: value.workflow_count as f64,
+            persisted_tool_result_count: value.persisted_tool_result_count as f64,
+            project_memory_document_count: value.project_memory_document_count as f64,
+            index: value.index.map(Into::into),
+            decisive_fact_id: value.decisive_fact_id,
+            observed_at_unix_ms: value.observed_at_unix_ms as f64,
+            source_object_id: value.source_object_id as f64,
+            source_generation: value.source_generation as f64,
+            last_commit_seq: value.last_commit_seq as f64,
+        }
+    }
+}
+
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct EngineSessionDetails {
+    pub contract_version: u32,
+    pub at_commit_seq: f64,
+    pub session: Option<EngineSessionDetail>,
+}
+
+impl From<SessionDetails> for EngineSessionDetails {
+    fn from(value: SessionDetails) -> Self {
+        Self {
+            contract_version: value.contract_version,
+            at_commit_seq: value.at_commit_seq as f64,
+            session: value.session.map(Into::into),
+        }
+    }
+}
+
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct EngineMessageDetail {
+    pub message_id: String,
+    pub session_id: String,
+    pub project_id: String,
+    pub adapter_id: String,
+    pub source_instance_id: f64,
+    pub native_session_id: String,
+    pub native_project_key: String,
+    pub native_message_id: Option<String>,
+    pub native_kind: String,
+    pub role: String,
+    pub content: serde_json::Value,
+    pub native_payload: serde_json::Value,
+    pub source_time: Option<String>,
+    pub source_time_quality: Option<String>,
+    pub parent_native_message_id: Option<String>,
+    pub model: Option<String>,
+    pub search_text: Option<String>,
+    pub decisive_fact_id: String,
+    pub observed_at_unix_ms: f64,
+    pub source_object_id: f64,
+    pub source_generation: f64,
+    pub last_commit_seq: f64,
+}
+
+impl From<MessageDetail> for EngineMessageDetail {
+    fn from(value: MessageDetail) -> Self {
+        Self {
+            message_id: value.message_id,
+            session_id: value.session_id,
+            project_id: value.project_id,
+            adapter_id: value.adapter_id,
+            source_instance_id: value.source_instance_id as f64,
+            native_session_id: value.native_session_id,
+            native_project_key: value.native_project_key,
+            native_message_id: value.native_message_id,
+            native_kind: value.native_kind,
+            role: value.role,
+            content: value.content,
+            native_payload: value.native_payload,
+            source_time: value.source_time,
+            source_time_quality: value.source_time_quality,
+            parent_native_message_id: value.parent_native_message_id,
+            model: value.model,
+            search_text: value.search_text,
+            decisive_fact_id: value.decisive_fact_id,
+            observed_at_unix_ms: value.observed_at_unix_ms as f64,
+            source_object_id: value.source_object_id as f64,
+            source_generation: value.source_generation as f64,
+            last_commit_seq: value.last_commit_seq as f64,
+        }
+    }
+}
+
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct EngineMessagePage {
+    pub contract_version: u32,
+    pub at_commit_seq: f64,
+    pub project_id: String,
+    pub session_id: String,
+    pub items: Vec<EngineMessageDetail>,
+    pub payload_bytes: f64,
+    pub payload_byte_limit: f64,
+    pub next_cursor: Option<String>,
+}
+
+impl From<MessagePage> for EngineMessagePage {
+    fn from(value: MessagePage) -> Self {
+        Self {
+            contract_version: value.contract_version,
+            at_commit_seq: value.at_commit_seq as f64,
+            project_id: value.project_id,
+            session_id: value.session_id,
+            items: value.items.into_iter().map(Into::into).collect(),
+            payload_bytes: value.payload_bytes as f64,
+            payload_byte_limit: value.payload_byte_limit as f64,
+            next_cursor: value.next_cursor,
+        }
+    }
+}
+
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct EngineSourceSummary {
+    pub source_id: String,
+    pub source_instance_id: f64,
+    pub adapter_id: String,
+    pub display_name: String,
+    pub adapter_contract_version: u32,
+    pub discovered_at_unix_ms: f64,
+    pub last_seen_at_unix_ms: f64,
+    pub stream_count: f64,
+    pub unavailable_stream_count: f64,
+    pub object_count: f64,
+    pub active_object_count: f64,
+    pub record_error_count: f64,
+    pub fact_count: f64,
+    pub commit_count: f64,
+    pub last_commit_seq: Option<f64>,
+}
+
+impl From<SourceSummary> for EngineSourceSummary {
+    fn from(value: SourceSummary) -> Self {
+        Self {
+            source_id: value.source_id,
+            source_instance_id: value.source_instance_id as f64,
+            adapter_id: value.adapter_id,
+            display_name: value.display_name,
+            adapter_contract_version: value.adapter_contract_version,
+            discovered_at_unix_ms: value.discovered_at_unix_ms as f64,
+            last_seen_at_unix_ms: value.last_seen_at_unix_ms as f64,
+            stream_count: value.stream_count as f64,
+            unavailable_stream_count: value.unavailable_stream_count as f64,
+            object_count: value.object_count as f64,
+            active_object_count: value.active_object_count as f64,
+            record_error_count: value.record_error_count as f64,
+            fact_count: value.fact_count as f64,
+            commit_count: value.commit_count as f64,
+            last_commit_seq: value.last_commit_seq.map(|number| number as f64),
+        }
+    }
+}
+
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct EngineSourcePage {
+    pub contract_version: u32,
+    pub at_commit_seq: f64,
+    pub items: Vec<EngineSourceSummary>,
+    pub next_cursor: Option<String>,
+}
+
+impl From<SourcePage> for EngineSourcePage {
+    fn from(value: SourcePage) -> Self {
+        Self {
+            contract_version: value.contract_version,
+            at_commit_seq: value.at_commit_seq as f64,
+            items: value.items.into_iter().map(Into::into).collect(),
+            next_cursor: value.next_cursor,
+        }
+    }
+}
+
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct EngineNamedCount {
+    pub name: String,
+    pub count: f64,
+}
+
+impl From<NamedCount> for EngineNamedCount {
+    fn from(value: NamedCount) -> Self {
+        Self {
+            name: value.name,
+            count: value.count as f64,
+        }
+    }
+}
+
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct EngineCanonicalStats {
+    pub contract_version: u32,
+    pub at_commit_seq: f64,
+    pub schema_version: u32,
+    pub source_instances: f64,
+    pub source_streams: f64,
+    pub source_objects: f64,
+    pub active_source_objects: f64,
+    pub source_record_errors: f64,
+    pub ingest_commits: f64,
+    pub fact_records: f64,
+    pub searchable_messages: f64,
+    pub entities: Vec<EngineNamedCount>,
+    pub source_stream_states: Vec<EngineNamedCount>,
+    pub projection_readiness: Vec<EngineNamedCount>,
+    pub database_page_count: f64,
+    pub database_page_size_bytes: f64,
+    pub allocated_database_bytes: f64,
+}
+
+impl From<CanonicalStats> for EngineCanonicalStats {
+    fn from(value: CanonicalStats) -> Self {
+        Self {
+            contract_version: value.contract_version,
+            at_commit_seq: value.at_commit_seq as f64,
+            schema_version: value.schema_version,
+            source_instances: value.source_instances as f64,
+            source_streams: value.source_streams as f64,
+            source_objects: value.source_objects as f64,
+            active_source_objects: value.active_source_objects as f64,
+            source_record_errors: value.source_record_errors as f64,
+            ingest_commits: value.ingest_commits as f64,
+            fact_records: value.fact_records as f64,
+            searchable_messages: value.searchable_messages as f64,
+            entities: value.entities.into_iter().map(Into::into).collect(),
+            source_stream_states: value
+                .source_stream_states
+                .into_iter()
+                .map(Into::into)
+                .collect(),
+            projection_readiness: value
+                .projection_readiness
+                .into_iter()
+                .map(Into::into)
+                .collect(),
+            database_page_count: value.database_page_count as f64,
+            database_page_size_bytes: value.database_page_size_bytes as f64,
+            allocated_database_bytes: value.allocated_database_bytes as f64,
         }
     }
 }
@@ -821,6 +1163,24 @@ impl From<RuntimeSnapshot> for EngineRuntimeSnapshot {
                 })
                 .collect(),
             next_cursor: value.next_cursor,
+        }
+    }
+}
+
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct EngineRunStateLookup {
+    pub contract_version: u32,
+    pub at_commit_seq: f64,
+    pub run: Option<EngineRuntimeRun>,
+}
+
+impl From<RunStateLookup> for EngineRunStateLookup {
+    fn from(value: RunStateLookup) -> Self {
+        Self {
+            contract_version: value.contract_version,
+            at_commit_seq: value.at_commit_seq as f64,
+            run: value.run.map(Into::into),
         }
     }
 }
@@ -1318,6 +1678,76 @@ impl SpaghettiEngine {
         )
     }
 
+    /// Read one transcript-backed canonical session and its projection counts.
+    /// A well-formed unknown identity returns an absent `session`.
+    #[napi(ts_return_type = "Promise<EngineSessionDetails>")]
+    pub fn get_session(
+        &self,
+        session_id: String,
+        signal: Option<AbortSignal>,
+    ) -> AsyncTask<SessionDetailsTask> {
+        let cancellation = cancellation_for_signal(signal.as_ref());
+        AsyncTask::with_optional_signal(
+            SessionDetailsTask {
+                engine: Arc::clone(&self.inner),
+                session_id,
+                cancellation,
+            },
+            signal,
+        )
+    }
+
+    /// Page canonical messages for one verified project/session membership.
+    /// Both row count and decoded JSON payload bytes are bounded in Rust.
+    #[napi(ts_return_type = "Promise<EngineMessagePage>")]
+    pub fn get_messages(
+        &self,
+        options: EngineMessagePageOptions,
+        signal: Option<AbortSignal>,
+    ) -> AsyncTask<MessagesTask> {
+        let cancellation = cancellation_for_signal(signal.as_ref());
+        AsyncTask::with_optional_signal(
+            MessagesTask {
+                engine: Arc::clone(&self.inner),
+                options,
+                cancellation,
+            },
+            signal,
+        )
+    }
+
+    /// List configured source instances and their durable ingest inventory.
+    #[napi(ts_return_type = "Promise<EngineSourcePage>")]
+    pub fn list_sources(
+        &self,
+        options: Option<EngineHistoryPageOptions>,
+        signal: Option<AbortSignal>,
+    ) -> AsyncTask<SourcesTask> {
+        let cancellation = cancellation_for_signal(signal.as_ref());
+        AsyncTask::with_optional_signal(
+            SourcesTask {
+                engine: Arc::clone(&self.inner),
+                options,
+                cancellation,
+            },
+            signal,
+        )
+    }
+
+    /// Return one snapshot-consistent set of canonical and source-catalog
+    /// counts. Compatibility-cache tables are intentionally excluded.
+    #[napi(ts_return_type = "Promise<EngineCanonicalStats>")]
+    pub fn get_stats(&self, signal: Option<AbortSignal>) -> AsyncTask<CanonicalStatsTask> {
+        let cancellation = cancellation_for_signal(signal.as_ref());
+        AsyncTask::with_optional_signal(
+            CanonicalStatsTask {
+                engine: Arc::clone(&self.inner),
+                cancellation,
+            },
+            signal,
+        )
+    }
+
     /// Return canonical usage totals for one project or one verified session.
     #[napi(ts_return_type = "Promise<EngineUsageTotals>")]
     pub fn get_usage(
@@ -1376,6 +1806,25 @@ impl SpaghettiEngine {
             RuntimeSnapshotTask {
                 engine: Arc::clone(&self.inner),
                 options,
+                cancellation,
+            },
+            signal,
+        )
+    }
+
+    /// Look up one canonical run without probing process liveness. A
+    /// well-formed unknown identity returns an absent `run`.
+    #[napi(ts_return_type = "Promise<EngineRunStateLookup>")]
+    pub fn get_run_state(
+        &self,
+        run_id: String,
+        signal: Option<AbortSignal>,
+    ) -> AsyncTask<RunStateTask> {
+        let cancellation = cancellation_for_signal(signal.as_ref());
+        AsyncTask::with_optional_signal(
+            RunStateTask {
+                engine: Arc::clone(&self.inner),
+                run_id,
                 cancellation,
             },
             signal,
@@ -1600,6 +2049,29 @@ pub struct HistorySessionsTask {
     options: EngineHistorySessionPageOptions,
 }
 
+pub struct SessionDetailsTask {
+    engine: Arc<SpaghettiEngineCore>,
+    session_id: String,
+    cancellation: QueryCancellationToken,
+}
+
+pub struct MessagesTask {
+    engine: Arc<SpaghettiEngineCore>,
+    options: EngineMessagePageOptions,
+    cancellation: QueryCancellationToken,
+}
+
+pub struct SourcesTask {
+    engine: Arc<SpaghettiEngineCore>,
+    options: Option<EngineHistoryPageOptions>,
+    cancellation: QueryCancellationToken,
+}
+
+pub struct CanonicalStatsTask {
+    engine: Arc<SpaghettiEngineCore>,
+    cancellation: QueryCancellationToken,
+}
+
 pub struct UsageTotalsTask {
     engine: Arc<SpaghettiEngineCore>,
     options: EngineUsageScopeOptions,
@@ -1615,6 +2087,12 @@ pub struct UsageActivityTask {
 pub struct RuntimeSnapshotTask {
     engine: Arc<SpaghettiEngineCore>,
     options: Option<EngineRuntimeSnapshotOptions>,
+    cancellation: QueryCancellationToken,
+}
+
+pub struct RunStateTask {
+    engine: Arc<SpaghettiEngineCore>,
+    run_id: String,
     cancellation: QueryCancellationToken,
 }
 
@@ -1794,6 +2272,93 @@ impl Task for HistorySessionsTask {
     }
 }
 
+impl Task for SessionDetailsTask {
+    type Output = EngineSessionDetails;
+    type JsValue = EngineSessionDetails;
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        self.engine
+            .session_details_cancellable(
+                SessionDetailsRequest {
+                    session_id: self.session_id.clone(),
+                },
+                self.cancellation.clone(),
+            )
+            .map(Into::into)
+            .map_err(napi_error)
+    }
+
+    fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
+        Ok(output)
+    }
+}
+
+impl Task for MessagesTask {
+    type Output = EngineMessagePage;
+    type JsValue = EngineMessagePage;
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        self.engine
+            .messages_cancellable(
+                MessagePageRequest {
+                    project_id: self.options.project_id.clone(),
+                    session_id: self.options.session_id.clone(),
+                    cursor: self.options.cursor.clone(),
+                    limit: self.options.limit.unwrap_or(DEFAULT_DETAIL_PAGE_LIMIT),
+                },
+                self.cancellation.clone(),
+            )
+            .map(Into::into)
+            .map_err(napi_error)
+    }
+
+    fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
+        Ok(output)
+    }
+}
+
+impl Task for SourcesTask {
+    type Output = EngineSourcePage;
+    type JsValue = EngineSourcePage;
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        let options = self.options.clone().unwrap_or(EngineHistoryPageOptions {
+            cursor: None,
+            limit: None,
+        });
+        self.engine
+            .sources_cancellable(
+                SourcePageRequest {
+                    cursor: options.cursor,
+                    limit: options.limit.unwrap_or(DEFAULT_DETAIL_PAGE_LIMIT),
+                },
+                self.cancellation.clone(),
+            )
+            .map(Into::into)
+            .map_err(napi_error)
+    }
+
+    fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
+        Ok(output)
+    }
+}
+
+impl Task for CanonicalStatsTask {
+    type Output = EngineCanonicalStats;
+    type JsValue = EngineCanonicalStats;
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        self.engine
+            .canonical_stats_cancellable(self.cancellation.clone())
+            .map(Into::into)
+            .map_err(napi_error)
+    }
+
+    fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
+        Ok(output)
+    }
+}
+
 impl Task for UsageTotalsTask {
     type Output = EngineUsageTotals;
     type JsValue = EngineUsageTotals;
@@ -1861,6 +2426,27 @@ impl Task for RuntimeSnapshotTask {
                     session_id: options.session_id,
                     cursor: options.cursor,
                     limit: options.limit.unwrap_or(DEFAULT_RUNTIME_PAGE_LIMIT),
+                },
+                self.cancellation.clone(),
+            )
+            .map(Into::into)
+            .map_err(napi_error)
+    }
+
+    fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
+        Ok(output)
+    }
+}
+
+impl Task for RunStateTask {
+    type Output = EngineRunStateLookup;
+    type JsValue = EngineRunStateLookup;
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        self.engine
+            .run_state_cancellable(
+                RunStateRequest {
+                    run_id: self.run_id.clone(),
                 },
                 self.cancellation.clone(),
             )

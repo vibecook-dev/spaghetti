@@ -6,6 +6,8 @@ use super::EngineError;
 const MAX_OPAQUE_ID_BYTES: usize = 32 * 1024;
 pub(super) const PROJECT_ID_PREFIX: &str = "project_v1_";
 pub(super) const SESSION_ID_PREFIX: &str = "session_v1_";
+pub(super) const MESSAGE_ID_PREFIX: &str = "message_v1_";
+pub(super) const SOURCE_ID_PREFIX: &str = "source_v1_";
 pub(super) const RUN_ID_PREFIX: &str = "run_v1_";
 pub(super) const PRESENCE_ID_PREFIX: &str = "presence_v1_";
 pub(super) const TEAM_ID_PREFIX: &str = "team_v1_";

@@ -7,6 +7,7 @@
 mod artifact_projection;
 mod commit;
 mod coordinator;
+mod detail_query;
 mod memory_projection;
 mod observation;
 mod owner_lock;
@@ -34,6 +35,12 @@ use crate::adapter::FactBatch;
 use crate::claude::ClaudeCodeAdapter;
 use commit::{CommitReceipt, ObservationCommit};
 pub use coordinator::{ObservationCoordinator, ReconcileOutcome, ReconcileRequest};
+pub use detail_query::{
+    CanonicalStats, MessageDetail, MessagePage, MessagePageRequest, NamedCount, SessionDetail,
+    SessionDetails, SessionDetailsRequest, SessionIndexDetail, SourcePage, SourcePageRequest,
+    SourceSummary, DEFAULT_DETAIL_PAGE_LIMIT, DETAIL_QUERY_CONTRACT_VERSION,
+    MAX_MESSAGE_PAGE_PAYLOAD_BYTES,
+};
 pub use observation::ObservationStatusSnapshot;
 use observation::{ObservationLease, ObservationRuntime, PendingObservationWork};
 use owner_lock::DatabaseOwnerLock;
@@ -47,9 +54,9 @@ pub use query_pool::{
 };
 use query_pool::{QueryClient, QueryPool, SourceCatalogSnapshot};
 pub use runtime_query::{
-    RuntimePresenceSnapshot, RuntimeRunEvidence, RuntimeRunSnapshot, RuntimeSnapshot,
-    RuntimeSnapshotEntry, RuntimeSnapshotRequest, DEFAULT_RUNTIME_PAGE_LIMIT,
-    RUNTIME_QUERY_CONTRACT_VERSION,
+    RunStateLookup, RunStateRequest, RuntimePresenceSnapshot, RuntimeRunEvidence,
+    RuntimeRunSnapshot, RuntimeSnapshot, RuntimeSnapshotEntry, RuntimeSnapshotRequest,
+    DEFAULT_RUNTIME_PAGE_LIMIT, RUNTIME_QUERY_CONTRACT_VERSION,
 };
 use supervisor::ObservationSupervisor;
 pub use supervisor::ObservationSupervisorOptions;
@@ -401,6 +408,41 @@ impl SpaghettiEngineCore {
         queries.history_sessions(request)
     }
 
+    /// Read one transcript-backed canonical session plus counts and decisive
+    /// provenance from one committed snapshot.
+    pub fn session_details(
+        &self,
+        request: SessionDetailsRequest,
+    ) -> Result<SessionDetails, EngineError> {
+        let (_, queries) = self.clients()?;
+        queries.session_details(request)
+    }
+
+    pub fn session_details_cancellable(
+        &self,
+        request: SessionDetailsRequest,
+        cancellation: QueryCancellationToken,
+    ) -> Result<SessionDetails, EngineError> {
+        let (_, queries) = self.clients()?;
+        queries.session_details_cancellable(request, cancellation)
+    }
+
+    /// Page canonical messages in deterministic source-time/key order. Both
+    /// row count and returned payload bytes are bounded by Rust.
+    pub fn messages(&self, request: MessagePageRequest) -> Result<MessagePage, EngineError> {
+        let (_, queries) = self.clients()?;
+        queries.messages(request)
+    }
+
+    pub fn messages_cancellable(
+        &self,
+        request: MessagePageRequest,
+        cancellation: QueryCancellationToken,
+    ) -> Result<MessagePage, EngineError> {
+        let (_, queries) = self.clients()?;
+        queries.messages_cancellable(request, cancellation)
+    }
+
     /// Return all-time canonical usage totals for one project or one verified
     /// session within that project.
     pub fn usage_totals(
@@ -456,6 +498,51 @@ impl SpaghettiEngineCore {
     ) -> Result<RuntimeSnapshot, EngineError> {
         let (_, queries) = self.clients()?;
         queries.runtime_snapshot_cancellable(request, cancellation)
+    }
+
+    /// Look up one canonical run using the same evidence model as runtime
+    /// snapshots. Unknown but well-formed identifiers return no row.
+    pub fn run_state(&self, request: RunStateRequest) -> Result<RunStateLookup, EngineError> {
+        let (_, queries) = self.clients()?;
+        queries.run_state(request)
+    }
+
+    pub fn run_state_cancellable(
+        &self,
+        request: RunStateRequest,
+        cancellation: QueryCancellationToken,
+    ) -> Result<RunStateLookup, EngineError> {
+        let (_, queries) = self.clients()?;
+        queries.run_state_cancellable(request, cancellation)
+    }
+
+    /// List configured source instances with catalog/error/commit counts.
+    pub fn sources(&self, request: SourcePageRequest) -> Result<SourcePage, EngineError> {
+        let (_, queries) = self.clients()?;
+        queries.sources(request)
+    }
+
+    pub fn sources_cancellable(
+        &self,
+        request: SourcePageRequest,
+        cancellation: QueryCancellationToken,
+    ) -> Result<SourcePage, EngineError> {
+        let (_, queries) = self.clients()?;
+        queries.sources_cancellable(request, cancellation)
+    }
+
+    /// Return one coherent set of canonical and source-catalog counts.
+    pub fn canonical_stats(&self) -> Result<CanonicalStats, EngineError> {
+        let (_, queries) = self.clients()?;
+        queries.canonical_stats()
+    }
+
+    pub fn canonical_stats_cancellable(
+        &self,
+        cancellation: QueryCancellationToken,
+    ) -> Result<CanonicalStats, EngineError> {
+        let (_, queries) = self.clients()?;
+        queries.canonical_stats_cancellable(cancellation)
     }
 
     pub fn teams(&self, request: TeamPageRequest) -> Result<TeamPage, EngineError> {

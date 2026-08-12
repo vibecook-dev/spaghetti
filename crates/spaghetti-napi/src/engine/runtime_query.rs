@@ -30,6 +30,18 @@ pub struct RuntimeSnapshotRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunStateRequest {
+    pub run_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunStateLookup {
+    pub contract_version: u32,
+    pub at_commit_seq: u64,
+    pub run: Option<RuntimeRunSnapshot>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeSnapshot {
     pub contract_version: u32,
     pub at_commit_seq: u64,
@@ -174,6 +186,92 @@ pub(super) fn validate_runtime_request(
         project_key,
         session_key,
         cursor,
+    })
+}
+
+pub(super) fn validate_run_state_request(
+    request: &RunStateRequest,
+) -> Result<Vec<u8>, EngineError> {
+    decode_entity_id(&request.run_id, RUN_ID_PREFIX, "run state id")
+}
+
+pub(super) fn read_run_state(
+    connection: &Connection,
+    request: &RunStateRequest,
+) -> Result<RunStateLookup, EngineError> {
+    let run_key = validate_run_state_request(request)?;
+    let transaction = connection
+        .unchecked_transaction()
+        .map_err(|error| query_sqlite_error("begin run state snapshot", error))?;
+    let watermark = read_committed_watermark(&transaction)?;
+    let mut statement = transaction
+        .prepare(
+            r#"
+            SELECT cr.run_key, cr.session_key, cs.project_key,
+                   cr.native_run_id, cr.parent_run_key,
+                   cs.native_session_id, cs.native_project_key,
+                   si.adapter_id, fr.source_instance_id,
+                   ors.state, ors.last_activity_at, ors.terminal_at,
+                   (SELECT COUNT(*) FROM run_evidence all_re
+                    WHERE all_re.run_key = cr.run_key) AS evidence_count,
+                   re.fact_id, re.evidence_kind, re.evidence_strength,
+                   re.native_state, re.source_time, re.source_time_quality,
+                   evidence_fr.observed_at, re.source_object_id,
+                   re.last_commit_seq AS evidence_commit_seq,
+                   (SELECT COUNT(*) FROM canonical_presences cp
+                    WHERE cp.run_key = cr.run_key) AS presence_count,
+                   (SELECT COUNT(*) FROM canonical_presences cp
+                    WHERE cp.run_key = cr.run_key
+                      AND cp.presence_status = 'conflicting')
+                       AS conflicting_presence_count,
+                   MAX(cr.last_commit_seq,
+                       COALESCE(ors.last_commit_seq, 0),
+                       COALESCE(re.last_commit_seq, 0),
+                       COALESCE((SELECT MAX(cp.last_commit_seq)
+                                 FROM canonical_presences cp
+                                 WHERE cp.run_key = cr.run_key), 0))
+                       AS last_commit_seq,
+                   MAX(cr.last_commit_seq,
+                       COALESCE(ors.last_commit_seq, 0),
+                       COALESCE(re.last_commit_seq, 0),
+                       COALESCE((SELECT MAX(cp.last_commit_seq)
+                                 FROM canonical_presences cp
+                                 WHERE cp.run_key = cr.run_key), 0))
+                       AS sort_rank,
+                   MAX(COALESCE(ors.terminal_at, ''),
+                       COALESCE(ors.last_activity_at, ''),
+                       COALESCE(re.source_time, '')) AS sort_time
+            FROM canonical_runs cr
+            JOIN fact_records fr ON fr.fact_id = cr.fact_id
+            JOIN source_instances si
+              ON si.source_instance_id = fr.source_instance_id
+            LEFT JOIN canonical_sessions cs
+              ON cs.session_key = cr.session_key
+            LEFT JOIN observed_run_states ors
+              ON ors.run_key = cr.run_key
+            LEFT JOIN run_evidence re
+              ON re.fact_id = ors.decisive_evidence_id
+            LEFT JOIN fact_records evidence_fr
+              ON evidence_fr.fact_id = re.fact_id
+            WHERE cr.run_key = ?1
+            "#,
+        )
+        .map_err(|error| query_sqlite_error("prepare run state lookup", error))?;
+    let run = statement
+        .query_row([&run_key], |row| {
+            decode_run_entry(row).map_err(to_rusqlite_query_error)
+        })
+        .optional()
+        .map_err(|error| query_sqlite_error("read run state lookup", error))?
+        .map(|row| row.entry.run.expect("run decoder always returns a run"));
+    drop(statement);
+    transaction
+        .commit()
+        .map_err(|error| query_sqlite_error("finish run state snapshot", error))?;
+    Ok(RunStateLookup {
+        contract_version: RUNTIME_QUERY_CONTRACT_VERSION,
+        at_commit_seq: watermark,
+        run,
     })
 }
 
@@ -773,6 +871,10 @@ fn query_sqlite_error(operation: &'static str, error: rusqlite::Error) -> Engine
     }
 }
 
+fn to_rusqlite_query_error(error: EngineError) -> rusqlite::Error {
+    rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Blob, Box::new(error))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1093,6 +1195,31 @@ mod tests {
         assert_eq!(run.presence_count, 1);
         assert_eq!(run.conflicting_presence_count, 0);
         assert!(second.next_cursor.is_none());
+
+        let exact = client
+            .run_state(RunStateRequest {
+                run_id: encode_entity_id(RUN_ID_PREFIX, b"run"),
+            })
+            .unwrap();
+        assert_eq!(exact.contract_version, RUNTIME_QUERY_CONTRACT_VERSION);
+        assert_eq!(exact.at_commit_seq, 1);
+        let exact_run = exact.run.unwrap();
+        assert_eq!(exact_run.native_run_id, "root");
+        assert_eq!(exact_run.state.as_deref(), Some("active"));
+        assert_eq!(exact_run.presence_count, 1);
+
+        let unknown = client
+            .run_state(RunStateRequest {
+                run_id: encode_entity_id(RUN_ID_PREFIX, b"unknown"),
+            })
+            .unwrap();
+        assert!(unknown.run.is_none());
+        assert!(matches!(
+            client.run_state(RunStateRequest {
+                run_id: "native-run-id".to_string(),
+            }),
+            Err(EngineError::InvalidQuery(_))
+        ));
 
         let scoped = client
             .runtime_snapshot(RuntimeSnapshotRequest {
