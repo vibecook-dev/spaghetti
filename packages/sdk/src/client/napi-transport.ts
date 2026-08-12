@@ -21,6 +21,7 @@ import {
   normalizeTransportError,
   protocolMismatchError,
 } from './errors.js';
+import { encodedRequestBytes } from './encoding.js';
 
 export interface NapiTransportOptions {
   engine: SpaghettiEngine;
@@ -132,7 +133,7 @@ export class NapiTransport implements SpaghettiClientTransport {
         reason: 'duplicate',
       });
     }
-    if (encodedBytes(request.payload) > SPAGHETTI_MAX_REQUEST_BYTES) {
+    if (encodedRequestBytes(request.payload) > SPAGHETTI_MAX_REQUEST_BYTES) {
       return failure({
         code: 'invalid_request',
         message: `The query request exceeds the ${SPAGHETTI_MAX_REQUEST_BYTES}-byte transport limit.`,
@@ -243,13 +244,5 @@ async function executeEngineRequest(
       return engine.listTeamInboxes(request.payload, signal);
     case 'listTeamInboxMessages':
       return engine.listTeamInboxMessages(request.payload, signal);
-  }
-}
-
-function encodedBytes(payload: unknown): number {
-  try {
-    return Buffer.byteLength(JSON.stringify(payload ?? null), 'utf8');
-  } catch {
-    return Number.POSITIVE_INFINITY;
   }
 }

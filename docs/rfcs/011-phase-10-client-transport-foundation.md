@@ -86,9 +86,8 @@ read and does not change the legacy production surface.
 
 ## Remaining Phase 10 work
 
-- define the framed IPC host/channel and implement `IpcTransport` against this
-  exact protocol;
-- add N-API/IPC normalized-result conformance and IPC benchmark evidence;
+- connect the completed framed IPC transport to the selected
+  field-native/daemon endpoint and add topology benchmark evidence;
 - expose committed-change replay and `SpaghettiClient.subscribe()`;
 - migrate CLI/TUI, playground/Electron, React hooks, and SDK examples in
   reversible slices with stale-result tests;

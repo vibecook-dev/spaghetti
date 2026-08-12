@@ -12,3 +12,7 @@ export {
   type OpenSpaghettiClientOptions,
   type OpenEmbeddedSpaghettiClientOptions,
 } from './client.js';
+export * from './ipc-channel.js';
+export * from './ipc-framing.js';
+export { IpcTransport, SPAGHETTI_IPC_CONNECT_TIMEOUT_MS, type IpcTransportOptions } from './ipc-transport.js';
+export { SpaghettiIpcHost, serveSpaghettiIpc, type SpaghettiIpcHostOptions } from './ipc-host.js';

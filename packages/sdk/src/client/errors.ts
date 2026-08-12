@@ -1,4 +1,9 @@
-import { SpaghettiClientError, type SpaghettiClientErrorCode, type SpaghettiProtocolError } from './protocol.js';
+import {
+  SpaghettiClientError,
+  isSpaghettiClientErrorCode,
+  type SpaghettiClientErrorCode,
+  type SpaghettiProtocolError,
+} from './protocol.js';
 import { EngineUnavailableError } from '../native.js';
 
 const CURSOR_SCOPE = /scope|filter|project|session|workflow|inbox/i;
@@ -87,20 +92,7 @@ export function clientError(error: SpaghettiProtocolError, requestId?: number): 
 }
 
 export function isClientErrorCode(value: unknown): value is SpaghettiClientErrorCode {
-  return [
-    'invalid_request',
-    'unsupported_capability',
-    'projection_pending',
-    'cursor_invalid',
-    'cancelled',
-    'deadline_exceeded',
-    'engine_stopping',
-    'database_busy',
-    'transport_unavailable',
-    'protocol_mismatch',
-    'transport_closed',
-    'internal',
-  ].includes(String(value));
+  return isSpaghettiClientErrorCode(value);
 }
 
 function protocolErrorFromClient(error: SpaghettiClientError): SpaghettiProtocolError {

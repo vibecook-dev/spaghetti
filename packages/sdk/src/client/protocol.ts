@@ -132,19 +132,30 @@ export const SPAGHETTI_CLIENT_METHODS = completeMethodList([
   'listTeamInboxMessages',
 ] as const);
 
-export type SpaghettiClientErrorCode =
-  | 'invalid_request'
-  | 'unsupported_capability'
-  | 'projection_pending'
-  | 'cursor_invalid'
-  | 'cancelled'
-  | 'deadline_exceeded'
-  | 'engine_stopping'
-  | 'database_busy'
-  | 'transport_unavailable'
-  | 'protocol_mismatch'
-  | 'transport_closed'
-  | 'internal';
+export function isSpaghettiClientMethod(value: unknown): value is SpaghettiClientMethod {
+  return typeof value === 'string' && (SPAGHETTI_CLIENT_METHODS as readonly string[]).includes(value);
+}
+
+export const SPAGHETTI_CLIENT_ERROR_CODES = [
+  'invalid_request',
+  'unsupported_capability',
+  'projection_pending',
+  'cursor_invalid',
+  'cancelled',
+  'deadline_exceeded',
+  'engine_stopping',
+  'database_busy',
+  'transport_unavailable',
+  'protocol_mismatch',
+  'transport_closed',
+  'internal',
+] as const;
+
+export type SpaghettiClientErrorCode = (typeof SPAGHETTI_CLIENT_ERROR_CODES)[number];
+
+export function isSpaghettiClientErrorCode(value: unknown): value is SpaghettiClientErrorCode {
+  return typeof value === 'string' && (SPAGHETTI_CLIENT_ERROR_CODES as readonly string[]).includes(value);
+}
 
 export interface SpaghettiProtocolError {
   code: SpaghettiClientErrorCode;
