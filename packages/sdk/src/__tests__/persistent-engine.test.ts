@@ -128,4 +128,27 @@ describe('persistent SpaghettiEngine', { skip: !native }, () => {
     assert.equal(engine.status.observation.fullReconcileRequired, false);
     assert.equal(engine.status.observation.recoveryRequired, false);
   });
+
+  test('starts, refreshes, and stops native Claude observation', async () => {
+    const dbPath = temporaryDatabase();
+    const root = path.join(path.dirname(dbPath), 'claude-observed');
+    mkdirSync(root, { recursive: true });
+    writeFileSync(path.join(root, 'settings.json'), '{"model":"claude-sonnet"}');
+    const engine = await openTracked(dbPath, 'sdk-observation-test');
+
+    const started = await engine.startClaudeObservation({ roots: [root] });
+    assert.equal(started.observation.state, 'live');
+    assert.equal(started.observation.supervisorsRunning, 1);
+    assert.equal(started.observation.watchedInstances, 1);
+    assert.equal(started.observation.watchRoots, 1);
+
+    const beforeRefresh = started.observation.reconcilesTotal;
+    const refreshed = await engine.refreshClaudeObservation();
+    assert.equal(refreshed.observation.reconcilesTotal > beforeRefresh, true);
+    assert.equal(refreshed.observation.state, 'live');
+
+    const stopped = await engine.stopClaudeObservation();
+    assert.equal(stopped.observation.supervisorsRunning, 0);
+    await assert.rejects(engine.refreshClaudeObservation(), /not running/i);
+  });
 });

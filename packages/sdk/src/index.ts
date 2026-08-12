@@ -129,6 +129,7 @@ export {
   type SpaghettiEngineOverview,
   type SpaghettiEngineReconcileOptions,
   type SpaghettiEngineReconcileResult,
+  type SpaghettiEngineObservationOptions,
 } from './native.js';
 
 export { reportIngestErrors, summarizeIngestErrors } from './data/ingest-error-report.js';

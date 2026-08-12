@@ -8,7 +8,7 @@ use napi_derive::napi;
 
 use crate::engine::{
     EngineHealthSnapshot, EngineOptions, EngineOverview, EngineStatusSnapshot,
-    ObservationCoordinator, ObservationStatusSnapshot, OwnerMetadata, ReconcileOutcome,
+    ObservationStatusSnapshot, ObservationSupervisorOptions, OwnerMetadata, ReconcileOutcome,
     ReconcileRequest, SpaghettiEngineCore,
 };
 
@@ -61,6 +61,9 @@ pub struct EngineObservationStatus {
     pub dirty_instances: u32,
     pub full_reconcile_required: bool,
     pub recovery_required: bool,
+    pub supervisors_running: u32,
+    pub watched_instances: u32,
+    pub watch_roots: u32,
     pub reconciles_total: f64,
     pub failed_reconciles_total: f64,
     pub retry_signals_total: f64,
@@ -79,6 +82,9 @@ impl From<ObservationStatusSnapshot> for EngineObservationStatus {
             dirty_instances: value.dirty_instances,
             full_reconcile_required: value.full_reconcile_required,
             recovery_required: value.recovery_required,
+            supervisors_running: value.supervisors_running,
+            watched_instances: value.watched_instances,
+            watch_roots: value.watch_roots,
             reconciles_total: value.reconciles_total as f64,
             failed_reconciles_total: value.failed_reconciles_total as f64,
             retry_signals_total: value.retry_signals_total as f64,
@@ -160,6 +166,15 @@ pub struct EngineReconcileOptions {
     /// Configured native data roots understood by the selected adapter.
     pub roots: Vec<String>,
     /// Durable ingest reason. Defaults to `manual_reconcile`.
+    pub reason: Option<String>,
+}
+
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct EngineObservationOptions {
+    /// Configured native data roots understood by the selected adapter.
+    pub roots: Vec<String>,
+    /// Durable ingest reason prefix. Defaults to `native_watch`.
     pub reason: Option<String>,
 }
 
@@ -282,6 +297,51 @@ impl SpaghettiEngine {
         )
     }
 
+    /// Register consolidated native roots before an initial scan, then keep
+    /// one bounded Rust supervisor reconciling Claude changes and polling.
+    #[napi(ts_return_type = "Promise<EngineStatus>")]
+    pub fn start_claude_observation(
+        &self,
+        options: EngineObservationOptions,
+        signal: Option<AbortSignal>,
+    ) -> AsyncTask<StartClaudeObservationTask> {
+        AsyncTask::with_optional_signal(
+            StartClaudeObservationTask {
+                engine: Arc::clone(&self.inner),
+                options,
+            },
+            signal,
+        )
+    }
+
+    /// Force the running Claude supervisor through its common reconcile path.
+    #[napi(ts_return_type = "Promise<EngineStatus>")]
+    pub fn refresh_claude_observation(
+        &self,
+        signal: Option<AbortSignal>,
+    ) -> AsyncTask<RefreshClaudeObservationTask> {
+        AsyncTask::with_optional_signal(
+            RefreshClaudeObservationTask {
+                engine: Arc::clone(&self.inner),
+            },
+            signal,
+        )
+    }
+
+    /// Stop native Claude watch registration without disposing the engine.
+    #[napi(ts_return_type = "Promise<EngineStatus>")]
+    pub fn stop_claude_observation(
+        &self,
+        signal: Option<AbortSignal>,
+    ) -> AsyncTask<StopClaudeObservationTask> {
+        AsyncTask::with_optional_signal(
+            StopClaudeObservationTask {
+                engine: Arc::clone(&self.inner),
+            },
+            signal,
+        )
+    }
+
     /// Invalidate queued query requests. Requests submitted afterward use a
     /// new cancellation epoch and remain valid.
     #[napi]
@@ -360,19 +420,25 @@ pub struct ReconcileClaudeTask {
     options: EngineReconcileOptions,
 }
 
+pub struct StartClaudeObservationTask {
+    engine: Arc<SpaghettiEngineCore>,
+    options: EngineObservationOptions,
+}
+
+pub struct RefreshClaudeObservationTask {
+    engine: Arc<SpaghettiEngineCore>,
+}
+
+pub struct StopClaudeObservationTask {
+    engine: Arc<SpaghettiEngineCore>,
+}
+
 impl Task for ReconcileClaudeTask {
     type Output = EngineReconcileResult;
     type JsValue = EngineReconcileResult;
 
     fn compute(&mut self) -> Result<Self::Output> {
-        if self.options.roots.is_empty()
-            || self.options.roots.iter().any(|root| root.trim().is_empty())
-        {
-            return Err(Error::new(
-                Status::InvalidArg,
-                "reconcileClaude requires at least one non-empty root",
-            ));
-        }
+        validate_roots(&self.options.roots, "reconcileClaude")?;
         let request = ReconcileRequest {
             configured_roots: self.options.roots.iter().map(PathBuf::from).collect(),
             reason: self
@@ -381,10 +447,63 @@ impl Task for ReconcileClaudeTask {
                 .clone()
                 .unwrap_or_else(|| "manual_reconcile".to_string()),
         };
-        ObservationCoordinator::new(Arc::clone(&self.engine))
-            .reconcile(&crate::claude::ClaudeCodeAdapter::new(), request)
+        self.engine
+            .reconcile_claude(request)
             .map(Into::into)
             .map_err(napi_error)
+    }
+
+    fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
+        Ok(output)
+    }
+}
+
+impl Task for StartClaudeObservationTask {
+    type Output = EngineStatus;
+    type JsValue = EngineStatus;
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        validate_roots(&self.options.roots, "startClaudeObservation")?;
+        let mut options = ObservationSupervisorOptions::new(
+            self.options.roots.iter().map(PathBuf::from).collect(),
+        );
+        if let Some(reason) = self.options.reason.clone() {
+            options.reason = reason;
+        }
+        self.engine
+            .start_claude_observation(options)
+            .map_err(napi_error)?;
+        Ok(self.engine.status().into())
+    }
+
+    fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
+        Ok(output)
+    }
+}
+
+impl Task for RefreshClaudeObservationTask {
+    type Output = EngineStatus;
+    type JsValue = EngineStatus;
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        self.engine
+            .refresh_claude_observation()
+            .map_err(napi_error)?;
+        Ok(self.engine.status().into())
+    }
+
+    fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
+        Ok(output)
+    }
+}
+
+impl Task for StopClaudeObservationTask {
+    type Output = EngineStatus;
+    type JsValue = EngineStatus;
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        self.engine.stop_claude_observation().map_err(napi_error)?;
+        Ok(self.engine.status().into())
     }
 
     fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
@@ -425,4 +544,14 @@ impl Task for DisposeTask {
 
 fn napi_error(error: impl std::fmt::Display) -> Error {
     Error::new(Status::GenericFailure, error.to_string())
+}
+
+fn validate_roots(roots: &[String], operation: &str) -> Result<()> {
+    if roots.is_empty() || roots.iter().any(|root| root.trim().is_empty()) {
+        return Err(Error::new(
+            Status::InvalidArg,
+            format!("{operation} requires at least one non-empty root"),
+        ));
+    }
+    Ok(())
 }

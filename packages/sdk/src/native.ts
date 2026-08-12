@@ -166,6 +166,10 @@ export interface SpaghettiEngineObservationStatus {
   fullReconcileRequired: boolean;
   /** A known-loss or retry condition remains, even during an active repair pass. */
   recoveryRequired: boolean;
+  supervisorsRunning: number;
+  watchedInstances: number;
+  /** Consolidated physical roots registered with native watcher backends. */
+  watchRoots: number;
   reconcilesTotal: number;
   failedReconcilesTotal: number;
   retrySignalsTotal: number;
@@ -215,6 +219,13 @@ export interface SpaghettiEngineReconcileOptions {
   reason?: string;
 }
 
+export interface SpaghettiEngineObservationOptions {
+  /** Configured Claude Code data roots, such as `~/.claude`. */
+  roots: string[];
+  /** Durable reason prefix. Defaults to `native_watch`. */
+  reason?: string;
+}
+
 export interface SpaghettiEngineReconcileResult {
   instancesDiscovered: number;
   streamsReconciled: number;
@@ -240,6 +251,15 @@ export interface SpaghettiEngine {
     options: SpaghettiEngineReconcileOptions,
     signal?: AbortSignal,
   ): Promise<SpaghettiEngineReconcileResult>;
+  /** Register native watchers before the initial scan and supervise changes in Rust. */
+  startClaudeObservation(
+    options: SpaghettiEngineObservationOptions,
+    signal?: AbortSignal,
+  ): Promise<SpaghettiEngineStatus>;
+  /** Force the running supervisor through its common reconcile path. */
+  refreshClaudeObservation(signal?: AbortSignal): Promise<SpaghettiEngineStatus>;
+  /** Stop Claude watch registration without disposing the engine. */
+  stopClaudeObservation(signal?: AbortSignal): Promise<SpaghettiEngineStatus>;
   cancelPendingQueries(): number;
   dispose(): Promise<SpaghettiEngineStatus>;
 }

@@ -15,6 +15,7 @@ mod projection;
 mod query_pool;
 mod session_index_projection;
 mod settings_projection;
+mod supervisor;
 mod task_projection;
 mod team_projection;
 mod tool_result_projection;
@@ -26,16 +27,19 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 
 use crate::adapter::FactBatch;
+use crate::claude::ClaudeCodeAdapter;
 use commit::{CommitReceipt, ObservationCommit};
 pub use coordinator::{ObservationCoordinator, ReconcileOutcome, ReconcileRequest};
 pub use observation::ObservationStatusSnapshot;
-use observation::{ObservationLease, ObservationRuntime};
+use observation::{ObservationLease, ObservationRuntime, PendingObservationWork};
 use owner_lock::DatabaseOwnerLock;
 pub use owner_lock::OwnerMetadata;
 pub use query_pool::{
     ChangeCursor, ChangeReplay, ChangeReplayRequest, DurableChange, QueryOverview,
 };
 use query_pool::{QueryClient, QueryPool, SourceCatalogSnapshot};
+use supervisor::ObservationSupervisor;
+pub use supervisor::ObservationSupervisorOptions;
 use writer::{WriterClient, WriterRuntime};
 
 const DEFAULT_QUERY_WORKERS: usize = 2;
@@ -184,11 +188,14 @@ pub struct SpaghettiEngineCore {
     owner: OwnerMetadata,
     query_workers: usize,
     observation: Arc<ObservationRuntime>,
+    supervisors: Mutex<Vec<ObservationSupervisor>>,
     lifecycle: Mutex<Lifecycle>,
     stopped: Condvar,
 }
 
 impl SpaghettiEngineCore {
+    pub const CLAUDE_ADAPTER_ID: &'static str = concat!("claude", "-code");
+
     pub fn open(options: EngineOptions) -> Result<Arc<Self>, EngineError> {
         let database_path = normalize_database_path(&options.database_path)?;
         let query_workers = options.query_workers.unwrap_or(DEFAULT_QUERY_WORKERS);
@@ -212,6 +219,7 @@ impl SpaghettiEngineCore {
             owner,
             query_workers,
             observation: ObservationRuntime::new(),
+            supervisors: Mutex::new(Vec::new()),
             lifecycle: Mutex::new(Lifecycle {
                 phase: LifecyclePhase::Running,
                 runtime: Some(EngineRuntime {
@@ -240,6 +248,20 @@ impl SpaghettiEngineCore {
             })
             .unwrap_or((false, 0, 0));
         let running = lifecycle.phase == LifecyclePhase::Running;
+        let mut observation = self.observation.snapshot();
+        let supervisors = self.lock_supervisors();
+        for supervisor in supervisors
+            .iter()
+            .filter(|supervisor| supervisor.is_alive())
+        {
+            observation.supervisors_running = observation.supervisors_running.saturating_add(1);
+            observation.watched_instances = observation
+                .watched_instances
+                .saturating_add(supervisor.watched_instances());
+            observation.watch_roots = observation
+                .watch_roots
+                .saturating_add(supervisor.watch_roots());
+        }
 
         EngineStatusSnapshot {
             state: lifecycle.phase.as_str().to_string(),
@@ -249,7 +271,7 @@ impl SpaghettiEngineCore {
             configured_query_workers: usize_to_u32(self.query_workers),
             alive_query_workers: usize_to_u32(alive_query_workers),
             in_flight_queries: usize_to_u32(in_flight_queries),
-            observation: self.observation.snapshot(),
+            observation,
             owner: (lifecycle.phase != LifecyclePhase::Stopped).then(|| self.owner.clone()),
         }
     }
@@ -388,6 +410,28 @@ impl SpaghettiEngineCore {
         Ok(queries.cancel_pending())
     }
 
+    pub fn reconcile_claude(
+        self: &Arc<Self>,
+        request: ReconcileRequest,
+    ) -> Result<ReconcileOutcome, EngineError> {
+        ObservationCoordinator::new(Arc::clone(self)).reconcile(&ClaudeCodeAdapter::new(), request)
+    }
+
+    pub fn start_claude_observation(
+        self: &Arc<Self>,
+        options: ObservationSupervisorOptions,
+    ) -> Result<(), EngineError> {
+        self.start_observation_supervisor(ClaudeCodeAdapter::new(), options)
+    }
+
+    pub fn refresh_claude_observation(&self) -> Result<(), EngineError> {
+        self.refresh_observation_supervisor(Self::CLAUDE_ADAPTER_ID)
+    }
+
+    pub fn stop_claude_observation(&self) -> Result<bool, EngineError> {
+        self.stop_observation_supervisor(Self::CLAUDE_ADAPTER_ID)
+    }
+
     /// Retain a lossless, bounded dirty marker for one discovered instance.
     /// Native watchers and polling supervisors use this before attempting the
     /// same coordinator entry point used by explicit reconcile requests.
@@ -409,6 +453,83 @@ impl SpaghettiEngineCore {
         reason: crate::source::DirtyReason,
     ) -> Result<(), EngineError> {
         self.observation.mark_adapter_dirty(adapter_id, reason)
+    }
+
+    pub(crate) fn next_observation_work(&self, adapter_id: &str) -> Option<PendingObservationWork> {
+        self.observation.next_pending(adapter_id)
+    }
+
+    pub fn start_observation_supervisor<A: crate::adapter::AgentAdapter>(
+        self: &Arc<Self>,
+        adapter: A,
+        options: ObservationSupervisorOptions,
+    ) -> Result<(), EngineError> {
+        let adapter_id = adapter.manifest().id.as_str().to_string();
+        let lifecycle = self.lock_lifecycle();
+        if lifecycle.phase != LifecyclePhase::Running {
+            return Err(EngineError::ShuttingDown);
+        }
+        let supervisors = self.lock_supervisors();
+        if supervisors
+            .iter()
+            .any(|supervisor| supervisor.adapter_id() == adapter_id)
+        {
+            return Err(EngineError::InvalidConfig(format!(
+                "observation supervisor for adapter {adapter_id} is already running"
+            )));
+        }
+        drop(supervisors);
+        drop(lifecycle);
+        let supervisor = ObservationSupervisor::start(Arc::clone(self), adapter, options)?;
+        let lifecycle = self.lock_lifecycle();
+        if lifecycle.phase != LifecyclePhase::Running {
+            drop(lifecycle);
+            drop(supervisor);
+            return Err(EngineError::ShuttingDown);
+        }
+        let mut supervisors = self.lock_supervisors();
+        if supervisors
+            .iter()
+            .any(|existing| existing.adapter_id() == adapter_id)
+        {
+            drop(supervisors);
+            drop(lifecycle);
+            drop(supervisor);
+            return Err(EngineError::InvalidConfig(format!(
+                "observation supervisor for adapter {adapter_id} is already running"
+            )));
+        }
+        supervisors.push(supervisor);
+        Ok(())
+    }
+
+    pub fn refresh_observation_supervisor(&self, adapter_id: &str) -> Result<(), EngineError> {
+        let supervisors = self.lock_supervisors();
+        let client = supervisors
+            .iter()
+            .find(|supervisor| supervisor.adapter_id() == adapter_id)
+            .ok_or_else(|| {
+                EngineError::InvalidConfig(format!(
+                    "observation supervisor for adapter {adapter_id} is not running"
+                ))
+            })?
+            .client();
+        drop(supervisors);
+        client.refresh()
+    }
+
+    pub fn stop_observation_supervisor(&self, adapter_id: &str) -> Result<bool, EngineError> {
+        let mut supervisors = self.lock_supervisors();
+        let Some(index) = supervisors
+            .iter()
+            .position(|supervisor| supervisor.adapter_id() == adapter_id)
+        else {
+            return Ok(false);
+        };
+        let mut supervisor = supervisors.swap_remove(index);
+        drop(supervisors);
+        supervisor.shutdown()?;
+        Ok(true)
     }
 
     /// Stop accepting work, cancel queued queries, join readers, join the
@@ -438,11 +559,20 @@ impl SpaghettiEngineCore {
             .expect("running engine must own its runtime");
         drop(lifecycle);
 
+        let mut first_error = None;
+        let mut supervisors = {
+            let mut owned = self.lock_supervisors();
+            std::mem::take(&mut *owned)
+        };
+        for supervisor in &mut supervisors {
+            if let Err(error) = supervisor.shutdown() {
+                first_error.get_or_insert(error);
+            }
+        }
         self.observation.stop_and_wait();
 
-        let mut first_error = None;
         if let Err(error) = runtime.queries.shutdown() {
-            first_error = Some(error);
+            first_error.get_or_insert(error);
         }
         if let Err(error) = runtime.writer.shutdown() {
             first_error.get_or_insert(error);
@@ -494,6 +624,12 @@ impl SpaghettiEngineCore {
 
     fn lock_lifecycle(&self) -> MutexGuard<'_, Lifecycle> {
         self.lifecycle
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn lock_supervisors(&self) -> MutexGuard<'_, Vec<ObservationSupervisor>> {
+        self.supervisors
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }

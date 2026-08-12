@@ -46,6 +46,9 @@ pub struct ObservationStatusSnapshot {
     pub dirty_instances: u32,
     pub full_reconcile_required: bool,
     pub recovery_required: bool,
+    pub supervisors_running: u32,
+    pub watched_instances: u32,
+    pub watch_roots: u32,
     pub reconciles_total: u64,
     pub failed_reconciles_total: u64,
     pub retry_signals_total: u64,
@@ -122,6 +125,19 @@ pub(crate) struct ObservationRuntime {
     dirty_instance_capacity: usize,
     state: Mutex<ObservationState>,
     idle: Condvar,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum PendingObservationWork {
+    Adapter {
+        adapter_id: String,
+        reason: DirtyReason,
+    },
+    Instance {
+        adapter_id: String,
+        stable_key: Vec<u8>,
+        reason: DirtyReason,
+    },
 }
 
 impl ObservationRuntime {
@@ -231,6 +247,9 @@ impl ObservationRuntime {
             dirty_instances: bounded_u32(state.pending_instances.len()),
             full_reconcile_required: !state.pending_adapters.is_empty(),
             recovery_required: has_degraded_pending(&state),
+            supervisors_running: 0,
+            watched_instances: 0,
+            watch_roots: 0,
             reconciles_total: state.reconciles_total,
             failed_reconciles_total: state.failed_reconciles_total,
             retry_signals_total: state.retry_signals_total,
@@ -291,6 +310,29 @@ impl ObservationRuntime {
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
         }
         state.phase = ObservationPhase::Stopped;
+    }
+
+    pub(crate) fn next_pending(&self, adapter_id: &str) -> Option<PendingObservationWork> {
+        let state = self.lock_state();
+        if !state.accepting || state.active.is_some() {
+            return None;
+        }
+        if let Some(pending) = state.pending_adapters.get(adapter_id) {
+            return Some(PendingObservationWork::Adapter {
+                adapter_id: adapter_id.to_string(),
+                reason: pending.reason,
+            });
+        }
+        state
+            .pending_instances
+            .iter()
+            .filter(|(key, _)| key.adapter_id == adapter_id)
+            .min_by_key(|(_, pending)| pending.sequence)
+            .map(|(key, pending)| PendingObservationWork::Instance {
+                adapter_id: key.adapter_id.clone(),
+                stable_key: key.stable_key.clone(),
+                reason: pending.reason,
+            })
     }
 
     fn transition_to_reconciling(&self, id: u64) {
@@ -728,5 +770,30 @@ mod tests {
         assert_eq!(recovered.state, "live");
         assert!(!recovered.recovery_required);
         assert!(recovered.last_error.is_none());
+    }
+
+    #[test]
+    fn pending_work_prefers_adapter_recovery_and_is_hidden_during_reconcile() {
+        let runtime = ObservationRuntime::with_capacity(4).unwrap();
+        runtime
+            .mark_instance_dirty("other", b"one", DirtyReason::NativeEvent)
+            .unwrap();
+        runtime
+            .mark_adapter_dirty("adapter", DirtyReason::WatcherOverflow)
+            .unwrap();
+        assert!(matches!(
+            runtime.next_pending("adapter"),
+            Some(PendingObservationWork::Adapter { ref adapter_id, reason })
+                if adapter_id == "adapter" && reason == DirtyReason::WatcherOverflow
+        ));
+
+        let lease = runtime.begin_full("adapter", 10).unwrap();
+        assert!(runtime.next_pending("adapter").is_none());
+        lease.complete(&empty_outcome(), 1, 20);
+        assert!(matches!(
+            runtime.next_pending("other"),
+            Some(PendingObservationWork::Instance { ref adapter_id, ref stable_key, .. })
+                if adapter_id == "other" && stable_key == b"one"
+        ));
     }
 }

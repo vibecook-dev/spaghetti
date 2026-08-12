@@ -23,6 +23,15 @@ export declare class SpaghettiEngine {
    */
   reconcileClaude(options: EngineReconcileOptions, signal?: AbortSignal | undefined | null): Promise<EngineReconcileResult>
   /**
+   * Register consolidated native roots before an initial scan, then keep
+   * one bounded Rust supervisor reconciling Claude changes and polling.
+   */
+  startClaudeObservation(options: EngineObservationOptions, signal?: AbortSignal | undefined | null): Promise<EngineStatus>
+  /** Force the running Claude supervisor through its common reconcile path. */
+  refreshClaudeObservation(signal?: AbortSignal | undefined | null): Promise<EngineStatus>
+  /** Stop native Claude watch registration without disposing the engine. */
+  stopClaudeObservation(signal?: AbortSignal | undefined | null): Promise<EngineStatus>
+  /**
    * Invalidate queued query requests. Requests submitted afterward use a
    * new cancellation epoch and remain valid.
    */
@@ -37,12 +46,22 @@ export interface EngineHealth {
   detail?: string
 }
 
+export interface EngineObservationOptions {
+  /** Configured native data roots understood by the selected adapter. */
+  roots: Array<string>
+  /** Durable ingest reason prefix. Defaults to `native_watch`. */
+  reason?: string
+}
+
 export interface EngineObservationStatus {
   state: string
   reconcileInFlight: boolean
   dirtyInstances: number
   fullReconcileRequired: boolean
   recoveryRequired: boolean
+  supervisorsRunning: number
+  watchedInstances: number
+  watchRoots: number
   reconcilesTotal: number
   failedReconcilesTotal: number
   retrySignalsTotal: number

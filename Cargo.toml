@@ -44,6 +44,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
 # Filesystem / text
 walkdir    = "2"
+notify     = "8.2"
 regex      = "1"
 once_cell  = "1"
 memmap2    = "0.9"

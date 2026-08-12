@@ -41,6 +41,7 @@ tracing-subscriber.workspace = true
 
 # Filesystem / text
 walkdir.workspace = true
+notify.workspace = true
 regex.workspace = true
 once_cell.workspace = true
 blake3.workspace = true
