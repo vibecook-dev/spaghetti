@@ -3,18 +3,26 @@ import { afterEach, describe, test } from 'node:test';
 import { appendFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import {
   compareClaudeObservationHistory,
+  compareClaudeObservationHistoryQueries,
+  createSpaghettiService,
   defaultClaudeObservationShadowDbPath,
   loadNativeAddon,
   openClaudeObservationShadow,
   type ClaudeObservationShadow,
+  type SpaghettiEngineHistoryProject,
+  type SpaghettiEngineHistorySession,
   type SpaghettiEngineOverview,
 } from '../index.js';
 
 const native = loadNativeAddon();
+const here = path.dirname(fileURLToPath(import.meta.url));
+const SMALL_CLAUDE_FIXTURE = path.resolve(here, '../../../../crates/spaghetti-napi/fixtures/small/.claude');
 const SESSION_ID = '11111111-2222-3333-4444-555555555555';
+const SECOND_SESSION_ID = '22222222-3333-4444-5555-666666666666';
 const shadows: ClaudeObservationShadow[] = [];
 const tempDirs: string[] = [];
 
@@ -33,16 +41,75 @@ function fixture(): { directory: string; productionDb: string; root: string; tra
 }
 
 function message(uuid: string, role: 'user' | 'assistant', content: string): string {
+  return sessionMessage(SESSION_ID, '2026-08-12T00:00:00.000Z', uuid, role, content);
+}
+
+function sessionMessage(
+  sessionId: string,
+  timestamp: string,
+  uuid: string,
+  role: 'user' | 'assistant',
+  content: string,
+): string {
   return `${JSON.stringify({
     type: role,
     uuid,
     parentUuid: null,
-    timestamp: '2026-08-12T00:00:00.000Z',
-    sessionId: SESSION_ID,
+    timestamp,
+    sessionId,
     cwd: '/tmp/shadow-project',
     gitBranch: 'main',
     message: { role, content },
   })}\n`;
+}
+
+function sessionIndex(sessionId: string, modified: string): string {
+  return JSON.stringify({
+    version: 1,
+    originalPath: '/tmp/shadow-project',
+    entries: [
+      {
+        sessionId,
+        fullPath: `/tmp/shadow-project/${sessionId}.jsonl`,
+        fileMtime: 1_786_507_200_000,
+        firstPrompt: `indexed ${sessionId}`,
+        summary: 'native index summary',
+        messageCount: 9,
+        created: '2026-08-10T00:00:00.000Z',
+        modified,
+        gitBranch: 'index-branch',
+        projectPath: '/tmp/shadow-project',
+        isSidechain: false,
+      },
+    ],
+  });
+}
+
+async function allCanonicalProjects(shadow: ClaudeObservationShadow): Promise<SpaghettiEngineHistoryProject[]> {
+  const items: SpaghettiEngineHistoryProject[] = [];
+  let cursor: string | undefined;
+  do {
+    const page = await shadow.listHistoryProjects({ limit: 2, cursor });
+    items.push(...page.items);
+    cursor = page.nextCursor;
+  } while (cursor);
+  return items;
+}
+
+async function allCanonicalSessions(
+  shadow: ClaudeObservationShadow,
+  projects: readonly SpaghettiEngineHistoryProject[],
+): Promise<SpaghettiEngineHistorySession[]> {
+  const items: SpaghettiEngineHistorySession[] = [];
+  for (const project of projects) {
+    let cursor: string | undefined;
+    do {
+      const page = await shadow.listHistorySessions(project.projectId, { limit: 3, cursor });
+      items.push(...page.items);
+      cursor = page.nextCursor;
+    } while (cursor);
+  }
+  return items;
 }
 
 afterEach(async () => {
@@ -86,6 +153,79 @@ describe('Claude observation shadow', () => {
     assert.throws(
       () => compareClaudeObservationHistory(overview, { sessions: -1, messages: 5, subagentMessages: 2 }),
       /non-negative safe integer/,
+    );
+  });
+
+  test('normalizes project/session query parity and classifies metadata-only projects', () => {
+    const project = {
+      nativeProjectKey: 'project',
+      transcriptSessionCount: 1,
+      messageCount: 3,
+      memoryDocumentCount: 1,
+      hasMemoryIndex: true,
+    } as SpaghettiEngineHistoryProject;
+    const metadataOnly = {
+      nativeProjectKey: 'metadata-only',
+      transcriptSessionCount: 0,
+      messageCount: 0,
+      memoryDocumentCount: 1,
+      hasMemoryIndex: true,
+    } as SpaghettiEngineHistoryProject;
+    const session = {
+      nativeProjectKey: 'project',
+      nativeSessionId: SESSION_ID,
+      messageCount: 3,
+    } as SpaghettiEngineHistorySession;
+    const parity = compareClaudeObservationHistoryQueries(
+      [project, metadataOnly],
+      [session],
+      [
+        {
+          nativeProjectKey: 'project',
+          sessionCount: 1,
+          parentMessageCount: 2,
+          subagentMessageCount: 1,
+          hasMemory: true,
+        },
+      ],
+      [
+        {
+          nativeProjectKey: 'project',
+          nativeSessionId: SESSION_ID,
+          parentMessageCount: 2,
+          subagentMessageCount: 1,
+        },
+      ],
+    );
+    assert.equal(parity.exact, true);
+    assert.deepEqual(parity.projects.acceptedCanonicalOnly, ['metadata-only']);
+    assert.deepEqual(parity.projects.unexpectedCanonicalOnly, []);
+    assert.deepEqual(parity.sessions.unexpectedCanonicalOnly, []);
+    assert.deepEqual(parity.acceptedDifferences, ['canonical_message_count_includes_subagents']);
+
+    assert.equal(
+      compareClaudeObservationHistoryQueries(
+        [{ ...project, messageCount: 2 }],
+        [session],
+        [
+          {
+            nativeProjectKey: 'project',
+            sessionCount: 1,
+            parentMessageCount: 2,
+            subagentMessageCount: 1,
+            hasMemory: true,
+          },
+        ],
+        [
+          {
+            nativeProjectKey: 'project',
+            nativeSessionId: SESSION_ID,
+            parentMessageCount: 2,
+            subagentMessageCount: 1,
+          },
+        ],
+      ).exact,
+      false,
     );
   });
 });
@@ -181,5 +321,199 @@ describe('Claude observation shadow native lifecycle', { skip: !native }, () => 
     assert.deepEqual([resumed.overview.canonicalSessions, resumed.overview.canonicalMessages], [1, 2]);
     assert.equal(resumed.status.owner?.ownerLabel, 'sdk-shadow-restart-test');
     assert.equal((await reopened.dispose()).state, 'stopped');
+  });
+
+  test('queries canonical projects and sessions with Rust-owned ordering, pagination, and enrichment', async () => {
+    const { productionDb, root } = fixture();
+    const projectsRoot = path.join(root, 'projects');
+    const recentProject = path.join(projectsRoot, '-tmp-recent-project');
+    const olderProject = path.join(projectsRoot, '-tmp-older-project');
+    const indexOnlyProject = path.join(projectsRoot, '-tmp-index-only-project');
+    const memoryOnlyProject = path.join(projectsRoot, '-tmp-memory-only-project');
+    for (const project of [recentProject, olderProject, indexOnlyProject, memoryOnlyProject]) {
+      mkdirSync(project, { recursive: true });
+    }
+    writeFileSync(
+      path.join(recentProject, `${SESSION_ID}.jsonl`),
+      sessionMessage(
+        SESSION_ID,
+        '2026-08-12T02:00:00.000Z',
+        'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+        'user',
+        'recent transcript',
+      ),
+    );
+    writeFileSync(
+      path.join(recentProject, `${SECOND_SESSION_ID}.jsonl`),
+      sessionMessage(
+        SECOND_SESSION_ID,
+        '2026-08-12T01:00:00.000Z',
+        'cccccccc-dddd-eeee-ffff-000000000000',
+        'assistant',
+        'second recent transcript',
+      ),
+    );
+    writeFileSync(
+      path.join(recentProject, 'sessions-index.json'),
+      JSON.stringify({
+        ...JSON.parse(sessionIndex(SESSION_ID, '2026-08-12T03:00:00.000Z')),
+        entries: [
+          JSON.parse(sessionIndex(SESSION_ID, '2026-08-12T03:00:00.000Z')).entries[0],
+          JSON.parse(sessionIndex(SECOND_SESSION_ID, '2026-08-12T01:30:00.000Z')).entries[0],
+        ],
+      }),
+    );
+    writeFileSync(
+      path.join(olderProject, '44444444-5555-6666-7777-888888888888.jsonl'),
+      sessionMessage(
+        '44444444-5555-6666-7777-888888888888',
+        '2026-08-11T02:00:00.000Z',
+        'bbbbbbbb-cccc-dddd-eeee-ffffffffffff',
+        'assistant',
+        'older transcript',
+      ),
+    );
+    writeFileSync(
+      path.join(indexOnlyProject, 'sessions-index.json'),
+      sessionIndex('33333333-4444-5555-6666-777777777777', '2026-08-10T01:00:00.000Z'),
+    );
+    mkdirSync(path.join(memoryOnlyProject, 'memory'), { recursive: true });
+    writeFileSync(path.join(memoryOnlyProject, 'memory', 'MEMORY.md'), '# Canonical memory\n');
+
+    const shadow = await openClaudeObservationShadow({ productionDbPath: productionDb, roots: [root] });
+    shadows.push(shadow);
+
+    const first = await shadow.listHistoryProjects({ limit: 2 });
+    assert.equal(first.contractVersion, 1);
+    assert.equal(first.items.length, 2);
+    assert.equal(first.items[0]?.nativeProjectKey, '-tmp-recent-project');
+    assert.equal(first.items[0]?.latestActivitySource, 'session_index');
+    assert.equal(first.items[0]?.transcriptSessionCount, 2);
+    assert.equal(first.items[0]?.messageCount, 2);
+    assert.equal(first.items[0]?.index?.entryCount, 2);
+    assert.ok(first.nextCursor);
+
+    const second = await shadow.listHistoryProjects({ limit: 2, cursor: first.nextCursor });
+    assert.equal(second.items.length, 2);
+    assert.equal(second.nextCursor, undefined);
+    assert.deepEqual(
+      [...first.items, ...second.items].map((item) => item.nativeProjectKey),
+      ['-tmp-recent-project', '-tmp-older-project', '-tmp-index-only-project', '-tmp-memory-only-project'],
+    );
+    assert.equal(first.atCommitSeq, second.atCommitSeq);
+    const indexOnly = second.items.find((item) => item.nativeProjectKey === '-tmp-index-only-project');
+    assert.equal(indexOnly?.transcriptSessionCount, 0);
+    assert.equal(indexOnly?.messageCount, 0);
+    const memoryOnly = second.items.find((item) => item.nativeProjectKey === '-tmp-memory-only-project');
+    assert.equal(memoryOnly?.memoryDocumentCount, 1);
+    assert.equal(memoryOnly?.hasMemoryIndex, true);
+    assert.equal(memoryOnly?.latestActivityAt, undefined);
+
+    const recent = first.items[0];
+    assert.ok(recent);
+    const sessions = await shadow.listHistorySessions(recent.projectId, { limit: 1 });
+    assert.equal(sessions.projectId, recent.projectId);
+    assert.equal(sessions.atCommitSeq, first.atCommitSeq);
+    assert.equal(sessions.items.length, 1);
+    assert.equal(sessions.items[0]?.nativeSessionId, SESSION_ID);
+    assert.equal(sessions.items[0]?.messageCount, 1);
+    assert.equal(sessions.items[0]?.firstMessageAt, '2026-08-12T02:00:00.000Z');
+    assert.equal(sessions.items[0]?.firstMessageTimeQuality, 'native_exact');
+    assert.equal(sessions.items[0]?.index?.messageCount, 9, 'native index count stays separate');
+    assert.equal(sessions.items[0]?.index?.transcriptStatus, 'present');
+    assert.equal(sessions.items[0]?.index?.resolutionStatus, 'resolved');
+    assert.ok(sessions.nextCursor);
+    const remainingSessions = await shadow.listHistorySessions(recent.projectId, {
+      limit: 1,
+      cursor: sessions.nextCursor,
+    });
+    assert.equal(remainingSessions.atCommitSeq, sessions.atCommitSeq);
+    assert.deepEqual(
+      [...sessions.items, ...remainingSessions.items].map((item) => item.nativeSessionId),
+      [SESSION_ID, SECOND_SESSION_ID],
+    );
+    assert.equal(remainingSessions.nextCursor, undefined);
+
+    await assert.rejects(shadow.listHistoryProjects({ limit: 0 }), /limit must be between 1 and 200/i);
+    await assert.rejects(shadow.listHistoryProjects({ cursor: 'not-a-cursor' }), /cursor/i);
+    await assert.rejects(shadow.listHistorySessions(recent.projectId, { cursor: first.nextCursor }), /cursor/i);
+    await assert.rejects(shadow.listHistorySessions('not-a-project'), /project id/i);
+
+    appendFileSync(
+      path.join(recentProject, `${SESSION_ID}.jsonl`),
+      sessionMessage(
+        SESSION_ID,
+        '2026-08-12T04:00:00.000Z',
+        'dddddddd-eeee-ffff-0000-111111111111',
+        'assistant',
+        'invalidate the old snapshot cursor',
+      ),
+    );
+    await shadow.refresh();
+    await assert.rejects(shadow.listHistoryProjects({ limit: 2, cursor: first.nextCursor }), /cursor expired/i);
+  });
+
+  test('matches normalized project/session summaries from the committed TypeScript oracle', async () => {
+    const directory = mkdtempSync(path.join(tmpdir(), 'spaghetti-shadow-parity-'));
+    tempDirs.push(directory);
+    const productionDb = path.join(directory, 'legacy.db');
+    const legacy = createSpaghettiService({
+      rootDir: SMALL_CLAUDE_FIXTURE,
+      dbPath: productionDb,
+      engine: 'ts',
+    });
+    try {
+      await legacy.initialize();
+      const shadow = await openClaudeObservationShadow({
+        productionDbPath: productionDb,
+        roots: [SMALL_CLAUDE_FIXTURE],
+        ownerLabel: 'sdk-shadow-query-parity-test',
+      });
+      shadows.push(shadow);
+
+      const canonicalProjects = await allCanonicalProjects(shadow);
+      const canonicalSessions = await allCanonicalSessions(shadow, canonicalProjects);
+      const legacyProjects = legacy.getProjectList({ sourceId: 'claude-code' });
+      const legacySessions = legacyProjects.flatMap((project) =>
+        legacy.getSessionList(project, { sourceId: 'claude-code' }).map((session) => {
+          const subagentMessageCount = legacy
+            .getSessionSubagents(session.projectSlug, session.sessionId, {
+              sourceId: 'claude-code',
+              includeNested: true,
+            })
+            .reduce((total, agent) => total + agent.messageCount, 0);
+          return {
+            nativeProjectKey: session.projectSlug,
+            nativeSessionId: session.sessionId,
+            parentMessageCount: session.messageCount,
+            subagentMessageCount,
+          };
+        }),
+      );
+      const legacyProjectSummaries = legacyProjects.map((project) => {
+        const projectSessions = legacySessions.filter((session) => session.nativeProjectKey === project.slug);
+        return {
+          nativeProjectKey: project.slug,
+          sessionCount: project.sessionCount,
+          parentMessageCount: project.messageCount,
+          subagentMessageCount: projectSessions.reduce((total, session) => total + session.subagentMessageCount, 0),
+          hasMemory: project.hasMemory,
+        };
+      });
+
+      const parity = compareClaudeObservationHistoryQueries(
+        canonicalProjects,
+        canonicalSessions,
+        legacyProjectSummaries,
+        legacySessions,
+      );
+      assert.equal(parity.exact, true, JSON.stringify(parity));
+      assert.equal(parity.projects.compared, legacyProjects.length);
+      assert.equal(parity.sessions.compared, legacySessions.length);
+      assert.deepEqual(parity.projects.unexpectedCanonicalOnly, []);
+      assert.deepEqual(parity.sessions.unexpectedCanonicalOnly, []);
+    } finally {
+      await legacy.dispose();
+    }
   });
 });

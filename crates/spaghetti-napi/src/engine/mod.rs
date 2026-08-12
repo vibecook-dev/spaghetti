@@ -35,7 +35,11 @@ use observation::{ObservationLease, ObservationRuntime, PendingObservationWork};
 use owner_lock::DatabaseOwnerLock;
 pub use owner_lock::OwnerMetadata;
 pub use query_pool::{
-    ChangeCursor, ChangeReplay, ChangeReplayRequest, DurableChange, QueryOverview,
+    ChangeCursor, ChangeReplay, ChangeReplayRequest, DurableChange, HistoryProjectIndexSummary,
+    HistoryProjectPage, HistoryProjectPageRequest, HistoryProjectSummary,
+    HistorySessionIndexSummary, HistorySessionPage, HistorySessionPageRequest,
+    HistorySessionSummary, QueryOverview, DEFAULT_HISTORY_PAGE_LIMIT,
+    HISTORY_QUERY_CONTRACT_VERSION,
 };
 use query_pool::{QueryClient, QueryPool, SourceCatalogSnapshot};
 use supervisor::ObservationSupervisor;
@@ -356,6 +360,26 @@ impl SpaghettiEngineCore {
             query_only: query.query_only,
             read_only: query.read_only,
         })
+    }
+
+    /// List canonical projects through one bounded, snapshot-consistent
+    /// read-only query operation.
+    pub fn history_projects(
+        &self,
+        request: HistoryProjectPageRequest,
+    ) -> Result<HistoryProjectPage, EngineError> {
+        let (_, queries) = self.clients()?;
+        queries.history_projects(request)
+    }
+
+    /// List transcript-backed canonical sessions for one opaque project
+    /// identity. Native index enrichment remains separately identified.
+    pub fn history_sessions(
+        &self,
+        request: HistorySessionPageRequest,
+    ) -> Result<HistorySessionPage, EngineError> {
+        let (_, queries) = self.clients()?;
+        queries.history_sessions(request)
     }
 
     /// Atomically persist one decoded source range, advance its durable

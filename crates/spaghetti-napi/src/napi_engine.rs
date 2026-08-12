@@ -8,8 +8,11 @@ use napi_derive::napi;
 
 use crate::engine::{
     EngineHealthSnapshot, EngineOptions, EngineOverview, EngineStatusSnapshot,
-    ObservationStatusSnapshot, ObservationSupervisorOptions, OwnerMetadata, ReconcileOutcome,
-    ReconcileRequest, SpaghettiEngineCore,
+    HistoryProjectIndexSummary, HistoryProjectPage, HistoryProjectPageRequest,
+    HistoryProjectSummary, HistorySessionIndexSummary, HistorySessionPage,
+    HistorySessionPageRequest, HistorySessionSummary, ObservationStatusSnapshot,
+    ObservationSupervisorOptions, OwnerMetadata, ReconcileOutcome, ReconcileRequest,
+    SpaghettiEngineCore, DEFAULT_HISTORY_PAGE_LIMIT,
 };
 
 #[napi(object)]
@@ -166,6 +169,226 @@ pub struct EngineOverviewResult {
 
 #[napi(object)]
 #[derive(Debug, Clone)]
+pub struct EngineHistoryPageOptions {
+    /// Opaque keyset cursor returned by the preceding page.
+    pub cursor: Option<String>,
+    /// Page size. Defaults to 50 and is capped by the Rust query engine.
+    pub limit: Option<u32>,
+}
+
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct EngineHistorySessionPageOptions {
+    /// Opaque project identity returned by `listHistoryProjects`.
+    pub project_id: String,
+    /// Opaque keyset cursor returned by the preceding page.
+    pub cursor: Option<String>,
+    /// Page size. Defaults to 50 and is capped by the Rust query engine.
+    pub limit: Option<u32>,
+}
+
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct EngineHistoryProjectIndex {
+    pub status: String,
+    pub original_path: Option<String>,
+    pub entry_count: f64,
+    pub assertion_count: f64,
+    pub competing_snapshot_count: f64,
+    pub last_commit_seq: f64,
+}
+
+impl From<HistoryProjectIndexSummary> for EngineHistoryProjectIndex {
+    fn from(value: HistoryProjectIndexSummary) -> Self {
+        Self {
+            status: value.status,
+            original_path: value.original_path,
+            entry_count: value.entry_count as f64,
+            assertion_count: value.assertion_count as f64,
+            competing_snapshot_count: value.competing_snapshot_count as f64,
+            last_commit_seq: value.last_commit_seq as f64,
+        }
+    }
+}
+
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct EngineHistoryProject {
+    pub project_id: String,
+    pub adapter_id: String,
+    pub source_instance_id: f64,
+    pub native_project_key: String,
+    pub transcript_session_count: f64,
+    pub message_count: f64,
+    pub memory_document_count: f64,
+    pub has_memory_index: bool,
+    pub latest_activity_at: Option<String>,
+    pub latest_activity_source: Option<String>,
+    pub index: Option<EngineHistoryProjectIndex>,
+    pub last_commit_seq: f64,
+}
+
+impl From<HistoryProjectSummary> for EngineHistoryProject {
+    fn from(value: HistoryProjectSummary) -> Self {
+        Self {
+            project_id: value.project_id,
+            adapter_id: value.adapter_id,
+            source_instance_id: value.source_instance_id as f64,
+            native_project_key: value.native_project_key,
+            transcript_session_count: value.transcript_session_count as f64,
+            message_count: value.message_count as f64,
+            memory_document_count: value.memory_document_count as f64,
+            has_memory_index: value.has_memory_index,
+            latest_activity_at: value.latest_activity_at,
+            latest_activity_source: value.latest_activity_source,
+            index: value.index.map(Into::into),
+            last_commit_seq: value.last_commit_seq as f64,
+        }
+    }
+}
+
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct EngineHistoryProjectPage {
+    pub contract_version: u32,
+    pub at_commit_seq: f64,
+    pub items: Vec<EngineHistoryProject>,
+    pub next_cursor: Option<String>,
+}
+
+impl From<HistoryProjectPage> for EngineHistoryProjectPage {
+    fn from(value: HistoryProjectPage) -> Self {
+        Self {
+            contract_version: value.contract_version,
+            at_commit_seq: value.at_commit_seq as f64,
+            items: value.items.into_iter().map(Into::into).collect(),
+            next_cursor: value.next_cursor,
+        }
+    }
+}
+
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct EngineHistorySessionIndex {
+    pub full_path: String,
+    pub file_mtime_ms: f64,
+    pub first_prompt: String,
+    pub summary: Option<String>,
+    pub message_count: f64,
+    pub created_at: String,
+    pub created_at_quality: String,
+    pub modified_at: String,
+    pub modified_at_quality: String,
+    pub git_branch: String,
+    pub project_path: String,
+    pub is_sidechain: bool,
+    pub transcript_status: String,
+    pub resolution_status: String,
+    pub assertion_count: f64,
+    pub competing_entry_count: f64,
+    pub identity_conflict: bool,
+    pub join_conflict: bool,
+    pub last_commit_seq: f64,
+}
+
+impl From<HistorySessionIndexSummary> for EngineHistorySessionIndex {
+    fn from(value: HistorySessionIndexSummary) -> Self {
+        Self {
+            full_path: value.full_path,
+            file_mtime_ms: value.file_mtime_ms as f64,
+            first_prompt: value.first_prompt,
+            summary: value.summary,
+            message_count: value.message_count as f64,
+            created_at: value.created_at,
+            created_at_quality: value.created_at_quality,
+            modified_at: value.modified_at,
+            modified_at_quality: value.modified_at_quality,
+            git_branch: value.git_branch,
+            project_path: value.project_path,
+            is_sidechain: value.is_sidechain,
+            transcript_status: value.transcript_status,
+            resolution_status: value.resolution_status,
+            assertion_count: value.assertion_count as f64,
+            competing_entry_count: value.competing_entry_count as f64,
+            identity_conflict: value.identity_conflict,
+            join_conflict: value.join_conflict,
+            last_commit_seq: value.last_commit_seq as f64,
+        }
+    }
+}
+
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct EngineHistorySession {
+    pub session_id: String,
+    pub project_id: String,
+    pub native_session_id: String,
+    pub native_project_key: String,
+    pub cwd: Option<String>,
+    pub git_branch: Option<String>,
+    pub first_prompt: Option<String>,
+    pub ai_title: Option<String>,
+    pub custom_title: Option<String>,
+    pub message_count: f64,
+    pub first_message_at: Option<String>,
+    pub first_message_time_quality: Option<String>,
+    pub last_message_at: Option<String>,
+    pub last_message_time_quality: Option<String>,
+    pub latest_activity_at: Option<String>,
+    pub latest_activity_source: Option<String>,
+    pub index: Option<EngineHistorySessionIndex>,
+    pub last_commit_seq: f64,
+}
+
+impl From<HistorySessionSummary> for EngineHistorySession {
+    fn from(value: HistorySessionSummary) -> Self {
+        Self {
+            session_id: value.session_id,
+            project_id: value.project_id,
+            native_session_id: value.native_session_id,
+            native_project_key: value.native_project_key,
+            cwd: value.cwd,
+            git_branch: value.git_branch,
+            first_prompt: value.first_prompt,
+            ai_title: value.ai_title,
+            custom_title: value.custom_title,
+            message_count: value.message_count as f64,
+            first_message_at: value.first_message_at,
+            first_message_time_quality: value.first_message_time_quality,
+            last_message_at: value.last_message_at,
+            last_message_time_quality: value.last_message_time_quality,
+            latest_activity_at: value.latest_activity_at,
+            latest_activity_source: value.latest_activity_source,
+            index: value.index.map(Into::into),
+            last_commit_seq: value.last_commit_seq as f64,
+        }
+    }
+}
+
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct EngineHistorySessionPage {
+    pub contract_version: u32,
+    pub at_commit_seq: f64,
+    pub project_id: String,
+    pub items: Vec<EngineHistorySession>,
+    pub next_cursor: Option<String>,
+}
+
+impl From<HistorySessionPage> for EngineHistorySessionPage {
+    fn from(value: HistorySessionPage) -> Self {
+        Self {
+            contract_version: value.contract_version,
+            at_commit_seq: value.at_commit_seq as f64,
+            project_id: value.project_id,
+            items: value.items.into_iter().map(Into::into).collect(),
+            next_cursor: value.next_cursor,
+        }
+    }
+}
+
+#[napi(object)]
+#[derive(Debug, Clone)]
 pub struct EngineReconcileOptions {
     /// Configured native data roots understood by the selected adapter.
     pub roots: Vec<String>,
@@ -281,6 +504,40 @@ impl SpaghettiEngine {
         AsyncTask::with_optional_signal(
             OverviewTask {
                 engine: Arc::clone(&self.inner),
+            },
+            signal,
+        )
+    }
+
+    /// List canonical projects in Rust-defined activity order. The cursor is
+    /// opaque, versioned, and valid only for this query.
+    #[napi(ts_return_type = "Promise<EngineHistoryProjectPage>")]
+    pub fn list_history_projects(
+        &self,
+        options: Option<EngineHistoryPageOptions>,
+        signal: Option<AbortSignal>,
+    ) -> AsyncTask<HistoryProjectsTask> {
+        AsyncTask::with_optional_signal(
+            HistoryProjectsTask {
+                engine: Arc::clone(&self.inner),
+                options,
+            },
+            signal,
+        )
+    }
+
+    /// List transcript-backed sessions for one canonical project. Native
+    /// session-index metadata is returned as explicitly sourced enrichment.
+    #[napi(ts_return_type = "Promise<EngineHistorySessionPage>")]
+    pub fn list_history_sessions(
+        &self,
+        options: EngineHistorySessionPageOptions,
+        signal: Option<AbortSignal>,
+    ) -> AsyncTask<HistorySessionsTask> {
+        AsyncTask::with_optional_signal(
+            HistorySessionsTask {
+                engine: Arc::clone(&self.inner),
+                options,
             },
             signal,
         )
@@ -421,6 +678,16 @@ pub struct OverviewTask {
     engine: Arc<SpaghettiEngineCore>,
 }
 
+pub struct HistoryProjectsTask {
+    engine: Arc<SpaghettiEngineCore>,
+    options: Option<EngineHistoryPageOptions>,
+}
+
+pub struct HistorySessionsTask {
+    engine: Arc<SpaghettiEngineCore>,
+    options: EngineHistorySessionPageOptions,
+}
+
 pub struct ReconcileClaudeTask {
     engine: Arc<SpaghettiEngineCore>,
     options: EngineReconcileOptions,
@@ -523,6 +790,49 @@ impl Task for OverviewTask {
 
     fn compute(&mut self) -> Result<Self::Output> {
         self.engine.overview().map(Into::into).map_err(napi_error)
+    }
+
+    fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
+        Ok(output)
+    }
+}
+
+impl Task for HistoryProjectsTask {
+    type Output = EngineHistoryProjectPage;
+    type JsValue = EngineHistoryProjectPage;
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        let options = self.options.clone().unwrap_or(EngineHistoryPageOptions {
+            cursor: None,
+            limit: None,
+        });
+        self.engine
+            .history_projects(HistoryProjectPageRequest {
+                cursor: options.cursor,
+                limit: options.limit.unwrap_or(DEFAULT_HISTORY_PAGE_LIMIT),
+            })
+            .map(Into::into)
+            .map_err(napi_error)
+    }
+
+    fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
+        Ok(output)
+    }
+}
+
+impl Task for HistorySessionsTask {
+    type Output = EngineHistorySessionPage;
+    type JsValue = EngineHistorySessionPage;
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        self.engine
+            .history_sessions(HistorySessionPageRequest {
+                project_id: self.options.project_id.clone(),
+                cursor: self.options.cursor.clone(),
+                limit: self.options.limit.unwrap_or(DEFAULT_HISTORY_PAGE_LIMIT),
+            })
+            .map(Into::into)
+            .map_err(napi_error)
     }
 
     fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {

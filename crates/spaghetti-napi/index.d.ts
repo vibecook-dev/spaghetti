@@ -18,6 +18,16 @@ export declare class SpaghettiEngine {
   /** Execute the first typed, read-only Rust query. */
   overview(signal?: AbortSignal | undefined | null): Promise<EngineOverviewResult>
   /**
+   * List canonical projects in Rust-defined activity order. The cursor is
+   * opaque, versioned, and valid only for this query.
+   */
+  listHistoryProjects(options?: EngineHistoryPageOptions | undefined | null, signal?: AbortSignal | undefined | null): Promise<EngineHistoryProjectPage>
+  /**
+   * List transcript-backed sessions for one canonical project. Native
+   * session-index metadata is returned as explicitly sourced enrichment.
+   */
+  listHistorySessions(options: EngineHistorySessionPageOptions, signal?: AbortSignal | undefined | null): Promise<EngineHistorySessionPage>
+  /**
    * Reconcile the adapter-declared Claude source map through the common
    * Rust drivers, decoders, projections, and durable cursor transaction.
    */
@@ -44,6 +54,104 @@ export interface EngineHealth {
   status: EngineStatus
   healthy: boolean
   detail?: string
+}
+
+export interface EngineHistoryPageOptions {
+  /** Opaque keyset cursor returned by the preceding page. */
+  cursor?: string
+  /** Page size. Defaults to 50 and is capped by the Rust query engine. */
+  limit?: number
+}
+
+export interface EngineHistoryProject {
+  projectId: string
+  adapterId: string
+  sourceInstanceId: number
+  nativeProjectKey: string
+  transcriptSessionCount: number
+  messageCount: number
+  memoryDocumentCount: number
+  hasMemoryIndex: boolean
+  latestActivityAt?: string
+  latestActivitySource?: string
+  index?: EngineHistoryProjectIndex
+  lastCommitSeq: number
+}
+
+export interface EngineHistoryProjectIndex {
+  status: string
+  originalPath?: string
+  entryCount: number
+  assertionCount: number
+  competingSnapshotCount: number
+  lastCommitSeq: number
+}
+
+export interface EngineHistoryProjectPage {
+  contractVersion: number
+  atCommitSeq: number
+  items: Array<EngineHistoryProject>
+  nextCursor?: string
+}
+
+export interface EngineHistorySession {
+  sessionId: string
+  projectId: string
+  nativeSessionId: string
+  nativeProjectKey: string
+  cwd?: string
+  gitBranch?: string
+  firstPrompt?: string
+  aiTitle?: string
+  customTitle?: string
+  messageCount: number
+  firstMessageAt?: string
+  firstMessageTimeQuality?: string
+  lastMessageAt?: string
+  lastMessageTimeQuality?: string
+  latestActivityAt?: string
+  latestActivitySource?: string
+  index?: EngineHistorySessionIndex
+  lastCommitSeq: number
+}
+
+export interface EngineHistorySessionIndex {
+  fullPath: string
+  fileMtimeMs: number
+  firstPrompt: string
+  summary?: string
+  messageCount: number
+  createdAt: string
+  createdAtQuality: string
+  modifiedAt: string
+  modifiedAtQuality: string
+  gitBranch: string
+  projectPath: string
+  isSidechain: boolean
+  transcriptStatus: string
+  resolutionStatus: string
+  assertionCount: number
+  competingEntryCount: number
+  identityConflict: boolean
+  joinConflict: boolean
+  lastCommitSeq: number
+}
+
+export interface EngineHistorySessionPage {
+  contractVersion: number
+  atCommitSeq: number
+  projectId: string
+  items: Array<EngineHistorySession>
+  nextCursor?: string
+}
+
+export interface EngineHistorySessionPageOptions {
+  /** Opaque project identity returned by `listHistoryProjects`. */
+  projectId: string
+  /** Opaque keyset cursor returned by the preceding page. */
+  cursor?: string
+  /** Page size. Defaults to 50 and is capped by the Rust query engine. */
+  limit?: number
 }
 
 export interface EngineObservationOptions {

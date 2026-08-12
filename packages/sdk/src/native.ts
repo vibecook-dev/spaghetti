@@ -216,6 +216,112 @@ export interface SpaghettiEngineOverview {
   readOnly: boolean;
 }
 
+export interface SpaghettiEngineHistoryPageOptions {
+  /** Opaque keyset cursor returned by the preceding page. */
+  cursor?: string;
+  /** Page size. Defaults to 50 and must be between 1 and 200. */
+  limit?: number;
+}
+
+export interface SpaghettiEngineHistorySessionPageOptions extends SpaghettiEngineHistoryPageOptions {
+  /** Opaque project identity returned by {@link SpaghettiEngine.listHistoryProjects}. */
+  projectId: string;
+}
+
+export type SpaghettiEngineHistoryActivitySource = 'message' | 'session' | 'session_index';
+
+export interface SpaghettiEngineHistoryProjectIndex {
+  status: string;
+  originalPath?: string;
+  entryCount: number;
+  assertionCount: number;
+  competingSnapshotCount: number;
+  lastCommitSeq: number;
+}
+
+/** Rust-owned canonical project aggregation, without compatibility-table guesses. */
+export interface SpaghettiEngineHistoryProject {
+  projectId: string;
+  adapterId: string;
+  sourceInstanceId: number;
+  nativeProjectKey: string;
+  /** Transcript-backed sessions only; metadata-only index entries are not promoted to history. */
+  transcriptSessionCount: number;
+  messageCount: number;
+  memoryDocumentCount: number;
+  /** A native memory-index document exists; topic documents alone do not set this flag. */
+  hasMemoryIndex: boolean;
+  latestActivityAt?: string;
+  latestActivitySource?: SpaghettiEngineHistoryActivitySource;
+  index?: SpaghettiEngineHistoryProjectIndex;
+  lastCommitSeq: number;
+}
+
+export interface SpaghettiEngineHistoryProjectPage {
+  contractVersion: number;
+  atCommitSeq: number;
+  items: SpaghettiEngineHistoryProject[];
+  nextCursor?: string;
+}
+
+export type SpaghettiEngineTimestampQuality =
+  | 'native_exact'
+  | 'native_approximate'
+  | 'file_metadata_fallback'
+  | 'derived';
+
+export interface SpaghettiEngineHistorySessionIndex {
+  fullPath: string;
+  fileMtimeMs: number;
+  firstPrompt: string;
+  summary?: string;
+  messageCount: number;
+  createdAt: string;
+  createdAtQuality: SpaghettiEngineTimestampQuality;
+  modifiedAt: string;
+  modifiedAtQuality: SpaghettiEngineTimestampQuality;
+  gitBranch: string;
+  projectPath: string;
+  isSidechain: boolean;
+  transcriptStatus: string;
+  resolutionStatus: string;
+  assertionCount: number;
+  competingEntryCount: number;
+  identityConflict: boolean;
+  joinConflict: boolean;
+  lastCommitSeq: number;
+}
+
+/** Transcript-backed canonical session with separately sourced native-index enrichment. */
+export interface SpaghettiEngineHistorySession {
+  sessionId: string;
+  projectId: string;
+  nativeSessionId: string;
+  nativeProjectKey: string;
+  cwd?: string;
+  gitBranch?: string;
+  firstPrompt?: string;
+  aiTitle?: string;
+  customTitle?: string;
+  messageCount: number;
+  firstMessageAt?: string;
+  firstMessageTimeQuality?: SpaghettiEngineTimestampQuality;
+  lastMessageAt?: string;
+  lastMessageTimeQuality?: SpaghettiEngineTimestampQuality;
+  latestActivityAt?: string;
+  latestActivitySource?: SpaghettiEngineHistoryActivitySource;
+  index?: SpaghettiEngineHistorySessionIndex;
+  lastCommitSeq: number;
+}
+
+export interface SpaghettiEngineHistorySessionPage {
+  contractVersion: number;
+  atCommitSeq: number;
+  projectId: string;
+  items: SpaghettiEngineHistorySession[];
+  nextCursor?: string;
+}
+
 export interface SpaghettiEngineReconcileOptions {
   /** Configured Claude Code data roots, such as `~/.claude`. */
   roots: string[];
@@ -251,6 +357,14 @@ export interface SpaghettiEngine {
   readonly status: SpaghettiEngineStatus;
   health(signal?: AbortSignal): Promise<SpaghettiEngineHealth>;
   overview(signal?: AbortSignal): Promise<SpaghettiEngineOverview>;
+  listHistoryProjects(
+    options?: SpaghettiEngineHistoryPageOptions,
+    signal?: AbortSignal,
+  ): Promise<SpaghettiEngineHistoryProjectPage>;
+  listHistorySessions(
+    options: SpaghettiEngineHistorySessionPageOptions,
+    signal?: AbortSignal,
+  ): Promise<SpaghettiEngineHistorySessionPage>;
   reconcileClaude(
     options: SpaghettiEngineReconcileOptions,
     signal?: AbortSignal,

@@ -14,6 +14,11 @@ import {
   openSpaghettiEngine,
   type SpaghettiEngine,
   type SpaghettiEngineHealth,
+  type SpaghettiEngineHistoryPageOptions,
+  type SpaghettiEngineHistoryProject,
+  type SpaghettiEngineHistoryProjectPage,
+  type SpaghettiEngineHistorySession,
+  type SpaghettiEngineHistorySessionPage,
   type SpaghettiEngineOverview,
   type SpaghettiEngineStatus,
 } from './native.js';
@@ -73,12 +78,73 @@ export interface ClaudeObservationHistoryParity {
   };
 }
 
+export interface ClaudeLegacyProjectSummary {
+  nativeProjectKey: string;
+  sessionCount: number;
+  /** Compatibility parent-transcript count. Subagents are separate legacy rows. */
+  parentMessageCount: number;
+  /** Raw compatibility subagent transcript rows, including workflow-nested agents. */
+  subagentMessageCount: number;
+  hasMemory: boolean;
+}
+
+export interface ClaudeLegacySessionSummary {
+  nativeProjectKey: string;
+  nativeSessionId: string;
+  /** Compatibility parent-transcript count. */
+  parentMessageCount: number;
+  /** Raw compatibility subagent transcript rows scoped to this parent session. */
+  subagentMessageCount: number;
+}
+
+export interface ClaudeObservationHistoryQueryParity {
+  exact: boolean;
+  projects: {
+    compared: number;
+    missingCanonical: string[];
+    /** Metadata/memory projects with no legacy compatibility project row. */
+    acceptedCanonicalOnly: string[];
+    /** Canonical-only projects that unexpectedly contain transcript history. */
+    unexpectedCanonicalOnly: string[];
+    mismatched: Array<{
+      nativeProjectKey: string;
+      fields: string[];
+    }>;
+  };
+  sessions: {
+    compared: number;
+    missingCanonical: string[];
+    /** Always unexpected: canonical sessions require transcript evidence. */
+    unexpectedCanonicalOnly: string[];
+    mismatched: Array<{
+      nativeSessionId: string;
+      fields: string[];
+    }>;
+  };
+  /**
+   * Canonical message counts include parent and subagent transcript rows, so
+   * comparison normalizes legacy parent and raw subagent counts together.
+   */
+  acceptedDifferences: readonly ['canonical_message_count_includes_subagents'];
+}
+
 export interface ClaudeObservationShadow {
   readonly databasePath: string;
   readonly roots: readonly string[];
   readonly status: SpaghettiEngineStatus;
   snapshot(signal?: AbortSignal): Promise<ClaudeObservationShadowSnapshot>;
   compareHistory(legacy: ClaudeLegacyHistoryCounts, signal?: AbortSignal): Promise<ClaudeObservationHistoryParity>;
+  /** Query Rust-owned canonical project summaries without opening either database in TypeScript. */
+  listHistoryProjects(
+    options?: SpaghettiEngineHistoryPageOptions,
+    signal?: AbortSignal,
+  ): Promise<SpaghettiEngineHistoryProjectPage>;
+  /** Query transcript-backed sessions for one opaque canonical project identity. */
+  listHistorySessions(
+    projectId: string,
+    options?: SpaghettiEngineHistoryPageOptions,
+    signal?: AbortSignal,
+  ): Promise<SpaghettiEngineHistorySessionPage>;
   refresh(signal?: AbortSignal): Promise<SpaghettiEngineStatus>;
   dispose(): Promise<SpaghettiEngineStatus>;
 }
@@ -125,6 +191,88 @@ export function compareClaudeObservationHistory(
       delta: messageDelta,
       exact: messageDelta === 0,
     },
+  };
+}
+
+/**
+ * Compare the fields with equivalent legacy/canonical meaning.
+ *
+ * Index-only and memory-only projects are legitimate canonical evidence and
+ * therefore appear as `canonicalOnly`, not as fabricated transcript rows.
+ */
+export function compareClaudeObservationHistoryQueries(
+  canonicalProjects: readonly SpaghettiEngineHistoryProject[],
+  canonicalSessions: readonly SpaghettiEngineHistorySession[],
+  legacyProjects: readonly ClaudeLegacyProjectSummary[],
+  legacySessions: readonly ClaudeLegacySessionSummary[],
+): ClaudeObservationHistoryQueryParity {
+  const canonicalProjectMap = uniqueBy(canonicalProjects, (project) => project.nativeProjectKey, 'canonical project');
+  const legacyProjectMap = uniqueBy(legacyProjects, (project) => project.nativeProjectKey, 'legacy project');
+  const canonicalSessionMap = uniqueBy(canonicalSessions, (session) => session.nativeSessionId, 'canonical session');
+  const legacySessionMap = uniqueBy(legacySessions, (session) => session.nativeSessionId, 'legacy session');
+  const projectMismatch: ClaudeObservationHistoryQueryParity['projects']['mismatched'] = [];
+  const sessionMismatch: ClaudeObservationHistoryQueryParity['sessions']['mismatched'] = [];
+
+  for (const [nativeProjectKey, legacy] of legacyProjectMap) {
+    assertCount('legacy project sessionCount', legacy.sessionCount);
+    assertCount('legacy project parentMessageCount', legacy.parentMessageCount);
+    assertCount('legacy project subagentMessageCount', legacy.subagentMessageCount);
+    assertCount('legacy project totalMessageCount', legacy.parentMessageCount + legacy.subagentMessageCount);
+    const canonical = canonicalProjectMap.get(nativeProjectKey);
+    if (!canonical) continue;
+    const fields: string[] = [];
+    if (canonical.transcriptSessionCount !== legacy.sessionCount) fields.push('sessionCount');
+    if (canonical.messageCount !== legacy.parentMessageCount + legacy.subagentMessageCount) fields.push('messageCount');
+    if (canonical.hasMemoryIndex !== legacy.hasMemory) fields.push('hasMemory');
+    if (fields.length > 0) projectMismatch.push({ nativeProjectKey, fields });
+  }
+  for (const [nativeSessionId, legacy] of legacySessionMap) {
+    assertCount('legacy session parentMessageCount', legacy.parentMessageCount);
+    assertCount('legacy session subagentMessageCount', legacy.subagentMessageCount);
+    assertCount('legacy session totalMessageCount', legacy.parentMessageCount + legacy.subagentMessageCount);
+    const canonical = canonicalSessionMap.get(nativeSessionId);
+    if (!canonical) continue;
+    const fields: string[] = [];
+    if (canonical.nativeProjectKey !== legacy.nativeProjectKey) fields.push('nativeProjectKey');
+    if (canonical.messageCount !== legacy.parentMessageCount + legacy.subagentMessageCount) fields.push('messageCount');
+    if (fields.length > 0) sessionMismatch.push({ nativeSessionId, fields });
+  }
+
+  const missingProjects = [...legacyProjectMap.keys()].filter((key) => !canonicalProjectMap.has(key)).sort();
+  const canonicalOnlyProjects = [...canonicalProjectMap.entries()].filter(([key]) => !legacyProjectMap.has(key));
+  const acceptedCanonicalOnlyProjects = canonicalOnlyProjects
+    .filter(([, project]) => project.transcriptSessionCount === 0 && project.messageCount === 0)
+    .map(([key]) => key)
+    .sort();
+  const unexpectedCanonicalOnlyProjects = canonicalOnlyProjects
+    .filter(([, project]) => project.transcriptSessionCount > 0 || project.messageCount > 0)
+    .map(([key]) => key)
+    .sort();
+  const missingSessions = [...legacySessionMap.keys()].filter((key) => !canonicalSessionMap.has(key)).sort();
+  const canonicalOnlySessions = [...canonicalSessionMap.keys()].filter((key) => !legacySessionMap.has(key)).sort();
+  const exact =
+    missingProjects.length === 0 &&
+    unexpectedCanonicalOnlyProjects.length === 0 &&
+    projectMismatch.length === 0 &&
+    missingSessions.length === 0 &&
+    canonicalOnlySessions.length === 0 &&
+    sessionMismatch.length === 0;
+  return {
+    exact,
+    projects: {
+      compared: legacyProjectMap.size,
+      missingCanonical: missingProjects,
+      acceptedCanonicalOnly: acceptedCanonicalOnlyProjects,
+      unexpectedCanonicalOnly: unexpectedCanonicalOnlyProjects,
+      mismatched: projectMismatch,
+    },
+    sessions: {
+      compared: legacySessionMap.size,
+      missingCanonical: missingSessions,
+      unexpectedCanonicalOnly: canonicalOnlySessions,
+      mismatched: sessionMismatch,
+    },
+    acceptedDifferences: ['canonical_message_count_includes_subagents'],
   };
 }
 
@@ -187,6 +335,21 @@ class NativeClaudeObservationShadow implements ClaudeObservationShadow {
     signal?: AbortSignal,
   ): Promise<ClaudeObservationHistoryParity> {
     return compareClaudeObservationHistory(await this.engine.overview(signal), legacy);
+  }
+
+  listHistoryProjects(
+    options?: SpaghettiEngineHistoryPageOptions,
+    signal?: AbortSignal,
+  ): Promise<SpaghettiEngineHistoryProjectPage> {
+    return this.engine.listHistoryProjects(options, signal);
+  }
+
+  listHistorySessions(
+    projectId: string,
+    options?: SpaghettiEngineHistoryPageOptions,
+    signal?: AbortSignal,
+  ): Promise<SpaghettiEngineHistorySessionPage> {
+    return this.engine.listHistorySessions({ projectId, ...options }, signal);
   }
 
   refresh(signal?: AbortSignal): Promise<SpaghettiEngineStatus> {
@@ -284,4 +447,15 @@ function assertCount(label: string, value: number): void {
   if (!Number.isSafeInteger(value) || value < 0) {
     throw new Error(`Claude legacy ${label} count must be a non-negative safe integer.`);
   }
+}
+
+function uniqueBy<T>(values: readonly T[], keyOf: (value: T) => string, label: string): Map<string, T> {
+  const output = new Map<string, T>();
+  for (const value of values) {
+    const key = keyOf(value);
+    if (typeof key !== 'string' || key.trim() === '') throw new Error(`${label} identity must be a non-empty string.`);
+    if (output.has(key)) throw new Error(`${label} identity is duplicated: ${key}`);
+    output.set(key, value);
+  }
+  return output;
 }

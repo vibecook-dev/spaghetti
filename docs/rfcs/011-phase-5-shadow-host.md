@@ -80,9 +80,11 @@ parity, concurrent idempotent disposal, and durable reopen. The persistent
 engine overview test separately proves canonical counts are visible while
 legacy compatibility counts stay zero.
 
-This is not Phase 8 sole-writer cutover. The next gate is typed Rust query
-parity for the UI's actual read packs. Only after those queries can serve the
-production surface may a feature flag select exactly one complete writer mode:
+This is not Phase 8 sole-writer cutover. The first typed Rust project/session
+query pack is now recorded in
+[the Phase 9 query record](./011-phase-9-project-session-query.md); the other
+UI read packs remain gates. Only after those queries can serve the production
+surface may a feature flag select exactly one complete writer mode:
 stop and close the legacy owner first, then open the Rust engine on the chosen
 production database. Independent legacy and Rust writers against that database
 remain forbidden.
