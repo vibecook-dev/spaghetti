@@ -28,6 +28,10 @@ pub struct WriterHealth {
 
 enum WriterCommand {
     Health(Sender<Result<WriterHealth, EngineError>>),
+    ReserveSourceInstance {
+        source: Box<commit::SourceInstanceSpec>,
+        response: Sender<Result<u64, EngineError>>,
+    },
     Commit {
         request: Box<ObservationCommit>,
         response: Sender<Result<CommitReceipt, EngineError>>,
@@ -62,6 +66,25 @@ impl WriterClient {
 
     pub fn is_alive(&self) -> bool {
         self.alive.load(Ordering::Acquire)
+    }
+
+    pub fn reserve_source_instance(
+        &self,
+        source: commit::SourceInstanceSpec,
+    ) -> Result<u64, EngineError> {
+        if !self.alive.load(Ordering::Acquire) {
+            return Err(EngineError::WorkerUnavailable { worker: "writer" });
+        }
+        let (response_tx, response_rx) = bounded(1);
+        self.commands
+            .send(WriterCommand::ReserveSourceInstance {
+                source: Box::new(source),
+                response: response_tx,
+            })
+            .map_err(|_| EngineError::WorkerUnavailable { worker: "writer" })?;
+        response_rx
+            .recv()
+            .map_err(|_| EngineError::WorkerUnavailable { worker: "writer" })?
     }
 
     pub fn commit_observation(
@@ -191,6 +214,9 @@ fn writer_thread(
         match command {
             WriterCommand::Health(response) => {
                 let _ = response.send(read_health(&connection));
+            }
+            WriterCommand::ReserveSourceInstance { source, response } => {
+                let _ = response.send(commit::reserve_source_instance(&mut connection, &source));
             }
             WriterCommand::Commit { request, response } => {
                 let _ = response.send(commit::apply_observation_commit(&mut connection, &request));

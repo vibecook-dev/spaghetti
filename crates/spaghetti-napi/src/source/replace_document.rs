@@ -8,6 +8,9 @@ use super::{
 };
 
 const CHECKPOINT_MAGIC: &[u8] = b"SPRD";
+const CHECKPOINT_VERSION_PRESENT_ONLY: u8 = 1;
+const CHECKPOINT_VERSION_PRESENCE_AWARE: u8 = 2;
+const ABSENT_REVISION_BYTES: &[u8] = b"spaghetti:replace-document:absent:v1";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReplaceDocumentConfig {
@@ -25,7 +28,8 @@ impl Default for ReplaceDocumentConfig {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReplaceCheckpoint {
     pub generation: u64,
-    pub identity: FileIdentity,
+    pub present: bool,
+    pub identity: Option<FileIdentity>,
     pub revision: Revision,
 }
 
@@ -37,27 +41,79 @@ impl ReplaceCheckpoint {
     pub fn encode(&self) -> Vec<u8> {
         let mut bytes = Vec::with_capacity(96);
         bytes.extend_from_slice(CHECKPOINT_MAGIC);
-        bytes.push(1);
+        bytes.push(CHECKPOINT_VERSION_PRESENCE_AWARE);
         bytes.extend_from_slice(&self.generation.to_be_bytes());
-        self.identity.encode_into(&mut bytes);
+        bytes.push(u8::from(self.present));
+        if let Some(identity) = &self.identity {
+            identity.encode_into(&mut bytes);
+        }
         bytes.extend_from_slice(self.revision.as_bytes());
         bytes
     }
 
     pub fn decode(bytes: &[u8]) -> Result<Self, SourceDriverError> {
-        let mut reader = CursorReader::new(bytes, CHECKPOINT_MAGIC)?;
+        let Some(bytes) = bytes.strip_prefix(CHECKPOINT_MAGIC) else {
+            return Err(SourceDriverError::InvalidCursor(
+                "checkpoint magic does not match driver".to_string(),
+            ));
+        };
+        let Some((&version, payload)) = bytes.split_first() else {
+            return Err(SourceDriverError::InvalidCursor(
+                "checkpoint is truncated".to_string(),
+            ));
+        };
+        let mut reader = CursorReader::from_payload(payload);
+        if version == CHECKPOINT_VERSION_PRESENT_ONLY {
+            let checkpoint = Self {
+                generation: reader.u64()?,
+                present: true,
+                identity: Some(FileIdentity::decode_from(&mut reader)?),
+                revision: reader.revision()?,
+            };
+            reader.finish()?;
+            checkpoint.validate()?;
+            return Ok(checkpoint);
+        }
+        if version != CHECKPOINT_VERSION_PRESENCE_AWARE {
+            return Err(SourceDriverError::InvalidCursor(
+                "unsupported checkpoint version".to_string(),
+            ));
+        }
+        let generation = reader.u64()?;
+        let present = reader.bool()?;
+        let identity = if present {
+            Some(FileIdentity::decode_from(&mut reader)?)
+        } else {
+            None
+        };
         let checkpoint = Self {
-            generation: reader.u64()?,
-            identity: FileIdentity::decode_from(&mut reader)?,
+            generation,
+            present,
+            identity,
             revision: reader.revision()?,
         };
         reader.finish()?;
-        if checkpoint.generation == 0 {
+        checkpoint.validate()?;
+        Ok(checkpoint)
+    }
+
+    fn validate(&self) -> Result<(), SourceDriverError> {
+        if self.generation == 0 {
             return Err(SourceDriverError::InvalidCursor(
                 "replace-document generation must be greater than zero".to_string(),
             ));
         }
-        Ok(checkpoint)
+        if self.present != self.identity.is_some() {
+            return Err(SourceDriverError::InvalidCursor(
+                "replace-document checkpoint identity does not match state".to_string(),
+            ));
+        }
+        if !self.present && self.revision != absent_revision() {
+            return Err(SourceDriverError::InvalidCursor(
+                "replace-document absence checkpoint has an invalid revision".to_string(),
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -72,6 +128,10 @@ pub enum ReplaceRead {
         record: SourceRecord,
         checkpoint: ReplaceCheckpoint,
         generation_changed: bool,
+    },
+    Removed {
+        record: SourceRecord,
+        checkpoint: ReplaceCheckpoint,
     },
     Quarantined {
         quarantine: DriverQuarantine,
@@ -106,7 +166,7 @@ impl ReplaceDocument {
         incompatible_replacement: bool,
     ) -> Result<ReplaceRead, SourceDriverError> {
         match read_stable_file(path, self.config.max_document_bytes)? {
-            StableRead::Missing => Ok(ReplaceRead::Missing),
+            StableRead::Missing => self.observe_absence(previous, origin),
             StableRead::Unstable => Ok(ReplaceRead::RetryTransient),
             StableRead::Oversized(stamp) => {
                 let revision = stamp_revision(&stamp);
@@ -114,10 +174,13 @@ impl ReplaceDocument {
                     generation(previous, incompatible_replacement)?;
                 let checkpoint = ReplaceCheckpoint {
                     generation,
-                    identity: stamp.identity,
+                    present: true,
+                    identity: Some(stamp.identity),
                     revision,
                 };
-                if !generation_changed && previous.is_some_and(|old| old.revision == revision) {
+                if !generation_changed
+                    && previous.is_some_and(|old| old.present && old.revision == revision)
+                {
                     return Ok(ReplaceRead::Unchanged { checkpoint });
                 }
                 let start = previous.map_or(Revision::ZERO, |old| old.revision);
@@ -147,10 +210,13 @@ impl ReplaceDocument {
                     generation(previous, incompatible_replacement)?;
                 let checkpoint = ReplaceCheckpoint {
                     generation,
-                    identity: stamp.identity,
+                    present: true,
+                    identity: Some(stamp.identity),
                     revision,
                 };
-                if !generation_changed && previous.is_some_and(|old| old.revision == revision) {
+                if !generation_changed
+                    && previous.is_some_and(|old| old.present && old.revision == revision)
+                {
                     return Ok(ReplaceRead::Unchanged { checkpoint });
                 }
                 let start = previous.map_or(Revision::ZERO, |old| old.revision);
@@ -169,6 +235,38 @@ impl ReplaceDocument {
             }
         }
     }
+
+    fn observe_absence(
+        &self,
+        previous: Option<&ReplaceCheckpoint>,
+        origin: &RecordOrigin,
+    ) -> Result<ReplaceRead, SourceDriverError> {
+        let Some(previous) = previous else {
+            return Ok(ReplaceRead::Missing);
+        };
+        previous.validate()?;
+        if !previous.present {
+            return Ok(ReplaceRead::Unchanged {
+                checkpoint: previous.clone(),
+            });
+        }
+        let checkpoint = ReplaceCheckpoint {
+            generation: next_generation(previous.generation)?,
+            present: false,
+            identity: None,
+            revision: absent_revision(),
+        };
+        Ok(ReplaceRead::Removed {
+            record: SourceRecord::absent(
+                origin,
+                checkpoint.generation,
+                previous.cursor(),
+                checkpoint.cursor(),
+                0,
+            ),
+            checkpoint,
+        })
+    }
 }
 
 fn generation(
@@ -178,7 +276,8 @@ fn generation(
     let Some(previous) = previous else {
         return Ok((1, true));
     };
-    if incompatible_replacement {
+    previous.validate()?;
+    if !previous.present || incompatible_replacement {
         Ok((
             previous.generation.checked_add(1).ok_or_else(|| {
                 SourceDriverError::InvalidCursor("source generation overflowed".to_string())
@@ -188,6 +287,16 @@ fn generation(
     } else {
         Ok((previous.generation, false))
     }
+}
+
+fn absent_revision() -> Revision {
+    Revision::digest(ABSENT_REVISION_BYTES)
+}
+
+fn next_generation(current: u64) -> Result<u64, SourceDriverError> {
+    current
+        .checked_add(1)
+        .ok_or_else(|| SourceDriverError::InvalidCursor("source generation overflowed".to_string()))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -432,5 +541,79 @@ mod tests {
             ReplaceCheckpoint::decode(&checkpoint.encode()).unwrap(),
             checkpoint
         );
+    }
+
+    #[test]
+    fn legacy_present_checkpoint_decodes_for_restart_compatibility() {
+        let file = NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), b"document").unwrap();
+        let ReplaceRead::Record { checkpoint, .. } = driver(64)
+            .read(file.path(), None, &origin(), false)
+            .unwrap()
+        else {
+            panic!("expected record");
+        };
+        let mut legacy = Vec::new();
+        legacy.extend_from_slice(CHECKPOINT_MAGIC);
+        legacy.push(CHECKPOINT_VERSION_PRESENT_ONLY);
+        legacy.extend_from_slice(&checkpoint.generation.to_be_bytes());
+        checkpoint
+            .identity
+            .as_ref()
+            .unwrap()
+            .encode_into(&mut legacy);
+        legacy.extend_from_slice(checkpoint.revision.as_bytes());
+
+        assert_eq!(ReplaceCheckpoint::decode(&legacy).unwrap(), checkpoint);
+    }
+
+    #[test]
+    fn deletion_is_observed_once_and_recreation_starts_a_new_generation() {
+        let directory = TempDir::new().unwrap();
+        let path = directory.path().join("summary.json");
+        std::fs::write(&path, b"one").unwrap();
+        let ReplaceRead::Record {
+            checkpoint: present,
+            ..
+        } = driver(64).read(&path, None, &origin(), false).unwrap()
+        else {
+            panic!("expected initial record");
+        };
+
+        std::fs::remove_file(&path).unwrap();
+        let ReplaceRead::Removed {
+            record,
+            checkpoint: absent,
+        } = driver(64)
+            .read(&path, Some(&present), &origin(), false)
+            .unwrap()
+        else {
+            panic!("expected removal observation");
+        };
+        assert_eq!(record.state, crate::source::SourceRecordState::Absent);
+        assert_eq!(absent.generation, present.generation + 1);
+        assert!(!absent.present);
+        assert_eq!(ReplaceCheckpoint::decode(&absent.encode()).unwrap(), absent);
+        assert!(matches!(
+            driver(64)
+                .read(&path, Some(&absent), &origin(), false)
+                .unwrap(),
+            ReplaceRead::Unchanged { .. }
+        ));
+
+        std::fs::write(&path, b"two").unwrap();
+        let ReplaceRead::Record {
+            checkpoint: recreated,
+            generation_changed,
+            ..
+        } = driver(64)
+            .read(&path, Some(&absent), &origin(), false)
+            .unwrap()
+        else {
+            panic!("expected recreated record");
+        };
+        assert!(generation_changed);
+        assert_eq!(recreated.generation, absent.generation + 1);
+        assert!(recreated.present);
     }
 }

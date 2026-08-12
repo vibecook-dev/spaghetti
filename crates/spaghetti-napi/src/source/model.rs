@@ -366,6 +366,10 @@ pub(crate) struct CursorReader<'a> {
 }
 
 impl<'a> CursorReader<'a> {
+    pub(crate) fn from_payload(bytes: &'a [u8]) -> Self {
+        Self { remaining: bytes }
+    }
+
     pub(crate) fn new(bytes: &'a [u8], magic: &[u8]) -> Result<Self, SourceDriverError> {
         let Some(rest) = bytes.strip_prefix(magic) else {
             return Err(SourceDriverError::InvalidCursor(

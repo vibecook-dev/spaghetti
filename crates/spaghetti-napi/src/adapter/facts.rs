@@ -997,6 +997,17 @@ impl FactBatch {
     pub fn next_decoder_state(&self) -> Option<&[u8]> {
         self.next_decoder_state.as_deref()
     }
+
+    /// Raw-retention policy is enforced by the common coordinator after
+    /// decoding. Removing the payload does not change the fact kind or its
+    /// provenance-derived identity; the durable record hash remains available.
+    pub(crate) fn redact_unknown_record_payloads(&mut self) {
+        for envelope in &mut self.facts {
+            if let Fact::UnknownRecord { raw_payload, .. } = &mut envelope.value {
+                raw_payload.clear();
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1143,5 +1154,31 @@ mod tests {
         let encoded = serde_json::to_value(&fact).unwrap();
         assert_eq!(encoded["ArtifactContent"]["content"], "AP8K");
         assert_eq!(serde_json::from_value::<Fact>(encoded).unwrap(), fact);
+    }
+
+    #[test]
+    fn unknown_payload_redaction_preserves_fact_identity_and_provenance_hash() {
+        let record = record();
+        let mut batch = FactBatch::new(1, 1).unwrap();
+        let fact_id = batch
+            .push(
+                &record,
+                Fact::UnknownRecord {
+                    native_kind: Some("future".to_string()),
+                    raw_payload: b"sensitive".to_vec(),
+                    reason: "future decoder".to_string(),
+                },
+            )
+            .unwrap();
+        let payload_hash = batch.facts()[0].provenance.record_hash;
+
+        batch.redact_unknown_record_payloads();
+
+        assert_eq!(batch.facts()[0].id, fact_id);
+        assert_eq!(batch.facts()[0].provenance.record_hash, payload_hash);
+        let Fact::UnknownRecord { raw_payload, .. } = &batch.facts()[0].value else {
+            panic!("expected unknown record");
+        };
+        assert!(raw_payload.is_empty());
     }
 }

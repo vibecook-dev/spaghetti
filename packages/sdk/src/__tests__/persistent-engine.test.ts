@@ -8,7 +8,7 @@
 
 import { afterEach, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -90,5 +90,28 @@ describe('persistent SpaghettiEngine', { skip: !native }, () => {
     const second = await openTracked(dbPath, 'second');
     assert.equal(second.status.owner?.ownerLabel, 'second');
     assert.equal((await second.health()).healthy, true);
+  });
+
+  test('reconciles declared Claude objects through the persistent handle', async () => {
+    const dbPath = temporaryDatabase();
+    const root = path.join(path.dirname(dbPath), 'claude-source');
+    mkdirSync(root, { recursive: true });
+    writeFileSync(path.join(root, 'settings.json'), '{"model":"claude-sonnet"}');
+    const engine = await openTracked(dbPath, 'sdk-reconcile-test');
+
+    const first = await engine.reconcileClaude({ roots: [root], reason: 'sdk_fixture' });
+    assert.equal(first.instancesDiscovered, 1);
+    assert.equal(first.streamsReconciled > 0, true);
+    assert.equal(first.objectsDiscovered, 1);
+    assert.equal(first.objectsRegistered, 1);
+    assert.equal(first.recordsDecoded, 1);
+    assert.equal(first.commits, 2);
+    assert.equal((first.lastCommitSeq ?? 0) > 0, true);
+
+    const unchanged = await engine.reconcileClaude({ roots: [root] });
+    assert.equal(unchanged.objectsRegistered, 0);
+    assert.equal(unchanged.recordsDecoded, 0);
+    assert.equal(unchanged.objectsUnchanged, 1);
+    assert.equal(unchanged.commits, 0);
   });
 });

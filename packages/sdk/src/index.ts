@@ -126,6 +126,8 @@ export {
   type SpaghettiEngineStatus,
   type SpaghettiEngineHealth,
   type SpaghettiEngineOverview,
+  type SpaghettiEngineReconcileOptions,
+  type SpaghettiEngineReconcileResult,
 } from './native.js';
 
 export { reportIngestErrors, summarizeIngestErrors } from './data/ingest-error-report.js';

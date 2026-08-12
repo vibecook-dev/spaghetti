@@ -3115,6 +3115,7 @@ mod tests {
                 DecodeContext {
                     decoder: &decoder,
                     object_context,
+                    decoder_state: None,
                 },
                 record,
                 &mut batch,
@@ -3448,6 +3449,7 @@ mod tests {
                         DecodeContext {
                             decoder: &decoder_id,
                             object_context: &object_context,
+                            decoder_state: None,
                         },
                         &record,
                         &mut batch,
@@ -6262,6 +6264,36 @@ mod tests {
             20
         );
 
+        // Artifact metadata is transcript history. A later ordinary record
+        // from the same append object must not be mistaken for an empty
+        // replace-document snapshot and retract that accumulated history.
+        let ordinary_record = direct_record(1, 2, 3, 27, b"ordinary-message");
+        let mut ordinary_batch = FactBatch::new(2, 1).unwrap();
+        ordinary_batch
+            .push(
+                &ordinary_record,
+                Fact::Message(tool_message(
+                    "ordinary-message",
+                    MessageRole::Assistant,
+                    vec![ContentBlock::Text {
+                        text: "after the file-history record".to_string(),
+                    }],
+                )),
+            )
+            .unwrap();
+        commit_direct_batch(&mut connection, &ordinary_record, 1, 2, 28, &ordinary_batch);
+        assert_eq!(count(&connection, "artifact_snapshot_assertions"), 2);
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT metadata_assertion_count FROM canonical_artifacts WHERE artifact_key = ?1",
+                    [artifact_key.as_bytes()],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            2
+        );
+
         let content_record = object_record(
             2,
             1,
@@ -6387,7 +6419,7 @@ mod tests {
             &mut connection,
             &rewritten_metadata_record,
             1,
-            2,
+            3,
             61,
             &FactBatch::new(1, 1).unwrap(),
         );

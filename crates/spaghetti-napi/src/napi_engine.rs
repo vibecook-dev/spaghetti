@@ -7,8 +7,8 @@ use napi::bindgen_prelude::{AbortSignal, AsyncTask, Env, Error, Result, Status, 
 use napi_derive::napi;
 
 use crate::engine::{
-    EngineHealthSnapshot, EngineOptions, EngineOverview, EngineStatusSnapshot, OwnerMetadata,
-    SpaghettiEngineCore,
+    EngineHealthSnapshot, EngineOptions, EngineOverview, EngineStatusSnapshot,
+    ObservationCoordinator, OwnerMetadata, ReconcileOutcome, ReconcileRequest, SpaghettiEngineCore,
 };
 
 #[napi(object)]
@@ -113,6 +113,53 @@ pub struct EngineOverviewResult {
     pub read_only: bool,
 }
 
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct EngineReconcileOptions {
+    /// Configured native data roots understood by the selected adapter.
+    pub roots: Vec<String>,
+    /// Durable ingest reason. Defaults to `manual_reconcile`.
+    pub reason: Option<String>,
+}
+
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct EngineReconcileResult {
+    pub instances_discovered: u32,
+    pub streams_reconciled: u32,
+    pub streams_unavailable: u32,
+    pub objects_discovered: u32,
+    pub objects_registered: u32,
+    pub objects_changed: u32,
+    pub objects_unchanged: u32,
+    pub objects_removed: u32,
+    pub records_decoded: u32,
+    pub records_quarantined: u32,
+    pub retries_required: u32,
+    pub commits: u32,
+    pub last_commit_seq: Option<f64>,
+}
+
+impl From<ReconcileOutcome> for EngineReconcileResult {
+    fn from(value: ReconcileOutcome) -> Self {
+        Self {
+            instances_discovered: value.instances_discovered,
+            streams_reconciled: value.streams_reconciled,
+            streams_unavailable: value.streams_unavailable,
+            objects_discovered: value.objects_discovered,
+            objects_registered: value.objects_registered,
+            objects_changed: value.objects_changed,
+            objects_unchanged: value.objects_unchanged,
+            objects_removed: value.objects_removed,
+            records_decoded: value.records_decoded,
+            records_quarantined: value.records_quarantined,
+            retries_required: value.retries_required,
+            commits: value.commits,
+            last_commit_seq: value.last_commit_seq.map(|value| value as f64),
+        }
+    }
+}
+
 impl From<EngineOverview> for EngineOverviewResult {
     fn from(value: EngineOverview) -> Self {
         Self {
@@ -172,6 +219,23 @@ impl SpaghettiEngine {
         AsyncTask::with_optional_signal(
             OverviewTask {
                 engine: Arc::clone(&self.inner),
+            },
+            signal,
+        )
+    }
+
+    /// Reconcile the adapter-declared Claude source map through the common
+    /// Rust drivers, decoders, projections, and durable cursor transaction.
+    #[napi(ts_return_type = "Promise<EngineReconcileResult>")]
+    pub fn reconcile_claude(
+        &self,
+        options: EngineReconcileOptions,
+        signal: Option<AbortSignal>,
+    ) -> AsyncTask<ReconcileClaudeTask> {
+        AsyncTask::with_optional_signal(
+            ReconcileClaudeTask {
+                engine: Arc::clone(&self.inner),
+                options,
             },
             signal,
         )
@@ -248,6 +312,43 @@ impl Task for HealthTask {
 
 pub struct OverviewTask {
     engine: Arc<SpaghettiEngineCore>,
+}
+
+pub struct ReconcileClaudeTask {
+    engine: Arc<SpaghettiEngineCore>,
+    options: EngineReconcileOptions,
+}
+
+impl Task for ReconcileClaudeTask {
+    type Output = EngineReconcileResult;
+    type JsValue = EngineReconcileResult;
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        if self.options.roots.is_empty()
+            || self.options.roots.iter().any(|root| root.trim().is_empty())
+        {
+            return Err(Error::new(
+                Status::InvalidArg,
+                "reconcileClaude requires at least one non-empty root",
+            ));
+        }
+        let request = ReconcileRequest {
+            configured_roots: self.options.roots.iter().map(PathBuf::from).collect(),
+            reason: self
+                .options
+                .reason
+                .clone()
+                .unwrap_or_else(|| "manual_reconcile".to_string()),
+        };
+        ObservationCoordinator::new(Arc::clone(&self.engine))
+            .reconcile(&crate::claude::ClaudeCodeAdapter::new(), request)
+            .map(Into::into)
+            .map_err(napi_error)
+    }
+
+    fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
+        Ok(output)
+    }
 }
 
 impl Task for OverviewTask {

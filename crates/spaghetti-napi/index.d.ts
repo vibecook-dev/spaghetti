@@ -18,6 +18,11 @@ export declare class SpaghettiEngine {
   /** Execute the first typed, read-only Rust query. */
   overview(signal?: AbortSignal | undefined | null): Promise<EngineOverviewResult>
   /**
+   * Reconcile the adapter-declared Claude source map through the common
+   * Rust drivers, decoders, projections, and durable cursor transaction.
+   */
+  reconcileClaude(options: EngineReconcileOptions, signal?: AbortSignal | undefined | null): Promise<EngineReconcileResult>
+  /**
    * Invalidate queued query requests. Requests submitted afterward use a
    * new cancellation epoch and remain valid.
    */
@@ -64,6 +69,29 @@ export interface EngineOwnerMetadata {
   executable?: string
   hostname?: string
   engineVersion: string
+}
+
+export interface EngineReconcileOptions {
+  /** Configured native data roots understood by the selected adapter. */
+  roots: Array<string>
+  /** Durable ingest reason. Defaults to `manual_reconcile`. */
+  reason?: string
+}
+
+export interface EngineReconcileResult {
+  instancesDiscovered: number
+  streamsReconciled: number
+  streamsUnavailable: number
+  objectsDiscovered: number
+  objectsRegistered: number
+  objectsChanged: number
+  objectsUnchanged: number
+  objectsRemoved: number
+  recordsDecoded: number
+  recordsQuarantined: number
+  retriesRequired: number
+  commits: number
+  lastCommitSeq?: number
 }
 
 export interface EngineStatus {

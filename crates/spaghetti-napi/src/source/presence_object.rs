@@ -168,7 +168,10 @@ impl PresenceObject {
                 });
             }
         }
-        let generation = previous.map_or(1, |checkpoint| checkpoint.generation);
+        let generation = match previous {
+            Some(checkpoint) => next_generation(checkpoint.generation)?,
+            None => 1,
+        };
         let kind = if previous.is_some() {
             PresenceKind::Removed
         } else {
@@ -338,7 +341,7 @@ mod tests {
             observation(driver(true).read(&path, Some(&present), &origin()).unwrap());
         assert_eq!(kind, PresenceKind::Removed);
         assert_eq!(record.state, SourceRecordState::Absent);
-        assert_eq!(removed.generation, present.generation);
+        assert_eq!(removed.generation, present.generation + 1);
 
         std::fs::write(&path, b"second").unwrap();
         let (kind, _, recreated) =

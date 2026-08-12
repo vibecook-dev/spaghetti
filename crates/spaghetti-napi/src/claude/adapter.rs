@@ -5112,6 +5112,7 @@ mod tests {
                     DecodeContext {
                         decoder: &DecoderId::new(INTERPRETATION_SETTINGS_DECODER).unwrap(),
                         object_context: &object_context,
+                        decoder_state: None,
                     },
                     &source,
                     &mut batch,
@@ -5180,6 +5181,7 @@ mod tests {
                         DecodeContext {
                             decoder: &DecoderId::new(INTERPRETATION_SETTINGS_DECODER).unwrap(),
                             object_context: &object_context,
+                            decoder_state: None,
                         },
                         &source,
                         &mut batch,
@@ -5211,6 +5213,7 @@ mod tests {
                     DecodeContext {
                         decoder: &DecoderId::new(INTERPRETATION_SETTINGS_DECODER).unwrap(),
                         object_context: &object_context,
+                        decoder_state: None,
                     },
                     &absent,
                     &mut absent_batch,
@@ -5242,6 +5245,7 @@ mod tests {
                     DecodeContext {
                         decoder: &DecoderId::new(PERSISTED_TOOL_RESULT_DECODER).unwrap(),
                         object_context: &object_context,
+                        decoder_state: None,
                     },
                     &source,
                     &mut batch,
@@ -5273,6 +5277,7 @@ mod tests {
                     DecodeContext {
                         decoder: &DecoderId::new(PERSISTED_TOOL_RESULT_DECODER).unwrap(),
                         object_context: &object_context,
+                        decoder_state: None,
                     },
                     &empty,
                     &mut empty_batch,
@@ -5294,6 +5299,7 @@ mod tests {
                     DecodeContext {
                         decoder: &DecoderId::new(PERSISTED_TOOL_RESULT_DECODER).unwrap(),
                         object_context: &object_context,
+                        decoder_state: None,
                     },
                     &invalid,
                     &mut invalid_batch,
@@ -5318,6 +5324,7 @@ mod tests {
                     DecodeContext {
                         decoder: &DecoderId::new(PERSISTED_TOOL_RESULT_DECODER).unwrap(),
                         object_context: &object_context,
+                        decoder_state: None,
                     },
                     &absent,
                     &mut absent_batch,
@@ -5346,6 +5353,7 @@ mod tests {
                     DecodeContext {
                         decoder: &DecoderId::new(PROJECT_MEMORY_DECODER).unwrap(),
                         object_context: &object_context,
+                        decoder_state: None,
                     },
                     &source,
                     &mut batch,
@@ -5382,6 +5390,7 @@ mod tests {
                 DecodeContext {
                     decoder: &DecoderId::new(PROJECT_MEMORY_DECODER).unwrap(),
                     object_context: &topic_context,
+                    decoder_state: None,
                 },
                 &topic_source,
                 &mut topic_batch,
@@ -5401,6 +5410,7 @@ mod tests {
                     DecodeContext {
                         decoder: &DecoderId::new(PROJECT_MEMORY_DECODER).unwrap(),
                         object_context: &topic_context,
+                        decoder_state: None,
                     },
                     &empty_source,
                     &mut empty_batch,
@@ -5423,6 +5433,7 @@ mod tests {
                     DecodeContext {
                         decoder: &DecoderId::new(PROJECT_MEMORY_DECODER).unwrap(),
                         object_context: &topic_context,
+                        decoder_state: None,
                     },
                     &invalid,
                     &mut invalid_batch,
@@ -5443,6 +5454,7 @@ mod tests {
                     DecodeContext {
                         decoder: &DecoderId::new(PROJECT_MEMORY_DECODER).unwrap(),
                         object_context: &topic_context,
+                        decoder_state: None,
                     },
                     &absent,
                     &mut absent_batch,
@@ -5489,6 +5501,7 @@ mod tests {
                 DecodeContext {
                     decoder: &DecoderId::new(SESSION_INDEX_DECODER).unwrap(),
                     object_context: &object_context,
+                    decoder_state: None,
                 },
                 &source,
                 &mut batch,
@@ -5546,6 +5559,7 @@ mod tests {
                     DecodeContext {
                         decoder: &DecoderId::new(SESSION_INDEX_DECODER).unwrap(),
                         object_context: &object_context,
+                        decoder_state: None,
                     },
                     &source,
                     &mut batch,
@@ -5582,6 +5596,7 @@ mod tests {
                 DecodeContext {
                     decoder: &DecoderId::new(TODO_DECODER).unwrap(),
                     object_context: &object_context,
+                    decoder_state: None,
                 },
                 &first,
                 &mut batch,
@@ -5615,6 +5630,7 @@ mod tests {
                 DecodeContext {
                     decoder: &DecoderId::new(TODO_DECODER).unwrap(),
                     object_context: &object_context,
+                    decoder_state: None,
                 },
                 &changed,
                 &mut changed_batch,
@@ -5655,6 +5671,7 @@ mod tests {
                 DecodeContext {
                     decoder: &DecoderId::new(TASK_ITEM_DECODER).unwrap(),
                     object_context: &object_context,
+                    decoder_state: None,
                 },
                 &record,
                 &mut batch,
@@ -5688,6 +5705,7 @@ mod tests {
                     DecodeContext {
                         decoder: &DecoderId::new(TASK_ITEM_DECODER).unwrap(),
                         object_context: &object_context,
+                        decoder_state: None,
                     },
                     &mismatch,
                     &mut mismatch_batch,
@@ -5719,6 +5737,7 @@ mod tests {
                     DecodeContext {
                         decoder: &DecoderId::new(PLAN_DECODER).unwrap(),
                         object_context: &object_context,
+                        decoder_state: None,
                     },
                     &record,
                     &mut batch,
@@ -5741,6 +5760,7 @@ mod tests {
                 DecodeContext {
                     decoder: &DecoderId::new(PLAN_DECODER).unwrap(),
                     object_context: &object_context,
+                    decoder_state: None,
                 },
                 &headless,
                 &mut headless_batch,
@@ -5758,6 +5778,7 @@ mod tests {
                     DecodeContext {
                         decoder: &DecoderId::new(PLAN_DECODER).unwrap(),
                         object_context: &object_context,
+                        decoder_state: None,
                     },
                     &document_record(&[0xff]),
                     &mut invalid_batch,
@@ -5809,6 +5830,7 @@ mod tests {
                     DecodeContext {
                         decoder: &DecoderId::new(PARENT_DECODER).unwrap(),
                         object_context: &object_context,
+                        decoder_state: None,
                     },
                     &checkpoint,
                     &mut batch,
@@ -5880,6 +5902,7 @@ mod tests {
                 DecodeContext {
                     decoder: &DecoderId::new(PARENT_DECODER).unwrap(),
                     object_context: &object_context,
+                    decoder_state: None,
                 },
                 &delta,
                 &mut delta_batch,
@@ -5941,6 +5964,7 @@ mod tests {
                     DecodeContext {
                         decoder: &DecoderId::new(PARENT_DECODER).unwrap(),
                         object_context: &object_context,
+                        decoder_state: None,
                     },
                     &mismatched,
                     &mut batch,
@@ -5975,6 +5999,7 @@ mod tests {
                 DecodeContext {
                     decoder: &DecoderId::new(PARENT_DECODER).unwrap(),
                     object_context: &object_context,
+                    decoder_state: None,
                 },
                 &missing_capture_marker,
                 &mut missing_batch,
@@ -6011,6 +6036,7 @@ mod tests {
                     DecodeContext {
                         decoder: &decoder,
                         object_context: &object_context,
+                        decoder_state: None,
                     },
                     &content,
                     &mut batch,
@@ -6051,6 +6077,7 @@ mod tests {
                     DecodeContext {
                         decoder: &decoder,
                         object_context: &object_context,
+                        decoder_state: None,
                     },
                     &absent_document_record(),
                     &mut absent_batch,
@@ -6066,6 +6093,7 @@ mod tests {
                 DecodeContext {
                     decoder: &decoder,
                     object_context: &object_context,
+                    decoder_state: None,
                 },
                 &document_record(b""),
                 &mut empty_batch,
@@ -6084,6 +6112,7 @@ mod tests {
                     DecodeContext {
                         decoder: &decoder,
                         object_context: &object_context,
+                        decoder_state: None,
                     },
                     &document_record(&[0xff]),
                     &mut binary_batch,
@@ -6138,6 +6167,7 @@ mod tests {
                     DecodeContext {
                         decoder: &decoder,
                         object_context: &object_context,
+                        decoder_state: None,
                     },
                     &record,
                     &mut batch,
@@ -6185,6 +6215,7 @@ mod tests {
                     DecodeContext {
                         decoder: &decoder,
                         object_context: &object_context,
+                        decoder_state: None,
                     },
                     &absent_document_record(),
                     &mut absent,
@@ -6204,6 +6235,7 @@ mod tests {
                     DecodeContext {
                         decoder: &decoder,
                         object_context: &object_context,
+                        decoder_state: None,
                     },
                     &mismatched,
                     &mut mismatched_batch,
@@ -6238,6 +6270,7 @@ mod tests {
                 DecodeContext {
                     decoder: &decoder,
                     object_context: &object_context,
+                    decoder_state: None,
                 },
                 &started_record,
                 &mut started_batch,
@@ -6274,6 +6307,7 @@ mod tests {
                 DecodeContext {
                     decoder: &decoder,
                     object_context: &object_context,
+                    decoder_state: None,
                 },
                 &result_record,
                 &mut result_batch,
@@ -6300,6 +6334,7 @@ mod tests {
                         DecodeContext {
                             decoder: &decoder,
                             object_context: &object_context,
+                            decoder_state: None,
                         },
                         &record(invalid),
                         &mut invalid_batch,
@@ -6350,6 +6385,7 @@ mod tests {
                 DecodeContext {
                     decoder: &DecoderId::new(ACTIVE_SESSION_DECODER).unwrap(),
                     object_context: &object_context,
+                    decoder_state: None,
                 },
                 &record,
                 &mut batch,
@@ -6399,6 +6435,7 @@ mod tests {
                 DecodeContext {
                     decoder: &DecoderId::new(ACTIVE_SESSION_DECODER).unwrap(),
                     object_context: &object_context,
+                    decoder_state: None,
                 },
                 &changed,
                 &mut changed_batch,
@@ -6428,6 +6465,7 @@ mod tests {
                 DecodeContext {
                     decoder: &decoder,
                     object_context: &object_context,
+                    decoder_state: None,
                 },
                 &absent_presence_record(),
                 &mut absent_batch,
@@ -6442,6 +6480,7 @@ mod tests {
                 DecodeContext {
                     decoder: &decoder,
                     object_context: &object_context,
+                    decoder_state: None,
                 },
                 &presence_record(b""),
                 &mut empty_batch,
@@ -6461,6 +6500,7 @@ mod tests {
                 DecodeContext {
                     decoder: &decoder,
                     object_context: &object_context,
+                    decoder_state: None,
                 },
                 &mismatch_record,
                 &mut mismatch_batch,
@@ -6508,6 +6548,7 @@ mod tests {
                 DecodeContext {
                     decoder: &DecoderId::new(TEAM_CONFIG_DECODER).unwrap(),
                     object_context: &object_context,
+                    decoder_state: None,
                 },
                 &record,
                 &mut batch,
@@ -6552,6 +6593,7 @@ mod tests {
                     DecodeContext {
                         decoder: &DecoderId::new(TEAM_INBOX_DECODER).unwrap(),
                         object_context: &object_context,
+                        decoder_state: None,
                     },
                     &record,
                     &mut batch,
@@ -6608,6 +6650,7 @@ mod tests {
                 DecodeContext {
                     decoder: &DecoderId::new(TEAM_INBOX_DECODER).unwrap(),
                     object_context: &object_context,
+                    decoder_state: None,
                 },
                 &record,
                 &mut batch,
@@ -6640,6 +6683,7 @@ mod tests {
                 DecodeContext {
                     decoder: &DecoderId::new(PARENT_DECODER).unwrap(),
                     object_context: &object_context,
+                    decoder_state: None,
                 },
                 &record,
                 &mut batch,
@@ -6690,6 +6734,7 @@ mod tests {
                 DecodeContext {
                     decoder: &DecoderId::new(PARENT_DECODER).unwrap(),
                     object_context: &object_context,
+                    decoder_state: None,
                 },
                 &task_record,
                 &mut batch,
@@ -6732,6 +6777,7 @@ mod tests {
                 DecodeContext {
                     decoder: &DecoderId::new(PARENT_DECODER).unwrap(),
                     object_context: &object_context,
+                    decoder_state: None,
                 },
                 &record,
                 &mut batch,
@@ -6807,6 +6853,7 @@ mod tests {
                 DecodeContext {
                     decoder: &DecoderId::new(SUBAGENT_DECODER).unwrap(),
                     object_context: &context,
+                    decoder_state: None,
                 },
                 &record,
                 &mut batch,
@@ -6851,6 +6898,7 @@ mod tests {
                 DecodeContext {
                     decoder: &DecoderId::new(SUBAGENT_DECODER).unwrap(),
                     object_context: &context,
+                    decoder_state: None,
                 },
                 &metadata_record,
                 &mut mismatched_batch,
@@ -6862,6 +6910,7 @@ mod tests {
                 DecodeContext {
                     decoder: &DecoderId::new(SUBAGENT_META_DECODER).unwrap(),
                     object_context: &context,
+                    decoder_state: None,
                 },
                 &metadata_record,
                 &mut batch,
@@ -6893,6 +6942,7 @@ mod tests {
                 DecodeContext {
                     decoder: &DecoderId::new(SUBAGENT_META_DECODER).unwrap(),
                     object_context: &context,
+                    decoder_state: None,
                 },
                 &malformed,
                 &mut unknown_batch,

@@ -365,6 +365,9 @@ pub enum DecodeDisposition {
 pub struct DecodeContext<'a> {
     pub decoder: &'a DecoderId,
     pub object_context: &'a AdapterObjectContext,
+    /// Opaque state from the last successfully committed record in this
+    /// object generation. Stateless decoders receive `None`.
+    pub decoder_state: Option<&'a [u8]>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

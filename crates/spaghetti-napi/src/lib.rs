@@ -38,7 +38,8 @@ pub mod source;
 // docs that name `ingest` / `live_ingest_batch` keep resolving.
 pub use napi_engine::{
     open_spaghetti_engine, EngineHealth, EngineOpenOptions, EngineOverviewResult,
-    EngineOwnerMetadata, EngineStatus, SpaghettiEngine,
+    EngineOwnerMetadata, EngineReconcileOptions, EngineReconcileResult, EngineStatus,
+    SpaghettiEngine,
 };
 pub use orchestrate::ingest::{
     ingest, IngestError, IngestOptions, IngestProgress, IngestStats, IngestTask,

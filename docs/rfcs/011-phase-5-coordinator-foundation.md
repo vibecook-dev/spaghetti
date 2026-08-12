@@ -63,11 +63,12 @@ TypeScript typechecking, the production build, the RFC 011 ownership ratchet,
 format/diff checks, and zero differences for the small Claude, medium Claude,
 Codex, and Grok ingest matrices.
 
-## Next coordinator slice
+## Follow-on coordinator slice
 
-The next slice will enumerate adapter-declared file objects, hydrate these
-checkpoints, dispatch the common append/replace/presence drivers, decode facts,
-and commit cursor/projection/outbox updates through the persistent writer.
-Confirmed source absence must follow each stream's deletion policy. Native
-watcher hints and polling will reuse that reconcile path rather than create a
-second ingest route.
+The declared-object reconcile path described in
+[the follow-on phase record](./011-phase-5-coordinator-reconcile.md) now
+enumerates adapter-declared file objects, hydrates these checkpoints, dispatches
+the common append/replace/presence drivers, decodes facts, and commits cursor,
+projection, and outbox updates through the persistent writer. Native watcher
+hints and polling remain the next layer and will reuse that reconcile path
+rather than create a second ingest route.

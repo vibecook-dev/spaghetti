@@ -6,6 +6,7 @@
 
 mod artifact_projection;
 mod commit;
+mod coordinator;
 mod memory_projection;
 mod owner_lock;
 mod presence_projection;
@@ -25,6 +26,7 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 
 use crate::adapter::FactBatch;
 use commit::{CommitReceipt, ObservationCommit};
+pub use coordinator::{ObservationCoordinator, ReconcileOutcome, ReconcileRequest};
 use owner_lock::DatabaseOwnerLock;
 pub use owner_lock::OwnerMetadata;
 pub use query_pool::{
@@ -85,6 +87,12 @@ pub enum EngineError {
 
     #[error("invalid observation commit: {0}")]
     InvalidCommit(String),
+
+    #[error("observation coordinator {operation} failed: {detail}")]
+    Observation {
+        operation: &'static str,
+        detail: String,
+    },
 
     #[error("source cursor changed before commit for adapter {adapter_id}, stream {stream_key}")]
     StaleSourceCursor {
@@ -311,6 +319,16 @@ impl SpaghettiEngineCore {
     ) -> Result<CommitReceipt, EngineError> {
         let (writer, _) = self.clients()?;
         writer.commit_observation(request)
+    }
+
+    /// Allocate the durable source-instance identity before adapters derive
+    /// entity keys for a newly discovered instance.
+    pub(crate) fn reserve_source_instance(
+        &self,
+        source: commit::SourceInstanceSpec,
+    ) -> Result<u64, EngineError> {
+        let (writer, _) = self.clients()?;
+        writer.reserve_source_instance(source)
     }
 
     /// Commit storage-agnostic adapter facts through the common projectors.

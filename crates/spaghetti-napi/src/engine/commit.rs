@@ -246,6 +246,24 @@ pub(crate) fn apply_observation_commit(
     )
 }
 
+/// Reserve or hydrate the durable identifier adapters need before emitting
+/// entity keys. Discovery is catalog state, not a source-range commit, so it
+/// deliberately does not allocate an ingest commit or change-log entry.
+pub(super) fn reserve_source_instance(
+    connection: &mut Connection,
+    source: &SourceInstanceSpec,
+) -> Result<u64, EngineError> {
+    validate_source_instance(source)?;
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|error| sqlite_error("begin source instance reservation", error))?;
+    let source_instance_id = upsert_source_instance(&transaction, source)?;
+    transaction
+        .commit()
+        .map_err(|error| sqlite_error("commit source instance reservation", error))?;
+    Ok(source_instance_id)
+}
+
 pub(super) fn apply_observation_commit_with_projection(
     connection: &mut Connection,
     request: &ObservationCommit,
@@ -369,9 +387,7 @@ struct StoredSourceObject {
 }
 
 fn validate_commit(request: &ObservationCommit) -> Result<(), EngineError> {
-    require_text("source.adapter_id", &request.source.adapter_id)?;
-    require_bytes("source.stable_key", &request.source.stable_key)?;
-    require_text("source.display_name", &request.source.display_name)?;
+    validate_source_instance(&request.source)?;
     require_text("stream.stream_key", &request.stream.stream_key)?;
     require_text("stream.driver_kind", &request.stream.driver_kind)?;
     require_text("stream.decoder_key", &request.stream.decoder_key)?;
@@ -457,6 +473,23 @@ fn validate_commit(request: &ObservationCommit) -> Result<(), EngineError> {
         require_text("record_error.error_message", &error.error_message)?;
         require_text("record_error.adapter_version", &error.adapter_version)?;
         to_i64(error.generation, "record error generation")?;
+    }
+    Ok(())
+}
+
+fn validate_source_instance(source: &SourceInstanceSpec) -> Result<(), EngineError> {
+    require_text("source.adapter_id", &source.adapter_id)?;
+    require_bytes("source.stable_key", &source.stable_key)?;
+    require_text("source.display_name", &source.display_name)?;
+    if source.adapter_contract_version == 0 {
+        return Err(EngineError::InvalidCommit(
+            "source adapter contract version must be greater than zero".to_string(),
+        ));
+    }
+    if source.last_seen_at < source.discovered_at {
+        return Err(EngineError::InvalidCommit(
+            "source last_seen_at must not precede discovered_at".to_string(),
+        ));
     }
     Ok(())
 }

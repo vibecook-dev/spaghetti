@@ -189,11 +189,38 @@ export interface SpaghettiEngineOverview {
   readOnly: boolean;
 }
 
+export interface SpaghettiEngineReconcileOptions {
+  /** Configured Claude Code data roots, such as `~/.claude`. */
+  roots: string[];
+  /** Durable ingest reason. Defaults to `manual_reconcile`. */
+  reason?: string;
+}
+
+export interface SpaghettiEngineReconcileResult {
+  instancesDiscovered: number;
+  streamsReconciled: number;
+  streamsUnavailable: number;
+  objectsDiscovered: number;
+  objectsRegistered: number;
+  objectsChanged: number;
+  objectsUnchanged: number;
+  objectsRemoved: number;
+  recordsDecoded: number;
+  recordsQuarantined: number;
+  retriesRequired: number;
+  commits: number;
+  lastCommitSeq?: number;
+}
+
 /** Async handle backed by one persistent Rust engine lifecycle. */
 export interface SpaghettiEngine {
   readonly status: SpaghettiEngineStatus;
   health(signal?: AbortSignal): Promise<SpaghettiEngineHealth>;
   overview(signal?: AbortSignal): Promise<SpaghettiEngineOverview>;
+  reconcileClaude(
+    options: SpaghettiEngineReconcileOptions,
+    signal?: AbortSignal,
+  ): Promise<SpaghettiEngineReconcileResult>;
   cancelPendingQueries(): number;
   dispose(): Promise<SpaghettiEngineStatus>;
 }
