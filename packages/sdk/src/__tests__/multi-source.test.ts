@@ -22,7 +22,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 
 import { createSpaghettiService } from '../legacy-oracle.js';
 import { createCodexSource } from '../sources/index.js';
-import type { SpaghettiAPI } from '../index.js';
+import type { LegacySpaghettiAPI as SpaghettiAPI } from '../legacy-api.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const FIXTURE_ROOT_DIR = path.resolve(here, '../../../../crates/spaghetti-napi/fixtures/small/.claude');

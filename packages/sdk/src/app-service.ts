@@ -1,12 +1,11 @@
 /**
  * AppService — Frontend-ready API wrapping the data service
  *
- * Adapted from ClaudeCodeAppService. Implements SpaghettiAPI.
+ * Retired TypeScript compatibility facade used only by the differential oracle.
  */
 
 import { EventEmitter } from 'events';
 import type {
-  SpaghettiAPI,
   ProjectListItem,
   ProjectMember,
   ProjectReference,
@@ -21,6 +20,7 @@ import type {
   TokenActivityQuery,
   TokenActivityResult,
 } from './api.js';
+import type { LegacySpaghettiAPI } from './legacy-api.js';
 import type {
   SubagentTimelinePage,
   SubagentTimelinePageRequest,
@@ -45,11 +45,11 @@ import type { SpaghettiLive } from './live/spaghetti-live.js';
 import { createSpaghettiLive } from './live/spaghetti-live.js';
 import type { ErrorSink } from './io/error-sink.js';
 
-class SpaghettiAppService extends EventEmitter implements SpaghettiAPI {
+class SpaghettiAppService extends EventEmitter implements LegacySpaghettiAPI {
   private dataService: AgentDataService;
 
   /**
-   * Public `api.live` handle — present only when the lifecycle owner
+   * Legacy `api.live` handle — present only when the lifecycle owner
    * was constructed with a live-updates orchestrator (i.e. the caller
    * opted into `createSpaghettiService({ live: true })`). Wired up
    * in the constructor so access is a simple field read.
@@ -421,6 +421,6 @@ function toSessionListItem(data: SessionSummaryData): SessionListItem {
   };
 }
 
-export function createSpaghettiAppService(dataService: AgentDataService, errorSink?: ErrorSink): SpaghettiAPI {
+export function createSpaghettiAppService(dataService: AgentDataService, errorSink?: ErrorSink): LegacySpaghettiAPI {
   return new SpaghettiAppService(dataService, errorSink);
 }

@@ -23,6 +23,11 @@ export declare class SpaghettiEngine {
    */
   replayChanges(options?: EngineChangeReplayOptions | undefined | null, signal?: AbortSignal | undefined | null): Promise<EngineChangeReplay>
   /**
+   * Wait off the JavaScript thread for the Rust writer to publish a newer
+   * durable commit. No SQLite read is performed while the request is idle.
+   */
+  waitForCommit(options: EngineCommitWaitOptions, signal?: AbortSignal | undefined | null): Promise<EngineCommitWaitResult>
+  /**
    * List canonical projects in Rust-defined activity order. The cursor is
    * opaque, versioned, and valid only for this query.
    */
@@ -268,6 +273,20 @@ export interface EngineChangeReplayOptions {
   topics?: Array<string>
   /** Page size. Defaults to 100 and is capped at 1,000 in Rust. */
   limit?: number
+}
+
+export interface EngineCommitWaitOptions {
+  /** Resolve after the sole writer publishes a strictly newer commit. */
+  afterCommitSeq: number
+  /** Bounded recovery timeout. Defaults to 30 seconds; maximum 5 minutes. */
+  timeoutMs?: number
+}
+
+export interface EngineCommitWaitResult {
+  observedCommitSeq: number
+  /** `commit` or `timeout`. */
+  reason: string
+  waitedMs: number
 }
 
 export interface EngineDelegationPage {

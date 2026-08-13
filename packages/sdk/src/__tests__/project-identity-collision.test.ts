@@ -6,7 +6,7 @@ import path from 'node:path';
 
 import { createSpaghettiService } from '../legacy-oracle.js';
 import { createCodexSource } from '../sources/index.js';
-import type { SpaghettiAPI } from '../index.js';
+import type { LegacySpaghettiAPI as SpaghettiAPI } from '../legacy-api.js';
 
 const COLLISION_SLUG = '-tmp-spaghetti-path-with-dash';
 const CLAUDE_PATH = '/tmp/spaghetti/path-with-dash';

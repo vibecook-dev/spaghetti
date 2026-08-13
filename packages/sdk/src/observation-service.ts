@@ -23,6 +23,7 @@ import type {
   TokenActivityQuery,
   TokenActivityResult,
   WorkflowListItem,
+  SpaghettiAPI,
 } from './api.js';
 import type {
   InitProgress,
@@ -68,64 +69,12 @@ export interface ObservationServiceOptions extends ObservationHostOptions {
 }
 
 /**
- * Async product surface used during the Phase 10 consumer cutover.
+ * Async product surface used by production consumers after the Phase 10 cutover.
  *
  * Result DTOs deliberately remain compatible with the former `SpaghettiAPI`
  * so renderers and command formatting do not acquire storage semantics.
  */
-export interface ObservationService {
-  initialize(): Promise<void>;
-  shutdown(): void;
-  dispose(): Promise<void>;
-  rebuildIndex(): Promise<{ durationMs: number }>;
-  isReady(): boolean;
-  getSourceIds(): Promise<string[]>;
-  getProjectList(options?: SourceFilter): Promise<ProjectListItem[]>;
-  getProjectTokenActivity(project: ProjectReference, query: TokenActivityQuery): Promise<TokenActivityResult>;
-  getSessionList(project: ProjectReference, options?: SourceFilter): Promise<SessionListItem[]>;
-  getSessionMessages(
-    projectSlug: string,
-    sessionId: string,
-    limit?: number,
-    offset?: number,
-    options?: SourceFilter,
-  ): Promise<MessagePage>;
-  getSessionTimelineFacets(projectSlug: string, sessionId: string, options?: SourceFilter): Promise<TimelineFacets>;
-  getSessionTimeline(projectSlug: string, sessionId: string, request?: TimelinePageRequest): Promise<TimelinePage>;
-  getProjectMemory(project: ProjectReference, options?: SourceFilter): Promise<string | null>;
-  getSessionTodos(projectSlug: string, sessionId: string): Promise<unknown[]>;
-  getSessionPlan(projectSlug: string, sessionId: string): Promise<unknown | null>;
-  getSessionTask(projectSlug: string, sessionId: string): Promise<unknown | null>;
-  getToolResult(projectSlug: string, sessionId: string, toolUseId: string): Promise<string | null>;
-  getSessionSubagents(projectSlug: string, sessionId: string, options?: SubagentFilter): Promise<SubagentListItem[]>;
-  getSessionWorkflows(projectSlug: string, sessionId: string): Promise<WorkflowListItem[]>;
-  getWorkflowSubagents(
-    projectSlug: string,
-    sessionId: string,
-    workflowId: string,
-    options?: SourceFilter,
-  ): Promise<SubagentListItem[]>;
-  getSubagentMessages(
-    projectSlug: string,
-    sessionId: string,
-    agentId: string,
-    limit?: number,
-    offset?: number,
-    workflowId?: string,
-    options?: SourceFilter,
-  ): Promise<SubagentMessagePage>;
-  getSubagentTimeline(
-    projectSlug: string,
-    sessionId: string,
-    agentId: string,
-    request: SubagentTimelinePageRequest,
-  ): Promise<SubagentTimelinePage>;
-  search(query: SearchQuery): Promise<SearchResultSet>;
-  getStats(): Promise<StoreStats>;
-  getTeams(): Promise<TeamDirectory[]>;
-  onProgress(cb: (progress: InitProgress) => void): () => void;
-  onReady(cb: (info: { durationMs: number }) => void): () => void;
-  onChange(cb: (batch: SegmentChangeBatch) => void): () => void;
+export interface ObservationService extends SpaghettiAPI {
   snapshot(signal?: AbortSignal): Promise<ObservationHostSnapshot>;
   serveIpc(channel: SpaghettiIpcChannel, transportKind?: string): SpaghettiIpcHost;
 }

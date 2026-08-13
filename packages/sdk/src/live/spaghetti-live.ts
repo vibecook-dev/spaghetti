@@ -52,7 +52,7 @@ import type { LiveWatch } from './live-watch.js';
 // ═══════════════════════════════════════════════════════════════════════════
 
 /**
- * The `api.live` handle exposed on `SpaghettiAPI` when the service was
+ * The `api.live` handle exposed on the repository-only legacy API when the service was
  * constructed with `{ live: true }`. Matches `docs/LIVE-UPDATES-DESIGN.md`
  * §8.
  */

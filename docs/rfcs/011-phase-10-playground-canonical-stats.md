@@ -1,10 +1,11 @@
 # RFC 011 Phase 10: first playground renderer cutover
 
-Status: canonical catalog statistics exposed to the renderer on 2026-08-12;
-broader product reads and production-owner promotion remain
+Status: complete on 2026-08-12; broader product reads and production-owner
+promotion subsequently completed in the
+[Phase 10 closure ledger](./011-phase-10-closure.md)
 
-This slice moves the first user-visible playground read onto the canonical
-`SpaghettiClient` path. When the opt-in RFC 011 observation owner is available,
+This slice moved the first user-visible playground read onto the canonical
+`SpaghettiClient` path. At this historical boundary, when the observation owner was available,
 the Settings dialog shows its catalog commit, searchable-message count, active
 source-object count, and allocated database bytes. The values retain the
 versioned Rust `getStats` DTO rather than being relabeled as legacy segments.
@@ -70,13 +71,10 @@ degraded without changing this lifecycle check.
   from the migrated product module and continues to reject owner-SDK runtime
   imports from Electron main and preload.
 
-## Remaining work
+## Closure
 
-- migrate project/session/search or timeline surfaces only after their
-  canonical identity and display DTOs preserve the current multi-source
-  navigation contract;
-- map durable change topics to bounded renderer invalidations and remove the
-  migrated surface's legacy refresh dependency;
-- promote the Rust observation owner out of opt-in shadow mode after rollout
-  behavior and recovery are defined;
-- shrink the legacy query and SQLite ownership allowlists as each read moves.
+Project/session/search/timeline surfaces now preserve the multi-source product
+contract through the async observation service. Durable changes provide
+bounded renderer invalidations, the Rust utility owner is unconditional, and
+the legacy query/SQLite ownership allowlists are empty. The renderer adapter is
+structurally typed as asynchronous and contains no Promise-to-sync cast.

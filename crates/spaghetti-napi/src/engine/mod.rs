@@ -36,6 +36,7 @@ mod writer;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
+use std::time::{Duration, Instant};
 
 use crate::adapter::{AdapterRegistry, FactBatch};
 pub use capability_query::{
@@ -107,6 +108,8 @@ use writer::{WriterClient, WriterRuntime};
 
 const DEFAULT_QUERY_WORKERS: usize = 2;
 const MAX_QUERY_WORKERS: usize = 16;
+pub const DEFAULT_COMMIT_WAIT_TIMEOUT_MS: u32 = 30_000;
+pub const MAX_COMMIT_WAIT_TIMEOUT_MS: u32 = 300_000;
 
 #[derive(Debug, thiserror::Error)]
 pub enum EngineError {
@@ -262,6 +265,115 @@ pub struct EngineOverview {
     pub read_only: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommitWaitResult {
+    pub observed_commit_seq: u64,
+    pub reason: String,
+    pub waited_ms: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CommitNotificationState {
+    latest_commit_seq: u64,
+    stopping: bool,
+}
+
+#[derive(Debug)]
+struct CommitNotifications {
+    changed: tokio::sync::watch::Sender<CommitNotificationState>,
+}
+
+impl CommitNotifications {
+    fn new(latest_commit_seq: u64) -> Self {
+        let (changed, _) = tokio::sync::watch::channel(CommitNotificationState {
+            latest_commit_seq,
+            stopping: false,
+        });
+        Self { changed }
+    }
+
+    fn publish(&self, commit_seq: u64) {
+        self.changed.send_if_modified(|state| {
+            if commit_seq <= state.latest_commit_seq {
+                return false;
+            }
+            state.latest_commit_seq = commit_seq;
+            true
+        });
+    }
+
+    fn stop(&self) {
+        self.changed.send_if_modified(|state| {
+            if state.stopping {
+                return false;
+            }
+            state.stopping = true;
+            true
+        });
+    }
+
+    async fn wait(
+        &self,
+        after_commit_seq: u64,
+        timeout_ms: u32,
+        cancellation: &QueryCancellationToken,
+    ) -> Result<CommitWaitResult, EngineError> {
+        if timeout_ms == 0 || timeout_ms > MAX_COMMIT_WAIT_TIMEOUT_MS {
+            return Err(EngineError::InvalidQuery(format!(
+                "commit wait timeout_ms must be between 1 and {MAX_COMMIT_WAIT_TIMEOUT_MS}, got {timeout_ms}"
+            )));
+        }
+        let started = Instant::now();
+        let timeout = Duration::from_millis(u64::from(timeout_ms));
+        let deadline = tokio::time::sleep(timeout);
+        tokio::pin!(deadline);
+        let mut changed = self.changed.subscribe();
+
+        loop {
+            if cancellation.is_cancelled() {
+                return Err(EngineError::QueryCancelled);
+            }
+            let state = *changed.borrow_and_update();
+            if state.stopping {
+                return Err(EngineError::ShuttingDown);
+            }
+            if state.latest_commit_seq > after_commit_seq {
+                return Ok(CommitWaitResult {
+                    observed_commit_seq: state.latest_commit_seq,
+                    reason: "commit".to_string(),
+                    waited_ms: duration_ms(started.elapsed()),
+                });
+            }
+
+            tokio::select! {
+                biased;
+                _ = cancellation.cancelled() => return Err(EngineError::QueryCancelled),
+                result = changed.changed() => {
+                    if result.is_err() {
+                        return Err(EngineError::ShuttingDown);
+                    }
+                }
+                _ = &mut deadline => {
+                    let state = *changed.borrow();
+                    if state.stopping {
+                        return Err(EngineError::ShuttingDown);
+                    }
+                    return Ok(CommitWaitResult {
+                        observed_commit_seq: state.latest_commit_seq,
+                        reason: if state.latest_commit_seq > after_commit_seq {
+                            "commit"
+                        } else {
+                            "timeout"
+                        }
+                        .to_string(),
+                        waited_ms: duration_ms(started.elapsed()),
+                    });
+                }
+            }
+        }
+    }
+}
+
 /// One persistent engine owner for one canonical database.
 pub struct SpaghettiEngineCore {
     database_path: PathBuf,
@@ -272,6 +384,7 @@ pub struct SpaghettiEngineCore {
     observation_workers: Mutex<Option<Arc<rayon::ThreadPool>>>,
     supervisors: Mutex<Vec<ObservationSupervisor>>,
     lifecycle: Mutex<Lifecycle>,
+    commit_notifications: CommitNotifications,
     stopped: Condvar,
 }
 
@@ -305,6 +418,7 @@ impl SpaghettiEngineCore {
         let owner = owner_lock.metadata().clone();
         let writer = WriterRuntime::start(database_path.clone())?;
         let queries = QueryPool::start(database_path.clone(), query_workers)?;
+        let latest_commit_seq = queries.client().overview()?.commit_seq;
         let observation_workers = rayon::ThreadPoolBuilder::new()
             .num_threads(4)
             .thread_name(|index| format!("spaghetti-observe-{index}"))
@@ -330,6 +444,7 @@ impl SpaghettiEngineCore {
                     queries,
                 }),
             }),
+            commit_notifications: CommitNotifications::new(latest_commit_seq),
             stopped: Condvar::new(),
         }))
     }
@@ -819,7 +934,9 @@ impl SpaghettiEngineCore {
         request: ObservationCommit,
     ) -> Result<CommitReceipt, EngineError> {
         let (writer, _) = self.clients()?;
-        writer.commit_observation(request)
+        let receipt = writer.commit_observation(request)?;
+        self.commit_notifications.publish(receipt.commit_seq);
+        Ok(receipt)
     }
 
     /// Allocate the durable source-instance identity before adapters derive
@@ -840,7 +957,9 @@ impl SpaghettiEngineCore {
         batch: FactBatch,
     ) -> Result<CommitReceipt, EngineError> {
         let (writer, _) = self.clients()?;
-        writer.commit_facts(request, batch)
+        let receipt = writer.commit_facts(request, batch)?;
+        self.commit_notifications.publish(receipt.commit_seq);
+        Ok(receipt)
     }
 
     /// Replay durable projection changes from a snapshot-consistent read-only
@@ -860,6 +979,19 @@ impl SpaghettiEngineCore {
     ) -> Result<ChangeReplay, EngineError> {
         let (_, queries) = self.clients()?;
         queries.replay_changes_cancellable(request, cancellation)
+    }
+
+    /// Wait for the sole Rust writer to publish a commit newer than the
+    /// supplied watermark. This never opens or queries SQLite while idle.
+    pub async fn wait_for_commit(
+        &self,
+        after_commit_seq: u64,
+        timeout_ms: u32,
+        cancellation: QueryCancellationToken,
+    ) -> Result<CommitWaitResult, EngineError> {
+        self.commit_notifications
+            .wait(after_commit_seq, timeout_ms, &cancellation)
+            .await
     }
 
     /// Run durable outbox maintenance through the sole writer lane. Normal
@@ -1106,6 +1238,7 @@ impl SpaghettiEngineCore {
             .take()
             .expect("running engine must own its runtime");
         drop(lifecycle);
+        self.commit_notifications.stop();
 
         let mut first_error = None;
         let mut supervisors = {
@@ -1262,6 +1395,10 @@ fn usize_to_u32(value: usize) -> u32 {
     u32::try_from(value).unwrap_or(u32::MAX)
 }
 
+fn duration_ms(value: Duration) -> u64 {
+    u64::try_from(value.as_millis()).unwrap_or(u64::MAX)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1342,6 +1479,40 @@ mod tests {
 
         let reopened = SpaghettiEngineCore::open(options(database)).unwrap();
         reopened.shutdown().unwrap();
+    }
+
+    #[tokio::test]
+    async fn commit_notifications_wake_without_polling_and_honor_cancellation() {
+        let notifications = Arc::new(CommitNotifications::new(7));
+        let immediate = notifications
+            .wait(6, 1_000, &QueryCancellationToken::default())
+            .await
+            .unwrap();
+        assert_eq!(immediate.observed_commit_seq, 7);
+        assert_eq!(immediate.reason, "commit");
+
+        let waiting = Arc::clone(&notifications);
+        let waiter = tokio::spawn(async move {
+            waiting
+                .wait(7, 1_000, &QueryCancellationToken::default())
+                .await
+        });
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        notifications.publish(8);
+        let woken = waiter.await.unwrap().unwrap();
+        assert_eq!(woken.observed_commit_seq, 8);
+        assert_eq!(woken.reason, "commit");
+
+        let cancellation = QueryCancellationToken::default();
+        let cancel_for_waiter = cancellation.clone();
+        let waiting = Arc::clone(&notifications);
+        let waiter = tokio::spawn(async move { waiting.wait(8, 1_000, &cancel_for_waiter).await });
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        cancellation.cancel();
+        assert!(matches!(
+            waiter.await.unwrap(),
+            Err(EngineError::QueryCancelled)
+        ));
     }
 
     #[cfg(unix)]

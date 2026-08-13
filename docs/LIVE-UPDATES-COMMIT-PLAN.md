@@ -1,6 +1,11 @@
+> **Historical implementation sequence — superseded by RFC 011.** The
+> TypeScript watcher/writer and `api.live` commits below are retained as
+> provenance for the repository oracle, not as current work. See the
+> [Phase 10 closure ledger](./rfcs/011-phase-10-closure.md).
+
 # Live Updates — Commit Plan
 
-**Status:** Implementation sequencing for RFC 005.
+**Status:** Historical RFC 005 implementation sequence.
 **Created:** 2026-04-20
 **Companion docs:** `docs/rfcs/005-live-updates.md`, `docs/LIVE-UPDATES-DESIGN.md`.
 

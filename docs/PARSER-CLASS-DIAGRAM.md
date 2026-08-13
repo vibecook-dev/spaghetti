@@ -1,6 +1,12 @@
+> **Historical pre-RFC 011 diagram — superseded.** The dual-engine/shared
+> TypeScript schema and `api.live` graph below is retained only as design
+> history. See [RFC 011](./rfcs/011-rust-observation-query-engine.md) and the
+> [Phase 10 closure ledger](./rfcs/011-phase-10-closure.md) for the sole Rust
+> owner and asynchronous client topology.
+
 # Parser Engine — Class Diagram
 
-**Status:** Reference diagram of the spaghetti parsing engine.
+**Status:** Historical diagram of the retired dual-engine parser/store graph.
 **Updated:** 2026-04-29
 **Companion docs:** `PARSER-PIPELINE.md` (pipeline walkthrough), `PARSER-UNPARSED-DATA.md` (gap inventory), `RFC-005-LIVE-UPDATES.md` (warm-start architecture).
 

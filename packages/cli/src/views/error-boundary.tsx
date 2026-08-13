@@ -1,12 +1,10 @@
 /**
  * ErrorBoundary — catches errors thrown while rendering a view.
  *
- * Many views run synchronous SDK queries directly in render / useMemo
- * (getProjectList, getSessionMessages, search, …). A single query-time
- * failure (e.g. SQLITE_CORRUPT surfacing mid-session) would otherwise throw
- * during render and tear down the whole Ink tree, dumping a raw React stack
- * over the alt-screen canvas. This boundary catches it and shows a compact
- * panel instead, letting the user step back to the previous view or quit.
+ * Views load async SDK queries into React state. A render-time failure in that
+ * state or in presentation code would otherwise tear down the whole Ink tree
+ * and dump a raw React stack over the alt-screen canvas. This boundary catches
+ * it and shows a compact panel, letting the user step back or quit.
  *
  * It clears its caught error whenever `resetKey` changes, so navigating away
  * from a crashed view (which changes the view-stack depth) recovers cleanly.

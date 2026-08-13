@@ -1,10 +1,17 @@
 # RFC 009: Retire the TypeScript Bulk Ingest Engine
 
-**Status:** Draft v1
+**Status:** Superseded and completed through RFC 011
 **Created:** 2026-08-07
 **Author:** James Yong + Kimi
 **Hard dependency:** completed readiness report from [RFC 008 — Rust Bulk Ingest Production Readiness](./008-rust-ingest-production-readiness.md)
 **Independent of:** [RFC 007 — Retire the Runtime Bridge](./007-retire-runtime-bridge.md)
+
+> **Supersession note:** RFC 011 completed the broader target: Rust owns cold
+> and live source observation, the Spaghetti database, projections, queries,
+> and durable delivery. The TypeScript source/storage implementation remains
+> only as an isolated repository differential oracle and is absent from
+> production and published package graphs. Clauses below that retain a
+> TypeScript live writer or rollback owner are historical and no longer apply.
 
 ---
 

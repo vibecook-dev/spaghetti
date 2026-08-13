@@ -476,18 +476,46 @@ struct QueryControl {
 }
 
 /// Transport-neutral, request-scoped cancellation observed by query workers.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct QueryCancellationToken {
     cancelled: Arc<AtomicBool>,
+    changed: tokio::sync::watch::Sender<bool>,
+}
+
+impl Default for QueryCancellationToken {
+    fn default() -> Self {
+        let (changed, _) = tokio::sync::watch::channel(false);
+        Self {
+            cancelled: Arc::new(AtomicBool::new(false)),
+            changed,
+        }
+    }
 }
 
 impl QueryCancellationToken {
     pub fn cancel(&self) {
-        self.cancelled.store(true, Ordering::Release);
+        if !self.cancelled.swap(true, Ordering::AcqRel) {
+            self.changed.send_replace(true);
+        }
     }
 
     pub fn is_cancelled(&self) -> bool {
         self.cancelled.load(Ordering::Acquire)
+    }
+
+    pub async fn cancelled(&self) {
+        if self.is_cancelled() {
+            return;
+        }
+        let mut changed = self.changed.subscribe();
+        if *changed.borrow_and_update() {
+            return;
+        }
+        while changed.changed().await.is_ok() {
+            if *changed.borrow_and_update() {
+                return;
+            }
+        }
     }
 }
 

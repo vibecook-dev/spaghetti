@@ -1,6 +1,11 @@
 # RFC 011 Phase 9: canonical timeline, branch, and facet query pack
 
-Status: Rust canonical timeline shadow slice implemented on 2026-08-12
+Status: Phase 9 slice complete; Phase 10 production cutover completed on 2026-08-12
+
+> Historical boundary: shadow/legacy ownership language below records the
+> state when this query pack landed. The current Rust-owned topology and
+> remaining rollout evidence are in the
+> [Phase 10 closure ledger](./011-phase-10-closure.md).
 
 This slice makes a session timeline one coarse Rust query across root and
 delegated runs. It returns the page, exact filtered total, unfiltered session

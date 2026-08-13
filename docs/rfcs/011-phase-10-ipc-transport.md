@@ -1,12 +1,14 @@
 # RFC 011 Phase 10: framed IPC transport and host bridge
 
-Status: transport and playground utility endpoint complete on 2026-08-12;
-production-owner cutover remains
+Status: complete on 2026-08-12; the playground utility process is the selected
+production owner and the final cutover is recorded in the
+[Phase 10 closure ledger](./011-phase-10-closure.md)
 
 This slice adds the second transport for the asynchronous `SpaghettiClient`.
 It preserves the Phase 10 protocol and all accepted Rust query DTOs while
 moving calls across a bounded binary channel. It does not select a mandatory
-daemon topology, add endpoint discovery, or switch a production consumer.
+daemon topology or add endpoint discovery; the subsequent playground cutover
+selected this utility-process topology.
 
 ## Wire boundary
 
@@ -100,9 +102,9 @@ transport exactly once when it owns it.
 - structured cursor-error parity across the two transports.
 
 The real-engine parity case compares overview, durable-replay, project-page,
-and statistics DTOs field-for-field at the JavaScript object boundary. It then
-verifies that an invalid cursor retains the same public `cursor_invalid`
-classification.
+commit-wait, and statistics DTOs at the JavaScript object boundary. It also
+verifies commit-wait cancellation and that an invalid cursor retains the same
+public `cursor_invalid` classification.
 
 This is semantic and lifecycle evidence for the portable MessagePort bridge,
 not a field-native/daemon performance claim. The
@@ -111,13 +113,11 @@ records same-host encoded bytes, latency, event-loop delay, utility heap/RSS,
 cancellation, recovery, and a bounded 12.6 MiB response through the real
 production-built Electron endpoint.
 
-## Remaining Phase 10 work
+## Closure
 
-- establish reviewed regression thresholds with scaled and accepted private
-  corpora, then promote the Rust owner out of opt-in shadow mode;
-- migrate CLI/TUI, playground/Electron, React hooks, and SDK examples in
-  reversible slices with stale-result tests;
-- deprecate compatibility APIs, move the TypeScript oracle to test-only code,
-  then remove production `node:sqlite`, query repair, schema, and SQL ownership;
-- add the final architecture gate rejecting production bypasses around
-  `SpaghettiClient`.
+The Rust utility-process owner is unconditional in production playground code;
+CLI/TUI and React consumers use asynchronous Rust-backed APIs, durable
+subscriptions cross the same framed cancellation path, and the package/source
+architecture gates reject TypeScript SQLite ownership or direct transport
+bypasses. Reviewed regression thresholds and accepted private-corpus runs
+remain maintainer-owned rollout evidence documented in the closure ledger.

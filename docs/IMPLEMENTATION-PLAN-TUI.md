@@ -1,3 +1,8 @@
+> **Historical implementation plan.** UI decisions may remain useful, but the
+> synchronous `SpaghettiAPI` data examples below predate RFC 011 and must not be
+> copied into current code. Production reads use the asynchronous Rust-backed
+> service recorded in the [Phase 10 closure ledger](./rfcs/011-phase-10-closure.md).
+
 # Implementation Plan: TUI Redesign (Ink)
 
 **Companion to**: RFC 001, TUI-DESIGN.md

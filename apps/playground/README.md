@@ -27,91 +27,54 @@ report; see the
 SQLite cache (not `~/.spaghetti`):
 
 ```text
-macOS:  ~/Library/Application Support/@vibecook/spaghetti-playground/cache/spaghetti-{rs,ts}.db
-Windows: %APPDATA%/@vibecook/spaghetti-playground/cache/spaghetti-{rs,ts}.db
-Linux:  ~/.config/@vibecook/spaghetti-playground/cache/spaghetti-{rs,ts}.db
+macOS:  ~/Library/Application Support/@vibecook/spaghetti-playground/cache/spaghetti-rs.db
+Windows: %APPDATA%/@vibecook/spaghetti-playground/cache/spaghetti-rs.db
+Linux:  ~/.config/@vibecook/spaghetti-playground/cache/spaghetti-rs.db
 ```
 
-Engine preference: `<userData>/settings.json` (`"engine": "rs" | "ts"`, default `rs`).
+The Rust observation engine is unconditional. A historical `"engine": "ts"`
+setting is ignored and cannot restore a TypeScript database owner.
 
 ## Operational notes (cache health)
 
-1. **Prefer graceful quit** — close the window or Cmd+Q. The app awaits `api.dispose()` so live pipelines drain and SQLite closes cleanly. Avoid `kill -9` during first cold ingest; native bulk can leave a half-written cache if terminated mid-write.
+1. **Prefer graceful quit** — close the window or Cmd+Q. The app awaits the
+   observation service's `dispose()` so native observation, queries, IPC, and
+   SQLite close in order. Durable commits remain crash-safe, but graceful quit
+   avoids unnecessary recovery work.
 2. **Do not run `PRAGMA integrity_check`** (or other long exclusive SQLite tools) against the live playground DB while it is ingesting.
-3. **On `SQLITE_CORRUPT` / “database disk image is malformed”**: the SDK
-   **self-recovers** once — it deletes the shared cache and re-ingests from
-   `~/.claude` / `~/.codex` / `~/.grok`. The loading screen shows
-   `SQLite cache malformed — deleting and re-ingesting from disk…`.
-
-   Manual wipe (if recovery still fails, or you want a clean slate):
+3. **On persistent `SQLITE_CORRUPT` / “database disk image is malformed”**:
+   quit the owner before removing the rebuildable cache, then restart to
+   reconcile `~/.claude` / `~/.codex` / `~/.grok`:
 
 ```bash
-# Native engine cache
 rm -f ~/Library/Application\ Support/@vibecook/spaghetti-playground/cache/spaghetti-rs.db*
-
-# Or TypeScript engine cache
-rm -f ~/Library/Application\ Support/@vibecook/spaghetti-playground/cache/spaghetti-ts.db*
-
-# Optional: force engine in settings.json
-# { "engine": "rs" }
 ```
-
-Preflight: `PRAGMA quick_check` before multi-source ingest also auto-wipes a
-corrupt file before exclusive native starts.
 
 4. **Single instance** — a second `dev` / `start` focuses the existing window instead of opening a second process on the same cache.
 
-## Native module (`better-sqlite3`) ABI note
-
-`better-sqlite3` is a native module and only has **one** copy in the pnpm
-store, shared between `packages/sdk` (tested under Node) and this app (runs
-under Electron). Node and Electron use different V8 ABIs, so the binary
-can't satisfy both at once.
-
-The workflow:
-
-| Step | ABI | Who |
-|---|---|---|
-| `pnpm install` | **Node** (prebuild) | monorepo default |
-| `pnpm -F @vibecook/spaghetti-playground dev` | builds **SDK dist**, then **Electron** ABI for better-sqlite3 | playground |
-| After playground, before SDK tests / CLI | rebuild for **Node** | you |
-
-`predev` / `prestart` run `pnpm -F @vibecook/spaghetti-sdk build` so Electron always
-loads recovery and other SDK fixes from `packages/sdk/dist` (not a stale build).
-
-```bash
-# After running the playground, restore Node ABI for tests / spag CLI:
-pnpm -F @vibecook/spaghetti-playground rebuild:node
-# or from repo root:
-pnpm rebuild better-sqlite3
-```
-
-Symptom if you forget: Node fails with
-`NODE_MODULE_VERSION 145` vs `137` (Electron vs Node) when opening better-sqlite3.
-
-Requires Xcode CLT (macOS) / Python 3 / node-gyp prerequisites to compile
-from source if the prebuild isn't available.
+The SDK build uses a Node-API Rust addon rather than a JavaScript SQLite
+binding. No Node/Electron `better-sqlite3` ABI swap or rebuild step is needed.
+`predev` / `prestart` still build the SDK so Electron never loads stale client
+or declaration artifacts.
 
 ## Architecture
 
 ```text
 renderer -> preload -> Electron main broker -> SDK UtilityProcess
-                         |                    |- legacy SpaghettiService
-                         |                    `- opt-in Rust observation owner
-                         |                         `- framed SpaghettiClient port
+                         |                    `- one Rust observation owner
+                         |                         `- framed SpaghettiClient ports
                          `-> file-explorer UtilityProcess -> mille MessagePort
 ```
 
-- **SDK UtilityProcess** owns the live compatibility `SpaghettiService` and
-  its SQLite lifecycle. Primary source is Claude Code; Codex / Grok are
-  auto-detected. Progress/ready/change events return through the main broker,
-  and quit awaits utility disposal.
-- With `SPAGHETTI_OBSERVATION_SHADOW=1`, that utility also owns the isolated
-  RFC 011 Rust observation engine. Electron main can negotiate a canonical
-  `SpaghettiClient` over a transferred, versioned framed `MessagePort` using
-  the storage-free `@vibecook/spaghetti-sdk/client` entry. The Settings dialog
-  reads canonical catalog statistics through that client; other renderer
-  surfaces remain on compatibility RPC until each product DTO is migrated.
+- **SDK UtilityProcess** unconditionally owns one Rust observation service and
+  its SQLite lifecycle. Claude Code is primary; Codex/Grok are auto-detected.
+  Progress/ready/change events return through the main broker, and quit awaits
+  utility disposal.
+- Electron main negotiates `SpaghettiClient` connections over transferred,
+  versioned framed `MessagePort`s using the storage-free
+  `@vibecook/spaghetti-sdk/client` entry. Product RPC methods delegate to the
+  same async Rust-backed service; no main/preload/renderer process opens the
+  database.
 - **preload** exposes `window.spaghetti` (`src/shared/ipc.ts`).
 - **renderer** uses the **archive / paper** design (EB Garamond, ink on
   cream or ink-black paper, light/dark toggle). Multi-source project
@@ -146,6 +109,7 @@ matching the archive Structure panel. Packages are linked from the local
 
 ## Notes
 
-The renderer does **not** mount `<AgentDataPlayground />` directly — that
-component assumes synchronous SDK calls, but over IPC every call is a
-Promise. The shell in `App.tsx` is a read-only project/session browser.
+The published `<AgentDataPlayground />` and live hooks now accept the same
+asynchronous React client used over IPC and suppress stale Promise results. The
+app retains its custom archive shell in `App.tsx` for product-specific layout,
+not because of a synchronous API limitation.

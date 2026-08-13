@@ -36,6 +36,7 @@ rusqlite.workspace = true
 # Concurrency
 crossbeam-channel.workspace = true
 rayon.workspace = true
+tokio.workspace = true
 
 # Errors
 thiserror.workspace = true

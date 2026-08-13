@@ -1,6 +1,7 @@
 # RFC 001: TUI / One-Off Command Split
 
-**Status**: Draft v2
+**Status**: Historical UI design; synchronous data-access examples superseded
+by [RFC 011](./011-rust-observation-query-engine.md)
 **Created**: 2026-03-29
 **Updated**: 2026-03-29
 **Author**: James Yong + Claude

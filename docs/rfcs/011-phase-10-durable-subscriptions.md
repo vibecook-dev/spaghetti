@@ -1,7 +1,7 @@
 # RFC 011 Phase 10: durable replay and client subscriptions
 
-Status: bounded replay and transport-neutral subscription slice complete on
-2026-08-12; push publication and retention resets remain
+Status: complete on 2026-08-12; bounded replay, commit-driven wake-up,
+retention resets, cancellation, and delivery metrics are implemented
 
 This slice exposes the engine's transactional `change_log` through the same
 asynchronous client boundary used by canonical queries. It adds no TypeScript
@@ -32,15 +32,19 @@ both embedded N-API and framed IPC topologies.
 
 ## Subscription behavior
 
-`SpaghettiClient.subscribe()` is an `AsyncIterable` built entirely from the
-durable replay operation. It:
+`SpaghettiClient.subscribe()` is an `AsyncIterable` that uses durable replay
+as its source of truth and a native commit signal as its idle wake-up. It:
 
 1. replays pages strictly after the requested cursor;
 2. yields every non-empty page without overlapping requests;
 3. immediately drains another page while `hasMore` is true;
-4. advances its private polling cursor to `(atCommitSeq, u32::MAX)` after a
+4. advances its private cursor to `(atCommitSeq, u32::MAX)` after a
    complete snapshot, so topic filters do not repeatedly scan irrelevant rows;
-5. waits 250 ms by default before checking for a newer commit.
+5. calls the transport-neutral `waitForCommit()` operation and blocks off the
+   JavaScript thread until the sole writer publishes a newer commit;
+6. uses a bounded 30-second wait timeout as notification-loss recovery, then
+   replays once before renewing the wait. The timeout is configurable from 1
+   through 300,000 ms and is not the primary delivery mechanism.
 
 The cursor exposed in each yielded page remains the last delivered change, so
 a disconnected caller can persist it and resume with at-least-once delivery.
@@ -48,12 +52,16 @@ The private snapshot cursor is only an optimization for the uninterrupted
 subscription. Callers deduplicate reconnect delivery by `(commitSeq, ordinal)`,
 as required by RFC 011.
 
-Polling is the first transport-neutral implementation because no Rust live
-publisher exists yet. Replacing the wait with a native/IPC wake-up signal will
-not change the public iterator, replay semantics, or durable cursor contract.
+`SpaghettiEngineCore` initializes the publisher from the durable watermark and
+publishes every successful observation/fact commit through a Tokio watch
+channel. N-API awaits that channel without occupying a libuv or query-pool
+worker; framed IPC carries the same request/result DTO and cancel frame. No
+SQLite connection or query is used while the native wait is pending. Durable
+replay after wake-up, and after the bounded recovery timeout, prevents the
+process-local signal from becoming the correctness source.
 
 Each subscription owns a cancellation controller. Caller abort and client
-disposal stop an in-flight replay or polling wait and complete the iterator.
+disposal stop an in-flight replay or native wait and complete the iterator.
 The client rejects malformed pages that claim more data without advancing,
 return unordered cursors, disagree with their final cursor, exceed their
 snapshot watermark, or move behind the requested durable cursor.
@@ -61,7 +69,8 @@ snapshot watermark, or move behind the requested durable cursor.
 ## Verification
 
 Rust tests pin ordered, filtered, paginated, restart-safe replay; snapshot
-watermarks; payload accounting; and pre-dispatch cancellation. SDK tests pin:
+watermarks; payload accounting; pruning/`ResetRequired`; publisher wake-up and
+cancellation; and pre-dispatch cancellation. SDK tests pin:
 
 - multi-page iterator delivery and exact cursor handoff;
 - filtered request propagation and bounded batch validation;
@@ -70,15 +79,21 @@ watermarks; payload accounting; and pre-dispatch cancellation. SDK tests pin:
 - exhaustive N-API dispatch for the expanded method vocabulary;
 - real N-API DTO generation and empty-engine replay;
 - field-for-field replay parity through direct N-API and framed IPC clients.
+- timeout recovery without high-frequency replay polling;
+- field-for-field commit-wait and cancellation parity through direct N-API and
+  framed IPC clients.
 
-## Remaining work
+## Metrics and retention
 
-- add a Rust publisher/wake-up path so idle subscriptions do not poll while
-  preserving durable replay as the source of truth;
-- define change-log retention and return RFC 011 `ResetRequired` when a saved
-  cursor predates `oldestAvailable`;
-- add subscriber lag, replay bytes, cancellation, and polling/wake-up metrics;
-- migrate consumers to the asynchronous client and its durable invalidation
-  stream in reversible slices;
-- benchmark replay and live-delivery latency through the selected production
-  IPC endpoint before cutover.
+`SpaghettiClient.getSubscriptionMetrics()` returns a fixed-size, process-local
+snapshot containing active subscriptions, replay requests and payload bytes,
+delivered batches and changes, commit wake-ups, recovery timeouts,
+cancellations, and maximum observed commit lag. Rust overview/retention state
+continues to expose the oldest retained cursor and retained change-log size.
+When a saved cursor predates that window, replay returns structured
+`reset_required`; callers read a current snapshot watermark and resubscribe.
+
+The selected Electron topology benchmark remains the reproducible latency and
+boundary-byte harness. Scale-50/private-corpus results and release thresholds
+are rollout evidence, not unfinished subscription correctness work; they are
+tracked in the [Phase 10 closure ledger](./011-phase-10-closure.md).

@@ -2,6 +2,10 @@
 
 Status: Phase 9 N-API shadow exit satisfied on 2026-08-12
 
+> Historical boundary: pre-cutover ownership language below records the state
+> when this gate ran. Phase 10 subsequently cut every production consumer over;
+> see the [Phase 10 closure ledger](./011-phase-10-closure.md).
+
 This record closes the correctness and benchmark work shared by the Phase 9
 query packs. It does not perform the Phase 10 production-client cutover or
 claim an IPC result before that transport exists.

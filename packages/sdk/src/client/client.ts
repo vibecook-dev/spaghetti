@@ -13,6 +13,7 @@ import {
   type SpaghettiQueryOptions,
   type SpaghettiSubscribeOptions,
   type SpaghettiSubscribeRequest,
+  type SpaghettiSubscriptionMetrics,
 } from './protocol.js';
 import {
   cancelledProtocolError,
@@ -34,10 +35,10 @@ interface SupersessionEntry {
   controller: AbortController;
 }
 
-export const SPAGHETTI_SUBSCRIPTION_POLL_INTERVAL_MS = 250;
+export const SPAGHETTI_SUBSCRIPTION_WAKE_TIMEOUT_MS = 30_000;
+export const SPAGHETTI_SUBSCRIPTION_MAX_WAKE_TIMEOUT_MS = 300_000;
 
 const MAX_CHANGE_ORDINAL = 0xffff_ffff;
-const MAX_TIMER_DELAY_MS = 0x7fff_ffff;
 
 class DefaultSpaghettiClient implements SpaghettiClient {
   readonly info: SpaghettiClientInfo;
@@ -47,6 +48,18 @@ class DefaultSpaghettiClient implements SpaghettiClient {
   private readonly supersession = new Map<string, SupersessionEntry>();
   private readonly inFlight = new Map<number, AbortController>();
   private readonly subscriptions = new Set<AbortController>();
+  private readonly subscriptionMetrics: SpaghettiSubscriptionMetrics = {
+    activeSubscriptions: 0,
+    replayRequests: 0,
+    replayPayloadBytes: 0,
+    deliveredBatches: 0,
+    deliveredChanges: 0,
+    waitRequests: 0,
+    commitWakeups: 0,
+    waitTimeouts: 0,
+    cancellations: 0,
+    maxObservedLagCommits: 0,
+  };
 
   constructor(
     private readonly transport: SpaghettiClientTransport,
@@ -68,6 +81,13 @@ class DefaultSpaghettiClient implements SpaghettiClient {
     options?: SpaghettiQueryOptions,
   ): Promise<SpaghettiClientResponseMap['replayChanges']> {
     return this.query('replayChanges', request, options);
+  }
+
+  waitForCommit(
+    request: SpaghettiClientRequestMap['waitForCommit'],
+    options?: SpaghettiQueryOptions,
+  ): Promise<SpaghettiClientResponseMap['waitForCommit']> {
+    return this.query('waitForCommit', request, options);
   }
 
   listProjects(
@@ -256,12 +276,16 @@ class DefaultSpaghettiClient implements SpaghettiClient {
     if (this.closed) throw clientError(closedProtocolError());
     if (options.signal?.aborted) throw clientError(cancelledProtocolError());
 
-    const pollIntervalMs = options.pollIntervalMs ?? SPAGHETTI_SUBSCRIPTION_POLL_INTERVAL_MS;
-    if (!Number.isSafeInteger(pollIntervalMs) || pollIntervalMs < 1 || pollIntervalMs > MAX_TIMER_DELAY_MS) {
+    const wakeTimeoutMs = options.wakeTimeoutMs ?? SPAGHETTI_SUBSCRIPTION_WAKE_TIMEOUT_MS;
+    if (
+      !Number.isSafeInteger(wakeTimeoutMs) ||
+      wakeTimeoutMs < 1 ||
+      wakeTimeoutMs > SPAGHETTI_SUBSCRIPTION_MAX_WAKE_TIMEOUT_MS
+    ) {
       throw clientError({
         code: 'invalid_request',
-        message: `pollIntervalMs must be an integer between 1 and ${MAX_TIMER_DELAY_MS}.`,
-        field: 'pollIntervalMs',
+        message: `wakeTimeoutMs must be an integer between 1 and ${SPAGHETTI_SUBSCRIPTION_MAX_WAKE_TIMEOUT_MS}.`,
+        field: 'wakeTimeoutMs',
       });
     }
     if (
@@ -278,7 +302,11 @@ class DefaultSpaghettiClient implements SpaghettiClient {
     const initialCursor = request.from ? { ...request.from } : undefined;
     const topics = request.topics ? [...request.topics] : undefined;
     const batchSize = request.batchSize;
-    return this.subscription(initialCursor, topics, batchSize, pollIntervalMs, options.signal);
+    return this.subscription(initialCursor, topics, batchSize, wakeTimeoutMs, options.signal);
+  }
+
+  getSubscriptionMetrics(): Readonly<SpaghettiSubscriptionMetrics> {
+    return Object.freeze({ ...this.subscriptionMetrics });
   }
 
   dispose(): Promise<void> {
@@ -297,16 +325,20 @@ class DefaultSpaghettiClient implements SpaghettiClient {
     initialCursor: SpaghettiSubscribeRequest['from'],
     topics: string[] | undefined,
     batchSize: number | undefined,
-    pollIntervalMs: number,
+    wakeTimeoutMs: number,
     callerSignal: AbortSignal | undefined,
   ): AsyncGenerator<SpaghettiCommittedChangeBatch> {
     const controller = new AbortController();
     const signal = combineSignals(callerSignal, controller.signal);
     let cursor = initialCursor;
+    let cancellationCounted = false;
     this.subscriptions.add(controller);
+    this.subscriptionMetrics.activeSubscriptions += 1;
 
     try {
       while (!signal?.aborted) {
+        const replayAfter = cursor;
+        this.subscriptionMetrics.replayRequests += 1;
         const page = await this.replayChanges(
           {
             ...(cursor ? { after: cursor } : {}),
@@ -317,8 +349,18 @@ class DefaultSpaghettiClient implements SpaghettiClient {
         );
         if (signal?.aborted) return;
         assertReplayProgress(page, cursor);
+        this.subscriptionMetrics.replayPayloadBytes += page.payloadBytes;
+        const lagStart = replayAfter?.commitSeq ?? page.oldestAvailable?.commitSeq ?? page.atCommitSeq;
+        this.subscriptionMetrics.maxObservedLagCommits = Math.max(
+          this.subscriptionMetrics.maxObservedLagCommits,
+          page.atCommitSeq - lagStart,
+        );
 
-        if (page.changes.length > 0) yield page;
+        if (page.changes.length > 0) {
+          this.subscriptionMetrics.deliveredBatches += 1;
+          this.subscriptionMetrics.deliveredChanges += page.changes.length;
+          yield page;
+        }
 
         if (page.hasMore) {
           cursor = page.nextCursor;
@@ -326,14 +368,28 @@ class DefaultSpaghettiClient implements SpaghettiClient {
         }
 
         cursor = { commitSeq: page.atCommitSeq, ordinal: MAX_CHANGE_ORDINAL };
-        if (!(await abortableDelay(pollIntervalMs, signal))) return;
+        this.subscriptionMetrics.waitRequests += 1;
+        const wake = await this.waitForCommit(
+          { afterCommitSeq: page.atCommitSeq, timeoutMs: wakeTimeoutMs },
+          signal ? { signal } : undefined,
+        );
+        if (signal?.aborted) return;
+        assertCommitWait(wake, page.atCommitSeq);
+        if (wake.reason === 'commit') this.subscriptionMetrics.commitWakeups += 1;
+        else this.subscriptionMetrics.waitTimeouts += 1;
       }
     } catch (error) {
-      if (signal?.aborted && error instanceof SpaghettiClientError && error.code === 'cancelled') return;
+      if (signal?.aborted && error instanceof SpaghettiClientError && error.code === 'cancelled') {
+        this.subscriptionMetrics.cancellations += 1;
+        cancellationCounted = true;
+        return;
+      }
       throw error;
     } finally {
+      if (signal?.aborted && !cancellationCounted) this.subscriptionMetrics.cancellations += 1;
       controller.abort(cancelledProtocolError());
       this.subscriptions.delete(controller);
+      this.subscriptionMetrics.activeSubscriptions -= 1;
     }
   }
 
@@ -459,6 +515,9 @@ function assertReplayProgress(page: SpaghettiCommittedChangeBatch, after: Spaghe
   if (!Number.isSafeInteger(page.atCommitSeq) || page.atCommitSeq < 0) {
     throw clientError(protocolMismatchError('change replay returned an invalid snapshot watermark'));
   }
+  if (!Number.isSafeInteger(page.payloadBytes) || page.payloadBytes < 0) {
+    throw clientError(protocolMismatchError('change replay returned an invalid payload byte count'));
+  }
   if (after && page.atCommitSeq < after.commitSeq) {
     throw clientError({
       code: 'cursor_invalid',
@@ -489,6 +548,24 @@ function assertReplayProgress(page: SpaghettiCommittedChangeBatch, after: Spaghe
   }
   if (!page.nextCursor || compareChangeCursors(page.nextCursor, page.changes.at(-1)!.cursor) !== 0) {
     throw clientError(protocolMismatchError('change replay next cursor does not match its final change'));
+  }
+}
+
+function assertCommitWait(result: SpaghettiClientResponseMap['waitForCommit'], afterCommitSeq: number): void {
+  if (
+    !Number.isSafeInteger(result.observedCommitSeq) ||
+    result.observedCommitSeq < 0 ||
+    !Number.isSafeInteger(result.waitedMs) ||
+    result.waitedMs < 0 ||
+    (result.reason !== 'commit' && result.reason !== 'timeout')
+  ) {
+    throw clientError(protocolMismatchError('commit wait returned an invalid result'));
+  }
+  if (result.reason === 'commit' && result.observedCommitSeq <= afterCommitSeq) {
+    throw clientError(protocolMismatchError('commit wake did not advance the durable watermark'));
+  }
+  if (result.reason === 'timeout' && result.observedCommitSeq > afterCommitSeq) {
+    throw clientError(protocolMismatchError('commit wait timed out despite a newer durable watermark'));
   }
 }
 
@@ -544,22 +621,5 @@ function abortableRequest<T>(request: Promise<T>, signal: AbortSignal | undefine
         reject(error);
       },
     );
-  });
-}
-
-function abortableDelay(delayMs: number, signal: AbortSignal | undefined): Promise<boolean> {
-  if (signal?.aborted) return Promise.resolve(false);
-  return new Promise<boolean>((resolve) => {
-    let settled = false;
-    const finish = (completed: boolean): void => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      signal?.removeEventListener('abort', onAbort);
-      resolve(completed);
-    };
-    const onAbort = (): void => finish(false);
-    const timer = setTimeout(() => finish(true), delayMs);
-    signal?.addEventListener('abort', onAbort, { once: true });
   });
 }

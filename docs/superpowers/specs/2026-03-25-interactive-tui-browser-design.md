@@ -1,3 +1,7 @@
+> **Historical UI specification.** Its synchronous `SpaghettiAPI` references
+> predate RFC 011; the shipped browser uses asynchronous Rust-backed reads.
+> See the [Phase 10 closure ledger](../../rfcs/011-phase-10-closure.md).
+
 # Interactive TUI Browser for `spag p`
 
 **Date:** 2026-03-25

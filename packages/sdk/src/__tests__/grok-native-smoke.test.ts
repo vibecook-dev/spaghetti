@@ -21,7 +21,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 
 import { loadLegacyNativeAddon as loadNativeAddon } from '../legacy-native.js';
 import { createSpaghettiService, createGrokSource } from '../legacy-oracle.js';
-import type { SpaghettiAPI } from '../index.js';
+import type { LegacySpaghettiAPI as SpaghettiAPI } from '../legacy-api.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const GROK_FIXTURE = path.resolve(here, '../../../../crates/spaghetti-napi/fixtures/small-grok/.grok');

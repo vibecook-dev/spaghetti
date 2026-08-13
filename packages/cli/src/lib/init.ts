@@ -181,7 +181,7 @@ export function shutdownService(): void {
 
 /**
  * Awaitable teardown — preferred over `shutdownService()` whenever the
- * caller can `await`. Routes through `SpaghettiAPI.dispose()` so the
+ * caller can `await`. Routes through `ObservationService.dispose()` so the
  * live pipeline stops, the writer loop drains, and SQLite closes in
  * the right order. SIGINT in `bin.ts` calls this before
  * `process.exit` so checkpoint state is never lost on Ctrl-C.

@@ -4,7 +4,7 @@ import dts from 'vite-plugin-dts';
 import { resolve } from 'path';
 
 export default defineConfig({
-  plugins: [react(), dts({ entryRoot: 'src', insertTypesEntry: true, rollupTypes: false })],
+  plugins: [react(), dts({ entryRoot: 'src', insertTypesEntry: true, rollupTypes: true })],
   build: {
     lib: {
       entry: {

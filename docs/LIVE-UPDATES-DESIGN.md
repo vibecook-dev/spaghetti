@@ -1,6 +1,11 @@
+> **Historical pre-RFC 011 design — superseded.** The TypeScript watcher,
+> writer, `api.live`, and synchronous React design below is repository-oracle
+> history, not a production path. Current durable delivery is recorded in the
+> [Phase 10 subscription record](./rfcs/011-phase-10-durable-subscriptions.md).
+
 # Live Updates — Concrete Design
 
-**Status:** Implementation design, companion to `docs/rfcs/005-live-updates.md`.
+**Status:** Historical implementation design, superseded by RFC 011.
 **Created:** 2026-04-20
 **Scope:** Exact file layout, interface signatures, data flow, and phased migration for the live-updates work. The RFC is the "why + what"; this doc is the "here's exactly what changes."
 

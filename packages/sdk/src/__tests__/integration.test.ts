@@ -13,7 +13,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { createSpaghettiService } from '../create.js';
-import type { SpaghettiAPI, ProjectListItem, SessionListItem, MessagePage } from '../api.js';
+import type { ProjectListItem, SessionListItem, MessagePage } from '../api.js';
+import type { LegacySpaghettiAPI as SpaghettiAPI } from '../legacy-api.js';
 import type { SearchResultSet, StoreStats, InitProgress } from '../data/segment-types.js';
 
 // ═══════════════════════════════════════════════════════════════════════════

@@ -32,7 +32,7 @@
   ],
   "scripts": {
     "gen:worker": "esbuild src/workers/parse-worker.ts --bundle --platform=node --format=esm --outfile=src/workers/parse-worker.js",
-    "build": "vite build",
+    "build": "vite build && node ../../scripts/check-sdk-package.mjs",
     "clean": "rm -rf dist",
     "typecheck": "tsc --noEmit",
     "test": "node --import tsx --test --test-force-exit src/__tests__/*.test.ts src/**/__tests__/*.test.ts"

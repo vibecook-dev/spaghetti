@@ -40,6 +40,7 @@ export interface SpaghettiClientRequestMap {
   getHealth: undefined;
   getOverview: undefined;
   replayChanges: EngineRequest<'replayChanges'>;
+  waitForCommit: EngineRequest<'waitForCommit'>;
   listProjects: EngineRequest<'listHistoryProjects'>;
   listSessions: EngineRequest<'listHistorySessions'>;
   getSession: GetSessionRequest;
@@ -73,6 +74,7 @@ export interface SpaghettiClientResponseMap {
   getHealth: EngineResult<'health'>;
   getOverview: EngineResult<'overview'>;
   replayChanges: EngineResult<'replayChanges'>;
+  waitForCommit: EngineResult<'waitForCommit'>;
   listProjects: EngineResult<'listHistoryProjects'>;
   listSessions: EngineResult<'listHistorySessions'>;
   getSession: EngineResult<'getSession'>;
@@ -107,6 +109,7 @@ export const SPAGHETTI_CLIENT_METHODS = completeMethodList([
   'getHealth',
   'getOverview',
   'replayChanges',
+  'waitForCommit',
   'listProjects',
   'listSessions',
   'getSession',
@@ -285,11 +288,25 @@ export interface SpaghettiSubscribeRequest {
 
 export interface SpaghettiSubscribeOptions {
   signal?: AbortSignal;
-  /** Delay between empty replay pages. Defaults to 250 ms. */
-  pollIntervalMs?: number;
+  /** Maximum native wake wait before renewing it. Defaults to 30 seconds. */
+  wakeTimeoutMs?: number;
 }
 
 export type SpaghettiCommittedChangeBatch = SpaghettiClientResponseMap['replayChanges'];
+
+/** Process-local counters for the durable subscription delivery path. */
+export interface SpaghettiSubscriptionMetrics {
+  activeSubscriptions: number;
+  replayRequests: number;
+  replayPayloadBytes: number;
+  deliveredBatches: number;
+  deliveredChanges: number;
+  waitRequests: number;
+  commitWakeups: number;
+  waitTimeouts: number;
+  cancellations: number;
+  maxObservedLagCommits: number;
+}
 
 /** The new asynchronous, transport-neutral canonical query surface. */
 export interface SpaghettiClient {
@@ -300,6 +317,10 @@ export interface SpaghettiClient {
     request?: Exclude<SpaghettiClientRequestMap['replayChanges'], undefined>,
     options?: SpaghettiQueryOptions,
   ): Promise<SpaghettiClientResponseMap['replayChanges']>;
+  waitForCommit(
+    request: SpaghettiClientRequestMap['waitForCommit'],
+    options?: SpaghettiQueryOptions,
+  ): Promise<SpaghettiClientResponseMap['waitForCommit']>;
   listProjects(
     request?: Exclude<SpaghettiClientRequestMap['listProjects'], undefined>,
     options?: SpaghettiQueryOptions,
@@ -405,6 +426,8 @@ export interface SpaghettiClient {
     request?: SpaghettiSubscribeRequest,
     options?: SpaghettiSubscribeOptions,
   ): AsyncIterable<SpaghettiCommittedChangeBatch>;
+  /** Snapshot of local subscription delivery counters. */
+  getSubscriptionMetrics(): Readonly<SpaghettiSubscriptionMetrics>;
   dispose(): Promise<void>;
 }
 

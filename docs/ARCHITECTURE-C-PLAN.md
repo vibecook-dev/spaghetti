@@ -1,3 +1,8 @@
+> **Historical implementation plan — superseded by RFC 011.** Architecture C
+> is retained as provenance for the retired TypeScript query/store oracle; it
+> is not the current production database topology. See the
+> [Phase 10 closure ledger](./rfcs/011-phase-10-closure.md).
+
 # Architecture C Implementation Plan
 
 **Status**: All 4 phases implemented (2026-03-21)

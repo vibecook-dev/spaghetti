@@ -22,7 +22,7 @@ import { mkdtempSync, rmSync, writeFileSync, appendFileSync, mkdirSync } from 'n
 import { createRequire } from 'node:module';
 
 import { createSpaghettiService } from '../../create.js';
-import type { SpaghettiAPI } from '../../api.js';
+import type { LegacySpaghettiAPI as SpaghettiAPI } from '../../legacy-api.js';
 
 const require = createRequire(import.meta.url);
 

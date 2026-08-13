@@ -1,6 +1,11 @@
+> **Historical gap inventory — superseded by RFC 011.** The TS-as-ground-truth
+> and Rust-performance-port columns below do not describe the current common
+> Rust adapter/source architecture. Retain them only as migration provenance;
+> see [RFC 011](./rfcs/011-rust-observation-query-engine.md).
+
 # Unparsed `.claude/` Data
 
-**Status:** Gap inventory for the spaghetti parsing library.
+**Status:** Historical dual-engine gap inventory.
 **Updated:** 2026-07-03
 **Scope:** `~/.claude/` on-disk state written by Claude Code that the spaghetti library does **not** currently ingest (or ingests incompletely). Separate doc: `PARSER-PIPELINE.md` for what *is* parsed.
 

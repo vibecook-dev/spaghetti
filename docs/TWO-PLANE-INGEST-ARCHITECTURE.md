@@ -1,6 +1,11 @@
+> **Historical pre-RFC 011 topology — superseded.** This document describes
+> the transitional TypeScript ingest planes, not the production owner after
+> the Rust observation/query cutover. See [RFC 011](./rfcs/011-rust-observation-query-engine.md)
+> and the [Phase 10 closure ledger](./rfcs/011-phase-10-closure.md).
+
 # Two-Plane Ingest Architecture
 
-**Status:** North-star + current-state map  
+**Status:** Historical transitional map; superseded by RFC 011
 **Created:** 2026-07-10 (as the three-plane map)  
 **Revised:** 2026-08-08 — Plane 3 retired, see `docs/rfcs/007-retire-runtime-bridge.md`  
 **Scope:** How Spaghetti ingests local agent data today (Claude Code first), and how the two ingest planes fit the long-term goal: a tool and a set of well-designed APIs for indexing, querying, and reacting to agent history and live state.

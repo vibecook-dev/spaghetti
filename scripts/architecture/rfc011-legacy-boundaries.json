@@ -49,6 +49,14 @@
     "observation_host_runtime_boundary_violations": {
       "description": "The native observation host runtime graph cannot import TypeScript source readers, watchers, parsers, SQLite/schema, or projection writers.",
       "allowed": []
+    },
+    "react_synchronous_query_bypasses": {
+      "description": "Published React and Electron renderer code cannot restore synchronous database snapshots or the repository-only legacy API.",
+      "allowed": []
+    },
+    "sdk_package_boundary_gaps": {
+      "description": "The SDK build must roll declarations from public entries and reject legacy ownership leaks in the built artifact.",
+      "allowed": []
     }
   }
 }

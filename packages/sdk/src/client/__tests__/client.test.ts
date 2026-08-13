@@ -16,6 +16,7 @@ import {
   openSpaghettiClient,
   type AnySpaghettiProtocolRequest,
   type SpaghettiClientMethod,
+  type SpaghettiClientResponseMap,
   type SpaghettiClientTransport,
   type SpaghettiProtocolRequest,
   type SpaghettiProtocolResponse,
@@ -292,7 +293,7 @@ describe('SpaghettiClient protocol', () => {
     assert.equal(transport.requestSignals[0]?.aborted, true);
   });
 
-  test('subscribes through ordered replay pages and advances empty polling to the snapshot watermark', async () => {
+  test('subscribes through ordered replay pages, waits for commits, and reports delivery metrics', async () => {
     const firstPage = {
       contractVersion: 1,
       atCommitSeq: 2,
@@ -317,16 +318,33 @@ describe('SpaghettiClient protocol', () => {
       nextCursor: { commitSeq: 2, ordinal: 0 },
       hasMore: false,
     };
+    const recoveryPage = {
+      ...finalPage,
+      changes: [],
+      nextCursor: undefined,
+      payloadBytes: 0,
+    };
     let replayCalls = 0;
+    let waitCalls = 0;
     let markThirdStarted: (() => void) | undefined;
     const thirdStarted = new Promise<void>((resolve) => {
       markThirdStarted = resolve;
     });
     const transport = new FakeTransport((request) => {
+      if (request.method === 'waitForCommit') {
+        waitCalls += 1;
+        return success(
+          request,
+          waitCalls === 1
+            ? { observedCommitSeq: 2, reason: 'timeout', waitedMs: 10 }
+            : { observedCommitSeq: 3, reason: 'commit', waitedMs: 1 },
+        );
+      }
       assert.equal(request.method, 'replayChanges');
       replayCalls += 1;
       if (replayCalls === 1) return success(request, firstPage);
       if (replayCalls === 2) return success(request, finalPage);
+      if (replayCalls === 3) return success(request, recoveryPage);
       markThirdStarted?.();
       return new Promise(() => undefined);
     });
@@ -338,7 +356,7 @@ describe('SpaghettiClient protocol', () => {
         topics: ['history.session.changed'],
         batchSize: 1,
       },
-      { signal: cancellation.signal, pollIntervalMs: 1 },
+      { signal: cancellation.signal, wakeTimeoutMs: 10 },
     );
     const iterator = subscription[Symbol.asyncIterator]();
 
@@ -360,6 +378,13 @@ describe('SpaghettiClient protocol', () => {
           topics: ['history.session.changed'],
           limit: 1,
         },
+        { afterCommitSeq: 2, timeoutMs: 10 },
+        {
+          after: { commitSeq: 2, ordinal: 0xffff_ffff },
+          topics: ['history.session.changed'],
+          limit: 1,
+        },
+        { afterCommitSeq: 2, timeoutMs: 10 },
         {
           after: { commitSeq: 2, ordinal: 0xffff_ffff },
           topics: ['history.session.changed'],
@@ -367,9 +392,23 @@ describe('SpaghettiClient protocol', () => {
         },
       ],
     );
+    assert.deepEqual(client.getSubscriptionMetrics(), {
+      activeSubscriptions: 1,
+      replayRequests: 4,
+      replayPayloadBytes: 78,
+      deliveredBatches: 2,
+      deliveredChanges: 2,
+      waitRequests: 2,
+      commitWakeups: 1,
+      waitTimeouts: 1,
+      cancellations: 0,
+      maxObservedLagCommits: 2,
+    });
     cancellation.abort();
     assert.deepEqual(await waiting, { value: undefined, done: true });
-    assert.equal(transport.requestSignals[2]?.aborted, true);
+    assert.equal(transport.requestSignals[5]?.aborted, true);
+    assert.equal(client.getSubscriptionMetrics().activeSubscriptions, 0);
+    assert.equal(client.getSubscriptionMetrics().cancellations, 1);
     await client.dispose();
   });
 
@@ -385,7 +424,7 @@ describe('SpaghettiClient protocol', () => {
       }),
     );
     const client = await openSpaghettiClient({ transport });
-    const iterator = client.subscribe(undefined, { pollIntervalMs: 1 })[Symbol.asyncIterator]();
+    const iterator = client.subscribe(undefined, { wakeTimeoutMs: 1 })[Symbol.asyncIterator]();
 
     await assert.rejects(iterator.next(), (error) => errorCode(error, 'protocol_mismatch'));
     await client.dispose();
@@ -407,7 +446,7 @@ describe('SpaghettiClient protocol', () => {
       (error) => errorCode(error, 'invalid_request'),
     );
     assert.throws(
-      () => client.subscribe(undefined, { pollIntervalMs: 0 }),
+      () => client.subscribe(undefined, { wakeTimeoutMs: 0 }),
       (error) => errorCode(error, 'invalid_request'),
     );
 
@@ -445,6 +484,7 @@ describe('NapiTransport dispatch', () => {
     await client.getHealth();
     await client.getOverview();
     await client.replayChanges();
+    await client.waitForCommit({ afterCommitSeq: 0, timeoutMs: 1 });
     await client.listProjects({ limit: 1 });
     await client.listSessions({ projectId: 'project' });
     await client.getSession({ sessionId: 'session' });
@@ -478,6 +518,7 @@ describe('NapiTransport dispatch', () => {
         'health',
         'overview',
         'replayChanges',
+        'waitForCommit',
         'listHistoryProjects',
         'listHistorySessions',
         'getSession',
@@ -544,6 +585,37 @@ describe('embedded SpaghettiClient', { skip: !native }, () => {
     assert.equal(replay.hasMore, false);
     assert.equal(replay.payloadBytes, 0);
     assert.equal(replay.payloadByteLimit, 12 * 1024 * 1024);
+    const commitWait = await client.waitForCommit({ afterCommitSeq: 0, timeoutMs: 1 });
+    assert.equal(commitWait.observedCommitSeq, 0);
+    assert.equal(commitWait.reason, 'timeout');
+    assert.ok(commitWait.waitedMs >= 1);
+
+    const idleWaits = Array.from({ length: 8 }, () => {
+      const controller = new AbortController();
+      return {
+        controller,
+        promise: client.waitForCommit({ afterCommitSeq: 0, timeoutMs: 30_000 }, { signal: controller.signal }),
+      };
+    });
+    let rejectStarvation!: (error: Error) => void;
+    const starvation = new Promise<never>((_resolve, reject) => {
+      rejectStarvation = reject;
+    });
+    const starvationGuard = setTimeout(
+      () => rejectStarvation(new Error('idle commit waiters starved an unrelated native query')),
+      500,
+    );
+    let concurrentOverview: SpaghettiClientResponseMap['getOverview'] | undefined;
+    try {
+      concurrentOverview = await Promise.race([client.getOverview(), starvation]);
+    } finally {
+      clearTimeout(starvationGuard);
+      for (const wait of idleWaits) wait.controller.abort();
+    }
+    await Promise.all(
+      idleWaits.map(({ promise }) => assert.rejects(promise, (error) => errorCode(error, 'cancelled'))),
+    );
+    assert.equal(concurrentOverview?.commitSeq, 0);
     const projects = await client.listProjects();
     assert.equal(projects.contractVersion, 1);
     assert.equal(projects.atCommitSeq, 0);

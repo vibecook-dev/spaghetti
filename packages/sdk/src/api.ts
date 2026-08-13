@@ -11,7 +11,6 @@ import type {
 } from './data/segment-types.js';
 import type { TokenUsageSummary } from './data/summary-types.js';
 import type { SessionMessage, TeamDirectory } from './types/index.js';
-import type { SpaghettiLive } from './live/spaghetti-live.js';
 import type {
   SubagentTimelinePage,
   SubagentTimelinePageRequest,
@@ -171,17 +170,14 @@ export interface SubagentMessagePage {
 // ═══════════════════════════════════════════════════════════════════════════
 
 export interface SpaghettiAPI {
-  /** Initialize the data service (parse + index) */
+  /** Initialize the Rust observation owner. */
   initialize(): Promise<void>;
 
   /** Shut down watchers and close the database */
   shutdown(): void;
 
   /**
-   * Force a full cold rebuild of the index. Closes the DB, deletes its
-   * files, and re-ingests from scratch via the native Rust path (with
-   * TS fallback). Useful when the index looks out of sync with
-   * `~/.claude` or after a schema bump.
+   * Reconcile every configured native adapter through the sole Rust owner.
    */
   rebuildIndex(): Promise<{ durationMs: number }>;
 
@@ -190,22 +186,22 @@ export interface SpaghettiAPI {
 
   /** Get all projects sorted by last active date */
   /** Distinct agent sources present in the index (e.g. ['claude-code']). */
-  getSourceIds(): string[];
+  getSourceIds(): Promise<string[]>;
   /**
    * List unique workspaces, optionally scoped to those touched by one agent.
    * Project metrics are aggregated across the contributing agents.
    */
-  getProjectList(options?: SourceFilter): ProjectListItem[];
+  getProjectList(options?: SourceFilter): Promise<ProjectListItem[]>;
 
   /** Source-normalized daily token activity for one aggregated workspace. */
-  getProjectTokenActivity(project: ProjectReference, query: TokenActivityQuery): TokenActivityResult;
+  getProjectTokenActivity(project: ProjectReference, query: TokenActivityQuery): Promise<TokenActivityResult>;
 
   /**
    * Get all sessions for a project sorted by last update. Sessions retain
    * their individual `sourceId`; use the optional filter for an agent-only
    * session list.
    */
-  getSessionList(project: ProjectReference, options?: SourceFilter): SessionListItem[];
+  getSessionList(project: ProjectReference, options?: SourceFilter): Promise<SessionListItem[]>;
 
   /**
    * Get paginated messages for a session.
@@ -218,38 +214,38 @@ export interface SpaghettiAPI {
     limit?: number,
     offset?: number,
     options?: SourceFilter,
-  ): MessagePage;
+  ): Promise<MessagePage>;
 
   /** Full-session normalized display counts, independent of loaded pages. */
-  getSessionTimelineFacets(projectSlug: string, sessionId: string, options?: SourceFilter): TimelineFacets;
+  getSessionTimelineFacets(projectSlug: string, sessionId: string, options?: SourceFilter): Promise<TimelineFacets>;
 
   /** Database-filtered normalized display messages, newest page first. */
-  getSessionTimeline(projectSlug: string, sessionId: string, request?: TimelinePageRequest): TimelinePage;
+  getSessionTimeline(projectSlug: string, sessionId: string, request?: TimelinePageRequest): Promise<TimelinePage>;
 
   /**
    * Get project MEMORY.md content.
    * Memory is Claude-only today; with `{ sourceId }` other than `claude-code`,
    * returns null so a Codex project does not surface Claude's MEMORY.md.
    */
-  getProjectMemory(project: ProjectReference, options?: SourceFilter): string | null;
+  getProjectMemory(project: ProjectReference, options?: SourceFilter): Promise<string | null>;
 
   /** Get todos for a session */
-  getSessionTodos(projectSlug: string, sessionId: string): unknown[];
+  getSessionTodos(projectSlug: string, sessionId: string): Promise<unknown[]>;
 
   /** Get plan for a session */
-  getSessionPlan(projectSlug: string, sessionId: string): unknown | null;
+  getSessionPlan(projectSlug: string, sessionId: string): Promise<unknown | null>;
 
   /** Get task for a session */
-  getSessionTask(projectSlug: string, sessionId: string): unknown | null;
+  getSessionTask(projectSlug: string, sessionId: string): Promise<unknown | null>;
 
   /** Get a persisted tool result */
-  getToolResult(projectSlug: string, sessionId: string, toolUseId: string): string | null;
+  getToolResult(projectSlug: string, sessionId: string, toolUseId: string): Promise<string | null>;
 
   /** Get top-level subagent list for a session (excludes workflow-nested) */
-  getSessionSubagents(projectSlug: string, sessionId: string, options?: SubagentFilter): SubagentListItem[];
+  getSessionSubagents(projectSlug: string, sessionId: string, options?: SubagentFilter): Promise<SubagentListItem[]>;
 
   /** Get agent-orchestration workflow runs for a session */
-  getSessionWorkflows(projectSlug: string, sessionId: string): WorkflowListItem[];
+  getSessionWorkflows(projectSlug: string, sessionId: string): Promise<WorkflowListItem[]>;
 
   /** Get the subagents that ran under a specific workflow */
   getWorkflowSubagents(
@@ -257,7 +253,7 @@ export interface SpaghettiAPI {
     sessionId: string,
     workflowId: string,
     options?: SourceFilter,
-  ): SubagentListItem[];
+  ): Promise<SubagentListItem[]>;
 
   /**
    * Get paginated subagent messages. Pass `workflowId` to disambiguate when
@@ -272,7 +268,7 @@ export interface SpaghettiAPI {
     offset?: number,
     workflowId?: string,
     options?: SourceFilter,
-  ): SubagentMessagePage;
+  ): Promise<SubagentMessagePage>;
 
   /** Normalized, filterable display rows for one inline agent branch. */
   getSubagentTimeline(
@@ -280,20 +276,20 @@ export interface SpaghettiAPI {
     sessionId: string,
     agentId: string,
     request: SubagentTimelinePageRequest,
-  ): SubagentTimelinePage;
+  ): Promise<SubagentTimelinePage>;
 
   /** Full-text search across all segments */
-  search(query: SearchQuery): SearchResultSet;
+  search(query: SearchQuery): Promise<SearchResultSet>;
 
   /** Get store statistics */
-  getStats(): StoreStats;
+  getStats(): Promise<StoreStats>;
 
   /**
    * Agent teams parsed from `~/.claude/teams/` (experimental agent-teams
    * feature). Empty array when the feature is unused. `config` is null
    * for orphaned team dirs that only have inboxes on disk.
    */
-  getTeams(): TeamDirectory[];
+  getTeams(): Promise<TeamDirectory[]>;
 
   /** Subscribe to init progress events */
   onProgress(cb: (progress: InitProgress) => void): () => void;
@@ -303,14 +299,6 @@ export interface SpaghettiAPI {
 
   /** Subscribe to data change events */
   onChange(cb: (batch: SegmentChangeBatch) => void): () => void;
-
-  /**
-   * Live-updates surface (RFC 005 / Plane 2). Present only when the
-   * service was constructed with `{ live: true }`. See
-   * `docs/rfcs/005-live-updates.md` §Public API for the full
-   * subscribe + events + prewarm contract.
-   */
-  readonly live?: SpaghettiLive;
 
   /**
    * Awaitable teardown. Stops the live disk pipeline, drains

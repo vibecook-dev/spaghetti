@@ -1,6 +1,11 @@
 # RFC 011 Phase 9: canonical project/session query pack
 
-Status: first Rust canonical query-parity slice implemented on 2026-08-12
+Status: Phase 9 slice complete; Phase 10 production cutover completed on 2026-08-12
+
+> Historical boundary: shadow/legacy ownership language below records the
+> state when this query pack landed. The current Rust-owned topology and
+> remaining rollout evidence are in the
+> [Phase 10 closure ledger](./011-phase-10-closure.md).
 
 This slice exposes project aggregation and per-project session summaries from
 the RFC 011 canonical projections. It is intentionally available through the

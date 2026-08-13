@@ -202,6 +202,8 @@ async function executeEngineRequest(
       return engine.overview(signal);
     case 'replayChanges':
       return engine.replayChanges(request.payload, signal);
+    case 'waitForCommit':
+      return engine.waitForCommit(request.payload, signal);
     case 'listProjects':
       return engine.listHistoryProjects(request.payload, signal);
     case 'listSessions':

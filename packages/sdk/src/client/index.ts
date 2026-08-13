@@ -8,7 +8,8 @@ export {
 } from './napi-transport.js';
 export {
   openSpaghettiClient,
-  SPAGHETTI_SUBSCRIPTION_POLL_INTERVAL_MS,
+  SPAGHETTI_SUBSCRIPTION_MAX_WAKE_TIMEOUT_MS,
+  SPAGHETTI_SUBSCRIPTION_WAKE_TIMEOUT_MS,
   type OpenSpaghettiClientOptions,
 } from './client.js';
 export { openEmbeddedSpaghettiClient, type OpenEmbeddedSpaghettiClientOptions } from './embedded-client.js';

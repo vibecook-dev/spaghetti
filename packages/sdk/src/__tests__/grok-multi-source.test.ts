@@ -19,7 +19,7 @@ import { appendFileSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'n
 
 import { createSpaghettiService } from '../legacy-oracle.js';
 import { createGrokSource } from '../sources/index.js';
-import type { SpaghettiAPI } from '../index.js';
+import type { LegacySpaghettiAPI as SpaghettiAPI } from '../legacy-api.js';
 import type { Change } from '../live/change-events.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));

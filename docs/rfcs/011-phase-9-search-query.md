@@ -1,6 +1,11 @@
 # RFC 011 Phase 9: canonical full-text search query pack
 
-Status: Rust canonical search shadow slice implemented on 2026-08-12
+Status: Phase 9 slice complete; Phase 10 production cutover completed on 2026-08-12
+
+> Historical boundary: shadow/legacy ownership language below records the
+> state when this query pack landed. The current Rust-owned topology and
+> remaining rollout evidence are in the
+> [Phase 10 closure ledger](./011-phase-10-closure.md).
 
 This slice makes canonical message search one coarse Rust operation across
 parent and delegated transcripts. It is available through the persistent

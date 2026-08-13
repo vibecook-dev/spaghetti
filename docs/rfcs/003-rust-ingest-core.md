@@ -1,6 +1,7 @@
 # RFC 003: Rust Ingest Core
 
-**Status**: Draft v1
+**Status**: Superseded by [RFC 011](./011-rust-observation-query-engine.md);
+retained as historical migration context
 **Created**: 2026-04-16
 **Author**: James Yong + Claude
 

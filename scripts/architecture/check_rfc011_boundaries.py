@@ -52,7 +52,7 @@ MIGRATED_CLIENT_CONSUMERS = (
 )
 DIRECT_ENGINE_QUERY_RE = re.compile(
     r"\b(?:this\.)?engine\.(?:"
-    r"health|overview|replayChanges|listHistoryProjects|listHistorySessions|getSession|getMessages|search|getTimeline|"
+    r"health|overview|replayChanges|waitForCommit|listHistoryProjects|listHistorySessions|getSession|getMessages|search|getTimeline|"
     r"listDelegations|listWorkflows|getWorkflow|listWorkflowMembers|listMemoryDocuments|listTaskCollections|listTasks|"
     r"listPlans|listToolResults|listArtifacts|listSources|getStats|getUsage|getUsageActivity|getRuntimeSnapshot|"
     r"getRunState|listTeams|getTeam|listTeamInboxes|listTeamInboxMessages"
@@ -92,6 +92,13 @@ RUST_LEGACY_DEFAULT_MODULES = {
 }
 LEGACY_NAPI_DECLARATION_RE = re.compile(
     r"^export declare function (?:ingest|liveIngestBatch)\b", re.MULTILINE
+)
+REACT_SYNCHRONOUS_BYPASS_RE = re.compile(
+    r"\buseSyncExternalStore\b"
+    r"|\b(?:api|client)\.live\b"
+    r"|\bas\s+unknown\s+as\s+SpaghettiAPI\b"
+    r"|\bLegacySpaghettiAPI\b"
+    r"|['\"](?:\.\.?/)*legacy-api(?:\.js)?['\"]"
 )
 
 
@@ -394,6 +401,38 @@ def discover_observation_host_runtime_boundary_violations() -> set[str]:
     return violations
 
 
+def discover_react_synchronous_query_bypasses() -> set[str]:
+    """Published React and Electron renderer code must consume async reads."""
+    roots = (
+        REPO_ROOT / "packages/sdk/src/react",
+        REPO_ROOT / "apps/playground/src/renderer/src",
+    )
+    found: set[str] = set()
+    for root in roots:
+        for path in sorted((*root.rglob("*.ts"), *root.rglob("*.tsx"))):
+            if "__tests__" in path.parts:
+                continue
+            if REACT_SYNCHRONOUS_BYPASS_RE.search(read(path)):
+                found.add(repo_path(path))
+    return found
+
+
+def discover_sdk_package_boundary_gaps() -> set[str]:
+    """The package build must roll entry declarations and scan the artifact."""
+    found: set[str] = set()
+    vite_config = REPO_ROOT / "packages/sdk/vite.config.ts"
+    package_path = REPO_ROOT / "packages/sdk/package.json"
+    checker = REPO_ROOT / "scripts/check-sdk-package.mjs"
+    if not re.search(r"\brollupTypes\s*:\s*true\b", read(vite_config)):
+        found.add(f"{repo_path(vite_config)}#rollupTypes")
+    package_manifest = json.loads(read(package_path))
+    if "check-sdk-package.mjs" not in package_manifest.get("scripts", {}).get("build", ""):
+        found.add(f"{repo_path(package_path)}#build")
+    if not checker.exists():
+        found.add(repo_path(checker))
+    return found
+
+
 DISCOVERERS: dict[str, Callable[[], set[str]]] = {
     "typescript_sql_authorities": discover_typescript_sql_authorities,
     "typescript_sql_drivers": discover_typescript_sql_drivers,
@@ -407,6 +446,8 @@ DISCOVERERS: dict[str, Callable[[], set[str]]] = {
     "portable_client_runtime_boundary_violations": discover_portable_client_runtime_boundary_violations,
     "playground_main_sdk_owner_bypasses": discover_playground_main_sdk_owner_bypasses,
     "observation_host_runtime_boundary_violations": discover_observation_host_runtime_boundary_violations,
+    "react_synchronous_query_bypasses": discover_react_synchronous_query_bypasses,
+    "sdk_package_boundary_gaps": discover_sdk_package_boundary_gaps,
 }
 
 

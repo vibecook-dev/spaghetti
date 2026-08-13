@@ -93,7 +93,9 @@ await host.dispose();
 
 `@vibecook/spaghetti-sdk/client` contains transport-neutral N-API and framed
 IPC clients. Electron main/render processes can use a framed client while one
-utility process remains the sole native owner.
+utility process remains the sole native owner. Durable subscriptions wait on
+the Rust writer's commit signal and replay from `(commitSeq, ordinal)`; use
+`getSubscriptionMetrics()` for local delivery/lag diagnostics.
 
 ## Architecture and compatibility
 
@@ -113,7 +115,11 @@ See [RFC 011](../../docs/rfcs/011-rust-observation-query-engine.md) and the
 ## React components
 
 Presentation components remain available from
-`@vibecook/spaghetti-sdk/react` and require React 19 as an optional peer.
+`@vibecook/spaghetti-sdk/react` and require React 19 as an optional peer. Pass a
+structurally checked asynchronous client through `<SpaghettiProvider
+client={client}>`. Live hooks load snapshots in effects and suppress late
+results from superseded scopes; they never execute a database read during
+render.
 
 ## Requirements
 

@@ -1,6 +1,7 @@
 # RFC 005: Live Updates
 
-**Status**: Draft v1
+**Status**: Historical TypeScript live-update design; superseded by
+[RFC 011](./011-rust-observation-query-engine.md)
 **Created**: 2026-04-20
 **Author**: James Yong + Claude
 

@@ -255,6 +255,20 @@ export interface SpaghettiEngineChangeReplay {
   payloadByteLimit: number;
 }
 
+export interface SpaghettiEngineCommitWaitOptions {
+  /** Resolve after a commit newer than this sequence is published. */
+  afterCommitSeq: number;
+  /** Maximum wait in milliseconds. Defaults to 30 seconds. */
+  timeoutMs?: number;
+}
+
+export interface SpaghettiEngineCommitWaitResult {
+  /** Latest commit observed by the engine when the wait resolved. */
+  observedCommitSeq: number;
+  reason: 'commit' | 'timeout';
+  waitedMs: number;
+}
+
 export interface SpaghettiEngineHistoryPageOptions {
   /** Opaque keyset cursor returned by the preceding page. */
   cursor?: string;
@@ -1493,6 +1507,10 @@ export interface SpaghettiEngine {
     options?: SpaghettiEngineChangeReplayOptions,
     signal?: AbortSignal,
   ): Promise<SpaghettiEngineChangeReplay>;
+  waitForCommit(
+    options: SpaghettiEngineCommitWaitOptions,
+    signal?: AbortSignal,
+  ): Promise<SpaghettiEngineCommitWaitResult>;
   listHistoryProjects(
     options?: SpaghettiEngineHistoryPageOptions,
     signal?: AbortSignal,

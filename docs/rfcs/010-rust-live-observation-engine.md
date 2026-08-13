@@ -1,7 +1,8 @@
 # RFC 010: Rust Observation Engine — Unified Ingest, Live State, and Agent Adapters
 
-- **Status:** Draft
+- **Status:** Implemented transitional observation design; superseded by RFC 011
 - **Created:** 2026-08-10
+- **Revised:** 2026-08-12
 - **Authors:** James Yong, contributors
 - **Target:** `spaghetti`
 - **Type:** Architecture / migration / adapter contract
@@ -12,6 +13,15 @@
   - `docs/rfcs/006-thin-normalized-model.md`
   - `docs/rfcs/007-retire-runtime-bridge.md`
   - `docs/rfcs/009-retire-typescript-bulk-ingest.md`
+  - `docs/rfcs/011-rust-observation-query-engine.md`
+
+> **Completion/supersession note:** The unified Rust driver, adapter, cursor,
+> projection, and durable-observation direction in this RFC was implemented.
+> [RFC 011](./011-rust-observation-query-engine.md) then made the persistent
+> Rust engine the sole production SQLite and query owner, completed the async
+> client cutover, and retired production TypeScript storage reachability. RFC
+> 010 is therefore a completed transitional driver migration, not the final
+> database/client architecture.
 
 ## 1. Summary
 

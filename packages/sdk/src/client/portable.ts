@@ -8,7 +8,8 @@ export * from './protocol.js';
 export { normalizeTransportError } from './errors.js';
 export {
   openSpaghettiClient,
-  SPAGHETTI_SUBSCRIPTION_POLL_INTERVAL_MS,
+  SPAGHETTI_SUBSCRIPTION_MAX_WAKE_TIMEOUT_MS,
+  SPAGHETTI_SUBSCRIPTION_WAKE_TIMEOUT_MS,
   type OpenSpaghettiClientOptions,
 } from './client.js';
 export * from './ipc-channel.js';

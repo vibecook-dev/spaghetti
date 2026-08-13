@@ -1,11 +1,11 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Library, Moon, PanelLeft, Search, Settings, Sun } from 'lucide-react';
 import { TrafficLights } from './components/TrafficLights.js';
-import { SpaghettiProvider, type SpaghettiProviderProps } from '@vibecook/spaghetti-sdk/react';
+import { SpaghettiProvider } from '@vibecook/spaghetti-sdk/react';
 import type { ProjectListItem, SegmentChangeBatch, SessionListItem, StoreStats } from '@vibecook/spaghetti-sdk';
 import type { SpaghettiClientResponseMap } from '@vibecook/spaghetti-sdk/client';
 import type { ObservationOwnerStatus } from '@shared/ipc';
-import { createIpcApi } from './ipc-api.js';
+import { createIpcClient } from './ipc-api.js';
 import { LoadingScreen } from './components/LoadingScreen.js';
 import { SourceBadge, SourceBadges } from './components/SourceBadge.js';
 import { SessionMessagesView } from './components/SessionMessagesView.js';
@@ -70,9 +70,9 @@ function projectKey(p: ProjectKey): string {
 }
 
 export function App() {
-  let api: ReturnType<typeof createIpcApi>;
+  let client: ReturnType<typeof createIpcClient>;
   try {
-    api = createIpcApi();
+    client = createIpcClient();
   } catch (err) {
     return (
       <div className="p-6 font-mono text-xs h-full bg-chrome text-ink">
@@ -85,7 +85,7 @@ export function App() {
   }
 
   return (
-    <SpaghettiProvider api={api as SpaghettiProviderProps['api']}>
+    <SpaghettiProvider client={client}>
       <PlaygroundShell />
     </SpaghettiProvider>
   );

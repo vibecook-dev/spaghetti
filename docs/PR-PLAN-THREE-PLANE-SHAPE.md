@@ -1,3 +1,8 @@
+> **Historical migration plan — superseded by RFC 011.** The TypeScript
+> factory, ingest-plane, SQLite, and synchronous API details below no longer
+> describe a production entry graph. See the
+> [Phase 10 closure ledger](./rfcs/011-phase-10-closure.md).
+
 # PR Plan: Align SDK to Three-Plane Shape
 
 **Status:** Implemented (façades + factory composition)  

@@ -34,9 +34,10 @@ pub mod orchestrate;
 pub mod source;
 
 pub use napi_engine::{
-    open_spaghetti_engine, EngineHealth, EngineObservationOptions, EngineObservationStatus,
-    EngineOpenOptions, EngineOverviewResult, EngineOwnerMetadata, EngineReconcileOptions,
-    EngineReconcileResult, EngineStatus, SpaghettiEngine,
+    open_spaghetti_engine, EngineCommitWaitOptions, EngineCommitWaitResult, EngineHealth,
+    EngineObservationOptions, EngineObservationStatus, EngineOpenOptions, EngineOverviewResult,
+    EngineOwnerMetadata, EngineReconcileOptions, EngineReconcileResult, EngineStatus,
+    SpaghettiEngine,
 };
 #[cfg(feature = "legacy-oracle")]
 pub use orchestrate::ingest::{

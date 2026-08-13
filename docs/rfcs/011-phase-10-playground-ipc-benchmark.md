@@ -1,7 +1,8 @@
 # RFC 011 Phase 10: playground IPC topology benchmark
 
-Status: selected-topology benchmark complete on 2026-08-12; reviewed
-regression thresholds and broader rollout evidence remain
+Status: selected-topology benchmark complete on 2026-08-12; code cutover is
+complete, while reviewed regression thresholds and broader rollout evidence
+remain maintainer acceptance inputs
 
 This record measures the actual Electron topology selected for the playground:
 an Electron-main `SpaghettiClient` sends versioned binary frames over
@@ -90,9 +91,11 @@ reproducible report format; one host run does not establish release thresholds.
 
 Remaining rollout evidence includes scale-50 and accepted private-corpus runs,
 reviewed regression limits, and deeper native queue/SQLite/conversion telemetry.
+These are explicitly external rollout inputs rather than Phase 10 code or
+ownership blockers.
 The first reversible
 [renderer DTO read](./011-phase-10-playground-canonical-stats.md) subsequently
-landed for canonical statistics. Broader renderer migration, public
-subscription topic mapping, promotion of the Rust utility-process owner out of
-opt-in shadow mode, and eventual retirement of the legacy TypeScript SQLite
-service remain.
+landed for canonical statistics. Broader renderer migration, durable
+subscription invalidation, promotion of the Rust utility-process owner, and
+production retirement of the TypeScript SQLite graph subsequently completed;
+see the [Phase 10 closure ledger](./011-phase-10-closure.md).

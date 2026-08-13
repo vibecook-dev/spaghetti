@@ -1,13 +1,14 @@
 # RFC 011 Phase 10: canonical shadow client cutover
 
-Status: first canonical consumer cutover complete on 2026-08-12; user-facing
-legacy consumers remain
+Status: complete on 2026-08-12; this first-consumer slice was followed by the
+full production cutover in the [Phase 10 closure ledger](./011-phase-10-closure.md)
 
 This slice migrates the existing Claude observation shadow from direct N-API
 query calls to the transport-neutral `SpaghettiClient`. The shadow powers the
 playground's opt-in canonical diagnostics and the query-conformance benchmark,
-so this is a real consumer boundary without changing legacy CLI or UI result
-contracts prematurely.
+so this was the first real consumer boundary without prematurely changing CLI
+or UI result contracts. The historical `ObservationShadow` name is retained
+only for differential APIs; it is not the current production ownership mode.
 
 ## Ownership split
 
@@ -26,7 +27,7 @@ The client is disposed before the engine. Startup failure disposes whichever
 resources were acquired, concurrent shadow disposal remains idempotent, and
 the transport never independently owns or shuts down the engine.
 
-All 28 canonical query methods used by the shadow facade now cross request-ID
+All canonical query methods used by the shadow facade cross request-ID
 correlation, protocol/query-contract negotiation, request bounds,
 `AbortSignal`, result-contract checks, and structured error normalization. The
 facade keeps its existing DTOs and method names so the playground and benchmark
@@ -62,17 +63,12 @@ N-API capabilities, stable invalid-request/cursor/cancellation errors, and
 idempotent owner disposal. The canonical conformance benchmark now measures
 and compares the client facade rather than a direct engine shortcut.
 
-## Remaining work
+## Closure
 
-- continue the first
-  [user-facing playground read](./011-phase-10-playground-canonical-stats.md)
-  with project/session/search surfaces whose canonical DTOs preserve their
-  product contracts;
-- replace legacy playground change forwarding with durable client
-  subscriptions once topic payloads have a public invalidation mapping;
-- use the completed
-  [utility-process benchmark](./011-phase-10-playground-ipc-benchmark.md) to
-  establish rollout thresholds and promote its Rust owner out of opt-in shadow
-  mode;
-- remove each migrated module from the legacy ownership allowlists and retire
-  TypeScript SQLite only after no production read bypass remains.
+The user-facing playground, CLI/TUI, SDK, and React surfaces subsequently moved
+to the production Rust observation service. Durable replay now drives bounded
+invalidation, and the utility process unconditionally owns the playground
+database. Empty legacy ownership allowlists, source-graph checks, and the built
+package scan prevent a production read bypass from returning. The
+[utility-process benchmark](./011-phase-10-playground-ipc-benchmark.md) remains
+the rollout evidence harness.

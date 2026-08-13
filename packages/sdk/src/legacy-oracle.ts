@@ -8,6 +8,7 @@
  */
 
 export * from './index.js';
+export type { LegacySpaghettiAPI } from './legacy-api.js';
 export * from './legacy-native.js';
 export * from './io/index.js';
 export * from './parser/index.js';

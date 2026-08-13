@@ -1,6 +1,12 @@
+> **Historical pre-RFC 011 map — superseded.** The dual TypeScript/Rust
+> parser, writer, SQLite, and synchronous API topology below is not the shipped
+> architecture. Rust is now the sole production observation/query owner; see
+> [RFC 011](./rfcs/011-rust-observation-query-engine.md) and its
+> [Phase 10 closure ledger](./rfcs/011-phase-10-closure.md).
+
 # Parser Pipeline
 
-**Status:** Reference map of the current `~/.claude/` parsing pipeline.
+**Status:** Historical map of the retired dual-engine parsing pipeline.
 **Updated:** 2026-04-19
 **Companion doc:** `PARSER-UNPARSED-DATA.md` covers the inverse — data the pipeline does not yet ingest.
 

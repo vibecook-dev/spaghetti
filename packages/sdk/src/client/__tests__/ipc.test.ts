@@ -428,6 +428,16 @@ describe('N-API and IPC semantic parity', { skip: !native }, () => {
     try {
       assert.deepEqual(await ipc.getOverview(), await direct.getOverview());
       assert.deepEqual(await ipc.replayChanges(), await direct.replayChanges());
+      const [ipcWait, directWait] = await Promise.all([
+        ipc.waitForCommit({ afterCommitSeq: 0, timeoutMs: 1 }),
+        direct.waitForCommit({ afterCommitSeq: 0, timeoutMs: 1 }),
+      ]);
+      assert.deepEqual(
+        { observedCommitSeq: ipcWait.observedCommitSeq, reason: ipcWait.reason },
+        { observedCommitSeq: directWait.observedCommitSeq, reason: directWait.reason },
+      );
+      assert.ok(ipcWait.waitedMs >= 1);
+      assert.ok(directWait.waitedMs >= 1);
       assert.deepEqual(await ipc.listProjects(), await direct.listProjects());
       assert.deepEqual(await ipc.getStats(), await direct.getStats());
       await assert.rejects(ipc.listProjects({ cursor: 'not-a-cursor' }), (error) =>
@@ -436,6 +446,14 @@ describe('N-API and IPC semantic parity', { skip: !native }, () => {
       await assert.rejects(direct.listProjects({ cursor: 'not-a-cursor' }), (error) =>
         expectClientError(error, 'cursor_invalid'),
       );
+
+      const ipcCancellation = new AbortController();
+      const pendingWait = ipc.waitForCommit(
+        { afterCommitSeq: 0, timeoutMs: 30_000 },
+        { signal: ipcCancellation.signal },
+      );
+      ipcCancellation.abort();
+      await assert.rejects(pendingWait, (error) => expectClientError(error, 'cancelled'));
     } finally {
       await ipc.dispose();
       await fixture.host.dispose();

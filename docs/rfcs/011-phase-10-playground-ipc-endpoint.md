@@ -1,7 +1,8 @@
 # RFC 011 Phase 10: playground utility-process IPC endpoint
 
-Status: opt-in canonical endpoint and topology benchmark complete on
-2026-08-12; production-owner cutover remains
+Status: complete on 2026-08-12; this endpoint is the playground's production
+owner boundary and final evidence is indexed by the
+[Phase 10 closure ledger](./011-phase-10-closure.md)
 
 This slice connects the Phase 10 framed transport to the existing Electron
 utility-process ownership boundary. It gives Electron main a real negotiated
@@ -32,7 +33,7 @@ Electron main
                  -> one Rust SpaghettiEngine owner
 ```
 
-The existing structured-clone RPC remains the control and compatibility
+The existing structured-clone RPC remains the control and product bridge
 plane. It transfers a port and acknowledges attachment, but it does not carry
 canonical query DTOs. After negotiation, every canonical operation uses the
 versioned binary frame, request ID, error vocabulary, payload bounds,
@@ -74,14 +75,11 @@ explicit new negotiation after the utility host restarts.
   exact encoded frame bytes, latency, event-loop delay, utility RSS/heap,
   cancellation, recovery, and a 12.6 MiB bounded response.
 
-## Remaining work
+## Closure
 
-- establish reviewed regression thresholds with scaled and accepted private
-  corpora using the committed topology report format;
-- continue the first
-  [product-compatible renderer read](./011-phase-10-playground-canonical-stats.md)
-  with project/session/search surfaces in reversible slices;
-- use durable client subscriptions for invalidation after public topic mapping
-  is defined;
-- promote the Rust observation owner out of opt-in shadow mode before retiring
-  the legacy TypeScript SQLite service.
+The renderer's project/session/message/search/statistics reads now use an
+explicit asynchronous client, durable subscriptions invalidate product
+snapshots, and `SdkRuntime` creates the Rust observation service
+unconditionally. The repository-only TypeScript oracle is outside the utility,
+main, preload, renderer, and published package graphs. Reviewed scale/private
+thresholds remain rollout policy, using the committed topology report format.

@@ -35,7 +35,6 @@ import { parseArgs } from 'node:util';
 
 import {
   loadNativeAddon,
-  type SpaghettiAPI,
   type SpaghettiEngineHistoryProject,
   type SpaghettiEngineHistorySession,
   type SpaghettiEngineRuntimeEntry,
@@ -46,11 +45,12 @@ import {
   createSpaghettiService,
   openClaudeObservationShadow,
   type ClaudeObservationShadow,
+  type LegacySpaghettiAPI,
 } from '../packages/sdk/src/legacy-oracle.js';
 
 type Mode = 'all' | 'conformance';
-type LegacyProject = ReturnType<SpaghettiAPI['getProjectList']>[number];
-type LegacySession = ReturnType<SpaghettiAPI['getSessionList']>[number];
+type LegacyProject = ReturnType<LegacySpaghettiAPI['getProjectList']>[number];
+type LegacySession = ReturnType<LegacySpaghettiAPI['getSessionList']>[number];
 
 interface LegacySessionOracle {
   project: LegacyProject;
@@ -158,7 +158,7 @@ interface CompleteSurfaceFixture {
 }
 
 interface HarnessContext {
-  legacy: SpaghettiAPI;
+  legacy: LegacySpaghettiAPI;
   shadow: ClaudeObservationShadow;
   workRoot: string;
   shadowDbPath: string;
@@ -562,7 +562,7 @@ function latestUsageRange(sessions: readonly SpaghettiEngineHistorySession[]): {
 }
 
 async function prepareContext(
-  legacy: SpaghettiAPI,
+  legacy: LegacySpaghettiAPI,
   shadow: ClaudeObservationShadow,
   workRoot: string,
   shadowDbPath: string,
@@ -1418,7 +1418,7 @@ async function main(): Promise<void> {
   const completeSurface = installCompleteSurfaceFixture(workRoot);
   const payloadBoundary = installPayloadBoundaryFixture(workRoot);
   const corpus = corpusStats(workRoot);
-  let legacy: SpaghettiAPI | undefined;
+  let legacy: LegacySpaghettiAPI | undefined;
   let shadow: ClaudeObservationShadow | undefined;
 
   console.log(`fixture:       ${fixtureRoot}`);

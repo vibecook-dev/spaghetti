@@ -1,3 +1,8 @@
+> **Historical implementation record.** Do not execute the synchronous API
+> snippets below against the current codebase. RFC 011 migrated CLI/TUI reads
+> to the asynchronous Rust-backed service; see the
+> [Phase 10 closure ledger](../../rfcs/011-phase-10-closure.md).
+
 # Interactive TUI Browser Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.

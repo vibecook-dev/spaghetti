@@ -5,9 +5,10 @@
  * main process exposes via ipcMain.handle, and the preload forwards through
  * contextBridge.exposeInMainWorld('spaghetti', …).
  *
- * The subset of the SDK's SpaghettiAPI exposed here is everything a read-only
- * agent-data browser needs — list/read/search, plus the initialization
- * lifecycle. Mutations aren't surfaced (the playground is read-only).
+ * The subset of the SDK's asynchronous observation service exposed here is
+ * everything a read-only agent-data browser needs — list/read/search, plus
+ * the initialization lifecycle. Mutations aren't surfaced (the playground is
+ * read-only).
  *
  * Progress and change events are exposed as one-way channels from main →
  * renderer (no invoke), wrapped by `onProgress` / `onReady` / `onChange` on
@@ -133,7 +134,7 @@ export interface SpaghettiIPC {
   retryInit(): Promise<{ ok: true }>;
   /** The sole RFC 011 production engine. */
   getEngine(): Promise<'rs'>;
-  /** Opt-in RFC 011 shadow health and Claude-scoped history parity. */
+  /** Transitional method name for production RFC 011 owner health. */
   getObservationShadowStatus(): Promise<ObservationShadowReport>;
   /** Lightweight owner availability; unlike the full report, runs no queries. */
   getObservationOwnerStatus(): Promise<ObservationOwnerStatus>;

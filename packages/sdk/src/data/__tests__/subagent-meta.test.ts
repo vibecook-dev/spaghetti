@@ -13,7 +13,7 @@ import * as path from 'node:path';
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from 'node:fs';
 
 import { createSpaghettiService } from '../../create.js';
-import type { SpaghettiAPI } from '../../api.js';
+import type { LegacySpaghettiAPI as SpaghettiAPI } from '../../legacy-api.js';
 
 const SLUG = '-Users-demo-meta';
 const SESSION_ID = 'cccc0000-1111-2222-3333-444455556666';

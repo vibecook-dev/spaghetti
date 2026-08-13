@@ -3,7 +3,13 @@
  */
 
 // Context
-export { SpaghettiProvider, useSpaghettiAPI, type SpaghettiProviderProps } from './context.js';
+export {
+  SpaghettiProvider,
+  useSpaghettiClient,
+  useSpaghettiAPI,
+  type SpaghettiProviderProps,
+  type SpaghettiReactClient,
+} from './context.js';
 
 // Main playground component
 export { AgentDataPlayground } from './AgentDataPlayground.js';

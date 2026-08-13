@@ -1,7 +1,8 @@
 /**
- * Factory — createSpaghettiService()
+ * Repository-only legacy differential factory — createSpaghettiService()
  *
- * Wires AgentSource → DurableStore → StaticIngest / LiveDiskIngest → SpaghettiAPI.
+ * Wires the retired TypeScript source/storage/query graph for isolated parity
+ * tooling. Production package entries deliberately cannot reach this module.
  * Lifecycle owners are built via {@link createLifecycleOwnerForSource} (Phase E)
  * so product branches do not live here.
  *
@@ -16,7 +17,7 @@ import type { AgentDataService, LifecycleOwner } from './data/agent-data-service
 import { SpaghettiDataService } from './data/multi-source-service.js';
 import { loadLegacyNativeAddon } from './legacy-native.js';
 import { defaultDbPathForEngine, resolveEngine, type IngestEngine } from './settings.js';
-import type { SpaghettiAPI } from './api.js';
+import type { LegacySpaghettiAPI } from './legacy-api.js';
 import { createClaudeCodeSource, type AgentSource } from './sources/index.js';
 import { createLifecycleOwnerForSource } from './sources/registry.js';
 import { createClaudeCodeLiveDiskIngest } from './sources/claude-code/live/disk-ingest.js';
@@ -83,16 +84,16 @@ export interface SpaghettiServiceOptions {
 }
 
 /**
- * Create a fully wired SpaghettiAPI instance.
+ * Create a fully wired synchronous differential-oracle instance.
  *
  * Usage:
- *   import { createSpaghettiService } from '@vibecook/spaghetti-sdk';
+ *   import { createSpaghettiService } from '../packages/sdk/src/legacy-oracle.js';
  *
  *   const spaghetti = createSpaghettiService();
  *   await spaghetti.initialize();
  *   const projects = spaghetti.getProjectList();
  */
-export function createSpaghettiService(options?: SpaghettiServiceOptions): SpaghettiAPI {
+export function createSpaghettiService(options?: SpaghettiServiceOptions): LegacySpaghettiAPI {
   const errorSink = options?.errorSink ?? createConsoleErrorSink('[spaghetti-sdk]');
 
   if (options?.dataService) {

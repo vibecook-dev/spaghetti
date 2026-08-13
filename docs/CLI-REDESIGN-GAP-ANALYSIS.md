@@ -1,3 +1,8 @@
+> **Historical gap analysis.** References to a synchronous `SpaghettiAPI` or
+> TypeScript database service predate RFC 011 and do not describe the current
+> production graph. See the
+> [Phase 10 closure ledger](./rfcs/011-phase-10-closure.md).
+
 # Spaghetti CLI Redesign — Gap Analysis & Design Direction
 
 **Status**: Draft

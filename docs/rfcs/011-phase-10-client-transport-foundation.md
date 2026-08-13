@@ -1,19 +1,19 @@
 # RFC 011 Phase 10: asynchronous client and N-API transport foundation
 
-Status: foundation and first consumer/utility endpoint complete on 2026-08-12;
-broad consumer cutover remains
+Status: complete on 2026-08-12; the subsequent consumer cutover and retirement
+gate are recorded in the [Phase 10 closure ledger](./011-phase-10-closure.md)
 
 This slice introduces the public transport-neutral client boundary required
-before production TypeScript consumers can stop depending on synchronous
-SQLite queries. It does not switch a production consumer or retire legacy
-database ownership yet.
+before production TypeScript consumers stop depending on synchronous SQLite
+queries. This document records the foundation slice; the completed final
+topology is summarized under **Closure** below.
 
 ## Public boundary
 
 `packages/sdk/src/client/` now defines:
 
 - `SpaghettiClient`, the asynchronous semantic query facade;
-- one exhaustive request/result map for all 29 canonical Rust read/replay methods;
+- one exhaustive request/result map for all 30 canonical Rust read/replay/wait methods;
 - versioned request/response envelopes with monotonic request IDs;
 - explicit transport and query-contract negotiation;
 - a bounded 64 KiB request envelope;
@@ -64,13 +64,13 @@ transport/request diagnostic ID at the public boundary.
 `openEmbeddedSpaghettiClient()` is an owner constructor, not a compatibility
 reader. It acquires the Rust database owner lock and optionally starts native
 Claude observation. It must use the database and source set assigned to that
-owner; it must not be pointed at a database concurrently owned by the legacy
-TypeScript service, `field-native`, or a daemon. Owner conflicts return a
+owner; it must not be pointed at a database concurrently owned by
+`field-native` or a daemon. Owner conflicts return a
 structured `database_busy` error rather than silently opening another path.
 
-During the remaining migration, callers can also inject any negotiated
-`SpaghettiClientTransport` through `openSpaghettiClient()`. This is the seam
-the IPC implementation and consumer tests use without importing N-API.
+Callers can inject any negotiated `SpaghettiClientTransport` through
+`openSpaghettiClient()`. This is the seam the IPC implementation and consumer
+tests use without importing N-API.
 
 ## Verification
 
@@ -81,25 +81,24 @@ the IPC implementation and consumer tests use without importing N-API.
 - response-envelope and result-contract mismatch;
 - structured error propagation and internal-error sanitization;
 - pre-dispatch abort, request supersession, and in-flight disposal;
-- exhaustive one-call N-API dispatch for all 29 canonical methods;
+- exhaustive one-call N-API dispatch for all 30 canonical methods;
 - a real persistent Rust engine open/query/dispose lifecycle;
 - native validation, cursor, and request-payload error mapping.
 
 The Phase 9 query-conformance benchmark remains the semantic oracle for the
-underlying result DTOs and performance. This slice adds no TypeScript SQLite
-read and does not change the legacy production surface.
+underlying result DTOs and performance. This slice added no TypeScript SQLite
+read; the later cutover removed the legacy graph from production reachability.
 
-## Remaining Phase 10 work
+## Closure
 
-- use the completed
-  [playground utility-process benchmark](./011-phase-10-playground-ipc-benchmark.md)
-  to establish rollout thresholds, then promote the owner out of opt-in shadow
-  mode;
-- continue the first
-  [playground/Electron renderer read](./011-phase-10-playground-canonical-stats.md),
-  then migrate CLI/TUI, React hooks, and SDK examples in reversible slices with
-  stale-result tests;
-- deprecate compatibility APIs, move the TypeScript oracle to test-only code,
-  then remove production `node:sqlite`, query repair, schema, and SQL ownership;
-- add the final architecture gate rejecting production bypasses around
-  `SpaghettiClient`.
+CLI/TUI, playground/Electron, SDK, and React database reads are asynchronous
+and Rust-backed. React suppresses superseded Promise results; the Electron
+renderer uses a structurally checked async client without a compatibility
+cast. The TypeScript SQLite implementation is reachable only through the
+repository differential-oracle entry, is absent from package artifacts, and
+cannot re-enter a production graph under the architecture ratchet.
+
+The completed [utility-process benchmark](./011-phase-10-playground-ipc-benchmark.md)
+continues to provide reproducible rollout measurements. Maintainer-selected
+scale-50/private runs and release thresholds remain external acceptance
+evidence rather than a second production owner.

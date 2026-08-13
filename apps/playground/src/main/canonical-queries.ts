@@ -6,7 +6,7 @@ export interface ObservationClientProvider {
   getObservationClient(): Promise<SpaghettiClient>;
 }
 
-/** First renderer-safe canonical DTO: catalog statistics need no legacy adaptation. */
+/** Renderer-safe canonical catalog statistics. */
 export async function readCanonicalStats(
   provider: ObservationClientProvider,
 ): Promise<SpaghettiClientResponseMap['getStats']> {

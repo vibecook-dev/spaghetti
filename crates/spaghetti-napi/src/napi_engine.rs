@@ -5,7 +5,9 @@ use std::sync::Arc;
 
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use base64::Engine as _;
-use napi::bindgen_prelude::{AbortSignal, AsyncTask, Env, Error, Result, Status, Task};
+use napi::bindgen_prelude::{
+    AbortSignal, AsyncBlock, AsyncBlockBuilder, AsyncTask, Env, Error, Result, Status, Task,
+};
 use napi_derive::napi;
 
 use crate::adapter::AdapterRegistry;
@@ -13,17 +15,17 @@ use crate::claude::ClaudeCodeAdapter;
 use crate::codex::CodexAdapter;
 use crate::engine::{
     ArtifactDetail, ArtifactPage, ArtifactPageRequest, CanonicalStats, ChangeCursor, ChangeReplay,
-    ChangeReplayRequest, DelegationPage, DelegationPageRequest, DelegationSummary, DurableChange,
-    EngineError, EngineHealthSnapshot, EngineOptions, EngineOverview, EngineStatusSnapshot,
-    HistoryProjectIndexSummary, HistoryProjectPage, HistoryProjectPageRequest,
-    HistoryProjectSummary, HistorySessionIndexSummary, HistorySessionPage,
-    HistorySessionPageRequest, HistorySessionSummary, MemoryDocument, MemoryDocumentPage,
-    MemoryDocumentPageRequest, MessageDetail, MessagePage, MessagePageRequest, NamedCount,
-    ObservationStatusSnapshot, ObservationSupervisorOptions, OwnerMetadata, PlanDetail, PlanPage,
-    PlanPageRequest, QueryCancellationToken, ReconcileOutcome, ReconcileRequest, RunStateLookup,
-    RunStateRequest, RuntimePresenceSnapshot, RuntimeRunEvidence, RuntimeRunSnapshot,
-    RuntimeSnapshot, RuntimeSnapshotRequest, SearchHit, SearchPage, SearchPageRequest,
-    SessionDetail, SessionDetails, SessionDetailsRequest, SessionIndexDetail,
+    ChangeReplayRequest, CommitWaitResult, DelegationPage, DelegationPageRequest,
+    DelegationSummary, DurableChange, EngineError, EngineHealthSnapshot, EngineOptions,
+    EngineOverview, EngineStatusSnapshot, HistoryProjectIndexSummary, HistoryProjectPage,
+    HistoryProjectPageRequest, HistoryProjectSummary, HistorySessionIndexSummary,
+    HistorySessionPage, HistorySessionPageRequest, HistorySessionSummary, MemoryDocument,
+    MemoryDocumentPage, MemoryDocumentPageRequest, MessageDetail, MessagePage, MessagePageRequest,
+    NamedCount, ObservationStatusSnapshot, ObservationSupervisorOptions, OwnerMetadata, PlanDetail,
+    PlanPage, PlanPageRequest, QueryCancellationToken, ReconcileOutcome, ReconcileRequest,
+    RunStateLookup, RunStateRequest, RuntimePresenceSnapshot, RuntimeRunEvidence,
+    RuntimeRunSnapshot, RuntimeSnapshot, RuntimeSnapshotRequest, SearchHit, SearchPage,
+    SearchPageRequest, SessionDetail, SessionDetails, SessionDetailsRequest, SessionIndexDetail,
     SourceCapabilitySummary, SourcePage, SourcePageRequest, SourceSummary, SpaghettiEngineCore,
     TaskCollectionPage, TaskCollectionPageRequest, TaskCollectionSummary, TaskDetail, TaskPage,
     TaskPageRequest, TeamConfigSummary, TeamDetails, TeamDetailsRequest, TeamInboxMessage,
@@ -35,9 +37,10 @@ use crate::engine::{
     UsageTokenValues, UsageTotalsReport, WorkflowDetails, WorkflowDetailsRequest, WorkflowMember,
     WorkflowMemberPage, WorkflowMemberPageRequest, WorkflowPage, WorkflowPageRequest,
     WorkflowSummary, CHANGE_REPLAY_CONTRACT_VERSION, DEFAULT_CAPABILITY_PAGE_LIMIT,
-    DEFAULT_CHANGE_REPLAY_LIMIT, DEFAULT_DETAIL_PAGE_LIMIT, DEFAULT_HISTORY_PAGE_LIMIT,
-    DEFAULT_ORCHESTRATION_PAGE_LIMIT, DEFAULT_RUNTIME_PAGE_LIMIT, DEFAULT_SEARCH_PAGE_LIMIT,
-    DEFAULT_TEAM_PAGE_LIMIT, DEFAULT_TIMELINE_PAGE_LIMIT, MAX_CHANGE_REPLAY_PAYLOAD_BYTES,
+    DEFAULT_CHANGE_REPLAY_LIMIT, DEFAULT_COMMIT_WAIT_TIMEOUT_MS, DEFAULT_DETAIL_PAGE_LIMIT,
+    DEFAULT_HISTORY_PAGE_LIMIT, DEFAULT_ORCHESTRATION_PAGE_LIMIT, DEFAULT_RUNTIME_PAGE_LIMIT,
+    DEFAULT_SEARCH_PAGE_LIMIT, DEFAULT_TEAM_PAGE_LIMIT, DEFAULT_TIMELINE_PAGE_LIMIT,
+    MAX_CHANGE_REPLAY_PAYLOAD_BYTES,
 };
 use crate::grok::GrokAdapter;
 
@@ -225,6 +228,34 @@ pub struct EngineChangeReplayOptions {
     pub topics: Option<Vec<String>>,
     /// Page size. Defaults to 100 and is capped at 1,000 in Rust.
     pub limit: Option<u32>,
+}
+
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct EngineCommitWaitOptions {
+    /// Resolve after the sole writer publishes a strictly newer commit.
+    pub after_commit_seq: f64,
+    /// Bounded recovery timeout. Defaults to 30 seconds; maximum 5 minutes.
+    pub timeout_ms: Option<u32>,
+}
+
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct EngineCommitWaitResult {
+    pub observed_commit_seq: f64,
+    /// `commit` or `timeout`.
+    pub reason: String,
+    pub waited_ms: f64,
+}
+
+impl From<CommitWaitResult> for EngineCommitWaitResult {
+    fn from(value: CommitWaitResult) -> Self {
+        Self {
+            observed_commit_seq: value.observed_commit_seq as f64,
+            reason: value.reason,
+            waited_ms: value.waited_ms as f64,
+        }
+    }
 }
 
 #[napi(object)]
@@ -3082,6 +3113,39 @@ impl SpaghettiEngine {
             },
             signal,
         )
+    }
+
+    /// Wait off the JavaScript thread for the Rust writer to publish a newer
+    /// durable commit. No SQLite read is performed while the request is idle.
+    #[napi(ts_return_type = "Promise<EngineCommitWaitResult>")]
+    pub fn wait_for_commit(
+        &self,
+        env: Env,
+        options: EngineCommitWaitOptions,
+        signal: Option<AbortSignal>,
+    ) -> Result<AsyncBlock<EngineCommitWaitResult>> {
+        const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
+        if !options.after_commit_seq.is_finite()
+            || options.after_commit_seq.fract() != 0.0
+            || !(0.0..=MAX_SAFE_INTEGER).contains(&options.after_commit_seq)
+        {
+            return Err(Error::new(
+                Status::InvalidArg,
+                "afterCommitSeq must be a non-negative safe integer",
+            ));
+        }
+        let engine = Arc::clone(&self.inner);
+        let after_commit_seq = options.after_commit_seq as u64;
+        let timeout_ms = options.timeout_ms.unwrap_or(DEFAULT_COMMIT_WAIT_TIMEOUT_MS);
+        let cancellation = cancellation_for_signal(signal.as_ref());
+        AsyncBlockBuilder::new(async move {
+            engine
+                .wait_for_commit(after_commit_seq, timeout_ms, cancellation)
+                .await
+                .map(Into::into)
+                .map_err(napi_error)
+        })
+        .build(&env)
     }
 
     /// List canonical projects in Rust-defined activity order. The cursor is

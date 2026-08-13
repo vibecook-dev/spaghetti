@@ -1,3 +1,8 @@
+> **Historical data-access examples.** The visual design remains a reference,
+> but synchronous `api.*` examples predate RFC 011. Current CLI/TUI reads are
+> asynchronous and Rust-backed; see the
+> [Phase 10 closure ledger](./rfcs/011-phase-10-closure.md).
+
 # Spaghetti TUI Design
 
 **Status**: Draft

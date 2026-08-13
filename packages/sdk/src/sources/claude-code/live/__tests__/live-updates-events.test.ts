@@ -22,7 +22,7 @@ import path from 'node:path';
 import { mkdtempSync, rmSync, mkdirSync, writeFileSync, realpathSync } from 'node:fs';
 
 import { createSpaghettiService } from '../../../../create.js';
-import type { SpaghettiAPI } from '../../../../api.js';
+import type { LegacySpaghettiAPI as SpaghettiAPI } from '../../../../legacy-api.js';
 import type { Change } from '../../../../live/change-events.js';
 
 const SLUG = 'e2e-slug';
