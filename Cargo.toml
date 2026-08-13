@@ -49,6 +49,7 @@ regex      = "1"
 once_cell  = "1"
 memmap2    = "0.9"
 blake3     = "1.8"
+rustix     = { version = "1.1", features = ["fs"] }
 
 # Time formatting (ISO 8601 from epoch ms, matching JS `new Date(x).toISOString()`)
 time       = { version = "0.3", features = ["formatting"] }

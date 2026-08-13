@@ -8,6 +8,9 @@ use base64::Engine as _;
 use napi::bindgen_prelude::{AbortSignal, AsyncTask, Env, Error, Result, Status, Task};
 use napi_derive::napi;
 
+use crate::adapter::AdapterRegistry;
+use crate::claude::ClaudeCodeAdapter;
+use crate::codex::CodexAdapter;
 use crate::engine::{
     ArtifactDetail, ArtifactPage, ArtifactPageRequest, CanonicalStats, ChangeCursor, ChangeReplay,
     ChangeReplayRequest, DelegationPage, DelegationPageRequest, DelegationSummary, DurableChange,
@@ -20,22 +23,25 @@ use crate::engine::{
     PlanPageRequest, QueryCancellationToken, ReconcileOutcome, ReconcileRequest, RunStateLookup,
     RunStateRequest, RuntimePresenceSnapshot, RuntimeRunEvidence, RuntimeRunSnapshot,
     RuntimeSnapshot, RuntimeSnapshotRequest, SearchHit, SearchPage, SearchPageRequest,
-    SessionDetail, SessionDetails, SessionDetailsRequest, SessionIndexDetail, SourcePage,
-    SourcePageRequest, SourceSummary, SpaghettiEngineCore, TaskCollectionPage,
-    TaskCollectionPageRequest, TaskCollectionSummary, TaskDetail, TaskPage, TaskPageRequest,
-    TeamConfigSummary, TeamDetails, TeamDetailsRequest, TeamInboxMessage, TeamInboxMessagePage,
-    TeamInboxMessagePageRequest, TeamInboxPage, TeamInboxPageRequest, TeamInboxSummary, TeamMember,
-    TeamPage, TeamPageRequest, TeamSummary, TimelineFacets, TimelineMessage, TimelinePage,
-    TimelinePageRequest, ToolResultDetail, ToolResultPage, ToolResultPageRequest,
-    UntimedUsageSummary, UsageActivityDay, UsageActivityReport, UsageActivityRequest,
-    UsageAggregate, UsageCoverageSummary, UsageScopeRequest, UsageTokenValues, UsageTotalsReport,
-    WorkflowDetails, WorkflowDetailsRequest, WorkflowMember, WorkflowMemberPage,
-    WorkflowMemberPageRequest, WorkflowPage, WorkflowPageRequest, WorkflowSummary,
-    CHANGE_REPLAY_CONTRACT_VERSION, DEFAULT_CAPABILITY_PAGE_LIMIT, DEFAULT_CHANGE_REPLAY_LIMIT,
-    DEFAULT_DETAIL_PAGE_LIMIT, DEFAULT_HISTORY_PAGE_LIMIT, DEFAULT_ORCHESTRATION_PAGE_LIMIT,
-    DEFAULT_RUNTIME_PAGE_LIMIT, DEFAULT_SEARCH_PAGE_LIMIT, DEFAULT_TEAM_PAGE_LIMIT,
-    DEFAULT_TIMELINE_PAGE_LIMIT, MAX_CHANGE_REPLAY_PAYLOAD_BYTES,
+    SessionDetail, SessionDetails, SessionDetailsRequest, SessionIndexDetail,
+    SourceCapabilitySummary, SourcePage, SourcePageRequest, SourceSummary, SpaghettiEngineCore,
+    TaskCollectionPage, TaskCollectionPageRequest, TaskCollectionSummary, TaskDetail, TaskPage,
+    TaskPageRequest, TeamConfigSummary, TeamDetails, TeamDetailsRequest, TeamInboxMessage,
+    TeamInboxMessagePage, TeamInboxMessagePageRequest, TeamInboxPage, TeamInboxPageRequest,
+    TeamInboxSummary, TeamMember, TeamPage, TeamPageRequest, TeamSummary, TimelineFacets,
+    TimelineMessage, TimelinePage, TimelinePageRequest, ToolResultDetail, ToolResultPage,
+    ToolResultPageRequest, UntimedUsageSummary, UsageActivityDay, UsageActivityReport,
+    UsageActivityRequest, UsageAggregate, UsageCoverageSummary, UsageScopeRequest,
+    UsageTokenValues, UsageTotalsReport, WorkflowDetails, WorkflowDetailsRequest, WorkflowMember,
+    WorkflowMemberPage, WorkflowMemberPageRequest, WorkflowPage, WorkflowPageRequest,
+    WorkflowSummary, CHANGE_REPLAY_CONTRACT_VERSION, DEFAULT_CAPABILITY_PAGE_LIMIT,
+    DEFAULT_CHANGE_REPLAY_LIMIT, DEFAULT_DETAIL_PAGE_LIMIT, DEFAULT_HISTORY_PAGE_LIMIT,
+    DEFAULT_ORCHESTRATION_PAGE_LIMIT, DEFAULT_RUNTIME_PAGE_LIMIT, DEFAULT_SEARCH_PAGE_LIMIT,
+    DEFAULT_TEAM_PAGE_LIMIT, DEFAULT_TIMELINE_PAGE_LIMIT, MAX_CHANGE_REPLAY_PAYLOAD_BYTES,
 };
+use crate::grok::GrokAdapter;
+
+const CLAUDE_ADAPTER_ID: &str = "claude-code";
 
 #[napi(object)]
 #[derive(Debug, Clone)]
@@ -183,6 +189,11 @@ pub struct EngineOverviewResult {
     /// Canonical history materialized by RFC 011 observation commits.
     pub canonical_sessions: u32,
     pub canonical_messages: u32,
+    /// Oldest durable change still resumable without taking a new snapshot.
+    pub change_log_oldest_cursor: Option<EngineChangeCursor>,
+    pub change_log_pruned_through_seq: f64,
+    pub change_log_retained_changes: f64,
+    pub change_log_retained_payload_bytes: f64,
     pub writer_data_version: u32,
     pub journal_mode: String,
     pub query_only: bool,
@@ -1959,12 +1970,37 @@ impl From<ArtifactPage> for EngineArtifactPage {
 
 #[napi(object)]
 #[derive(Debug, Clone)]
+pub struct EngineSourceCapability {
+    pub id: String,
+    pub support_level: String,
+    pub granularity: String,
+    pub availability: String,
+    pub notes: Option<String>,
+}
+
+impl From<SourceCapabilitySummary> for EngineSourceCapability {
+    fn from(value: SourceCapabilitySummary) -> Self {
+        Self {
+            id: value.id,
+            support_level: value.support_level,
+            granularity: value.granularity,
+            availability: value.availability,
+            notes: value.notes,
+        }
+    }
+}
+
+#[napi(object)]
+#[derive(Debug, Clone)]
 pub struct EngineSourceSummary {
     pub source_id: String,
     pub source_instance_id: f64,
     pub adapter_id: String,
     pub display_name: String,
+    pub adapter_version: String,
     pub adapter_contract_version: u32,
+    pub source_schema_versions: Vec<String>,
+    pub capabilities: Vec<EngineSourceCapability>,
     pub discovered_at_unix_ms: f64,
     pub last_seen_at_unix_ms: f64,
     pub stream_count: f64,
@@ -1984,7 +2020,10 @@ impl From<SourceSummary> for EngineSourceSummary {
             source_instance_id: value.source_instance_id as f64,
             adapter_id: value.adapter_id,
             display_name: value.display_name,
+            adapter_version: value.adapter_version,
             adapter_contract_version: value.adapter_contract_version,
+            source_schema_versions: value.source_schema_versions,
+            capabilities: value.capabilities.into_iter().map(Into::into).collect(),
             discovered_at_unix_ms: value.discovered_at_unix_ms as f64,
             last_seen_at_unix_ms: value.last_seen_at_unix_ms as f64,
             stream_count: value.stream_count as f64,
@@ -2887,8 +2926,30 @@ pub struct EngineReconcileOptions {
 
 #[napi(object)]
 #[derive(Debug, Clone)]
+pub struct EngineAdapterReconcileOptions {
+    /// Open adapter identifier registered by the native composition root.
+    pub adapter_id: String,
+    /// Configured native data roots understood by that adapter.
+    pub roots: Vec<String>,
+    /// Durable ingest reason. Defaults to `manual_reconcile`.
+    pub reason: Option<String>,
+}
+
+#[napi(object)]
+#[derive(Debug, Clone)]
 pub struct EngineObservationOptions {
     /// Configured native data roots understood by the selected adapter.
+    pub roots: Vec<String>,
+    /// Durable ingest reason prefix. Defaults to `native_watch`.
+    pub reason: Option<String>,
+}
+
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct EngineAdapterObservationOptions {
+    /// Open adapter identifier registered by the native composition root.
+    pub adapter_id: String,
+    /// Configured native data roots understood by that adapter.
     pub roots: Vec<String>,
     /// Durable ingest reason prefix. Defaults to `native_watch`.
     pub reason: Option<String>,
@@ -2908,6 +2969,7 @@ pub struct EngineReconcileResult {
     pub records_decoded: u32,
     pub records_quarantined: u32,
     pub retries_required: u32,
+    pub incomplete_tail_retries: u32,
     pub commits: u32,
     pub last_commit_seq: Option<f64>,
 }
@@ -2926,6 +2988,7 @@ impl From<ReconcileOutcome> for EngineReconcileResult {
             records_decoded: value.records_decoded,
             records_quarantined: value.records_quarantined,
             retries_required: value.retries_required,
+            incomplete_tail_retries: value.incomplete_tail_retries,
             commits: value.commits,
             last_commit_seq: value.last_commit_seq.map(|value| value as f64),
         }
@@ -2942,6 +3005,10 @@ impl From<EngineOverview> for EngineOverviewResult {
             messages: value.messages,
             canonical_sessions: value.canonical_sessions,
             canonical_messages: value.canonical_messages,
+            change_log_oldest_cursor: value.change_log_oldest_cursor.map(Into::into),
+            change_log_pruned_through_seq: value.change_log_pruned_through_seq as f64,
+            change_log_retained_changes: value.change_log_retained_changes as f64,
+            change_log_retained_payload_bytes: value.change_log_retained_payload_bytes as f64,
             writer_data_version: value.writer_data_version,
             journal_mode: value.journal_mode,
             query_only: value.query_only,
@@ -3497,6 +3564,85 @@ impl SpaghettiEngine {
         )
     }
 
+    /// Reconcile any registered adapter through the common Rust source and
+    /// projection transaction path.
+    #[napi(ts_return_type = "Promise<EngineReconcileResult>")]
+    pub fn reconcile_adapter(
+        &self,
+        options: EngineAdapterReconcileOptions,
+        signal: Option<AbortSignal>,
+    ) -> AsyncTask<ReconcileClaudeTask> {
+        let cancellation = cancellation_for_signal(signal.as_ref());
+        AsyncTask::with_optional_signal(
+            ReconcileClaudeTask {
+                engine: Arc::clone(&self.inner),
+                adapter_id: options.adapter_id,
+                options: EngineReconcileOptions {
+                    roots: options.roots,
+                    reason: options.reason,
+                },
+                cancellation,
+            },
+            signal,
+        )
+    }
+
+    /// Register consolidated roots and supervise any registered adapter.
+    #[napi(ts_return_type = "Promise<EngineStatus>")]
+    pub fn start_observation(
+        &self,
+        options: EngineAdapterObservationOptions,
+        signal: Option<AbortSignal>,
+    ) -> AsyncTask<StartClaudeObservationTask> {
+        let cancellation = cancellation_for_signal(signal.as_ref());
+        AsyncTask::with_optional_signal(
+            StartClaudeObservationTask {
+                engine: Arc::clone(&self.inner),
+                adapter_id: options.adapter_id,
+                options: EngineObservationOptions {
+                    roots: options.roots,
+                    reason: options.reason,
+                },
+                cancellation,
+            },
+            signal,
+        )
+    }
+
+    /// Force one running adapter supervisor through common reconciliation.
+    #[napi(ts_return_type = "Promise<EngineStatus>")]
+    pub fn refresh_observation(
+        &self,
+        adapter_id: String,
+        signal: Option<AbortSignal>,
+    ) -> AsyncTask<RefreshClaudeObservationTask> {
+        let cancellation = cancellation_for_signal(signal.as_ref());
+        AsyncTask::with_optional_signal(
+            RefreshClaudeObservationTask {
+                engine: Arc::clone(&self.inner),
+                adapter_id,
+                cancellation,
+            },
+            signal,
+        )
+    }
+
+    /// Stop one adapter supervisor without disposing the engine.
+    #[napi(ts_return_type = "Promise<EngineStatus>")]
+    pub fn stop_observation(
+        &self,
+        adapter_id: String,
+        signal: Option<AbortSignal>,
+    ) -> AsyncTask<StopClaudeObservationTask> {
+        AsyncTask::with_optional_signal(
+            StopClaudeObservationTask {
+                engine: Arc::clone(&self.inner),
+                adapter_id,
+            },
+            signal,
+        )
+    }
+
     /// Reconcile the adapter-declared Claude source map through the common
     /// Rust drivers, decoders, projections, and durable cursor transaction.
     #[napi(ts_return_type = "Promise<EngineReconcileResult>")]
@@ -3505,10 +3651,13 @@ impl SpaghettiEngine {
         options: EngineReconcileOptions,
         signal: Option<AbortSignal>,
     ) -> AsyncTask<ReconcileClaudeTask> {
+        let cancellation = cancellation_for_signal(signal.as_ref());
         AsyncTask::with_optional_signal(
             ReconcileClaudeTask {
                 engine: Arc::clone(&self.inner),
+                adapter_id: CLAUDE_ADAPTER_ID.to_string(),
                 options,
+                cancellation,
             },
             signal,
         )
@@ -3522,10 +3671,13 @@ impl SpaghettiEngine {
         options: EngineObservationOptions,
         signal: Option<AbortSignal>,
     ) -> AsyncTask<StartClaudeObservationTask> {
+        let cancellation = cancellation_for_signal(signal.as_ref());
         AsyncTask::with_optional_signal(
             StartClaudeObservationTask {
                 engine: Arc::clone(&self.inner),
+                adapter_id: CLAUDE_ADAPTER_ID.to_string(),
                 options,
+                cancellation,
             },
             signal,
         )
@@ -3537,9 +3689,12 @@ impl SpaghettiEngine {
         &self,
         signal: Option<AbortSignal>,
     ) -> AsyncTask<RefreshClaudeObservationTask> {
+        let cancellation = cancellation_for_signal(signal.as_ref());
         AsyncTask::with_optional_signal(
             RefreshClaudeObservationTask {
                 engine: Arc::clone(&self.inner),
+                adapter_id: CLAUDE_ADAPTER_ID.to_string(),
+                cancellation,
             },
             signal,
         )
@@ -3554,6 +3709,7 @@ impl SpaghettiEngine {
         AsyncTask::with_optional_signal(
             StopClaudeObservationTask {
                 engine: Arc::clone(&self.inner),
+                adapter_id: CLAUDE_ADAPTER_ID.to_string(),
             },
             signal,
         )
@@ -3597,11 +3753,20 @@ impl Task for OpenEngineTask {
             .options
             .query_workers
             .map(|value| usize::try_from(value).unwrap_or(usize::MAX));
-        let inner = SpaghettiEngineCore::open(EngineOptions {
-            database_path: PathBuf::from(&self.options.db_path),
-            query_workers,
-            owner_label: self.options.owner_label.clone(),
-        })
+        let registry = AdapterRegistry::builder()
+            .register(ClaudeCodeAdapter::new())
+            .register(CodexAdapter::new())
+            .register(GrokAdapter::new())
+            .build()
+            .map_err(|error| Error::new(Status::InvalidArg, error.to_string()))?;
+        let inner = SpaghettiEngineCore::open_with_registry(
+            EngineOptions {
+                database_path: PathBuf::from(&self.options.db_path),
+                query_workers,
+                owner_label: self.options.owner_label.clone(),
+            },
+            registry,
+        )
         .map_err(napi_error)?;
         Ok(SpaghettiEngine { inner })
     }
@@ -3793,20 +3958,27 @@ pub struct TeamInboxMessagesTask {
 
 pub struct ReconcileClaudeTask {
     engine: Arc<SpaghettiEngineCore>,
+    adapter_id: String,
     options: EngineReconcileOptions,
+    cancellation: QueryCancellationToken,
 }
 
 pub struct StartClaudeObservationTask {
     engine: Arc<SpaghettiEngineCore>,
+    adapter_id: String,
     options: EngineObservationOptions,
+    cancellation: QueryCancellationToken,
 }
 
 pub struct RefreshClaudeObservationTask {
     engine: Arc<SpaghettiEngineCore>,
+    adapter_id: String,
+    cancellation: QueryCancellationToken,
 }
 
 pub struct StopClaudeObservationTask {
     engine: Arc<SpaghettiEngineCore>,
+    adapter_id: String,
 }
 
 impl Task for ReconcileClaudeTask {
@@ -3814,7 +3986,7 @@ impl Task for ReconcileClaudeTask {
     type JsValue = EngineReconcileResult;
 
     fn compute(&mut self) -> Result<Self::Output> {
-        validate_roots(&self.options.roots, "reconcileClaude")?;
+        validate_roots(&self.options.roots, "reconcileAdapter")?;
         let request = ReconcileRequest {
             configured_roots: self.options.roots.iter().map(PathBuf::from).collect(),
             reason: self
@@ -3824,7 +3996,7 @@ impl Task for ReconcileClaudeTask {
                 .unwrap_or_else(|| "manual_reconcile".to_string()),
         };
         self.engine
-            .reconcile_claude(request)
+            .reconcile_adapter_cancellable(&self.adapter_id, request, self.cancellation.clone())
             .map(Into::into)
             .map_err(napi_error)
     }
@@ -3839,7 +4011,7 @@ impl Task for StartClaudeObservationTask {
     type JsValue = EngineStatus;
 
     fn compute(&mut self) -> Result<Self::Output> {
-        validate_roots(&self.options.roots, "startClaudeObservation")?;
+        validate_roots(&self.options.roots, "startObservation")?;
         let mut options = ObservationSupervisorOptions::new(
             self.options.roots.iter().map(PathBuf::from).collect(),
         );
@@ -3847,7 +4019,11 @@ impl Task for StartClaudeObservationTask {
             options.reason = reason;
         }
         self.engine
-            .start_claude_observation(options)
+            .start_registered_observation_cancellable(
+                &self.adapter_id,
+                options,
+                self.cancellation.clone(),
+            )
             .map_err(napi_error)?;
         Ok(self.engine.status().into())
     }
@@ -3863,7 +4039,7 @@ impl Task for RefreshClaudeObservationTask {
 
     fn compute(&mut self) -> Result<Self::Output> {
         self.engine
-            .refresh_claude_observation()
+            .refresh_observation_supervisor_cancellable(&self.adapter_id, self.cancellation.clone())
             .map_err(napi_error)?;
         Ok(self.engine.status().into())
     }
@@ -3878,7 +4054,9 @@ impl Task for StopClaudeObservationTask {
     type JsValue = EngineStatus;
 
     fn compute(&mut self) -> Result<Self::Output> {
-        self.engine.stop_claude_observation().map_err(napi_error)?;
+        self.engine
+            .stop_observation_supervisor(&self.adapter_id)
+            .map_err(napi_error)?;
         Ok(self.engine.status().into())
     }
 

@@ -2,7 +2,7 @@
  * Shared hooks — list navigation and terminal dimensions
  */
 
-import { useState, useCallback, useEffect, useRef } from 'react';
+import { useState, useCallback, useEffect, useRef, type DependencyList } from 'react';
 import { useStdout } from 'ink';
 
 // ─── useListNavigation ─────────────────────────────────────────────────
@@ -148,4 +148,41 @@ export function useAlternateScreen(): void {
   useEffect(() => {
     // intentional no-op; see JSDoc above
   }, []);
+}
+
+// ─── useAsyncValue ───────────────────────────────────────────────────
+
+/** Resolve one canonical client read without allowing stale effects to win. */
+export function useAsyncValue<T>(
+  load: () => Promise<T>,
+  dependencies: DependencyList,
+  initialValue: T,
+): { value: T; loading: boolean; error: Error | null } {
+  const [value, setValue] = useState<T>(initialValue);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<Error | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    setLoading(true);
+    setError(null);
+    void load().then(
+      (next) => {
+        if (!active) return;
+        setValue(next);
+        setLoading(false);
+      },
+      (reason: unknown) => {
+        if (!active) return;
+        setError(reason instanceof Error ? reason : new Error(String(reason)));
+        setLoading(false);
+      },
+    );
+    return () => {
+      active = false;
+    };
+    // The caller supplies the semantic request identity explicitly.
+  }, dependencies);
+
+  return { value, loading, error };
 }

@@ -10,7 +10,7 @@ export interface SettingsDialogProps {
   onOpenChange: (open: boolean) => void;
   onRebuild: () => void;
   rebuilding: boolean;
-  engine: 'rs' | 'ts' | null;
+  engine: 'rs' | null;
   stats: StoreStats | null;
   observationStatus: ObservationOwnerStatus | null;
   canonicalStats: SpaghettiClientResponseMap['getStats'] | null;
@@ -79,10 +79,7 @@ export function SettingsDialog({
                 Index
               </h2>
               <dl className="border-y border-[#2b2623]/15 font-mono text-[9px] uppercase tracking-[0.1em] dark:border-[#d4cbbd]/15">
-                <SettingRow
-                  label="Engine"
-                  value={engine === 'ts' ? 'TypeScript' : engine === 'rs' ? 'Native' : 'Resolving'}
-                />
+                <SettingRow label="Engine" value={engine === 'rs' ? 'Rust observation' : 'Resolving'} />
                 <SettingRow label="Status" value="Ready" />
                 <SettingRow label="Segments" value={stats ? formatNumber(stats.totalSegments) : '—'} />
                 <SettingRow label="Search entries" value={stats ? formatNumber(stats.searchIndexed) : '—'} />

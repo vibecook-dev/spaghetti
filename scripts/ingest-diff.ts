@@ -76,13 +76,13 @@ import {
   createClaudeCodeSource,
   createCodexSource,
   createGrokSource,
-} from '../packages/sdk/dist/index.js';
+} from '../packages/sdk/src/legacy-oracle.js';
 
 // `@vibecook/spaghetti-sdk-native` is a workspace dep of the SDK — not of
 // the repo root — so under pnpm's isolated layout it is only resolvable
 // from the SDK's own node_modules. Anchor the require there (the SDK dist
 // entry we import from above) instead of at this script's path.
-const require = createRequire(new URL('../packages/sdk/dist/index.js', import.meta.url));
+const require = createRequire(new URL('../packages/sdk/package.json', import.meta.url));
 
 // ─── CLI ────────────────────────────────────────────────────────────────────
 

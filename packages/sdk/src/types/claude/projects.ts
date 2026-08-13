@@ -66,6 +66,7 @@ export type SessionMessageType =
   | 'custom-title'
   | 'file-history-delta'
   | 'file-history-snapshot'
+  | 'frame-link'
   | 'mode'
   | 'pr-link'
   | 'progress'
@@ -86,6 +87,7 @@ export type SessionMessage =
   | CustomTitleMessage
   | FileHistoryDeltaMessage
   | FileHistorySnapshotMessage
+  | FrameLinkMessage
   | ModeMessage
   | PrLinkMessage
   | ProgressMessage
@@ -195,6 +197,16 @@ export interface FileHistoryDeltaMessage {
   backup: FileBackupEntry;
 }
 
+/** Link from a transcript to an artifact/frame rendered by Claude Code. */
+export interface FrameLinkMessage {
+  type: 'frame-link';
+  sessionId: string;
+  path: string;
+  frameUrl: string;
+  title: string;
+  timestamp: string;
+}
+
 export interface FileHistorySnapshot {
   messageId: string;
   timestamp: string;
@@ -256,6 +268,10 @@ export interface UserMessage extends BaseMessageFields {
   interruptedMessageId?: string;
   /** Why a tool call was refused (e.g. `'automode-blocked'`). */
   toolDenialKind?: string;
+  /** Queue lane selected for this user turn. */
+  queuePriority?: string;
+  /** Free-form feedback attached to the turn by the client UI. */
+  userFeedback?: string;
 }
 
 export interface UserMessagePayload {
@@ -355,6 +371,7 @@ export interface AssistantMessage extends BaseMessageFields {
   attributionMcpServer?: string;
   attributionMcpTool?: string;
   attributionSkill?: string;
+  attributionPlugin?: string;
   /** Reasoning-effort tier the turn ran at (e.g. `'low'`, `'xhigh'`). */
   effort?: string;
 }
@@ -372,7 +389,12 @@ export interface AssistantMessagePayload {
   container?: unknown;
 }
 
-export type AssistantContentBlock = ThinkingBlock | RedactedThinkingBlock | AssistantTextBlock | ToolUseBlock;
+export type AssistantContentBlock =
+  | ThinkingBlock
+  | RedactedThinkingBlock
+  | AssistantTextBlock
+  | ToolUseBlock
+  | FallbackBlock;
 
 export interface ThinkingBlock {
   type: 'thinking';
@@ -395,6 +417,13 @@ export interface ToolUseBlock {
   id: string;
   name: ToolName;
   input: Record<string, unknown>;
+}
+
+/** Records an automatic model transition inside an assistant response. */
+export interface FallbackBlock {
+  type: 'fallback';
+  from: { model: string; [key: string]: unknown };
+  to: { model: string; [key: string]: unknown };
 }
 
 export type ToolName =
@@ -420,6 +449,7 @@ export type ToolName =
   | 'Skill'
   | 'KillShell'
   | 'Agent'
+  | 'Artifact'
   | 'ToolSearch'
   | 'EnterWorktree'
   | 'ExitWorktree'
@@ -428,11 +458,14 @@ export type ToolName =
   | 'CronDelete'
   | 'CronList'
   | 'LSP'
+  | 'ListAgents'
   | 'TeamCreate'
   | 'TeamDelete'
   | 'TaskGet'
   | 'Monitor'
   | 'PowerShell'
+  | 'PushNotification'
+  | 'ReportFindings'
   | 'ScheduleWakeup'
   | 'SendUserFile'
   | 'Workflow'
@@ -474,7 +507,9 @@ export type SystemMessage =
   | AwaySummarySystemMessage
   | InformationalSystemMessage
   | ScheduledTaskFireSystemMessage
-  | ModelConsentFallbackSystemMessage;
+  | ModelConsentFallbackSystemMessage
+  | ModelRefusalFallbackSystemMessage
+  | AgentsKilledSystemMessage;
 
 interface SystemMessageBase extends BaseMessageFields {
   type: 'system';
@@ -585,6 +620,26 @@ export interface ModelConsentFallbackSystemMessage extends SystemMessageBase {
   originalModel: string;
   /** Whether the fallback was written back as the session default. */
   persistedAsDefault: boolean;
+}
+
+/** API refusal that caused Claude Code to retract the turn and change model. */
+export interface ModelRefusalFallbackSystemMessage extends SystemMessageBase {
+  subtype: 'model_refusal_fallback';
+  content: string;
+  trigger: string;
+  direction: string;
+  originalModel: string;
+  fallbackModel: string;
+  requestId: string;
+  apiRefusalCategory: string;
+  apiRefusalExplanation: string;
+  retractedMessageUuids: string[];
+  refusedUserMessageUuid: string | null;
+}
+
+/** Marker emitted after Claude Code terminates outstanding background agents. */
+export interface AgentsKilledSystemMessage extends SystemMessageBase {
+  subtype: 'agents_killed';
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════

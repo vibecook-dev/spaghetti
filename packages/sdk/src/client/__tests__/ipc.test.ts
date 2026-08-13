@@ -146,6 +146,22 @@ describe('Spaghetti IPC framing', () => {
           result: { contractVersion: 1, commitSeq: 0 },
         } as unknown as SpaghettiProtocolResponse,
       },
+      {
+        type: 'response',
+        response: {
+          protocolVersion: 1,
+          queryContractVersion: 1,
+          requestId: 8,
+          ok: false,
+          error: {
+            code: 'reset_required',
+            message: 'Read a new snapshot.',
+            reason: 'retention_gap',
+            currentCommitSeq: 42,
+            oldestAvailable: { commitSeq: 17, ordinal: 0 },
+          },
+        },
+      },
       { type: 'cancel', requestId: 7 },
       { type: 'close' },
     ];

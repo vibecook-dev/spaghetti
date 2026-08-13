@@ -11,19 +11,17 @@ import { useTerminalSize } from './hooks.js';
 
 /**
  * Compact indicator of the ingest engine actually in use this session.
- * `rs` (Rust native) renders green, `ts` (TypeScript fallback) cyan —
- * fed the *effective* engine (`resolveActiveEngine().engine`), so it
- * reads `TS` when an `rs` preference silently fell back to TypeScript
- * because the native addon isn't installed.
+ * RFC 011 has one production owner. The compatibility prop remains typed as
+ * `IngestEngine` while older renderer state is retired, but only Rust is shown.
  */
 export function EngineBadge({ engine }: { engine: IngestEngine }): React.ReactElement {
   const isRust = engine === 'rs';
-  const color = isRust ? 'green' : 'cyan';
+  const color = isRust ? 'green' : 'yellow';
   return (
     <Text>
       <Text dimColor>engine </Text>
       <Text color={color} bold>
-        {'●'} {isRust ? 'RS' : 'TS'}
+        {'●'} {isRust ? 'RS' : 'LEGACY'}
       </Text>
       <Text> </Text>
     </Text>

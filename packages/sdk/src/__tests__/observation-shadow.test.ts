@@ -25,7 +25,7 @@ import {
   type SpaghettiEngineHistorySession,
   type SpaghettiEngineOverview,
   type TeamDirectory,
-} from '../index.js';
+} from '../legacy-oracle.js';
 
 const native = loadNativeAddon();
 const here = path.dirname(fileURLToPath(import.meta.url));

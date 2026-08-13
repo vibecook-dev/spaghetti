@@ -153,7 +153,10 @@ pub struct SourceSummary {
     pub source_instance_id: u64,
     pub adapter_id: String,
     pub display_name: String,
+    pub adapter_version: String,
     pub adapter_contract_version: u32,
+    pub source_schema_versions: Vec<String>,
+    pub capabilities: Vec<SourceCapabilitySummary>,
     pub discovered_at_unix_ms: i64,
     pub last_seen_at_unix_ms: i64,
     pub stream_count: u64,
@@ -164,6 +167,15 @@ pub struct SourceSummary {
     pub fact_count: u64,
     pub commit_count: u64,
     pub last_commit_seq: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourceCapabilitySummary {
+    pub id: String,
+    pub support_level: String,
+    pub granularity: String,
+    pub availability: String,
+    pub notes: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -707,8 +719,10 @@ pub(super) fn read_source_page(
                 GROUP BY source_instance_id
             )
             SELECT si.source_instance_id, si.adapter_id, si.display_name,
-                   si.adapter_contract_version, si.discovered_at,
-                   si.last_seen_at, COALESCE(ss.stream_count, 0),
+                   si.adapter_version, si.adapter_contract_version,
+                   si.source_schema_versions_json, si.capabilities_json,
+                   si.discovered_at, si.last_seen_at,
+                   COALESCE(ss.stream_count, 0),
                    COALESCE(ss.unavailable_stream_count, 0),
                    COALESCE(os.object_count, 0),
                    COALESCE(os.active_object_count, 0),
@@ -793,45 +807,64 @@ fn decode_source_row(row: &Row<'_>) -> Result<SourceRow, EngineError> {
             source_instance_id,
             adapter_id: query_get(row, 1, "decode source adapter id")?,
             display_name: query_get(row, 2, "decode source display name")?,
+            adapter_version: query_get(row, 3, "decode source adapter version")?,
             adapter_contract_version: decode_nonnegative_u32(
-                query_get(row, 3, "decode source contract version")?,
+                query_get(row, 4, "decode source contract version")?,
                 "source adapter contract version",
             )?,
-            discovered_at_unix_ms: query_get(row, 4, "decode source discovery time")?,
-            last_seen_at_unix_ms: query_get(row, 5, "decode source last-seen time")?,
+            source_schema_versions: decode_source_manifest_json(
+                query_get(row, 5, "decode source schema versions")?,
+                "source schema versions",
+            )?,
+            capabilities: decode_source_manifest_json(
+                query_get(row, 6, "decode source capabilities")?,
+                "source capabilities",
+            )?,
+            discovered_at_unix_ms: query_get(row, 7, "decode source discovery time")?,
+            last_seen_at_unix_ms: query_get(row, 8, "decode source last-seen time")?,
             stream_count: decode_nonnegative_u64(
-                query_get(row, 6, "decode source stream count")?,
+                query_get(row, 9, "decode source stream count")?,
                 "source stream count",
             )?,
             unavailable_stream_count: decode_nonnegative_u64(
-                query_get(row, 7, "decode unavailable source stream count")?,
+                query_get(row, 10, "decode unavailable source stream count")?,
                 "unavailable source stream count",
             )?,
             object_count: decode_nonnegative_u64(
-                query_get(row, 8, "decode source object count")?,
+                query_get(row, 11, "decode source object count")?,
                 "source object count",
             )?,
             active_object_count: decode_nonnegative_u64(
-                query_get(row, 9, "decode active source object count")?,
+                query_get(row, 12, "decode active source object count")?,
                 "active source object count",
             )?,
             record_error_count: decode_nonnegative_u64(
-                query_get(row, 10, "decode source record error count")?,
+                query_get(row, 13, "decode source record error count")?,
                 "source record error count",
             )?,
             fact_count: decode_nonnegative_u64(
-                query_get(row, 11, "decode source fact count")?,
+                query_get(row, 14, "decode source fact count")?,
                 "source fact count",
             )?,
             commit_count: decode_nonnegative_u64(
-                query_get(row, 12, "decode source commit count")?,
+                query_get(row, 15, "decode source commit count")?,
                 "source commit count",
             )?,
             last_commit_seq: decode_optional_u64(
-                query_get(row, 13, "decode source last commit")?,
+                query_get(row, 16, "decode source last commit")?,
                 "source last commit sequence",
             )?,
         },
+    })
+}
+
+fn decode_source_manifest_json<T>(value: String, label: &'static str) -> Result<T, EngineError>
+where
+    T: for<'de> Deserialize<'de>,
+{
+    serde_json::from_str(&value).map_err(|error| EngineError::Sqlite {
+        operation: "decode source manifest",
+        detail: format!("invalid {label}: {error}"),
     })
 }
 
@@ -1295,13 +1328,13 @@ mod tests {
             .unwrap();
         connection
             .execute(
-                "INSERT INTO source_instances VALUES (1, 'fixture', ?1, 'Fixture', 1, 10, 20)",
+                "INSERT INTO source_instances VALUES (1, 'fixture', ?1, 'Fixture', '1.2.3', 1, '[\"fixture-v1\"]', '[{\"id\":\"history\",\"support_level\":\"native\",\"granularity\":\"message\",\"availability\":\"live\",\"notes\":null}]', 10, 20)",
                 [b"fixture-root".as_slice()],
             )
             .unwrap();
         connection
             .execute(
-                "INSERT INTO source_instances VALUES (2, 'alpha', ?1, 'Alpha', 2, 11, 21)",
+                "INSERT INTO source_instances VALUES (2, 'alpha', ?1, 'Alpha', '2.0.0', 2, '[]', '[]', 11, 21)",
                 [b"alpha-root".as_slice()],
             )
             .unwrap();
@@ -1313,7 +1346,11 @@ mod tests {
             .unwrap();
         connection
             .execute(
-                "INSERT INTO source_objects VALUES (1, 1, ?1, '/fixture/session.jsonl', NULL, 1, ?2, NULL, NULL, NULL, NULL, NULL, NULL, 100, 20, 1, 1, 'active')",
+                "INSERT INTO source_objects (
+                    source_object_id, source_stream_id, object_key, display_path,
+                    generation, committed_cursor, size_bytes, mtime_ns,
+                    decoder_contract_version, last_commit_seq, state
+                ) VALUES (1, 1, ?1, '/fixture/session.jsonl', 1, ?2, 100, 20, 1, 1, 'active')",
                 params![b"object".as_slice(), b"cursor".as_slice()],
             )
             .unwrap();
@@ -1574,6 +1611,13 @@ mod tests {
         )
         .unwrap();
         assert_eq!(second.items[0].adapter_id, "fixture");
+        assert_eq!(second.items[0].adapter_version, "1.2.3");
+        assert_eq!(second.items[0].source_schema_versions, ["fixture-v1"]);
+        assert_eq!(second.items[0].capabilities.len(), 1);
+        assert_eq!(second.items[0].capabilities[0].id, "history");
+        assert_eq!(second.items[0].capabilities[0].support_level, "native");
+        assert_eq!(second.items[0].capabilities[0].granularity, "message");
+        assert_eq!(second.items[0].capabilities[0].availability, "live");
         assert_eq!(second.items[0].stream_count, 1);
         assert_eq!(second.items[0].active_object_count, 1);
         assert_eq!(second.items[0].fact_count, 4);

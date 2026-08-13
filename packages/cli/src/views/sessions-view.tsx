@@ -2,12 +2,12 @@
  * SessionsView — Scrollable list of sessions for a project
  */
 
-import React, { useMemo } from 'react';
+import React from 'react';
 import { Box, Text, useInput, useStdout } from 'ink';
 import type { ProjectListItem, SessionListItem } from '@vibecook/spaghetti-sdk';
 import { useViewNav } from './context.js';
 import { useApi } from './shell.js';
-import { useListNavigation } from './hooks.js';
+import { useAsyncValue, useListNavigation } from './hooks.js';
 import { formatTokenUsage, formatRelativeTime, formatNumber, formatDuration } from '../lib/format.js';
 import { SessionTabView } from './session-tab-view.js';
 import type { ViewEntry } from './types.js';
@@ -84,9 +84,8 @@ export function SessionsView({ project, initialIndex }: SessionsViewProps): Reac
   const { stdout } = useStdout();
   const cols = stdout?.columns ?? 80;
 
-  const sessions = useMemo(() => {
-    return api.getSessionList(project);
-  }, [api, project]);
+  const sessionQuery = useAsyncValue(() => api.getSessionList(project), [api, project], [] as SessionListItem[]);
+  const sessions = sessionQuery.value;
 
   const { selectedIndex, scrollOffset, moveUp, moveDown } = useListNavigation({
     itemCount: sessions.length,
@@ -118,6 +117,9 @@ export function SessionsView({ project, initialIndex }: SessionsViewProps): Reac
     },
     { isActive: !nav.searchMode },
   );
+
+  if (sessionQuery.loading) return <Text dimColor> Loading canonical sessions…</Text>;
+  if (sessionQuery.error) return <Text color="red"> {sessionQuery.error.message}</Text>;
 
   if (sessions.length === 0) {
     return (

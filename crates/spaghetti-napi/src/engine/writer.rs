@@ -16,7 +16,9 @@ use rusqlite::Connection;
 use crate::adapter::FactBatch;
 use crate::core::schema;
 
-use super::commit::{self, CommitReceipt, ObservationCommit};
+use super::commit::{
+    self, ChangeLogRetentionPolicy, ChangeLogRetentionSnapshot, CommitReceipt, ObservationCommit,
+};
 use super::projection;
 use super::EngineError;
 
@@ -40,6 +42,11 @@ enum WriterCommand {
         request: Box<ObservationCommit>,
         batch: Box<FactBatch>,
         response: Sender<Result<CommitReceipt, EngineError>>,
+    },
+    MaintainChangeLog {
+        policy: ChangeLogRetentionPolicy,
+        now_ms: i64,
+        response: Sender<Result<ChangeLogRetentionSnapshot, EngineError>>,
     },
     Shutdown,
 }
@@ -119,6 +126,27 @@ impl WriterClient {
             .send(WriterCommand::CommitFacts {
                 request: Box::new(request),
                 batch: Box::new(batch),
+                response: response_tx,
+            })
+            .map_err(|_| EngineError::WorkerUnavailable { worker: "writer" })?;
+        response_rx
+            .recv()
+            .map_err(|_| EngineError::WorkerUnavailable { worker: "writer" })?
+    }
+
+    pub fn maintain_change_log(
+        &self,
+        policy: ChangeLogRetentionPolicy,
+        now_ms: i64,
+    ) -> Result<ChangeLogRetentionSnapshot, EngineError> {
+        if !self.alive.load(Ordering::Acquire) {
+            return Err(EngineError::WorkerUnavailable { worker: "writer" });
+        }
+        let (response_tx, response_rx) = bounded(1);
+        self.commands
+            .send(WriterCommand::MaintainChangeLog {
+                policy,
+                now_ms,
                 response: response_tx,
             })
             .map_err(|_| EngineError::WorkerUnavailable { worker: "writer" })?;
@@ -232,6 +260,13 @@ fn writer_thread(
                     &batch,
                 ));
             }
+            WriterCommand::MaintainChangeLog {
+                policy,
+                now_ms,
+                response,
+            } => {
+                let _ = response.send(commit::maintain_change_log(&mut connection, policy, now_ms));
+            }
             WriterCommand::Shutdown => break,
         }
     }
@@ -243,6 +278,12 @@ fn open_writer(database_path: &PathBuf) -> Result<Connection, EngineError> {
     let connection = Connection::open(database_path).map_err(|error| EngineError::Sqlite {
         operation: "open writer connection",
         detail: error.to_string(),
+    })?;
+    super::local_permissions::restrict_owner_file(database_path).map_err(|error| {
+        EngineError::Sqlite {
+            operation: "restrict writer database permissions",
+            detail: error.to_string(),
+        }
     })?;
     connection
         .busy_timeout(Duration::from_secs(5))
@@ -257,6 +298,12 @@ fn open_writer(database_path: &PathBuf) -> Result<Connection, EngineError> {
     schema::initialize_schema(&connection).map_err(|error| EngineError::Sqlite {
         operation: "initialize schema",
         detail: error.to_string(),
+    })?;
+    super::local_permissions::restrict_sqlite_files(database_path).map_err(|error| {
+        EngineError::Sqlite {
+            operation: "restrict writer SQLite sidecar permissions",
+            detail: error.to_string(),
+        }
     })?;
     Ok(connection)
 }
@@ -302,5 +349,20 @@ mod tests {
             client.health(),
             Err(EngineError::WorkerUnavailable { worker: "writer" })
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn writer_database_is_restricted_to_the_current_user() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("permissions.db");
+        let mut runtime = WriterRuntime::start(database.clone()).unwrap();
+        assert_eq!(
+            std::fs::metadata(&database).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        runtime.shutdown().unwrap();
     }
 }

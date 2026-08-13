@@ -1,0 +1,1274 @@
+/**
+ * Product compatibility facade backed exclusively by the RFC 011 Rust owner.
+ *
+ * This module intentionally contains presentation/compatibility mapping only:
+ * it does not read agent files, open SQLite, repair projections, or own a
+ * process-local source watcher. Every durable read crosses `SpaghettiClient`.
+ */
+
+import { EventEmitter } from 'node:events';
+import { basename } from 'node:path';
+
+import type {
+  MessagePage,
+  ProjectListItem,
+  ProjectMember,
+  ProjectReference,
+  SessionListItem,
+  SourceFilter,
+  SubagentFilter,
+  SubagentListItem,
+  SubagentMessagePage,
+  TokenActivityDay,
+  TokenActivityQuery,
+  TokenActivityResult,
+  WorkflowListItem,
+} from './api.js';
+import type {
+  InitProgress,
+  SearchQuery,
+  SearchResultSet,
+  SegmentChangeBatch,
+  StoreStats,
+} from './data/segment-types.js';
+import type {
+  SubagentTimelinePage,
+  SubagentTimelinePageRequest,
+  TimelineFacets,
+  TimelinePage,
+  TimelinePageRequest,
+} from './data/timeline-query.js';
+import type { TokenUsageSummary } from './data/summary-types.js';
+import type { SessionMessage } from './react/chat/types.js';
+import type { TeamDirectory } from './types/index.js';
+import type {
+  SpaghettiEngineDelegation,
+  SpaghettiEngineHistoryProject,
+  SpaghettiEngineHistorySession,
+  SpaghettiEngineMessageDetail,
+  SpaghettiEngineTask,
+  SpaghettiEngineTimelineMessage,
+  SpaghettiEngineUsageAggregate,
+  SpaghettiEngineWorkflowMember,
+} from './native.js';
+import {
+  openObservationHost,
+  type ObservationHost,
+  type ObservationHostOptions,
+  type ObservationHostSnapshot,
+} from './observation-host.js';
+import type { SpaghettiIpcChannel, SpaghettiIpcHost } from './client/index.js';
+
+const PAGE_LIMIT = 200;
+const MAX_CHANGE_ORDINAL = 0xffff_ffff;
+
+export interface ObservationServiceOptions extends ObservationHostOptions {
+  /** Subscribe to committed projection changes. Defaults to true. */
+  live?: boolean;
+}
+
+/**
+ * Async product surface used during the Phase 10 consumer cutover.
+ *
+ * Result DTOs deliberately remain compatible with the former `SpaghettiAPI`
+ * so renderers and command formatting do not acquire storage semantics.
+ */
+export interface ObservationService {
+  initialize(): Promise<void>;
+  shutdown(): void;
+  dispose(): Promise<void>;
+  rebuildIndex(): Promise<{ durationMs: number }>;
+  isReady(): boolean;
+  getSourceIds(): Promise<string[]>;
+  getProjectList(options?: SourceFilter): Promise<ProjectListItem[]>;
+  getProjectTokenActivity(project: ProjectReference, query: TokenActivityQuery): Promise<TokenActivityResult>;
+  getSessionList(project: ProjectReference, options?: SourceFilter): Promise<SessionListItem[]>;
+  getSessionMessages(
+    projectSlug: string,
+    sessionId: string,
+    limit?: number,
+    offset?: number,
+    options?: SourceFilter,
+  ): Promise<MessagePage>;
+  getSessionTimelineFacets(projectSlug: string, sessionId: string, options?: SourceFilter): Promise<TimelineFacets>;
+  getSessionTimeline(projectSlug: string, sessionId: string, request?: TimelinePageRequest): Promise<TimelinePage>;
+  getProjectMemory(project: ProjectReference, options?: SourceFilter): Promise<string | null>;
+  getSessionTodos(projectSlug: string, sessionId: string): Promise<unknown[]>;
+  getSessionPlan(projectSlug: string, sessionId: string): Promise<unknown | null>;
+  getSessionTask(projectSlug: string, sessionId: string): Promise<unknown | null>;
+  getToolResult(projectSlug: string, sessionId: string, toolUseId: string): Promise<string | null>;
+  getSessionSubagents(projectSlug: string, sessionId: string, options?: SubagentFilter): Promise<SubagentListItem[]>;
+  getSessionWorkflows(projectSlug: string, sessionId: string): Promise<WorkflowListItem[]>;
+  getWorkflowSubagents(
+    projectSlug: string,
+    sessionId: string,
+    workflowId: string,
+    options?: SourceFilter,
+  ): Promise<SubagentListItem[]>;
+  getSubagentMessages(
+    projectSlug: string,
+    sessionId: string,
+    agentId: string,
+    limit?: number,
+    offset?: number,
+    workflowId?: string,
+    options?: SourceFilter,
+  ): Promise<SubagentMessagePage>;
+  getSubagentTimeline(
+    projectSlug: string,
+    sessionId: string,
+    agentId: string,
+    request: SubagentTimelinePageRequest,
+  ): Promise<SubagentTimelinePage>;
+  search(query: SearchQuery): Promise<SearchResultSet>;
+  getStats(): Promise<StoreStats>;
+  getTeams(): Promise<TeamDirectory[]>;
+  onProgress(cb: (progress: InitProgress) => void): () => void;
+  onReady(cb: (info: { durationMs: number }) => void): () => void;
+  onChange(cb: (batch: SegmentChangeBatch) => void): () => void;
+  snapshot(signal?: AbortSignal): Promise<ObservationHostSnapshot>;
+  serveIpc(channel: SpaghettiIpcChannel, transportKind?: string): SpaghettiIpcHost;
+}
+
+interface ResolvedSession {
+  project: SpaghettiEngineHistoryProject;
+  session: SpaghettiEngineHistorySession;
+}
+
+interface TimelineRow {
+  index: number;
+  adapterId: string;
+  nativeChildId?: string;
+  runId: string;
+  message: SessionMessage;
+}
+
+interface ProjectSummary {
+  canonical: SpaghettiEngineHistoryProject;
+  item: ProjectListItem;
+}
+
+/** Construct an uninitialized Rust-owned product service. */
+export function createObservationService(options: ObservationServiceOptions): ObservationService {
+  return new RustObservationService(options);
+}
+
+class RustObservationService extends EventEmitter implements ObservationService {
+  private host: ObservationHost | null = null;
+  private initializePromise: Promise<void> | null = null;
+  private disposePromise: Promise<void> | null = null;
+  private subscriptionAbort: AbortController | null = null;
+  private ready = false;
+
+  constructor(private readonly options: ObservationServiceOptions) {
+    super();
+  }
+
+  initialize(): Promise<void> {
+    if (this.ready) return Promise.resolve();
+    if (this.disposePromise) return Promise.reject(new Error('Observation service is stopping.'));
+    if (!this.initializePromise) {
+      const startedAt = Date.now();
+      const work = (async () => {
+        this.emitProgress('parsing', 'Starting Rust observation owner…');
+        let host: ObservationHost | null = null;
+        try {
+          host = await openObservationHost(this.options);
+          if (this.disposePromise) throw new Error('Observation service stopped during initialization.');
+          this.emitProgress('reconciling', 'Reading canonical source catalog…');
+          await host.client.listSources({ limit: 1 });
+          if (this.options.live !== false) await this.startSubscription(host);
+          if (this.disposePromise) throw new Error('Observation service stopped during initialization.');
+          this.host = host;
+          this.ready = true;
+          const info = { durationMs: Date.now() - startedAt };
+          this.emit('ready', info);
+        } catch (error) {
+          this.subscriptionAbort?.abort();
+          this.subscriptionAbort = null;
+          this.host = null;
+          this.ready = false;
+          if (host) await host.dispose().catch(() => undefined);
+          throw error;
+        }
+      })();
+      const tracked = work.finally(() => {
+        if (this.initializePromise === tracked) this.initializePromise = null;
+      });
+      this.initializePromise = tracked;
+    }
+    return this.initializePromise;
+  }
+
+  shutdown(): void {
+    void this.dispose().catch(() => undefined);
+  }
+
+  dispose(): Promise<void> {
+    if (!this.disposePromise) {
+      this.disposePromise = (async () => {
+        this.subscriptionAbort?.abort();
+        this.subscriptionAbort = null;
+        const initializing = this.initializePromise;
+        if (initializing) await initializing.catch(() => undefined);
+        const host = this.host;
+        this.host = null;
+        this.ready = false;
+        if (host) await host.dispose();
+        this.removeAllListeners();
+      })();
+    }
+    return this.disposePromise;
+  }
+
+  async rebuildIndex(): Promise<{ durationMs: number }> {
+    const startedAt = Date.now();
+    this.emitProgress('reconciling', 'Reconciling all native adapters…');
+    await this.requireHost().refresh();
+    return { durationMs: Date.now() - startedAt };
+  }
+
+  isReady(): boolean {
+    return this.ready;
+  }
+
+  async getSourceIds(): Promise<string[]> {
+    const sources = await collectPages((cursor) =>
+      this.requireHost().client.listSources({ cursor, limit: PAGE_LIMIT }),
+    );
+    return [...new Set(sources.map((item) => item.adapterId))].sort();
+  }
+
+  async getProjectList(options?: SourceFilter): Promise<ProjectListItem[]> {
+    const summaries = await this.projectSummaries(options);
+    const groups = new Map<string, ProjectListItem>();
+    for (const { item } of summaries) {
+      const key = item.projectId;
+      const current = groups.get(key);
+      if (!current) {
+        groups.set(key, structuredClone(item));
+        continue;
+      }
+      mergeProject(current, item);
+    }
+    return [...groups.values()].sort(compareProjectActivity);
+  }
+
+  async getProjectTokenActivity(project: ProjectReference, query: TokenActivityQuery): Promise<TokenActivityResult> {
+    const projects = await this.resolveProjects(project, query);
+    const reports = await Promise.all(
+      projects.map((item) =>
+        this.requireHost().client.getUsageActivity({
+          projectId: item.projectId,
+          from: query.from,
+          to: query.to,
+        }),
+      ),
+    );
+    const days = new Map<string, TokenActivityDay>();
+    for (const report of reports) {
+      for (const day of report.days) {
+        const values = usageValues(day.aggregate);
+        const exactTokens = day.aggregate.exact.componentTotalTokens;
+        const estimatedTokens = day.aggregate.estimated.componentTotalTokens;
+        const sourceId = projects.find((item) => item.projectId === report.projectId)?.adapterId;
+        const current = days.get(day.date);
+        if (!current) {
+          days.set(day.date, {
+            date: day.date,
+            tokenUsage: values,
+            quality: activityQuality(exactTokens, estimatedTokens),
+            exactTokens,
+            estimatedTokens,
+            messageCount: day.aggregate.contributionCount,
+            sessionCount: day.aggregate.sessionCount,
+            sourceIds: sourceId ? [sourceId] : [],
+          });
+        } else {
+          addTokenUsage(current.tokenUsage, values);
+          current.exactTokens += exactTokens;
+          current.estimatedTokens += estimatedTokens;
+          current.messageCount += day.aggregate.contributionCount;
+          current.sessionCount += day.aggregate.sessionCount;
+          if (sourceId) current.sourceIds = [...new Set([...current.sourceIds, sourceId])].sort();
+          current.quality = activityQuality(current.exactTokens, current.estimatedTokens);
+        }
+      }
+    }
+    return { from: query.from, to: query.to, days: [...days.values()].sort((a, b) => a.date.localeCompare(b.date)) };
+  }
+
+  async getSessionList(project: ProjectReference, options?: SourceFilter): Promise<SessionListItem[]> {
+    const projects = await this.resolveProjects(project, options);
+    const output: SessionListItem[] = [];
+    for (const canonicalProject of projects) {
+      const sessions = await this.allSessions(canonicalProject.projectId);
+      for (const session of sessions) output.push(await this.sessionListItem(canonicalProject, session));
+    }
+    return output.sort((a, b) => b.lastUpdate.localeCompare(a.lastUpdate));
+  }
+
+  async getSessionMessages(
+    projectSlug: string,
+    sessionId: string,
+    limit = 30,
+    offset = 0,
+    options?: SourceFilter,
+  ): Promise<MessagePage> {
+    const resolved = await this.resolveSession(projectSlug, sessionId, options?.sourceId);
+    const boundedLimit = boundInteger(limit, 1, 100_000, 30);
+    const boundedOffset = boundInteger(offset, 0, Number.MAX_SAFE_INTEGER, 0);
+    const details = await this.allMessages(resolved, boundedOffset + boundedLimit + 1);
+    const messages = details.slice(boundedOffset, boundedOffset + boundedLimit).map(compatibilityMessage);
+    const total = await this.messageCount(resolved);
+    return { messages, total, offset: boundedOffset, hasMore: boundedOffset + messages.length < total };
+  }
+
+  async getSessionTimelineFacets(
+    projectSlug: string,
+    sessionId: string,
+    options?: SourceFilter,
+  ): Promise<TimelineFacets> {
+    const resolved = await this.resolveSession(projectSlug, sessionId, options?.sourceId);
+    const rows = await this.timelineRows(resolved);
+    return timelineFacets(rows);
+  }
+
+  async getSessionTimeline(
+    projectSlug: string,
+    sessionId: string,
+    request: TimelinePageRequest = {},
+  ): Promise<TimelinePage> {
+    const resolved = await this.resolveSession(projectSlug, sessionId, request.sourceId);
+    return timelinePage(await this.timelineRows(resolved), request);
+  }
+
+  async getProjectMemory(project: ProjectReference, options?: SourceFilter): Promise<string | null> {
+    const projects = await this.resolveProjects(project, options);
+    for (const item of projects) {
+      const documents = await collectPages((cursor) =>
+        this.requireHost().client.listMemoryDocuments({ projectId: item.projectId, cursor, limit: PAGE_LIMIT }),
+      );
+      const index = documents.find((document) => document.isIndex);
+      if (index) return index.content;
+    }
+    return null;
+  }
+
+  async getSessionTodos(projectSlug: string, sessionId: string): Promise<unknown[]> {
+    const resolved = await this.resolveSession(projectSlug, sessionId);
+    const tasks = await this.sessionTasks(resolved.session.sessionId);
+    return tasks.map((task) => ({
+      content: task.subject,
+      status: task.taskStatus,
+      ...(task.activeForm ? { activeForm: task.activeForm } : {}),
+    }));
+  }
+
+  async getSessionPlan(projectSlug: string, sessionId: string): Promise<unknown | null> {
+    const resolved = await this.resolveSession(projectSlug, sessionId);
+    const messages = await this.allMessages(resolved);
+    const planSlug = messages
+      .map((message) => recordString(message.nativePayload, 'slug'))
+      .find((value): value is string => Boolean(value));
+    if (!planSlug) return null;
+    const plans = await collectPages((cursor) => this.requireHost().client.listPlans({ cursor, limit: PAGE_LIMIT }));
+    const plan = plans.find((item) => item.nativePlanId === planSlug);
+    return plan ? { slug: plan.nativePlanId, title: plan.title, content: plan.content, size: plan.sizeBytes } : null;
+  }
+
+  async getSessionTask(projectSlug: string, sessionId: string): Promise<unknown | null> {
+    const resolved = await this.resolveSession(projectSlug, sessionId);
+    const collections = await collectPages((cursor) =>
+      this.requireHost().client.listTaskCollections({
+        sessionId: resolved.session.sessionId,
+        cursor,
+        limit: PAGE_LIMIT,
+      }),
+    );
+    if (collections.length === 0) return null;
+    const collection = collections[0]!;
+    const items = await collectPages((cursor) =>
+      this.requireHost().client.listTasks({ collectionId: collection.collectionId, cursor, limit: PAGE_LIMIT }),
+    );
+    return {
+      taskId: collection.nativeCollectionId,
+      hasHighwatermark: false,
+      highwatermark: null,
+      lockExists: false,
+      items: items.map(taskItem),
+    };
+  }
+
+  async getToolResult(projectSlug: string, sessionId: string, toolUseId: string): Promise<string | null> {
+    const resolved = await this.resolveSession(projectSlug, sessionId);
+    const results = await collectPages((cursor) =>
+      this.requireHost().client.listToolResults({
+        projectId: resolved.project.projectId,
+        sessionId: resolved.session.sessionId,
+        cursor,
+        limit: PAGE_LIMIT,
+      }),
+    );
+    return results.find((item) => item.nativeToolUseId === toolUseId)?.content ?? null;
+  }
+
+  async getSessionSubagents(
+    projectSlug: string,
+    sessionId: string,
+    options?: SubagentFilter,
+  ): Promise<SubagentListItem[]> {
+    const resolved = await this.resolveSession(projectSlug, sessionId, options?.sourceId);
+    const delegations = await collectPages((cursor) =>
+      this.requireHost().client.listDelegations({
+        projectId: resolved.project.projectId,
+        sessionId: resolved.session.sessionId,
+        ...(!options?.includeNested ? { standaloneOnly: true } : {}),
+        cursor,
+        limit: PAGE_LIMIT,
+      }),
+    );
+    return delegations.map((item) => delegationItem(item, ''));
+  }
+
+  async getSessionWorkflows(projectSlug: string, sessionId: string): Promise<WorkflowListItem[]> {
+    const resolved = await this.resolveSession(projectSlug, sessionId);
+    const workflows = await collectPages((cursor) =>
+      this.requireHost().client.listWorkflows({
+        projectId: resolved.project.projectId,
+        sessionId: resolved.session.sessionId,
+        cursor,
+        limit: PAGE_LIMIT,
+      }),
+    );
+    return workflows.map((workflow) => ({
+      workflowId: workflow.workflowId,
+      name: workflow.name ?? workflow.nativeWorkflowId,
+      status: workflow.nativeStatus ?? workflow.workflowStatus ?? workflow.resolutionStatus,
+      agentCount: workflow.agentCount ?? workflow.observedMemberCount,
+      totalTokens: workflow.totalTokens ?? 0,
+      totalToolCalls: workflow.totalToolCalls ?? 0,
+      durationMs: workflow.durationMs ?? 0,
+      subagentCount: workflow.observedMemberCount,
+    }));
+  }
+
+  async getWorkflowSubagents(
+    projectSlug: string,
+    sessionId: string,
+    workflowId: string,
+    options?: SourceFilter,
+  ): Promise<SubagentListItem[]> {
+    const resolved = await this.resolveSession(projectSlug, sessionId, options?.sourceId);
+    const workflow = await this.requireHost().client.getWorkflow({ workflowId });
+    if (
+      workflow.workflow.projectId !== resolved.project.projectId ||
+      workflow.workflow.sessionId !== resolved.session.sessionId
+    ) {
+      return [];
+    }
+    const members = await collectPages((cursor) =>
+      this.requireHost().client.listWorkflowMembers({ workflowId, cursor, limit: PAGE_LIMIT }),
+    );
+    return members.map((member) => workflowMemberItem(member, workflowId));
+  }
+
+  async getSubagentMessages(
+    projectSlug: string,
+    sessionId: string,
+    agentId: string,
+    limit = 30,
+    offset = 0,
+    workflowId?: string,
+    options?: SourceFilter,
+  ): Promise<SubagentMessagePage> {
+    const resolved = await this.resolveSession(projectSlug, sessionId, options?.sourceId);
+    const [details, envelopes] = await Promise.all([this.allMessages(resolved), this.timelineEnvelopes(resolved)]);
+    let runIds: Set<string> | undefined;
+    if (workflowId) {
+      const members = await collectPages((cursor) =>
+        this.requireHost().client.listWorkflowMembers({ workflowId, cursor, limit: PAGE_LIMIT }),
+      );
+      runIds = new Set(members.filter((member) => member.nativeAgentId === agentId).map((member) => member.childRunId));
+    }
+    const eligibleIds = new Set(
+      envelopes
+        .filter((envelope) => envelope.nativeChildId === agentId && (!runIds || runIds.has(envelope.runId)))
+        .map((envelope) => envelope.messageId),
+    );
+    const matching = details.filter((detail) => eligibleIds.has(detail.messageId));
+    const boundedOffset = boundInteger(offset, 0, Number.MAX_SAFE_INTEGER, 0);
+    const boundedLimit = boundInteger(limit, 1, 100_000, 30);
+    const messages = matching.slice(boundedOffset, boundedOffset + boundedLimit).map(compatibilityMessage);
+    return {
+      messages,
+      total: matching.length,
+      offset: boundedOffset,
+      hasMore: boundedOffset + messages.length < matching.length,
+    };
+  }
+
+  async getSubagentTimeline(
+    projectSlug: string,
+    sessionId: string,
+    agentId: string,
+    request: SubagentTimelinePageRequest,
+  ): Promise<SubagentTimelinePage> {
+    const resolved = await this.resolveSession(projectSlug, sessionId, request.sourceId);
+    let rows = (await this.timelineRows(resolved)).filter((row) => row.nativeChildId === agentId);
+    if (request.workflowId) {
+      const members = await collectPages((cursor) =>
+        this.requireHost().client.listWorkflowMembers({ workflowId: request.workflowId!, cursor, limit: PAGE_LIMIT }),
+      );
+      const runIds = new Set(
+        members.filter((member) => member.nativeAgentId === agentId).map((member) => member.childRunId),
+      );
+      rows = rows.filter((row) => runIds.has(row.runId));
+    }
+    rows = filterTimeline(rows, request);
+    const offset = boundInteger(request.offset ?? 0, 0, Number.MAX_SAFE_INTEGER, 0);
+    const limit = boundInteger(request.limit ?? 30, 1, 500, 30);
+    const messages = rows.slice(offset, offset + limit).map((row) => row.message);
+    return { messages, total: rows.length, offset, hasMore: offset + messages.length < rows.length };
+  }
+
+  async search(query: SearchQuery): Promise<SearchResultSet> {
+    const limit = boundInteger(query.limit ?? 50, 1, 200, 50);
+    const offset = boundInteger(query.offset ?? 0, 0, Number.MAX_SAFE_INTEGER, 0);
+    let projectIds: string[] | undefined;
+    if (query.projectMembers?.length) {
+      const projects = await this.resolveProjects(
+        { projectId: 'compat-search', members: query.projectMembers },
+        query.sourceId ? { sourceId: query.sourceId } : undefined,
+      );
+      projectIds = projects.map((project) => project.projectId);
+    } else if (query.projectSlug) {
+      projectIds = (
+        await this.resolveProjects(query.projectSlug, query.sourceId ? { sourceId: query.sourceId } : undefined)
+      ).map((project) => project.projectId);
+    }
+    if (projectIds && projectIds.length === 0) return { results: [], total: 0, hasMore: false };
+
+    let scopes: Array<{ projectId?: string; sessionId?: string }>;
+    if (query.sessionId) {
+      const candidates = projectIds
+        ? (await this.allProjects()).filter((project) => projectIds!.includes(project.projectId))
+        : (await this.allProjects()).filter((project) => !query.sourceId || project.adapterId === query.sourceId);
+      scopes = [];
+      for (const project of candidates) {
+        const session = (await this.allSessions(project.projectId)).find(
+          (item) => item.nativeSessionId === query.sessionId,
+        );
+        if (session) scopes.push({ projectId: project.projectId, sessionId: session.sessionId });
+      }
+      if (scopes.length === 0) return { results: [], total: 0, hasMore: false };
+    } else {
+      scopes = projectIds?.map((projectId) => ({ projectId })) ?? [{}];
+    }
+    const pages = await Promise.all(
+      scopes.map((scope) =>
+        this.requireHost().client.search({
+          text: query.text,
+          ...scope,
+          ...(query.sourceId ? { adapterIds: [query.sourceId] } : {}),
+          limit: Math.min(PAGE_LIMIT, offset + limit),
+        }),
+      ),
+    );
+    const all = pages
+      .flatMap((page) => page.items)
+      .sort((a, b) => a.score - b.score || a.messageId.localeCompare(b.messageId));
+    const total = pages.reduce((sum, page) => sum + page.total, 0);
+    const results = all.slice(offset, offset + limit).map((hit) => ({
+      key: `message:${hit.messageId}`,
+      type: 'message' as const,
+      snippet: hit.snippet,
+      rank: hit.score,
+      ...(hit.nativeProjectKey ? { projectSlug: hit.nativeProjectKey } : {}),
+      ...(hit.nativeSessionId ? { sessionId: hit.nativeSessionId } : {}),
+      sourceId: hit.adapterId,
+      ...(hit.nativeChildId ? { agentId: hit.nativeChildId } : {}),
+    }));
+    return { results, total, hasMore: offset + results.length < total };
+  }
+
+  async getStats(): Promise<StoreStats> {
+    const stats = await this.requireHost().client.getStats();
+    return {
+      totalSegments: stats.factRecords,
+      segmentsByType: Object.fromEntries(stats.entities.map((item) => [item.name, item.count])),
+      totalFingerprints: stats.activeSourceObjects,
+      dbSizeBytes: stats.allocatedDatabaseBytes,
+      searchIndexed: stats.searchableMessages,
+    };
+  }
+
+  async getTeams(): Promise<TeamDirectory[]> {
+    const teams = await collectPages((cursor) => this.requireHost().client.listTeams({ cursor, limit: PAGE_LIMIT }));
+    const output: TeamDirectory[] = [];
+    for (const summary of teams) {
+      const details = await this.requireHost().client.getTeam({ teamId: summary.teamId });
+      const inboxes = await collectPages((cursor) =>
+        this.requireHost().client.listTeamInboxes({ teamId: summary.teamId, cursor, limit: PAGE_LIMIT }),
+      );
+      const mappedInboxes: TeamDirectory['inboxes'] = {};
+      for (const inbox of inboxes) {
+        const messages = await collectPages((cursor) =>
+          this.requireHost().client.listTeamInboxMessages({ inboxId: inbox.inboxId, cursor, limit: PAGE_LIMIT }),
+        );
+        mappedInboxes[inbox.nativeRecipientName] = messages.map((message) => ({
+          from: message.nativeSenderName,
+          text: message.text,
+          ...(message.summary ? { summary: message.summary } : {}),
+          timestamp: message.sourceTime,
+          ...(message.color ? { color: message.color } : {}),
+          read: message.read,
+          ...(message.nativeMessageId ? { msg_id: message.nativeMessageId } : {}),
+          ...(message.nativeVersion !== undefined ? { msgV: message.nativeVersion } : {}),
+          ...(message.nativeKind ? { type: message.nativeKind } : {}),
+        }));
+      }
+      output.push({
+        teamId: summary.nativeTeamId,
+        config: details.team.config
+          ? {
+              name: details.team.config.name,
+              ...(details.team.config.description ? { description: details.team.config.description } : {}),
+              createdAt: Date.parse(details.team.config.createdAt),
+              leadAgentId: details.team.config.nativeLeadAgentId,
+              leadSessionId: details.team.config.nativeLeadSessionId,
+              members: details.members.map((member) => ({
+                agentId: member.nativeAgentId,
+                name: member.nativeName,
+                ...(member.agentType ? { agentType: member.agentType } : {}),
+                ...(member.model ? { model: member.model } : {}),
+                ...(member.prompt ? { prompt: member.prompt } : {}),
+                ...(member.color ? { color: member.color } : {}),
+                ...(member.planModeRequired !== undefined ? { planModeRequired: member.planModeRequired } : {}),
+                joinedAt: Date.parse(member.joinedAt),
+                tmuxPaneId: member.tmuxPaneId,
+                cwd: member.cwd,
+                subscriptions: member.subscriptions,
+                ...(member.backendType ? { backendType: member.backendType } : {}),
+              })),
+            }
+          : null,
+        inboxes: mappedInboxes,
+      });
+    }
+    return output;
+  }
+
+  onProgress(cb: (progress: InitProgress) => void): () => void {
+    this.on('progress', cb);
+    return () => this.removeListener('progress', cb);
+  }
+
+  onReady(cb: (info: { durationMs: number }) => void): () => void {
+    this.on('ready', cb);
+    return () => this.removeListener('ready', cb);
+  }
+
+  onChange(cb: (batch: SegmentChangeBatch) => void): () => void {
+    this.on('change', cb);
+    return () => this.removeListener('change', cb);
+  }
+
+  snapshot(signal?: AbortSignal): Promise<ObservationHostSnapshot> {
+    return this.requireHost().snapshot(signal);
+  }
+
+  serveIpc(channel: SpaghettiIpcChannel, transportKind?: string): SpaghettiIpcHost {
+    return this.requireHost().serveIpc(channel, transportKind);
+  }
+
+  private requireHost(): ObservationHost {
+    if (!this.host || !this.ready) throw new Error('Observation service is not ready.');
+    return this.host;
+  }
+
+  private emitProgress(phase: InitProgress['phase'], message: string): void {
+    this.emit('progress', { phase, message } satisfies InitProgress);
+  }
+
+  private async startSubscription(host: ObservationHost): Promise<void> {
+    const abort = new AbortController();
+    this.subscriptionAbort = abort;
+    const overview = await host.client.getOverview();
+    const from = { commitSeq: overview.commitSeq, ordinal: MAX_CHANGE_ORDINAL };
+    void (async () => {
+      try {
+        for await (const page of host.client.subscribe({ from }, { signal: abort.signal })) {
+          if (page.changes.length === 0) continue;
+          // Compatibility consumers treat this as a bounded invalidation, not
+          // as a second semantic event bus. Empty changes deliberately mean
+          // "refresh the selected snapshot" and avoid decoding source paths.
+          this.emit('change', { changes: [], timestamp: Date.now() } satisfies SegmentChangeBatch);
+        }
+      } catch (error) {
+        if (!abort.signal.aborted)
+          this.emitProgress('reconciling', `Durable subscription interrupted: ${String(error)}`);
+      }
+    })();
+  }
+
+  private async allProjects(): Promise<SpaghettiEngineHistoryProject[]> {
+    return await collectPages((cursor) => this.requireHost().client.listProjects({ cursor, limit: PAGE_LIMIT }));
+  }
+
+  private async allSessions(projectId: string): Promise<SpaghettiEngineHistorySession[]> {
+    return await collectPages((cursor) =>
+      this.requireHost().client.listSessions({ projectId, cursor, limit: PAGE_LIMIT }),
+    );
+  }
+
+  private async resolveProjects(
+    project: ProjectReference,
+    options?: SourceFilter,
+  ): Promise<SpaghettiEngineHistoryProject[]> {
+    const all = await this.allProjects();
+    const members = typeof project === 'string' ? undefined : project.members;
+    return all.filter((candidate) => {
+      if (options?.sourceId && candidate.adapterId !== options.sourceId) return false;
+      if (members) {
+        return members.some(
+          (member) => member.sourceId === candidate.adapterId && member.slug === candidate.nativeProjectKey,
+        );
+      }
+      return candidate.nativeProjectKey === project;
+    });
+  }
+
+  private async resolveSession(projectSlug: string, sessionId: string, sourceId?: string): Promise<ResolvedSession> {
+    const projects = (await this.allProjects()).filter(
+      (project) => project.nativeProjectKey === projectSlug && (!sourceId || project.adapterId === sourceId),
+    );
+    for (const project of projects) {
+      const session = (await this.allSessions(project.projectId)).find((item) => item.nativeSessionId === sessionId);
+      if (session) return { project, session };
+    }
+    throw new Error(`Canonical session '${sessionId}' was not found in project '${projectSlug}'.`);
+  }
+
+  private async projectSummaries(options?: SourceFilter): Promise<ProjectSummary[]> {
+    const projects = (await this.allProjects()).filter(
+      (project) => !options?.sourceId || project.adapterId === options.sourceId,
+    );
+    const output: ProjectSummary[] = [];
+    for (const project of projects) {
+      const sessions = await this.allSessions(project.projectId);
+      const usage = await this.requireHost().client.getUsage({ projectId: project.projectId });
+      const absolutePath = project.index?.originalPath ?? pathLikeNativeKey(project.nativeProjectKey);
+      const firstActiveAt = minTimestamp(
+        sessions.flatMap((session) => [session.firstMessageAt, session.index?.createdAt]),
+      );
+      const latest = [...sessions].sort((a, b) => sessionActivity(b).localeCompare(sessionActivity(a)))[0];
+      const member: ProjectMember = { sourceId: project.adapterId, slug: project.nativeProjectKey };
+      const groupKey = absolutePath ? `path:${normalizePath(absolutePath)}` : `member:${JSON.stringify(member)}`;
+      output.push({
+        canonical: project,
+        item: {
+          projectId: groupKey,
+          members: [member],
+          slug: project.nativeProjectKey,
+          sourceIds: [project.adapterId],
+          folderName: absolutePath ? basename(absolutePath) || absolutePath : project.nativeProjectKey,
+          absolutePath,
+          sessionCount: project.transcriptSessionCount,
+          messageCount: project.messageCount,
+          tokenUsage: usageValues(usage.aggregate),
+          tokensEstimated: usage.aggregate.estimatedContributionCount > 0,
+          lastActiveAt: project.latestActivityAt ?? '',
+          firstActiveAt,
+          latestGitBranch: latest?.gitBranch ?? latest?.index?.gitBranch ?? '',
+          latestPrompt: latest?.customTitle ?? latest?.aiTitle ?? latest?.firstPrompt ?? latest?.index?.summary ?? '',
+          hasMemory: project.memoryDocumentCount > 0,
+        },
+      });
+    }
+    return output;
+  }
+
+  private async sessionListItem(
+    project: SpaghettiEngineHistoryProject,
+    session: SpaghettiEngineHistorySession,
+  ): Promise<SessionListItem> {
+    const [usage, collections] = await Promise.all([
+      this.requireHost().client.getUsage({ projectId: project.projectId, sessionId: session.sessionId }),
+      collectPages((cursor) =>
+        this.requireHost().client.listTaskCollections({ sessionId: session.sessionId, cursor, limit: PAGE_LIMIT }),
+      ),
+    ]);
+    const todoCount = collections.reduce((sum, item) => sum + item.itemCount, 0);
+    const startTime = session.firstMessageAt ?? session.index?.createdAt ?? '';
+    const lastUpdate = session.latestActivityAt ?? session.lastMessageAt ?? session.index?.modifiedAt ?? startTime;
+    return {
+      sessionId: session.nativeSessionId,
+      sourceId: project.adapterId,
+      projectSlug: project.nativeProjectKey,
+      startTime,
+      lastUpdate,
+      lifespanMs: durationBetween(startTime, lastUpdate),
+      tokenUsage: usageValues(usage.aggregate),
+      tokensEstimated: usage.aggregate.estimatedContributionCount > 0,
+      messageCount: session.messageCount,
+      fullPath: session.index?.fullPath ?? '',
+      title: session.customTitle ?? session.aiTitle ?? '',
+      summary: session.index?.summary ?? '',
+      firstPrompt: session.firstPrompt ?? session.index?.firstPrompt ?? '',
+      gitBranch: session.gitBranch ?? session.index?.gitBranch ?? '',
+      todoCount,
+      planSlug: null,
+      hasTask: collections.length > 0,
+      isSidechain: session.index?.isSidechain ?? false,
+    };
+  }
+
+  private async allMessages(
+    resolved: ResolvedSession,
+    stopAfter = Number.MAX_SAFE_INTEGER,
+  ): Promise<SpaghettiEngineMessageDetail[]> {
+    const output: SpaghettiEngineMessageDetail[] = [];
+    let cursor: string | undefined;
+    do {
+      const page = await this.requireHost().client.getMessages({
+        projectId: resolved.project.projectId,
+        sessionId: resolved.session.sessionId,
+        cursor,
+        limit: PAGE_LIMIT,
+      });
+      output.push(...page.items);
+      cursor = page.nextCursor;
+    } while (cursor && output.length < stopAfter);
+    return output;
+  }
+
+  private async messageCount(resolved: ResolvedSession): Promise<number> {
+    const detail = await this.requireHost().client.getSession({ sessionId: resolved.session.sessionId });
+    return detail.session?.messageCount ?? resolved.session.messageCount;
+  }
+
+  private async timelineRows(resolved: ResolvedSession): Promise<TimelineRow[]> {
+    const envelopes = await this.timelineEnvelopes(resolved);
+    const chronological = envelopes.reverse();
+    const rows: TimelineRow[] = [];
+    for (const envelope of chronological) {
+      for (const message of timelineMessages(envelope)) {
+        rows.push({
+          index: rows.length + 1,
+          adapterId: envelope.adapterId,
+          nativeChildId: envelope.nativeChildId,
+          runId: envelope.runId,
+          message,
+        });
+      }
+    }
+    attachToolResults(rows);
+    return rows;
+  }
+
+  private async timelineEnvelopes(resolved: ResolvedSession): Promise<SpaghettiEngineTimelineMessage[]> {
+    return await collectPages((cursor) =>
+      this.requireHost().client.getTimeline({
+        projectId: resolved.project.projectId,
+        sessionId: resolved.session.sessionId,
+        cursor,
+        limit: PAGE_LIMIT,
+      }),
+    );
+  }
+
+  private async sessionTasks(sessionId: string): Promise<SpaghettiEngineTask[]> {
+    const collections = await collectPages((cursor) =>
+      this.requireHost().client.listTaskCollections({ sessionId, cursor, limit: PAGE_LIMIT }),
+    );
+    const output: SpaghettiEngineTask[] = [];
+    for (const collection of collections) {
+      output.push(
+        ...(await collectPages((cursor) =>
+          this.requireHost().client.listTasks({ collectionId: collection.collectionId, cursor, limit: PAGE_LIMIT }),
+        )),
+      );
+    }
+    return output;
+  }
+}
+
+async function collectPages<T>(read: (cursor?: string) => Promise<{ items: T[]; nextCursor?: string }>): Promise<T[]> {
+  const output: T[] = [];
+  let cursor: string | undefined;
+  const seen = new Set<string>();
+  do {
+    const page = await read(cursor);
+    output.push(...page.items);
+    const next = page.nextCursor;
+    if (next && (next === cursor || seen.has(next))) throw new Error('Canonical page cursor did not advance.');
+    if (next) seen.add(next);
+    cursor = next;
+  } while (cursor);
+  return output;
+}
+
+function usageValues(aggregate: SpaghettiEngineUsageAggregate): TokenUsageSummary {
+  const values = aggregate.combined;
+  return {
+    inputTokens: values.inputTokens,
+    outputTokens: values.outputTokens,
+    cacheCreationTokens: values.cacheCreationTokens,
+    cacheReadTokens: values.cacheReadTokens,
+    totalTokens: values.componentTotalTokens,
+  };
+}
+
+function addTokenUsage(target: TokenUsageSummary, source: TokenUsageSummary): void {
+  target.inputTokens += source.inputTokens;
+  target.outputTokens += source.outputTokens;
+  target.cacheCreationTokens += source.cacheCreationTokens;
+  target.cacheReadTokens += source.cacheReadTokens;
+  target.totalTokens += source.totalTokens;
+}
+
+function activityQuality(exact: number, estimated: number): TokenActivityDay['quality'] {
+  if (exact > 0 && estimated > 0) return 'mixed';
+  if (estimated > 0) return 'estimated';
+  if (exact > 0) return 'exact';
+  return 'unavailable';
+}
+
+function mergeProject(target: ProjectListItem, source: ProjectListItem): void {
+  const keys = new Set(target.members.map(memberKey));
+  for (const member of source.members) if (!keys.has(memberKey(member))) target.members.push(member);
+  target.members.sort((a, b) => memberKey(a).localeCompare(memberKey(b)));
+  target.sourceIds = [...new Set(target.members.map((member) => member.sourceId))].sort();
+  target.sessionCount += source.sessionCount;
+  target.messageCount += source.messageCount;
+  addTokenUsage(target.tokenUsage, source.tokenUsage);
+  target.tokensEstimated ||= source.tokensEstimated;
+  target.hasMemory ||= source.hasMemory;
+  if (!target.firstActiveAt || (source.firstActiveAt && source.firstActiveAt < target.firstActiveAt)) {
+    target.firstActiveAt = source.firstActiveAt;
+  }
+  if (source.lastActiveAt > target.lastActiveAt) {
+    target.lastActiveAt = source.lastActiveAt;
+    target.latestGitBranch = source.latestGitBranch;
+    target.latestPrompt = source.latestPrompt;
+    target.slug = source.slug;
+  }
+}
+
+function memberKey(member: ProjectMember): string {
+  return JSON.stringify([member.sourceId, member.slug]);
+}
+
+function compareProjectActivity(a: ProjectListItem, b: ProjectListItem): number {
+  return b.lastActiveAt.localeCompare(a.lastActiveAt) || a.projectId.localeCompare(b.projectId);
+}
+
+function pathLikeNativeKey(value: string): string {
+  return value.startsWith('/') || /^[A-Za-z]:[\\/]/.test(value) ? value : '';
+}
+
+function normalizePath(value: string): string {
+  const normalized = value.trim().replace(/\\/g, '/');
+  return normalized.length > 1 ? normalized.replace(/\/+$/, '') : normalized;
+}
+
+function minTimestamp(values: Array<string | undefined>): string {
+  return values.filter((value): value is string => Boolean(value)).sort()[0] ?? '';
+}
+
+function sessionActivity(session: SpaghettiEngineHistorySession): string {
+  return session.latestActivityAt ?? session.lastMessageAt ?? session.index?.modifiedAt ?? '';
+}
+
+function durationBetween(first: string, last: string): number {
+  const start = Date.parse(first);
+  const end = Date.parse(last);
+  return Number.isFinite(start) && Number.isFinite(end) ? Math.max(0, end - start) : 0;
+}
+
+function boundInteger(value: number, min: number, max: number, fallback: number): number {
+  return Number.isFinite(value) ? Math.max(min, Math.min(max, Math.floor(value))) : fallback;
+}
+
+function recordString(value: unknown, key: string): string | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  const found = (value as Record<string, unknown>)[key];
+  return typeof found === 'string' && found ? found : undefined;
+}
+
+/**
+ * Preserve the former message DTO without exposing source-format semantics to
+ * TypeScript. Rust has already normalized every content block; this mapping is
+ * presentation-only and is identical for every adapter.
+ */
+function compatibilityMessage(detail: SpaghettiEngineMessageDetail): MessagePage['messages'][number] {
+  const content = Array.isArray(detail.content) ? (detail.content as Array<Record<string, unknown>>) : [];
+  const blocks = content.map(compatibilityContentBlock);
+  const text = content
+    .filter((block) => block.kind === 'text')
+    .map((block) => String(block.text ?? ''))
+    .join('\n');
+  const base = {
+    uuid: detail.nativeMessageId ?? detail.messageId,
+    parentUuid: detail.parentNativeMessageId ?? null,
+    timestamp: detail.sourceTime ?? '',
+    sessionId: detail.nativeSessionId,
+    cwd: '',
+    version: '',
+    gitBranch: '',
+    isSidechain: false,
+    userType: 'external',
+  };
+
+  if (detail.role === 'user') {
+    const onlyText = blocks.every((block) => block.type === 'text');
+    return {
+      ...base,
+      type: 'user',
+      message: { role: 'user', content: onlyText ? text : blocks },
+    } as unknown as MessagePage['messages'][number];
+  }
+  if (detail.role === 'assistant') {
+    return {
+      ...base,
+      type: 'assistant',
+      message: {
+        role: 'assistant',
+        content: blocks,
+        ...(detail.model ? { model: detail.model } : {}),
+      },
+    } as unknown as MessagePage['messages'][number];
+  }
+  return {
+    ...base,
+    type: detail.nativeKind === 'summary' ? 'summary' : 'system',
+    content: text || textValue(detail.content),
+    ...(detail.nativeKind ? { subtype: detail.nativeKind } : {}),
+  } as unknown as MessagePage['messages'][number];
+}
+
+function compatibilityContentBlock(block: Record<string, unknown>): Record<string, unknown> {
+  switch (block.kind) {
+    case 'text':
+      return { type: 'text', text: String(block.text ?? '') };
+    case 'thinking':
+      return block.redacted === true
+        ? { type: 'redacted_thinking', data: String(block.text ?? '') }
+        : { type: 'thinking', thinking: String(block.text ?? '') };
+    case 'tool_call':
+      return {
+        type: 'tool_use',
+        id: String(block.native_id ?? ''),
+        name: String(block.name ?? 'Unknown Tool'),
+        input: objectValue(block.input),
+      };
+    case 'tool_result':
+      return {
+        type: 'tool_result',
+        tool_use_id: String(block.native_call_id ?? ''),
+        content: textValue(block.content),
+        is_error: block.is_error === true,
+      };
+    default:
+      return { type: 'text', text: textValue(block.value ?? block) };
+  }
+}
+
+function taskItem(task: SpaghettiEngineTask): Record<string, unknown> {
+  return {
+    id: task.nativeTaskId ?? String(task.itemOrdinal),
+    subject: task.subject,
+    description: task.description ?? '',
+    ...(task.activeForm ? { activeForm: task.activeForm } : {}),
+    ...(task.nativeOwner ? { owner: task.nativeOwner } : {}),
+    status: task.taskStatus,
+    blocks: task.blocks,
+    blockedBy: task.blockedBy,
+  };
+}
+
+function delegationItem(item: SpaghettiEngineDelegation, workflowId: string): SubagentListItem {
+  return {
+    sourceId: item.adapterId,
+    agentId: item.nativeChildId ?? item.nativeRunId ?? item.runId,
+    agentType: item.agentType ?? item.requestedAgentType ?? item.relationKind,
+    messageCount: item.messageCount,
+    workflowId,
+    spawnToolId: item.branchAnchorMessageId ?? null,
+    linkMethod: item.branchAnchorMessageId
+      ? 'tool_result'
+      : item.relationStrength === 'ordinal'
+        ? 'ordinal'
+        : 'unlinked',
+    ...(item.worktreePath ? { worktreePath: item.worktreePath } : {}),
+  };
+}
+
+function workflowMemberItem(item: SpaghettiEngineWorkflowMember, workflowId: string): SubagentListItem {
+  return {
+    sourceId: item.adapterId,
+    agentId: item.nativeAgentId,
+    agentType: item.agentType ?? 'unknown',
+    messageCount: item.messageCount,
+    workflowId,
+    spawnToolId: null,
+    linkMethod: 'unlinked',
+    ...(item.worktreePath ? { worktreePath: item.worktreePath } : {}),
+  };
+}
+
+function timelineMessages(item: SpaghettiEngineTimelineMessage): SessionMessage[] {
+  const content = Array.isArray(item.content) ? (item.content as Array<Record<string, unknown>>) : [];
+  const base = {
+    parentUuid: item.parentNativeMessageId ?? null,
+    timestamp: item.sourceTime ?? '',
+    sessionId: item.nativeSessionId,
+    role: item.role,
+    model: item.model,
+    agentId: item.nativeChildId,
+    isSidechain: item.branchKind === 'delegated' || undefined,
+    branchKey: item.runId,
+    branchToolId: item.branchAnchorMessageId,
+  };
+  const output: SessionMessage[] = [];
+  const texts = content.filter((block) => block.kind === 'text').map((block) => String(block.text ?? ''));
+  if (texts.length > 0 || content.length === 0) {
+    output.push({
+      ...base,
+      timelineId: `${item.messageId}:text`,
+      uuid: item.nativeMessageId ?? item.messageId,
+      type: item.nativeKind === 'summary' ? 'summary' : item.role,
+      content: texts.join('\n'),
+    });
+  }
+  let ordinal = 0;
+  for (const block of content) {
+    const kind = String(block.kind ?? 'native');
+    if (kind === 'text') continue;
+    const uuid = `${item.nativeMessageId ?? item.messageId}-${kind}-${ordinal++}`;
+    if (kind === 'thinking') {
+      output.push({
+        ...base,
+        timelineId: `${item.messageId}:${ordinal}`,
+        uuid,
+        type: 'thinking',
+        content: String(block.text ?? ''),
+      });
+    } else if (kind === 'tool_call') {
+      output.push({
+        ...base,
+        timelineId: `${item.messageId}:${ordinal}`,
+        uuid,
+        type: 'tool_use',
+        toolUse: {
+          toolId: String(block.native_id ?? ''),
+          toolName: String(block.name ?? 'Unknown Tool'),
+          input: objectValue(block.input),
+        },
+      });
+    } else if (kind === 'tool_result') {
+      output.push({
+        ...base,
+        timelineId: `${item.messageId}:${ordinal}`,
+        uuid,
+        type: 'tool_result',
+        toolResult: {
+          toolId: String(block.native_call_id ?? ''),
+          isError: block.is_error === true,
+          content: textValue(block.content),
+        },
+      });
+    } else {
+      output.push({
+        ...base,
+        timelineId: `${item.messageId}:${ordinal}`,
+        uuid,
+        type: item.nativeKind || 'system',
+        content: textValue(block.value ?? block),
+      });
+    }
+  }
+  return output;
+}
+
+function objectValue(value: unknown): Record<string, unknown> {
+  return value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
+}
+
+function textValue(value: unknown): string {
+  if (typeof value === 'string') return value;
+  if (value == null) return '';
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return String(value);
+  }
+}
+
+function attachToolResults(rows: TimelineRow[]): void {
+  const calls = new Map<string, SessionMessage>();
+  for (const row of rows) {
+    const call = row.message.toolUse;
+    if (call?.toolId) calls.set(call.toolId, row.message);
+    const result = row.message.toolResult;
+    if (result?.toolId) {
+      const owner = calls.get(result.toolId);
+      if (owner?.toolUse) owner.toolUse = { ...owner.toolUse, result };
+    }
+  }
+}
+
+function timelineFacets(rows: TimelineRow[]): TimelineFacets {
+  const messageCounts: Record<string, number> = {};
+  const toolCounts: Record<string, number> = {};
+  for (const row of rows) {
+    messageCounts[row.message.type] = (messageCounts[row.message.type] ?? 0) + 1;
+    const tool = row.message.toolUse?.toolName;
+    if (tool) toolCounts[tool] = (toolCounts[tool] ?? 0) + 1;
+  }
+  return { total: rows.length, messageCounts, toolCounts };
+}
+
+function timelinePage(rows: TimelineRow[], request: TimelinePageRequest): TimelinePage {
+  const filtered = filterTimeline(rows, request);
+  const before = request.before == null ? Number.MAX_SAFE_INTEGER : request.before;
+  const eligible = filtered.filter((row) => row.index < before);
+  const limit = boundInteger(request.limit ?? 30, 1, 500, 30);
+  const newest = eligible.slice(-limit);
+  return {
+    messages: newest.map((row) => row.message),
+    total: filtered.length,
+    nextCursor: eligible.length > newest.length ? newest[0]?.index : undefined,
+    hasMore: eligible.length > newest.length,
+  };
+}
+
+function filterTimeline<T extends TimelinePageRequest | SubagentTimelinePageRequest>(
+  rows: TimelineRow[],
+  request: T,
+): TimelineRow[] {
+  const includeTypes = new Set(request.includeTypes ?? []);
+  const includeTools = new Set(request.includeTools ?? []);
+  const excludeTypes = new Set(request.excludeTypes ?? []);
+  const excludeTools = new Set(request.excludeTools ?? []);
+  const search = request.search?.trim().toLocaleLowerCase();
+  return rows.filter((row) => {
+    if (request.sourceId && row.adapterId !== request.sourceId) return false;
+    const type = row.message.type;
+    const tool = row.message.toolUse?.toolName;
+    if (includeTypes.size > 0 || includeTools.size > 0) {
+      if (!includeTypes.has(type) && (!tool || !includeTools.has(tool))) return false;
+    } else if (excludeTypes.has(type) || (tool && excludeTools.has(tool))) {
+      return false;
+    }
+    return !search || timelineSearchText(row.message).includes(search);
+  });
+}
+
+function timelineSearchText(message: SessionMessage): string {
+  return [message.content, message.toolUse?.toolName, message.toolUse?.input, message.toolResult?.content]
+    .map(textValue)
+    .join(' ')
+    .toLocaleLowerCase();
+}

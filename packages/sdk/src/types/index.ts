@@ -108,6 +108,15 @@ export interface SubagentMeta {
   name?: string;
   spawnDepth?: number;
   worktreePath?: string;
+  /** Parent agent identifier used by newer nested-agent records. */
+  parentAgentId?: string;
+  /** Model and scheduling metadata emitted by team/parallel-agent runs. */
+  model?: string;
+  taskKind?: string;
+  teamName?: string;
+  color?: string;
+  planModeRequired?: boolean;
+  permissionMode?: string;
   /**
    * `tool_use` id of the Agent call that spawned this subagent — the join
    * back to the assistant message that launched it.

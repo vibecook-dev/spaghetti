@@ -627,6 +627,7 @@ def validate_sessions() -> Section:
     EXPECTED_KEYS = interface_fields("ActiveSessionFile", "claude/toplevel-files-data.ts")
 
     file_count = 0
+    key_file_count = 0
     all_keys: set[str] = set()
     per_file_issues: list[str] = []
 
@@ -638,7 +639,13 @@ def validate_sessions() -> Section:
             s.gap(f"Unexpected directory: {entry}")
             continue
         if not entry.endswith(".json"):
-            s.gap(f"Non-JSON file: {entry}")
+            key_match = re.fullmatch(r"(\d+)\.([0-9a-f]{64})\.key", entry)
+            if key_match:
+                key_file_count += 1
+                if fpath.stat().st_size == 0:
+                    s.gap(f"Empty active-session key sidecar: {entry}")
+                continue
+            s.gap(f"Unknown active-session sidecar: {entry}")
             continue
 
         file_count += 1
@@ -666,6 +673,7 @@ def validate_sessions() -> Section:
             per_file_issues.append(f"{entry}: MISSING keys: {missing}")
 
     s.stat("Session files", file_count)
+    s.stat("Bridge-auth key sidecars", key_file_count)
     s.stat("All unique keys collected", sorted(all_keys))
 
     extra_overall = all_keys - EXPECTED_KEYS
@@ -697,7 +705,7 @@ def validate_cache() -> Section:
         s.gap("Directory does not exist")
         return s
 
-    KNOWN_FILES = {"changelog.md"}
+    KNOWN_FILES = {"changelog.md", "my-closed-issues.json"}
 
     entries = sorted(os.listdir(cache_dir))
     s.stat("All files", entries)
@@ -710,7 +718,7 @@ def validate_cache() -> Section:
         s.gap(f"Unknown files: {sorted(unexpected)}")
 
     if not unexpected and not dirs:
-        s.info("Only changelog.md found — matches CacheDirectory type")
+        s.info("All cache files match CacheDirectory")
 
     return s
 

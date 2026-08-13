@@ -114,6 +114,17 @@ export declare class SpaghettiEngine {
   /** Page one inbox's messages in native snapshot order. */
   listTeamInboxMessages(options: EngineTeamInboxMessagePageOptions, signal?: AbortSignal | undefined | null): Promise<EngineTeamInboxMessagePage>
   /**
+   * Reconcile any registered adapter through the common Rust source and
+   * projection transaction path.
+   */
+  reconcileAdapter(options: EngineAdapterReconcileOptions, signal?: AbortSignal | undefined | null): Promise<EngineReconcileResult>
+  /** Register consolidated roots and supervise any registered adapter. */
+  startObservation(options: EngineAdapterObservationOptions, signal?: AbortSignal | undefined | null): Promise<EngineStatus>
+  /** Force one running adapter supervisor through common reconciliation. */
+  refreshObservation(adapterId: string, signal?: AbortSignal | undefined | null): Promise<EngineStatus>
+  /** Stop one adapter supervisor without disposing the engine. */
+  stopObservation(adapterId: string, signal?: AbortSignal | undefined | null): Promise<EngineStatus>
+  /**
    * Reconcile the adapter-declared Claude source map through the common
    * Rust drivers, decoders, projections, and durable cursor transaction.
    */
@@ -134,6 +145,24 @@ export declare class SpaghettiEngine {
   cancelPendingQueries(): number
   /** Deterministically stop readers, stop the writer, and release ownership. */
   dispose(): Promise<EngineStatus>
+}
+
+export interface EngineAdapterObservationOptions {
+  /** Open adapter identifier registered by the native composition root. */
+  adapterId: string
+  /** Configured native data roots understood by that adapter. */
+  roots: Array<string>
+  /** Durable ingest reason prefix. Defaults to `native_watch`. */
+  reason?: string
+}
+
+export interface EngineAdapterReconcileOptions {
+  /** Open adapter identifier registered by the native composition root. */
+  adapterId: string
+  /** Configured native data roots understood by that adapter. */
+  roots: Array<string>
+  /** Durable ingest reason. Defaults to `manual_reconcile`. */
+  reason?: string
 }
 
 export interface EngineArtifact {
@@ -555,6 +584,11 @@ export interface EngineOverviewResult {
   /** Canonical history materialized by RFC 011 observation commits. */
   canonicalSessions: number
   canonicalMessages: number
+  /** Oldest durable change still resumable without taking a new snapshot. */
+  changeLogOldestCursor?: EngineChangeCursor
+  changeLogPrunedThroughSeq: number
+  changeLogRetainedChanges: number
+  changeLogRetainedPayloadBytes: number
   writerDataVersion: number
   journalMode: string
   queryOnly: boolean
@@ -621,6 +655,7 @@ export interface EngineReconcileResult {
   recordsDecoded: number
   recordsQuarantined: number
   retriesRequired: number
+  incompleteTailRetries: number
   commits: number
   lastCommitSeq?: number
 }
@@ -827,6 +862,14 @@ export interface EngineSessionDetails {
   session?: EngineSessionDetail
 }
 
+export interface EngineSourceCapability {
+  id: string
+  supportLevel: string
+  granularity: string
+  availability: string
+  notes?: string
+}
+
 export interface EngineSourcePage {
   contractVersion: number
   atCommitSeq: number
@@ -839,7 +882,10 @@ export interface EngineSourceSummary {
   sourceInstanceId: number
   adapterId: string
   displayName: string
+  adapterVersion: string
   adapterContractVersion: number
+  sourceSchemaVersions: Array<string>
+  capabilities: Array<EngineSourceCapability>
   discoveredAtUnixMs: number
   lastSeenAtUnixMs: number
   streamCount: number
@@ -1449,179 +1495,6 @@ export interface EngineWorkflowSummary {
   sourceObjectId: number
   sourceGeneration: number
   lastCommitSeq: number
-}
-
-/**
- * Run a full ingest of `agent_dir`, writing into the SQLite file at
- * `db_path`. Returns a Promise that resolves to [`IngestStats`] or
- * rejects with a fatal error.
- *
- * Only `mode: "cold"` is implemented in Phase 1.
- *
- * The optional `on_progress` callback is invoked from the libuv
- * worker thread (threadsafe) with snapshots during ingest — start,
- * per-project-complete, and finalize. Throttled implicitly by the
- * coarse "per project" granularity.
- */
-export declare function ingest(opts: IngestOptions, onProgress?: (progress: IngestProgress) => void): Promise<IngestStats>
-
-/**
- * One reported ingest failure. Matches `FrozenNativeIngestError` in
- * `packages/sdk/src/native.ts`, frozen by RFC 008 Phase 0.
- */
-export interface IngestError {
-  /**
-   * Absent for `severity = "source"`, which by definition happened before
-   * any project identity existed. Phase 0 made this optional precisely so
-   * such failures need not invent a slug.
-   */
-  slug?: string
-  /**
-   * Always present — every surfaced error can name a file even when it
-   * cannot name a project.
-   */
-  path: string
-  /** One of `record-skip`, `project-fatal`, `source`. */
-  severity: string
-  message: string
-}
-
-/**
- * Options for [`ingest`].
- *
- * Mirrors the RFC 003 `IngestOptions` TypeScript shape. Fields that RFC
- * marks optional are `Option<T>` here and get defaulted in
- * [`IngestOptions::resolved`].
- */
-export interface IngestOptions {
-  /**
-   * Agent data root on disk (e.g. `~/.claude` or `~/.codex`).
-   * Paired with [`source_id`] to select the reader and stamp rows.
-   */
-  agentDir: string
-  dbPath: string
-  /** `"cold"` | `"warm"`. Warm no-ops when fingerprints are unchanged. */
-  mode: string
-  progressIntervalMs?: number
-  parallelism?: number
-  /**
-   * Agent product id stamped on every core row (default `claude-code`).
-   * Optional so existing TS callers that omit it keep working.
-   */
-  sourceId?: string
-  /**
-   * When `true`, bulk ingest stays on WAL + `synchronous=NORMAL`
-   * (desktop-safe). Default / omitted = fast MEMORY + OFF path.
-   */
-  safeBulk?: boolean
-}
-
-/**
- * Progress snapshot for the optional on-progress callback. Fires once
- * on start (`phase = "scanning"`, projects_total set), once per project
- * completion (`phase = "parsing"`), and once at finalization
- * (`phase = "finalizing"`). The JS side can subscribe to drive a
- * progress bar / TUI status line without having to poll.
- */
-export interface IngestProgress {
-  phase: string
-  projectsDone: number
-  projectsTotal: number
-  elapsedMs: number
-}
-
-/**
- * Stats returned on successful ingest.
- *
- * Mirrors the RFC 003 `IngestStats` shape. Errors accumulated during
- * ingest (e.g. bad JSONL lines) are returned in `errors`; fatal errors
- * reject the promise instead.
- */
-export interface IngestStats {
-  durationMs: number
-  projectsProcessed: number
-  sessionsProcessed: number
-  messagesWritten: number
-  subagentsWritten: number
-  /**
-   * Non-fatal errors collected during ingest, capped for display. Read
-   * `error_count` for the real total — a caller that treats
-   * `errors.length` as the count will silently under-report once more
-   * than [`DISPLAY_CAP`](crate::core::errors::DISPLAY_CAP) inputs fail.
-   */
-  errors: Array<IngestError>
-  /** Uncapped number of errors seen. */
-  errorCount: number
-  /** True when `errors` was truncated, i.e. `error_count > errors.len()`. */
-  errorsTruncated: boolean
-}
-
-/** Result of one `live_ingest_batch` call. */
-export interface LiveBatchResult {
-  /** One `LiveRowId` per input row, in input order. Empty on empty input. */
-  writtenRows: Array<LiveRowId>
-  /** Wall-clock duration of the whole call (ms). */
-  durationMs: number
-}
-
-/**
- * Write a batch of live-update rows to the SQLite DB at `db_path`.
- *
- * Thin NAPI wrapper that delegates to [`live_ingest_batch_inner`] and
- * marshals the error back across the boundary. Keeping the logic in
- * an internal function means `cargo test` can exercise it without
- * linking against Node runtime symbols (`napi_delete_reference` et al.).
- *
- * `source_id` defaults to `claude-code` when omitted so existing TS
- * callers keep working. Multi-source live writers should pass the
- * agent id explicitly (Phase B).
- */
-export declare function liveIngestBatch(dbPath: string, rows: Array<LiveRow>, sourceId?: string | undefined | null): LiveBatchResult
-
-/**
- * One row the TS live-update writer wants persisted.
- *
- * `payload_json` is a JSON-encoded payload whose shape depends on
- * `category`; see the module-level table for the mapping.
- */
-export interface LiveRow {
-  /**
-   * One of: `message` | `subagent` | `tool_result` | `file_history` |
-   * `todo` | `task` | `plan` | `project_memory` | `session_index`.
-   */
-  category: string
-  /**
-   * Project slug, when the row is project-scoped. Absent for
-   * session-only rows (file_history / todo / task).
-   */
-  slug?: string
-  /**
-   * Session UUID, when the row is session-scoped. Absent for
-   * project-only rows (plan / project_memory / session_index).
-   */
-  sessionId?: string
-  /** JSON-encoded payload. The Rust side deserialises per `category`. */
-  payloadJson: string
-}
-
-/**
- * Identifier of a row the batch successfully wrote. The TS side
- * uses this to reconstruct the matching `Change` event on the
- * live-updates subscriber path.
- */
-export interface LiveRowId {
-  category: string
-  slug?: string
-  sessionId?: string
-  /**
-   * Unique key for the row within its category. For `message` this
-   * is the message uuid; for `tool_result` the tool_use_id; for
-   * `subagent` the agent_id; for `file_history` the session id;
-   * for `todo` the agent_id; for `task` the session id; for `plan`
-   * the plan slug; for `project_memory` / `session_index` the
-   * project slug.
-   */
-  rowKey: string
 }
 
 /** Returns the semver of the native addon. */

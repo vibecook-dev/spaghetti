@@ -2,7 +2,7 @@
  * Plan command — view session plan content
  */
 
-import type { SpaghettiAPI } from '@vibecook/spaghetti-sdk';
+import type { ObservationService } from '@vibecook/spaghetti-sdk/observation';
 import { theme } from '../lib/color.js';
 import { resolveProject, resolveSession, suggestProjects } from '../lib/resolve.js';
 import { UserError, noProjectMatch, noSessionMatch } from '../lib/error.js';
@@ -18,12 +18,12 @@ interface PlanData {
 }
 
 export async function planCommand(
-  api: SpaghettiAPI,
+  api: ObservationService,
   projectInput: string | undefined,
   sessionInput: string | undefined,
   opts: PlanOptions,
 ): Promise<void> {
-  const projects = api.getProjectList();
+  const projects = await api.getProjectList();
 
   // Resolve project
   const projStr = projectInput ?? '.';
@@ -34,7 +34,7 @@ export async function planCommand(
   }
 
   // Resolve session
-  const sessions = api.getSessionList(project);
+  const sessions = await api.getSessionList(project);
 
   if (sessions.length === 0) {
     throw new UserError(
@@ -51,7 +51,7 @@ export async function planCommand(
   }
 
   // Get plan
-  const plan = api.getSessionPlan(session.projectSlug, session.sessionId) as PlanData | null;
+  const plan = (await api.getSessionPlan(session.projectSlug, session.sessionId)) as PlanData | null;
 
   // JSON output
   if (opts.json) {

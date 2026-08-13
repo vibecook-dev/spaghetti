@@ -11,14 +11,17 @@ pub mod adapter;
 /// The walk is Claude-layout-specific; `FingerprintStore` itself is a
 /// thin SQLite accessor and is a candidate to lift into `core` in a
 /// later phase if a second source needs the same table API.
+#[cfg(feature = "legacy-oracle")]
 pub mod fingerprint;
 pub mod fts_text;
 /// Anthropic JSONL → thin message projection (RFC 006 seam).
 pub mod message_extractor;
+#[cfg(feature = "legacy-oracle")]
 pub mod project_parser;
 pub mod session_metadata;
 pub mod types;
 
 pub use adapter::ClaudeCodeAdapter;
 pub use message_extractor::{project_jsonl_line, MessageProjection};
+#[cfg(feature = "legacy-oracle")]
 pub use project_parser::ProjectParser;

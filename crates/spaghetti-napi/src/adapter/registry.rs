@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::Arc;
 
 use super::{AdapterError, AdapterId, AgentAdapter};
@@ -25,8 +26,16 @@ impl AdapterRegistryBuilder {
     pub fn build(self) -> Result<AdapterRegistry, AdapterError> {
         let mut adapters = BTreeMap::new();
         for adapter in self.adapters {
-            adapter.manifest().validate()?;
-            let id = adapter.manifest().id.clone();
+            let manifest =
+                catch_unwind(AssertUnwindSafe(|| adapter.manifest().clone())).map_err(|_| {
+                    AdapterError::new(
+                        super::AdapterErrorClass::AdapterFatal,
+                        "adapter_panic",
+                        "adapter panicked while declaring its manifest",
+                    )
+                })?;
+            manifest.validate()?;
+            let id = manifest.id;
             if adapters.insert(id.clone(), adapter).is_some() {
                 return Err(AdapterError::invalid_contract(format!(
                     "duplicate adapter id {id}"
@@ -48,8 +57,19 @@ pub struct AdapterRegistry {
 }
 
 impl AdapterRegistry {
+    pub fn builder() -> AdapterRegistryBuilder {
+        AdapterRegistryBuilder::new()
+    }
+
     pub fn get(&self, id: &AdapterId) -> Option<&Arc<dyn AgentAdapter>> {
         self.adapters.get(id)
+    }
+
+    pub fn resolve(&self, id: &str) -> Result<Arc<dyn AgentAdapter>, AdapterError> {
+        let id = AdapterId::new(id)?;
+        self.get(&id).cloned().ok_or_else(|| {
+            AdapterError::invalid_contract(format!("adapter {id} is not registered"))
+        })
     }
 
     pub fn len(&self) -> usize {

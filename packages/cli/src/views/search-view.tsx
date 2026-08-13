@@ -4,10 +4,10 @@
 
 import React, { useMemo, useCallback } from 'react';
 import { Box, Text, useInput, useStdout } from 'ink';
-import type { SearchResultSet, SearchResult } from '@vibecook/spaghetti-sdk';
+import type { ProjectListItem, SearchResultSet, SearchResult, SessionListItem } from '@vibecook/spaghetti-sdk';
 import { useViewNav } from './context.js';
 import { useApi } from './shell.js';
-import { useListNavigation } from './hooks.js';
+import { useAsyncValue, useListNavigation } from './hooks.js';
 import { formatRelativeTime } from '../lib/format.js';
 import { SessionsView } from './sessions-view.js';
 import { MessagesView } from './messages-view.js';
@@ -113,24 +113,45 @@ export function SearchView({ query }: SearchViewProps): React.ReactElement {
   const { stdout } = useStdout();
   const cols = stdout?.columns ?? 80;
 
-  // Execute search
-  const resultSet: SearchResultSet = useMemo(() => {
-    return api.search({ text: query });
-  }, [api, query]);
+  const loaded = useAsyncValue(
+    async () => {
+      const [resultSet, projects] = await Promise.all([api.search({ text: query }), api.getProjectList()]);
+      const sessionsByProject = new Map<string, SessionListItem[]>();
+      for (const project of projects) {
+        if (
+          resultSet.results.some((result) =>
+            project.members.some(
+              (member) =>
+                member.slug === result.projectSlug && (!result.sourceId || member.sourceId === result.sourceId),
+            ),
+          )
+        ) {
+          sessionsByProject.set(project.projectId, await api.getSessionList(project));
+        }
+      }
+      return { resultSet, projects, sessionsByProject };
+    },
+    [api, query],
+    {
+      resultSet: { results: [], total: 0, hasMore: false } as SearchResultSet,
+      projects: [] as ProjectListItem[],
+      sessionsByProject: new Map<string, SessionListItem[]>(),
+    },
+  );
+  const { resultSet, projects, sessionsByProject } = loaded.value;
 
   const results = resultSet.results;
 
   // Build an exact source/slug lookup; slugs alone are lossy path encodings.
   const projectsByMember = useMemo(() => {
     const map = new Map<string, string>();
-    const projects = api.getProjectList();
     for (const p of projects) {
       for (const member of p.members) {
         map.set(`${member.sourceId}/${member.slug}`, p.folderName);
       }
     }
     return map;
-  }, [api]);
+  }, [projects]);
 
   // Build session index + time lookup, scoped per project source when known.
   const sessionInfo = useMemo(() => {
@@ -141,13 +162,14 @@ export function SearchView({ query }: SearchViewProps): React.ReactElement {
         projectMembers.set(`${r.sourceId}/${r.projectSlug}`, { slug: r.projectSlug, sourceId: r.sourceId });
       }
     }
-    const projects = api.getProjectList();
     for (const { slug, sourceId } of projectMembers.values()) {
       const project = projects.find((candidate) =>
         candidate.members.some((member) => member.sourceId === sourceId && member.slug === slug),
       );
       if (!project) continue;
-      const sessions = api.getSessionList(project, { sourceId });
+      const sessions = (sessionsByProject.get(project.projectId) ?? []).filter(
+        (session) => session.sourceId === sourceId,
+      );
       for (let i = 0; i < sessions.length; i++) {
         const key = `${slug}/${sessions[i].sourceId}/${sessions[i].sessionId}`;
         if (!map.has(key)) {
@@ -160,7 +182,7 @@ export function SearchView({ query }: SearchViewProps): React.ReactElement {
       }
     }
     return map;
-  }, [api, results]);
+  }, [projects, results, sessionsByProject]);
 
   const { selectedIndex, scrollOffset, moveUp, moveDown } = useListNavigation({
     itemCount: results.length,
@@ -179,7 +201,6 @@ export function SearchView({ query }: SearchViewProps): React.ReactElement {
       }
 
       // Find the project — prefer the source that owns this session when known.
-      const projects = api.getProjectList();
       const project = projects.find((candidate) =>
         candidate.members.some(
           (member) => member.slug === slug && (!result.sourceId || member.sourceId === result.sourceId),
@@ -202,7 +223,7 @@ export function SearchView({ query }: SearchViewProps): React.ReactElement {
         return;
       }
 
-      const sessions = api.getSessionList(project);
+      const sessions = sessionsByProject.get(project.projectId) ?? [];
       const sessIdx = sessions.findIndex(
         (s) => s.sessionId === sessionId && (!result.sourceId || s.sourceId === result.sourceId),
       );
@@ -241,7 +262,7 @@ export function SearchView({ query }: SearchViewProps): React.ReactElement {
       // Multi-push: pop search, push sessions + messages
       nav.popAndPush(sessionsEntry, messagesEntry);
     },
-    [api, nav, sessionInfo],
+    [nav, projects, sessionInfo, sessionsByProject],
   );
 
   // Key handling
@@ -263,6 +284,9 @@ export function SearchView({ query }: SearchViewProps): React.ReactElement {
     },
     { isActive: !nav.searchMode },
   );
+
+  if (loaded.loading) return <Text dimColor> Loading canonical search results…</Text>;
+  if (loaded.error) return <Text color="red"> {loaded.error.message}</Text>;
 
   // Empty state
   if (results.length === 0) {

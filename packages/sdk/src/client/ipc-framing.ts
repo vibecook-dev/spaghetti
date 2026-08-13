@@ -213,7 +213,24 @@ function parseProtocolError(value: unknown): SpaghettiProtocolError {
     ...optionalString(candidate, 'projection'),
     ...optionalNumber(candidate, 'retryAfterMs'),
     ...optionalString(candidate, 'diagnosticId'),
+    ...optionalNumber(candidate, 'currentCommitSeq'),
+    ...optionalChangeCursor(candidate, 'oldestAvailable'),
   };
+}
+
+function optionalChangeCursor(
+  candidate: Record<string, unknown>,
+  field: string,
+): { oldestAvailable?: { commitSeq: number; ordinal: number } } {
+  const value = candidate[field];
+  if (value === undefined) return {};
+  const cursor = record(value);
+  const commitSeq = requiredNonNegativeInteger(cursor.commitSeq, `${field}.commitSeq`);
+  const ordinal = requiredNonNegativeInteger(cursor.ordinal, `${field}.ordinal`);
+  if (ordinal > 0xffff_ffff) {
+    throw new SpaghettiIpcFrameError(`${field}.ordinal exceeds uint32.`);
+  }
+  return { oldestAvailable: { commitSeq, ordinal } };
 }
 
 function record(value: unknown): Record<string, unknown> {
@@ -237,6 +254,13 @@ function numberArray(value: unknown, field: string): number[] {
 function requiredPositiveInteger(value: unknown, field: string): number {
   if (!Number.isSafeInteger(value) || (value as number) < 1) {
     throw new SpaghettiIpcFrameError(`${field} must be a positive safe integer.`);
+  }
+  return value as number;
+}
+
+function requiredNonNegativeInteger(value: unknown, field: string): number {
+  if (!Number.isSafeInteger(value) || (value as number) < 0) {
+    throw new SpaghettiIpcFrameError(`${field} must be a non-negative safe integer.`);
   }
   return value as number;
 }

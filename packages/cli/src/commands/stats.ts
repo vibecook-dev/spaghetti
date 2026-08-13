@@ -2,7 +2,7 @@
  * Stats command — usage statistics overview
  */
 
-import type { SpaghettiAPI } from '@vibecook/spaghetti-sdk';
+import type { ObservationService } from '@vibecook/spaghetti-sdk/observation';
 import { theme } from '../lib/color.js';
 import { formatTokens, formatBytes, formatNumber, formatBar, totalTokens } from '../lib/format.js';
 
@@ -10,9 +10,8 @@ export interface StatsOptions {
   json?: boolean;
 }
 
-export async function statsCommand(api: SpaghettiAPI, opts: StatsOptions): Promise<void> {
-  const storeStats = api.getStats();
-  const projects = api.getProjectList();
+export async function statsCommand(api: ObservationService, opts: StatsOptions): Promise<void> {
+  const [storeStats, projects] = await Promise.all([api.getStats(), api.getProjectList()]);
 
   // Aggregate totals
   let totalSessions = 0;

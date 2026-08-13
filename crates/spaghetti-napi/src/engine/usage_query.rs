@@ -895,14 +895,17 @@ mod tests {
             .execute(
                 r#"
                 INSERT INTO usage_contributions (
-                    fact_id, subject_key, session_key, scope, accounting,
+                    fact_id, subject_key, session_key, series_key, scope, accounting,
                     quality, quality_bucket, input_tokens, output_tokens,
-                    cache_creation_tokens, cache_read_tokens, model, source_time,
+                    cache_creation_tokens, cache_read_tokens,
+                    reported_input_tokens, reported_output_tokens,
+                    reported_cache_creation_tokens, reported_cache_read_tokens,
+                    model, source_time,
                     source_time_quality, source_object_id, source_generation,
                     cursor_end, last_commit_seq
                 ) VALUES (
-                    ?1, ?2, ?3, ?4, 'delta', ?5, ?6, ?7, ?8, ?9, ?10,
-                    ?11, ?12, ?13, 1, 1, ?14, 1
+                    ?1, ?2, ?3, ?2, ?4, 'delta', ?5, ?6, ?7, ?8, ?9, ?10,
+                    ?7, ?8, ?9, ?10, ?11, ?12, ?13, 1, 1, ?14, 1
                 )
                 "#,
                 params![
@@ -932,7 +935,7 @@ mod tests {
             .unwrap();
         connection
             .execute(
-                "INSERT INTO source_instances VALUES (1, 'fixture', ?1, 'Fixture', 1, 1, 1)",
+                "INSERT INTO source_instances VALUES (1, 'fixture', ?1, 'Fixture', '1.0.0', 1, '[]', '[]', 1, 1)",
                 [b"root".as_slice()],
             )
             .unwrap();
@@ -944,7 +947,10 @@ mod tests {
             .unwrap();
         connection
             .execute(
-                "INSERT INTO source_objects VALUES (1, 1, ?1, NULL, NULL, 1, ?2, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 1, 1, 'active')",
+                "INSERT INTO source_objects (
+                    source_object_id, source_stream_id, object_key, generation,
+                    committed_cursor, decoder_contract_version, last_commit_seq, state
+                ) VALUES (1, 1, ?1, 1, ?2, 1, 1, 'active')",
                 params![b"object".as_slice(), b"cursor".as_slice()],
             )
             .unwrap();

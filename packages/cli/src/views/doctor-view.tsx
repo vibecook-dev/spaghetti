@@ -198,7 +198,9 @@ export function DoctorView(): React.ReactElement {
         {engineLabel}
       </Row>
       <Sub>
-        {ix.nativeAvailable ? `native ${ix.nativeVersion ?? 'loaded'}` : 'native addon unavailable — TS ingest path'}
+        {ix.nativeAvailable
+          ? `native ${ix.nativeVersion ?? 'loaded'}`
+          : 'native addon unavailable — Rust startup blocked'}
       </Sub>
       <Row icon={<StatusIcon kind={ix.dbExists ? 'ok' : 'warn'} />} label="index db">
         {tildify(ix.dbPath)}

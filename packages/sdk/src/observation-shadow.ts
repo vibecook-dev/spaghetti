@@ -86,6 +86,12 @@ export interface ClaudeObservationShadowOptions {
   signal?: AbortSignal;
 }
 
+/** Adapter-neutral isolated observation host used by canonical parity gates. */
+export interface ObservationShadowOptions extends ClaudeObservationShadowOptions {
+  /** Open identifier of an adapter registered in the native composition root. */
+  adapterId: string;
+}
+
 export interface ClaudeObservationShadowSnapshot {
   mode: 'shadow';
   databasePath: string;
@@ -352,6 +358,10 @@ export interface ClaudeObservationShadow {
   dispose(): Promise<SpaghettiEngineStatus>;
 }
 
+/** Canonical query/lifecycle surface shared by every registered adapter. */
+export type ObservationShadow = Omit<ClaudeObservationShadow, 'compareHistory'>;
+export type ObservationShadowSnapshot = ClaudeObservationShadowSnapshot;
+
 /** Derive a sibling database without changing or opening either path. */
 export function defaultClaudeObservationShadowDbPath(productionDbPath: string): string {
   const absolute = resolveDatabaseCandidate(productionDbPath, 'production');
@@ -568,9 +578,24 @@ export function compareClaudeObservationUsage(
   };
 }
 
-/** Open one isolated engine, register watchers, then complete the initial scan. */
+/** Open one isolated engine for any registered adapter and complete its initial scan. */
+export async function openObservationShadow(options: ObservationShadowOptions): Promise<ObservationShadow> {
+  const adapterId = options.adapterId.trim();
+  if (adapterId.length === 0) throw new Error('Observation shadow adapterId must not be empty.');
+  return openObservationShadowInternal(options, adapterId, adapterId);
+}
+
+/** Claude compatibility wrapper around the adapter-neutral observation host. */
 export async function openClaudeObservationShadow(
   options: ClaudeObservationShadowOptions,
+): Promise<ClaudeObservationShadow> {
+  return openObservationShadowInternal(options, 'claude-code', 'Claude');
+}
+
+async function openObservationShadowInternal(
+  options: ClaudeObservationShadowOptions,
+  adapterId: string,
+  displayName: string,
 ): Promise<ClaudeObservationShadow> {
   options.signal?.throwIfAborted();
   const productionPath = canonicalPotentialPath(options.productionDbPath, 'production');
@@ -582,16 +607,18 @@ export async function openClaudeObservationShadow(
   const engine = await openSpaghettiEngine({
     dbPath: shadowPath,
     queryWorkers: options.queryWorkers ?? 1,
-    ownerLabel: options.ownerLabel ?? 'sdk-claude-observation-shadow',
+    ownerLabel:
+      options.ownerLabel ??
+      (adapterId === 'claude-code' ? 'sdk-claude-observation-shadow' : `sdk-${adapterId}-observation-shadow`),
   });
   let client: SpaghettiClient | undefined;
   try {
-    await engine.startClaudeObservation({ roots, reason: 'shadow_observation' }, options.signal);
+    await engine.startObservation({ adapterId, roots, reason: 'shadow_observation' }, options.signal);
     client = await openSpaghettiClient({
       transport: new NapiTransport({ engine, ownsEngine: false }),
-      clientName: 'claude-observation-shadow',
+      clientName: `${adapterId}-observation-shadow`,
     });
-    return new NativeClaudeObservationShadow(engine, client, roots);
+    return new NativeClaudeObservationShadow(engine, client, roots, adapterId, displayName);
   } catch (error) {
     await client?.dispose().catch(() => undefined);
     await engine.dispose();
@@ -609,6 +636,8 @@ class NativeClaudeObservationShadow implements ClaudeObservationShadow {
     private readonly engine: SpaghettiEngine,
     private readonly client: SpaghettiClient,
     roots: string[],
+    private readonly adapterId: string,
+    private readonly displayName: string,
   ) {
     this.databasePath = engine.status.databasePath;
     this.roots = Object.freeze([...roots]);
@@ -623,7 +652,7 @@ class NativeClaudeObservationShadow implements ClaudeObservationShadow {
   }
 
   serveIpc(channel: SpaghettiIpcChannel, transportKind = 'ipc'): SpaghettiIpcHost {
-    if (this.disposePromise) throw new Error('Claude observation shadow is stopping.');
+    if (this.disposePromise) throw new Error(`${this.displayName} observation shadow is stopping.`);
 
     let host: SpaghettiIpcHost | undefined;
     let unsubscribeClose = (): void => undefined;
@@ -833,7 +862,7 @@ class NativeClaudeObservationShadow implements ClaudeObservationShadow {
   }
 
   refresh(signal?: AbortSignal): Promise<SpaghettiEngineStatus> {
-    return this.engine.refreshClaudeObservation(signal);
+    return this.engine.refreshObservation(this.adapterId, signal);
   }
 
   async dispose(): Promise<SpaghettiEngineStatus> {

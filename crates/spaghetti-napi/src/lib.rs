@@ -1,9 +1,8 @@
-//! NAPI-RS bindings for the spaghetti ingest core.
+//! NAPI-RS bindings for the Spaghetti observation and query engine.
 //!
 //! This crate is the Rust side of `@vibecook/spaghetti-sdk-native`. It
-//! hosts the ingest pipeline (RFC 003): streaming JSONL readers, SQLite
-//! schema + writer, project parser, FTS text extraction, and the NAPI
-//! `ingest()` entry point.
+//! hosts the persistent RFC 011 engine. The superseded RFC 003 bulk/live
+//! writer is compiled only by the repository's `legacy-oracle` feature.
 //!
 //! # Layout (Phase A structural split)
 //!
@@ -16,8 +15,7 @@
 //!   workers (library-first; no Node types).
 //! - [`source`] — adapter-neutral RFC 011 source drivers, provenance records,
 //!   and bounded recovery scheduling.
-//! - [`orchestrate`] — NAPI entrypoints that glue cold/warm ingest
-//!   and live batch writes onto the core writer.
+//! - `orchestrate` — feature-gated legacy differential tooling.
 
 // Dead code is expected until Phase 1 finishes wiring the orchestrator.
 #![allow(dead_code)]
@@ -31,19 +29,20 @@ pub mod core;
 pub mod engine;
 pub mod grok;
 mod napi_engine;
+#[cfg(feature = "legacy-oracle")]
 pub mod orchestrate;
 pub mod source;
 
-// Re-export NAPI entrypoints at the crate root so existing bindings and
-// docs that name `ingest` / `live_ingest_batch` keep resolving.
 pub use napi_engine::{
     open_spaghetti_engine, EngineHealth, EngineObservationOptions, EngineObservationStatus,
     EngineOpenOptions, EngineOverviewResult, EngineOwnerMetadata, EngineReconcileOptions,
     EngineReconcileResult, EngineStatus, SpaghettiEngine,
 };
+#[cfg(feature = "legacy-oracle")]
 pub use orchestrate::ingest::{
     ingest, IngestError, IngestOptions, IngestProgress, IngestStats, IngestTask,
 };
+#[cfg(feature = "legacy-oracle")]
 pub use orchestrate::live_ingest::{live_ingest_batch, LiveBatchResult, LiveRow, LiveRowId};
 
 /// Returns the semver of the native addon.

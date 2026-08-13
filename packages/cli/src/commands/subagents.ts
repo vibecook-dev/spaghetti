@@ -2,7 +2,7 @@
  * Subagents command — list and view subagent messages
  */
 
-import type { SpaghettiAPI } from '@vibecook/spaghetti-sdk';
+import type { ObservationService } from '@vibecook/spaghetti-sdk/observation';
 import { theme } from '../lib/color.js';
 import { formatNumber } from '../lib/format.js';
 import { renderTable } from '../lib/table.js';
@@ -18,13 +18,13 @@ export interface SubagentsOptions {
 }
 
 export async function subagentsCommand(
-  api: SpaghettiAPI,
+  api: ObservationService,
   projectInput: string | undefined,
   sessionInput: string | undefined,
   agentIndex: string | undefined,
   opts: SubagentsOptions,
 ): Promise<void> {
-  const projects = api.getProjectList();
+  const projects = await api.getProjectList();
 
   // Resolve project
   const projStr = projectInput ?? '.';
@@ -35,7 +35,7 @@ export async function subagentsCommand(
   }
 
   // Resolve session
-  const sessions = api.getSessionList(project);
+  const sessions = await api.getSessionList(project);
 
   if (sessions.length === 0) {
     throw new UserError(
@@ -52,7 +52,7 @@ export async function subagentsCommand(
   }
 
   // Get subagents
-  const subagents = api.getSessionSubagents(session.projectSlug, session.sessionId);
+  const subagents = await api.getSessionSubagents(session.projectSlug, session.sessionId);
 
   // If agent index provided, show that agent's messages
   if (agentIndex !== undefined) {
@@ -62,7 +62,7 @@ export async function subagentsCommand(
     }
 
     const agent = subagents[idx - 1]!;
-    const msgPage = api.getSubagentMessages(session.projectSlug, session.sessionId, agent.agentId, 1000, 0);
+    const msgPage = await api.getSubagentMessages(session.projectSlug, session.sessionId, agent.agentId, 1000, 0);
 
     if (opts.json) {
       process.stdout.write(

@@ -1,30 +1,12 @@
-/**
- * resolveActiveEngine — effective-engine resolution + native fallback.
- *
- * The helper is the single source of truth for "which engine actually
- * runs", mirroring `LifecycleOwner.initialize()`'s
- * `engine === 'rs' ? loadNativeAddon() : null` branch. These tests pin
- * the *preference* via `SPAG_ENGINE` (highest-precedence input) and
- * assert the contract; native availability is fixed for the process
- * (`loadNativeAddon()` is memoized) so the fallback is asserted as an
- * invariant rather than by toggling the addon.
- */
-
-import { test, describe, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
+import { afterEach, describe, test } from 'node:test';
 
 import { resolveActiveEngine } from '../native.js';
+import { resolveEngine } from '../settings.js';
 
-describe('resolveActiveEngine', () => {
-  let savedEngine: string | undefined;
-  let savedLegacy: string | undefined;
-
-  beforeEach(() => {
-    savedEngine = process.env.SPAG_ENGINE;
-    savedLegacy = process.env.SPAG_NATIVE_INGEST;
-    delete process.env.SPAG_ENGINE;
-    delete process.env.SPAG_NATIVE_INGEST;
-  });
+describe('RFC 011 production engine resolution', () => {
+  const savedEngine = process.env.SPAG_ENGINE;
+  const savedLegacy = process.env.SPAG_NATIVE_INGEST;
 
   afterEach(() => {
     if (savedEngine === undefined) delete process.env.SPAG_ENGINE;
@@ -33,37 +15,19 @@ describe('resolveActiveEngine', () => {
     else process.env.SPAG_NATIVE_INGEST = savedLegacy;
   });
 
-  test('a `ts` preference always runs ts (no native needed)', () => {
+  test('legacy environment switches cannot revive the TypeScript owner', () => {
     process.env.SPAG_ENGINE = 'ts';
-    const info = resolveActiveEngine();
-    assert.equal(info.preference, 'ts');
-    assert.equal(info.engine, 'ts');
+    process.env.SPAG_NATIVE_INGEST = '0';
+    assert.equal(resolveEngine(), 'rs');
+    assert.equal(resolveActiveEngine().engine, 'rs');
+    assert.equal(resolveActiveEngine().preference, 'rs');
   });
 
-  test('an `rs` preference runs rs iff the native addon is available', () => {
-    process.env.SPAG_ENGINE = 'rs';
+  test('addon availability is diagnostic and never changes engine identity', () => {
     const info = resolveActiveEngine();
-    assert.equal(info.preference, 'rs');
-    assert.equal(info.engine, info.nativeAvailable ? 'rs' : 'ts');
-  });
-
-  test('the effective engine never claims rs without a loaded addon', () => {
-    for (const pref of ['ts', 'rs'] as const) {
-      process.env.SPAG_ENGINE = pref;
-      const info = resolveActiveEngine();
-      if (info.engine === 'rs') {
-        assert.equal(info.nativeAvailable, true, 'engine "rs" requires nativeAvailable');
-      }
-    }
-  });
-
-  test('nativeVersion is a string exactly when nativeAvailable', () => {
-    const info = resolveActiveEngine();
+    assert.equal(info.engine, 'rs');
     assert.equal(typeof info.nativeAvailable, 'boolean');
-    if (info.nativeAvailable) {
-      assert.equal(typeof info.nativeVersion, 'string');
-    } else {
-      assert.equal(info.nativeVersion, null);
-    }
+    if (info.nativeAvailable) assert.equal(typeof info.nativeVersion, 'string');
+    else assert.equal(info.nativeVersion, null);
   });
 });

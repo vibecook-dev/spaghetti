@@ -9,10 +9,10 @@ use std::collections::BTreeSet;
 use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 
 use crate::adapter::{
-    DelegationFact, DelegationKind, DelegationMetadataFact, DelegationSpawnFact, EntityKey,
-    EvidenceKind, EvidenceStrength, Fact, FactBatch, FactEnvelope, MessageRole, QualifiedTimestamp,
-    RelationStrength, TimestampQuality, TokenUsage, UsageAccounting, UsageFact, UsageScope,
-    ValueQuality,
+    DelegationFact, DelegationKind, DelegationMetadataFact, DelegationSpawnFact,
+    DependencyRevision, EntityKey, EvidenceKind, EvidenceStrength, Fact, FactBatch, FactEnvelope,
+    MessageRole, QualifiedTimestamp, RelationStrength, TimestampQuality, TokenUsage,
+    UsageAccounting, UsageFact, UsageScope, ValueQuality,
 };
 
 use super::artifact_projection::apply_artifact_facts;
@@ -51,13 +51,11 @@ pub(super) fn apply_fact_observation_commit(
     let fact_count = u32::try_from(batch.facts().len()).map_err(|_| {
         EngineError::InvalidCommit("fact batch exceeds durable count range".to_string())
     })?;
-    if let Some(last) = batch.facts().last() {
-        if last.provenance.cursor_end != request.object.committed_cursor {
-            return Err(EngineError::InvalidCommit(
-                "typed fact batch does not end at the committed source cursor".to_string(),
-            ));
-        }
-    }
+    // A multi-record append commit can legitimately end with a known ignored
+    // record (for example telemetry following a message). In that case the
+    // last fact precedes the committed driver cursor. Provenance is validated
+    // per fact below; requiring equality here would make batching depend on
+    // every native record producing a common fact.
     let mut request = request.clone();
     request.fact_count = fact_count;
     if let Some(next_decoder_state) = batch.next_decoder_state() {
@@ -102,7 +100,12 @@ impl TransactionalProjectionWork for FactProjectionWork<'_> {
         let mut changed_tool_references = replaced_message_reference_keys(transaction, context)?;
         let mut changes = retract_canonical_generation(transaction, context)?;
         for envelope in self.batch.facts() {
-            persist_fact(transaction, context, envelope)?;
+            persist_fact(
+                transaction,
+                context,
+                envelope,
+                self.batch.dependency_reads(),
+            )?;
             match &envelope.value {
                 Fact::Session(fact) => {
                     changed_session_keys.insert(fact.session.as_bytes().to_vec());
@@ -616,20 +619,81 @@ impl TransactionalProjectionWork for FactProjectionWork<'_> {
             let Fact::Usage(fact) = &envelope.value else {
                 continue;
             };
-            if fact.accounting != UsageAccounting::Delta {
-                return Err(EngineError::InvalidCommit(format!(
-                    "{} usage requires a declared counter series; Phase 4 only projects Delta accounting",
-                    usage_accounting(fact.accounting)
-                )));
+            let previous = read_contribution(transaction, envelope.id.as_bytes())?;
+            if let Some(previous) = previous.as_ref() {
+                adjust_usage_total(transaction, previous, -1, context.commit_seq)?;
+                touched_sessions.insert(previous.session_key.clone());
+                delete_contribution(transaction, envelope.id.as_bytes())?;
             }
-            if let Some(previous) = read_contribution(transaction, envelope.id.as_bytes())? {
-                adjust_usage_total(transaction, &previous, -1, context.commit_seq)?;
-                touched_sessions.insert(previous.session_key);
+
+            let series_key = usage_series_key(context, fact);
+            if fact.accounting == UsageAccounting::Snapshot {
+                for replaced in read_snapshot_series_contributions(
+                    transaction,
+                    &series_key,
+                    context.generation,
+                )? {
+                    adjust_usage_total(transaction, &replaced, -1, context.commit_seq)?;
+                    touched_sessions.insert(replaced.session_key.clone());
+                    delete_contribution(transaction, &replaced.fact_id)?;
+                }
             }
-            let contribution = UsageContribution::from_fact(fact)?;
-            write_contribution(transaction, context, envelope, &contribution)?;
+
+            let reported = token_values(fact.values)?;
+            let values = if fact.accounting == UsageAccounting::Cumulative {
+                cumulative_values(
+                    reported,
+                    read_cumulative_predecessor(
+                        transaction,
+                        &series_key,
+                        context.generation,
+                        &envelope.provenance.cursor_end,
+                    )?
+                    .map(|contribution| contribution.reported),
+                )?
+            } else {
+                reported
+            };
+            let contribution = UsageContribution::from_fact(
+                envelope.id.as_bytes(),
+                fact,
+                series_key,
+                reported,
+                values,
+                context,
+                &envelope.provenance.cursor_end,
+            )?;
+            write_contribution(transaction, context, envelope, fact, &contribution)?;
             adjust_usage_total(transaction, &contribution, 1, context.commit_seq)?;
-            touched_sessions.insert(contribution.session_key);
+            touched_sessions.insert(contribution.session_key.clone());
+
+            if let Some(previous) = previous {
+                if previous.accounting == UsageAccounting::Cumulative
+                    && (previous.series_key != contribution.series_key
+                        || previous.source_generation != contribution.source_generation)
+                {
+                    if let Some(session_key) = repair_cumulative_successor(
+                        transaction,
+                        &previous.series_key,
+                        previous.source_generation,
+                        &previous.cursor_end,
+                        context.commit_seq,
+                    )? {
+                        touched_sessions.insert(session_key);
+                    }
+                }
+            }
+            if fact.accounting == UsageAccounting::Cumulative {
+                if let Some(session_key) = repair_cumulative_successor(
+                    transaction,
+                    &contribution.series_key,
+                    contribution.source_generation,
+                    &contribution.cursor_end,
+                    context.commit_seq,
+                )? {
+                    touched_sessions.insert(session_key);
+                }
+            }
         }
 
         // Generation-owned fact rows are removed only after every projector
@@ -697,6 +761,7 @@ fn persist_fact(
     transaction: &Transaction<'_>,
     context: &ProjectionCommitContext,
     envelope: &FactEnvelope,
+    dependencies: &[DependencyRevision],
 ) -> Result<(), EngineError> {
     let payload = serialize(&envelope.value, "serialize fact audit payload")?;
     transaction
@@ -743,8 +808,41 @@ fn persist_fact(
                 sqlite_u64(context.commit_seq, "commit sequence")?,
             ],
         )
-        .map(|_| ())
-        .map_err(|error| sqlite_error("persist typed fact", error))
+        .map_err(|error| sqlite_error("persist typed fact", error))?;
+    transaction
+        .execute(
+            "DELETE FROM fact_dependency_reads WHERE fact_id = ?1",
+            [envelope.id.as_bytes().as_slice()],
+        )
+        .map_err(|error| sqlite_error("replace fact dependency reads", error))?;
+    for dependency in dependencies {
+        if dependency.source_instance_id != context.source_instance_id
+            || dependency.root_name.trim().is_empty()
+            || dependency.object_key.is_empty()
+            || dependency.revision.iter().all(|byte| *byte == 0)
+        {
+            return Err(EngineError::InvalidCommit(
+                "fact dependency revision is incomplete or crosses source instances".to_string(),
+            ));
+        }
+        transaction
+            .execute(
+                r#"
+                INSERT INTO fact_dependency_reads (
+                    fact_id, source_instance_id, root_name, object_key, revision
+                ) VALUES (?1, ?2, ?3, ?4, ?5)
+                "#,
+                params![
+                    envelope.id.as_bytes().as_slice(),
+                    sqlite_u64(dependency.source_instance_id, "dependency source instance")?,
+                    dependency.root_name,
+                    dependency.object_key,
+                    dependency.revision.as_slice(),
+                ],
+            )
+            .map_err(|error| sqlite_error("persist fact dependency read", error))?;
+    }
+    Ok(())
 }
 
 fn retract_canonical_generation(
@@ -1830,21 +1928,56 @@ fn canonical_run_exists(
 
 #[derive(Debug, Clone)]
 struct UsageContribution {
+    fact_id: Vec<u8>,
     session_key: Vec<u8>,
     subject_key: Vec<u8>,
+    series_key: Vec<u8>,
+    accounting: UsageAccounting,
     quality_bucket: &'static str,
     values: [i64; 4],
+    reported: [i64; 4],
+    source_generation: u64,
+    cursor_end: Vec<u8>,
 }
 
 impl UsageContribution {
-    fn from_fact(fact: &UsageFact) -> Result<Self, EngineError> {
+    #[allow(clippy::too_many_arguments)]
+    fn from_fact(
+        fact_id: &[u8],
+        fact: &UsageFact,
+        series_key: Vec<u8>,
+        reported: [i64; 4],
+        values: [i64; 4],
+        context: &ProjectionCommitContext,
+        cursor_end: &[u8],
+    ) -> Result<Self, EngineError> {
         Ok(Self {
+            fact_id: fact_id.to_vec(),
             session_key: fact.session.as_bytes().to_vec(),
             subject_key: fact.subject.as_bytes().to_vec(),
+            series_key,
+            accounting: fact.accounting,
             quality_bucket: quality_bucket(fact.quality),
-            values: token_values(fact.values)?,
+            values,
+            reported,
+            source_generation: context.generation,
+            cursor_end: cursor_end.to_vec(),
         })
     }
+}
+
+fn usage_series_key(context: &ProjectionCommitContext, fact: &UsageFact) -> Vec<u8> {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"spaghetti-usage-series-v1\0");
+    hasher.update(&context.source_instance_id.to_be_bytes());
+    hasher.update(&context.source_stream_id.to_be_bytes());
+    hasher.update(&context.source_object_id.to_be_bytes());
+    hasher.update(fact.subject.as_bytes());
+    hasher.update(usage_scope(fact.scope).as_bytes());
+    if let Some(model) = fact.model.as_deref() {
+        hasher.update(model.as_bytes());
+    }
+    hasher.finalize().as_bytes().to_vec()
 }
 
 fn read_replaced_contributions(
@@ -1854,8 +1987,12 @@ fn read_replaced_contributions(
     let mut statement = transaction
         .prepare(
             r#"
-            SELECT session_key, subject_key, quality_bucket, input_tokens,
-                   output_tokens, cache_creation_tokens, cache_read_tokens
+            SELECT fact_id, session_key, subject_key, series_key, accounting,
+                   quality_bucket, input_tokens, output_tokens,
+                   cache_creation_tokens, cache_read_tokens,
+                   reported_input_tokens, reported_output_tokens,
+                   reported_cache_creation_tokens, reported_cache_read_tokens,
+                   source_generation, cursor_end
             FROM usage_contributions
             WHERE source_object_id = ?1 AND source_generation <> ?2
             "#,
@@ -1882,8 +2019,12 @@ fn read_contribution(
     transaction
         .query_row(
             r#"
-            SELECT session_key, subject_key, quality_bucket, input_tokens,
-                   output_tokens, cache_creation_tokens, cache_read_tokens
+            SELECT fact_id, session_key, subject_key, series_key, accounting,
+                   quality_bucket, input_tokens, output_tokens,
+                   cache_creation_tokens, cache_read_tokens,
+                   reported_input_tokens, reported_output_tokens,
+                   reported_cache_creation_tokens, reported_cache_read_tokens,
+                   source_generation, cursor_end
             FROM usage_contributions WHERE fact_id = ?1
             "#,
             [fact_id],
@@ -1894,46 +2035,166 @@ fn read_contribution(
 }
 
 fn contribution_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<UsageContribution> {
-    let bucket: String = row.get(2)?;
+    let accounting: String = row.get(4)?;
+    let accounting = match accounting.as_str() {
+        "delta" => UsageAccounting::Delta,
+        "cumulative" => UsageAccounting::Cumulative,
+        "snapshot" => UsageAccounting::Snapshot,
+        value => {
+            return Err(rusqlite::Error::FromSqlConversionFailure(
+                4,
+                rusqlite::types::Type::Text,
+                format!("unknown usage accounting {value}").into(),
+            ));
+        }
+    };
+    let bucket: String = row.get(5)?;
     let quality_bucket = match bucket.as_str() {
         "exact" => "exact",
         _ => "estimated",
     };
+    let source_generation = row.get::<_, i64>(14)?;
     Ok(UsageContribution {
-        session_key: row.get(0)?,
-        subject_key: row.get(1)?,
+        fact_id: row.get(0)?,
+        session_key: row.get(1)?,
+        subject_key: row.get(2)?,
+        series_key: row.get(3)?,
+        accounting,
         quality_bucket,
-        values: [row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?],
+        values: [row.get(6)?, row.get(7)?, row.get(8)?, row.get(9)?],
+        reported: [row.get(10)?, row.get(11)?, row.get(12)?, row.get(13)?],
+        source_generation: u64::try_from(source_generation).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(
+                14,
+                rusqlite::types::Type::Integer,
+                Box::new(error),
+            )
+        })?,
+        cursor_end: row.get(15)?,
     })
+}
+
+fn read_snapshot_series_contributions(
+    transaction: &Transaction<'_>,
+    series_key: &[u8],
+    generation: u64,
+) -> Result<Vec<UsageContribution>, EngineError> {
+    let mut statement = transaction
+        .prepare(
+            r#"
+            SELECT fact_id, session_key, subject_key, series_key, accounting,
+                   quality_bucket, input_tokens, output_tokens,
+                   cache_creation_tokens, cache_read_tokens,
+                   reported_input_tokens, reported_output_tokens,
+                   reported_cache_creation_tokens, reported_cache_read_tokens,
+                   source_generation, cursor_end
+            FROM usage_contributions
+            WHERE series_key = ?1 AND source_generation = ?2
+              AND accounting = 'snapshot'
+            "#,
+        )
+        .map_err(|error| sqlite_error("prepare snapshot usage replacement", error))?;
+    let contributions = statement
+        .query_map(
+            params![series_key, sqlite_u64(generation, "source generation")?],
+            contribution_from_row,
+        )
+        .map_err(|error| sqlite_error("read snapshot usage replacement", error))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| sqlite_error("collect snapshot usage replacement", error))?;
+    Ok(contributions)
+}
+
+fn read_cumulative_predecessor(
+    transaction: &Transaction<'_>,
+    series_key: &[u8],
+    generation: u64,
+    cursor_end: &[u8],
+) -> Result<Option<UsageContribution>, EngineError> {
+    transaction
+        .query_row(
+            r#"
+            SELECT fact_id, session_key, subject_key, series_key, accounting,
+                   quality_bucket, input_tokens, output_tokens,
+                   cache_creation_tokens, cache_read_tokens,
+                   reported_input_tokens, reported_output_tokens,
+                   reported_cache_creation_tokens, reported_cache_read_tokens,
+                   source_generation, cursor_end
+            FROM usage_contributions
+            WHERE series_key = ?1 AND source_generation = ?2
+              AND accounting = 'cumulative' AND cursor_end < ?3
+            ORDER BY cursor_end DESC, fact_id DESC
+            LIMIT 1
+            "#,
+            params![
+                series_key,
+                sqlite_u64(generation, "source generation")?,
+                cursor_end,
+            ],
+            contribution_from_row,
+        )
+        .optional()
+        .map_err(|error| sqlite_error("read cumulative usage predecessor", error))
+}
+
+fn cumulative_values(
+    reported: [i64; 4],
+    predecessor: Option<[i64; 4]>,
+) -> Result<[i64; 4], EngineError> {
+    let Some(predecessor) = predecessor else {
+        return Ok(reported);
+    };
+    let mut values = [0_i64; 4];
+    for index in 0..values.len() {
+        values[index] = if reported[index] >= predecessor[index] {
+            reported[index]
+                .checked_sub(predecessor[index])
+                .ok_or_else(|| EngineError::InvalidCommit("usage counter underflow".to_string()))?
+        } else {
+            // A decrease is a native counter reset, not a negative usage
+            // contribution. The first value after reset starts a new epoch.
+            reported[index]
+        };
+    }
+    Ok(values)
+}
+
+fn delete_contribution(transaction: &Transaction<'_>, fact_id: &[u8]) -> Result<(), EngineError> {
+    transaction
+        .execute(
+            "DELETE FROM usage_contributions WHERE fact_id = ?1",
+            [fact_id],
+        )
+        .map(|_| ())
+        .map_err(|error| sqlite_error("delete usage contribution", error))
 }
 
 fn write_contribution(
     transaction: &Transaction<'_>,
     context: &ProjectionCommitContext,
     envelope: &FactEnvelope,
+    fact: &UsageFact,
     contribution: &UsageContribution,
 ) -> Result<(), EngineError> {
-    let Fact::Usage(fact) = &envelope.value else {
-        return Err(EngineError::InvalidCommit(
-            "non-usage fact reached usage projector".to_string(),
-        ));
-    };
     transaction
         .execute(
             r#"
             INSERT INTO usage_contributions (
-                fact_id, subject_key, session_key, scope, accounting,
+                fact_id, subject_key, session_key, series_key, scope, accounting,
                 quality, quality_bucket, input_tokens, output_tokens,
-                cache_creation_tokens, cache_read_tokens, model, source_time,
+                cache_creation_tokens, cache_read_tokens, reported_input_tokens,
+                reported_output_tokens, reported_cache_creation_tokens,
+                reported_cache_read_tokens, model, source_time,
                 source_time_quality, source_object_id, source_generation,
                 cursor_end, last_commit_seq
             ) VALUES (
                 ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
-                ?13, ?14, ?15, ?16, ?17, ?18
+                ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23
             )
             ON CONFLICT(fact_id) DO UPDATE SET
                 subject_key = excluded.subject_key,
                 session_key = excluded.session_key,
+                series_key = excluded.series_key,
                 scope = excluded.scope,
                 accounting = excluded.accounting,
                 quality = excluded.quality,
@@ -1942,6 +2203,10 @@ fn write_contribution(
                 output_tokens = excluded.output_tokens,
                 cache_creation_tokens = excluded.cache_creation_tokens,
                 cache_read_tokens = excluded.cache_read_tokens,
+                reported_input_tokens = excluded.reported_input_tokens,
+                reported_output_tokens = excluded.reported_output_tokens,
+                reported_cache_creation_tokens = excluded.reported_cache_creation_tokens,
+                reported_cache_read_tokens = excluded.reported_cache_read_tokens,
                 model = excluded.model,
                 source_time = excluded.source_time,
                 source_time_quality = excluded.source_time_quality,
@@ -1954,6 +2219,7 @@ fn write_contribution(
                 envelope.id.as_bytes().as_slice(),
                 contribution.subject_key,
                 contribution.session_key,
+                contribution.series_key,
                 usage_scope(fact.scope),
                 usage_accounting(fact.accounting),
                 value_quality(fact.quality),
@@ -1962,6 +2228,10 @@ fn write_contribution(
                 contribution.values[1],
                 contribution.values[2],
                 contribution.values[3],
+                contribution.reported[0],
+                contribution.reported[1],
+                contribution.reported[2],
+                contribution.reported[3],
                 fact.model,
                 timestamp_value(fact.source_time.as_ref()),
                 timestamp_quality(fact.source_time.as_ref()),
@@ -1973,6 +2243,74 @@ fn write_contribution(
         )
         .map(|_| ())
         .map_err(|error| sqlite_error("write usage contribution", error))
+}
+
+fn repair_cumulative_successor(
+    transaction: &Transaction<'_>,
+    series_key: &[u8],
+    generation: u64,
+    cursor_end: &[u8],
+    commit_seq: u64,
+) -> Result<Option<Vec<u8>>, EngineError> {
+    let successor = transaction
+        .query_row(
+            r#"
+            SELECT fact_id, session_key, subject_key, series_key, accounting,
+                   quality_bucket, input_tokens, output_tokens,
+                   cache_creation_tokens, cache_read_tokens,
+                   reported_input_tokens, reported_output_tokens,
+                   reported_cache_creation_tokens, reported_cache_read_tokens,
+                   source_generation, cursor_end
+            FROM usage_contributions
+            WHERE series_key = ?1 AND source_generation = ?2
+              AND accounting = 'cumulative' AND cursor_end > ?3
+            ORDER BY cursor_end ASC, fact_id ASC
+            LIMIT 1
+            "#,
+            params![
+                series_key,
+                sqlite_u64(generation, "source generation")?,
+                cursor_end,
+            ],
+            contribution_from_row,
+        )
+        .optional()
+        .map_err(|error| sqlite_error("read cumulative usage successor", error))?;
+    let Some(mut successor) = successor else {
+        return Ok(None);
+    };
+    let predecessor =
+        read_cumulative_predecessor(transaction, series_key, generation, &successor.cursor_end)?;
+    let next_values = cumulative_values(
+        successor.reported,
+        predecessor.map(|contribution| contribution.reported),
+    )?;
+    if next_values == successor.values {
+        return Ok(Some(successor.session_key));
+    }
+    adjust_usage_total(transaction, &successor, -1, commit_seq)?;
+    successor.values = next_values;
+    transaction
+        .execute(
+            r#"
+            UPDATE usage_contributions
+            SET input_tokens = ?2, output_tokens = ?3,
+                cache_creation_tokens = ?4, cache_read_tokens = ?5,
+                last_commit_seq = ?6
+            WHERE fact_id = ?1
+            "#,
+            params![
+                successor.fact_id,
+                successor.values[0],
+                successor.values[1],
+                successor.values[2],
+                successor.values[3],
+                sqlite_u64(commit_seq, "commit sequence")?,
+            ],
+        )
+        .map_err(|error| sqlite_error("repair cumulative usage successor", error))?;
+    adjust_usage_total(transaction, &successor, 1, commit_seq)?;
+    Ok(Some(successor.session_key))
 }
 
 fn adjust_usage_total(
@@ -2439,6 +2777,7 @@ fn sqlite_error(operation: &'static str, error: rusqlite::Error) -> EngineError 
 
 #[cfg(test)]
 mod tests {
+    use std::cell::RefCell as StdRefCell;
     use std::collections::BTreeMap;
     use std::io::Write;
     use std::path::Path;
@@ -2449,7 +2788,7 @@ mod tests {
     use crate::adapter::{
         AdapterId, AdapterObjectContext, AgentAdapter, ArtifactCapture, ArtifactContentFact,
         ArtifactMetadataEntry, ArtifactMetadataSnapshotFact, ArtifactObservationKind, ContentBlock,
-        DecodeContext, DecoderId, FactBatch, HookEventSummary,
+        DecodeContext, DecoderId, DependencyRevision, FactBatch, HookEventSummary,
         InterpretationSettingsDocumentStatus, InterpretationSettingsFact,
         InterpretationSettingsLayer, InterpretationSettingsSnapshot, MessageFact,
         PersistedToolResultFact, PlanSnapshotFact, PresenceFact, ProjectMemoryDocumentFact,
@@ -2462,6 +2801,7 @@ mod tests {
     };
     use crate::claude::ClaudeCodeAdapter;
     use crate::core::schema;
+    #[cfg(feature = "legacy-oracle")]
     use crate::orchestrate::ingest::{run_ingest, IngestOptions};
     use crate::source::{
         AppendCheckpoint, AppendDelimitedConfig, AppendDelimitedFile, AppendItem, AppendRead,
@@ -2470,14 +2810,18 @@ mod tests {
 
     use super::*;
     use crate::engine::commit::{
-        apply_observation_commit, ExpectedSourceCursor, SourceInstanceSpec, SourceObjectUpdate,
-        SourceStreamSpec,
+        apply_observation_commit, source_instance_catalog_id, source_stream_catalog_id,
+        ExpectedSourceCursor, SourceInstanceSpec, SourceObjectUpdate, SourceStreamSpec,
     };
 
     const SESSION: &str = "01234567-89ab-cdef-0123-456789abcdef";
     const PROJECT: &str = "-Users-fixture-project";
     const STREAM: &str = "session-transcripts";
     const DECODER: &str = "claude-session-record";
+
+    thread_local! {
+        static TEST_OBJECT_KEYS: StdRefCell<Vec<Vec<u8>>> = const { StdRefCell::new(Vec::new()) };
+    }
 
     fn transcript() -> Vec<Vec<u8>> {
         vec![
@@ -2493,6 +2837,7 @@ mod tests {
     }
 
     fn database() -> Connection {
+        TEST_OBJECT_KEYS.with(|keys| keys.borrow_mut().clear());
         let connection = Connection::open_in_memory().unwrap();
         schema::initialize_schema(&connection).unwrap();
         connection
@@ -2533,7 +2878,10 @@ mod tests {
                 adapter_id: "claude-code".to_string(),
                 stable_key: b"fixture-root".to_vec(),
                 display_name: "Claude fixture".to_string(),
+                adapter_version: "1.0.0".to_string(),
                 adapter_contract_version: 2,
+                source_schema_versions: Vec::new(),
+                capabilities: Vec::new(),
                 discovered_at: 1,
                 last_seen_at: started_at,
             },
@@ -2557,6 +2905,7 @@ mod tests {
                 driver_checkpoint_version: None,
                 decoder_state: None,
                 decoder_state_version: None,
+                retry_state: None,
                 size_bytes: None,
                 mtime_ns: None,
                 decoder_contract_version: 2,
@@ -2579,6 +2928,7 @@ mod tests {
         committed_cursor: Vec<u8>,
         started_at: i64,
     ) -> ObservationCommit {
+        remember_test_object(object_key);
         let mut request = request(expected, generation, committed_cursor, started_at);
         request.object.object_key = object_key.to_vec();
         request.object.display_path = Some(String::from_utf8_lossy(object_key).into_owned());
@@ -2596,6 +2946,7 @@ mod tests {
             ),
         )
         .unwrap();
+        remember_test_object(b"fixture-transcript");
     }
 
     fn register_object_key(connection: &mut Connection, object_key: &[u8], clock: i64) {
@@ -2610,17 +2961,41 @@ mod tests {
             ),
         )
         .unwrap();
+        remember_test_object(object_key);
+    }
+
+    fn remember_test_object(object_key: &[u8]) {
+        TEST_OBJECT_KEYS.with(|keys| {
+            let mut keys = keys.borrow_mut();
+            if !keys.iter().any(|known| known == object_key) {
+                keys.push(object_key.to_vec());
+            }
+        });
     }
 
     fn origin(observed_at: i64) -> RecordOrigin {
+        let source_instance_id = source_instance_catalog_id("claude-code", b"fixture-root");
         RecordOrigin {
-            source_instance_id: 1,
-            stream_id: 1,
-            object_id: 1,
+            source_instance_id,
+            stream_id: source_stream_catalog_id(source_instance_id, STREAM),
+            object_id: crate::engine::commit::source_object_catalog_id(
+                source_stream_catalog_id(source_instance_id, STREAM),
+                b"fixture-transcript",
+            ),
             observed_at,
             source_timestamp_hint: None,
             media_type: SourceMediaType::new("application/x-ndjson").unwrap(),
         }
+    }
+
+    fn object_catalog_id(object_key: &[u8]) -> i64 {
+        let source_instance_id = source_instance_catalog_id("claude-code", b"fixture-root");
+        crate::engine::commit::source_object_catalog_id(
+            source_stream_catalog_id(source_instance_id, STREAM),
+            object_key,
+        )
+        .try_into()
+        .expect("catalog identifiers fit SQLite INTEGER")
     }
 
     fn direct_record(
@@ -2641,18 +3016,26 @@ mod tests {
     }
 
     fn object_record(
-        object_id: u64,
+        object_ordinal: u64,
         generation: u64,
         cursor_start: SourceCursor,
         cursor_end: SourceCursor,
         observed_at: i64,
         payload: &[u8],
     ) -> SourceRecord {
+        let source_instance_id = source_instance_catalog_id("claude-code", b"fixture-root");
+        let stream_id = source_stream_catalog_id(source_instance_id, STREAM);
+        let object_key = TEST_OBJECT_KEYS.with(|keys| {
+            keys.borrow()
+                .get(usize::try_from(object_ordinal - 1).unwrap())
+                .cloned()
+                .unwrap_or_else(|| panic!("test object ordinal {object_ordinal} is not registered"))
+        });
         SourceRecord::new(
             &RecordOrigin {
-                source_instance_id: 1,
-                stream_id: 1,
-                object_id,
+                source_instance_id,
+                stream_id,
+                object_id: crate::engine::commit::source_object_catalog_id(stream_id, &object_key),
                 observed_at,
                 source_timestamp_hint: None,
                 media_type: SourceMediaType::new("application/json").unwrap(),
@@ -3312,6 +3695,54 @@ mod tests {
         connection.query_row(&sql, [], |row| row.get(0)).unwrap()
     }
 
+    fn usage_fact(
+        native_subject: &str,
+        accounting: UsageAccounting,
+        quality: ValueQuality,
+        values: [u64; 4],
+    ) -> Fact {
+        Fact::Usage(UsageFact {
+            subject: entity("usage_subject", native_subject),
+            session: entity("session", SESSION),
+            scope: UsageScope::Session,
+            accounting,
+            quality,
+            values: TokenUsage {
+                input_tokens: values[0],
+                output_tokens: values[1],
+                cache_creation_tokens: values[2],
+                cache_read_tokens: values[3],
+            },
+            model: Some("fixture-model".to_string()),
+            source_time: None,
+        })
+    }
+
+    fn usage_totals(connection: &Connection) -> [i64; 8] {
+        connection
+            .query_row(
+                r#"SELECT exact_input_tokens, exact_output_tokens,
+                          exact_cache_creation_tokens, exact_cache_read_tokens,
+                          estimated_input_tokens, estimated_output_tokens,
+                          estimated_cache_creation_tokens, estimated_cache_read_tokens
+                   FROM usage_totals WHERE session_key = ?1"#,
+                [entity("session", SESSION).as_bytes()],
+                |row| {
+                    Ok([
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                        row.get(7)?,
+                    ])
+                },
+            )
+            .unwrap()
+    }
+
     struct ShadowCommit<'a> {
         stream: &'a str,
         decoder: &'a str,
@@ -3329,7 +3760,10 @@ mod tests {
                 adapter_id: "claude-code".to_string(),
                 stable_key: b"phase4-shadow-fixture".to_vec(),
                 display_name: "Claude Phase 4 shadow fixture".to_string(),
+                adapter_version: "1.0.0".to_string(),
                 adapter_contract_version: 2,
+                source_schema_versions: Vec::new(),
+                capabilities: Vec::new(),
                 discovered_at: 1,
                 last_seen_at: input.clock,
             },
@@ -3353,6 +3787,7 @@ mod tests {
                 driver_checkpoint_version: None,
                 decoder_state: None,
                 decoder_state_version: None,
+                retry_state: None,
                 size_bytes: None,
                 mtime_ns: None,
                 decoder_contract_version: 2,
@@ -3768,6 +4203,200 @@ mod tests {
         assert_eq!(before_audit, semantic_snapshot(&cold));
     }
 
+    #[test]
+    fn usage_snapshot_replaces_its_series_and_can_reclassify_quality() {
+        let mut connection = database();
+        register_object(&mut connection);
+
+        let first = direct_record(1, 0, 1, 20, b"snapshot-one");
+        let mut first_batch = FactBatch::new(2, 2).unwrap();
+        first_batch
+            .push(
+                &first,
+                usage_fact(
+                    "session-counter",
+                    UsageAccounting::Snapshot,
+                    ValueQuality::NativeExact,
+                    [10, 2, 0, 0],
+                ),
+            )
+            .unwrap();
+        commit_direct_batch(&mut connection, &first, 1, 0, 21, &first_batch);
+        assert_eq!(usage_totals(&connection), [10, 2, 0, 0, 0, 0, 0, 0]);
+
+        let replacement = direct_record(1, 1, 2, 22, b"snapshot-two");
+        let mut replacement_batch = FactBatch::new(2, 2).unwrap();
+        replacement_batch
+            .push(
+                &replacement,
+                usage_fact(
+                    "session-counter",
+                    UsageAccounting::Snapshot,
+                    ValueQuality::Estimated,
+                    [14, 3, 1, 0],
+                ),
+            )
+            .unwrap();
+        commit_direct_batch(&mut connection, &replacement, 1, 1, 23, &replacement_batch);
+
+        assert_eq!(count(&connection, "usage_contributions"), 1);
+        assert_eq!(usage_totals(&connection), [0, 0, 0, 0, 14, 3, 1, 0]);
+    }
+
+    #[test]
+    fn typed_fact_commit_persists_stamped_dependency_reads_atomically() {
+        let mut connection = database();
+        register_object(&mut connection);
+        let record = direct_record(1, 0, 1, 20, b"dependency-backed");
+        let mut batch = FactBatch::new(2, 2).unwrap();
+        batch
+            .push(
+                &record,
+                usage_fact(
+                    "dependency-counter",
+                    UsageAccounting::Delta,
+                    ValueQuality::NativeExact,
+                    [1, 2, 3, 4],
+                ),
+            )
+            .unwrap();
+        batch
+            .add_dependency_read(DependencyRevision {
+                source_instance_id: record.source_instance_id,
+                root_name: "sessions".to_string(),
+                object_key: b"session/summary.json".to_vec(),
+                revision: [7; 32],
+            })
+            .unwrap();
+
+        commit_direct_batch(&mut connection, &record, 1, 0, 21, &batch);
+        let stored: (i64, String, Vec<u8>, Vec<u8>) = connection
+            .query_row(
+                "SELECT source_instance_id, root_name, object_key, revision FROM fact_dependency_reads",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(stored.0, record.source_instance_id as i64);
+        assert_eq!(stored.1, "sessions");
+        assert_eq!(stored.2, b"session/summary.json");
+        assert_eq!(stored.3, vec![7; 32]);
+    }
+
+    #[test]
+    fn cumulative_usage_differences_and_counter_resets_never_double_count() {
+        let mut connection = database();
+        register_object(&mut connection);
+        let samples = [
+            (0, 1, b"cumulative-100".as_slice(), [100, 10, 0, 0]),
+            (1, 2, b"cumulative-150".as_slice(), [150, 14, 2, 0]),
+            (2, 3, b"cumulative-reset".as_slice(), [20, 3, 0, 1]),
+        ];
+        for (index, (start, end, payload, values)) in samples.into_iter().enumerate() {
+            let record = direct_record(1, start, end, 30 + index as i64, payload);
+            let mut batch = FactBatch::new(2, 2).unwrap();
+            batch
+                .push(
+                    &record,
+                    usage_fact(
+                        "session-counter",
+                        UsageAccounting::Cumulative,
+                        ValueQuality::NativeExact,
+                        values,
+                    ),
+                )
+                .unwrap();
+            commit_direct_batch(
+                &mut connection,
+                &record,
+                1,
+                start,
+                40 + index as i64,
+                &batch,
+            );
+        }
+
+        assert_eq!(count(&connection, "usage_contributions"), 3);
+        assert_eq!(usage_totals(&connection), [170, 17, 2, 1, 0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn late_cumulative_sample_repairs_only_its_immediate_successor() {
+        let mut connection = database();
+        register_object(&mut connection);
+
+        let first = direct_record(1, 0, 10, 50, b"cumulative-100");
+        let mut first_batch = FactBatch::new(2, 2).unwrap();
+        first_batch
+            .push(
+                &first,
+                usage_fact(
+                    "session-counter",
+                    UsageAccounting::Cumulative,
+                    ValueQuality::NativeExact,
+                    [100, 0, 0, 0],
+                ),
+            )
+            .unwrap();
+        commit_direct_batch(&mut connection, &first, 1, 0, 51, &first_batch);
+
+        let third = direct_record(1, 20, 30, 52, b"cumulative-180");
+        let mut third_batch = FactBatch::new(2, 2).unwrap();
+        third_batch
+            .push(
+                &third,
+                usage_fact(
+                    "session-counter",
+                    UsageAccounting::Cumulative,
+                    ValueQuality::NativeExact,
+                    [180, 0, 0, 0],
+                ),
+            )
+            .unwrap();
+        commit_direct_batch(&mut connection, &third, 1, 10, 53, &third_batch);
+        assert_eq!(usage_totals(&connection)[0], 180);
+
+        let second = direct_record(1, 10, 20, 54, b"cumulative-140");
+        let mut second_batch = FactBatch::new(2, 2).unwrap();
+        second_batch
+            .push(
+                &second,
+                usage_fact(
+                    "session-counter",
+                    UsageAccounting::Cumulative,
+                    ValueQuality::NativeExact,
+                    [140, 0, 0, 0],
+                ),
+            )
+            .unwrap();
+        apply_fact_observation_commit(
+            &mut connection,
+            &request(
+                ExpectedSourceCursor::At {
+                    generation: 1,
+                    committed_cursor: SourceCursor::append_offset(30).into_bytes(),
+                },
+                1,
+                SourceCursor::append_offset(30).into_bytes(),
+                55,
+            ),
+            &second_batch,
+        )
+        .unwrap();
+
+        assert_eq!(count(&connection, "usage_contributions"), 3);
+        assert_eq!(usage_totals(&connection)[0], 180);
+        let contributions = connection
+            .prepare("SELECT input_tokens FROM usage_contributions ORDER BY cursor_end")
+            .unwrap()
+            .query_map([], |row| row.get::<_, i64>(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(contributions, vec![100, 40, 40]);
+    }
+
+    #[cfg(feature = "legacy-oracle")]
     #[test]
     fn claude_shadow_history_and_usage_match_the_legacy_small_fixture() {
         let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/small/.claude");
@@ -7448,14 +8077,15 @@ mod tests {
             1
         );
 
-        let (removed_object, remaining_workflow) = if decisive_object_id == 2 {
-            (primary_object.as_slice(), secondary_workflow.as_bytes())
-        } else {
-            assert_eq!(decisive_object_id, 3);
-            (secondary_object.as_slice(), primary_workflow.as_bytes())
-        };
+        let (removed_object, removed_object_ordinal, remaining_workflow) =
+            if decisive_object_id == object_catalog_id(primary_object) {
+                (primary_object.as_slice(), 2, secondary_workflow.as_bytes())
+            } else {
+                assert_eq!(decisive_object_id, object_catalog_id(secondary_object));
+                (secondary_object.as_slice(), 3, primary_workflow.as_bytes())
+            };
         let rewritten = object_record(
-            decisive_object_id as u64,
+            removed_object_ordinal,
             2,
             SourceCursor::append_offset(0),
             SourceCursor::append_offset(1),
@@ -8922,8 +9552,8 @@ mod tests {
         );
         let audit_payload: Vec<u8> = connection
             .query_row(
-                "SELECT payload_json FROM fact_records WHERE fact_kind = 'interpretation_settings' AND source_object_id = 2",
-                [],
+                "SELECT payload_json FROM fact_records WHERE fact_kind = 'interpretation_settings' AND source_object_id = ?1",
+                [object_catalog_id(local_object)],
                 |row| row.get(0),
             )
             .unwrap();

@@ -1784,7 +1784,7 @@ mod tests {
             .unwrap();
         connection
             .execute(
-                "INSERT INTO source_instances VALUES (1, 'fixture', ?1, 'Fixture', 1, 10, 20)",
+                "INSERT INTO source_instances VALUES (1, 'fixture', ?1, 'Fixture', '1.0.0', 1, '[]', '[]', 10, 20)",
                 [b"fixture-root".as_slice()],
             )
             .unwrap();
@@ -1796,7 +1796,11 @@ mod tests {
             .unwrap();
         connection
             .execute(
-                "INSERT INTO source_objects VALUES (1, 1, ?1, '/fixture', NULL, 1, ?2, NULL, NULL, NULL, NULL, NULL, NULL, 100, 20, 1, 1, 'active')",
+                "INSERT INTO source_objects (
+                    source_object_id, source_stream_id, object_key, display_path,
+                    generation, committed_cursor, size_bytes, mtime_ns,
+                    decoder_contract_version, last_commit_seq, state
+                ) VALUES (1, 1, ?1, '/fixture', 1, ?2, 100, 20, 1, 1, 'active')",
                 params![b"object".as_slice(), b"cursor".as_slice()],
             )
             .unwrap();

@@ -107,13 +107,7 @@ KNOWN_TELEMETRY_EVENT_NAMES = union_members("TelemetryEventName", TELEMETRY_TS)
 
 TELEMETRY_EVENT_DATA_KEYS = interface_fields("TelemetryEventData", TELEMETRY_TS)
 
-TELEMETRY_ENV_KEYS = {
-    "platform", "node_version", "terminal", "package_managers",
-    "runtimes", "is_running_with_bun", "is_ci", "is_claubbit",
-    "is_github_action", "is_claude_code_action", "is_claude_ai_auth",
-    "version", "arch", "is_claude_code_remote", "deployment_environment",
-    "is_conductor", "version_base",
-}
+TELEMETRY_ENV_KEYS = interface_fields("TelemetryEnv", TELEMETRY_TS)
 
 # StatsigCachedEvaluations outer keys
 STATSIG_CACHED_EVAL_OUTER = {"source", "data", "receivedAt", "stableID", "fullUserHash"}

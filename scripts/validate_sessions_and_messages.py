@@ -98,7 +98,7 @@ ALL_KNOWN_ENVELOPE_FIELDS = (
 )
 
 EXPECTED_ASSISTANT_CONTENT_BLOCK_TYPES = {
-    "thinking", "redacted_thinking", "text", "tool_use"
+    "thinking", "redacted_thinking", "text", "tool_use", "fallback"
 }
 
 EXPECTED_STOP_REASONS = {

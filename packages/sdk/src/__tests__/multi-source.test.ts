@@ -20,7 +20,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 
-import { createSpaghettiService } from '../index.js';
+import { createSpaghettiService } from '../legacy-oracle.js';
 import { createCodexSource } from '../sources/index.js';
 import type { SpaghettiAPI } from '../index.js';
 

@@ -31,8 +31,10 @@ export interface NapiTransportOptions {
 }
 
 export interface OpenNapiTransportOptions extends SpaghettiEngineOpenOptions {
-  /** Start the native Claude observer before returning the connected transport. */
+  /** Start one registered native observer before returning the connected transport. */
   observation?: {
+    /** Defaults to `claude-code` for compatibility. */
+    adapterId?: string;
     roots: string[];
     reason?: string;
   };
@@ -174,7 +176,13 @@ export async function openNapiTransport(options: OpenNapiTransportOptions): Prom
   const { observation, ...engineOptions } = options;
   const engine = await openSpaghettiEngine(engineOptions);
   try {
-    if (observation) await engine.startClaudeObservation(observation);
+    if (observation) {
+      await engine.startObservation({
+        adapterId: observation.adapterId ?? 'claude-code',
+        roots: observation.roots,
+        reason: observation.reason,
+      });
+    }
     return new NapiTransport({ engine, ownsEngine: true });
   } catch (error) {
     await engine.dispose();

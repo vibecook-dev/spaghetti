@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>API Reference — Spaghetti</title>
-  <meta name="description" content="Spaghetti SDK API reference: multi-agent createSpaghettiService, SourceFilter, Codex source, live updates, and React exports." />
+  <meta name="description" content="Spaghetti Rust observation SDK: createObservationService, canonical clients, multi-adapter queries, and durable changes." />
   <meta name="theme-color" content="#050607" />
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%232dd4bf'/%3E%3Ctext x='16' y='22' text-anchor='middle' font-family='monospace' font-size='14' font-weight='700' fill='%23042f2e'%3Esp%3C/text%3E%3C/svg%3E" />
   <script>
@@ -26,10 +26,7 @@
 <body>
   <nav class="nav" aria-label="Primary">
     <div class="nav-inner">
-      <a href="index.html" class="nav-brand">
-        <span class="nav-logo" aria-hidden="true">sp</span>
-        Spaghetti
-      </a>
+      <a href="index.html" class="nav-brand"><span class="nav-logo" aria-hidden="true">sp</span>Spaghetti</a>
       <ul class="nav-links" id="nav-links">
         <li><a href="index.html#features">Features</a></li>
         <li><a href="index.html#architecture">Architecture</a></li>
@@ -38,12 +35,9 @@
         <li><a href="api.html" class="active">API</a></li>
       </ul>
       <div class="nav-actions">
-        <button type="button" class="theme-toggle" data-theme-toggle aria-label="Toggle theme" title="Toggle theme">
-          <span class="icon-moon" aria-hidden="true">☾</span>
-          <span class="icon-sun" aria-hidden="true">☀</span>
-        </button>
+        <button type="button" class="theme-toggle" data-theme-toggle aria-label="Toggle theme" title="Toggle theme"><span class="icon-moon" aria-hidden="true">☾</span><span class="icon-sun" aria-hidden="true">☀</span></button>
         <a class="btn btn-ghost btn-sm" href="https://github.com/vibecook-dev/spaghetti" target="_blank" rel="noopener">GitHub</a>
-        <a class="btn btn-primary btn-sm" href="index.html#install">Get started</a>
+        <a class="btn btn-primary btn-sm" href="#install">Get started</a>
         <button class="nav-toggle" id="nav-toggle" aria-label="Menu" aria-expanded="false">☰</button>
       </div>
     </div>
@@ -54,1106 +48,115 @@
       <h4>Getting started</h4>
       <a href="#install">Install</a>
       <a href="#quickstart">Quickstart</a>
-      <a href="#create">createSpaghettiService</a>
-      <a href="#multi-source">Multi-source</a>
-      <a href="#engines">Engine selection</a>
-
-      <h4>SpaghettiAPI</h4>
+      <a href="#options">Options</a>
+      <h4>Product service</h4>
       <a href="#lifecycle">Lifecycle</a>
-      <a href="#projects">Projects &amp; sessions</a>
-      <a href="#artifacts">Artifacts</a>
-      <a href="#search">Search &amp; stats</a>
+      <a href="#queries">Queries</a>
       <a href="#events">Events</a>
-      <a href="#live">Live updates</a>
-
-      <h4>Types</h4>
-      <a href="#types-list">List &amp; page types</a>
-      <a href="#types-search">Search types</a>
-      <a href="#types-options">Service options</a>
-
-      <h4>React</h4>
-      <a href="#react">React exports</a>
-      <a href="#react-live">Live hooks</a>
-
-      <h4>More</h4>
-      <a href="#paths">Default paths</a>
-      <a href="#errors">Errors &amp; disposal</a>
+      <h4>Canonical API</h4>
+      <a href="#host">Observation host</a>
+      <a href="#client">Client transports</a>
+      <a href="#ownership">Ownership</a>
     </aside>
 
     <main class="api-main">
-      <div class="eyebrow">@vibecook/spaghetti-sdk</div>
+      <div class="eyebrow">@vibecook/spaghetti-sdk · RFC 011</div>
       <h1 style="font-size:clamp(2rem,4vw,2.75rem);margin-bottom:12px">API reference</h1>
-      <p class="lead">
-        Index Claude Code and Codex data into one SQLite store, query with
-        source-scoped reads, run full-text search, and subscribe to live updates.
-        Same surface the CLI uses — version <strong>0.5.17</strong>.
-      </p>
+      <p class="lead">One async product service over a Rust-owned canonical database. Claude Code, Codex, and Grok use the same adapter-neutral query contract.</p>
 
-      <!-- Install -->
       <section class="api-section" id="install">
         <h2>Install</h2>
-        <p class="section-desc">Installs a platform-specific native binary via optional dependencies. If the binary is missing, the TypeScript engine takes over automatically — no flags required.</p>
-        <div class="code-block">
-          <div class="code-header">
-            <span>shell</span>
-            <button class="copy-btn" type="button" data-copy>Copy</button>
-          </div>
-          <pre><code>npm install @vibecook/spaghetti-sdk
-<span class="c-cm"># or</span>
-pnpm add @vibecook/spaghetti-sdk</code></pre>
-        </div>
-        <div class="callout">
-          <span>ⓘ</span>
-          <div>
-            <strong>Peer deps:</strong> React 19 is optional and only required for
-            <code>@vibecook/spaghetti-sdk/react</code>. Runtime needs Node ≥ 18 and
-            <code>better-sqlite3</code> (prebuilds for common platforms).
-          </div>
-        </div>
+        <p class="section-desc">Requires a supported platform prebuild for <code>@vibecook/spaghetti-sdk-native</code> and Node ≥ 22.13.0.</p>
+        <div class="code-block"><div class="code-header"><span>shell</span><button class="copy-btn" type="button" data-copy>Copy</button></div><pre><code>npm install @vibecook/spaghetti-sdk</code></pre></div>
+        <div class="callout"><span>ⓘ</span><div><strong>Rust only:</strong> a missing native binary is an actionable startup error. The retired TypeScript engine is not a package export or fallback.</div></div>
       </section>
 
-      <!-- Quickstart -->
       <section class="api-section" id="quickstart">
         <h2>Quickstart</h2>
-        <p class="section-desc">Create a service, initialize once (cold or warm start), query, then dispose.</p>
-        <div class="code-block">
-          <div class="code-header">
-            <span>app.ts</span>
-            <button class="copy-btn" type="button" data-copy>Copy</button>
-          </div>
-          <pre><code><span class="c-kw">import</span> {
-  createSpaghettiService,
-  createCodexSource,
-} <span class="c-kw">from</span> <span class="c-str">'@vibecook/spaghetti-sdk'</span>;
+        <p class="section-desc">Configure explicit roots, initialize once, await reads, and always dispose.</p>
+        <div class="code-block"><div class="code-header"><span>app.ts</span><button class="copy-btn" type="button" data-copy>Copy</button></div>
+<pre><code><span class="c-kw">import</span> { homedir } <span class="c-kw">from</span> <span class="c-str">'node:os'</span>;
+<span class="c-kw">import</span> { join } <span class="c-kw">from</span> <span class="c-str">'node:path'</span>;
+<span class="c-kw">import</span> { createObservationService } <span class="c-kw">from</span> <span class="c-str">'@vibecook/spaghetti-sdk'</span>;
 
-<span class="c-kw">const</span> api = <span class="c-fn">createSpaghettiService</span>({
-  additionalSources: [<span class="c-fn">createCodexSource</span>()],
-});
-
-api.<span class="c-fn">onProgress</span>((p) => {
-  console.<span class="c-fn">log</span>(p.phase, p.message, p.current, p.total);
+<span class="c-kw">const</span> api = <span class="c-fn">createObservationService</span>({
+  dbPath: <span class="c-fn">join</span>(<span class="c-fn">homedir</span>(), <span class="c-str">'.spaghetti/cache/spaghetti-rs.db'</span>),
+  sources: [
+    { adapterId: <span class="c-str">'claude-code'</span>, roots: [<span class="c-fn">join</span>(<span class="c-fn">homedir</span>(), <span class="c-str">'.claude'</span>)] },
+    { adapterId: <span class="c-str">'codex'</span>, roots: [<span class="c-fn">join</span>(<span class="c-fn">homedir</span>(), <span class="c-str">'.codex'</span>)] },
+    { adapterId: <span class="c-str">'grok'</span>, roots: [<span class="c-fn">join</span>(<span class="c-fn">homedir</span>(), <span class="c-str">'.grok'</span>)] },
+  ],
+  live: <span class="c-kw">true</span>,
 });
 
 <span class="c-kw">await</span> api.<span class="c-fn">initialize</span>();
-
-<span class="c-kw">const</span> projects = api.<span class="c-fn">getProjectList</span>();
-<span class="c-kw">const</span> p = projects[<span class="c-num">0</span>];
-<span class="c-kw">const</span> sessions = api.<span class="c-fn">getSessionList</span>(p);
-<span class="c-kw">const</span> page = api.<span class="c-fn">getSessionMessages</span>(
-  sessions[<span class="c-num">0</span>].projectSlug,
-  sessions[<span class="c-num">0</span>].sessionId,
-  <span class="c-num">50</span>,
-  <span class="c-num">0</span>,
-  { sourceId: sessions[<span class="c-num">0</span>].sourceId },
-);
-<span class="c-kw">const</span> hits = api.<span class="c-fn">search</span>({ text: <span class="c-str">'refactor parser'</span>, limit: <span class="c-num">20</span> });
-
-<span class="c-kw">await</span> api.<span class="c-fn">dispose</span>(); <span class="c-cm">// preferred over shutdown()</span></code></pre>
-        </div>
+<span class="c-kw">const</span> projects = <span class="c-kw">await</span> api.<span class="c-fn">getProjectList</span>();
+<span class="c-kw">const</span> sourceId = projects[<span class="c-num">0</span>].members[<span class="c-num">0</span>].sourceId;
+<span class="c-kw">const</span> sessions = <span class="c-kw">await</span> api.<span class="c-fn">getSessionList</span>(projects[<span class="c-num">0</span>], { sourceId });
+<span class="c-kw">const</span> hits = <span class="c-kw">await</span> api.<span class="c-fn">search</span>({ text: <span class="c-str">'refactor parser'</span>, sourceId });
+<span class="c-kw">await</span> api.<span class="c-fn">dispose</span>();</code></pre></div>
       </section>
 
-      <!-- createSpaghettiService -->
-      <section class="api-section" id="create">
-        <h2>createSpaghettiService</h2>
-        <p class="section-desc">Factory that wires FileService, shared SqliteService, parsers, ingest, and the public app service.</p>
-        <div class="code-block mb-24">
-          <div class="code-header"><span>signature</span></div>
-          <pre><code><span class="c-kw">function</span> <span class="c-fn">createSpaghettiService</span>(
-  options?: <span class="c-type">SpaghettiServiceOptions</span>
-): <span class="c-type">SpaghettiAPI</span></code></pre>
-        </div>
-        <table class="options-table">
-          <thead>
-            <tr>
-              <th>Option</th>
-              <th>Type</th>
-              <th>Default</th>
-              <th>Description</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr>
-              <td>claudeDir</td>
-              <td>string</td>
-              <td><code>~/.claude</code></td>
-              <td>Claude Code data root. Ignored when <code>source</code> is set.</td>
-            </tr>
-            <tr>
-              <td>source</td>
-              <td>AgentSource</td>
-              <td>Claude Code</td>
-              <td>Primary agent adapter. Defaults to <code>createClaudeCodeSource()</code>.</td>
-            </tr>
-            <tr>
-              <td>additionalSources</td>
-              <td>AgentSource[]</td>
-              <td><code>[]</code></td>
-              <td>Extra agents into the <strong>same</strong> store (e.g. <code>createCodexSource()</code>). CLI auto-detects <code>~/.codex/sessions</code>.</td>
-            </tr>
-            <tr>
-              <td>dbPath</td>
-              <td>string</td>
-              <td><code>~/.spaghetti/cache/spaghetti-{rs,ts}.db</code></td>
-              <td>SQLite index path. Per-engine default so switching engines does not force a re-ingest.</td>
-            </tr>
-            <tr>
-              <td>engine</td>
-              <td><code>'rs' | 'ts'</code></td>
-              <td>resolved</td>
-              <td>Pin ingest engine for this instance. Wins over env and config. Codex always uses the TS path.</td>
-            </tr>
-            <tr>
-              <td>live</td>
-              <td>boolean</td>
-              <td><code>false</code></td>
-              <td>Start filesystem watchers and expose <code>api.live</code> (Claude + Codex when present).</td>
-            </tr>
-            <tr>
-              <td>dataService</td>
-              <td>ClaudeCodeAgentDataService</td>
-              <td>—</td>
-              <td>Inject a custom/mock implementation for tests.</td>
-            </tr>
-            <tr>
-              <td>errorSink</td>
-              <td>ErrorSink</td>
-              <td>console.warn</td>
-              <td>Unified sink for live-pipeline and internal errors.</td>
-            </tr>
-          </tbody>
-        </table>
+      <section class="api-section" id="options">
+        <h2>createObservationService</h2>
+        <pre><code><span class="c-kw">function</span> <span class="c-fn">createObservationService</span>(options: <span class="c-type">ObservationServiceOptions</span>): <span class="c-type">ObservationService</span></code></pre>
+        <table class="options-table"><thead><tr><th>Option</th><th>Type</th><th>Default</th><th>Description</th></tr></thead><tbody>
+          <tr><td>dbPath</td><td>string</td><td>required</td><td>File-backed database exclusively owned by this host.</td></tr>
+          <tr><td>sources</td><td>ObservationHostSource[]</td><td>required</td><td>Unique adapter IDs with one or more explicit native roots.</td></tr>
+          <tr><td>queryWorkers</td><td>number</td><td>2</td><td>Persistent read-only SQLite workers.</td></tr>
+          <tr><td>ownerLabel</td><td>string</td><td>SDK label</td><td>Diagnostic owner metadata.</td></tr>
+          <tr><td>live</td><td>boolean</td><td>true</td><td>Subscribe to durable committed changes.</td></tr>
+          <tr><td>signal</td><td>AbortSignal</td><td>—</td><td>Cancel startup with complete partial-owner cleanup.</td></tr>
+        </tbody></table>
       </section>
 
-      <!-- Multi-source -->
-      <section class="api-section" id="multi-source">
-        <h2>Multi-source (RFC 006)</h2>
-        <p class="section-desc">
-          One index, <code>source_id</code> column — not one DB per agent. Project PK is
-          composite <code>(source_id, slug)</code>. The project list aggregates agents that worked in
-          the same directory; pass its stable project locator when drilling into sessions.
-        </p>
-        <div class="code-block mb-24">
-          <div class="code-header"><span>multi-source.ts</span><button class="copy-btn" type="button" data-copy>Copy</button></div>
-          <pre><code><span class="c-kw">import</span> {
-  createSpaghettiService,
-  createCodexSource,
-  defaultCodexDir,
-} <span class="c-kw">from</span> <span class="c-str">'@vibecook/spaghetti-sdk'</span>;
-
-<span class="c-kw">const</span> api = <span class="c-fn">createSpaghettiService</span>({
-  additionalSources: [<span class="c-fn">createCodexSource</span>({ rootDir: <span class="c-fn">defaultCodexDir</span>() })],
-});
-<span class="c-kw">await</span> api.<span class="c-fn">initialize</span>();
-
-api.<span class="c-fn">getSourceIds</span>();                        <span class="c-cm">// ['claude-code', 'codex']</span>
-api.<span class="c-fn">getProjectList</span>({ sourceId: <span class="c-str">'codex'</span> }); <span class="c-cm">// Codex only</span>
-
-<span class="c-kw">const</span> p = api.<span class="c-fn">getProjectList</span>().<span class="c-fn">find</span>((x) =&gt; x.sourceIds.<span class="c-fn">includes</span>(<span class="c-str">'codex'</span>))!;
-api.<span class="c-fn">getSessionList</span>(p); <span class="c-cm">// sessions from every agent in this workspace</span></code></pre>
-        </div>
-        <div class="callout">
-          <span>ⓘ</span>
-          <div>
-            <strong>Codex tokens:</strong> official usage from <code>token_count</code> events;
-            when missing, tiktoken estimates visible text and sets
-            <code>tokensEstimated: true</code> (UI shows <code>~N</code>).
-          </div>
-        </div>
-      </section>
-
-      <!-- Engines -->
-      <section class="api-section" id="engines">
-        <h2>Engine selection</h2>
-        <p class="section-desc">Resolution order (first match wins). Per-instance <code>engine</code> on the factory is independent of process-wide resolution used when the option is omitted.</p>
-        <div class="code-block mb-24">
-          <div class="code-header"><span>resolution order</span></div>
-          <pre><code><span class="c-num">1.</span> createSpaghettiService({ engine: <span class="c-str">'rs'</span> | <span class="c-str">'ts'</span> })
-<span class="c-num">2.</span> SPAG_ENGINE=ts|rs
-<span class="c-num">3.</span> SPAG_NATIVE_INGEST=0|1   <span class="c-cm">// legacy</span>
-<span class="c-num">4.</span> ~/.spaghetti/config.json → { <span class="c-str">"engine"</span>: <span class="c-str">"rs"</span> }
-<span class="c-num">5.</span> Default: <span class="c-str">rs</span></code></pre>
-        </div>
-        <div class="callout warn">
-          <span>⚠</span>
-          <div>
-            <strong>Two instances, one DB:</strong> avoid opening the same
-            <code>dbPath</code> from two services in one process — risks
-            <code>SQLITE_BUSY</code>. Use separate paths for parallel indexes.
-          </div>
-        </div>
-      </section>
-
-      <!-- Lifecycle -->
       <section class="api-section" id="lifecycle">
         <h2>Lifecycle</h2>
-        <p class="section-desc">Initialize runs cold start (empty DB) or warm start (fingerprint diff). Always call dispose/shutdown when done.</p>
-
-        <div class="method-group">
-          <h3>Methods</h3>
-
-          <div class="method open">
-            <div class="method-header" data-toggle>
-              <span class="method-chevron">▶</span>
-              <div class="method-sig">
-                <span class="name">initialize</span><span class="params">()</span>: <span class="ret">Promise&lt;void&gt;</span>
-              </div>
-              <span class="method-badge async">async</span>
-            </div>
-            <div class="method-body">
-              <p>Parse source data, write/update the SQLite index, build FTS. Emits progress via <code>onProgress</code> and fires <code>onReady</code> when complete.</p>
-            </div>
-          </div>
-
-          <div class="method">
-            <div class="method-header" data-toggle>
-              <span class="method-chevron">▶</span>
-              <div class="method-sig">
-                <span class="name">shutdown</span><span class="params">()</span>: <span class="ret">void</span>
-              </div>
-              <span class="method-badge sync">sync</span>
-            </div>
-            <div class="method-body">
-              <p>Fire-and-forget teardown: stop watchers, close the database. Prefer <code>dispose()</code> when you can await.</p>
-            </div>
-          </div>
-
-          <div class="method">
-            <div class="method-header" data-toggle>
-              <span class="method-chevron">▶</span>
-              <div class="method-sig">
-                <span class="name">dispose</span><span class="params">()</span>: <span class="ret">Promise&lt;void&gt;</span>
-              </div>
-              <span class="method-badge async">async</span>
-            </div>
-            <div class="method-body">
-              <p>Awaitable teardown. Stops the live pipeline, drains in-flight writes, disposes subscribers, closes SQLite.</p>
-            </div>
-          </div>
-
-          <div class="method">
-            <div class="method-header" data-toggle>
-              <span class="method-chevron">▶</span>
-              <div class="method-sig">
-                <span class="name">rebuildIndex</span><span class="params">()</span>: <span class="ret">Promise&lt;{ durationMs: number }&gt;</span>
-              </div>
-              <span class="method-badge async">async</span>
-            </div>
-            <div class="method-body">
-              <p>Force a full cold rebuild. Closes the DB, deletes its files, re-ingests from scratch via native Rust (with TS fallback). Use after schema bumps or when the index looks out of sync.</p>
-            </div>
-          </div>
-
-          <div class="method">
-            <div class="method-header" data-toggle>
-              <span class="method-chevron">▶</span>
-              <div class="method-sig">
-                <span class="name">isReady</span><span class="params">()</span>: <span class="ret">boolean</span>
-              </div>
-              <span class="method-badge sync">sync</span>
-            </div>
-            <div class="method-body">
-              <p>Whether the service finished initialize and can accept queries.</p>
-            </div>
-          </div>
-        </div>
+        <ul><li><code>initialize(): Promise&lt;void&gt;</code></li><li><code>isReady(): boolean</code></li><li><code>rebuildIndex(): Promise&lt;{ durationMs: number }&gt;</code></li><li><code>snapshot(signal?): Promise&lt;ObservationHostSnapshot&gt;</code></li><li><code>dispose(): Promise&lt;void&gt;</code></li></ul>
+        <p><code>shutdown()</code> starts disposal for compatibility; await <code>dispose()</code> whenever teardown ordering matters.</p>
       </section>
 
-      <!-- Projects -->
-      <section class="api-section" id="projects">
-        <h2>Projects &amp; sessions</h2>
-        <p class="section-desc">Primary navigation surface. Lists are sorted by recency.</p>
-
-        <div class="method-group">
-          <h3>Methods</h3>
-
-          <div class="method">
-            <div class="method-header" data-toggle>
-              <span class="method-chevron">▶</span>
-              <div class="method-sig">
-                <span class="name">getSourceIds</span><span class="params">()</span>: <span class="ret">string[]</span>
-              </div>
-              <span class="method-badge sync">sync</span>
-            </div>
-            <div class="method-body">
-              <p>Distinct agent sources present in the index (e.g. <code>['claude-code', 'codex']</code>).</p>
-            </div>
-          </div>
-
-          <div class="method">
-            <div class="method-header" data-toggle>
-              <span class="method-chevron">▶</span>
-              <div class="method-sig">
-                <span class="name">getProjectList</span><span class="params">(options?)</span>: <span class="ret">ProjectListItem[]</span>
-              </div>
-              <span class="method-badge sync">sync</span>
-            </div>
-            <div class="method-body">
-              <p>Unique workspaces sorted by last active date. Each item includes its stable <code>projectId</code>, exact source/slug <code>members</code>, <code>sourceIds</code>, session counts, token totals, and <code>tokensEstimated</code>.</p>
-              <table class="param-table">
-                <thead><tr><th>Param</th><th>Type</th><th>Description</th></tr></thead>
-                <tbody>
-                  <tr><td>options.sourceId</td><td>string?</td><td>Optional filter to one agent source.</td></tr>
-                </tbody>
-              </table>
-            </div>
-          </div>
-
-          <div class="method">
-            <div class="method-header" data-toggle>
-              <span class="method-chevron">▶</span>
-              <div class="method-sig">
-                <span class="name">getSessionList</span><span class="params">(project, options?)</span>: <span class="ret">SessionListItem[]</span>
-              </div>
-              <span class="method-badge sync">sync</span>
-            </div>
-            <div class="method-body">
-              <p>Sessions for a project sorted by last update. Pass a <code>ProjectListItem</code> (or other <code>ProjectLocator</code>) for exact multi-agent lookup. A slug string remains available for legacy callers.</p>
-              <table class="param-table">
-                <thead><tr><th>Param</th><th>Type</th><th>Description</th></tr></thead>
-                <tbody>
-                  <tr><td>project</td><td>ProjectReference</td><td>Stable project locator, or a legacy project slug string.</td></tr>
-                  <tr><td>options.sourceId</td><td>string?</td><td>Optional agent scope for legacy slug calls.</td></tr>
-                </tbody>
-              </table>
-            </div>
-          </div>
-
-          <div class="method">
-            <div class="method-header" data-toggle>
-              <span class="method-chevron">▶</span>
-              <div class="method-sig">
-                <span class="name">getSessionMessages</span><span class="params">(projectSlug, sessionId, limit?, offset?, options?)</span>: <span class="ret">MessagePage</span>
-              </div>
-              <span class="method-badge sync">sync</span>
-            </div>
-            <div class="method-body">
-              <p>Paginated messages. Payloads preserve the source-native record (Claude JSONL or Codex rollout line). Optional <code>sourceId</code> for defense in depth.</p>
-              <table class="param-table">
-                <thead><tr><th>Param</th><th>Type</th><th>Description</th></tr></thead>
-                <tbody>
-                  <tr><td>projectSlug</td><td>string</td><td>Project slug.</td></tr>
-                  <tr><td>sessionId</td><td>string</td><td>Session UUID.</td></tr>
-                  <tr><td>limit</td><td>number?</td><td>Page size (default 30).</td></tr>
-                  <tr><td>offset</td><td>number?</td><td>Row offset.</td></tr>
-                  <tr><td>options.sourceId</td><td>string?</td><td>Optional agent scope.</td></tr>
-                </tbody>
-              </table>
-            </div>
-          </div>
-
-          <div class="method">
-            <div class="method-header" data-toggle>
-              <span class="method-chevron">▶</span>
-              <div class="method-sig">
-                <span class="name">getProjectMemory</span><span class="params">(project, options?)</span>: <span class="ret">string | null</span>
-              </div>
-              <span class="method-badge sync">sync</span>
-            </div>
-            <div class="method-body">
-              <p>Project <code>MEMORY.md</code>. Claude-only today — returns <code>null</code> when <code>sourceId</code> is not <code>claude-code</code>.</p>
-            </div>
-          </div>
+      <section class="api-section" id="queries">
+        <h2>Async product queries</h2>
+        <div class="method-grid">
+          <article class="method-card"><h3>History</h3><p><code>getSourceIds</code>, <code>getProjectList</code>, <code>getSessionList</code>, <code>getSessionMessages</code>, timeline and facets.</p></article>
+          <article class="method-card"><h3>Artifacts</h3><p>Memory, todos, tasks, plans, tool results, subagents, workflows, and teams.</p></article>
+          <article class="method-card"><h3>Discovery</h3><p><code>search</code>, token activity, and <code>getStats</code>. Multi-source drill-downs accept <code>sourceId</code>.</p></article>
         </div>
+        <p>Returned message DTOs are identical across adapters. Source-native envelopes stay in Rust detail storage and are never interpreted by applications.</p>
       </section>
 
-      <!-- Artifacts -->
-      <section class="api-section" id="artifacts">
-        <h2>Artifacts</h2>
-        <p class="section-desc">Plans, todos, memory, subagents, workflows, tool results, and teams.</p>
-
-        <div class="method-group">
-          <h3>Methods</h3>
-
-          <div class="method">
-            <div class="method-header" data-toggle>
-              <span class="method-chevron">▶</span>
-              <div class="method-sig">
-                <span class="name">getProjectMemory</span><span class="params">(project)</span>: <span class="ret">string | null</span>
-              </div>
-              <span class="method-badge sync">sync</span>
-            </div>
-            <div class="method-body">
-              <p>Raw <code>MEMORY.md</code> content for a project, or null if absent.</p>
-            </div>
-          </div>
-
-          <div class="method">
-            <div class="method-header" data-toggle>
-              <span class="method-chevron">▶</span>
-              <div class="method-sig">
-                <span class="name">getSessionTodos</span><span class="params">(projectSlug, sessionId)</span>: <span class="ret">unknown[]</span>
-              </div>
-              <span class="method-badge sync">sync</span>
-            </div>
-            <div class="method-body">
-              <p>Todo items for a session (agent-scoped todo files under <code>~/.claude/todos/</code>).</p>
-            </div>
-          </div>
-
-          <div class="method">
-            <div class="method-header" data-toggle>
-              <span class="method-chevron">▶</span>
-              <div class="method-sig">
-                <span class="name">getSessionPlan</span><span class="params">(projectSlug, sessionId)</span>: <span class="ret">unknown | null</span>
-              </div>
-              <span class="method-badge sync">sync</span>
-            </div>
-            <div class="method-body">
-              <p>Plan linked to the session, if any.</p>
-            </div>
-          </div>
-
-          <div class="method">
-            <div class="method-header" data-toggle>
-              <span class="method-chevron">▶</span>
-              <div class="method-sig">
-                <span class="name">getSessionTask</span><span class="params">(projectSlug, sessionId)</span>: <span class="ret">unknown | null</span>
-              </div>
-              <span class="method-badge sync">sync</span>
-            </div>
-            <div class="method-body">
-              <p>Task metadata (highwatermark / lock presence). Task item bodies are not fully ingested.</p>
-            </div>
-          </div>
-
-          <div class="method">
-            <div class="method-header" data-toggle>
-              <span class="method-chevron">▶</span>
-              <div class="method-sig">
-                <span class="name">getToolResult</span><span class="params">(projectSlug, sessionId, toolUseId)</span>: <span class="ret">string | null</span>
-              </div>
-              <span class="method-badge sync">sync</span>
-            </div>
-            <div class="method-body">
-              <p>Persisted tool result text for a tool_use id.</p>
-            </div>
-          </div>
-
-          <div class="method">
-            <div class="method-header" data-toggle>
-              <span class="method-chevron">▶</span>
-              <div class="method-sig">
-                <span class="name">getSessionSubagents</span><span class="params">(projectSlug, sessionId, options?)</span>: <span class="ret">SubagentListItem[]</span>
-              </div>
-              <span class="method-badge sync">sync</span>
-            </div>
-            <div class="method-body">
-              <p>Subagent metadata with normalized message counts and parent Task/Agent linkage. Pass <code>{ includeNested: true }</code> to include workflow-nested agents.</p>
-            </div>
-          </div>
-
-          <div class="method">
-            <div class="method-header" data-toggle>
-              <span class="method-chevron">▶</span>
-              <div class="method-sig">
-                <span class="name">getSubagentTimeline</span><span class="params">(projectSlug, sessionId, agentId, request)</span>: <span class="ret">SubagentTimelinePage</span>
-              </div>
-              <span class="method-badge sync">sync</span>
-            </div>
-            <div class="method-body">
-              <p>DB-filtered, independently paginated display rows for an inline subagent branch. Raw sidecar messages remain available through <code>getSubagentMessages</code>.</p>
-            </div>
-          </div>
-
-          <div class="method">
-            <div class="method-header" data-toggle>
-              <span class="method-chevron">▶</span>
-              <div class="method-sig">
-                <span class="name">getSubagentMessages</span><span class="params">(projectSlug, sessionId, agentId, limit?, offset?)</span>: <span class="ret">SubagentMessagePage</span>
-              </div>
-              <span class="method-badge sync">sync</span>
-            </div>
-            <div class="method-body">
-              <p>Paginated messages from a subagent transcript.</p>
-            </div>
-          </div>
-
-          <div class="method">
-            <div class="method-header" data-toggle>
-              <span class="method-chevron">▶</span>
-              <div class="method-sig">
-                <span class="name">getSessionWorkflows</span><span class="params">(projectSlug, sessionId)</span>: <span class="ret">WorkflowListItem[]</span>
-              </div>
-              <span class="method-badge sync">sync</span>
-            </div>
-            <div class="method-body">
-              <p>Agent-orchestration workflow runs for a session (schema v4+).</p>
-            </div>
-          </div>
-
-          <div class="method">
-            <div class="method-header" data-toggle>
-              <span class="method-chevron">▶</span>
-              <div class="method-sig">
-                <span class="name">getWorkflowSubagents</span><span class="params">(projectSlug, sessionId, workflowId)</span>: <span class="ret">SubagentListItem[]</span>
-              </div>
-              <span class="method-badge sync">sync</span>
-            </div>
-            <div class="method-body">
-              <p>Subagents that ran under a specific workflow.</p>
-            </div>
-          </div>
-
-          <div class="method">
-            <div class="method-header" data-toggle>
-              <span class="method-chevron">▶</span>
-              <div class="method-sig">
-                <span class="name">getTeams</span><span class="params">()</span>: <span class="ret">TeamDirectory[]</span>
-              </div>
-              <span class="method-badge sync">sync</span>
-            </div>
-            <div class="method-body">
-              <p>Agent teams from <code>~/.claude/teams/</code>. Empty when the feature is unused. <code>config</code> may be null for orphaned team dirs.</p>
-            </div>
-          </div>
-        </div>
-      </section>
-
-      <!-- Search -->
-      <section class="api-section" id="search">
-        <h2>Search &amp; stats</h2>
-        <p class="section-desc">FTS5 over message text (and auxiliary entities). Stats reflect the open SQLite store.</p>
-
-        <div class="method-group">
-          <h3>Methods</h3>
-
-          <div class="method open">
-            <div class="method-header" data-toggle>
-              <span class="method-chevron">▶</span>
-              <div class="method-sig">
-                <span class="name">search</span><span class="params">(query)</span>: <span class="ret">SearchResultSet</span>
-              </div>
-              <span class="method-badge sync">sync</span>
-            </div>
-            <div class="method-body">
-              <p>Full-text search. Supports optional filters by segment type, project, session, and pagination.</p>
-              <div class="code-block">
-                <div class="code-header"><span>example</span><button class="copy-btn" type="button" data-copy>Copy</button></div>
-                <pre><code><span class="c-kw">const</span> { results, total, hasMore } = api.<span class="c-fn">search</span>({
-  text: <span class="c-str">'worker pool'</span>,
-  projectSlug: <span class="c-str">'-Users-me-Projects-app'</span>,
-  limit: <span class="c-num">25</span>,
-  offset: <span class="c-num">0</span>,
-});</code></pre>
-              </div>
-            </div>
-          </div>
-
-          <div class="method">
-            <div class="method-header" data-toggle>
-              <span class="method-chevron">▶</span>
-              <div class="method-sig">
-                <span class="name">getStats</span><span class="params">()</span>: <span class="ret">StoreStats</span>
-              </div>
-              <span class="method-badge sync">sync</span>
-            </div>
-            <div class="method-body">
-              <p>Aggregate store statistics: segment counts by type, fingerprint count, DB size, and search index size.</p>
-            </div>
-          </div>
-        </div>
-      </section>
-
-      <!-- Events -->
       <section class="api-section" id="events">
-        <h2>Events</h2>
-        <p class="section-desc">Subscribe to init progress, ready, and coarse data-change batches. For fine-grained live events, use <code>api.live</code>.</p>
-
-        <div class="method-group">
-          <h3>Methods</h3>
-
-          <div class="method">
-            <div class="method-header" data-toggle>
-              <span class="method-chevron">▶</span>
-              <div class="method-sig">
-                <span class="name">onProgress</span><span class="params">(cb)</span>: <span class="ret">() =&gt; void</span>
-              </div>
-              <span class="method-badge sync">sync</span>
-            </div>
-            <div class="method-body">
-              <p>Subscribe to init progress. Callback receives <code>InitProgress</code> with phase, message, and optional current/total. Returns unsubscribe.</p>
-            </div>
-          </div>
-
-          <div class="method">
-            <div class="method-header" data-toggle>
-              <span class="method-chevron">▶</span>
-              <div class="method-sig">
-                <span class="name">onReady</span><span class="params">(cb)</span>: <span class="ret">() =&gt; void</span>
-              </div>
-              <span class="method-badge sync">sync</span>
-            </div>
-            <div class="method-body">
-              <p>Fires once when initialize completes with <code>{ durationMs }</code>.</p>
-            </div>
-          </div>
-
-          <div class="method">
-            <div class="method-header" data-toggle>
-              <span class="method-chevron">▶</span>
-              <div class="method-sig">
-                <span class="name">onChange</span><span class="params">(cb)</span>: <span class="ret">() =&gt; void</span>
-              </div>
-              <span class="method-badge sync">sync</span>
-            </div>
-            <div class="method-body">
-              <p>Coarse segment change batches during ingest/reconcile. For live file appends, prefer <code>api.live.onChange</code>.</p>
-            </div>
-          </div>
-        </div>
+        <h2>Lifecycle and change events</h2>
+        <pre><code><span class="c-kw">const</span> offProgress = api.<span class="c-fn">onProgress</span>((progress) =&gt; console.log(progress));
+<span class="c-kw">const</span> offReady = api.<span class="c-fn">onReady</span>((info) =&gt; console.log(info.durationMs));
+<span class="c-kw">const</span> offChange = api.<span class="c-fn">onChange</span>(() =&gt; refreshVisibleSnapshot());</code></pre>
+        <p>Changes are durable projection invalidations. Consumers refresh through queries instead of decoding source paths or maintaining a second event-semantic authority.</p>
       </section>
 
-      <!-- Live -->
-      <section class="api-section" id="live">
-        <h2>Live updates</h2>
-        <p class="section-desc">
-          Present only when constructed with <code>{ live: true }</code>. Watchers keep SQLite warm;
-          typed <code>Change</code> events fan out after each commit.
-        </p>
-
-        <div class="code-block mb-24">
-          <div class="code-header"><span>live.ts</span><button class="copy-btn" type="button" data-copy>Copy</button></div>
-          <pre><code><span class="c-kw">const</span> api = <span class="c-fn">createSpaghettiService</span>({ live: <span class="c-kw">true</span> });
-<span class="c-kw">await</span> api.<span class="c-fn">initialize</span>();
-
-<span class="c-kw">const</span> dispose = api.live!.<span class="c-fn">onChange</span>(
-  { type: <span class="c-str">'session'</span>, slug, sessionId },
-  (e) => {
-    <span class="c-kw">if</span> (e.type === <span class="c-str">'session.message.added'</span>) {
-      console.<span class="c-fn">log</span>(e.message);
-    }
-  },
-);
-
-<span class="c-cm">// Async iterable form</span>
-<span class="c-kw">for await</span> (<span class="c-kw">const</span> e <span class="c-kw">of</span> api.live!.<span class="c-fn">events</span>()) {
-  console.<span class="c-fn">log</span>(e.type, e.seq);
-}
-
-dispose();</code></pre>
-        </div>
-
-        <div class="method-group">
-          <h3>api.live surface</h3>
-
-          <div class="method">
-            <div class="method-header" data-toggle>
-              <span class="method-chevron">▶</span>
-              <div class="method-sig">
-                <span class="name">onChange</span><span class="params">(listener | topic, listener, options?)</span>: <span class="ret">Dispose</span>
-              </div>
-              <span class="method-badge live">live</span>
-            </div>
-            <div class="method-body">
-              <p>Firehose or scoped subscribe. Prewarms the relevant watcher scope. Returns a dispose handle. Supports single-event or coalesced batch delivery via options.</p>
-            </div>
-          </div>
-
-          <div class="method">
-            <div class="method-header" data-toggle>
-              <span class="method-chevron">▶</span>
-              <div class="method-sig">
-                <span class="name">events</span><span class="params">(options?)</span>: <span class="ret">AsyncIterable&lt;Change&gt;</span>
-              </div>
-              <span class="method-badge live">live</span>
-            </div>
-            <div class="method-body">
-              <p>Async iterable over changes. Bounded ring buffer with drop-oldest on overflow. Options: <code>bufferSize</code>, <code>onDrop</code>.</p>
-            </div>
-          </div>
-
-          <div class="method">
-            <div class="method-header" data-toggle>
-              <span class="method-chevron">▶</span>
-              <div class="method-sig">
-                <span class="name">prewarm</span><span class="params">(topic)</span>: <span class="ret">Dispose</span>
-              </div>
-              <span class="method-badge live">live</span>
-            </div>
-            <div class="method-body">
-              <p>Explicit watcher attachment without a subscriber. Ref-counted; dispose detaches when last ref drops.</p>
-            </div>
-          </div>
-        </div>
-
-        <div class="type-card mt-32">
-          <div class="type-card-header">
-            <h3>Change</h3>
-            <span class="kind">union</span>
-          </div>
-          <p>Discriminated by <code>type</code>. Each event carries <code>seq</code> (in-memory monotonic) and <code>ts</code>.</p>
-          <div class="code-block">
-            <pre><code><span class="c-str">'session.message.added'</span>   <span class="c-cm">// new message append</span>
-<span class="c-str">'session.created'</span>          <span class="c-cm">// new session file</span>
-<span class="c-str">'session.rewritten'</span>        <span class="c-cm">// truncate / rewrite</span>
-<span class="c-str">'subagent.updated'</span>
-<span class="c-str">'tool-result.added'</span>
-<span class="c-str">'file-history.added'</span>
-<span class="c-str">'todo.updated'</span>
-<span class="c-str">'task.updated'</span>
-<span class="c-str">'plan.upserted'</span>
-<span class="c-str">'settings.changed'</span></code></pre>
-          </div>
-        </div>
+      <section class="api-section" id="host">
+        <h2>Canonical observation host</h2>
+        <p>Import <code>openObservationHost</code> from <code>@vibecook/spaghetti-sdk/observation</code> for typed canonical DTOs and direct access to <code>host.client</code>.</p>
+        <pre><code><span class="c-kw">const</span> host = <span class="c-kw">await</span> <span class="c-fn">openObservationHost</span>({ dbPath, sources });
+<span class="c-kw">const</span> sourcePage = <span class="c-kw">await</span> host.client.<span class="c-fn">listSources</span>();
+<span class="c-kw">const</span> projectPage = <span class="c-kw">await</span> host.client.<span class="c-fn">listProjects</span>();
+<span class="c-kw">await</span> host.<span class="c-fn">dispose</span>();</code></pre>
       </section>
 
-      <!-- Types: list -->
-      <section class="api-section" id="types-list">
-        <h2>List &amp; page types</h2>
-        <p class="section-desc">Return shapes from the primary list and pagination methods.</p>
-
-        <div class="type-card">
-          <div class="type-card-header">
-            <h3>ProjectListItem</h3>
-            <span class="kind">interface</span>
-          </div>
-          <div class="code-block">
-            <pre><code>{
-  projectId: <span class="c-type">string</span>                <span class="c-cm">// stable workspace identity</span>
-  members: <span class="c-type">ProjectMember[]</span>         <span class="c-cm">// exact { sourceId, slug } pairs</span>
-  slug: <span class="c-type">string</span>                     <span class="c-cm">// representative legacy slug</span>
-  sourceIds: <span class="c-type">string[]</span>              <span class="c-cm">// agents active in the workspace</span>
-  folderName: <span class="c-type">string</span>
-  absolutePath: <span class="c-type">string</span>
-  sessionCount: <span class="c-type">number</span>
-  messageCount: <span class="c-type">number</span>
-  tokenUsage: <span class="c-type">TokenUsageSummary</span>
-  tokensEstimated: <span class="c-type">boolean</span>        <span class="c-cm">// true → show "~" (tiktoken fallback)</span>
-  lastActiveAt: <span class="c-type">string</span>
-  firstActiveAt: <span class="c-type">string</span>
-  latestGitBranch: <span class="c-type">string</span>
-  hasMemory: <span class="c-type">boolean</span>
-}</code></pre>
-          </div>
-        </div>
-
-        <div class="type-card">
-          <div class="type-card-header">
-            <h3>SessionListItem</h3>
-            <span class="kind">interface</span>
-          </div>
-          <div class="code-block">
-            <pre><code>{
-  sessionId: <span class="c-type">string</span>
-  sourceId: <span class="c-type">string</span>
-  projectSlug: <span class="c-type">string</span>
-  startTime: <span class="c-type">string</span>
-  lastUpdate: <span class="c-type">string</span>
-  lifespanMs: <span class="c-type">number</span>
-  tokenUsage: <span class="c-type">TokenUsageSummary</span>
-  tokensEstimated: <span class="c-type">boolean</span>
-  messageCount: <span class="c-type">number</span>
-  fullPath: <span class="c-type">string</span>
-  summary: <span class="c-type">string</span>
-  firstPrompt: <span class="c-type">string</span>
-  gitBranch: <span class="c-type">string</span>
-  todoCount: <span class="c-type">number</span>
-  planSlug: <span class="c-type">string | null</span>
-  hasTask: <span class="c-type">boolean</span>
-  isSidechain: <span class="c-type">boolean</span>
-}</code></pre>
-          </div>
-        </div>
-
-        <div class="type-card">
-          <div class="type-card-header">
-            <h3>SourceFilter</h3>
-            <span class="kind">interface</span>
-          </div>
-          <div class="code-block">
-            <pre><code>{ sourceId?: <span class="c-type">string</span> }</code></pre>
-          </div>
-        </div>
-
-        <div class="type-card">
-          <div class="type-card-header">
-            <h3>MessagePage</h3>
-            <span class="kind">interface</span>
-          </div>
-          <div class="code-block">
-            <pre><code>{
-  messages: <span class="c-type">SessionMessage[]</span>
-  total: <span class="c-type">number</span>
-  offset: <span class="c-type">number</span>
-  hasMore: <span class="c-type">boolean</span>
-}</code></pre>
-          </div>
-        </div>
-
-        <div class="type-card">
-          <div class="type-card-header">
-            <h3>SubagentListItem · WorkflowListItem</h3>
-            <span class="kind">interface</span>
-          </div>
-          <div class="code-block">
-            <pre><code><span class="c-cm">// SubagentListItem</span>
-{
-  sourceId: <span class="c-type">string</span>
-  agentId: <span class="c-type">string</span>
-  agentType: <span class="c-type">string</span>
-  messageCount: <span class="c-type">number</span>
-  workflowId: <span class="c-type">string</span>
-  spawnToolId: <span class="c-type">string | null</span>
-  linkMethod: <span class="c-type">'tool_result' | 'ordinal' | 'unlinked'</span>
-}
-
-<span class="c-cm">// WorkflowListItem</span>
-{
-  workflowId: <span class="c-type">string</span>
-  name: <span class="c-type">string</span>
-  status: <span class="c-type">string</span>
-  agentCount: <span class="c-type">number</span>
-  totalTokens: <span class="c-type">number</span>
-  totalToolCalls: <span class="c-type">number</span>
-  durationMs: <span class="c-type">number</span>
-  subagentCount: <span class="c-type">number</span>
-}</code></pre>
-          </div>
-        </div>
+      <section class="api-section" id="client">
+        <h2>Client transports</h2>
+        <p><code>@vibecook/spaghetti-sdk/client</code> provides the same negotiated protocol over embedded N-API and framed IPC transports. Electron can keep N-API in one utility owner while main and renderer processes use portable clients.</p>
       </section>
 
-      <!-- Types: search -->
-      <section class="api-section" id="types-search">
-        <h2>Search types</h2>
-
-        <div class="type-card">
-          <div class="type-card-header">
-            <h3>SearchQuery</h3>
-            <span class="kind">interface</span>
-          </div>
-          <div class="code-block">
-            <pre><code>{
-  text: <span class="c-type">string</span>
-  type?: <span class="c-type">SegmentType</span>
-  projectSlug?: <span class="c-type">string</span>
-  sessionId?: <span class="c-type">string</span>
-  tags?: <span class="c-type">string[]</span>
-  limit?: <span class="c-type">number</span>
-  offset?: <span class="c-type">number</span>
-}</code></pre>
-          </div>
-        </div>
-
-        <div class="type-card">
-          <div class="type-card-header">
-            <h3>SearchResultSet</h3>
-            <span class="kind">interface</span>
-          </div>
-          <div class="code-block">
-            <pre><code>{
-  results: <span class="c-type">SearchResult[]</span>  <span class="c-cm">// key, type, snippet, rank, slugs</span>
-  total: <span class="c-type">number</span>
-  hasMore: <span class="c-type">boolean</span>
-}</code></pre>
-          </div>
-        </div>
-
-        <div class="type-card">
-          <div class="type-card-header">
-            <h3>StoreStats</h3>
-            <span class="kind">interface</span>
-          </div>
-          <div class="code-block">
-            <pre><code>{
-  totalSegments: <span class="c-type">number</span>
-  segmentsByType: <span class="c-type">Record&lt;string, number&gt;</span>
-  totalFingerprints: <span class="c-type">number</span>
-  dbSizeBytes: <span class="c-type">number</span>
-  searchIndexed: <span class="c-type">number</span>
-}</code></pre>
-          </div>
-        </div>
-
-        <div class="type-card">
-          <div class="type-card-header">
-            <h3>InitProgress</h3>
-            <span class="kind">interface</span>
-          </div>
-          <div class="code-block">
-            <pre><code>{
-  phase: <span class="c-str">'parsing'</span> | <span class="c-str">'storing'</span> | <span class="c-str">'indexing'</span> | <span class="c-str">'reconciling'</span>
-  message: <span class="c-type">string</span>
-  current?: <span class="c-type">number</span>
-  total?: <span class="c-type">number</span>
-}</code></pre>
-          </div>
-        </div>
+      <section class="api-section" id="ownership">
+        <h2>Ownership and errors</h2>
+        <p>Exactly one host may own a database. A competing owner is rejected with diagnostic metadata. Startup cancellation or adapter failure disposes every supervisor, worker, client, and lock before rejecting.</p>
+        <div class="callout"><span>!</span><div>Legacy engine selectors (<code>SPAG_ENGINE</code>, <code>SPAG_NATIVE_INGEST</code>, and persisted <code>engine: "ts"</code>) are ignored. Use a repository differential command—not an application setting—to run old oracle code.</div></div>
       </section>
-
-      <!-- Types: options -->
-      <section class="api-section" id="types-options">
-        <h2>Service options &amp; settings</h2>
-        <p class="section-desc">Helpers exported from the package root for engine preferences.</p>
-        <div class="code-block">
-          <div class="code-header"><span>settings API</span></div>
-          <pre><code><span class="c-kw">import</span> {
-  resolveEngine,
-  readSettings,
-  writeSettings,
-  defaultDbPathForEngine,
-  type IngestEngine,       <span class="c-cm">// 'ts' | 'rs'</span>
-} <span class="c-kw">from</span> <span class="c-str">'@vibecook/spaghetti-sdk'</span>;
-
-<span class="c-fn">writeSettings</span>({ engine: <span class="c-str">'ts'</span> });
-<span class="c-kw">const</span> engine = <span class="c-fn">resolveEngine</span>();
-<span class="c-kw">const</span> db = <span class="c-fn">defaultDbPathForEngine</span>(engine);</code></pre>
-        </div>
-      </section>
-
-      <!-- React -->
-      <section class="api-section" id="react">
-        <h2>React exports</h2>
-        <p class="section-desc">Subpath <code>@vibecook/spaghetti-sdk/react</code>. Requires React 19 peer dependency.</p>
-        <div class="code-block mb-24">
-          <div class="code-header"><span>App.tsx</span><button class="copy-btn" type="button" data-copy>Copy</button></div>
-          <pre><code><span class="c-kw">import</span> {
-  SpaghettiProvider,
-  AgentDataPlayground,
-  ProjectCard,
-  SessionCard,
-  MessageEntry,
-  useSpaghettiAPI,
-  formatTokenCount,
-  formatRelativeTime,
-} <span class="c-kw">from</span> <span class="c-str">'@vibecook/spaghetti-sdk/react'</span>;
-
-<span class="c-kw">export default function</span> <span class="c-fn">App</span>({ api }: { api: <span class="c-type">SpaghettiAPI</span> }) {
-  <span class="c-kw">return</span> (
-    &lt;<span class="c-type">SpaghettiProvider</span> api={api}&gt;
-      &lt;<span class="c-type">AgentDataPlayground</span> /&gt;
-    &lt;/<span class="c-type">SpaghettiProvider</span>&gt;
-  );
-}</code></pre>
-        </div>
-        <table class="options-table">
-          <thead>
-            <tr><th>Export</th><th>Kind</th><th>Description</th></tr>
-          </thead>
-          <tbody>
-            <tr><td>SpaghettiProvider</td><td>component</td><td>Provides API context to the tree.</td></tr>
-            <tr><td>useSpaghettiAPI</td><td>hook</td><td>Read the API from context.</td></tr>
-            <tr><td>AgentDataPlayground</td><td>component</td><td>Full browse UI.</td></tr>
-            <tr><td>ProjectCard · SessionCard</td><td>component</td><td>List cards.</td></tr>
-            <tr><td>MessageEntry</td><td>component</td><td>Rendered session message.</td></tr>
-            <tr><td>DetailOverlay · MetaRow · Badge</td><td>component</td><td>UI primitives.</td></tr>
-            <tr><td>formatTokenCount · formatRelativeTime · formatDuration · formatBytes</td><td>util</td><td>Display formatters.</td></tr>
-          </tbody>
-        </table>
-      </section>
-
-      <!-- React live -->
-      <section class="api-section" id="react-live">
-        <h2>React live hooks</h2>
-        <p class="section-desc">Require a service created with <code>{ live: true }</code>.</p>
-        <table class="options-table">
-          <thead>
-            <tr><th>Hook</th><th>Description</th></tr>
-          </thead>
-          <tbody>
-            <tr>
-              <td>useLiveSessionMessages</td>
-              <td>Live-updating message list for a session.</td>
-            </tr>
-            <tr>
-              <td>useLiveSessionList</td>
-              <td>Live-updating session list for a project.</td>
-            </tr>
-            <tr>
-              <td>useLiveSettings</td>
-              <td>Subscribe to settings file changes.</td>
-            </tr>
-            <tr>
-              <td>useLiveChanges</td>
-              <td>Low-level change stream subscription.</td>
-            </tr>
-          </tbody>
-        </table>
-      </section>
-
-      <!-- Paths -->
-      <section class="api-section" id="paths">
-        <h2>Default paths</h2>
-        <table class="options-table">
-          <thead>
-            <tr><th>Path</th><th>Purpose</th></tr>
-          </thead>
-          <tbody>
-            <tr>
-              <td><code>~/.claude</code></td>
-              <td>Claude Code source data (read-only for Spaghetti).</td>
-            </tr>
-            <tr>
-              <td><code>~/.codex</code></td>
-              <td>OpenAI Codex CLI data; rollouts under <code>sessions/YYYY/MM/DD/</code>.</td>
-            </tr>
-            <tr>
-              <td><code>~/.spaghetti/cache/spaghetti-rs.db</code></td>
-              <td>Default SQLite index for Rust engine (schema v7+).</td>
-            </tr>
-            <tr>
-              <td><code>~/.spaghetti/cache/spaghetti-ts.db</code></td>
-              <td>Default SQLite index for TypeScript engine.</td>
-            </tr>
-            <tr>
-              <td><code>~/.spaghetti/config.json</code></td>
-              <td>Persisted settings (engine preference).</td>
-            </tr>
-            <tr>
-              <td><code>~/.spaghetti/channel/</code></td>
-              <td>Live chat channel discovery (CLI chat / plugins).</td>
-            </tr>
-            <tr>
-              <td><code>~/.spaghetti/hooks/</code></td>
-              <td>Hook event stream from spaghetti-hooks plugin.</td>
-            </tr>
-          </tbody>
-        </table>
-      </section>
-
-      <!-- Errors -->
-      <section class="api-section" id="errors">
-        <h2>Errors &amp; disposal</h2>
-        <p class="section-desc">Initialize throws if the primary source root is missing or unreadable. Codex failures are non-fatal (additive source). Live pipeline errors route through <code>errorSink</code> rather than crashing the process.</p>
-        <div class="callout">
-          <span>ⓘ</span>
-          <div>
-            <strong>Best practice:</strong> always pair <code>initialize()</code> with
-            <code>await dispose()</code> (or <code>shutdown()</code> in sync contexts).
-            Leaving the process without teardown can keep SQLite WAL files and watchers alive.
-          </div>
-        </div>
-        <div class="code-block">
-          <div class="code-header"><span>cleanup pattern</span><button class="copy-btn" type="button" data-copy>Copy</button></div>
-          <pre><code><span class="c-kw">const</span> api = <span class="c-fn">createSpaghettiService</span>();
-<span class="c-kw">try</span> {
-  <span class="c-kw">await</span> api.<span class="c-fn">initialize</span>();
-  <span class="c-cm">// … work …</span>
-} <span class="c-kw">finally</span> {
-  <span class="c-kw">await</span> api.<span class="c-fn">dispose</span>();
-}</code></pre>
-        </div>
-      </section>
-
-      <div class="cta-band" style="margin-top:24px;padding:36px 28px">
-        <h2 style="font-size:1.4rem">Ready to index?</h2>
-        <p class="lead" style="margin-bottom:20px">Install the CLI or drop the SDK into your next tool.</p>
-        <div class="hero-ctas">
-          <a class="btn btn-primary" href="index.html#install">Get started</a>
-          <a class="btn btn-secondary" href="https://github.com/vibecook-dev/spaghetti" target="_blank" rel="noopener">View source</a>
-        </div>
-      </div>
     </main>
   </div>
 
-  <footer class="footer" style="margin-top:0">
-    <div class="wrap wrap-wide">
-      <div class="footer-bottom" style="border:none;padding-top:0">
-        <span>© 2026 James Yong · Spaghetti API</span>
-        <span><a href="index.html">← Docs home</a> · <a href="commands.html">Commands</a></span>
-      </div>
-    </div>
-  </footer>
-
+  <footer class="footer" style="margin-top:0"><div class="wrap wrap-wide"><div class="footer-bottom" style="border:none;padding-top:0"><span>© 2026 James Yong · Spaghetti API</span><span><a href="index.html">← Docs home</a> · <a href="commands.html">Commands</a></span></div></div></footer>
   <script src="app.js"></script>
 </body>
 </html>

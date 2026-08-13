@@ -14,6 +14,9 @@ import pc from 'picocolors';
 // ─── Markdown rendering ────────────────────────────────────────────────
 
 const MIN_MD_WIDTH = 20;
+const markdownColors = pc.createColors(
+  process.env.FORCE_COLOR === undefined ? pc.isColorSupported : process.env.FORCE_COLOR !== '0',
+);
 let mdCache: { width: number; instance: Marked } | null = null;
 
 function getMarkdownRenderer(width: number): Marked {
@@ -25,17 +28,17 @@ function getMarkdownRenderer(width: number): Marked {
       width: w,
       reflowText: true,
       tab: 2,
-      heading: (s: string) => pc.bold(pc.cyan(s)),
-      firstHeading: (s: string) => pc.bold(pc.cyan(s)),
-      strong: pc.bold,
-      em: pc.italic,
-      codespan: (s: string) => pc.cyan(s),
-      code: (s: string) => pc.dim(s),
-      blockquote: (s: string) => pc.dim(pc.italic(s)),
-      hr: () => pc.dim('─'.repeat(w)),
+      heading: (s: string) => markdownColors.bold(markdownColors.cyan(s)),
+      firstHeading: (s: string) => markdownColors.bold(markdownColors.cyan(s)),
+      strong: markdownColors.bold,
+      em: markdownColors.italic,
+      codespan: (s: string) => markdownColors.cyan(s),
+      code: (s: string) => markdownColors.dim(s),
+      blockquote: (s: string) => markdownColors.dim(markdownColors.italic(s)),
+      hr: () => markdownColors.dim('─'.repeat(w)),
       listitem: (s: string) => s,
-      link: (s: string) => pc.cyan(pc.underline(s)),
-      href: (s: string) => pc.dim(s),
+      link: (s: string) => markdownColors.cyan(markdownColors.underline(s)),
+      href: (s: string) => markdownColors.dim(s),
     }) as Parameters<Marked['use']>[0],
   );
   mdCache = { width: w, instance };

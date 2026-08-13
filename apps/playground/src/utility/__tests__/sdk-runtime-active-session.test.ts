@@ -1,6 +1,5 @@
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
-import { once } from 'node:events';
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -129,28 +128,17 @@ describe('active transcript stream routing', () => {
   });
 });
 
-describe('observation shadow host status', () => {
-  test('is explicitly disabled unless configured', async () => {
-    const runtime = new SdkRuntime({ dbPath: '/tmp/not-opened.db', engine: 'ts' }, sink());
+describe('production observation host status', () => {
+  test('is the unconditional production owner', async () => {
+    const runtime = new SdkRuntime({ dbPath: '/tmp/not-opened.db' }, sink());
 
-    assert.deepEqual(runtime.getObservationOwnerStatus(), { enabled: false, state: 'disabled' });
-    assert.deepEqual(await runtime.getObservationShadowStatus(), { enabled: false, state: 'disabled' });
-    const ports = new MessageChannel();
-    const peerClosed = once(ports.port1, 'close');
-    await assert.rejects(runtime.attachObservationClient(ports.port2), /shadow is disabled/);
-    await peerClosed;
+    assert.deepEqual(runtime.getObservationOwnerStatus(), { enabled: true, state: 'starting' });
+    assert.equal(runtime.engine, 'rs');
     await runtime.dispose();
-
-    const configured = new SdkRuntime(
-      { dbPath: '/tmp/not-opened.db', engine: 'ts', observationShadow: { dbPath: '/tmp/not-opened-shadow.db' } },
-      sink(),
-    );
-    assert.deepEqual(configured.getObservationOwnerStatus(), { enabled: true, state: 'starting' });
-    await configured.dispose();
-    assert.deepEqual(configured.getObservationOwnerStatus(), { enabled: true, state: 'stopped' });
+    assert.deepEqual(runtime.getObservationOwnerStatus(), { enabled: true, state: 'stopped' });
   });
 
-  test('owns an isolated Rust shadow after legacy readiness', { skip: !native }, async () => {
+  test('owns one Rust production database and serves canonical IPC', { skip: !native }, async () => {
     const directory = mkdtempSync(path.join(tmpdir(), 'spaghetti-host-shadow-'));
     const root = path.join(directory, 'claude');
     const project = path.join(root, 'projects', '-tmp-shadow-project');
@@ -175,7 +163,6 @@ describe('observation shadow host status', () => {
     const runtime = new SdkRuntime(
       {
         dbPath: productionDb,
-        engine: 'ts',
         rootDir: root,
         additionalSources: [],
         observationShadow: { dbPath: shadowDb },
@@ -199,12 +186,8 @@ describe('observation shadow host status', () => {
       assert.equal(report.state, 'running', report.error);
       assert.deepEqual(runtime.getObservationOwnerStatus(), { enabled: true, state: 'running' });
       assert.equal(report.snapshot?.status.observation.supervisorsRunning, 1);
-      assert.deepEqual(
-        [report.snapshot?.overview.canonicalSessions, report.snapshot?.overview.canonicalMessages],
-        [1, 1],
-      );
-      assert.equal(report.historyParity?.exact, true);
-      assert.equal(existsSync(productionDb), true);
+      assert.equal(report.snapshot?.health.healthy, true);
+      assert.equal(existsSync(productionDb), false);
       assert.equal(existsSync(shadowDb), true);
       assert.notEqual(report.databasePath, productionDb);
       assert.equal(client.info.transportKind, 'playground-utility');

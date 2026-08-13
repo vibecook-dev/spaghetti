@@ -1,10 +1,4 @@
-/**
- * Engine command — show or switch the active ingest engine.
- *
- * Each engine (ts/rs) writes to its own SQLite file, so switching
- * doesn't force a re-ingest. Setting is persisted to
- * `~/.spaghetti/config.json` and picked up by the SDK on next startup.
- */
+/** Engine command — report the RFC 011 Rust owner and clean old settings. */
 
 import {
   defaultDbPathForEngine,
@@ -12,7 +6,6 @@ import {
   resolveActiveEngine,
   settingsPath,
   writeSettings,
-  type IngestEngine,
 } from '@vibecook/spaghetti-sdk';
 import { theme } from '../lib/color.js';
 
@@ -21,28 +14,21 @@ export interface EngineOptions {
 }
 
 export async function engineCommand(target: string | undefined, opts: EngineOptions): Promise<void> {
-  // Effective engine (after native-addon fallback), not just the
-  // preference — a `rs` config with no native addon actually runs `ts`.
   const active = resolveActiveEngine();
   const settings = readSettings();
-  const fellBack = active.preference !== active.engine;
+  const dbPath = defaultDbPathForEngine('rs');
 
-  // ── Show current state (no target argument) ───────────────────────────
   if (!target) {
     if (opts.json) {
       process.stdout.write(
         JSON.stringify(
           {
-            active: active.engine,
-            preference: active.preference,
-            persisted: settings.engine ?? null,
-            source: engineSource(settings.engine),
+            active: 'rs',
+            policy: 'rust-only',
+            ignoredLegacyPreference: settings.engine === 'ts' ? 'ts' : null,
             nativeAddonAvailable: active.nativeAvailable,
             nativeVersion: active.nativeVersion,
-            dbPaths: {
-              ts: defaultDbPathForEngine('ts'),
-              rs: defaultDbPathForEngine('rs'),
-            },
+            dbPath,
             configPath: settingsPath(),
           },
           null,
@@ -52,91 +38,61 @@ export async function engineCommand(target: string | undefined, opts: EngineOpti
       return;
     }
 
-    const lines: string[] = [];
-    lines.push('');
-    lines.push(`  ${theme.heading('Active ingest engine')}`);
-    lines.push('');
-    lines.push(
-      `    engine:     ${theme.project(active.engine)}${active.engine === 'ts' ? ' (TypeScript)' : ' (Rust native)'}`,
-    );
-    if (fellBack) {
-      lines.push(
-        `    ${theme.warning(`preference is "${active.preference}" but the native addon isn't installed — running ${active.engine}`)}`,
-      );
+    const lines = [
+      '',
+      `  ${theme.heading('Observation engine')}`,
+      '',
+      `    engine:     ${theme.project('rs')} (Rust observation owner)`,
+      `    native:     ${
+        active.nativeAvailable
+          ? theme.project('available') + theme.muted(` (v${active.nativeVersion})`)
+          : theme.muted('not installed — startup is blocked')
+      }`,
+    ];
+    if (settings.engine === 'ts') {
+      lines.push(`    ${theme.warning('legacy config requested "ts"; RFC 011 ignores it')}`);
     }
-    lines.push(`    source:     ${theme.muted(engineSource(settings.engine))}`);
     lines.push(
-      `    native:     ${active.nativeAvailable ? theme.project('available') + theme.muted(` (v${active.nativeVersion})`) : theme.muted('not installed')}`,
+      '',
+      `  ${theme.muted('Production DB')}`,
+      `    ${dbPath}`,
+      '',
+      `  ${theme.muted('The TypeScript engine is a repository-only differential oracle.')}`,
+      `  ${theme.muted('Config: ' + settingsPath())}`,
+      '',
     );
-    lines.push('');
-    lines.push(`  ${theme.muted('DB files')}`);
-    lines.push(`    ts:  ${defaultDbPathForEngine('ts')}`);
-    lines.push(`    rs:  ${defaultDbPathForEngine('rs')}`);
-    lines.push('');
-    lines.push(`  ${theme.muted('Switch with: spag engine ts   or   spag engine rs')}`);
-    lines.push(`  ${theme.muted('Config: ' + settingsPath())}`);
-    lines.push('');
     process.stdout.write(lines.join('\n') + '\n');
     return;
   }
 
-  // ── Switch engines ────────────────────────────────────────────────────
   const lower = target.toLowerCase();
-  if (lower !== 'ts' && lower !== 'rs') {
-    process.stderr.write(theme.error(`\n  Unknown engine: "${target}". Use "ts" or "rs".\n\n`));
+  if (lower !== 'rs') {
+    const reason =
+      lower === 'ts' ? 'The TypeScript production engine was retired by RFC 011.' : `Unknown engine: "${target}".`;
+    process.stderr.write(theme.error(`\n  ${reason} Use "rs".\n\n`));
     process.exitCode = 1;
     return;
   }
 
-  const next = lower as IngestEngine;
-
-  if (next === 'rs' && !active.nativeAvailable) {
+  if (!active.nativeAvailable) {
     process.stderr.write(
       theme.error(
-        `\n  Native addon (@vibecook/spaghetti-sdk-native) not installed.\n` +
-          `  The Rust engine is unavailable on this install — keeping current engine (${active.engine}).\n\n`,
+        '\n  Native addon (@vibecook/spaghetti-sdk-native) not installed.\n' +
+          '  RFC 011 requires this addon; reinstall the package before starting Spaghetti.\n\n',
       ),
     );
     process.exitCode = 1;
     return;
   }
 
-  writeSettings({ ...settings, engine: next });
-
+  writeSettings({ ...settings, engine: 'rs' });
   if (opts.json) {
     process.stdout.write(
-      JSON.stringify(
-        {
-          previous: active.preference,
-          active: next,
-          dbPath: defaultDbPathForEngine(next),
-          configPath: settingsPath(),
-        },
-        null,
-        2,
-      ) + '\n',
+      JSON.stringify({ active: 'rs', policy: 'rust-only', dbPath, configPath: settingsPath() }, null, 2) + '\n',
     );
     return;
   }
-
   process.stdout.write(
-    '\n  ' +
-      theme.project(`Engine switched: ${active.preference} → ${next}`) +
-      '\n' +
-      theme.muted(`  DB: ${defaultDbPathForEngine(next)}`) +
-      '\n' +
-      theme.muted(`  (Next spag invocation will use the ${next} engine.)`) +
-      '\n\n',
+    '\n  ' + theme.project('Rust observation engine selected') + '\n' + theme.muted(`  DB: ${dbPath}`) + '\n\n',
   );
-}
-
-function engineSource(persisted: IngestEngine | undefined): string {
-  if (process.env.SPAG_ENGINE === 'ts' || process.env.SPAG_ENGINE === 'rs') {
-    return `env SPAG_ENGINE=${process.env.SPAG_ENGINE}`;
-  }
-  if (process.env.SPAG_NATIVE_INGEST === '0' || process.env.SPAG_NATIVE_INGEST === '1') {
-    return `env SPAG_NATIVE_INGEST=${process.env.SPAG_NATIVE_INGEST} (legacy)`;
-  }
-  if (persisted) return `config file`;
-  return `default`;
 }

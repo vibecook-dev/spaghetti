@@ -9,6 +9,7 @@ mod capability_query;
 mod commit;
 mod coordinator;
 mod detail_query;
+mod local_permissions;
 mod memory_projection;
 mod observation;
 mod orchestration_query;
@@ -36,8 +37,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 
-use crate::adapter::FactBatch;
-use crate::claude::ClaudeCodeAdapter;
+use crate::adapter::{AdapterRegistry, FactBatch};
 pub use capability_query::{
     ArtifactDetail, ArtifactPage, ArtifactPageRequest, MemoryDocument, MemoryDocumentPage,
     MemoryDocumentPageRequest, PlanDetail, PlanPage, PlanPageRequest, TaskCollectionPage,
@@ -45,12 +45,18 @@ pub use capability_query::{
     ToolResultDetail, ToolResultPage, ToolResultPageRequest, CAPABILITY_QUERY_CONTRACT_VERSION,
     DEFAULT_CAPABILITY_PAGE_LIMIT, MAX_CAPABILITY_PAGE_PAYLOAD_BYTES,
 };
+pub use commit::{
+    ChangeLogRetentionPolicy, ChangeLogRetentionSnapshot, DEFAULT_CHANGE_LOG_MAX_AGE_MS,
+    DEFAULT_CHANGE_LOG_MAX_PAYLOAD_BYTES, DEFAULT_CHANGE_LOG_MIN_RESUMABLE_COMMITS,
+};
 use commit::{CommitReceipt, ObservationCommit};
-pub use coordinator::{ObservationCoordinator, ReconcileOutcome, ReconcileRequest};
+pub use coordinator::{
+    ObservationCoordinator, ReconcileOutcome, ReconcileRequest, ReconcileRetryTarget,
+};
 pub use detail_query::{
     CanonicalStats, MessageDetail, MessagePage, MessagePageRequest, NamedCount, SessionDetail,
-    SessionDetails, SessionDetailsRequest, SessionIndexDetail, SourcePage, SourcePageRequest,
-    SourceSummary, DEFAULT_DETAIL_PAGE_LIMIT, DETAIL_QUERY_CONTRACT_VERSION,
+    SessionDetails, SessionDetailsRequest, SessionIndexDetail, SourceCapabilitySummary, SourcePage,
+    SourcePageRequest, SourceSummary, DEFAULT_DETAIL_PAGE_LIMIT, DETAIL_QUERY_CONTRACT_VERSION,
     MAX_MESSAGE_PAGE_PAYLOAD_BYTES,
 };
 pub use observation::ObservationStatusSnapshot;
@@ -146,6 +152,15 @@ pub enum EngineError {
     #[error("query queue is full")]
     QueryQueueFull,
 
+    #[error(
+        "RESET_REQUIRED current_commit_seq={current_commit_seq} oldest_commit_seq={oldest_commit_seq:?} oldest_ordinal={oldest_ordinal:?}"
+    )]
+    ResetRequired {
+        current_commit_seq: u64,
+        oldest_commit_seq: Option<u64>,
+        oldest_ordinal: Option<u32>,
+    },
+
     #[error("invalid query: {0}")]
     InvalidQuery(String),
 
@@ -237,6 +252,10 @@ pub struct EngineOverview {
     /// Canonical history materialized by RFC 011 observation commits.
     pub canonical_sessions: u32,
     pub canonical_messages: u32,
+    pub change_log_oldest_cursor: Option<ChangeCursor>,
+    pub change_log_pruned_through_seq: u64,
+    pub change_log_retained_changes: u64,
+    pub change_log_retained_payload_bytes: u64,
     pub writer_data_version: u32,
     pub journal_mode: String,
     pub query_only: bool,
@@ -248,16 +267,28 @@ pub struct SpaghettiEngineCore {
     database_path: PathBuf,
     owner: OwnerMetadata,
     query_workers: usize,
+    adapters: Arc<AdapterRegistry>,
     observation: Arc<ObservationRuntime>,
+    observation_workers: Mutex<Option<Arc<rayon::ThreadPool>>>,
     supervisors: Mutex<Vec<ObservationSupervisor>>,
     lifecycle: Mutex<Lifecycle>,
     stopped: Condvar,
 }
 
 impl SpaghettiEngineCore {
-    pub const CLAUDE_ADAPTER_ID: &'static str = concat!("claude", "-code");
-
     pub fn open(options: EngineOptions) -> Result<Arc<Self>, EngineError> {
+        Self::open_with_registry(
+            options,
+            AdapterRegistry::builder()
+                .build()
+                .map_err(|error| EngineError::InvalidConfig(error.to_string()))?,
+        )
+    }
+
+    pub fn open_with_registry(
+        options: EngineOptions,
+        adapters: AdapterRegistry,
+    ) -> Result<Arc<Self>, EngineError> {
         let database_path = normalize_database_path(&options.database_path)?;
         let query_workers = options.query_workers.unwrap_or(DEFAULT_QUERY_WORKERS);
         if !(1..=MAX_QUERY_WORKERS).contains(&query_workers) {
@@ -274,12 +305,22 @@ impl SpaghettiEngineCore {
         let owner = owner_lock.metadata().clone();
         let writer = WriterRuntime::start(database_path.clone())?;
         let queries = QueryPool::start(database_path.clone(), query_workers)?;
+        let observation_workers = rayon::ThreadPoolBuilder::new()
+            .num_threads(4)
+            .thread_name(|index| format!("spaghetti-observe-{index}"))
+            .build()
+            .map_err(|error| EngineError::WorkerStart {
+                worker: "observation decode pool",
+                detail: error.to_string(),
+            })?;
 
         Ok(Arc::new(Self {
             database_path,
             owner,
             query_workers,
+            adapters: Arc::new(adapters),
             observation: ObservationRuntime::new(),
+            observation_workers: Mutex::new(Some(Arc::new(observation_workers))),
             supervisors: Mutex::new(Vec::new()),
             lifecycle: Mutex::new(Lifecycle {
                 phase: LifecyclePhase::Running,
@@ -322,6 +363,13 @@ impl SpaghettiEngineCore {
             observation.watch_roots = observation
                 .watch_roots
                 .saturating_add(supervisor.watch_roots());
+            if !supervisor.watcher_available() {
+                observation.state = "degraded".to_string();
+                observation.recovery_required = true;
+                observation.last_error.get_or_insert_with(|| {
+                    "native watcher unavailable; observation is using polling fallback".to_string()
+                });
+            }
         }
 
         EngineStatusSnapshot {
@@ -408,6 +456,10 @@ impl SpaghettiEngineCore {
             messages: query.messages,
             canonical_sessions: query.canonical_sessions,
             canonical_messages: query.canonical_messages,
+            change_log_oldest_cursor: query.change_log_oldest_cursor,
+            change_log_pruned_through_seq: query.change_log_pruned_through_seq,
+            change_log_retained_changes: query.change_log_retained_changes,
+            change_log_retained_payload_bytes: query.change_log_retained_payload_bytes,
             writer_data_version: writer_health.data_version,
             journal_mode: writer_health.journal_mode,
             query_only: query.query_only,
@@ -810,6 +862,18 @@ impl SpaghettiEngineCore {
         queries.replay_changes_cancellable(request, cancellation)
     }
 
+    /// Run durable outbox maintenance through the sole writer lane. Normal
+    /// commits apply the default policy automatically; this entry point lets
+    /// a host run the same policy during an explicit maintenance tick.
+    pub fn maintain_change_log(
+        &self,
+        policy: ChangeLogRetentionPolicy,
+        now_ms: i64,
+    ) -> Result<ChangeLogRetentionSnapshot, EngineError> {
+        let (writer, _) = self.clients()?;
+        writer.maintain_change_log(policy, now_ms)
+    }
+
     /// Hydrate one adapter instance's durable common-source state through the
     /// bounded read-only lane. The observation coordinator uses this to resume
     /// common drivers; it is intentionally not part of the public query API.
@@ -827,26 +891,54 @@ impl SpaghettiEngineCore {
         Ok(queries.cancel_pending())
     }
 
-    pub fn reconcile_claude(
+    pub fn reconcile_adapter(
         self: &Arc<Self>,
+        adapter_id: &str,
         request: ReconcileRequest,
     ) -> Result<ReconcileOutcome, EngineError> {
-        ObservationCoordinator::new(Arc::clone(self)).reconcile(&ClaudeCodeAdapter::new(), request)
+        self.reconcile_adapter_cancellable(adapter_id, request, QueryCancellationToken::default())
     }
 
-    pub fn start_claude_observation(
+    pub fn reconcile_adapter_cancellable(
         self: &Arc<Self>,
+        adapter_id: &str,
+        request: ReconcileRequest,
+        cancellation: QueryCancellationToken,
+    ) -> Result<ReconcileOutcome, EngineError> {
+        let adapter = self.registered_adapter(adapter_id)?;
+        ObservationCoordinator::with_cancellation(Arc::clone(self), cancellation)
+            .reconcile(adapter.as_ref(), request)
+    }
+
+    pub fn start_registered_observation(
+        self: &Arc<Self>,
+        adapter_id: &str,
         options: ObservationSupervisorOptions,
     ) -> Result<(), EngineError> {
-        self.start_observation_supervisor(ClaudeCodeAdapter::new(), options)
+        self.start_registered_observation_cancellable(
+            adapter_id,
+            options,
+            QueryCancellationToken::default(),
+        )
     }
 
-    pub fn refresh_claude_observation(&self) -> Result<(), EngineError> {
-        self.refresh_observation_supervisor(Self::CLAUDE_ADAPTER_ID)
+    pub fn start_registered_observation_cancellable(
+        self: &Arc<Self>,
+        adapter_id: &str,
+        options: ObservationSupervisorOptions,
+        cancellation: QueryCancellationToken,
+    ) -> Result<(), EngineError> {
+        let adapter = self.registered_adapter(adapter_id)?;
+        self.start_observation_supervisor_cancellable(adapter, options, cancellation)
     }
 
-    pub fn stop_claude_observation(&self) -> Result<bool, EngineError> {
-        self.stop_observation_supervisor(Self::CLAUDE_ADAPTER_ID)
+    fn registered_adapter(
+        &self,
+        adapter_id: &str,
+    ) -> Result<Arc<dyn crate::adapter::AgentAdapter>, EngineError> {
+        self.adapters
+            .resolve(adapter_id)
+            .map_err(|error| EngineError::InvalidConfig(error.to_string()))
     }
 
     /// Retain a lossless, bounded dirty marker for one discovered instance.
@@ -881,6 +973,22 @@ impl SpaghettiEngineCore {
         adapter: A,
         options: ObservationSupervisorOptions,
     ) -> Result<(), EngineError> {
+        self.start_observation_supervisor_cancellable(
+            adapter,
+            options,
+            QueryCancellationToken::default(),
+        )
+    }
+
+    pub fn start_observation_supervisor_cancellable<A: crate::adapter::AgentAdapter>(
+        self: &Arc<Self>,
+        adapter: A,
+        options: ObservationSupervisorOptions,
+        cancellation: QueryCancellationToken,
+    ) -> Result<(), EngineError> {
+        if cancellation.is_cancelled() {
+            return Err(EngineError::QueryCancelled);
+        }
         let adapter_id = adapter.manifest().id.as_str().to_string();
         let lifecycle = self.lock_lifecycle();
         if lifecycle.phase != LifecyclePhase::Running {
@@ -897,7 +1005,16 @@ impl SpaghettiEngineCore {
         }
         drop(supervisors);
         drop(lifecycle);
-        let supervisor = ObservationSupervisor::start(Arc::clone(self), adapter, options)?;
+        let supervisor = ObservationSupervisor::start_cancellable(
+            Arc::clone(self),
+            adapter,
+            options,
+            cancellation.clone(),
+        )?;
+        if cancellation.is_cancelled() {
+            drop(supervisor);
+            return Err(EngineError::QueryCancelled);
+        }
         let lifecycle = self.lock_lifecycle();
         if lifecycle.phase != LifecyclePhase::Running {
             drop(lifecycle);
@@ -921,6 +1038,20 @@ impl SpaghettiEngineCore {
     }
 
     pub fn refresh_observation_supervisor(&self, adapter_id: &str) -> Result<(), EngineError> {
+        self.refresh_observation_supervisor_cancellable(
+            adapter_id,
+            QueryCancellationToken::default(),
+        )
+    }
+
+    pub fn refresh_observation_supervisor_cancellable(
+        &self,
+        adapter_id: &str,
+        cancellation: QueryCancellationToken,
+    ) -> Result<(), EngineError> {
+        if cancellation.is_cancelled() {
+            return Err(EngineError::QueryCancelled);
+        }
         let supervisors = self.lock_supervisors();
         let client = supervisors
             .iter()
@@ -932,7 +1063,7 @@ impl SpaghettiEngineCore {
             })?
             .client();
         drop(supervisors);
-        client.refresh()
+        client.refresh_cancellable(cancellation)
     }
 
     pub fn stop_observation_supervisor(&self, adapter_id: &str) -> Result<bool, EngineError> {
@@ -987,6 +1118,14 @@ impl SpaghettiEngineCore {
             }
         }
         self.observation.stop_and_wait();
+        let observation_workers = {
+            let mut workers = self
+                .observation_workers
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            workers.take()
+        };
+        drop(observation_workers);
 
         if let Err(error) = runtime.queries.shutdown() {
             first_error.get_or_insert(error);
@@ -1027,6 +1166,15 @@ impl SpaghettiEngineCore {
         started_at_unix_ms: i64,
     ) -> Result<ObservationLease, EngineError> {
         self.observation.begin_full(adapter_id, started_at_unix_ms)
+    }
+
+    pub(crate) fn observation_workers(&self) -> Result<Arc<rayon::ThreadPool>, EngineError> {
+        self.observation_workers
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_ref()
+            .cloned()
+            .ok_or(EngineError::ShuttingDown)
     }
 
     pub(crate) fn begin_instance_reconcile(

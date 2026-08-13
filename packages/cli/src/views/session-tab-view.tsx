@@ -25,6 +25,7 @@ import { HRule } from './chrome.js';
 import { MessagesView } from './messages-view.js';
 import { formatNumber, formatRelativeTime } from '../lib/format.js';
 import type { ViewEntry } from './types.js';
+import { useAsyncValue } from './hooks.js';
 
 // ─── Constants ────────────────────────────────────────────────────────
 
@@ -87,18 +88,15 @@ function renderMarkdownLines(content: string): React.ReactElement[] {
 // ─── TodosPanel ───────────────────────────────────────────────────────
 
 interface TodosPanelProps {
-  projectSlug: string;
-  sessionId: string;
+  rawTodos: unknown[];
   scrollOffset: number;
   viewportHeight: number;
 }
 
-function TodosPanel({ projectSlug, sessionId, scrollOffset, viewportHeight }: TodosPanelProps): React.ReactElement {
-  const api = useApi();
+function TodosPanel({ rawTodos, scrollOffset, viewportHeight }: TodosPanelProps): React.ReactElement {
   const { stdout } = useStdout();
   const cols = stdout?.columns ?? 80;
 
-  const rawTodos = useMemo(() => api.getSessionTodos(projectSlug, sessionId), [api, projectSlug, sessionId]);
   const todos = useMemo(() => rawTodos.map(parseTodo), [rawTodos]);
 
   if (todos.length === 0) {
@@ -155,16 +153,12 @@ function TodosPanel({ projectSlug, sessionId, scrollOffset, viewportHeight }: To
 // ─── PlanPanel ────────────────────────────────────────────────────────
 
 interface PlanPanelProps {
-  projectSlug: string;
-  sessionId: string;
+  rawPlan: unknown | null;
   scrollOffset: number;
   viewportHeight: number;
 }
 
-function PlanPanel({ projectSlug, sessionId, scrollOffset, viewportHeight }: PlanPanelProps): React.ReactElement {
-  const api = useApi();
-
-  const rawPlan = useMemo(() => api.getSessionPlan(projectSlug, sessionId), [api, projectSlug, sessionId]);
+function PlanPanel({ rawPlan, scrollOffset, viewportHeight }: PlanPanelProps): React.ReactElement {
   const content = useMemo(() => extractPlanContent(rawPlan), [rawPlan]);
   const lines = useMemo(() => (content ? renderMarkdownLines(content) : []), [content]);
 
@@ -184,8 +178,7 @@ function PlanPanel({ projectSlug, sessionId, scrollOffset, viewportHeight }: Pla
 // ─── SubagentsPanel ───────────────────────────────────────────────────
 
 interface SubagentsPanelProps {
-  projectSlug: string;
-  sessionId: string;
+  subagents: SubagentListItem[];
   scrollOffset: number;
   selectedIndex: number;
   viewportHeight: number;
@@ -207,16 +200,11 @@ function SubagentsPanelCard({ agent, selected }: { agent: SubagentListItem; sele
 }
 
 function SubagentsPanel({
-  projectSlug,
-  sessionId,
+  subagents,
   scrollOffset,
   selectedIndex,
   viewportHeight,
 }: SubagentsPanelProps): React.ReactElement {
-  const api = useApi();
-
-  const subagents = useMemo(() => api.getSessionSubagents(projectSlug, sessionId), [api, projectSlug, sessionId]);
-
   if (subagents.length === 0) {
     return (
       <Box flexDirection="column" paddingLeft={2}>
@@ -546,10 +534,12 @@ function WorkflowDetailView({
   const { stdout } = useStdout();
   const viewportHeight = Math.max((stdout?.rows ?? 24) - 8, 5);
 
-  const agents = useMemo(
+  const loaded = useAsyncValue(
     () => api.getWorkflowSubagents(projectSlug, sessionId, workflow.workflowId),
     [api, projectSlug, sessionId, workflow.workflowId],
+    [] as SubagentListItem[],
   );
+  const agents = loaded.value;
   const [selected, setSelected] = useState(0);
   const [scroll, setScroll] = useState(0);
   const viewportItems = Math.max(1, Math.floor(viewportHeight / 3));
@@ -585,6 +575,9 @@ function WorkflowDetailView({
     },
     { isActive: !nav.searchMode },
   );
+
+  if (loaded.loading) return <Text dimColor> Loading canonical workflow…</Text>;
+  if (loaded.error) return <Text color="red"> {loaded.error.message}</Text>;
 
   return (
     <Box flexDirection="column">
@@ -641,39 +634,44 @@ export function SessionTabView({ project, session, sessionIndex }: SessionTabVie
   // Compute max scroll values for tabs 1-5
   const viewportHeight = Math.max(termRows - 8, 5);
 
-  const rawTodos = useMemo(
-    () => api.getSessionTodos(session.projectSlug, session.sessionId),
+  const loaded = useAsyncValue(
+    async () => {
+      const [rawTodos, rawPlan, subagents, teams, workflows] = await Promise.all([
+        api.getSessionTodos(session.projectSlug, session.sessionId),
+        api.getSessionPlan(session.projectSlug, session.sessionId),
+        api.getSessionSubagents(session.projectSlug, session.sessionId),
+        api.getTeams(),
+        api.getSessionWorkflows(session.projectSlug, session.sessionId),
+      ]);
+      return { rawTodos, rawPlan, subagents, teams, workflows };
+    },
     [api, session.projectSlug, session.sessionId],
+    {
+      rawTodos: [] as unknown[],
+      rawPlan: null as unknown | null,
+      subagents: [] as SubagentListItem[],
+      teams: [] as TeamDirectory[],
+      workflows: [] as WorkflowListItem[],
+    },
   );
+  const { rawTodos, rawPlan, subagents, teams, workflows } = loaded.value;
   const todosCount = rawTodos.length;
   const todosMaxScroll = Math.max(0, todosCount - viewportHeight);
 
-  const rawPlan = useMemo(
-    () => api.getSessionPlan(session.projectSlug, session.sessionId),
-    [api, session.projectSlug, session.sessionId],
-  );
   const planContent = useMemo(() => extractPlanContent(rawPlan), [rawPlan]);
   const planLineCount = useMemo(() => (planContent ? planContent.split('\n').length : 0), [planContent]);
   const planMaxScroll = Math.max(0, planLineCount - viewportHeight);
 
-  const subagents = useMemo(
-    () => api.getSessionSubagents(session.projectSlug, session.sessionId),
-    [api, session.projectSlug, session.sessionId],
-  );
   const subagentsCount = subagents.length;
   const subagentsViewportItems = Math.max(1, Math.floor(viewportHeight / 3));
   const subagentsMaxScroll = Math.max(0, subagentsCount - subagentsViewportItems);
 
-  const sessionTeams = useMemo(() => matchTeamsForSession(api.getTeams(), session.sessionId), [api, session.sessionId]);
+  const sessionTeams = useMemo(() => matchTeamsForSession(teams, session.sessionId), [teams, session.sessionId]);
   const teamRows = useMemo(() => buildTeamRows(sessionTeams), [sessionTeams]);
   const teamRowCount = teamRows.length;
   const teamViewportItems = Math.max(1, Math.floor((viewportHeight - 2) / 3));
   const teamMaxScroll = Math.max(0, teamRowCount - teamViewportItems);
 
-  const workflows = useMemo(
-    () => api.getSessionWorkflows(session.projectSlug, session.sessionId),
-    [api, session.projectSlug, session.sessionId],
-  );
   const workflowCount = workflows.length;
   const workflowViewportItems = Math.max(1, Math.floor(viewportHeight / 3));
   const workflowMaxScroll = Math.max(0, workflowCount - workflowViewportItems);
@@ -826,32 +824,23 @@ export function SessionTabView({ project, session, sessionIndex }: SessionTabVie
       <TabBar tabs={[...TABS]} activeIndex={activeTab} onTabChange={setActiveTab} breadcrumb={tabBreadcrumb} />
       {activeTab === 0 && <MessagesView project={project} session={session} sessionIndex={sessionIndex} />}
       {activeTab !== 0 && <HRule />}
-      {activeTab === 1 && (
-        <TodosPanel
-          projectSlug={session.projectSlug}
-          sessionId={session.sessionId}
-          scrollOffset={todosScroll}
-          viewportHeight={viewportHeight}
-        />
+      {activeTab !== 0 && loaded.loading && <Text dimColor> Loading canonical session details…</Text>}
+      {activeTab !== 0 && loaded.error && <Text color="red"> {loaded.error.message}</Text>}
+      {activeTab === 1 && !loaded.loading && !loaded.error && (
+        <TodosPanel rawTodos={rawTodos} scrollOffset={todosScroll} viewportHeight={viewportHeight} />
       )}
-      {activeTab === 2 && (
-        <PlanPanel
-          projectSlug={session.projectSlug}
-          sessionId={session.sessionId}
-          scrollOffset={planScroll}
-          viewportHeight={viewportHeight}
-        />
+      {activeTab === 2 && !loaded.loading && !loaded.error && (
+        <PlanPanel rawPlan={rawPlan} scrollOffset={planScroll} viewportHeight={viewportHeight} />
       )}
-      {activeTab === 3 && (
+      {activeTab === 3 && !loaded.loading && !loaded.error && (
         <SubagentsPanel
-          projectSlug={session.projectSlug}
-          sessionId={session.sessionId}
+          subagents={subagents}
           scrollOffset={subagentsScroll}
           selectedIndex={subagentsSelected}
           viewportHeight={viewportHeight}
         />
       )}
-      {activeTab === 4 && (
+      {activeTab === 4 && !loaded.loading && !loaded.error && (
         <TeamPanel
           teams={sessionTeams}
           rows={teamRows}
@@ -860,7 +849,7 @@ export function SessionTabView({ project, session, sessionIndex }: SessionTabVie
           viewportHeight={viewportHeight}
         />
       )}
-      {activeTab === 5 && (
+      {activeTab === 5 && !loaded.loading && !loaded.error && (
         <WorkflowPanel
           workflows={workflows}
           scrollOffset={workflowScroll}

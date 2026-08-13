@@ -19,7 +19,8 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { mkdtempSync, rmSync } from 'node:fs';
 
-import { createSpaghettiService, createGrokSource, loadNativeAddon } from '../index.js';
+import { loadLegacyNativeAddon as loadNativeAddon } from '../legacy-native.js';
+import { createSpaghettiService, createGrokSource } from '../legacy-oracle.js';
 import type { SpaghettiAPI } from '../index.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));

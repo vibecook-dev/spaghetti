@@ -2,7 +2,8 @@
  * Sessions command — list sessions for a project
  */
 
-import type { SpaghettiAPI, SessionListItem } from '@vibecook/spaghetti-sdk';
+import type { SessionListItem } from '@vibecook/spaghetti-sdk';
+import type { ObservationService } from '@vibecook/spaghetti-sdk/observation';
 import { theme } from '../lib/color.js';
 import { formatTokens, formatTokenUsage, formatDuration, formatNumber, totalTokens } from '../lib/format.js';
 import { sourceReportsPerMessageTokens } from '@vibecook/spaghetti-sdk';
@@ -89,11 +90,11 @@ function parseSince(since: string): Date | null {
 }
 
 export async function sessionsCommand(
-  api: SpaghettiAPI,
+  api: ObservationService,
   projectInput: string | undefined,
   opts: SessionsOptions,
 ): Promise<void> {
-  const projects = api.getProjectList();
+  const projects = await api.getProjectList();
 
   // Resolve project
   const input = projectInput ?? '.';
@@ -103,7 +104,8 @@ export async function sessionsCommand(
     throw noProjectMatch(input, suggestProjects(input, projects));
   }
 
-  let sessions = api.getSessionList(project);
+  const allSessions = await api.getSessionList(project);
+  let sessions = [...allSessions];
 
   // Filter by --since
   if (opts.since) {
@@ -138,7 +140,7 @@ export async function sessionsCommand(
   }
 
   // Header
-  const totalSessions = api.getSessionList(project).length;
+  const totalSessions = allSessions.length;
   const header = `  ${theme.project(project.folderName)} ${project.sourceIds.map((id) => theme.agent(id)).join(' ')} ${theme.muted(`(${totalSessions} sessions)`)}`;
 
   const columns: Column[] = [

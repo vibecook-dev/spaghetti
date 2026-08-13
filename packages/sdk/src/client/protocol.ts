@@ -144,6 +144,7 @@ export const SPAGHETTI_CLIENT_ERROR_CODES = [
   'unsupported_capability',
   'projection_pending',
   'cursor_invalid',
+  'reset_required',
   'cancelled',
   'deadline_exceeded',
   'engine_stopping',
@@ -169,6 +170,9 @@ export interface SpaghettiProtocolError {
   projection?: string;
   retryAfterMs?: number;
   diagnosticId?: string;
+  /** Snapshot watermark a consumer must use after a retained-history gap. */
+  currentCommitSeq?: number;
+  oldestAvailable?: { commitSeq: number; ordinal: number };
 }
 
 export class SpaghettiClientError extends Error {
@@ -180,6 +184,8 @@ export class SpaghettiClientError extends Error {
   readonly projection?: string;
   readonly retryAfterMs?: number;
   readonly diagnosticId?: string;
+  readonly currentCommitSeq?: number;
+  readonly oldestAvailable?: { commitSeq: number; ordinal: number };
 
   constructor(error: SpaghettiProtocolError, requestId?: number) {
     super(error.message);
@@ -192,6 +198,8 @@ export class SpaghettiClientError extends Error {
     this.projection = error.projection;
     this.retryAfterMs = error.retryAfterMs;
     this.diagnosticId = error.diagnosticId;
+    this.currentCommitSeq = error.currentCommitSeq;
+    this.oldestAvailable = error.oldestAvailable;
   }
 }
 

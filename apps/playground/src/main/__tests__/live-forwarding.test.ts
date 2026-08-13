@@ -1,21 +1,14 @@
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
-import type { Change, InitProgress, SegmentChangeBatch, SpaghettiAPI } from '@vibecook/spaghetti-sdk';
-import {
-  attachPlaygroundEventForwarding,
-  LIVE_FORWARD_THROTTLE_MS,
-  liveChangeToBatch,
-  PLAYGROUND_LIVE_TOPICS,
-} from '../../utility/live-forwarding.js';
+import type { Change, InitProgress, SegmentChangeBatch } from '@vibecook/spaghetti-sdk';
+import type { ObservationService } from '@vibecook/spaghetti-sdk/observation';
+import { attachPlaygroundEventForwarding, liveChangeToBatch } from '../../utility/live-forwarding.js';
 
 describe('playground live event forwarding', () => {
-  test('prewarms every visible scope and forwards lifecycle plus live changes', () => {
+  test('forwards the Rust-owned lifecycle and durable invalidations once', () => {
     let progressListener: ((progress: InitProgress) => void) | undefined;
     let readyListener: ((info: { durationMs: number }) => void) | undefined;
     let legacyChangeListener: ((batch: SegmentChangeBatch) => void) | undefined;
-    let liveChangeListener: ((changes: Change[]) => void) | undefined;
-    let liveChangeOptions: { throttleMs: number; latest: false } | undefined;
-    const prewarmed: string[] = [];
     const disposed: string[] = [];
 
     const sdk = {
@@ -31,18 +24,7 @@ describe('playground live event forwarding', () => {
         legacyChangeListener = listener;
         return () => disposed.push('legacy-change');
       },
-      live: {
-        prewarm(topic: (typeof PLAYGROUND_LIVE_TOPICS)[number]) {
-          prewarmed.push(topic.kind);
-          return () => disposed.push(`prewarm:${topic.kind}`);
-        },
-        onChange(listener: typeof liveChangeListener, options: typeof liveChangeOptions) {
-          liveChangeListener = listener;
-          liveChangeOptions = options;
-          return () => disposed.push('live-change');
-        },
-      },
-    } as unknown as SpaghettiAPI;
+    } as unknown as ObservationService;
 
     const progressEvents: InitProgress[] = [];
     const readyEvents: Array<{ durationMs: number }> = [];
@@ -53,82 +35,19 @@ describe('playground live event forwarding', () => {
       change: (event) => changeEvents.push(event),
     });
 
-    assert.deepEqual(
-      prewarmed,
-      PLAYGROUND_LIVE_TOPICS.map((topic) => topic.kind),
-    );
-    assert.deepEqual(liveChangeOptions, { throttleMs: LIVE_FORWARD_THROTTLE_MS, latest: false });
-
     const progress = { phase: 'indexing', message: 'updated' } as InitProgress;
     progressListener?.(progress);
     readyListener?.({ durationMs: 42 });
     legacyChangeListener?.({ changes: [], timestamp: 10 });
-    liveChangeListener?.([
-      {
-        type: 'session.rewritten',
-        sourceId: 'codex',
-        seq: 7,
-        ts: 20,
-        slug: 'project-a',
-        sessionId: 'session-a',
-      },
-      {
-        type: 'tool-result.added',
-        sourceId: 'codex',
-        seq: 8,
-        ts: 21,
-        slug: 'project-a',
-        sessionId: 'session-a',
-        toolUseId: 'tool-a',
-      },
-    ]);
 
     assert.deepEqual(progressEvents, [progress]);
     assert.deepEqual(readyEvents, [{ durationMs: 42 }]);
-    assert.deepEqual(changeEvents, [
-      { changes: [], timestamp: 10 },
-      {
-        changes: [
-          {
-            key: 'live:session.rewritten:7',
-            type: 'session',
-            action: 'upsert',
-            sourceId: 'codex',
-            projectSlug: 'project-a',
-            sessionId: 'session-a',
-            revision: 7,
-          },
-          {
-            key: 'live:tool-result.added:8',
-            type: 'tool_result',
-            action: 'upsert',
-            sourceId: 'codex',
-            projectSlug: 'project-a',
-            sessionId: 'session-a',
-            revision: 8,
-          },
-        ],
-        timestamp: 21,
-      },
-    ]);
+    assert.deepEqual(changeEvents, [{ changes: [], timestamp: 10 }]);
 
     dispose();
     dispose();
-    assert.equal(
-      disposed.length,
-      4 + PLAYGROUND_LIVE_TOPICS.length,
-      'every owned subscription is disposed exactly once',
-    );
-    assert.deepEqual(
-      new Set(disposed),
-      new Set([
-        'progress',
-        'ready',
-        'legacy-change',
-        'live-change',
-        ...PLAYGROUND_LIVE_TOPICS.map((topic) => `prewarm:${topic.kind}`),
-      ]),
-    );
+    assert.equal(disposed.length, 3, 'every owned subscription is disposed exactly once');
+    assert.deepEqual(new Set(disposed), new Set(['progress', 'ready', 'legacy-change']));
   });
 
   test('adapts every live change kind to the existing renderer batch contract', () => {

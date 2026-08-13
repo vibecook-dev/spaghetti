@@ -2,14 +2,13 @@
  * Messages command — read messages from a session
  */
 
-import type { SpaghettiAPI } from '@vibecook/spaghetti-sdk';
+import type { ObservationService } from '@vibecook/spaghetti-sdk/observation';
 import { theme } from '../lib/color.js';
 import { formatTokenUsage, formatRelativeTime, formatDuration, formatNumber } from '../lib/format.js';
 import { resolveProject, resolveSession, suggestProjects } from '../lib/resolve.js';
 import { UserError, noProjectMatch, noSessionMatch } from '../lib/error.js';
 import { resolveLimit, resolveOffset, resolveOptionalCount } from '../lib/limit.js';
 import { renderMessages, filterDisplayableMessages } from '../lib/message-render.js';
-import { adaptMessagesForDisplay } from '../lib/source-messages.js';
 import { outputWithPager } from '../lib/pager.js';
 import { getTerminalWidth } from '../lib/terminal.js';
 
@@ -45,12 +44,12 @@ export function hasMoreToShow(opts: {
 }
 
 export async function messagesCommand(
-  api: SpaghettiAPI,
+  api: ObservationService,
   projectInput: string | undefined,
   sessionInput: string | undefined,
   opts: MessagesOptions,
 ): Promise<void> {
-  const projects = api.getProjectList();
+  const projects = await api.getProjectList();
 
   // Resolve project
   const projStr = projectInput ?? '.';
@@ -61,7 +60,7 @@ export async function messagesCommand(
   }
 
   // Resolve the session across every agent that worked in this project.
-  const sessions = api.getSessionList(project);
+  const sessions = await api.getSessionList(project);
 
   if (sessions.length === 0) {
     throw new UserError(
@@ -95,13 +94,25 @@ export async function messagesCommand(
 
   // JSON/raw: fetch with exact limit, no filtering (raw stays source-native)
   if (opts.json) {
-    const page = api.getSessionMessages(session.projectSlug, session.sessionId, displayLimit, offset, sourceScope);
+    const page = await api.getSessionMessages(
+      session.projectSlug,
+      session.sessionId,
+      displayLimit,
+      offset,
+      sourceScope,
+    );
     process.stdout.write(JSON.stringify(page, null, 2) + '\n');
     return;
   }
 
   if (opts.raw) {
-    const page = api.getSessionMessages(session.projectSlug, session.sessionId, displayLimit, offset, sourceScope);
+    const page = await api.getSessionMessages(
+      session.projectSlug,
+      session.sessionId,
+      displayLimit,
+      offset,
+      sourceScope,
+    );
     for (const msg of page.messages) {
       process.stdout.write(JSON.stringify(msg) + '\n');
     }
@@ -114,29 +125,27 @@ export async function messagesCommand(
   const OVER_FETCH_MULTIPLIER = 3;
   const MAX_RETRIES = 2;
 
-  const page = api.getSessionMessages(
+  const page = await api.getSessionMessages(
     session.projectSlug,
     session.sessionId,
     displayLimit * OVER_FETCH_MULTIPLIER,
     offset,
     sourceScope,
   );
-  let displayMessages = filterDisplayableMessages(adaptMessagesForDisplay(page.messages, session.sourceId));
+  let displayMessages = filterDisplayableMessages(page.messages);
   let totalRaw = page.total;
   let lastHasMore = page.hasMore;
   let fetchOffset = offset + page.messages.length;
 
   for (let retry = 0; retry < MAX_RETRIES && displayMessages.length < displayLimit && lastHasMore; retry++) {
-    const morePage = api.getSessionMessages(
+    const morePage = await api.getSessionMessages(
       session.projectSlug,
       session.sessionId,
       displayLimit * OVER_FETCH_MULTIPLIER,
       fetchOffset,
       sourceScope,
     );
-    displayMessages = displayMessages.concat(
-      filterDisplayableMessages(adaptMessagesForDisplay(morePage.messages, session.sourceId)),
-    );
+    displayMessages = displayMessages.concat(filterDisplayableMessages(morePage.messages));
     totalRaw = morePage.total;
     lastHasMore = morePage.hasMore;
     fetchOffset += morePage.messages.length;

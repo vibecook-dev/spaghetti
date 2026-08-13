@@ -2,7 +2,8 @@
  * Projects command — list all projects with usage stats
  */
 
-import type { SpaghettiAPI, ProjectListItem } from '@vibecook/spaghetti-sdk';
+import type { ProjectListItem } from '@vibecook/spaghetti-sdk';
+import type { ObservationService } from '@vibecook/spaghetti-sdk/observation';
 import { theme } from '../lib/color.js';
 import { formatTokens, formatTokenUsage, formatRelativeTime, formatNumber, totalTokens } from '../lib/format.js';
 import { sourceReportsPerMessageTokens } from '@vibecook/spaghetti-sdk';
@@ -40,8 +41,8 @@ function sortProjects(projects: ProjectListItem[], key: SortKey): ProjectListIte
   }
 }
 
-export async function projectsCommand(api: SpaghettiAPI, opts: ProjectsOptions): Promise<void> {
-  let projects = api.getProjectList();
+export async function projectsCommand(api: ObservationService, opts: ProjectsOptions): Promise<void> {
+  let projects = await api.getProjectList();
 
   // Sort
   const sortKey = (opts.sort ?? 'active') as SortKey;

@@ -820,8 +820,8 @@ mod tests {
             .execute_batch(
                 r#"
                 INSERT INTO source_instances VALUES
-                    (1, 'fixture', x'01', 'Fixture', 1, 1, 1),
-                    (2, 'other', x'02', 'Other', 1, 1, 1);
+                    (1, 'fixture', x'01', 'Fixture', '1.0.0', 1, '[]', '[]', 1, 1),
+                    (2, 'other', x'02', 'Other', '1.0.0', 1, '[]', '[]', 1, 1);
                 INSERT INTO source_streams (
                     source_stream_id, source_instance_id, stream_key,
                     driver_kind, decoder_key, stream_state, last_commit_seq

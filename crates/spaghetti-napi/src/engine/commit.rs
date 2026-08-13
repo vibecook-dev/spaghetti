@@ -5,11 +5,48 @@
 //! adapter-specific fact/projector implementations land in later phases and
 //! must execute inside this boundary before the cursor is advanced.
 
+use std::collections::BTreeSet;
+
 use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
+use serde::{Deserialize, Serialize};
 
 use super::EngineError;
 
 const MAX_DRIVER_CHECKPOINT_BYTES: usize = 64 * 1024 * 1024;
+const CHANGE_LOG_ROW_OVERHEAD_BYTES: u64 = 24;
+
+/// Default durable replay window. Size is measured as the encoded change
+/// fields plus a fixed cursor/schema overhead, rather than SQLite page usage,
+/// so the bound remains deterministic across SQLite builds and page sizes.
+pub const DEFAULT_CHANGE_LOG_MAX_AGE_MS: u64 = 7 * 24 * 60 * 60 * 1_000;
+pub const DEFAULT_CHANGE_LOG_MAX_PAYLOAD_BYTES: u64 = 128 * 1024 * 1024;
+pub const DEFAULT_CHANGE_LOG_MIN_RESUMABLE_COMMITS: u64 = 1_024;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ChangeLogRetentionPolicy {
+    pub max_age_ms: u64,
+    pub max_payload_bytes: u64,
+    pub min_resumable_commits: u64,
+}
+
+impl Default for ChangeLogRetentionPolicy {
+    fn default() -> Self {
+        Self {
+            max_age_ms: DEFAULT_CHANGE_LOG_MAX_AGE_MS,
+            max_payload_bytes: DEFAULT_CHANGE_LOG_MAX_PAYLOAD_BYTES,
+            min_resumable_commits: DEFAULT_CHANGE_LOG_MIN_RESUMABLE_COMMITS,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChangeLogRetentionSnapshot {
+    pub pruned_through_commit_seq: u64,
+    pub retained_change_count: u64,
+    pub retained_payload_bytes: u64,
+    pub oldest_retained_commit_seq: Option<u64>,
+    pub oldest_retained_ordinal: Option<u32>,
+}
 
 /// Stable schema version for a change payload. This is independent from the
 /// SQLite schema version and is supplied by the projector that owns a topic.
@@ -20,9 +57,21 @@ pub struct SourceInstanceSpec {
     pub adapter_id: String,
     pub stable_key: Vec<u8>,
     pub display_name: String,
+    pub adapter_version: String,
     pub adapter_contract_version: u32,
+    pub source_schema_versions: Vec<String>,
+    pub capabilities: Vec<SourceCapabilitySpec>,
     pub discovered_at: i64,
     pub last_seen_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourceCapabilitySpec {
+    pub id: String,
+    pub support_level: String,
+    pub granularity: String,
+    pub availability: String,
+    pub notes: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -60,6 +109,7 @@ pub struct SourceObjectUpdate {
     pub driver_checkpoint_version: Option<u32>,
     pub decoder_state: Option<Vec<u8>>,
     pub decoder_state_version: Option<u32>,
+    pub retry_state: Option<Vec<u8>>,
     pub size_bytes: Option<u64>,
     pub mtime_ns: Option<i64>,
     pub decoder_contract_version: u32,
@@ -347,6 +397,11 @@ pub(super) fn apply_observation_commit_with_components(
             ],
         )
         .map_err(|error| sqlite_error("finalize ingest commit", error))?;
+    prune_change_log(
+        &transaction,
+        ChangeLogRetentionPolicy::default(),
+        request.committed_at,
+    )?;
     hook.reach(CommitStage::BeforeCommit)?;
     transaction
         .commit()
@@ -481,6 +536,7 @@ fn validate_source_instance(source: &SourceInstanceSpec) -> Result<(), EngineErr
     require_text("source.adapter_id", &source.adapter_id)?;
     require_bytes("source.stable_key", &source.stable_key)?;
     require_text("source.display_name", &source.display_name)?;
+    require_text("source.adapter_version", &source.adapter_version)?;
     if source.adapter_contract_version == 0 {
         return Err(EngineError::InvalidCommit(
             "source adapter contract version must be greater than zero".to_string(),
@@ -490,6 +546,28 @@ fn validate_source_instance(source: &SourceInstanceSpec) -> Result<(), EngineErr
         return Err(EngineError::InvalidCommit(
             "source last_seen_at must not precede discovered_at".to_string(),
         ));
+    }
+    let mut source_schema_versions = BTreeSet::new();
+    for version in &source.source_schema_versions {
+        require_text("source.source_schema_version", version)?;
+        if !source_schema_versions.insert(version) {
+            return Err(EngineError::InvalidCommit(format!(
+                "source schema version {version} is declared more than once"
+            )));
+        }
+    }
+    let mut capability_ids = BTreeSet::new();
+    for capability in &source.capabilities {
+        require_text("source.capability.id", &capability.id)?;
+        require_text("source.capability.support_level", &capability.support_level)?;
+        require_text("source.capability.granularity", &capability.granularity)?;
+        require_text("source.capability.availability", &capability.availability)?;
+        if !capability_ids.insert(&capability.id) {
+            return Err(EngineError::InvalidCommit(format!(
+                "source capability {} is declared more than once",
+                capability.id
+            )));
+        }
     }
     Ok(())
 }
@@ -532,24 +610,67 @@ fn upsert_source_instance(
     transaction: &Transaction<'_>,
     source: &SourceInstanceSpec,
 ) -> Result<u64, EngineError> {
+    let source_schema_versions_json = serde_json::to_string(&source.source_schema_versions)
+        .map_err(|error| {
+            EngineError::InvalidCommit(format!("could not encode source schema versions: {error}"))
+        })?;
+    let capabilities_json = serde_json::to_string(&source.capabilities).map_err(|error| {
+        EngineError::InvalidCommit(format!("could not encode source capabilities: {error}"))
+    })?;
+    let existing_id: Option<i64> = transaction
+        .query_row(
+            "SELECT source_instance_id FROM source_instances WHERE adapter_id = ?1 AND stable_key = ?2",
+            params![source.adapter_id, source.stable_key],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|error| sqlite_error("read source instance identity", error))?;
+    let source_instance_id = match existing_id {
+        Some(id) => from_i64(id, "source instance id")?,
+        None => {
+            let id = source_instance_catalog_id(&source.adapter_id, &source.stable_key);
+            let occupied: Option<(String, Vec<u8>)> = transaction
+                .query_row(
+                    "SELECT adapter_id, stable_key FROM source_instances WHERE source_instance_id = ?1",
+                    [to_i64(id, "source instance id")?],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()
+                .map_err(|error| sqlite_error("check source instance identity collision", error))?;
+            if occupied.is_some() {
+                return Err(EngineError::InvalidCommit(
+                    "deterministic source instance identity collision".to_string(),
+                ));
+            }
+            id
+        }
+    };
     let id: i64 = transaction
         .query_row(
             r#"
             INSERT INTO source_instances (
-                adapter_id, stable_key, display_name, adapter_contract_version,
-                discovered_at, last_seen_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                source_instance_id, adapter_id, stable_key, display_name, adapter_version,
+                adapter_contract_version, source_schema_versions_json,
+                capabilities_json, discovered_at, last_seen_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
             ON CONFLICT(adapter_id, stable_key) DO UPDATE SET
                 display_name = excluded.display_name,
+                adapter_version = excluded.adapter_version,
                 adapter_contract_version = excluded.adapter_contract_version,
+                source_schema_versions_json = excluded.source_schema_versions_json,
+                capabilities_json = excluded.capabilities_json,
                 last_seen_at = excluded.last_seen_at
             RETURNING source_instance_id
             "#,
             params![
+                to_i64(source_instance_id, "source instance id")?,
                 source.adapter_id,
                 source.stable_key,
                 source.display_name,
+                source.adapter_version,
                 i64::from(source.adapter_contract_version),
+                source_schema_versions_json,
+                capabilities_json,
                 source.discovered_at,
                 source.last_seen_at
             ],
@@ -589,13 +710,41 @@ fn upsert_source_stream(
     commit_seq: u64,
     stream: &SourceStreamSpec,
 ) -> Result<u64, EngineError> {
+    let existing_id: Option<i64> = transaction
+        .query_row(
+            "SELECT source_stream_id FROM source_streams WHERE source_instance_id = ?1 AND stream_key = ?2",
+            params![to_i64(source_instance_id, "source instance id")?, stream.stream_key],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|error| sqlite_error("read source stream identity", error))?;
+    let source_stream_id = match existing_id {
+        Some(id) => from_i64(id, "source stream id")?,
+        None => {
+            let id = source_stream_catalog_id(source_instance_id, &stream.stream_key);
+            let occupied: Option<i64> = transaction
+                .query_row(
+                    "SELECT source_stream_id FROM source_streams WHERE source_stream_id = ?1",
+                    [to_i64(id, "source stream id")?],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(|error| sqlite_error("check source stream identity collision", error))?;
+            if occupied.is_some() {
+                return Err(EngineError::InvalidCommit(
+                    "deterministic source stream identity collision".to_string(),
+                ));
+            }
+            id
+        }
+    };
     let id: i64 = transaction
         .query_row(
             r#"
             INSERT INTO source_streams (
-                source_instance_id, stream_key, driver_kind, decoder_key,
+                source_stream_id, source_instance_id, stream_key, driver_kind, decoder_key,
                 stream_state, last_reconciled_at, last_commit_seq
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
             ON CONFLICT(source_instance_id, stream_key) DO UPDATE SET
                 driver_kind = excluded.driver_kind,
                 decoder_key = excluded.decoder_key,
@@ -605,6 +754,7 @@ fn upsert_source_stream(
             RETURNING source_stream_id
             "#,
             params![
+                to_i64(source_stream_id, "source stream id")?,
                 to_i64(source_instance_id, "source instance id")?,
                 stream.stream_key,
                 stream.driver_kind,
@@ -685,16 +835,31 @@ fn reserve_source_object_identity(
         return Ok(existing.source_object_id);
     }
 
+    let source_object_id = source_object_catalog_id(source_stream_id, &object.object_key);
+    let occupied: Option<i64> = transaction
+        .query_row(
+            "SELECT source_object_id FROM source_objects WHERE source_object_id = ?1",
+            [to_i64(source_object_id, "source object id")?],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|error| sqlite_error("check source object identity collision", error))?;
+    if occupied.is_some() {
+        return Err(EngineError::InvalidCommit(
+            "deterministic source object identity collision".to_string(),
+        ));
+    }
     let id: i64 = transaction
         .query_row(
             r#"
             INSERT INTO source_objects (
-                source_stream_id, object_key, generation, committed_cursor,
+                source_object_id, source_stream_id, object_key, generation, committed_cursor,
                 decoder_contract_version, state
-            ) VALUES (?1, ?2, ?3, X'', ?4, 'pending')
+            ) VALUES (?1, ?2, ?3, ?4, X'', ?5, 'pending')
             RETURNING source_object_id
             "#,
             params![
+                to_i64(source_object_id, "source object id")?,
                 to_i64(source_stream_id, "source stream id")?,
                 object.object_key,
                 to_i64(object.generation, "source object generation")?,
@@ -704,6 +869,41 @@ fn reserve_source_object_identity(
         )
         .map_err(|error| sqlite_error("reserve source object identity", error))?;
     from_i64(id, "source object id")
+}
+
+fn deterministic_catalog_id(domain: &[u8], components: &[&[u8]]) -> u64 {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"spaghetti/catalog-id/v1");
+    hasher.update(&(domain.len() as u64).to_be_bytes());
+    hasher.update(domain);
+    for component in components {
+        hasher.update(&(component.len() as u64).to_be_bytes());
+        hasher.update(component);
+    }
+    let mut prefix = [0_u8; 8];
+    prefix.copy_from_slice(&hasher.finalize().as_bytes()[..8]);
+    // Catalog IDs cross N-API as JavaScript numbers in the current transport,
+    // so keep the deterministic namespace inside the exact integer range.
+    let id = u64::from_be_bytes(prefix) & ((1_u64 << 53) - 1);
+    id.max(1)
+}
+
+pub(crate) fn source_instance_catalog_id(adapter_id: &str, stable_key: &[u8]) -> u64 {
+    deterministic_catalog_id(b"source-instance", &[adapter_id.as_bytes(), stable_key])
+}
+
+pub(crate) fn source_stream_catalog_id(source_instance_id: u64, stream_key: &str) -> u64 {
+    deterministic_catalog_id(
+        b"source-stream",
+        &[&source_instance_id.to_be_bytes(), stream_key.as_bytes()],
+    )
+}
+
+pub(crate) fn source_object_catalog_id(source_stream_id: u64, object_key: &[u8]) -> u64 {
+    deterministic_catalog_id(
+        b"source-object",
+        &[&source_stream_id.to_be_bytes(), object_key],
+    )
 }
 
 fn finalize_source_object(
@@ -724,10 +924,11 @@ fn finalize_source_object(
                 committed_cursor = ?4, observed_revision = ?5,
                 adapter_object_context = ?6, driver_checkpoint = ?7,
                 driver_checkpoint_version = ?8, decoder_state = ?9,
-                decoder_state_version = ?10, size_bytes = ?11, mtime_ns = ?12,
-                decoder_contract_version = ?13, last_commit_seq = ?14,
-                state = ?15
-            WHERE source_object_id = ?16
+                decoder_state_version = ?10, retry_state = ?11,
+                size_bytes = ?12, mtime_ns = ?13,
+                decoder_contract_version = ?14, last_commit_seq = ?15,
+                state = ?16
+            WHERE source_object_id = ?17
             "#,
             params![
                 object.display_path,
@@ -740,6 +941,7 @@ fn finalize_source_object(
                 object.driver_checkpoint_version.map(i64::from),
                 object.decoder_state,
                 object.decoder_state_version.map(i64::from),
+                object.retry_state,
                 size_bytes,
                 object.mtime_ns,
                 i64::from(object.decoder_contract_version),
@@ -853,6 +1055,7 @@ fn write_change_log(
     commit_seq: u64,
     changes: &[ChangeEntry],
 ) -> Result<(), EngineError> {
+    let mut retained_payload_bytes = 0_u64;
     let mut statement = transaction
         .prepare_cached(
             r#"
@@ -864,6 +1067,13 @@ fn write_change_log(
         )
         .map_err(|error| sqlite_error("prepare durable change", error))?;
     for (ordinal, change) in changes.iter().enumerate() {
+        retained_payload_bytes = retained_payload_bytes
+            .checked_add(change_log_payload_bytes(change)?)
+            .ok_or_else(|| {
+                EngineError::InvalidCommit(
+                    "change-log retained payload accounting overflowed u64".to_string(),
+                )
+            })?;
         statement
             .execute(params![
                 to_i64(commit_seq, "commit sequence")?,
@@ -878,7 +1088,297 @@ fn write_change_log(
             ])
             .map_err(|error| sqlite_error("write durable change", error))?;
     }
+    drop(statement);
+    if !changes.is_empty() {
+        transaction
+            .execute(
+                r#"
+                UPDATE change_log_retention_state
+                SET retained_change_count = retained_change_count + ?1,
+                    retained_payload_bytes = retained_payload_bytes + ?2
+                WHERE singleton = 1
+                "#,
+                params![
+                    i64::try_from(changes.len()).map_err(|_| EngineError::InvalidCommit(
+                        "change count exceeds SQLite integer range".to_string()
+                    ))?,
+                    to_i64(retained_payload_bytes, "change-log retained payload bytes")?,
+                ],
+            )
+            .map_err(|error| sqlite_error("account durable changes", error))?;
+    }
     Ok(())
+}
+
+fn change_log_payload_bytes(change: &ChangeEntry) -> Result<u64, EngineError> {
+    [
+        change.topic.len(),
+        change.entity_key.len(),
+        change.operation.len(),
+        change.payload.len(),
+    ]
+    .into_iter()
+    .try_fold(CHANGE_LOG_ROW_OVERHEAD_BYTES, |total, bytes| {
+        let bytes = u64::try_from(bytes).map_err(|_| {
+            EngineError::InvalidCommit(
+                "change-log field length exceeds durable accounting range".to_string(),
+            )
+        })?;
+        total.checked_add(bytes).ok_or_else(|| {
+            EngineError::InvalidCommit(
+                "change-log row payload accounting overflowed u64".to_string(),
+            )
+        })
+    })
+}
+
+/// Prune only complete commit groups. The minimum sequence window wins over
+/// both age and size, so a large recent commit can temporarily exceed the
+/// byte target without making a just-issued cursor non-resumable.
+pub(super) fn maintain_change_log(
+    connection: &mut Connection,
+    policy: ChangeLogRetentionPolicy,
+    now_ms: i64,
+) -> Result<ChangeLogRetentionSnapshot, EngineError> {
+    validate_change_log_retention_policy(policy)?;
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|error| sqlite_error("begin change-log retention", error))?;
+    let snapshot = prune_change_log(&transaction, policy, now_ms)?;
+    transaction
+        .commit()
+        .map_err(|error| sqlite_error("commit change-log retention", error))?;
+    Ok(snapshot)
+}
+
+fn validate_change_log_retention_policy(
+    policy: ChangeLogRetentionPolicy,
+) -> Result<(), EngineError> {
+    if policy.max_age_ms == 0 {
+        return Err(EngineError::InvalidConfig(
+            "change-log max_age_ms must be greater than zero".to_string(),
+        ));
+    }
+    if policy.max_payload_bytes == 0 {
+        return Err(EngineError::InvalidConfig(
+            "change-log max_payload_bytes must be greater than zero".to_string(),
+        ));
+    }
+    if policy.min_resumable_commits == 0 {
+        return Err(EngineError::InvalidConfig(
+            "change-log min_resumable_commits must be greater than zero".to_string(),
+        ));
+    }
+    to_i64(policy.max_age_ms, "change-log maximum age")?;
+    to_i64(policy.max_payload_bytes, "change-log maximum payload bytes")?;
+    to_i64(
+        policy.min_resumable_commits,
+        "change-log minimum resumable commits",
+    )?;
+    Ok(())
+}
+
+fn prune_change_log(
+    transaction: &Transaction<'_>,
+    policy: ChangeLogRetentionPolicy,
+    now_ms: i64,
+) -> Result<ChangeLogRetentionSnapshot, EngineError> {
+    validate_change_log_retention_policy(policy)?;
+    let watermark = transaction
+        .query_row(
+            "SELECT COALESCE(MAX(commit_seq), 0) FROM ingest_commits WHERE committed_at IS NOT NULL",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .map_err(|error| sqlite_error("read retention watermark", error))?;
+    let watermark = from_i64(watermark, "retention watermark")?;
+    let protected_floor = watermark.saturating_sub(policy.min_resumable_commits);
+
+    let (current_floor, retained_change_count, retained_payload_bytes): (i64, i64, i64) =
+        transaction
+            .query_row(
+                r#"
+                SELECT pruned_through_commit_seq, retained_change_count,
+                       retained_payload_bytes
+                FROM change_log_retention_state WHERE singleton = 1
+                "#,
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .map_err(|error| sqlite_error("read change-log retention state", error))?;
+    let current_floor = from_i64(current_floor, "change-log pruned floor")?;
+    let retained_change_count = from_i64(retained_change_count, "retained change count")?;
+    let retained_payload_bytes = from_i64(retained_payload_bytes, "retained change payload bytes")?;
+
+    let max_age_ms = i64::try_from(policy.max_age_ms).map_err(|_| {
+        EngineError::InvalidConfig("change-log maximum age exceeds i64".to_string())
+    })?;
+    let age_cutoff = now_ms.saturating_sub(max_age_ms);
+    let age_candidate: i64 = transaction
+        .query_row(
+            r#"
+            SELECT COALESCE(MAX(commit_seq), 0)
+            FROM ingest_commits
+            WHERE committed_at IS NOT NULL
+              AND committed_at <= ?1
+              AND commit_seq <= ?2
+            "#,
+            params![
+                age_cutoff,
+                to_i64(protected_floor, "retention protected floor")?
+            ],
+            |row| row.get(0),
+        )
+        .map_err(|error| sqlite_error("select age retention boundary", error))?;
+    let age_candidate = from_i64(age_candidate, "age retention boundary")?;
+
+    let size_candidate =
+        if retained_payload_bytes > policy.max_payload_bytes && protected_floor > current_floor {
+            let bytes_to_remove = retained_payload_bytes - policy.max_payload_bytes;
+            transaction
+                .query_row(
+                    r#"
+                WITH per_commit AS (
+                  SELECT commit_seq,
+                         SUM(
+                           length(CAST(topic AS BLOB)) + length(entity_key) +
+                           length(CAST(operation AS BLOB)) + length(payload) + ?1
+                         ) AS payload_bytes
+                  FROM change_log
+                  WHERE commit_seq > ?2 AND commit_seq <= ?3
+                  GROUP BY commit_seq
+                ), cumulative AS (
+                  SELECT commit_seq,
+                         SUM(payload_bytes) OVER (
+                           ORDER BY commit_seq ROWS UNBOUNDED PRECEDING
+                         ) AS removed_bytes
+                  FROM per_commit
+                )
+                SELECT COALESCE(
+                  (SELECT MIN(commit_seq) FROM cumulative WHERE removed_bytes >= ?4),
+                  (SELECT MAX(commit_seq) FROM per_commit),
+                  0
+                )
+                "#,
+                    params![
+                        to_i64(CHANGE_LOG_ROW_OVERHEAD_BYTES, "change-log row overhead")?,
+                        to_i64(current_floor, "change-log current floor")?,
+                        to_i64(protected_floor, "retention protected floor")?,
+                        to_i64(bytes_to_remove, "change-log bytes to remove")?,
+                    ],
+                    |row| row.get::<_, i64>(0),
+                )
+                .map_err(|error| sqlite_error("select size retention boundary", error))
+                .and_then(|value| from_i64(value, "size retention boundary"))?
+        } else {
+            0
+        };
+
+    let next_floor = current_floor
+        .max(age_candidate)
+        .max(size_candidate)
+        .min(protected_floor);
+    if next_floor > current_floor {
+        let (removed_count, removed_bytes): (i64, i64) = transaction
+            .query_row(
+                r#"
+                SELECT COUNT(*), COALESCE(SUM(
+                  length(CAST(topic AS BLOB)) + length(entity_key) +
+                  length(CAST(operation AS BLOB)) + length(payload) + ?1
+                ), 0)
+                FROM change_log
+                WHERE commit_seq <= ?2
+                "#,
+                params![
+                    to_i64(CHANGE_LOG_ROW_OVERHEAD_BYTES, "change-log row overhead")?,
+                    to_i64(next_floor, "next change-log floor")?,
+                ],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(|error| sqlite_error("measure pruned change log", error))?;
+        let removed_count = from_i64(removed_count, "pruned change count")?;
+        let removed_bytes = from_i64(removed_bytes, "pruned change payload bytes")?;
+        transaction
+            .execute(
+                "DELETE FROM change_log WHERE commit_seq <= ?1",
+                [to_i64(next_floor, "next change-log floor")?],
+            )
+            .map_err(|error| sqlite_error("prune change log", error))?;
+        transaction
+            .execute(
+                r#"
+                UPDATE change_log_retention_state
+                SET pruned_through_commit_seq = ?1,
+                    retained_change_count = ?2,
+                    retained_payload_bytes = ?3,
+                    last_pruned_at = ?4
+                WHERE singleton = 1
+                "#,
+                params![
+                    to_i64(next_floor, "next change-log floor")?,
+                    to_i64(
+                        retained_change_count.saturating_sub(removed_count),
+                        "retained change count",
+                    )?,
+                    to_i64(
+                        retained_payload_bytes.saturating_sub(removed_bytes),
+                        "retained change payload bytes",
+                    )?,
+                    now_ms,
+                ],
+            )
+            .map_err(|error| sqlite_error("advance change-log retention floor", error))?;
+    } else {
+        transaction
+            .execute(
+                "UPDATE change_log_retention_state SET last_pruned_at = ?1 WHERE singleton = 1",
+                [now_ms],
+            )
+            .map_err(|error| sqlite_error("record change-log retention check", error))?;
+    }
+
+    read_change_log_retention_snapshot(transaction)
+}
+
+fn read_change_log_retention_snapshot(
+    transaction: &Transaction<'_>,
+) -> Result<ChangeLogRetentionSnapshot, EngineError> {
+    let (floor, count, bytes): (i64, i64, i64) = transaction
+        .query_row(
+            r#"
+            SELECT pruned_through_commit_seq, retained_change_count,
+                   retained_payload_bytes
+            FROM change_log_retention_state WHERE singleton = 1
+            "#,
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .map_err(|error| sqlite_error("read retained change metrics", error))?;
+    let oldest = transaction
+        .query_row(
+            "SELECT commit_seq, ordinal FROM change_log ORDER BY commit_seq, ordinal LIMIT 1",
+            [],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+        )
+        .optional()
+        .map_err(|error| sqlite_error("read oldest retained change", error))?;
+    let (oldest_retained_commit_seq, oldest_retained_ordinal) = match oldest {
+        Some((commit_seq, ordinal)) => (
+            Some(from_i64(commit_seq, "oldest retained commit")?),
+            Some(u32::try_from(ordinal).map_err(|_| EngineError::Sqlite {
+                operation: "decode oldest retained change",
+                detail: format!("change ordinal was outside u32: {ordinal}"),
+            })?),
+        ),
+        None => (None, None),
+    };
+    Ok(ChangeLogRetentionSnapshot {
+        pruned_through_commit_seq: from_i64(floor, "change-log pruned floor")?,
+        retained_change_count: from_i64(count, "retained change count")?,
+        retained_payload_bytes: from_i64(bytes, "retained change payload bytes")?,
+        oldest_retained_commit_seq,
+        oldest_retained_ordinal,
+    })
 }
 
 fn to_i64(value: u64, field: &'static str) -> Result<i64, EngineError> {
@@ -1022,7 +1522,10 @@ mod tests {
                 adapter_id: "fixture".to_string(),
                 stable_key: b"fixture-root".to_vec(),
                 display_name: "Fixture root".to_string(),
+                adapter_version: "1.0.0".to_string(),
                 adapter_contract_version: 3,
+                source_schema_versions: Vec::new(),
+                capabilities: Vec::new(),
                 discovered_at: 1_000,
                 last_seen_at: 1_100,
             },
@@ -1046,6 +1549,7 @@ mod tests {
                 driver_checkpoint_version: Some(1),
                 decoder_state: Some(b"decoder".to_vec()),
                 decoder_state_version: Some(2),
+                retry_state: None,
                 size_bytes: Some(128),
                 mtime_ns: Some(1_000_000),
                 decoder_contract_version: 4,
@@ -1152,7 +1656,16 @@ mod tests {
                 },
             )
             .unwrap();
-        assert_eq!(provenance, (1, 1, 1, 1, 1));
+        assert_eq!(
+            provenance,
+            (
+                1,
+                to_i64(receipt.source_instance_id, "test source instance").unwrap(),
+                to_i64(receipt.source_stream_id, "test source stream").unwrap(),
+                to_i64(receipt.source_object_id, "test source object").unwrap(),
+                1,
+            )
+        );
 
         let commit: (i64, i64) = connection
             .query_row(
@@ -1199,7 +1712,7 @@ mod tests {
     fn cursor_compare_and_swap_makes_committed_range_retry_idempotent() {
         let mut connection = database();
         let original = request();
-        apply_observation_commit(&mut connection, &original).unwrap();
+        let first = apply_observation_commit(&mut connection, &original).unwrap();
 
         assert!(matches!(
             apply_observation_commit(&mut connection, &original),
@@ -1218,10 +1731,46 @@ mod tests {
         next.committed_at = 1_400;
         let receipt = apply_observation_commit(&mut connection, &next).unwrap();
         assert_eq!(receipt.commit_seq, 2);
-        assert_eq!(receipt.source_instance_id, 1);
-        assert_eq!(receipt.source_stream_id, 1);
-        assert_eq!(receipt.source_object_id, 1);
+        assert_eq!(receipt.source_instance_id, first.source_instance_id);
+        assert_eq!(receipt.source_stream_id, first.source_stream_id);
+        assert_eq!(receipt.source_object_id, first.source_object_id);
         assert_eq!(count(&connection, "ingest_commits"), 2);
+    }
+
+    #[test]
+    fn catalog_identity_is_independent_of_unrelated_registration_order() {
+        fn commit_named(connection: &mut Connection, stable_key: &[u8]) -> CommitReceipt {
+            let mut request = request();
+            request.source.stable_key = stable_key.to_vec();
+            request.source.display_name = String::from_utf8_lossy(stable_key).into_owned();
+            request.object.object_key = b"shared-object-name".to_vec();
+            apply_observation_commit(connection, &request).unwrap()
+        }
+
+        let mut first_order = database();
+        let alpha_first = commit_named(&mut first_order, b"alpha-root");
+        let beta_second = commit_named(&mut first_order, b"beta-root");
+
+        let mut reverse_order = database();
+        let beta_first = commit_named(&mut reverse_order, b"beta-root");
+        let alpha_second = commit_named(&mut reverse_order, b"alpha-root");
+
+        assert_eq!(
+            alpha_first.source_instance_id,
+            alpha_second.source_instance_id
+        );
+        assert_eq!(alpha_first.source_stream_id, alpha_second.source_stream_id);
+        assert_eq!(alpha_first.source_object_id, alpha_second.source_object_id);
+        assert_eq!(
+            beta_second.source_instance_id,
+            beta_first.source_instance_id
+        );
+        assert_eq!(beta_second.source_stream_id, beta_first.source_stream_id);
+        assert_eq!(beta_second.source_object_id, beta_first.source_object_id);
+        assert_ne!(
+            alpha_first.source_instance_id,
+            beta_first.source_instance_id
+        );
     }
 
     #[test]

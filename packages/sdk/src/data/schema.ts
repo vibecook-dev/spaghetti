@@ -99,7 +99,12 @@ import type { SqliteService } from '../io/index.js';
 // guaranteed to have both its relation and search index entry.
 // v33: writer-maintained source-neutral content-block metadata for indexed
 // canonical timeline filters and facets.
-export const SCHEMA_VERSION = 33;
+// v34: durable common-driver retry state for bounded malformed snapshots.
+// v35: durable change-log retention accounting and stale-cursor reset floor.
+// v36: truthful cumulative/snapshot usage series and raw counter values.
+// v37: durable adapter/source-schema/capability manifest snapshots.
+// v38: stamped adapter dependency reads attached to durable fact records.
+export const SCHEMA_VERSION = 38;
 
 export const TOKEN_ACTIVITY_TRIGGER_NAMES = [
   'token_activity_messages_ai',
@@ -503,7 +508,10 @@ CREATE TABLE IF NOT EXISTS source_instances (
   adapter_id TEXT NOT NULL,
   stable_key BLOB NOT NULL,
   display_name TEXT NOT NULL,
+  adapter_version TEXT NOT NULL,
   adapter_contract_version INTEGER NOT NULL,
+  source_schema_versions_json TEXT NOT NULL,
+  capabilities_json TEXT NOT NULL,
   discovered_at INTEGER NOT NULL,
   last_seen_at INTEGER NOT NULL,
   UNIQUE(adapter_id, stable_key)
@@ -535,6 +543,7 @@ CREATE TABLE IF NOT EXISTS source_objects (
   driver_checkpoint_version INTEGER,
   decoder_state BLOB,
   decoder_state_version INTEGER,
+  retry_state BLOB,
   size_bytes INTEGER,
   mtime_ns INTEGER,
   decoder_contract_version INTEGER NOT NULL,
@@ -562,6 +571,19 @@ CREATE TABLE IF NOT EXISTS change_log (
   payload BLOB NOT NULL,
   PRIMARY KEY (commit_seq, ordinal)
 );
+
+CREATE TABLE IF NOT EXISTS change_log_retention_state (
+  singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+  pruned_through_commit_seq INTEGER NOT NULL DEFAULT 0,
+  retained_change_count INTEGER NOT NULL DEFAULT 0,
+  retained_payload_bytes INTEGER NOT NULL DEFAULT 0,
+  last_pruned_at INTEGER
+);
+
+INSERT OR IGNORE INTO change_log_retention_state (
+  singleton, pruned_through_commit_seq, retained_change_count,
+  retained_payload_bytes, last_pruned_at
+) VALUES (1, 0, 0, 0, NULL);
 
 CREATE TABLE IF NOT EXISTS projection_versions (
   projection_id TEXT NOT NULL,
@@ -611,6 +633,18 @@ CREATE TABLE IF NOT EXISTS fact_records (
   payload_json BLOB NOT NULL,
   last_commit_seq INTEGER NOT NULL REFERENCES ingest_commits(commit_seq) ON DELETE RESTRICT
 );
+
+CREATE TABLE IF NOT EXISTS fact_dependency_reads (
+  fact_id BLOB NOT NULL REFERENCES fact_records(fact_id) ON DELETE CASCADE,
+  source_instance_id INTEGER NOT NULL REFERENCES source_instances(source_instance_id) ON DELETE CASCADE,
+  root_name TEXT NOT NULL,
+  object_key BLOB NOT NULL,
+  revision BLOB NOT NULL,
+  PRIMARY KEY (fact_id, source_instance_id, root_name, object_key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_fact_dependency_reads_object
+ON fact_dependency_reads(source_instance_id, root_name, object_key, fact_id);
 
 CREATE TABLE IF NOT EXISTS canonical_sessions (
   session_key BLOB PRIMARY KEY,
@@ -1546,6 +1580,7 @@ CREATE TABLE IF NOT EXISTS usage_contributions (
   fact_id BLOB PRIMARY KEY REFERENCES fact_records(fact_id) ON DELETE CASCADE,
   subject_key BLOB NOT NULL,
   session_key BLOB NOT NULL,
+  series_key BLOB NOT NULL,
   scope TEXT NOT NULL,
   accounting TEXT NOT NULL,
   quality TEXT NOT NULL,
@@ -1554,6 +1589,10 @@ CREATE TABLE IF NOT EXISTS usage_contributions (
   output_tokens INTEGER NOT NULL,
   cache_creation_tokens INTEGER NOT NULL,
   cache_read_tokens INTEGER NOT NULL,
+  reported_input_tokens INTEGER NOT NULL,
+  reported_output_tokens INTEGER NOT NULL,
+  reported_cache_creation_tokens INTEGER NOT NULL,
+  reported_cache_read_tokens INTEGER NOT NULL,
   model TEXT,
   source_time TEXT,
   source_time_quality TEXT,
@@ -1561,6 +1600,11 @@ CREATE TABLE IF NOT EXISTS usage_contributions (
   source_generation INTEGER NOT NULL,
   cursor_end BLOB NOT NULL,
   last_commit_seq INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_usage_contributions_series_cursor
+ON usage_contributions (
+  series_key, source_generation, cursor_end, fact_id
 );
 
 CREATE TABLE IF NOT EXISTS usage_totals (
@@ -1674,6 +1718,7 @@ CREATE INDEX IF NOT EXISTS idx_source_streams_instance_state ON source_streams(s
 CREATE INDEX IF NOT EXISTS idx_source_objects_stream_state ON source_objects(source_stream_id, state);
 CREATE INDEX IF NOT EXISTS idx_source_objects_last_commit ON source_objects(last_commit_seq);
 CREATE INDEX IF NOT EXISTS idx_ingest_commits_source_seq ON ingest_commits(source_instance_id, commit_seq);
+CREATE INDEX IF NOT EXISTS idx_ingest_commits_retention ON ingest_commits(committed_at, commit_seq);
 CREATE INDEX IF NOT EXISTS idx_change_log_topic_cursor ON change_log(topic, commit_seq, ordinal);
 CREATE INDEX IF NOT EXISTS idx_projection_versions_readiness ON projection_versions(readiness, projection_id);
 CREATE INDEX IF NOT EXISTS idx_source_record_errors_commit ON source_record_errors(first_commit_seq);
@@ -1925,9 +1970,11 @@ const CURRENT_TABLES = [
   'canonical_messages',
   'canonical_runs',
   'canonical_sessions',
+  'fact_dependency_reads',
   'fact_records',
   'source_record_errors',
   'change_log',
+  'change_log_retention_state',
   'projection_versions',
   'source_objects',
   'source_streams',

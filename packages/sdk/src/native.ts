@@ -1,18 +1,14 @@
 /**
  * Native addon loader — `@vibecook/spaghetti-sdk-native`.
  *
- * The Rust ingest core (RFC 003) ships as a separate native addon. This
- * module loads it opportunistically: if the addon is missing or fails
- * to load (unsupported platform, broken install), the SDK falls back
- * to the pure-TypeScript ingest path.
- *
- * As of Phase 4 (cutover, 0.7.0) the native path is the **default** —
- * set `SPAG_NATIVE_INGEST=0` to force the TS path.
+ * The Rust RFC 011 observation/query engine ships as a separate native addon.
+ * The production SDK requires it; a missing or incompatible binary is an
+ * actionable startup error and never selects a second ingest authority.
  */
 
 import { createRequire } from 'node:module';
 
-import { resolveEngine, type IngestEngine } from './settings.js';
+import type { IngestEngine } from './settings.js';
 
 export interface NativeIngestOptions {
   /**
@@ -210,6 +206,11 @@ export interface SpaghettiEngineOverview {
   /** Canonical history materialized by RFC 011 observation commits. */
   canonicalSessions: number;
   canonicalMessages: number;
+  /** Oldest durable change still resumable without taking a new snapshot. */
+  changeLogOldestCursor?: SpaghettiEngineChangeCursor;
+  changeLogPrunedThroughSeq: number;
+  changeLogRetainedChanges: number;
+  changeLogRetainedPayloadBytes: number;
   writerDataVersion: number;
   journalMode: string;
   queryOnly: boolean;
@@ -1041,7 +1042,10 @@ export interface SpaghettiEngineSourceSummary {
   sourceInstanceId: number;
   adapterId: string;
   displayName: string;
+  adapterVersion: string;
   adapterContractVersion: number;
+  sourceSchemaVersions: string[];
+  capabilities: SpaghettiEngineSourceCapability[];
   discoveredAtUnixMs: number;
   lastSeenAtUnixMs: number;
   streamCount: number;
@@ -1052,6 +1056,14 @@ export interface SpaghettiEngineSourceSummary {
   factCount: number;
   commitCount: number;
   lastCommitSeq?: number;
+}
+
+export interface SpaghettiEngineSourceCapability {
+  id: string;
+  supportLevel: 'native' | 'derived' | 'estimated' | 'unsupported' | string;
+  granularity: string;
+  availability: 'live' | 'eventually_live' | 'completion_only' | 'backfill_only' | string;
+  notes?: string;
 }
 
 export interface SpaghettiEngineSourcePage {
@@ -1432,17 +1444,27 @@ export interface SpaghettiEngineTeamInboxMessagePage {
 }
 
 export interface SpaghettiEngineReconcileOptions {
-  /** Configured Claude Code data roots, such as `~/.claude`. */
+  /** Configured native data roots understood by the selected adapter. */
   roots: string[];
   /** Durable ingest reason. Defaults to `manual_reconcile`. */
   reason?: string;
 }
 
 export interface SpaghettiEngineObservationOptions {
-  /** Configured Claude Code data roots, such as `~/.claude`. */
+  /** Configured native data roots understood by the selected adapter. */
   roots: string[];
   /** Durable reason prefix. Defaults to `native_watch`. */
   reason?: string;
+}
+
+export interface SpaghettiEngineAdapterReconcileOptions extends SpaghettiEngineReconcileOptions {
+  /** Open adapter identifier, such as `claude-code`, `codex`, or `grok`. */
+  adapterId: string;
+}
+
+export interface SpaghettiEngineAdapterObservationOptions extends SpaghettiEngineObservationOptions {
+  /** Open adapter identifier, such as `claude-code`, `codex`, or `grok`. */
+  adapterId: string;
 }
 
 export interface SpaghettiEngineReconcileResult {
@@ -1457,6 +1479,7 @@ export interface SpaghettiEngineReconcileResult {
   recordsDecoded: number;
   recordsQuarantined: number;
   retriesRequired: number;
+  incompleteTailRetries: number;
   commits: number;
   lastCommitSeq?: number;
 }
@@ -1535,6 +1558,20 @@ export interface SpaghettiEngine {
     options: SpaghettiEngineTeamInboxMessagePageOptions,
     signal?: AbortSignal,
   ): Promise<SpaghettiEngineTeamInboxMessagePage>;
+  /** Reconcile any registered adapter through the common source engine. */
+  reconcileAdapter(
+    options: SpaghettiEngineAdapterReconcileOptions,
+    signal?: AbortSignal,
+  ): Promise<SpaghettiEngineReconcileResult>;
+  /** Start one registered adapter's native observation supervisor. */
+  startObservation(
+    options: SpaghettiEngineAdapterObservationOptions,
+    signal?: AbortSignal,
+  ): Promise<SpaghettiEngineStatus>;
+  /** Force one running adapter supervisor through reconciliation. */
+  refreshObservation(adapterId: string, signal?: AbortSignal): Promise<SpaghettiEngineStatus>;
+  /** Stop one adapter supervisor without disposing the engine. */
+  stopObservation(adapterId: string, signal?: AbortSignal): Promise<SpaghettiEngineStatus>;
   reconcileClaude(
     options: SpaghettiEngineReconcileOptions,
     signal?: AbortSignal,
@@ -1555,32 +1592,6 @@ export interface SpaghettiEngine {
 export interface NativeAddon {
   /** Returns the semver of the loaded native addon. */
   nativeVersion(): string;
-  /**
-   * Run a full ingest and resolve to the stats. Optionally receives a
-   * progress callback invoked from the libuv worker thread (safe from
-   * any thread — caller need not synchronise).
-   */
-  ingest(opts: NativeIngestOptions, onProgress?: NativeProgressCallback): Promise<NativeIngestStats>;
-  /**
-   * Write a batch of live-update rows to the SQLite DB at `dbPath`.
-   * Wraps `writer::write_batch_with_tx` (RFC 005 Phase 4 C4.1) so the
-   * live-ingest path shares the cold-start writer's transaction +
-   * UPSERT semantics.
-   *
-   * Synchronous on the Rust side (the whole batch is one BEGIN
-   * IMMEDIATE / COMMIT) — the TS caller wraps it in a Promise at the
-   * call site if it wants to interop with the rest of the async
-   * live-updates pipeline.
-   *
-   * Throws on any single-row failure (bad JSON, unknown category,
-   * SQLite error); the whole batch is rolled back and the TS side
-   * falls back to its own writer.
-   */
-  /**
-   * Write a live batch. Optional `sourceId` defaults to `claude-code` on
-   * the Rust side when omitted.
-   */
-  liveIngestBatch(dbPath: string, rows: NativeLiveRow[], sourceId?: string): NativeLiveBatchResult;
   /** Open the persistent RFC 011 engine shell off the JavaScript thread. */
   openSpaghettiEngine(options: SpaghettiEngineOpenOptions): Promise<SpaghettiEngine>;
 }
@@ -1588,11 +1599,8 @@ export interface NativeAddon {
 /**
  * Why the native addon did not load, in terms a user can act on.
  *
- * The loader used to swallow the require failure entirely, so "the addon is
- * missing" and "the addon exists but this platform has no prebuilt binary" and
- * "the binary is there but its glibc is too old" all looked identical: the
- * engine silently became `ts` and nothing said why. RFC 008 Phase 4 requires
- * the missing-addon path to be loud and actionable.
+ * The loader reports whether the package is missing, unsupported, or cannot
+ * load on the current libc. RFC 011 has no production TypeScript fallback.
  */
 export class EngineUnavailableError extends Error {
   /** `process.platform` — `linux`, `darwin`, `win32`. */
@@ -1621,8 +1629,8 @@ export class EngineUnavailableError extends Error {
   }) {
     const target = [init.platform, init.arch, init.libc].filter(Boolean).join('-');
     super(
-      `Native ingest addon unavailable for ${target}. ` +
-        `Falling back to the TypeScript engine, which is slower but produces the same index. ` +
+      `Native observation addon unavailable for ${target}. ` +
+        `RFC 011 requires the Rust engine; no TypeScript production fallback is enabled. ` +
         `${installHint(init.platform, init.libc)}`,
     );
     this.name = 'EngineUnavailableError';
@@ -1701,9 +1709,9 @@ export function loadNativeAddon(): NativeAddon | null {
 /**
  * Open the persistent Rust observation/query engine.
  *
- * This is the low-level persistent lifecycle surface, not yet a replacement
- * for {@link createSpaghettiService}. Use `openClaudeObservationShadow()` for
- * the isolated staged-observation mode while query parity is built.
+ * This is the low-level persistent lifecycle surface. Applications normally
+ * use `createObservationService()`, which owns this handle and exposes the
+ * canonical client-backed product API.
  */
 export function openSpaghettiEngine(options: SpaghettiEngineOpenOptions): Promise<SpaghettiEngine> {
   const addon = loadNativeAddon();
@@ -1766,9 +1774,8 @@ function expectedAddonVersion(): string {
 /**
  * Why the native addon is unavailable, or `null` when it loaded.
  *
- * Call after {@link loadNativeAddon}. Surfacing this is what turns a silent
- * fallback into an actionable one — the engine still works, so this is a
- * diagnostic rather than a thrown error.
+ * Call after {@link loadNativeAddon}. Production hosts throw this failure at
+ * startup; diagnostics can inspect it without opening an engine.
  */
 export function nativeLoadFailure(): EngineUnavailableError | null {
   loadNativeAddon();
@@ -1776,31 +1783,18 @@ export function nativeLoadFailure(): EngineUnavailableError | null {
 }
 
 /**
- * Whether the native ingest path is enabled.
- *
- * Resolves via the shared `resolveEngine()` helper — honours (in order)
- * `SPAG_ENGINE=ts|rs`, legacy `SPAG_NATIVE_INGEST=0|1`, the persisted
- * engine setting in `~/.spaghetti/config.json`, and the default (`rs`).
- *
- * If the addon itself is missing or fails to load, the SDK falls back
- * to the TS path regardless of this setting. This helper only gates
- * the *preference*; actual resolution is
- * `isNativeIngestEnabled() && loadNativeAddon() !== null`.
+ * Compatibility diagnostic retained for callers from the pre-RFC 011 SDK.
+ * Production ingest is always native; availability is reported separately.
  */
 export function isNativeIngestEnabled(): boolean {
-  return resolveEngine() === 'rs';
+  return true;
 }
 
-/** Effective ingest engine after native-addon fallback — see {@link resolveActiveEngine}. */
+/** Rust-only production engine status. */
 export interface ActiveEngineInfo {
-  /**
-   * The engine actually used at runtime. `'rs'` only when the `rs`
-   * preference is set AND the native addon loads on this platform;
-   * otherwise `'ts'` (either the preference was `ts`, or it was `rs`
-   * but the addon is missing and the SDK fell back).
-   */
+  /** The sole production engine. */
   engine: IngestEngine;
-  /** The configured preference alone (env → legacy env → config → default `rs`). */
+  /** Retained for response compatibility; always `rs`. */
   preference: IngestEngine;
   /** Whether the native addon (`@vibecook/spaghetti-sdk-native`) loaded. */
   nativeAvailable: boolean;
@@ -1809,25 +1803,14 @@ export interface ActiveEngineInfo {
 }
 
 /**
- * Resolve the ingest engine that a service will *actually* run — the
- * single source of truth for the native-fallback rule mirrored in
- * `LifecycleOwner.initialize()` (`engine === 'rs' ? loadNativeAddon() : null`,
- * then native-or-TS). Consumers that need to *display* the active engine
- * (CLI badge, `spag engine`, doctor) should call this rather than
- * `resolveEngine()`, which only reports the preference and so reads `rs`
- * even when the addon is missing and the run silently falls back to `ts`.
- *
- * Pure + cheap: `loadNativeAddon()` is memoized, so this is safe to call
- * from a hot render path.
+ * Resolve production engine availability without inventing a fallback.
  */
 export function resolveActiveEngine(): ActiveEngineInfo {
-  const preference = resolveEngine();
   const native = loadNativeAddon();
   const nativeAvailable = native !== null;
-  const engine: IngestEngine = preference === 'rs' && nativeAvailable ? 'rs' : 'ts';
   return {
-    engine,
-    preference,
+    engine: 'rs',
+    preference: 'rs',
     nativeAvailable,
     nativeVersion: native?.nativeVersion() ?? null,
   };

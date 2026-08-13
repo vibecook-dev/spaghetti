@@ -130,7 +130,7 @@ impl ClaudeCodeAdapter {
                 id: AdapterId::new(ADAPTER_ID).expect("static Claude adapter id is valid"),
                 display_name: "Claude Code".to_string(),
                 adapter_version: env!("CARGO_PKG_VERSION").to_string(),
-                contract_version: 14,
+                contract_version: 15,
                 source_schema_versions: vec![
                     "claude-code-jsonl-v1".to_string(),
                     "claude-code-subagent-meta-v1".to_string(),
@@ -238,7 +238,7 @@ impl AgentAdapter for ClaudeCodeAdapter {
                 priority: IngestPriority::Interactive,
                 consistency: ConsistencyPolicy::IncrementalCursor,
                 deletion: DeletionPolicy::MirrorSource,
-                retention: RawRetentionPolicy::Full,
+                retention: RawRetentionPolicy::HashOnly,
                 capabilities: transcript_capabilities(),
             },
             StreamSpec {
@@ -255,7 +255,7 @@ impl AgentAdapter for ClaudeCodeAdapter {
                 priority: IngestPriority::Interactive,
                 consistency: ConsistencyPolicy::IncrementalCursor,
                 deletion: DeletionPolicy::MirrorSource,
-                retention: RawRetentionPolicy::Full,
+                retention: RawRetentionPolicy::HashOnly,
                 capabilities: transcript_capabilities(),
             },
             StreamSpec {
@@ -274,7 +274,7 @@ impl AgentAdapter for ClaudeCodeAdapter {
                 priority: IngestPriority::ForegroundRepair,
                 consistency: ConsistencyPolicy::SnapshotReplace,
                 deletion: DeletionPolicy::MirrorSource,
-                retention: RawRetentionPolicy::Full,
+                retention: RawRetentionPolicy::HashOnly,
                 capabilities: subagent_metadata_capabilities(),
             },
             StreamSpec {
@@ -293,7 +293,7 @@ impl AgentAdapter for ClaudeCodeAdapter {
                 priority: IngestPriority::ForegroundRepair,
                 consistency: ConsistencyPolicy::SnapshotReplace,
                 deletion: DeletionPolicy::MirrorSource,
-                retention: RawRetentionPolicy::Full,
+                retention: RawRetentionPolicy::HashOnly,
                 capabilities: team_config_capabilities(),
             },
             StreamSpec {
@@ -312,7 +312,7 @@ impl AgentAdapter for ClaudeCodeAdapter {
                 priority: IngestPriority::ForegroundRepair,
                 consistency: ConsistencyPolicy::SnapshotReplace,
                 deletion: DeletionPolicy::MirrorSource,
-                retention: RawRetentionPolicy::Full,
+                retention: RawRetentionPolicy::HashOnly,
                 capabilities: team_inbox_capabilities(),
             },
             StreamSpec {
@@ -332,7 +332,7 @@ impl AgentAdapter for ClaudeCodeAdapter {
                 priority: IngestPriority::Interactive,
                 consistency: ConsistencyPolicy::SnapshotReplace,
                 deletion: DeletionPolicy::MirrorSource,
-                retention: RawRetentionPolicy::Full,
+                retention: RawRetentionPolicy::HashOnly,
                 capabilities: presence_capabilities(),
             },
             StreamSpec {
@@ -351,7 +351,7 @@ impl AgentAdapter for ClaudeCodeAdapter {
                 priority: IngestPriority::Interactive,
                 consistency: ConsistencyPolicy::SnapshotReplace,
                 deletion: DeletionPolicy::MirrorSource,
-                retention: RawRetentionPolicy::Full,
+                retention: RawRetentionPolicy::HashOnly,
                 capabilities: task_capabilities(),
             },
             StreamSpec {
@@ -370,7 +370,7 @@ impl AgentAdapter for ClaudeCodeAdapter {
                 priority: IngestPriority::Interactive,
                 consistency: ConsistencyPolicy::SnapshotReplace,
                 deletion: DeletionPolicy::MirrorSource,
-                retention: RawRetentionPolicy::Full,
+                retention: RawRetentionPolicy::HashOnly,
                 capabilities: task_capabilities(),
             },
             StreamSpec {
@@ -389,7 +389,7 @@ impl AgentAdapter for ClaudeCodeAdapter {
                 priority: IngestPriority::Interactive,
                 consistency: ConsistencyPolicy::SnapshotReplace,
                 deletion: DeletionPolicy::MirrorSource,
-                retention: RawRetentionPolicy::Full,
+                retention: RawRetentionPolicy::HashOnly,
                 capabilities: task_capabilities(),
             },
             StreamSpec {
@@ -408,7 +408,7 @@ impl AgentAdapter for ClaudeCodeAdapter {
                 priority: IngestPriority::ForegroundRepair,
                 consistency: ConsistencyPolicy::SnapshotReplace,
                 deletion: DeletionPolicy::MirrorSource,
-                retention: RawRetentionPolicy::Full,
+                retention: RawRetentionPolicy::HashOnly,
                 capabilities: artifact_capabilities(),
             },
             StreamSpec {
@@ -427,7 +427,7 @@ impl AgentAdapter for ClaudeCodeAdapter {
                 priority: IngestPriority::ForegroundRepair,
                 consistency: ConsistencyPolicy::SnapshotReplace,
                 deletion: DeletionPolicy::MirrorSource,
-                retention: RawRetentionPolicy::Full,
+                retention: RawRetentionPolicy::HashOnly,
                 capabilities: workflow_capabilities(),
             },
             StreamSpec {
@@ -444,7 +444,7 @@ impl AgentAdapter for ClaudeCodeAdapter {
                 priority: IngestPriority::Interactive,
                 consistency: ConsistencyPolicy::IncrementalCursor,
                 deletion: DeletionPolicy::MirrorSource,
-                retention: RawRetentionPolicy::Full,
+                retention: RawRetentionPolicy::HashOnly,
                 capabilities: workflow_capabilities(),
             },
             StreamSpec {
@@ -463,7 +463,7 @@ impl AgentAdapter for ClaudeCodeAdapter {
                 priority: IngestPriority::Interactive,
                 consistency: ConsistencyPolicy::SnapshotReplace,
                 deletion: DeletionPolicy::MirrorSource,
-                retention: RawRetentionPolicy::Full,
+                retention: RawRetentionPolicy::HashOnly,
                 capabilities: session_index_capabilities(),
             },
             StreamSpec {
@@ -482,7 +482,7 @@ impl AgentAdapter for ClaudeCodeAdapter {
                 priority: IngestPriority::Interactive,
                 consistency: ConsistencyPolicy::SnapshotReplace,
                 deletion: DeletionPolicy::MirrorSource,
-                retention: RawRetentionPolicy::Full,
+                retention: RawRetentionPolicy::HashOnly,
                 capabilities: project_memory_capabilities(),
             },
             StreamSpec {
@@ -501,7 +501,7 @@ impl AgentAdapter for ClaudeCodeAdapter {
                 priority: IngestPriority::Interactive,
                 consistency: ConsistencyPolicy::SnapshotReplace,
                 deletion: DeletionPolicy::MirrorSource,
-                retention: RawRetentionPolicy::Full,
+                retention: RawRetentionPolicy::HashOnly,
                 capabilities: persisted_tool_result_capabilities(),
             },
             StreamSpec {
@@ -4008,8 +4008,11 @@ fn message_native_key(
     if let Some(native_message_id) = native_message_id {
         push_key_component(&mut key, native_message_id.as_bytes());
     } else {
-        push_key_component(&mut key, &record.object_id.to_be_bytes());
-        push_key_component(&mut key, &record.generation.to_be_bytes());
+        // Catalog row IDs and generations are observation provenance, not
+        // native identity. Scheduler order can allocate a different object ID
+        // on a fresh build, and a rewrite necessarily advances generation.
+        // The object context above plus the framed byte range is stable for
+        // the same native transcript content across both cases.
         push_key_component(&mut key, record.cursor_start.as_bytes());
         push_key_component(&mut key, record.cursor_end.as_bytes());
     }
@@ -4161,7 +4164,7 @@ fn is_uuid(value: &str) -> bool {
 
 fn path_error(path: &Path, detail: &str) -> AdapterError {
     AdapterError::new(
-        AdapterErrorClass::StreamFatal,
+        AdapterErrorClass::RecordPermanent,
         "claude_object_path",
         format!("{}: {detail}", path.to_string_lossy()),
     )
@@ -4334,7 +4337,7 @@ mod tests {
             std::fs::canonicalize(root.path()).unwrap().join("sessions")
         );
         assert_eq!(streams.len(), 16);
-        assert_eq!(adapter.manifest().contract_version, 14);
+        assert_eq!(adapter.manifest().contract_version, 15);
         assert!(adapter
             .manifest()
             .source_schema_versions
@@ -6711,6 +6714,49 @@ mod tests {
         assert_eq!(usage.values.cache_read_tokens, 3);
         assert_eq!(usage.scope, UsageScope::Message);
         assert_eq!(usage.accounting, UsageAccounting::Delta);
+    }
+
+    #[test]
+    fn message_without_native_id_is_stable_across_catalog_order_and_generation() {
+        let root = TempDir::new().unwrap();
+        let adapter = ClaudeCodeAdapter::new();
+        let object_context = adapter
+            .bootstrap_object(
+                &instance(root.path()),
+                &object(PARENT_STREAM, &format!("project/{SESSION}.jsonl")),
+            )
+            .unwrap();
+        let payload = br#"{"type":"summary","summary":"stable summary","leafUuid":"leaf"}"#;
+        let first_record = record(payload);
+        let mut replay_record = first_record.clone();
+        replay_record.object_id = first_record.object_id + 100;
+        replay_record.generation = first_record.generation + 3;
+        let decode_message = |record: &SourceRecord| {
+            let mut batch = FactBatch::new(4, 2).unwrap();
+            adapter
+                .decode(
+                    DecodeContext {
+                        decoder: &DecoderId::new(PARENT_DECODER).unwrap(),
+                        object_context: &object_context,
+                        decoder_state: None,
+                    },
+                    record,
+                    &mut batch,
+                )
+                .unwrap();
+            let message = fact_values(&batch)
+                .find_map(|fact| match fact {
+                    Fact::Message(message) => Some(message.message.clone()),
+                    _ => None,
+                })
+                .expect("summary message");
+            message
+        };
+
+        assert_eq!(
+            decode_message(&first_record),
+            decode_message(&replay_record)
+        );
     }
 
     #[test]

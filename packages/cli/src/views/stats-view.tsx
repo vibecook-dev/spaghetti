@@ -10,6 +10,7 @@ import { useViewNav } from './context.js';
 import { useApi } from './shell.js';
 import { sourceReportsPerMessageTokens } from '@vibecook/spaghetti-sdk';
 import { formatTokens, formatNumber, formatBytes, formatBar, totalTokens } from '../lib/format.js';
+import { useAsyncValue } from './hooks.js';
 
 export function StatsView(): React.ReactElement {
   const nav = useViewNav();
@@ -17,10 +18,28 @@ export function StatsView(): React.ReactElement {
   const { stdout } = useStdout();
   const termRows = stdout?.rows ?? 24;
 
-  // Gather data
+  const loaded = useAsyncValue(
+    async () => {
+      const [stats, projects] = await Promise.all([api.getStats(), api.getProjectList()]);
+      return { stats, projects };
+    },
+    [api],
+    {
+      stats: {
+        totalSegments: 0,
+        segmentsByType: {},
+        totalFingerprints: 0,
+        dbSizeBytes: 0,
+        searchIndexed: 0,
+      },
+      projects: [],
+    },
+  );
+
+  // Derive display aggregates from one coherent canonical read set.
   const { stats, totalTok, topProjects } = useMemo(() => {
-    const s = api.getStats();
-    const p = api.getProjectList();
+    const s = loaded.value.stats;
+    const p = loaded.value.projects;
     let sessions = 0;
     let messages = 0;
     let inputTokens = 0;
@@ -62,7 +81,7 @@ export function StatsView(): React.ReactElement {
       totalTok: total,
       topProjects: ranked,
     };
-  }, [api]);
+  }, [loaded.value]);
 
   // Build lines
   const lines: React.ReactElement[] = [];
@@ -180,6 +199,9 @@ export function StatsView(): React.ReactElement {
     },
     { isActive: !nav.searchMode },
   );
+
+  if (loaded.loading) return <Text dimColor> Loading canonical statistics…</Text>;
+  if (loaded.error) return <Text color="red"> {loaded.error.message}</Text>;
 
   const visibleLines = lines.slice(scrollOffset, scrollOffset + viewportHeight);
 

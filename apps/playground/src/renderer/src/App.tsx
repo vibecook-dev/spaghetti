@@ -93,7 +93,7 @@ export function App() {
 
 function PlaygroundShell() {
   const [ready, setReady] = useState(false);
-  const [engine, setEngine] = useState<'rs' | 'ts' | null>(null);
+  const [engine, setEngine] = useState<'rs' | null>(null);
   const [rebuilding, setRebuilding] = useState(false);
   const [debugSession, setDebugSession] = useState<DebugSessionModule | null>(null);
   const [projects, setProjects] = useState<ProjectListItem[]>([]);

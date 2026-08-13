@@ -17,9 +17,11 @@ export type TelemetryEventName =
   | 'tengu_continue'
   | 'tengu_dir_search'
   | 'tengu_exit'
+  | 'tengu_feature_ok'
   | 'tengu_file_history_backup_deleted_file'
   | 'tengu_file_history_backup_file_created'
   | 'tengu_file_history_snapshot_success'
+  | 'tengu_file_suggestions_git_ls_files'
   | 'tengu_grove_oauth_401_received'
   | 'tengu_init'
   | 'tengu_input_command'
@@ -87,6 +89,12 @@ export interface TelemetryEnv {
   deployment_environment: string;
   is_conductor: boolean;
   version_base: string;
+  /** Build timestamp added by newer native Claude Code releases. */
+  build_time?: string;
+  is_local_agent_mode?: boolean;
+  platform_raw?: string;
+  shell?: string;
+  vcs?: string;
 }
 
 export interface TelemetryEventData {

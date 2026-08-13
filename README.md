@@ -2,7 +2,7 @@
 
 **Turn your local agent history into a searchable workspace.**
 
-Spaghetti is a local-first CLI and SDK for coding-agent data. It indexes **Claude Code** (`~/.claude`) and **OpenAI Codex** (`~/.codex`) into one SQLite store so you can search conversations, browse projects and sessions, review plans/todos/subagents, and build tools on top of the same index.
+Spaghetti is a local-first CLI and SDK for coding-agent data. Its Rust observation engine indexes **Claude Code** (`~/.claude`), **OpenAI Codex** (`~/.codex`), and **Grok CLI** (`~/.grok`) into one SQLite store so you can search conversations, browse projects and sessions, review artifacts, and build tools on the same canonical index.
 
 [![npm version](https://img.shields.io/npm/v/@vibecook/spaghetti.svg?label=@vibecook/spaghetti)](https://www.npmjs.com/package/@vibecook/spaghetti)
 [![npm version](https://img.shields.io/npm/v/@vibecook/spaghetti-sdk.svg?label=@vibecook/spaghetti-sdk)](https://www.npmjs.com/package/@vibecook/spaghetti-sdk)
@@ -50,13 +50,13 @@ npx @vibecook/spaghetti search "worker pool"
 
 If `~/.codex/sessions` exists, Codex is auto-detected and indexed alongside Claude Code (zero config).
 
-### No install scripts, no native build step
+### Prebuilt Rust observation engine
 
-Spaghetti's index runs on Node's built-in SQLite (`node:sqlite`), and the
-optional Rust ingest engine ships prebuilt binaries inside its package. Nothing
-compiles or downloads on install, so a stock `npm install` works regardless of
-your package manager's install-script policy — including npm 12, which blocks
-them by default.
+Spaghetti ships the RFC 011 Rust observation/query engine as a platform-specific
+prebuilt binary. It owns source discovery, live reconciliation, SQLite writes,
+queries, and durable change replay. There is no production TypeScript ingest
+fallback; an unsupported or missing native binary fails startup with an
+actionable installation error.
 
 This required Node `>=22.13.0`; earlier versions are out of support.
 
@@ -66,7 +66,7 @@ This required Node `>=22.13.0`; earlier versions are out of support.
 |---|---|
 | [`@vibecook/spaghetti`](https://www.npmjs.com/package/@vibecook/spaghetti) | Interactive TUI plus one-shot CLI commands |
 | [`@vibecook/spaghetti-sdk`](https://www.npmjs.com/package/@vibecook/spaghetti-sdk) | Scripts, apps, and custom tooling over the same index |
-| Native Rust ingest | Faster Claude cold starts by default, with automatic TypeScript fallback |
+| Rust observation engine | One owner for Claude, Codex, and Grok ingestion, queries, and live changes |
 | [Docs site](https://vibecook-dev.github.io/spaghetti/) | Product overview, architecture, CLI & API reference |
 
 ## Common commands
@@ -87,9 +87,7 @@ spag doctor
 - **Claude Code** — projects/sessions under `~/.claude`, messages, plans, todos, memory, subagents, workflows, teams, hooks/channels
 - **OpenAI Codex** — rollouts under `~/.codex/sessions/**`, chat turns, official `token_count` usage (tiktoken estimate when events are missing)
 - **Grok CLI (xAI)** — `~/.grok/sessions/**/chat_history.jsonl`, conversational turns, turn-scoped timestamps (`events.jsonl`), session token aggregates (`signals.json`); tool I/O and `updates.jsonl` deliberately skipped
-- One local SQLite index under `~/.spaghetti/cache` with a `source_id` column (schema v7+)
-
-Native Grok cold/warm + live batch ship in the Rust addon (default `engine=rs`). Published npm builds pick this up on the next release after these commits land; local workspace builds already include it.
+- One Rust-owned local SQLite index under `~/.spaghetti/cache`
 
 ## Built for two audiences
 
@@ -102,19 +100,27 @@ Launch `spag` for the full-screen TUI (agent tabs when multiple sources are pres
 Use the SDK when you want the same indexed data from scripts or apps:
 
 ```ts
-import { createSpaghettiService, createCodexSource } from '@vibecook/spaghetti-sdk';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
+import { createObservationService } from '@vibecook/spaghetti-sdk';
 
-const api = createSpaghettiService({
-  // optional; CLI auto-detects Codex + Grok when their session dirs exist
-  additionalSources: [createCodexSource()],
+const api = createObservationService({
+  dbPath: join(homedir(), '.spaghetti/cache/spaghetti-rs.db'),
+  sources: [
+    { adapterId: 'claude-code', roots: [join(homedir(), '.claude')] },
+    { adapterId: 'codex', roots: [join(homedir(), '.codex')] },
+    { adapterId: 'grok', roots: [join(homedir(), '.grok')] },
+  ],
+  live: true,
 });
 await api.initialize();
 
-const projects = api.getProjectList();
-const sessions = api.getSessionList(projects[0].slug, {
-  sourceId: projects[0].sourceId, // always scope multi-source drill-downs
+const projects = await api.getProjectList();
+const member = projects[0].members[0];
+const sessions = await api.getSessionList(projects[0], {
+  sourceId: member.sourceId,
 });
-const results = api.search({ text: 'worker thread' });
+const results = await api.search({ text: 'worker thread' });
 
 await api.dispose();
 ```
@@ -131,16 +137,16 @@ await api.dispose();
 ## Repo map
 
 - [`packages/cli`](packages/cli) — published CLI package
-- [`packages/sdk`](packages/sdk) — parsing, indexing, query APIs, and React exports
-- [`crates/spaghetti-napi`](crates/spaghetti-napi) — native Rust ingest engine (Claude bulk path)
+- [`packages/sdk`](packages/sdk) — async product API, canonical client transports, and React exports
+- [`crates/spaghetti-napi`](crates/spaghetti-napi) — Rust observation, projection, query, and adapter engine
 - [`apps/playground`](apps/playground) — Electron demo app
 - [`site`](site) — official documentation website
 - [`docs`](docs) — RFCs, design notes, and deeper implementation details
 
 ## Requirements
 
-- Node.js `>=22.13.0` for end users (`node:sqlite`)
-- `~/.claude` and/or `~/.codex` for real data
+- Node.js `>=22.13.0` for end users
+- `~/.claude`, `~/.codex`, and/or `~/.grok` for real data
 - `pnpm` + Node.js 24 for local workspace development
 
 ## Learn more
@@ -148,7 +154,7 @@ await api.dispose();
 - [CLI README](packages/cli/README.md)
 - [SDK README](packages/sdk/README.md)
 - [Releasing guide](RELEASING.md)
-- [Two-plane architecture](docs/TWO-PLANE-INGEST-ARCHITECTURE.md)
+- [Rust observation engine RFC](docs/rfcs/011-rust-observation-query-engine.md)
 
 ## License
 

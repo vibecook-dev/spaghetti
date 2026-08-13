@@ -6,7 +6,7 @@ export interface LoadingScreenProps {
   sources: SourceProgressState[];
   progress: ProgressSnapshot | null;
   elapsedMs: number;
-  engine: 'rs' | 'ts' | null;
+  engine: 'rs' | null;
   error: string | null;
   headline?: string;
   onRetry?: () => void;

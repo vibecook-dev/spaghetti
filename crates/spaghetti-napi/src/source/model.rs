@@ -6,6 +6,8 @@ const APPEND_CURSOR_KIND: u8 = 1;
 const SNAPSHOT_CURSOR_KIND: u8 = 2;
 const DIRECTORY_CURSOR_KIND: u8 = 3;
 const PRESENCE_CURSOR_KIND: u8 = 4;
+const SQLITE_SNAPSHOT_CURSOR_KIND: u8 = 5;
+const KEY_VALUE_SNAPSHOT_CURSOR_KIND: u8 = 6;
 const HASH_BYTES: usize = 32;
 
 /// Opaque, versioned cursor carried from a driver into provenance storage.
@@ -54,6 +56,14 @@ impl SourceCursor {
 
     pub fn presence(revision: Revision) -> Self {
         Self::hash_cursor(PRESENCE_CURSOR_KIND, revision)
+    }
+
+    pub fn sqlite_snapshot(revision: Revision) -> Self {
+        Self::hash_cursor(SQLITE_SNAPSHOT_CURSOR_KIND, revision)
+    }
+
+    pub fn key_value_snapshot(revision: Revision) -> Self {
+        Self::hash_cursor(KEY_VALUE_SNAPSHOT_CURSOR_KIND, revision)
     }
 
     fn hash_cursor(kind: u8, revision: Revision) -> Self {
@@ -339,6 +349,12 @@ pub enum SourceDriverError {
 
     #[error("source limit exceeded: {0}")]
     LimitExceeded(String),
+
+    #[error("source snapshot was unstable: {0}")]
+    Unstable(String),
+
+    #[error("source database read failed: {0}")]
+    Database(String),
 
     #[error("source I/O failed while {operation} {path}: {source}")]
     Io {

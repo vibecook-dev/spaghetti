@@ -1110,6 +1110,7 @@ dependencies = [
  "rayon",
  "regex",
  "rusqlite",
+ "rustix",
  "serde",
  "serde_json",
  "sonic-rs",

@@ -8,18 +8,10 @@
  */
 
 import { execSync } from 'node:child_process';
-import { existsSync, statSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import {
-  createClaudeCodeSource,
-  defaultDbPathForEngine,
-  isNativeIngestEnabled,
-  listActiveSessionsFromDir,
-  resolveActiveEngine,
-  resolveEngine,
-  type IngestEngine,
-} from '@vibecook/spaghetti-sdk';
+import { defaultDbPathForEngine, resolveActiveEngine, resolveEngine, type IngestEngine } from '@vibecook/spaghetti-sdk';
 import {
   claudePaths,
   createDefaultCommandRunner,
@@ -173,15 +165,16 @@ function collectIndexLive(): IndexLiveReport {
     dbExists = existsSync(dbPath);
   }
 
-  const source = createClaudeCodeSource();
-  const sessionsDir = source.paths.sessionsDir;
-  const alive = listActiveSessionsFromDir(sessionsDir, { requireAlive: true });
-  const onDisk = listActiveSessionsFromDir(sessionsDir, { requireAlive: false });
+  // This is a transient process-health probe, not an ingest path. It reads
+  // only PID fields from Claude's discovery files and never writes history.
+  const sessionsDir = join(CLAUDE_DIR, 'sessions');
+  const onDisk = activeSessionPids(sessionsDir);
+  const alive = onDisk.filter(isProcessAlive);
 
   return {
     preferredEngine,
     effectiveEngine: active.engine,
-    nativeAvailable: isNativeIngestEnabled() || active.nativeAvailable,
+    nativeAvailable: active.nativeAvailable,
     nativeVersion: active.nativeVersion,
     dbPath,
     dbExists,
@@ -192,6 +185,35 @@ function collectIndexLive(): IndexLiveReport {
     activeSessionsOnDisk: onDisk.length,
     activeSessionsAlive: alive.length,
   };
+}
+
+function activeSessionPids(sessionsDir: string): number[] {
+  if (!existsSync(sessionsDir)) return [];
+  try {
+    return readdirSync(sessionsDir)
+      .filter((entry) => entry.endsWith('.json'))
+      .map((entry) => {
+        const fallback = Number.parseInt(entry.slice(0, -5), 10);
+        try {
+          const parsed = JSON.parse(readFileSync(join(sessionsDir, entry), 'utf8')) as { pid?: unknown };
+          return typeof parsed.pid === 'number' ? parsed.pid : fallback;
+        } catch {
+          return Number.NaN;
+        }
+      })
+      .filter((pid) => Number.isFinite(pid) && pid > 0);
+  } catch {
+    return [];
+  }
+}
+
+function isProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'EPERM';
+  }
 }
 
 export function collectDoctorReport(version: string): DoctorReport {

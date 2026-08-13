@@ -34,17 +34,19 @@ import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 
 import {
-  compareClaudeObservationHistoryQueries,
-  compareClaudeObservationUsage,
-  createSpaghettiService,
   loadNativeAddon,
-  openClaudeObservationShadow,
-  type ClaudeObservationShadow,
   type SpaghettiAPI,
   type SpaghettiEngineHistoryProject,
   type SpaghettiEngineHistorySession,
   type SpaghettiEngineRuntimeEntry,
 } from '../packages/sdk/src/index.js';
+import {
+  compareClaudeObservationHistoryQueries,
+  compareClaudeObservationUsage,
+  createSpaghettiService,
+  openClaudeObservationShadow,
+  type ClaudeObservationShadow,
+} from '../packages/sdk/src/legacy-oracle.js';
 
 type Mode = 'all' | 'conformance';
 type LegacyProject = ReturnType<SpaghettiAPI['getProjectList']>[number];

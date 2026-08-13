@@ -28,7 +28,7 @@ import type { AgentDataStore } from '../../data/agent-data-store.js';
 import type { IngestService } from '../../data/ingest-service.js';
 import type { LifecycleOwner } from '../../data/lifecycle-owner.js';
 import type { LiveWatch } from '../../live/live-watch.js';
-import { loadNativeAddon } from '../../native.js';
+import { loadLegacyNativeAddon as loadNativeAddon } from '../../legacy-native.js';
 import { resolveEngine, type IngestEngine } from '../../settings.js';
 import { CodexReader } from './reader.js';
 import { createCodexLiveWatch, type CodexLiveWatch } from './live-watch.js';

@@ -9,7 +9,7 @@
  */
 
 import { createProgram } from './index.js';
-import { initService, shutdownService, registerService, disposeService, detectAdditionalSources } from './lib/init.js';
+import { initService, shutdownService, registerService, disposeService, createService } from './lib/init.js';
 import { handleError } from './lib/error.js';
 import { checkForUpdates } from './lib/updater.js';
 
@@ -71,7 +71,6 @@ async function main(): Promise<void> {
       const { render } = await import('ink');
       const React = await import('react');
       const { Shell } = await import('./views/shell.js');
-      const { createSpaghettiService } = await import('@vibecook/spaghetti-sdk');
 
       // Enter the alternate screen BEFORE Ink's first render. If we
       // let Shell's `useAlternateScreen` hook do it via useEffect, the
@@ -83,9 +82,9 @@ async function main(): Promise<void> {
       altScreenActive = true;
       process.on('exit', leaveAltScreen);
 
-      // Plane 2 on for the long-lived TUI so session lists / search stay warm
-      // while Claude Code writes. One-shot commands (initService) stay pull-only.
-      const service = createSpaghettiService({ live: true, additionalSources: detectAdditionalSources() });
+      // The TUI and one-shot commands now share the same persistent Rust
+      // observation owner; durable replay keeps long-lived views fresh.
+      const service = createService();
       registerService(service);
       // Don't initialize here — let Shell handle it with BootView
       const { waitUntilExit } = render(React.createElement(Shell, { api: service }), { exitOnCtrlC: true });

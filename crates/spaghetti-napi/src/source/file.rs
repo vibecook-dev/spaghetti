@@ -1,6 +1,6 @@
 use std::fs::{File, Metadata};
 use std::io::Read;
-use std::path::{Component, Path};
+use std::path::{Component, Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
 use super::model::{io_error, FileIdentity, Revision, SourceDriverError};
@@ -24,11 +24,72 @@ pub(crate) struct FileStamp {
     pub modified_ns: i128,
 }
 
+/// Capture the identity and bounded size of a confined regular file without
+/// following source-owned symlinks. Database drivers use this before and after
+/// a consistent source transaction to distinguish replacement from an
+/// ordinary source commit.
+pub(crate) fn confined_file_stamp(
+    root: &Path,
+    relative_path: &Path,
+    max_bytes: usize,
+) -> Result<Option<FileStamp>, SourceDriverError> {
+    let path = root.join(relative_path);
+    let Some(file) = open_confined_file(root, relative_path)? else {
+        return Ok(None);
+    };
+    let handle_metadata = file
+        .metadata()
+        .map_err(|error| io_error("reading metadata for", &path, error))?;
+    if !handle_metadata.is_file() {
+        return Err(SourceDriverError::PathEscape(
+            path.to_string_lossy().into_owned(),
+        ));
+    }
+    let stamp = file_stamp(&path, &handle_metadata);
+    if stamp.len > max_bytes as u64 {
+        return Err(SourceDriverError::LimitExceeded(format!(
+            "source file exceeds {max_bytes} byte limit"
+        )));
+    }
+    let path_metadata = std::fs::metadata(&path)
+        .map_err(|error| io_error("rechecking metadata for", &path, error))?;
+    if stamp != file_stamp(&path, &path_metadata) {
+        return Err(SourceDriverError::Unstable(
+            "source file identity changed while it was opened".to_string(),
+        ));
+    }
+    Ok(Some(stamp))
+}
+
 pub(crate) fn read_stable_file(
     path: &Path,
     max_bytes: usize,
 ) -> Result<StableRead, SourceDriverError> {
     read_stable_file_with_hook(path, max_bytes, || {})
+}
+
+pub(crate) fn read_stable_file_confined(
+    root: &Path,
+    relative_path: &Path,
+    max_bytes: usize,
+) -> Result<StableRead, SourceDriverError> {
+    read_stable_file_confined_with_hook(root, relative_path, max_bytes, || {})
+}
+
+pub(crate) fn read_stable_file_confined_with_hook<F>(
+    root: &Path,
+    relative_path: &Path,
+    max_bytes: usize,
+    after_read: F,
+) -> Result<StableRead, SourceDriverError>
+where
+    F: FnOnce(),
+{
+    let path = root.join(relative_path);
+    let Some(file) = open_confined_file(root, relative_path)? else {
+        return Ok(StableRead::Missing);
+    };
+    read_stable_opened(file, &path, max_bytes, after_read)
 }
 
 pub(crate) fn read_stable_file_with_hook<F>(
@@ -39,13 +100,34 @@ pub(crate) fn read_stable_file_with_hook<F>(
 where
     F: FnOnce(),
 {
-    let mut file = match File::open(path) {
-        Ok(file) => file,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(StableRead::Missing);
-        }
-        Err(error) => return Err(io_error("opening", path, error)),
+    let (parent, file_name) = parent_and_file_name(path)?;
+    let Some(file) = open_confined_file(parent, file_name)? else {
+        return Ok(StableRead::Missing);
     };
+    read_stable_opened(file, path, max_bytes, after_read)
+}
+
+pub(crate) fn parent_and_file_name(path: &Path) -> Result<(&Path, &Path), SourceDriverError> {
+    let file_name = path
+        .file_name()
+        .map(Path::new)
+        .ok_or_else(|| SourceDriverError::PathEscape(path.to_string_lossy().into_owned()))?;
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    Ok((parent, file_name))
+}
+
+fn read_stable_opened<F>(
+    mut file: File,
+    path: &Path,
+    max_bytes: usize,
+    after_read: F,
+) -> Result<StableRead, SourceDriverError>
+where
+    F: FnOnce(),
+{
     let before_metadata = file
         .metadata()
         .map_err(|error| io_error("reading metadata for", path, error))?;
@@ -95,6 +177,112 @@ where
         bytes,
         revision,
     })
+}
+
+/// Open a source file relative to an already-approved root without following
+/// symlinks in any source-owned path component. On POSIX hosts each component
+/// is resolved from the preceding directory descriptor, so replacing a path
+/// after discovery cannot redirect the read outside the root.
+pub(crate) fn open_confined_file(
+    root: &Path,
+    relative_path: &Path,
+) -> Result<Option<File>, SourceDriverError> {
+    confined_relative_path_key(relative_path)?;
+    let components = relative_path
+        .components()
+        .filter_map(|component| match component {
+            Component::Normal(value) => Some(PathBuf::from(value)),
+            Component::CurDir => None,
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => None,
+        })
+        .collect::<Vec<_>>();
+    if components.is_empty() {
+        return Err(SourceDriverError::PathEscape(
+            relative_path.to_string_lossy().into_owned(),
+        ));
+    }
+
+    #[cfg(unix)]
+    {
+        use rustix::fs::{openat, Mode, OFlags, CWD};
+
+        let directory_flags =
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW;
+        let file_flags = OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW;
+        let mut directory = match openat(CWD, root, directory_flags, Mode::empty()) {
+            Ok(directory) => directory,
+            Err(error) => return classify_confined_open_error(root, relative_path, error),
+        };
+        for component in &components[..components.len() - 1] {
+            directory = match openat(&directory, component, directory_flags, Mode::empty()) {
+                Ok(directory) => directory,
+                Err(error) => return classify_confined_open_error(root, relative_path, error),
+            };
+        }
+        let file = match openat(
+            &directory,
+            &components[components.len() - 1],
+            file_flags,
+            Mode::empty(),
+        ) {
+            Ok(file) => file,
+            Err(error) => return classify_confined_open_error(root, relative_path, error),
+        };
+        Ok(Some(File::from(file)))
+    }
+
+    #[cfg(not(unix))]
+    {
+        let canonical_root = root
+            .canonicalize()
+            .map_err(|error| io_error("resolving confined root", root, error))?;
+        let candidate = root.join(relative_path);
+        let metadata = match std::fs::symlink_metadata(&candidate) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => {
+                return Err(io_error(
+                    "reading confined path metadata for",
+                    &candidate,
+                    error,
+                ))
+            }
+        };
+        if metadata.file_type().is_symlink() {
+            return Err(SourceDriverError::PathEscape(
+                candidate.to_string_lossy().into_owned(),
+            ));
+        }
+        let canonical_candidate = candidate
+            .canonicalize()
+            .map_err(|error| io_error("resolving confined source path", &candidate, error))?;
+        if !canonical_candidate.starts_with(&canonical_root) {
+            return Err(SourceDriverError::PathEscape(
+                candidate.to_string_lossy().into_owned(),
+            ));
+        }
+        File::open(&canonical_candidate)
+            .map(Some)
+            .map_err(|error| io_error("opening confined source", &candidate, error))
+    }
+}
+
+#[cfg(unix)]
+fn classify_confined_open_error(
+    root: &Path,
+    relative_path: &Path,
+    error: rustix::io::Errno,
+) -> Result<Option<File>, SourceDriverError> {
+    if error == rustix::io::Errno::NOENT {
+        return Ok(None);
+    }
+    let path = root.join(relative_path);
+    if error == rustix::io::Errno::LOOP || error == rustix::io::Errno::NOTDIR {
+        return Err(SourceDriverError::PathEscape(
+            path.to_string_lossy().into_owned(),
+        ));
+    }
+    Err(io_error("opening confined source", &path, error.into()))
 }
 
 pub(crate) fn file_stamp(path: &Path, metadata: &Metadata) -> FileStamp {
@@ -205,7 +393,7 @@ fn os_bytes(value: &std::ffi::OsStr) -> Vec<u8> {
 mod tests {
     use std::io::Write;
 
-    use tempfile::NamedTempFile;
+    use tempfile::{NamedTempFile, TempDir};
 
     use super::*;
 
@@ -228,5 +416,53 @@ mod tests {
             confined_relative_path_key(Path::new("../escape")),
             Err(SourceDriverError::PathEscape(_))
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn confined_open_rejects_final_and_intermediate_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().join("root");
+        let outside = temp.path().join("outside");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret"), b"outside-secret").unwrap();
+
+        symlink(outside.join("secret"), root.join("final")).unwrap();
+        assert!(matches!(
+            open_confined_file(&root, Path::new("final")),
+            Err(SourceDriverError::PathEscape(_))
+        ));
+
+        symlink(&outside, root.join("nested")).unwrap();
+        assert!(matches!(
+            open_confined_file(&root, Path::new("nested/secret")),
+            Err(SourceDriverError::PathEscape(_))
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn confined_stable_read_does_not_follow_a_racing_replacement() {
+        use std::os::unix::fs::symlink;
+
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().join("root");
+        std::fs::create_dir_all(&root).unwrap();
+        let source = root.join("source.json");
+        let outside = temp.path().join("secret.json");
+        std::fs::write(&source, b"inside").unwrap();
+        std::fs::write(&outside, b"outside-secret").unwrap();
+
+        let result =
+            read_stable_file_confined_with_hook(&root, Path::new("source.json"), 64, || {
+                std::fs::remove_file(&source).unwrap();
+                symlink(&outside, &source).unwrap();
+            })
+            .unwrap();
+
+        assert!(matches!(result, StableRead::Unstable));
     }
 }

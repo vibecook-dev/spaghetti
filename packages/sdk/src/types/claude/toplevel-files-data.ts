@@ -49,6 +49,8 @@ export interface SettingsFile {
   tui?: string;
   autoCompactEnabled?: boolean;
   agentPushNotifEnabled?: boolean;
+  /** Enable Claude Code's inline prompt-completion suggestions. */
+  promptSuggestionEnabled?: boolean;
   skipWorkflowUsageWarning?: boolean;
   skipAutoPermissionPrompt?: boolean;
   /** Co-authorship trailers Claude Code appends, e.g. `{ commit: '' }`. */
@@ -160,6 +162,19 @@ export interface ActiveSessionFile {
   nameSource?: string;
   bridgeSessionId?: string;
   messagingSocketPath?: string;
+}
+
+/**
+ * Metadata for a `sessions/{pid}.{sessionHash}.key` bridge-auth sidecar.
+ *
+ * The key material is deliberately not exposed through this type: callers may
+ * inventory the file without moving a live session secret into application
+ * data or logs.
+ */
+export interface ActiveSessionKeyFile {
+  pid: number;
+  sessionHash: string;
+  size: number;
 }
 
 export interface TopLevelFiles {

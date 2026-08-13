@@ -7,30 +7,37 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
 use std::fs::Metadata;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Component, Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use rayon::prelude::*;
 use walkdir::WalkDir;
 
 use crate::adapter::{
-    AdapterError, AdapterErrorClass, AdapterObjectContext, AgentAdapter, DecodeContext,
-    DecodeDisposition, DeletionPolicy, DiscoveryContext, DriverSpec, FactBatch, RawRetentionPolicy,
-    SourceInstance, SourceInstanceSpec as AdapterSourceInstanceSpec, SourceObjectDescriptor,
-    StreamAuthority, StreamSpec,
+    AdapterError, AdapterErrorClass, AdapterManifest, AdapterObjectContext, AgentAdapter,
+    Availability, CapabilityGranularity, DecodeContext, DecodeDisposition, DeletionPolicy,
+    DependencyRevision, DiscoveryContext, DriverSpec, FactBatch, RawRetentionPolicy, SourceAccess,
+    SourceInstance, SourceInstanceSpec as AdapterSourceInstanceSpec, SourceListedObject,
+    SourceObjectDescriptor, SourceObjectList, SourceObjectListRequest, SourceQuery, SourceRows,
+    SourceSnapshot, StreamAuthority, StreamSpec, SupportLevel,
 };
 use crate::source::{
     confined_relative_path_key, AppendCheckpoint, AppendDelimitedFile, AppendItem, AppendRead,
-    PresenceCheckpoint, PresenceObject, PresenceRead, RecordOrigin, ReplaceCheckpoint,
-    ReplaceDocument, ReplaceRead, Revision, SourceCursor, SourceDriverError, SourceMediaType,
-    SourceRecord,
+    BoundedScheduler, DirectoryCheckpoint, DirectoryEntryKind, DirectoryScan, DirectorySelection,
+    DirectorySnapshot, DirtyReason, KeyValueCheckpoint, KeyValueRead, KeyValueSnapshot,
+    MalformedRevisionGuard, MalformedRevisionPolicy, ParseFailureDecision, PresenceCheckpoint,
+    PresenceObject, PresenceRead, RecordOrigin, ReplaceCheckpoint, ReplaceDocument, ReplaceRead,
+    Revision, ScheduleOutcome, ScheduledWork, SourceCursor, SourceDriverError, SourceMediaType,
+    SourceRecord, SqliteCheckpoint, SqliteRead, SqliteSnapshot, WorkKey,
 };
 
 use super::commit::{
-    CommitReceipt, ExpectedSourceCursor, ObservationCommit, SourceInstanceSpec, SourceObjectUpdate,
-    SourceRecordError, SourceStreamSpec,
+    CommitReceipt, ExpectedSourceCursor, ObservationCommit, SourceCapabilitySpec,
+    SourceInstanceSpec, SourceObjectUpdate, SourceRecordError, SourceStreamSpec,
 };
-use super::query_pool::{SourceCatalogObject, SourceCatalogSnapshot};
+use super::query_pool::{QueryCancellationToken, SourceCatalogObject, SourceCatalogSnapshot};
 use super::{EngineError, SpaghettiEngineCore};
 
 const FACT_BATCH_LIMIT: usize = 4_096;
@@ -38,6 +45,9 @@ const DIAGNOSTIC_LIMIT: usize = 256;
 const DISCOVERY_MAX_DEPTH: usize = 64;
 const DISCOVERY_MAX_ENTRIES: usize = 250_000;
 const MAX_APPEND_RECORDS_PER_RECONCILE: usize = 4_096;
+const MAX_APPEND_RECORDS_PER_COMMIT: usize = 64;
+const SCHEDULER_CAPACITY: usize = 1_024;
+const MAX_OBJECTS_IN_FLIGHT: usize = 4;
 
 #[derive(Debug, Clone)]
 pub struct ReconcileRequest {
@@ -67,17 +77,232 @@ pub struct ReconcileOutcome {
     pub records_decoded: u32,
     pub records_quarantined: u32,
     pub retries_required: u32,
+    pub incomplete_tail_retries: u32,
+    pub retry_targets: Vec<ReconcileRetryTarget>,
     pub commits: u32,
     pub last_commit_seq: Option<u64>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ReconcileRetryTarget {
+    pub stable_key: Vec<u8>,
+    pub stream_key: String,
+    pub object_key: Vec<u8>,
+}
+
 pub struct ObservationCoordinator {
     engine: Arc<SpaghettiEngineCore>,
+    cancellations: Vec<QueryCancellationToken>,
+}
+
+#[derive(Debug, Clone)]
+struct TrackedDependency {
+    revision: DependencyRevision,
+    root: PathBuf,
+    kind: TrackedDependencyKind,
+}
+
+#[derive(Debug, Clone)]
+enum TrackedDependencyKind {
+    Object {
+        relative_path: PathBuf,
+        max_bytes: usize,
+    },
+    Query(SourceQuery),
+    Listing(SourceObjectListRequest),
+}
+
+struct ConfinedSourceAccess<'a> {
+    instance: &'a SourceInstance,
+    cancellations: &'a [QueryCancellationToken],
+    reads: Mutex<Vec<TrackedDependency>>,
+}
+
+impl<'a> ConfinedSourceAccess<'a> {
+    const MAX_READ_BYTES: usize = 64 * 1024 * 1024;
+
+    fn new(instance: &'a SourceInstance, cancellations: &'a [QueryCancellationToken]) -> Self {
+        Self {
+            instance,
+            cancellations,
+            reads: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn revisions(&self) -> Result<Vec<DependencyRevision>, EngineError> {
+        self.reads
+            .lock()
+            .map(|reads| reads.iter().map(|read| read.revision.clone()).collect())
+            .map_err(|_| observation_error("read source dependencies", "dependency lock poisoned"))
+    }
+
+    fn changed_since_read(&self) -> Result<bool, EngineError> {
+        let reads = self
+            .reads
+            .lock()
+            .map_err(|_| {
+                observation_error("validate source dependencies", "dependency lock poisoned")
+            })?
+            .clone();
+        for read in reads {
+            check_cancellations(self.cancellations)?;
+            let current = match &read.kind {
+                TrackedDependencyKind::Object {
+                    relative_path,
+                    max_bytes,
+                } => dependency_snapshot(
+                    self.instance.id,
+                    &read.revision.root_name,
+                    &read.root,
+                    relative_path,
+                    *max_bytes,
+                )
+                .map(|snapshot| snapshot.revision),
+                TrackedDependencyKind::Query(query) => {
+                    source_query_snapshot(self.instance.id, &read.root, query, self.cancellations)
+                        .map(|rows| rows.revision)
+                }
+                TrackedDependencyKind::Listing(request) => {
+                    source_object_listing(self.instance.id, &read.root, request, self.cancellations)
+                        .map(|listing| listing.revision)
+                }
+            };
+            let current = match current {
+                Ok(revision) => revision,
+                Err(SourceDriverError::Unstable(_)) => return Ok(true),
+                Err(error) => return Err(source_error(error)),
+            };
+            if current != read.revision {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    fn track(&self, tracked: TrackedDependency) -> Result<(), AdapterError> {
+        let mut reads = self.reads.lock().map_err(|_| {
+            AdapterError::new(
+                AdapterErrorClass::AdapterFatal,
+                "source_access_lock",
+                "source dependency lock was poisoned",
+            )
+        })?;
+        if let Some(existing) = reads.iter_mut().find(|read| {
+            read.revision.root_name == tracked.revision.root_name
+                && read.revision.object_key == tracked.revision.object_key
+        }) {
+            *existing = tracked;
+        } else {
+            reads.push(tracked);
+        }
+        Ok(())
+    }
+}
+
+impl SourceAccess for ConfinedSourceAccess<'_> {
+    fn read_object(
+        &self,
+        root_name: &str,
+        relative_path: &Path,
+        max_bytes: usize,
+    ) -> Result<SourceSnapshot, AdapterError> {
+        check_cancellations(self.cancellations).map_err(|_| {
+            AdapterError::new(
+                AdapterErrorClass::Transient,
+                "source_access_cancelled",
+                "source dependency read was cancelled",
+            )
+        })?;
+        if max_bytes == 0 || max_bytes > Self::MAX_READ_BYTES {
+            return Err(AdapterError::invalid_contract(format!(
+                "source dependency byte limit must be between 1 and {}",
+                Self::MAX_READ_BYTES
+            )));
+        }
+        let root = self.instance.root(root_name)?.to_path_buf();
+        let snapshot =
+            dependency_snapshot(self.instance.id, root_name, &root, relative_path, max_bytes)
+                .map_err(|error| {
+                    AdapterError::new(
+                        AdapterErrorClass::Transient,
+                        "source_access_read",
+                        error.to_string(),
+                    )
+                })?;
+        let tracked = TrackedDependency {
+            revision: snapshot.revision.clone(),
+            root,
+            kind: TrackedDependencyKind::Object {
+                relative_path: relative_path.to_path_buf(),
+                max_bytes,
+            },
+        };
+        self.track(tracked)?;
+        Ok(snapshot)
+    }
+
+    fn query_source_db(&self, query: &SourceQuery) -> Result<SourceRows, AdapterError> {
+        check_cancellations(self.cancellations).map_err(|_| source_access_cancelled())?;
+        validate_source_query_bounds(query)?;
+        let root = self.instance.root(&query.root_name)?.to_path_buf();
+        let rows = source_query_snapshot(self.instance.id, &root, query, self.cancellations)
+            .map_err(source_access_error)?;
+        self.track(TrackedDependency {
+            revision: rows.revision.clone(),
+            root,
+            kind: TrackedDependencyKind::Query(query.clone()),
+        })?;
+        Ok(rows)
+    }
+
+    fn list_objects(
+        &self,
+        request: &SourceObjectListRequest,
+    ) -> Result<SourceObjectList, AdapterError> {
+        check_cancellations(self.cancellations).map_err(|_| source_access_cancelled())?;
+        if request.max_entries == 0 || request.max_entries > 10_000 || request.include.is_empty() {
+            return Err(AdapterError::invalid_contract(
+                "source object listing requires include patterns and a 1..=10000 entry bound",
+            ));
+        }
+        let root = self.instance.root(&request.root_name)?.to_path_buf();
+        let listing = source_object_listing(self.instance.id, &root, request, self.cancellations)
+            .map_err(source_access_error)?;
+        self.track(TrackedDependency {
+            revision: listing.revision.clone(),
+            root,
+            kind: TrackedDependencyKind::Listing(request.clone()),
+        })?;
+        Ok(listing)
+    }
 }
 
 impl ObservationCoordinator {
     pub fn new(engine: Arc<SpaghettiEngineCore>) -> Self {
-        Self { engine }
+        Self {
+            engine,
+            cancellations: Vec::new(),
+        }
+    }
+
+    pub fn with_cancellation(
+        engine: Arc<SpaghettiEngineCore>,
+        cancellation: QueryCancellationToken,
+    ) -> Self {
+        Self {
+            engine,
+            cancellations: vec![cancellation],
+        }
+    }
+
+    pub(crate) fn with_cancellations(
+        engine: Arc<SpaghettiEngineCore>,
+        cancellations: Vec<QueryCancellationToken>,
+    ) -> Self {
+        Self {
+            engine,
+            cancellations,
+        }
     }
 
     pub fn reconcile<A: AgentAdapter + ?Sized>(
@@ -85,6 +310,7 @@ impl ObservationCoordinator {
         adapter: &A,
         request: ReconcileRequest,
     ) -> Result<ReconcileOutcome, EngineError> {
+        self.check_cancelled()?;
         validate_request(&request)?;
         let manifest = adapter.manifest();
         manifest
@@ -95,12 +321,15 @@ impl ObservationCoordinator {
             .engine
             .begin_full_reconcile(manifest.id.as_str(), started_at)?;
         let result = (|| {
-            let instances = adapter
-                .discover(&DiscoveryContext {
+            self.check_cancelled()?;
+            let instances = catch_adapter_panic("discover source instances", || {
+                adapter.discover(&DiscoveryContext {
                     configured_roots: request.configured_roots,
                     observed_at: started_at,
                 })
-                .map_err(|error| adapter_error("discover source instances", error))?;
+            })?
+            .map_err(|error| adapter_error("discover source instances", error))?;
+            self.check_cancelled()?;
             let mut outcome = ReconcileOutcome {
                 instances_discovered: bounded_u32(instances.len()),
                 ..ReconcileOutcome::default()
@@ -108,6 +337,7 @@ impl ObservationCoordinator {
             let mut instance_keys = BTreeSet::new();
             lease.begin_reconciling();
             for spec in instances {
+                self.check_cancelled()?;
                 if !instance_keys.insert(spec.stable_key.as_bytes().to_vec()) {
                     return Err(observation_error(
                         "validate discovered source instances",
@@ -130,6 +360,7 @@ impl ObservationCoordinator {
         spec: AdapterSourceInstanceSpec,
         reason: impl Into<String>,
     ) -> Result<ReconcileOutcome, EngineError> {
+        self.check_cancelled()?;
         let manifest = adapter.manifest();
         manifest
             .validate()
@@ -147,6 +378,7 @@ impl ObservationCoordinator {
             started_at,
         )?;
         let result = (|| {
+            self.check_cancelled()?;
             let mut outcome = ReconcileOutcome {
                 instances_discovered: 1,
                 ..ReconcileOutcome::default()
@@ -155,6 +387,114 @@ impl ObservationCoordinator {
             Ok(outcome)
         })();
         self.finish_reconcile(lease, result, started_at)
+    }
+
+    pub(crate) fn reconcile_declared_object<A: AgentAdapter + ?Sized>(
+        &self,
+        adapter: &A,
+        spec: AdapterSourceInstanceSpec,
+        target: &ReconcileRetryTarget,
+        reason: impl Into<String>,
+    ) -> Result<ReconcileOutcome, EngineError> {
+        self.check_cancelled()?;
+        let manifest = adapter.manifest();
+        manifest
+            .validate()
+            .map_err(|error| adapter_error("validate adapter manifest", error))?;
+        if spec.stable_key.as_bytes() != target.stable_key {
+            return Err(EngineError::InvalidConfig(
+                "retry target does not belong to the declared source instance".to_string(),
+            ));
+        }
+        let reason = reason.into();
+        if reason.trim().is_empty() {
+            return Err(EngineError::InvalidConfig(
+                "object reconcile requires a reason".to_string(),
+            ));
+        }
+        let started_at = now_unix_ms()?;
+        let lease = self.engine.begin_instance_reconcile(
+            manifest.id.as_str(),
+            spec.stable_key.as_bytes(),
+            started_at,
+        )?;
+        let result = (|| {
+            let catalog = self
+                .engine
+                .source_catalog(manifest.id.as_str(), spec.stable_key.as_bytes())?;
+            let source_instance_id = catalog.source_instance_id.ok_or_else(|| {
+                observation_error("resume retry object", "source instance is not registered")
+            })?;
+            let instance = SourceInstance {
+                id: source_instance_id,
+                spec,
+            };
+            let stream =
+                catch_adapter_panic("declare retry source stream", || adapter.streams(&instance))?
+                    .map_err(|error| adapter_error("declare retry source stream", error))?
+                    .into_iter()
+                    .find(|stream| stream.id.as_str() == target.stream_key)
+                    .ok_or_else(|| {
+                        observation_error(
+                            "resume retry object",
+                            format!("adapter no longer declares stream {}", target.stream_key),
+                        )
+                    })?;
+            stream
+                .validate(&instance)
+                .map_err(|error| adapter_error("validate retry source stream", error))?;
+            if matches!(stream.driver, DriverSpec::DirectorySnapshot(_)) {
+                return Err(observation_error(
+                    "resume retry object",
+                    "directory membership retries require an instance reconcile",
+                ));
+            }
+            let previous = catalog
+                .objects
+                .iter()
+                .find(|object| {
+                    object.stream_key == target.stream_key && object.object_key == target.object_key
+                })
+                .ok_or_else(|| {
+                    observation_error("resume retry object", "source object is not registered")
+                })?;
+            let root = instance
+                .root(&stream.selector.root_name)
+                .map_err(|error| adapter_error("resolve retry source root", error))?;
+            let relative_path = previous_display_path(previous)?;
+            let object = DeclaredObject {
+                path: root.join(&relative_path),
+                descriptor: SourceObjectDescriptor {
+                    stream_id: stream.id.clone(),
+                    object_key: target.object_key.clone(),
+                    relative_path,
+                },
+                metadata: confined_metadata(root, previous.display_path.as_deref()),
+            };
+            let mut outcome = ReconcileOutcome {
+                instances_discovered: 1,
+                streams_reconciled: 1,
+                objects_discovered: 1,
+                ..ReconcileOutcome::default()
+            };
+            lease.begin_reconciling();
+            self.reconcile_object(
+                adapter,
+                &instance,
+                &stream,
+                &object,
+                Some(previous),
+                &reason,
+                started_at,
+                &mut outcome,
+            )?;
+            Ok(outcome)
+        })();
+        self.finish_reconcile(lease, result, started_at)
+    }
+
+    fn check_cancelled(&self) -> Result<(), EngineError> {
+        check_cancellations(&self.cancellations)
     }
 
     fn finish_reconcile(
@@ -190,14 +530,24 @@ impl ObservationCoordinator {
         started_at: i64,
         outcome: &mut ReconcileOutcome,
     ) -> Result<(), EngineError> {
+        self.check_cancelled()?;
         let manifest = adapter.manifest();
         let catalog = self
             .engine
             .source_catalog(manifest.id.as_str(), spec.stable_key.as_bytes())?;
         // Entity keys emitted by adapters include the durable source-instance
-        // ID. Reserve it before decoding and refresh discovery metadata even
-        // when this instance currently declares no matching objects.
-        let source_instance_id = self.reserve_instance(adapter, &spec, started_at)?;
+        // ID. Reserve it before first decode or when the adapter contract
+        // changes. An ordinary unchanged poll reuses the catalog identity so it
+        // does not create an otherwise empty SQLite write transaction.
+        let source_instance_id =
+            match (catalog.source_instance_id, catalog.adapter_contract_version) {
+                (Some(source_instance_id), Some(contract_version))
+                    if contract_version == manifest.contract_version =>
+                {
+                    source_instance_id
+                }
+                _ => self.reserve_instance(adapter, &spec, started_at)?,
+            };
         if catalog
             .source_instance_id
             .is_some_and(|catalog_id| catalog_id != source_instance_id)
@@ -211,11 +561,14 @@ impl ObservationCoordinator {
             id: source_instance_id,
             spec,
         };
-        let streams = adapter
-            .streams(&instance)
+        let mut discovery = DiscoveryIndex::default();
+        let streams = catch_adapter_panic("declare source streams", || adapter.streams(&instance))?
             .map_err(|error| adapter_error("declare source streams", error))?;
+        discovery.preload(&instance, &streams, &self.cancellations)?;
         let mut stream_ids = BTreeSet::new();
+        let mut scheduled_objects = Vec::new();
         for stream in streams {
+            self.check_cancelled()?;
             stream
                 .validate(&instance)
                 .map_err(|error| adapter_error("validate source stream", error))?;
@@ -226,10 +579,25 @@ impl ObservationCoordinator {
                 ));
             }
             outcome.streams_reconciled = outcome.streams_reconciled.saturating_add(1);
-            self.reconcile_stream(
-                adapter, &instance, &stream, &catalog, reason, started_at, outcome,
-            )?;
+            scheduled_objects.extend(self.collect_stream_work(
+                adapter,
+                &instance,
+                &stream,
+                &catalog,
+                &mut discovery,
+                reason,
+                started_at,
+                outcome,
+            )?);
         }
+        self.execute_scheduled_objects(
+            adapter,
+            &instance,
+            scheduled_objects,
+            reason,
+            started_at,
+            outcome,
+        )?;
         Ok(())
     }
 
@@ -239,46 +607,61 @@ impl ObservationCoordinator {
         spec: &AdapterSourceInstanceSpec,
         started_at: i64,
     ) -> Result<u64, EngineError> {
-        self.engine.reserve_source_instance(SourceInstanceSpec {
-            adapter_id: adapter.manifest().id.as_str().to_string(),
-            stable_key: spec.stable_key.as_bytes().to_vec(),
-            display_name: spec.display_name.clone(),
-            adapter_contract_version: adapter.manifest().contract_version,
-            discovered_at: started_at,
-            last_seen_at: started_at,
-        })
+        self.check_cancelled()?;
+        self.engine.reserve_source_instance(source_instance_spec(
+            adapter.manifest(),
+            spec,
+            started_at,
+            started_at,
+        ))
+    }
+
+    fn commit_observation_checked(
+        &self,
+        request: ObservationCommit,
+    ) -> Result<CommitReceipt, EngineError> {
+        self.check_cancelled()?;
+        self.engine.commit_observation(request)
+    }
+
+    fn commit_facts_checked(
+        &self,
+        request: ObservationCommit,
+        batch: FactBatch,
+    ) -> Result<CommitReceipt, EngineError> {
+        self.check_cancelled()?;
+        self.engine.commit_facts(request, batch)
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn reconcile_stream<A: AgentAdapter + ?Sized>(
+    fn collect_stream_work<A: AgentAdapter + ?Sized>(
         &self,
         adapter: &A,
         instance: &SourceInstance,
         stream: &StreamSpec,
         catalog: &SourceCatalogSnapshot,
+        discovery: &mut DiscoveryIndex,
         reason: &str,
         started_at: i64,
         outcome: &mut ReconcileOutcome,
-    ) -> Result<(), EngineError> {
-        if matches!(stream.driver, DriverSpec::DirectorySnapshot(_)) {
-            return Err(observation_error(
-                "dispatch source stream",
-                format!(
-                    "stream {} declares DirectorySnapshot, which produces membership changes rather than adapter records",
-                    stream.id
-                ),
-            ));
-        }
+    ) -> Result<Vec<ObjectWork>, EngineError> {
+        self.check_cancelled()?;
         if stream.authority == StreamAuthority::IgnoredDerived {
-            return Ok(());
+            return Ok(Vec::new());
         }
         let root = instance
             .root(&stream.selector.root_name)
             .map_err(|error| adapter_error("resolve source root", error))?;
-        let discovered = discover_objects(root, stream)?;
+        if let DriverSpec::DirectorySnapshot(config) = &stream.driver {
+            self.reconcile_directory_snapshot(
+                adapter, instance, stream, root, catalog, config, reason, started_at, outcome,
+            )?;
+            return Ok(Vec::new());
+        }
+        let discovered = discovery.discover_objects(root, stream, &self.cancellations)?;
         if !discovered.available {
             outcome.streams_unavailable = outcome.streams_unavailable.saturating_add(1);
-            return Ok(());
+            return Ok(Vec::new());
         }
         outcome.objects_discovered = outcome
             .objects_discovered
@@ -297,7 +680,9 @@ impl ObservationCoordinator {
             }
         }
 
+        let mut work = Vec::new();
         for object in discovered.objects.values() {
+            self.check_cancelled()?;
             let previous = stored_by_key
                 .remove(&object.descriptor.object_key)
                 .or_else(|| {
@@ -309,16 +694,11 @@ impl ObservationCoordinator {
                     let prior_key = stored_by_path.get(&display)?;
                     stored_by_key.remove(prior_key)
                 });
-            self.reconcile_object(
-                adapter,
-                instance,
-                stream,
-                object,
-                previous.as_ref(),
-                reason,
-                started_at,
-                outcome,
-            )?;
+            work.push(ObjectWork {
+                stream: stream.clone(),
+                object: object.clone(),
+                previous,
+            });
         }
 
         if stream.deletion == DeletionPolicy::MirrorSource {
@@ -326,6 +706,7 @@ impl ObservationCoordinator {
                 .values()
                 .filter(|object| object.state != "absent")
             {
+                self.check_cancelled()?;
                 let Some(relative_path) = previous_display_relative(previous, root) else {
                     outcome.retries_required = outcome.retries_required.saturating_add(1);
                     continue;
@@ -339,16 +720,252 @@ impl ObservationCoordinator {
                     },
                     metadata: None,
                 };
-                self.reconcile_object(
+                if previous.state == "quarantined" {
+                    let durable = DurableObject::from_catalog(instance.id, previous);
+                    self.commit_missing_object_absence(
+                        adapter,
+                        instance,
+                        stream,
+                        &object,
+                        &AdapterObjectContext::empty(),
+                        &durable,
+                        reason,
+                        started_at,
+                        outcome,
+                    )?;
+                    continue;
+                }
+                work.push(ObjectWork {
+                    stream: stream.clone(),
+                    object,
+                    previous: Some(previous.clone()),
+                });
+            }
+        }
+        Ok(work)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn reconcile_directory_snapshot<A: AgentAdapter + ?Sized>(
+        &self,
+        adapter: &A,
+        instance: &SourceInstance,
+        stream: &StreamSpec,
+        root: &Path,
+        catalog: &SourceCatalogSnapshot,
+        config: &crate::source::DirectorySnapshotConfig,
+        reason: &str,
+        started_at: i64,
+        outcome: &mut ReconcileOutcome,
+    ) -> Result<(), EngineError> {
+        const DIRECTORY_OBJECT_KEY: &[u8] = b"\x01directory-snapshot-root";
+        let previous = catalog.objects.iter().find(|object| {
+            object.stream_key == stream.id.as_str()
+                && object.object_key.as_slice() == DIRECTORY_OBJECT_KEY
+        });
+        let previous_checkpoint = previous
+            .and_then(|object| object.driver_checkpoint.as_deref())
+            .map(DirectoryCheckpoint::decode)
+            .transpose()
+            .map_err(source_error)?;
+        if previous.is_some_and(|object| object.driver_checkpoint_version != Some(1)) {
+            return Err(observation_error(
+                "resume directory snapshot",
+                format!("stream {} has an unsupported checkpoint version", stream.id),
+            ));
+        }
+        let patterns = SelectorPatterns::new(stream)?;
+        let driver = DirectorySnapshot::new(config.clone()).map_err(source_error)?;
+        let scan = driver
+            .scan(
+                root,
+                previous_checkpoint.as_ref(),
+                &|relative: &Path, kind| match kind {
+                    DirectoryEntryKind::Directory => DirectorySelection::Recurse,
+                    DirectoryEntryKind::File if patterns.matches(relative) => {
+                        DirectorySelection::Include
+                    }
+                    DirectoryEntryKind::File => DirectorySelection::Ignore,
+                },
+            )
+            .map_err(source_error)?;
+        match scan {
+            DirectoryScan::Unavailable => {
+                outcome.streams_unavailable = outcome.streams_unavailable.saturating_add(1);
+                Ok(())
+            }
+            DirectoryScan::RetryTransient => {
+                outcome.retries_required = outcome.retries_required.saturating_add(1);
+                Ok(())
+            }
+            DirectoryScan::Snapshot {
+                changes,
+                checkpoint,
+                ..
+            } => {
+                outcome.objects_discovered = outcome.objects_discovered.saturating_add(1);
+                if previous_checkpoint.as_ref() == Some(&checkpoint) && changes.is_empty() {
+                    outcome.objects_unchanged = outcome.objects_unchanged.saturating_add(1);
+                    return Ok(());
+                }
+                let object = DeclaredObject {
+                    path: root.to_path_buf(),
+                    descriptor: SourceObjectDescriptor {
+                        stream_id: stream.id.clone(),
+                        object_key: DIRECTORY_OBJECT_KEY.to_vec(),
+                        relative_path: PathBuf::from("."),
+                    },
+                    metadata: std::fs::symlink_metadata(root).ok(),
+                };
+                let expected = previous.map_or(ExpectedSourceCursor::Absent, |object| {
+                    ExpectedSourceCursor::At {
+                        generation: object.generation,
+                        committed_cursor: object.committed_cursor.clone(),
+                    }
+                });
+                let request = commit_request(
                     adapter,
                     instance,
                     stream,
                     &object,
-                    Some(previous),
+                    &AdapterObjectContext::empty(),
+                    expected,
+                    checkpoint.generation,
+                    checkpoint.cursor().into_bytes(),
+                    Some(checkpoint.encode()),
+                    None,
+                    None,
+                    "active",
+                    Vec::new(),
                     reason,
                     started_at,
-                    outcome,
                 )?;
+                let receipt = self.commit_observation_checked(request)?;
+                record_commit(outcome, &receipt);
+                if previous.is_none() {
+                    outcome.objects_registered = outcome.objects_registered.saturating_add(1);
+                }
+                outcome.objects_changed = outcome.objects_changed.saturating_add(1);
+                Ok(())
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn execute_scheduled_objects<A: AgentAdapter + ?Sized>(
+        &self,
+        adapter: &A,
+        instance: &SourceInstance,
+        work: Vec<ObjectWork>,
+        reason: &str,
+        started_at: i64,
+        outcome: &mut ReconcileOutcome,
+    ) -> Result<(), EngineError> {
+        if work.is_empty() {
+            return Ok(());
+        }
+        let mut scheduler = BoundedScheduler::new(SCHEDULER_CAPACITY, MAX_OBJECTS_IN_FLIGHT)
+            .map_err(source_error)?;
+        let mut pending = work.into_iter();
+        let mut exhausted = false;
+        let mut admitted = BTreeMap::<WorkKey, ObjectWork>::new();
+
+        while !exhausted || scheduler.queued_len() > 0 || scheduler.in_flight_len() > 0 {
+            self.check_cancelled()?;
+            while !exhausted && scheduler.queued_len() < SCHEDULER_CAPACITY {
+                let Some(next) = pending.next() else {
+                    exhausted = true;
+                    break;
+                };
+                let generation = next
+                    .previous
+                    .as_ref()
+                    .map_or(1, |previous| previous.generation);
+                let key = scheduled_work_key(&next.stream, &next.object, generation)?;
+                let scheduled = ScheduledWork {
+                    key: key.clone(),
+                    priority: next.stream.priority,
+                    reason: DirtyReason::Recovery,
+                };
+                match scheduler.enqueue(scheduled) {
+                    ScheduleOutcome::Enqueued => {
+                        if admitted.insert(key, next).is_some() {
+                            return Err(observation_error(
+                                "schedule source objects",
+                                "duplicate object/generation work key",
+                            ));
+                        }
+                    }
+                    ScheduleOutcome::Coalesced | ScheduleOutcome::PriorityEscalated => {
+                        return Err(observation_error(
+                            "schedule source objects",
+                            "discovery produced duplicate object/generation work",
+                        ));
+                    }
+                    ScheduleOutcome::FullNeedsReconcile => {
+                        return Err(observation_error(
+                            "schedule source objects",
+                            "bounded scheduler rejected work before reaching its declared capacity",
+                        ));
+                    }
+                }
+            }
+
+            let mut wave = Vec::new();
+            while wave.len() < MAX_OBJECTS_IN_FLIGHT {
+                let Some(scheduled) = scheduler.dispatch() else {
+                    break;
+                };
+                let task = admitted.remove(&scheduled.key).ok_or_else(|| {
+                    observation_error(
+                        "dispatch source objects",
+                        "scheduler returned work without an admitted object",
+                    )
+                })?;
+                wave.push((scheduled.key, task));
+            }
+            if wave.is_empty() {
+                return Err(observation_error(
+                    "dispatch source objects",
+                    "bounded scheduler made no progress",
+                ));
+            }
+
+            let workers = self.engine.observation_workers()?;
+            let results = workers.install(|| {
+                wave.into_par_iter()
+                    .map(|(key, task)| {
+                        let mut local = ReconcileOutcome::default();
+                        let result = self.reconcile_object(
+                            adapter,
+                            instance,
+                            &task.stream,
+                            &task.object,
+                            task.previous.as_ref(),
+                            reason,
+                            started_at,
+                            &mut local,
+                        );
+                        (key, result, local)
+                    })
+                    .collect::<Vec<_>>()
+            });
+
+            let mut first_error = None;
+            for (key, result, local) in results {
+                if !scheduler.complete(&key) {
+                    return Err(observation_error(
+                        "complete source object work",
+                        "scheduler lost an in-flight object key",
+                    ));
+                }
+                merge_outcome(outcome, local);
+                if let Err(error) = result {
+                    first_error.get_or_insert(error);
+                }
+            }
+            if let Some(error) = first_error {
+                return Err(error);
             }
         }
         Ok(())
@@ -366,9 +983,19 @@ impl ObservationCoordinator {
         started_at: i64,
         outcome: &mut ReconcileOutcome,
     ) -> Result<(), EngineError> {
-        let object_context = adapter
-            .bootstrap_object(instance, &object.descriptor)
-            .map_err(|error| adapter_error("bootstrap source object", error))?;
+        self.check_cancelled()?;
+        let source_access = ConfinedSourceAccess::new(instance, &self.cancellations);
+        let object_context = match catch_adapter_panic("bootstrap source object", || {
+            adapter.bootstrap_object_with_access(instance, &object.descriptor, &source_access)
+        })? {
+            Ok(context) => context,
+            Err(error) if error.class == AdapterErrorClass::RecordPermanent => {
+                return self.quarantine_object_path(
+                    adapter, instance, stream, object, previous, error, reason, started_at, outcome,
+                )
+            }
+            Err(error) => return Err(adapter_error("bootstrap source object", error)),
+        };
         let durable = match previous {
             Some(previous) => DurableObject::from_catalog(instance.id, previous),
             None => self.register_object(
@@ -383,6 +1010,9 @@ impl ObservationCoordinator {
             )?,
         };
         durable.validate_driver_checkpoint(stream)?;
+        let root = instance
+            .root(&stream.selector.root_name)
+            .map_err(|error| adapter_error("resolve source root for confined read", error))?;
 
         let origin = RecordOrigin {
             source_instance_id: durable.source_instance_id,
@@ -392,13 +1022,15 @@ impl ObservationCoordinator {
             source_timestamp_hint: None,
             media_type: media_type(&object.path)?,
         };
-        match &stream.driver {
+        let result = match &stream.driver {
             DriverSpec::AppendDelimited(config) => self.reconcile_append(
                 adapter,
                 instance,
                 stream,
                 object,
+                root,
                 &object_context,
+                &source_access,
                 durable,
                 &origin,
                 config,
@@ -411,7 +1043,9 @@ impl ObservationCoordinator {
                 instance,
                 stream,
                 object,
+                root,
                 &object_context,
+                &source_access,
                 durable,
                 &origin,
                 config,
@@ -424,7 +1058,39 @@ impl ObservationCoordinator {
                 instance,
                 stream,
                 object,
+                root,
                 &object_context,
+                &source_access,
+                durable,
+                &origin,
+                config,
+                reason,
+                started_at,
+                outcome,
+            ),
+            DriverSpec::SqliteSnapshot(config) => self.reconcile_sqlite_snapshot(
+                adapter,
+                instance,
+                stream,
+                object,
+                root,
+                &object_context,
+                &source_access,
+                durable,
+                &origin,
+                config,
+                reason,
+                started_at,
+                outcome,
+            ),
+            DriverSpec::KeyValueSnapshot(config) => self.reconcile_key_value_snapshot(
+                adapter,
+                instance,
+                stream,
+                object,
+                root,
+                &object_context,
+                &source_access,
                 durable,
                 &origin,
                 config,
@@ -433,7 +1099,83 @@ impl ObservationCoordinator {
                 outcome,
             ),
             DriverSpec::DirectorySnapshot(_) => unreachable!("rejected before object discovery"),
+        };
+        if result.is_ok() && source_access.changed_since_read()? {
+            outcome.retries_required = outcome.retries_required.saturating_add(1);
+            record_retry_target(outcome, instance, stream, object);
         }
+        result
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn quarantine_object_path<A: AgentAdapter + ?Sized>(
+        &self,
+        adapter: &A,
+        instance: &SourceInstance,
+        stream: &StreamSpec,
+        object: &DeclaredObject,
+        previous: Option<&SourceCatalogObject>,
+        error: AdapterError,
+        reason: &str,
+        started_at: i64,
+        outcome: &mut ReconcileOutcome,
+    ) -> Result<(), EngineError> {
+        if previous.is_some_and(|object| object.state == "quarantined") {
+            outcome.objects_unchanged = outcome.objects_unchanged.saturating_add(1);
+            return Ok(());
+        }
+
+        let (expected, generation) = match previous {
+            Some(previous) => {
+                let durable = DurableObject::from_catalog(instance.id, previous);
+                (
+                    durable.expected(),
+                    next_object_generation(&durable, "quarantine invalid source object path")?,
+                )
+            }
+            None => (ExpectedSourceCursor::Absent, 1),
+        };
+        let cursor = initial_cursor_bytes(stream);
+        let request = commit_request(
+            adapter,
+            instance,
+            stream,
+            object,
+            &AdapterObjectContext::empty(),
+            expected,
+            generation,
+            cursor.clone(),
+            None,
+            None,
+            None,
+            "quarantined",
+            vec![SourceRecordError {
+                generation,
+                cursor_start: cursor.clone(),
+                cursor_end: cursor,
+                payload_hash: blake3::hash(&object.descriptor.object_key)
+                    .as_bytes()
+                    .to_vec(),
+                media_type: media_type(&object.path)?.as_str().to_string(),
+                raw_payload: None,
+                error_class: adapter_error_class(error.class).to_string(),
+                error_message: format!("{}: {}", error.code, error.message),
+                adapter_version: adapter.manifest().adapter_version.clone(),
+                contract_version: adapter.manifest().contract_version,
+                last_retry_at: None,
+            }],
+            reason,
+            started_at,
+        )?;
+        let receipt = self.commit_facts_checked(
+            request,
+            FactBatch::new(FACT_BATCH_LIMIT, DIAGNOSTIC_LIMIT)
+                .map_err(|error| adapter_error("create path quarantine fact batch", error))?,
+        )?;
+        record_commit(outcome, &receipt);
+        outcome.records_quarantined = outcome.records_quarantined.saturating_add(1);
+        outcome.objects_changed = outcome.objects_changed.saturating_add(1);
+        Ok(())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -452,6 +1194,8 @@ impl ObservationCoordinator {
             DriverSpec::AppendDelimited(_) => SourceCursor::append_offset(0),
             DriverSpec::ReplaceDocument(_) => SourceCursor::snapshot(Revision::ZERO),
             DriverSpec::Presence(_) => SourceCursor::presence(Revision::ZERO),
+            DriverSpec::SqliteSnapshot(_) => SourceCursor::sqlite_snapshot(Revision::ZERO),
+            DriverSpec::KeyValueSnapshot(_) => SourceCursor::key_value_snapshot(Revision::ZERO),
             DriverSpec::DirectorySnapshot(_) => unreachable!("not an adapter record stream"),
         };
         let request = commit_request(
@@ -471,7 +1215,7 @@ impl ObservationCoordinator {
             reason,
             started_at,
         )?;
-        let receipt = self.engine.commit_observation(request)?;
+        let receipt = self.commit_observation_checked(request)?;
         record_commit(outcome, &receipt);
         outcome.objects_registered = outcome.objects_registered.saturating_add(1);
         Ok(DurableObject {
@@ -480,10 +1224,12 @@ impl ObservationCoordinator {
             source_object_id: receipt.source_object_id,
             generation: 1,
             committed_cursor: initial_cursor_bytes(stream),
+            adapter_object_context: Some(object_context.payload().to_vec()),
             driver_checkpoint: None,
             driver_checkpoint_version: None,
             decoder_state: None,
             decoder_state_version: None,
+            retry_state: None,
             decoder_contract_version: adapter.manifest().contract_version,
             state: "pending".to_string(),
         })
@@ -496,7 +1242,9 @@ impl ObservationCoordinator {
         instance: &SourceInstance,
         stream: &StreamSpec,
         object: &DeclaredObject,
+        root: &Path,
         object_context: &AdapterObjectContext,
+        source_access: &ConfinedSourceAccess<'_>,
         mut durable: DurableObject,
         origin: &RecordOrigin,
         config: &crate::source::AppendDelimitedConfig,
@@ -505,7 +1253,9 @@ impl ObservationCoordinator {
         outcome: &mut ReconcileOutcome,
     ) -> Result<(), EngineError> {
         let mut config = config.clone();
-        config.max_records_per_batch = 1;
+        config.max_records_per_batch = config
+            .max_records_per_batch
+            .min(MAX_APPEND_RECORDS_PER_COMMIT);
         let driver = AppendDelimitedFile::new(config).map_err(source_error)?;
         let mut previous = durable
             .driver_checkpoint
@@ -513,17 +1263,20 @@ impl ObservationCoordinator {
             .map(AppendCheckpoint::decode)
             .transpose()
             .map_err(source_error)?;
-        let mut force_contract_replay =
-            durable.driver_checkpoint.is_some() && durable.decoder_contract_changed(adapter);
+        let mut force_contract_replay = durable.driver_checkpoint.is_some()
+            && (durable.decoder_contract_changed(adapter)
+                || durable.object_context_changed(object_context));
         let mut records_seen = 0_usize;
         loop {
-            if records_seen == MAX_APPEND_RECORDS_PER_RECONCILE {
+            self.check_cancelled()?;
+            if records_seen >= MAX_APPEND_RECORDS_PER_RECONCILE {
                 outcome.retries_required = outcome.retries_required.saturating_add(1);
                 return Ok(());
             }
             match driver
-                .read(
-                    &object.path,
+                .read_confined(
+                    root,
+                    &object.descriptor.relative_path,
                     previous.as_ref(),
                     origin,
                     force_contract_replay,
@@ -607,7 +1360,7 @@ impl ObservationCoordinator {
                                 started_at,
                             )?;
                             let receipt = if generation_changed {
-                                self.engine.commit_facts(
+                                self.commit_facts_checked(
                                     request,
                                     FactBatch::new(FACT_BATCH_LIMIT, DIAGNOSTIC_LIMIT).map_err(
                                         |error| {
@@ -619,7 +1372,7 @@ impl ObservationCoordinator {
                                     )?,
                                 )?
                             } else {
-                                self.engine.commit_observation(request)?
+                                self.commit_observation_checked(request)?
                             };
                             record_commit(outcome, &receipt);
                             durable.advance(&checkpoint, checkpoint_bytes.clone());
@@ -636,104 +1389,82 @@ impl ObservationCoordinator {
                         }
                     } else {
                         records_seen = records_seen.saturating_add(items.len());
-                        debug_assert_eq!(items.len(), 1);
-                        match &items[0] {
-                            AppendItem::Record(record) => {
-                                let decoded = decode_record(
-                                    adapter,
-                                    stream,
-                                    object_context,
-                                    record,
-                                    prior_decoder_state.as_deref(),
-                                )?;
-                                if decoded.disposition == DecodeDisposition::RetryTransient {
-                                    outcome.retries_required =
-                                        outcome.retries_required.saturating_add(1);
-                                    return Ok(());
+                        let mut batch = FactBatch::new(FACT_BATCH_LIMIT, DIAGNOSTIC_LIMIT)
+                            .map_err(|error| {
+                                adapter_error("create append commit fact batch", error)
+                            })?;
+                        let mut errors = Vec::new();
+                        let mut next_decoder_state = prior_decoder_state.clone();
+                        let mut next_decoder_state_version = prior_decoder_state_version;
+                        let mut decoded_count = 0_u32;
+                        let mut quarantined_count = 0_u32;
+                        for item in &items {
+                            self.check_cancelled()?;
+                            match item {
+                                AppendItem::Record(record) => {
+                                    let decoded = decode_record(
+                                        adapter,
+                                        stream,
+                                        object_context,
+                                        source_access,
+                                        record,
+                                        next_decoder_state.as_deref(),
+                                    )?;
+                                    if decoded.disposition == DecodeDisposition::RetryTransient {
+                                        outcome.retries_required =
+                                            outcome.retries_required.saturating_add(1);
+                                        return Ok(());
+                                    }
+                                    if let Some(state) = decoded.next_decoder_state.clone() {
+                                        next_decoder_state = Some(state);
+                                        next_decoder_state_version =
+                                            Some(adapter.manifest().contract_version);
+                                    }
+                                    decoded_count = decoded_count.saturating_add(1);
+                                    if decoded.quarantined {
+                                        quarantined_count = quarantined_count.saturating_add(1);
+                                    }
+                                    errors.extend(decoded.errors);
+                                    batch.append(decoded.batch).map_err(|error| {
+                                        adapter_error("merge append record fact batches", error)
+                                    })?;
                                 }
-                                let request = commit_request(
-                                    adapter,
-                                    instance,
-                                    stream,
-                                    object,
-                                    object_context,
-                                    durable.expected(),
-                                    checkpoint.generation,
-                                    checkpoint.cursor().into_bytes(),
-                                    Some(checkpoint_bytes.clone()),
-                                    decoded
-                                        .next_decoder_state
-                                        .clone()
-                                        .or_else(|| prior_decoder_state.clone()),
-                                    decoded
-                                        .next_decoder_state
-                                        .as_ref()
-                                        .map(|_| adapter.manifest().contract_version)
-                                        .or(prior_decoder_state_version),
-                                    "active",
-                                    decoded.errors,
-                                    reason,
-                                    started_at,
-                                )?;
-                                let receipt =
-                                    if decoded.batch.facts().is_empty() && !generation_changed {
-                                        self.engine.commit_observation(request)?
-                                    } else {
-                                        self.engine.commit_facts(request, decoded.batch)?
-                                    };
-                                record_commit(outcome, &receipt);
-                                outcome.records_decoded = outcome.records_decoded.saturating_add(1);
-                                if decoded.quarantined {
-                                    outcome.records_quarantined =
-                                        outcome.records_quarantined.saturating_add(1);
+                                AppendItem::Quarantined(quarantine) => {
+                                    quarantined_count = quarantined_count.saturating_add(1);
+                                    errors.push(quarantine_error(adapter, origin, quarantine));
                                 }
-                                durable.decoder_state = decoded
-                                    .next_decoder_state
-                                    .or_else(|| prior_decoder_state.clone());
-                                if durable.decoder_state.is_some() {
-                                    durable.decoder_state_version =
-                                        Some(adapter.manifest().contract_version);
-                                }
-                            }
-                            AppendItem::Quarantined(quarantine) => {
-                                let request = commit_request(
-                                    adapter,
-                                    instance,
-                                    stream,
-                                    object,
-                                    object_context,
-                                    durable.expected(),
-                                    checkpoint.generation,
-                                    checkpoint.cursor().into_bytes(),
-                                    Some(checkpoint_bytes.clone()),
-                                    prior_decoder_state.clone(),
-                                    prior_decoder_state_version,
-                                    "active",
-                                    vec![quarantine_error(adapter, origin, quarantine)],
-                                    reason,
-                                    started_at,
-                                )?;
-                                let receipt = if generation_changed {
-                                    self.engine.commit_facts(
-                                        request,
-                                        FactBatch::new(FACT_BATCH_LIMIT, DIAGNOSTIC_LIMIT)
-                                            .map_err(|error| {
-                                                adapter_error(
-                                                    "create generation quarantine fact batch",
-                                                    error,
-                                                )
-                                            })?,
-                                    )?
-                                } else {
-                                    self.engine.commit_observation(request)?
-                                };
-                                record_commit(outcome, &receipt);
-                                durable.decoder_state = prior_decoder_state;
-                                durable.decoder_state_version = prior_decoder_state_version;
-                                outcome.records_quarantined =
-                                    outcome.records_quarantined.saturating_add(1);
                             }
                         }
+                        let request = commit_request(
+                            adapter,
+                            instance,
+                            stream,
+                            object,
+                            object_context,
+                            durable.expected(),
+                            checkpoint.generation,
+                            checkpoint.cursor().into_bytes(),
+                            Some(checkpoint_bytes.clone()),
+                            next_decoder_state.clone(),
+                            next_decoder_state_version,
+                            "active",
+                            errors,
+                            reason,
+                            started_at,
+                        )?;
+                        let receipt = if batch.facts().is_empty() && !generation_changed {
+                            self.commit_observation_checked(request)?
+                        } else {
+                            self.commit_facts_checked(request, batch)?
+                        };
+                        record_commit(outcome, &receipt);
+                        durable.decoder_state = next_decoder_state;
+                        durable.decoder_state_version = next_decoder_state_version;
+                        outcome.records_decoded =
+                            outcome.records_decoded.saturating_add(decoded_count);
+                        outcome.records_quarantined = outcome
+                            .records_quarantined
+                            .saturating_add(quarantined_count);
                         durable.advance(&checkpoint, checkpoint_bytes.clone());
                         durable.state = "active".to_string();
                         outcome.objects_changed = outcome.objects_changed.saturating_add(1);
@@ -743,6 +1474,9 @@ impl ObservationCoordinator {
                     if !more_available {
                         if needs_retry {
                             outcome.retries_required = outcome.retries_required.saturating_add(1);
+                            outcome.incomplete_tail_retries =
+                                outcome.incomplete_tail_retries.saturating_add(1);
+                            record_retry_target(outcome, instance, stream, object);
                         }
                         return Ok(());
                     }
@@ -789,7 +1523,7 @@ impl ObservationCoordinator {
         )?;
         let batch = FactBatch::new(FACT_BATCH_LIMIT, DIAGNOSTIC_LIMIT)
             .map_err(|error| adapter_error("create deletion fact batch", error))?;
-        let receipt = self.engine.commit_facts(request, batch)?;
+        let receipt = self.commit_facts_checked(request, batch)?;
         record_commit(outcome, &receipt);
         outcome.objects_removed = outcome.objects_removed.saturating_add(1);
         outcome.objects_changed = outcome.objects_changed.saturating_add(1);
@@ -803,7 +1537,9 @@ impl ObservationCoordinator {
         instance: &SourceInstance,
         stream: &StreamSpec,
         object: &DeclaredObject,
+        root: &Path,
         object_context: &AdapterObjectContext,
+        source_access: &ConfinedSourceAccess<'_>,
         durable: DurableObject,
         origin: &RecordOrigin,
         config: &crate::source::ReplaceDocumentConfig,
@@ -811,16 +1547,24 @@ impl ObservationCoordinator {
         started_at: i64,
         outcome: &mut ReconcileOutcome,
     ) -> Result<(), EngineError> {
+        self.check_cancelled()?;
         let previous = durable
             .driver_checkpoint
             .as_deref()
             .map(ReplaceCheckpoint::decode)
             .transpose()
             .map_err(source_error)?;
-        let generation_reset = durable.decoder_contract_changed(adapter);
+        let generation_reset = durable.decoder_contract_changed(adapter)
+            || durable.object_context_changed(object_context);
         match ReplaceDocument::new(config.clone())
             .map_err(source_error)?
-            .read(&object.path, previous.as_ref(), origin, generation_reset)
+            .read_confined(
+                root,
+                &object.descriptor.relative_path,
+                previous.as_ref(),
+                origin,
+                generation_reset,
+            )
             .map_err(source_error)?
         {
             ReplaceRead::Missing => {
@@ -863,7 +1607,7 @@ impl ObservationCoordinator {
                     reason,
                     started_at,
                 )?;
-                let receipt = self.engine.commit_observation(request)?;
+                let receipt = self.commit_observation_checked(request)?;
                 record_commit(outcome, &receipt);
                 outcome.objects_changed = outcome.objects_changed.saturating_add(1);
                 Ok(())
@@ -889,6 +1633,7 @@ impl ObservationCoordinator {
                     stream,
                     object,
                     object_context,
+                    source_access,
                     &durable,
                     record,
                     checkpoint,
@@ -906,6 +1651,7 @@ impl ObservationCoordinator {
                         stream,
                         object,
                         object_context,
+                        source_access,
                         &durable,
                         record,
                         checkpoint,
@@ -955,7 +1701,7 @@ impl ObservationCoordinator {
                 // A replace-document quarantine describes the current whole
                 // document, so its former typed snapshot is no longer current
                 // even when the driver generation itself did not change.
-                let receipt = self.engine.commit_facts(
+                let receipt = self.commit_facts_checked(
                     request,
                     FactBatch::new(FACT_BATCH_LIMIT, DIAGNOSTIC_LIMIT).map_err(|error| {
                         adapter_error("create snapshot quarantine fact batch", error)
@@ -977,6 +1723,7 @@ impl ObservationCoordinator {
         stream: &StreamSpec,
         object: &DeclaredObject,
         object_context: &AdapterObjectContext,
+        source_access: &ConfinedSourceAccess<'_>,
         durable: &DurableObject,
         record: SourceRecord,
         checkpoint: ReplaceCheckpoint,
@@ -985,6 +1732,7 @@ impl ObservationCoordinator {
         started_at: i64,
         outcome: &mut ReconcileOutcome,
     ) -> Result<(), EngineError> {
+        self.check_cancelled()?;
         let generation_changed = checkpoint.generation != durable.generation;
         let prior_decoder_state = (!generation_changed)
             .then(|| durable.decoder_state.clone())
@@ -996,12 +1744,93 @@ impl ObservationCoordinator {
             adapter,
             stream,
             object_context,
+            source_access,
             &record,
             prior_decoder_state.as_deref(),
         )?;
         if decoded.disposition == DecodeDisposition::RetryTransient {
-            outcome.retries_required = outcome.retries_required.saturating_add(1);
-            return Ok(());
+            let now = now_unix_ms()?;
+            let mut guard = MalformedRevisionGuard::from_checkpoint(
+                MalformedRevisionPolicy::default(),
+                durable.retry_state.as_deref(),
+            )
+            .map_err(source_error)?;
+            return match guard.classify_failure(checkpoint.revision, now) {
+                ParseFailureDecision::RetryTransient { attempt } => {
+                    let mut request = commit_request(
+                        adapter,
+                        instance,
+                        stream,
+                        object,
+                        object_context,
+                        durable.expected(),
+                        durable.generation,
+                        durable.committed_cursor.clone(),
+                        durable.driver_checkpoint.clone(),
+                        durable.decoder_state.clone(),
+                        durable.decoder_state_version,
+                        "retrying",
+                        vec![snapshot_decode_error(
+                            adapter,
+                            stream,
+                            &record,
+                            "transient",
+                            format!(
+                                "complete snapshot decode requested retry; stable revision attempt {attempt}"
+                            ),
+                            Some(now),
+                        )],
+                        reason,
+                        started_at,
+                    )?;
+                    request.object.observed_revision =
+                        Some(checkpoint.revision.as_bytes().to_vec());
+                    request.object.retry_state = guard.checkpoint();
+                    let receipt = self.commit_observation_checked(request)?;
+                    record_commit(outcome, &receipt);
+                    outcome.retries_required = outcome.retries_required.saturating_add(1);
+                    outcome.objects_changed = outcome.objects_changed.saturating_add(1);
+                    Ok(())
+                }
+                ParseFailureDecision::Quarantine { attempts } => {
+                    let request = commit_request(
+                        adapter,
+                        instance,
+                        stream,
+                        object,
+                        object_context,
+                        durable.expected(),
+                        checkpoint.generation,
+                        checkpoint.cursor().into_bytes(),
+                        Some(checkpoint.encode()),
+                        prior_decoder_state,
+                        prior_decoder_state_version,
+                        "quarantined",
+                        vec![snapshot_decode_error(
+                            adapter,
+                            stream,
+                            &record,
+                            "record_permanent",
+                            format!(
+                                "complete snapshot remained malformed after {attempts} stable revision attempts"
+                            ),
+                            Some(now),
+                        )],
+                        reason,
+                        started_at,
+                    )?;
+                    let receipt = self.commit_facts_checked(
+                        request,
+                        FactBatch::new(FACT_BATCH_LIMIT, DIAGNOSTIC_LIMIT).map_err(|error| {
+                            adapter_error("create malformed snapshot quarantine batch", error)
+                        })?,
+                    )?;
+                    record_commit(outcome, &receipt);
+                    outcome.records_quarantined = outcome.records_quarantined.saturating_add(1);
+                    outcome.objects_changed = outcome.objects_changed.saturating_add(1);
+                    Ok(())
+                }
+            };
         }
         let request = commit_request(
             adapter,
@@ -1024,7 +1853,7 @@ impl ObservationCoordinator {
             reason,
             started_at,
         )?;
-        let receipt = self.engine.commit_facts(request, decoded.batch)?;
+        let receipt = self.commit_facts_checked(request, decoded.batch)?;
         record_commit(outcome, &receipt);
         outcome.records_decoded = outcome.records_decoded.saturating_add(1);
         if decoded.quarantined {
@@ -1038,13 +1867,286 @@ impl ObservationCoordinator {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn reconcile_presence<A: AgentAdapter + ?Sized>(
+    fn reconcile_sqlite_snapshot<A: AgentAdapter + ?Sized>(
+        &self,
+        adapter: &A,
+        instance: &SourceInstance,
+        stream: &StreamSpec,
+        object: &DeclaredObject,
+        root: &Path,
+        object_context: &AdapterObjectContext,
+        source_access: &ConfinedSourceAccess<'_>,
+        durable: DurableObject,
+        origin: &RecordOrigin,
+        config: &crate::source::SqliteSnapshotConfig,
+        reason: &str,
+        started_at: i64,
+        outcome: &mut ReconcileOutcome,
+    ) -> Result<(), EngineError> {
+        let previous = durable
+            .driver_checkpoint
+            .as_deref()
+            .map(SqliteCheckpoint::decode)
+            .transpose()
+            .map_err(source_error)?;
+        let force_replay = durable.decoder_contract_changed(adapter)
+            || durable.object_context_changed(object_context);
+        let cancellations = self.cancellations.clone();
+        match SqliteSnapshot::new(config.clone())
+            .map_err(source_error)?
+            .read_confined(
+                root,
+                &object.descriptor.relative_path,
+                previous.as_ref(),
+                origin,
+                force_replay,
+                move || {
+                    cancellations
+                        .iter()
+                        .any(QueryCancellationToken::is_cancelled)
+                },
+            )
+            .map_err(source_error)?
+        {
+            SqliteRead::Missing => {
+                if stream.deletion == DeletionPolicy::MirrorSource {
+                    self.commit_missing_object_absence(
+                        adapter,
+                        instance,
+                        stream,
+                        object,
+                        object_context,
+                        &durable,
+                        reason,
+                        started_at,
+                        outcome,
+                    )
+                } else {
+                    outcome.objects_unchanged = outcome.objects_unchanged.saturating_add(1);
+                    Ok(())
+                }
+            }
+            SqliteRead::RetryTransient => {
+                self.check_cancelled()?;
+                outcome.retries_required = outcome.retries_required.saturating_add(1);
+                record_retry_target(outcome, instance, stream, object);
+                Ok(())
+            }
+            SqliteRead::Unchanged { .. } => {
+                outcome.objects_unchanged = outcome.objects_unchanged.saturating_add(1);
+                Ok(())
+            }
+            SqliteRead::Snapshot {
+                mut records,
+                mut checkpoint,
+                ..
+            } => {
+                rebase_database_recreation(
+                    &durable,
+                    previous.is_none(),
+                    &mut checkpoint.generation,
+                    &mut records,
+                )?;
+                self.commit_database_snapshot(
+                    adapter,
+                    instance,
+                    stream,
+                    object,
+                    object_context,
+                    source_access,
+                    &durable,
+                    records,
+                    checkpoint.generation,
+                    checkpoint.cursor().into_bytes(),
+                    checkpoint.encode(),
+                    reason,
+                    started_at,
+                    outcome,
+                )
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn reconcile_key_value_snapshot<A: AgentAdapter + ?Sized>(
+        &self,
+        adapter: &A,
+        instance: &SourceInstance,
+        stream: &StreamSpec,
+        object: &DeclaredObject,
+        root: &Path,
+        object_context: &AdapterObjectContext,
+        source_access: &ConfinedSourceAccess<'_>,
+        durable: DurableObject,
+        origin: &RecordOrigin,
+        config: &crate::source::KeyValueSnapshotConfig,
+        reason: &str,
+        started_at: i64,
+        outcome: &mut ReconcileOutcome,
+    ) -> Result<(), EngineError> {
+        let previous = durable
+            .driver_checkpoint
+            .as_deref()
+            .map(KeyValueCheckpoint::decode)
+            .transpose()
+            .map_err(source_error)?;
+        let force_replay = durable.decoder_contract_changed(adapter)
+            || durable.object_context_changed(object_context);
+        let cancellations = self.cancellations.clone();
+        match KeyValueSnapshot::new(config.clone())
+            .map_err(source_error)?
+            .read_confined(
+                root,
+                &object.descriptor.relative_path,
+                previous.as_ref(),
+                origin,
+                force_replay,
+                move || {
+                    cancellations
+                        .iter()
+                        .any(QueryCancellationToken::is_cancelled)
+                },
+            )
+            .map_err(source_error)?
+        {
+            KeyValueRead::Missing => {
+                if stream.deletion == DeletionPolicy::MirrorSource {
+                    self.commit_missing_object_absence(
+                        adapter,
+                        instance,
+                        stream,
+                        object,
+                        object_context,
+                        &durable,
+                        reason,
+                        started_at,
+                        outcome,
+                    )
+                } else {
+                    outcome.objects_unchanged = outcome.objects_unchanged.saturating_add(1);
+                    Ok(())
+                }
+            }
+            KeyValueRead::RetryTransient => {
+                self.check_cancelled()?;
+                outcome.retries_required = outcome.retries_required.saturating_add(1);
+                record_retry_target(outcome, instance, stream, object);
+                Ok(())
+            }
+            KeyValueRead::Unchanged { .. } => {
+                outcome.objects_unchanged = outcome.objects_unchanged.saturating_add(1);
+                Ok(())
+            }
+            KeyValueRead::Snapshot {
+                mut records,
+                mut checkpoint,
+                ..
+            } => {
+                rebase_database_recreation(
+                    &durable,
+                    previous.is_none(),
+                    &mut checkpoint.generation,
+                    &mut records,
+                )?;
+                self.commit_database_snapshot(
+                    adapter,
+                    instance,
+                    stream,
+                    object,
+                    object_context,
+                    source_access,
+                    &durable,
+                    records,
+                    checkpoint.generation,
+                    checkpoint.cursor().into_bytes(),
+                    checkpoint.encode(),
+                    reason,
+                    started_at,
+                    outcome,
+                )
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn commit_database_snapshot<A: AgentAdapter + ?Sized>(
         &self,
         adapter: &A,
         instance: &SourceInstance,
         stream: &StreamSpec,
         object: &DeclaredObject,
         object_context: &AdapterObjectContext,
+        source_access: &ConfinedSourceAccess<'_>,
+        durable: &DurableObject,
+        records: Vec<SourceRecord>,
+        generation: u64,
+        cursor: Vec<u8>,
+        checkpoint: Vec<u8>,
+        reason: &str,
+        started_at: i64,
+        outcome: &mut ReconcileOutcome,
+    ) -> Result<(), EngineError> {
+        self.check_cancelled()?;
+        let generation_changed = generation != durable.generation;
+        let prior_decoder_state = (!generation_changed)
+            .then(|| durable.decoder_state.clone())
+            .flatten();
+        let decoded = decode_snapshot_records(
+            adapter,
+            stream,
+            object_context,
+            source_access,
+            &records,
+            prior_decoder_state,
+        )?;
+        let Some(decoded) = decoded else {
+            outcome.retries_required = outcome.retries_required.saturating_add(1);
+            record_retry_target(outcome, instance, stream, object);
+            return Ok(());
+        };
+        let decoder_state_version = decoded
+            .next_decoder_state
+            .as_ref()
+            .map(|_| adapter.manifest().contract_version);
+        let request = commit_request(
+            adapter,
+            instance,
+            stream,
+            object,
+            object_context,
+            durable.expected(),
+            generation,
+            cursor,
+            Some(checkpoint),
+            decoded.next_decoder_state,
+            decoder_state_version,
+            "active",
+            decoded.errors,
+            reason,
+            started_at,
+        )?;
+        let receipt = self.commit_facts_checked(request, decoded.batch)?;
+        record_commit(outcome, &receipt);
+        outcome.records_decoded = outcome
+            .records_decoded
+            .saturating_add(bounded_u32(records.len()));
+        outcome.records_quarantined = outcome
+            .records_quarantined
+            .saturating_add(decoded.quarantined_records);
+        outcome.objects_changed = outcome.objects_changed.saturating_add(1);
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn reconcile_presence<A: AgentAdapter + ?Sized>(
+        &self,
+        adapter: &A,
+        instance: &SourceInstance,
+        stream: &StreamSpec,
+        object: &DeclaredObject,
+        root: &Path,
+        object_context: &AdapterObjectContext,
+        source_access: &ConfinedSourceAccess<'_>,
         durable: DurableObject,
         origin: &RecordOrigin,
         config: &crate::source::PresenceObjectConfig,
@@ -1052,6 +2154,7 @@ impl ObservationCoordinator {
         started_at: i64,
         outcome: &mut ReconcileOutcome,
     ) -> Result<(), EngineError> {
+        self.check_cancelled()?;
         let previous = durable
             .driver_checkpoint
             .as_deref()
@@ -1061,8 +2164,9 @@ impl ObservationCoordinator {
         let contract_replay = durable.decoder_contract_changed(adapter);
         match PresenceObject::new(config.clone())
             .map_err(source_error)?
-            .read(
-                &object.path,
+            .read_confined(
+                root,
+                &object.descriptor.relative_path,
                 (!contract_replay).then_some(previous.as_ref()).flatten(),
                 origin,
             )
@@ -1102,6 +2206,7 @@ impl ObservationCoordinator {
                     adapter,
                     stream,
                     object_context,
+                    source_access,
                     &record,
                     prior_decoder_state.as_deref(),
                 )?;
@@ -1130,7 +2235,7 @@ impl ObservationCoordinator {
                     reason,
                     started_at,
                 )?;
-                let receipt = self.engine.commit_facts(request, decoded.batch)?;
+                let receipt = self.commit_facts_checked(request, decoded.batch)?;
                 record_commit(outcome, &receipt);
                 outcome.records_decoded = outcome.records_decoded.saturating_add(1);
                 if decoded.quarantined {
@@ -1151,19 +2256,151 @@ struct DiscoveredObjects {
     objects: BTreeMap<Vec<u8>, DeclaredObject>,
 }
 
+#[derive(Clone)]
 struct DeclaredObject {
     path: PathBuf,
     descriptor: SourceObjectDescriptor,
     metadata: Option<Metadata>,
 }
 
-fn discover_objects(root: &Path, stream: &StreamSpec) -> Result<DiscoveredObjects, EngineError> {
-    let root_metadata = match std::fs::symlink_metadata(root) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+struct ObjectWork {
+    stream: StreamSpec,
+    object: DeclaredObject,
+    previous: Option<SourceCatalogObject>,
+}
+
+#[derive(Default)]
+struct DiscoveryIndex {
+    roots: BTreeMap<PathBuf, RootDiscovery>,
+}
+
+struct RootDiscovery {
+    available: bool,
+    files: Vec<DiscoveredFile>,
+}
+
+struct DiscoveredFile {
+    path: PathBuf,
+    metadata: Option<Metadata>,
+}
+
+impl DiscoveryIndex {
+    fn preload(
+        &mut self,
+        instance: &SourceInstance,
+        streams: &[StreamSpec],
+        cancellations: &[QueryCancellationToken],
+    ) -> Result<(), EngineError> {
+        let mut roots = streams
+            .iter()
+            .filter(|stream| !matches!(stream.driver, DriverSpec::DirectorySnapshot(_)))
+            .map(|stream| {
+                instance
+                    .root(&stream.selector.root_name)
+                    .map(Path::to_path_buf)
+                    .map_err(|error| adapter_error("resolve discovery root", error))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        roots.sort_by_key(|root| root.components().count());
+        roots.dedup();
+        let mut consolidated = Vec::<PathBuf>::new();
+        for root in roots {
+            if consolidated
+                .iter()
+                .any(|ancestor| root.starts_with(ancestor))
+            {
+                continue;
+            }
+            consolidated.push(root);
+        }
+        for root in consolidated {
+            check_cancellations(cancellations)?;
+            self.roots
+                .insert(root.clone(), scan_root(&root, cancellations)?);
+        }
+        Ok(())
+    }
+
+    fn discover_objects(
+        &mut self,
+        root: &Path,
+        stream: &StreamSpec,
+        cancellations: &[QueryCancellationToken],
+    ) -> Result<DiscoveredObjects, EngineError> {
+        let mut discovery_root = self
+            .roots
+            .keys()
+            .filter(|candidate| root.starts_with(candidate.as_path()))
+            .max_by_key(|candidate| candidate.components().count())
+            .cloned();
+        if discovery_root.is_none() {
+            self.roots
+                .insert(root.to_path_buf(), scan_root(root, cancellations)?);
+            discovery_root = Some(root.to_path_buf());
+        }
+        let discovery_root = discovery_root.expect("discovery root was resolved above");
+        let root_discovery = self
+            .roots
+            .get(&discovery_root)
+            .expect("root discovery was inserted above");
+        if !root_discovery.available {
             return Ok(DiscoveredObjects {
                 available: false,
                 objects: BTreeMap::new(),
+            });
+        }
+
+        let patterns = SelectorPatterns::new(stream)?;
+        let mut objects = BTreeMap::new();
+        for file in &root_discovery.files {
+            check_cancellations(cancellations)?;
+            let Ok(relative_path) = file.path.strip_prefix(root) else {
+                continue;
+            };
+            if !patterns.matches(relative_path) {
+                continue;
+            }
+            let object_key = confined_relative_path_key(relative_path).map_err(source_error)?;
+            let descriptor = SourceObjectDescriptor {
+                stream_id: stream.id.clone(),
+                object_key: object_key.clone(),
+                relative_path: relative_path.to_path_buf(),
+            };
+            if objects
+                .insert(
+                    object_key,
+                    DeclaredObject {
+                        path: file.path.clone(),
+                        descriptor,
+                        metadata: file.metadata.clone(),
+                    },
+                )
+                .is_some()
+            {
+                return Err(observation_error(
+                    "enumerate source objects",
+                    "two paths resolved to the same binary object key",
+                ));
+            }
+        }
+        Ok(DiscoveredObjects {
+            available: true,
+            objects,
+        })
+    }
+}
+
+fn scan_root(
+    root: &Path,
+    cancellations: &[QueryCancellationToken],
+) -> Result<RootDiscovery, EngineError> {
+    check_cancellations(cancellations)?;
+    let root_metadata = match std::fs::symlink_metadata(root) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(RootDiscovery {
+                available: false,
+                files: Vec::new(),
             });
         }
         Err(error) => {
@@ -1180,14 +2417,14 @@ fn discover_objects(root: &Path, stream: &StreamSpec) -> Result<DiscoveredObject
             format!("{} is not a real directory", root.to_string_lossy()),
         ));
     }
-    let patterns = SelectorPatterns::new(stream)?;
-    let mut objects = BTreeMap::new();
+    let mut files = Vec::new();
     let mut entries = 0_usize;
     for entry in WalkDir::new(root)
         .min_depth(1)
         .max_depth(DISCOVERY_MAX_DEPTH + 1)
         .follow_links(false)
     {
+        check_cancellations(cancellations)?;
         let entry = entry.map_err(|error| {
             observation_error(
                 "enumerate source root",
@@ -1213,42 +2450,32 @@ fn discover_objects(root: &Path, stream: &StreamSpec) -> Result<DiscoveredObject
         if !entry.file_type().is_file() {
             continue;
         }
-        let relative = entry.path().strip_prefix(root).map_err(|_| {
+        entry.path().strip_prefix(root).map_err(|_| {
             observation_error(
                 "confine source object",
                 entry.path().to_string_lossy().into_owned(),
             )
         })?;
-        if !patterns.matches(relative) {
-            continue;
-        }
-        let object_key = confined_relative_path_key(relative).map_err(source_error)?;
-        let descriptor = SourceObjectDescriptor {
-            stream_id: stream.id.clone(),
-            object_key: object_key.clone(),
-            relative_path: relative.to_path_buf(),
-        };
-        if objects
-            .insert(
-                object_key,
-                DeclaredObject {
-                    path: entry.path().to_path_buf(),
-                    descriptor,
-                    metadata: entry.metadata().ok(),
-                },
-            )
-            .is_some()
-        {
-            return Err(observation_error(
-                "enumerate source objects",
-                "two paths resolved to the same binary object key",
-            ));
-        }
+        files.push(DiscoveredFile {
+            path: entry.path().to_path_buf(),
+            metadata: entry.metadata().ok(),
+        });
     }
-    Ok(DiscoveredObjects {
+    Ok(RootDiscovery {
         available: true,
-        objects,
+        files,
     })
+}
+
+fn check_cancellations(cancellations: &[QueryCancellationToken]) -> Result<(), EngineError> {
+    if cancellations
+        .iter()
+        .any(QueryCancellationToken::is_cancelled)
+    {
+        Err(EngineError::QueryCancelled)
+    } else {
+        Ok(())
+    }
 }
 
 struct SelectorPatterns {
@@ -1401,10 +2628,12 @@ struct DurableObject {
     source_object_id: u64,
     generation: u64,
     committed_cursor: Vec<u8>,
+    adapter_object_context: Option<Vec<u8>>,
     driver_checkpoint: Option<Vec<u8>>,
     driver_checkpoint_version: Option<u32>,
     decoder_state: Option<Vec<u8>>,
     decoder_state_version: Option<u32>,
+    retry_state: Option<Vec<u8>>,
     decoder_contract_version: u32,
     state: String,
 }
@@ -1417,10 +2646,12 @@ impl DurableObject {
             source_object_id: object.source_object_id,
             generation: object.generation,
             committed_cursor: object.committed_cursor.clone(),
+            adapter_object_context: object.adapter_object_context.clone(),
             driver_checkpoint: object.driver_checkpoint.clone(),
             driver_checkpoint_version: object.driver_checkpoint_version,
             decoder_state: object.decoder_state.clone(),
             decoder_state_version: object.decoder_state_version,
+            retry_state: object.retry_state.clone(),
             decoder_contract_version: object.decoder_contract_version,
             state: object.state.clone(),
         }
@@ -1443,6 +2674,10 @@ impl DurableObject {
         self.decoder_contract_version != adapter.manifest().contract_version
     }
 
+    fn object_context_changed(&self, context: &AdapterObjectContext) -> bool {
+        self.adapter_object_context.as_deref() != Some(context.payload())
+    }
+
     fn validate_driver_checkpoint(&self, stream: &StreamSpec) -> Result<(), EngineError> {
         let Some(version) = self.driver_checkpoint_version else {
             return Ok(());
@@ -1450,7 +2685,9 @@ impl DurableObject {
         let supported = match stream.driver {
             DriverSpec::AppendDelimited(_) | DriverSpec::Presence(_) => version == 1,
             DriverSpec::ReplaceDocument(_) => matches!(version, 1 | 2),
-            DriverSpec::DirectorySnapshot(_) => false,
+            DriverSpec::DirectorySnapshot(_)
+            | DriverSpec::SqliteSnapshot(_)
+            | DriverSpec::KeyValueSnapshot(_) => version == 1,
         };
         if supported {
             Ok(())
@@ -1481,6 +2718,22 @@ fn rebase_checkpointless_recreation(
     Ok(())
 }
 
+fn rebase_database_recreation(
+    durable: &DurableObject,
+    checkpointless: bool,
+    checkpoint_generation: &mut u64,
+    records: &mut [SourceRecord],
+) -> Result<(), EngineError> {
+    if durable.state == "absent" && checkpointless {
+        let generation = next_object_generation(durable, "resume recreated database snapshot")?;
+        *checkpoint_generation = generation;
+        for record in records {
+            record.generation = generation;
+        }
+    }
+    Ok(())
+}
+
 fn next_object_generation(
     durable: &DurableObject,
     operation: &'static str,
@@ -1499,17 +2752,129 @@ struct DecodedRecord {
     quarantined: bool,
 }
 
+struct DecodedSnapshot {
+    batch: FactBatch,
+    errors: Vec<SourceRecordError>,
+    next_decoder_state: Option<Vec<u8>>,
+    quarantined_records: u32,
+}
+
+fn decode_snapshot_records<A: AgentAdapter + ?Sized>(
+    adapter: &A,
+    stream: &StreamSpec,
+    object_context: &AdapterObjectContext,
+    source_access: &ConfinedSourceAccess<'_>,
+    records: &[SourceRecord],
+    mut decoder_state: Option<Vec<u8>>,
+) -> Result<Option<DecodedSnapshot>, EngineError> {
+    let mut batch = FactBatch::new(FACT_BATCH_LIMIT, DIAGNOSTIC_LIMIT)
+        .map_err(|error| adapter_error("create database snapshot fact batch", error))?;
+    let mut errors = Vec::new();
+    let mut quarantined_records = 0_u32;
+    for record in records {
+        let decoded = decode_record(
+            adapter,
+            stream,
+            object_context,
+            source_access,
+            record,
+            decoder_state.as_deref(),
+        )?;
+        if decoded.disposition == DecodeDisposition::RetryTransient {
+            return Ok(None);
+        }
+        if let Some(next) = decoded.next_decoder_state {
+            decoder_state = Some(next);
+        }
+        errors.extend(decoded.errors);
+        if decoded.quarantined {
+            quarantined_records = quarantined_records.saturating_add(1);
+        }
+        batch
+            .append(decoded.batch)
+            .map_err(|error| adapter_error("merge database snapshot facts", error))?;
+    }
+    Ok(Some(DecodedSnapshot {
+        batch,
+        errors,
+        next_decoder_state: decoder_state,
+        quarantined_records,
+    }))
+}
+
+fn source_instance_spec(
+    manifest: &AdapterManifest,
+    spec: &AdapterSourceInstanceSpec,
+    discovered_at: i64,
+    last_seen_at: i64,
+) -> SourceInstanceSpec {
+    SourceInstanceSpec {
+        adapter_id: manifest.id.as_str().to_string(),
+        stable_key: spec.stable_key.as_bytes().to_vec(),
+        display_name: spec.display_name.clone(),
+        adapter_version: manifest.adapter_version.clone(),
+        adapter_contract_version: manifest.contract_version,
+        source_schema_versions: manifest.source_schema_versions.clone(),
+        capabilities: manifest
+            .capabilities
+            .iter()
+            .map(|capability| SourceCapabilitySpec {
+                id: capability.id.as_str().to_string(),
+                support_level: support_level_name(capability.support.level).to_string(),
+                granularity: capability_granularity_name(&capability.support.granularity),
+                availability: availability_name(capability.support.availability).to_string(),
+                notes: capability.support.notes.clone(),
+            })
+            .collect(),
+        discovered_at,
+        last_seen_at,
+    }
+}
+
+fn support_level_name(level: SupportLevel) -> &'static str {
+    match level {
+        SupportLevel::Native => "native",
+        SupportLevel::Derived => "derived",
+        SupportLevel::Estimated => "estimated",
+        SupportLevel::Unsupported => "unsupported",
+    }
+}
+
+fn capability_granularity_name(granularity: &CapabilityGranularity) -> String {
+    match granularity {
+        CapabilityGranularity::Record => "record".to_string(),
+        CapabilityGranularity::Message => "message".to_string(),
+        CapabilityGranularity::Turn => "turn".to_string(),
+        CapabilityGranularity::Run => "run".to_string(),
+        CapabilityGranularity::Session => "session".to_string(),
+        CapabilityGranularity::Team => "team".to_string(),
+        CapabilityGranularity::Project => "project".to_string(),
+        CapabilityGranularity::Instance => "instance".to_string(),
+        CapabilityGranularity::Custom(value) => format!("custom:{value}"),
+    }
+}
+
+fn availability_name(availability: Availability) -> &'static str {
+    match availability {
+        Availability::Live => "live",
+        Availability::EventuallyLive => "eventually_live",
+        Availability::CompletionOnly => "completion_only",
+        Availability::BackfillOnly => "backfill_only",
+    }
+}
+
 fn decode_record<A: AgentAdapter + ?Sized>(
     adapter: &A,
     stream: &StreamSpec,
     object_context: &AdapterObjectContext,
+    source_access: &ConfinedSourceAccess<'_>,
     record: &SourceRecord,
     decoder_state: Option<&[u8]>,
 ) -> Result<DecodedRecord, EngineError> {
     let mut batch = FactBatch::new(FACT_BATCH_LIMIT, DIAGNOSTIC_LIMIT)
         .map_err(|error| adapter_error("create fact batch", error))?;
-    let disposition = adapter
-        .decode(
+    let disposition = catch_adapter_panic("decode source record", || {
+        adapter.decode_with_access(
             DecodeContext {
                 decoder: &stream.decoder,
                 object_context,
@@ -1517,8 +2882,10 @@ fn decode_record<A: AgentAdapter + ?Sized>(
             },
             record,
             &mut batch,
+            source_access,
         )
-        .map_err(|error| adapter_error("decode source record", error))?;
+    })?
+    .map_err(|error| adapter_error("decode source record", error))?;
     let fact_count = batch.facts().len();
     match disposition {
         DecodeDisposition::Applied if fact_count == 0 => {
@@ -1541,8 +2908,20 @@ fn decode_record<A: AgentAdapter + ?Sized>(
         }
         _ => {}
     }
-    if stream.retention != RawRetentionPolicy::Full {
-        batch.redact_unknown_record_payloads();
+    for dependency in source_access.revisions()? {
+        batch
+            .add_dependency_read(dependency)
+            .map_err(|error| adapter_error("record source dependency", error))?;
+    }
+    match stream.retention {
+        RawRetentionPolicy::Full => {}
+        RawRetentionPolicy::DiagnosticExcerpt => {
+            let excerpt = diagnostic_excerpt(&record.payload);
+            batch.replace_unknown_record_payloads(&excerpt);
+        }
+        RawRetentionPolicy::HashOnly | RawRetentionPolicy::None => {
+            batch.redact_unknown_record_payloads();
+        }
     }
     let quarantined = batch
         .diagnostics()
@@ -1557,8 +2936,7 @@ fn decode_record<A: AgentAdapter + ?Sized>(
             cursor_end: record.cursor_end.as_bytes().to_vec(),
             payload_hash: record.payload_hash.as_bytes().to_vec(),
             media_type: record.media_type.as_str().to_string(),
-            raw_payload: (stream.retention == RawRetentionPolicy::Full)
-                .then(|| record.payload.clone()),
+            raw_payload: retained_diagnostic_payload(stream.retention, &record.payload),
             error_class: adapter_error_class(diagnostic.class).to_string(),
             error_message: format!("{}: {}", diagnostic.code, diagnostic.message),
             adapter_version: adapter.manifest().adapter_version.clone(),
@@ -1595,21 +2973,11 @@ fn commit_request<A: AgentAdapter + ?Sized>(
     started_at: i64,
 ) -> Result<ObservationCommit, EngineError> {
     let committed_at = now_unix_ms()?.max(started_at);
-    let fallback_metadata = object
-        .metadata
-        .is_none()
-        .then(|| std::fs::metadata(&object.path).ok())
-        .flatten();
-    let metadata = object.metadata.as_ref().or(fallback_metadata.as_ref());
+    // Metadata captured during no-follow discovery is advisory. Never reopen
+    // the path here: it may have been replaced after the confined content read.
+    let metadata = object.metadata.as_ref();
     Ok(ObservationCommit {
-        source: SourceInstanceSpec {
-            adapter_id: adapter.manifest().id.as_str().to_string(),
-            stable_key: instance.spec.stable_key.as_bytes().to_vec(),
-            display_name: instance.spec.display_name.clone(),
-            adapter_contract_version: adapter.manifest().contract_version,
-            discovered_at: started_at,
-            last_seen_at: committed_at,
-        },
+        source: source_instance_spec(adapter.manifest(), &instance.spec, started_at, committed_at),
         stream: SourceStreamSpec {
             stream_key: stream.id.as_str().to_string(),
             driver_kind: stream.driver.kind().to_string(),
@@ -1638,6 +3006,7 @@ fn commit_request<A: AgentAdapter + ?Sized>(
             driver_checkpoint,
             decoder_state,
             decoder_state_version,
+            retry_state: None,
             size_bytes: metadata.map(Metadata::len),
             mtime_ns: metadata.and_then(modified_ns),
             decoder_contract_version: adapter.manifest().contract_version,
@@ -1669,12 +3038,37 @@ fn previous_display_relative(object: &SourceCatalogObject, root: &Path) -> Optio
     .then_some(relative)
 }
 
+fn previous_display_path(object: &SourceCatalogObject) -> Result<PathBuf, EngineError> {
+    let display = object.display_path.as_deref().ok_or_else(|| {
+        observation_error("resume retry object", "source object has no display path")
+    })?;
+    let relative = PathBuf::from(display);
+    let path_key = confined_relative_path_key(&relative).map_err(source_error)?;
+    if path_key != object.object_key {
+        return Err(observation_error(
+            "resume retry object",
+            "source object display path no longer matches its binary key",
+        ));
+    }
+    Ok(relative)
+}
+
+fn confined_metadata(root: &Path, display_path: Option<&str>) -> Option<Metadata> {
+    let relative = PathBuf::from(display_path?);
+    let metadata = std::fs::symlink_metadata(root.join(relative)).ok()?;
+    (!metadata.file_type().is_symlink() && metadata.is_file()).then_some(metadata)
+}
+
 fn initial_cursor_bytes(stream: &StreamSpec) -> Vec<u8> {
     match stream.driver {
         DriverSpec::AppendDelimited(_) => SourceCursor::append_offset(0).into_bytes(),
         DriverSpec::ReplaceDocument(_) => SourceCursor::snapshot(Revision::ZERO).into_bytes(),
         DriverSpec::Presence(_) => SourceCursor::presence(Revision::ZERO).into_bytes(),
-        DriverSpec::DirectorySnapshot(_) => unreachable!("not an adapter record stream"),
+        DriverSpec::DirectorySnapshot(_) => SourceCursor::directory(Revision::ZERO).into_bytes(),
+        DriverSpec::SqliteSnapshot(_) => SourceCursor::sqlite_snapshot(Revision::ZERO).into_bytes(),
+        DriverSpec::KeyValueSnapshot(_) => {
+            SourceCursor::key_value_snapshot(Revision::ZERO).into_bytes()
+        }
     }
 }
 
@@ -1682,7 +3076,9 @@ fn driver_checkpoint_version(driver: &DriverSpec) -> u32 {
     match driver {
         DriverSpec::AppendDelimited(_) | DriverSpec::Presence(_) => 1,
         DriverSpec::ReplaceDocument(_) => 2,
-        DriverSpec::DirectorySnapshot(_) => unreachable!("not an adapter record stream"),
+        DriverSpec::DirectorySnapshot(_)
+        | DriverSpec::SqliteSnapshot(_)
+        | DriverSpec::KeyValueSnapshot(_) => 1,
     }
 }
 
@@ -1692,6 +3088,7 @@ fn media_type(path: &Path) -> Result<SourceMediaType, EngineError> {
         Some("json") => "application/json",
         Some("md") => "text/markdown",
         Some("txt") => "text/plain",
+        Some("db" | "db3" | "sqlite" | "sqlite3") => "application/vnd.sqlite3",
         _ => "application/octet-stream",
     };
     SourceMediaType::new(value).map_err(source_error)
@@ -1714,6 +3111,441 @@ fn quarantine_error<A: AgentAdapter + ?Sized>(
         adapter_version: adapter.manifest().adapter_version.clone(),
         contract_version: adapter.manifest().contract_version,
         last_retry_at: None,
+    }
+}
+
+fn snapshot_decode_error<A: AgentAdapter + ?Sized>(
+    adapter: &A,
+    stream: &StreamSpec,
+    record: &SourceRecord,
+    error_class: &str,
+    error_message: String,
+    last_retry_at: Option<i64>,
+) -> SourceRecordError {
+    SourceRecordError {
+        generation: record.generation,
+        cursor_start: record.cursor_start.as_bytes().to_vec(),
+        cursor_end: record.cursor_end.as_bytes().to_vec(),
+        payload_hash: record.payload_hash.as_bytes().to_vec(),
+        media_type: record.media_type.as_str().to_string(),
+        raw_payload: retained_diagnostic_payload(stream.retention, &record.payload),
+        error_class: error_class.to_string(),
+        error_message,
+        adapter_version: adapter.manifest().adapter_version.clone(),
+        contract_version: adapter.manifest().contract_version,
+        last_retry_at,
+    }
+}
+
+const MAX_DIAGNOSTIC_EXCERPT_BYTES: usize = 1_024;
+const MAX_DIAGNOSTIC_SHAPE_ITEMS: usize = 16;
+
+fn retained_diagnostic_payload(retention: RawRetentionPolicy, payload: &[u8]) -> Option<Vec<u8>> {
+    match retention {
+        RawRetentionPolicy::None | RawRetentionPolicy::HashOnly => None,
+        RawRetentionPolicy::DiagnosticExcerpt => Some(diagnostic_excerpt(payload)),
+        RawRetentionPolicy::Full => Some(payload.to_vec()),
+    }
+}
+
+fn dependency_snapshot(
+    source_instance_id: u64,
+    root_name: &str,
+    root: &Path,
+    relative_path: &Path,
+    max_bytes: usize,
+) -> Result<SourceSnapshot, SourceDriverError> {
+    let object_key = confined_relative_path_key(relative_path)?;
+    let (payload, revision, oversized) =
+        match crate::source::read_stable_file_confined(root, relative_path, max_bytes)? {
+            crate::source::StableRead::Missing => (
+                None,
+                *blake3::hash(b"spaghetti/source-dependency/missing/v1").as_bytes(),
+                false,
+            ),
+            crate::source::StableRead::Unstable => {
+                return Err(SourceDriverError::Unstable(
+                    relative_path.to_string_lossy().into_owned(),
+                ))
+            }
+            crate::source::StableRead::Oversized(stamp) => {
+                let mut hasher = blake3::Hasher::new();
+                hasher.update(b"spaghetti/source-dependency/oversized/v1");
+                hasher.update(&stamp.len.to_be_bytes());
+                hasher.update(&stamp.modified_ns.to_be_bytes());
+                (None, *hasher.finalize().as_bytes(), true)
+            }
+            crate::source::StableRead::Stable {
+                bytes, revision, ..
+            } => (Some(bytes), *revision.as_bytes(), false),
+        };
+    Ok(SourceSnapshot {
+        payload,
+        revision: DependencyRevision {
+            source_instance_id,
+            root_name: root_name.to_string(),
+            object_key,
+            revision,
+        },
+        oversized,
+    })
+}
+
+fn source_query_snapshot(
+    source_instance_id: u64,
+    root: &Path,
+    query: &SourceQuery,
+    cancellations: &[QueryCancellationToken],
+) -> Result<SourceRows, SourceDriverError> {
+    let dependency_key = source_query_dependency_key(query)?;
+    let config = crate::source::SqliteSnapshotConfig {
+        queries: vec![query.query.clone()],
+        max_database_bytes: query.bounds.max_database_bytes,
+        max_sidecar_bytes: query.bounds.max_sidecar_bytes,
+        max_rows: query.bounds.max_rows,
+        max_value_bytes: query.bounds.max_value_bytes,
+        max_snapshot_bytes: query.bounds.max_snapshot_bytes,
+        busy_timeout_ms: query.bounds.busy_timeout_ms,
+    };
+    let origin = RecordOrigin {
+        source_instance_id,
+        stream_id: 0,
+        object_id: 0,
+        observed_at: 0,
+        source_timestamp_hint: None,
+        media_type: SourceMediaType::new("application/vnd.sqlite3")?,
+    };
+    let cancellation_tokens = cancellations.to_vec();
+    match SqliteSnapshot::new(config)?.read_confined(
+        root,
+        &query.relative_path,
+        None,
+        &origin,
+        false,
+        move || {
+            cancellation_tokens
+                .iter()
+                .any(QueryCancellationToken::is_cancelled)
+        },
+    )? {
+        SqliteRead::Missing => Ok(SourceRows {
+            available: false,
+            schema_version: None,
+            rows: Vec::new(),
+            revision: DependencyRevision {
+                source_instance_id,
+                root_name: query.root_name.clone(),
+                object_key: dependency_key,
+                revision: *blake3::hash(b"spaghetti/source-query/missing/v1").as_bytes(),
+            },
+        }),
+        SqliteRead::RetryTransient => Err(SourceDriverError::Unstable(format!(
+            "source query {} must be retried",
+            query.query.name
+        ))),
+        SqliteRead::Unchanged { .. } => unreachable!("checkpointless source query"),
+        SqliteRead::Snapshot {
+            records,
+            checkpoint,
+            ..
+        } => Ok(SourceRows {
+            available: true,
+            schema_version: Some(checkpoint.schema_version),
+            rows: records
+                .iter()
+                .map(|record| crate::source::SqliteRowRecord::decode(&record.payload))
+                .collect::<Result<Vec<_>, _>>()?,
+            revision: DependencyRevision {
+                source_instance_id,
+                root_name: query.root_name.clone(),
+                object_key: dependency_key,
+                revision: *checkpoint.revision.as_bytes(),
+            },
+        }),
+    }
+}
+
+fn source_object_listing(
+    source_instance_id: u64,
+    root: &Path,
+    request: &SourceObjectListRequest,
+    cancellations: &[QueryCancellationToken],
+) -> Result<SourceObjectList, SourceDriverError> {
+    let dependency_key = source_listing_dependency_key(request)?;
+    let root_metadata = match std::fs::symlink_metadata(root) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(SourceObjectList {
+                available: false,
+                objects: Vec::new(),
+                revision: DependencyRevision {
+                    source_instance_id,
+                    root_name: request.root_name.clone(),
+                    object_key: dependency_key,
+                    revision: *blake3::hash(b"spaghetti/source-listing/missing/v1").as_bytes(),
+                },
+            });
+        }
+        Err(error) => {
+            return Err(SourceDriverError::Unstable(format!(
+                "cannot inspect source listing root {}: {error}",
+                root.display()
+            )))
+        }
+    };
+    if root_metadata.file_type().is_symlink() || !root_metadata.is_dir() {
+        return Err(SourceDriverError::PathEscape(
+            root.to_string_lossy().into_owned(),
+        ));
+    }
+    let compile = |pattern: &String| {
+        GlobPattern::new(pattern).map_err(|detail| {
+            SourceDriverError::InvalidConfig(format!(
+                "source listing pattern {pattern:?}: {detail}"
+            ))
+        })
+    };
+    let patterns = SelectorPatterns {
+        include: request
+            .include
+            .iter()
+            .map(compile)
+            .collect::<Result<_, _>>()?,
+        exclude: request
+            .exclude
+            .iter()
+            .map(compile)
+            .collect::<Result<_, _>>()?,
+    };
+    let mut objects = Vec::new();
+    let mut scanned = 0_usize;
+    for entry in WalkDir::new(root)
+        .min_depth(1)
+        .max_depth(DISCOVERY_MAX_DEPTH + 1)
+        .follow_links(false)
+    {
+        if cancellations
+            .iter()
+            .any(QueryCancellationToken::is_cancelled)
+        {
+            return Err(SourceDriverError::Unstable(
+                "source listing was cancelled".to_string(),
+            ));
+        }
+        let entry = entry.map_err(|error| SourceDriverError::Unstable(error.to_string()))?;
+        if entry.depth() > DISCOVERY_MAX_DEPTH {
+            return Err(SourceDriverError::LimitExceeded(format!(
+                "source listing exceeds {DISCOVERY_MAX_DEPTH} path components"
+            )));
+        }
+        scanned = scanned.saturating_add(1);
+        if scanned > DISCOVERY_MAX_ENTRIES {
+            return Err(SourceDriverError::LimitExceeded(format!(
+                "source listing exceeds {DISCOVERY_MAX_ENTRIES} scanned entries"
+            )));
+        }
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let relative = entry.path().strip_prefix(root).map_err(|_| {
+            SourceDriverError::PathEscape(entry.path().to_string_lossy().into_owned())
+        })?;
+        if !patterns.matches(relative) {
+            continue;
+        }
+        if objects.len() == request.max_entries {
+            return Err(SourceDriverError::LimitExceeded(format!(
+                "source listing exceeds {} selected entries",
+                request.max_entries
+            )));
+        }
+        let metadata = entry.metadata().map_err(|error| {
+            SourceDriverError::Unstable(format!(
+                "cannot inspect source listing entry {}: {error}",
+                entry.path().display()
+            ))
+        })?;
+        objects.push(SourceListedObject {
+            object_key: confined_relative_path_key(relative)?,
+            relative_path: relative.to_path_buf(),
+            size_bytes: metadata.len(),
+            modified_ns: modified_ns(&metadata),
+        });
+    }
+    objects.sort_by(|left, right| left.object_key.cmp(&right.object_key));
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"spaghetti/source-listing/revision/v1\0");
+    for object in &objects {
+        hasher.update(&(object.object_key.len() as u64).to_be_bytes());
+        hasher.update(&object.object_key);
+        hasher.update(&object.size_bytes.to_be_bytes());
+        hasher.update(&object.modified_ns.unwrap_or(i64::MIN).to_be_bytes());
+    }
+    Ok(SourceObjectList {
+        available: true,
+        objects,
+        revision: DependencyRevision {
+            source_instance_id,
+            root_name: request.root_name.clone(),
+            object_key: dependency_key,
+            revision: *hasher.finalize().as_bytes(),
+        },
+    })
+}
+
+fn source_query_dependency_key(query: &SourceQuery) -> Result<Vec<u8>, SourceDriverError> {
+    let path_key = confined_relative_path_key(&query.relative_path)?;
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"spaghetti/source-query/key/v1\0");
+    hasher.update(&(path_key.len() as u64).to_be_bytes());
+    hasher.update(&path_key);
+    hasher.update(query.query.name.as_bytes());
+    hasher.update(query.query.sql.as_bytes());
+    for key in &query.query.key_columns {
+        hasher.update(key.as_bytes());
+        hasher.update(&[0]);
+    }
+    Ok(hasher.finalize().as_bytes().to_vec())
+}
+
+fn source_listing_dependency_key(
+    request: &SourceObjectListRequest,
+) -> Result<Vec<u8>, SourceDriverError> {
+    let mut include = request.include.clone();
+    let mut exclude = request.exclude.clone();
+    include.sort();
+    exclude.sort();
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"spaghetti/source-listing/key/v1\0");
+    for pattern in include {
+        GlobPattern::new(&pattern).map_err(SourceDriverError::InvalidConfig)?;
+        hasher.update(pattern.as_bytes());
+        hasher.update(&[0]);
+    }
+    hasher.update(&[0xff]);
+    for pattern in exclude {
+        GlobPattern::new(&pattern).map_err(SourceDriverError::InvalidConfig)?;
+        hasher.update(pattern.as_bytes());
+        hasher.update(&[0]);
+    }
+    Ok(hasher.finalize().as_bytes().to_vec())
+}
+
+fn validate_source_query_bounds(query: &SourceQuery) -> Result<(), AdapterError> {
+    const MAX_DATABASE_BYTES: usize = 4 * 1024 * 1024 * 1024;
+    if query.root_name.trim().is_empty()
+        || query.bounds.max_database_bytes == 0
+        || query.bounds.max_database_bytes > MAX_DATABASE_BYTES
+        || query.bounds.max_sidecar_bytes == 0
+        || query.bounds.max_sidecar_bytes > MAX_DATABASE_BYTES
+        || query.bounds.max_rows == 0
+        || query.bounds.max_rows > 16_384
+        || query.bounds.max_value_bytes == 0
+        || query.bounds.max_value_bytes > ConfinedSourceAccess::MAX_READ_BYTES
+        || query.bounds.max_snapshot_bytes == 0
+        || query.bounds.max_snapshot_bytes > ConfinedSourceAccess::MAX_READ_BYTES
+        || query.bounds.busy_timeout_ms > 30_000
+    {
+        return Err(AdapterError::invalid_contract(
+            "source database query bounds are zero or outside engine limits",
+        ));
+    }
+    Ok(())
+}
+
+fn source_access_cancelled() -> AdapterError {
+    AdapterError::new(
+        AdapterErrorClass::Transient,
+        "source_access_cancelled",
+        "source dependency read was cancelled",
+    )
+}
+
+fn source_access_error(error: SourceDriverError) -> AdapterError {
+    let class = match error {
+        SourceDriverError::InvalidConfig(_)
+        | SourceDriverError::InvalidCursor(_)
+        | SourceDriverError::LimitExceeded(_)
+        | SourceDriverError::PathEscape(_) => AdapterErrorClass::InvalidContract,
+        SourceDriverError::Unstable(_)
+        | SourceDriverError::Database(_)
+        | SourceDriverError::Io { .. } => AdapterErrorClass::Transient,
+    };
+    AdapterError::new(class, "source_access_read", error.to_string())
+}
+
+/// Produce useful quarantine context without retaining native values or even
+/// native JSON property names. Dynamic property names can themselves contain
+/// secrets, so only their hashes and value kinds are exposed.
+fn diagnostic_excerpt(payload: &[u8]) -> Vec<u8> {
+    let payload_hash = blake3::hash(payload).to_hex().to_string();
+    let shape = match serde_json::from_slice::<serde_json::Value>(payload) {
+        Ok(serde_json::Value::Object(object)) => {
+            let keys = object
+                .iter()
+                .take(MAX_DIAGNOSTIC_SHAPE_ITEMS)
+                .map(|(key, value)| {
+                    let key_hash = blake3::hash(key.as_bytes()).to_hex().to_string();
+                    serde_json::json!({
+                        "key_hash": &key_hash[..12],
+                        "value_kind": json_value_kind(value),
+                    })
+                })
+                .collect::<Vec<_>>();
+            serde_json::json!({
+                "kind": "json_object",
+                "bytes": payload.len(),
+                "hash": payload_hash,
+                "members": object.len(),
+                "shape": keys,
+                "truncated": object.len() > MAX_DIAGNOSTIC_SHAPE_ITEMS,
+            })
+        }
+        Ok(serde_json::Value::Array(array)) => {
+            let items = array
+                .iter()
+                .take(MAX_DIAGNOSTIC_SHAPE_ITEMS)
+                .map(json_value_kind)
+                .collect::<Vec<_>>();
+            serde_json::json!({
+                "kind": "json_array",
+                "bytes": payload.len(),
+                "hash": payload_hash,
+                "items": array.len(),
+                "item_kinds": items,
+                "truncated": array.len() > MAX_DIAGNOSTIC_SHAPE_ITEMS,
+            })
+        }
+        Ok(value) => serde_json::json!({
+            "kind": json_value_kind(&value),
+            "bytes": payload.len(),
+            "hash": payload_hash,
+        }),
+        Err(_) => serde_json::json!({
+            "kind": "opaque",
+            "bytes": payload.len(),
+            "hash": payload_hash,
+        }),
+    };
+    let encoded = serde_json::to_vec(&shape).unwrap_or_else(|_| {
+        format!(r#"{{"kind":"redacted","bytes":{}}}"#, payload.len()).into_bytes()
+    });
+    debug_assert!(encoded.len() <= MAX_DIAGNOSTIC_EXCERPT_BYTES);
+    if encoded.len() <= MAX_DIAGNOSTIC_EXCERPT_BYTES {
+        encoded
+    } else {
+        encoded[..MAX_DIAGNOSTIC_EXCERPT_BYTES].to_vec()
+    }
+}
+
+fn json_value_kind(value: &serde_json::Value) -> &'static str {
+    match value {
+        serde_json::Value::Null => "null",
+        serde_json::Value::Bool(_) => "boolean",
+        serde_json::Value::Number(_) => "number",
+        serde_json::Value::String(_) => "string",
+        serde_json::Value::Array(_) => "array",
+        serde_json::Value::Object(_) => "object",
     }
 }
 
@@ -1754,6 +3586,82 @@ fn record_commit(outcome: &mut ReconcileOutcome, receipt: &CommitReceipt) {
     outcome.last_commit_seq = Some(receipt.commit_seq);
 }
 
+fn scheduled_work_key(
+    stream: &StreamSpec,
+    object: &DeclaredObject,
+    generation: u64,
+) -> Result<WorkKey, EngineError> {
+    let stream_id = stream.id.as_str().as_bytes();
+    let mut object_key =
+        Vec::with_capacity(8 + stream_id.len() + object.descriptor.object_key.len());
+    object_key.extend_from_slice(&(stream_id.len() as u64).to_be_bytes());
+    object_key.extend_from_slice(stream_id);
+    object_key.extend_from_slice(&object.descriptor.object_key);
+    WorkKey::new(object_key, generation).map_err(source_error)
+}
+
+fn merge_outcome(target: &mut ReconcileOutcome, source: ReconcileOutcome) {
+    target.instances_discovered = target
+        .instances_discovered
+        .saturating_add(source.instances_discovered);
+    target.streams_reconciled = target
+        .streams_reconciled
+        .saturating_add(source.streams_reconciled);
+    target.streams_unavailable = target
+        .streams_unavailable
+        .saturating_add(source.streams_unavailable);
+    target.objects_discovered = target
+        .objects_discovered
+        .saturating_add(source.objects_discovered);
+    target.objects_registered = target
+        .objects_registered
+        .saturating_add(source.objects_registered);
+    target.objects_changed = target
+        .objects_changed
+        .saturating_add(source.objects_changed);
+    target.objects_unchanged = target
+        .objects_unchanged
+        .saturating_add(source.objects_unchanged);
+    target.objects_removed = target
+        .objects_removed
+        .saturating_add(source.objects_removed);
+    target.records_decoded = target
+        .records_decoded
+        .saturating_add(source.records_decoded);
+    target.records_quarantined = target
+        .records_quarantined
+        .saturating_add(source.records_quarantined);
+    target.retries_required = target
+        .retries_required
+        .saturating_add(source.retries_required);
+    target.incomplete_tail_retries = target
+        .incomplete_tail_retries
+        .saturating_add(source.incomplete_tail_retries);
+    for retry in source.retry_targets {
+        if !target.retry_targets.contains(&retry) {
+            target.retry_targets.push(retry);
+        }
+    }
+    target.commits = target.commits.saturating_add(source.commits);
+    target.last_commit_seq = target.last_commit_seq.max(source.last_commit_seq);
+}
+
+fn record_retry_target(
+    outcome: &mut ReconcileOutcome,
+    instance: &SourceInstance,
+    stream: &StreamSpec,
+    object: &DeclaredObject,
+) {
+    let target = ReconcileRetryTarget {
+        stable_key: instance.spec.stable_key.as_bytes().to_vec(),
+        stream_key: stream.id.as_str().to_string(),
+        object_key: object.descriptor.object_key.clone(),
+    };
+    if !outcome.retry_targets.contains(&target) {
+        outcome.retry_targets.push(target);
+    }
+}
+
 fn now_unix_ms() -> Result<i64, EngineError> {
     let duration = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1764,6 +3672,17 @@ fn now_unix_ms() -> Result<i64, EngineError> {
 
 fn bounded_u32(value: usize) -> u32 {
     u32::try_from(value).unwrap_or(u32::MAX)
+}
+
+fn catch_adapter_panic<T>(
+    operation: &'static str,
+    call: impl FnOnce() -> Result<T, AdapterError>,
+) -> Result<Result<T, AdapterError>, EngineError> {
+    catch_unwind(AssertUnwindSafe(call)).map_err(|_| {
+        // Panic payloads are deliberately omitted: adapters parse private
+        // source content and a formatted payload is not safe public telemetry.
+        observation_error(operation, "adapter panicked at the controlled boundary")
+    })
 }
 
 fn adapter_error(operation: &'static str, error: AdapterError) -> EngineError {
@@ -1792,12 +3711,23 @@ fn observation_error(operation: &'static str, detail: impl Into<String>) -> Engi
 #[cfg(test)]
 mod tests {
     use std::io::Write;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
 
     use rusqlite::{Connection, OpenFlags};
     use tempfile::TempDir;
 
+    use crate::adapter::{
+        AdapterId, AdapterManifest, ConsistencyPolicy, DecoderId, EntityScope, Fact,
+        ObjectSelector, SourceInstanceKey, SourceRoot, StreamId,
+    };
     use crate::claude::ClaudeCodeAdapter;
     use crate::engine::EngineOptions;
+    use crate::source::{
+        platform_path_key, DirectorySnapshotConfig, IngestPriority, KeyValueRecord,
+        KeyValueSnapshotConfig, ReplaceDocumentConfig, SqliteQuerySpec, SqliteRowRecord,
+        SqliteSnapshotConfig,
+    };
 
     use super::*;
 
@@ -1830,6 +3760,97 @@ mod tests {
         assert!(GlobPattern::new("root/a**b/file").is_err());
         assert!(GlobPattern::new("../escape").is_err());
         assert!(GlobPattern::new("/absolute").is_err());
+    }
+
+    #[test]
+    fn diagnostic_retention_is_bounded_and_never_copies_secret_keys_or_values() {
+        let payload = br#"{"authorization":"Bearer private-token","nested":{"password":"hunter2"},"count":7}"#;
+        let excerpt = retained_diagnostic_payload(RawRetentionPolicy::DiagnosticExcerpt, payload)
+            .expect("diagnostic excerpt");
+        assert!(excerpt.len() <= MAX_DIAGNOSTIC_EXCERPT_BYTES);
+        serde_json::from_slice::<serde_json::Value>(&excerpt).expect("valid diagnostic JSON");
+        let text = String::from_utf8(excerpt).unwrap();
+        for secret in ["authorization", "private-token", "password", "hunter2"] {
+            assert!(!text.contains(secret), "diagnostic leaked {secret}");
+        }
+        assert_eq!(
+            retained_diagnostic_payload(RawRetentionPolicy::Full, payload),
+            Some(payload.to_vec())
+        );
+        assert_eq!(
+            retained_diagnostic_payload(RawRetentionPolicy::HashOnly, payload),
+            None
+        );
+        assert_eq!(
+            retained_diagnostic_payload(RawRetentionPolicy::None, payload),
+            None
+        );
+    }
+
+    #[test]
+    fn source_access_confines_stamps_and_revalidates_dependency_reads() {
+        let root = TempDir::new().unwrap();
+        std::fs::write(root.path().join("summary.json"), br#"{"title":"one"}"#).unwrap();
+        let source_database = root.path().join("source.db");
+        Connection::open(&source_database)
+            .unwrap()
+            .execute_batch(
+                "CREATE TABLE items(id INTEGER PRIMARY KEY, value TEXT);\n\
+                 INSERT INTO items VALUES (1, 'one');",
+            )
+            .unwrap();
+        let instance = SourceInstance {
+            id: 41,
+            spec: AdapterSourceInstanceSpec {
+                stable_key: SourceInstanceKey::new(b"source-access-root".to_vec()).unwrap(),
+                display_name: "source access".to_string(),
+                roots: vec![crate::adapter::SourceRoot {
+                    name: "sessions".to_string(),
+                    path: root.path().to_path_buf(),
+                }],
+                discovery_reason: "test".to_string(),
+            },
+        };
+        let cancellations = Vec::new();
+        let access = ConfinedSourceAccess::new(&instance, &cancellations);
+        let snapshot = access
+            .read_object("sessions", Path::new("summary.json"), 1_024)
+            .unwrap();
+        assert_eq!(snapshot.payload.unwrap(), br#"{"title":"one"}"#);
+        let rows = access
+            .query_source_db(&SourceQuery {
+                root_name: "sessions".to_string(),
+                relative_path: PathBuf::from("source.db"),
+                query: SqliteQuerySpec {
+                    name: "items".to_string(),
+                    sql: "SELECT id, value FROM items".to_string(),
+                    key_columns: vec!["id".to_string()],
+                },
+                bounds: crate::adapter::SourceQueryBounds::default(),
+            })
+            .unwrap();
+        assert!(rows.available);
+        assert_eq!(rows.rows.len(), 1);
+        let listing = access
+            .list_objects(&SourceObjectListRequest {
+                root_name: "sessions".to_string(),
+                include: vec!["*.json".to_string()],
+                exclude: Vec::new(),
+                max_entries: 8,
+            })
+            .unwrap();
+        assert_eq!(listing.objects.len(), 1);
+        assert_eq!(access.revisions().unwrap().len(), 3);
+        assert!(!access.changed_since_read().unwrap());
+
+        Connection::open(&source_database)
+            .unwrap()
+            .execute("UPDATE items SET value = 'two' WHERE id = 1", [])
+            .unwrap();
+        assert!(access.changed_since_read().unwrap());
+        assert!(access
+            .read_object("sessions", Path::new("../escape"), 1_024)
+            .is_err());
     }
 
     #[test]
@@ -1894,6 +3915,259 @@ mod tests {
                 .unwrap()
                 .committed_offset,
             std::fs::metadata(&transcript).unwrap().len()
+        );
+    }
+
+    #[test]
+    fn append_backfill_commits_multiple_records_as_one_bounded_batch() {
+        let fixture = ClaudeFixture::new();
+        let transcript = fixture.transcript_path();
+        let mut contents = Vec::new();
+        for index in 0..10 {
+            contents.extend(transcript_line(&format!("m{index}"), "batched"));
+        }
+        std::fs::write(transcript, contents).unwrap();
+        let engine = fixture.open_engine();
+
+        let outcome = fixture.reconcile(&engine);
+        assert_eq!(outcome.records_decoded, 10);
+        assert_eq!(
+            outcome.commits, 2,
+            "object registration plus one data commit"
+        );
+        assert_eq!(count_rows(&fixture.database, "canonical_messages"), 10);
+    }
+
+    #[test]
+    fn cancellation_during_decode_prevents_the_pending_record_commit() {
+        let fixture = ClaudeFixture::new();
+        std::fs::write(
+            fixture.transcript_path(),
+            transcript_line("m1", "cancelled"),
+        )
+        .unwrap();
+        let engine = fixture.open_engine();
+        let cancellation = QueryCancellationToken::default();
+        let adapter = CancelOnDecodeAdapter {
+            inner: ClaudeCodeAdapter::new(),
+            cancellation: cancellation.clone(),
+        };
+
+        let error = ObservationCoordinator::with_cancellation(Arc::clone(&engine), cancellation)
+            .reconcile(
+                &adapter,
+                ReconcileRequest::manual(vec![fixture.root.clone()]),
+            )
+            .unwrap_err();
+
+        assert!(matches!(error, EngineError::QueryCancelled));
+        assert_eq!(count_rows(&fixture.database, "canonical_messages"), 0);
+        let transcript = catalog_object(&engine, &fixture.root, "session-transcripts");
+        assert_eq!(transcript.state, "pending");
+        assert_eq!(
+            SourceCursor::from_opaque(transcript.committed_cursor)
+                .unwrap()
+                .append_offset_value(),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn adapter_decode_panic_is_contained_without_committing_the_record() {
+        let fixture = ClaudeFixture::new();
+        std::fs::write(fixture.transcript_path(), transcript_line("m1", "private")).unwrap();
+        let engine = fixture.open_engine();
+        let adapter = PanicOnDecodeAdapter {
+            inner: ClaudeCodeAdapter::new(),
+        };
+
+        let error = ObservationCoordinator::new(Arc::clone(&engine))
+            .reconcile(
+                &adapter,
+                ReconcileRequest::manual(vec![fixture.root.clone()]),
+            )
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            EngineError::Observation {
+                operation: "decode source record",
+                ..
+            }
+        ));
+        assert_eq!(count_rows(&fixture.database, "canonical_messages"), 0);
+        let transcript = catalog_object(&engine, &fixture.root, "session-transcripts");
+        assert_eq!(transcript.state, "pending");
+    }
+
+    #[test]
+    fn stable_snapshot_retry_state_survives_restart_and_becomes_quarantine() {
+        let fixture = ClaudeFixture::new();
+        std::fs::write(
+            fixture.root.join("settings.json"),
+            br#"{"model":"malformed-to-adapter"}"#,
+        )
+        .unwrap();
+        let adapter = RetryEverySnapshotAdapter {
+            inner: ClaudeCodeAdapter::new(),
+        };
+
+        let first = fixture.open_engine();
+        let initial = ObservationCoordinator::new(Arc::clone(&first))
+            .reconcile(
+                &adapter,
+                ReconcileRequest::manual(vec![fixture.root.clone()]),
+            )
+            .unwrap();
+        assert_eq!(initial.retries_required, 1);
+        let retrying = catalog_object(&first, &fixture.root, "interpretation-settings");
+        assert_eq!(retrying.state, "retrying");
+        assert!(retrying.retry_state.is_some());
+        first.shutdown().unwrap();
+
+        std::thread::sleep(Duration::from_millis(110));
+        let restarted = fixture.open_engine();
+        let settled = ObservationCoordinator::new(Arc::clone(&restarted))
+            .reconcile(
+                &adapter,
+                ReconcileRequest::manual(vec![fixture.root.clone()]),
+            )
+            .unwrap();
+        assert_eq!(settled.retries_required, 0);
+        assert_eq!(settled.records_quarantined, 1);
+        let quarantined = catalog_object(&restarted, &fixture.root, "interpretation-settings");
+        assert_eq!(quarantined.state, "quarantined");
+        assert!(quarantined.retry_state.is_none());
+        assert_eq!(count_rows(&fixture.database, "source_record_errors"), 1);
+        assert_eq!(
+            record_error_state(&fixture.database),
+            ("record_permanent".to_string(), 1)
+        );
+    }
+
+    #[test]
+    fn directory_snapshot_stream_persists_membership_and_reconciles_changes() {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().join("source");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("first.json"), b"one").unwrap();
+        std::fs::write(root.join("ignored.txt"), b"ignored").unwrap();
+        let database = temp.path().join("directory.db");
+        let engine = open_test_engine(database);
+        let adapter = DirectoryOnlyAdapter::new();
+
+        let initial = ObservationCoordinator::new(Arc::clone(&engine))
+            .reconcile(&adapter, ReconcileRequest::manual(vec![root.clone()]))
+            .unwrap();
+        assert_eq!(initial.objects_registered, 1);
+        assert_eq!(initial.objects_changed, 1);
+        let first = directory_catalog_object(&engine, &root);
+        let first_checkpoint =
+            DirectoryCheckpoint::decode(first.driver_checkpoint.as_deref().unwrap()).unwrap();
+        assert_eq!(first_checkpoint.entries.len(), 1);
+        assert!(first_checkpoint
+            .entries
+            .values()
+            .any(|entry| entry.display_path == "first.json"));
+
+        std::fs::remove_file(root.join("first.json")).unwrap();
+        std::fs::write(root.join("second.json"), b"two").unwrap();
+        let changed = ObservationCoordinator::new(Arc::clone(&engine))
+            .reconcile(&adapter, ReconcileRequest::manual(vec![root.clone()]))
+            .unwrap();
+        assert_eq!(changed.objects_changed, 1);
+        let second = directory_catalog_object(&engine, &root);
+        let second_checkpoint =
+            DirectoryCheckpoint::decode(second.driver_checkpoint.as_deref().unwrap()).unwrap();
+        assert_eq!(second_checkpoint.entries.len(), 1);
+        assert!(second_checkpoint
+            .entries
+            .values()
+            .any(|entry| entry.display_path == "second.json"));
+
+        let unchanged = ObservationCoordinator::new(Arc::clone(&engine))
+            .reconcile(&adapter, ReconcileRequest::manual(vec![root]))
+            .unwrap();
+        assert_eq!(unchanged.commits, 0);
+        assert_eq!(unchanged.objects_unchanged, 1);
+    }
+
+    #[test]
+    fn database_snapshot_streams_commit_atomic_replacements_through_the_common_runtime() {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().join("source");
+        std::fs::create_dir_all(&root).unwrap();
+        let source = root.join("source.db");
+        Connection::open(&source)
+            .unwrap()
+            .execute_batch(
+                "CREATE TABLE items(id INTEGER PRIMARY KEY, value TEXT);\n\
+                 INSERT INTO items VALUES (1, 'one'), (2, 'two');\n\
+                 CREATE TABLE state(key TEXT PRIMARY KEY, value BLOB);\n\
+                 INSERT INTO state VALUES ('agent.one', x'31'), ('other', x'32');",
+            )
+            .unwrap();
+        let database = temp.path().join("engine.db");
+        let engine = open_test_engine(database.clone());
+        let adapter = DatabaseSnapshotAdapter::new();
+
+        let initial = ObservationCoordinator::new(Arc::clone(&engine))
+            .reconcile(&adapter, ReconcileRequest::manual(vec![root.clone()]))
+            .unwrap();
+        assert_eq!(initial.records_decoded, 3);
+        assert_eq!(stream_fact_count(&database, "sqlite-items"), 2);
+        assert_eq!(stream_fact_count(&database, "key-values"), 1);
+
+        Connection::open(&source)
+            .unwrap()
+            .execute_batch(
+                "DELETE FROM items WHERE id = 2;\n\
+                 UPDATE state SET value = x'39' WHERE key = 'other';",
+            )
+            .unwrap();
+        let changed = ObservationCoordinator::new(Arc::clone(&engine))
+            .reconcile(&adapter, ReconcileRequest::manual(vec![root.clone()]))
+            .unwrap();
+        assert_eq!(changed.records_decoded, 1);
+        assert_eq!(stream_fact_count(&database, "sqlite-items"), 1);
+        assert_eq!(stream_fact_count(&database, "key-values"), 1);
+
+        Connection::open(&source)
+            .unwrap()
+            .execute("DELETE FROM state WHERE key = 'agent.one'", [])
+            .unwrap();
+        let removed = ObservationCoordinator::new(Arc::clone(&engine))
+            .reconcile(&adapter, ReconcileRequest::manual(vec![root]))
+            .unwrap();
+        assert_eq!(removed.records_decoded, 0);
+        assert_eq!(stream_fact_count(&database, "key-values"), 0);
+        engine.shutdown().unwrap();
+    }
+
+    #[test]
+    fn production_scheduler_bounds_parallel_object_decode() {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().join("source");
+        std::fs::create_dir_all(&root).unwrap();
+        for index in 0..8 {
+            std::fs::write(root.join(format!("{index}.json")), b"{}").unwrap();
+        }
+        let engine = open_test_engine(temp.path().join("parallel.db"));
+        let adapter = ParallelSnapshotAdapter::new();
+
+        let outcome = ObservationCoordinator::new(Arc::clone(&engine))
+            .reconcile(&adapter, ReconcileRequest::manual(vec![root]))
+            .unwrap();
+
+        assert_eq!(outcome.records_decoded, 8);
+        let maximum = adapter.maximum.load(Ordering::Acquire);
+        assert!(
+            maximum >= 2,
+            "independent objects did not decode in parallel"
+        );
+        assert!(
+            maximum <= MAX_OBJECTS_IN_FLIGHT,
+            "decode concurrency exceeded the common bound: {maximum}"
         );
     }
 
@@ -1984,6 +4258,36 @@ mod tests {
     }
 
     #[test]
+    fn invalid_matching_object_is_quarantined_without_stalling_other_streams() {
+        let fixture = ClaudeFixture::new();
+        let transcript = fixture.transcript_path();
+        std::fs::write(&transcript, transcript_line("m1", "valid")).unwrap();
+        let sessions = fixture.root.join("sessions");
+        std::fs::create_dir_all(&sessions).unwrap();
+        let lookalike = sessions.join("notes.json");
+        std::fs::write(&lookalike, br#"{"note":"not a process presence"}"#).unwrap();
+        let engine = fixture.open_engine();
+
+        let initial = fixture.reconcile(&engine);
+        assert_eq!(initial.records_decoded, 1);
+        assert_eq!(initial.records_quarantined, 1);
+        assert_eq!(count_rows(&fixture.database, "canonical_messages"), 1);
+        assert_eq!(count_rows(&fixture.database, "source_record_errors"), 1);
+        let quarantined = catalog_object(&engine, &fixture.root, "active-sessions");
+        assert_eq!(quarantined.state, "quarantined");
+
+        let unchanged = fixture.reconcile(&engine);
+        assert_eq!(unchanged.records_quarantined, 0);
+        assert_eq!(count_rows(&fixture.database, "source_record_errors"), 1);
+
+        std::fs::remove_file(lookalike).unwrap();
+        let removed = fixture.reconcile(&engine);
+        assert_eq!(removed.objects_removed, 1);
+        let absent = catalog_object(&engine, &fixture.root, "active-sessions");
+        assert_eq!(absent.state, "absent");
+    }
+
+    #[test]
     fn reconcile_lifecycle_reports_live_retry_and_failure_states() {
         let fixture = ClaudeFixture::new();
         let transcript = fixture.transcript_path();
@@ -2005,9 +4309,11 @@ mod tests {
         append.flush().unwrap();
         let retry = fixture.reconcile(&engine);
         assert_eq!(retry.retries_required, 1);
+        assert_eq!(retry.incomplete_tail_retries, 1);
         let degraded = engine.status().observation;
         assert_eq!(degraded.state, "degraded");
-        assert!(degraded.full_reconcile_required);
+        assert!(!degraded.full_reconcile_required);
+        assert_eq!(degraded.dirty_instances, 1);
         assert_eq!(degraded.retry_signals_total, 1);
         assert!(!engine.health().healthy);
 
@@ -2029,6 +4335,401 @@ mod tests {
         _temp: TempDir,
         root: PathBuf,
         database: PathBuf,
+    }
+
+    struct CancelOnDecodeAdapter {
+        inner: ClaudeCodeAdapter,
+        cancellation: QueryCancellationToken,
+    }
+
+    struct PanicOnDecodeAdapter {
+        inner: ClaudeCodeAdapter,
+    }
+
+    impl AgentAdapter for PanicOnDecodeAdapter {
+        fn manifest(&self) -> &crate::adapter::AdapterManifest {
+            self.inner.manifest()
+        }
+
+        fn discover(
+            &self,
+            context: &DiscoveryContext,
+        ) -> Result<Vec<AdapterSourceInstanceSpec>, AdapterError> {
+            self.inner.discover(context)
+        }
+
+        fn streams(&self, instance: &SourceInstance) -> Result<Vec<StreamSpec>, AdapterError> {
+            self.inner.streams(instance)
+        }
+
+        fn bootstrap_object(
+            &self,
+            instance: &SourceInstance,
+            object: &SourceObjectDescriptor,
+        ) -> Result<AdapterObjectContext, AdapterError> {
+            self.inner.bootstrap_object(instance, object)
+        }
+
+        fn decode(
+            &self,
+            _context: DecodeContext<'_>,
+            _record: &SourceRecord,
+            _output: &mut FactBatch,
+        ) -> Result<DecodeDisposition, AdapterError> {
+            panic!("private panic payload must not cross the boundary")
+        }
+    }
+
+    struct RetryEverySnapshotAdapter {
+        inner: ClaudeCodeAdapter,
+    }
+
+    impl AgentAdapter for RetryEverySnapshotAdapter {
+        fn manifest(&self) -> &crate::adapter::AdapterManifest {
+            self.inner.manifest()
+        }
+
+        fn discover(
+            &self,
+            context: &DiscoveryContext,
+        ) -> Result<Vec<AdapterSourceInstanceSpec>, AdapterError> {
+            self.inner.discover(context)
+        }
+
+        fn streams(&self, instance: &SourceInstance) -> Result<Vec<StreamSpec>, AdapterError> {
+            self.inner.streams(instance)
+        }
+
+        fn bootstrap_object(
+            &self,
+            instance: &SourceInstance,
+            object: &SourceObjectDescriptor,
+        ) -> Result<AdapterObjectContext, AdapterError> {
+            self.inner.bootstrap_object(instance, object)
+        }
+
+        fn decode(
+            &self,
+            _context: DecodeContext<'_>,
+            _record: &SourceRecord,
+            _output: &mut FactBatch,
+        ) -> Result<DecodeDisposition, AdapterError> {
+            Ok(DecodeDisposition::RetryTransient)
+        }
+    }
+
+    struct DirectoryOnlyAdapter {
+        manifest: AdapterManifest,
+    }
+
+    impl DirectoryOnlyAdapter {
+        fn new() -> Self {
+            Self {
+                manifest: synthetic_manifest("synthetic-directory"),
+            }
+        }
+    }
+
+    impl AgentAdapter for DirectoryOnlyAdapter {
+        fn manifest(&self) -> &AdapterManifest {
+            &self.manifest
+        }
+
+        fn discover(
+            &self,
+            context: &DiscoveryContext,
+        ) -> Result<Vec<AdapterSourceInstanceSpec>, AdapterError> {
+            synthetic_discovery(context)
+        }
+
+        fn streams(&self, _instance: &SourceInstance) -> Result<Vec<StreamSpec>, AdapterError> {
+            Ok(vec![StreamSpec {
+                id: StreamId::new("membership")?,
+                driver: DriverSpec::DirectorySnapshot(DirectorySnapshotConfig {
+                    max_entries: 100,
+                    max_depth: 4,
+                }),
+                selector: ObjectSelector {
+                    root_name: "root".to_string(),
+                    include: vec!["*.json".to_string()],
+                    exclude: Vec::new(),
+                },
+                decoder: DecoderId::new("membership-v1")?,
+                authority: StreamAuthority::Supplemental,
+                entity_scope: EntityScope::Instance,
+                priority: IngestPriority::Maintenance,
+                consistency: ConsistencyPolicy::SnapshotDiff,
+                deletion: DeletionPolicy::MirrorSource,
+                retention: RawRetentionPolicy::None,
+                capabilities: Vec::new(),
+            }])
+        }
+
+        fn decode(
+            &self,
+            _context: DecodeContext<'_>,
+            _record: &SourceRecord,
+            _output: &mut FactBatch,
+        ) -> Result<DecodeDisposition, AdapterError> {
+            panic!("directory membership streams do not emit adapter records")
+        }
+    }
+
+    struct DatabaseSnapshotAdapter {
+        manifest: AdapterManifest,
+    }
+
+    impl DatabaseSnapshotAdapter {
+        fn new() -> Self {
+            Self {
+                manifest: synthetic_manifest("synthetic-database"),
+            }
+        }
+    }
+
+    impl AgentAdapter for DatabaseSnapshotAdapter {
+        fn manifest(&self) -> &AdapterManifest {
+            &self.manifest
+        }
+
+        fn discover(
+            &self,
+            context: &DiscoveryContext,
+        ) -> Result<Vec<AdapterSourceInstanceSpec>, AdapterError> {
+            synthetic_discovery(context)
+        }
+
+        fn streams(&self, _instance: &SourceInstance) -> Result<Vec<StreamSpec>, AdapterError> {
+            let sqlite = SqliteSnapshotConfig::bounded(vec![SqliteQuerySpec {
+                name: "items".to_string(),
+                sql: "SELECT id, value FROM items".to_string(),
+                key_columns: vec!["id".to_string()],
+            }]);
+            let mut key_values = KeyValueSnapshotConfig::bounded(
+                "state",
+                "SELECT key, value FROM state",
+                "key",
+                "value",
+            );
+            key_values.key_prefixes = vec![b"agent.".to_vec()];
+            Ok(vec![
+                database_stream(
+                    "sqlite-items",
+                    "sqlite-row-v1",
+                    DriverSpec::SqliteSnapshot(sqlite),
+                )?,
+                database_stream(
+                    "key-values",
+                    "key-value-v1",
+                    DriverSpec::KeyValueSnapshot(key_values),
+                )?,
+            ])
+        }
+
+        fn decode(
+            &self,
+            context: DecodeContext<'_>,
+            record: &SourceRecord,
+            output: &mut FactBatch,
+        ) -> Result<DecodeDisposition, AdapterError> {
+            let native_kind = match context.decoder.as_str() {
+                "sqlite-row-v1" => {
+                    let row = SqliteRowRecord::decode(&record.payload).map_err(|error| {
+                        AdapterError::new(
+                            AdapterErrorClass::RecordPermanent,
+                            "invalid_sqlite_row",
+                            error.to_string(),
+                        )
+                    })?;
+                    format!("sqlite:{}", hex_key(&row.row_key))
+                }
+                "key-value-v1" => {
+                    let entry = KeyValueRecord::decode(&record.payload).map_err(|error| {
+                        AdapterError::new(
+                            AdapterErrorClass::RecordPermanent,
+                            "invalid_key_value_record",
+                            error.to_string(),
+                        )
+                    })?;
+                    format!("key-value:{}", String::from_utf8_lossy(&entry.key))
+                }
+                _ => return Err(AdapterError::unknown_decoder(context.decoder)),
+            };
+            output.push(
+                record,
+                Fact::UnknownRecord {
+                    native_kind: Some(native_kind),
+                    raw_payload: record.payload.clone(),
+                    reason: "synthetic database conformance".to_string(),
+                },
+            )?;
+            Ok(DecodeDisposition::PreservedUnknown)
+        }
+    }
+
+    fn database_stream(
+        stream: &str,
+        decoder: &str,
+        driver: DriverSpec,
+    ) -> Result<StreamSpec, AdapterError> {
+        Ok(StreamSpec {
+            id: StreamId::new(stream)?,
+            driver,
+            selector: ObjectSelector {
+                root_name: "root".to_string(),
+                include: vec!["source.db".to_string()],
+                exclude: Vec::new(),
+            },
+            decoder: DecoderId::new(decoder)?,
+            authority: StreamAuthority::Canonical,
+            entity_scope: EntityScope::Instance,
+            priority: IngestPriority::Maintenance,
+            consistency: ConsistencyPolicy::SnapshotDiff,
+            deletion: DeletionPolicy::MirrorSource,
+            retention: RawRetentionPolicy::HashOnly,
+            capabilities: Vec::new(),
+        })
+    }
+
+    fn hex_key(value: &[u8]) -> String {
+        value.iter().map(|byte| format!("{byte:02x}")).collect()
+    }
+
+    struct ParallelSnapshotAdapter {
+        manifest: AdapterManifest,
+        active: AtomicUsize,
+        maximum: AtomicUsize,
+    }
+
+    impl ParallelSnapshotAdapter {
+        fn new() -> Self {
+            Self {
+                manifest: synthetic_manifest("synthetic-parallel"),
+                active: AtomicUsize::new(0),
+                maximum: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    impl AgentAdapter for ParallelSnapshotAdapter {
+        fn manifest(&self) -> &AdapterManifest {
+            &self.manifest
+        }
+
+        fn discover(
+            &self,
+            context: &DiscoveryContext,
+        ) -> Result<Vec<AdapterSourceInstanceSpec>, AdapterError> {
+            synthetic_discovery(context)
+        }
+
+        fn streams(&self, _instance: &SourceInstance) -> Result<Vec<StreamSpec>, AdapterError> {
+            Ok(vec![StreamSpec {
+                id: StreamId::new("snapshots")?,
+                driver: DriverSpec::ReplaceDocument(ReplaceDocumentConfig {
+                    max_document_bytes: 1_024,
+                }),
+                selector: ObjectSelector {
+                    root_name: "root".to_string(),
+                    include: vec!["*.json".to_string()],
+                    exclude: Vec::new(),
+                },
+                decoder: DecoderId::new("snapshot-v1")?,
+                authority: StreamAuthority::Canonical,
+                entity_scope: EntityScope::Instance,
+                priority: IngestPriority::Interactive,
+                consistency: ConsistencyPolicy::SnapshotReplace,
+                deletion: DeletionPolicy::MirrorSource,
+                retention: RawRetentionPolicy::HashOnly,
+                capabilities: Vec::new(),
+            }])
+        }
+
+        fn decode(
+            &self,
+            _context: DecodeContext<'_>,
+            _record: &SourceRecord,
+            _output: &mut FactBatch,
+        ) -> Result<DecodeDisposition, AdapterError> {
+            let active = self.active.fetch_add(1, Ordering::AcqRel) + 1;
+            self.maximum.fetch_max(active, Ordering::AcqRel);
+            std::thread::sleep(Duration::from_millis(25));
+            self.active.fetch_sub(1, Ordering::AcqRel);
+            Ok(DecodeDisposition::IgnoredKnown)
+        }
+    }
+
+    fn synthetic_manifest(id: &str) -> AdapterManifest {
+        AdapterManifest {
+            id: AdapterId::new(id).unwrap(),
+            display_name: id.to_string(),
+            adapter_version: "1.0.0".to_string(),
+            contract_version: 1,
+            source_schema_versions: Vec::new(),
+            capabilities: Vec::new(),
+        }
+    }
+
+    fn synthetic_discovery(
+        context: &DiscoveryContext,
+    ) -> Result<Vec<AdapterSourceInstanceSpec>, AdapterError> {
+        context
+            .configured_roots
+            .iter()
+            .map(|root| {
+                let canonical = root.canonicalize().map_err(|error| {
+                    AdapterError::new(
+                        AdapterErrorClass::Transient,
+                        "root_unavailable",
+                        error.to_string(),
+                    )
+                })?;
+                Ok(AdapterSourceInstanceSpec {
+                    stable_key: SourceInstanceKey::new(platform_path_key(&canonical))?,
+                    display_name: canonical.to_string_lossy().into_owned(),
+                    roots: vec![SourceRoot {
+                        name: "root".to_string(),
+                        path: canonical,
+                    }],
+                    discovery_reason: "synthetic coordinator test".to_string(),
+                })
+            })
+            .collect()
+    }
+
+    impl AgentAdapter for CancelOnDecodeAdapter {
+        fn manifest(&self) -> &crate::adapter::AdapterManifest {
+            self.inner.manifest()
+        }
+
+        fn discover(
+            &self,
+            context: &DiscoveryContext,
+        ) -> Result<Vec<AdapterSourceInstanceSpec>, AdapterError> {
+            self.inner.discover(context)
+        }
+
+        fn streams(&self, instance: &SourceInstance) -> Result<Vec<StreamSpec>, AdapterError> {
+            self.inner.streams(instance)
+        }
+
+        fn bootstrap_object(
+            &self,
+            instance: &SourceInstance,
+            object: &SourceObjectDescriptor,
+        ) -> Result<AdapterObjectContext, AdapterError> {
+            self.inner.bootstrap_object(instance, object)
+        }
+
+        fn decode(
+            &self,
+            context: DecodeContext<'_>,
+            record: &SourceRecord,
+            output: &mut FactBatch,
+        ) -> Result<DecodeDisposition, AdapterError> {
+            self.cancellation.cancel();
+            self.inner.decode(context, record, output)
+        }
     }
 
     impl ClaudeFixture {
@@ -2067,6 +4768,28 @@ mod tests {
         }
     }
 
+    fn open_test_engine(database_path: PathBuf) -> Arc<SpaghettiEngineCore> {
+        SpaghettiEngineCore::open(EngineOptions {
+            database_path,
+            query_workers: Some(1),
+            owner_label: Some("synthetic-coordinator-test".to_string()),
+        })
+        .unwrap()
+    }
+
+    fn directory_catalog_object(engine: &SpaghettiEngineCore, root: &Path) -> SourceCatalogObject {
+        engine
+            .source_catalog(
+                "synthetic-directory",
+                &platform_path_key(&root.canonicalize().unwrap()),
+            )
+            .unwrap()
+            .objects
+            .into_iter()
+            .find(|object| object.stream_key == "membership")
+            .unwrap()
+    }
+
     const PROJECT: &str = "-Users-fixture-project";
     const SESSION: &str = "01234567-89ab-cdef-0123-456789abcdef";
 
@@ -2084,12 +4807,25 @@ mod tests {
             Connection::open_with_flags(database, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
         let sql = match table {
             "canonical_messages" => "SELECT COUNT(*) FROM canonical_messages",
+            "source_record_errors" => "SELECT COUNT(*) FROM source_record_errors",
             "canonical_interpretation_settings_documents" => {
                 "SELECT COUNT(*) FROM canonical_interpretation_settings_documents"
             }
             _ => panic!("unsupported coordinator test table"),
         };
         connection.query_row(sql, [], |row| row.get(0)).unwrap()
+    }
+
+    fn record_error_state(database: &Path) -> (String, i64) {
+        let connection =
+            Connection::open_with_flags(database, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+        connection
+            .query_row(
+                "SELECT error_class, retry_count FROM source_record_errors LIMIT 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap()
     }
 
     fn catalog_object(
@@ -2127,6 +4863,24 @@ mod tests {
             .query_row(
                 "SELECT COUNT(*) FROM fact_records WHERE source_instance_id = ?1",
                 [i64::try_from(instance_id).unwrap()],
+                |row| row.get(0),
+            )
+            .unwrap()
+    }
+
+    fn stream_fact_count(database: &Path, stream_key: &str) -> i64 {
+        let connection =
+            Connection::open_with_flags(database, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+        connection
+            .query_row(
+                r#"
+                SELECT COUNT(*)
+                FROM fact_records AS fact
+                JOIN source_streams AS stream
+                  ON stream.source_stream_id = fact.source_stream_id
+                WHERE stream.stream_key = ?1
+                "#,
+                [stream_key],
                 |row| row.get(0),
             )
             .unwrap()

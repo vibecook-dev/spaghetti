@@ -18,9 +18,7 @@ function event(data: SdkHostEvent): void {
 
 function readConfig(): SdkRuntimeOptions {
   const dbPath = process.env.SPAGHETTI_DB_PATH;
-  const rawEngine = process.env.SPAGHETTI_ENGINE;
   if (!dbPath) throw new Error('SPAGHETTI_DB_PATH is required');
-  if (rawEngine !== 'rs' && rawEngine !== 'ts') throw new Error(`Invalid SPAGHETTI_ENGINE: ${rawEngine ?? ''}`);
   const rootDir = process.env.SPAGHETTI_ROOT_DIR;
   const rawShadow = process.env.SPAGHETTI_OBSERVATION_SHADOW;
   if (rawShadow && !['0', '1', 'false', 'true'].includes(rawShadow.toLowerCase())) {
@@ -36,7 +34,6 @@ function readConfig(): SdkRuntimeOptions {
     rawDetectAdditional === undefined || rawDetectAdditional === '1' || rawDetectAdditional.toLowerCase() === 'true';
   return {
     dbPath,
-    engine: rawEngine,
     ...(rootDir ? { rootDir } : {}),
     ...(!detectAdditionalSources ? { additionalSources: [] } : {}),
     ...(shadowEnabled ? { observationShadow: shadowDbPath ? { dbPath: shadowDbPath } : {} } : {}),

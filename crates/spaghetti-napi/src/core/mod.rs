@@ -1,4 +1,4 @@
-//! Source-agnostic ingest core: I/O, schema, event bus, SQLite writer.
+//! Shared storage/text helpers for the persistent engine.
 //!
 //! These modules do not know Claude Code's on-disk layout or Anthropic
 //! message envelopes. Producers (today: [`crate::claude`]) push
@@ -12,19 +12,27 @@
 //! override) so multi-source indexes stay correct when native ingest
 //! shares a DB with other agents.
 
+#[cfg(feature = "legacy-oracle")]
 pub mod errors;
+#[cfg(feature = "legacy-oracle")]
 pub mod event;
+#[cfg(feature = "legacy-oracle")]
 pub mod ingest_contract;
+#[cfg(feature = "legacy-oracle")]
 pub mod jsonl;
+#[cfg(feature = "legacy-oracle")]
+mod legacy;
 pub mod schema;
 pub mod text;
 pub mod timefmt;
+#[cfg(feature = "legacy-oracle")]
 pub mod token_activity;
+#[cfg(feature = "legacy-oracle")]
 pub mod writer;
 
+#[cfg(feature = "legacy-oracle")]
 pub use event::IngestEvent;
+#[cfg(feature = "legacy-oracle")]
 pub use jsonl::{read_jsonl_streaming, JsonlError, StreamingResult};
-
-/// Default `source_id` for native Claude Code rows — matches the SQL
-/// schema DEFAULT and the TS `AgentSourceId` for Claude.
-pub const DEFAULT_SOURCE_ID: &str = "claude-code";
+#[cfg(feature = "legacy-oracle")]
+pub use legacy::DEFAULT_SOURCE_ID;

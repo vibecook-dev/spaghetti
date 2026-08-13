@@ -14,16 +14,12 @@
 import { app } from 'electron';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import * as path from 'node:path';
-import type { IngestEngine } from '@vibecook/spaghetti-sdk';
-
 export interface PlaygroundSettings {
-  /** Ingest engine the playground should use. Defaults to `rs` (native). */
-  engine?: IngestEngine;
+  /** @deprecated Read only so older settings files remain compatible. */
+  engine?: 'rs' | 'ts';
   /** Unknown keys from future versions are preserved. */
   [key: string]: unknown;
 }
-
-const DEFAULT_ENGINE: IngestEngine = 'rs';
 
 export function settingsPath(): string {
   return path.join(app.getPath('userData'), 'settings.json');
@@ -48,13 +44,9 @@ export function writeSettings(settings: PlaygroundSettings): void {
 }
 
 /**
- * Engine the playground should run. Reads `<userData>/settings.json` and
- * falls back to the default (`rs`). Deliberately does not consult
- * `SPAG_ENGINE` or `~/.spaghetti/config.json` — those belong to the CLI's
- * user-level preference surface, not the desktop app's.
+ * The playground has one production engine. The settings file is deliberately
+ * not consulted so an old `engine: "ts"` entry cannot revive a second owner.
  */
-export function resolveAppEngine(): IngestEngine {
-  const stored = readSettings().engine;
-  if (stored === 'ts' || stored === 'rs') return stored;
-  return DEFAULT_ENGINE;
+export function resolveAppEngine(): 'rs' {
+  return 'rs';
 }

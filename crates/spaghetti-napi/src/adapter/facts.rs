@@ -6,7 +6,7 @@ use serde_json::Value;
 
 use crate::source::SourceRecord;
 
-use super::{AdapterDiagnostic, AdapterError, AdapterId};
+use super::{AdapterDiagnostic, AdapterError, AdapterId, DependencyRevision};
 
 const FACT_HASH_BYTES: usize = 32;
 const MAX_ENTITY_KEY_BYTES: usize = 8 * 1024;
@@ -898,6 +898,7 @@ pub struct FactBatch {
     max_diagnostics: usize,
     facts: Vec<FactEnvelope>,
     diagnostics: Vec<AdapterDiagnostic>,
+    dependency_reads: Vec<DependencyRevision>,
     next_decoder_state: Option<Vec<u8>>,
     next_record_ordinals: BTreeMap<RecordFactKey, u32>,
 }
@@ -937,6 +938,7 @@ impl FactBatch {
             max_diagnostics,
             facts: Vec::new(),
             diagnostics: Vec::new(),
+            dependency_reads: Vec::new(),
             next_decoder_state: None,
             next_record_ordinals: BTreeMap::new(),
         })
@@ -989,12 +991,68 @@ impl FactBatch {
         Ok(())
     }
 
+    pub(crate) fn append(&mut self, mut other: Self) -> Result<(), AdapterError> {
+        let fact_count = self
+            .facts
+            .len()
+            .checked_add(other.facts.len())
+            .ok_or_else(|| AdapterError::invalid_contract("fact batch size overflowed"))?;
+        if fact_count > self.max_facts {
+            return Err(AdapterError::invalid_contract(format!(
+                "fact batch exceeds {} facts",
+                self.max_facts
+            )));
+        }
+        let diagnostic_count = self
+            .diagnostics
+            .len()
+            .checked_add(other.diagnostics.len())
+            .ok_or_else(|| AdapterError::invalid_contract("diagnostic batch size overflowed"))?;
+        if diagnostic_count > self.max_diagnostics {
+            return Err(AdapterError::invalid_contract(format!(
+                "fact batch exceeds {} diagnostics",
+                self.max_diagnostics
+            )));
+        }
+        self.facts.append(&mut other.facts);
+        self.diagnostics.append(&mut other.diagnostics);
+        for dependency in other.dependency_reads {
+            self.add_dependency_read(dependency)?;
+        }
+        if other.next_decoder_state.is_some() {
+            self.next_decoder_state = other.next_decoder_state;
+        }
+        Ok(())
+    }
+
     pub fn facts(&self) -> &[FactEnvelope] {
         &self.facts
     }
 
     pub fn diagnostics(&self) -> &[AdapterDiagnostic] {
         &self.diagnostics
+    }
+
+    pub fn dependency_reads(&self) -> &[DependencyRevision] {
+        &self.dependency_reads
+    }
+
+    pub fn add_dependency_read(
+        &mut self,
+        dependency: DependencyRevision,
+    ) -> Result<(), AdapterError> {
+        const MAX_DEPENDENCY_READS: usize = 256;
+        if self.dependency_reads.contains(&dependency) {
+            return Ok(());
+        }
+        if self.dependency_reads.len() == MAX_DEPENDENCY_READS {
+            return Err(AdapterError::invalid_contract(format!(
+                "fact batch exceeds {MAX_DEPENDENCY_READS} dependency reads"
+            )));
+        }
+        self.dependency_reads.push(dependency);
+        self.dependency_reads.sort();
+        Ok(())
     }
 
     pub fn next_decoder_state(&self) -> Option<&[u8]> {
@@ -1005,9 +1063,14 @@ impl FactBatch {
     /// decoding. Removing the payload does not change the fact kind or its
     /// provenance-derived identity; the durable record hash remains available.
     pub(crate) fn redact_unknown_record_payloads(&mut self) {
+        self.replace_unknown_record_payloads(&[]);
+    }
+
+    pub(crate) fn replace_unknown_record_payloads(&mut self, replacement: &[u8]) {
         for envelope in &mut self.facts {
             if let Fact::UnknownRecord { raw_payload, .. } = &mut envelope.value {
                 raw_payload.clear();
+                raw_payload.extend_from_slice(replacement);
             }
         }
     }

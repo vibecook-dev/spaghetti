@@ -5,9 +5,17 @@
 //! skipped at extraction except `event_msg/token_count`, which attributes
 //! tokens onto the preceding assistant message (ccusage-style).
 
+mod adapter;
+#[cfg(feature = "legacy-oracle")]
 pub mod estimate_tokens;
+#[cfg(feature = "legacy-oracle")]
 pub mod message_extractor;
+#[cfg(feature = "legacy-oracle")]
 pub mod reader;
 
+pub use adapter::CodexAdapter;
+
+#[cfg(feature = "legacy-oracle")]
 pub use message_extractor::{project_jsonl_line, MessageProjection};
+#[cfg(feature = "legacy-oracle")]
 pub use reader::CodexReader;

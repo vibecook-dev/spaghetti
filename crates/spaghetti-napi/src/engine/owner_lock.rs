@@ -83,6 +83,18 @@ impl DatabaseOwnerLock {
         let lock_path = sibling_path(database_path, ".owner-lock.sqlite3");
         let metadata_path = sibling_path(database_path, ".owner.json");
         let metadata = OwnerMetadata::new(database_path, owner_label);
+        super::local_permissions::reject_symlink(&lock_path).map_err(|error| {
+            EngineError::OwnerLock {
+                lock_path: lock_path.clone(),
+                detail: error.to_string(),
+            }
+        })?;
+        super::local_permissions::reject_symlink(&metadata_path).map_err(|error| {
+            EngineError::OwnerLock {
+                lock_path: metadata_path.clone(),
+                detail: error.to_string(),
+            }
+        })?;
         let (ready_tx, ready_rx) = bounded(1);
         let (stop_tx, stop_rx) = bounded(1);
         let thread_lock_path = lock_path.clone();
@@ -174,6 +186,13 @@ fn lock_thread(
             return;
         }
     };
+    if let Err(error) = super::local_permissions::restrict_owner_file(&lock_path) {
+        let _ = ready.send(Err(LockStartupError {
+            busy: false,
+            message: error.to_string(),
+        }));
+        return;
+    }
 
     let startup = (|| -> rusqlite::Result<()> {
         connection.busy_timeout(Duration::ZERO)?;
@@ -223,7 +242,8 @@ fn sibling_path(database_path: &Path, suffix: &str) -> PathBuf {
 
 fn write_metadata(path: &Path, metadata: &OwnerMetadata) -> std::io::Result<()> {
     let payload = serde_json::to_vec_pretty(metadata).map_err(std::io::Error::other)?;
-    fs::write(path, payload)
+    fs::write(path, payload)?;
+    super::local_permissions::restrict_owner_file(path)
 }
 
 fn read_metadata(path: &Path) -> Option<OwnerMetadata> {
@@ -270,5 +290,26 @@ mod tests {
 
         let mut second = DatabaseOwnerLock::acquire(&database, "second".to_string()).unwrap();
         second.release().unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn owner_files_are_restricted_to_the_current_user() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("permissions.db");
+        let mut owner = DatabaseOwnerLock::acquire(&database, "permissions".to_string()).unwrap();
+        let lock = sibling_path(&database, ".owner-lock.sqlite3");
+        let metadata = sibling_path(&database, ".owner.json");
+        assert_eq!(
+            fs::metadata(lock).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(
+            fs::metadata(metadata).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        owner.release().unwrap();
     }
 }

@@ -30,7 +30,7 @@ import { initializeSchema } from '../schema.js';
 import type { SqliteService } from '../../io/index.js';
 import type { IngestService } from '../ingest-service.js';
 import type { ParsedRow } from '../../live/incremental-parser.js';
-import type { NativeAddon } from '../../native.js';
+import type { LegacyNativeAddon as NativeAddon } from '../../legacy-native.js';
 import type {
   SessionMessage,
   SubagentTranscript,

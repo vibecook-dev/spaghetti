@@ -1,10 +1,9 @@
 /**
  * Spaghetti SDK settings — persisted user preferences.
  *
- * Backs `~/.spaghetti/config.json`. The only setting today is which
- * ingest engine (native Rust vs pure TypeScript) to use; more may land
- * over time. Keep the file small, hand-editable, and forward-compatible
- * (unknown keys are preserved on write).
+ * Backs `~/.spaghetti/config.json`. Pre-RFC 011 releases persisted an engine
+ * choice here. That field remains readable for migration diagnostics, but the
+ * production observation engine is now always Rust.
  */
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
@@ -14,7 +13,7 @@ import * as path from 'node:path';
 export type IngestEngine = 'ts' | 'rs';
 
 export interface SpaghettiSettings {
-  /** Which ingest engine to use for startup. Defaults to `rs` (native). */
+  /** @deprecated Retained only to read pre-RFC 011 configuration. */
   engine?: IngestEngine;
   /** Unknown keys from future versions are preserved. */
   [key: string]: unknown;
@@ -42,33 +41,19 @@ export function writeSettings(settings: SpaghettiSettings): void {
 }
 
 /**
- * Resolve the active ingest engine, consulting (in order):
- * 1. `SPAG_ENGINE=ts|rs` env var
- * 2. Legacy `SPAG_NATIVE_INGEST=0|1` env var (0 → ts, 1 → rs)
- * 3. Persisted `engine` setting in `~/.spaghetti/config.json`
- * 4. Default: `rs`
+ * Resolve the production engine. Legacy environment/config preferences are
+ * intentionally ignored: accepting `ts` here would recreate a second
+ * production ingestion authority.
  */
 export function resolveEngine(): IngestEngine {
-  const envEngine = process.env.SPAG_ENGINE;
-  if (envEngine === 'ts' || envEngine === 'rs') return envEngine;
-
-  const legacy = process.env.SPAG_NATIVE_INGEST;
-  if (legacy === '0') return 'ts';
-  if (legacy === '1') return 'rs';
-
-  const stored = readSettings().engine;
-  if (stored === 'ts' || stored === 'rs') return stored;
-
   return 'rs';
 }
 
 /**
  * Default DB path for a given engine.
  *
- * Separate files per engine means switching engines doesn't require
- * re-ingesting — each side keeps its own cache and results are
- * comparable side-by-side. Useful while TS remains the iteration +
- * ground-truth path and Rust is still stabilising.
+ * The `ts` spelling is retained for repository differential tooling. Shipped
+ * SDK/CLI/playground code always requests `rs`.
  */
 export function defaultDbPathForEngine(engine: IngestEngine): string {
   return path.join(os.homedir(), '.spaghetti', 'cache', `spaghetti-${engine}.db`);

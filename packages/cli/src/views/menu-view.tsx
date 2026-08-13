@@ -5,12 +5,12 @@
  * Each pushes the corresponding view onto the navigation stack.
  */
 
-import React, { useMemo } from 'react';
+import React from 'react';
 import { Box, Text, useInput } from 'ink';
 import { sourceDisplayName, sourceDisplayRoot, sourceReportsPerMessageTokens } from '@vibecook/spaghetti-sdk';
 import { useViewNav } from './context.js';
 import { useApi } from './shell.js';
-import { useListNavigation, useTerminalSize } from './hooks.js';
+import { useAsyncValue, useListNavigation, useTerminalSize } from './hooks.js';
 import { WelcomePanel } from './welcome-panel.js';
 import type { WelcomePanelStats } from './welcome-panel.js';
 import { ProjectsView } from './projects-view.js';
@@ -67,73 +67,67 @@ export function MenuView(): React.ReactElement {
   const api = useApi();
   const { cols } = useTerminalSize();
 
-  // Load aggregate data for stats display
-  const { panelStats, dataSize, queryMs, projectCount, tokenStr, pluginStatStr, sourceIds, loadError } = useMemo(() => {
-    const t0 = performance.now();
-    let projects: ReturnType<typeof api.getProjectList> = [];
-    let loadError: string | null = null;
-    try {
-      projects = api.getProjectList();
-    } catch (err) {
-      // Never throw out of useMemo — uncaught SQLITE_CORRUPT kills the TUI process.
-      const msg = err instanceof Error ? err.message : String(err);
-      loadError = /malformed|SQLITE_CORRUPT|corrupt/i.test(msg)
-        ? 'Index cache is corrupt. Run `spag rebuild` or delete ~/.spaghetti/cache/spaghetti-rs.db'
-        : msg;
-    }
-    const elapsed = Math.round(performance.now() - t0);
+  // Load aggregate data for stats display through the async canonical client.
+  const query = useAsyncValue(
+    async () => {
+      const t0 = performance.now();
+      const [projects, storeStats, sourceIds] = await Promise.all([
+        api.getProjectList(),
+        api.getStats(),
+        api.getSourceIds(),
+      ]);
+      const elapsed = Math.round(performance.now() - t0);
 
-    let sessions = 0;
-    let messages = 0;
-    let tokens = 0;
-    let anyTokenSource = false;
-    for (const p of projects) {
-      sessions += p.sessionCount;
-      messages += p.messageCount;
-      if (p.sourceIds.some(sourceReportsPerMessageTokens)) {
-        anyTokenSource = true;
-        tokens += totalTokens(p.tokenUsage);
+      let sessions = 0;
+      let messages = 0;
+      let tokens = 0;
+      let anyTokenSource = false;
+      for (const p of projects) {
+        sessions += p.sessionCount;
+        messages += p.messageCount;
+        if (p.sourceIds.some(sourceReportsPerMessageTokens)) {
+          anyTokenSource = true;
+          tokens += totalTokens(p.tokenUsage);
+        }
       }
-    }
 
-    const stats: WelcomePanelStats = {
-      projects: projects.length,
-      sessions,
-      messages,
-      tokens: anyTokenSource || projects.length === 0 ? formatTokens(tokens) : '—',
-    };
+      const stats: WelcomePanelStats = {
+        projects: projects.length,
+        sessions,
+        messages,
+        tokens: anyTokenSource || projects.length === 0 ? formatTokens(tokens) : '—',
+      };
 
-    let dataSize = '—';
-    let sourceIds: string[] = [];
-    try {
-      const s = api.getStats();
-      dataSize = formatBytes(s.dbSizeBytes);
-      sourceIds = api.getSourceIds();
-    } catch {
-      /* already captured loadError above, or secondary failure */
-    }
+      return {
+        panelStats: stats,
+        dataSize: formatBytes(storeStats.dbSizeBytes),
+        queryMs: elapsed,
+        projectCount: projects.length,
+        tokenStr: anyTokenSource || projects.length === 0 ? formatTokens(tokens) : '—',
+        sourceIds,
+      };
+    },
+    [api],
+    {
+      panelStats: { projects: 0, sessions: 0, messages: 0, tokens: '—' },
+      dataSize: '—',
+      queryMs: 0,
+      projectCount: 0,
+      tokenStr: '—',
+      sourceIds: [] as string[],
+    },
+  );
+  const { panelStats, dataSize, queryMs, projectCount, tokenStr, sourceIds } = query.value;
+  const loadError = query.error?.message ?? null;
 
-    // RFC 007: the menu no longer advertises plugin health — the plugins are
-    // retiring, so the only thing worth surfacing is whether leftovers remain.
-    // Read-only, three JSON files; safe to do on mount.
-    const leftovers = probePluginLeftovers({ claudeHome: defaultClaudeHome() });
-    const pluginStat = leftovers.clean
-      ? 'no leftovers'
-      : leftovers.unknowns.length > 0
-        ? 'state unknown'
-        : 'leftovers found';
-
-    return {
-      panelStats: stats,
-      dataSize,
-      queryMs: elapsed,
-      projectCount: projects.length,
-      tokenStr: anyTokenSource || projects.length === 0 ? formatTokens(tokens) : '—',
-      pluginStatStr: pluginStat,
-      sourceIds,
-      loadError,
-    };
-  }, [api]);
+  // This is a read-only diagnostic for retired plugin state, unrelated to
+  // source observation or projection ownership.
+  const leftovers = probePluginLeftovers({ claudeHome: defaultClaudeHome() });
+  const pluginStatStr = leftovers.clean
+    ? 'no leftovers'
+    : leftovers.unknowns.length > 0
+      ? 'state unknown'
+      : 'leftovers found';
 
   // Agent-aware labels (RFC 006 multi-source): reflect whichever agents are
   // actually indexed rather than assuming Claude Code.

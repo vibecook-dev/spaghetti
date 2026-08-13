@@ -17,7 +17,10 @@ use crate::adapter::{AgentAdapter, DiscoveryContext, SourceInstanceSpec};
 use crate::source::{DirtyReason, PollingPolicy};
 
 use super::observation::PendingObservationWork;
-use super::{EngineError, ObservationCoordinator, ReconcileRequest, SpaghettiEngineCore};
+use super::{
+    EngineError, ObservationCoordinator, QueryCancellationToken, ReconcileRequest,
+    ReconcileRetryTarget, SpaghettiEngineCore,
+};
 
 const WATCH_EVENT_CAPACITY: usize = 1_024;
 const CONTROL_CAPACITY: usize = 16;
@@ -41,7 +44,10 @@ impl ObservationSupervisorOptions {
 }
 
 enum SupervisorCommand {
-    Refresh(Sender<Result<(), EngineError>>),
+    Refresh {
+        cancellation: QueryCancellationToken,
+        response: Sender<Result<(), EngineError>>,
+    },
     Shutdown,
 }
 
@@ -49,6 +55,13 @@ enum WatchIngress {
     Event(Event),
     BackendError,
 }
+
+type WatcherFactory = fn(
+    Weak<SpaghettiEngineCore>,
+    String,
+    Arc<WatchTopology>,
+    Sender<()>,
+) -> Result<RecommendedWatcher, EngineError>;
 
 #[derive(Debug, Clone)]
 struct WatchedInstance {
@@ -75,6 +88,8 @@ pub(crate) struct ObservationSupervisor {
     watch_roots: u32,
     commands: Sender<SupervisorCommand>,
     alive: Arc<AtomicBool>,
+    watcher_available: Arc<AtomicBool>,
+    cancellation: QueryCancellationToken,
     join: Option<JoinHandle<()>>,
 }
 
@@ -90,6 +105,31 @@ impl ObservationSupervisor {
         adapter: A,
         options: ObservationSupervisorOptions,
     ) -> Result<Self, EngineError> {
+        Self::start_cancellable(engine, adapter, options, QueryCancellationToken::default())
+    }
+
+    pub(crate) fn start_cancellable<A: AgentAdapter>(
+        engine: Arc<SpaghettiEngineCore>,
+        adapter: A,
+        options: ObservationSupervisorOptions,
+        startup_cancellation: QueryCancellationToken,
+    ) -> Result<Self, EngineError> {
+        Self::start_with_watcher_factory(
+            engine,
+            adapter,
+            options,
+            create_registered_watcher,
+            startup_cancellation,
+        )
+    }
+
+    fn start_with_watcher_factory<A: AgentAdapter>(
+        engine: Arc<SpaghettiEngineCore>,
+        adapter: A,
+        options: ObservationSupervisorOptions,
+        watcher_factory: WatcherFactory,
+        startup_cancellation: QueryCancellationToken,
+    ) -> Result<Self, EngineError> {
         validate_options(&options)?;
         let options = normalize_options(options)?;
         adapter
@@ -101,6 +141,10 @@ impl ObservationSupervisor {
         let (ready_tx, ready_rx) = bounded(1);
         let alive = Arc::new(AtomicBool::new(false));
         let thread_alive = Arc::clone(&alive);
+        let watcher_available = Arc::new(AtomicBool::new(false));
+        let thread_watcher_available = Arc::clone(&watcher_available);
+        let cancellation = QueryCancellationToken::default();
+        let thread_cancellation = cancellation.clone();
         let worker_adapter_id = adapter_id.clone();
         let weak_engine = Arc::downgrade(&engine);
 
@@ -108,12 +152,18 @@ impl ObservationSupervisor {
             .name(format!("spaghetti-watch-{adapter_id}"))
             .spawn(move || {
                 supervisor_thread(
-                    weak_engine,
                     adapter,
-                    options,
-                    command_rx,
-                    ready_tx,
-                    thread_alive,
+                    SupervisorThreadContext {
+                        engine: weak_engine,
+                        options,
+                        commands: command_rx,
+                        ready: ready_tx,
+                        alive: thread_alive,
+                        watcher_available: thread_watcher_available,
+                        watcher_factory,
+                        cancellation: thread_cancellation,
+                        startup_cancellation,
+                    },
                 );
             })
             .map_err(|error| EngineError::WorkerStart {
@@ -124,13 +174,14 @@ impl ObservationSupervisor {
         match ready_rx.recv() {
             Ok(Ok(ready)) => {
                 debug_assert!(ready.topology_instances > 0);
-                debug_assert!(ready.physical_roots > 0);
                 Ok(Self {
                     adapter_id: worker_adapter_id,
                     watched_instances: bounded_u32(ready.topology_instances),
                     watch_roots: bounded_u32(ready.physical_roots),
                     commands: command_tx,
                     alive,
+                    watcher_available,
+                    cancellation,
                     join: Some(join),
                 })
             }
@@ -161,7 +212,15 @@ impl ObservationSupervisor {
     }
 
     pub(crate) fn watch_roots(&self) -> u32 {
-        self.watch_roots
+        if self.watcher_available.load(Ordering::Acquire) {
+            self.watch_roots
+        } else {
+            0
+        }
+    }
+
+    pub(crate) fn watcher_available(&self) -> bool {
+        self.watcher_available.load(Ordering::Acquire)
     }
 
     pub(crate) fn client(&self) -> ObservationSupervisorClient {
@@ -175,6 +234,7 @@ impl ObservationSupervisor {
         let Some(join) = self.join.take() else {
             return Ok(());
         };
+        self.cancellation.cancel();
         let _ = self.commands.send(SupervisorCommand::Shutdown);
         join.join().map_err(|_| EngineError::WorkerPanic {
             worker: "observation supervisor",
@@ -184,6 +244,13 @@ impl ObservationSupervisor {
 
 impl ObservationSupervisorClient {
     pub(crate) fn refresh(&self) -> Result<(), EngineError> {
+        self.refresh_cancellable(QueryCancellationToken::default())
+    }
+
+    pub(crate) fn refresh_cancellable(
+        &self,
+        cancellation: QueryCancellationToken,
+    ) -> Result<(), EngineError> {
         if !self.alive.load(Ordering::Acquire) {
             return Err(EngineError::WorkerUnavailable {
                 worker: "observation supervisor",
@@ -191,7 +258,10 @@ impl ObservationSupervisorClient {
         }
         let (response_tx, response_rx) = bounded(1);
         self.commands
-            .send(SupervisorCommand::Refresh(response_tx))
+            .send(SupervisorCommand::Refresh {
+                cancellation,
+                response: response_tx,
+            })
             .map_err(|_| EngineError::WorkerUnavailable {
                 worker: "observation supervisor",
             })?;
@@ -209,14 +279,30 @@ impl Drop for ObservationSupervisor {
     }
 }
 
-fn supervisor_thread<A: AgentAdapter>(
+struct SupervisorThreadContext {
     engine: Weak<SpaghettiEngineCore>,
-    adapter: A,
     options: ObservationSupervisorOptions,
     commands: Receiver<SupervisorCommand>,
     ready: Sender<Result<StartReady, EngineError>>,
     alive: Arc<AtomicBool>,
-) {
+    watcher_available: Arc<AtomicBool>,
+    watcher_factory: WatcherFactory,
+    cancellation: QueryCancellationToken,
+    startup_cancellation: QueryCancellationToken,
+}
+
+fn supervisor_thread<A: AgentAdapter>(adapter: A, context: SupervisorThreadContext) {
+    let SupervisorThreadContext {
+        engine,
+        options,
+        commands,
+        ready,
+        alive,
+        watcher_available,
+        watcher_factory,
+        cancellation,
+        startup_cancellation,
+    } = context;
     let adapter_id = adapter.manifest().id.as_str().to_string();
     let topology = match discover_topology(&adapter, &options.configured_roots) {
         Ok(topology) => topology,
@@ -226,23 +312,23 @@ fn supervisor_thread<A: AgentAdapter>(
         }
     };
     let topology = Arc::new(topology);
+    if startup_cancellation.is_cancelled() {
+        let _ = ready.send(Err(EngineError::QueryCancelled));
+        return;
+    }
     let (wake_tx, wake_rx) = bounded(WATCH_EVENT_CAPACITY);
-    let mut watcher = match create_watcher(
+    let mut watcher = match watcher_factory(
         engine.clone(),
         adapter_id.clone(),
         Arc::clone(&topology),
-        wake_tx,
+        wake_tx.clone(),
     ) {
-        Ok(watcher) => watcher,
-        Err(error) => {
-            let _ = ready.send(Err(error));
-            return;
+        Ok(watcher) => {
+            watcher_available.store(true, Ordering::Release);
+            Some(watcher)
         }
+        Err(_) => None,
     };
-    if let Err(error) = register_roots(&mut watcher, &topology.physical_roots) {
-        let _ = ready.send(Err(error));
-        return;
-    }
 
     // Watch registration is complete before the first scan begins. Callbacks
     // admit dirty state synchronously; their bounded channel only wakes this
@@ -252,7 +338,11 @@ fn supervisor_thread<A: AgentAdapter>(
         let _ = ready.send(Err(EngineError::ShuttingDown));
         return;
     };
-    if let Err(error) = ObservationCoordinator::new(Arc::clone(&initial_engine)).reconcile(
+    if let Err(error) = ObservationCoordinator::with_cancellations(
+        Arc::clone(&initial_engine),
+        vec![cancellation.clone(), startup_cancellation.clone()],
+    )
+    .reconcile(
         &adapter,
         ReconcileRequest {
             configured_roots: options.configured_roots.clone(),
@@ -263,14 +353,29 @@ fn supervisor_thread<A: AgentAdapter>(
         return;
     }
     let mut polling = PollingPolicy::default();
+    if watcher.is_none() {
+        polling.record_watcher_unavailable();
+        // With no watcher callback to cover the initial scan window, retain a
+        // second full pass before readiness. Future polls remain authoritative
+        // until registration succeeds.
+        let _ =
+            initial_engine.require_observation_reconcile(&adapter_id, DirtyReason::BackendError);
+    }
     let initial_summary = drain_pending(
         &initial_engine,
         &adapter,
         &options,
         &topology,
         MAX_RECONCILE_PASSES_PER_WAKE,
+        &[cancellation.clone(), startup_cancellation],
     );
     update_polling_after_drain(&mut polling, &initial_summary);
+    handle_backend_failure(
+        &initial_summary,
+        &mut watcher,
+        &watcher_available,
+        &mut polling,
+    );
     if let Err(error) = initial_summary.result {
         let _ = ready.send(Err(error));
         return;
@@ -293,13 +398,26 @@ fn supervisor_thread<A: AgentAdapter>(
     loop {
         select! {
             recv(commands) -> command => match command {
-                Ok(SupervisorCommand::Refresh(response)) => {
+                Ok(SupervisorCommand::Refresh { cancellation: refresh_cancellation, response }) => {
                     let result = engine.upgrade().ok_or(EngineError::ShuttingDown).and_then(|engine| {
                         engine
                             .require_observation_reconcile(&adapter_id, DirtyReason::ManualRepair)
                             .and_then(|()| {
-                                let summary = drain_pending(&engine, &adapter, &options, &topology, MAX_RECONCILE_PASSES_PER_WAKE);
+                                let summary = drain_pending(
+                                    &engine,
+                                    &adapter,
+                                    &options,
+                                    &topology,
+                                    MAX_RECONCILE_PASSES_PER_WAKE,
+                                    &[cancellation.clone(), refresh_cancellation],
+                                );
                                 update_polling_after_drain(&mut polling, &summary);
+                                handle_backend_failure(
+                                    &summary,
+                                    &mut watcher,
+                                    &watcher_available,
+                                    &mut polling,
+                                );
                                 summary.result
                             })
                     });
@@ -324,30 +442,75 @@ fn supervisor_thread<A: AgentAdapter>(
                         &options,
                         &topology,
                         MAX_RECONCILE_PASSES_PER_WAKE,
+                        std::slice::from_ref(&cancellation),
                     );
                     update_polling_after_drain(&mut polling, &summary);
+                    handle_backend_failure(
+                        &summary,
+                        &mut watcher,
+                        &watcher_available,
+                        &mut polling,
+                    );
                 }
             },
             recv(poll) -> _ => {
                 let Some(engine) = engine.upgrade() else { break; };
-                let _ = engine.require_observation_reconcile(
-                    &adapter_id,
-                    DirtyReason::PollDetectedChange,
-                );
+                if watcher.is_none() {
+                    match watcher_factory(
+                        Arc::downgrade(&engine),
+                        adapter_id.clone(),
+                        Arc::clone(&topology),
+                        wake_tx.clone(),
+                    ) {
+                        Ok(recovered) => {
+                            watcher = Some(recovered);
+                            watcher_available.store(true, Ordering::Release);
+                            polling.record_watcher_success();
+                        }
+                        Err(_) => polling.record_watcher_unavailable(),
+                    }
+                }
+                if engine.next_observation_work(&adapter_id).is_none() {
+                    let _ = engine.require_observation_reconcile(
+                        &adapter_id,
+                        DirtyReason::PollDetectedChange,
+                    );
+                }
                 let summary = drain_pending(
                     &engine,
                     &adapter,
                     &options,
                     &topology,
                     MAX_RECONCILE_PASSES_PER_WAKE,
+                    std::slice::from_ref(&cancellation),
                 );
                 update_polling_after_drain(&mut polling, &summary);
+                handle_backend_failure(
+                    &summary,
+                    &mut watcher,
+                    &watcher_available,
+                    &mut polling,
+                );
             },
         }
         poll = after(next_poll_delay(&polling));
     }
     drop(watcher);
+    watcher_available.store(false, Ordering::Release);
     alive.store(false, Ordering::Release);
+}
+
+fn handle_backend_failure(
+    summary: &DrainSummary,
+    watcher: &mut Option<RecommendedWatcher>,
+    watcher_available: &AtomicBool,
+    polling: &mut PollingPolicy,
+) {
+    if summary.backend_failure {
+        *watcher = None;
+        watcher_available.store(false, Ordering::Release);
+        polling.record_watcher_unavailable();
+    }
 }
 
 fn discover_topology<A: AgentAdapter>(
@@ -421,6 +584,17 @@ fn create_watcher(
     })
 }
 
+fn create_registered_watcher(
+    engine: Weak<SpaghettiEngineCore>,
+    adapter_id: String,
+    topology: Arc<WatchTopology>,
+    wake: Sender<()>,
+) -> Result<RecommendedWatcher, EngineError> {
+    let mut watcher = create_watcher(engine, adapter_id, Arc::clone(&topology), wake)?;
+    register_roots(&mut watcher, &topology.physical_roots)?;
+    Ok(watcher)
+}
+
 fn register_roots(watcher: &mut RecommendedWatcher, roots: &[PathBuf]) -> Result<(), EngineError> {
     for root in roots {
         watcher
@@ -477,8 +651,10 @@ fn route_ingress(
 struct DrainSummary {
     result: Result<(), EngineError>,
     retries_required: bool,
+    incomplete_tail_retry: bool,
     changed: bool,
     watcher_failure: bool,
+    backend_failure: bool,
     watcher_success: bool,
 }
 
@@ -487,8 +663,10 @@ impl Default for DrainSummary {
         Self {
             result: Ok(()),
             retries_required: false,
+            incomplete_tail_retry: false,
             changed: false,
             watcher_failure: false,
+            backend_failure: false,
             watcher_success: false,
         }
     }
@@ -505,10 +683,18 @@ fn drain_pending<A: AgentAdapter>(
     options: &ObservationSupervisorOptions,
     topology: &WatchTopology,
     max_passes: usize,
+    cancellations: &[QueryCancellationToken],
 ) -> DrainSummary {
     let mut summary = DrainSummary::default();
     for _ in 0..max_passes {
-        match drain_pending_once(engine, adapter, options, topology) {
+        if cancellations
+            .iter()
+            .any(QueryCancellationToken::is_cancelled)
+        {
+            summary.result = Err(EngineError::QueryCancelled);
+            return summary;
+        }
+        match drain_pending_once(engine, adapter, options, topology, cancellations) {
             Ok(Some(drained)) => {
                 summary.changed |= drained.outcome.objects_changed > 0;
                 summary.watcher_failure |= matches!(
@@ -517,9 +703,11 @@ fn drain_pending<A: AgentAdapter>(
                         | DirtyReason::InternalQueueOverflow
                         | DirtyReason::BackendError
                 );
+                summary.backend_failure |= drained.reason == DirtyReason::BackendError;
                 summary.watcher_success |= drained.reason == DirtyReason::NativeEvent;
                 if drained.outcome.retries_required > 0 {
                     summary.retries_required = true;
+                    summary.incomplete_tail_retry = drained.outcome.incomplete_tail_retries > 0;
                     return summary;
                 }
             }
@@ -544,7 +732,14 @@ fn drain_pending_once<A: AgentAdapter>(
     adapter: &A,
     options: &ObservationSupervisorOptions,
     topology: &WatchTopology,
+    cancellations: &[QueryCancellationToken],
 ) -> Result<Option<DrainedObservation>, EngineError> {
+    if cancellations
+        .iter()
+        .any(QueryCancellationToken::is_cancelled)
+    {
+        return Err(EngineError::QueryCancelled);
+    }
     let adapter_id = adapter.manifest().id.as_str();
     let Some(work) = engine.next_observation_work(adapter_id) else {
         return Ok(None);
@@ -555,7 +750,11 @@ fn drain_pending_once<A: AgentAdapter>(
             reason,
         } => {
             debug_assert_eq!(pending_adapter, adapter_id);
-            let outcome = ObservationCoordinator::new(Arc::clone(engine)).reconcile(
+            let outcome = ObservationCoordinator::with_cancellations(
+                Arc::clone(engine),
+                cancellations.to_vec(),
+            )
+            .reconcile(
                 adapter,
                 ReconcileRequest {
                     configured_roots: options.configured_roots.clone(),
@@ -581,19 +780,58 @@ fn drain_pending_once<A: AgentAdapter>(
                     reason,
                 }));
             };
-            let outcome = ObservationCoordinator::new(Arc::clone(engine))
-                .reconcile_declared_instance(
-                    adapter,
-                    instance.spec.clone(),
-                    reason_label(&options.reason, reason),
-                )?;
+            let outcome = ObservationCoordinator::with_cancellations(
+                Arc::clone(engine),
+                cancellations.to_vec(),
+            )
+            .reconcile_declared_instance(
+                adapter,
+                instance.spec.clone(),
+                reason_label(&options.reason, reason),
+            )?;
+            Ok(Some(DrainedObservation { outcome, reason }))
+        }
+        PendingObservationWork::Object {
+            adapter_id: pending_adapter,
+            stable_key,
+            stream_key,
+            object_key,
+            reason,
+        } => {
+            debug_assert_eq!(pending_adapter, adapter_id);
+            let Some(instance) = topology
+                .instances
+                .iter()
+                .find(|instance| instance.stable_key == stable_key)
+            else {
+                engine.require_observation_reconcile(adapter_id, DirtyReason::IdentityChanged)?;
+                return Ok(Some(DrainedObservation {
+                    outcome: super::ReconcileOutcome::default(),
+                    reason,
+                }));
+            };
+            let target = ReconcileRetryTarget {
+                stable_key,
+                stream_key,
+                object_key,
+            };
+            let outcome = ObservationCoordinator::with_cancellations(
+                Arc::clone(engine),
+                cancellations.to_vec(),
+            )
+            .reconcile_declared_object(
+                adapter,
+                instance.spec.clone(),
+                &target,
+                reason_label(&options.reason, reason),
+            )?;
             Ok(Some(DrainedObservation { outcome, reason }))
         }
     }
 }
 
 fn update_polling_after_drain(policy: &mut PollingPolicy, summary: &DrainSummary) {
-    policy.set_incomplete_tail(summary.retries_required);
+    policy.set_incomplete_tail(summary.incomplete_tail_retry);
     if summary.changed {
         policy.record_activity(now_monotonic_ms());
     }
@@ -751,6 +989,54 @@ mod tests {
 
     use super::*;
 
+    fn unavailable_watcher(
+        _engine: Weak<SpaghettiEngineCore>,
+        _adapter_id: String,
+        _topology: Arc<WatchTopology>,
+        _wake: Sender<()>,
+    ) -> Result<RecommendedWatcher, EngineError> {
+        Err(EngineError::WorkerStart {
+            worker: "native filesystem watcher",
+            detail: "injected unavailable backend".to_string(),
+        })
+    }
+
+    #[test]
+    fn unavailable_native_watcher_starts_in_polling_fallback_and_detects_changes() {
+        const WAIT: Duration = Duration::from_secs(15);
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().join("source");
+        std::fs::create_dir_all(&root).unwrap();
+        let settings = root.join("settings.json");
+        std::fs::write(&settings, br#"{"model":"claude-sonnet"}"#).unwrap();
+        let database = temp.path().join("fallback.db");
+        let engine = open_engine(database.clone());
+
+        let mut supervisor = ObservationSupervisor::start_with_watcher_factory(
+            Arc::clone(&engine),
+            ClaudeCodeAdapter::new(),
+            ObservationSupervisorOptions::new(vec![root]),
+            unavailable_watcher,
+            QueryCancellationToken::default(),
+        )
+        .unwrap();
+
+        assert!(supervisor.is_alive());
+        assert!(!supervisor.watcher_available());
+        assert_eq!(supervisor.watch_roots(), 0);
+        assert_eq!(effective_settings_model(&database), "claude-sonnet");
+
+        std::fs::write(&settings, br#"{"model":"claude-opus"}"#).unwrap();
+        wait_until(
+            WAIT,
+            || effective_settings_model(&database) == "claude-opus",
+            || "polling fallback did not reconcile the settings change".to_string(),
+        );
+
+        supervisor.shutdown().unwrap();
+        engine.shutdown().unwrap();
+    }
+
     #[test]
     fn overlapping_and_missing_logical_roots_consolidate_to_one_native_watch() {
         let temp = TempDir::new().unwrap();
@@ -828,8 +1114,16 @@ mod tests {
         let mut policy = PollingPolicy::default();
         assert!(next_poll_delay(&policy) >= Duration::from_secs(5));
 
+        let generic_retry = DrainSummary {
+            retries_required: true,
+            ..DrainSummary::default()
+        };
+        update_polling_after_drain(&mut policy, &generic_retry);
+        assert!(next_poll_delay(&policy) >= Duration::from_secs(5));
+
         let retry = DrainSummary {
             retries_required: true,
+            incomplete_tail_retry: true,
             ..DrainSummary::default()
         };
         update_polling_after_drain(&mut policy, &retry);
@@ -881,7 +1175,7 @@ mod tests {
             discover_topology(&ClaudeCodeAdapter::new(), std::slice::from_ref(&root)).unwrap();
         route_ingress(
             &engine,
-            SpaghettiEngineCore::CLAUDE_ADAPTER_ID,
+            "claude-code",
             &topology,
             WatchIngress::Event(
                 Event::new(notify::event::EventKind::Modify(
@@ -1214,7 +1508,7 @@ mod tests {
     fn transcript_cursor(engine: &SpaghettiEngineCore, root: &Path) -> SourceCursor {
         let stable_key = platform_path_key(&root.canonicalize().unwrap());
         let object = engine
-            .source_catalog(SpaghettiEngineCore::CLAUDE_ADAPTER_ID, &stable_key)
+            .source_catalog("claude-code", &stable_key)
             .unwrap()
             .objects
             .into_iter()

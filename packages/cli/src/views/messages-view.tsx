@@ -19,7 +19,6 @@ import { useApi } from './shell.js';
 import { formatTokens, formatRelativeTime, formatDuration } from '../lib/format.js';
 import { theme } from '../lib/color.js';
 import { renderMarkdownText } from '../lib/message-render.js';
-import { adaptMessagesForDisplay } from '../lib/source-messages.js';
 import {
   buildDisplayItems,
   applyDisplayFilters,
@@ -441,19 +440,40 @@ export function MessagesView({
   const [allMessages, setAllMessages] = useState<SessionMessage[]>([]);
   const [loadedOffsetLow, setLoadedOffsetLow] = useState(0);
   const [totalCount, setTotalCount] = useState(0);
+  const [loadError, setLoadError] = useState<Error | null>(null);
+  const loadingMoreRef = useRef(false);
 
   const sourceScope = useMemo(() => ({ sourceId: session.sourceId }), [session.sourceId]);
 
   // Initial load
   useEffect(() => {
-    const probe = api.getSessionMessages(session.projectSlug, session.sessionId, 1, 0, sourceScope);
-    const total = probe.total;
-    setTotalCount(total);
-
-    const startOffset = Math.max(0, total - PAGE_SIZE);
-    const page = api.getSessionMessages(session.projectSlug, session.sessionId, PAGE_SIZE, startOffset, sourceScope);
-    setAllMessages(adaptMessagesForDisplay(page.messages, session.sourceId));
-    setLoadedOffsetLow(startOffset);
+    let active = true;
+    loadingMoreRef.current = false;
+    setLoadError(null);
+    void (async () => {
+      try {
+        const probe = await api.getSessionMessages(session.projectSlug, session.sessionId, 1, 0, sourceScope);
+        const total = probe.total;
+        const startOffset = Math.max(0, total - PAGE_SIZE);
+        const page = await api.getSessionMessages(
+          session.projectSlug,
+          session.sessionId,
+          PAGE_SIZE,
+          startOffset,
+          sourceScope,
+        );
+        if (!active) return;
+        setTotalCount(total);
+        setAllMessages(page.messages);
+        setLoadedOffsetLow(startOffset);
+      } catch (reason) {
+        if (!active) return;
+        setLoadError(reason instanceof Error ? reason : new Error(String(reason)));
+      }
+    })();
+    return () => {
+      active = false;
+    };
   }, [api, session.projectSlug, session.sessionId, session.sourceId, sourceScope]);
 
   const allDisplayItems = useMemo(() => buildDisplayItems(allMessages), [allMessages]);
@@ -577,21 +597,29 @@ export function MessagesView({
   }, [initialIndex, displayItems.length, jumpTo]);
 
   // Load more messages when scrolling near bottom
-  const loadMoreMessages = useCallback(() => {
-    if (loadedOffsetLow <= 0) return;
+  const loadMoreMessages = useCallback(async () => {
+    if (loadedOffsetLow <= 0 || loadingMoreRef.current) return;
     const nextOffset = Math.max(0, loadedOffsetLow - PAGE_SIZE);
     const fetchSize = loadedOffsetLow - nextOffset;
     if (fetchSize <= 0) return;
 
-    const olderPage = api.getSessionMessages(
-      session.projectSlug,
-      session.sessionId,
-      fetchSize,
-      nextOffset,
-      sourceScope,
-    );
-    setLoadedOffsetLow(nextOffset);
-    setAllMessages((prev) => [...adaptMessagesForDisplay(olderPage.messages, session.sourceId), ...prev]);
+    loadingMoreRef.current = true;
+    setLoadError(null);
+    try {
+      const olderPage = await api.getSessionMessages(
+        session.projectSlug,
+        session.sessionId,
+        fetchSize,
+        nextOffset,
+        sourceScope,
+      );
+      setLoadedOffsetLow(nextOffset);
+      setAllMessages((prev) => [...olderPage.messages, ...prev]);
+    } catch (reason) {
+      setLoadError(reason instanceof Error ? reason : new Error(String(reason)));
+    } finally {
+      loadingMoreRef.current = false;
+    }
   }, [api, session.projectSlug, session.sessionId, session.sourceId, loadedOffsetLow, sourceScope]);
 
   // Build filter chips + count label for display within this view
@@ -615,7 +643,7 @@ export function MessagesView({
         moveDown();
         // Load more when near bottom
         if (loadedOffsetLow > 0 && selectedIndex >= displayItems.length - LOAD_MORE_THRESHOLD) {
-          loadMoreMessages();
+          void loadMoreMessages();
         }
       } else if (key.return) {
         if (displayItems.length === 0) return;
@@ -677,6 +705,8 @@ export function MessagesView({
   const unloadedItems = Math.max(0, totalCount - allMessages.length);
   const unloadedLinesBefore = Math.round(unloadedItems * avgLinesPerItem);
   const estimatedTotalLines = totalLoadedLines + unloadedLinesBefore;
+
+  if (loadError) return <Text color="red"> {loadError.message}</Text>;
 
   return (
     <Box flexDirection="column">

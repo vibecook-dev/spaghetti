@@ -4,8 +4,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::source::{
-    AppendDelimitedConfig, DirectorySnapshotConfig, IngestPriority, PresenceObjectConfig,
-    ReplaceDocumentConfig, SourceRecord,
+    AppendDelimitedConfig, DirectorySnapshotConfig, IngestPriority, KeyValueSnapshotConfig,
+    PresenceObjectConfig, ReplaceDocumentConfig, SourceRecord, SqliteQuerySpec, SqliteRowRecord,
+    SqliteSnapshotConfig,
 };
 
 use super::FactBatch;
@@ -213,6 +214,8 @@ pub enum DriverSpec {
     ReplaceDocument(ReplaceDocumentConfig),
     DirectorySnapshot(DirectorySnapshotConfig),
     Presence(PresenceObjectConfig),
+    SqliteSnapshot(SqliteSnapshotConfig),
+    KeyValueSnapshot(KeyValueSnapshotConfig),
 }
 
 impl DriverSpec {
@@ -222,6 +225,8 @@ impl DriverSpec {
             Self::ReplaceDocument(_) => "replace_document",
             Self::DirectorySnapshot(_) => "directory_snapshot",
             Self::Presence(_) => "presence_object",
+            Self::SqliteSnapshot(_) => "sqlite_snapshot",
+            Self::KeyValueSnapshot(_) => "key_value_snapshot",
         }
     }
 }
@@ -265,9 +270,14 @@ pub enum DeletionPolicy {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RawRetentionPolicy {
-    Full,
+    /// Retain no duplicate native payload. Provenance required for fact
+    /// identity remains durable independently of this policy.
+    None,
     HashOnly,
-    ProvenanceOnly,
+    /// Retain only a bounded structural description with native values and
+    /// property names removed.
+    DiagnosticExcerpt,
+    Full,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -318,6 +328,110 @@ pub struct SourceObjectDescriptor {
 pub struct AdapterObjectContext {
     version: u32,
     payload: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct DependencyRevision {
+    pub source_instance_id: u64,
+    pub root_name: String,
+    pub object_key: Vec<u8>,
+    pub revision: [u8; 32],
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceSnapshot {
+    /// `None` represents an observed missing or oversized dependency. Inspect
+    /// `oversized` to distinguish those states without receiving unbounded
+    /// bytes.
+    pub payload: Option<Vec<u8>>,
+    pub revision: DependencyRevision,
+    pub oversized: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceQueryBounds {
+    pub max_database_bytes: usize,
+    pub max_sidecar_bytes: usize,
+    pub max_rows: usize,
+    pub max_value_bytes: usize,
+    pub max_snapshot_bytes: usize,
+    pub busy_timeout_ms: u64,
+}
+
+impl Default for SourceQueryBounds {
+    fn default() -> Self {
+        let defaults = SqliteSnapshotConfig::bounded(vec![SqliteQuerySpec {
+            name: "placeholder".to_string(),
+            sql: "SELECT 1 AS key".to_string(),
+            key_columns: vec!["key".to_string()],
+        }]);
+        Self {
+            max_database_bytes: defaults.max_database_bytes,
+            max_sidecar_bytes: defaults.max_sidecar_bytes,
+            max_rows: defaults.max_rows,
+            max_value_bytes: defaults.max_value_bytes,
+            max_snapshot_bytes: defaults.max_snapshot_bytes,
+            busy_timeout_ms: defaults.busy_timeout_ms,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceQuery {
+    pub root_name: String,
+    pub relative_path: PathBuf,
+    pub query: SqliteQuerySpec,
+    pub bounds: SourceQueryBounds,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceRows {
+    pub available: bool,
+    pub schema_version: Option<u64>,
+    pub rows: Vec<SqliteRowRecord>,
+    pub revision: DependencyRevision,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceObjectListRequest {
+    pub root_name: String,
+    pub include: Vec<String>,
+    pub exclude: Vec<String>,
+    pub max_entries: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceListedObject {
+    pub object_key: Vec<u8>,
+    pub relative_path: PathBuf,
+    pub size_bytes: u64,
+    pub modified_ns: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceObjectList {
+    pub available: bool,
+    pub objects: Vec<SourceListedObject>,
+    pub revision: DependencyRevision,
+}
+
+/// Bounded read-only access to adapter-owned dependencies. Implementations
+/// enforce configured roots, no-follow path confinement, cancellation, stable
+/// reads, and byte limits; adapters never receive a raw filesystem handle.
+pub trait SourceAccess: Send + Sync {
+    fn read_object(
+        &self,
+        root_name: &str,
+        relative_path: &std::path::Path,
+        max_bytes: usize,
+    ) -> Result<SourceSnapshot, AdapterError>;
+
+    fn query_source_db(&self, query: &SourceQuery) -> Result<SourceRows, AdapterError>;
+
+    fn list_objects(
+        &self,
+        request: &SourceObjectListRequest,
+    ) -> Result<SourceObjectList, AdapterError>;
 }
 
 impl AdapterObjectContext {
@@ -440,12 +554,87 @@ pub trait AgentAdapter: Send + Sync + 'static {
         Ok(AdapterObjectContext::empty())
     }
 
+    fn bootstrap_object_with_access(
+        &self,
+        instance: &SourceInstance,
+        object: &SourceObjectDescriptor,
+        _source_access: &dyn SourceAccess,
+    ) -> Result<AdapterObjectContext, AdapterError> {
+        self.bootstrap_object(instance, object)
+    }
+
     fn decode(
         &self,
         context: DecodeContext<'_>,
         record: &SourceRecord,
         output: &mut FactBatch,
     ) -> Result<DecodeDisposition, AdapterError>;
+
+    fn decode_with_access(
+        &self,
+        context: DecodeContext<'_>,
+        record: &SourceRecord,
+        output: &mut FactBatch,
+        _source_access: &dyn SourceAccess,
+    ) -> Result<DecodeDisposition, AdapterError> {
+        self.decode(context, record, output)
+    }
+}
+
+impl<T> AgentAdapter for std::sync::Arc<T>
+where
+    T: AgentAdapter + ?Sized,
+{
+    fn manifest(&self) -> &AdapterManifest {
+        (**self).manifest()
+    }
+
+    fn discover(
+        &self,
+        context: &DiscoveryContext,
+    ) -> Result<Vec<SourceInstanceSpec>, AdapterError> {
+        (**self).discover(context)
+    }
+
+    fn streams(&self, instance: &SourceInstance) -> Result<Vec<StreamSpec>, AdapterError> {
+        (**self).streams(instance)
+    }
+
+    fn bootstrap_object(
+        &self,
+        instance: &SourceInstance,
+        object: &SourceObjectDescriptor,
+    ) -> Result<AdapterObjectContext, AdapterError> {
+        (**self).bootstrap_object(instance, object)
+    }
+
+    fn bootstrap_object_with_access(
+        &self,
+        instance: &SourceInstance,
+        object: &SourceObjectDescriptor,
+        source_access: &dyn SourceAccess,
+    ) -> Result<AdapterObjectContext, AdapterError> {
+        (**self).bootstrap_object_with_access(instance, object, source_access)
+    }
+
+    fn decode(
+        &self,
+        context: DecodeContext<'_>,
+        record: &SourceRecord,
+        output: &mut FactBatch,
+    ) -> Result<DecodeDisposition, AdapterError> {
+        (**self).decode(context, record, output)
+    }
+
+    fn decode_with_access(
+        &self,
+        context: DecodeContext<'_>,
+        record: &SourceRecord,
+        output: &mut FactBatch,
+        source_access: &dyn SourceAccess,
+    ) -> Result<DecodeDisposition, AdapterError> {
+        (**self).decode_with_access(context, record, output, source_access)
+    }
 }
 
 #[cfg(test)]

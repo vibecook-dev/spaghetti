@@ -16,7 +16,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { mkdtempSync, rmSync } from 'node:fs';
 
-import { createSpaghettiService } from '../index.js';
+import { createSpaghettiService } from '../legacy-oracle.js';
 import type { SpaghettiAPI } from '../index.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));

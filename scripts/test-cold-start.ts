@@ -10,7 +10,7 @@
  * Usage: rm -f ~/.spaghetti/cache/spaghetti.db && npx tsx scripts/test-cold-start.ts
  */
 
-import { createSpaghettiService } from '../packages/sdk/src/index.js';
+import { createSpaghettiService } from '../packages/sdk/src/legacy-oracle.js';
 
 async function main() {
   console.log('Creating service...');

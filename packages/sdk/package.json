@@ -16,6 +16,11 @@
       "import": "./dist/client.js",
       "require": "./dist/client.cjs"
     },
+    "./observation": {
+      "types": "./dist/observation.d.ts",
+      "import": "./dist/observation.js",
+      "require": "./dist/observation.cjs"
+    },
     "./react": {
       "types": "./dist/react.d.ts",
       "import": "./dist/react.js",
@@ -27,18 +32,15 @@
   ],
   "scripts": {
     "gen:worker": "esbuild src/workers/parse-worker.ts --bundle --platform=node --format=esm --outfile=src/workers/parse-worker.js",
-    "build": "pnpm gen:worker && vite build",
+    "build": "vite build",
     "clean": "rm -rf dist",
     "typecheck": "tsc --noEmit",
     "test": "node --import tsx --test --test-force-exit src/__tests__/*.test.ts src/**/__tests__/*.test.ts"
   },
   "dependencies": {
-    "@parcel/watcher": "^2.5.0",
     "@vibecook/spaghetti-sdk-native": "workspace:*",
-    "chokidar": "^4.0.0",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
-    "js-tiktoken": "^1.0.21",
     "lucide-react": "^0.468.0",
     "react-markdown": "^10.1.0",
     "react-syntax-highlighter": "^15.6.1",
@@ -62,8 +64,11 @@
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
     "@types/react-syntax-highlighter": "^15.5.13",
+    "@parcel/watcher": "^2.5.0",
     "@vitejs/plugin-react": "^4.0.0",
+    "chokidar": "^4.0.0",
     "esbuild": "^0.27.0",
+    "js-tiktoken": "^1.0.21",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "typescript": "^5.7.0",

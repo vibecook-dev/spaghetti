@@ -2,7 +2,7 @@
  * Search command — full-text search across all segments
  */
 
-import type { SpaghettiAPI } from '@vibecook/spaghetti-sdk';
+import type { ObservationService } from '@vibecook/spaghetti-sdk/observation';
 import { theme } from '../lib/color.js';
 import { resolveProject, suggestProjects } from '../lib/resolve.js';
 import { noProjectMatch } from '../lib/error.js';
@@ -18,12 +18,12 @@ export interface SearchOptions {
   json?: boolean;
 }
 
-export async function searchCommand(api: SpaghettiAPI, query: string, opts: SearchOptions): Promise<void> {
+export async function searchCommand(api: ObservationService, query: string, opts: SearchOptions): Promise<void> {
   // Resolve project scope if provided
   let projectMembers: Array<{ sourceId: string; slug: string }> | undefined;
 
   if (opts.project) {
-    const projects = api.getProjectList();
+    const projects = await api.getProjectList();
     const project = resolveProject(opts.project, projects);
 
     if (!project) {
@@ -37,7 +37,7 @@ export async function searchCommand(api: SpaghettiAPI, query: string, opts: Sear
   const offset = resolveOffset(opts.offset);
 
   // Execute search
-  const results = api.search({
+  const results = await api.search({
     text: query,
     projectMembers,
     limit,

@@ -91,7 +91,7 @@ function renderReport(report: DoctorReport): string {
   if (ix.nativeAvailable) {
     lines.push(sub(`native ${ix.nativeVersion ?? 'loaded'}`));
   } else {
-    lines.push(sub(theme.muted('native addon unavailable — TS ingest path')));
+    lines.push(sub(theme.muted('native addon unavailable — Rust observation cannot start')));
   }
   lines.push(row(ix.dbExists ? OK : WARN, 'index db', tildify(ix.dbPath)));
   if (ix.dbExists && ix.dbSizeBytes != null) {

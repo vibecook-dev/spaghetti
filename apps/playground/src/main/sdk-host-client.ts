@@ -4,7 +4,6 @@ import { MessageChannelMain, utilityProcess, type MessagePortMain, type UtilityP
 import { existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import type { IngestEngine } from '@vibecook/spaghetti-sdk';
 import {
   IpcTransport,
   MessagePortIpcChannel,
@@ -37,7 +36,6 @@ interface PendingRequest {
 
 export interface SdkHostClientOptions {
   dbPath: string;
-  engine: IngestEngine;
   rootDir?: string;
   observationShadow?: { dbPath?: string };
   /** Defaults to utility-host auto-detection. Benchmarks can disable it. */
@@ -102,7 +100,6 @@ export class SdkHostClient {
         env: {
           ...process.env,
           SPAGHETTI_DB_PATH: this.options.dbPath,
-          SPAGHETTI_ENGINE: this.options.engine,
           ...(this.options.rootDir ? { SPAGHETTI_ROOT_DIR: this.options.rootDir } : {}),
           ...(this.options.observationShadow
             ? {

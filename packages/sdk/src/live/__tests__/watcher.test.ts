@@ -100,20 +100,37 @@ function samePath(a: string, b: string): boolean {
 describe('createParcelWatcher (RFC 005 C2.1)', () => {
   let tempDir: string;
   let realTempDir: string;
+  let parcelUnavailable: Error | null = null;
 
   before(async () => {
     tempDir = mkdtempSync(path.join(os.tmpdir(), 'spaghetti-watcher-test-'));
     // Parcel emits realpath-canonicalised paths — resolve the symlinked
     // `/tmp` → `/private/tmp` on macOS so equality checks below work.
     realTempDir = (await import('node:fs')).realpathSync(tempDir);
+    try {
+      const unsubscribe = await createParcelWatcher().subscribe(realTempDir, () => {}, {
+        ignore: [],
+        recursive: true,
+      });
+      await unsubscribe();
+    } catch (error) {
+      parcelUnavailable = error instanceof Error ? error : new Error(String(error));
+    }
   });
 
   after(() => {
     rmSync(tempDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   });
 
+  const requireParcel = (t: { skip(message?: string): void }): boolean => {
+    if (!parcelUnavailable) return true;
+    t.skip(`native watcher unavailable in this environment: ${parcelUnavailable.message}`);
+    return false;
+  };
+
   // ─── subscribe: create ────────────────────────────────────────────────
-  test('subscribe fires `create` when a file is added', async () => {
+  test('subscribe fires `create` when a file is added', async (t) => {
+    if (!requireParcel(t)) return;
     const watcher = createParcelWatcher();
     const { onEvents, waitForMatch } = createCollector();
 
@@ -136,7 +153,8 @@ describe('createParcelWatcher (RFC 005 C2.1)', () => {
   });
 
   // ─── subscribe: update ────────────────────────────────────────────────
-  test('subscribe fires an event when a watched file is modified', async () => {
+  test('subscribe fires an event when a watched file is modified', async (t) => {
+    if (!requireParcel(t)) return;
     // Note: macOS FSEvents + @parcel/watcher do not reliably distinguish
     // the first post-subscribe event for a file as `create` vs `update`.
     // When a file exists at subscribe time and is then mutated, FSEvents'
@@ -168,7 +186,8 @@ describe('createParcelWatcher (RFC 005 C2.1)', () => {
   });
 
   // ─── subscribe: delete ────────────────────────────────────────────────
-  test('subscribe fires `delete` when a watched file is removed', async () => {
+  test('subscribe fires `delete` when a watched file is removed', async (t) => {
+    if (!requireParcel(t)) return;
     const watcher = createParcelWatcher();
     const target = path.join(realTempDir, 'delete-me.txt');
     writeFileSync(target, 'doomed');
@@ -196,7 +215,8 @@ describe('createParcelWatcher (RFC 005 C2.1)', () => {
   });
 
   // ─── unsubscribe stops emission ───────────────────────────────────────
-  test('the returned Unsubscribe stops emissions', async () => {
+  test('the returned Unsubscribe stops emissions', async (t) => {
+    if (!requireParcel(t)) return;
     const watcher = createParcelWatcher();
     const { events, onEvents, waitForMatch } = createCollector();
 
@@ -232,7 +252,8 @@ describe('createParcelWatcher (RFC 005 C2.1)', () => {
   });
 
   // ─── ignore glob filters paths ────────────────────────────────────────
-  test('`ignore` glob filters out matching paths', async () => {
+  test('`ignore` glob filters out matching paths', async (t) => {
+    if (!requireParcel(t)) return;
     const watcher = createParcelWatcher();
     const { events, onEvents, waitForMatch } = createCollector();
 
@@ -269,7 +290,8 @@ describe('createParcelWatcher (RFC 005 C2.1)', () => {
   });
 
   // ─── writeSnapshot + getEventsSince round-trip ────────────────────────
-  test('writeSnapshot + getEventsSince round-trip captures changes', async () => {
+  test('writeSnapshot + getEventsSince round-trip captures changes', async (t) => {
+    if (!requireParcel(t)) return;
     const watcher = createParcelWatcher();
 
     // Use a dedicated subdir so the snapshot reflects a known starting
@@ -310,6 +332,7 @@ describe('createParcelWatcher (RFC 005 C2.1)', () => {
   // back. Two spellings of one file meant the live tailer missed the byte
   // checkpoint keyed on the cold-ingest path and replayed the file from 0.
   test('events are spelled under the caller-supplied root, not the resolved one', async (t) => {
+    if (!requireParcel(t)) return;
     if (tempDir === realTempDir) {
       t.skip('root is not symlinked on this platform');
       return;

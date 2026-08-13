@@ -22,6 +22,7 @@ import type {
   ShellSnapshotsDirectory,
   ShellSnapshotFile,
   CacheDirectory,
+  MyClosedIssuesFile,
   StatusLineCommandFile,
   TeamDirectory,
   TeamConfig,
@@ -380,6 +381,14 @@ export class ConfigParserImpl implements ConfigParser {
       result.changelog = { content, size: stats?.size ?? 0 };
     } catch {
       // no changelog
+    }
+
+    try {
+      const issuesPath = path.join(rootDir, 'cache', 'my-closed-issues.json');
+      const issues = this.fileService.readJsonSync<unknown>(issuesPath);
+      if (Array.isArray(issues)) result.myClosedIssues = issues as MyClosedIssuesFile;
+    } catch {
+      // no issue cache (or an incomplete cache write)
     }
 
     return result;

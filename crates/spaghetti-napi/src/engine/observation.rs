@@ -4,7 +4,7 @@
 //! This runtime serializes those coordinator passes and retains bounded dirty
 //! state whenever work cannot be admitted or a pass cannot prove itself live.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 
 use crate::source::DirtyReason;
@@ -65,6 +65,13 @@ struct InstanceKey {
     stable_key: Vec<u8>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct ObjectKey {
+    instance: InstanceKey,
+    stream_key: String,
+    object_key: Vec<u8>,
+}
+
 impl InstanceKey {
     fn new(adapter_id: &str, stable_key: &[u8]) -> Result<Self, EngineError> {
         if adapter_id.trim().is_empty() {
@@ -108,6 +115,7 @@ struct ObservationState {
     phase: ObservationPhase,
     active: Option<ActiveReconcile>,
     pending_instances: BTreeMap<InstanceKey, PendingDirty>,
+    pending_objects: BTreeMap<ObjectKey, PendingDirty>,
     pending_adapters: BTreeMap<String, PendingDirty>,
     next_dirty_sequence: u64,
     next_reconcile_id: u64,
@@ -138,6 +146,13 @@ pub(crate) enum PendingObservationWork {
         stable_key: Vec<u8>,
         reason: DirtyReason,
     },
+    Object {
+        adapter_id: String,
+        stable_key: Vec<u8>,
+        stream_key: String,
+        object_key: Vec<u8>,
+        reason: DirtyReason,
+    },
 }
 
 impl ObservationRuntime {
@@ -159,6 +174,7 @@ impl ObservationRuntime {
                 phase: ObservationPhase::Idle,
                 active: None,
                 pending_instances: BTreeMap::new(),
+                pending_objects: BTreeMap::new(),
                 pending_adapters: BTreeMap::new(),
                 next_dirty_sequence: 0,
                 next_reconcile_id: 0,
@@ -244,7 +260,7 @@ impl ObservationRuntime {
         ObservationStatusSnapshot {
             state: state.phase.as_str().to_string(),
             reconcile_in_flight: state.active.is_some(),
-            dirty_instances: bounded_u32(state.pending_instances.len()),
+            dirty_instances: dirty_instance_count(&state),
             full_reconcile_required: !state.pending_adapters.is_empty(),
             recovery_required: has_degraded_pending(&state),
             supervisors_running: 0,
@@ -323,16 +339,40 @@ impl ObservationRuntime {
                 reason: pending.reason,
             });
         }
-        state
+        let instance = state
             .pending_instances
             .iter()
             .filter(|(key, _)| key.adapter_id == adapter_id)
-            .min_by_key(|(_, pending)| pending.sequence)
-            .map(|(key, pending)| PendingObservationWork::Instance {
+            .min_by_key(|(_, pending)| pending.sequence);
+        let object = state
+            .pending_objects
+            .iter()
+            .filter(|(key, _)| key.instance.adapter_id == adapter_id)
+            .min_by_key(|(_, pending)| pending.sequence);
+        match (instance, object) {
+            (Some((key, pending)), Some((_, object_pending)))
+                if pending.sequence <= object_pending.sequence =>
+            {
+                Some(PendingObservationWork::Instance {
+                    adapter_id: key.adapter_id.clone(),
+                    stable_key: key.stable_key.clone(),
+                    reason: pending.reason,
+                })
+            }
+            (Some((key, pending)), None) => Some(PendingObservationWork::Instance {
                 adapter_id: key.adapter_id.clone(),
                 stable_key: key.stable_key.clone(),
                 reason: pending.reason,
-            })
+            }),
+            (_, Some((key, pending))) => Some(PendingObservationWork::Object {
+                adapter_id: key.instance.adapter_id.clone(),
+                stable_key: key.instance.stable_key.clone(),
+                stream_key: key.stream_key.clone(),
+                object_key: key.object_key.clone(),
+                reason: pending.reason,
+            }),
+            (None, None) => None,
+        }
     }
 
     fn transition_to_reconciling(&self, id: u64) {
@@ -364,7 +404,23 @@ impl ObservationRuntime {
         state.retry_signals_total = state
             .retry_signals_total
             .saturating_add(u64::from(outcome.retries_required));
-        if outcome.retries_required > 0 {
+        let retry_adapter_id = match &active.scope {
+            ReconcileScope::Adapter(adapter_id) => adapter_id.clone(),
+            ReconcileScope::Instance(key) => key.adapter_id.clone(),
+        };
+        for target in &outcome.retry_targets {
+            let key = ObjectKey {
+                instance: InstanceKey {
+                    adapter_id: retry_adapter_id.clone(),
+                    stable_key: target.stable_key.clone(),
+                },
+                stream_key: target.stream_key.clone(),
+                object_key: target.object_key.clone(),
+            };
+            self.enqueue_object_locked(&mut state, key, DirtyReason::Recovery);
+        }
+        let targeted = u32::try_from(outcome.retry_targets.len()).unwrap_or(u32::MAX);
+        if outcome.retries_required > targeted {
             self.enqueue_scope_locked(&mut state, &active.scope, DirtyReason::Recovery);
         }
         state.phase = pending_phase(&state);
@@ -426,24 +482,70 @@ impl ObservationRuntime {
             pending.sequence = sequence;
             return;
         }
-        if state.pending_instances.len() < self.dirty_instance_capacity {
-            state
-                .pending_instances
-                .insert(key, PendingDirty { reason, sequence });
-            return;
-        }
-
-        state.queue_overflows_total = state.queue_overflows_total.saturating_add(1);
-        let adapter_id = key.adapter_id;
-        let mut merged = DirtyReason::InternalQueueOverflow.merge(reason);
-        state.pending_instances.retain(|pending_key, pending| {
-            if pending_key.adapter_id == adapter_id {
+        let mut merged = reason;
+        state.pending_objects.retain(|object_key, pending| {
+            if object_key.instance == key {
                 merged = merged.merge(pending.reason);
                 false
             } else {
                 true
             }
         });
+        if state.pending_instances.len() + state.pending_objects.len()
+            < self.dirty_instance_capacity
+        {
+            state.pending_instances.insert(
+                key,
+                PendingDirty {
+                    reason: merged,
+                    sequence,
+                },
+            );
+            return;
+        }
+
+        state.queue_overflows_total = state.queue_overflows_total.saturating_add(1);
+        let adapter_id = key.adapter_id;
+        let mut merged = DirtyReason::InternalQueueOverflow.merge(reason);
+        retain_other_adapter_work(state, &adapter_id, &mut merged);
+        enqueue_adapter_with_sequence_locked(state, adapter_id, merged, sequence);
+    }
+
+    fn enqueue_object_locked(
+        &self,
+        state: &mut ObservationState,
+        key: ObjectKey,
+        reason: DirtyReason,
+    ) {
+        let sequence = next_dirty_sequence(state);
+        if let Some(adapter) = state.pending_adapters.get_mut(&key.instance.adapter_id) {
+            adapter.reason = adapter.reason.merge(reason);
+            adapter.sequence = sequence;
+            return;
+        }
+        if let Some(instance) = state.pending_instances.get_mut(&key.instance) {
+            instance.reason = instance.reason.merge(reason);
+            instance.sequence = sequence;
+            return;
+        }
+        if let Some(pending) = state.pending_objects.get_mut(&key) {
+            pending.reason = pending.reason.merge(reason);
+            pending.sequence = sequence;
+            return;
+        }
+        if state.pending_instances.len() + state.pending_objects.len()
+            < self.dirty_instance_capacity
+        {
+            state
+                .pending_objects
+                .insert(key, PendingDirty { reason, sequence });
+            return;
+        }
+
+        state.queue_overflows_total = state.queue_overflows_total.saturating_add(1);
+        let adapter_id = key.instance.adapter_id;
+        let mut merged = DirtyReason::InternalQueueOverflow.merge(reason);
+        retain_other_adapter_work(state, &adapter_id, &mut merged);
         enqueue_adapter_with_sequence_locked(state, adapter_id, merged, sequence);
     }
 
@@ -498,15 +600,31 @@ impl Drop for ObservationLease {
 fn enqueue_adapter_locked(state: &mut ObservationState, adapter_id: &str, reason: DirtyReason) {
     let sequence = next_dirty_sequence(state);
     let mut merged = reason;
+    retain_other_adapter_work(state, adapter_id, &mut merged);
+    enqueue_adapter_with_sequence_locked(state, adapter_id.to_string(), merged, sequence);
+}
+
+fn retain_other_adapter_work(
+    state: &mut ObservationState,
+    adapter_id: &str,
+    merged: &mut DirtyReason,
+) {
     state.pending_instances.retain(|key, pending| {
         if key.adapter_id == adapter_id {
-            merged = merged.merge(pending.reason);
+            *merged = (*merged).merge(pending.reason);
             false
         } else {
             true
         }
     });
-    enqueue_adapter_with_sequence_locked(state, adapter_id.to_string(), merged, sequence);
+    state.pending_objects.retain(|key, pending| {
+        if key.instance.adapter_id == adapter_id {
+            *merged = (*merged).merge(pending.reason);
+            false
+        } else {
+            true
+        }
+    });
 }
 
 fn enqueue_adapter_with_sequence_locked(
@@ -535,6 +653,9 @@ fn acknowledge_scope_locked(
             state.pending_instances.retain(|key, pending| {
                 key.adapter_id != *adapter_id || pending.sequence > through_sequence
             });
+            state.pending_objects.retain(|key, pending| {
+                key.instance.adapter_id != *adapter_id || pending.sequence > through_sequence
+            });
             if state
                 .pending_adapters
                 .get(adapter_id)
@@ -551,6 +672,9 @@ fn acknowledge_scope_locked(
             {
                 state.pending_instances.remove(key);
             }
+            state.pending_objects.retain(|object_key, pending| {
+                object_key.instance != *key || pending.sequence > through_sequence
+            });
         }
     }
 }
@@ -564,6 +688,7 @@ fn pending_phase(state: &ObservationState) -> ObservationPhase {
     let reasons = state
         .pending_instances
         .values()
+        .chain(state.pending_objects.values())
         .chain(state.pending_adapters.values())
         .map(|pending| pending.reason);
     let mut has_pending = false;
@@ -584,6 +709,7 @@ fn has_degraded_pending(state: &ObservationState) -> bool {
     state
         .pending_instances
         .values()
+        .chain(state.pending_objects.values())
         .chain(state.pending_adapters.values())
         .any(|pending| is_degraded_reason(pending.reason))
 }
@@ -612,6 +738,18 @@ fn bounded_detail(detail: &str) -> String {
 
 fn bounded_u32(value: usize) -> u32 {
     u32::try_from(value).unwrap_or(u32::MAX)
+}
+
+fn dirty_instance_count(state: &ObservationState) -> u32 {
+    let mut instances = BTreeSet::new();
+    instances.extend(state.pending_instances.keys().cloned());
+    instances.extend(
+        state
+            .pending_objects
+            .keys()
+            .map(|object| object.instance.clone()),
+    );
+    bounded_u32(instances.len())
 }
 
 fn fallback_now_unix_ms() -> i64 {
@@ -645,6 +783,40 @@ mod tests {
         assert_eq!(status.reconciles_total, 1);
         assert!(!status.reconcile_in_flight);
         assert!(!status.recovery_required);
+    }
+
+    #[test]
+    fn incomplete_tail_retry_is_retained_as_object_work_not_full_reconcile() {
+        let runtime = ObservationRuntime::with_capacity(4).unwrap();
+        let lease = runtime.begin_full("adapter", 10).unwrap();
+        let outcome = ReconcileOutcome {
+            retries_required: 1,
+            incomplete_tail_retries: 1,
+            retry_targets: vec![super::super::ReconcileRetryTarget {
+                stable_key: b"instance".to_vec(),
+                stream_key: "transcript".to_string(),
+                object_key: b"object".to_vec(),
+            }],
+            ..ReconcileOutcome::default()
+        };
+        lease.complete(&outcome, 1, 20);
+
+        assert!(!runtime.snapshot().full_reconcile_required);
+        assert!(matches!(
+            runtime.next_pending("adapter"),
+            Some(PendingObservationWork::Object {
+                stable_key,
+                stream_key,
+                object_key,
+                ..
+            }) if stable_key == b"instance"
+                && stream_key == "transcript"
+                && object_key == b"object"
+        ));
+
+        let retry = runtime.begin_instance("adapter", b"instance", 30).unwrap();
+        retry.complete(&ReconcileOutcome::default(), 1, 40);
+        assert!(runtime.next_pending("adapter").is_none());
     }
 
     #[test]

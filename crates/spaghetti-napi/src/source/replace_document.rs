@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use super::file::{read_stable_file, stamp_revision, StableRead};
+use super::file::{read_stable_file, read_stable_file_confined, stamp_revision, StableRead};
 use super::model::CursorReader;
 use super::{
     DriverQuarantine, FileIdentity, RecordHash, RecordOrigin, Revision, SourceCursor,
@@ -8,6 +8,7 @@ use super::{
 };
 
 const CHECKPOINT_MAGIC: &[u8] = b"SPRD";
+const MALFORMED_GUARD_MAGIC: &[u8] = b"SPMG";
 const CHECKPOINT_VERSION_PRESENT_ONLY: u8 = 1;
 const CHECKPOINT_VERSION_PRESENCE_AWARE: u8 = 2;
 const ABSENT_REVISION_BYTES: &[u8] = b"spaghetti:replace-document:absent:v1";
@@ -165,7 +166,38 @@ impl ReplaceDocument {
         origin: &RecordOrigin,
         incompatible_replacement: bool,
     ) -> Result<ReplaceRead, SourceDriverError> {
-        match read_stable_file(path, self.config.max_document_bytes)? {
+        self.interpret_read(
+            read_stable_file(path, self.config.max_document_bytes)?,
+            previous,
+            origin,
+            incompatible_replacement,
+        )
+    }
+
+    pub fn read_confined(
+        &self,
+        root: &Path,
+        relative_path: &Path,
+        previous: Option<&ReplaceCheckpoint>,
+        origin: &RecordOrigin,
+        incompatible_replacement: bool,
+    ) -> Result<ReplaceRead, SourceDriverError> {
+        self.interpret_read(
+            read_stable_file_confined(root, relative_path, self.config.max_document_bytes)?,
+            previous,
+            origin,
+            incompatible_replacement,
+        )
+    }
+
+    fn interpret_read(
+        &self,
+        read: StableRead,
+        previous: Option<&ReplaceCheckpoint>,
+        origin: &RecordOrigin,
+        incompatible_replacement: bool,
+    ) -> Result<ReplaceRead, SourceDriverError> {
+        match read {
             StableRead::Missing => self.observe_absence(previous, origin),
             StableRead::Unstable => Ok(ReplaceRead::RetryTransient),
             StableRead::Oversized(stamp) => {
@@ -348,6 +380,51 @@ impl MalformedRevisionGuard {
         })
     }
 
+    pub fn from_checkpoint(
+        policy: MalformedRevisionPolicy,
+        checkpoint: Option<&[u8]>,
+    ) -> Result<Self, SourceDriverError> {
+        let mut guard = Self::new(policy)?;
+        let Some(bytes) = checkpoint else {
+            return Ok(guard);
+        };
+        const CHECKPOINT_BYTES: usize = 4 + 1 + 32 + 8 + 4 + 1;
+        if bytes.len() != CHECKPOINT_BYTES || &bytes[..4] != MALFORMED_GUARD_MAGIC || bytes[4] != 1
+        {
+            return Err(SourceDriverError::InvalidCursor(
+                "malformed-revision guard checkpoint is invalid".to_string(),
+            ));
+        }
+        let revision = Revision::from_bytes(bytes[5..37].try_into().expect("fixed revision slice"));
+        let first_seen_at_ms =
+            i64::from_be_bytes(bytes[37..45].try_into().expect("fixed first-seen slice"));
+        let attempts = u32::from_be_bytes(bytes[45..49].try_into().expect("fixed attempts slice"));
+        if attempts == 0 || bytes[49] > 1 {
+            return Err(SourceDriverError::InvalidCursor(
+                "malformed-revision guard checkpoint state is invalid".to_string(),
+            ));
+        }
+        guard.current = Some(FailureState {
+            revision,
+            first_seen_at_ms,
+            attempts,
+            quarantined: bytes[49] == 1,
+        });
+        Ok(guard)
+    }
+
+    pub fn checkpoint(&self) -> Option<Vec<u8>> {
+        let state = self.current.as_ref()?;
+        let mut bytes = Vec::with_capacity(50);
+        bytes.extend_from_slice(MALFORMED_GUARD_MAGIC);
+        bytes.push(1);
+        bytes.extend_from_slice(state.revision.as_bytes());
+        bytes.extend_from_slice(&state.first_seen_at_ms.to_be_bytes());
+        bytes.extend_from_slice(&state.attempts.to_be_bytes());
+        bytes.push(u8::from(state.quarantined));
+        Some(bytes)
+    }
+
     pub fn classify_failure(&mut self, revision: Revision, now_ms: i64) -> ParseFailureDecision {
         let state = self.current.get_or_insert(FailureState {
             revision,
@@ -511,6 +588,15 @@ mod tests {
             guard.classify_failure(first, 1_000),
             ParseFailureDecision::RetryTransient { attempt: 1 }
         );
+        let checkpoint = guard.checkpoint().unwrap();
+        let mut guard = MalformedRevisionGuard::from_checkpoint(
+            MalformedRevisionPolicy {
+                minimum_attempts: 2,
+                settle_delay_ms: 100,
+            },
+            Some(&checkpoint),
+        )
+        .unwrap();
         assert_eq!(
             guard.classify_failure(first, 1_050),
             ParseFailureDecision::RetryTransient { attempt: 2 }

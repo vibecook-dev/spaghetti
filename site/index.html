@@ -4,10 +4,10 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Spaghetti — Untangle your agent history</title>
-  <meta name="description" content="Local-first CLI and SDK for agent history. Index Claude Code and Codex into SQLite, search conversations, browse sessions, and build tools on top of your local agent data." />
+  <meta name="description" content="Local-first CLI and SDK powered by one Rust observation engine for Claude Code, Codex, and Grok history." />
   <meta name="theme-color" content="#050607" />
   <meta property="og:title" content="Spaghetti — Untangle your agent history" />
-  <meta property="og:description" content="Local-first CLI and SDK that turns Claude Code + Codex history into a searchable multi-agent workspace." />
+  <meta property="og:description" content="One Rust-owned local index for Claude Code, Codex, and Grok history." />
   <meta property="og:type" content="website" />
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%232dd4bf'/%3E%3Ctext x='16' y='22' text-anchor='middle' font-family='monospace' font-size='14' font-weight='700' fill='%23042f2e'%3Esp%3C/text%3E%3C/svg%3E" />
   <script>
@@ -164,7 +164,7 @@
         <article class="feature-card">
           <div class="feature-icon amber">▣</div>
           <h3>Multi-agent by design</h3>
-          <p>Claude Code and OpenAI Codex side by side in one index. Agent tabs in the TUI, an Agent column in lists, and source-scoped session reads so slugs never collide.</p>
+          <p>Claude Code, OpenAI Codex, and Grok side by side in one index. Agent tabs, source columns, and scoped reads keep native identities distinct.</p>
         </article>
         <article class="feature-card">
           <div class="feature-icon green">⬡</div>
@@ -173,8 +173,8 @@
         </article>
         <article class="feature-card">
           <div class="feature-icon magenta">⚡</div>
-          <h3>Native Rust ingest</h3>
-          <p>Claude bulk path is a napi-rs addon with rayon parallelism. Pure TypeScript for Codex and as automatic fallback — zero configuration.</p>
+          <h3>Rust observation engine</h3>
+          <p>One napi-rs owner handles all built-in adapters, bounded reconciliation, SQLite projections, queries, and durable live changes.</p>
         </article>
         <article class="feature-card">
           <div class="feature-icon blue">⧉</div>
@@ -402,10 +402,10 @@
 
           <!-- TS engine -->
           <rect x="300" y="280" width="220" height="130" rx="14" fill="url(#g-ts)" stroke="rgba(96,165,250,0.4)" stroke-width="1.5"/>
-          <text x="410" y="312" text-anchor="middle" fill="#93c5fd" font-family="JetBrains Mono, monospace" font-size="10" letter-spacing="1">ENGINE · TS</text>
-          <text x="410" y="338" text-anchor="middle" fill="#eef1f6" font-family="Instrument Sans, sans-serif" font-size="16" font-weight="600">TypeScript</text>
-          <text x="410" y="360" text-anchor="middle" fill="#bfdbfe" font-family="JetBrains Mono, monospace" font-size="11">workers · streaming · FTS</text>
-          <text x="410" y="384" text-anchor="middle" fill="#dbeafe" font-family="Instrument Sans, sans-serif" font-size="12">Ground truth · fallback</text>
+          <text x="410" y="312" text-anchor="middle" fill="#93c5fd" font-family="JetBrains Mono, monospace" font-size="10" letter-spacing="1">REPOSITORY ORACLE</text>
+          <text x="410" y="338" text-anchor="middle" fill="#eef1f6" font-family="Instrument Sans, sans-serif" font-size="16" font-weight="600">Differential tests</text>
+          <text x="410" y="360" text-anchor="middle" fill="#bfdbfe" font-family="JetBrains Mono, monospace" font-size="11">not package-exported</text>
+          <text x="410" y="384" text-anchor="middle" fill="#dbeafe" font-family="Instrument Sans, sans-serif" font-size="12">Not a production path</text>
 
           <!-- Flow engines → SQLite -->
           <path d="M520 165 C560 165, 560 260, 590 260" stroke="url(#g-line)" stroke-width="1.5" fill="none" marker-end="url(#arrow)"/>
@@ -432,7 +432,7 @@
 
           <rect x="830" y="220" width="180" height="80" rx="12" fill="#12151c" stroke="rgba(45,212,191,0.25)"/>
           <text x="920" y="252" text-anchor="middle" fill="#eef1f6" font-family="Instrument Sans, sans-serif" font-size="14" font-weight="600">SDK API</text>
-          <text x="920" y="274" text-anchor="middle" fill="#5eead4" font-family="JetBrains Mono, monospace" font-size="11">createSpaghettiService</text>
+          <text x="920" y="274" text-anchor="middle" fill="#5eead4" font-family="JetBrains Mono, monospace" font-size="11">createObservationService</text>
 
           <rect x="830" y="360" width="180" height="80" rx="12" fill="#12151c" stroke="rgba(232,121,249,0.25)"/>
           <text x="920" y="392" text-anchor="middle" fill="#eef1f6" font-family="Instrument Sans, sans-serif" font-size="14" font-weight="600">React · Live</text>
@@ -447,11 +447,11 @@
         <div class="arch-legend">
           <div class="arch-legend-item">
             <span class="arch-legend-swatch" style="background:#0f766e"></span>
-            Rust ingest (default)
+            Rust observation owner
           </div>
           <div class="arch-legend-item">
             <span class="arch-legend-swatch" style="background:#1e40af"></span>
-            TypeScript ingest (parity + fallback)
+            Repository-only differential oracle
           </div>
           <div class="arch-legend-item">
             <span class="arch-legend-swatch" style="background:#2dd4bf"></span>
@@ -533,41 +533,40 @@
   <section class="section" id="engines">
     <div class="wrap">
       <div class="section-header">
-        <div class="eyebrow">Dual engines</div>
-        <h2>Speed by default. Correctness always.</h2>
-        <p class="lead">Rust and TypeScript write the same schema. A fixture-based ingest-diff harness keeps them honest in CI.</p>
+        <div class="eyebrow">One production owner</div>
+        <h2>Observation and queries, together in Rust.</h2>
+        <p class="lead">RFC 011 gives discovery, decoding, SQLite writes, queries, live recovery, and durable changes one authority.</p>
       </div>
       <div class="engine-grid">
         <div class="engine-card featured">
-          <div class="engine-badge">⬡ engine: 'rs'</div>
-          <h3>Native Rust</h3>
-          <p>napi-rs addon with rayon-parallel project parse and a dedicated rusqlite writer thread. Roughly 2× faster cold start on multi-GB histories.</p>
+          <div class="engine-badge">⬡ Rust observation</div>
+          <h3>Production engine</h3>
+          <p>A napi-rs host with bounded source drivers, registered adapters, one rusqlite writer, read-only query workers, and durable subscriptions.</p>
           <ul class="engine-list">
-            <li>Claude Code project/session bulk + live batch writes</li>
-            <li>FTS triggers dropped during bulk, rebuilt once</li>
+            <li>Claude Code, Codex, and Grok through one adapter contract</li>
+            <li>Atomic projection commits and retained change replay</li>
             <li>Prebuilt binaries: macOS + Linux (x64/arm64)</li>
-            <li>Default when the native module loads</li>
+            <li>The only first-party production path</li>
           </ul>
         </div>
         <div class="engine-card">
-          <div class="engine-badge" style="color:var(--blue)">◈ engine: 'ts'</div>
-          <h3>TypeScript</h3>
-          <p>Full streaming pipeline with worker threads. Ground truth for Claude, exclusive path for Codex today, automatic fallback when native is unavailable.</p>
+          <div class="engine-badge" style="color:var(--blue)">◈ Differential oracle</div>
+          <h3>Repository tests only</h3>
+          <p>The retired TypeScript pipeline remains in source control only to compare accepted fixtures during migration.</p>
           <ul class="engine-list">
-            <li>Claude config, analytics, plugins · full Codex reader</li>
-            <li>Codex <code>token_count</code> + tiktoken estimate fallback</li>
-            <li>Worker pool with sequential fallback</li>
-            <li>Pin with <code>SPAG_ENGINE=ts</code></li>
+            <li>Absent from package exports</li>
+            <li>Cannot be selected by CLI or playground</li>
+            <li>Old Rust bulk/live bridge is feature-gated too</li>
+            <li>Never used as a missing-addon fallback</li>
           </ul>
         </div>
       </div>
       <div class="callout mt-32">
         <span>ⓘ</span>
         <div>
-          <strong>Engine resolution:</strong>
-          per-service <code>engine</code> option → <code>SPAG_ENGINE</code> env → legacy <code>SPAG_NATIVE_INGEST</code> →
-          <code>~/.spaghetti/config.json</code> → default <code>rs</code>.
-          Each engine uses its own DB file so switching never forces a re-ingest.
+          <strong>Rust-only policy:</strong> old <code>SPAG_ENGINE</code>,
+          <code>SPAG_NATIVE_INGEST</code>, and persisted <code>engine: "ts"</code>
+          values are ignored. A missing native addon is an actionable startup error.
         </div>
       </div>
     </div>
@@ -706,8 +705,8 @@
           <div class="eyebrow">SDK</div>
           <h2>Build on the same index</h2>
           <p class="lead" style="margin:14px 0 24px">
-            One factory. One API. Scripts, dashboards, and Electron apps all read
-            the SQLite index the CLI builds. React components live under
+            One async API. Scripts, dashboards, and Electron apps all read the
+            same Rust-owned canonical index. React components live under
             <code>@vibecook/spaghetti-sdk/react</code>.
           </p>
           <a class="btn btn-secondary" href="api.html">API reference →</a>
@@ -718,21 +717,24 @@
             <button class="copy-btn" type="button" data-copy>Copy</button>
           </div>
           <pre><code><span class="c-kw">import</span> {
-  createSpaghettiService,
-  createCodexSource,
+  createObservationService,
 } <span class="c-kw">from</span> <span class="c-str">'@vibecook/spaghetti-sdk'</span>;
 
-<span class="c-kw">const</span> api = <span class="c-fn">createSpaghettiService</span>({
-  additionalSources: [<span class="c-fn">createCodexSource</span>()],
+<span class="c-kw">const</span> api = <span class="c-fn">createObservationService</span>({
+  dbPath: <span class="c-str">'/path/to/spaghetti-rs.db'</span>,
+  sources: [
+    { adapterId: <span class="c-str">'claude-code'</span>, roots: [<span class="c-str">'/home/me/.claude'</span>] },
+    { adapterId: <span class="c-str">'codex'</span>, roots: [<span class="c-str">'/home/me/.codex'</span>] },
+  ],
   live: <span class="c-kw">true</span>,
 });
 <span class="c-kw">await</span> api.<span class="c-fn">initialize</span>();
 
-<span class="c-kw">const</span> sources = api.<span class="c-fn">getSourceIds</span>(); <span class="c-cm">// ['claude-code','codex']</span>
-<span class="c-kw">const</span> projects = api.<span class="c-fn">getProjectList</span>();
-<span class="c-kw">const</span> sessions = api.<span class="c-fn">getSessionList</span>(
-  projects[<span class="c-num">0</span>].slug,
-  { sourceId: projects[<span class="c-num">0</span>].sourceId },
+<span class="c-kw">const</span> sources = <span class="c-kw">await</span> api.<span class="c-fn">getSourceIds</span>();
+<span class="c-kw">const</span> projects = <span class="c-kw">await</span> api.<span class="c-fn">getProjectList</span>();
+<span class="c-kw">const</span> sessions = <span class="c-kw">await</span> api.<span class="c-fn">getSessionList</span>(
+  projects[<span class="c-num">0</span>],
+  { sourceId: projects[<span class="c-num">0</span>].members[<span class="c-num">0</span>].sourceId },
 );
 
 <span class="c-kw">await</span> api.<span class="c-fn">dispose</span>();</code></pre>
@@ -790,8 +792,8 @@ spag</code></pre>
           <ul>
             <li><a href="commands.html">CLI commands</a></li>
             <li><a href="api.html">API reference</a></li>
-            <li><a href="api.html#create">createSpaghettiService</a></li>
-            <li><a href="api.html#live">Live updates</a></li>
+            <li><a href="api.html#options">createObservationService</a></li>
+            <li><a href="api.html#events">Durable changes</a></li>
           </ul>
         </div>
         <div>

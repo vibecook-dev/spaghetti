@@ -11,9 +11,11 @@ pub use contract::{
     AdapterDiagnostic, AdapterError, AdapterErrorClass, AdapterId, AdapterManifest,
     AdapterObjectContext, AgentAdapter, Availability, CapabilityDeclaration, CapabilityGranularity,
     CapabilityId, CapabilitySupport, ConsistencyPolicy, DecodeContext, DecodeDisposition,
-    DecoderId, DeletionPolicy, DiscoveryContext, DriverSpec, EntityScope, ObjectSelector,
-    RawRetentionPolicy, SourceInstance, SourceInstanceKey, SourceInstanceSpec,
-    SourceObjectDescriptor, SourceRoot, StreamAuthority, StreamId, StreamSpec, SupportLevel,
+    DecoderId, DeletionPolicy, DependencyRevision, DiscoveryContext, DriverSpec, EntityScope,
+    ObjectSelector, RawRetentionPolicy, SourceAccess, SourceInstance, SourceInstanceKey,
+    SourceInstanceSpec, SourceListedObject, SourceObjectDescriptor, SourceObjectList,
+    SourceObjectListRequest, SourceQuery, SourceQueryBounds, SourceRoot, SourceRows,
+    SourceSnapshot, StreamAuthority, StreamId, StreamSpec, SupportLevel,
 };
 pub use facts::{
     ArtifactCapture, ArtifactContentFact, ArtifactMetadataEntry, ArtifactMetadataSnapshotFact,

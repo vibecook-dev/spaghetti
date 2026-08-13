@@ -2,7 +2,8 @@
  * Dashboard command — default view when running `spaghetti` with no args
  */
 
-import type { SpaghettiAPI, ProjectListItem } from '@vibecook/spaghetti-sdk';
+import type { ProjectListItem, StoreStats } from '@vibecook/spaghetti-sdk';
+import type { ObservationService } from '@vibecook/spaghetti-sdk/observation';
 import { theme } from '../lib/color.js';
 import { formatTokens, formatBytes, formatRelativeTime, formatNumber, totalTokens } from '../lib/format.js';
 import { getTerminalWidth } from '../lib/terminal.js';
@@ -11,10 +12,7 @@ function renderHeader(version: string): string {
   return theme.heading(`  Spaghetti v${version}`) + '  ' + theme.muted('local agent history explorer');
 }
 
-function renderSummary(api: SpaghettiAPI): string {
-  const projects = api.getProjectList();
-  const stats = api.getStats();
-
+function renderSummary(projects: ProjectListItem[], stats: StoreStats): string {
   const projectCount = projects.length;
   let totalSessions = 0;
   let totalTok = 0;
@@ -87,9 +85,8 @@ function renderQuickCommands(): string {
  * Output a machine-readable JSON summary to stdout.
  * Used when `spag` is piped (not a TTY).
  */
-export async function summaryJSON(api: SpaghettiAPI): Promise<void> {
-  const projects = api.getProjectList();
-  const stats = api.getStats();
+export async function summaryJSON(api: ObservationService): Promise<void> {
+  const [projects, stats] = await Promise.all([api.getProjectList(), api.getStats()]);
 
   let totalSessions = 0;
   let totalMessages = 0;
@@ -129,17 +126,17 @@ export async function summaryJSON(api: SpaghettiAPI): Promise<void> {
   process.stdout.write(JSON.stringify(summary, null, 2) + '\n');
 }
 
-export async function dashboardCommand(api: SpaghettiAPI, version: string): Promise<void> {
+export async function dashboardCommand(api: ObservationService, version: string): Promise<void> {
   const width = getTerminalWidth();
   const divider = theme.muted('\u2500'.repeat(Math.min(width, 60)));
 
-  const projects = api.getProjectList();
+  const [projects, stats] = await Promise.all([api.getProjectList(), api.getStats()]);
 
   const output = [
     '',
     renderHeader(version),
     '  ' + divider,
-    renderSummary(api),
+    renderSummary(projects, stats),
     renderRecentActivity(projects),
     renderQuickCommands(),
     '',

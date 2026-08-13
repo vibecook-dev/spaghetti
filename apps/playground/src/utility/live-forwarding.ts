@@ -1,11 +1,5 @@
-import type {
-  Change,
-  ChangeTopic,
-  InitProgress,
-  SegmentChangeBatch,
-  SegmentType,
-  SpaghettiAPI,
-} from '@vibecook/spaghetti-sdk';
+import type { Change, ChangeTopic, InitProgress, SegmentChangeBatch, SegmentType } from '@vibecook/spaghetti-sdk';
+import type { ObservationService } from '@vibecook/spaghetti-sdk/observation';
 
 export interface PlaygroundEventSink {
   progress(progress: InitProgress): void;
@@ -75,26 +69,12 @@ export function liveChangeToBatch(change: Change): SegmentChangeBatch {
 }
 
 /** Own every SDK subscription and watcher prewarm as one disposable. */
-export function attachPlaygroundEventForwarding(sdk: SpaghettiAPI, sink: PlaygroundEventSink): () => void {
+export function attachPlaygroundEventForwarding(sdk: ObservationService, sink: PlaygroundEventSink): () => void {
   const disposers: Array<() => void> = [
     sdk.onProgress(sink.progress),
     sdk.onReady(sink.ready),
     sdk.onChange(sink.change),
   ];
-
-  if (sdk.live) {
-    for (const topic of PLAYGROUND_LIVE_TOPICS) {
-      disposers.push(sdk.live.prewarm(topic));
-    }
-    disposers.push(
-      sdk.live.onChange(
-        (changes) => {
-          if (changes.length > 0) sink.change(liveChangesToBatch(changes));
-        },
-        { throttleMs: LIVE_FORWARD_THROTTLE_MS, latest: false },
-      ),
-    );
-  }
 
   let disposed = false;
   return () => {

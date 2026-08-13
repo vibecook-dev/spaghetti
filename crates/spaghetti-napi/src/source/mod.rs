@@ -6,11 +6,13 @@
 mod append_delimited;
 mod directory_snapshot;
 mod file;
+mod key_value_snapshot;
 mod model;
 mod presence_object;
 mod recovery;
 mod replace_document;
 mod scheduler;
+mod sqlite_snapshot;
 
 #[cfg(test)]
 mod conformance;
@@ -26,6 +28,10 @@ pub use directory_snapshot::{
 };
 pub(crate) use file::confined_relative_path_key;
 pub use file::platform_path_key;
+pub(crate) use file::{read_stable_file_confined, StableRead};
+pub use key_value_snapshot::{
+    KeyValueCheckpoint, KeyValueRead, KeyValueRecord, KeyValueSnapshot, KeyValueSnapshotConfig,
+};
 pub use model::{
     DriverQuarantine, FileIdentity, RecordHash, RecordOrigin, Revision, SourceCursor,
     SourceDriverError, SourceMediaType, SourceRecord, SourceRecordState,
@@ -42,3 +48,7 @@ pub use replace_document::{
     ReplaceDocument, ReplaceDocumentConfig, ReplaceRead,
 };
 pub use scheduler::{BoundedScheduler, IngestPriority, ScheduleOutcome, ScheduledWork, WorkKey};
+pub use sqlite_snapshot::{
+    SqliteCheckpoint, SqliteColumn, SqliteQuerySpec, SqliteRead, SqliteRowRecord, SqliteSnapshot,
+    SqliteSnapshotConfig, SqliteValue,
+};

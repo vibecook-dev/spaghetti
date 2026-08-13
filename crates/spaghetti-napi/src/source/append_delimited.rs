@@ -2,7 +2,7 @@ use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 
-use super::file::file_identity;
+use super::file::{file_identity, open_confined_file, parent_and_file_name};
 use super::model::{io_error, CursorReader};
 use super::{
     DriverQuarantine, FileIdentity, RecordHash, RecordOrigin, Revision, SourceCursor,
@@ -177,13 +177,36 @@ impl AppendDelimitedFile {
         origin: &RecordOrigin,
         force_contract_replay: bool,
     ) -> Result<AppendRead, SourceDriverError> {
-        let mut file = match File::open(path) {
-            Ok(file) => file,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(AppendRead::Missing);
-            }
-            Err(error) => return Err(io_error("opening", path, error)),
+        let (parent, file_name) = parent_and_file_name(path)?;
+        let Some(file) = open_confined_file(parent, file_name)? else {
+            return Ok(AppendRead::Missing);
         };
+        self.read_opened(file, path, previous, origin, force_contract_replay)
+    }
+
+    pub fn read_confined(
+        &self,
+        root: &Path,
+        relative_path: &Path,
+        previous: Option<&AppendCheckpoint>,
+        origin: &RecordOrigin,
+        force_contract_replay: bool,
+    ) -> Result<AppendRead, SourceDriverError> {
+        let path = root.join(relative_path);
+        let Some(file) = open_confined_file(root, relative_path)? else {
+            return Ok(AppendRead::Missing);
+        };
+        self.read_opened(file, &path, previous, origin, force_contract_replay)
+    }
+
+    fn read_opened(
+        &self,
+        mut file: File,
+        path: &Path,
+        previous: Option<&AppendCheckpoint>,
+        origin: &RecordOrigin,
+        force_contract_replay: bool,
+    ) -> Result<AppendRead, SourceDriverError> {
         let initial_metadata = file
             .metadata()
             .map_err(|error| io_error("reading metadata for", path, error))?;

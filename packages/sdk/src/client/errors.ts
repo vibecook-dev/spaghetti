@@ -43,6 +43,8 @@ export function normalizeTransportError(error: unknown, diagnosticId: string): S
       ...(typeof error.projection === 'string' ? { projection: error.projection } : {}),
       ...(typeof error.retryAfterMs === 'number' ? { retryAfterMs: error.retryAfterMs } : {}),
       ...(typeof error.diagnosticId === 'string' ? { diagnosticId: error.diagnosticId } : {}),
+      ...(typeof error.currentCommitSeq === 'number' ? { currentCommitSeq: error.currentCommitSeq } : {}),
+      ...(isChangeCursor(error.oldestAvailable) ? { oldestAvailable: error.oldestAvailable } : {}),
     };
   }
 
@@ -53,6 +55,9 @@ export function normalizeTransportError(error: unknown, diagnosticId: string): S
     error && typeof error === 'object' && typeof (error as { code?: unknown }).code === 'string'
       ? (error as { code: string }).code
       : undefined;
+
+  const reset = parseResetRequired(raw);
+  if (reset) return reset;
 
   if (name === 'AbortError' || nativeStatus === 'Cancelled' || /\babort|\bcancel/.test(lower)) {
     return cancelledProtocolError();
@@ -123,7 +128,53 @@ function protocolErrorFromClient(error: SpaghettiClientError): SpaghettiProtocol
     ...(error.projection ? { projection: error.projection } : {}),
     ...(error.retryAfterMs !== undefined ? { retryAfterMs: error.retryAfterMs } : {}),
     ...(error.diagnosticId ? { diagnosticId: error.diagnosticId } : {}),
+    ...(error.currentCommitSeq !== undefined ? { currentCommitSeq: error.currentCommitSeq } : {}),
+    ...(error.oldestAvailable ? { oldestAvailable: error.oldestAvailable } : {}),
   };
+}
+
+function parseResetRequired(raw: string): SpaghettiProtocolError | undefined {
+  const match = raw
+    .trim()
+    .match(
+      /^RESET_REQUIRED current_commit_seq=(\d+) oldest_commit_seq=(?:Some\((\d+)\)|None) oldest_ordinal=(?:Some\((\d+)\)|None)$/,
+    );
+  if (!match) return undefined;
+  const currentCommitSeq = Number(match[1]);
+  const oldestCommitSeq = match[2] === undefined ? undefined : Number(match[2]);
+  const oldestOrdinal = match[3] === undefined ? undefined : Number(match[3]);
+  if (!Number.isSafeInteger(currentCommitSeq) || currentCommitSeq < 0) return undefined;
+  const oldestAvailable =
+    oldestCommitSeq !== undefined &&
+    oldestOrdinal !== undefined &&
+    Number.isSafeInteger(oldestCommitSeq) &&
+    oldestCommitSeq >= 0 &&
+    Number.isInteger(oldestOrdinal) &&
+    oldestOrdinal >= 0 &&
+    oldestOrdinal <= 0xffff_ffff
+      ? { commitSeq: oldestCommitSeq, ordinal: oldestOrdinal }
+      : undefined;
+  return {
+    code: 'reset_required',
+    message: 'The saved change cursor is older than retained history; read a new snapshot and resubscribe.',
+    reason: 'retention_gap',
+    currentCommitSeq,
+    ...(oldestAvailable ? { oldestAvailable } : {}),
+  };
+}
+
+function isChangeCursor(value: unknown): value is { commitSeq: number; ordinal: number } {
+  if (!value || typeof value !== 'object') return false;
+  const cursor = value as { commitSeq?: unknown; ordinal?: unknown };
+  return (
+    typeof cursor.commitSeq === 'number' &&
+    Number.isSafeInteger(cursor.commitSeq) &&
+    cursor.commitSeq >= 0 &&
+    typeof cursor.ordinal === 'number' &&
+    Number.isInteger(cursor.ordinal) &&
+    cursor.ordinal >= 0 &&
+    cursor.ordinal <= 0xffff_ffff
+  );
 }
 
 function isProtocolErrorLike(error: unknown): error is Record<string, unknown> & { code: SpaghettiClientErrorCode } {

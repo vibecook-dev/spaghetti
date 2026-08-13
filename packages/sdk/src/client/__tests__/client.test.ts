@@ -247,6 +247,22 @@ describe('SpaghettiClient protocol', () => {
       'cursor_invalid',
       'cursor classification remains more specific than InvalidArg',
     );
+    assert.deepEqual(
+      normalizeTransportError(
+        nativeError(
+          'GenericFailure',
+          'RESET_REQUIRED current_commit_seq=42 oldest_commit_seq=Some(17) oldest_ordinal=Some(0)',
+        ),
+        'napi-6',
+      ),
+      {
+        code: 'reset_required',
+        message: 'The saved change cursor is older than retained history; read a new snapshot and resubscribe.',
+        reason: 'retention_gap',
+        currentCommitSeq: 42,
+        oldestAvailable: { commitSeq: 17, ordinal: 0 },
+      },
+    );
   });
 
   test('rejects pre-aborted and post-disposal requests without dispatch', async () => {

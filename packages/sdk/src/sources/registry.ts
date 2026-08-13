@@ -11,7 +11,7 @@ import type { ErrorSink } from '../io/error-sink.js';
 import type { LifecycleOwner } from '../data/lifecycle-owner.js';
 import { createIngestService } from '../data/ingest-service.js';
 import type { DurableStore } from '../store/durable-store.js';
-import type { NativeAddon } from '../native.js';
+import type { LegacyNativeAddon as NativeAddon } from '../legacy-native.js';
 import type { IngestEngine } from '../settings.js';
 import type { ClaudeCodeLiveDiskIngest } from './claude-code/live/disk-ingest.js';
 import { toLifecycleOptions } from '../planes/static-ingest.js';

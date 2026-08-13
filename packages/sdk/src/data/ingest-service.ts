@@ -21,7 +21,7 @@ import type {
 } from '../types/index.js';
 import type { Change } from '../live/change-events.js';
 import type { ParsedRow, ParsedRowCategory } from '../live/parsed-row.js';
-import type { NativeAddon } from '../native.js';
+import type { LegacyNativeAddon as NativeAddon } from '../legacy-native.js';
 import type { IngestEngine } from '../settings.js';
 import type { IngestHooks, MessageExtractor, SessionTokenApi } from '../sources/types.js';
 import { claudeCodeMessageExtractor } from '../sources/claude-code/message-extractor.js';

@@ -3,7 +3,7 @@
  *
  * - Single-instance lock so two playgrounds cannot share the same cache.
  * - Creates a BrowserWindow with context isolation + preload.
- * - Initializes SpaghettiService (multi-source ingest into userData SQLite).
+ * - Starts one Rust observation owner in a UtilityProcess.
  * - Mille file explorer UtilityProcess (right panel) via MessagePort.
  * - Awaitable dispose on quit (prefer over kill -9 mid-ingest).
  */
@@ -14,11 +14,9 @@ import { existsSync } from 'node:fs';
 import { realpath } from 'node:fs/promises';
 import { basename, dirname, extname, isAbsolute, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import type { IngestEngine } from '@vibecook/spaghetti-sdk';
 import type { SdkHostEvent } from '../shared/sdk-protocol.js';
 import { EVENT_CHANNELS } from '../shared/ipc.js';
 import { registerIpcHandlers } from './ipc-handlers.js';
-import { resolveAppEngine } from './settings.js';
 import { SdkHostClient } from './sdk-host-client.js';
 import { closeMilleWorkspace, getMilleActiveRoot, openMilleWorkspace } from './mille-host.js';
 
@@ -69,11 +67,10 @@ if (!gotTheLock) {
 /**
  * Resolve the SQLite index path inside Electron's per-app `userData` folder.
  *
- * Filename includes the active ingest engine (rs|ts). Engine is read from the
- * app's own settings file — not `~/.spaghetti/config.json`.
+ * The stable `-rs` name also keeps existing RFC 011 databases reusable.
  */
-function resolvePlaygroundDbPath(engine: IngestEngine): string {
-  return join(app.getPath('userData'), 'cache', `spaghetti-${engine}.db`);
+function resolvePlaygroundDbPath(): string {
+  return join(app.getPath('userData'), 'cache', 'spaghetti-rs.db');
 }
 
 /**
@@ -149,9 +146,8 @@ function createWindow(): BrowserWindow {
 void app.whenReady().then(async () => {
   if (!gotTheLock) return;
 
-  const engine = resolveAppEngine();
-  const dbPath = resolvePlaygroundDbPath(engine);
-  const sdkHost = new SdkHostClient({ dbPath, engine, onEvent: broadcastSdkEvent });
+  const dbPath = resolvePlaygroundDbPath();
+  const sdkHost = new SdkHostClient({ dbPath, onEvent: broadcastSdkEvent });
   sdkHostClient = sdkHost;
   registerIpcHandlers(sdkHost);
 

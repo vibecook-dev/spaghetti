@@ -77,6 +77,11 @@ pub struct QueryOverview {
     /// Canonical history materialized by the common observation coordinator.
     pub canonical_sessions: u32,
     pub canonical_messages: u32,
+    /// Durable replay-retention metrics from the same read snapshot.
+    pub change_log_oldest_cursor: Option<ChangeCursor>,
+    pub change_log_pruned_through_seq: u64,
+    pub change_log_retained_changes: u64,
+    pub change_log_retained_payload_bytes: u64,
     pub query_only: bool,
     pub read_only: bool,
 }
@@ -224,6 +229,7 @@ pub struct SourceCatalogObject {
     pub driver_checkpoint_version: Option<u32>,
     pub decoder_state: Option<Vec<u8>>,
     pub decoder_state_version: Option<u32>,
+    pub retry_state: Option<Vec<u8>>,
     pub size_bytes: Option<u64>,
     pub mtime_ns: Option<i64>,
     pub decoder_contract_version: u32,
@@ -480,7 +486,7 @@ impl QueryCancellationToken {
         self.cancelled.store(true, Ordering::Release);
     }
 
-    fn is_cancelled(&self) -> bool {
+    pub fn is_cancelled(&self) -> bool {
         self.cancelled.load(Ordering::Acquire)
     }
 }
@@ -2701,14 +2707,25 @@ fn read_overview(connection: &Connection) -> Result<QueryOverview, EngineError> 
             detail: error.to_string(),
         })?;
 
+    let commit_seq = read_commit_seq(&transaction)?;
+    let change_log_oldest_cursor = read_oldest_change_cursor(&transaction, commit_seq)?;
+    let (
+        change_log_pruned_through_seq,
+        change_log_retained_changes,
+        change_log_retained_payload_bytes,
+    ) = read_change_log_retention_state(&transaction)?;
     let overview = QueryOverview {
         schema_version,
-        commit_seq: read_commit_seq(&transaction)?,
+        commit_seq,
         projects: count_table(&transaction, "projects")?,
         sessions: count_table(&transaction, "sessions")?,
         messages: count_table(&transaction, "messages")?,
         canonical_sessions: count_table(&transaction, "canonical_sessions")?,
         canonical_messages: count_table(&transaction, "canonical_messages")?,
+        change_log_oldest_cursor,
+        change_log_pruned_through_seq,
+        change_log_retained_changes,
+        change_log_retained_payload_bytes,
         query_only: query_only != 0,
         // The connection was opened with SQLITE_OPEN_READ_ONLY. The write
         // rejection test below verifies this invariant on the actual handle.
@@ -2810,7 +2827,8 @@ fn read_source_catalog(
                        so.generation, so.committed_cursor, so.observed_revision,
                        so.adapter_object_context, so.driver_checkpoint,
                        so.driver_checkpoint_version, so.decoder_state,
-                       so.decoder_state_version, so.size_bytes, so.mtime_ns,
+                       so.decoder_state_version, so.retry_state,
+                       so.size_bytes, so.mtime_ns,
                        so.decoder_contract_version, so.last_commit_seq, so.state
                 FROM source_objects so
                 JOIN source_streams ss ON ss.source_stream_id = so.source_stream_id
@@ -2890,27 +2908,30 @@ fn read_source_catalog(
                     })?,
                     "adapter state version",
                 )?,
+                retry_state: row
+                    .get(14)
+                    .map_err(|error| query_sqlite_error("decode source retry state", error))?,
                 size_bytes: decode_optional_u64(
-                    row.get(14)
+                    row.get(15)
                         .map_err(|error| query_sqlite_error("decode source size", error))?,
                     "source size",
                 )?,
                 mtime_ns: row
-                    .get(15)
+                    .get(16)
                     .map_err(|error| query_sqlite_error("decode source mtime", error))?,
                 decoder_contract_version: decode_nonnegative_u32(
-                    row.get(16).map_err(|error| {
+                    row.get(17).map_err(|error| {
                         query_sqlite_error("decode decoder contract version", error)
                     })?,
                     "decoder contract version",
                 )?,
                 last_commit_seq: decode_optional_u64(
-                    row.get(17)
+                    row.get(18)
                         .map_err(|error| query_sqlite_error("decode source commit", error))?,
                     "source commit sequence",
                 )?,
                 state: row
-                    .get(18)
+                    .get(19)
                     .map_err(|error| query_sqlite_error("decode source state", error))?,
             });
         }
@@ -2996,26 +3017,19 @@ fn read_change_replay(
         .unchecked_transaction()
         .map_err(|error| query_sqlite_error("begin change replay snapshot", error))?;
     let watermark = read_committed_watermark(&transaction)?;
-    let oldest_available = transaction
-        .query_row(
-            r#"
-            SELECT commit_seq, ordinal
-            FROM change_log
-            WHERE commit_seq <= ?1
-            ORDER BY commit_seq, ordinal
-            LIMIT 1
-            "#,
-            [to_query_i64(watermark, "commit watermark")?],
-            |row| {
-                let commit_seq: i64 = row.get(0)?;
-                let ordinal: i64 = row.get(1)?;
-                Ok((commit_seq, ordinal))
-            },
-        )
-        .optional()
-        .map_err(|error| query_sqlite_error("read oldest durable change", error))?
-        .map(|(commit_seq, ordinal)| decode_cursor(commit_seq, ordinal))
-        .transpose()?;
+    let oldest_available = read_oldest_change_cursor(&transaction, watermark)?;
+    let (pruned_through_commit_seq, _, _) = read_change_log_retention_state(&transaction)?;
+    if request
+        .after
+        .is_some_and(|cursor| cursor.commit_seq <= pruned_through_commit_seq)
+        && pruned_through_commit_seq > 0
+    {
+        return Err(EngineError::ResetRequired {
+            current_commit_seq: watermark,
+            oldest_commit_seq: oldest_available.map(|cursor| cursor.commit_seq),
+            oldest_ordinal: oldest_available.map(|cursor| cursor.ordinal),
+        });
+    }
 
     let after = request.after.unwrap_or(ChangeCursor {
         commit_seq: 0,
@@ -3141,6 +3155,60 @@ fn read_change_replay(
     })
 }
 
+fn read_oldest_change_cursor(
+    connection: &Connection,
+    watermark: u64,
+) -> Result<Option<ChangeCursor>, EngineError> {
+    connection
+        .query_row(
+            r#"
+            SELECT commit_seq, ordinal
+            FROM change_log
+            WHERE commit_seq <= ?1
+            ORDER BY commit_seq, ordinal
+            LIMIT 1
+            "#,
+            [to_query_i64(watermark, "commit watermark")?],
+            |row| {
+                let commit_seq: i64 = row.get(0)?;
+                let ordinal: i64 = row.get(1)?;
+                Ok((commit_seq, ordinal))
+            },
+        )
+        .optional()
+        .map_err(|error| query_sqlite_error("read oldest durable change", error))?
+        .map(|(commit_seq, ordinal)| decode_cursor(commit_seq, ordinal))
+        .transpose()
+}
+
+fn read_change_log_retention_state(
+    connection: &Connection,
+) -> Result<(u64, u64, u64), EngineError> {
+    let (floor, retained_changes, retained_payload_bytes): (i64, i64, i64) = connection
+        .query_row(
+            r#"
+            SELECT pruned_through_commit_seq, retained_change_count,
+                   retained_payload_bytes
+            FROM change_log_retention_state WHERE singleton = 1
+            "#,
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .map_err(|error| query_sqlite_error("read change-log retention metrics", error))?;
+    Ok((
+        decode_nonnegative_i64(floor, "change-log pruned floor")?,
+        decode_nonnegative_i64(retained_changes, "retained change count")?,
+        decode_nonnegative_i64(retained_payload_bytes, "retained change payload bytes")?,
+    ))
+}
+
+fn decode_nonnegative_i64(value: i64, field: &'static str) -> Result<u64, EngineError> {
+    u64::try_from(value).map_err(|_| EngineError::Sqlite {
+        operation: "decode non-negative query metric",
+        detail: format!("{field} was negative: {value}"),
+    })
+}
+
 fn change_payload_bytes(change: &DurableChange) -> Result<u64, EngineError> {
     [
         change.topic.len(),
@@ -3236,10 +3304,10 @@ fn query_sqlite_error(operation: &'static str, error: rusqlite::Error) -> Engine
 mod tests {
     use super::*;
     use crate::engine::commit::{
-        ChangeEntry, ExpectedSourceCursor, ObservationCommit, SourceInstanceSpec,
-        SourceObjectUpdate, SourceStreamSpec,
+        ChangeEntry, ChangeLogRetentionPolicy, ExpectedSourceCursor, ObservationCommit,
+        SourceInstanceSpec, SourceObjectUpdate, SourceStreamSpec,
     };
-    use crate::engine::writer::WriterRuntime;
+    use crate::engine::writer::{WriterClient, WriterRuntime};
     use rusqlite::Connection;
     use tempfile::tempdir;
 
@@ -3249,7 +3317,10 @@ mod tests {
                 adapter_id: "query-fixture".to_string(),
                 stable_key: b"root".to_vec(),
                 display_name: "Query fixture".to_string(),
+                adapter_version: "1.0.0".to_string(),
                 adapter_contract_version: 1,
+                source_schema_versions: Vec::new(),
+                capabilities: Vec::new(),
                 discovered_at: 10,
                 last_seen_at: 10,
             },
@@ -3273,6 +3344,7 @@ mod tests {
                 driver_checkpoint_version: None,
                 decoder_state: None,
                 decoder_state_version: None,
+                retry_state: None,
                 size_bytes: None,
                 mtime_ns: None,
                 decoder_contract_version: 1,
@@ -3300,6 +3372,29 @@ mod tests {
                     payload: b"runtime".to_vec(),
                 },
             ],
+        }
+    }
+
+    fn commit_revisions(client: &WriterClient, count: u8) {
+        let mut previous_cursor: Option<Vec<u8>> = None;
+        for sequence in 1..=count {
+            let mut request = commit_request();
+            request.object.expected = previous_cursor
+                .as_ref()
+                .map(|cursor| ExpectedSourceCursor::At {
+                    generation: 1,
+                    committed_cursor: cursor.clone(),
+                })
+                .unwrap_or(ExpectedSourceCursor::Absent);
+            let cursor = vec![sequence];
+            request.object.committed_cursor = cursor.clone();
+            request.started_at = i64::from(sequence) * 10;
+            request.committed_at = request.started_at + 1;
+            request.changes[0].payload = vec![sequence];
+            request.changes[1].payload = vec![sequence];
+            let receipt = client.commit_observation(request).unwrap();
+            assert_eq!(receipt.commit_seq, u64::from(sequence));
+            previous_cursor = Some(cursor);
         }
     }
 
@@ -4077,6 +4172,108 @@ mod tests {
         assert!(second.payload_bytes <= MAX_CHANGE_REPLAY_PAYLOAD_BYTES);
 
         pool.shutdown().unwrap();
+        writer.shutdown().unwrap();
+    }
+
+    #[test]
+    fn retention_prunes_complete_commits_and_requires_stale_cursor_reset() {
+        let dir = tempdir().unwrap();
+        let database = dir.path().join("replay-retention.db");
+        let mut writer = WriterRuntime::start(database.clone()).unwrap();
+        let client = writer.client();
+        commit_revisions(&client, 4);
+
+        let retention = client
+            .maintain_change_log(
+                ChangeLogRetentionPolicy {
+                    // Keep every fixture commit by age so this exercises the
+                    // independent logical-size boundary.
+                    max_age_ms: 10_000,
+                    max_payload_bytes: 1,
+                    min_resumable_commits: 2,
+                },
+                1_000,
+            )
+            .unwrap();
+        assert_eq!(retention.pruned_through_commit_seq, 2);
+        assert_eq!(retention.retained_change_count, 4);
+        assert!(retention.retained_payload_bytes > 0);
+        assert_eq!(retention.oldest_retained_commit_seq, Some(3));
+        assert_eq!(retention.oldest_retained_ordinal, Some(0));
+
+        let mut pool = QueryPool::start(database, 1).unwrap();
+        let queries = pool.client();
+        let stale = queries
+            .replay_changes(ChangeReplayRequest {
+                after: Some(ChangeCursor {
+                    commit_seq: 2,
+                    ordinal: u32::MAX,
+                }),
+                topics: Vec::new(),
+                limit: 10,
+            })
+            .unwrap_err();
+        assert!(matches!(
+            stale,
+            EngineError::ResetRequired {
+                current_commit_seq: 4,
+                oldest_commit_seq: Some(3),
+                oldest_ordinal: Some(0),
+            }
+        ));
+
+        let retained = queries
+            .replay_changes(ChangeReplayRequest {
+                after: Some(ChangeCursor {
+                    commit_seq: 3,
+                    ordinal: 0,
+                }),
+                topics: Vec::new(),
+                limit: 10,
+            })
+            .unwrap();
+        assert_eq!(retained.changes.len(), 3);
+        assert_eq!(retained.oldest_available.unwrap().commit_seq, 3);
+
+        let overview = queries.overview().unwrap();
+        assert_eq!(overview.change_log_pruned_through_seq, 2);
+        assert_eq!(overview.change_log_retained_changes, 4);
+        assert_eq!(
+            overview.change_log_oldest_cursor,
+            Some(ChangeCursor {
+                commit_seq: 3,
+                ordinal: 0,
+            })
+        );
+
+        pool.shutdown().unwrap();
+        writer.shutdown().unwrap();
+    }
+
+    #[test]
+    fn retention_age_boundary_is_independent_of_the_size_target() {
+        let dir = tempdir().unwrap();
+        let database = dir.path().join("replay-retention-age.db");
+        let mut writer = WriterRuntime::start(database).unwrap();
+        let client = writer.client();
+        commit_revisions(&client, 4);
+
+        let retention = client
+            .maintain_change_log(
+                ChangeLogRetentionPolicy {
+                    max_age_ms: 25,
+                    max_payload_bytes: 1024 * 1024,
+                    min_resumable_commits: 2,
+                },
+                46,
+            )
+            .unwrap();
+        // cutoff=21 includes commits 1 and 2, while the two-commit minimum
+        // independently protects commits 3 and 4.
+        assert_eq!(retention.pruned_through_commit_seq, 2);
+        assert_eq!(retention.oldest_retained_commit_seq, Some(3));
+        assert_eq!(retention.retained_change_count, 4);
+
         writer.shutdown().unwrap();
     }
 

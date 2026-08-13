@@ -32,9 +32,8 @@ import type {
   TokenActivityResult,
 } from '@vibecook/spaghetti-sdk';
 import type { SpaghettiClientResponseMap } from '@vibecook/spaghetti-sdk/client';
+import type { ObservationHostSnapshot } from '@vibecook/spaghetti-sdk/observation';
 import type {
-  ClaudeObservationHistoryParity,
-  ClaudeObservationShadowSnapshot,
   InitProgress,
   SearchQuery,
   SearchResultSet,
@@ -53,9 +52,7 @@ export interface ObservationShadowReport {
   state: ObservationOwnerStatus['state'] | 'degraded';
   error?: string;
   databasePath?: string;
-  parityError?: string;
-  snapshot?: ClaudeObservationShadowSnapshot;
-  historyParity?: ClaudeObservationHistoryParity;
+  snapshot?: ObservationHostSnapshot;
 }
 
 /**
@@ -134,8 +131,8 @@ export interface SpaghettiIPC {
    * Used after corrupt/malformed DB errors so the UI is not stuck.
    */
   retryInit(): Promise<{ ok: true }>;
-  /** Resolved ingest engine: `'rs'` (native Rust) or `'ts'` (TypeScript). */
-  getEngine(): Promise<'rs' | 'ts'>;
+  /** The sole RFC 011 production engine. */
+  getEngine(): Promise<'rs'>;
   /** Opt-in RFC 011 shadow health and Claude-scoped history parity. */
   getObservationShadowStatus(): Promise<ObservationShadowReport>;
   /** Lightweight owner availability; unlike the full report, runs no queries. */

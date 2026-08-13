@@ -8,11 +8,10 @@
  * to ProjectsView when the service is ready.
  */
 
-import React, { useState, useCallback, useEffect, useRef, useMemo } from 'react';
+import React, { useState, useCallback, useEffect, useRef } from 'react';
 import { Box, Text, useApp, useInput } from 'ink';
 import { createRequire } from 'node:module';
-import { resolveActiveEngine } from '@vibecook/spaghetti-sdk';
-import type { SpaghettiAPI } from '@vibecook/spaghetti-sdk';
+import type { ObservationService } from '@vibecook/spaghetti-sdk/observation';
 import type { ViewEntry, ViewNav, ViewContext } from './types.js';
 import { ViewNavProvider } from './context.js';
 import { Header, Footer, HRule } from './chrome.js';
@@ -30,9 +29,9 @@ export const VERSION = (_require('../package.json') as { version: string }).vers
 
 // ─── API Context ───────────────────────────────────────────────────────
 
-const ApiContext = React.createContext<SpaghettiAPI>(null!);
+const ApiContext = React.createContext<ObservationService>(null!);
 export const ApiProvider = ApiContext.Provider;
-export function useApi(): SpaghettiAPI {
+export function useApi(): ObservationService {
   return React.useContext(ApiContext);
 }
 
@@ -77,7 +76,7 @@ function defaultHints(entry: ViewEntry, isRoot: boolean): string {
 // ─── Shell Component ───────────────────────────────────────────────────
 
 export interface ShellProps {
-  api: SpaghettiAPI;
+  api: ObservationService;
 }
 
 export function Shell({ api }: ShellProps): React.ReactElement {
@@ -86,11 +85,8 @@ export function Shell({ api }: ShellProps): React.ReactElement {
   // Enter alternate screen buffer for a clean full-screen TUI canvas
   useAlternateScreen();
 
-  // Effective ingest engine for the footer badge. Fixed for the process
-  // lifetime (native-addon availability can't change mid-run), so resolve
-  // it once. Uses the effective value, not the preference — a `rs` config
-  // with no native addon shows `TS`, matching what the service actually ran.
-  const engine = useMemo(() => resolveActiveEngine().engine, []);
+  // RFC 011 makes the Rust observation engine the only production owner.
+  const engine = 'rs' as const;
 
   // ── Initialization lifecycle ──────────────────────────────────────
 
@@ -129,13 +125,13 @@ export function Shell({ api }: ShellProps): React.ReactElement {
           // Probe a cheap read: a corrupt cache can survive initialize() and
           // only fail when the menu queries (SQLITE_CORRUPT). Auto-rebuild once.
           try {
-            api.getProjectList();
+            await api.getProjectList();
           } catch (probeErr) {
             const msg = probeErr instanceof Error ? probeErr.message : String(probeErr);
             if (/malformed|SQLITE_CORRUPT|corrupt/i.test(msg)) {
               setProgress({ message: 'Index corrupt — rebuilding…', current: 0, total: 0 });
               await api.rebuildIndex();
-              api.getProjectList();
+              await api.getProjectList();
             } else {
               throw probeErr;
             }
@@ -214,25 +210,15 @@ export function Shell({ api }: ShellProps): React.ReactElement {
   const handleSearch = useCallback(
     (query: string) => {
       setSearchMode(false);
-      // This query runs in an event handler (outside render), so a throw here
-      // would escape the ErrorBoundary and crash the shell. Guard it; SearchView
-      // re-runs the search and is itself wrapped by the boundary, so a genuine
-      // query failure surfaces there as a panel rather than a raw stack.
-      let total = 0;
-      try {
-        total = api.search({ text: query }).total;
-      } catch {
-        // fall through with total = 0; SearchView reports the real error
-      }
       const entry: ViewEntry = {
         type: 'search',
         component: () => <SearchView query={query} />,
-        breadcrumb: `Search: "${query}" (${total} results)`,
+        breadcrumb: `Search: "${query}"`,
         hints: '\u2191\u2193 navigate  \u23CE jump to message  Esc back  / new search',
       };
       push(entry);
     },
-    [api, push],
+    [push],
   );
 
   const top = stack[stack.length - 1];

@@ -114,7 +114,7 @@ export function createProgram(): Command {
     { name: 'plan', alias: 'pl', description: 'View session plan' },
     { name: 'export', alias: 'x', description: 'Export project data' },
     { name: 'doctor', alias: '', description: 'Health check for spaghetti and its data paths' },
-    { name: 'engine', alias: '', description: 'Show or switch the active ingest engine (ts | rs)' },
+    { name: 'engine', alias: '', description: 'Show the Rust observation engine status' },
     { name: 'uninstall', alias: '', description: 'Show uninstall instructions' },
     { name: 'update', alias: '', description: 'Check for updates and install the latest version' },
   ];
@@ -383,11 +383,11 @@ export function createProgram(): Command {
 
   program.addCommand(doctorCmd);
 
-  // Engine command (does not need SpaghettiAPI — reads/writes settings only)
+  // Engine command (does not open the observation database).
   program
     .command('engine')
-    .description('Show or switch the active ingest engine (ts | rs)')
-    .argument('[target]', 'Engine to switch to: `ts` (TypeScript) or `rs` (Rust native)')
+    .description('Show the Rust observation engine status')
+    .argument('[target]', 'Optional compatibility target; only `rs` is supported')
     .option('--json', 'Output as JSON')
     .action(async (target: string | undefined, opts: { json?: boolean }) => {
       await engineCommand(target, opts);

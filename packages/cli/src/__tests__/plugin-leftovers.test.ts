@@ -7,7 +7,7 @@
  */
 
 import assert from 'node:assert/strict';
-import { describe, it, before, after } from 'node:test';
+import { after, describe, it } from 'node:test';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -420,23 +420,10 @@ describe('probePluginLeftovers — degraded inputs', () => {
 describe('probePluginLeftovers — isolation from the real Claude home', () => {
   const realHome = join(homedir(), '.claude');
   const sentinel = join(realHome, '.spag-rfc007-probe-sentinel');
-  let createdSentinel = false;
-  let before1: string | null = null;
-
-  before(() => {
-    if (!existsSync(realHome)) return;
-    if (!existsSync(sentinel)) {
-      writeFileSync(sentinel, 'rfc-007 probe isolation sentinel', 'utf-8');
-      createdSentinel = true;
-    }
-    before1 = readFileSync(sentinel, 'utf-8');
-  });
-
-  after(() => {
-    if (createdSentinel && existsSync(sentinel)) rmSync(sentinel, { force: true });
-  });
 
   it('probing a fake home leaves the real ~/.claude byte-identical', () => {
+    const existed = existsSync(sentinel);
+    const before = existed ? readFileSync(sentinel, 'utf-8') : null;
     const home = makeHome();
     writeInstalled(home, { version: 2, plugins: { [HOOKS_ID]: [userRecord(HOOKS_ID)] } });
     writeMarketplaces(home, { [MARKETPLACE_NAME]: { source: { source: 'github', repo: CANONICAL_REPO } } });
@@ -445,9 +432,8 @@ describe('probePluginLeftovers — isolation from the real Claude home', () => {
 
     assert.equal(report.claudeHome, home);
     assert.notEqual(report.claudeHome, realHome);
-    if (before1 !== null) {
-      assert.equal(readFileSync(sentinel, 'utf-8'), before1, 'probe must not touch the real Claude home');
-    }
+    assert.equal(existsSync(sentinel), existed, 'probe must not create files in the real Claude home');
+    if (before !== null) assert.equal(readFileSync(sentinel, 'utf-8'), before);
   });
 
   it('defaultClaudeHome honours CLAUDE_CONFIG_DIR at call time, not import time', () => {

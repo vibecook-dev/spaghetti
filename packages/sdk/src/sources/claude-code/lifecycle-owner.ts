@@ -61,7 +61,7 @@ import type { FileService } from '../../io/index.js';
 import type { ClaudeCodeLiveUpdates } from './live/live-updates.js';
 import type { LiveWatch } from '../../live/live-watch.js';
 import { createWorkerPool, isWorkerThreadsAvailable, type WorkerToMainMessage } from '../../workers/index.js';
-import { loadNativeAddon } from '../../native.js';
+import { loadLegacyNativeAddon as loadNativeAddon } from '../../legacy-native.js';
 import { defaultDbPathForEngine, resolveEngine, type IngestEngine } from '../../settings.js';
 
 // ═══════════════════════════════════════════════════════════════════════════

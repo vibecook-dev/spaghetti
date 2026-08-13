@@ -2,7 +2,7 @@
  * Memory command — view project MEMORY.md content
  */
 
-import type { SpaghettiAPI } from '@vibecook/spaghetti-sdk';
+import type { ObservationService } from '@vibecook/spaghetti-sdk/observation';
 import { theme } from '../lib/color.js';
 import { resolveProject, suggestProjects } from '../lib/resolve.js';
 import { noProjectMatch } from '../lib/error.js';
@@ -13,11 +13,11 @@ export interface MemoryOptions {
 }
 
 export async function memoryCommand(
-  api: SpaghettiAPI,
+  api: ObservationService,
   projectInput: string | undefined,
   opts: MemoryOptions,
 ): Promise<void> {
-  const projects = api.getProjectList();
+  const projects = await api.getProjectList();
 
   // If no project specified and cwd doesn't match, list projects with memory
   const input = projectInput ?? '.';
@@ -63,7 +63,7 @@ export async function memoryCommand(
   }
 
   // Get memory content
-  const memory = api.getProjectMemory(
+  const memory = await api.getProjectMemory(
     project,
     project.sourceIds.includes('claude-code') ? { sourceId: 'claude-code' } : undefined,
   );

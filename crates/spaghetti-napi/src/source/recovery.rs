@@ -322,6 +322,13 @@ impl PollingPolicy {
         self.watcher_failures = self.watcher_failures.saturating_add(1);
     }
 
+    /// Enter polling fallback immediately when the watcher backend could not be
+    /// created or registered at all. Runtime event failures still use the
+    /// repeated-failure threshold above.
+    pub fn record_watcher_unavailable(&mut self) {
+        self.watcher_failures = self.failures_before_fallback;
+    }
+
     pub fn record_watcher_success(&mut self) {
         self.watcher_failures = 0;
     }

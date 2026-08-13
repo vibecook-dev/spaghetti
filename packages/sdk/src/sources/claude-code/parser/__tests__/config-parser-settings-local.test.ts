@@ -66,6 +66,7 @@ describe('ConfigParser settings.local.json', () => {
         tui: 'fullscreen',
         autoCompactEnabled: false,
         agentPushNotifEnabled: true,
+        promptSuggestionEnabled: true,
         skipWorkflowUsageWarning: true,
       }),
     );
@@ -73,7 +74,23 @@ describe('ConfigParser settings.local.json', () => {
     assert.equal(s.tui, 'fullscreen');
     assert.equal(s.autoCompactEnabled, false);
     assert.equal(s.agentPushNotifEnabled, true);
+    assert.equal(s.promptSuggestionEnabled, true);
     assert.equal(s.skipWorkflowUsageWarning, true);
+  });
+
+  test('cache/my-closed-issues.json is retained without assuming an upstream record schema', () => {
+    mkdirSync(path.join(rootDir, 'cache'), { recursive: true });
+    const issue = { number: 42, repository: 'example/project', futureField: { retained: true } };
+    writeFileSync(path.join(rootDir, 'cache', 'my-closed-issues.json'), JSON.stringify([issue]));
+
+    assert.deepEqual(parser.parseConfig(rootDir).cache.myClosedIssues, [issue]);
+  });
+
+  test('malformed cache/my-closed-issues.json is ignored as an incomplete cache write', () => {
+    mkdirSync(path.join(rootDir, 'cache'), { recursive: true });
+    writeFileSync(path.join(rootDir, 'cache', 'my-closed-issues.json'), '{');
+
+    assert.equal(parser.parseConfig(rootDir).cache.myClosedIssues, undefined);
   });
 
   test('mcp-needs-auth-cache.json is read into config.mcpNeedsAuth', () => {

@@ -1,6 +1,8 @@
 use std::path::Path;
 
-use super::file::{read_stable_file, stamp_revision, FileStamp, StableRead};
+use super::file::{
+    read_stable_file, read_stable_file_confined, stamp_revision, FileStamp, StableRead,
+};
 use super::model::CursorReader;
 use super::{FileIdentity, RecordOrigin, Revision, SourceCursor, SourceDriverError, SourceRecord};
 
@@ -132,7 +134,34 @@ impl PresenceObject {
         previous: Option<&PresenceCheckpoint>,
         origin: &RecordOrigin,
     ) -> Result<PresenceRead, SourceDriverError> {
-        match read_stable_file(path, self.config.max_content_bytes)? {
+        self.interpret_read(
+            read_stable_file(path, self.config.max_content_bytes)?,
+            previous,
+            origin,
+        )
+    }
+
+    pub fn read_confined(
+        &self,
+        root: &Path,
+        relative_path: &Path,
+        previous: Option<&PresenceCheckpoint>,
+        origin: &RecordOrigin,
+    ) -> Result<PresenceRead, SourceDriverError> {
+        self.interpret_read(
+            read_stable_file_confined(root, relative_path, self.config.max_content_bytes)?,
+            previous,
+            origin,
+        )
+    }
+
+    fn interpret_read(
+        &self,
+        read: StableRead,
+        previous: Option<&PresenceCheckpoint>,
+        origin: &RecordOrigin,
+    ) -> Result<PresenceRead, SourceDriverError> {
+        match read {
             StableRead::Unstable => Ok(PresenceRead::RetryTransient),
             StableRead::Missing => self.observe_absence(previous, origin),
             StableRead::Oversized(stamp) => {

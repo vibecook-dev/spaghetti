@@ -50,7 +50,7 @@ import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 
-import { createSpaghettiService } from '../packages/sdk/dist/index.js';
+import { createSpaghettiService } from '../packages/sdk/src/legacy-oracle.js';
 
 // Resolve the native addon from the SDK package — under pnpm's strict
 // workspace layout, `@vibecook/spaghetti-sdk-native` is only hoisted into

@@ -3,7 +3,8 @@
  */
 
 import { writeFileSync } from 'node:fs';
-import type { SpaghettiAPI, SessionListItem, SessionMessage } from '@vibecook/spaghetti-sdk';
+import type { SessionListItem, SessionMessage } from '@vibecook/spaghetti-sdk';
+import type { ObservationService } from '@vibecook/spaghetti-sdk/observation';
 import { theme } from '../lib/color.js';
 import { formatDuration, formatTokens, totalTokens } from '../lib/format.js';
 import { resolveProject, suggestProjects } from '../lib/resolve.js';
@@ -128,11 +129,11 @@ function exportSessionAsMarkdown(session: SessionListItem, messages: SessionMess
 }
 
 export async function exportCommand(
-  api: SpaghettiAPI,
+  api: ObservationService,
   projectInput: string | undefined,
   opts: ExportOptions,
 ): Promise<void> {
-  const projects = api.getProjectList();
+  const projects = await api.getProjectList();
 
   // Resolve project
   const projStr = projectInput ?? '.';
@@ -146,7 +147,7 @@ export async function exportCommand(
   const includeTools = opts.includeTools ?? false;
 
   // Get sessions to export
-  let sessions = api.getSessionList(project);
+  let sessions = await api.getSessionList(project);
 
   if (opts.session) {
     // Filter to a single session
@@ -174,7 +175,7 @@ export async function exportCommand(
     parts.push('');
 
     for (const session of sessions) {
-      const page = api.getSessionMessages(session.projectSlug, session.sessionId, 100000, 0, {
+      const page = await api.getSessionMessages(session.projectSlug, session.sessionId, 100000, 0, {
         sourceId: session.sourceId,
       });
       parts.push(exportSessionAsMarkdown(session, page.messages, includeTools));
@@ -187,7 +188,7 @@ export async function exportCommand(
     // JSON export
     const exportedSessions: ExportedSession[] = [];
     for (const session of sessions) {
-      const page = api.getSessionMessages(session.projectSlug, session.sessionId, 100000, 0, {
+      const page = await api.getSessionMessages(session.projectSlug, session.sessionId, 100000, 0, {
         sourceId: session.sourceId,
       });
 

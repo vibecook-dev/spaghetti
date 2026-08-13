@@ -13,6 +13,7 @@ import { useApi } from './shell.js';
 import { HRule } from './chrome.js';
 import { TabBar } from './tab-bar.js';
 import { SessionsView } from './sessions-view.js';
+import { useAsyncValue } from './hooks.js';
 
 // ─── Constants ────────────────────────────────────────────────────────
 
@@ -53,14 +54,16 @@ function MemoryPanel({ project }: MemoryPanelProps): React.ReactElement {
   const { stdout } = useStdout();
   const termRows = stdout?.rows ?? 24;
 
-  const content = useMemo(
+  const loaded = useAsyncValue(
     () =>
       api.getProjectMemory(
         project,
         project.sourceIds.includes('claude-code') ? { sourceId: 'claude-code' } : undefined,
       ),
     [api, project],
+    null,
   );
+  const content = loaded.value;
   const lines = useMemo(() => (content ? renderMarkdownLines(content) : []), [content]);
 
   const [scrollOffset, setScrollOffset] = useState(0);
@@ -77,6 +80,14 @@ function MemoryPanel({ project }: MemoryPanelProps): React.ReactElement {
     },
     { isActive: !nav.searchMode },
   );
+
+  if (loaded.loading) {
+    return <Text dimColor> Loading canonical memory…</Text>;
+  }
+
+  if (loaded.error) {
+    return <Text color="red"> {loaded.error.message}</Text>;
+  }
 
   if (!content) {
     return (

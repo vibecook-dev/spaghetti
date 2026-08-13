@@ -11,7 +11,9 @@ Static product docs for GitHub Pages. No build step.
 | `app.js` | Theme toggle, nav, copy, accordion, scroll-spy |
 | `.nojekyll` | Disable Jekyll processing on GitHub Pages |
 
-**Aligned with product v0.5.17:** Claude Code + OpenAI Codex in one index (`source_id`), agent tabs in the TUI, source-scoped session reads, Codex `token_count` + tiktoken estimates (`tokensEstimated` / `~N`).
+**Aligned with RFC 011:** one Rust observation/query owner for Claude Code,
+OpenAI Codex, and Grok; async client-backed SDK reads; no production
+TypeScript ingest fallback.
 
 Terminal product shots on the landing page are **HTML mocks** styled to match
 real CLI chrome (window dots, mono layout, FTS snippets). They use synthetic
@@ -94,6 +96,6 @@ npx --yes gh-pages -d site
 When shipping product changes, update:
 
 1. Version strings (`v0.5.x`) on landing + API/commands headers
-2. `createSpaghettiService` options and list/query signatures in `api.html`
+2. `createObservationService` options and async query signatures in `api.html`
 3. CLI mocks (Agent column, tagline, multi-agent TUI tree) in `index.html`
 4. New commands or multi-source behavior in `commands.html`

@@ -2,7 +2,7 @@
  * Todos command — view todo items for a session
  */
 
-import type { SpaghettiAPI } from '@vibecook/spaghetti-sdk';
+import type { ObservationService } from '@vibecook/spaghetti-sdk/observation';
 import { theme } from '../lib/color.js';
 import { resolveProject, resolveSession, suggestProjects } from '../lib/resolve.js';
 import { UserError, noProjectMatch, noSessionMatch } from '../lib/error.js';
@@ -45,12 +45,12 @@ function renderTodoContent(todo: TodoItem): string {
 }
 
 export async function todosCommand(
-  api: SpaghettiAPI,
+  api: ObservationService,
   projectInput: string | undefined,
   sessionInput: string | undefined,
   opts: TodosOptions,
 ): Promise<void> {
-  const projects = api.getProjectList();
+  const projects = await api.getProjectList();
 
   // Resolve project
   const projStr = projectInput ?? '.';
@@ -61,7 +61,7 @@ export async function todosCommand(
   }
 
   // Resolve session
-  const sessions = api.getSessionList(project);
+  const sessions = await api.getSessionList(project);
 
   if (sessions.length === 0) {
     throw new UserError(
@@ -78,7 +78,7 @@ export async function todosCommand(
   }
 
   // Get todos
-  const todos = api.getSessionTodos(session.projectSlug, session.sessionId) as TodoItem[];
+  const todos = (await api.getSessionTodos(session.projectSlug, session.sessionId)) as TodoItem[];
 
   // JSON output
   if (opts.json) {

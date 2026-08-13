@@ -1,5 +1,5 @@
 /**
- * Service initialization — create SpaghettiAPI with progress display
+ * Service initialization — sole-owner Rust observation with progress display
  *
  * Uses direct stderr writes instead of setInterval-based spinners,
  * because the core initialization blocks the event loop during
@@ -7,38 +7,38 @@
  */
 
 import {
-  createSpaghettiService,
-  createCodexSource,
-  defaultCodexDir,
-  createGrokSource,
-  defaultGrokDir,
-} from '@vibecook/spaghetti-sdk';
-import type { SpaghettiAPI, AgentSource } from '@vibecook/spaghetti-sdk';
+  createObservationService,
+  type ObservationHostSource,
+  type ObservationService,
+} from '@vibecook/spaghetti-sdk/observation';
 import { existsSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { join } from 'node:path';
 import pc from 'picocolors';
 import { isTTY } from './terminal.js';
 
 /**
  * Auto-detect other installed agents on this machine and return their
- * `AgentSource`s to ingest alongside Claude Code (RFC 006 multi-source).
+ * native adapter roots to observe alongside Claude Code.
  * Only sources whose data actually exists are added, so a machine without
  * Codex pays nothing.
  */
-export function detectAdditionalSources(): AgentSource[] {
-  const sources: AgentSource[] = [];
+export function detectAdditionalSources(): ObservationHostSource[] {
+  const sources: ObservationHostSource[] = [];
   // Codex CLI: ~/.codex/sessions
-  if (existsSync(join(defaultCodexDir(), 'sessions'))) {
-    sources.push(createCodexSource());
+  const codexRoot = join(homedir(), '.codex');
+  if (existsSync(join(codexRoot, 'sessions'))) {
+    sources.push({ adapterId: 'codex', roots: [codexRoot] });
   }
   // Grok CLI (xAI): ~/.grok/sessions
-  if (existsSync(join(defaultGrokDir(), 'sessions'))) {
-    sources.push(createGrokSource());
+  const grokRoot = join(homedir(), '.grok');
+  if (existsSync(join(grokRoot, 'sessions'))) {
+    sources.push({ adapterId: 'grok', roots: [grokRoot] });
   }
   return sources;
 }
 
-let _service: SpaghettiAPI | null = null;
+let _service: ObservationService | null = null;
 
 export interface InitOptions {
   silent?: boolean;
@@ -117,12 +117,19 @@ function stripAnsi(str: string): string {
   return str.replace(/\x1b\[[0-9;]*m/g, '');
 }
 
-export async function initService(opts?: InitOptions): Promise<SpaghettiAPI> {
-  const service = createSpaghettiService({
-    rootDir: opts?.rootDir ?? opts?.claudeDir,
-    dbPath: opts?.dbPath,
-    additionalSources: detectAdditionalSources(),
+export function createService(opts?: InitOptions): ObservationService {
+  const claudeRoot = opts?.rootDir ?? opts?.claudeDir ?? join(homedir(), '.claude');
+  const dbPath = opts?.dbPath ?? join(homedir(), '.spaghetti', 'cache', 'spaghetti-rs.db');
+  return createObservationService({
+    dbPath,
+    sources: [{ adapterId: 'claude-code', roots: [claudeRoot] }, ...detectAdditionalSources()],
+    ownerLabel: 'spaghetti-cli',
+    live: true,
   });
+}
+
+export async function initService(opts?: InitOptions): Promise<ObservationService> {
+  const service = createService(opts);
 
   registerService(service);
 
@@ -161,7 +168,7 @@ export async function initService(opts?: InitOptions): Promise<SpaghettiAPI> {
  * a time, matching the single-service-per-process assumption baked
  * into `_service` since the file's inception.
  */
-export function registerService(service: SpaghettiAPI): void {
+export function registerService(service: ObservationService): void {
   _service = service;
 }
 
