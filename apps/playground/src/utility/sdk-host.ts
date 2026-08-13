@@ -20,12 +20,6 @@ function readConfig(): SdkRuntimeOptions {
   const dbPath = process.env.SPAGHETTI_DB_PATH;
   if (!dbPath) throw new Error('SPAGHETTI_DB_PATH is required');
   const rootDir = process.env.SPAGHETTI_ROOT_DIR;
-  const rawShadow = process.env.SPAGHETTI_OBSERVATION_SHADOW;
-  if (rawShadow && !['0', '1', 'false', 'true'].includes(rawShadow.toLowerCase())) {
-    throw new Error('SPAGHETTI_OBSERVATION_SHADOW must be 0, 1, false, or true');
-  }
-  const shadowEnabled = rawShadow === '1' || rawShadow?.toLowerCase() === 'true';
-  const shadowDbPath = process.env.SPAGHETTI_OBSERVATION_SHADOW_DB_PATH;
   const rawDetectAdditional = process.env.SPAGHETTI_DETECT_ADDITIONAL_SOURCES;
   if (rawDetectAdditional && !['0', '1', 'false', 'true'].includes(rawDetectAdditional.toLowerCase())) {
     throw new Error('SPAGHETTI_DETECT_ADDITIONAL_SOURCES must be 0, 1, false, or true');
@@ -36,7 +30,6 @@ function readConfig(): SdkRuntimeOptions {
     dbPath,
     ...(rootDir ? { rootDir } : {}),
     ...(!detectAdditionalSources ? { additionalSources: [] } : {}),
-    ...(shadowEnabled ? { observationShadow: shadowDbPath ? { dbPath: shadowDbPath } : {} } : {}),
   };
 }
 
@@ -59,8 +52,8 @@ async function dispatch(request: SdkRpcRequest): Promise<unknown> {
       return { ok: true as const };
     case 'getEngine':
       return runtime.engine;
-    case 'getObservationShadowStatus':
-      return runtime.getObservationShadowStatus();
+    case 'getObservationHostStatus':
+      return runtime.getObservationHostStatus();
     case 'getObservationOwnerStatus':
       return runtime.getObservationOwnerStatus();
     case 'getProjectList':

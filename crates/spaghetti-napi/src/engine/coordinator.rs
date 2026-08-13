@@ -40,12 +40,16 @@ use super::commit::{
 use super::query_pool::{QueryCancellationToken, SourceCatalogObject, SourceCatalogSnapshot};
 use super::{EngineError, SpaghettiEngineCore};
 
-const FACT_BATCH_LIMIT: usize = 4_096;
+// One default append-driver batch can contain 1,024 records. Built-in
+// transcript decoders emit several normalized facts per record, so keep the
+// fact envelope bound independently large enough for that byte-bounded input
+// transaction without falling back to tiny commits.
+const FACT_BATCH_LIMIT: usize = 8_192;
 const DIAGNOSTIC_LIMIT: usize = 256;
 const DISCOVERY_MAX_DEPTH: usize = 64;
 const DISCOVERY_MAX_ENTRIES: usize = 250_000;
 const MAX_APPEND_RECORDS_PER_RECONCILE: usize = 4_096;
-const MAX_APPEND_RECORDS_PER_COMMIT: usize = 64;
+const MAX_APPEND_RECORDS_PER_COMMIT: usize = 1_024;
 const SCHEDULER_CAPACITY: usize = 1_024;
 const MAX_OBJECTS_IN_FLIGHT: usize = 4;
 
@@ -78,6 +82,10 @@ pub struct ReconcileOutcome {
     pub records_quarantined: u32,
     pub retries_required: u32,
     pub incomplete_tail_retries: u32,
+    /// Retry work caused only by the deliberate per-pass record bound. The
+    /// supervisor may resume this immediately without treating it like an
+    /// unstable or incomplete source.
+    pub backlog_remaining: u32,
     pub retry_targets: Vec<ReconcileRetryTarget>,
     pub commits: u32,
     pub last_commit_seq: Option<u64>,
@@ -1271,6 +1279,8 @@ impl ObservationCoordinator {
             self.check_cancelled()?;
             if records_seen >= MAX_APPEND_RECORDS_PER_RECONCILE {
                 outcome.retries_required = outcome.retries_required.saturating_add(1);
+                outcome.backlog_remaining = outcome.backlog_remaining.saturating_add(1);
+                record_retry_target(outcome, instance, stream, object);
                 return Ok(());
             }
             match driver
@@ -2984,6 +2994,7 @@ fn commit_request<A: AgentAdapter + ?Sized>(
             decoder_key: stream.decoder.as_str().to_string(),
             stream_state: "available".to_string(),
             last_reconciled_at: Some(committed_at),
+            retention: stream.retention,
         },
         object: SourceObjectUpdate {
             object_key: object.descriptor.object_key.clone(),
@@ -3637,6 +3648,9 @@ fn merge_outcome(target: &mut ReconcileOutcome, source: ReconcileOutcome) {
     target.incomplete_tail_retries = target
         .incomplete_tail_retries
         .saturating_add(source.incomplete_tail_retries);
+    target.backlog_remaining = target
+        .backlog_remaining
+        .saturating_add(source.backlog_remaining);
     for retry in source.retry_targets {
         if !target.retry_targets.contains(&retry) {
             target.retry_targets.push(retry);

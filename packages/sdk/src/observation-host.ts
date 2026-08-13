@@ -43,6 +43,18 @@ export interface ObservationHostOptions {
   ownerLabel?: string;
   /** Cancels startup; every partially started supervisor is still disposed. */
   signal?: AbortSignal;
+  /** Structured startup snapshots, including heartbeats during long scans. */
+  onProgress?: (progress: ObservationHostProgress) => void;
+}
+
+export interface ObservationHostProgress {
+  stage: 'opening' | 'adapter-scanning' | 'adapter-ready' | 'ready';
+  adapterId?: string;
+  /** One-based configured source position. */
+  sourceIndex?: number;
+  sourceCount: number;
+  elapsedMs: number;
+  status?: SpaghettiEngineStatus;
 }
 
 export interface ObservationHostSnapshot {
@@ -69,6 +81,12 @@ export interface ObservationHost {
 export async function openObservationHost(options: ObservationHostOptions): Promise<ObservationHost> {
   options.signal?.throwIfAborted();
   const sources = normalizeSources(options.sources);
+  const startedAt = Date.now();
+  emitHostProgress(options, {
+    stage: 'opening',
+    sourceCount: sources.length,
+    elapsedMs: 0,
+  });
   const engine = await openSpaghettiEngine({
     dbPath: resolveDatabasePath(options.dbPath),
     queryWorkers: options.queryWorkers,
@@ -76,26 +94,58 @@ export async function openObservationHost(options: ObservationHostOptions): Prom
   });
   let client: SpaghettiClient | undefined;
   try {
-    for (const source of sources) {
+    for (const [index, source] of sources.entries()) {
       options.signal?.throwIfAborted();
-      await engine.startObservation(
-        {
+      const report = (stage: ObservationHostProgress['stage']): void =>
+        emitHostProgress(options, {
+          stage,
           adapterId: source.adapterId,
-          roots: [...source.roots],
-          reason: 'production_observation',
-        },
-        options.signal,
-      );
+          sourceIndex: index + 1,
+          sourceCount: sources.length,
+          elapsedMs: Date.now() - startedAt,
+          status: engine.status,
+        });
+      report('adapter-scanning');
+      const heartbeat = setInterval(() => {
+        if (!options.signal?.aborted) report('adapter-scanning');
+      }, 1_000);
+      try {
+        await engine.startObservation(
+          {
+            adapterId: source.adapterId,
+            roots: [...source.roots],
+            reason: 'production_observation',
+          },
+          options.signal,
+        );
+      } finally {
+        clearInterval(heartbeat);
+      }
+      report('adapter-ready');
     }
     client = await openSpaghettiClient({
       transport: new NapiTransport({ engine, ownsEngine: false }),
       clientName: 'observation-host',
+    });
+    emitHostProgress(options, {
+      stage: 'ready',
+      sourceCount: sources.length,
+      elapsedMs: Date.now() - startedAt,
+      status: engine.status,
     });
     return new NativeObservationHost(engine, client, sources);
   } catch (error) {
     await client?.dispose().catch(() => undefined);
     await engine.dispose();
     throw error;
+  }
+}
+
+function emitHostProgress(options: ObservationHostOptions, progress: ObservationHostProgress): void {
+  try {
+    options.onProgress?.(progress);
+  } catch {
+    // Observability callbacks cannot take down the sole database owner.
   }
 }
 

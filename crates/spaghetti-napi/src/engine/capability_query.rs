@@ -1790,7 +1790,7 @@ mod tests {
             .unwrap();
         connection
             .execute(
-                "INSERT INTO source_streams VALUES (1, 1, 'fixture', 'replace_document', 'fixture', 'available', 20, 1)",
+                "INSERT INTO source_streams VALUES (1, 1, 'fixture', 'replace_document', 'fixture', 'available', 'none', 20, 1)",
                 [],
             )
             .unwrap();

@@ -13,7 +13,7 @@ export function registerIpcHandlers(client: SdkHostClient): void {
   ipcMain.handle(IPC_CHANNELS.rebuildIndex, () => client.request('rebuildIndex'));
   ipcMain.handle(IPC_CHANNELS.retryInit, () => client.request('retryInit'));
   ipcMain.handle(IPC_CHANNELS.getEngine, () => client.request('getEngine'));
-  ipcMain.handle(IPC_CHANNELS.getObservationShadowStatus, () => client.request('getObservationShadowStatus'));
+  ipcMain.handle(IPC_CHANNELS.getObservationHostStatus, () => client.request('getObservationHostStatus'));
   ipcMain.handle(IPC_CHANNELS.getObservationOwnerStatus, () => client.request('getObservationOwnerStatus'));
   ipcMain.handle(IPC_CHANNELS.getCanonicalStats, () => readCanonicalStats(client));
 

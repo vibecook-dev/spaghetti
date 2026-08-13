@@ -10,8 +10,10 @@ import {
   loadNativeAddon,
   MessagePortIpcChannel,
   openSpaghettiClient,
+  type InitProgress,
   type SpaghettiClient,
 } from '@vibecook/spaghetti-sdk';
+import type { ObservationService } from '@vibecook/spaghetti-sdk/observation';
 import { activeSessionChangeForBatch, SdkRuntime, type ActiveStreamIdentity } from '../sdk-runtime.js';
 
 const native = loadNativeAddon();
@@ -138,12 +140,50 @@ describe('production observation host status', () => {
     assert.deepEqual(runtime.getObservationOwnerStatus(), { enabled: true, state: 'stopped' });
   });
 
+  test('reports the latest structured startup snapshot to late callers', async () => {
+    const progress: InitProgress[] = [];
+    let finishInitialize = (): void => undefined;
+    const initializing = new Promise<void>((resolve) => {
+      finishInitialize = resolve;
+    });
+    const runtime = new SdkRuntime(
+      { dbPath: '/tmp/not-opened.db' },
+      { ...sink(), progress: (item) => progress.push(item) },
+    );
+    const service = {
+      isReady: () => false,
+      onProgress(listener: (item: InitProgress) => void) {
+        listener({
+          phase: 'parsing',
+          message: 'claude-code scan in progress…',
+          sourceId: 'claude-code',
+          sourceStage: 'active',
+          sourceIndex: 1,
+          sourceCount: 3,
+        });
+        return () => undefined;
+      },
+      onReady: () => () => undefined,
+      onChange: () => () => undefined,
+      initialize: () => initializing,
+      dispose: async () => finishInitialize(),
+    } as unknown as ObservationService;
+    (runtime as unknown as { createService: () => ObservationService }).createService = () => service;
+
+    runtime.start();
+    await new Promise((resolve) => setImmediate(resolve));
+
+    assert.equal(progress.length, 1);
+    assert.deepEqual(runtime.getObservationOwnerStatus().progress, progress[0]);
+    await runtime.dispose();
+    assert.equal(runtime.getObservationOwnerStatus().state, 'stopped');
+  });
+
   test('owns one Rust production database and serves canonical IPC', { skip: !native }, async () => {
-    const directory = mkdtempSync(path.join(tmpdir(), 'spaghetti-host-shadow-'));
+    const directory = mkdtempSync(path.join(tmpdir(), 'spaghetti-production-host-'));
     const root = path.join(directory, 'claude');
-    const project = path.join(root, 'projects', '-tmp-shadow-project');
+    const project = path.join(root, 'projects', '-tmp-production-project');
     const productionDb = path.join(directory, 'production.db');
-    const shadowDb = path.join(directory, 'shadow.db');
     mkdirSync(project, { recursive: true });
     for (const secondary of ['todos', 'tasks', 'plans']) mkdirSync(path.join(root, secondary));
     writeFileSync(
@@ -154,7 +194,7 @@ describe('production observation host status', () => {
         parentUuid: null,
         timestamp: '2026-08-12T00:00:00.000Z',
         sessionId: SESSION_ID,
-        cwd: '/tmp/shadow-project',
+        cwd: '/tmp/production-project',
         gitBranch: 'main',
         message: { role: 'user', content: 'observe the utility host' },
       })}\n`,
@@ -165,7 +205,6 @@ describe('production observation host status', () => {
         dbPath: productionDb,
         rootDir: root,
         additionalSources: [],
-        observationShadow: { dbPath: shadowDb },
       },
       { ...sink(), initError: (message) => errors.push(message) },
     );
@@ -180,20 +219,24 @@ describe('production observation host status', () => {
       });
       [, client] = await Promise.all([attached, opened]);
 
-      const report = await waitForShadow(runtime);
+      const report = await waitForHost(runtime);
       assert.deepEqual(errors, []);
       assert.equal(runtime.isReady(), true);
       assert.equal(report.state, 'running', report.error);
-      assert.deepEqual(runtime.getObservationOwnerStatus(), { enabled: true, state: 'running' });
+      const owner = runtime.getObservationOwnerStatus();
+      assert.equal(owner.enabled, true);
+      assert.equal(owner.state, 'running');
+      assert.equal(owner.progress?.message, 'Rust observation service is ready.');
+      assert.equal(owner.progress?.sourceCount, 1);
+      assert.ok((owner.progress?.elapsedMs ?? -1) >= 0);
       assert.equal(report.snapshot?.status.observation.supervisorsRunning, 1);
       assert.equal(report.snapshot?.health.healthy, true);
-      assert.equal(existsSync(productionDb), false);
-      assert.equal(existsSync(shadowDb), true);
-      assert.notEqual(report.databasePath, productionDb);
+      assert.equal(existsSync(productionDb), true);
+      assert.equal(report.databasePath, productionDb);
       assert.equal(client.info.transportKind, 'playground-utility');
       const [overview, projects] = await Promise.all([client.getOverview(), client.listProjects({ limit: 10 })]);
       assert.deepEqual([overview.canonicalSessions, overview.canonicalMessages], [1, 1]);
-      assert.equal(projects.items[0]?.nativeProjectKey, '-tmp-shadow-project');
+      assert.equal(projects.items[0]?.nativeProjectKey, '-tmp-production-project');
     } finally {
       await client?.dispose();
       await runtime.dispose();
@@ -202,12 +245,12 @@ describe('production observation host status', () => {
   });
 });
 
-async function waitForShadow(runtime: SdkRuntime) {
+async function waitForHost(runtime: SdkRuntime) {
   const deadline = Date.now() + 10_000;
   while (Date.now() < deadline) {
-    const report = await runtime.getObservationShadowStatus();
+    const report = await runtime.getObservationHostStatus();
     if (report.state !== 'starting') return report;
     await new Promise((resolve) => setTimeout(resolve, 20));
   }
-  throw new Error('Timed out waiting for utility observation shadow startup');
+  throw new Error('Timed out waiting for utility observation host startup');
 }

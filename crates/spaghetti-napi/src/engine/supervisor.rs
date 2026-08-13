@@ -361,21 +361,24 @@ fn supervisor_thread<A: AgentAdapter>(adapter: A, context: SupervisorThreadConte
         let _ =
             initial_engine.require_observation_reconcile(&adapter_id, DirtyReason::BackendError);
     }
-    let initial_summary = drain_pending(
-        &initial_engine,
-        &adapter,
-        &options,
-        &topology,
-        MAX_RECONCILE_PASSES_PER_WAKE,
-        &[cancellation.clone(), startup_cancellation],
-    );
-    update_polling_after_drain(&mut polling, &initial_summary);
-    handle_backend_failure(
-        &initial_summary,
-        &mut watcher,
-        &watcher_available,
-        &mut polling,
-    );
+    let initial_summary = loop {
+        let summary = drain_pending(
+            &initial_engine,
+            &adapter,
+            &options,
+            &topology,
+            MAX_RECONCILE_PASSES_PER_WAKE,
+            &[cancellation.clone(), startup_cancellation.clone()],
+        );
+        update_polling_after_drain(&mut polling, &summary);
+        handle_backend_failure(&summary, &mut watcher, &watcher_available, &mut polling);
+        if summary.result.is_err() || !summary.immediate_retry {
+            break summary;
+        }
+        // The coordinator remains bounded and cancellable, but known finite
+        // cold backlog must converge before this supervisor reports ready.
+        std::thread::yield_now();
+    };
     if let Err(error) = initial_summary.result {
         let _ = ready.send(Err(error));
         return;
@@ -418,6 +421,9 @@ fn supervisor_thread<A: AgentAdapter>(adapter: A, context: SupervisorThreadConte
                                     &watcher_available,
                                     &mut polling,
                                 );
+                                if summary.immediate_retry {
+                                    let _ = wake_tx.try_send(());
+                                }
                                 summary.result
                             })
                     });
@@ -451,6 +457,9 @@ fn supervisor_thread<A: AgentAdapter>(adapter: A, context: SupervisorThreadConte
                         &watcher_available,
                         &mut polling,
                     );
+                    if summary.immediate_retry {
+                        let _ = wake_tx.try_send(());
+                    }
                 }
             },
             recv(poll) -> _ => {
@@ -491,6 +500,9 @@ fn supervisor_thread<A: AgentAdapter>(adapter: A, context: SupervisorThreadConte
                     &watcher_available,
                     &mut polling,
                 );
+                if summary.immediate_retry {
+                    let _ = wake_tx.try_send(());
+                }
             },
         }
         poll = after(next_poll_delay(&polling));
@@ -651,6 +663,7 @@ fn route_ingress(
 struct DrainSummary {
     result: Result<(), EngineError>,
     retries_required: bool,
+    immediate_retry: bool,
     incomplete_tail_retry: bool,
     changed: bool,
     watcher_failure: bool,
@@ -663,6 +676,7 @@ impl Default for DrainSummary {
         Self {
             result: Ok(()),
             retries_required: false,
+            immediate_retry: false,
             incomplete_tail_retry: false,
             changed: false,
             watcher_failure: false,
@@ -708,10 +722,16 @@ fn drain_pending<A: AgentAdapter>(
                 if drained.outcome.retries_required > 0 {
                     summary.retries_required = true;
                     summary.incomplete_tail_retry = drained.outcome.incomplete_tail_retries > 0;
-                    return summary;
+                    if drained.outcome.backlog_remaining == 0 {
+                        return summary;
+                    }
+                    summary.immediate_retry = true;
                 }
             }
-            Ok(None) => return summary,
+            Ok(None) => {
+                summary.immediate_retry = false;
+                return summary;
+            }
             Err(error) => {
                 summary.result = Err(error);
                 return summary;
@@ -721,9 +741,13 @@ fn drain_pending<A: AgentAdapter>(
             .next_observation_work(adapter.manifest().id.as_str())
             .is_none()
         {
+            summary.immediate_retry = false;
             return summary;
         }
     }
+    summary.immediate_retry = engine
+        .next_observation_work(adapter.manifest().id.as_str())
+        .is_some();
     summary
 }
 

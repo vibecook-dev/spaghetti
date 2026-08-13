@@ -65,7 +65,15 @@ pub(super) fn apply_artifact_facts(
 ) -> Result<Vec<ChangeEntry>, EngineError> {
     let object_id = sqlite_u64(context.source_object_id, "source object id")?;
     let generation = sqlite_u64(context.generation, "source generation")?;
-    let mut affected_artifacts = source_object_keys(
+    let has_metadata_fact = batch
+        .facts()
+        .iter()
+        .any(|envelope| matches!(envelope.value, Fact::ArtifactMetadataSnapshot(_)));
+    let has_content_fact = batch
+        .facts()
+        .iter()
+        .any(|envelope| matches!(envelope.value, Fact::ArtifactContent(_)));
+    let metadata_artifacts = source_object_keys(
         transaction,
         r#"
         SELECT DISTINCT metadata.artifact_key
@@ -76,32 +84,54 @@ pub(super) fn apply_artifact_facts(
         object_id,
         "read source-owned artifact metadata",
     )?;
-    affected_artifacts.extend(source_object_keys(
+    let content_artifacts = source_object_keys(
         transaction,
         "SELECT DISTINCT artifact_key FROM artifact_content_assertions WHERE source_object_id = ?1",
         object_id,
         "read source-owned artifact content",
-    )?);
+    )?;
+    // Append metadata needs no work on a same-generation batch that contains
+    // no metadata. Replaceable content still needs an empty deletion commit,
+    // while old append metadata is retracted on generation replacement.
+    let touches_metadata =
+        has_metadata_fact || (context.replaces_prior_generation && !metadata_artifacts.is_empty());
+    let touches_content = has_content_fact || !content_artifacts.is_empty();
+    if !touches_metadata && !touches_content {
+        return Ok(Vec::new());
+    }
+    let mut affected_artifacts = BTreeSet::new();
+    if touches_metadata {
+        affected_artifacts.extend(metadata_artifacts);
+    }
+    if touches_content {
+        affected_artifacts.extend(content_artifacts);
+    }
 
     // Transcript metadata is append history and accumulates inside a
     // generation. A rewrite starts a new generation and retracts the old
     // checkpoint/delta assertions. Blob documents, in contrast, replace as a
     // whole even when the common driver keeps the same generation.
-    transaction
-        .execute(
-            r#"
-            DELETE FROM artifact_snapshot_assertions
-            WHERE source_object_id = ?1 AND source_generation <> ?2
-            "#,
-            params![object_id, generation],
-        )
-        .map_err(|error| sqlite_error("retract replaced artifact metadata generation", error))?;
-    transaction
-        .execute(
-            "DELETE FROM artifact_content_assertions WHERE source_object_id = ?1",
-            [object_id],
-        )
-        .map_err(|error| sqlite_error("retract replaced artifact content", error))?;
+    if touches_metadata && context.replaces_prior_generation {
+        transaction
+            .execute(
+                r#"
+                DELETE FROM artifact_snapshot_assertions
+                WHERE source_object_id = ?1 AND source_generation <> ?2
+                "#,
+                params![object_id, generation],
+            )
+            .map_err(|error| {
+                sqlite_error("retract replaced artifact metadata generation", error)
+            })?;
+    }
+    if touches_content {
+        transaction
+            .execute(
+                "DELETE FROM artifact_content_assertions WHERE source_object_id = ?1",
+                [object_id],
+            )
+            .map_err(|error| sqlite_error("retract replaced artifact content", error))?;
+    }
 
     for envelope in batch.facts() {
         match &envelope.value {
@@ -130,31 +160,35 @@ pub(super) fn apply_artifact_facts(
 
     // Canonical rows now reference the surviving decisive assertions (or have
     // been removed), so superseded audit facts can be deleted safely.
-    transaction
-        .execute(
-            r#"
-            DELETE FROM fact_records
-            WHERE source_object_id = ?1
-              AND fact_kind = 'artifact_content'
-              AND last_commit_seq <> ?2
-            "#,
-            params![
-                object_id,
-                sqlite_u64(context.commit_seq, "commit sequence")?,
-            ],
-        )
-        .map_err(|error| sqlite_error("retract replaced artifact content facts", error))?;
-    transaction
-        .execute(
-            r#"
-            DELETE FROM fact_records
-            WHERE source_object_id = ?1
-              AND source_generation <> ?2
-              AND fact_kind = 'artifact_metadata_snapshot'
-            "#,
-            params![object_id, generation],
-        )
-        .map_err(|error| sqlite_error("retract replaced artifact metadata facts", error))?;
+    if touches_content {
+        transaction
+            .execute(
+                r#"
+                DELETE FROM fact_records
+                WHERE source_object_id = ?1
+                  AND fact_kind = 'artifact_content'
+                  AND last_commit_seq <> ?2
+                "#,
+                params![
+                    object_id,
+                    sqlite_u64(context.commit_seq, "commit sequence")?,
+                ],
+            )
+            .map_err(|error| sqlite_error("retract replaced artifact content facts", error))?;
+    }
+    if touches_metadata && context.replaces_prior_generation {
+        transaction
+            .execute(
+                r#"
+                DELETE FROM fact_records
+                WHERE source_object_id = ?1
+                  AND source_generation <> ?2
+                  AND fact_kind = 'artifact_metadata_snapshot'
+                "#,
+                params![object_id, generation],
+            )
+            .map_err(|error| sqlite_error("retract replaced artifact metadata facts", error))?;
+    }
 
     Ok(changes)
 }

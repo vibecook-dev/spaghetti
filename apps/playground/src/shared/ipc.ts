@@ -46,9 +46,10 @@ export interface ObservationOwnerStatus {
   enabled: boolean;
   state: 'disabled' | 'starting' | 'running' | 'failed' | 'stopped';
   error?: string;
+  progress?: InitProgress;
 }
 
-export interface ObservationShadowReport {
+export interface ObservationHostReport {
   enabled: boolean;
   state: ObservationOwnerStatus['state'] | 'degraded';
   error?: string;
@@ -134,8 +135,8 @@ export interface SpaghettiIPC {
   retryInit(): Promise<{ ok: true }>;
   /** The sole RFC 011 production engine. */
   getEngine(): Promise<'rs'>;
-  /** Transitional method name for production RFC 011 owner health. */
-  getObservationShadowStatus(): Promise<ObservationShadowReport>;
+  /** Detailed production host health and native engine snapshot. */
+  getObservationHostStatus(): Promise<ObservationHostReport>;
   /** Lightweight owner availability; unlike the full report, runs no queries. */
   getObservationOwnerStatus(): Promise<ObservationOwnerStatus>;
   /** Canonical catalog statistics read through the framed utility client. */
@@ -224,7 +225,7 @@ export const IPC_CHANNELS = {
   rebuildIndex: 'spaghetti:rebuildIndex',
   retryInit: 'spaghetti:retryInit',
   getEngine: 'spaghetti:getEngine',
-  getObservationShadowStatus: 'spaghetti:getObservationShadowStatus',
+  getObservationHostStatus: 'spaghetti:getObservationHostStatus',
   getObservationOwnerStatus: 'spaghetti:getObservationOwnerStatus',
   getCanonicalStats: 'spaghetti:getCanonicalStats',
   getProjectList: 'spaghetti:getProjectList',

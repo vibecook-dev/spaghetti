@@ -10,6 +10,7 @@ import {
   loadNativeAddon,
   openObservationHost,
   type ObservationHost,
+  type ObservationHostProgress,
   type ObservationHostSource,
   type ObservationService,
 } from '../index.js';
@@ -72,10 +73,12 @@ describe('observation host options', () => {
 describe('multi-adapter observation host', { skip: !native }, () => {
   test('owns one database, runs all registered adapters, and reopens without duplication', async () => {
     const fixture = multiAdapterFixture();
+    const startup: ObservationHostProgress[] = [];
     const host = await openObservationHost({
       ...fixture,
       queryWorkers: 2,
       ownerLabel: 'multi-adapter-host-test',
+      onProgress: (progress) => startup.push(progress),
     });
     hosts.push(host);
 
@@ -83,6 +86,11 @@ describe('multi-adapter observation host', { skip: !native }, () => {
     assert.equal(host.status.observation.supervisorsRunning, 3);
     assert.equal(host.clientInfo.transportKind, 'napi');
     assert.equal((await host.snapshot()).health.healthy, true);
+    assert.deepEqual(
+      startup.filter((progress) => progress.stage === 'adapter-ready').map((progress) => progress.adapterId),
+      ['claude-code', 'codex', 'grok'],
+    );
+    assert.equal(startup.at(-1)?.stage, 'ready');
 
     const sources = await host.client.listSources();
     assert.deepEqual(sources.items.map((source) => source.adapterId).sort(), ['claude-code', 'codex', 'grok']);
@@ -123,7 +131,13 @@ describe('multi-adapter observation host', { skip: !native }, () => {
     services.push(service);
     await service.initialize();
 
+    const lateProgress: Array<{ message: string }> = [];
+    const stopLateProgress = service.onProgress((progress) => lateProgress.push(progress));
+    await new Promise((resolve) => setImmediate(resolve));
+    stopLateProgress();
+
     assert.equal(service.isReady(), true);
+    assert.equal(lateProgress.at(-1)?.message, 'Rust observation service is ready.');
     assert.deepEqual(await service.getSourceIds(), ['claude-code', 'codex', 'grok']);
     const projects = await service.getProjectList();
     assert.deepEqual([...new Set(projects.flatMap((project) => project.sourceIds))].sort(), [

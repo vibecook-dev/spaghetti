@@ -110,42 +110,73 @@ pub(super) fn apply_workflow_facts(
 ) -> Result<Vec<ChangeEntry>, EngineError> {
     let object_id = sqlite_u64(context.source_object_id, "source object id")?;
     let generation = sqlite_u64(context.generation, "source generation")?;
-    let mut affected_workflows = source_object_keys(
+    let has_snapshot_fact = batch
+        .facts()
+        .iter()
+        .any(|envelope| matches!(envelope.value, Fact::WorkflowSnapshot(_)));
+    let has_event_fact = batch
+        .facts()
+        .iter()
+        .any(|envelope| matches!(envelope.value, Fact::WorkflowMemberEvent(_)));
+    let snapshot_workflows = source_object_keys(
         transaction,
         "SELECT DISTINCT workflow_key FROM workflow_snapshot_assertions WHERE source_object_id = ?1",
         object_id,
         "read source-owned workflow snapshots",
     )?;
-    affected_workflows.extend(source_object_keys(
+    let event_workflows = source_object_keys(
         transaction,
         "SELECT DISTINCT workflow_key FROM workflow_member_event_assertions WHERE source_object_id = ?1",
         object_id,
         "read source-owned workflow journal events",
-    )?);
-    let mut affected_members = source_object_keys(
+    )?;
+    let event_members = source_object_keys(
         transaction,
         "SELECT DISTINCT member_key FROM workflow_member_event_assertions WHERE source_object_id = ?1",
         object_id,
         "read source-owned workflow members",
     )?;
+    let touches_snapshot = has_snapshot_fact || !snapshot_workflows.is_empty();
+    let touches_events = has_event_fact
+        || (context.replaces_prior_generation
+            && (!event_workflows.is_empty() || !event_members.is_empty()));
+    if !touches_snapshot && !touches_events {
+        return Ok(Vec::new());
+    }
+    let mut affected_workflows = BTreeSet::new();
+    if touches_snapshot {
+        affected_workflows.extend(snapshot_workflows);
+    }
+    if touches_events {
+        affected_workflows.extend(event_workflows);
+    }
+    let mut affected_members = if touches_events {
+        event_members
+    } else {
+        BTreeSet::new()
+    };
 
     // A run summary is a whole replaceable document. Journal records append
     // within a generation and retract only when that append history rewrites.
-    transaction
-        .execute(
-            "DELETE FROM workflow_snapshot_assertions WHERE source_object_id = ?1",
-            [object_id],
-        )
-        .map_err(|error| sqlite_error("replace workflow run snapshot", error))?;
-    transaction
-        .execute(
-            r#"
-            DELETE FROM workflow_member_event_assertions
-            WHERE source_object_id = ?1 AND source_generation <> ?2
-            "#,
-            params![object_id, generation],
-        )
-        .map_err(|error| sqlite_error("retract replaced workflow journal generation", error))?;
+    if touches_snapshot {
+        transaction
+            .execute(
+                "DELETE FROM workflow_snapshot_assertions WHERE source_object_id = ?1",
+                [object_id],
+            )
+            .map_err(|error| sqlite_error("replace workflow run snapshot", error))?;
+    }
+    if touches_events && context.replaces_prior_generation {
+        transaction
+            .execute(
+                r#"
+                DELETE FROM workflow_member_event_assertions
+                WHERE source_object_id = ?1 AND source_generation <> ?2
+                "#,
+                params![object_id, generation],
+            )
+            .map_err(|error| sqlite_error("retract replaced workflow journal generation", error))?;
+    }
 
     for envelope in batch.facts() {
         match &envelope.value {
@@ -184,31 +215,35 @@ pub(super) fn apply_workflow_facts(
     }
 
     // Canonical foreign keys now point at surviving decisive assertions.
-    transaction
-        .execute(
-            r#"
-            DELETE FROM fact_records
-            WHERE source_object_id = ?1
-              AND fact_kind = 'workflow_snapshot'
-              AND last_commit_seq <> ?2
-            "#,
-            params![
-                object_id,
-                sqlite_u64(context.commit_seq, "commit sequence")?,
-            ],
-        )
-        .map_err(|error| sqlite_error("retract replaced workflow snapshot facts", error))?;
-    transaction
-        .execute(
-            r#"
-            DELETE FROM fact_records
-            WHERE source_object_id = ?1
-              AND fact_kind = 'workflow_member_event'
-              AND source_generation <> ?2
-            "#,
-            params![object_id, generation],
-        )
-        .map_err(|error| sqlite_error("retract replaced workflow event facts", error))?;
+    if touches_snapshot {
+        transaction
+            .execute(
+                r#"
+                DELETE FROM fact_records
+                WHERE source_object_id = ?1
+                  AND fact_kind = 'workflow_snapshot'
+                  AND last_commit_seq <> ?2
+                "#,
+                params![
+                    object_id,
+                    sqlite_u64(context.commit_seq, "commit sequence")?,
+                ],
+            )
+            .map_err(|error| sqlite_error("retract replaced workflow snapshot facts", error))?;
+    }
+    if touches_events && context.replaces_prior_generation {
+        transaction
+            .execute(
+                r#"
+                DELETE FROM fact_records
+                WHERE source_object_id = ?1
+                  AND fact_kind = 'workflow_member_event'
+                  AND source_generation <> ?2
+                "#,
+                params![object_id, generation],
+            )
+            .map_err(|error| sqlite_error("retract replaced workflow event facts", error))?;
+    }
 
     Ok(changes)
 }

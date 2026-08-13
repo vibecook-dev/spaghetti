@@ -8,6 +8,7 @@ use rusqlite::{params, Transaction};
 
 use crate::adapter::ContentBlock;
 
+use super::projection::execute_cached;
 use super::EngineError;
 
 pub(super) fn replace_message_content_blocks(
@@ -16,35 +17,38 @@ pub(super) fn replace_message_content_blocks(
     session_key: &[u8],
     run_key: &[u8],
     content: &[ContentBlock],
+    replaces_existing: bool,
 ) -> Result<(), EngineError> {
-    transaction
-        .execute(
+    if replaces_existing {
+        execute_cached(
+            transaction,
             "DELETE FROM canonical_message_content_blocks WHERE message_key = ?1",
             [message_key],
         )
         .map_err(|error| sqlite_error("replace canonical message content blocks", error))?;
+    }
 
     for (ordinal, block) in content.iter().enumerate() {
         let (content_kind, tool_name, native_tool_call_id) = block_metadata(block);
-        transaction
-            .execute(
-                r#"
+        execute_cached(
+            transaction,
+            r#"
                 INSERT INTO canonical_message_content_blocks (
                     message_key, session_key, run_key, block_ordinal,
                     content_kind, tool_name, native_tool_call_id
                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
                 "#,
-                params![
-                    message_key,
-                    session_key,
-                    run_key,
-                    sqlite_usize(ordinal)?,
-                    content_kind,
-                    tool_name,
-                    native_tool_call_id,
-                ],
-            )
-            .map_err(|error| sqlite_error("index canonical message content block", error))?;
+            params![
+                message_key,
+                session_key,
+                run_key,
+                sqlite_usize(ordinal)?,
+                content_kind,
+                tool_name,
+                native_tool_call_id,
+            ],
+        )
+        .map_err(|error| sqlite_error("index canonical message content block", error))?;
     }
     Ok(())
 }

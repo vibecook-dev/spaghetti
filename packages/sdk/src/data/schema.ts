@@ -104,7 +104,11 @@ import type { SqliteService } from '../io/index.js';
 // v36: truthful cumulative/snapshot usage series and raw counter values.
 // v37: durable adapter/source-schema/capability manifest snapshots.
 // v38: stamped adapter dependency reads attached to durable fact records.
-export const SCHEMA_VERSION = 38;
+// v39: versioned compact fact/native-message blobs. Rust is the production
+// writer; this DDL remains its migration mirror for transitional tooling.
+// v40: durable stream retention, provenance-only fact rows for non-Full
+// streams, and removal of the unused wide fact entity/kind index.
+export const SCHEMA_VERSION = 40;
 
 export const TOKEN_ACTIVITY_TRIGGER_NAMES = [
   'token_activity_messages_ai',
@@ -524,6 +528,7 @@ CREATE TABLE IF NOT EXISTS source_streams (
   driver_kind TEXT NOT NULL,
   decoder_key TEXT NOT NULL,
   stream_state TEXT NOT NULL,
+  raw_retention TEXT NOT NULL DEFAULT 'none',
   last_reconciled_at INTEGER,
   last_commit_seq INTEGER,
   UNIQUE(source_instance_id, stream_key)
@@ -615,8 +620,10 @@ CREATE TABLE IF NOT EXISTS source_record_errors (
   PRIMARY KEY (source_object_id, generation, cursor_start, cursor_end)
 );
 
--- RFC 011 typed-fact audit store and common projections. Adapters emit the
--- facts; only the common writer maps them into these tables.
+-- RFC 011 typed-fact provenance store and common projections. payload_json is
+-- empty with codec 'omitted' unless the stream declares Full retention or a
+-- DiagnosticExcerpt stream preserves one bounded redacted unknown-record
+-- shape; only the common writer maps facts into these tables.
 CREATE TABLE IF NOT EXISTS fact_records (
   fact_id BLOB PRIMARY KEY,
   fact_kind TEXT NOT NULL,
@@ -631,6 +638,7 @@ CREATE TABLE IF NOT EXISTS fact_records (
   local_fact_ordinal INTEGER NOT NULL,
   observed_at INTEGER NOT NULL,
   payload_json BLOB NOT NULL,
+  payload_codec TEXT NOT NULL DEFAULT 'identity',
   last_commit_seq INTEGER NOT NULL REFERENCES ingest_commits(commit_seq) ON DELETE RESTRICT
 );
 
@@ -876,6 +884,7 @@ CREATE TABLE IF NOT EXISTS canonical_messages (
   model TEXT,
   search_text TEXT,
   raw_json BLOB NOT NULL,
+  raw_json_codec TEXT NOT NULL DEFAULT 'identity',
   fact_id BLOB NOT NULL REFERENCES fact_records(fact_id) ON DELETE CASCADE,
   source_object_id INTEGER NOT NULL,
   source_generation INTEGER NOT NULL,
@@ -1723,9 +1732,9 @@ CREATE INDEX IF NOT EXISTS idx_change_log_topic_cursor ON change_log(topic, comm
 CREATE INDEX IF NOT EXISTS idx_projection_versions_readiness ON projection_versions(readiness, projection_id);
 CREATE INDEX IF NOT EXISTS idx_source_record_errors_commit ON source_record_errors(first_commit_seq);
 CREATE INDEX IF NOT EXISTS idx_fact_records_object_generation ON fact_records(source_object_id, source_generation);
-CREATE INDEX IF NOT EXISTS idx_fact_records_entity_kind ON fact_records(entity_key, fact_kind);
 CREATE INDEX IF NOT EXISTS idx_fact_records_source_instance ON fact_records(source_instance_id, fact_id);
 CREATE INDEX IF NOT EXISTS idx_canonical_sessions_project ON canonical_sessions(project_key, session_key);
+CREATE INDEX IF NOT EXISTS idx_canonical_sessions_source_generation ON canonical_sessions(source_object_id, source_generation);
 CREATE INDEX IF NOT EXISTS idx_session_index_snapshot_assertions_project ON session_index_snapshot_assertions(project_key, fact_id);
 CREATE INDEX IF NOT EXISTS idx_session_index_snapshot_assertions_source ON session_index_snapshot_assertions(source_object_id, project_key);
 CREATE INDEX IF NOT EXISTS idx_session_index_entry_assertions_project ON session_index_entry_assertions(project_key, entry_ordinal);
@@ -1752,10 +1761,14 @@ CREATE INDEX IF NOT EXISTS idx_canonical_message_blocks_run ON canonical_message
 CREATE INDEX IF NOT EXISTS idx_canonical_messages_session_order ON canonical_messages(session_key, source_generation, cursor_start);
 CREATE INDEX IF NOT EXISTS idx_canonical_messages_session_activity ON canonical_messages(session_key, source_time, message_key, source_time_quality, last_commit_seq);
 CREATE INDEX IF NOT EXISTS idx_canonical_messages_run_activity ON canonical_messages(run_key, source_time, message_key);
+CREATE INDEX IF NOT EXISTS idx_canonical_messages_source_generation ON canonical_messages(source_object_id, source_generation);
 CREATE INDEX IF NOT EXISTS idx_canonical_runs_session ON canonical_runs(session_key, run_key);
 CREATE INDEX IF NOT EXISTS idx_canonical_runs_commit ON canonical_runs(last_commit_seq DESC, run_key DESC);
+CREATE INDEX IF NOT EXISTS idx_canonical_runs_source_generation ON canonical_runs(source_object_id, source_generation);
 CREATE INDEX IF NOT EXISTS idx_usage_contributions_session_time ON usage_contributions(session_key, source_time, fact_id);
+CREATE INDEX IF NOT EXISTS idx_usage_contributions_source_generation ON usage_contributions(source_object_id, source_generation);
 CREATE INDEX IF NOT EXISTS idx_run_evidence_run_order ON run_evidence(run_key, source_generation, cursor_end);
+CREATE INDEX IF NOT EXISTS idx_run_evidence_source_generation ON run_evidence(source_object_id, source_generation);
 CREATE INDEX IF NOT EXISTS idx_presence_assertions_presence ON presence_assertions(presence_key, fact_id);
 CREATE INDEX IF NOT EXISTS idx_presence_assertions_source ON presence_assertions(source_object_id, presence_key);
 CREATE INDEX IF NOT EXISTS idx_presence_assertions_session ON presence_assertions(session_key, presence_key);
@@ -1764,6 +1777,7 @@ CREATE INDEX IF NOT EXISTS idx_canonical_presences_run ON canonical_presences(ru
 CREATE INDEX IF NOT EXISTS idx_canonical_presences_commit ON canonical_presences(last_commit_seq DESC, presence_key DESC);
 CREATE INDEX IF NOT EXISTS idx_delegation_assertions_child_order ON delegation_assertions(child_run_key, relation_strength, source_generation, cursor_end);
 CREATE INDEX IF NOT EXISTS idx_delegation_assertions_parent ON delegation_assertions(parent_run_key, child_run_key);
+CREATE INDEX IF NOT EXISTS idx_delegation_assertions_source_generation ON delegation_assertions(source_object_id, source_generation);
 CREATE INDEX IF NOT EXISTS idx_canonical_delegations_session ON canonical_delegations(session_key, child_run_key);
 CREATE INDEX IF NOT EXISTS idx_canonical_delegations_session_activity ON canonical_delegations(session_key, (CASE WHEN source_time IS NULL THEN 1 ELSE 0 END), COALESCE(source_time, '') DESC, child_run_key DESC);
 CREATE INDEX IF NOT EXISTS idx_delegation_metadata_assertions_child ON delegation_metadata_assertions(child_run_key, fact_id);
@@ -1772,6 +1786,7 @@ CREATE INDEX IF NOT EXISTS idx_delegation_metadata_assertions_task ON delegation
 CREATE INDEX IF NOT EXISTS idx_canonical_delegation_metadata_session ON canonical_delegation_metadata(session_key, child_run_key);
 CREATE INDEX IF NOT EXISTS idx_delegation_spawn_assertions_task ON delegation_spawn_assertions(session_key, native_task_id, parent_run_key);
 CREATE INDEX IF NOT EXISTS idx_delegation_spawn_assertions_source ON delegation_spawn_assertions(source_object_id, spawn_key);
+CREATE INDEX IF NOT EXISTS idx_delegation_spawn_assertions_source_generation ON delegation_spawn_assertions(source_object_id, source_generation);
 CREATE INDEX IF NOT EXISTS idx_canonical_delegation_spawns_session ON canonical_delegation_spawns(session_key, native_task_id, spawn_key);
 CREATE INDEX IF NOT EXISTS idx_team_snapshot_assertions_team ON team_snapshot_assertions(team_key, fact_id);
 CREATE INDEX IF NOT EXISTS idx_team_snapshot_assertions_source ON team_snapshot_assertions(source_object_id, team_key);

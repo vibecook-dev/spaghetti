@@ -13,6 +13,7 @@ use rusqlite::{params, Transaction};
 use crate::adapter::{ContentBlock, Fact, FactBatch, FactEnvelope, PersistedToolResultFact};
 
 use super::commit::{ChangeEntry, ProjectionCommitContext};
+use super::projection::execute_cached;
 use super::EngineError;
 
 const CHANGE_SCHEMA_VERSION: u32 = 1;
@@ -36,7 +37,7 @@ pub(super) fn replaced_message_reference_keys(
     context: &ProjectionCommitContext,
 ) -> Result<BTreeSet<ToolReferenceKey>, EngineError> {
     let mut statement = transaction
-        .prepare(
+        .prepare_cached(
             r#"
             SELECT DISTINCT session_key, native_tool_use_id
             FROM message_tool_references
@@ -64,14 +65,21 @@ pub(super) fn replace_message_references(
     message_key: &[u8],
     session_key: &[u8],
     content: &[ContentBlock],
+    replaces_existing: bool,
 ) -> Result<BTreeSet<ToolReferenceKey>, EngineError> {
-    let mut affected = message_reference_keys(transaction, message_key)?;
-    transaction
-        .execute(
+    let mut affected = if replaces_existing {
+        message_reference_keys(transaction, message_key)?
+    } else {
+        BTreeSet::new()
+    };
+    if replaces_existing {
+        execute_cached(
+            transaction,
             "DELETE FROM message_tool_references WHERE message_key = ?1",
             [message_key],
         )
         .map_err(|error| sqlite_error("replace message tool references", error))?;
+    }
 
     for (ordinal, block) in content.iter().enumerate() {
         let (native_tool_use_id, reference_kind) = match block {
@@ -82,26 +90,26 @@ pub(super) fn replace_message_references(
         if native_tool_use_id.trim().is_empty() {
             continue;
         }
-        transaction
-            .execute(
-                r#"
+        execute_cached(
+            transaction,
+            r#"
                 INSERT INTO message_tool_references (
                     message_key, session_key, native_tool_use_id,
                     reference_kind, block_ordinal, source_object_id,
                     source_generation
                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
                 "#,
-                params![
-                    message_key,
-                    session_key,
-                    native_tool_use_id,
-                    reference_kind,
-                    sqlite_usize(ordinal, "content block ordinal")?,
-                    sqlite_u64(context.source_object_id, "source object id")?,
-                    sqlite_u64(context.generation, "source generation")?,
-                ],
-            )
-            .map_err(|error| sqlite_error("index message tool reference", error))?;
+            params![
+                message_key,
+                session_key,
+                native_tool_use_id,
+                reference_kind,
+                sqlite_usize(ordinal, "content block ordinal")?,
+                sqlite_u64(context.source_object_id, "source object id")?,
+                sqlite_u64(context.generation, "source generation")?,
+            ],
+        )
+        .map_err(|error| sqlite_error("index message tool reference", error))?;
         affected.insert((session_key.to_vec(), native_tool_use_id.clone()));
     }
     Ok(affected)
@@ -115,16 +123,23 @@ pub(super) fn apply_persisted_tool_result_facts(
 ) -> Result<Vec<ChangeEntry>, EngineError> {
     let object_id = sqlite_u64(context.source_object_id, "source object id")?;
     let mut affected_results = source_object_result_keys(transaction, object_id)?;
+    let has_result_fact = batch
+        .facts()
+        .iter()
+        .any(|envelope| matches!(envelope.value, Fact::PersistedToolResult(_)));
+    let owns_result_document = has_result_fact || !affected_results.is_empty();
     affected_results.extend(result_keys_for_references(transaction, changed_references)?);
 
     // Each immediate .txt file is one complete replace-document object. An
     // empty batch on confirmed absence retracts only that object's assertion.
-    transaction
-        .execute(
-            "DELETE FROM persisted_tool_result_assertions WHERE source_object_id = ?1",
-            [object_id],
-        )
-        .map_err(|error| sqlite_error("replace persisted tool result assertion", error))?;
+    if owns_result_document {
+        transaction
+            .execute(
+                "DELETE FROM persisted_tool_result_assertions WHERE source_object_id = ?1",
+                [object_id],
+            )
+            .map_err(|error| sqlite_error("replace persisted tool result assertion", error))?;
+    }
 
     for envelope in batch.facts() {
         let Fact::PersistedToolResult(fact) = &envelope.value else {
@@ -147,20 +162,23 @@ pub(super) fn apply_persisted_tool_result_facts(
     }
 
     // The canonical foreign key now points only at a surviving decisive fact.
-    transaction
-        .execute(
-            r#"
-            DELETE FROM fact_records
-            WHERE source_object_id = ?1
-              AND fact_kind = 'persisted_tool_result'
-              AND last_commit_seq <> ?2
-            "#,
-            params![
-                object_id,
-                sqlite_u64(context.commit_seq, "commit sequence")?,
-            ],
-        )
-        .map_err(|error| sqlite_error("retract replaced persisted tool result facts", error))?;
+    // Transcript-only correlation does not own a replaceable sidecar.
+    if owns_result_document {
+        transaction
+            .execute(
+                r#"
+                DELETE FROM fact_records
+                WHERE source_object_id = ?1
+                  AND fact_kind = 'persisted_tool_result'
+                  AND last_commit_seq <> ?2
+                "#,
+                params![
+                    object_id,
+                    sqlite_u64(context.commit_seq, "commit sequence")?,
+                ],
+            )
+            .map_err(|error| sqlite_error("retract replaced persisted tool result facts", error))?;
+    }
 
     Ok(changes)
 }
@@ -170,7 +188,7 @@ fn message_reference_keys(
     message_key: &[u8],
 ) -> Result<BTreeSet<ToolReferenceKey>, EngineError> {
     let mut statement = transaction
-        .prepare(
+        .prepare_cached(
             "SELECT DISTINCT session_key, native_tool_use_id FROM message_tool_references WHERE message_key = ?1",
         )
         .map_err(|error| sqlite_error("prepare prior message tool references", error))?;

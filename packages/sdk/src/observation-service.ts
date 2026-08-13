@@ -56,6 +56,7 @@ import {
   openObservationHost,
   type ObservationHost,
   type ObservationHostOptions,
+  type ObservationHostProgress,
   type ObservationHostSnapshot,
 } from './observation-host.js';
 import type { SpaghettiIpcChannel, SpaghettiIpcHost } from './client/index.js';
@@ -107,6 +108,8 @@ class RustObservationService extends EventEmitter implements ObservationService 
   private initializePromise: Promise<void> | null = null;
   private disposePromise: Promise<void> | null = null;
   private subscriptionAbort: AbortController | null = null;
+  private startupAbort: AbortController | null = null;
+  private lastProgress: InitProgress | null = null;
   private ready = false;
 
   constructor(private readonly options: ObservationServiceOptions) {
@@ -119,10 +122,21 @@ class RustObservationService extends EventEmitter implements ObservationService 
     if (!this.initializePromise) {
       const startedAt = Date.now();
       const work = (async () => {
-        this.emitProgress('parsing', 'Starting Rust observation owner…');
+        const startupAbort = new AbortController();
+        this.startupAbort = startupAbort;
+        const signal = this.options.signal
+          ? AbortSignal.any([this.options.signal, startupAbort.signal])
+          : startupAbort.signal;
         let host: ObservationHost | null = null;
         try {
-          host = await openObservationHost(this.options);
+          host = await openObservationHost({
+            ...this.options,
+            signal,
+            onProgress: (progress) => {
+              this.emitHostProgress(progress);
+              this.options.onProgress?.(progress);
+            },
+          });
           if (this.disposePromise) throw new Error('Observation service stopped during initialization.');
           this.emitProgress('reconciling', 'Reading canonical source catalog…');
           await host.client.listSources({ limit: 1 });
@@ -131,6 +145,12 @@ class RustObservationService extends EventEmitter implements ObservationService 
           this.host = host;
           this.ready = true;
           const info = { durationMs: Date.now() - startedAt };
+          this.emitProgress('indexing', 'Rust observation service is ready.', {
+            current: this.options.sources.length,
+            total: this.options.sources.length,
+            sourceCount: this.options.sources.length,
+            elapsedMs: info.durationMs,
+          });
           this.emit('ready', info);
         } catch (error) {
           this.subscriptionAbort?.abort();
@@ -139,6 +159,8 @@ class RustObservationService extends EventEmitter implements ObservationService 
           this.ready = false;
           if (host) await host.dispose().catch(() => undefined);
           throw error;
+        } finally {
+          if (this.startupAbort === startupAbort) this.startupAbort = null;
         }
       })();
       const tracked = work.finally(() => {
@@ -156,6 +178,7 @@ class RustObservationService extends EventEmitter implements ObservationService 
   dispose(): Promise<void> {
     if (!this.disposePromise) {
       this.disposePromise = (async () => {
+        this.startupAbort?.abort();
         this.subscriptionAbort?.abort();
         this.subscriptionAbort = null;
         const initializing = this.initializePromise;
@@ -610,6 +633,8 @@ class RustObservationService extends EventEmitter implements ObservationService 
 
   onProgress(cb: (progress: InitProgress) => void): () => void {
     this.on('progress', cb);
+    const last = this.lastProgress;
+    if (last) queueMicrotask(() => this.listeners('progress').includes(cb) && cb(last));
     return () => this.removeListener('progress', cb);
   }
 
@@ -636,8 +661,59 @@ class RustObservationService extends EventEmitter implements ObservationService 
     return this.host;
   }
 
-  private emitProgress(phase: InitProgress['phase'], message: string): void {
-    this.emit('progress', { phase, message } satisfies InitProgress);
+  private emitProgress(phase: InitProgress['phase'], message: string, detail: Partial<InitProgress> = {}): void {
+    const progress = { phase, message, ...detail } satisfies InitProgress;
+    this.lastProgress = progress;
+    this.emit('progress', progress);
+  }
+
+  private emitHostProgress(progress: ObservationHostProgress): void {
+    const sourceId = progress.adapterId;
+    const commitSeq = progress.status?.observation.lastCommitSeq;
+    switch (progress.stage) {
+      case 'opening':
+        this.emitProgress('parsing', 'Opening Rust observation owner…', {
+          sourceCount: progress.sourceCount,
+          elapsedMs: progress.elapsedMs,
+        });
+        return;
+      case 'adapter-scanning':
+        this.emitProgress(
+          'parsing',
+          `${sourceId} scan in progress${commitSeq == null ? '' : ` — commit ${commitSeq}`}…`,
+          {
+            sourceId,
+            sourceStage: 'active',
+            sourceIndex: progress.sourceIndex,
+            sourceCount: progress.sourceCount,
+            current: progress.sourceIndex,
+            total: progress.sourceCount,
+            elapsedMs: progress.elapsedMs,
+            ...(commitSeq == null ? {} : { commitSeq }),
+          },
+        );
+        return;
+      case 'adapter-ready':
+        this.emitProgress('indexing', `${sourceId} observation is live.`, {
+          sourceId,
+          sourceStage: 'done',
+          sourceIndex: progress.sourceIndex,
+          sourceCount: progress.sourceCount,
+          current: progress.sourceIndex,
+          total: progress.sourceCount,
+          elapsedMs: progress.elapsedMs,
+          ...(commitSeq == null ? {} : { commitSeq }),
+        });
+        return;
+      case 'ready':
+        this.emitProgress('reconciling', 'All configured Rust observations are live.', {
+          current: progress.sourceCount,
+          total: progress.sourceCount,
+          sourceCount: progress.sourceCount,
+          elapsedMs: progress.elapsedMs,
+          ...(commitSeq == null ? {} : { commitSeq }),
+        });
+    }
   }
 
   private async startSubscription(host: ObservationHost): Promise<void> {

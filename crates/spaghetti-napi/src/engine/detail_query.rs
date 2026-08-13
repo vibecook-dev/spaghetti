@@ -11,6 +11,7 @@ use super::query_identity::{
     SESSION_ID_PREFIX, SOURCE_ID_PREFIX,
 };
 use super::query_pool::read_committed_watermark;
+use super::storage_codec;
 use super::EngineError;
 
 pub const DETAIL_QUERY_CONTRACT_VERSION: u32 = 1;
@@ -471,7 +472,8 @@ pub(super) fn read_message_page(
                        cs.native_session_id, cs.native_project_key,
                        CASE WHEN cm.source_time IS NULL THEN 1 ELSE 0 END
                            AS untimed_rank,
-                       COALESCE(cm.source_time, '') AS sort_time
+                       COALESCE(cm.source_time, '') AS sort_time,
+                       cm.raw_json_codec
                 FROM canonical_messages cm
                 JOIN canonical_sessions cs ON cs.session_key = cm.session_key
                 JOIN fact_records fr ON fr.fact_id = cm.fact_id
@@ -485,7 +487,8 @@ pub(super) fn read_message_page(
                    search_text, raw_json, fact_id, source_object_id,
                    source_generation, last_commit_seq, adapter_id,
                    source_instance_id, observed_at, native_session_id,
-                   native_project_key, untimed_rank, sort_time
+                   native_project_key, untimed_rank, sort_time,
+                   raw_json_codec
             FROM message_rows
             WHERE (?3 = 0)
                OR untimed_rank > ?4
@@ -584,7 +587,14 @@ fn decode_message_row(row: &Row<'_>) -> Result<MessageRow, EngineError> {
     let session_key: Vec<u8> = query_get(row, 1, "decode message session key")?;
     let project_key: Vec<u8> = query_get(row, 2, "decode message project key")?;
     let content_json: Vec<u8> = query_get(row, 6, "decode canonical message content")?;
-    let raw_json: Vec<u8> = query_get(row, 12, "decode native message payload")?;
+    let stored_raw_json: Vec<u8> = query_get(row, 12, "read native message payload")?;
+    let raw_json_codec: String = query_get(row, 24, "read native message payload codec")?;
+    let raw_json = storage_codec::decode(
+        &raw_json_codec,
+        &stored_raw_json,
+        MAX_MESSAGE_PAGE_PAYLOAD_BYTES as usize,
+        "decode native message payload",
+    )?;
     let fact_id: Vec<u8> = query_get(row, 13, "decode message fact id")?;
     let payload_bytes = u64::try_from(content_json.len())
         .ok()
@@ -1340,7 +1350,7 @@ mod tests {
             .unwrap();
         connection
             .execute(
-                "INSERT INTO source_streams VALUES (1, 1, 'transcripts', 'append_delimited', 'fixture', 'available', 20, 1)",
+                "INSERT INTO source_streams VALUES (1, 1, 'transcripts', 'append_delimited', 'fixture', 'available', 'none', 20, 1)",
                 [],
             )
             .unwrap();

@@ -44,6 +44,17 @@ Schema version 18 adds:
 - `usage_contributions` and `usage_totals`, with exact and estimated buckets
   kept separate.
 
+This section records the Phase 4 schema as it shipped. Schema v40 supersedes
+the unconditional fact-payload retention described above: `fact_records` is
+now the provenance and ownership ledger required for retraction, while only a
+stream declaring `Full` retention keeps an additional compressed fact body.
+`None` and `HashOnly` streams retain the deterministic fact identity, entity
+key, source object/generation/cursor, record hash, ordinal, observation time,
+and commit sequence without a duplicate semantic payload. `DiagnosticExcerpt`
+does the same for ordinary facts and may retain only the already-redacted,
+bounded shape of an unknown record. Canonical projections and source records
+remain the rebuild inputs.
+
 Rust remains the target schema authority. The TypeScript DDL is updated only
 as a temporary migration mirror so the legacy differential oracle can still
 open the same schema. The repository's existing wipe-on-version-change policy

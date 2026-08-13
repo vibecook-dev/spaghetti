@@ -10,6 +10,8 @@ use std::collections::BTreeSet;
 use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 
+use crate::adapter::RawRetentionPolicy;
+
 use super::EngineError;
 
 const MAX_DRIVER_CHECKPOINT_BYTES: usize = 64 * 1024 * 1024;
@@ -20,7 +22,11 @@ const CHANGE_LOG_ROW_OVERHEAD_BYTES: u64 = 24;
 /// so the bound remains deterministic across SQLite builds and page sizes.
 pub const DEFAULT_CHANGE_LOG_MAX_AGE_MS: u64 = 7 * 24 * 60 * 60 * 1_000;
 pub const DEFAULT_CHANGE_LOG_MAX_PAYLOAD_BYTES: u64 = 128 * 1024 * 1024;
-pub const DEFAULT_CHANGE_LOG_MIN_RESUMABLE_COMMITS: u64 = 1_024;
+// Backfill commits are intentionally much wider than live commits. Keeping
+// 1,024 of those groups could pin several gigabytes despite the 128 MiB size
+// target; 128 still protects a substantial cursor window, while age/size keep
+// ordinary low-volume live history considerably longer.
+pub const DEFAULT_CHANGE_LOG_MIN_RESUMABLE_COMMITS: u64 = 128;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ChangeLogRetentionPolicy {
@@ -81,6 +87,7 @@ pub struct SourceStreamSpec {
     pub decoder_key: String,
     pub stream_state: String,
     pub last_reconciled_at: Option<i64>,
+    pub retention: RawRetentionPolicy,
 }
 
 /// Compare-and-swap precondition for a source-object update. `Absent` is not
@@ -254,6 +261,11 @@ pub(super) struct ProjectionCommitContext {
     pub source_stream_id: u64,
     pub source_object_id: u64,
     pub generation: u64,
+    /// True only for the first atomic commit that supersedes an object's
+    /// previously durable generation. Same-generation append batches must not
+    /// repeatedly search every projection for rows that cannot exist.
+    pub replaces_prior_generation: bool,
+    pub retention: RawRetentionPolicy,
 }
 
 struct NoProjectionWork;
@@ -357,6 +369,10 @@ pub(super) fn apply_observation_commit_with_components(
         source_stream_id,
         source_object_id,
         generation: request.object.generation,
+        replaces_prior_generation: existing
+            .as_ref()
+            .is_some_and(|stored| stored.generation != request.object.generation),
+        retention: request.stream.retention,
     };
 
     let mut changes = request.changes.clone();
@@ -743,12 +759,13 @@ fn upsert_source_stream(
             r#"
             INSERT INTO source_streams (
                 source_stream_id, source_instance_id, stream_key, driver_kind, decoder_key,
-                stream_state, last_reconciled_at, last_commit_seq
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                stream_state, raw_retention, last_reconciled_at, last_commit_seq
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
             ON CONFLICT(source_instance_id, stream_key) DO UPDATE SET
                 driver_kind = excluded.driver_kind,
                 decoder_key = excluded.decoder_key,
                 stream_state = excluded.stream_state,
+                raw_retention = excluded.raw_retention,
                 last_reconciled_at = excluded.last_reconciled_at,
                 last_commit_seq = excluded.last_commit_seq
             RETURNING source_stream_id
@@ -760,6 +777,7 @@ fn upsert_source_stream(
                 stream.driver_kind,
                 stream.decoder_key,
                 stream.stream_state,
+                raw_retention_policy(stream.retention),
                 stream.last_reconciled_at,
                 to_i64(commit_seq, "commit sequence")?
             ],
@@ -767,6 +785,15 @@ fn upsert_source_stream(
         )
         .map_err(|error| sqlite_error("upsert source stream", error))?;
     from_i64(id, "source stream id")
+}
+
+fn raw_retention_policy(policy: RawRetentionPolicy) -> &'static str {
+    match policy {
+        RawRetentionPolicy::None => "none",
+        RawRetentionPolicy::HashOnly => "hash_only",
+        RawRetentionPolicy::DiagnosticExcerpt => "diagnostic_excerpt",
+        RawRetentionPolicy::Full => "full",
+    }
 }
 
 fn read_source_object(
@@ -1535,6 +1562,7 @@ mod tests {
                 decoder_key: "fixture.jsonl".to_string(),
                 stream_state: "available".to_string(),
                 last_reconciled_at: Some(1_050),
+                retention: RawRetentionPolicy::Full,
             },
             object: SourceObjectUpdate {
                 object_key: b"session-1".to_vec(),
@@ -1637,6 +1665,12 @@ mod tests {
         assert_eq!(count(&connection, "fixture_canonical"), 1);
         assert_eq!(count(&connection, "fixture_runtime"), 1);
         assert_eq!(count(&connection, "fixture_usage"), 1);
+        let raw_retention: String = connection
+            .query_row("SELECT raw_retention FROM source_streams", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(raw_retention, "full");
         let provenance: (i64, i64, i64, i64, i64) = connection
             .query_row(
                 r#"

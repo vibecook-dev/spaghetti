@@ -45,6 +45,10 @@ pub(super) fn apply_session_index_facts(
     changed_session_keys: &BTreeSet<Vec<u8>>,
 ) -> Result<Vec<ChangeEntry>, EngineError> {
     let object_id = sqlite_u64(context.source_object_id, "source object id")?;
+    let has_snapshot_fact = batch
+        .facts()
+        .iter()
+        .any(|envelope| matches!(envelope.value, Fact::SessionIndexSnapshot(_)));
     let mut affected_projects = source_object_keys(
         transaction,
         "SELECT DISTINCT project_key FROM session_index_snapshot_assertions WHERE source_object_id = ?1",
@@ -62,6 +66,8 @@ pub(super) fn apply_session_index_facts(
         object_id,
         "read replaced session index entries",
     )?;
+    let owns_snapshot =
+        has_snapshot_fact || !affected_projects.is_empty() || !affected_sessions.is_empty();
     affected_sessions.extend(indexed_candidates(transaction, changed_session_keys)?);
     affected_sessions.extend(children_for_projects(
         transaction,
@@ -70,14 +76,17 @@ pub(super) fn apply_session_index_facts(
         "read prior canonical session index entries",
     )?);
 
-    // One replace-document commit owns the complete current index assertion,
-    // including same-generation rewrites and an empty batch on deletion.
-    transaction
-        .execute(
-            "DELETE FROM session_index_snapshot_assertions WHERE source_object_id = ?1",
-            [object_id],
-        )
-        .map_err(|error| sqlite_error("replace session index snapshot", error))?;
+    // A transcript commit may still change a session-index join, but it does
+    // not own the index document. Only replace assertions when this object
+    // supplied (or previously supplied) the replace-document snapshot.
+    if owns_snapshot {
+        transaction
+            .execute(
+                "DELETE FROM session_index_snapshot_assertions WHERE source_object_id = ?1",
+                [object_id],
+            )
+            .map_err(|error| sqlite_error("replace session index snapshot", error))?;
+    }
 
     for envelope in batch.facts() {
         let Fact::SessionIndexSnapshot(fact) = &envelope.value else {
@@ -115,21 +124,24 @@ pub(super) fn apply_session_index_facts(
         changes.push(entry_conflict_change(&session_key, &reduction)?);
     }
 
-    // Reducers now reference only surviving decisive assertions.
-    transaction
-        .execute(
-            r#"
-            DELETE FROM fact_records
-            WHERE source_object_id = ?1
-              AND fact_kind = 'session_index_snapshot'
-              AND last_commit_seq <> ?2
-            "#,
-            params![
-                object_id,
-                sqlite_u64(context.commit_seq, "commit sequence")?,
-            ],
-        )
-        .map_err(|error| sqlite_error("retract replaced session index facts", error))?;
+    // Reducers now reference only surviving decisive assertions. Avoid this
+    // source-object fact scan for transcript-only join maintenance.
+    if owns_snapshot {
+        transaction
+            .execute(
+                r#"
+                DELETE FROM fact_records
+                WHERE source_object_id = ?1
+                  AND fact_kind = 'session_index_snapshot'
+                  AND last_commit_seq <> ?2
+                "#,
+                params![
+                    object_id,
+                    sqlite_u64(context.commit_seq, "commit sequence")?,
+                ],
+            )
+            .map_err(|error| sqlite_error("retract replaced session index facts", error))?;
+    }
 
     Ok(changes)
 }

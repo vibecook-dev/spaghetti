@@ -51,6 +51,12 @@ pub(super) fn apply_task_snapshots(
     batch: &FactBatch,
 ) -> Result<Vec<ChangeEntry>, EngineError> {
     let object_id = sqlite_u64(context.source_object_id, "source object id")?;
+    let has_task_fact = batch.facts().iter().any(|envelope| {
+        matches!(
+            envelope.value,
+            Fact::TaskSnapshot(_) | Fact::PlanSnapshot(_)
+        )
+    });
     let mut affected_collections = source_object_keys(
         transaction,
         "SELECT DISTINCT collection_key FROM task_snapshot_assertions WHERE source_object_id = ?1",
@@ -74,6 +80,14 @@ pub(super) fn apply_task_snapshots(
         object_id,
         "read replaced plans",
     )?;
+
+    if !has_task_fact
+        && affected_collections.is_empty()
+        && affected_tasks.is_empty()
+        && affected_plans.is_empty()
+    {
+        return Ok(Vec::new());
+    }
 
     // Every declared input is a replace-document object. Same-generation
     // edits and confirmed deletion therefore replace the object's complete

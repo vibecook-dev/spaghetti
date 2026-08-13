@@ -2,7 +2,13 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import { Library, Moon, PanelLeft, Search, Settings, Sun } from 'lucide-react';
 import { TrafficLights } from './components/TrafficLights.js';
 import { SpaghettiProvider } from '@vibecook/spaghetti-sdk/react';
-import type { ProjectListItem, SegmentChangeBatch, SessionListItem, StoreStats } from '@vibecook/spaghetti-sdk';
+import type {
+  InitProgress,
+  ProjectListItem,
+  SegmentChangeBatch,
+  SessionListItem,
+  StoreStats,
+} from '@vibecook/spaghetti-sdk';
 import type { SpaghettiClientResponseMap } from '@vibecook/spaghetti-sdk/client';
 import type { ObservationOwnerStatus } from '@shared/ipc';
 import { createIpcClient } from './ipc-api.js';
@@ -257,12 +263,18 @@ function PlaygroundShell() {
   useEffect(() => {
     const bridge = window.spaghetti;
 
-    const unsubProgress = bridge.onProgress((p) => {
+    const handleProgress = (p: InitProgress) => {
       const snap: ProgressSnapshot = {
         phase: p.phase,
         message: p.message,
         current: p.current,
         total: p.total,
+        sourceId: p.sourceId,
+        sourceStage: p.sourceStage,
+        sourceIndex: p.sourceIndex,
+        sourceCount: p.sourceCount,
+        elapsedMs: p.elapsedMs,
+        commitSeq: p.commitSeq,
       };
       const msg = p.message.toLowerCase();
       if (
@@ -280,7 +292,8 @@ function PlaygroundShell() {
       }
       setProgress(snap);
       setSources((prev) => applyProgressEvent(prev, snap));
-    });
+    };
+    const unsubProgress = bridge.onProgress(handleProgress);
 
     const unsubReady = bridge.onReady((info) => {
       setSources((prev) =>
@@ -371,6 +384,8 @@ function PlaygroundShell() {
             }
             return;
           }
+          const owner = await bridge.getObservationOwnerStatus();
+          if (!cancelled && owner.progress) handleProgress(owner.progress);
         } catch {
           /* not created yet */
         }

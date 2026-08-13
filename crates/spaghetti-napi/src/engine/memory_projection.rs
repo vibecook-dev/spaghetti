@@ -30,6 +30,14 @@ pub(super) fn apply_project_memory_facts(
 ) -> Result<Vec<ChangeEntry>, EngineError> {
     let object_id = sqlite_u64(context.source_object_id, "source object id")?;
     let mut affected_documents = source_object_keys(transaction, object_id)?;
+    let has_memory_fact = batch
+        .facts()
+        .iter()
+        .any(|envelope| matches!(envelope.value, Fact::ProjectMemoryDocument(_)));
+
+    if !has_memory_fact && affected_documents.is_empty() {
+        return Ok(Vec::new());
+    }
 
     // Every memory file is one complete replace-document object. The empty
     // batch used for confirmed deletion retracts only that file's assertion.

@@ -30,6 +30,19 @@ pub(super) fn apply_presence_facts(
 ) -> Result<Vec<ChangeEntry>, EngineError> {
     let object_id = sqlite_u64(context.source_object_id, "source object id")?;
     let mut affected = source_object_keys(transaction, object_id)?;
+    let has_presence_fact = batch
+        .facts()
+        .iter()
+        .any(|envelope| matches!(envelope.value, Fact::Presence(_)));
+
+    // Projection dispatch is intentionally shared by all fact batches. A
+    // transcript object therefore reaches this projector even though it can
+    // never own presence assertions. Preserve empty replace-document commits
+    // when this object previously owned an assertion, but avoid scanning its
+    // growing fact ledger for an unrelated no-op.
+    if !has_presence_fact && affected.is_empty() {
+        return Ok(Vec::new());
+    }
 
     // Presence objects are whole, replaceable observations. Updates and
     // confirmed absence both replace the assertion owned by this object even

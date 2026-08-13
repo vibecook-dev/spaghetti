@@ -1,0 +1,554 @@
+#!/usr/bin/env -S tsx
+/**
+ * RFC 011 production-path ingestion benchmark.
+ *
+ * Unlike `bench-ingest.ts`, this opens the sole-owner observation host and
+ * exercises the same adapter -> source driver -> fact projection -> SQLite
+ * path used by applications. The default synthetic corpus is deterministic,
+ * contains one intentionally large append object, and therefore catches
+ * accidental per-commit scans of previously ingested rows.
+ *
+ * Usage:
+ *   pnpm bench:observation
+ *   pnpm bench:observation --records 32768 --runs 3 --warmup 1
+ *   pnpm bench:observation --scenario warm-unchanged
+ *   pnpm bench:observation --scenario live-append --append-records 64
+ *   pnpm bench:observation --scenario warm-append --append-records 64
+ *   pnpm bench:observation --fixture ~/.claude --report-json /tmp/report.json
+ */
+
+import { DatabaseSync } from 'node:sqlite';
+import {
+  appendFileSync,
+  closeSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  openSync,
+  readdirSync,
+  readSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
+import { homedir, tmpdir } from 'node:os';
+import * as path from 'node:path';
+import { parseArgs } from 'node:util';
+
+import { openObservationHost } from '../packages/sdk/src/observation-host.js';
+
+type Scenario = 'cold' | 'live-append' | 'warm-unchanged' | 'warm-append';
+
+interface DatabaseMetrics {
+  canonicalMessages: number;
+  facts: number;
+  commits: number;
+  changeLogRows: number | null;
+  changeLogPayloadBytes: number | null;
+  databaseBytes: number;
+}
+
+interface Sample extends DatabaseMetrics {
+  readyMs: number;
+  durationMs: number;
+  inputBytes: number;
+  inputRecords: number;
+  mibPerSecond: number;
+  recordsPerSecond: number;
+}
+
+interface Summary {
+  scenario: Scenario;
+  records: number;
+  appendRecords: number;
+  samples: Sample[];
+  finalMetrics: DatabaseMetrics;
+  durationMs: {
+    min: number;
+    p50: number;
+    median: number;
+    p95: number;
+    p99: number;
+    mean: number;
+    max: number;
+  };
+  medianMibPerSecond: number;
+  medianRecordsPerSecond: number;
+}
+
+const { values } = parseArgs({
+  options: {
+    fixture: { type: 'string' },
+    records: { type: 'string' },
+    'append-records': { type: 'string' },
+    runs: { type: 'string' },
+    warmup: { type: 'string' },
+    scenario: { type: 'string' },
+    'report-json': { type: 'string' },
+    'keep-workspace': { type: 'boolean' },
+  },
+});
+
+const records = positiveInteger(values.records ?? '8192', 'records');
+const appendRecords = positiveInteger(values['append-records'] ?? '64', 'append-records');
+const runs = positiveInteger(values.runs ?? '3', 'runs');
+const warmup = nonnegativeInteger(values.warmup ?? '1', 'warmup');
+const scenario = (values.scenario ?? 'cold') as Scenario;
+if (!['cold', 'live-append', 'warm-unchanged', 'warm-append'].includes(scenario)) {
+  fail(`--scenario must be cold|live-append|warm-unchanged|warm-append, got: ${scenario}`);
+}
+
+const fixture = values.fixture ? path.resolve(expandTilde(values.fixture)) : undefined;
+if (fixture && !existsSync(fixture)) fail(`fixture not found: ${fixture}`);
+const reportPath = values['report-json'] ? path.resolve(expandTilde(values['report-json'])) : undefined;
+const keepWorkspace = values['keep-workspace'] ?? false;
+const workspace = mkdtempSync(path.join(tmpdir(), 'spaghetti-observation-bench-'));
+
+try {
+  const sourceRoot = fixture ?? path.join(workspace, '.claude');
+  const transcript = fixture ? undefined : createSyntheticCorpus(sourceRoot, records);
+  const inputBytes = directoryBytes(sourceRoot);
+  const inputRecords = fixture ? countJsonLines(sourceRoot) : records;
+  const samples: Sample[] = [];
+
+  console.log(
+    `RFC 011 observation benchmark: ${scenario}, ${inputRecords.toLocaleString()} records, ${formatBytes(inputBytes)}`,
+  );
+
+  if (scenario === 'live-append') {
+    const liveResult = await runLiveAppendSeries({
+      sourceRoot,
+      transcript,
+      inputRecords,
+      appendRecords,
+      warmup,
+      runs,
+      databasePath: path.join(workspace, 'observation-live.sqlite'),
+    });
+    samples.push(...liveResult.samples);
+    const summary = summarize(scenario, records, appendRecords, samples, liveResult.finalMetrics);
+    printSummary(summary, reportPath);
+  } else {
+    for (let index = 0; index < warmup + runs; index += 1) {
+      const measured = index >= warmup;
+      const sample = await runSample({
+        sourceRoot,
+        transcript,
+        inputBytes,
+        inputRecords,
+        scenario,
+        appendRecords,
+        iteration: index,
+        databasePath: path.join(workspace, `observation-${index}.sqlite`),
+      });
+      logSample(sample, measured ? `run ${index - warmup + 1}` : `warmup ${index + 1}`);
+      if (measured) samples.push(sample);
+    }
+    const finalMetrics = requireLastSample(samples);
+    const summary = summarize(scenario, records, appendRecords, samples, finalMetrics);
+    printSummary(summary, reportPath);
+  }
+  if (keepWorkspace) console.log(`  workspace: ${workspace}`);
+} finally {
+  if (!keepWorkspace) rmSync(workspace, { recursive: true, force: true });
+}
+
+async function runLiveAppendSeries(options: {
+  sourceRoot: string;
+  transcript?: string;
+  inputRecords: number;
+  appendRecords: number;
+  warmup: number;
+  runs: number;
+  databasePath: string;
+}): Promise<{ samples: Sample[]; finalMetrics: DatabaseMetrics }> {
+  if (!options.transcript) fail('live-append requires the synthetic corpus');
+  const host = await timedOpen(options.sourceRoot, options.databasePath);
+  const samples: Sample[] = [];
+  try {
+    await converge(host.value);
+    for (let index = 0; index < options.warmup + options.runs; index += 1) {
+      const measured = index >= options.warmup;
+      const beforeBytes = statSync(options.transcript).size;
+      appendSyntheticRecords(
+        options.transcript,
+        options.inputRecords + index * options.appendRecords,
+        options.appendRecords,
+      );
+      const inputBytes = statSync(options.transcript).size - beforeBytes;
+      const startedAt = performance.now();
+      await host.value.refresh('claude-code');
+      const readyMs = performance.now() - startedAt;
+      await converge(host.value);
+      const durationMs = performance.now() - startedAt;
+      // Query through the native read pool while the owner is alive. Opening
+      // node:sqlite here would load a second SQLite implementation into this
+      // process; their process-scoped POSIX locks cannot safely coordinate.
+      const metrics = await readHostMetrics(host.value);
+      const expectedMessages = options.inputRecords + (index + 1) * options.appendRecords;
+      if (metrics.canonicalMessages !== expectedMessages) {
+        throw new Error(
+          `observation did not converge: expected ${expectedMessages} canonical messages, found ${metrics.canonicalMessages}`,
+        );
+      }
+      const sample: Sample = {
+        ...metrics,
+        readyMs,
+        durationMs,
+        inputBytes,
+        inputRecords: options.appendRecords,
+        mibPerSecond: durationMs === 0 ? 0 : inputBytes / 1024 / 1024 / (durationMs / 1000),
+        recordsPerSecond: durationMs === 0 ? 0 : options.appendRecords / (durationMs / 1000),
+      };
+      logSample(sample, measured ? `run ${index - options.warmup + 1}` : `warmup ${index + 1}`);
+      if (measured) samples.push(sample);
+    }
+  } finally {
+    await host.value.dispose();
+  }
+  const finalMetrics = readDatabaseMetrics(options.databasePath);
+  assertSyntheticConvergence(
+    options.inputRecords + (options.warmup + options.runs) * options.appendRecords,
+    finalMetrics,
+  );
+  return { samples, finalMetrics };
+}
+
+async function readHostMetrics(host: Awaited<ReturnType<typeof openObservationHost>>): Promise<DatabaseMetrics> {
+  const stats = await host.client.getStats();
+  return {
+    canonicalMessages: stats.searchableMessages,
+    facts: stats.factRecords,
+    commits: stats.ingestCommits,
+    changeLogRows: null,
+    changeLogPayloadBytes: null,
+    databaseBytes: stats.allocatedDatabaseBytes,
+  };
+}
+
+function logSample(sample: Sample, label: string): void {
+  console.log(
+    `  ${label}: ${formatDuration(sample.durationMs)} converged ` +
+      `(${formatDuration(sample.readyMs)} ready), ` +
+      `${sample.recordsPerSecond.toFixed(0)} records/s, ${sample.mibPerSecond.toFixed(2)} MiB/s, ` +
+      `${sample.commits.toLocaleString()} commits, ${formatBytes(sample.databaseBytes)} DB`,
+  );
+}
+
+async function runSample(options: {
+  sourceRoot: string;
+  transcript?: string;
+  inputBytes: number;
+  inputRecords: number;
+  scenario: Scenario;
+  appendRecords: number;
+  iteration: number;
+  databasePath: string;
+}): Promise<Sample> {
+  let sampleStartedAt = performance.now();
+  let host = await timedOpen(options.sourceRoot, options.databasePath);
+  let readyMs = host.durationMs;
+  let benchmarkBytes = options.inputBytes;
+  let benchmarkRecords = options.inputRecords;
+
+  if (options.scenario !== 'cold') {
+    await converge(host.value);
+    if (options.scenario === 'warm-append' || options.scenario === 'live-append') {
+      if (!options.transcript) fail('append scenarios require the synthetic corpus');
+      const beforeBytes = statSync(options.transcript).size;
+      appendSyntheticRecords(
+        options.transcript,
+        options.inputRecords + options.iteration * options.appendRecords,
+        options.appendRecords,
+      );
+      benchmarkBytes = statSync(options.transcript).size - beforeBytes;
+      benchmarkRecords = options.appendRecords;
+    }
+    sampleStartedAt = performance.now();
+    if (options.scenario === 'live-append') {
+      await host.value.refresh('claude-code');
+      readyMs = performance.now() - sampleStartedAt;
+    } else {
+      await host.value.dispose();
+      host = await timedOpen(options.sourceRoot, options.databasePath);
+      readyMs = host.durationMs;
+    }
+  }
+
+  await converge(host.value);
+  const durationMs = performance.now() - sampleStartedAt;
+  const metrics = await finishSample(host.value, options.databasePath);
+  if (options.transcript) {
+    const appends = options.scenario === 'warm-append' || options.scenario === 'live-append';
+    const expectedMessages = options.inputRecords + (appends ? (options.iteration + 1) * options.appendRecords : 0);
+    assertSyntheticConvergence(expectedMessages, metrics);
+  }
+  return {
+    ...metrics,
+    readyMs,
+    durationMs,
+    inputBytes: benchmarkBytes,
+    inputRecords: benchmarkRecords,
+    mibPerSecond: durationMs === 0 ? 0 : benchmarkBytes / 1024 / 1024 / (durationMs / 1000),
+    recordsPerSecond: durationMs === 0 ? 0 : benchmarkRecords / (durationMs / 1000),
+  };
+}
+
+async function finishSample(
+  host: Awaited<ReturnType<typeof openObservationHost>>,
+  databasePath: string,
+): Promise<DatabaseMetrics> {
+  await host.dispose();
+  return readDatabaseMetrics(databasePath);
+}
+
+function assertSyntheticConvergence(expectedMessages: number, metrics: DatabaseMetrics): void {
+  if (metrics.canonicalMessages !== expectedMessages) {
+    throw new Error(
+      `observation did not converge: expected ${expectedMessages} canonical messages, found ${metrics.canonicalMessages}`,
+    );
+  }
+}
+
+async function timedOpen(sourceRoot: string, databasePath: string) {
+  const startedAt = performance.now();
+  const value = await openObservationHost({
+    dbPath: databasePath,
+    queryWorkers: 1,
+    ownerLabel: 'observation-benchmark',
+    sources: [{ adapterId: 'claude-code', roots: [sourceRoot] }],
+  });
+  return { value, durationMs: performance.now() - startedAt };
+}
+
+async function converge(host: Awaited<ReturnType<typeof openObservationHost>>): Promise<void> {
+  for (let pass = 0; pass < 10_000; pass += 1) {
+    const observation = host.status.observation;
+    if (
+      !observation.reconcileInFlight &&
+      !observation.recoveryRequired &&
+      !observation.fullReconcileRequired &&
+      observation.dirtyInstances === 0
+    ) {
+      return;
+    }
+    await host.refresh('claude-code');
+  }
+  throw new Error('observation did not converge after 10,000 bounded repair passes');
+}
+
+function createSyntheticCorpus(root: string, recordCount: number): string {
+  const project = path.join(root, 'projects', '-benchmark-project');
+  mkdirSync(project, { recursive: true });
+  const transcript = path.join(project, '00000000-0000-4000-8000-000000000001.jsonl');
+  const chunks: string[] = [];
+  for (let index = 0; index < recordCount; index += 1) chunks.push(syntheticRecord(index));
+  writeFileSync(transcript, chunks.join(''));
+  return transcript;
+}
+
+function appendSyntheticRecords(transcript: string, start: number, count: number): void {
+  const chunks: string[] = [];
+  for (let index = start; index < start + count; index += 1) chunks.push(syntheticRecord(index));
+  appendFileSync(transcript, chunks.join(''));
+}
+
+function syntheticRecord(index: number): string {
+  const suffix = index.toString(16).padStart(12, '0');
+  const uuid = `00000000-0000-4000-8000-${suffix}`;
+  const sessionId = '00000000-0000-4000-8000-000000000001';
+  const common = {
+    uuid,
+    parentUuid: null,
+    timestamp: new Date(Date.UTC(2026, 0, 1, 0, 0, index)).toISOString(),
+    sessionId,
+    cwd: '/benchmark/project',
+    version: '1.0.0',
+    gitBranch: 'main',
+    isSidechain: false,
+    userType: 'external',
+  };
+  const record =
+    index % 2 === 0
+      ? {
+          type: 'user',
+          ...common,
+          message: { role: 'user', content: `benchmark prompt ${index}` },
+        }
+      : {
+          type: 'assistant',
+          ...common,
+          requestId: `request-${index}`,
+          message: {
+            model: 'claude-benchmark',
+            id: `message-${index}`,
+            type: 'message',
+            role: 'assistant',
+            content: [{ type: 'text', text: `benchmark response ${index}` }],
+            stop_reason: 'end_turn',
+            stop_sequence: null,
+            usage: {
+              input_tokens: 100,
+              output_tokens: 20,
+              cache_creation_input_tokens: 0,
+              cache_read_input_tokens: 0,
+            },
+          },
+        };
+  return `${JSON.stringify(record)}\n`;
+}
+
+function readDatabaseMetrics(databasePath: string): DatabaseMetrics {
+  const database = new DatabaseSync(databasePath, { readOnly: true });
+  try {
+    const scalar = (sql: string): number => Number((database.prepare(sql).get() as { value: number }).value);
+    return {
+      canonicalMessages: scalar('SELECT COUNT(*) AS value FROM canonical_messages'),
+      facts: scalar('SELECT COUNT(*) AS value FROM fact_records'),
+      commits: scalar('SELECT COUNT(*) AS value FROM ingest_commits'),
+      changeLogRows: scalar('SELECT COUNT(*) AS value FROM change_log'),
+      changeLogPayloadBytes: scalar('SELECT COALESCE(SUM(length(payload)), 0) AS value FROM change_log'),
+      databaseBytes: statSync(databasePath).size,
+    };
+  } finally {
+    database.close();
+  }
+}
+
+function directoryBytes(root: string): number {
+  let bytes = 0;
+  for (const entry of readdirSync(root, { withFileTypes: true })) {
+    const item = path.join(root, entry.name);
+    bytes += entry.isDirectory() ? directoryBytes(item) : statSync(item).size;
+  }
+  return bytes;
+}
+
+function countJsonLines(root: string): number {
+  let count = 0;
+  for (const entry of readdirSync(root, { withFileTypes: true })) {
+    const item = path.join(root, entry.name);
+    if (entry.isDirectory()) count += countJsonLines(item);
+    else if (entry.name.endsWith('.jsonl')) {
+      const descriptor = openSync(item, 'r');
+      const buffer = Buffer.allocUnsafe(64 * 1024);
+      try {
+        let bytesRead = 0;
+        do {
+          bytesRead = readSync(descriptor, buffer, 0, buffer.length, null);
+          for (let index = 0; index < bytesRead; index += 1) {
+            if (buffer[index] === 0x0a) count += 1;
+          }
+        } while (bytesRead > 0);
+      } finally {
+        closeSync(descriptor);
+      }
+    }
+  }
+  return count;
+}
+
+function summarize(
+  selectedScenario: Scenario,
+  selectedRecords: number,
+  selectedAppendRecords: number,
+  samples: Sample[],
+  finalMetrics: DatabaseMetrics,
+): Summary {
+  const durationSamples = samples.map((sample) => sample.durationMs);
+  return {
+    scenario: selectedScenario,
+    records: selectedRecords,
+    appendRecords: selectedAppendRecords,
+    samples,
+    finalMetrics,
+    durationMs: distribution(durationSamples),
+    medianMibPerSecond: median(samples.map((sample) => sample.mibPerSecond)),
+    medianRecordsPerSecond: median(samples.map((sample) => sample.recordsPerSecond)),
+  };
+}
+
+function printSummary(summary: Summary, selectedReportPath?: string): void {
+  console.log(
+    `  p50/p99: ${formatDuration(summary.durationMs.p50)} / ${formatDuration(summary.durationMs.p99)}, ` +
+      `${summary.medianRecordsPerSecond.toFixed(0)} records/s, ` +
+      `${summary.medianMibPerSecond.toFixed(2)} MiB/s`,
+  );
+  console.log(
+    `  final: ${summary.finalMetrics.canonicalMessages.toLocaleString()} messages, ` +
+      `${summary.finalMetrics.facts.toLocaleString()} facts, ` +
+      `${summary.finalMetrics.commits.toLocaleString()} commits, ` +
+      `${formatBytes(summary.finalMetrics.databaseBytes)} DB`,
+  );
+  if (selectedReportPath) {
+    mkdirSync(path.dirname(selectedReportPath), { recursive: true });
+    writeFileSync(selectedReportPath, `${JSON.stringify(summary, null, 2)}\n`);
+    console.log(`  report: ${selectedReportPath}`);
+  }
+}
+
+function requireLastSample(samples: Sample[]): DatabaseMetrics {
+  const sample = samples.at(-1);
+  if (!sample) fail('benchmark produced no measured samples');
+  return {
+    canonicalMessages: sample.canonicalMessages,
+    facts: sample.facts,
+    commits: sample.commits,
+    changeLogRows: sample.changeLogRows,
+    changeLogPayloadBytes: sample.changeLogPayloadBytes,
+    databaseBytes: sample.databaseBytes,
+  };
+}
+
+function distribution(values: number[]) {
+  return {
+    min: Math.min(...values),
+    p50: percentile(values, 0.5),
+    median: median(values),
+    p95: percentile(values, 0.95),
+    p99: percentile(values, 0.99),
+    mean: values.reduce((sum, value) => sum + value, 0) / values.length,
+    max: Math.max(...values),
+  };
+}
+
+function median(values: number[]): number {
+  return percentile(values, 0.5);
+}
+
+function percentile(values: number[], quantile: number): number {
+  const sorted = [...values].sort((left, right) => left - right);
+  const rank = (sorted.length - 1) * quantile;
+  const lower = Math.floor(rank);
+  const upper = Math.ceil(rank);
+  return sorted[lower] + (sorted[upper] - sorted[lower]) * (rank - lower);
+}
+
+function positiveInteger(value: string, name: string): number {
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isSafeInteger(parsed) || parsed <= 0) fail(`--${name} must be a positive integer`);
+  return parsed;
+}
+
+function nonnegativeInteger(value: string, name: string): number {
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isSafeInteger(parsed) || parsed < 0) fail(`--${name} must be a non-negative integer`);
+  return parsed;
+}
+
+function expandTilde(value: string): string {
+  return value.startsWith('~/') ? path.join(homedir(), value.slice(2)) : value;
+}
+
+function formatDuration(milliseconds: number): string {
+  return milliseconds < 1_000 ? `${milliseconds.toFixed(1)}ms` : `${(milliseconds / 1_000).toFixed(2)}s`;
+}
+
+function formatBytes(bytes: number): string {
+  return bytes < 1024 * 1024 ? `${(bytes / 1024).toFixed(1)} KiB` : `${(bytes / 1024 / 1024).toFixed(1)} MiB`;
+}
+
+function fail(message: string): never {
+  console.error(message);
+  process.exit(2);
+}

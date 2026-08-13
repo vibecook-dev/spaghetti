@@ -16,6 +16,13 @@ mod base64_bytes {
     use base64::Engine;
     use serde::{Deserialize, Deserializer, Serializer};
 
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum EncodedBytes {
+        Base64(String),
+        LegacyArray(Vec<u8>),
+    }
+
     pub fn serialize<S>(value: &[u8], serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
@@ -27,13 +34,15 @@ mod base64_bytes {
     where
         D: Deserializer<'de>,
     {
-        let value = String::deserialize(deserializer)?;
-        STANDARD.decode(value).map_err(serde::de::Error::custom)
+        match EncodedBytes::deserialize(deserializer)? {
+            EncodedBytes::Base64(value) => STANDARD.decode(value).map_err(serde::de::Error::custom),
+            EncodedBytes::LegacyArray(value) => Ok(value),
+        }
     }
 }
 
 #[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-pub struct EntityKey(Vec<u8>);
+pub struct EntityKey(#[serde(with = "base64_bytes")] Vec<u8>);
 
 impl EntityKey {
     pub fn native(
@@ -363,6 +372,11 @@ pub struct MessageFact {
     pub parent_native_message_id: Option<String>,
     pub model: Option<String>,
     pub search_text: Option<String>,
+    /// Lossless native JSON used by the canonical detail projection. The
+    /// common writer stores this once in `canonical_messages.raw_json`; fact
+    /// audit JSON intentionally omits the duplicate body and retains the
+    /// record hash/provenance as required by HashOnly transcript streams.
+    #[serde(default, skip_serializing)]
     pub raw_json: Vec<u8>,
 }
 
@@ -1220,6 +1234,46 @@ mod tests {
         let encoded = serde_json::to_value(&fact).unwrap();
         assert_eq!(encoded["ArtifactContent"]["content"], "AP8K");
         assert_eq!(serde_json::from_value::<Fact>(encoded).unwrap(), fact);
+    }
+
+    #[test]
+    fn entity_keys_use_compact_base64_and_accept_legacy_byte_arrays() {
+        let key = EntityKey(vec![0, 1, 2, 250, 255]);
+        assert_eq!(serde_json::to_string(&key).unwrap(), r#""AAEC+v8=""#);
+        assert_eq!(
+            serde_json::from_str::<EntityKey>("[0,1,2,250,255]").unwrap(),
+            key
+        );
+    }
+
+    #[test]
+    fn message_audit_json_omits_the_single_copy_native_payload() {
+        let key = EntityKey(vec![1, 2, 3]);
+        let fact = Fact::Message(MessageFact {
+            message: key.clone(),
+            session: key.clone(),
+            run: key,
+            native_message_id: Some("m1".to_string()),
+            native_kind: "assistant".to_string(),
+            role: MessageRole::Assistant,
+            content: vec![ContentBlock::Text {
+                text: "visible".to_string(),
+            }],
+            source_time: None,
+            parent_native_message_id: None,
+            model: None,
+            search_text: Some("visible".to_string()),
+            raw_json: br#"{"secret":"native-only"}"#.to_vec(),
+        });
+
+        let encoded = serde_json::to_value(&fact).unwrap();
+        assert!(encoded["Message"].get("raw_json").is_none());
+        let decoded = serde_json::from_value::<Fact>(encoded).unwrap();
+        let Fact::Message(decoded) = decoded else {
+            panic!("expected message fact");
+        };
+        assert!(decoded.raw_json.is_empty());
+        assert_eq!(decoded.search_text.as_deref(), Some("visible"));
     }
 
     #[test]

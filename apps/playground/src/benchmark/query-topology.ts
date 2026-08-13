@@ -263,16 +263,13 @@ async function run(): Promise<void> {
 
   const scratch = mkdtempSync(path.join(tmpdir(), 'spaghetti-ipc-topology-'));
   const root = path.join(scratch, '.claude');
-  const legacyDbPath = path.join(scratch, 'legacy.db');
-  const shadowDbPath = path.join(scratch, 'observation.db');
+  const dbPath = path.join(scratch, 'observation.db');
   cpSync(fixtureRoot, root, { recursive: true });
   const payloadFixture = installPayloadFixture(root);
   const frames: FrameCounters = { sentCount: 0, sentBytes: 0, receivedCount: 0, receivedBytes: 0 };
   const host = new SdkHostClient({
-    dbPath: legacyDbPath,
-    engine: 'ts',
+    dbPath,
     rootDir: root,
-    observationShadow: { dbPath: shadowDbPath },
     detectAdditionalSources: false,
     onEvent: () => undefined,
   });

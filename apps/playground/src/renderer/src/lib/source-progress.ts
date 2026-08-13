@@ -12,6 +12,12 @@ export interface ProgressSnapshot {
   message: string;
   current?: number;
   total?: number;
+  sourceId?: SourceId;
+  sourceStage?: 'active' | 'done';
+  sourceIndex?: number;
+  sourceCount?: number;
+  elapsedMs?: number;
+  commitSeq?: number;
 }
 
 export interface SourceProgressState {
@@ -76,9 +82,9 @@ export function phaseLabel(phase: string): string {
  * pending row (Claude runs first in the default owner order).
  */
 export function applyProgressEvent(sources: SourceProgressState[], event: ProgressSnapshot): SourceProgressState[] {
-  let inferred = inferSourceFromMessage(event.message);
+  let inferred = event.sourceId ?? inferSourceFromMessage(event.message);
   const fraction =
-    event.total != null && event.total > 0 && event.current != null
+    event.sourceIndex == null && event.total != null && event.total > 0 && event.current != null
       ? Math.min(1, Math.max(0, event.current / event.total))
       : undefined;
 
@@ -122,8 +128,8 @@ export function applyProgressEvent(sources: SourceProgressState[], event: Progre
     if (i === idx) {
       return {
         ...s,
-        stage: 'active' as const,
-        fraction: fraction ?? s.fraction,
+        stage: event.sourceStage === 'done' ? ('done' as const) : ('active' as const),
+        fraction: event.sourceStage === 'done' ? 1 : (fraction ?? s.fraction),
         detail: event.message,
       };
     }
@@ -143,7 +149,8 @@ export function initialSourceStates(detected?: SourceId[]): SourceProgressState[
   return [...ordered, ...extras].map((s, i) => ({
     id: s.id,
     label: s.label,
-    stage: i === 0 ? ('pending' as const) : ('pending' as const),
+    stage: i === 0 ? ('active' as const) : ('pending' as const),
+    ...(i === 0 ? { detail: 'Waiting for the Rust observation owner…' } : {}),
   }));
 }
 

@@ -22,6 +22,7 @@ mod runtime_query;
 mod search_query;
 mod session_index_projection;
 mod settings_projection;
+mod storage_codec;
 mod supervisor;
 mod task_projection;
 mod team_projection;
@@ -144,6 +145,21 @@ pub enum EngineError {
     Sqlite {
         operation: &'static str,
         detail: String,
+    },
+
+    #[error("storage codec {operation} failed: {detail}")]
+    StorageCodec {
+        operation: &'static str,
+        detail: String,
+    },
+
+    #[error(
+        "insufficient disk space for observation database at {database_path}: available={available_bytes} bytes, required reserve={reserve_bytes} bytes"
+    )]
+    InsufficientDiskSpace {
+        database_path: PathBuf,
+        available_bytes: u64,
+        reserve_bytes: u64,
     },
 
     #[error("engine is shutting down or already stopped")]
@@ -300,6 +316,10 @@ impl CommitNotifications {
             state.latest_commit_seq = commit_seq;
             true
         });
+    }
+
+    fn latest_commit_seq(&self) -> u64 {
+        self.changed.borrow().latest_commit_seq
     }
 
     fn stop(&self) {
@@ -466,6 +486,15 @@ impl SpaghettiEngineCore {
             .unwrap_or((false, 0, 0));
         let running = lifecycle.phase == LifecyclePhase::Running;
         let mut observation = self.observation.snapshot();
+        let latest_commit_seq = self.commit_notifications.latest_commit_seq();
+        if latest_commit_seq > 0 {
+            observation.last_commit_seq = Some(
+                observation
+                    .last_commit_seq
+                    .unwrap_or_default()
+                    .max(latest_commit_seq),
+            );
+        }
         let supervisors = self.lock_supervisors();
         for supervisor in supervisors
             .iter()
@@ -1484,6 +1513,7 @@ mod tests {
     #[tokio::test]
     async fn commit_notifications_wake_without_polling_and_honor_cancellation() {
         let notifications = Arc::new(CommitNotifications::new(7));
+        assert_eq!(notifications.latest_commit_seq(), 7);
         let immediate = notifications
             .wait(6, 1_000, &QueryCancellationToken::default())
             .await
@@ -1499,6 +1529,7 @@ mod tests {
         });
         tokio::time::sleep(Duration::from_millis(10)).await;
         notifications.publish(8);
+        assert_eq!(notifications.latest_commit_seq(), 8);
         let woken = waiter.await.unwrap().unwrap();
         assert_eq!(woken.observed_commit_seq, 8);
         assert_eq!(woken.reason, "commit");

@@ -37,7 +37,6 @@ interface PendingRequest {
 export interface SdkHostClientOptions {
   dbPath: string;
   rootDir?: string;
-  observationShadow?: { dbPath?: string };
   /** Defaults to utility-host auto-detection. Benchmarks can disable it. */
   detectAdditionalSources?: boolean;
   onEvent(event: SdkHostEvent): void;
@@ -101,14 +100,6 @@ export class SdkHostClient {
           ...process.env,
           SPAGHETTI_DB_PATH: this.options.dbPath,
           ...(this.options.rootDir ? { SPAGHETTI_ROOT_DIR: this.options.rootDir } : {}),
-          ...(this.options.observationShadow
-            ? {
-                SPAGHETTI_OBSERVATION_SHADOW: '1',
-                ...(this.options.observationShadow.dbPath
-                  ? { SPAGHETTI_OBSERVATION_SHADOW_DB_PATH: this.options.observationShadow.dbPath }
-                  : {}),
-              }
-            : {}),
           ...(this.options.detectAdditionalSources !== undefined
             ? { SPAGHETTI_DETECT_ADDITIONAL_SOURCES: this.options.detectAdditionalSources ? '1' : '0' }
             : {}),

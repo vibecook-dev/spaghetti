@@ -941,7 +941,7 @@ mod tests {
             .unwrap();
         connection
             .execute(
-                "INSERT INTO source_streams VALUES (1, 1, 'history', 'append_file', 'fixture', 'available', NULL, 1)",
+                "INSERT INTO source_streams VALUES (1, 1, 'history', 'append_file', 'fixture', 'available', 'none', NULL, 1)",
                 [],
             )
             .unwrap();

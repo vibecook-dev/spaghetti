@@ -33,6 +33,12 @@ pub(super) fn apply_team_snapshots(
     batch: &FactBatch,
 ) -> Result<Vec<ChangeEntry>, EngineError> {
     let object_id = sqlite_u64(context.source_object_id, "source object id")?;
+    let has_team_fact = batch.facts().iter().any(|envelope| {
+        matches!(
+            envelope.value,
+            Fact::TeamSnapshot(_) | Fact::TeamInboxSnapshot(_)
+        )
+    });
     let mut affected_teams = source_object_keys(
         transaction,
         "SELECT DISTINCT team_key FROM team_snapshot_assertions WHERE source_object_id = ?1",
@@ -45,6 +51,11 @@ pub(super) fn apply_team_snapshots(
         object_id,
         "read replaced team inbox snapshots",
     )?;
+
+    if !has_team_fact && affected_teams.is_empty() && affected_inboxes.is_empty() {
+        return Ok(Vec::new());
+    }
+
     let mut affected_members = children_for_parents(
         transaction,
         "SELECT member_key FROM canonical_team_members WHERE team_key = ?1",

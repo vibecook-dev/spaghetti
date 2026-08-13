@@ -9,6 +9,7 @@ export {
   openObservationHost,
   type ObservationHost,
   type ObservationHostOptions,
+  type ObservationHostProgress,
   type ObservationHostSnapshot,
   type ObservationHostSource,
 } from './observation-host.js';

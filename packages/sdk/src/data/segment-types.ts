@@ -115,6 +115,14 @@ export interface InitProgress {
   message: string;
   current?: number;
   total?: number;
+  /** Explicit native adapter identity; consumers must not parse `message`. */
+  sourceId?: string;
+  sourceStage?: 'active' | 'done';
+  /** One-based configured source position. */
+  sourceIndex?: number;
+  sourceCount?: number;
+  elapsedMs?: number;
+  commitSeq?: number;
 }
 
 export interface PaginatedSegmentQuery {

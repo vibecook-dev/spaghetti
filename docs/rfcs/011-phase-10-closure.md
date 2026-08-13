@@ -131,9 +131,107 @@ toward the retired architecture.
 carry explicit RFC 011 supersession notices and link to this closure ledger.
 Current Phase 9/10 records describe the Rust-owned asynchronous topology.
 
+### P10-09 — playground benchmark retained migration-era selectors
+
+A follow-up playground audit found that the Electron topology benchmark still
+passed an obsolete `engine: 'ts'` field and routed its real Rust database
+through an `observationShadow` option. The engine field had no runtime effect,
+but `src/benchmark` was outside the playground TypeScript project, so the stale
+option was not rejected. Current utility configuration and diagnostics also
+retained unused shadow-era names after the unconditional production cutover.
+
+**Resolution:** the benchmark now supplies one canonical `dbPath`; the shadow
+option and environment-variable seam are deleted; host diagnostics use
+production-owner terminology; and `src/benchmark` is included in the
+playground TypeScript project. A one-run real Electron topology smoke test
+negotiated `playground-utility` and returned the expected fixture counts of
+three projects, 20 sessions, and 300 messages through the Rust owner.
+
+### P10-10 — cold ingest looked idle while native message storage amplified input
+
+A real playground cold start exposed two coupled production defects. After
+roughly 468 MiB of transcript input, the incomplete SQLite cache had already
+grown to roughly 3 GiB even though the Rust process was still actively
+scanning. Message-native JSON was stored once in `canonical_messages` and again
+inside the fact audit; Serde encoded both the duplicated `Vec<u8>` payload and
+repeated entity keys as JSON integer arrays. At the same time, startup progress
+was a one-shot renderer event with no late-subscriber snapshot, no per-adapter
+heartbeat, and shutdown waited for initialization before cancelling it. The
+playground therefore appeared stuck at ingest while the cache continued to
+consume disk.
+
+The first compact-storage pass removed the integer-array encoding and the
+second native-message copy, but a bounded real replay exposed one more layer:
+at 402 MB (decimal) of committed append cursors, the 1.9 GiB cache still
+contained 339 MiB of normalized fact-audit JSON and a 116 MiB
+`entity_key, fact_kind` index
+that no query consumed. This was contrary to the stream contract: Claude,
+Codex, and Grok transcript streams declare `HashOnly`, while the projector was
+persisting every normalized fact body as though they declared `Full`.
+
+**Resolution:** schema v40 carries the declared raw-retention policy through
+the commit context and records it on `source_streams`. `fact_records` is now a
+provenance/ownership ledger: `None` and `HashOnly` store an explicit empty
+`omitted` payload alongside the durable fact identity, entity key, source
+object/generation/cursor, record hash, ordinal, observation time, and commit
+sequence. `DiagnosticExcerpt` does the same for ordinary facts and retains
+only an already-redacted bounded unknown-record shape; `Full` opts into a
+compressed fact body. The unused wide fact index is removed; the
+source-instance and object/generation indexes required by inventory and
+retraction remain. Lossless canonical message detail stays available as the
+sole native-message copy, with bounded zstd compression and compact entity-key
+serialization. A stale schema is rebuilt and vacuumed before cold ingest. The
+sole writer rejects commits before the filesystem crosses a bounded 1–4 GiB
+reserve instead of filling the volume.
+
+Observation startup publishes structured per-adapter state and periodic
+heartbeats, caches the latest snapshot for late subscribers and renderer status
+polling, settles explicitly on ready, and aborts native initialization before
+awaiting shutdown. Regression coverage locks the retention-aware single-copy
+storage shape, compression and decode bounds, durable retention value, removal
+of the unused index, legacy decoding, schema-space reclamation, disk-reserve
+calculation, startup lifecycle, and renderer source-state mapping.
+
+A real schema-v40 Electron replay reached 406,865,997 committed append-cursor
+bytes with 844,003 facts and 197,233 canonical messages. The database plus its
+live WAL occupied 1,535,231,176 bytes (1.43 GiB), roughly one quarter below the
+v39 footprint at the comparable cursor. Every fact row used the explicit
+`omitted` codec and the aggregate fact-audit payload was zero bytes. The replay
+was then stopped through the normal Electron lifecycle; SQLite `quick_check`
+returned `ok`, and the resumable cache was retained.
+
+### P10-11 — the retained benchmark did not measure production cold ingestion
+
+The performance follow-up found that the existing `bench:ingest` command still
+measured the retired native bulk/oracle route and a small fixture. It did not
+open the production observation host, exercise adapter and projection work, or
+wait for all bounded startup passes to converge. On the production route, a
+deterministic 16,384-record transcript initially took 30.24 seconds, and an 8x
+corpus showed strongly superlinear growth.
+
+**Resolution:** `bench:observation` now drives the real asynchronous owner,
+asserts convergence and canonical row counts, retains one host for live
+percentile samples, and reports durable database/change-log metrics. The first
+optimization wave removes a 64-record coordinator bottleneck, gates
+generation-replacement work, adds matching cleanup indexes, reuses statements,
+coalesces repeated aggregates, skips provably unrelated projectors, applies
+bounded cache/mmap/checkpoint settings, and makes startup readiness wait for
+known backlog. The best implementation point reduced 16,384 records to 2.08
+seconds; the final checkpoint-balanced configuration takes 2.58 seconds (11.7x
+faster than the original) while measuring single-record live append at p50 6.0
+ms / p99 8.2 ms and 64-record bursts at p50 19.1 ms / p99 91.4 ms. The remaining
+16k-to-131k scaling curve still fails the new acceptance gate.
+
+The [performance optimization design](./011-performance-optimization-plan.md)
+records the evidence, rejected spikes, non-negotiable correctness constraints,
+and staged plan for metrics, a writer-owned bootstrap lifecycle, normalized
+provenance storage, and set-oriented projection maintenance. Phase 10's Rust
+ownership exit remains complete; RFC-wide performance acceptance remains an
+active engineering gate rather than being represented as closed.
+
 ## Verification
 
-The complete closure tree passed these local gates on 2026-08-12:
+The complete closure tree passed these local gates through 2026-08-13:
 
 - `pnpm typecheck`, `pnpm lint`, `pnpm format:check`, `pnpm validate`, and
   `pnpm build`;
@@ -143,7 +241,7 @@ The complete closure tree passed these local gates on 2026-08-12:
   failures;
 - CLI tests: 110 passed, zero failures;
 - `cargo fmt --all -- --check`, workspace/all-feature `cargo check`, Clippy
-  with warnings denied, and 504 Rust tests;
+  with warnings denied, and 513 Rust tests;
 - Phase 9 query conformance: all 12 groups passed, including the 12 MiB
   payload-boundary probe;
 - architecture ownership ratchet: every rule has zero active and zero

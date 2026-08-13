@@ -1980,6 +1980,19 @@ fn open_reader(database_path: &PathBuf) -> Result<Connection, EngineError> {
             operation: "enable query foreign keys",
             detail: error.to_string(),
         })?;
+    connection
+        .pragma_update(None, "cache_size", -32_000_i64)
+        .map_err(|error| EngineError::Sqlite {
+            operation: "configure query page cache",
+            detail: error.to_string(),
+        })?;
+    connection
+        .pragma_update(None, "mmap_size", 256_i64 * 1024 * 1024)
+        .map_err(|error| EngineError::Sqlite {
+            operation: "configure query mmap window",
+            detail: error.to_string(),
+        })?;
+    connection.set_prepared_statement_cache_capacity(128);
     Ok(connection)
 }
 
@@ -3358,6 +3371,7 @@ mod tests {
                 decoder_key: "fixture".to_string(),
                 stream_state: "available".to_string(),
                 last_reconciled_at: None,
+                retention: crate::adapter::RawRetentionPolicy::Full,
             },
             object: SourceObjectUpdate {
                 object_key: b"object".to_vec(),

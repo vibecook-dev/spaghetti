@@ -55,6 +55,15 @@ pub(super) fn apply_interpretation_settings_facts(
 ) -> Result<Vec<ChangeEntry>, EngineError> {
     let object_id = sqlite_u64(context.source_object_id, "source object id")?;
     let mut affected_documents = source_object_keys(transaction, object_id)?;
+    let has_settings_fact = batch
+        .facts()
+        .iter()
+        .any(|envelope| matches!(envelope.value, Fact::InterpretationSettings(_)));
+
+    if !has_settings_fact && affected_documents.is_empty() {
+        return Ok(Vec::new());
+    }
+
     let mut affected_scopes = scopes_for_documents(transaction, &affected_documents)?;
 
     // One source object is one complete root settings document. A valid edit,

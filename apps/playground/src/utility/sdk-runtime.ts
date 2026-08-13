@@ -13,8 +13,8 @@ import {
 import type { InitProgress, SegmentChangeBatch, TimelinePageRequest } from '@vibecook/spaghetti-sdk';
 import type {
   ActiveSessionChange,
+  ObservationHostReport,
   ObservationOwnerStatus,
-  ObservationShadowReport,
   SessionStreamSnapshot,
 } from '../shared/ipc.js';
 import { attachPlaygroundEventForwarding } from './live-forwarding.js';
@@ -25,8 +25,6 @@ export interface SdkRuntimeOptions {
   rootDir?: string;
   /** Override auto-detected secondary native adapters. */
   additionalSources?: ObservationHostSource[];
-  /** Transitional name for an explicit canonical DB path. */
-  observationShadow?: { dbPath?: string };
 }
 
 export interface SdkRuntimeEventSink {
@@ -92,6 +90,8 @@ export class SdkRuntime {
   private activeStream: ActiveStreamIdentity | null = null;
   private ownerState: ObservationOwnerStatus['state'] = 'starting';
   private ownerError: string | null = null;
+  private lastProgress: InitProgress | null = null;
+  private sourceCount = 0;
 
   constructor(
     private readonly options: SdkRuntimeOptions,
@@ -120,9 +120,13 @@ export class SdkRuntime {
         this.ownerState = 'running';
       })
       .catch((error: unknown) => {
-        this.ownerState = 'failed';
-        this.ownerError = String(error);
-        this.sink.initError(String(error));
+        if (this.disposed) {
+          this.ownerState = 'stopped';
+        } else {
+          this.ownerState = 'failed';
+          this.ownerError = String(error);
+          this.sink.initError(String(error));
+        }
         throw error;
       })
       .finally(() => {
@@ -139,9 +143,9 @@ export class SdkRuntime {
     return await operation(this.requireService());
   }
 
-  async getObservationShadowStatus(): Promise<ObservationShadowReport> {
+  async getObservationHostStatus(): Promise<ObservationHostReport> {
     const owner = this.getObservationOwnerStatus();
-    const databasePath = this.databasePath();
+    const databasePath = this.options.dbPath;
     if (owner.state !== 'running') return { ...owner, databasePath };
     try {
       const snapshot = await this.requireService().snapshot();
@@ -162,6 +166,7 @@ export class SdkRuntime {
       enabled: true,
       state: this.ownerState,
       ...(this.ownerError ? { error: this.ownerError } : {}),
+      ...(this.lastProgress ? { progress: this.lastProgress } : {}),
     };
   }
 
@@ -229,20 +234,21 @@ export class SdkRuntime {
   async dispose(): Promise<void> {
     if (this.disposed) return;
     this.disposed = true;
+    await this.disposeService();
     if (this.recoveryPromise) await this.recoveryPromise.catch(() => undefined);
     if (this.maintenancePromise) await this.maintenancePromise.catch(() => undefined);
-    if (this.initPromise) await this.initPromise.catch(() => undefined);
-    await this.disposeService();
     this.ownerState = 'stopped';
   }
 
   private createService(): ObservationService {
+    const sources = [
+      primarySource(this.options.rootDir),
+      ...(this.options.additionalSources ?? detectedAdditionalSources()),
+    ];
+    this.sourceCount = sources.length;
     return createObservationService({
-      dbPath: this.databasePath(),
-      sources: [
-        primarySource(this.options.rootDir),
-        ...(this.options.additionalSources ?? detectedAdditionalSources()),
-      ],
+      dbPath: this.options.dbPath,
+      sources,
       ownerLabel: 'playground-utility-production',
       live: true,
     });
@@ -251,8 +257,22 @@ export class SdkRuntime {
   private attachEvents(service: ObservationService): void {
     this.clearEvents();
     this.eventCleanup = attachPlaygroundEventForwarding(service, {
-      progress: this.sink.progress,
-      ready: this.sink.ready,
+      progress: (progress) => {
+        this.lastProgress = progress;
+        this.sink.progress(progress);
+      },
+      ready: (info) => {
+        const sourceCount = this.sourceCount;
+        this.lastProgress = {
+          phase: 'indexing',
+          message: 'Rust observation service is ready.',
+          current: sourceCount,
+          total: sourceCount,
+          sourceCount,
+          elapsedMs: info.durationMs,
+        };
+        this.sink.ready(info);
+      },
       change: (batch) => {
         this.sink.change(batch);
         this.forwardActiveSessionChange(batch);
@@ -290,6 +310,10 @@ export class SdkRuntime {
       await service.initialize();
       this.ownerState = 'running';
     } catch (error) {
+      if (this.disposed) {
+        this.ownerState = 'stopped';
+        return;
+      }
       this.ownerState = 'failed';
       this.ownerError = String(error);
       this.sink.initError(String(error));
@@ -309,9 +333,5 @@ export class SdkRuntime {
     } catch (error) {
       console.error('[sdk-host] observation service dispose failed', error);
     }
-  }
-
-  private databasePath(): string {
-    return this.options.observationShadow?.dbPath ?? this.options.dbPath;
   }
 }

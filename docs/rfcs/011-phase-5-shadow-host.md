@@ -1,6 +1,13 @@
 # RFC 011 Phase 5: utility-process observation shadow
 
-Status: opt-in isolated shadow host implemented on 2026-08-12
+Status: historical migration slice implemented on 2026-08-12; superseded by
+the unconditional Phase 10 production cutover
+
+> **Supersession note:** This record preserves the temporary Phase 5 topology.
+> The current playground no longer accepts the shadow-selection environment
+> variables or exposes `getObservationShadowStatus()`. It opens exactly one
+> production Rust owner at `SPAGHETTI_DB_PATH` and reports it through
+> `getObservationHostStatus()` / `getObservationOwnerStatus()`.
 
 This slice moves the native Claude observation supervisor into the real
 long-lived Electron utility-process lifecycle without claiming the production

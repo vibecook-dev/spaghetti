@@ -4,7 +4,7 @@
 //! single-writer ownership structural and keeps N-API objects `Send` without
 //! moving SQLite handles across runtimes.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
@@ -21,6 +21,10 @@ use super::commit::{
 };
 use super::projection;
 use super::EngineError;
+
+const MIN_DISK_RESERVE_BYTES: u64 = 1024 * 1024 * 1024;
+const MAX_DISK_RESERVE_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+const WRITER_STATEMENT_CACHE_CAPACITY: usize = 256;
 
 #[derive(Debug, Clone)]
 pub struct WriterHealth {
@@ -244,21 +248,24 @@ fn writer_thread(
                 let _ = response.send(read_health(&connection));
             }
             WriterCommand::ReserveSourceInstance { source, response } => {
-                let _ = response.send(commit::reserve_source_instance(&mut connection, &source));
+                let result = ensure_disk_reserve(&database_path)
+                    .and_then(|()| commit::reserve_source_instance(&mut connection, &source));
+                let _ = response.send(result);
             }
             WriterCommand::Commit { request, response } => {
-                let _ = response.send(commit::apply_observation_commit(&mut connection, &request));
+                let result = ensure_disk_reserve(&database_path)
+                    .and_then(|()| commit::apply_observation_commit(&mut connection, &request));
+                let _ = response.send(result);
             }
             WriterCommand::CommitFacts {
                 request,
                 batch,
                 response,
             } => {
-                let _ = response.send(projection::apply_fact_observation_commit(
-                    &mut connection,
-                    &request,
-                    &batch,
-                ));
+                let result = ensure_disk_reserve(&database_path).and_then(|()| {
+                    projection::apply_fact_observation_commit(&mut connection, &request, &batch)
+                });
+                let _ = response.send(result);
             }
             WriterCommand::MaintainChangeLog {
                 policy,
@@ -272,6 +279,30 @@ fn writer_thread(
     }
 
     alive.store(false, Ordering::Release);
+}
+
+fn ensure_disk_reserve(database_path: &Path) -> Result<(), EngineError> {
+    let filesystem_path = database_path.parent().unwrap_or(database_path);
+    let stats = rustix::fs::statvfs(filesystem_path).map_err(|error| EngineError::Sqlite {
+        operation: "inspect observation database free space",
+        detail: error.to_string(),
+    })?;
+    let fragment_bytes = stats.f_frsize.max(stats.f_bsize).max(1);
+    let available_bytes = stats.f_bavail.saturating_mul(fragment_bytes);
+    let total_bytes = stats.f_blocks.saturating_mul(fragment_bytes);
+    let reserve_bytes = disk_reserve_bytes(total_bytes);
+    if available_bytes < reserve_bytes {
+        return Err(EngineError::InsufficientDiskSpace {
+            database_path: database_path.to_path_buf(),
+            available_bytes,
+            reserve_bytes,
+        });
+    }
+    Ok(())
+}
+
+fn disk_reserve_bytes(total_bytes: u64) -> u64 {
+    (total_bytes / 50).clamp(MIN_DISK_RESERVE_BYTES, MAX_DISK_RESERVE_BYTES)
 }
 
 fn open_writer(database_path: &PathBuf) -> Result<Connection, EngineError> {
@@ -299,6 +330,20 @@ fn open_writer(database_path: &PathBuf) -> Result<Connection, EngineError> {
         operation: "initialize schema",
         detail: error.to_string(),
     })?;
+    // Let SQLite refresh bounded planner statistics for tables that need it.
+    // The 0x10000 bit asks a newly opened long-lived connection to consider
+    // every table once; SQLite's optimize pragma decides whether ANALYZE work
+    // is actually necessary and limits the analysis scope.
+    connection
+        .execute_batch("PRAGMA optimize=0x10002")
+        .map_err(|error| EngineError::Sqlite {
+            operation: "optimize writer query planner",
+            detail: error.to_string(),
+        })?;
+    // Projection SQL is deliberately stable across commits. Keep the hot
+    // statements compiled on this long-lived sole-writer connection instead
+    // of paying sqlite3_prepare_v2 for every fact.
+    connection.set_prepared_statement_cache_capacity(WRITER_STATEMENT_CACHE_CAPACITY);
     super::local_permissions::restrict_sqlite_files(database_path).map_err(|error| {
         EngineError::Sqlite {
             operation: "restrict writer SQLite sidecar permissions",
@@ -349,6 +394,19 @@ mod tests {
             client.health(),
             Err(EngineError::WorkerUnavailable { worker: "writer" })
         ));
+    }
+
+    #[test]
+    fn disk_reserve_is_bounded_and_keeps_two_percent_on_normal_volumes() {
+        assert_eq!(
+            disk_reserve_bytes(10 * 1024 * 1024 * 1024),
+            MIN_DISK_RESERVE_BYTES
+        );
+        assert_eq!(
+            disk_reserve_bytes(100 * 1024 * 1024 * 1024),
+            2 * 1024 * 1024 * 1024
+        );
+        assert_eq!(disk_reserve_bytes(u64::MAX), MAX_DISK_RESERVE_BYTES);
     }
 
     #[cfg(unix)]

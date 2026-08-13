@@ -17,6 +17,14 @@
 use rusqlite::Connection;
 use thiserror::Error;
 
+const WRITER_CACHE_KIB: i64 = 128_000;
+const SQLITE_MMAP_BYTES: i64 = 256 * 1024 * 1024;
+// A 32 MiB WAL kept 100-sample 64-record burst p99 below 100 ms without the
+// repeated cold-load penalty measured at 16 MiB. See the RFC 011 performance
+// optimization record for the controlled checkpoint spike.
+const WAL_AUTOCHECKPOINT_PAGES: i64 = 8_192;
+const WAL_JOURNAL_LIMIT_BYTES: i64 = 64 * 1024 * 1024;
+
 /// The current schema version. Bumping this forces a wipe-and-rebuild of all
 /// tables on the next call to [`initialize_schema`].
 ///
@@ -91,7 +99,12 @@ use thiserror::Error;
 /// v37: durable adapter version, source-schema versions, and capability
 /// declarations on each source instance for offline SDK inspection.
 /// v38: stamped adapter dependency reads attached to durable fact records.
-pub const SCHEMA_VERSION: u32 = 38;
+/// v39: versioned zstd storage for fact audit blobs and canonical native
+/// message payloads. Message audit JSON no longer duplicates the native body;
+/// stale rebuildable caches are compacted after the wipe.
+/// v40: stream retention is durable, non-Full streams keep provenance-only
+/// fact records, and the unused wide fact entity/kind index is removed.
+pub const SCHEMA_VERSION: u32 = 40;
 
 /// Full DDL for the current schema — lifted verbatim from the TS `SCHEMA_SQL`
 /// template literal. Whitespace differs; structure does not.
@@ -354,6 +367,7 @@ CREATE TABLE IF NOT EXISTS source_streams (
   driver_kind TEXT NOT NULL,
   decoder_key TEXT NOT NULL,
   stream_state TEXT NOT NULL,
+  raw_retention TEXT NOT NULL DEFAULT 'none',
   last_reconciled_at INTEGER,
   last_commit_seq INTEGER,
   UNIQUE(source_instance_id, stream_key)
@@ -445,8 +459,10 @@ CREATE TABLE IF NOT EXISTS source_record_errors (
   PRIMARY KEY (source_object_id, generation, cursor_start, cursor_end)
 );
 
--- RFC 011 typed-fact audit store and common projections. Adapters emit the
--- facts; only the common writer maps them into these tables.
+-- RFC 011 typed-fact provenance store and common projections. payload_json is
+-- empty with codec 'omitted' unless the stream declares Full retention or a
+-- DiagnosticExcerpt stream preserves one bounded redacted unknown-record
+-- shape; only the common writer maps facts into these tables.
 CREATE TABLE IF NOT EXISTS fact_records (
   fact_id BLOB PRIMARY KEY,
   fact_kind TEXT NOT NULL,
@@ -461,6 +477,7 @@ CREATE TABLE IF NOT EXISTS fact_records (
   local_fact_ordinal INTEGER NOT NULL,
   observed_at INTEGER NOT NULL,
   payload_json BLOB NOT NULL,
+  payload_codec TEXT NOT NULL DEFAULT 'identity',
   last_commit_seq INTEGER NOT NULL REFERENCES ingest_commits(commit_seq) ON DELETE RESTRICT
 );
 
@@ -706,6 +723,7 @@ CREATE TABLE IF NOT EXISTS canonical_messages (
   model TEXT,
   search_text TEXT,
   raw_json BLOB NOT NULL,
+  raw_json_codec TEXT NOT NULL DEFAULT 'identity',
   fact_id BLOB NOT NULL REFERENCES fact_records(fact_id) ON DELETE CASCADE,
   source_object_id INTEGER NOT NULL,
   source_generation INTEGER NOT NULL,
@@ -1553,9 +1571,9 @@ CREATE INDEX IF NOT EXISTS idx_change_log_topic_cursor ON change_log(topic, comm
 CREATE INDEX IF NOT EXISTS idx_projection_versions_readiness ON projection_versions(readiness, projection_id);
 CREATE INDEX IF NOT EXISTS idx_source_record_errors_commit ON source_record_errors(first_commit_seq);
 CREATE INDEX IF NOT EXISTS idx_fact_records_object_generation ON fact_records(source_object_id, source_generation);
-CREATE INDEX IF NOT EXISTS idx_fact_records_entity_kind ON fact_records(entity_key, fact_kind);
 CREATE INDEX IF NOT EXISTS idx_fact_records_source_instance ON fact_records(source_instance_id, fact_id);
 CREATE INDEX IF NOT EXISTS idx_canonical_sessions_project ON canonical_sessions(project_key, session_key);
+CREATE INDEX IF NOT EXISTS idx_canonical_sessions_source_generation ON canonical_sessions(source_object_id, source_generation);
 CREATE INDEX IF NOT EXISTS idx_session_index_snapshot_assertions_project ON session_index_snapshot_assertions(project_key, fact_id);
 CREATE INDEX IF NOT EXISTS idx_session_index_snapshot_assertions_source ON session_index_snapshot_assertions(source_object_id, project_key);
 CREATE INDEX IF NOT EXISTS idx_session_index_entry_assertions_project ON session_index_entry_assertions(project_key, entry_ordinal);
@@ -1582,10 +1600,14 @@ CREATE INDEX IF NOT EXISTS idx_canonical_message_blocks_run ON canonical_message
 CREATE INDEX IF NOT EXISTS idx_canonical_messages_session_order ON canonical_messages(session_key, source_generation, cursor_start);
 CREATE INDEX IF NOT EXISTS idx_canonical_messages_session_activity ON canonical_messages(session_key, source_time, message_key, source_time_quality, last_commit_seq);
 CREATE INDEX IF NOT EXISTS idx_canonical_messages_run_activity ON canonical_messages(run_key, source_time, message_key);
+CREATE INDEX IF NOT EXISTS idx_canonical_messages_source_generation ON canonical_messages(source_object_id, source_generation);
 CREATE INDEX IF NOT EXISTS idx_canonical_runs_session ON canonical_runs(session_key, run_key);
 CREATE INDEX IF NOT EXISTS idx_canonical_runs_commit ON canonical_runs(last_commit_seq DESC, run_key DESC);
+CREATE INDEX IF NOT EXISTS idx_canonical_runs_source_generation ON canonical_runs(source_object_id, source_generation);
 CREATE INDEX IF NOT EXISTS idx_usage_contributions_session_time ON usage_contributions(session_key, source_time, fact_id);
+CREATE INDEX IF NOT EXISTS idx_usage_contributions_source_generation ON usage_contributions(source_object_id, source_generation);
 CREATE INDEX IF NOT EXISTS idx_run_evidence_run_order ON run_evidence(run_key, source_generation, cursor_end);
+CREATE INDEX IF NOT EXISTS idx_run_evidence_source_generation ON run_evidence(source_object_id, source_generation);
 CREATE INDEX IF NOT EXISTS idx_presence_assertions_presence ON presence_assertions(presence_key, fact_id);
 CREATE INDEX IF NOT EXISTS idx_presence_assertions_source ON presence_assertions(source_object_id, presence_key);
 CREATE INDEX IF NOT EXISTS idx_presence_assertions_session ON presence_assertions(session_key, presence_key);
@@ -1594,6 +1616,7 @@ CREATE INDEX IF NOT EXISTS idx_canonical_presences_run ON canonical_presences(ru
 CREATE INDEX IF NOT EXISTS idx_canonical_presences_commit ON canonical_presences(last_commit_seq DESC, presence_key DESC);
 CREATE INDEX IF NOT EXISTS idx_delegation_assertions_child_order ON delegation_assertions(child_run_key, relation_strength, source_generation, cursor_end);
 CREATE INDEX IF NOT EXISTS idx_delegation_assertions_parent ON delegation_assertions(parent_run_key, child_run_key);
+CREATE INDEX IF NOT EXISTS idx_delegation_assertions_source_generation ON delegation_assertions(source_object_id, source_generation);
 CREATE INDEX IF NOT EXISTS idx_canonical_delegations_session ON canonical_delegations(session_key, child_run_key);
 CREATE INDEX IF NOT EXISTS idx_canonical_delegations_session_activity ON canonical_delegations(session_key, (CASE WHEN source_time IS NULL THEN 1 ELSE 0 END), COALESCE(source_time, '') DESC, child_run_key DESC);
 CREATE INDEX IF NOT EXISTS idx_delegation_metadata_assertions_child ON delegation_metadata_assertions(child_run_key, fact_id);
@@ -1602,6 +1625,7 @@ CREATE INDEX IF NOT EXISTS idx_delegation_metadata_assertions_task ON delegation
 CREATE INDEX IF NOT EXISTS idx_canonical_delegation_metadata_session ON canonical_delegation_metadata(session_key, child_run_key);
 CREATE INDEX IF NOT EXISTS idx_delegation_spawn_assertions_task ON delegation_spawn_assertions(session_key, native_task_id, parent_run_key);
 CREATE INDEX IF NOT EXISTS idx_delegation_spawn_assertions_source ON delegation_spawn_assertions(source_object_id, spawn_key);
+CREATE INDEX IF NOT EXISTS idx_delegation_spawn_assertions_source_generation ON delegation_spawn_assertions(source_object_id, source_generation);
 CREATE INDEX IF NOT EXISTS idx_canonical_delegation_spawns_session ON canonical_delegation_spawns(session_key, native_task_id, spawn_key);
 CREATE INDEX IF NOT EXISTS idx_team_snapshot_assertions_team ON team_snapshot_assertions(team_key, fact_id);
 CREATE INDEX IF NOT EXISTS idx_team_snapshot_assertions_source ON team_snapshot_assertions(source_object_id, team_key);
@@ -2123,8 +2147,9 @@ pub fn rebuild_fts_and_recreate_triggers(conn: &Connection) -> Result<(), Schema
     Ok(())
 }
 
-/// Apply the connection-level PRAGMAs that the TS `SqliteService` sets on
-/// every open: WAL journal mode, NORMAL synchronous, foreign keys on.
+/// Apply the connection-level PRAGMAs for the long-lived sole writer. The
+/// cache and checkpoint bounds are explicit so performance does not silently
+/// fall back to SQLite's ~2 MiB page cache and 1,000-page checkpoint cadence.
 ///
 /// Note: on an in-memory connection SQLite refuses WAL and reports
 /// `journal_mode = memory`. Tests that need to verify WAL use a file-backed
@@ -2135,6 +2160,11 @@ pub fn set_pragmas(conn: &Connection) -> Result<(), SchemaError> {
     conn.pragma_update(None, "journal_mode", "WAL")?;
     conn.pragma_update(None, "synchronous", "NORMAL")?;
     conn.pragma_update(None, "foreign_keys", "ON")?;
+    conn.pragma_update(None, "temp_store", "MEMORY")?;
+    conn.pragma_update(None, "cache_size", -WRITER_CACHE_KIB)?;
+    conn.pragma_update(None, "mmap_size", SQLITE_MMAP_BYTES)?;
+    conn.pragma_update(None, "wal_autocheckpoint", WAL_AUTOCHECKPOINT_PAGES)?;
+    conn.pragma_update(None, "journal_size_limit", WAL_JOURNAL_LIMIT_BYTES)?;
     Ok(())
 }
 
@@ -2191,7 +2221,9 @@ pub fn initialize_schema(conn: &Connection) -> Result<(), SchemaError> {
 
     let current = current_schema_version(conn)?;
 
-    if current != Some(SCHEMA_VERSION) {
+    let rebuilt = current != Some(SCHEMA_VERSION);
+
+    if rebuilt {
         // Drop legacy tables from previous schema versions. Errors here are
         // deliberately ignored (match TS try/catch with empty catch) so a
         // partially-broken legacy state still migrates.
@@ -2236,6 +2268,13 @@ pub fn initialize_schema(conn: &Connection) -> Result<(), SchemaError> {
     // Kept as a reusable block so bulk ingestion can drop/recreate this
     // invalidation family without duplicating it inside SCHEMA_SQL.
     conn.execute_batch(SESSION_SUMMARY_TRIGGERS_SQL)?;
+
+    // Dropping a stale rebuildable cache leaves its old pages allocated. Repack
+    // now, while this writer is still the only connection, so a cold ingest
+    // does not begin with gigabytes of dead space.
+    if rebuilt {
+        conn.execute_batch("VACUUM")?;
+    }
 
     Ok(())
 }
@@ -2388,6 +2427,36 @@ mod tests {
             "idx_canonical_message_blocks_session_kind"
         ));
         assert!(object_exists(&conn, "table", "canonical_messages"));
+        for index in [
+            "idx_canonical_sessions_source_generation",
+            "idx_canonical_messages_source_generation",
+            "idx_canonical_runs_source_generation",
+            "idx_usage_contributions_source_generation",
+            "idx_run_evidence_source_generation",
+            "idx_delegation_assertions_source_generation",
+            "idx_delegation_spawn_assertions_source_generation",
+        ] {
+            assert!(object_exists(&conn, "index", index), "missing {index}");
+        }
+        for (table, column) in [
+            ("source_streams", "raw_retention"),
+            ("fact_records", "payload_codec"),
+            ("canonical_messages", "raw_json_codec"),
+        ] {
+            let present: i64 = conn
+                .query_row(
+                    &format!("SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name = ?1"),
+                    [column],
+                    |row| row.get(0),
+                )
+                .expect("inspect compact payload schema");
+            assert_eq!(present, 1, "missing {table}.{column}");
+        }
+        assert!(!object_exists(
+            &conn,
+            "index",
+            "idx_fact_records_entity_kind"
+        ));
         assert!(object_exists(
             &conn,
             "table",
@@ -2598,6 +2667,53 @@ mod tests {
     }
 
     #[test]
+    fn generation_cleanup_queries_use_source_generation_indexes() {
+        let conn = Connection::open_in_memory().expect("open in-memory db");
+        initialize_schema(&conn).expect("initialize schema");
+
+        for (table, index) in [
+            ("fact_records", "idx_fact_records_object_generation"),
+            (
+                "canonical_sessions",
+                "idx_canonical_sessions_source_generation",
+            ),
+            (
+                "canonical_messages",
+                "idx_canonical_messages_source_generation",
+            ),
+            ("canonical_runs", "idx_canonical_runs_source_generation"),
+            (
+                "usage_contributions",
+                "idx_usage_contributions_source_generation",
+            ),
+            ("run_evidence", "idx_run_evidence_source_generation"),
+            (
+                "delegation_assertions",
+                "idx_delegation_assertions_source_generation",
+            ),
+            (
+                "delegation_spawn_assertions",
+                "idx_delegation_spawn_assertions_source_generation",
+            ),
+        ] {
+            let sql = format!(
+                "EXPLAIN QUERY PLAN SELECT 1 FROM {table} WHERE source_object_id = ?1 AND source_generation <> ?2"
+            );
+            let mut statement = conn.prepare(&sql).expect("prepare query plan");
+            let details = statement
+                .query_map([1_i64, 1_i64], |row| row.get::<_, String>(3))
+                .expect("read query plan")
+                .collect::<Result<Vec<_>, _>>()
+                .expect("collect query plan")
+                .join("\n");
+            assert!(
+                details.contains(index),
+                "{table} cleanup did not use {index}: {details}"
+            );
+        }
+    }
+
+    #[test]
     fn same_version_attach_refreshes_activity_triggers_and_upserts_stay_safe() {
         let conn = Connection::open_in_memory().expect("open in-memory db");
         initialize_schema(&conn).expect("first init");
@@ -2694,6 +2810,48 @@ mod tests {
     }
 
     #[test]
+    fn stale_schema_rebuild_reclaims_dead_pages_before_cold_ingest() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let database = directory.path().join("stale.db");
+        let conn = Connection::open(&database).expect("open file database");
+        initialize_schema(&conn).expect("first init");
+        let schema_floor: i64 = conn
+            .query_row("PRAGMA page_count", [], |row| row.get(0))
+            .expect("read empty schema page count");
+        conn.execute(
+            "INSERT INTO messages (project_slug, session_id, msg_index, data) VALUES ('p', 's', 0, ?1)",
+            [vec![b'x'; 4 * 1024 * 1024]],
+        )
+        .expect("inflate stale cache");
+        let before: i64 = conn
+            .query_row("PRAGMA page_count", [], |row| row.get(0))
+            .expect("read inflated page count");
+        conn.execute(
+            "UPDATE schema_meta SET value = ?1 WHERE key = 'version'",
+            [SCHEMA_VERSION.saturating_sub(1).to_string()],
+        )
+        .expect("mark stale");
+
+        initialize_schema(&conn).expect("rebuild and compact");
+
+        let after: i64 = conn
+            .query_row("PRAGMA page_count", [], |row| row.get(0))
+            .expect("read compact page count");
+        let freelist_after: i64 = conn
+            .query_row("PRAGMA freelist_count", [], |row| row.get(0))
+            .expect("read compact freelist count");
+        assert!(
+            before >= schema_floor + 1_000,
+            "fixture did not allocate enough pages: floor {schema_floor}, inflated {before}"
+        );
+        assert!(
+            after <= schema_floor + 8,
+            "rebuild did not return near its schema floor: {schema_floor} -> {before} -> {after}"
+        );
+        assert_eq!(freelist_after, 0, "VACUUM left dead pages on the freelist");
+    }
+
+    #[test]
     fn stale_schema_drops_rfc011_foreign_key_graph_in_dependency_order() {
         let conn = Connection::open_in_memory().expect("open in-memory db");
         conn.pragma_update(None, "foreign_keys", "ON")
@@ -2784,5 +2942,18 @@ mod tests {
             .query_row("PRAGMA foreign_keys", [], |row| row.get(0))
             .expect("read foreign_keys");
         assert_eq!(fk, 1);
+
+        let cache_size: i64 = conn
+            .query_row("PRAGMA cache_size", [], |row| row.get(0))
+            .expect("read cache_size");
+        assert_eq!(cache_size, -WRITER_CACHE_KIB);
+        let mmap_size: i64 = conn
+            .query_row("PRAGMA mmap_size", [], |row| row.get(0))
+            .expect("read mmap_size");
+        assert_eq!(mmap_size, SQLITE_MMAP_BYTES);
+        let checkpoint_pages: i64 = conn
+            .query_row("PRAGMA wal_autocheckpoint", [], |row| row.get(0))
+            .expect("read wal_autocheckpoint");
+        assert_eq!(checkpoint_pages, WAL_AUTOCHECKPOINT_PAGES);
     }
 }

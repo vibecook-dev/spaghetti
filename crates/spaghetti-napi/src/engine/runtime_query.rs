@@ -929,7 +929,7 @@ mod tests {
             .unwrap();
         connection
             .execute(
-                "INSERT INTO source_streams VALUES (1, 1, 'runtime', 'presence_object', 'fixture', 'available', NULL, 1)",
+                "INSERT INTO source_streams VALUES (1, 1, 'runtime', 'presence_object', 'fixture', 'available', 'none', NULL, 1)",
                 [],
             )
             .unwrap();

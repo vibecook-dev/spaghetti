@@ -4,15 +4,18 @@
 //! Adapters never receive a SQLite handle, table name, or change-log topic.
 
 use std::cell::RefCell;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
-use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
+use rusqlite::{
+    params, params_from_iter, Connection, OptionalExtension, Params, Transaction,
+    TransactionBehavior,
+};
 
 use crate::adapter::{
     DelegationFact, DelegationKind, DelegationMetadataFact, DelegationSpawnFact,
     DependencyRevision, EntityKey, EvidenceKind, EvidenceStrength, Fact, FactBatch, FactEnvelope,
-    MessageRole, QualifiedTimestamp, RelationStrength, TimestampQuality, TokenUsage,
-    UsageAccounting, UsageFact, UsageScope, ValueQuality,
+    MessageRole, QualifiedTimestamp, RawRetentionPolicy, RelationStrength, SessionFact,
+    TimestampQuality, TokenUsage, UsageAccounting, UsageFact, UsageScope, ValueQuality,
 };
 
 use super::artifact_projection::apply_artifact_facts;
@@ -24,6 +27,7 @@ use super::memory_projection::apply_project_memory_facts;
 use super::presence_projection::apply_presence_facts;
 use super::session_index_projection::apply_session_index_facts;
 use super::settings_projection::apply_interpretation_settings_facts;
+use super::storage_codec::{omitted, BlobEncoder, EncodedBlob};
 use super::task_projection::apply_task_snapshots;
 use super::team_projection::apply_team_snapshots;
 use super::timeline_projection::replace_message_content_blocks;
@@ -66,8 +70,11 @@ pub(super) fn apply_fact_observation_commit(
         }
         request.object.decoder_state = Some(next_decoder_state.to_vec());
     }
+    let encoded_payloads = encode_fact_payloads(batch, request.stream.retention)?;
     let projection = FactProjectionWork {
         batch,
+        encoded_payloads,
+        retention: request.stream.retention,
         retracted_run_keys: RefCell::new(BTreeSet::new()),
     };
     apply_observation_commit_with_projection(connection, &request, &projection)
@@ -75,7 +82,15 @@ pub(super) fn apply_fact_observation_commit(
 
 struct FactProjectionWork<'a> {
     batch: &'a FactBatch,
+    encoded_payloads: Vec<EncodedFactPayload>,
+    retention: RawRetentionPolicy,
     retracted_run_keys: RefCell<BTreeSet<Vec<u8>>>,
+}
+
+#[derive(Debug)]
+struct EncodedFactPayload {
+    audit: EncodedBlob,
+    message_raw: Option<EncodedBlob>,
 }
 
 impl TransactionalProjectionWork for FactProjectionWork<'_> {
@@ -84,33 +99,75 @@ impl TransactionalProjectionWork for FactProjectionWork<'_> {
         transaction: &Transaction<'_>,
         context: &ProjectionCommitContext,
     ) -> Result<Vec<ChangeEntry>, EngineError> {
+        if self.retention != context.retention {
+            return Err(EngineError::InvalidCommit(
+                "encoded fact retention does not match the committed stream policy".to_string(),
+            ));
+        }
         validate_batch_provenance(self.batch, context)?;
-        self.retracted_run_keys.replace(old_generation_keys(
-            transaction,
-            "SELECT DISTINCT run_key FROM canonical_runs WHERE source_object_id = ?1 AND source_generation <> ?2",
-            context,
-            "read replaced canonical runs",
-        )?);
-        let mut changed_session_keys = old_generation_keys(
-            transaction,
-            "SELECT DISTINCT session_key FROM canonical_sessions WHERE source_object_id = ?1 AND source_generation <> ?2",
-            context,
-            "read replaced canonical sessions",
-        )?;
-        let mut changed_tool_references = replaced_message_reference_keys(transaction, context)?;
-        let mut changes = retract_canonical_generation(transaction, context)?;
-        for envelope in self.batch.facts() {
+        let (
+            retracted_run_keys,
+            mut changed_session_keys,
+            mut changed_tool_references,
+            mut changes,
+        ) = if context.replaces_prior_generation {
+            (
+                    old_generation_keys(
+                        transaction,
+                        "SELECT DISTINCT run_key FROM canonical_runs WHERE source_object_id = ?1 AND source_generation <> ?2",
+                        context,
+                        "read replaced canonical runs",
+                    )?,
+                    old_generation_keys(
+                        transaction,
+                        "SELECT DISTINCT session_key FROM canonical_sessions WHERE source_object_id = ?1 AND source_generation <> ?2",
+                        context,
+                        "read replaced canonical sessions",
+                    )?,
+                    replaced_message_reference_keys(transaction, context)?,
+                    retract_canonical_generation(transaction, context)?,
+                )
+        } else {
+            (
+                BTreeSet::new(),
+                BTreeSet::new(),
+                BTreeSet::new(),
+                Vec::new(),
+            )
+        };
+        self.retracted_run_keys.replace(retracted_run_keys);
+        let coalesced_sessions = coalesced_session_projections(self.batch);
+        let last_run_facts = last_run_fact_indices(self.batch);
+        let existing_message_keys = existing_message_keys(transaction, self.batch)?;
+        let mut seen_message_keys = BTreeSet::new();
+        for (index, envelope) in self.batch.facts().iter().enumerate() {
+            let encoded = self.encoded_payloads.get(index).ok_or_else(|| {
+                EngineError::InvalidCommit(
+                    "encoded fact payload count did not match fact batch".to_string(),
+                )
+            })?;
             persist_fact(
                 transaction,
                 context,
                 envelope,
                 self.batch.dependency_reads(),
+                &encoded.audit,
             )?;
             match &envelope.value {
-                Fact::Session(fact) => {
+                Fact::Session(original) => {
+                    let Some((fact, last_index)) =
+                        coalesced_sessions.get(original.session.as_bytes())
+                    else {
+                        return Err(EngineError::InvalidCommit(
+                            "session projection coalescing lost an input fact".to_string(),
+                        ));
+                    };
+                    if *last_index != index {
+                        continue;
+                    }
                     changed_session_keys.insert(fact.session.as_bytes().to_vec());
-                    transaction
-                        .execute(
+                    execute_cached(
+                        transaction,
                             r#"
                             INSERT INTO canonical_sessions (
                                 session_key, project_key, native_session_id,
@@ -146,7 +203,7 @@ impl TransactionalProjectionWork for FactProjectionWork<'_> {
                                 cursor_end = excluded.cursor_end,
                                 last_commit_seq = excluded.last_commit_seq
                             "#,
-                            params![
+                        params![
                                 fact.session.as_bytes(),
                                 fact.project.as_bytes(),
                                 fact.native_session_id,
@@ -163,8 +220,8 @@ impl TransactionalProjectionWork for FactProjectionWork<'_> {
                                 sqlite_u64(context.generation, "source generation")?,
                                 envelope.provenance.cursor_end,
                                 sqlite_u64(context.commit_seq, "commit sequence")?,
-                            ],
-                        )
+                        ],
+                    )
                         .map_err(|error| sqlite_error("project canonical session", error))?;
                     changes.push(upsert_change(
                         "history.session.changed",
@@ -173,22 +230,30 @@ impl TransactionalProjectionWork for FactProjectionWork<'_> {
                     )?);
                 }
                 Fact::Message(fact) => {
+                    let message_key = fact.message.as_bytes();
+                    let replaces_existing_message = existing_message_keys.contains(message_key)
+                        || !seen_message_keys.insert(message_key.to_vec());
                     let content = serialize(&fact.content, "serialize canonical content")?;
-                    transaction
-                        .execute(
-                            r#"
+                    let native_payload = encoded.message_raw.as_ref().ok_or_else(|| {
+                        EngineError::InvalidCommit(
+                            "message fact is missing encoded native payload".to_string(),
+                        )
+                    })?;
+                    execute_cached(
+                        transaction,
+                        r#"
                             INSERT INTO canonical_messages (
                                 message_key, session_key, run_key,
                                 native_message_id, native_kind, role,
                                 content_json, source_time, source_time_quality,
                                 parent_native_message_id, model, search_text,
-                                raw_json, fact_id, source_object_id,
+                                raw_json, raw_json_codec, fact_id, source_object_id,
                                 source_generation, cursor_start, cursor_end,
                                 last_commit_seq
                             ) VALUES (
                                 ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
                                 ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18,
-                                ?19
+                                ?19, ?20
                             )
                             ON CONFLICT(message_key) DO UPDATE SET
                                 session_key = excluded.session_key,
@@ -203,6 +268,7 @@ impl TransactionalProjectionWork for FactProjectionWork<'_> {
                                 model = excluded.model,
                                 search_text = excluded.search_text,
                                 raw_json = excluded.raw_json,
+                                raw_json_codec = excluded.raw_json_codec,
                                 fact_id = excluded.fact_id,
                                 source_object_id = excluded.source_object_id,
                                 source_generation = excluded.source_generation,
@@ -210,29 +276,30 @@ impl TransactionalProjectionWork for FactProjectionWork<'_> {
                                 cursor_end = excluded.cursor_end,
                                 last_commit_seq = excluded.last_commit_seq
                             "#,
-                            params![
-                                fact.message.as_bytes(),
-                                fact.session.as_bytes(),
-                                fact.run.as_bytes(),
-                                fact.native_message_id,
-                                fact.native_kind,
-                                message_role(&fact.role),
-                                content,
-                                timestamp_value(fact.source_time.as_ref()),
-                                timestamp_quality(fact.source_time.as_ref()),
-                                fact.parent_native_message_id,
-                                fact.model,
-                                fact.search_text,
-                                fact.raw_json,
-                                envelope.id.as_bytes().as_slice(),
-                                sqlite_u64(context.source_object_id, "source object id")?,
-                                sqlite_u64(context.generation, "source generation")?,
-                                envelope.provenance.cursor_start,
-                                envelope.provenance.cursor_end,
-                                sqlite_u64(context.commit_seq, "commit sequence")?,
-                            ],
-                        )
-                        .map_err(|error| sqlite_error("project canonical message", error))?;
+                        params![
+                            fact.message.as_bytes(),
+                            fact.session.as_bytes(),
+                            fact.run.as_bytes(),
+                            fact.native_message_id,
+                            fact.native_kind,
+                            message_role(&fact.role),
+                            content,
+                            timestamp_value(fact.source_time.as_ref()),
+                            timestamp_quality(fact.source_time.as_ref()),
+                            fact.parent_native_message_id,
+                            fact.model,
+                            fact.search_text,
+                            native_payload.bytes.as_slice(),
+                            native_payload.codec,
+                            envelope.id.as_bytes().as_slice(),
+                            sqlite_u64(context.source_object_id, "source object id")?,
+                            sqlite_u64(context.generation, "source generation")?,
+                            envelope.provenance.cursor_start,
+                            envelope.provenance.cursor_end,
+                            sqlite_u64(context.commit_seq, "commit sequence")?,
+                        ],
+                    )
+                    .map_err(|error| sqlite_error("project canonical message", error))?;
                     changes.push(upsert_change(
                         "history.message.changed",
                         fact.message.as_bytes(),
@@ -241,22 +308,27 @@ impl TransactionalProjectionWork for FactProjectionWork<'_> {
                     changed_tool_references.extend(replace_message_references(
                         transaction,
                         context,
-                        fact.message.as_bytes(),
+                        message_key,
                         fact.session.as_bytes(),
                         &fact.content,
+                        replaces_existing_message,
                     )?);
                     replace_message_content_blocks(
                         transaction,
-                        fact.message.as_bytes(),
+                        message_key,
                         fact.session.as_bytes(),
                         fact.run.as_bytes(),
                         &fact.content,
+                        replaces_existing_message,
                     )?;
                 }
                 Fact::Run(fact) => {
-                    transaction
-                        .execute(
-                            r#"
+                    if last_run_facts.get(fact.run.as_bytes()) != Some(&index) {
+                        continue;
+                    }
+                    execute_cached(
+                        transaction,
+                        r#"
                             INSERT INTO canonical_runs (
                                 run_key, session_key, native_run_id,
                                 parent_run_key, fact_id, source_object_id,
@@ -272,19 +344,19 @@ impl TransactionalProjectionWork for FactProjectionWork<'_> {
                                 cursor_end = excluded.cursor_end,
                                 last_commit_seq = excluded.last_commit_seq
                             "#,
-                            params![
-                                fact.run.as_bytes(),
-                                fact.session.as_bytes(),
-                                fact.native_run_id,
-                                fact.parent_run.as_ref().map(EntityKey::as_bytes),
-                                envelope.id.as_bytes().as_slice(),
-                                sqlite_u64(context.source_object_id, "source object id")?,
-                                sqlite_u64(context.generation, "source generation")?,
-                                envelope.provenance.cursor_end,
-                                sqlite_u64(context.commit_seq, "commit sequence")?,
-                            ],
-                        )
-                        .map_err(|error| sqlite_error("project canonical run", error))?;
+                        params![
+                            fact.run.as_bytes(),
+                            fact.session.as_bytes(),
+                            fact.native_run_id,
+                            fact.parent_run.as_ref().map(EntityKey::as_bytes),
+                            envelope.id.as_bytes().as_slice(),
+                            sqlite_u64(context.source_object_id, "source object id")?,
+                            sqlite_u64(context.generation, "source generation")?,
+                            envelope.provenance.cursor_end,
+                            sqlite_u64(context.commit_seq, "commit sequence")?,
+                        ],
+                    )
+                    .map_err(|error| sqlite_error("project canonical run", error))?;
                     changes.push(upsert_change(
                         "history.run.changed",
                         fact.run.as_bytes(),
@@ -346,14 +418,16 @@ impl TransactionalProjectionWork for FactProjectionWork<'_> {
         transaction: &Transaction<'_>,
         context: &ProjectionCommitContext,
     ) -> Result<Vec<ChangeEntry>, EngineError> {
-        let mut affected_states = old_generation_keys(
-            transaction,
-            "SELECT DISTINCT run_key FROM run_evidence WHERE source_object_id = ?1 AND source_generation <> ?2",
-            context,
-            "read replaced run evidence",
-        )?;
-        transaction
-            .execute(
+        let mut affected_states = BTreeSet::new();
+        if context.replaces_prior_generation {
+            affected_states = old_generation_keys(
+                transaction,
+                "SELECT DISTINCT run_key FROM run_evidence WHERE source_object_id = ?1 AND source_generation <> ?2",
+                context,
+                "read replaced run evidence",
+            )?;
+            execute_cached(
+                transaction,
                 "DELETE FROM run_evidence WHERE source_object_id = ?1 AND source_generation <> ?2",
                 params![
                     sqlite_u64(context.source_object_id, "source object id")?,
@@ -361,14 +435,15 @@ impl TransactionalProjectionWork for FactProjectionWork<'_> {
                 ],
             )
             .map_err(|error| sqlite_error("retract replaced run evidence", error))?;
+        }
 
         for envelope in self.batch.facts() {
             let Fact::RunEvidence(fact) = &envelope.value else {
                 continue;
             };
-            transaction
-                .execute(
-                    r#"
+            execute_cached(
+                transaction,
+                r#"
                     INSERT INTO run_evidence (
                         fact_id, run_key, evidence_kind, evidence_strength,
                         native_state, source_time, source_time_quality,
@@ -387,21 +462,21 @@ impl TransactionalProjectionWork for FactProjectionWork<'_> {
                         cursor_end = excluded.cursor_end,
                         last_commit_seq = excluded.last_commit_seq
                     "#,
-                    params![
-                        envelope.id.as_bytes().as_slice(),
-                        fact.run.as_bytes(),
-                        evidence_kind(fact.kind),
-                        evidence_strength(fact.strength),
-                        fact.native_state,
-                        timestamp_value(fact.source_time.as_ref()),
-                        timestamp_quality(fact.source_time.as_ref()),
-                        sqlite_u64(context.source_object_id, "source object id")?,
-                        sqlite_u64(context.generation, "source generation")?,
-                        envelope.provenance.cursor_end,
-                        sqlite_u64(context.commit_seq, "commit sequence")?,
-                    ],
-                )
-                .map_err(|error| sqlite_error("project run evidence", error))?;
+                params![
+                    envelope.id.as_bytes().as_slice(),
+                    fact.run.as_bytes(),
+                    evidence_kind(fact.kind),
+                    evidence_strength(fact.strength),
+                    fact.native_state,
+                    timestamp_value(fact.source_time.as_ref()),
+                    timestamp_quality(fact.source_time.as_ref()),
+                    sqlite_u64(context.source_object_id, "source object id")?,
+                    sqlite_u64(context.generation, "source generation")?,
+                    envelope.provenance.cursor_end,
+                    sqlite_u64(context.commit_seq, "commit sequence")?,
+                ],
+            )
+            .map_err(|error| sqlite_error("project run evidence", error))?;
             affected_states.insert(fact.run.as_bytes().to_vec());
         }
 
@@ -411,21 +486,24 @@ impl TransactionalProjectionWork for FactProjectionWork<'_> {
             changes.push(state_change(&run_key, state.as_deref())?);
         }
 
-        let mut affected_delegations = old_generation_keys(
-            transaction,
-            "SELECT DISTINCT child_run_key FROM delegation_assertions WHERE source_object_id = ?1 AND source_generation <> ?2",
-            context,
-            "read replaced delegation assertions",
-        )?;
-        transaction
-            .execute(
-                "DELETE FROM delegation_assertions WHERE source_object_id = ?1 AND source_generation <> ?2",
-                params![
-                    sqlite_u64(context.source_object_id, "source object id")?,
-                    sqlite_u64(context.generation, "source generation")?,
-                ],
-            )
-            .map_err(|error| sqlite_error("retract replaced delegation assertions", error))?;
+        let mut affected_delegations = BTreeSet::new();
+        if context.replaces_prior_generation {
+            affected_delegations = old_generation_keys(
+                transaction,
+                "SELECT DISTINCT child_run_key FROM delegation_assertions WHERE source_object_id = ?1 AND source_generation <> ?2",
+                context,
+                "read replaced delegation assertions",
+            )?;
+            transaction
+                .execute(
+                    "DELETE FROM delegation_assertions WHERE source_object_id = ?1 AND source_generation <> ?2",
+                    params![
+                        sqlite_u64(context.source_object_id, "source object id")?,
+                        sqlite_u64(context.generation, "source generation")?,
+                    ],
+                )
+                .map_err(|error| sqlite_error("retract replaced delegation assertions", error))?;
+        }
 
         for envelope in self.batch.facts() {
             let Fact::Delegation(fact) = &envelope.value else {
@@ -457,6 +535,12 @@ impl TransactionalProjectionWork for FactProjectionWork<'_> {
             context,
             "read replaced delegation metadata",
         )?;
+        let owns_delegation_metadata = !affected_metadata.is_empty()
+            || self
+                .batch
+                .facts()
+                .iter()
+                .any(|envelope| matches!(envelope.value, Fact::DelegationMetadata(_)));
         affected_delegations.extend(affected_metadata.iter().cloned());
         transaction
             .execute(
@@ -479,35 +563,38 @@ impl TransactionalProjectionWork for FactProjectionWork<'_> {
         // retract only when the object generation changes. Capture joined
         // child keys before deletion so a disappeared native match can fall
         // back to weaker durable layout evidence in the same transaction.
-        affected_delegations.extend(old_generation_keys(
-            transaction,
-            r#"
-            SELECT DISTINCT metadata.child_run_key
-            FROM delegation_spawn_assertions AS spawn
-            JOIN delegation_metadata_assertions AS metadata
-              ON metadata.session_key = spawn.session_key
-             AND metadata.native_task_id = spawn.native_task_id
-            WHERE spawn.source_object_id = ?1
-              AND spawn.source_generation <> ?2
-            "#,
-            context,
-            "read replaced spawn correlations",
-        )?);
-        let mut affected_spawns = old_generation_keys(
-            transaction,
-            "SELECT DISTINCT spawn_key FROM delegation_spawn_assertions WHERE source_object_id = ?1 AND source_generation <> ?2",
-            context,
-            "read replaced delegation spawns",
-        )?;
-        transaction
-            .execute(
-                "DELETE FROM delegation_spawn_assertions WHERE source_object_id = ?1 AND source_generation <> ?2",
-                params![
-                    sqlite_u64(context.source_object_id, "source object id")?,
-                    sqlite_u64(context.generation, "source generation")?,
-                ],
-            )
-            .map_err(|error| sqlite_error("retract replaced delegation spawns", error))?;
+        let mut affected_spawns = BTreeSet::new();
+        if context.replaces_prior_generation {
+            affected_delegations.extend(old_generation_keys(
+                transaction,
+                r#"
+                SELECT DISTINCT metadata.child_run_key
+                FROM delegation_spawn_assertions AS spawn
+                JOIN delegation_metadata_assertions AS metadata
+                  ON metadata.session_key = spawn.session_key
+                 AND metadata.native_task_id = spawn.native_task_id
+                WHERE spawn.source_object_id = ?1
+                  AND spawn.source_generation <> ?2
+                "#,
+                context,
+                "read replaced spawn correlations",
+            )?);
+            affected_spawns = old_generation_keys(
+                transaction,
+                "SELECT DISTINCT spawn_key FROM delegation_spawn_assertions WHERE source_object_id = ?1 AND source_generation <> ?2",
+                context,
+                "read replaced delegation spawns",
+            )?;
+            transaction
+                .execute(
+                    "DELETE FROM delegation_spawn_assertions WHERE source_object_id = ?1 AND source_generation <> ?2",
+                    params![
+                        sqlite_u64(context.source_object_id, "source object id")?,
+                        sqlite_u64(context.generation, "source generation")?,
+                    ],
+                )
+                .map_err(|error| sqlite_error("retract replaced delegation spawns", error))?;
+        }
 
         for envelope in self.batch.facts() {
             let Fact::DelegationSpawn(fact) = &envelope.value else {
@@ -577,20 +664,27 @@ impl TransactionalProjectionWork for FactProjectionWork<'_> {
         changes.extend(apply_artifact_facts(transaction, context, self.batch)?);
         changes.extend(apply_workflow_facts(transaction, context, self.batch)?);
 
-        transaction
-            .execute(
-                r#"
-                DELETE FROM fact_records
-                WHERE source_object_id = ?1
-                  AND fact_kind = 'delegation_metadata'
-                  AND last_commit_seq <> ?2
-                "#,
-                params![
-                    sqlite_u64(context.source_object_id, "source object id")?,
-                    sqlite_u64(context.commit_seq, "commit sequence")?,
-                ],
-            )
-            .map_err(|error| sqlite_error("retract replaced delegation metadata facts", error))?;
+        // Delegation metadata is a replace-document fact. Transcript objects
+        // reach this shared projector too; scanning their growing fact ledger
+        // after every append is both unrelated and quadratic at corpus scale.
+        if owns_delegation_metadata {
+            transaction
+                .execute(
+                    r#"
+                    DELETE FROM fact_records
+                    WHERE source_object_id = ?1
+                      AND fact_kind = 'delegation_metadata'
+                      AND last_commit_seq <> ?2
+                    "#,
+                    params![
+                        sqlite_u64(context.source_object_id, "source object id")?,
+                        sqlite_u64(context.commit_seq, "commit sequence")?,
+                    ],
+                )
+                .map_err(|error| {
+                    sqlite_error("retract replaced delegation metadata facts", error)
+                })?;
+        }
         Ok(changes)
     }
 
@@ -600,28 +694,44 @@ impl TransactionalProjectionWork for FactProjectionWork<'_> {
         context: &ProjectionCommitContext,
     ) -> Result<Vec<ChangeEntry>, EngineError> {
         let mut touched_sessions = BTreeSet::new();
-        let replaced = read_replaced_contributions(transaction, context)?;
+        let mut pending_totals = BTreeMap::new();
+        let existing_contribution_ids = existing_usage_contribution_ids(transaction, self.batch)?;
+        let mut seen_contribution_ids = BTreeSet::new();
+        let replaced = if context.replaces_prior_generation {
+            read_replaced_contributions(transaction, context)?
+        } else {
+            Vec::new()
+        };
         for contribution in &replaced {
-            adjust_usage_total(transaction, contribution, -1, context.commit_seq)?;
+            adjust_usage_total(transaction, &mut pending_totals, contribution, -1)?;
             touched_sessions.insert(contribution.session_key.clone());
         }
-        transaction
-            .execute(
-                "DELETE FROM usage_contributions WHERE source_object_id = ?1 AND source_generation <> ?2",
-                params![
-                    sqlite_u64(context.source_object_id, "source object id")?,
-                    sqlite_u64(context.generation, "source generation")?,
-                ],
-            )
-            .map_err(|error| sqlite_error("retract replaced usage contributions", error))?;
+        if context.replaces_prior_generation {
+            transaction
+                .execute(
+                    "DELETE FROM usage_contributions WHERE source_object_id = ?1 AND source_generation <> ?2",
+                    params![
+                        sqlite_u64(context.source_object_id, "source object id")?,
+                        sqlite_u64(context.generation, "source generation")?,
+                    ],
+                )
+                .map_err(|error| sqlite_error("retract replaced usage contributions", error))?;
+        }
 
         for envelope in self.batch.facts() {
             let Fact::Usage(fact) = &envelope.value else {
                 continue;
             };
-            let previous = read_contribution(transaction, envelope.id.as_bytes())?;
+            let fact_id = envelope.id.as_bytes().as_slice();
+            let replaces_existing = existing_contribution_ids.contains(fact_id)
+                || !seen_contribution_ids.insert(fact_id.to_vec());
+            let previous = if replaces_existing {
+                read_contribution(transaction, fact_id)?
+            } else {
+                None
+            };
             if let Some(previous) = previous.as_ref() {
-                adjust_usage_total(transaction, previous, -1, context.commit_seq)?;
+                adjust_usage_total(transaction, &mut pending_totals, previous, -1)?;
                 touched_sessions.insert(previous.session_key.clone());
                 delete_contribution(transaction, envelope.id.as_bytes())?;
             }
@@ -633,7 +743,7 @@ impl TransactionalProjectionWork for FactProjectionWork<'_> {
                     &series_key,
                     context.generation,
                 )? {
-                    adjust_usage_total(transaction, &replaced, -1, context.commit_seq)?;
+                    adjust_usage_total(transaction, &mut pending_totals, &replaced, -1)?;
                     touched_sessions.insert(replaced.session_key.clone());
                     delete_contribution(transaction, &replaced.fact_id)?;
                 }
@@ -664,7 +774,7 @@ impl TransactionalProjectionWork for FactProjectionWork<'_> {
                 &envelope.provenance.cursor_end,
             )?;
             write_contribution(transaction, context, envelope, fact, &contribution)?;
-            adjust_usage_total(transaction, &contribution, 1, context.commit_seq)?;
+            adjust_usage_total(transaction, &mut pending_totals, &contribution, 1)?;
             touched_sessions.insert(contribution.session_key.clone());
 
             if let Some(previous) = previous {
@@ -678,6 +788,7 @@ impl TransactionalProjectionWork for FactProjectionWork<'_> {
                         previous.source_generation,
                         &previous.cursor_end,
                         context.commit_seq,
+                        &mut pending_totals,
                     )? {
                         touched_sessions.insert(session_key);
                     }
@@ -690,6 +801,7 @@ impl TransactionalProjectionWork for FactProjectionWork<'_> {
                     contribution.source_generation,
                     &contribution.cursor_end,
                     context.commit_seq,
+                    &mut pending_totals,
                 )? {
                     touched_sessions.insert(session_key);
                 }
@@ -698,15 +810,19 @@ impl TransactionalProjectionWork for FactProjectionWork<'_> {
 
         // Generation-owned fact rows are removed only after every projector
         // has retracted its dependent state and usage delta.
-        transaction
-            .execute(
-                "DELETE FROM fact_records WHERE source_object_id = ?1 AND source_generation <> ?2",
-                params![
-                    sqlite_u64(context.source_object_id, "source object id")?,
-                    sqlite_u64(context.generation, "source generation")?,
-                ],
-            )
-            .map_err(|error| sqlite_error("retract replaced fact records", error))?;
+        if context.replaces_prior_generation {
+            transaction
+                .execute(
+                    "DELETE FROM fact_records WHERE source_object_id = ?1 AND source_generation <> ?2",
+                    params![
+                        sqlite_u64(context.source_object_id, "source object id")?,
+                        sqlite_u64(context.generation, "source generation")?,
+                    ],
+                )
+                .map_err(|error| sqlite_error("retract replaced fact records", error))?;
+        }
+
+        flush_usage_totals(transaction, pending_totals, context.commit_seq)?;
 
         touched_sessions
             .into_iter()
@@ -728,6 +844,128 @@ impl TransactionalProjectionWork for FactProjectionWork<'_> {
             })
             .collect()
     }
+}
+
+fn existing_usage_contribution_ids(
+    transaction: &Transaction<'_>,
+    batch: &FactBatch,
+) -> Result<BTreeSet<Vec<u8>>, EngineError> {
+    let ids = batch
+        .facts()
+        .iter()
+        .filter_map(|envelope| {
+            matches!(envelope.value, Fact::Usage(_)).then_some(envelope.id.as_bytes().as_slice())
+        })
+        .collect::<BTreeSet<_>>();
+    if ids.is_empty() {
+        return Ok(BTreeSet::new());
+    }
+    let placeholders = std::iter::repeat_n("?", ids.len())
+        .collect::<Vec<_>>()
+        .join(",");
+    let sql = format!("SELECT fact_id FROM usage_contributions WHERE fact_id IN ({placeholders})");
+    let mut statement = transaction
+        .prepare(&sql)
+        .map_err(|error| sqlite_error("prepare existing usage contribution batch", error))?;
+    let existing = statement
+        .query_map(params_from_iter(ids), |row| row.get::<_, Vec<u8>>(0))
+        .map_err(|error| sqlite_error("read existing usage contribution batch", error))?
+        .collect::<Result<BTreeSet<_>, _>>()
+        .map_err(|error| sqlite_error("collect existing usage contribution batch", error))?;
+    Ok(existing)
+}
+
+fn coalesced_session_projections(batch: &FactBatch) -> BTreeMap<Vec<u8>, (SessionFact, usize)> {
+    let mut sessions = BTreeMap::new();
+    for (index, envelope) in batch.facts().iter().enumerate() {
+        let Fact::Session(next) = &envelope.value else {
+            continue;
+        };
+        let entry = sessions
+            .entry(next.session.as_bytes().to_vec())
+            .or_insert_with(|| (next.clone(), index));
+        if entry.1 != index {
+            merge_session_projection(&mut entry.0, next);
+            entry.1 = index;
+        }
+    }
+    sessions
+}
+
+fn merge_session_projection(current: &mut SessionFact, next: &SessionFact) {
+    current.project = next.project.clone();
+    current
+        .native_session_id
+        .clone_from(&next.native_session_id);
+    current
+        .native_project_key
+        .clone_from(&next.native_project_key);
+    replace_if_some(&mut current.cwd, &next.cwd);
+    replace_if_some(&mut current.git_branch, &next.git_branch);
+    if next.first_prompt.is_some()
+        && current
+            .first_prompt
+            .as_deref()
+            .is_none_or(|value| value.trim().is_empty() || value == "No prompt")
+    {
+        current.first_prompt.clone_from(&next.first_prompt);
+    }
+    replace_if_some(&mut current.ai_title, &next.ai_title);
+    replace_if_some(&mut current.custom_title, &next.custom_title);
+    replace_if_some(&mut current.source_time, &next.source_time);
+}
+
+fn replace_if_some<T: Clone>(current: &mut Option<T>, next: &Option<T>) {
+    if next.is_some() {
+        current.clone_from(next);
+    }
+}
+
+fn last_run_fact_indices(batch: &FactBatch) -> BTreeMap<Vec<u8>, usize> {
+    batch
+        .facts()
+        .iter()
+        .enumerate()
+        .filter_map(|(index, envelope)| {
+            let Fact::Run(fact) = &envelope.value else {
+                return None;
+            };
+            Some((fact.run.as_bytes().to_vec(), index))
+        })
+        .collect()
+}
+
+fn existing_message_keys(
+    transaction: &Transaction<'_>,
+    batch: &FactBatch,
+) -> Result<BTreeSet<Vec<u8>>, EngineError> {
+    let keys = batch
+        .facts()
+        .iter()
+        .filter_map(|envelope| {
+            let Fact::Message(fact) = &envelope.value else {
+                return None;
+            };
+            Some(fact.message.as_bytes())
+        })
+        .collect::<BTreeSet<_>>();
+    if keys.is_empty() {
+        return Ok(BTreeSet::new());
+    }
+    let placeholders = std::iter::repeat_n("?", keys.len())
+        .collect::<Vec<_>>()
+        .join(",");
+    let sql =
+        format!("SELECT message_key FROM canonical_messages WHERE message_key IN ({placeholders})");
+    let mut statement = transaction
+        .prepare(&sql)
+        .map_err(|error| sqlite_error("prepare existing canonical message batch", error))?;
+    let existing = statement
+        .query_map(params_from_iter(keys), |row| row.get::<_, Vec<u8>>(0))
+        .map_err(|error| sqlite_error("read existing canonical message batch", error))?
+        .collect::<Result<BTreeSet<_>, _>>()
+        .map_err(|error| sqlite_error("collect existing canonical message batch", error))?;
+    Ok(existing)
 }
 
 fn validate_batch_provenance(
@@ -762,19 +1000,19 @@ fn persist_fact(
     context: &ProjectionCommitContext,
     envelope: &FactEnvelope,
     dependencies: &[DependencyRevision],
+    payload: &EncodedBlob,
 ) -> Result<(), EngineError> {
-    let payload = serialize(&envelope.value, "serialize fact audit payload")?;
-    transaction
-        .execute(
-            r#"
+    execute_cached(
+        transaction,
+        r#"
             INSERT INTO fact_records (
                 fact_id, fact_kind, entity_key, source_instance_id,
                 source_stream_id, source_object_id, source_generation,
                 cursor_start, cursor_end, payload_hash, local_fact_ordinal,
-                observed_at, payload_json, last_commit_seq
+                observed_at, payload_json, payload_codec, last_commit_seq
             ) VALUES (
                 ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
-                ?13, ?14
+                ?13, ?14, ?15
             )
             ON CONFLICT(fact_id) DO UPDATE SET
                 fact_kind = excluded.fact_kind,
@@ -789,32 +1027,41 @@ fn persist_fact(
                 local_fact_ordinal = excluded.local_fact_ordinal,
                 observed_at = excluded.observed_at,
                 payload_json = excluded.payload_json,
+                payload_codec = excluded.payload_codec,
                 last_commit_seq = excluded.last_commit_seq
             "#,
-            params![
-                envelope.id.as_bytes().as_slice(),
-                envelope.value.kind(),
-                envelope.value.entity_key().map(EntityKey::as_bytes),
-                sqlite_u64(context.source_instance_id, "source instance id")?,
-                sqlite_u64(context.source_stream_id, "source stream id")?,
-                sqlite_u64(context.source_object_id, "source object id")?,
-                sqlite_u64(context.generation, "source generation")?,
-                envelope.provenance.cursor_start,
-                envelope.provenance.cursor_end,
-                envelope.provenance.record_hash.as_slice(),
-                i64::from(envelope.provenance.local_fact_ordinal),
-                envelope.provenance.observed_at,
-                payload,
-                sqlite_u64(context.commit_seq, "commit sequence")?,
-            ],
-        )
-        .map_err(|error| sqlite_error("persist typed fact", error))?;
-    transaction
-        .execute(
+        params![
+            envelope.id.as_bytes().as_slice(),
+            envelope.value.kind(),
+            envelope.value.entity_key().map(EntityKey::as_bytes),
+            sqlite_u64(context.source_instance_id, "source instance id")?,
+            sqlite_u64(context.source_stream_id, "source stream id")?,
+            sqlite_u64(context.source_object_id, "source object id")?,
+            sqlite_u64(context.generation, "source generation")?,
+            envelope.provenance.cursor_start,
+            envelope.provenance.cursor_end,
+            envelope.provenance.record_hash.as_slice(),
+            i64::from(envelope.provenance.local_fact_ordinal),
+            envelope.provenance.observed_at,
+            payload.bytes.as_slice(),
+            payload.codec,
+            sqlite_u64(context.commit_seq, "commit sequence")?,
+        ],
+    )
+    .map_err(|error| sqlite_error("persist typed fact", error))?;
+    // A cursor-valid same-generation append cannot revisit an already
+    // committed fact ID. A contract/source replay advances the generation and
+    // cascades old dependencies with the old fact rows. Therefore an empty
+    // dependency set has nothing to replace and should not perform a B-tree
+    // lookup for every ordinary history fact.
+    if !dependencies.is_empty() {
+        execute_cached(
+            transaction,
             "DELETE FROM fact_dependency_reads WHERE fact_id = ?1",
             [envelope.id.as_bytes().as_slice()],
         )
         .map_err(|error| sqlite_error("replace fact dependency reads", error))?;
+    }
     for dependency in dependencies {
         if dependency.source_instance_id != context.source_instance_id
             || dependency.root_name.trim().is_empty()
@@ -843,6 +1090,39 @@ fn persist_fact(
             .map_err(|error| sqlite_error("persist fact dependency read", error))?;
     }
     Ok(())
+}
+
+fn encode_fact_payloads(
+    batch: &FactBatch,
+    retention: RawRetentionPolicy,
+) -> Result<Vec<EncodedFactPayload>, EngineError> {
+    let mut encoder = BlobEncoder::new()?;
+    batch
+        .facts()
+        .iter()
+        .map(|envelope| {
+            // fact_records is the durable provenance/ownership ledger. Full
+            // opts into normalized fact bodies. DiagnosticExcerpt retains
+            // only the already-redacted bounded UnknownRecord shape; ordinary
+            // facts would merely duplicate canonical semantics.
+            let retain_audit = retention == RawRetentionPolicy::Full
+                || (retention == RawRetentionPolicy::DiagnosticExcerpt
+                    && matches!(envelope.value, Fact::UnknownRecord { .. }));
+            let audit = if retain_audit {
+                let audit_json = serialize(&envelope.value, "serialize fact audit payload")?;
+                encoder.encode(&audit_json, "compress fact audit payload")?
+            } else {
+                omitted()
+            };
+            let message_raw = match &envelope.value {
+                Fact::Message(fact) => Some(
+                    encoder.encode(&fact.raw_json, "compress canonical native message payload")?,
+                ),
+                _ => None,
+            };
+            Ok(EncodedFactPayload { audit, message_raw })
+        })
+        .collect()
 }
 
 fn retract_canonical_generation(
@@ -2017,7 +2297,7 @@ fn read_contribution(
     fact_id: &[u8],
 ) -> Result<Option<UsageContribution>, EngineError> {
     transaction
-        .query_row(
+        .prepare_cached(
             r#"
             SELECT fact_id, session_key, subject_key, series_key, accounting,
                    quality_bucket, input_tokens, output_tokens,
@@ -2027,9 +2307,8 @@ fn read_contribution(
                    source_generation, cursor_end
             FROM usage_contributions WHERE fact_id = ?1
             "#,
-            [fact_id],
-            contribution_from_row,
         )
+        .and_then(|mut statement| statement.query_row([fact_id], contribution_from_row))
         .optional()
         .map_err(|error| sqlite_error("read prior usage contribution", error))
 }
@@ -2111,8 +2390,9 @@ fn read_cumulative_predecessor(
     generation: u64,
     cursor_end: &[u8],
 ) -> Result<Option<UsageContribution>, EngineError> {
+    let generation = sqlite_u64(generation, "source generation")?;
     transaction
-        .query_row(
+        .prepare_cached(
             r#"
             SELECT fact_id, session_key, subject_key, series_key, accounting,
                    quality_bucket, input_tokens, output_tokens,
@@ -2126,13 +2406,13 @@ fn read_cumulative_predecessor(
             ORDER BY cursor_end DESC, fact_id DESC
             LIMIT 1
             "#,
-            params![
-                series_key,
-                sqlite_u64(generation, "source generation")?,
-                cursor_end,
-            ],
-            contribution_from_row,
         )
+        .and_then(|mut statement| {
+            statement.query_row(
+                params![series_key, generation, cursor_end,],
+                contribution_from_row,
+            )
+        })
         .optional()
         .map_err(|error| sqlite_error("read cumulative usage predecessor", error))
 }
@@ -2160,13 +2440,13 @@ fn cumulative_values(
 }
 
 fn delete_contribution(transaction: &Transaction<'_>, fact_id: &[u8]) -> Result<(), EngineError> {
-    transaction
-        .execute(
-            "DELETE FROM usage_contributions WHERE fact_id = ?1",
-            [fact_id],
-        )
-        .map(|_| ())
-        .map_err(|error| sqlite_error("delete usage contribution", error))
+    execute_cached(
+        transaction,
+        "DELETE FROM usage_contributions WHERE fact_id = ?1",
+        [fact_id],
+    )
+    .map(|_| ())
+    .map_err(|error| sqlite_error("delete usage contribution", error))
 }
 
 fn write_contribution(
@@ -2176,9 +2456,9 @@ fn write_contribution(
     fact: &UsageFact,
     contribution: &UsageContribution,
 ) -> Result<(), EngineError> {
-    transaction
-        .execute(
-            r#"
+    execute_cached(
+        transaction,
+        r#"
             INSERT INTO usage_contributions (
                 fact_id, subject_key, session_key, series_key, scope, accounting,
                 quality, quality_bucket, input_tokens, output_tokens,
@@ -2215,34 +2495,34 @@ fn write_contribution(
                 cursor_end = excluded.cursor_end,
                 last_commit_seq = excluded.last_commit_seq
             "#,
-            params![
-                envelope.id.as_bytes().as_slice(),
-                contribution.subject_key,
-                contribution.session_key,
-                contribution.series_key,
-                usage_scope(fact.scope),
-                usage_accounting(fact.accounting),
-                value_quality(fact.quality),
-                contribution.quality_bucket,
-                contribution.values[0],
-                contribution.values[1],
-                contribution.values[2],
-                contribution.values[3],
-                contribution.reported[0],
-                contribution.reported[1],
-                contribution.reported[2],
-                contribution.reported[3],
-                fact.model,
-                timestamp_value(fact.source_time.as_ref()),
-                timestamp_quality(fact.source_time.as_ref()),
-                sqlite_u64(context.source_object_id, "source object id")?,
-                sqlite_u64(context.generation, "source generation")?,
-                envelope.provenance.cursor_end,
-                sqlite_u64(context.commit_seq, "commit sequence")?,
-            ],
-        )
-        .map(|_| ())
-        .map_err(|error| sqlite_error("write usage contribution", error))
+        params![
+            envelope.id.as_bytes().as_slice(),
+            contribution.subject_key,
+            contribution.session_key,
+            contribution.series_key,
+            usage_scope(fact.scope),
+            usage_accounting(fact.accounting),
+            value_quality(fact.quality),
+            contribution.quality_bucket,
+            contribution.values[0],
+            contribution.values[1],
+            contribution.values[2],
+            contribution.values[3],
+            contribution.reported[0],
+            contribution.reported[1],
+            contribution.reported[2],
+            contribution.reported[3],
+            fact.model,
+            timestamp_value(fact.source_time.as_ref()),
+            timestamp_quality(fact.source_time.as_ref()),
+            sqlite_u64(context.source_object_id, "source object id")?,
+            sqlite_u64(context.generation, "source generation")?,
+            envelope.provenance.cursor_end,
+            sqlite_u64(context.commit_seq, "commit sequence")?,
+        ],
+    )
+    .map(|_| ())
+    .map_err(|error| sqlite_error("write usage contribution", error))
 }
 
 fn repair_cumulative_successor(
@@ -2251,9 +2531,11 @@ fn repair_cumulative_successor(
     generation: u64,
     cursor_end: &[u8],
     commit_seq: u64,
+    pending_totals: &mut BTreeMap<Vec<u8>, [i64; 8]>,
 ) -> Result<Option<Vec<u8>>, EngineError> {
+    let generation_value = sqlite_u64(generation, "source generation")?;
     let successor = transaction
-        .query_row(
+        .prepare_cached(
             r#"
             SELECT fact_id, session_key, subject_key, series_key, accounting,
                    quality_bucket, input_tokens, output_tokens,
@@ -2267,13 +2549,13 @@ fn repair_cumulative_successor(
             ORDER BY cursor_end ASC, fact_id ASC
             LIMIT 1
             "#,
-            params![
-                series_key,
-                sqlite_u64(generation, "source generation")?,
-                cursor_end,
-            ],
-            contribution_from_row,
         )
+        .and_then(|mut statement| {
+            statement.query_row(
+                params![series_key, generation_value, cursor_end,],
+                contribution_from_row,
+            )
+        })
         .optional()
         .map_err(|error| sqlite_error("read cumulative usage successor", error))?;
     let Some(mut successor) = successor else {
@@ -2288,7 +2570,7 @@ fn repair_cumulative_successor(
     if next_values == successor.values {
         return Ok(Some(successor.session_key));
     }
-    adjust_usage_total(transaction, &successor, -1, commit_seq)?;
+    adjust_usage_total(transaction, pending_totals, &successor, -1)?;
     successor.values = next_values;
     transaction
         .execute(
@@ -2309,42 +2591,49 @@ fn repair_cumulative_successor(
             ],
         )
         .map_err(|error| sqlite_error("repair cumulative usage successor", error))?;
-    adjust_usage_total(transaction, &successor, 1, commit_seq)?;
+    adjust_usage_total(transaction, pending_totals, &successor, 1)?;
     Ok(Some(successor.session_key))
 }
 
 fn adjust_usage_total(
     transaction: &Transaction<'_>,
+    pending_totals: &mut BTreeMap<Vec<u8>, [i64; 8]>,
     contribution: &UsageContribution,
     direction: i64,
-    commit_seq: u64,
 ) -> Result<(), EngineError> {
-    let current = transaction
-        .query_row(
-            r#"
-            SELECT exact_input_tokens, exact_output_tokens,
-                   exact_cache_creation_tokens, exact_cache_read_tokens,
-                   estimated_input_tokens, estimated_output_tokens,
-                   estimated_cache_creation_tokens, estimated_cache_read_tokens
-            FROM usage_totals WHERE session_key = ?1
-            "#,
-            [&contribution.session_key],
-            |row| {
-                Ok([
-                    row.get(0)?,
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get(3)?,
-                    row.get(4)?,
-                    row.get(5)?,
-                    row.get(6)?,
-                    row.get(7)?,
-                ])
-            },
-        )
-        .optional()
-        .map_err(|error| sqlite_error("read usage aggregate", error))?
-        .unwrap_or([0_i64; 8]);
+    let current = if let Some(current) = pending_totals.get(&contribution.session_key) {
+        *current
+    } else {
+        let current = transaction
+            .prepare_cached(
+                r#"
+                SELECT exact_input_tokens, exact_output_tokens,
+                       exact_cache_creation_tokens, exact_cache_read_tokens,
+                       estimated_input_tokens, estimated_output_tokens,
+                       estimated_cache_creation_tokens, estimated_cache_read_tokens
+                FROM usage_totals WHERE session_key = ?1
+                "#,
+            )
+            .and_then(|mut statement| {
+                statement.query_row([&contribution.session_key], |row| {
+                    Ok([
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                        row.get(7)?,
+                    ])
+                })
+            })
+            .optional()
+            .map_err(|error| sqlite_error("read usage aggregate", error))?
+            .unwrap_or([0_i64; 8]);
+        pending_totals.insert(contribution.session_key.clone(), current);
+        current
+    };
     let offset = usize::from(contribution.quality_bucket != "exact") * 4;
     let mut next = current;
     for (index, value) in contribution.values.iter().enumerate() {
@@ -2360,17 +2649,27 @@ fn adjust_usage_total(
                 )
             })?;
     }
-    if next.iter().all(|value| *value == 0) {
-        transaction
-            .execute(
+    pending_totals.insert(contribution.session_key.clone(), next);
+    Ok(())
+}
+
+fn flush_usage_totals(
+    transaction: &Transaction<'_>,
+    pending_totals: BTreeMap<Vec<u8>, [i64; 8]>,
+    commit_seq: u64,
+) -> Result<(), EngineError> {
+    for (session_key, next) in pending_totals {
+        if next.iter().all(|value| *value == 0) {
+            execute_cached(
+                transaction,
                 "DELETE FROM usage_totals WHERE session_key = ?1",
-                [&contribution.session_key],
+                [&session_key],
             )
             .map_err(|error| sqlite_error("remove empty usage aggregate", error))?;
-        return Ok(());
-    }
-    transaction
-        .execute(
+            continue;
+        }
+        execute_cached(
+            transaction,
             r#"
             INSERT INTO usage_totals (
                 session_key, exact_input_tokens, exact_output_tokens,
@@ -2391,7 +2690,7 @@ fn adjust_usage_total(
                 last_commit_seq = excluded.last_commit_seq
             "#,
             params![
-                contribution.session_key,
+                session_key,
                 next[0],
                 next[1],
                 next[2],
@@ -2403,8 +2702,9 @@ fn adjust_usage_total(
                 sqlite_u64(commit_seq, "commit sequence")?,
             ],
         )
-        .map(|_| ())
-        .map_err(|error| sqlite_error("apply usage aggregate delta", error))
+        .map_err(|error| sqlite_error("apply usage aggregate delta", error))?;
+    }
+    Ok(())
 }
 
 /// Repair path retained for audit/migration. The ingest hot path never calls
@@ -2775,6 +3075,14 @@ fn sqlite_error(operation: &'static str, error: rusqlite::Error) -> EngineError 
     }
 }
 
+pub(super) fn execute_cached<P: Params>(
+    transaction: &Transaction<'_>,
+    sql: &str,
+    params: P,
+) -> rusqlite::Result<usize> {
+    transaction.prepare_cached(sql)?.execute(params)
+}
+
 #[cfg(test)]
 mod tests {
     use std::cell::RefCell as StdRefCell;
@@ -2891,6 +3199,7 @@ mod tests {
                 decoder_key: DECODER.to_string(),
                 stream_state: "available".to_string(),
                 last_reconciled_at: Some(started_at),
+                retention: RawRetentionPolicy::Full,
             },
             object: SourceObjectUpdate {
                 object_key: b"fixture-transcript".to_vec(),
@@ -3773,6 +4082,7 @@ mod tests {
                 decoder_key: input.decoder.to_string(),
                 stream_state: "available".to_string(),
                 last_reconciled_at: Some(input.clock),
+                retention: RawRetentionPolicy::Full,
             },
             object: SourceObjectUpdate {
                 object_key: input.object_key.to_vec(),
@@ -4051,12 +4361,12 @@ mod tests {
     }
 
     fn shadow_parent_rows(connection: &Connection) -> Vec<HistoryParityRow> {
-        let mut rows = connection
+        let rows = connection
             .prepare(
                 r#"
                 SELECT cs.native_session_id, cm.native_kind,
                        cm.native_message_id, cm.source_time,
-                       CAST(cm.raw_json AS TEXT),
+                       cm.raw_json, cm.raw_json_codec,
                        COALESCE(uc.input_tokens, 0),
                        COALESCE(uc.output_tokens, 0),
                        COALESCE(uc.cache_creation_tokens, 0),
@@ -4077,17 +4387,56 @@ mod tests {
                     row.get(1)?,
                     row.get(2)?,
                     row.get(3)?,
-                    normalized_json(row.get(4)?),
-                    row.get(5)?,
+                    row.get::<_, Vec<u8>>(4)?,
+                    row.get::<_, String>(5)?,
                     row.get(6)?,
                     row.get(7)?,
                     row.get(8)?,
                     row.get(9)?,
+                    row.get(10)?,
                 ))
             })
             .unwrap()
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
+        let mut rows = rows
+            .into_iter()
+            .map(
+                |(
+                    session,
+                    kind,
+                    message,
+                    time,
+                    raw,
+                    codec,
+                    input,
+                    output,
+                    creation,
+                    read,
+                    text,
+                )| {
+                    let raw = crate::engine::storage_codec::decode(
+                        &codec,
+                        &raw,
+                        64 * 1024 * 1024,
+                        "decode parent parity payload",
+                    )
+                    .unwrap();
+                    (
+                        session,
+                        kind,
+                        message,
+                        time,
+                        normalized_json(String::from_utf8(raw).unwrap()),
+                        input,
+                        output,
+                        creation,
+                        read,
+                        text,
+                    )
+                },
+            )
+            .collect::<Vec<_>>();
         rows.sort();
         rows
     }
@@ -4123,11 +4472,11 @@ mod tests {
     }
 
     fn shadow_subagent_rows(connection: &Connection) -> Vec<SubagentParityRow> {
-        let mut rows = connection
+        let rows = connection
             .prepare(
                 r#"
                 SELECT cs.native_session_id, cm.source_time,
-                       CAST(cm.raw_json AS TEXT),
+                       cm.raw_json, cm.raw_json_codec,
                        COALESCE(uc.input_tokens, 0),
                        COALESCE(uc.output_tokens, 0),
                        COALESCE(uc.cache_creation_tokens, 0),
@@ -4145,18 +4494,151 @@ mod tests {
                 Ok((
                     row.get(0)?,
                     row.get(1)?,
-                    normalized_json(row.get(2)?),
-                    row.get(3)?,
+                    row.get::<_, Vec<u8>>(2)?,
+                    row.get::<_, String>(3)?,
                     row.get(4)?,
                     row.get(5)?,
                     row.get(6)?,
+                    row.get(7)?,
                 ))
             })
             .unwrap()
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
+        let mut rows = rows
+            .into_iter()
+            .map(
+                |(session, time, raw, codec, input, output, creation, read)| {
+                    let raw = crate::engine::storage_codec::decode(
+                        &codec,
+                        &raw,
+                        64 * 1024 * 1024,
+                        "decode subagent parity payload",
+                    )
+                    .unwrap();
+                    (
+                        session,
+                        time,
+                        normalized_json(String::from_utf8(raw).unwrap()),
+                        input,
+                        output,
+                        creation,
+                        read,
+                    )
+                },
+            )
+            .collect::<Vec<_>>();
         rows.sort();
         rows
+    }
+
+    #[test]
+    fn message_storage_keeps_one_compressed_native_copy_and_policy_bound_audit() {
+        let native_json = format!(
+            "{{\"type\":\"assistant\",\"nativeOnly\":\"{}\"}}",
+            "secret-padding-".repeat(1_024)
+        )
+        .into_bytes();
+        let record = direct_record(1, 0, native_json.len() as u64, 20, &native_json);
+        let mut message = tool_message("compact-message", MessageRole::Assistant, Vec::new());
+        message.raw_json = native_json.clone();
+        let mut batch = FactBatch::new(1, 1).unwrap();
+        batch.push(&record, Fact::Message(message)).unwrap();
+
+        let encoded = encode_fact_payloads(&batch, RawRetentionPolicy::HashOnly).unwrap();
+        let stored = &encoded[0];
+        assert_eq!(
+            stored.audit.codec,
+            crate::engine::storage_codec::OMITTED_CODEC
+        );
+        assert!(stored.audit.bytes.is_empty());
+
+        let raw = stored.message_raw.as_ref().unwrap();
+        assert_eq!(raw.codec, crate::engine::storage_codec::ZSTD_V1_CODEC);
+        assert!(raw.bytes.len() < native_json.len() / 4);
+        assert!(stored.audit.bytes.len() + raw.bytes.len() < native_json.len() / 3);
+        assert_eq!(
+            crate::engine::storage_codec::decode(
+                raw.codec,
+                &raw.bytes,
+                native_json.len(),
+                "decode native test payload",
+            )
+            .unwrap(),
+            native_json
+        );
+
+        let full = encode_fact_payloads(&batch, RawRetentionPolicy::Full).unwrap();
+        let full_audit = crate::engine::storage_codec::decode(
+            full[0].audit.codec,
+            &full[0].audit.bytes,
+            1024 * 1024,
+            "decode full audit test payload",
+        )
+        .unwrap();
+        let full_audit: serde_json::Value = serde_json::from_slice(&full_audit).unwrap();
+        assert!(full_audit["Message"].get("raw_json").is_none());
+
+        let mut unknown_batch = FactBatch::new(1, 1).unwrap();
+        unknown_batch
+            .push(
+                &record,
+                Fact::UnknownRecord {
+                    native_kind: Some("future".to_string()),
+                    raw_payload: br#"{"shape":["string"]}"#.to_vec(),
+                    reason: "preserved for a future decoder".to_string(),
+                },
+            )
+            .unwrap();
+        let diagnostic =
+            encode_fact_payloads(&unknown_batch, RawRetentionPolicy::DiagnosticExcerpt).unwrap();
+        assert_ne!(
+            diagnostic[0].audit.codec,
+            crate::engine::storage_codec::OMITTED_CODEC
+        );
+        assert!(!diagnostic[0].audit.bytes.is_empty());
+
+        let mut connection = database();
+        let mut hash_only_request = request(
+            ExpectedSourceCursor::Absent,
+            1,
+            record.cursor_end.as_bytes().to_vec(),
+            20,
+        );
+        hash_only_request.stream.retention = RawRetentionPolicy::HashOnly;
+        apply_fact_observation_commit(&mut connection, &hash_only_request, &batch).unwrap();
+        let (audit_bytes, audit_codec, native_bytes, native_codec, retention): (
+            i64,
+            String,
+            i64,
+            String,
+            String,
+        ) = connection
+            .query_row(
+                r#"
+                SELECT length(fr.payload_json), fr.payload_codec,
+                       length(cm.raw_json), cm.raw_json_codec, ss.raw_retention
+                FROM fact_records fr
+                JOIN canonical_messages cm ON cm.fact_id = fr.fact_id
+                JOIN source_streams ss ON ss.source_stream_id = fr.source_stream_id
+                "#,
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(audit_bytes, 0);
+        assert_eq!(audit_codec, crate::engine::storage_codec::OMITTED_CODEC);
+        assert!(native_bytes < i64::try_from(native_json.len() / 4).unwrap());
+        assert_eq!(native_codec, crate::engine::storage_codec::ZSTD_V1_CODEC);
+        assert_eq!(retention, "hash_only");
     }
 
     #[test]
@@ -9550,13 +10032,20 @@ mod tests {
             invalid_effective.permission_allow,
             global_settings.permission_allow
         );
-        let audit_payload: Vec<u8> = connection
+        let (audit_payload, audit_codec): (Vec<u8>, String) = connection
             .query_row(
-                "SELECT payload_json FROM fact_records WHERE fact_kind = 'interpretation_settings' AND source_object_id = ?1",
+                "SELECT payload_json, payload_codec FROM fact_records WHERE fact_kind = 'interpretation_settings' AND source_object_id = ?1",
                 [object_catalog_id(local_object)],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .unwrap();
+        let audit_payload = crate::engine::storage_codec::decode(
+            &audit_codec,
+            &audit_payload,
+            1024 * 1024,
+            "decode interpretation-settings audit payload",
+        )
+        .unwrap();
         assert!(!String::from_utf8(audit_payload)
             .unwrap()
             .contains("invalid-local-settings-secret"));
