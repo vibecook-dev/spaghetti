@@ -49,6 +49,9 @@ pub(super) fn apply_session_index_facts(
         .facts()
         .iter()
         .any(|envelope| matches!(envelope.value, Fact::SessionIndexSnapshot(_)));
+    if context.skip_unowned_replace_document(has_snapshot_fact) && changed_session_keys.is_empty() {
+        return Ok(Vec::new());
+    }
     let mut affected_projects = source_object_keys(
         transaction,
         "SELECT DISTINCT project_key FROM session_index_snapshot_assertions WHERE source_object_id = ?1",

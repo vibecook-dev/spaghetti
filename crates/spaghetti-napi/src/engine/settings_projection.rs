@@ -54,11 +54,14 @@ pub(super) fn apply_interpretation_settings_facts(
     batch: &FactBatch,
 ) -> Result<Vec<ChangeEntry>, EngineError> {
     let object_id = sqlite_u64(context.source_object_id, "source object id")?;
-    let mut affected_documents = source_object_keys(transaction, object_id)?;
     let has_settings_fact = batch
         .facts()
         .iter()
         .any(|envelope| matches!(envelope.value, Fact::InterpretationSettings(_)));
+    if context.skip_unowned_replace_document(has_settings_fact) {
+        return Ok(Vec::new());
+    }
+    let mut affected_documents = source_object_keys(transaction, object_id)?;
 
     if !has_settings_fact && affected_documents.is_empty() {
         return Ok(Vec::new());

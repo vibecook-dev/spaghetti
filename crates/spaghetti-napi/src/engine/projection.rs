@@ -88,6 +88,7 @@ pub(super) fn apply_fact_observation_commit_in_transaction(
     request: &ObservationCommit,
     batch: &FactBatch,
     hook: &dyn CommitHook,
+    persist_public_changes: bool,
 ) -> Result<CommitReceipt, EngineError> {
     let (request, projection) = prepare_fact_observation_commit(request, batch, Some(hook))?;
     apply_observation_commit_with_projection_in_transaction(
@@ -95,6 +96,7 @@ pub(super) fn apply_fact_observation_commit_in_transaction(
         &request,
         &projection,
         hook,
+        persist_public_changes,
     )
 }
 
@@ -479,6 +481,41 @@ impl TransactionalProjectionWork for FactProjectionWork<'_> {
         self.record_detail(CommitDetail::RunState, run_state_started);
 
         let delegation_started = Instant::now();
+        let has_delegation_fact = self.batch.facts().iter().any(|envelope| {
+            matches!(
+                envelope.value,
+                Fact::Delegation(_) | Fact::DelegationMetadata(_) | Fact::DelegationSpawn(_)
+            )
+        });
+        let has_run_fact = self
+            .batch
+            .facts()
+            .iter()
+            .any(|envelope| matches!(envelope.value, Fact::Run(_)))
+            || !self.retracted_run_keys.borrow().is_empty();
+        if context.skip_unowned_replace_document(has_delegation_fact)
+            && !has_run_fact
+            && !context.replaces_prior_generation
+        {
+            self.record_detail(CommitDetail::Delegation, delegation_started);
+            changes.extend(self.measure(CommitDetail::Presence, || {
+                apply_presence_facts(transaction, context, self.batch)
+            })?);
+            changes.extend(self.measure(CommitDetail::Team, || {
+                apply_team_snapshots(transaction, context, self.batch)
+            })?);
+            changes.extend(self.measure(CommitDetail::Task, || {
+                apply_task_snapshots(transaction, context, self.batch)
+            })?);
+            changes.extend(self.measure(CommitDetail::Artifact, || {
+                apply_artifact_facts(transaction, context, self.batch)
+            })?);
+            changes.extend(self.measure(CommitDetail::Workflow, || {
+                apply_workflow_facts(transaction, context, self.batch)
+            })?);
+            return Ok(changes);
+        }
+
         let mut affected_delegations = BTreeSet::new();
         if context.replaces_prior_generation {
             affected_delegations = old_generation_keys(
@@ -522,25 +559,33 @@ impl TransactionalProjectionWork for FactProjectionWork<'_> {
         // even when the source generation is unchanged or the replacement is
         // empty because the sidecar was deleted. Both the old and new child
         // keys can gain or lose a native spawn correlation.
-        let mut affected_metadata = source_object_keys(
-            transaction,
-            "SELECT DISTINCT child_run_key FROM delegation_metadata_assertions WHERE source_object_id = ?1",
-            context,
-            "read replaced delegation metadata",
-        )?;
-        let owns_delegation_metadata = !affected_metadata.is_empty()
-            || self
-                .batch
-                .facts()
-                .iter()
-                .any(|envelope| matches!(envelope.value, Fact::DelegationMetadata(_)));
-        affected_delegations.extend(affected_metadata.iter().cloned());
-        transaction
-            .execute(
-                "DELETE FROM delegation_metadata_assertions WHERE source_object_id = ?1",
-                [sqlite_u64(context.source_object_id, "source object id")?],
-            )
-            .map_err(|error| sqlite_error("retract replaced delegation metadata", error))?;
+        let has_delegation_metadata = self
+            .batch
+            .facts()
+            .iter()
+            .any(|envelope| matches!(envelope.value, Fact::DelegationMetadata(_)));
+        let mut affected_metadata = if context
+            .skip_unowned_replace_document(has_delegation_metadata)
+        {
+            BTreeSet::new()
+        } else {
+            source_object_keys(
+                transaction,
+                "SELECT DISTINCT child_run_key FROM delegation_metadata_assertions WHERE source_object_id = ?1",
+                context,
+                "read replaced delegation metadata",
+            )?
+        };
+        let owns_delegation_metadata = has_delegation_metadata || !affected_metadata.is_empty();
+        if owns_delegation_metadata {
+            affected_delegations.extend(affected_metadata.iter().cloned());
+            transaction
+                .execute(
+                    "DELETE FROM delegation_metadata_assertions WHERE source_object_id = ?1",
+                    [sqlite_u64(context.source_object_id, "source object id")?],
+                )
+                .map_err(|error| sqlite_error("retract replaced delegation metadata", error))?;
+        }
 
         for envelope in self.batch.facts() {
             let Fact::DelegationMetadata(fact) = &envelope.value else {

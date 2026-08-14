@@ -73,6 +73,9 @@ pub(super) fn apply_artifact_facts(
         .facts()
         .iter()
         .any(|envelope| matches!(envelope.value, Fact::ArtifactContent(_)));
+    if context.skip_unowned_replace_document(has_metadata_fact || has_content_fact) {
+        return Ok(Vec::new());
+    }
     let metadata_artifacts = source_object_keys(
         transaction,
         r#"

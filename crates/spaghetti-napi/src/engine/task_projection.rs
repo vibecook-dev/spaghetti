@@ -57,6 +57,9 @@ pub(super) fn apply_task_snapshots(
             Fact::TaskSnapshot(_) | Fact::PlanSnapshot(_)
         )
     });
+    if context.skip_unowned_replace_document(has_task_fact) {
+        return Ok(Vec::new());
+    }
     let mut affected_collections = source_object_keys(
         transaction,
         "SELECT DISTINCT collection_key FROM task_snapshot_assertions WHERE source_object_id = ?1",

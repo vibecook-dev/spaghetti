@@ -12,7 +12,6 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use rayon::prelude::*;
 use walkdir::WalkDir;
 
 use crate::adapter::{
@@ -34,8 +33,9 @@ use crate::source::{
 };
 
 use super::commit::{
-    CommitReceipt, ExpectedSourceCursor, ObservationCommit, SourceCapabilitySpec,
-    SourceInstanceSpec, SourceObjectUpdate, SourceRecordError, SourceStreamSpec,
+    source_object_catalog_id, source_stream_catalog_id, CommitReceipt, ExpectedSourceCursor,
+    ObservationCommit, SourceCapabilitySpec, SourceInstanceSpec, SourceObjectUpdate,
+    SourceRecordError, SourceStreamSpec,
 };
 use super::performance::{SourceDecodeObservation, SourceDecodeOutcome, SourcePerformanceRecorder};
 use super::query_pool::{QueryCancellationToken, SourceCatalogObject, SourceCatalogSnapshot};
@@ -52,7 +52,7 @@ const DISCOVERY_MAX_ENTRIES: usize = 250_000;
 const MAX_APPEND_RECORDS_PER_RECONCILE: usize = 4_096;
 const MAX_APPEND_RECORDS_PER_COMMIT: usize = 1_024;
 const SCHEDULER_CAPACITY: usize = 1_024;
-const MAX_OBJECTS_IN_FLIGHT: usize = 4;
+const MAX_OBJECTS_IN_FLIGHT: usize = 16;
 
 #[derive(Debug, Clone)]
 pub struct ReconcileRequest {
@@ -895,72 +895,90 @@ impl ObservationCoordinator {
         let mut pending = work.into_iter();
         let mut exhausted = false;
         let mut admitted = BTreeMap::<WorkKey, ObjectWork>::new();
+        let workers = self.engine.observation_workers()?;
+        let (result_tx, result_rx) = crossbeam_channel::bounded(MAX_OBJECTS_IN_FLIGHT);
+        let mut in_flight = 0_usize;
+        let mut first_error = None;
 
-        while !exhausted || scheduler.queued_len() > 0 || scheduler.in_flight_len() > 0 {
-            self.check_cancelled()?;
-            while !exhausted && scheduler.queued_len() < SCHEDULER_CAPACITY {
-                let Some(next) = pending.next() else {
-                    exhausted = true;
-                    break;
-                };
-                let generation = next
-                    .previous
-                    .as_ref()
-                    .map_or(1, |previous| previous.generation);
-                let key = scheduled_work_key(&next.stream, &next.object, generation)?;
-                let scheduled = ScheduledWork {
-                    key: key.clone(),
-                    priority: next.stream.priority,
-                    reason: DirtyReason::Recovery,
-                };
-                match scheduler.enqueue(scheduled) {
-                    ScheduleOutcome::Enqueued => {
-                        if admitted.insert(key, next).is_some() {
-                            return Err(observation_error(
-                                "schedule source objects",
-                                "duplicate object/generation work key",
-                            ));
-                        }
-                    }
-                    ScheduleOutcome::Coalesced | ScheduleOutcome::PriorityEscalated => {
-                        return Err(observation_error(
-                            "schedule source objects",
-                            "discovery produced duplicate object/generation work",
-                        ));
-                    }
-                    ScheduleOutcome::FullNeedsReconcile => {
-                        return Err(observation_error(
-                            "schedule source objects",
-                            "bounded scheduler rejected work before reaching its declared capacity",
-                        ));
+        workers.scope(|scope| {
+            loop {
+                if first_error.is_none() {
+                    if let Err(error) = self.check_cancelled() {
+                        first_error = Some(error);
                     }
                 }
-            }
-
-            let mut wave = Vec::new();
-            while wave.len() < MAX_OBJECTS_IN_FLIGHT {
-                let Some(scheduled) = scheduler.dispatch() else {
-                    break;
-                };
-                let task = admitted.remove(&scheduled.key).ok_or_else(|| {
-                    observation_error(
-                        "dispatch source objects",
-                        "scheduler returned work without an admitted object",
-                    )
-                })?;
-                wave.push((scheduled.key, task));
-            }
-            if wave.is_empty() {
-                return Err(observation_error(
-                    "dispatch source objects",
-                    "bounded scheduler made no progress",
-                ));
-            }
-
-            let workers = self.engine.observation_workers()?;
-            let results = workers.install(|| {
-                wave.into_par_iter()
-                    .map(|(key, task)| {
+                while first_error.is_none()
+                    && in_flight < MAX_OBJECTS_IN_FLIGHT
+                    && (!exhausted || scheduler.queued_len() > 0)
+                {
+                    while !exhausted && scheduler.queued_len() < SCHEDULER_CAPACITY {
+                        let Some(next) = pending.next() else {
+                            exhausted = true;
+                            break;
+                        };
+                        let generation = next
+                            .previous
+                            .as_ref()
+                            .map_or(1, |previous| previous.generation);
+                        let key = match scheduled_work_key(&next.stream, &next.object, generation)
+                        {
+                            Ok(key) => key,
+                            Err(error) => {
+                                first_error.get_or_insert(error);
+                                exhausted = true;
+                                break;
+                            }
+                        };
+                        let scheduled = ScheduledWork {
+                            key: key.clone(),
+                            priority: next.stream.priority,
+                            reason: DirtyReason::Recovery,
+                        };
+                        match scheduler.enqueue(scheduled) {
+                            ScheduleOutcome::Enqueued => {
+                                if admitted.insert(key, next).is_some() {
+                                    first_error.get_or_insert(observation_error(
+                                        "schedule source objects",
+                                        "duplicate object/generation work key",
+                                    ));
+                                    exhausted = true;
+                                    break;
+                                }
+                            }
+                            ScheduleOutcome::Coalesced | ScheduleOutcome::PriorityEscalated => {
+                                first_error.get_or_insert(observation_error(
+                                    "schedule source objects",
+                                    "discovery produced duplicate object/generation work",
+                                ));
+                                exhausted = true;
+                                break;
+                            }
+                            ScheduleOutcome::FullNeedsReconcile => {
+                                first_error.get_or_insert(observation_error(
+                                    "schedule source objects",
+                                    "bounded scheduler rejected work before reaching its declared capacity",
+                                ));
+                                exhausted = true;
+                                break;
+                            }
+                        }
+                    }
+                    let Some(scheduled) = scheduler.dispatch() else {
+                        break;
+                    };
+                    let task = match admitted.remove(&scheduled.key) {
+                        Some(task) => task,
+                        None => {
+                            first_error.get_or_insert(observation_error(
+                                "dispatch source objects",
+                                "scheduler returned work without an admitted object",
+                            ));
+                            break;
+                        }
+                    };
+                    let key = scheduled.key;
+                    let result_tx = result_tx.clone();
+                    scope.spawn(move |_| {
                         let mut local = ReconcileOutcome::default();
                         let result = self.reconcile_object(
                             adapter,
@@ -972,27 +990,49 @@ impl ObservationCoordinator {
                             started_at,
                             &mut local,
                         );
-                        (key, result, local)
-                    })
-                    .collect::<Vec<_>>()
-            });
-
-            let mut first_error = None;
-            for (key, result, local) in results {
-                if !scheduler.complete(&key) {
-                    return Err(observation_error(
-                        "complete source object work",
-                        "scheduler lost an in-flight object key",
-                    ));
+                        let _ = result_tx.send((key, result, local));
+                    });
+                    in_flight = in_flight.saturating_add(1);
                 }
-                merge_outcome(outcome, local);
-                if let Err(error) = result {
-                    first_error.get_or_insert(error);
+                if in_flight == 0 {
+                    if first_error.is_none()
+                        && !exhausted
+                        && scheduler.queued_len() == 0
+                        && scheduler.in_flight_len() == 0
+                    {
+                        first_error = Some(observation_error(
+                            "dispatch source objects",
+                            "bounded scheduler made no progress",
+                        ));
+                    }
+                    break;
+                }
+                match result_rx.recv() {
+                    Ok((key, result, local)) => {
+                        in_flight = in_flight.saturating_sub(1);
+                        if !scheduler.complete(&key) {
+                            first_error.get_or_insert(observation_error(
+                                "complete source object work",
+                                "scheduler lost an in-flight object key",
+                            ));
+                        }
+                        merge_outcome(outcome, local);
+                        if let Err(error) = result {
+                            first_error.get_or_insert(error);
+                        }
+                    }
+                    Err(_) => {
+                        first_error.get_or_insert(observation_error(
+                            "complete source object work",
+                            "object worker channel closed before draining in-flight work",
+                        ));
+                        break;
+                    }
                 }
             }
-            if let Some(error) = first_error {
-                return Err(error);
-            }
+        });
+        if let Some(error) = first_error {
+            return Err(error);
         }
         Ok(())
     }
@@ -1212,42 +1252,18 @@ impl ObservationCoordinator {
         stream: &StreamSpec,
         object: &DeclaredObject,
         object_context: &AdapterObjectContext,
-        reason: &str,
-        started_at: i64,
+        _reason: &str,
+        _started_at: i64,
         outcome: &mut ReconcileOutcome,
     ) -> Result<DurableObject, EngineError> {
-        let initial_cursor = match stream.driver {
-            DriverSpec::AppendDelimited(_) => SourceCursor::append_offset(0),
-            DriverSpec::ReplaceDocument(_) => SourceCursor::snapshot(Revision::ZERO),
-            DriverSpec::Presence(_) => SourceCursor::presence(Revision::ZERO),
-            DriverSpec::SqliteSnapshot(_) => SourceCursor::sqlite_snapshot(Revision::ZERO),
-            DriverSpec::KeyValueSnapshot(_) => SourceCursor::key_value_snapshot(Revision::ZERO),
-            DriverSpec::DirectorySnapshot(_) => unreachable!("not an adapter record stream"),
-        };
-        let request = commit_request(
-            adapter,
-            instance,
-            stream,
-            object,
-            object_context,
-            ExpectedSourceCursor::Absent,
-            1,
-            initial_cursor.into_bytes(),
-            None,
-            None,
-            None,
-            "pending",
-            Vec::new(),
-            reason,
-            started_at,
-        )?;
-        let receipt = self.commit_observation_checked(request)?;
-        record_commit(outcome, &receipt);
+        let source_stream_id = source_stream_catalog_id(instance.id, stream.id.as_str());
+        let source_object_id =
+            source_object_catalog_id(source_stream_id, &object.descriptor.object_key);
         outcome.objects_registered = outcome.objects_registered.saturating_add(1);
         Ok(DurableObject {
-            source_instance_id: receipt.source_instance_id,
-            source_stream_id: receipt.source_stream_id,
-            source_object_id: receipt.source_object_id,
+            source_instance_id: instance.id,
+            source_stream_id,
+            source_object_id,
             generation: 1,
             committed_cursor: initial_cursor_bytes(stream),
             adapter_object_context: Some(object_context.payload().to_vec()),
@@ -1258,6 +1274,7 @@ impl ObservationCoordinator {
             retry_state: None,
             decoder_contract_version: adapter.manifest().contract_version,
             state: "pending".to_string(),
+            unpersisted: true,
         })
     }
 
@@ -2734,6 +2751,7 @@ struct DurableObject {
     retry_state: Option<Vec<u8>>,
     decoder_contract_version: u32,
     state: String,
+    unpersisted: bool,
 }
 
 impl DurableObject {
@@ -2752,20 +2770,30 @@ impl DurableObject {
             retry_state: object.retry_state.clone(),
             decoder_contract_version: object.decoder_contract_version,
             state: object.state.clone(),
+            unpersisted: false,
         }
     }
 
     fn expected(&self) -> ExpectedSourceCursor {
-        ExpectedSourceCursor::At {
-            generation: self.generation,
-            committed_cursor: self.committed_cursor.clone(),
+        if self.unpersisted {
+            ExpectedSourceCursor::Absent
+        } else {
+            ExpectedSourceCursor::At {
+                generation: self.generation,
+                committed_cursor: self.committed_cursor.clone(),
+            }
         }
+    }
+
+    fn mark_persisted(&mut self) {
+        self.unpersisted = false;
     }
 
     fn advance(&mut self, checkpoint: &AppendCheckpoint, encoded: Vec<u8>) {
         self.generation = checkpoint.generation;
         self.committed_cursor = checkpoint.cursor().into_bytes();
         self.driver_checkpoint = Some(encoded);
+        self.unpersisted = false;
     }
 
     fn decoder_contract_changed<A: AgentAdapter + ?Sized>(&self, adapter: &A) -> bool {
@@ -4094,6 +4122,11 @@ mod tests {
         let initial = fixture.reconcile(&first);
         assert_eq!(initial.objects_registered, 1);
         assert_eq!(initial.records_decoded, 1);
+        assert_eq!(
+            count_rows(&fixture.database, "ingest_commits"),
+            1,
+            "new objects must persist identity in the first data commit, not a pending-only catalog transaction"
+        );
         assert_eq!(count_rows(&fixture.database, "canonical_messages"), 1);
         let first_instance_id = initial_source_instance_id(&fixture.database);
         let first_message_key = first_blob(
@@ -4163,8 +4196,8 @@ mod tests {
         let outcome = fixture.reconcile(&engine);
         assert_eq!(outcome.records_decoded, 10);
         assert_eq!(
-            outcome.commits, 2,
-            "object registration plus one data commit"
+            outcome.commits, 1,
+            "a new append object persists identity in the same data commit as its first records"
         );
         assert_eq!(count_rows(&fixture.database, "canonical_messages"), 10);
     }
@@ -4193,13 +4226,14 @@ mod tests {
 
         assert!(matches!(error, EngineError::QueryCancelled));
         assert_eq!(count_rows(&fixture.database, "canonical_messages"), 0);
-        let transcript = catalog_object(&engine, &fixture.root, "session-transcripts");
-        assert_eq!(transcript.state, "pending");
         assert_eq!(
-            SourceCursor::from_opaque(transcript.committed_cursor)
-                .unwrap()
-                .append_offset_value(),
-            Some(0)
+            count_rows(&fixture.database, "ingest_commits"),
+            0,
+            "cancelled first decode must not persist a pending catalog row"
+        );
+        assert!(
+            catalog_object_opt(&engine, &fixture.root, "session-transcripts").is_none(),
+            "an unpersisted object must stay absent until its first data commit"
         );
     }
 
@@ -4227,8 +4261,11 @@ mod tests {
             }
         ));
         assert_eq!(count_rows(&fixture.database, "canonical_messages"), 0);
-        let transcript = catalog_object(&engine, &fixture.root, "session-transcripts");
-        assert_eq!(transcript.state, "pending");
+        assert_eq!(count_rows(&fixture.database, "ingest_commits"), 0);
+        assert!(
+            catalog_object_opt(&engine, &fixture.root, "session-transcripts").is_none(),
+            "a panicked first decode must not leave a pending catalog row"
+        );
     }
 
     #[test]
@@ -4391,6 +4428,15 @@ mod tests {
             .unwrap();
 
         assert_eq!(outcome.records_decoded, 8);
+        assert_eq!(
+            outcome.objects_registered, 8,
+            "each new object is allocated locally without a pending catalog commit"
+        );
+        assert_eq!(
+            count_rows(&temp.path().join("parallel.db"), "ingest_commits"),
+            8,
+            "pipelined new objects must not pay a second pending-only transaction"
+        );
         let maximum = adapter.maximum.load(Ordering::Acquire);
         assert!(
             maximum >= 2,
@@ -5040,6 +5086,7 @@ mod tests {
             Connection::open_with_flags(database, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
         let sql = match table {
             "canonical_messages" => "SELECT COUNT(*) FROM canonical_messages",
+            "ingest_commits" => "SELECT COUNT(*) FROM ingest_commits",
             "source_record_errors" => "SELECT COUNT(*) FROM source_record_errors",
             "canonical_interpretation_settings_documents" => {
                 "SELECT COUNT(*) FROM canonical_interpretation_settings_documents"
@@ -5066,6 +5113,14 @@ mod tests {
         root: &Path,
         stream: &str,
     ) -> SourceCatalogObject {
+        catalog_object_opt(engine, root, stream).unwrap()
+    }
+
+    fn catalog_object_opt(
+        engine: &SpaghettiEngineCore,
+        root: &Path,
+        stream: &str,
+    ) -> Option<SourceCatalogObject> {
         let adapter = ClaudeCodeAdapter::new();
         engine
             .source_catalog(adapter.manifest().id.as_str(), &canonical_root_key(root))
@@ -5073,7 +5128,6 @@ mod tests {
             .objects
             .into_iter()
             .find(|object| object.stream_key == stream)
-            .unwrap()
     }
 
     fn initial_source_instance_id(database: &Path) -> u64 {

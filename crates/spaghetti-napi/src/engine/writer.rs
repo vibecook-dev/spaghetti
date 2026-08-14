@@ -33,8 +33,11 @@ const MAX_DISK_RESERVE_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 const WRITER_STATEMENT_CACHE_CAPACITY: usize = 256;
 const WRITER_QUEUE_CAPACITY: usize = 64;
 const MAX_PHYSICAL_COMMIT_GROUP: usize = 8;
+const BOOTSTRAP_PHYSICAL_COMMIT_GROUP: usize = 32;
 const GROUP_COMMIT_COLLECTION_WINDOW: Duration = Duration::from_micros(100);
+const BOOTSTRAP_GROUP_COMMIT_COLLECTION_WINDOW: Duration = Duration::from_millis(2);
 const WAL_CHECKPOINT_TARGET_BYTES: u64 = 32 * 1024 * 1024;
+const BOOTSTRAP_WAL_CHECKPOINT_TARGET_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const WAL_CHECKPOINT_RETRY_INTERVAL: Duration = Duration::from_millis(50);
 const WRITER_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -398,6 +401,7 @@ fn writer_thread(
     }
     let mut checkpoints = CheckpointController::new(&database_path);
     let mut pending = None;
+    let mut bootstrap_active = query_bootstrap_active(&connection).unwrap_or(false);
 
     'writer: loop {
         let command = match pending.take() {
@@ -408,9 +412,19 @@ fn writer_thread(
             },
         };
         if is_commit_command(&command) {
+            let max_group = if bootstrap_active {
+                BOOTSTRAP_PHYSICAL_COMMIT_GROUP
+            } else {
+                MAX_PHYSICAL_COMMIT_GROUP
+            };
+            let collect_window = if bootstrap_active {
+                BOOTSTRAP_GROUP_COMMIT_COLLECTION_WINDOW
+            } else {
+                GROUP_COMMIT_COLLECTION_WINDOW
+            };
             let mut group = vec![command];
             let mut waited_for_peer = false;
-            while group.len() < MAX_PHYSICAL_COMMIT_GROUP {
+            while group.len() < max_group {
                 match commands.try_recv() {
                     Ok(next) if is_commit_command(&next) => group.push(next),
                     Ok(next) => {
@@ -419,7 +433,7 @@ fn writer_thread(
                     }
                     Err(TryRecvError::Empty) if group.len() == 1 && !waited_for_peer => {
                         waited_for_peer = true;
-                        match commands.recv_timeout(GROUP_COMMIT_COLLECTION_WINDOW) {
+                        match commands.recv_timeout(collect_window) {
                             Ok(next) if is_commit_command(&next) => group.push(next),
                             Ok(next) => {
                                 pending = Some(next);
@@ -440,6 +454,7 @@ fn writer_thread(
                 &mut checkpoints,
                 group,
                 true,
+                bootstrap_active,
             );
             continue;
         }
@@ -461,12 +476,23 @@ fn writer_thread(
             }
             WriterCommand::BeginQueryBootstrap { response } => {
                 let result = ensure_disk_reserve(&database_path).and_then(|()| {
-                    schema::begin_query_bootstrap(&mut connection).map_err(|error| {
-                        EngineError::Sqlite {
-                            operation: "begin durable query bootstrap",
-                            detail: error.to_string(),
-                        }
-                    })
+                    let started =
+                        schema::begin_query_bootstrap(&mut connection).map_err(|error| {
+                            EngineError::Sqlite {
+                                operation: "begin durable query bootstrap",
+                                detail: error.to_string(),
+                            }
+                        })?;
+                    if started {
+                        schema::set_bootstrap_ingest_pragmas(&connection).map_err(|error| {
+                            EngineError::Sqlite {
+                                operation: "configure bootstrap ingest pragmas",
+                                detail: error.to_string(),
+                            }
+                        })?;
+                    }
+                    bootstrap_active = started || query_bootstrap_active(&connection)?;
+                    Ok(started)
                 });
                 let _ = response.send(result);
             }
@@ -474,12 +500,14 @@ fn writer_thread(
                 let started = Instant::now();
                 let result = query_bootstrap_active(&connection).and_then(|active| {
                     if !active {
+                        bootstrap_active = false;
                         return Ok(None);
                     }
                     ensure_disk_reserve(&database_path)?;
                     checkpoints.checkpoint(&connection, &telemetry)?;
                     let watermark = finalize_query_bootstrap_connection(&mut connection)?;
                     checkpoints.checkpoint(&connection, &telemetry)?;
+                    bootstrap_active = false;
                     Ok(watermark)
                 });
                 telemetry.bootstrap_finalize.record(started.elapsed());
@@ -522,6 +550,7 @@ fn process_commit_group(
     checkpoints: &mut CheckpointController,
     commands: Vec<WriterCommand>,
     record_queue_wait: bool,
+    bootstrap_active: bool,
 ) {
     debug_assert!(!commands.is_empty());
     debug_assert!(commands.iter().all(is_commit_command));
@@ -550,6 +579,7 @@ fn process_commit_group(
                     checkpoints,
                     vec![command],
                     false,
+                    bootstrap_active,
                 );
             }
         } else {
@@ -559,6 +589,7 @@ fn process_commit_group(
     }
 
     let physical_started = Instant::now();
+    let persist_public_changes = !bootstrap_active;
     let transaction = match connection.transaction_with_behavior(TransactionBehavior::Immediate) {
         Ok(transaction) => transaction,
         Err(error) => {
@@ -593,7 +624,12 @@ fn process_commit_group(
         let started = Instant::now();
         let result = match command {
             WriterCommand::Commit { request, .. } => {
-                commit::apply_observation_commit_in_transaction(&transaction, request, hook)
+                commit::apply_observation_commit_in_transaction(
+                    &transaction,
+                    request,
+                    hook,
+                    persist_public_changes,
+                )
             }
             WriterCommand::CommitFacts { request, batch, .. } => {
                 projection::apply_fact_observation_commit_in_transaction(
@@ -601,6 +637,7 @@ fn process_commit_group(
                     request,
                     batch,
                     hook,
+                    persist_public_changes,
                 )
             }
             _ => unreachable!("non-commit command entered a physical commit group"),
@@ -630,6 +667,7 @@ fn process_commit_group(
                     checkpoints,
                     vec![command],
                     false,
+                    bootstrap_active,
                 );
             }
         } else {
@@ -693,7 +731,7 @@ fn process_commit_group(
         atomic_saturating_add(&telemetry.commit_attempts, 1);
         send_commit_result(command, result);
     }
-    checkpoints.maybe_checkpoint(connection, telemetry);
+    checkpoints.maybe_checkpoint(connection, telemetry, bootstrap_active);
 }
 
 fn commit_queued_at(command: &WriterCommand) -> Instant {
@@ -745,11 +783,21 @@ impl CheckpointController {
         }
     }
 
-    fn maybe_checkpoint(&mut self, connection: &Connection, telemetry: &WriterTelemetry) {
+    fn maybe_checkpoint(
+        &mut self,
+        connection: &Connection,
+        telemetry: &WriterTelemetry,
+        bootstrap_active: bool,
+    ) {
         let wal_bytes = std::fs::metadata(&self.wal_path)
             .map(|metadata| metadata.len())
             .unwrap_or_default();
-        if wal_bytes < WAL_CHECKPOINT_TARGET_BYTES
+        let target = if bootstrap_active {
+            BOOTSTRAP_WAL_CHECKPOINT_TARGET_BYTES
+        } else {
+            WAL_CHECKPOINT_TARGET_BYTES
+        };
+        if wal_bytes < target
             || self
                 .last_attempt
                 .is_some_and(|attempt| attempt.elapsed() < WAL_CHECKPOINT_RETRY_INTERVAL)
@@ -1325,18 +1373,12 @@ fn query_bootstrap_active(connection: &Connection) -> Result<bool, EngineError> 
 fn finalize_query_bootstrap_connection(
     connection: &mut Connection,
 ) -> Result<Option<u64>, EngineError> {
-    connection
-        .pragma_update(None, "synchronous", "FULL")
-        .map_err(|error| EngineError::Sqlite {
-            operation: "strengthen bootstrap rollback durability",
-            detail: error.to_string(),
-        })?;
-    connection
-        .pragma_update(None, "journal_mode", "DELETE")
-        .map_err(|error| EngineError::Sqlite {
-            operation: "enter reader-free bootstrap journal mode",
-            detail: error.to_string(),
-        })?;
+    // Stay on WAL + NORMAL. Crash recovery already re-runs finalization, so
+    // switching a multi-gigabyte file to DELETE + FULL only adds fsyncs.
+    schema::set_bootstrap_ingest_pragmas(connection).map_err(|error| EngineError::Sqlite {
+        operation: "retain bootstrap cache for index finalization",
+        detail: error.to_string(),
+    })?;
 
     let finalization =
         schema::finalize_query_bootstrap(connection).map_err(|error| EngineError::Sqlite {
@@ -1510,6 +1552,7 @@ mod tests {
             &mut checkpoints,
             commands,
             true,
+            false,
         );
 
         for response in responses {
@@ -1556,6 +1599,7 @@ mod tests {
             &mut checkpoints,
             vec![first, second],
             true,
+            false,
         );
 
         first_response.recv().unwrap().unwrap();
@@ -1573,6 +1617,64 @@ mod tests {
                     .get::<_, i64>(0))
                 .unwrap(),
             1
+        );
+    }
+
+    #[test]
+    fn bootstrap_commits_omit_public_change_log_rows() {
+        let dir = tempdir().unwrap();
+        let database = dir.path().join("bootstrap-changelog.db");
+        let mut connection = open_writer(&database).unwrap();
+        let telemetry = WriterTelemetry::new();
+        let mut checkpoints = CheckpointController::new(&database);
+        let mut request = grouped_request(1);
+        request.changes.push(commit::ChangeEntry {
+            topic: "history.message.changed".to_string(),
+            schema_version: 1,
+            entity_key: b"message".to_vec(),
+            operation: "upsert".to_string(),
+            payload: Vec::new(),
+        });
+        let (command, response) = commit_command(request);
+
+        process_commit_group(
+            &mut connection,
+            &database,
+            &telemetry,
+            &mut checkpoints,
+            vec![command],
+            true,
+            true,
+        );
+        response.recv().unwrap().unwrap();
+
+        let change_log_rows: i64 = connection
+            .query_row("SELECT COUNT(*) FROM change_log", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(
+            change_log_rows, 0,
+            "bootstrap ingest publishes a snapshot watermark instead of historical change-log rows"
+        );
+        let commits: i64 = connection
+            .query_row("SELECT COUNT(*) FROM ingest_commits", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(commits, 1);
+    }
+
+    #[test]
+    fn bootstrap_defers_checkpoints_until_the_large_wal_threshold() {
+        let dir = tempdir().unwrap();
+        let database = dir.path().join("bootstrap-checkpoint.db");
+        let connection = open_writer(&database).unwrap();
+        let telemetry = WriterTelemetry::new();
+        let mut checkpoints = CheckpointController::new(&database);
+        checkpoints.maybe_checkpoint(&connection, &telemetry, true);
+        assert_eq!(telemetry.snapshot(0).checkpoint.attempts, 0);
+        checkpoints.maybe_checkpoint(&connection, &telemetry, false);
+        assert_eq!(
+            telemetry.snapshot(0).checkpoint.attempts,
+            0,
+            "an empty WAL stays below both live and bootstrap thresholds"
         );
     }
 

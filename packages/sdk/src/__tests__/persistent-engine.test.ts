@@ -112,7 +112,7 @@ describe('persistent SpaghettiEngine', { skip: !native }, () => {
     assert.equal(first.objectsDiscovered, 1);
     assert.equal(first.objectsRegistered, 1);
     assert.equal(first.recordsDecoded, 1);
-    assert.equal(first.commits, 2);
+    assert.equal(first.commits, 1);
     assert.equal((first.lastCommitSeq ?? 0) > 0, true);
     assert.equal(engine.status.observation.state, 'live');
     assert.equal(engine.status.observation.reconcilesTotal, 1);

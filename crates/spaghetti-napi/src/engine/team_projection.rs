@@ -39,6 +39,9 @@ pub(super) fn apply_team_snapshots(
             Fact::TeamSnapshot(_) | Fact::TeamInboxSnapshot(_)
         )
     });
+    if context.skip_unowned_replace_document(has_team_fact) {
+        return Ok(Vec::new());
+    }
     let mut affected_teams = source_object_keys(
         transaction,
         "SELECT DISTINCT team_key FROM team_snapshot_assertions WHERE source_object_id = ?1",

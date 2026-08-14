@@ -118,6 +118,9 @@ pub(super) fn apply_workflow_facts(
         .facts()
         .iter()
         .any(|envelope| matches!(envelope.value, Fact::WorkflowMemberEvent(_)));
+    if context.skip_unowned_replace_document(has_snapshot_fact || has_event_fact) {
+        return Ok(Vec::new());
+    }
     let snapshot_workflows = source_object_keys(
         transaction,
         "SELECT DISTINCT workflow_key FROM workflow_snapshot_assertions WHERE source_object_id = ?1",

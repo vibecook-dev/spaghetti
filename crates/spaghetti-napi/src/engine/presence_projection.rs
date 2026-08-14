@@ -29,11 +29,14 @@ pub(super) fn apply_presence_facts(
     batch: &FactBatch,
 ) -> Result<Vec<ChangeEntry>, EngineError> {
     let object_id = sqlite_u64(context.source_object_id, "source object id")?;
-    let mut affected = source_object_keys(transaction, object_id)?;
     let has_presence_fact = batch
         .facts()
         .iter()
         .any(|envelope| matches!(envelope.value, Fact::Presence(_)));
+    if context.skip_unowned_replace_document(has_presence_fact) {
+        return Ok(Vec::new());
+    }
+    let mut affected = source_object_keys(transaction, object_id)?;
 
     // Projection dispatch is intentionally shared by all fact batches. A
     // transcript object therefore reaches this projector even though it can

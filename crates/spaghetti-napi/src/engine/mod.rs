@@ -464,7 +464,7 @@ impl SpaghettiEngineCore {
             .transpose()?
             .unwrap_or_default();
         let observation_workers = rayon::ThreadPoolBuilder::new()
-            .num_threads(4)
+            .num_threads(16)
             .thread_name(|index| format!("spaghetti-observe-{index}"))
             .build()
             .map_err(|error| EngineError::WorkerStart {
@@ -1683,6 +1683,11 @@ mod tests {
         assert!(ready.accepting_queries);
         assert_eq!(ready.alive_query_workers, 2);
         assert_eq!(engine.overview().unwrap().commit_seq, 0);
+        assert_eq!(
+            engine.overview().unwrap().journal_mode.to_ascii_lowercase(),
+            "wal",
+            "bootstrap finalization must remain on WAL instead of rewriting the file in DELETE mode"
+        );
         assert_eq!(engine.complete_query_bootstrap().unwrap(), None);
         engine.shutdown().unwrap();
     }

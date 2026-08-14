@@ -122,11 +122,14 @@ pub(super) fn apply_persisted_tool_result_facts(
     changed_references: &BTreeSet<ToolReferenceKey>,
 ) -> Result<Vec<ChangeEntry>, EngineError> {
     let object_id = sqlite_u64(context.source_object_id, "source object id")?;
-    let mut affected_results = source_object_result_keys(transaction, object_id)?;
     let has_result_fact = batch
         .facts()
         .iter()
         .any(|envelope| matches!(envelope.value, Fact::PersistedToolResult(_)));
+    if context.skip_unowned_replace_document(has_result_fact) && changed_references.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut affected_results = source_object_result_keys(transaction, object_id)?;
     let owns_result_document = has_result_fact || !affected_results.is_empty();
     affected_results.extend(result_keys_for_references(transaction, changed_references)?);
 

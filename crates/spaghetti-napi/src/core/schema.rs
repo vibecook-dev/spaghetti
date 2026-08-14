@@ -27,6 +27,9 @@ const SQLITE_MMAP_BYTES: i64 = 256 * 1024 * 1024;
 // disabled rather than competing with that policy inside transaction commit.
 const WAL_AUTOCHECKPOINT_PAGES: i64 = 0;
 const WAL_JOURNAL_LIMIT_BYTES: i64 = 64 * 1024 * 1024;
+const BOOTSTRAP_CACHE_KIB: i64 = 1_000_000;
+const BOOTSTRAP_MMAP_BYTES: i64 = 2 * 1024 * 1024 * 1024;
+const BOOTSTRAP_JOURNAL_LIMIT_BYTES: i64 = 2 * 1024 * 1024 * 1024;
 
 const BOOTSTRAP_STATE_KEY: &str = "query_bootstrap_state";
 const BOOTSTRAP_EPOCH_KEY: &str = "query_bootstrap_epoch";
@@ -2334,10 +2337,10 @@ pub fn finalize_query_bootstrap(conn: &mut Connection) -> Result<Option<u64>, Sc
         [BOOTSTRAP_STATE_KEY],
     )?;
 
-    // Large index sort runs must remain bounded even on machines with less
-    // memory than the reference host. This connection-local setting is
-    // restored by the writer after finalization.
-    conn.pragma_update(None, "temp_store", "FILE")?;
+    // Index/FTS rebuilds run on the sole writer with no readers. Memory temp
+    // sorts avoid an extra spill file; the writer restores interactive pragmas
+    // after this function returns.
+    conn.pragma_update(None, "temp_store", "MEMORY")?;
     for (_, sql) in BOOTSTRAP_QUERY_INDEXES {
         conn.execute_batch(sql)?;
     }
@@ -2503,6 +2506,17 @@ pub fn set_pragmas(conn: &Connection) -> Result<(), SchemaError> {
     conn.pragma_update(None, "mmap_size", SQLITE_MMAP_BYTES)?;
     conn.pragma_update(None, "wal_autocheckpoint", WAL_AUTOCHECKPOINT_PAGES)?;
     conn.pragma_update(None, "journal_size_limit", WAL_JOURNAL_LIMIT_BYTES)?;
+    Ok(())
+}
+
+/// Larger cache/mmap/WAL limits used only while the owner is in durable
+/// query-bootstrap ingest or index finalization. `set_pragmas` restores the
+/// interactive policy before readers start.
+pub fn set_bootstrap_ingest_pragmas(conn: &Connection) -> Result<(), SchemaError> {
+    conn.pragma_update(None, "cache_size", -BOOTSTRAP_CACHE_KIB)?;
+    conn.pragma_update(None, "mmap_size", BOOTSTRAP_MMAP_BYTES)?;
+    conn.pragma_update(None, "journal_size_limit", BOOTSTRAP_JOURNAL_LIMIT_BYTES)?;
+    conn.pragma_update(None, "temp_store", "MEMORY")?;
     Ok(())
 }
 

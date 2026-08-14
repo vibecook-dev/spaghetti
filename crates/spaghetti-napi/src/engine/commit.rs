@@ -291,7 +291,17 @@ pub(super) struct ProjectionCommitContext {
     /// previously durable generation. Same-generation append batches must not
     /// repeatedly search every projection for rows that cannot exist.
     pub replaces_prior_generation: bool,
+    /// True when this transaction creates the source object. Replace-document
+    /// projectors can skip ownership probes: a brand-new object cannot already
+    /// own assertions.
+    pub object_is_new: bool,
     pub retention: RawRetentionPolicy,
+}
+
+impl ProjectionCommitContext {
+    pub(super) fn skip_unowned_replace_document(&self, has_matching_fact: bool) -> bool {
+        !has_matching_fact && self.object_is_new
+    }
 }
 
 struct NoProjectionWork;
@@ -393,6 +403,7 @@ pub(super) fn apply_observation_commit_with_components(
         request,
         projection_work,
         hook,
+        true,
     )?;
     transaction
         .commit()
@@ -405,6 +416,7 @@ pub(super) fn apply_observation_commit_in_transaction(
     transaction: &Transaction<'_>,
     request: &ObservationCommit,
     hook: &dyn CommitHook,
+    persist_public_changes: bool,
 ) -> Result<CommitReceipt, EngineError> {
     prepare_observation_commit(request, hook)?;
     apply_observation_commit_components_in_transaction(
@@ -412,6 +424,7 @@ pub(super) fn apply_observation_commit_in_transaction(
         request,
         &NoProjectionWork,
         hook,
+        persist_public_changes,
     )
 }
 
@@ -420,9 +433,16 @@ pub(super) fn apply_observation_commit_with_projection_in_transaction(
     request: &ObservationCommit,
     projection_work: &dyn TransactionalProjectionWork,
     hook: &dyn CommitHook,
+    persist_public_changes: bool,
 ) -> Result<CommitReceipt, EngineError> {
     prepare_observation_commit(request, hook)?;
-    apply_observation_commit_components_in_transaction(transaction, request, projection_work, hook)
+    apply_observation_commit_components_in_transaction(
+        transaction,
+        request,
+        projection_work,
+        hook,
+        persist_public_changes,
+    )
 }
 
 fn prepare_observation_commit(
@@ -443,6 +463,7 @@ fn apply_observation_commit_components_in_transaction(
     request: &ObservationCommit,
     projection_work: &dyn TransactionalProjectionWork,
     hook: &dyn CommitHook,
+    persist_public_changes: bool,
 ) -> Result<CommitReceipt, EngineError> {
     let source_instance_id = upsert_source_instance(transaction, &request.source)?;
     let commit_seq = insert_ingest_commit(transaction, source_instance_id, request)?;
@@ -450,6 +471,7 @@ fn apply_observation_commit_components_in_transaction(
         upsert_source_stream(transaction, source_instance_id, commit_seq, &request.stream)?;
     let existing = read_source_object(transaction, source_stream_id, &request.object.object_key)?;
     verify_cursor_precondition(request, existing.as_ref())?;
+    let object_is_new = existing.is_none();
     let source_object_id = reserve_source_object_identity(
         transaction,
         source_stream_id,
@@ -465,6 +487,7 @@ fn apply_observation_commit_components_in_transaction(
         replaces_prior_generation: existing
             .as_ref()
             .is_some_and(|stored| stored.generation != request.object.generation),
+        object_is_new,
         retention: request.stream.retention,
     };
 
@@ -493,10 +516,13 @@ fn apply_observation_commit_components_in_transaction(
         commit_seq,
         &request.record_errors,
     )?;
-    write_change_log(transaction, commit_seq, &changes)?;
+    if persist_public_changes {
+        write_change_log(transaction, commit_seq, &changes)?;
+    }
     hook.reach(CommitStage::AfterOutboxInsert)?;
 
-    if commit_seq % AUTOMATIC_CHANGE_LOG_MAINTENANCE_INTERVAL_COMMITS == 0
+    if persist_public_changes
+        && commit_seq % AUTOMATIC_CHANGE_LOG_MAINTENANCE_INTERVAL_COMMITS == 0
         && automatic_change_log_maintenance_due(
             transaction,
             ChangeLogRetentionPolicy::default(),
