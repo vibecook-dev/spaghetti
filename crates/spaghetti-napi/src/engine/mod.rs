@@ -9,6 +9,7 @@ mod capability_query;
 mod commit;
 mod coordinator;
 mod detail_query;
+mod ingest_profile;
 mod local_permissions;
 mod memory_projection;
 mod observation;

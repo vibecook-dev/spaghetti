@@ -2329,6 +2329,21 @@ pub fn begin_query_bootstrap(conn: &mut Connection) -> Result<bool, SchemaError>
 /// durable unavailability marker. The returned watermark is the snapshot
 /// boundary that a newly admitted subscriber must start from.
 pub fn finalize_query_bootstrap(conn: &mut Connection) -> Result<Option<u64>, SchemaError> {
+    finalize_query_bootstrap_inner(conn, true)
+}
+
+/// Isolation-only: rebuild deferred structures without the foreign-key audit.
+/// Production readiness still uses [`finalize_query_bootstrap`].
+pub fn finalize_query_bootstrap_skip_fk_check(
+    conn: &mut Connection,
+) -> Result<Option<u64>, SchemaError> {
+    finalize_query_bootstrap_inner(conn, false)
+}
+
+fn finalize_query_bootstrap_inner(
+    conn: &mut Connection,
+    check_foreign_keys: bool,
+) -> Result<Option<u64>, SchemaError> {
     if query_bootstrap_state(conn)?.is_none() {
         return Ok(None);
     }
@@ -2349,7 +2364,7 @@ pub fn finalize_query_bootstrap(conn: &mut Connection) -> Result<Option<u64>, Sc
     )?;
     conn.execute_batch(CANONICAL_FTS_TRIGGERS_SQL)?;
     conn.execute_batch("PRAGMA optimize=0x10002")?;
-    validate_query_bootstrap(conn)?;
+    validate_query_bootstrap(conn, check_foreign_keys)?;
 
     let watermark: i64 = conn.query_row(
         "SELECT COALESCE(MAX(commit_seq), 0) FROM ingest_commits WHERE committed_at IS NOT NULL",
@@ -2391,7 +2406,10 @@ pub fn recover_query_bootstrap(conn: &mut Connection) -> Result<bool, SchemaErro
     finalize_query_bootstrap(conn).map(|_| true)
 }
 
-fn validate_query_bootstrap(conn: &mut Connection) -> Result<(), SchemaError> {
+fn validate_query_bootstrap(
+    conn: &mut Connection,
+    check_foreign_keys: bool,
+) -> Result<(), SchemaError> {
     for (index, _) in BOOTSTRAP_QUERY_INDEXES {
         let exists: i64 = conn.query_row(
             "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = ?1",
@@ -2423,15 +2441,17 @@ fn validate_query_bootstrap(conn: &mut Connection) -> Result<(), SchemaError> {
             "quick_check returned {quick_check}"
         )));
     }
-    let foreign_key_violation = {
-        let mut statement = conn.prepare("PRAGMA foreign_key_check")?;
-        let mut rows = statement.query([])?;
-        rows.next()?.is_some()
-    };
-    if foreign_key_violation {
-        return Err(SchemaError::BootstrapValidation(
-            "foreign_key_check found at least one violation".to_string(),
-        ));
+    if check_foreign_keys {
+        let foreign_key_violation = {
+            let mut statement = conn.prepare("PRAGMA foreign_key_check")?;
+            let mut rows = statement.query([])?;
+            rows.next()?.is_some()
+        };
+        if foreign_key_violation {
+            return Err(SchemaError::BootstrapValidation(
+                "foreign_key_check found at least one violation".to_string(),
+            ));
+        }
     }
 
     let transaction = conn.transaction()?;

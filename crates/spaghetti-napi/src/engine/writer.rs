@@ -481,15 +481,20 @@ fn writer_thread(
             }
             WriterCommand::FinalizeQueryBootstrap { response } => {
                 let started = Instant::now();
+                let skip = super::ingest_profile::IngestProfileSkip::current();
                 let result = query_bootstrap_active(&connection).and_then(|active| {
                     if !active {
                         bootstrap_active = false;
                         return Ok(None);
                     }
                     ensure_disk_reserve(&database_path)?;
-                    checkpoints.checkpoint(&connection, &telemetry)?;
+                    if !skip.checkpoints && !skip.finalize {
+                        checkpoints.checkpoint(&connection, &telemetry)?;
+                    }
                     let watermark = finalize_query_bootstrap_connection(&mut connection)?;
-                    checkpoints.checkpoint(&connection, &telemetry)?;
+                    if !skip.checkpoints && !skip.finalize {
+                        checkpoints.checkpoint(&connection, &telemetry)?;
+                    }
                     bootstrap_active = false;
                     Ok(watermark)
                 });
@@ -854,7 +859,8 @@ impl CheckpointController {
         } else {
             WAL_CHECKPOINT_TARGET_BYTES
         };
-        if wal_bytes < target
+        if super::ingest_profile::IngestProfileSkip::current().checkpoints
+            || wal_bytes < target
             || self
                 .last_attempt
                 .is_some_and(|attempt| attempt.elapsed() < WAL_CHECKPOINT_RETRY_INTERVAL)
@@ -1384,6 +1390,7 @@ fn open_writer(database_path: &PathBuf) -> Result<Connection, EngineError> {
         operation: "configure writer pragmas",
         detail: error.to_string(),
     })?;
+    apply_ingest_profile_pragmas(&connection)?;
     schema::initialize_schema(&connection).map_err(|error| EngineError::Sqlite {
         operation: "initialize schema",
         detail: error.to_string(),
@@ -1430,6 +1437,9 @@ fn query_bootstrap_active(connection: &Connection) -> Result<bool, EngineError> 
 fn finalize_query_bootstrap_connection(
     connection: &mut Connection,
 ) -> Result<Option<u64>, EngineError> {
+    if super::ingest_profile::IngestProfileSkip::current().finalize {
+        return clear_query_bootstrap_marker(connection);
+    }
     // Stay on WAL + NORMAL. Crash recovery already re-runs finalization, so
     // switching a multi-gigabyte file to DELETE + FULL only adds fsyncs.
     schema::set_bootstrap_ingest_pragmas(connection).map_err(|error| EngineError::Sqlite {
@@ -1437,20 +1447,65 @@ fn finalize_query_bootstrap_connection(
         detail: error.to_string(),
     })?;
 
-    let finalization =
-        schema::finalize_query_bootstrap(connection).map_err(|error| EngineError::Sqlite {
-            operation: "finalize durable query bootstrap",
-            detail: error.to_string(),
-        });
-    let restore = schema::set_pragmas(connection).map_err(|error| EngineError::Sqlite {
-        operation: "restore writer pragmas after query bootstrap",
+    let skip = super::ingest_profile::IngestProfileSkip::current();
+    let finalization = if skip.relaxes_sqlite_constraints() {
+        schema::finalize_query_bootstrap_skip_fk_check(connection)
+    } else {
+        schema::finalize_query_bootstrap(connection)
+    }
+    .map_err(|error| EngineError::Sqlite {
+        operation: "finalize durable query bootstrap",
         detail: error.to_string(),
     });
+    let restore = schema::set_pragmas(connection)
+        .map_err(|error| EngineError::Sqlite {
+            operation: "restore writer pragmas after query bootstrap",
+            detail: error.to_string(),
+        })
+        .and_then(|()| apply_ingest_profile_pragmas(connection));
     match (finalization, restore) {
         (Ok(watermark), Ok(())) => Ok(watermark),
         (Err(error), _) => Err(error),
         (Ok(_), Err(error)) => Err(error),
     }
+}
+
+fn clear_query_bootstrap_marker(connection: &Connection) -> Result<Option<u64>, EngineError> {
+    if !query_bootstrap_active(connection)? {
+        return Ok(None);
+    }
+    let watermark: i64 = connection
+        .query_row(
+            "SELECT COALESCE(MAX(commit_seq), 0) FROM ingest_commits WHERE committed_at IS NOT NULL",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|error| EngineError::Sqlite {
+            operation: "read skipped bootstrap watermark",
+            detail: error.to_string(),
+        })?;
+    connection
+        .execute(
+            "DELETE FROM schema_meta WHERE key = 'query_bootstrap_state'",
+            [],
+        )
+        .map_err(|error| EngineError::Sqlite {
+            operation: "clear skipped query bootstrap marker",
+            detail: error.to_string(),
+        })?;
+    Ok(Some(u64::try_from(watermark).unwrap_or_default()))
+}
+
+fn apply_ingest_profile_pragmas(connection: &Connection) -> Result<(), EngineError> {
+    if !super::ingest_profile::IngestProfileSkip::current().relaxes_sqlite_constraints() {
+        return Ok(());
+    }
+    connection
+        .pragma_update(None, "foreign_keys", "OFF")
+        .map_err(|error| EngineError::Sqlite {
+            operation: "relax foreign keys for ingest profile skip",
+            detail: error.to_string(),
+        })
 }
 
 fn require_reader_free_checkpoint(outcome: CheckpointOutcome) -> Result<(), EngineError> {

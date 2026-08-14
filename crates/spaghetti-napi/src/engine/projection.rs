@@ -44,6 +44,7 @@ use super::EngineError;
 const CHANGE_SCHEMA_VERSION: u32 = 1;
 const FACT_INSERT_BATCH_ROWS: usize = 512;
 const MESSAGE_INSERT_BATCH_ROWS: usize = 256;
+const RUN_EVIDENCE_INSERT_BATCH_ROWS: usize = 512;
 
 /// Submit one already-decoded fact batch through the catalog/projection/cursor
 /// transaction. Public changes and the durable fact count are derived here;
@@ -199,12 +200,20 @@ impl TransactionalProjectionWork for FactProjectionWork<'_> {
         self.retracted_run_keys.replace(retracted_run_keys);
         let coalesced_sessions = coalesced_session_projections(self.batch);
         let last_run_facts = last_run_fact_indices(self.batch);
-        let existing_message_keys = existing_message_keys(transaction, self.batch)?;
+        let existing_message_keys = if context.object_is_new {
+            BTreeSet::new()
+        } else {
+            existing_message_keys(transaction, self.batch)?
+        };
         let mut seen_message_keys = BTreeSet::new();
         let duplicate_message_keys = duplicate_message_keys(self.batch);
         let mut new_message_content = Vec::new();
-        persist_facts(transaction, context, self.batch, &self.encoded_payloads)?;
-        persist_canonical_messages(transaction, context, self.batch, &self.encoded_payloads)?;
+        if !super::ingest_profile::IngestProfileSkip::current().facts {
+            persist_facts(transaction, context, self.batch, &self.encoded_payloads)?;
+        }
+        if !super::ingest_profile::IngestProfileSkip::current().messages {
+            persist_canonical_messages(transaction, context, self.batch, &self.encoded_payloads)?;
+        }
         for (index, envelope) in self.batch.facts().iter().enumerate() {
             match &envelope.value {
                 Fact::Session(original) => {
@@ -291,30 +300,33 @@ impl TransactionalProjectionWork for FactProjectionWork<'_> {
                         fact.message.as_bytes(),
                         envelope,
                     )?);
-                    changed_tool_references.extend(replace_message_references(
-                        transaction,
-                        context,
-                        message_key,
-                        fact.session.as_bytes(),
-                        &fact.content,
-                        replaces_existing_message,
-                    )?);
-                    if replaces_existing_message || duplicate_message_keys.contains(message_key) {
-                        replace_message_content_blocks(
+                    if !super::ingest_profile::IngestProfileSkip::current().messages {
+                        changed_tool_references.extend(replace_message_references(
                             transaction,
+                            context,
                             message_key,
                             fact.session.as_bytes(),
-                            fact.run.as_bytes(),
                             &fact.content,
                             replaces_existing_message,
-                        )?;
-                    } else {
-                        new_message_content.push(MessageContentBlocks {
-                            message_key,
-                            session_key: fact.session.as_bytes(),
-                            run_key: fact.run.as_bytes(),
-                            content: &fact.content,
-                        });
+                        )?);
+                        if replaces_existing_message || duplicate_message_keys.contains(message_key)
+                        {
+                            replace_message_content_blocks(
+                                transaction,
+                                message_key,
+                                fact.session.as_bytes(),
+                                fact.run.as_bytes(),
+                                &fact.content,
+                                replaces_existing_message,
+                            )?;
+                        } else {
+                            new_message_content.push(MessageContentBlocks {
+                                message_key,
+                                session_key: fact.session.as_bytes(),
+                                run_key: fact.run.as_bytes(),
+                                content: &fact.content,
+                            });
+                        }
                     }
                 }
                 Fact::Run(fact) => {
@@ -383,25 +395,29 @@ impl TransactionalProjectionWork for FactProjectionWork<'_> {
                 | Fact::Usage(_) => {}
             }
         }
-        insert_message_content_blocks(transaction, &new_message_content)?;
+        if !super::ingest_profile::IngestProfileSkip::current().messages {
+            insert_message_content_blocks(transaction, &new_message_content)?;
+        }
         self.record_detail(CommitDetail::HistoryAndFactStorage, history_started);
-        changes.extend(self.measure(CommitDetail::SessionIndex, || {
-            apply_session_index_facts(transaction, context, self.batch, &changed_session_keys)
-        })?);
-        changes.extend(self.measure(CommitDetail::ProjectMemory, || {
-            apply_project_memory_facts(transaction, context, self.batch)
-        })?);
-        changes.extend(self.measure(CommitDetail::PersistedToolResult, || {
-            apply_persisted_tool_result_facts(
-                transaction,
-                context,
-                self.batch,
-                &changed_tool_references,
-            )
-        })?);
-        changes.extend(self.measure(CommitDetail::InterpretationSettings, || {
-            apply_interpretation_settings_facts(transaction, context, self.batch)
-        })?);
+        if !super::ingest_profile::IngestProfileSkip::current().extras {
+            changes.extend(self.measure(CommitDetail::SessionIndex, || {
+                apply_session_index_facts(transaction, context, self.batch, &changed_session_keys)
+            })?);
+            changes.extend(self.measure(CommitDetail::ProjectMemory, || {
+                apply_project_memory_facts(transaction, context, self.batch)
+            })?);
+            changes.extend(self.measure(CommitDetail::PersistedToolResult, || {
+                apply_persisted_tool_result_facts(
+                    transaction,
+                    context,
+                    self.batch,
+                    &changed_tool_references,
+                )
+            })?);
+            changes.extend(self.measure(CommitDetail::InterpretationSettings, || {
+                apply_interpretation_settings_facts(transaction, context, self.batch)
+            })?);
+        }
         Ok(changes)
     }
 
@@ -411,72 +427,45 @@ impl TransactionalProjectionWork for FactProjectionWork<'_> {
         context: &ProjectionCommitContext,
     ) -> Result<Vec<ChangeEntry>, EngineError> {
         let run_state_started = Instant::now();
-        let mut affected_states = BTreeSet::new();
-        if context.replaces_prior_generation {
-            affected_states = old_generation_keys(
+        let mut changes = Vec::new();
+        if !super::ingest_profile::IngestProfileSkip::current().runtime {
+            let mut affected_states = BTreeSet::new();
+            if context.replaces_prior_generation {
+                affected_states = old_generation_keys(
+                    transaction,
+                    "SELECT DISTINCT run_key FROM run_evidence WHERE source_object_id = ?1 AND source_generation <> ?2",
+                    context,
+                    "read replaced run evidence",
+                )?;
+                execute_cached(
+                    transaction,
+                    "DELETE FROM run_evidence WHERE source_object_id = ?1 AND source_generation <> ?2",
+                    params![
+                        sqlite_u64(context.source_object_id, "source object id")?,
+                        sqlite_u64(context.generation, "source generation")?,
+                    ],
+                )
+                .map_err(|error| sqlite_error("retract replaced run evidence", error))?;
+            }
+
+            let folded = persist_run_evidence(
                 transaction,
-                "SELECT DISTINCT run_key FROM run_evidence WHERE source_object_id = ?1 AND source_generation <> ?2",
                 context,
-                "read replaced run evidence",
+                self.batch,
+                &mut affected_states,
             )?;
-            execute_cached(
-                transaction,
-                "DELETE FROM run_evidence WHERE source_object_id = ?1 AND source_generation <> ?2",
-                params![
-                    sqlite_u64(context.source_object_id, "source object id")?,
-                    sqlite_u64(context.generation, "source generation")?,
-                ],
-            )
-            .map_err(|error| sqlite_error("retract replaced run evidence", error))?;
-        }
 
-        for envelope in self.batch.facts() {
-            let Fact::RunEvidence(fact) = &envelope.value else {
-                continue;
-            };
-            execute_cached(
-                transaction,
-                r#"
-                    INSERT INTO run_evidence (
-                        fact_id, run_key, evidence_kind, evidence_strength,
-                        native_state, source_time, source_time_quality,
-                        source_object_id, source_generation, cursor_end,
-                        last_commit_seq
-                    ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
-                    ON CONFLICT(fact_id) DO UPDATE SET
-                        run_key = excluded.run_key,
-                        evidence_kind = excluded.evidence_kind,
-                        evidence_strength = excluded.evidence_strength,
-                        native_state = excluded.native_state,
-                        source_time = excluded.source_time,
-                        source_time_quality = excluded.source_time_quality,
-                        source_object_id = excluded.source_object_id,
-                        source_generation = excluded.source_generation,
-                        cursor_end = excluded.cursor_end,
-                        last_commit_seq = excluded.last_commit_seq
-                    "#,
-                params![
-                    envelope.id.as_bytes().as_slice(),
-                    fact.run.as_bytes(),
-                    evidence_kind(fact.kind),
-                    evidence_strength(fact.strength),
-                    fact.native_state,
-                    timestamp_value(fact.source_time.as_ref()),
-                    timestamp_quality(fact.source_time.as_ref()),
-                    sqlite_u64(context.source_object_id, "source object id")?,
-                    sqlite_u64(context.generation, "source generation")?,
-                    envelope.provenance.cursor_end,
-                    sqlite_u64(context.commit_seq, "commit sequence")?,
-                ],
-            )
-            .map_err(|error| sqlite_error("project run evidence", error))?;
-            affected_states.insert(fact.run.as_bytes().to_vec());
-        }
-
-        let mut changes = Vec::with_capacity(affected_states.len());
-        for run_key in affected_states {
-            let state = reduce_run_state(transaction, &run_key, context.commit_seq)?;
-            changes.push(state_change(&run_key, state.as_deref())?);
+            changes.reserve(affected_states.len());
+            for run_key in affected_states {
+                let state = if context.replaces_prior_generation {
+                    reduce_run_state(transaction, &run_key, context.commit_seq)?
+                } else if let Some(candidate) = folded.get(&run_key) {
+                    fold_run_state(transaction, &run_key, candidate, context.commit_seq)?
+                } else {
+                    reduce_run_state(transaction, &run_key, context.commit_seq)?
+                };
+                changes.push(state_change(&run_key, state.as_deref())?);
+            }
         }
         self.record_detail(CommitDetail::RunState, run_state_started);
 
@@ -487,15 +476,18 @@ impl TransactionalProjectionWork for FactProjectionWork<'_> {
                 Fact::Delegation(_) | Fact::DelegationMetadata(_) | Fact::DelegationSpawn(_)
             )
         });
-        let has_run_fact = self
-            .batch
-            .facts()
-            .iter()
-            .any(|envelope| matches!(envelope.value, Fact::Run(_)))
-            || !self.retracted_run_keys.borrow().is_empty();
-        if context.skip_unowned_replace_document(has_delegation_fact)
-            && !has_run_fact
-            && !context.replaces_prior_generation
+        let mut changed_runs = self.retracted_run_keys.borrow().clone();
+        changed_runs.extend(self.batch.facts().iter().filter_map(|envelope| {
+            let Fact::Run(fact) = &envelope.value else {
+                return None;
+            };
+            Some(fact.run.as_bytes().to_vec())
+        }));
+        let has_run_fact = !changed_runs.is_empty();
+        if super::ingest_profile::IngestProfileSkip::current().delegation
+            || (context.skip_unowned_replace_document(has_delegation_fact)
+                && !context.replaces_prior_generation
+                && (!has_run_fact || !runs_need_delegation_reduce(transaction, &changed_runs)?))
         {
             self.record_detail(CommitDetail::Delegation, delegation_started);
             changes.extend(self.measure(CommitDetail::Presence, || {
@@ -507,9 +499,11 @@ impl TransactionalProjectionWork for FactProjectionWork<'_> {
             changes.extend(self.measure(CommitDetail::Task, || {
                 apply_task_snapshots(transaction, context, self.batch)
             })?);
-            changes.extend(self.measure(CommitDetail::Artifact, || {
-                apply_artifact_facts(transaction, context, self.batch)
-            })?);
+            if !super::ingest_profile::IngestProfileSkip::current().artifact {
+                changes.extend(self.measure(CommitDetail::Artifact, || {
+                    apply_artifact_facts(transaction, context, self.batch)
+                })?);
+            }
             changes.extend(self.measure(CommitDetail::Workflow, || {
                 apply_workflow_facts(transaction, context, self.batch)
             })?);
@@ -658,13 +652,6 @@ impl TransactionalProjectionWork for FactProjectionWork<'_> {
             affected_delegations.extend(correlated_children_for_spawn(transaction, spawn_key)?);
         }
 
-        let mut changed_runs = self.retracted_run_keys.borrow().clone();
-        changed_runs.extend(self.batch.facts().iter().filter_map(|envelope| {
-            let Fact::Run(fact) = &envelope.value else {
-                return None;
-            };
-            Some(fact.run.as_bytes().to_vec())
-        }));
         for run_key in &changed_runs {
             affected_delegations.extend(delegation_children_for_run(transaction, run_key)?);
             affected_delegations.extend(correlated_children_for_run(transaction, run_key)?);
@@ -706,9 +693,11 @@ impl TransactionalProjectionWork for FactProjectionWork<'_> {
         changes.extend(self.measure(CommitDetail::Task, || {
             apply_task_snapshots(transaction, context, self.batch)
         })?);
-        changes.extend(self.measure(CommitDetail::Artifact, || {
-            apply_artifact_facts(transaction, context, self.batch)
-        })?);
+        if !super::ingest_profile::IngestProfileSkip::current().artifact {
+            changes.extend(self.measure(CommitDetail::Artifact, || {
+                apply_artifact_facts(transaction, context, self.batch)
+            })?);
+        }
         changes.extend(self.measure(CommitDetail::Workflow, || {
             apply_workflow_facts(transaction, context, self.batch)
         })?);
@@ -742,10 +731,17 @@ impl TransactionalProjectionWork for FactProjectionWork<'_> {
         transaction: &Transaction<'_>,
         context: &ProjectionCommitContext,
     ) -> Result<Vec<ChangeEntry>, EngineError> {
+        if super::ingest_profile::IngestProfileSkip::current().usage {
+            return Ok(Vec::new());
+        }
         let usage_started = Instant::now();
         let mut touched_sessions = BTreeSet::new();
         let mut pending_totals = BTreeMap::new();
-        let existing_contribution_ids = existing_usage_contribution_ids(transaction, self.batch)?;
+        let existing_contribution_ids = if context.object_is_new {
+            BTreeSet::new()
+        } else {
+            existing_usage_contribution_ids(transaction, self.batch)?
+        };
         let mut seen_contribution_ids = BTreeSet::new();
         let replaced = if context.replaces_prior_generation {
             read_replaced_contributions(transaction, context)?
@@ -1081,6 +1077,156 @@ fn validate_batch_provenance(
     Ok(())
 }
 
+#[derive(Debug, Clone)]
+struct FoldedRunEvidence {
+    fact_id: Vec<u8>,
+    kind: &'static str,
+    kind_rank: i64,
+    strength_rank: i64,
+    source_generation: i64,
+    cursor_end: Vec<u8>,
+    last_commit_seq: i64,
+    source_time: Option<String>,
+    last_activity_at: Option<String>,
+}
+
+fn persist_run_evidence(
+    transaction: &Transaction<'_>,
+    context: &ProjectionCommitContext,
+    batch: &FactBatch,
+    affected_states: &mut BTreeSet<Vec<u8>>,
+) -> Result<BTreeMap<Vec<u8>, FoldedRunEvidence>, EngineError> {
+    let mut folded = BTreeMap::new();
+    let mut rows = Vec::new();
+    let source_object_id = sqlite_u64(context.source_object_id, "source object id")?;
+    let source_generation = sqlite_u64(context.generation, "source generation")?;
+    let commit_seq = sqlite_u64(context.commit_seq, "commit sequence")?;
+    for envelope in batch.facts() {
+        let Fact::RunEvidence(fact) = &envelope.value else {
+            continue;
+        };
+        let run_key = fact.run.as_bytes().to_vec();
+        let kind = evidence_kind(fact.kind);
+        let source_time = timestamp_value(fact.source_time.as_ref()).map(str::to_string);
+        let last_activity_at = is_activity_evidence(fact.kind)
+            .then(|| source_time.clone())
+            .flatten();
+        let candidate = FoldedRunEvidence {
+            fact_id: envelope.id.as_bytes().to_vec(),
+            kind,
+            kind_rank: evidence_kind_rank(fact.kind),
+            strength_rank: evidence_strength_rank(fact.strength),
+            source_generation,
+            cursor_end: envelope.provenance.cursor_end.clone(),
+            last_commit_seq: commit_seq,
+            source_time,
+            last_activity_at,
+        };
+        match folded.get_mut(&run_key) {
+            Some(current) => {
+                if run_evidence_outranks(&candidate, current) {
+                    let last_activity_at = max_optional_time(
+                        current.last_activity_at.clone(),
+                        candidate.last_activity_at.clone(),
+                    );
+                    *current = candidate.clone();
+                    current.last_activity_at = last_activity_at;
+                } else {
+                    current.last_activity_at = max_optional_time(
+                        current.last_activity_at.clone(),
+                        candidate.last_activity_at.clone(),
+                    );
+                }
+            }
+            None => {
+                folded.insert(run_key.clone(), candidate);
+            }
+        }
+        affected_states.insert(run_key);
+        rows.push((
+            envelope.id.as_bytes().to_vec(),
+            fact.run.as_bytes().to_vec(),
+            kind,
+            evidence_strength(fact.strength),
+            fact.native_state.clone(),
+            timestamp_value(fact.source_time.as_ref()).map(str::to_string),
+            timestamp_quality(fact.source_time.as_ref()).map(str::to_string),
+            envelope.provenance.cursor_end.clone(),
+        ));
+    }
+
+    for chunk in rows.chunks(RUN_EVIDENCE_INSERT_BATCH_ROWS) {
+        let row = "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+        let sql = format!(
+            r#"
+            INSERT INTO run_evidence (
+                fact_id, run_key, evidence_kind, evidence_strength,
+                native_state, source_time, source_time_quality,
+                source_object_id, source_generation, cursor_end,
+                last_commit_seq
+            ) VALUES {}
+            {}
+            "#,
+            std::iter::repeat_n(row, chunk.len())
+                .collect::<Vec<_>>()
+                .join(", "),
+            if context.object_is_new {
+                ""
+            } else {
+                r#"
+            ON CONFLICT(fact_id) DO UPDATE SET
+                run_key = excluded.run_key,
+                evidence_kind = excluded.evidence_kind,
+                evidence_strength = excluded.evidence_strength,
+                native_state = excluded.native_state,
+                source_time = excluded.source_time,
+                source_time_quality = excluded.source_time_quality,
+                source_object_id = excluded.source_object_id,
+                source_generation = excluded.source_generation,
+                cursor_end = excluded.cursor_end,
+                last_commit_seq = excluded.last_commit_seq
+                "#
+            }
+        );
+        let mut values = Vec::with_capacity(chunk.len() * 11);
+        for (
+            fact_id,
+            run_key,
+            kind,
+            strength,
+            native_state,
+            source_time,
+            source_time_quality,
+            cursor_end,
+        ) in chunk
+        {
+            use rusqlite::types::Value;
+            values.push(Value::Blob(fact_id.clone()));
+            values.push(Value::Blob(run_key.clone()));
+            values.push(Value::Text((*kind).to_string()));
+            values.push(Value::Text((*strength).to_string()));
+            values.push(optional_text_value(native_state.as_deref()));
+            values.push(optional_text_value(source_time.as_deref()));
+            values.push(optional_text_value(source_time_quality.as_deref()));
+            values.push(Value::Integer(source_object_id));
+            values.push(Value::Integer(source_generation));
+            values.push(Value::Blob(cursor_end.clone()));
+            values.push(Value::Integer(commit_seq));
+        }
+        let result = if chunk.len() == RUN_EVIDENCE_INSERT_BATCH_ROWS {
+            transaction
+                .prepare_cached(&sql)
+                .and_then(|mut statement| statement.execute(params_from_iter(values.iter())))
+        } else {
+            transaction
+                .prepare(&sql)
+                .and_then(|mut statement| statement.execute(params_from_iter(values.iter())))
+        };
+        result.map_err(|error| sqlite_error("project run evidence batch", error))?;
+    }
+    Ok(folded)
+}
+
 fn persist_facts(
     transaction: &Transaction<'_>,
     context: &ProjectionCommitContext,
@@ -1123,6 +1269,15 @@ fn persist_facts(
                 cursor_start, cursor_end, payload_hash, local_fact_ordinal,
                 observed_at, payload_json, payload_codec, last_commit_seq
             ) VALUES {}
+            {}
+            "#,
+            std::iter::repeat_n(row, fact_chunk.len())
+                .collect::<Vec<_>>()
+                .join(", "),
+            if context.object_is_new {
+                ""
+            } else {
+                r#"
             ON CONFLICT(fact_id) DO UPDATE SET
                 fact_kind = excluded.fact_kind,
                 entity_key = excluded.entity_key,
@@ -1138,10 +1293,8 @@ fn persist_facts(
                 payload_json = excluded.payload_json,
                 payload_codec = excluded.payload_codec,
                 last_commit_seq = excluded.last_commit_seq
-            "#,
-            std::iter::repeat_n(row, fact_chunk.len())
-                .collect::<Vec<_>>()
-                .join(", ")
+                "#
+            }
         );
         let mut values = Vec::with_capacity(fact_chunk.len() * 15);
         for (envelope, payload) in fact_chunk.iter().zip(payload_chunk) {
@@ -1469,6 +1622,228 @@ fn source_object_keys(
     Ok(keys)
 }
 
+fn fold_run_state(
+    transaction: &Transaction<'_>,
+    run_key: &[u8],
+    incoming: &FoldedRunEvidence,
+    commit_seq: u64,
+) -> Result<Option<String>, EngineError> {
+    let current = transaction
+        .query_row(
+            r#"
+            SELECT ors.decisive_evidence_id, re.evidence_kind, re.evidence_strength,
+                   re.source_generation, re.cursor_end, re.last_commit_seq,
+                   re.source_time, ors.last_activity_at
+            FROM observed_run_states ors
+            JOIN run_evidence re ON re.fact_id = ors.decisive_evidence_id
+            WHERE ors.run_key = ?1
+            "#,
+            [run_key],
+            |row| {
+                let kind: String = row.get(1)?;
+                let strength: String = row.get(2)?;
+                Ok(FoldedRunEvidence {
+                    fact_id: row.get(0)?,
+                    kind: evidence_kind_from_stored(&kind),
+                    kind_rank: evidence_kind_rank_stored(&kind),
+                    strength_rank: evidence_strength_rank_stored(&strength),
+                    source_generation: row.get(3)?,
+                    cursor_end: row.get(4)?,
+                    last_commit_seq: row.get(5)?,
+                    source_time: row.get(6)?,
+                    last_activity_at: row.get(7)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(|error| sqlite_error("read current observed run state", error))?;
+
+    let (winner, last_activity_at) = match current {
+        None => (incoming, incoming.last_activity_at.clone()),
+        Some(current) => {
+            let last_activity_at = max_optional_time(
+                current.last_activity_at.clone(),
+                incoming.last_activity_at.clone(),
+            );
+            if run_evidence_outranks(incoming, &current) {
+                (incoming, last_activity_at)
+            } else if last_activity_at != current.last_activity_at {
+                write_observed_run_state(
+                    transaction,
+                    run_key,
+                    current.kind,
+                    &current.fact_id,
+                    last_activity_at.as_deref(),
+                    terminal_at_for_kind(current.kind, current.source_time.as_deref()),
+                    commit_seq,
+                )?;
+                return Ok(Some(run_state_label(current.kind).to_string()));
+            } else {
+                return Ok(Some(run_state_label(current.kind).to_string()));
+            }
+        }
+    };
+
+    write_observed_run_state(
+        transaction,
+        run_key,
+        winner.kind,
+        &winner.fact_id,
+        last_activity_at.as_deref(),
+        terminal_at_for_kind(winner.kind, winner.source_time.as_deref()),
+        commit_seq,
+    )?;
+    Ok(Some(run_state_label(winner.kind).to_string()))
+}
+
+fn write_observed_run_state(
+    transaction: &Transaction<'_>,
+    run_key: &[u8],
+    kind: &str,
+    decisive_evidence_id: &[u8],
+    last_activity_at: Option<&str>,
+    terminal_at: Option<&str>,
+    commit_seq: u64,
+) -> Result<(), EngineError> {
+    transaction
+        .execute(
+            r#"
+            INSERT INTO observed_run_states (
+                run_key, state, decisive_evidence_id, last_activity_at,
+                terminal_at, last_commit_seq
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            ON CONFLICT(run_key) DO UPDATE SET
+                state = excluded.state,
+                decisive_evidence_id = excluded.decisive_evidence_id,
+                last_activity_at = excluded.last_activity_at,
+                terminal_at = excluded.terminal_at,
+                last_commit_seq = excluded.last_commit_seq
+            "#,
+            params![
+                run_key,
+                run_state_label(kind),
+                decisive_evidence_id,
+                last_activity_at,
+                terminal_at,
+                sqlite_u64(commit_seq, "commit sequence")?,
+            ],
+        )
+        .map_err(|error| sqlite_error("write observed run state", error))?;
+    Ok(())
+}
+
+fn run_evidence_outranks(left: &FoldedRunEvidence, right: &FoldedRunEvidence) -> bool {
+    (
+        left.kind_rank,
+        left.strength_rank,
+        left.source_generation,
+        left.cursor_end.as_slice(),
+        left.last_commit_seq,
+        left.fact_id.as_slice(),
+    ) > (
+        right.kind_rank,
+        right.strength_rank,
+        right.source_generation,
+        right.cursor_end.as_slice(),
+        right.last_commit_seq,
+        right.fact_id.as_slice(),
+    )
+}
+
+fn max_optional_time(left: Option<String>, right: Option<String>) -> Option<String> {
+    match (left, right) {
+        (None, right) => right,
+        (left, None) => left,
+        (Some(left), Some(right)) => Some(if right > left { right } else { left }),
+    }
+}
+
+fn is_activity_evidence(kind: EvidenceKind) -> bool {
+    matches!(
+        kind,
+        EvidenceKind::RunStarted | EvidenceKind::ActivityObserved
+    )
+}
+
+fn evidence_kind_rank(kind: EvidenceKind) -> i64 {
+    match kind {
+        EvidenceKind::TerminalSucceeded
+        | EvidenceKind::TerminalFailed
+        | EvidenceKind::TerminalCancelled => 60,
+        EvidenceKind::InputRequested => 50,
+        EvidenceKind::WaitingObserved => 45,
+        EvidenceKind::RunStarted => 40,
+        EvidenceKind::ActivityObserved => 35,
+        EvidenceKind::RunDeclared => 20,
+    }
+}
+
+fn evidence_strength_rank(strength: EvidenceStrength) -> i64 {
+    match strength {
+        EvidenceStrength::NativeExplicit => 40,
+        EvidenceStrength::NativeActivity => 30,
+        EvidenceStrength::Presence => 20,
+        EvidenceStrength::Layout => 10,
+    }
+}
+
+fn evidence_kind_rank_stored(kind: &str) -> i64 {
+    match kind {
+        "terminal_succeeded" | "terminal_failed" | "terminal_cancelled" => 60,
+        "input_requested" => 50,
+        "waiting_observed" => 45,
+        "run_started" => 40,
+        "activity_observed" => 35,
+        "run_declared" => 20,
+        _ => 0,
+    }
+}
+
+fn evidence_strength_rank_stored(strength: &str) -> i64 {
+    match strength {
+        "native_explicit" => 40,
+        "native_activity" => 30,
+        "presence" => 20,
+        "layout" => 10,
+        _ => 0,
+    }
+}
+
+fn evidence_kind_from_stored(kind: &str) -> &'static str {
+    match kind {
+        "terminal_succeeded" => "terminal_succeeded",
+        "terminal_failed" => "terminal_failed",
+        "terminal_cancelled" => "terminal_cancelled",
+        "input_requested" => "input_requested",
+        "waiting_observed" => "waiting_observed",
+        "run_started" => "run_started",
+        "activity_observed" => "activity_observed",
+        "run_declared" => "run_declared",
+        _ => "unknown",
+    }
+}
+
+fn run_state_label(kind: &str) -> &'static str {
+    match kind {
+        "terminal_succeeded" => "succeeded",
+        "terminal_failed" => "failed",
+        "terminal_cancelled" => "cancelled",
+        "input_requested" | "waiting_observed" => "waiting",
+        "run_started" | "activity_observed" => "active",
+        "run_declared" => "declared",
+        _ => "unknown",
+    }
+}
+
+fn terminal_at_for_kind<'a>(kind: &str, source_time: Option<&'a str>) -> Option<&'a str> {
+    matches!(
+        kind,
+        "terminal_succeeded" | "terminal_failed" | "terminal_cancelled"
+    )
+    .then_some(source_time)
+    .flatten()
+}
+
 fn reduce_run_state(
     transaction: &Transaction<'_>,
     run_key: &[u8],
@@ -1634,6 +2009,40 @@ fn write_delegation_assertion(
         )
         .map(|_| ())
         .map_err(|error| sqlite_error("project delegation assertion", error))
+}
+
+fn runs_need_delegation_reduce(
+    transaction: &Transaction<'_>,
+    run_keys: &BTreeSet<Vec<u8>>,
+) -> Result<bool, EngineError> {
+    for run_key in run_keys {
+        let exists: i64 = transaction
+            .prepare_cached(
+                r#"
+                SELECT CASE
+                  WHEN EXISTS (
+                    SELECT 1 FROM delegation_assertions
+                    WHERE child_run_key = ?1 OR parent_run_key = ?1
+                  ) THEN 1
+                  WHEN EXISTS (
+                    SELECT 1 FROM delegation_spawn_assertions
+                    WHERE parent_run_key = ?1
+                  ) THEN 1
+                  WHEN EXISTS (
+                    SELECT 1 FROM delegation_metadata_assertions
+                    WHERE child_run_key = ?1
+                  ) THEN 1
+                  ELSE 0
+                END
+                "#,
+            )
+            .and_then(|mut statement| statement.query_row([run_key.as_slice()], |row| row.get(0)))
+            .map_err(|error| sqlite_error("probe existing delegation rows for run", error))?;
+        if exists != 0 {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn delegation_children_for_run(
@@ -3344,7 +3753,8 @@ mod tests {
     use crate::adapter::{
         AdapterId, AdapterObjectContext, AgentAdapter, ArtifactCapture, ArtifactContentFact,
         ArtifactMetadataEntry, ArtifactMetadataSnapshotFact, ArtifactObservationKind, ContentBlock,
-        DecodeContext, DecoderId, DependencyRevision, FactBatch, HookEventSummary,
+        DecodeContext, DecoderId, DependencyRevision, EvidenceKind, EvidenceStrength, FactBatch,
+        HookEventSummary,
         InterpretationSettingsDocumentStatus, InterpretationSettingsFact,
         InterpretationSettingsLayer, InterpretationSettingsSnapshot, MessageFact,
         PersistedToolResultFact, PlanSnapshotFact, PresenceFact, ProjectMemoryDocumentFact,
@@ -4983,6 +5393,51 @@ mod tests {
         assert_eq!(
             count(&connection, "fact_records"),
             i64::try_from(FACTS).unwrap()
+        );
+    }
+
+    #[test]
+    fn incremental_run_evidence_order_matches_sql_ranks() {
+        let declared = FoldedRunEvidence {
+            fact_id: vec![1],
+            kind: "run_declared",
+            kind_rank: evidence_kind_rank(EvidenceKind::RunDeclared),
+            strength_rank: evidence_strength_rank(EvidenceStrength::Layout),
+            source_generation: 1,
+            cursor_end: vec![1],
+            last_commit_seq: 1,
+            source_time: None,
+            last_activity_at: None,
+        };
+        let started = FoldedRunEvidence {
+            fact_id: vec![2],
+            kind: "run_started",
+            kind_rank: evidence_kind_rank(EvidenceKind::RunStarted),
+            strength_rank: evidence_strength_rank(EvidenceStrength::NativeActivity),
+            source_generation: 1,
+            cursor_end: vec![2],
+            last_commit_seq: 2,
+            source_time: Some("2026-01-01T00:00:00.000Z".to_string()),
+            last_activity_at: Some("2026-01-01T00:00:00.000Z".to_string()),
+        };
+        let succeeded = FoldedRunEvidence {
+            fact_id: vec![3],
+            kind: "terminal_succeeded",
+            kind_rank: evidence_kind_rank(EvidenceKind::TerminalSucceeded),
+            strength_rank: evidence_strength_rank(EvidenceStrength::NativeExplicit),
+            source_generation: 1,
+            cursor_end: vec![3],
+            last_commit_seq: 3,
+            source_time: Some("2026-01-01T00:00:01.000Z".to_string()),
+            last_activity_at: None,
+        };
+        assert!(run_evidence_outranks(&started, &declared));
+        assert!(run_evidence_outranks(&succeeded, &started));
+        assert!(!run_evidence_outranks(&declared, &succeeded));
+        assert_eq!(run_state_label(succeeded.kind), "succeeded");
+        assert_eq!(
+            max_optional_time(started.last_activity_at.clone(), succeeded.last_activity_at.clone()),
+            started.last_activity_at
         );
     }
 

@@ -114,6 +114,7 @@ const fixture = values.fixture ? path.resolve(expandTilde(values.fixture)) : und
 if (fixture && !existsSync(fixture)) fail(`fixture not found: ${fixture}`);
 const reportPath = values['report-json'] ? path.resolve(expandTilde(values['report-json'])) : undefined;
 const keepWorkspace = values['keep-workspace'] ?? false;
+const ingestProfileSkip = process.env.SPAGHETTI_INGEST_PROFILE_SKIP?.trim() || undefined;
 const workspace = mkdtempSync(path.join(tmpdir(), 'spaghetti-observation-bench-'));
 const baselineRssBytes = process.memoryUsage().rss;
 let peakRssBytes = baselineRssBytes;
@@ -131,7 +132,8 @@ try {
 
   console.log(
     `RFC 011 observation benchmark: ${scenario}, ${inputRecords.toLocaleString()} records, ` +
-      `${fixture ? 'fixture objects' : `${objects.toLocaleString()} objects`}, ${formatBytes(inputBytes)}`,
+      `${fixture ? 'fixture objects' : `${objects.toLocaleString()} objects`}, ${formatBytes(inputBytes)}` +
+      (ingestProfileSkip ? `, skip=${ingestProfileSkip}` : ''),
   );
 
   if (scenario === 'live-append') {
@@ -206,7 +208,7 @@ async function runLiveAppendSeries(options: {
       // process; their process-scoped POSIX locks cannot safely coordinate.
       const metrics = await readHostMetrics(host.value);
       const expectedMessages = options.inputRecords + (index + 1) * options.appendRecords;
-      if (metrics.canonicalMessages !== expectedMessages) {
+      if (!ingestProfileSkip && metrics.canonicalMessages !== expectedMessages) {
         throw new Error(
           `observation did not converge: expected ${expectedMessages} canonical messages, found ${metrics.canonicalMessages}`,
         );
@@ -300,7 +302,7 @@ async function runSample(options: {
   await converge(host.value);
   const durationMs = performance.now() - sampleStartedAt;
   const metrics = await finishSample(host.value, options.databasePath);
-  if (options.transcript) {
+  if (options.transcript && !ingestProfileSkip) {
     const appends = options.scenario === 'warm-append' || options.scenario === 'live-append';
     const expectedMessages = options.inputRecords + (appends ? (options.iteration + 1) * options.appendRecords : 0);
     assertSyntheticConvergence(expectedMessages, metrics);
