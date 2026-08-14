@@ -1013,27 +1013,23 @@ impl FactBatch {
         Ok(())
     }
 
-    pub(crate) fn append(&mut self, mut other: Self) -> Result<(), AdapterError> {
-        let fact_count = self
-            .facts
+    pub(crate) fn can_append(&self, other: &Self) -> bool {
+        self.facts
             .len()
             .checked_add(other.facts.len())
-            .ok_or_else(|| AdapterError::invalid_contract("fact batch size overflowed"))?;
-        if fact_count > self.max_facts {
+            .is_some_and(|count| count <= self.max_facts)
+            && self
+                .diagnostics
+                .len()
+                .checked_add(other.diagnostics.len())
+                .is_some_and(|count| count <= self.max_diagnostics)
+    }
+
+    pub(crate) fn append(&mut self, mut other: Self) -> Result<(), AdapterError> {
+        if !self.can_append(&other) {
             return Err(AdapterError::invalid_contract(format!(
-                "fact batch exceeds {} facts",
-                self.max_facts
-            )));
-        }
-        let diagnostic_count = self
-            .diagnostics
-            .len()
-            .checked_add(other.diagnostics.len())
-            .ok_or_else(|| AdapterError::invalid_contract("diagnostic batch size overflowed"))?;
-        if diagnostic_count > self.max_diagnostics {
-            return Err(AdapterError::invalid_contract(format!(
-                "fact batch exceeds {} diagnostics",
-                self.max_diagnostics
+                "fact batch exceeds {} facts or {} diagnostics",
+                self.max_facts, self.max_diagnostics
             )));
         }
         self.facts.append(&mut other.facts);
@@ -1105,6 +1101,7 @@ impl FactBatch {
 
 #[cfg(test)]
 mod tests {
+    use crate::adapter::AdapterErrorClass;
     use crate::source::{RecordOrigin, SourceCursor, SourceMediaType, SourceRecord};
 
     use super::*;
@@ -1227,6 +1224,33 @@ mod tests {
         assert!(batch
             .set_next_decoder_state(vec![0; FactBatch::MAX_DECODER_STATE_BYTES + 1])
             .is_err());
+    }
+
+    #[test]
+    fn append_rejects_batches_that_would_exceed_diagnostic_bound() {
+        let record = record();
+        let diagnostic = || AdapterDiagnostic {
+            class: AdapterErrorClass::RecordPermanent,
+            code: "overflow".to_string(),
+            message: "too many".to_string(),
+        };
+        let mut left = FactBatch::new(8, 2).unwrap();
+        left.push_diagnostic(diagnostic()).unwrap();
+        left.push_diagnostic(diagnostic()).unwrap();
+        let mut right = FactBatch::new(8, 2).unwrap();
+        right
+            .push(
+                &record,
+                Fact::UnknownRecord {
+                    native_kind: None,
+                    raw_payload: Vec::new(),
+                    reason: "overflow".to_string(),
+                },
+            )
+            .unwrap();
+        right.push_diagnostic(diagnostic()).unwrap();
+        assert!(!left.can_append(&right));
+        assert!(left.append(right).is_err());
     }
 
     #[test]

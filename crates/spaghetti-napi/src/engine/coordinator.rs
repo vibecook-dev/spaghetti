@@ -739,6 +739,53 @@ impl ObservationCoordinator {
     }
 
     #[allow(clippy::too_many_arguments)]
+    fn commit_append_slice<A: AgentAdapter + ?Sized>(
+        &self,
+        adapter: &A,
+        instance: &SourceInstance,
+        stream: &StreamSpec,
+        object: &DeclaredObject,
+        object_context: &AdapterObjectContext,
+        durable: &mut DurableObject,
+        lane: &mut CommitLane,
+        checkpoint: &AppendCheckpoint,
+        batch: FactBatch,
+        errors: Vec<SourceRecordError>,
+        decoder_state: Option<Vec<u8>>,
+        decoder_state_version: Option<u32>,
+        force_facts: bool,
+        reason: &str,
+        started_at: i64,
+    ) -> Result<(), EngineError> {
+        let checkpoint_bytes = checkpoint.encode();
+        let request = commit_request(
+            adapter,
+            instance,
+            stream,
+            object,
+            object_context,
+            durable.expected(),
+            checkpoint.generation,
+            checkpoint.cursor().into_bytes(),
+            Some(checkpoint_bytes.clone()),
+            decoder_state,
+            decoder_state_version,
+            "active",
+            errors,
+            reason,
+            started_at,
+        )?;
+        if batch.facts().is_empty() && !force_facts {
+            self.commit_observation_on(request, lane)?;
+        } else {
+            self.commit_facts_on(request, batch, lane)?;
+        }
+        durable.advance(checkpoint, checkpoint_bytes);
+        durable.state = "active".to_string();
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn collect_stream_work<A: AgentAdapter + ?Sized>(
         &self,
         adapter: &A,
@@ -1578,6 +1625,8 @@ impl ObservationCoordinator {
                         let mut next_decoder_state_version = prior_decoder_state_version;
                         let mut decoded_count = 0_u32;
                         let mut quarantined_count = 0_u32;
+                        let mut remaining_generation_change = generation_changed;
+                        let mut last_included: Option<AppendCheckpoint> = None;
                         for item in &items {
                             self.check_cancelled()?;
                             match item {
@@ -1605,39 +1654,127 @@ impl ObservationCoordinator {
                                     if decoded.quarantined {
                                         quarantined_count = quarantined_count.saturating_add(1);
                                     }
+                                    if !batch.can_append(&decoded.batch)
+                                        || errors.len().saturating_add(decoded.errors.len())
+                                            > DIAGNOSTIC_LIMIT
+                                    {
+                                        let Some(slice) = last_included.as_ref() else {
+                                            return Err(adapter_error(
+                                                "merge append record fact batches",
+                                                AdapterError::invalid_contract(
+                                                    "single append record exceeded the commit diagnostic bound",
+                                                ),
+                                            ));
+                                        };
+                                        self.commit_append_slice(
+                                            adapter,
+                                            instance,
+                                            stream,
+                                            object,
+                                            object_context,
+                                            &mut durable,
+                                            lane,
+                                            slice,
+                                            std::mem::replace(
+                                                &mut batch,
+                                                FactBatch::new(
+                                                    FACT_BATCH_LIMIT,
+                                                    DIAGNOSTIC_LIMIT,
+                                                )
+                                                .map_err(|error| {
+                                                    adapter_error(
+                                                        "create overflow append fact batch",
+                                                        error,
+                                                    )
+                                                })?,
+                                            ),
+                                            std::mem::take(&mut errors),
+                                            next_decoder_state.clone(),
+                                            next_decoder_state_version,
+                                            remaining_generation_change,
+                                            reason,
+                                            started_at,
+                                        )?;
+                                        remaining_generation_change = false;
+                                        durable.decoder_state = next_decoder_state.clone();
+                                        durable.decoder_state_version = next_decoder_state_version;
+                                    }
                                     errors.extend(decoded.errors);
                                     batch.append(decoded.batch).map_err(|error| {
                                         adapter_error("merge append record fact batches", error)
                                     })?;
+                                    last_included = Some(append_checkpoint_through(
+                                        &checkpoint,
+                                        &record.cursor_end,
+                                    ));
                                 }
                                 AppendItem::Quarantined(quarantine) => {
                                     quarantined_count = quarantined_count.saturating_add(1);
+                                    if errors.len() >= DIAGNOSTIC_LIMIT {
+                                        let Some(slice) = last_included.as_ref() else {
+                                            return Err(observation_error(
+                                                "merge append record fact batches",
+                                                "quarantine exceeded the commit diagnostic bound",
+                                            ));
+                                        };
+                                        self.commit_append_slice(
+                                            adapter,
+                                            instance,
+                                            stream,
+                                            object,
+                                            object_context,
+                                            &mut durable,
+                                            lane,
+                                            slice,
+                                            std::mem::replace(
+                                                &mut batch,
+                                                FactBatch::new(
+                                                    FACT_BATCH_LIMIT,
+                                                    DIAGNOSTIC_LIMIT,
+                                                )
+                                                .map_err(|error| {
+                                                    adapter_error(
+                                                        "create overflow append fact batch",
+                                                        error,
+                                                    )
+                                                })?,
+                                            ),
+                                            std::mem::take(&mut errors),
+                                            next_decoder_state.clone(),
+                                            next_decoder_state_version,
+                                            remaining_generation_change,
+                                            reason,
+                                            started_at,
+                                        )?;
+                                        remaining_generation_change = false;
+                                        durable.decoder_state = next_decoder_state.clone();
+                                        durable.decoder_state_version = next_decoder_state_version;
+                                    }
                                     errors.push(quarantine_error(adapter, origin, quarantine));
+                                    last_included = Some(append_checkpoint_through(
+                                        &checkpoint,
+                                        &quarantine.cursor_end,
+                                    ));
                                 }
                             }
                         }
-                        let request = commit_request(
+                        self.commit_append_slice(
                             adapter,
                             instance,
                             stream,
                             object,
                             object_context,
-                            durable.expected(),
-                            checkpoint.generation,
-                            checkpoint.cursor().into_bytes(),
-                            Some(checkpoint_bytes.clone()),
+                            &mut durable,
+                            lane,
+                            &checkpoint,
+                            batch,
+                            errors,
                             next_decoder_state.clone(),
                             next_decoder_state_version,
-                            "active",
-                            errors,
+                            remaining_generation_change,
                             reason,
                             started_at,
                         )?;
-                        if batch.facts().is_empty() && !generation_changed {
-                            self.commit_observation_on(request, lane)?;
-                        } else {
-                            self.commit_facts_on(request, batch, lane)?;
-                        }
                         durable.decoder_state = next_decoder_state;
                         durable.decoder_state_version = next_decoder_state_version;
                         outcome.records_decoded =
@@ -1645,8 +1782,6 @@ impl ObservationCoordinator {
                         outcome.records_quarantined = outcome
                             .records_quarantined
                             .saturating_add(quarantined_count);
-                        durable.advance(&checkpoint, checkpoint_bytes.clone());
-                        durable.state = "active".to_string();
                         outcome.objects_changed = outcome.objects_changed.saturating_add(1);
                     }
                     previous = Some(checkpoint);
@@ -4031,6 +4166,17 @@ fn scheduled_work_key(
     object_key.extend_from_slice(stream_id);
     object_key.extend_from_slice(&object.descriptor.object_key);
     WorkKey::new(object_key, generation).map_err(source_error)
+}
+
+fn append_checkpoint_through(
+    checkpoint: &AppendCheckpoint,
+    cursor_end: &SourceCursor,
+) -> AppendCheckpoint {
+    let mut next = checkpoint.clone();
+    if let Some(offset) = cursor_end.append_offset_value() {
+        next.committed_offset = offset;
+    }
+    next
 }
 
 fn merge_outcome(target: &mut ReconcileOutcome, source: ReconcileOutcome) {

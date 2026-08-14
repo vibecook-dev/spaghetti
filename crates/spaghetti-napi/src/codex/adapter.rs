@@ -1404,4 +1404,49 @@ mod tests {
             .unwrap();
         assert_eq!(repeated_turn_rows, 1, "last turn snapshot must replace");
     }
+
+    #[test]
+    fn unknown_record_diagnostics_flush_instead_of_exceeding_the_commit_bound() {
+        let root = TempDir::new().unwrap();
+        let day = root.path().join("sessions/2026/01/01");
+        fs::create_dir_all(&day).unwrap();
+        let mut lines = Vec::with_capacity(300);
+        for index in 0..300 {
+            lines.push(format!(
+                r#"{{"type":"not_a_codex_kind","timestamp":"2026-01-01T00:00:00.{index:03}Z"}}"#
+            ));
+        }
+        fs::write(day.join("rollout-diagnostics.jsonl"), lines.join("\n") + "\n").unwrap();
+
+        let temp = TempDir::new().unwrap();
+        let database_path = temp.path().join("codex-diagnostics.sqlite");
+        let registry = AdapterRegistry::builder()
+            .register(CodexAdapter::new())
+            .build()
+            .unwrap();
+        let engine = SpaghettiEngineCore::open_with_registry(
+            EngineOptions {
+                database_path,
+                query_workers: Some(1),
+                owner_label: Some("codex-diagnostic-overflow-test".to_string()),
+                defer_query_structures: false,
+            },
+            registry,
+        )
+        .unwrap();
+        let result = engine
+            .reconcile_adapter(
+                ADAPTER_ID,
+                ReconcileRequest::manual(vec![root.path().to_path_buf()]),
+            )
+            .expect("diagnostic overflow must split commits instead of failing reconcile");
+        assert_eq!(result.retries_required, 0);
+        assert_eq!(result.records_decoded, 300);
+        assert!(
+            result.commits >= 2,
+            "300 unknown Codex records must not fit in one 256-diagnostic commit, got {}",
+            result.commits
+        );
+        engine.shutdown().unwrap();
+    }
 }
