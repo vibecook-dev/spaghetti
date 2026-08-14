@@ -200,11 +200,7 @@ impl TransactionalProjectionWork for FactProjectionWork<'_> {
         self.retracted_run_keys.replace(retracted_run_keys);
         let coalesced_sessions = coalesced_session_projections(self.batch);
         let last_run_facts = last_run_fact_indices(self.batch);
-        let existing_message_keys = if context.object_is_new {
-            BTreeSet::new()
-        } else {
-            existing_message_keys(transaction, self.batch)?
-        };
+        let existing_message_keys = existing_message_keys(transaction, self.batch)?;
         let mut seen_message_keys = BTreeSet::new();
         let duplicate_message_keys = duplicate_message_keys(self.batch);
         let mut new_message_content = Vec::new();
@@ -737,11 +733,7 @@ impl TransactionalProjectionWork for FactProjectionWork<'_> {
         let usage_started = Instant::now();
         let mut touched_sessions = BTreeSet::new();
         let mut pending_totals = BTreeMap::new();
-        let existing_contribution_ids = if context.object_is_new {
-            BTreeSet::new()
-        } else {
-            existing_usage_contribution_ids(transaction, self.batch)?
-        };
+        let existing_contribution_ids = existing_usage_contribution_ids(transaction, self.batch)?;
         let mut seen_contribution_ids = BTreeSet::new();
         let replaced = if context.replaces_prior_generation {
             read_replaced_contributions(transaction, context)?
@@ -1165,15 +1157,6 @@ fn persist_run_evidence(
                 source_object_id, source_generation, cursor_end,
                 last_commit_seq
             ) VALUES {}
-            {}
-            "#,
-            std::iter::repeat_n(row, chunk.len())
-                .collect::<Vec<_>>()
-                .join(", "),
-            if context.object_is_new {
-                ""
-            } else {
-                r#"
             ON CONFLICT(fact_id) DO UPDATE SET
                 run_key = excluded.run_key,
                 evidence_kind = excluded.evidence_kind,
@@ -1185,8 +1168,10 @@ fn persist_run_evidence(
                 source_generation = excluded.source_generation,
                 cursor_end = excluded.cursor_end,
                 last_commit_seq = excluded.last_commit_seq
-                "#
-            }
+            "#,
+            std::iter::repeat_n(row, chunk.len())
+                .collect::<Vec<_>>()
+                .join(", ")
         );
         let mut values = Vec::with_capacity(chunk.len() * 11);
         for (
@@ -1269,15 +1254,6 @@ fn persist_facts(
                 cursor_start, cursor_end, payload_hash, local_fact_ordinal,
                 observed_at, payload_json, payload_codec, last_commit_seq
             ) VALUES {}
-            {}
-            "#,
-            std::iter::repeat_n(row, fact_chunk.len())
-                .collect::<Vec<_>>()
-                .join(", "),
-            if context.object_is_new {
-                ""
-            } else {
-                r#"
             ON CONFLICT(fact_id) DO UPDATE SET
                 fact_kind = excluded.fact_kind,
                 entity_key = excluded.entity_key,
@@ -1293,8 +1269,10 @@ fn persist_facts(
                 payload_json = excluded.payload_json,
                 payload_codec = excluded.payload_codec,
                 last_commit_seq = excluded.last_commit_seq
-                "#
-            }
+            "#,
+            std::iter::repeat_n(row, fact_chunk.len())
+                .collect::<Vec<_>>()
+                .join(", ")
         );
         let mut values = Vec::with_capacity(fact_chunk.len() * 15);
         for (envelope, payload) in fact_chunk.iter().zip(payload_chunk) {
@@ -5359,6 +5337,97 @@ mod tests {
         );
         assert_eq!(count(&connection, "canonical_message_content_blocks"), 1);
         assert_eq!(count(&connection, "fact_records"), 2);
+    }
+
+    #[test]
+    fn new_source_object_replaces_existing_message_content_blocks() {
+        let mut connection = database();
+        remember_test_object(b"object-a");
+        remember_test_object(b"object-b");
+        let first_record = object_record(
+            1,
+            1,
+            SourceCursor::append_offset(0),
+            SourceCursor::append_offset(1),
+            20,
+            b"first",
+        );
+        let mut first = tool_message(
+            "shared-message",
+            MessageRole::User,
+            vec![
+                ContentBlock::Text {
+                    text: "old-a".to_string(),
+                },
+                ContentBlock::Text {
+                    text: "old-b".to_string(),
+                },
+            ],
+        );
+        first.raw_json = br#"{"version":1}"#.to_vec();
+        let mut first_batch = FactBatch::new(1, 1).unwrap();
+        first_batch
+            .push(&first_record, Fact::Message(first))
+            .unwrap();
+        apply_fact_observation_commit(
+            &mut connection,
+            &request_for_object(
+                b"object-a",
+                ExpectedSourceCursor::Absent,
+                1,
+                first_record.cursor_end.as_bytes().to_vec(),
+                20,
+            ),
+            &first_batch,
+        )
+        .unwrap();
+        assert_eq!(count(&connection, "canonical_message_content_blocks"), 2);
+
+        let second_record = object_record(
+            2,
+            1,
+            SourceCursor::append_offset(0),
+            SourceCursor::append_offset(1),
+            30,
+            b"second",
+        );
+        let mut second = tool_message(
+            "shared-message",
+            MessageRole::Assistant,
+            vec![ContentBlock::Thinking {
+                text: "replacement".to_string(),
+                redacted: false,
+            }],
+        );
+        second.raw_json = br#"{"version":2}"#.to_vec();
+        let mut second_batch = FactBatch::new(1, 1).unwrap();
+        second_batch
+            .push(&second_record, Fact::Message(second))
+            .unwrap();
+        apply_fact_observation_commit(
+            &mut connection,
+            &request_for_object(
+                b"object-b",
+                ExpectedSourceCursor::Absent,
+                1,
+                second_record.cursor_end.as_bytes().to_vec(),
+                30,
+            ),
+            &second_batch,
+        )
+        .unwrap();
+
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT content_kind FROM canonical_message_content_blocks",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "thinking"
+        );
+        assert_eq!(count(&connection, "canonical_message_content_blocks"), 1);
     }
 
     #[test]
