@@ -53,6 +53,71 @@ const MAX_APPEND_RECORDS_PER_RECONCILE: usize = 4_096;
 const MAX_APPEND_RECORDS_PER_COMMIT: usize = 1_024;
 const SCHEDULER_CAPACITY: usize = 1_024;
 const MAX_OBJECTS_IN_FLIGHT: usize = 16;
+const MAX_UNACKED_COMMITS: usize = 256;
+
+struct CommitLane {
+    engine: Arc<SpaghettiEngineCore>,
+    pending: Option<crossbeam_channel::Receiver<Result<CommitReceipt, EngineError>>>,
+    commits: u32,
+    last_commit_seq: Option<u64>,
+}
+
+impl CommitLane {
+    fn new(engine: Arc<SpaghettiEngineCore>) -> Self {
+        Self {
+            engine,
+            pending: None,
+            commits: 0,
+            last_commit_seq: None,
+        }
+    }
+
+    fn submit_observation(&mut self, request: ObservationCommit) -> Result<(), EngineError> {
+        self.flush()?;
+        self.pending = Some(self.engine.submit_observation(request)?);
+        Ok(())
+    }
+
+    fn submit_facts(
+        &mut self,
+        request: ObservationCommit,
+        batch: FactBatch,
+    ) -> Result<(), EngineError> {
+        self.flush()?;
+        self.pending = Some(self.engine.submit_facts(request, batch)?);
+        Ok(())
+    }
+
+    fn flush(&mut self) -> Result<(), EngineError> {
+        let Some(pending) = self.pending.take() else {
+            return Ok(());
+        };
+        let receipt = recv_commit_receipt(pending)?;
+        self.note_receipt(&receipt);
+        Ok(())
+    }
+
+    fn note_receipt(&mut self, receipt: &CommitReceipt) {
+        self.engine.accept_commit_receipt(receipt);
+        self.commits = self.commits.saturating_add(1);
+        self.last_commit_seq = Some(receipt.commit_seq);
+    }
+
+    fn apply_to(&self, outcome: &mut ReconcileOutcome) {
+        outcome.commits = outcome.commits.saturating_add(self.commits);
+        if self.last_commit_seq.is_some() {
+            outcome.last_commit_seq = self.last_commit_seq;
+        }
+    }
+}
+
+fn recv_commit_receipt(
+    pending: crossbeam_channel::Receiver<Result<CommitReceipt, EngineError>>,
+) -> Result<CommitReceipt, EngineError> {
+    pending
+        .recv()
+        .map_err(|_| EngineError::WorkerUnavailable { worker: "writer" })?
+}
 
 #[derive(Debug, Clone)]
 pub struct ReconcileRequest {
@@ -489,6 +554,7 @@ impl ObservationCoordinator {
                 ..ReconcileOutcome::default()
             };
             lease.begin_reconciling();
+            let mut lane = CommitLane::new(Arc::clone(&self.engine));
             self.reconcile_object(
                 adapter,
                 &instance,
@@ -498,7 +564,10 @@ impl ObservationCoordinator {
                 &reason,
                 started_at,
                 &mut outcome,
+                &mut lane,
             )?;
+            lane.flush()?;
+            lane.apply_to(&mut outcome);
             Ok(outcome)
         })();
         self.finish_reconcile(lease, result, started_at)
@@ -650,6 +719,25 @@ impl ObservationCoordinator {
         self.engine.commit_facts(request, batch)
     }
 
+    fn commit_observation_on(
+        &self,
+        request: ObservationCommit,
+        lane: &mut CommitLane,
+    ) -> Result<(), EngineError> {
+        self.check_cancelled()?;
+        lane.submit_observation(request)
+    }
+
+    fn commit_facts_on(
+        &self,
+        request: ObservationCommit,
+        batch: FactBatch,
+        lane: &mut CommitLane,
+    ) -> Result<(), EngineError> {
+        self.check_cancelled()?;
+        lane.submit_facts(request, batch)
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn collect_stream_work<A: AgentAdapter + ?Sized>(
         &self,
@@ -749,6 +837,7 @@ impl ObservationCoordinator {
                         reason,
                         started_at,
                         outcome,
+                        None,
                     )?;
                     continue;
                 }
@@ -898,6 +987,8 @@ impl ObservationCoordinator {
         let workers = self.engine.observation_workers()?;
         let (result_tx, result_rx) = crossbeam_channel::bounded(MAX_OBJECTS_IN_FLIGHT);
         let mut in_flight = 0_usize;
+        let mut unacked =
+            Vec::<crossbeam_channel::Receiver<Result<CommitReceipt, EngineError>>>::new();
         let mut first_error = None;
 
         workers.scope(|scope| {
@@ -978,8 +1069,10 @@ impl ObservationCoordinator {
                     };
                     let key = scheduled.key;
                     let result_tx = result_tx.clone();
+                    let engine = Arc::clone(&self.engine);
                     scope.spawn(move |_| {
                         let mut local = ReconcileOutcome::default();
+                        let mut lane = CommitLane::new(engine);
                         let result = self.reconcile_object(
                             adapter,
                             instance,
@@ -989,8 +1082,13 @@ impl ObservationCoordinator {
                             reason,
                             started_at,
                             &mut local,
+                            &mut lane,
                         );
-                        let _ = result_tx.send((key, result, local));
+                        if result.is_err() {
+                            let _ = lane.flush();
+                        }
+                        lane.apply_to(&mut local);
+                        let _ = result_tx.send((key, result, local, lane.pending.take()));
                     });
                     in_flight = in_flight.saturating_add(1);
                 }
@@ -1008,7 +1106,7 @@ impl ObservationCoordinator {
                     break;
                 }
                 match result_rx.recv() {
-                    Ok((key, result, local)) => {
+                    Ok((key, result, local, pending)) => {
                         in_flight = in_flight.saturating_sub(1);
                         if !scheduler.complete(&key) {
                             first_error.get_or_insert(observation_error(
@@ -1018,6 +1116,18 @@ impl ObservationCoordinator {
                         }
                         merge_outcome(outcome, local);
                         if let Err(error) = result {
+                            first_error.get_or_insert(error);
+                        }
+                        if let Some(pending) = pending {
+                            unacked.push(pending);
+                        }
+                        let block = unacked.len() >= MAX_UNACKED_COMMITS;
+                        if let Err(error) = settle_ready_commits(
+                            &self.engine,
+                            &mut unacked,
+                            outcome,
+                            block,
+                        ) {
                             first_error.get_or_insert(error);
                         }
                     }
@@ -1031,6 +1141,9 @@ impl ObservationCoordinator {
                 }
             }
         });
+        if let Err(error) = settle_ready_commits(&self.engine, &mut unacked, outcome, true) {
+            first_error.get_or_insert(error);
+        }
         if let Some(error) = first_error {
             return Err(error);
         }
@@ -1048,6 +1161,7 @@ impl ObservationCoordinator {
         reason: &str,
         started_at: i64,
         outcome: &mut ReconcileOutcome,
+        lane: &mut CommitLane,
     ) -> Result<(), EngineError> {
         self.check_cancelled()?;
         let source_access = ConfinedSourceAccess::new(instance, &self.cancellations);
@@ -1057,7 +1171,8 @@ impl ObservationCoordinator {
             Ok(context) => context,
             Err(error) if error.class == AdapterErrorClass::RecordPermanent => {
                 return self.quarantine_object_path(
-                    adapter, instance, stream, object, previous, error, reason, started_at, outcome,
+                    adapter, instance, stream, object, previous, error, reason, started_at,
+                    outcome, lane,
                 )
             }
             Err(error) => return Err(adapter_error("bootstrap source object", error)),
@@ -1103,6 +1218,7 @@ impl ObservationCoordinator {
                 reason,
                 started_at,
                 outcome,
+                lane,
             ),
             DriverSpec::ReplaceDocument(config) => self.reconcile_replace(
                 adapter,
@@ -1118,6 +1234,7 @@ impl ObservationCoordinator {
                 reason,
                 started_at,
                 outcome,
+                lane,
             ),
             DriverSpec::Presence(config) => self.reconcile_presence(
                 adapter,
@@ -1133,6 +1250,7 @@ impl ObservationCoordinator {
                 reason,
                 started_at,
                 outcome,
+                lane,
             ),
             DriverSpec::SqliteSnapshot(config) => self.reconcile_sqlite_snapshot(
                 adapter,
@@ -1148,6 +1266,7 @@ impl ObservationCoordinator {
                 reason,
                 started_at,
                 outcome,
+                lane,
             ),
             DriverSpec::KeyValueSnapshot(config) => self.reconcile_key_value_snapshot(
                 adapter,
@@ -1163,6 +1282,7 @@ impl ObservationCoordinator {
                 reason,
                 started_at,
                 outcome,
+                lane,
             ),
             DriverSpec::DirectorySnapshot(_) => unreachable!("rejected before object discovery"),
         };
@@ -1185,6 +1305,7 @@ impl ObservationCoordinator {
         reason: &str,
         started_at: i64,
         outcome: &mut ReconcileOutcome,
+        lane: &mut CommitLane,
     ) -> Result<(), EngineError> {
         if previous.is_some_and(|object| object.state == "quarantined") {
             outcome.objects_unchanged = outcome.objects_unchanged.saturating_add(1);
@@ -1233,12 +1354,12 @@ impl ObservationCoordinator {
             reason,
             started_at,
         )?;
-        let receipt = self.commit_facts_checked(
+        self.commit_facts_on(
             request,
             FactBatch::new(FACT_BATCH_LIMIT, DIAGNOSTIC_LIMIT)
                 .map_err(|error| adapter_error("create path quarantine fact batch", error))?,
+            lane,
         )?;
-        record_commit(outcome, &receipt);
         outcome.records_quarantined = outcome.records_quarantined.saturating_add(1);
         outcome.objects_changed = outcome.objects_changed.saturating_add(1);
         Ok(())
@@ -1294,6 +1415,7 @@ impl ObservationCoordinator {
         reason: &str,
         started_at: i64,
         outcome: &mut ReconcileOutcome,
+        lane: &mut CommitLane,
     ) -> Result<(), EngineError> {
         let mut config = config.clone();
         config.max_records_per_batch = config
@@ -1352,6 +1474,7 @@ impl ObservationCoordinator {
                             reason,
                             started_at,
                             outcome,
+                            Some(lane),
                         )?;
                     } else {
                         outcome.objects_unchanged = outcome.objects_unchanged.saturating_add(1);
@@ -1416,8 +1539,8 @@ impl ObservationCoordinator {
                                 reason,
                                 started_at,
                             )?;
-                            let receipt = if generation_changed {
-                                self.commit_facts_checked(
+                            if generation_changed {
+                                self.commit_facts_on(
                                     request,
                                     FactBatch::new(FACT_BATCH_LIMIT, DIAGNOSTIC_LIMIT).map_err(
                                         |error| {
@@ -1427,11 +1550,11 @@ impl ObservationCoordinator {
                                             )
                                         },
                                     )?,
-                                )?
+                                    lane,
+                                )?;
                             } else {
-                                self.commit_observation_checked(request)?
-                            };
-                            record_commit(outcome, &receipt);
+                                self.commit_observation_on(request, lane)?;
+                            }
                             durable.advance(&checkpoint, checkpoint_bytes.clone());
                             durable.state = "active".to_string();
                             durable.decoder_state = retained_decoder_state;
@@ -1510,12 +1633,11 @@ impl ObservationCoordinator {
                             reason,
                             started_at,
                         )?;
-                        let receipt = if batch.facts().is_empty() && !generation_changed {
-                            self.commit_observation_checked(request)?
+                        if batch.facts().is_empty() && !generation_changed {
+                            self.commit_observation_on(request, lane)?;
                         } else {
-                            self.commit_facts_checked(request, batch)?
-                        };
-                        record_commit(outcome, &receipt);
+                            self.commit_facts_on(request, batch, lane)?;
+                        }
                         durable.decoder_state = next_decoder_state;
                         durable.decoder_state_version = next_decoder_state_version;
                         outcome.records_decoded =
@@ -1555,6 +1677,7 @@ impl ObservationCoordinator {
         reason: &str,
         started_at: i64,
         outcome: &mut ReconcileOutcome,
+        lane: Option<&mut CommitLane>,
     ) -> Result<(), EngineError> {
         if durable.state == "absent" {
             outcome.objects_unchanged = outcome.objects_unchanged.saturating_add(1);
@@ -1581,8 +1704,12 @@ impl ObservationCoordinator {
         )?;
         let batch = FactBatch::new(FACT_BATCH_LIMIT, DIAGNOSTIC_LIMIT)
             .map_err(|error| adapter_error("create deletion fact batch", error))?;
-        let receipt = self.commit_facts_checked(request, batch)?;
-        record_commit(outcome, &receipt);
+        if let Some(lane) = lane {
+            self.commit_facts_on(request, batch, lane)?;
+        } else {
+            let receipt = self.commit_facts_checked(request, batch)?;
+            record_commit(outcome, &receipt);
+        }
         outcome.objects_removed = outcome.objects_removed.saturating_add(1);
         outcome.objects_changed = outcome.objects_changed.saturating_add(1);
         Ok(())
@@ -1604,6 +1731,7 @@ impl ObservationCoordinator {
         reason: &str,
         started_at: i64,
         outcome: &mut ReconcileOutcome,
+        lane: &mut CommitLane,
     ) -> Result<(), EngineError> {
         self.check_cancelled()?;
         let previous = durable
@@ -1649,6 +1777,7 @@ impl ObservationCoordinator {
                         reason,
                         started_at,
                         outcome,
+                        Some(lane),
                     )
                 } else {
                     outcome.objects_unchanged = outcome.objects_unchanged.saturating_add(1);
@@ -1677,8 +1806,7 @@ impl ObservationCoordinator {
                     reason,
                     started_at,
                 )?;
-                let receipt = self.commit_observation_checked(request)?;
-                record_commit(outcome, &receipt);
+                self.commit_observation_on(request, lane)?;
                 outcome.objects_changed = outcome.objects_changed.saturating_add(1);
                 Ok(())
             }
@@ -1712,6 +1840,7 @@ impl ObservationCoordinator {
                     reason,
                     started_at,
                     outcome,
+                    lane,
                 )
             }
             ReplaceRead::Removed { record, checkpoint } => {
@@ -1731,6 +1860,7 @@ impl ObservationCoordinator {
                         reason,
                         started_at,
                         outcome,
+                        lane,
                     )
                 } else {
                     outcome.objects_unchanged = outcome.objects_unchanged.saturating_add(1);
@@ -1773,13 +1903,13 @@ impl ObservationCoordinator {
                 // A replace-document quarantine describes the current whole
                 // document, so its former typed snapshot is no longer current
                 // even when the driver generation itself did not change.
-                let receipt = self.commit_facts_checked(
+                self.commit_facts_on(
                     request,
                     FactBatch::new(FACT_BATCH_LIMIT, DIAGNOSTIC_LIMIT).map_err(|error| {
                         adapter_error("create snapshot quarantine fact batch", error)
                     })?,
+                    lane,
                 )?;
-                record_commit(outcome, &receipt);
                 outcome.records_quarantined = outcome.records_quarantined.saturating_add(1);
                 outcome.objects_changed = outcome.objects_changed.saturating_add(1);
                 Ok(())
@@ -1804,6 +1934,7 @@ impl ObservationCoordinator {
         reason: &str,
         started_at: i64,
         outcome: &mut ReconcileOutcome,
+        lane: &mut CommitLane,
     ) -> Result<(), EngineError> {
         self.check_cancelled()?;
         let generation_changed = checkpoint.generation != durable.generation;
@@ -1860,8 +1991,7 @@ impl ObservationCoordinator {
                     request.object.observed_revision =
                         Some(checkpoint.revision.as_bytes().to_vec());
                     request.object.retry_state = guard.checkpoint();
-                    let receipt = self.commit_observation_checked(request)?;
-                    record_commit(outcome, &receipt);
+                    self.commit_observation_on(request, lane)?;
                     outcome.retries_required = outcome.retries_required.saturating_add(1);
                     outcome.objects_changed = outcome.objects_changed.saturating_add(1);
                     Ok(())
@@ -1893,13 +2023,13 @@ impl ObservationCoordinator {
                         reason,
                         started_at,
                     )?;
-                    let receipt = self.commit_facts_checked(
+                    self.commit_facts_on(
                         request,
                         FactBatch::new(FACT_BATCH_LIMIT, DIAGNOSTIC_LIMIT).map_err(|error| {
                             adapter_error("create malformed snapshot quarantine batch", error)
                         })?,
+                        lane,
                     )?;
-                    record_commit(outcome, &receipt);
                     outcome.records_quarantined = outcome.records_quarantined.saturating_add(1);
                     outcome.objects_changed = outcome.objects_changed.saturating_add(1);
                     Ok(())
@@ -1927,8 +2057,7 @@ impl ObservationCoordinator {
             reason,
             started_at,
         )?;
-        let receipt = self.commit_facts_checked(request, decoded.batch)?;
-        record_commit(outcome, &receipt);
+        self.commit_facts_on(request, decoded.batch, lane)?;
         outcome.records_decoded = outcome.records_decoded.saturating_add(1);
         if decoded.quarantined {
             outcome.records_quarantined = outcome.records_quarantined.saturating_add(1);
@@ -1956,6 +2085,7 @@ impl ObservationCoordinator {
         reason: &str,
         started_at: i64,
         outcome: &mut ReconcileOutcome,
+        lane: &mut CommitLane,
     ) -> Result<(), EngineError> {
         let previous = durable
             .driver_checkpoint
@@ -2006,6 +2136,7 @@ impl ObservationCoordinator {
                         reason,
                         started_at,
                         outcome,
+                        Some(lane),
                     )
                 } else {
                     outcome.objects_unchanged = outcome.objects_unchanged.saturating_add(1);
@@ -2049,6 +2180,7 @@ impl ObservationCoordinator {
                     reason,
                     started_at,
                     outcome,
+                    lane,
                 )
             }
         }
@@ -2070,6 +2202,7 @@ impl ObservationCoordinator {
         reason: &str,
         started_at: i64,
         outcome: &mut ReconcileOutcome,
+        lane: &mut CommitLane,
     ) -> Result<(), EngineError> {
         let previous = durable
             .driver_checkpoint
@@ -2120,6 +2253,7 @@ impl ObservationCoordinator {
                         reason,
                         started_at,
                         outcome,
+                        Some(lane),
                     )
                 } else {
                     outcome.objects_unchanged = outcome.objects_unchanged.saturating_add(1);
@@ -2163,6 +2297,7 @@ impl ObservationCoordinator {
                     reason,
                     started_at,
                     outcome,
+                    lane,
                 )
             }
         }
@@ -2186,6 +2321,7 @@ impl ObservationCoordinator {
         reason: &str,
         started_at: i64,
         outcome: &mut ReconcileOutcome,
+        lane: &mut CommitLane,
     ) -> Result<(), EngineError> {
         self.check_cancelled()?;
         let generation_changed = generation != durable.generation;
@@ -2227,8 +2363,7 @@ impl ObservationCoordinator {
             reason,
             started_at,
         )?;
-        let receipt = self.commit_facts_checked(request, decoded.batch)?;
-        record_commit(outcome, &receipt);
+        self.commit_facts_on(request, decoded.batch, lane)?;
         outcome.records_decoded = outcome
             .records_decoded
             .saturating_add(bounded_u32(records.len()));
@@ -2255,6 +2390,7 @@ impl ObservationCoordinator {
         reason: &str,
         started_at: i64,
         outcome: &mut ReconcileOutcome,
+        lane: &mut CommitLane,
     ) -> Result<(), EngineError> {
         self.check_cancelled()?;
         let previous = durable
@@ -2350,8 +2486,7 @@ impl ObservationCoordinator {
                     reason,
                     started_at,
                 )?;
-                let receipt = self.commit_facts_checked(request, decoded.batch)?;
-                record_commit(outcome, &receipt);
+                self.commit_facts_on(request, decoded.batch, lane)?;
                 outcome.records_decoded = outcome.records_decoded.saturating_add(1);
                 if decoded.quarantined {
                     outcome.records_quarantined = outcome.records_quarantined.saturating_add(1);
@@ -3840,6 +3975,48 @@ fn validate_request(request: &ReconcileRequest) -> Result<(), EngineError> {
 fn record_commit(outcome: &mut ReconcileOutcome, receipt: &CommitReceipt) {
     outcome.commits = outcome.commits.saturating_add(1);
     outcome.last_commit_seq = Some(receipt.commit_seq);
+}
+
+fn settle_ready_commits(
+    engine: &SpaghettiEngineCore,
+    unacked: &mut Vec<crossbeam_channel::Receiver<Result<CommitReceipt, EngineError>>>,
+    outcome: &mut ReconcileOutcome,
+    block: bool,
+) -> Result<(), EngineError> {
+    if unacked.is_empty() {
+        return Ok(());
+    }
+    if block {
+        while let Some(pending) = unacked.pop() {
+            let receipt = recv_commit_receipt(pending)?;
+            engine.accept_commit_receipt(&receipt);
+            record_commit(outcome, &receipt);
+        }
+        return Ok(());
+    }
+    let mut index = 0;
+    while index < unacked.len() {
+        match unacked[index].try_recv() {
+            Ok(result) => {
+                let receipt = result?;
+                engine.accept_commit_receipt(&receipt);
+                record_commit(outcome, &receipt);
+                unacked.swap_remove(index);
+            }
+            Err(crossbeam_channel::TryRecvError::Empty) => index += 1,
+            Err(crossbeam_channel::TryRecvError::Disconnected) => {
+                unacked.swap_remove(index);
+                return Err(EngineError::WorkerUnavailable { worker: "writer" });
+            }
+        }
+    }
+    if unacked.len() >= MAX_UNACKED_COMMITS {
+        let pending = unacked.remove(0);
+        let receipt = recv_commit_receipt(pending)?;
+        engine.accept_commit_receipt(&receipt);
+        record_commit(outcome, &receipt);
+    }
+    Ok(())
 }
 
 fn scheduled_work_key(

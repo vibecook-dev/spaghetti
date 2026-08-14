@@ -1016,11 +1016,19 @@ impl SpaghettiEngineCore {
         &self,
         request: ObservationCommit,
     ) -> Result<CommitReceipt, EngineError> {
-        let writer = self.writer_client()?;
-        let receipt = writer.commit_observation(request)?;
-        self.commit_notifications.publish(receipt.commit_seq);
-        writer.record_changes_published(receipt.change_count);
+        let receipt = self
+            .submit_observation(request)?
+            .recv()
+            .map_err(|_| EngineError::WorkerUnavailable { worker: "writer" })??;
+        self.accept_commit_receipt(&receipt);
         Ok(receipt)
+    }
+
+    pub(crate) fn submit_observation(
+        &self,
+        request: ObservationCommit,
+    ) -> Result<crossbeam_channel::Receiver<Result<CommitReceipt, EngineError>>, EngineError> {
+        self.writer_client()?.submit_observation(request)
     }
 
     /// Allocate the durable source-instance identity before adapters derive
@@ -1040,11 +1048,27 @@ impl SpaghettiEngineCore {
         request: ObservationCommit,
         batch: FactBatch,
     ) -> Result<CommitReceipt, EngineError> {
-        let writer = self.writer_client()?;
-        let receipt = writer.commit_facts(request, batch)?;
-        self.commit_notifications.publish(receipt.commit_seq);
-        writer.record_changes_published(receipt.change_count);
+        let receipt = self
+            .submit_facts(request, batch)?
+            .recv()
+            .map_err(|_| EngineError::WorkerUnavailable { worker: "writer" })??;
+        self.accept_commit_receipt(&receipt);
         Ok(receipt)
+    }
+
+    pub(crate) fn submit_facts(
+        &self,
+        request: ObservationCommit,
+        batch: FactBatch,
+    ) -> Result<crossbeam_channel::Receiver<Result<CommitReceipt, EngineError>>, EngineError> {
+        self.writer_client()?.submit_facts(request, batch)
+    }
+
+    pub(crate) fn accept_commit_receipt(&self, receipt: &CommitReceipt) {
+        self.commit_notifications.publish(receipt.commit_seq);
+        if let Ok(writer) = self.writer_client() {
+            writer.record_changes_published(receipt.change_count);
+        }
     }
 
     /// Replay durable projection changes from a snapshot-consistent read-only

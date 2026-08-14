@@ -31,11 +31,12 @@ use super::EngineError;
 const MIN_DISK_RESERVE_BYTES: u64 = 1024 * 1024 * 1024;
 const MAX_DISK_RESERVE_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 const WRITER_STATEMENT_CACHE_CAPACITY: usize = 256;
-const WRITER_QUEUE_CAPACITY: usize = 64;
+const WRITER_QUEUE_CAPACITY: usize = 256;
 const MAX_PHYSICAL_COMMIT_GROUP: usize = 8;
-const BOOTSTRAP_PHYSICAL_COMMIT_GROUP: usize = 32;
+const BOOTSTRAP_PHYSICAL_COMMIT_GROUP: usize = 256;
+const BOOTSTRAP_PHYSICAL_GROUP_MAX_FACTS: u64 = 65_536;
 const GROUP_COMMIT_COLLECTION_WINDOW: Duration = Duration::from_micros(100);
-const BOOTSTRAP_GROUP_COMMIT_COLLECTION_WINDOW: Duration = Duration::from_millis(2);
+const BOOTSTRAP_GROUP_COMMIT_COLLECTION_WINDOW: Duration = Duration::from_millis(5);
 const WAL_CHECKPOINT_TARGET_BYTES: u64 = 32 * 1024 * 1024;
 const BOOTSTRAP_WAL_CHECKPOINT_TARGET_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const WAL_CHECKPOINT_RETRY_INTERVAL: Duration = Duration::from_millis(50);
@@ -200,6 +201,25 @@ impl WriterClient {
         &self,
         request: ObservationCommit,
     ) -> Result<CommitReceipt, EngineError> {
+        self.submit_observation(request)?
+            .recv()
+            .map_err(|_| EngineError::WorkerUnavailable { worker: "writer" })?
+    }
+
+    pub fn commit_facts(
+        &self,
+        request: ObservationCommit,
+        batch: FactBatch,
+    ) -> Result<CommitReceipt, EngineError> {
+        self.submit_facts(request, batch)?
+            .recv()
+            .map_err(|_| EngineError::WorkerUnavailable { worker: "writer" })?
+    }
+
+    pub(crate) fn submit_observation(
+        &self,
+        request: ObservationCommit,
+    ) -> Result<Receiver<Result<CommitReceipt, EngineError>>, EngineError> {
         if !self.alive.load(Ordering::Acquire) {
             return Err(EngineError::WorkerUnavailable { worker: "writer" });
         }
@@ -212,16 +232,14 @@ impl WriterClient {
                 response: response_tx,
             })
             .map_err(|_| EngineError::WorkerUnavailable { worker: "writer" })?;
-        response_rx
-            .recv()
-            .map_err(|_| EngineError::WorkerUnavailable { worker: "writer" })?
+        Ok(response_rx)
     }
 
-    pub fn commit_facts(
+    pub(crate) fn submit_facts(
         &self,
         request: ObservationCommit,
         batch: FactBatch,
-    ) -> Result<CommitReceipt, EngineError> {
+    ) -> Result<Receiver<Result<CommitReceipt, EngineError>>, EngineError> {
         if !self.alive.load(Ordering::Acquire) {
             return Err(EngineError::WorkerUnavailable { worker: "writer" });
         }
@@ -235,9 +253,7 @@ impl WriterClient {
                 response: response_tx,
             })
             .map_err(|_| EngineError::WorkerUnavailable { worker: "writer" })?;
-        response_rx
-            .recv()
-            .map_err(|_| EngineError::WorkerUnavailable { worker: "writer" })?
+        Ok(response_rx)
     }
 
     pub fn performance_snapshot(&self) -> WriterPerformanceSnapshot {
@@ -412,41 +428,8 @@ fn writer_thread(
             },
         };
         if is_commit_command(&command) {
-            let max_group = if bootstrap_active {
-                BOOTSTRAP_PHYSICAL_COMMIT_GROUP
-            } else {
-                MAX_PHYSICAL_COMMIT_GROUP
-            };
-            let collect_window = if bootstrap_active {
-                BOOTSTRAP_GROUP_COMMIT_COLLECTION_WINDOW
-            } else {
-                GROUP_COMMIT_COLLECTION_WINDOW
-            };
-            let mut group = vec![command];
-            let mut waited_for_peer = false;
-            while group.len() < max_group {
-                match commands.try_recv() {
-                    Ok(next) if is_commit_command(&next) => group.push(next),
-                    Ok(next) => {
-                        pending = Some(next);
-                        break;
-                    }
-                    Err(TryRecvError::Empty) if group.len() == 1 && !waited_for_peer => {
-                        waited_for_peer = true;
-                        match commands.recv_timeout(collect_window) {
-                            Ok(next) if is_commit_command(&next) => group.push(next),
-                            Ok(next) => {
-                                pending = Some(next);
-                                break;
-                            }
-                            Err(RecvTimeoutError::Timeout | RecvTimeoutError::Disconnected) => {
-                                break;
-                            }
-                        }
-                    }
-                    Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
-                }
-            }
+            let (group, leftover) = collect_commit_group(&commands, command, bootstrap_active);
+            pending = leftover;
             process_commit_group(
                 &mut connection,
                 &database_path,
@@ -541,6 +524,80 @@ fn is_commit_command(command: &WriterCommand) -> bool {
         command,
         WriterCommand::Commit { .. } | WriterCommand::CommitFacts { .. }
     )
+}
+
+fn collect_commit_group(
+    commands: &Receiver<WriterCommand>,
+    first: WriterCommand,
+    bootstrap_active: bool,
+) -> (Vec<WriterCommand>, Option<WriterCommand>) {
+    let max_group = if bootstrap_active {
+        BOOTSTRAP_PHYSICAL_COMMIT_GROUP
+    } else {
+        MAX_PHYSICAL_COMMIT_GROUP
+    };
+    let max_facts = if bootstrap_active {
+        BOOTSTRAP_PHYSICAL_GROUP_MAX_FACTS
+    } else {
+        u64::MAX
+    };
+    let collect_window = if bootstrap_active {
+        BOOTSTRAP_GROUP_COMMIT_COLLECTION_WINDOW
+    } else {
+        GROUP_COMMIT_COLLECTION_WINDOW
+    };
+    let mut group = vec![first];
+    let mut facts = commit_fact_count(group.last().expect("group starts with one commit"));
+    let mut leftover = None;
+    let mut waited = false;
+    loop {
+        if group.len() >= max_group {
+            break;
+        }
+        match commands.try_recv() {
+            Ok(next) if is_commit_command(&next) => {
+                let next_facts = commit_fact_count(&next);
+                if facts.saturating_add(next_facts) > max_facts {
+                    leftover = Some(next);
+                    break;
+                }
+                facts = facts.saturating_add(next_facts);
+                group.push(next);
+            }
+            Ok(next) => {
+                leftover = Some(next);
+                break;
+            }
+            Err(TryRecvError::Disconnected) => break,
+            Err(TryRecvError::Empty) => {
+                let wait = bootstrap_active || (group.len() == 1 && !waited);
+                if !wait {
+                    break;
+                }
+                waited = true;
+                match commands.recv_timeout(collect_window) {
+                    Ok(next) if is_commit_command(&next) => {
+                        let next_facts = commit_fact_count(&next);
+                        if facts.saturating_add(next_facts) > max_facts {
+                            leftover = Some(next);
+                            break;
+                        }
+                        facts = facts.saturating_add(next_facts);
+                        group.push(next);
+                        if bootstrap_active {
+                            waited = false;
+                        }
+                    }
+                    Ok(next) => {
+                        leftover = Some(next);
+                        break;
+                    }
+                    Err(RecvTimeoutError::Timeout | RecvTimeoutError::Disconnected) => break,
+                }
+            }
+        }
+    }
+    (group, leftover)
 }
 
 fn process_commit_group(
@@ -1528,6 +1585,23 @@ mod tests {
             2 * 1024 * 1024 * 1024
         );
         assert_eq!(disk_reserve_bytes(u64::MAX), MAX_DISK_RESERVE_BYTES);
+    }
+
+    #[test]
+    fn bootstrap_collects_queued_commits_up_to_the_fact_bound() {
+        let (tx, rx) = bounded(8);
+        let (first, first_rx) = commit_command(grouped_request(1));
+        let mut held = vec![first_rx];
+        for index in 2..=5 {
+            let (command, response) = commit_command(grouped_request(index));
+            tx.send(command).unwrap();
+            held.push(response);
+        }
+        let (group, leftover) = collect_commit_group(&rx, first, true);
+        assert_eq!(group.len(), 5);
+        assert!(leftover.is_none());
+        drop(tx);
+        drop(held);
     }
 
     #[test]
