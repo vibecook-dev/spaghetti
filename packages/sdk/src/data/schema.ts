@@ -108,7 +108,9 @@ import type { SqliteService } from '../io/index.js';
 // writer; this DDL remains its migration mirror for transitional tooling.
 // v40: durable stream retention, provenance-only fact rows for non-Full
 // streams, and removal of the unused wide fact entity/kind index.
-export const SCHEMA_VERSION = 40;
+// v41: canonical FTS uses a filtered external-content view so FTS5 integrity
+// checks cover exactly the non-empty searchable canonical-message subset.
+export const SCHEMA_VERSION = 41;
 
 export const TOKEN_ACTIVITY_TRIGGER_NAMES = [
   'token_activity_messages_ai',
@@ -1732,7 +1734,8 @@ CREATE INDEX IF NOT EXISTS idx_change_log_topic_cursor ON change_log(topic, comm
 CREATE INDEX IF NOT EXISTS idx_projection_versions_readiness ON projection_versions(readiness, projection_id);
 CREATE INDEX IF NOT EXISTS idx_source_record_errors_commit ON source_record_errors(first_commit_seq);
 CREATE INDEX IF NOT EXISTS idx_fact_records_object_generation ON fact_records(source_object_id, source_generation);
-CREATE INDEX IF NOT EXISTS idx_fact_records_source_instance ON fact_records(source_instance_id, fact_id);
+DROP INDEX IF EXISTS idx_fact_records_source_instance;
+CREATE INDEX IF NOT EXISTS idx_fact_records_source_instance_compact ON fact_records(source_instance_id);
 CREATE INDEX IF NOT EXISTS idx_canonical_sessions_project ON canonical_sessions(project_key, session_key);
 CREATE INDEX IF NOT EXISTS idx_canonical_sessions_source_generation ON canonical_sessions(source_object_id, source_generation);
 CREATE INDEX IF NOT EXISTS idx_session_index_snapshot_assertions_project ON session_index_snapshot_assertions(project_key, fact_id);
@@ -1757,8 +1760,8 @@ CREATE INDEX IF NOT EXISTS idx_message_tool_references_native ON message_tool_re
 CREATE INDEX IF NOT EXISTS idx_message_tool_references_source ON message_tool_references(source_object_id, source_generation, session_key, native_tool_use_id);
 CREATE INDEX IF NOT EXISTS idx_canonical_message_blocks_session_kind ON canonical_message_content_blocks(session_key, content_kind, message_key);
 CREATE INDEX IF NOT EXISTS idx_canonical_message_blocks_session_tool ON canonical_message_content_blocks(session_key, tool_name, message_key) WHERE tool_name IS NOT NULL;
-CREATE INDEX IF NOT EXISTS idx_canonical_message_blocks_run ON canonical_message_content_blocks(run_key, message_key, block_ordinal);
-CREATE INDEX IF NOT EXISTS idx_canonical_messages_session_order ON canonical_messages(session_key, source_generation, cursor_start);
+DROP INDEX IF EXISTS idx_canonical_message_blocks_run;
+DROP INDEX IF EXISTS idx_canonical_messages_session_order;
 CREATE INDEX IF NOT EXISTS idx_canonical_messages_session_activity ON canonical_messages(session_key, source_time, message_key, source_time_quality, last_commit_seq);
 CREATE INDEX IF NOT EXISTS idx_canonical_messages_run_activity ON canonical_messages(run_key, source_time, message_key);
 CREATE INDEX IF NOT EXISTS idx_canonical_messages_source_generation ON canonical_messages(source_object_id, source_generation);
@@ -1767,7 +1770,31 @@ CREATE INDEX IF NOT EXISTS idx_canonical_runs_commit ON canonical_runs(last_comm
 CREATE INDEX IF NOT EXISTS idx_canonical_runs_source_generation ON canonical_runs(source_object_id, source_generation);
 CREATE INDEX IF NOT EXISTS idx_usage_contributions_session_time ON usage_contributions(session_key, source_time, fact_id);
 CREATE INDEX IF NOT EXISTS idx_usage_contributions_source_generation ON usage_contributions(source_object_id, source_generation);
-CREATE INDEX IF NOT EXISTS idx_run_evidence_run_order ON run_evidence(run_key, source_generation, cursor_end);
+DROP INDEX IF EXISTS idx_run_evidence_run_order;
+CREATE INDEX IF NOT EXISTS idx_run_evidence_decisive ON run_evidence(
+  run_key,
+  (CASE evidence_kind
+    WHEN 'terminal_succeeded' THEN 60
+    WHEN 'terminal_failed' THEN 60
+    WHEN 'terminal_cancelled' THEN 60
+    WHEN 'input_requested' THEN 50
+    WHEN 'waiting_observed' THEN 45
+    WHEN 'run_started' THEN 40
+    WHEN 'activity_observed' THEN 35
+    WHEN 'run_declared' THEN 20
+    ELSE 0
+  END) DESC,
+  (CASE evidence_strength
+    WHEN 'native_explicit' THEN 40
+    WHEN 'native_activity' THEN 30
+    WHEN 'presence' THEN 20
+    WHEN 'layout' THEN 10
+    ELSE 0
+  END) DESC,
+  source_generation DESC, cursor_end DESC, last_commit_seq DESC, fact_id DESC
+);
+CREATE INDEX IF NOT EXISTS idx_run_evidence_activity_time ON run_evidence(run_key, source_time DESC)
+  WHERE evidence_kind IN ('run_started', 'activity_observed');
 CREATE INDEX IF NOT EXISTS idx_run_evidence_source_generation ON run_evidence(source_object_id, source_generation);
 CREATE INDEX IF NOT EXISTS idx_presence_assertions_presence ON presence_assertions(presence_key, fact_id);
 CREATE INDEX IF NOT EXISTS idx_presence_assertions_source ON presence_assertions(source_object_id, presence_key);
@@ -1828,12 +1855,16 @@ CREATE INDEX IF NOT EXISTS idx_canonical_workflows_session ON canonical_workflow
 CREATE INDEX IF NOT EXISTS idx_canonical_workflows_session_activity ON canonical_workflows(session_key, project_key, (CASE WHEN COALESCE(finished_at, started_at) IS NULL THEN 1 ELSE 0 END), COALESCE(finished_at, started_at, '') DESC, workflow_key DESC);
 CREATE INDEX IF NOT EXISTS idx_canonical_workflow_members_workflow ON canonical_workflow_members(workflow_key, native_agent_id);
 CREATE INDEX IF NOT EXISTS idx_canonical_workflow_members_workflow_order ON canonical_workflow_members(workflow_key, native_agent_id, member_key);
-CREATE INDEX IF NOT EXISTS idx_usage_contributions_session ON usage_contributions(session_key, fact_id);
+DROP INDEX IF EXISTS idx_usage_contributions_session;
 
 -- Persistent FTS5 (content-synced with messages)
 CREATE VIRTUAL TABLE IF NOT EXISTS search_fts USING fts5(text_content, content='messages', content_rowid='id');
 CREATE VIRTUAL TABLE IF NOT EXISTS subagent_search_fts USING fts5(search_text, content='subagent_timeline_messages', content_rowid='id');
-CREATE VIRTUAL TABLE IF NOT EXISTS canonical_message_search_fts USING fts5(search_text, content='canonical_messages', content_rowid='rowid');
+CREATE VIEW IF NOT EXISTS canonical_searchable_messages AS
+SELECT rowid, search_text
+FROM canonical_messages
+WHERE search_text IS NOT NULL AND trim(search_text) <> '';
+CREATE VIRTUAL TABLE IF NOT EXISTS canonical_message_search_fts USING fts5(search_text, content='canonical_searchable_messages', content_rowid='rowid');
 
 -- Auto-sync triggers
 CREATE TRIGGER IF NOT EXISTS messages_ai AFTER INSERT ON messages BEGIN
@@ -1927,6 +1958,8 @@ ${SESSION_SUMMARY_TRIGGERS_SQL}
  * Tables from previous schema versions that should be dropped during migration.
  */
 const LEGACY_TABLES = ['segments', 'search_index', 'schema_version'];
+
+const CURRENT_VIEWS = ['canonical_searchable_messages'];
 
 /**
  * All tables in the current schema (used for drop-and-recreate).
@@ -2048,6 +2081,14 @@ export function initializeSchema(db: SqliteService): void {
       }
     }
 
+    for (const view of CURRENT_VIEWS) {
+      try {
+        db.exec(`DROP VIEW IF EXISTS ${view}`);
+      } catch {
+        /* ignore */
+      }
+    }
+
     // Drop all current-schema tables (including triggers & virtual tables)
     for (const table of CURRENT_TABLES) {
       try {
@@ -2114,7 +2155,8 @@ export function initializeSchema(db: SqliteService): void {
       String(SCHEMA_VERSION),
     );
   } else {
-    // Version matches — ensure all tables exist (IF NOT EXISTS makes this safe)
+    // Version matches — ensure current objects exist and retire explicitly
+    // superseded indexes. The schema DDL is idempotent on a healthy database.
     db.exec(SCHEMA_SQL);
     // Trigger bodies can receive correctness fixes without changing stored
     // data. CREATE TRIGGER IF NOT EXISTS cannot replace an older body, so

@@ -14,7 +14,7 @@
 //! start. RFC 003 explicitly calls for wipe-on-stale rather than incremental
 //! migrations, so this module mirrors that behaviour exactly.
 
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior};
 use thiserror::Error;
 
 const WRITER_CACHE_KIB: i64 = 128_000;
@@ -22,8 +22,56 @@ const SQLITE_MMAP_BYTES: i64 = 256 * 1024 * 1024;
 // A 32 MiB WAL kept 100-sample 64-record burst p99 below 100 ms without the
 // repeated cold-load penalty measured at 16 MiB. See the RFC 011 performance
 // optimization record for the controlled checkpoint spike.
-const WAL_AUTOCHECKPOINT_PAGES: i64 = 8_192;
+// The writer actor owns the checkpoint schedule so checkpoint latency,
+// reader blocking, and progress are observable. SQLite's implicit hook is
+// disabled rather than competing with that policy inside transaction commit.
+const WAL_AUTOCHECKPOINT_PAGES: i64 = 0;
 const WAL_JOURNAL_LIMIT_BYTES: i64 = 64 * 1024 * 1024;
+
+const BOOTSTRAP_STATE_KEY: &str = "query_bootstrap_state";
+const BOOTSTRAP_EPOCH_KEY: &str = "query_bootstrap_epoch";
+const BOOTSTRAP_COMPLETED_EPOCH_KEY: &str = "query_bootstrap_completed_epoch";
+const BOOTSTRAP_SNAPSHOT_COMMIT_KEY: &str = "query_bootstrap_snapshot_commit_seq";
+
+/// Secondary structures that have no ingestion-time consumer. Uniqueness,
+/// foreign-key support, generation retraction, usage-series reduction, and
+/// run-state reducer indexes deliberately do not appear here.
+const BOOTSTRAP_QUERY_INDEXES: &[(&str, &str)] = &[
+    (
+        "idx_change_log_topic_cursor",
+        "CREATE INDEX IF NOT EXISTS idx_change_log_topic_cursor ON change_log(topic, commit_seq, ordinal)",
+    ),
+    (
+        "idx_fact_records_source_instance_compact",
+        "CREATE INDEX IF NOT EXISTS idx_fact_records_source_instance_compact ON fact_records(source_instance_id)",
+    ),
+    (
+        "idx_canonical_message_blocks_session_kind",
+        "CREATE INDEX IF NOT EXISTS idx_canonical_message_blocks_session_kind ON canonical_message_content_blocks(session_key, content_kind, message_key)",
+    ),
+    (
+        "idx_canonical_message_blocks_session_tool",
+        "CREATE INDEX IF NOT EXISTS idx_canonical_message_blocks_session_tool ON canonical_message_content_blocks(session_key, tool_name, message_key) WHERE tool_name IS NOT NULL",
+    ),
+    (
+        "idx_canonical_messages_session_activity",
+        "CREATE INDEX IF NOT EXISTS idx_canonical_messages_session_activity ON canonical_messages(session_key, source_time, message_key, source_time_quality, last_commit_seq)",
+    ),
+    (
+        "idx_canonical_messages_run_activity",
+        "CREATE INDEX IF NOT EXISTS idx_canonical_messages_run_activity ON canonical_messages(run_key, source_time, message_key)",
+    ),
+    (
+        "idx_usage_contributions_session_time",
+        "CREATE INDEX IF NOT EXISTS idx_usage_contributions_session_time ON usage_contributions(session_key, source_time, fact_id)",
+    ),
+];
+
+const CANONICAL_FTS_TRIGGERS: &[&str] = &[
+    "canonical_messages_search_ai",
+    "canonical_messages_search_ad",
+    "canonical_messages_search_au",
+];
 
 /// The current schema version. Bumping this forces a wipe-and-rebuild of all
 /// tables on the next call to [`initialize_schema`].
@@ -104,7 +152,10 @@ const WAL_JOURNAL_LIMIT_BYTES: i64 = 64 * 1024 * 1024;
 /// stale rebuildable caches are compacted after the wipe.
 /// v40: stream retention is durable, non-Full streams keep provenance-only
 /// fact records, and the unused wide fact entity/kind index is removed.
-pub const SCHEMA_VERSION: u32 = 40;
+/// v41: canonical FTS uses a filtered external-content view. This makes the
+/// FTS5 content-integrity contract match the intentionally searchable subset
+/// instead of treating NULL/empty canonical messages as missing documents.
+pub const SCHEMA_VERSION: u32 = 41;
 
 /// Full DDL for the current schema — lifted verbatim from the TS `SCHEMA_SQL`
 /// template literal. Whitespace differs; structure does not.
@@ -1571,7 +1622,8 @@ CREATE INDEX IF NOT EXISTS idx_change_log_topic_cursor ON change_log(topic, comm
 CREATE INDEX IF NOT EXISTS idx_projection_versions_readiness ON projection_versions(readiness, projection_id);
 CREATE INDEX IF NOT EXISTS idx_source_record_errors_commit ON source_record_errors(first_commit_seq);
 CREATE INDEX IF NOT EXISTS idx_fact_records_object_generation ON fact_records(source_object_id, source_generation);
-CREATE INDEX IF NOT EXISTS idx_fact_records_source_instance ON fact_records(source_instance_id, fact_id);
+DROP INDEX IF EXISTS idx_fact_records_source_instance;
+CREATE INDEX IF NOT EXISTS idx_fact_records_source_instance_compact ON fact_records(source_instance_id);
 CREATE INDEX IF NOT EXISTS idx_canonical_sessions_project ON canonical_sessions(project_key, session_key);
 CREATE INDEX IF NOT EXISTS idx_canonical_sessions_source_generation ON canonical_sessions(source_object_id, source_generation);
 CREATE INDEX IF NOT EXISTS idx_session_index_snapshot_assertions_project ON session_index_snapshot_assertions(project_key, fact_id);
@@ -1596,8 +1648,8 @@ CREATE INDEX IF NOT EXISTS idx_message_tool_references_native ON message_tool_re
 CREATE INDEX IF NOT EXISTS idx_message_tool_references_source ON message_tool_references(source_object_id, source_generation, session_key, native_tool_use_id);
 CREATE INDEX IF NOT EXISTS idx_canonical_message_blocks_session_kind ON canonical_message_content_blocks(session_key, content_kind, message_key);
 CREATE INDEX IF NOT EXISTS idx_canonical_message_blocks_session_tool ON canonical_message_content_blocks(session_key, tool_name, message_key) WHERE tool_name IS NOT NULL;
-CREATE INDEX IF NOT EXISTS idx_canonical_message_blocks_run ON canonical_message_content_blocks(run_key, message_key, block_ordinal);
-CREATE INDEX IF NOT EXISTS idx_canonical_messages_session_order ON canonical_messages(session_key, source_generation, cursor_start);
+DROP INDEX IF EXISTS idx_canonical_message_blocks_run;
+DROP INDEX IF EXISTS idx_canonical_messages_session_order;
 CREATE INDEX IF NOT EXISTS idx_canonical_messages_session_activity ON canonical_messages(session_key, source_time, message_key, source_time_quality, last_commit_seq);
 CREATE INDEX IF NOT EXISTS idx_canonical_messages_run_activity ON canonical_messages(run_key, source_time, message_key);
 CREATE INDEX IF NOT EXISTS idx_canonical_messages_source_generation ON canonical_messages(source_object_id, source_generation);
@@ -1606,7 +1658,31 @@ CREATE INDEX IF NOT EXISTS idx_canonical_runs_commit ON canonical_runs(last_comm
 CREATE INDEX IF NOT EXISTS idx_canonical_runs_source_generation ON canonical_runs(source_object_id, source_generation);
 CREATE INDEX IF NOT EXISTS idx_usage_contributions_session_time ON usage_contributions(session_key, source_time, fact_id);
 CREATE INDEX IF NOT EXISTS idx_usage_contributions_source_generation ON usage_contributions(source_object_id, source_generation);
-CREATE INDEX IF NOT EXISTS idx_run_evidence_run_order ON run_evidence(run_key, source_generation, cursor_end);
+DROP INDEX IF EXISTS idx_run_evidence_run_order;
+CREATE INDEX IF NOT EXISTS idx_run_evidence_decisive ON run_evidence(
+  run_key,
+  (CASE evidence_kind
+    WHEN 'terminal_succeeded' THEN 60
+    WHEN 'terminal_failed' THEN 60
+    WHEN 'terminal_cancelled' THEN 60
+    WHEN 'input_requested' THEN 50
+    WHEN 'waiting_observed' THEN 45
+    WHEN 'run_started' THEN 40
+    WHEN 'activity_observed' THEN 35
+    WHEN 'run_declared' THEN 20
+    ELSE 0
+  END) DESC,
+  (CASE evidence_strength
+    WHEN 'native_explicit' THEN 40
+    WHEN 'native_activity' THEN 30
+    WHEN 'presence' THEN 20
+    WHEN 'layout' THEN 10
+    ELSE 0
+  END) DESC,
+  source_generation DESC, cursor_end DESC, last_commit_seq DESC, fact_id DESC
+);
+CREATE INDEX IF NOT EXISTS idx_run_evidence_activity_time ON run_evidence(run_key, source_time DESC)
+  WHERE evidence_kind IN ('run_started', 'activity_observed');
 CREATE INDEX IF NOT EXISTS idx_run_evidence_source_generation ON run_evidence(source_object_id, source_generation);
 CREATE INDEX IF NOT EXISTS idx_presence_assertions_presence ON presence_assertions(presence_key, fact_id);
 CREATE INDEX IF NOT EXISTS idx_presence_assertions_source ON presence_assertions(source_object_id, presence_key);
@@ -1667,12 +1743,16 @@ CREATE INDEX IF NOT EXISTS idx_canonical_workflows_session ON canonical_workflow
 CREATE INDEX IF NOT EXISTS idx_canonical_workflows_session_activity ON canonical_workflows(session_key, project_key, (CASE WHEN COALESCE(finished_at, started_at) IS NULL THEN 1 ELSE 0 END), COALESCE(finished_at, started_at, '') DESC, workflow_key DESC);
 CREATE INDEX IF NOT EXISTS idx_canonical_workflow_members_workflow ON canonical_workflow_members(workflow_key, native_agent_id);
 CREATE INDEX IF NOT EXISTS idx_canonical_workflow_members_workflow_order ON canonical_workflow_members(workflow_key, native_agent_id, member_key);
-CREATE INDEX IF NOT EXISTS idx_usage_contributions_session ON usage_contributions(session_key, fact_id);
+DROP INDEX IF EXISTS idx_usage_contributions_session;
 
 -- Persistent FTS5 (content-synced with messages)
 CREATE VIRTUAL TABLE IF NOT EXISTS search_fts USING fts5(text_content, content='messages', content_rowid='id');
 CREATE VIRTUAL TABLE IF NOT EXISTS subagent_search_fts USING fts5(search_text, content='subagent_timeline_messages', content_rowid='id');
-CREATE VIRTUAL TABLE IF NOT EXISTS canonical_message_search_fts USING fts5(search_text, content='canonical_messages', content_rowid='rowid');
+CREATE VIEW IF NOT EXISTS canonical_searchable_messages AS
+SELECT rowid, search_text
+FROM canonical_messages
+WHERE search_text IS NOT NULL AND trim(search_text) <> '';
+CREATE VIRTUAL TABLE IF NOT EXISTS canonical_message_search_fts USING fts5(search_text, content='canonical_searchable_messages', content_rowid='rowid');
 
 -- Auto-sync triggers
 CREATE TRIGGER IF NOT EXISTS messages_ai AFTER INSERT ON messages BEGIN
@@ -1820,6 +1900,8 @@ END;
 /// migration. Kept verbatim with the TS `LEGACY_TABLES` list.
 const LEGACY_TABLES: &[&str] = &["segments", "search_index", "schema_version"];
 
+const CURRENT_VIEWS: &[&str] = &["canonical_searchable_messages"];
+
 /// All tables in the current schema, used for drop-and-recreate. Kept verbatim
 /// with the TS `CURRENT_TABLES` list (same order).
 const CURRENT_TABLES: &[&str] = &[
@@ -1922,6 +2004,9 @@ const CURRENT_TRIGGERS: &[&str] = &[
     "messages_ai",
     "messages_ad",
     "messages_au",
+    "subagent_timeline_ai",
+    "subagent_timeline_ad",
+    "subagent_timeline_au",
     "canonical_messages_search_ai",
     "canonical_messages_search_ad",
     "canonical_messages_search_au",
@@ -1959,6 +2044,53 @@ END;
 CREATE TRIGGER IF NOT EXISTS messages_au AFTER UPDATE ON messages BEGIN
   INSERT INTO search_fts(search_fts, rowid, text_content) VALUES ('delete', old.id, old.text_content);
   INSERT INTO search_fts(rowid, text_content) VALUES (new.id, new.text_content);
+END;
+CREATE TRIGGER IF NOT EXISTS subagent_timeline_ai AFTER INSERT ON subagent_timeline_messages BEGIN
+  INSERT INTO subagent_search_fts(rowid, search_text) VALUES (new.id, new.search_text);
+END;
+CREATE TRIGGER IF NOT EXISTS subagent_timeline_ad AFTER DELETE ON subagent_timeline_messages BEGIN
+  INSERT INTO subagent_search_fts(subagent_search_fts, rowid, search_text) VALUES ('delete', old.id, old.search_text);
+END;
+CREATE TRIGGER IF NOT EXISTS subagent_timeline_au AFTER UPDATE ON subagent_timeline_messages BEGIN
+  INSERT INTO subagent_search_fts(subagent_search_fts, rowid, search_text) VALUES ('delete', old.id, old.search_text);
+  INSERT INTO subagent_search_fts(rowid, search_text) VALUES (new.id, new.search_text);
+END;
+CREATE TRIGGER IF NOT EXISTS canonical_messages_search_ai AFTER INSERT ON canonical_messages
+WHEN new.search_text IS NOT NULL AND trim(new.search_text) <> '' BEGIN
+  INSERT INTO canonical_message_search_fts(rowid, search_text) VALUES (new.rowid, new.search_text);
+END;
+CREATE TRIGGER IF NOT EXISTS canonical_messages_search_ad AFTER DELETE ON canonical_messages
+WHEN old.search_text IS NOT NULL AND trim(old.search_text) <> '' BEGIN
+  INSERT INTO canonical_message_search_fts(canonical_message_search_fts, rowid, search_text)
+  VALUES ('delete', old.rowid, old.search_text);
+END;
+CREATE TRIGGER IF NOT EXISTS canonical_messages_search_au AFTER UPDATE OF search_text ON canonical_messages BEGIN
+  INSERT INTO canonical_message_search_fts(canonical_message_search_fts, rowid, search_text)
+  SELECT 'delete', old.rowid, old.search_text
+  WHERE old.search_text IS NOT NULL AND trim(old.search_text) <> '';
+  INSERT INTO canonical_message_search_fts(rowid, search_text)
+  SELECT new.rowid, new.search_text
+  WHERE new.search_text IS NOT NULL AND trim(new.search_text) <> '';
+END;
+"#;
+
+const CANONICAL_FTS_TRIGGERS_SQL: &str = r#"
+CREATE TRIGGER IF NOT EXISTS canonical_messages_search_ai AFTER INSERT ON canonical_messages
+WHEN new.search_text IS NOT NULL AND trim(new.search_text) <> '' BEGIN
+  INSERT INTO canonical_message_search_fts(rowid, search_text) VALUES (new.rowid, new.search_text);
+END;
+CREATE TRIGGER IF NOT EXISTS canonical_messages_search_ad AFTER DELETE ON canonical_messages
+WHEN old.search_text IS NOT NULL AND trim(old.search_text) <> '' BEGIN
+  INSERT INTO canonical_message_search_fts(canonical_message_search_fts, rowid, search_text)
+  VALUES ('delete', old.rowid, old.search_text);
+END;
+CREATE TRIGGER IF NOT EXISTS canonical_messages_search_au AFTER UPDATE OF search_text ON canonical_messages BEGIN
+  INSERT INTO canonical_message_search_fts(canonical_message_search_fts, rowid, search_text)
+  SELECT 'delete', old.rowid, old.search_text
+  WHERE old.search_text IS NOT NULL AND trim(old.search_text) <> '';
+  INSERT INTO canonical_message_search_fts(rowid, search_text)
+  SELECT new.rowid, new.search_text
+  WHERE new.search_text IS NOT NULL AND trim(new.search_text) <> '';
 END;
 "#;
 
@@ -2105,6 +2237,207 @@ pub enum SchemaError {
     /// An underlying SQLite error occurred.
     #[error("sqlite error: {0}")]
     Sqlite(#[from] rusqlite::Error),
+
+    #[error("query bootstrap validation failed: {0}")]
+    BootstrapValidation(String),
+}
+
+/// Return the durable query-bootstrap stage, if finalization is incomplete.
+/// Readers use this as a defense-in-depth admission check; the engine also
+/// keeps its query pool absent for the complete marked interval.
+pub fn query_bootstrap_state(conn: &Connection) -> Result<Option<String>, SchemaError> {
+    let meta_exists: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'schema_meta'",
+        [],
+        |row| row.get(0),
+    )?;
+    if meta_exists == 0 {
+        return Ok(None);
+    }
+    conn.query_row(
+        "SELECT value FROM schema_meta WHERE key = ?1",
+        [BOOTSTRAP_STATE_KEY],
+        |row| row.get(0),
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
+/// Atomically mark a fresh observation database as unavailable and remove
+/// only the reviewed query-side structures. Returning `false` means the
+/// database already contains committed observation history and must remain
+/// fully indexed.
+pub fn begin_query_bootstrap(conn: &mut Connection) -> Result<bool, SchemaError> {
+    let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    if transaction
+        .query_row(
+            "SELECT value FROM schema_meta WHERE key = ?1",
+            [BOOTSTRAP_STATE_KEY],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+        .is_some()
+    {
+        transaction.rollback()?;
+        return Ok(true);
+    }
+
+    let committed: i64 = transaction.query_row(
+        "SELECT COUNT(*) FROM ingest_commits WHERE committed_at IS NOT NULL",
+        [],
+        |row| row.get(0),
+    )?;
+    if committed != 0 {
+        transaction.rollback()?;
+        return Ok(false);
+    }
+
+    let prior_epoch = transaction
+        .query_row(
+            "SELECT value FROM schema_meta WHERE key = ?1",
+            [BOOTSTRAP_EPOCH_KEY],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or_default();
+    let epoch = prior_epoch.saturating_add(1).to_string();
+    transaction.execute(
+        "INSERT INTO schema_meta(key, value) VALUES (?1, 'building') \
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        [BOOTSTRAP_STATE_KEY],
+    )?;
+    transaction.execute(
+        "INSERT INTO schema_meta(key, value) VALUES (?1, ?2) \
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        [BOOTSTRAP_EPOCH_KEY, epoch.as_str()],
+    )?;
+    for trigger in CANONICAL_FTS_TRIGGERS {
+        transaction.execute_batch(&format!("DROP TRIGGER IF EXISTS {trigger}"))?;
+    }
+    for (index, _) in BOOTSTRAP_QUERY_INDEXES {
+        transaction.execute_batch(&format!("DROP INDEX IF EXISTS {index}"))?;
+    }
+    transaction.commit()?;
+    Ok(true)
+}
+
+/// Recreate and verify all deferred structures before atomically clearing the
+/// durable unavailability marker. The returned watermark is the snapshot
+/// boundary that a newly admitted subscriber must start from.
+pub fn finalize_query_bootstrap(conn: &mut Connection) -> Result<Option<u64>, SchemaError> {
+    if query_bootstrap_state(conn)?.is_none() {
+        return Ok(None);
+    }
+    conn.execute(
+        "UPDATE schema_meta SET value = 'finalizing' WHERE key = ?1",
+        [BOOTSTRAP_STATE_KEY],
+    )?;
+
+    // Large index sort runs must remain bounded even on machines with less
+    // memory than the reference host. This connection-local setting is
+    // restored by the writer after finalization.
+    conn.pragma_update(None, "temp_store", "FILE")?;
+    for (_, sql) in BOOTSTRAP_QUERY_INDEXES {
+        conn.execute_batch(sql)?;
+    }
+    conn.execute_batch(
+        "INSERT INTO canonical_message_search_fts(canonical_message_search_fts) VALUES('rebuild')",
+    )?;
+    conn.execute_batch(CANONICAL_FTS_TRIGGERS_SQL)?;
+    conn.execute_batch("PRAGMA optimize=0x10002")?;
+    validate_query_bootstrap(conn)?;
+
+    let watermark: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(commit_seq), 0) FROM ingest_commits WHERE committed_at IS NOT NULL",
+        [],
+        |row| row.get(0),
+    )?;
+    let epoch: String = conn.query_row(
+        "SELECT value FROM schema_meta WHERE key = ?1",
+        [BOOTSTRAP_EPOCH_KEY],
+        |row| row.get(0),
+    )?;
+    let watermark_text = watermark.max(0).to_string();
+    let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    transaction.execute(
+        "INSERT INTO schema_meta(key, value) VALUES (?1, ?2) \
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        [BOOTSTRAP_COMPLETED_EPOCH_KEY, epoch.as_str()],
+    )?;
+    transaction.execute(
+        "INSERT INTO schema_meta(key, value) VALUES (?1, ?2) \
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        [BOOTSTRAP_SNAPSHOT_COMMIT_KEY, watermark_text.as_str()],
+    )?;
+    transaction.execute(
+        "DELETE FROM schema_meta WHERE key = ?1",
+        [BOOTSTRAP_STATE_KEY],
+    )?;
+    transaction.commit()?;
+    Ok(Some(u64::try_from(watermark).unwrap_or_default()))
+}
+
+/// Complete a bootstrap left behind by an abrupt process exit. Schema
+/// initialization may already have recreated missing indexes; finalization is
+/// intentionally idempotent and always rebuilds canonical FTS from content.
+pub fn recover_query_bootstrap(conn: &mut Connection) -> Result<bool, SchemaError> {
+    if query_bootstrap_state(conn)?.is_none() {
+        return Ok(false);
+    }
+    finalize_query_bootstrap(conn).map(|_| true)
+}
+
+fn validate_query_bootstrap(conn: &mut Connection) -> Result<(), SchemaError> {
+    for (index, _) in BOOTSTRAP_QUERY_INDEXES {
+        let exists: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = ?1",
+            [*index],
+            |row| row.get(0),
+        )?;
+        if exists != 1 {
+            return Err(SchemaError::BootstrapValidation(format!(
+                "deferred index {index} is missing"
+            )));
+        }
+    }
+    for trigger in CANONICAL_FTS_TRIGGERS {
+        let exists: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name = ?1",
+            [*trigger],
+            |row| row.get(0),
+        )?;
+        if exists != 1 {
+            return Err(SchemaError::BootstrapValidation(format!(
+                "canonical FTS trigger {trigger} is missing"
+            )));
+        }
+    }
+
+    let quick_check: String = conn.query_row("PRAGMA quick_check(1)", [], |row| row.get(0))?;
+    if quick_check != "ok" {
+        return Err(SchemaError::BootstrapValidation(format!(
+            "quick_check returned {quick_check}"
+        )));
+    }
+    let foreign_key_violation = {
+        let mut statement = conn.prepare("PRAGMA foreign_key_check")?;
+        let mut rows = statement.query([])?;
+        rows.next()?.is_some()
+    };
+    if foreign_key_violation {
+        return Err(SchemaError::BootstrapValidation(
+            "foreign_key_check found at least one violation".to_string(),
+        ));
+    }
+
+    let transaction = conn.transaction()?;
+    let integrity = transaction.execute_batch(
+        "INSERT INTO canonical_message_search_fts(canonical_message_search_fts, rank) \
+         VALUES('integrity-check', 1)",
+    );
+    transaction.rollback()?;
+    integrity.map_err(SchemaError::from)
 }
 
 /// Drop per-row FTS and activity triggers during a high-volume import.
@@ -2141,6 +2474,10 @@ fn refresh_token_activity_triggers(conn: &Connection) -> Result<(), SchemaError>
 /// `messages`.
 pub fn rebuild_fts_and_recreate_triggers(conn: &Connection) -> Result<(), SchemaError> {
     conn.execute_batch("INSERT INTO search_fts(search_fts) VALUES('rebuild')")?;
+    conn.execute_batch("INSERT INTO subagent_search_fts(subagent_search_fts) VALUES('rebuild')")?;
+    conn.execute_batch(
+        "INSERT INTO canonical_message_search_fts(canonical_message_search_fts) VALUES('rebuild')",
+    )?;
     conn.execute_batch(FTS_TRIGGERS_SQL)?;
     conn.execute_batch(TOKEN_ACTIVITY_TRIGGERS_SQL)?;
     conn.execute_batch(SESSION_SUMMARY_TRIGGERS_SQL)?;
@@ -2148,8 +2485,9 @@ pub fn rebuild_fts_and_recreate_triggers(conn: &Connection) -> Result<(), Schema
 }
 
 /// Apply the connection-level PRAGMAs for the long-lived sole writer. The
-/// cache and checkpoint bounds are explicit so performance does not silently
-/// fall back to SQLite's ~2 MiB page cache and 1,000-page checkpoint cadence.
+/// cache and checkpoint ownership are explicit so performance does not
+/// silently fall back to SQLite's ~2 MiB page cache and hidden 1,000-page
+/// checkpoint cadence. The writer actor applies the bounded checkpoint policy.
 ///
 /// Note: on an in-memory connection SQLite refuses WAL and reports
 /// `journal_mode = memory`. Tests that need to verify WAL use a file-backed
@@ -2207,8 +2545,8 @@ pub fn current_schema_version(conn: &Connection) -> Result<Option<u32>, SchemaEr
 /// - If the stored version is missing or `!= SCHEMA_VERSION`, drops all
 ///   legacy + current tables (and their triggers) and rebuilds from
 ///   [`SCHEMA_SQL`].
-/// - Otherwise, reruns [`SCHEMA_SQL`] (every statement is `IF NOT EXISTS`,
-///   so it is safe and idempotent when the version already matches).
+/// - Otherwise, reruns [`SCHEMA_SQL`] (`IF NOT EXISTS` creates plus explicit
+///   `DROP INDEX IF EXISTS` retirement statements are idempotent).
 /// - Writes the current [`SCHEMA_VERSION`] into `schema_meta` after a wipe.
 ///
 /// This mirrors the behaviour of `initializeSchema` in
@@ -2229,6 +2567,10 @@ pub fn initialize_schema(conn: &Connection) -> Result<(), SchemaError> {
         // partially-broken legacy state still migrates.
         for table in LEGACY_TABLES {
             let _ = conn.execute_batch(&format!("DROP TABLE IF EXISTS {table}"));
+        }
+
+        for view in CURRENT_VIEWS {
+            let _ = conn.execute_batch(&format!("DROP VIEW IF EXISTS {view}"));
         }
 
         // Drop current-schema tables (including the FTS5 virtual table).
@@ -2257,8 +2599,9 @@ pub fn initialize_schema(conn: &Connection) -> Result<(), SchemaError> {
             [SCHEMA_VERSION.to_string()],
         )?;
     } else {
-        // Version matches — make sure all tables exist. Every statement in
-        // SCHEMA_SQL is IF NOT EXISTS so this is a no-op on a healthy DB.
+        // Version matches — make sure all current objects exist and retire
+        // explicitly superseded indexes. The DDL is idempotent on a healthy
+        // database.
         conn.execute_batch(SCHEMA_SQL)?;
         // Refresh derived-index trigger bodies: IF NOT EXISTS cannot replace
         // a correctness-fixed definition from the same schema version.
@@ -2295,6 +2638,140 @@ mod tests {
             )
             .unwrap();
         count > 0
+    }
+
+    fn seed_bootstrap_message(conn: &Connection) {
+        conn.execute_batch(
+            r#"
+            INSERT INTO source_instances (
+                source_instance_id, adapter_id, stable_key, display_name,
+                adapter_version, adapter_contract_version,
+                source_schema_versions_json, capabilities_json,
+                discovered_at, last_seen_at
+            ) VALUES (1, 'fixture', x'01', 'fixture', '1', 1, '[]', '[]', 1, 1);
+            INSERT INTO ingest_commits (
+                commit_seq, source_instance_id, reason, started_at,
+                committed_at, fact_count
+            ) VALUES (1, 1, 'bootstrap', 1, 2, 1);
+            INSERT INTO source_streams (
+                source_stream_id, source_instance_id, stream_key, driver_kind,
+                decoder_key, stream_state, last_commit_seq
+            ) VALUES (1, 1, 'messages', 'append', 'fixture', 'active', 1);
+            INSERT INTO source_objects (
+                source_object_id, source_stream_id, object_key, generation,
+                committed_cursor, decoder_contract_version, last_commit_seq,
+                state
+            ) VALUES (1, 1, x'01', 1, x'01', 1, 1, 'active');
+            INSERT INTO fact_records (
+                fact_id, fact_kind, entity_key, source_instance_id,
+                source_stream_id, source_object_id, source_generation,
+                cursor_start, cursor_end, payload_hash, local_fact_ordinal,
+                observed_at, payload_json, last_commit_seq
+            ) VALUES (
+                x'01', 'message', x'01', 1, 1, 1, 1, x'00', x'01',
+                zeroblob(32), 0, 1, x'', 1
+            );
+            INSERT INTO canonical_messages (
+                message_key, session_key, run_key, native_message_id,
+                native_kind, role, content_json, source_time,
+                source_time_quality, search_text, raw_json, fact_id,
+                source_object_id, source_generation, cursor_start, cursor_end,
+                last_commit_seq
+            ) VALUES (
+                x'01', x'02', x'03', 'native-1', 'user', 'user', x'5B5D',
+                '2026-08-13T00:00:00.000Z', 'native_exact',
+                'bootstrap searchable marker', x'7B7D', x'01', 1, 1,
+                x'00', x'01', 1
+            );
+            "#,
+        )
+        .expect("seed bootstrap content");
+    }
+
+    fn canonical_search_count(conn: &Connection, query: &str) -> i64 {
+        conn.query_row(
+            "SELECT COUNT(*) FROM canonical_message_search_fts WHERE canonical_message_search_fts MATCH ?1",
+            [query],
+            |row| row.get(0),
+        )
+        .expect("query canonical FTS")
+    }
+
+    #[test]
+    fn durable_query_bootstrap_defers_only_reviewed_structures_and_rebuilds_fts() {
+        let mut conn = Connection::open_in_memory().expect("open in-memory db");
+        initialize_schema(&conn).expect("initialize schema");
+
+        assert!(begin_query_bootstrap(&mut conn).expect("begin query bootstrap"));
+        assert_eq!(
+            query_bootstrap_state(&conn).unwrap().as_deref(),
+            Some("building")
+        );
+        for (index, _) in BOOTSTRAP_QUERY_INDEXES {
+            assert!(
+                !object_exists(&conn, "index", index),
+                "{index} remained active"
+            );
+        }
+        assert!(object_exists(
+            &conn,
+            "index",
+            "idx_fact_records_object_generation"
+        ));
+        assert!(object_exists(&conn, "index", "idx_run_evidence_decisive"));
+        for trigger in CANONICAL_FTS_TRIGGERS {
+            assert!(!object_exists(&conn, "trigger", trigger));
+        }
+
+        seed_bootstrap_message(&conn);
+        assert_eq!(canonical_search_count(&conn, "bootstrap"), 0);
+        assert_eq!(finalize_query_bootstrap(&mut conn).unwrap(), Some(1));
+        assert_eq!(query_bootstrap_state(&conn).unwrap(), None);
+        assert_eq!(canonical_search_count(&conn, "bootstrap"), 1);
+        for (index, _) in BOOTSTRAP_QUERY_INDEXES {
+            assert!(
+                object_exists(&conn, "index", index),
+                "{index} was not rebuilt"
+            );
+        }
+        for trigger in CANONICAL_FTS_TRIGGERS {
+            assert!(object_exists(&conn, "trigger", trigger));
+        }
+        let snapshot: String = conn
+            .query_row(
+                "SELECT value FROM schema_meta WHERE key = ?1",
+                [BOOTSTRAP_SNAPSHOT_COMMIT_KEY],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(snapshot, "1");
+        assert!(!begin_query_bootstrap(&mut conn).unwrap());
+    }
+
+    #[test]
+    fn incomplete_query_bootstrap_recovers_before_readiness() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("bootstrap-recovery.sqlite");
+        {
+            let mut conn = Connection::open(&database).unwrap();
+            set_pragmas(&conn).unwrap();
+            initialize_schema(&conn).unwrap();
+            assert!(begin_query_bootstrap(&mut conn).unwrap());
+            seed_bootstrap_message(&conn);
+            assert_eq!(canonical_search_count(&conn, "bootstrap"), 0);
+        }
+
+        let mut recovered = Connection::open(&database).unwrap();
+        set_pragmas(&recovered).unwrap();
+        initialize_schema(&recovered).unwrap();
+        assert_eq!(
+            query_bootstrap_state(&recovered).unwrap().as_deref(),
+            Some("building")
+        );
+        assert!(recover_query_bootstrap(&mut recovered).unwrap());
+        assert_eq!(query_bootstrap_state(&recovered).unwrap(), None);
+        assert_eq!(canonical_search_count(&recovered, "bootstrap"), 1);
+        assert!(!recover_query_bootstrap(&mut recovered).unwrap());
     }
 
     #[test]
@@ -2432,6 +2909,8 @@ mod tests {
             "idx_canonical_messages_source_generation",
             "idx_canonical_runs_source_generation",
             "idx_usage_contributions_source_generation",
+            "idx_run_evidence_decisive",
+            "idx_run_evidence_activity_time",
             "idx_run_evidence_source_generation",
             "idx_delegation_assertions_source_generation",
             "idx_delegation_spawn_assertions_source_generation",
@@ -2461,6 +2940,11 @@ mod tests {
             &conn,
             "table",
             "canonical_message_search_fts"
+        ));
+        assert!(object_exists(
+            &conn,
+            "view",
+            "canonical_searchable_messages"
         ));
         assert!(object_exists(&conn, "table", "canonical_runs"));
         assert!(object_exists(&conn, "table", "run_evidence"));
@@ -2709,6 +3193,107 @@ mod tests {
             assert!(
                 details.contains(index),
                 "{table} cleanup did not use {index}: {details}"
+            );
+        }
+    }
+
+    #[test]
+    fn run_state_reducers_use_aligned_ordering_indexes() {
+        let conn = Connection::open_in_memory().expect("open in-memory db");
+        initialize_schema(&conn).expect("initialize schema");
+        assert!(!object_exists(&conn, "index", "idx_run_evidence_run_order"));
+
+        // Same-version databases from before the aligned reducer indexes may
+        // still carry superseded write-only B-trees. Reattaching the owner
+        // must remove them as part of idempotent schema repair.
+        conn.execute_batch(
+            r#"
+            CREATE INDEX idx_run_evidence_run_order
+              ON run_evidence(run_key, source_generation, cursor_end);
+            CREATE INDEX idx_canonical_messages_session_order
+              ON canonical_messages(session_key, source_generation, cursor_start);
+            CREATE INDEX idx_canonical_message_blocks_run
+              ON canonical_message_content_blocks(run_key, message_key, block_ordinal);
+            CREATE INDEX idx_usage_contributions_session
+              ON usage_contributions(session_key, fact_id);
+            "#,
+        )
+        .expect("install superseded indexes");
+        initialize_schema(&conn).expect("refresh same-version schema");
+        assert!(!object_exists(&conn, "index", "idx_run_evidence_run_order"));
+        assert!(!object_exists(
+            &conn,
+            "index",
+            "idx_canonical_messages_session_order"
+        ));
+        assert!(!object_exists(
+            &conn,
+            "index",
+            "idx_canonical_message_blocks_run"
+        ));
+        assert!(!object_exists(
+            &conn,
+            "index",
+            "idx_usage_contributions_session"
+        ));
+
+        for (sql, expected_index) in [
+            (
+                r#"
+                EXPLAIN QUERY PLAN
+                SELECT fact_id, evidence_kind, source_time
+                FROM run_evidence
+                WHERE run_key = ?1
+                ORDER BY
+                  CASE evidence_kind
+                    WHEN 'terminal_succeeded' THEN 60
+                    WHEN 'terminal_failed' THEN 60
+                    WHEN 'terminal_cancelled' THEN 60
+                    WHEN 'input_requested' THEN 50
+                    WHEN 'waiting_observed' THEN 45
+                    WHEN 'run_started' THEN 40
+                    WHEN 'activity_observed' THEN 35
+                    WHEN 'run_declared' THEN 20
+                    ELSE 0
+                  END DESC,
+                  CASE evidence_strength
+                    WHEN 'native_explicit' THEN 40
+                    WHEN 'native_activity' THEN 30
+                    WHEN 'presence' THEN 20
+                    WHEN 'layout' THEN 10
+                    ELSE 0
+                  END DESC,
+                  source_generation DESC, cursor_end DESC,
+                  last_commit_seq DESC, fact_id DESC
+                LIMIT 1
+                "#,
+                "idx_run_evidence_decisive",
+            ),
+            (
+                r#"
+                EXPLAIN QUERY PLAN
+                SELECT MAX(source_time) FROM run_evidence
+                WHERE run_key = ?1
+                  AND evidence_kind IN ('run_started', 'activity_observed')
+                "#,
+                "idx_run_evidence_activity_time",
+            ),
+        ] {
+            let details = conn
+                .prepare(sql)
+                .expect("prepare run reducer plan")
+                .query_map([b"run".as_slice()], |row| row.get::<_, String>(3))
+                .expect("read run reducer plan")
+                .collect::<Result<Vec<_>, _>>()
+                .expect("collect run reducer plan")
+                .join("\n");
+            assert!(
+                details.contains(expected_index),
+                "run reducer did not use {expected_index}: {details}"
+            );
+            assert!(
+                !details.contains("USE TEMP B-TREE"),
+                "run reducer spilled its ordering: {details}"
             );
         }
     }

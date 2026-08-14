@@ -1,12 +1,13 @@
 # RFC 011 performance optimization design and execution plan
 
-Status: active; first optimization wave implemented and measured on 2026-08-13
+Status: implementation and local release validation complete on 2026-08-13;
+maintainer release-policy review remains external
 
 This record turns the RFC 010/011 performance requirements into a reproducible
 baseline, documents the production-path findings and rejected spikes, and
-defines the next storage and bootstrap changes. It does not weaken the RFC's
-atomic cursor/fact/projection/outbox boundary, sole-writer rule, query-only read
-pool, or readiness contract.
+records the accepted storage/bootstrap decisions and remaining evidence-gated
+opportunities. It does not weaken the RFC's atomic cursor/fact/projection/outbox
+boundary, sole-writer rule, query-only read pool, or readiness contract.
 
 ## Decision summary
 
@@ -32,11 +33,34 @@ The no-op projector dispatch fix alone reduced 65,536 records from 24.44 seconds
 to 13.43 seconds and 131,072 records from 89.09 seconds to 42.14 seconds before
 the checkpoint trade-off was selected.
 
-The remaining curve is still superlinear: in the final configuration an 8x
-increase from 16,384 to 131,072 records takes about 18.8x as long. This is not
-accepted as the final backfill architecture. Measurement attributes the
-remaining cost primarily to maintaining a wide normalized schema and its
-B-trees one row at a time.
+The first-wave curve was still superlinear: an 8x increase from 16,384 to
+131,072 records took about 18.8x as long. The subsequent measured pass aligned
+the run-state indexes with the reducer's actual ordering and removed or
+narrowed secondary indexes that had no distinct production query consumer.
+The pre-batching lifecycle build's same-host medians were 1.591 seconds at
+16,384 records and 8.299 seconds at 65,536 records, a 5.217x ratio that passed
+the <= 5.25 synthetic scale gate and stayed within the 10% instrumentation
+budget. A 131,072-record continuation completed in 21.22 seconds, versus the
+earlier 48.48-second checkpoint-balanced baseline.
+
+The subsequent P3/P4 audit found that the generic fact ledger retained a
+second semantic entity-key copy with no production query consumer, and that
+fact, canonical-message, and new content-block rows were still issued one at a
+time. The accepted implementation omits only that redundant ledger copy and
+uses bounded multi-row upserts while retaining every fact identity and source
+provenance field. Five-run same-host medians are now 1.176 seconds at 16,384
+records and 6.140 seconds at 65,536 records, a passing 5.220x ratio. That is
+about 26% faster at both sizes than the pre-batching lifecycle build; database
+size falls from 94.5/375.4 MiB to 86.4/343.0 MiB.
+
+The first truthful frozen-corpus bootstrap completed 3.86 GB of source in
+634.37 seconds, with ready time equal to convergence time, zero source retries,
+1,112,311 decoded records, 1,072,944 canonical messages, 5,138,709 facts, and
+69,041 commits. The earlier 1,075.56-second run was not a valid baseline: it
+returned ready at 565.51 seconds, repaired work afterward, and still omitted
+29,850 session records. The P3/P4 production revision preserves the complete
+output and zero-retry result at 574.80 seconds, 9.4% faster, while reducing the
+durable database from 9,808.2 MiB to 9,214.1 MiB, 6.1% smaller.
 
 ## Contract and gates
 
@@ -58,12 +82,15 @@ The optimization work adds these engineering gates:
 2. Same-host medians at 16k and 64k may not regress by more than 10% over the
    accepted report without an explained semantic or durability change.
 3. The 4x cold-load scale ratio `T(64k) / T(16k)` must reach <= 5.25 before the
-   synthetic scale gate is accepted. The current 6.46 ratio fails this gate.
+   synthetic scale gate is accepted. The first-wave 6.46 ratio failed; the
+   bootstrap-lifecycle 5.217 ratio and the stronger five-run set-write 5.220
+   ratio pass.
 4. Live latency is evaluated over at least 100 appends in one long-lived host;
    p50, p95, and p99 are reported. Recreating a database per sample is invalid.
-5. The real-corpus gate compares both engines on identical selected files,
-   retention policy, durable outputs, and cold filesystem state. The retired
-   tiny-fixture benchmark is not a substitute.
+5. The real-corpus gate compares production revisions on identical selected
+   files, retention policy, durable outputs, and cold filesystem state. A
+   retired engine with different durability or output semantics is diagnostic
+   only; the tiny-fixture benchmark is not a substitute.
 6. Reports include input bytes/records, facts, commits, canonical rows,
    change-log rows/bytes, main DB/WAL bytes, peak RSS, and query latency with
    and without concurrent backfill.
@@ -111,14 +138,62 @@ pnpm bench:observation --scenario live-append --records 8192 \
 | Final 32 MiB checkpoint policy               |  16,384 | 2.58 s median |     6,349 |      17 |     98.2 MiB |
 | Final 32 MiB checkpoint policy               |  65,536 |       16.66 s |     3,934 |      65 |    390.5 MiB |
 | Final 32 MiB checkpoint policy               | 131,072 |       48.48 s |     2,704 |     129 |    780.9 MiB |
+| Run-state reducer indexes, 3-run median      |  16,000 |        1.74 s |     9,218 |      17 |    104.0 MiB |
+| Run-state reducer indexes, 3-run median      |  64,000 |       12.13 s |     5,276 |      64 |    413.9 MiB |
+| Final aligned/pruned indexes, 3-run median   |  16,384 |       1.555 s |    10,539 |      17 |     94.5 MiB |
+| Final aligned/pruned indexes, 3-run median   |  65,536 |       8.098 s |     8,093 |      65 |    375.5 MiB |
+| + writer-owned checkpoints, 3-run median     |  16,384 |       1.559 s |    10,512 |      17 |     94.5 MiB |
+| + writer-owned checkpoints, 3-run median     |  65,536 |       8.007 s |     8,185 |      65 |    375.5 MiB |
+| + writer-owned checkpoints, continuation     | 131,072 |       20.36 s |     6,438 |     129 |    751.2 MiB |
+| + bounded source telemetry, 3-run median     |  16,384 |       1.662 s |     9,858 |      17 |     94.5 MiB |
+| + bounded source telemetry, 3-run median     |  65,536 |       8.597 s |     7,623 |      65 |    375.5 MiB |
+| + bounded source telemetry, continuation     | 131,072 |       21.22 s |     6,176 |     129 |    751.2 MiB |
+| Final bootstrap lifecycle, 3-run median      |  16,384 |       1.591 s |    10,301 |      17 |     94.5 MiB |
+| Final bootstrap lifecycle, 3-run median      |  65,536 |       8.299 s |     7,897 |      65 |    375.4 MiB |
+| + compact ledger/set writes, 5-run median    |  16,384 |       1.176 s |    13,931 |      17 |     86.4 MiB |
+| + compact ledger/set writes, 5-run median    |  65,536 |       6.140 s |    10,674 |      65 |    343.0 MiB |
 
-The final live results used one long-lived host and native query-pool validation
-after every sample:
+The earlier final-lifecycle reports measured process-level peak RSS at 334.4
+MiB, 618.9 MiB, and 664.4 MiB for 16k, 64k, and 131k respectively. The latest
+five-run reports measured 301.1 MiB at 16k and 556.0 MiB at 64k. The sampler
+includes the Node harness and corpus generation, so this is not
+native-allocation-only telemetry. The bounded multi-row values remain inside
+the existing 1,024-record/8 MiB transaction envelope; they do not create an
+unbounded staging area.
+
+The first-wave checkpoint-policy live results used one long-lived host and
+native query-pool validation after every sample:
 
 | Append size | Samples |     p50 |     p95 |     p99 |      Max |
 | ----------- | ------: | ------: | ------: | ------: | -------: |
 | 1 record    |     100 |  6.0 ms |  6.5 ms |  8.2 ms |   8.5 ms |
 | 64 records  |     100 | 19.1 ms | 85.5 ms | 91.4 ms | 100.5 ms |
+
+After native instrumentation and the final aligned/pruned index pass, the same
+long-lived-host protocol produced:
+
+| Append size | Samples |    p50 |     p95 |     p99 |     Max |
+| ----------- | ------: | -----: | ------: | ------: | ------: |
+| 1 record    |     100 | 2.2 ms |  2.5 ms |  3.2 ms |  3.2 ms |
+| 64 records  |     100 | 9.1 ms | 33.9 ms | 38.4 ms | 42.1 ms |
+
+The final bootstrap-lifecycle build repeated the 100-sample one-record gate at
+p50 1.3 ms and p99 2.1 ms; all samples were converged when refresh returned.
+
+The bounded set-write build repeated the gate twice. The accepted repeat was
+p50 1.5 ms, p95 1.7 ms, p99 3.0 ms, and max 30.8 ms. The isolated maximum is
+the same periodic writer-owned checkpoint band observed in earlier burst
+tests; the distribution remains far below the RFC's 100 ms p99 budget.
+
+A 65,536-record warm reopen measured 7.7 ms median readiness and 103.2 ms
+median full discovery convergence. It read zero source records and made zero
+SQLite row changes.
+
+The 64-record distribution shows a periodic 31–42 ms band when the next write
+queues behind a completed writer-owned checkpoint, but remains within the
+RFC's 100 ms p99 gate. A four-worker, ten-reader live-refresh run measured
+reader p95 at 3.157 ms idle and 3.804 ms during ingest (1.20x), with the refresh
+committing in 11.031 ms.
 
 The reports are generated outside the repository under `/private/tmp` so they
 do not become machine-specific release claims. A reviewed reference report can
@@ -184,21 +259,24 @@ inside a transaction. The fact ledger remains complete.
 ### F7 — SQLite defaults were inappropriate for the database size
 
 The sole writer now uses a bounded 128 MiB cache, 256 MiB mmap ceiling,
-memory-backed temporary storage, a 32 MiB WAL autocheckpoint target, and a 64
-MiB journal-size limit. Readers use a bounded 32 MiB cache, the same mmap
+memory-backed temporary storage, a 32 MiB writer-owned WAL checkpoint target,
+and a 64 MiB journal-size limit. SQLite's implicit autocheckpoint hook is
+disabled so it cannot hide checkpoint work inside commit timing or compete
+with the owner policy. Readers use a bounded 32 MiB cache, the same mmap
 ceiling, query-only mode, and statement caches. The writer asks SQLite's
 `PRAGMA optimize` to refresh bounded planner statistics when a long-lived
 connection opens.
 
 ### F8 — physical amplification is now the main bottleneck
 
-At 131,072 synthetic records the database contains 589,824 facts, or 4.5 facts
-per source record. The 781 MiB file consists of about 426 MiB of table B-trees,
-352 MiB of secondary/automatic B-trees, and 3 MiB of canonical FTS storage.
-Secondary B-trees are therefore about 45% of the file. The largest objects are
-`fact_records`, `canonical_messages`, their identity/activity indexes,
-canonical content blocks and indexes, `change_log`, usage contributions, and
-run evidence.
+The pre-pruning physical audit at 131,072 synthetic records contained 589,824
+facts, or 4.5 facts per source record. Its 781 MiB file consisted of about 426
+MiB of table B-trees, 352 MiB of secondary/automatic B-trees, and 3 MiB of
+canonical FTS storage. Secondary B-trees were therefore about 45% of the file.
+The largest objects were `fact_records`, `canonical_messages`, their
+identity/activity indexes, canonical content blocks and indexes, `change_log`,
+usage contributions, and run evidence. The final audited index set reduces the
+same 131k database to 751 MiB without changing its 589,824-fact output.
 
 `fact_records` also repeats source object, generation, cursors, hash,
 observation time, and commit metadata for every emitted fact. Its average
@@ -214,13 +292,29 @@ window is now 128 commits; age and byte limits still protect low-volume live
 use. A future bootstrap epoch should publish snapshot/reset semantics rather
 than retaining one public change per historical row.
 
-### F10 — engine metrics are below the RFC requirement
+### F10 — bounded native telemetry now localizes the remaining curve
 
-The external benchmark now measures the production path, but the engine still
-needs internal histograms for source read, decode, fact construction,
-projection families, SQLite step/commit/checkpoint time, rows changed, WAL
-bytes, writer queue delay, and reader age. Without those metrics, regressions
-still require stack sampling to localize.
+The owner exposes owner-lifetime fixed-bucket histograms and counters through
+the existing native `getStats` query. The write lane reports queue delay, disk
+reserve, commit stages, individual projection families, successful/failed
+commits, facts, public changes, and SQLite rows changed. The read lane reports
+queue depth/high-water, rejections, queue wait, execution latency, and oldest
+active reader age. The source lane reports common-driver reads, failures,
+genuine retries, bounded continuations, records/payload bytes, decode outcomes,
+facts, quarantines, total decode time, the adapter call, and fact identity/
+provenance construction. It exposes at most 128 adapter/stream/driver
+dimensions plus one fixed overflow lane. The same snapshot includes physical
+DB, WAL, and shared-memory bytes. Recording retains no per-request samples and
+opens no instrumentation connection.
+
+The production-path benchmark persists this snapshot and also samples peak
+process RSS. At 65,536 records, source reads took 109.8 ms, complete decode
+662.3 ms, and fact construction 107.3 ms (the last is a measured subset of the
+adapter call). History/fact projection took 3,271.1 ms and SQLite commit took
+1,473.4 ms. This directly rules out source I/O and JSON decoding as the main
+bottleneck and keeps storage amplification and set-oriented projection as the
+next targets. Remaining RFC-level observability gaps are cancellation and
+subscriber-lag counters and native allocation/RSS accounting.
 
 ### F11 — two SQLite implementations in one process are unsafe instrumentation
 
@@ -238,6 +332,134 @@ intrusive and architecturally correct. SQLite explicitly identifies multiple
 copies linked into one application as a corruption hazard; the benchmark is not
 allowed to violate a rule that production correctly enforces.
 
+### F12 — every secondary index needs a demonstrated consumer
+
+The schema accumulated indexes that were superseded by a wider prefix, used no
+production SQL path, or covered columns that the source-statistics query did
+not need. They consumed space and forced an additional B-tree mutation for
+every matching historical row.
+
+The final pass replaces the wide source-instance/fact covering index with a
+compact source-instance index and removes the superseded run-order,
+message-session-order, content-block-run, and usage-session indexes. The
+remaining usage-session-time index covers both usage query shapes. Production
+queries have `EXPLAIN QUERY PLAN` assertions for the new run-state ordering,
+source statistics, and usage paths, and all 12 end-to-end query-conformance
+groups pass. Existing schema-v40 databases receive the same repair through
+idempotent `DROP INDEX IF EXISTS`/`CREATE INDEX IF NOT EXISTS` initialization;
+they do not need a semantic schema-version bump.
+
+### F13 — checkpoint ownership must be explicit and nonblocking
+
+SQLite's autocheckpoint callback ran inside `COMMIT`, so the engine could see
+neither checkpoint count and duration nor the reader that prevented progress.
+It also left performance attribution ambiguous: the earlier 64k report charged
+3,335 ms to SQLite commit even though much of that time was checkpoint work.
+
+The writer now disables the implicit hook, checks physical WAL size after a
+successful commit, and schedules a controlled checkpoint at 32 MiB. The
+checkpoint runs on the sole writer lane after the durable receipt is returned.
+It first performs a nonblocking PASSIVE copy, then attempts TRUNCATE with a zero
+busy timeout; a reader can delay reclamation but never stalls behind a five
+second busy handler. Incomplete checkpoints retry on subsequent commits no
+more frequently than every 50 ms, and shutdown performs one final attempt after
+query workers close.
+
+Fixed telemetry reports attempts, completions, failures, reader-blocked
+attempts/time, last log/checkpointed/remaining frames, and latency. A real
+query-pool read transaction test pins a WAL generation, observes incomplete
+progress and positive oldest-reader age, releases it, then proves a second
+checkpoint reaches zero remaining frames and a zero-byte WAL. On cold 16k/64k
+runs the policy completed 4/4 and 25/25 checkpoints respectively; the 131k
+continuation completed 57/57. It preserves the scale gate and improves live
+64-record p99 from 38.7 to 37.5 ms in the measured run.
+
+### F14 — retry acknowledgement must match the scheduled scope
+
+The frozen corpus contains 39 session transcript objects larger than the
+coordinator's 4,096-record reconcile budget. Retry targets were correctly
+object-specific, but `reconcile_declared_object` acquired an instance-scoped
+observation lease. Completing the first object therefore acknowledged every
+sibling object whose dirty sequence predated that lease. A later full scan
+could rediscover some omitted ranges, which made repeated refreshes appear to
+converge while still leaving output incomplete.
+
+The lifecycle now has an explicit object reconcile scope. Success acknowledges
+only that exact `(adapter, instance, stream, object)` target; failure and
+further bounded backlog requeue the same object. A deterministic supervisor
+test uses 17 sibling files, each with 4,097 records, and requires every durable
+cursor to reach EOF across more than one 16-pass wake budget. The benchmark's
+32-object/131,104-record release gate produces all 131,104 messages before
+readiness with zero retries. The first lifecycle build took 16.45 seconds; the
+set-write build takes 11.84 seconds.
+
+### F15 — query bootstrap requires an observation pause barrier
+
+Query index and FTS finalization took about 37 seconds on the frozen corpus.
+During that interval the live supervisor's periodic polling backstop could
+start another full reconcile. SQLite remained safe because the writer
+serialized commands, but the host could start readers and return while that
+reconcile was still active. The benchmark readiness assertion caught this as
+`reconciling` with a pending full repair instead of silently timing the repair.
+
+Bootstrap completion now drains and pauses every native supervisor before the
+sole writer changes journal mode or rebuilds query structures. Watchers remain
+registered and continue admitting bounded dirty state while paused. After
+finalization, each worker resumes, drains all changes admitted during the
+barrier, and resets its polling deadline before query workers start. A focused
+test proves that a source mutation admitted while paused is invisible during
+finalization and durable before resume completes.
+
+### F16 — normalizing source records alone does not reduce this schema
+
+The 64k page audit attributed 80.7 MiB to `fact_records`, 13.5 MiB to its
+identity B-tree, and 11.8 MiB to its two required ownership indexes. Raw fact
+entity keys accounted for 31.5 MiB, but only 10.1 MiB after deduplication,
+which made a dictionary or source-record table look attractive in isolation.
+
+The actual `source_records` spike retained the stable external fact identity,
+normalized the record provenance once, and added the minimum record/fact
+indexes needed by ownership and retraction. Its tables and indexes occupied
+89.91 MiB versus 89.88 MiB for the current fact/source structures. The narrow
+record row was offset by a new fact-to-record key, uniqueness B-tree, and
+ownership indexes. It would also add 65,536 inserts and joins to the measured
+workload. The rewrite is therefore rejected, not deferred as an assumed win.
+Any future surrogate design must benchmark the complete tables and indexes and
+must narrow downstream foreign keys as well; normalizing one repeated prefix
+is insufficient.
+
+The audit did identify one safe physical redundancy. Canonical and assertion
+projections retain their semantic entity keys and point to the generic ledger
+by `fact_id`; no production SQL reads `fact_records.entity_key`. New writes now
+store that nullable ledger column as `NULL` while preserving fact ID, kind,
+source instance/stream/object/generation, cursor range, record hash, local
+ordinal, observation time, retained payload policy, and commit sequence. An
+entity-omission-only 64k spike was runtime-neutral and reduced the database
+from 375.5 MiB to 342.9 MiB, 8.7%. Existing databases remain readable and
+correct; the space is reclaimed on the next rebuild rather than by a risky
+in-place rewrite.
+
+### F17 — bounded multi-row writes reduce SQLite and FTS amplification
+
+The remaining history path executed one SQL statement for every fact,
+canonical message, and content block. The writer now emits multi-row fact
+upserts in chunks of 512, canonical-message upserts in chunks of 256, and
+new-message content-block inserts in chunks of 512. Full-size SQL shapes use
+the connection's statement cache; variable tails are prepared without
+polluting it. Owned parameter buffers are bounded by the existing
+1,024-record/8 MiB transaction limits. Existing messages and duplicate message
+keys retain the sequential delete/replacement path so last-write semantics do
+not change.
+
+Coalescing canonical-message upserts also lets FTS5 amortize trigger/segment
+work. At 64k the production path now reports 724,910 SQLite row changes rather
+than roughly 1.14 million and a 22.3 MiB WAL rather than roughly 43 MiB. The
+five-run medians are 1.176/6.140 seconds at 16k/64k with a passing 5.220x scale
+ratio, while exact Claude, Codex, and Grok differentials preserve cold, live,
+reconcile, generation-replacement, and restart semantics. On the frozen 3.86
+GB corpus, ready remains equal to convergence at 574.80 seconds with zero
+retries, and the database is 6.1% smaller.
+
 ## Controlled spikes and decisions
 
 | Spike                                                                                               | Result                                                                                                                                       | Decision                                                                                                                  |
@@ -251,7 +473,18 @@ allowed to violate a rule that production correctly enforces.
 | Raise WAL autocheckpoint from ~64 MiB to ~1 GiB                                                     | 64k regressed from 13.43 s to 18.77 s                                                                                                        | Rejected; close-time checkpoint burst outweighed reduced checkpoint frequency                                             |
 | Tune live WAL checkpoint cadence                                                                    | ~64 MiB gave 64-record p99 143.9 ms; ~16 MiB gave p99 69.1 ms but 64k cold 18.45 s; ~32 MiB gave 100-sample p99 91.4 ms and 64k cold 16.66 s | Landed ~32 MiB as the measured balance; retain adaptive/background checkpointing as future work                           |
 | Standalone Rust delta reducer for run state                                                         | 131k was neutral (41.78 vs 42.14 s) and smaller cases regressed                                                                              | Reverted; revisit only with schema-level, set-oriented arrangements                                                       |
+| Query-plan-aligned run-state reducer indexes                                                        | 64k: 13.62 -> 11.02 s in the controlled one-run comparison; reducer: 1,423.6 -> 386.8 ms; initial 16k/64k medians 1.74/12.13 s               | Landed; both reducer queries are `EXPLAIN QUERY PLAN` tested                                                              |
+| Remove superseded indexes and narrow the source-statistics covering index                           | Final 16k/64k medians: 1.555/8.098 s (5.209x); DB: 94.5/375.5 MiB; 131k continuation: 20.08 s and 751.0 MiB; all 12 query groups pass        | Landed; same-version repair removes old shapes, while source-statistics and usage queries retain tested indexed plans     |
+| Replace hidden autocheckpoint with writer-owned nonblocking checkpoint                              | 16k/64k: 1.559/8.007 s (5.138x), 4/4 and 25/25 complete; live p99: 2.5 ms/37.5 ms; pinned-reader recovery reaches a zero-byte WAL            | Landed; checkpoint progress and reader-blocked time are bounded telemetry, and shutdown retries after query-pool closure  |
+| Add bounded source-pipeline and adapter/stream telemetry                                            | 16k/64k: 1.662/8.597 s (5.173x); 131k: 21.22 s; live p99: 3.2/38.4 ms; 64k read/decode totals: 109.8/662.3 ms                                | Landed; remains inside both regression gates and proves storage/projection, not source decoding, dominates                |
 | Open `node:sqlite` for metrics while the native owner remains live                                  | Reproducible macOS `SIGBUS` in the native writer after 18–19 commits                                                                         | Rejected; all live metrics and queries cross the native read pool, and offline SQLite inspection waits for owner disposal |
+| Give object retry work an instance-scoped lifecycle lease                                           | Frozen corpus silently lost sibling targets; even post-ready repair omitted 29,850 records                                                   | Fixed with exact object-scoped acknowledgement and 17/32-sibling regression gates                                         |
+| Let supervisors poll during deferred-index/FTS finalization                                         | Readiness guard observed an active full reconcile after the writer cleared bootstrap                                                         | Fixed with native drain/pause/finalize/resume/drain barrier; watchers continue admitting changes                          |
+| Durable bootstrap on the frozen 3.86 GB corpus                                                      | 634.37 s ready/converged, 1,112,311 records, 5,138,709 facts, 69,041 commits, zero retries, 9,808.2 MiB DB                                   | Accepted as the first complete-output large-corpus reference report                                                       |
+| Normalize record provenance into a separate `source_records` table                                  | Complete 64k tables/indexes: 89.91 MiB normalized versus 89.88 MiB current; also adds one source-row insert and downstream joins per record  | Rejected; a future surrogate must narrow downstream identities and prove a net whole-schema win                           |
+| Omit the unconsumed generic-ledger entity-key copy                                                  | Entity-only 64k spike was runtime-neutral; DB 375.5 -> 342.9 MiB (-8.7%); canonical/assertion keys and all source provenance remain          | Landed without a schema bump; existing rows remain compatible and reclaim space on rebuild                                |
+| Batch fact, canonical-message, and new content-block writes                                         | Five-run 16k/64k medians 1.176/6.140 s (5.220x); 64k row changes ~1.14M -> 724,910 and WAL ~43 -> 22.3 MiB                                   | Landed with 512/256/512-row bounds and sequential fallback for replacements/duplicates                                    |
+| Repeat the optimized frozen-corpus gate                                                             | 574.80 s ready/converged, complete identical counts, zero retries, 9,214.1 MiB DB                                                            | Accepted; 9.4% faster and 6.1% smaller than the first truthful reference                                                  |
 
 The bulk spike is deliberately not exposed as a production flag. Its lifecycle
 is incomplete until crash recovery, reader quiescence, durable readiness, FTS
@@ -264,27 +497,38 @@ cross-engine oracles, and the packaged playground topology:
 
 - `cargo fmt --all -- --check`, workspace/all-feature `cargo check`, and
   workspace/all-target/all-feature Clippy with warnings denied passed;
-- the complete Rust workspace test run passed all 513 tests, including schema
-  rebuild compaction, cleanup query-plan selection, retention codecs,
-  projection replacement, recovery, cancellation, and query-pool coverage;
+- the latest complete Rust workspace/all-feature run passed all 531 tests,
+  including the object-scope sibling-backlog and bootstrap pause/resume
+  regressions, schema rebuild compaction, cleanup query-plan selection,
+  retention codecs, batched fact/message/content replacement, recovery,
+  cancellation, and query-pool coverage;
 - `pnpm typecheck`, `pnpm lint`, `pnpm format:check`, and `pnpm validate`
   passed, with zero architecture-boundary violations;
-- SDK package tests passed 311 tests with seven intentional skips, and all 110
+- SDK package tests passed 312 tests with seven intentional skips, and all 110
   CLI tests passed;
-- the small, medium, Codex, and Grok observation differential suites matched
-  their retained oracles exactly;
+- the Claude, Codex, and Grok observation differential suites are exact across
+  cold, live, reconcile, generation-replacement, and restart;
+- the packaged playground production build passed, the 32-sibling bootstrap
+  gate retained all 131,104 messages with ready equal to converged, warm reopen
+  rewrote zero rows, and the latest 100-sample live gate measured p50 1.5 ms /
+  p99 3.0 ms;
+- the frozen 3.86 GB gate completed with zero retries and ready equal to
+  converged at 574.80 seconds with the exact complete durable counts; its
+  report is retained outside the repository under the private reference-run
+  directory;
 - all 12 query-conformance groups passed on the 3-project, 20-session,
   300-message fixture, including a 12 MiB response-boundary case;
 - `pnpm build` rebuilt the native module, SDK, CLI, and playground; and
 - a post-build Electron utility-process smoke completed the native handshake,
   observed exactly 3 projects, 20 sessions, and 300 messages, recovered after
-  request cancellation, and kept each single fixture query below 3 ms. That
-  one-run smoke is topology evidence, not a release latency percentile.
+  100 request cancellations, and kept each single fixture query below 2.2 ms.
+  That one-run smoke is topology evidence, not a release latency percentile.
 
 The cold-load and 100-sample live distributions in the baseline section are
-the performance evidence. The remaining failed 4x scale-ratio gate is retained
-as an explicit open condition rather than hidden by the passing correctness
-matrix.
+the performance evidence. The 4x synthetic scale-ratio, explicit checkpoint,
+and pinned-reader recovery gates now pass, and a truthful large production
+reference now exists. No apples-to-apples speed claim is made against the
+retired legacy bulk path because its durability and durable outputs differ.
 
 ## Target architecture
 
@@ -329,9 +573,10 @@ The 64k spike saved only 3%; the 131k spike saved 23%. Bootstrap mode must
 therefore be size-gated and benchmarked on the real corpus rather than applied
 to every startup.
 
-### C. Normalize source-record provenance in the next schema
+### C. Keep the current provenance schema until a surrogate proves a net win
 
-Schema v41 should store source-record identity/provenance once:
+The measured source-record normalization is not the next schema. A viable
+future design would need to store source-record identity/provenance once:
 
 ```text
 source_records
@@ -346,33 +591,43 @@ fact_records
   local ordinal / fact kind / entity key / optional retained payload
 ```
 
-Derived rows should reference a narrow fact/record surrogate where it reduces
-foreign-key and secondary-index width while preserving the stable external
-fact identity. The migration remains a rebuild of the local derived cache, as
-RFC 011 already allows. `WITHOUT ROWID` and integer-surrogate alternatives must
-be benchmarked because random hash primary keys can trade space for insert
-locality.
+Derived rows would also need to reference a narrow fact/record surrogate so
+the saved prefix is not replaced by another wide foreign key and automatic
+B-tree. The complete 64k spike measured 89.91 MiB normalized versus 89.88 MiB
+current, so no schema version is reserved and no migration is scheduled. Any
+successor must benchmark all tables, automatic/secondary indexes, insert work,
+retraction plans, and query joins. `WITHOUT ROWID` and integer-surrogate
+alternatives remain candidates because random hash primary keys can trade
+space for insert locality, but they are not accepted architecture without that
+whole-schema evidence.
 
 ### D. Move projection application toward sets and affected keys
 
-The next projection layer stages one commit's facts in bounded temporary or
-in-memory tables and performs `INSERT ... SELECT`, keyed upserts, and reductions
-once per affected entity. Fact-kind/source ownership is computed once and
-routed only to relevant projectors. Reducer arrangements store the minimum
-state needed to apply deltas; full scans remain explicit repair/rewrite paths.
+The first accepted slice now applies bounded multi-row writes to the generic
+fact ledger, canonical messages, and new content blocks. Further slices may
+stage one commit's facts in bounded temporary or in-memory tables and perform
+`INSERT ... SELECT`, keyed upserts, and reductions once per affected entity.
+Fact-kind/source ownership should be computed once and routed only to relevant
+projectors. Reducer arrangements should store the minimum state needed to
+apply deltas; full scans remain explicit repair/rewrite paths.
 
 This follows the useful part of modern incremental view maintenance: propagate
 changed keys and weighted/delta contributions, not entire histories. It does
 not require adopting a distributed dataflow runtime inside the desktop engine.
+The earlier standalone run-state delta reducer was neutral at 131k and
+regressed smaller cases, so complex reducers remain evidence-gated rather than
+being rewritten merely to satisfy an architectural shape.
 
-### E. Make checkpointing adaptive only after reader telemetry exists
+### E. Evolve the measured checkpoint controller carefully
 
-The measured 32 MiB checkpoint target remains. Both the 16 MiB and 64 MiB
-alternatives lost an important workload gate, and a much larger fixed threshold
-was worse. Future control should observe WAL bytes, write rate, oldest reader
-age, and shutdown/finalization state. A pinned reader is allowed to delay a
-checkpoint, but the engine must expose it and demonstrate that WAL space is
-reclaimed after the reader releases.
+The measured 32 MiB writer-owned checkpoint target remains. Both the 16 MiB and
+64 MiB alternatives lost an important workload gate, and a much larger fixed
+threshold was worse. The controller observes physical WAL bytes, explicitly
+reports oldest-reader pressure alongside checkpoint progress, and finalizes
+after the read pool closes. A pinned reader may delay a checkpoint but cannot
+make the writer block; the recovery test demonstrates that WAL space is
+reclaimed after release. Future adaptation may add write rate and shutdown/
+bootstrap state, but only behind the same cold/live/concurrent gates.
 
 ## Execution plan
 
@@ -396,14 +651,38 @@ reclaimed after the reader releases.
 - record WAL, checkpoint, RSS, queue delay, and oldest-reader metrics;
 - run 100+ one-host live appends and burst tests;
 - run cold/warm/rewrite/crash tests on Claude, Codex, and Grok fixtures;
-- select a redacted representative large corpus and capture both legacy-bulk
-  and observation-host reports on the reference runner;
+- select a redacted representative large corpus, capture the production-host
+  report, and admit a legacy comparator only if its durability and durable
+  outputs are equivalent;
 - add query latency with concurrent ingest and pinned-reader WAL recovery.
 
-Exit: the RFC p50/p99 and apples-to-apples bulk comparison are measured rather
-than inferred.
+Exit: the RFC p50/p99 and production large-corpus baseline are measured rather
+than inferred; a non-equivalent legacy number is explicitly rejected instead
+of being presented as a comparison.
 
-### P2 — writer-owned bulk bootstrap
+Progress on 2026-08-13:
+
+- complete: bounded native write-stage/projector and query queue/execution
+  histograms, row/change counters, physical DB/WAL bytes, and active-reader
+  age;
+- complete: production-path peak-RSS reporting, 100-sample one-record and
+  64-record live distributions, and the ten-reader concurrent-refresh gate;
+- complete: cold synthetic localization and query-plan-verified run-state and
+  index-amplification fixes;
+- complete: the fully instrumented synthetic 16k/64k scale gate at a 5.173x
+  source-telemetry ratio and 5.217x final-lifecycle ratio, plus a 131k
+  continuation and bounded process-RSS evidence;
+- complete: explicit nonblocking checkpoint progress/timing and deterministic
+  pinned-reader WAL recovery through the sole native owner;
+- complete: bounded source read/decode/fact-construction metrics and capped
+  adapter/stream/driver dimensions, with healthy bounded continuations kept
+  distinct from retries;
+- complete: a frozen 3.86 GB real-corpus production-host report with truthful
+  readiness and complete object-scope convergence; the retired legacy-bulk
+  number remains diagnostic only because its durability model and durable
+  outputs are not equivalent.
+
+### P2 — writer-owned bulk bootstrap (implemented)
 
 - add durable bootstrap epoch/state and projection readiness;
 - do not start query workers until finalization completes;
@@ -416,34 +695,64 @@ than inferred.
 Exit: >=100k real-corpus loads improve materially, <=64k loads do not regress,
 and no partial index/FTS state can be served.
 
-### P3 — normalized provenance schema
+Completed on 2026-08-13. The reviewed query-only index/FTS set is deferred only
+for fresh inputs estimated above 48 MiB; uniqueness, foreign-key,
+generation-retraction, reducer, and usage-series structures remain live. The
+durable marker recovers before readers on restart, finalization stays on the
+sole writer with file-backed temp sorting and FULL rollback durability, and
+the supervisor pause barrier makes the readiness boundary observation-safe.
+Controlled 131k results show no useful one-object benefit but a 10% win and
+1.10 million fewer incremental row changes on a 4,096-object shape. The final
+32-large-object regression and frozen-corpus gate both report ready equal to
+converged.
 
-- spike record/fact key layouts and `WITHOUT ROWID` candidates;
-- land `source_records` plus narrow fact references behind a schema rebuild;
-- remove proven redundant indexes only after `EXPLAIN QUERY PLAN` and query
-  benchmark coverage;
-- track DB+WAL bytes per source record and per fact.
+### P3 — provenance storage decision (implemented)
 
-Exit: lower storage/write amplification with byte-for-byte query and replay
-parity.
+- audited complete table/index bytes and repeated fact fields at 64k and on the
+  frozen corpus;
+- spiked a normalized `source_records` layout with the required identity,
+  ownership, and retraction indexes;
+- rejected the schema rewrite after it measured 89.91 MiB versus 89.88 MiB for
+  the current structures;
+- removed only the proven unconsumed generic-ledger entity-key copy while
+  retaining semantic keys in canonical/assertion projections and preserving
+  all fact/source provenance;
+- retained the nullable column for existing-database compatibility rather than
+  forcing an unmeasured migration.
 
-### P4 — set-oriented projection batches
+Exit complete: 64k storage is 8.7% lower, the real database is 6.1% lower, and
+query/replay parity is exact. A broader integer-surrogate design remains a new
+measured proposal, not unfinished P3 work.
 
-- stage typed facts and affected keys once per transaction;
-- replace repeated row loops with bounded set operations where measurements
-  show a win;
-- persist reducer arrangements that make ordinary work proportional to deltas;
-- preserve full reducers for audit, generation replacement, and recovery.
+### P4 — bounded set-oriented projection batches (implemented)
 
-Exit: `T(64k) / T(16k) <= 5.25`, then tighten toward linear as the real corpus
-confirms it.
+- emit bounded multi-row upserts for fact rows and canonical messages;
+- emit bounded multi-row inserts for cold/new content blocks while preserving
+  sequential replacement and duplicate-key last-write behavior;
+- cache only fixed full-chunk SQL shapes and keep all buffers inside the
+  existing record/byte transaction bounds;
+- preserve full reducers for audit, generation replacement, and recovery;
+- defer more invasive reducer arrangements because the standalone run-state
+  delta spike was neutral/regressive and the current real-corpus stage profile
+  does not justify changing semantics without a dedicated proof.
 
-### P5 — release acceptance
+Exit complete: five-run `T(64k) / T(16k)` is 5.220, real-corpus time improves
+9.4%, one-record live p50/p99 remain 1.5/3.0 ms, and all adapter/query parity
+gates pass.
+
+### P5 — release acceptance (implementation complete)
 
 - full Rust, SDK, IPC, playground, parity, corruption/recovery, and package
-  gates;
-- reference cold/live/burst/query-concurrency reports reviewed by a maintainer;
-- update the Phase 10 closure ledger without reintroducing any legacy owner.
+  gates pass;
+- five-run cold, 100-sample live, warm-reopen, 32-object bootstrap, query
+  conformance, Electron topology, and frozen-corpus reports are retained
+  outside the repository;
+- the Phase 10 closure ledger records the final ownership and performance
+  evidence without reintroducing a legacy owner.
+
+Local implementation acceptance is complete. Publication of private reports,
+portable absolute thresholds, scale-50 policy, and the final release decision
+remain maintainer-owned policy inputs rather than code gaps.
 
 ## Research basis
 

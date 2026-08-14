@@ -1168,6 +1168,38 @@ mod tests {
             0
         );
 
+        connection
+            .execute(
+                "UPDATE canonical_messages SET search_text = NULL WHERE message_key = ?1",
+                [b"m1".as_slice()],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "UPDATE canonical_messages SET search_text = '   ' WHERE message_key = ?1",
+                [b"m1".as_slice()],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "UPDATE canonical_messages SET search_text = 'restored marker' WHERE message_key = ?1",
+                [b"m1".as_slice()],
+            )
+            .unwrap();
+        assert_eq!(
+            read_search_page(&connection, &request("restored marker", 10))
+                .unwrap()
+                .total,
+            1
+        );
+        connection
+            .execute(
+                "INSERT INTO canonical_message_search_fts(canonical_message_search_fts, rank) \
+                 VALUES('integrity-check', 1)",
+                [],
+            )
+            .expect("canonical FTS must agree with its filtered content view");
+
         let plan = connection
             .prepare(
                 "EXPLAIN QUERY PLAN SELECT rowid FROM canonical_message_search_fts \

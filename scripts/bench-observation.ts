@@ -11,6 +11,7 @@
  * Usage:
  *   pnpm bench:observation
  *   pnpm bench:observation --records 32768 --runs 3 --warmup 1
+ *   pnpm bench:observation --records 32768 --objects 1024 --runs 3 --warmup 1
  *   pnpm bench:observation --scenario warm-unchanged
  *   pnpm bench:observation --scenario live-append --append-records 64
  *   pnpm bench:observation --scenario warm-append --append-records 64
@@ -36,6 +37,7 @@ import * as path from 'node:path';
 import { parseArgs } from 'node:util';
 
 import { openObservationHost } from '../packages/sdk/src/observation-host.js';
+import type { SpaghettiEnginePerformanceStats } from '../packages/sdk/src/native.js';
 
 type Scenario = 'cold' | 'live-append' | 'warm-unchanged' | 'warm-append';
 
@@ -46,6 +48,7 @@ interface DatabaseMetrics {
   changeLogRows: number | null;
   changeLogPayloadBytes: number | null;
   databaseBytes: number;
+  performance: SpaghettiEnginePerformanceStats | null;
 }
 
 interface Sample extends DatabaseMetrics {
@@ -74,12 +77,19 @@ interface Summary {
   };
   medianMibPerSecond: number;
   medianRecordsPerSecond: number;
+  memory: {
+    baselineRssBytes: number;
+    finalRssBytes: number;
+    peakRssBytes: number;
+    peakRssDeltaBytes: number;
+  };
 }
 
 const { values } = parseArgs({
   options: {
     fixture: { type: 'string' },
     records: { type: 'string' },
+    objects: { type: 'string' },
     'append-records': { type: 'string' },
     runs: { type: 'string' },
     warmup: { type: 'string' },
@@ -90,6 +100,8 @@ const { values } = parseArgs({
 });
 
 const records = positiveInteger(values.records ?? '8192', 'records');
+const objects = positiveInteger(values.objects ?? '1', 'objects');
+if (objects > records) fail(`--objects must not exceed --records (${objects} > ${records})`);
 const appendRecords = positiveInteger(values['append-records'] ?? '64', 'append-records');
 const runs = positiveInteger(values.runs ?? '3', 'runs');
 const warmup = nonnegativeInteger(values.warmup ?? '1', 'warmup');
@@ -103,16 +115,23 @@ if (fixture && !existsSync(fixture)) fail(`fixture not found: ${fixture}`);
 const reportPath = values['report-json'] ? path.resolve(expandTilde(values['report-json'])) : undefined;
 const keepWorkspace = values['keep-workspace'] ?? false;
 const workspace = mkdtempSync(path.join(tmpdir(), 'spaghetti-observation-bench-'));
+const baselineRssBytes = process.memoryUsage().rss;
+let peakRssBytes = baselineRssBytes;
+const rssSampler = setInterval(() => {
+  peakRssBytes = Math.max(peakRssBytes, process.memoryUsage().rss);
+}, 5);
+rssSampler.unref();
 
 try {
   const sourceRoot = fixture ?? path.join(workspace, '.claude');
-  const transcript = fixture ? undefined : createSyntheticCorpus(sourceRoot, records);
+  const transcript = fixture ? undefined : createSyntheticCorpus(sourceRoot, records, objects);
   const inputBytes = directoryBytes(sourceRoot);
   const inputRecords = fixture ? countJsonLines(sourceRoot) : records;
   const samples: Sample[] = [];
 
   console.log(
-    `RFC 011 observation benchmark: ${scenario}, ${inputRecords.toLocaleString()} records, ${formatBytes(inputBytes)}`,
+    `RFC 011 observation benchmark: ${scenario}, ${inputRecords.toLocaleString()} records, ` +
+      `${fixture ? 'fixture objects' : `${objects.toLocaleString()} objects`}, ${formatBytes(inputBytes)}`,
   );
 
   if (scenario === 'live-append') {
@@ -126,7 +145,7 @@ try {
       databasePath: path.join(workspace, 'observation-live.sqlite'),
     });
     samples.push(...liveResult.samples);
-    const summary = summarize(scenario, records, appendRecords, samples, liveResult.finalMetrics);
+    const summary = summarize(scenario, inputRecords, appendRecords, samples, liveResult.finalMetrics);
     printSummary(summary, reportPath);
   } else {
     for (let index = 0; index < warmup + runs; index += 1) {
@@ -145,11 +164,12 @@ try {
       if (measured) samples.push(sample);
     }
     const finalMetrics = requireLastSample(samples);
-    const summary = summarize(scenario, records, appendRecords, samples, finalMetrics);
+    const summary = summarize(scenario, inputRecords, appendRecords, samples, finalMetrics);
     printSummary(summary, reportPath);
   }
   if (keepWorkspace) console.log(`  workspace: ${workspace}`);
 } finally {
+  clearInterval(rssSampler);
   if (!keepWorkspace) rmSync(workspace, { recursive: true, force: true });
 }
 
@@ -207,6 +227,7 @@ async function runLiveAppendSeries(options: {
     await host.value.dispose();
   }
   const finalMetrics = readDatabaseMetrics(options.databasePath);
+  finalMetrics.performance = samples.at(-1)?.performance ?? null;
   assertSyntheticConvergence(
     options.inputRecords + (options.warmup + options.runs) * options.appendRecords,
     finalMetrics,
@@ -223,6 +244,7 @@ async function readHostMetrics(host: Awaited<ReturnType<typeof openObservationHo
     changeLogRows: null,
     changeLogPayloadBytes: null,
     databaseBytes: stats.allocatedDatabaseBytes,
+    performance: stats.performance ?? null,
   };
 }
 
@@ -298,8 +320,9 @@ async function finishSample(
   host: Awaited<ReturnType<typeof openObservationHost>>,
   databasePath: string,
 ): Promise<DatabaseMetrics> {
+  const ownerMetrics = await readHostMetrics(host);
   await host.dispose();
-  return readDatabaseMetrics(databasePath);
+  return { ...readDatabaseMetrics(databasePath), performance: ownerMetrics.performance };
 }
 
 function assertSyntheticConvergence(expectedMessages: number, metrics: DatabaseMetrics): void {
@@ -318,33 +341,63 @@ async function timedOpen(sourceRoot: string, databasePath: string) {
     ownerLabel: 'observation-benchmark',
     sources: [{ adapterId: 'claude-code', roots: [sourceRoot] }],
   });
+  try {
+    assertObservationReady(value);
+  } catch (error) {
+    await value.dispose();
+    throw error;
+  }
   return { value, durationMs: performance.now() - startedAt };
 }
 
 async function converge(host: Awaited<ReturnType<typeof openObservationHost>>): Promise<void> {
   for (let pass = 0; pass < 10_000; pass += 1) {
-    const observation = host.status.observation;
-    if (
-      !observation.reconcileInFlight &&
-      !observation.recoveryRequired &&
-      !observation.fullReconcileRequired &&
-      observation.dirtyInstances === 0
-    ) {
-      return;
-    }
+    if (observationIsConverged(host)) return;
     await host.refresh('claude-code');
   }
   throw new Error('observation did not converge after 10,000 bounded repair passes');
 }
 
-function createSyntheticCorpus(root: string, recordCount: number): string {
+function assertObservationReady(host: Awaited<ReturnType<typeof openObservationHost>>): void {
+  if (observationIsConverged(host)) return;
+  const observation = host.status.observation;
+  throw new Error(
+    'observation host violated readiness: ' +
+      `state=${observation.state}, inFlight=${observation.reconcileInFlight}, ` +
+      `recovery=${observation.recoveryRequired}, full=${observation.fullReconcileRequired}, ` +
+      `dirtyInstances=${observation.dirtyInstances}`,
+  );
+}
+
+function observationIsConverged(host: Awaited<ReturnType<typeof openObservationHost>>): boolean {
+  const observation = host.status.observation;
+  return (
+    !observation.reconcileInFlight &&
+    !observation.recoveryRequired &&
+    !observation.fullReconcileRequired &&
+    observation.dirtyInstances === 0
+  );
+}
+
+function createSyntheticCorpus(root: string, recordCount: number, objectCount: number): string {
   const project = path.join(root, 'projects', '-benchmark-project');
   mkdirSync(project, { recursive: true });
-  const transcript = path.join(project, '00000000-0000-4000-8000-000000000001.jsonl');
-  const chunks: string[] = [];
-  for (let index = 0; index < recordCount; index += 1) chunks.push(syntheticRecord(index));
-  writeFileSync(transcript, chunks.join(''));
-  return transcript;
+  let nextRecord = 0;
+  let firstTranscript = '';
+  for (let objectIndex = 0; objectIndex < objectCount; objectIndex += 1) {
+    const suffix = (objectIndex + 1).toString(16).padStart(12, '0');
+    const sessionId = `00000000-0000-4000-8000-${suffix}`;
+    const transcript = path.join(project, `${sessionId}.jsonl`);
+    if (!firstTranscript) firstTranscript = transcript;
+    const count = Math.floor(recordCount / objectCount) + (objectIndex < recordCount % objectCount ? 1 : 0);
+    const chunks: string[] = [];
+    for (let local = 0; local < count; local += 1) {
+      chunks.push(syntheticRecord(nextRecord, sessionId));
+      nextRecord += 1;
+    }
+    writeFileSync(transcript, chunks.join(''));
+  }
+  return firstTranscript;
 }
 
 function appendSyntheticRecords(transcript: string, start: number, count: number): void {
@@ -353,10 +406,9 @@ function appendSyntheticRecords(transcript: string, start: number, count: number
   appendFileSync(transcript, chunks.join(''));
 }
 
-function syntheticRecord(index: number): string {
+function syntheticRecord(index: number, sessionId = '00000000-0000-4000-8000-000000000001'): string {
   const suffix = index.toString(16).padStart(12, '0');
   const uuid = `00000000-0000-4000-8000-${suffix}`;
-  const sessionId = '00000000-0000-4000-8000-000000000001';
   const common = {
     uuid,
     parentUuid: null,
@@ -409,6 +461,7 @@ function readDatabaseMetrics(databasePath: string): DatabaseMetrics {
       changeLogRows: scalar('SELECT COUNT(*) AS value FROM change_log'),
       changeLogPayloadBytes: scalar('SELECT COALESCE(SUM(length(payload)), 0) AS value FROM change_log'),
       databaseBytes: statSync(databasePath).size,
+      performance: null,
     };
   } finally {
     database.close();
@@ -456,6 +509,8 @@ function summarize(
   finalMetrics: DatabaseMetrics,
 ): Summary {
   const durationSamples = samples.map((sample) => sample.durationMs);
+  const finalRssBytes = process.memoryUsage().rss;
+  peakRssBytes = Math.max(peakRssBytes, finalRssBytes);
   return {
     scenario: selectedScenario,
     records: selectedRecords,
@@ -465,6 +520,12 @@ function summarize(
     durationMs: distribution(durationSamples),
     medianMibPerSecond: median(samples.map((sample) => sample.mibPerSecond)),
     medianRecordsPerSecond: median(samples.map((sample) => sample.recordsPerSecond)),
+    memory: {
+      baselineRssBytes,
+      finalRssBytes,
+      peakRssBytes,
+      peakRssDeltaBytes: Math.max(0, peakRssBytes - baselineRssBytes),
+    },
   };
 }
 
@@ -473,6 +534,11 @@ function printSummary(summary: Summary, selectedReportPath?: string): void {
     `  p50/p99: ${formatDuration(summary.durationMs.p50)} / ${formatDuration(summary.durationMs.p99)}, ` +
       `${summary.medianRecordsPerSecond.toFixed(0)} records/s, ` +
       `${summary.medianMibPerSecond.toFixed(2)} MiB/s`,
+  );
+  printPerformanceSummary(summary.finalMetrics.performance);
+  console.log(
+    `  process memory: ${formatBytes(summary.memory.peakRssBytes)} peak RSS ` +
+      `(+${formatBytes(summary.memory.peakRssDeltaBytes)} from harness baseline)`,
   );
   console.log(
     `  final: ${summary.finalMetrics.canonicalMessages.toLocaleString()} messages, ` +
@@ -497,7 +563,63 @@ function requireLastSample(samples: Sample[]): DatabaseMetrics {
     changeLogRows: sample.changeLogRows,
     changeLogPayloadBytes: sample.changeLogPayloadBytes,
     databaseBytes: sample.databaseBytes,
+    performance: sample.performance,
   };
+}
+
+function printPerformanceSummary(performance: SpaghettiEnginePerformanceStats | null): void {
+  if (!performance) return;
+  const writerTimings = new Map(performance.writer.timings.map((timing) => [timing.name, timing.latency]));
+  const stageNames = [
+    'prepare',
+    'canonical_projection',
+    'runtime_projection',
+    'usage_projection',
+    'change_log',
+    'sqlite_commit',
+    'bootstrap_finalize',
+  ];
+  const stages = stageNames
+    .map((name) => {
+      const latency = writerTimings.get(name);
+      return latency ? `${name}=${latency.totalMs.toFixed(1)}ms` : null;
+    })
+    .filter((value): value is string => value !== null)
+    .join(', ');
+  console.log(
+    `  native writer: ${performance.writer.sqliteRowsChanged.toLocaleString()} SQLite row changes, ` +
+      `queue high-water ${performance.writer.queueHighWatermark}; ${stages}`,
+  );
+  const sourceTimings = new Map(performance.source.totals.timings.map((timing) => [timing.name, timing.latency]));
+  console.log(
+    `  native source: ${performance.source.totals.recordsRead.toLocaleString()} records / ` +
+      `${formatBytes(performance.source.totals.payloadBytesRead)} read, ` +
+      `${performance.source.totals.factsEmitted.toLocaleString()} facts, ` +
+      `${performance.source.totals.readContinuations.toLocaleString()} bounded continuations / ` +
+      `${performance.source.totals.readRetries.toLocaleString()} retries; ` +
+      `read=${(sourceTimings.get('source_read')?.totalMs ?? 0).toFixed(1)}ms, ` +
+      `decode=${(sourceTimings.get('decode_total')?.totalMs ?? 0).toFixed(1)}ms, ` +
+      `adapter=${(sourceTimings.get('adapter_decode')?.totalMs ?? 0).toFixed(1)}ms, ` +
+      `fact-build=${(sourceTimings.get('fact_build')?.totalMs ?? 0).toFixed(1)}ms`,
+  );
+  const projectors = performance.writer.timings
+    .filter((timing) => timing.name.startsWith('projector.'))
+    .sort((left, right) => right.latency.totalMs - left.latency.totalMs)
+    .slice(0, 5)
+    .map((timing) => `${timing.name.slice('projector.'.length)}=${timing.latency.totalMs.toFixed(1)}ms`)
+    .join(', ');
+  console.log(`  native projectors: ${projectors}`);
+  console.log(
+    `  native pressure: ${formatBytes(performance.storage.walFileBytes)} WAL, ` +
+      `${performance.queries.queueHighWatermark} query queue high-water, ` +
+      `${performance.queries.oldestActiveMs.toFixed(1)}ms oldest active reader`,
+  );
+  const checkpoint = performance.writer.checkpoint;
+  console.log(
+    `  native checkpoints: ${checkpoint.completed}/${checkpoint.attempts} completed, ` +
+      `${checkpoint.blocked} reader-blocked, ${checkpoint.lastRemainingFrames.toLocaleString()} frames remaining, ` +
+      `${checkpoint.blockedByReaderMs.toFixed(1)}ms blocked time`,
+  );
 }
 
 function distribution(values: number[]) {

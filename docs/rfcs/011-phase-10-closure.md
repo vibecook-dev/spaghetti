@@ -91,18 +91,24 @@ had superseded those claims.
 and links here; every Phase 10 slice records the final Rust-owned topology while
 preserving its historical benchmark observations.
 
-### P10-06 — broad-rollout evidence is not yet accepted
+### P10-06 — broad-rollout evidence remains a release-policy input
 
-The reproducible Phase 9 N-API and Phase 10 Electron IPC benchmarks have
-accepted small and scale-10 observations. Scale-50, maintainer-approved private
-corpus results, deeper native timing/allocation telemetry, and reviewed release
-thresholds remain rollout evidence. They are not a reason to preserve a second
-database authority and cannot be fabricated by code changes.
+The reproducible Phase 9 N-API and Phase 10 Electron IPC benchmarks accepted
+small and scale-10 observations. The later production-host pass added bounded
+native storage/source/query telemetry and completed a frozen 3.86 GB private
+corpus with truthful readiness: 1,112,311 source records, 5,138,709 facts,
+69,041 commits, zero retries, and ready equal to converged. The first truthful
+run took 634.37 seconds; the optimized revision takes 574.80 seconds with the
+same complete counts. The private reports stay outside the repository.
+Scale-50 policy and reviewed release thresholds remain maintainer-owned rollout
+inputs; they are not a reason to preserve a second database authority and
+cannot be fabricated by code changes.
 
 **Closure disposition:** the reproducible harness and report schema remain in
-the repository. Private-data execution and release-policy thresholds are
-explicitly maintainer-owned. They do not preserve a second database authority
-or leave a Phase 10 code path open.
+the repository, and a large private production reference now exists.
+Publication of private data and release-policy thresholds remain explicitly
+maintainer-owned. They do not preserve a second database authority or leave a
+Phase 10 code path open.
 
 ### P10-07 — repository benchmarks still confused the public and oracle APIs
 
@@ -172,11 +178,13 @@ persisting every normalized fact body as though they declared `Full`.
 **Resolution:** schema v40 carries the declared raw-retention policy through
 the commit context and records it on `source_streams`. `fact_records` is now a
 provenance/ownership ledger: `None` and `HashOnly` store an explicit empty
-`omitted` payload alongside the durable fact identity, entity key, source
+`omitted` payload alongside the durable fact identity, fact kind, source
 object/generation/cursor, record hash, ordinal, observation time, and commit
-sequence. `DiagnosticExcerpt` does the same for ordinary facts and retains
-only an already-redacted bounded unknown-record shape; `Full` opts into a
-compressed fact body. The unused wide fact index is removed; the
+sequence. Semantic entity identity remains in canonical/assertion projections;
+the nullable generic-ledger copy is omitted by the later amplification pass
+described below. `DiagnosticExcerpt` does the same for ordinary facts and
+retains only an already-redacted bounded unknown-record shape; `Full` opts into
+a compressed fact body. The unused wide fact index is removed; the
 source-instance and object/generation indexes required by inventory and
 retraction remain. Lossless canonical message detail stays available as the
 sole native-message copy, with bounded zstd compression and compact entity-key
@@ -200,6 +208,16 @@ v39 footprint at the comparable cursor. Every fact row used the explicit
 was then stopped through the normal Electron lifecycle; SQLite `quick_check`
 returned `ok`, and the resumable cache was retained.
 
+The later physical-amplification pass narrowed the generic ledger one step
+further. Canonical and assertion projections already retain semantic entity
+keys and reference `fact_records` by `fact_id`; no production query consumed
+the second `fact_records.entity_key` copy. New rows therefore leave that
+nullable compatibility column empty while retaining fact kind, complete source
+provenance, record identity, retention codec, and commit ownership. An
+entity-only 64k spike reduced the database from 375.5 MiB to 342.9 MiB without
+a measurable runtime change. Existing databases remain compatible and reclaim
+the space on rebuild; no in-place semantic migration is required.
+
 ### P10-11 — the retained benchmark did not measure production cold ingestion
 
 The performance follow-up found that the existing `bench:ingest` command still
@@ -220,14 +238,37 @@ known backlog. The best implementation point reduced 16,384 records to 2.08
 seconds; the final checkpoint-balanced configuration takes 2.58 seconds (11.7x
 faster than the original) while measuring single-record live append at p50 6.0
 ms / p99 8.2 ms and 64-record bursts at p50 19.1 ms / p99 91.4 ms. The remaining
-16k-to-131k scaling curve still fails the new acceptance gate.
+16k-to-131k scaling curve still failed the new acceptance gate at that point.
+
+The next measured pass aligned reducer indexes with their actual ordering,
+removed superseded query indexes, made checkpoints explicitly writer-owned,
+and added a durable size-gated query bootstrap. A frozen-corpus audit then
+found and fixed object retries being acknowledged at instance scope and a
+polling race across deferred FTS/index finalization. That lifecycle build
+measured 1.591 seconds at 16,384 records and 8.299 seconds at 65,536 records, a
+passing 5.217x ratio.
+
+The subsequent storage/set-write pass rejected a neutral source-record
+normalization (89.91 MiB versus 89.88 MiB for the complete 64k structures),
+omitted the unused ledger entity-key copy, and batched fact, canonical-message,
+and cold content-block writes within fixed bounds. Five-run medians are 1.176
+seconds at 16,384 records and 6.140 seconds at 65,536 records, a passing 5.220x
+ratio, with 86.4/343.0 MiB databases. A 100-sample one-record live repeat
+measures p50 1.5 ms and p99 3.0 ms. The 32-large-object gate completes all
+131,104 messages at ready/convergence in 11.84 seconds, and a 64k warm reopen
+performs zero writes with 7.7 ms median readiness. The 3.86 GB private gate
+retains the exact complete counts and zero retries at 574.80 seconds with a
+9,214.1 MiB durable database, 9.4% faster and 6.1% smaller than the first
+truthful reference.
 
 The [performance optimization design](./011-performance-optimization-plan.md)
 records the evidence, rejected spikes, non-negotiable correctness constraints,
-and staged plan for metrics, a writer-owned bootstrap lifecycle, normalized
-provenance storage, and set-oriented projection maintenance. Phase 10's Rust
-ownership exit remains complete; RFC-wide performance acceptance remains an
-active engineering gate rather than being represented as closed.
+and staged plan. Metrics, index alignment, writer-owned checkpoints, durable
+bootstrap, provenance compaction, and bounded set-oriented history writes are
+implemented. A broader integer-surrogate schema and more invasive reducer
+arrangements would be new evidence-gated work, not incomplete Phase 10 scope.
+Phase 10's Rust ownership exit remains complete; release-policy acceptance is
+kept separate from the code-ownership exit.
 
 ## Verification
 
@@ -237,32 +278,41 @@ The complete closure tree passed these local gates through 2026-08-13:
   `pnpm build`;
 - SDK package build and artifact scan: 16 emitted files and exactly four
   rolled public declarations;
-- SDK tests: 318 total, 311 passed, seven environment-appropriate skips, zero
+- SDK tests: 319 total, 312 passed, seven environment-appropriate skips, zero
   failures;
 - CLI tests: 110 passed, zero failures;
 - `cargo fmt --all -- --check`, workspace/all-feature `cargo check`, Clippy
-  with warnings denied, and 513 Rust tests;
+  with warnings denied, and 531 Rust tests;
 - Phase 9 query conformance: all 12 groups passed, including the 12 MiB
   payload-boundary probe;
+- Claude, Codex, and Grok observation parity is exact across cold, live,
+  reconcile, generation-replacement, and restart scenarios;
+- the 32-large-object, warm-restart, 100-sample live, and frozen 3.86 GB
+  production-host gates passed with truthful readiness; the optimized private
+  gate completed at 574.80 seconds with zero retries and the exact complete
+  durable counts;
+- the post-build Electron utility-process smoke negotiated the Rust owner,
+  returned 3 projects, 20 sessions, and 300 messages, and recovered after 100
+  cancelled requests;
 - architecture ownership ratchet: every rule has zero active and zero
   allowlisted violations.
 
 ## Acceptance matrix
 
-| Requirement | Evidence | Status |
-| --- | --- | --- |
-| Async public compatibility and React APIs | TypeScript API/hook tests and package declarations | Complete |
-| CLI/TUI queries cross Rust-backed service | production imports plus command/view tests | Already satisfied |
-| Electron utility owns one Rust engine | utility lifecycle and framed transport tests | Already satisfied |
-| N-API and IPC normalized parity | real-engine transport suite | Already satisfied |
-| Cancellation and stale suppression | client, IPC, React tests | Complete |
-| Durable retention and reset | Rust replay-retention tests | Already satisfied |
-| Wake-driven subscriptions and metrics | Rust publisher plus client/IPC tests | Complete |
-| No production TypeScript SQLite/query authority | architecture ratchet and built artifact scan | Complete |
-| Query conformance and query-only purity | Phase 9 conformance harness | Already satisfied |
-| Reference rollout evidence | committed benchmark reports/commands | External evidence remains |
+| Requirement                                     | Evidence                                                  | Status                                              |
+| ----------------------------------------------- | --------------------------------------------------------- | --------------------------------------------------- |
+| Async public compatibility and React APIs       | TypeScript API/hook tests and package declarations        | Complete                                            |
+| CLI/TUI queries cross Rust-backed service       | production imports plus command/view tests                | Already satisfied                                   |
+| Electron utility owns one Rust engine           | utility lifecycle and framed transport tests              | Already satisfied                                   |
+| N-API and IPC normalized parity                 | real-engine transport suite                               | Already satisfied                                   |
+| Cancellation and stale suppression              | client, IPC, React tests                                  | Complete                                            |
+| Durable retention and reset                     | Rust replay-retention tests                               | Already satisfied                                   |
+| Wake-driven subscriptions and metrics           | Rust publisher plus client/IPC tests                      | Complete                                            |
+| No production TypeScript SQLite/query authority | architecture ratchet and built artifact scan              | Complete                                            |
+| Query conformance and query-only purity         | Phase 9 conformance harness                               | Already satisfied                                   |
+| Reference rollout evidence                      | reproducible commands plus private production-host report | Partially accepted; release policy remains external |
 
-All code/ownership rows satisfy the Phase 10 exit contract. Scale-50, accepted
-private-corpus observations, and reviewed thresholds remain rollout evidence
-for a release decision and for RFC-wide performance acceptance; they are not a
-second implementation or a Phase 10 ownership blocker.
+All code/ownership rows satisfy the Phase 10 exit contract. The accepted
+private-corpus observation establishes a production reference; scale-50 policy
+and reviewed thresholds remain rollout evidence for a release decision. They
+are not a second implementation or a Phase 10 ownership blocker.

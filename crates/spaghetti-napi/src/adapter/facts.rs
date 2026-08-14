@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::fmt;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -915,6 +916,7 @@ pub struct FactBatch {
     dependency_reads: Vec<DependencyRevision>,
     next_decoder_state: Option<Vec<u8>>,
     next_record_ordinals: BTreeMap<RecordFactKey, u32>,
+    fact_build_time: Duration,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -955,32 +957,38 @@ impl FactBatch {
             dependency_reads: Vec::new(),
             next_decoder_state: None,
             next_record_ordinals: BTreeMap::new(),
+            fact_build_time: Duration::ZERO,
         })
     }
 
     pub fn push(&mut self, record: &SourceRecord, value: Fact) -> Result<FactId, AdapterError> {
-        if self.facts.len() == self.max_facts {
-            return Err(AdapterError::invalid_contract(format!(
-                "fact batch exceeds {} facts",
-                self.max_facts
-            )));
-        }
-        let ordinal = self
-            .next_record_ordinals
-            .entry(RecordFactKey::from_record(record))
-            .or_insert(0);
-        let local_fact_ordinal = *ordinal;
-        *ordinal = ordinal.checked_add(1).ok_or_else(|| {
-            AdapterError::invalid_contract("source record exceeds provenance ordinal range")
-        })?;
-        let provenance = FactProvenance::from_record(record, local_fact_ordinal);
-        let id = provenance.fact_id(value.kind());
-        self.facts.push(FactEnvelope {
-            id,
-            provenance,
-            value,
-        });
-        Ok(id)
+        let started = Instant::now();
+        let result = (|| {
+            if self.facts.len() == self.max_facts {
+                return Err(AdapterError::invalid_contract(format!(
+                    "fact batch exceeds {} facts",
+                    self.max_facts
+                )));
+            }
+            let ordinal = self
+                .next_record_ordinals
+                .entry(RecordFactKey::from_record(record))
+                .or_insert(0);
+            let local_fact_ordinal = *ordinal;
+            *ordinal = ordinal.checked_add(1).ok_or_else(|| {
+                AdapterError::invalid_contract("source record exceeds provenance ordinal range")
+            })?;
+            let provenance = FactProvenance::from_record(record, local_fact_ordinal);
+            let id = provenance.fact_id(value.kind());
+            self.facts.push(FactEnvelope {
+                id,
+                provenance,
+                value,
+            });
+            Ok(id)
+        })();
+        self.fact_build_time = self.fact_build_time.saturating_add(started.elapsed());
+        result
     }
 
     pub fn push_diagnostic(&mut self, diagnostic: AdapterDiagnostic) -> Result<(), AdapterError> {
@@ -1036,7 +1044,12 @@ impl FactBatch {
         if other.next_decoder_state.is_some() {
             self.next_decoder_state = other.next_decoder_state;
         }
+        self.fact_build_time = self.fact_build_time.saturating_add(other.fact_build_time);
         Ok(())
+    }
+
+    pub(crate) fn fact_build_time(&self) -> Duration {
+        self.fact_build_time
     }
 
     pub fn facts(&self) -> &[FactEnvelope] {

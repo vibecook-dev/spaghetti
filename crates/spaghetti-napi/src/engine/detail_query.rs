@@ -6,6 +6,7 @@ use rusqlite::{Connection, OptionalExtension, Row, Transaction};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 
+use super::performance::EnginePerformanceSnapshot;
 use super::query_identity::{
     decode_entity_id, encode_entity_id, FACT_ID_PREFIX, MESSAGE_ID_PREFIX, PROJECT_ID_PREFIX,
     SESSION_ID_PREFIX, SOURCE_ID_PREFIX,
@@ -198,6 +199,10 @@ pub struct CanonicalStats {
     pub database_page_count: u64,
     pub database_page_size_bytes: u64,
     pub allocated_database_bytes: u64,
+    /// Owner-lifetime telemetry sampled immediately before the
+    /// snapshot-consistent database counts. Direct query-pool tests do not
+    /// have writer ownership and therefore leave it absent.
+    pub performance: Option<EnginePerformanceSnapshot>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -994,6 +999,7 @@ pub(super) fn read_canonical_stats(connection: &Connection) -> Result<CanonicalS
         database_page_count,
         database_page_size_bytes,
         allocated_database_bytes,
+        performance: None,
     };
     transaction
         .commit()
@@ -1662,6 +1668,16 @@ mod tests {
     fn source_statistics_index_is_installed() {
         let connection = Connection::open_in_memory().unwrap();
         schema::initialize_schema(&connection).unwrap();
+        connection
+            .execute_batch(
+                r#"
+                DROP INDEX idx_fact_records_source_instance_compact;
+                CREATE INDEX idx_fact_records_source_instance
+                  ON fact_records(source_instance_id, fact_id);
+                "#,
+            )
+            .unwrap();
+        schema::initialize_schema(&connection).unwrap();
         let names = connection
             .prepare("PRAGMA index_list('fact_records')")
             .unwrap()
@@ -1670,6 +1686,9 @@ mod tests {
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
         assert!(names
+            .iter()
+            .any(|name| name == "idx_fact_records_source_instance_compact"));
+        assert!(!names
             .iter()
             .any(|name| name == "idx_fact_records_source_instance"));
 
@@ -1687,7 +1706,7 @@ mod tests {
             .unwrap();
         assert!(
             plan.iter().any(|step| {
-                step.contains("USING COVERING INDEX idx_fact_records_source_instance")
+                step.contains("USING COVERING INDEX idx_fact_records_source_instance_compact")
             }),
             "source statistics must use the covering source-instance index: {plan:?}"
         );

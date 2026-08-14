@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { afterEach, describe, test } from 'node:test';
-import { cpSync, mkdtempSync, rmSync } from 'node:fs';
+import { cpSync, mkdtempSync, rmSync, truncateSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -71,6 +71,31 @@ describe('observation host options', () => {
 });
 
 describe('multi-adapter observation host', { skip: !native }, () => {
+  test('large fresh input remains query-unavailable through durable bootstrap finalization', async () => {
+    const fixture = multiAdapterFixture();
+    const largeInput = path.join(fixture.sources[0]!.roots[0]!, 'bootstrap-size-gate.bin');
+    writeFileSync(largeInput, '');
+    truncateSync(largeInput, 49 * 1024 * 1024);
+    const startup: ObservationHostProgress[] = [];
+    const host = await openObservationHost({
+      dbPath: fixture.dbPath,
+      sources: [fixture.sources[0]!],
+      queryWorkers: 1,
+      ownerLabel: 'bootstrap-host-test',
+      onProgress: (progress) => startup.push(progress),
+    });
+    hosts.push(host);
+
+    const finalizing = startup.filter((progress) => progress.stage === 'finalizing');
+    assert.ok(finalizing.length > 0);
+    assert.ok(finalizing.every((progress) => progress.status?.state === 'bootstrapping'));
+    assert.equal(host.status.state, 'running');
+    assert.equal(host.status.acceptingQueries, true);
+    assert.equal(host.status.aliveQueryWorkers, 1);
+    assert.ok((await host.client.getStats()).searchableMessages > 0);
+    assert.equal(startup.at(-1)?.stage, 'ready');
+  });
+
   test('owns one database, runs all registered adapters, and reopens without duplication', async () => {
     const fixture = multiAdapterFixture();
     const startup: ObservationHostProgress[] = [];
@@ -107,6 +132,41 @@ describe('multi-adapter observation host', { skip: !native }, () => {
     }
     const overview = await host.client.getOverview();
     assert.deepEqual([overview.canonicalSessions, overview.canonicalMessages], [34, 346]);
+    const stats = await host.client.getStats();
+    const performance = stats.performance;
+    assert.ok(performance, 'native owner performance snapshot');
+    assert.equal(performance.writer.committed, stats.ingestCommits);
+    assert.equal(performance.writer.failed, 0);
+    assert.ok(performance.writer.factsCommitted >= stats.factRecords);
+    assert.ok(performance.writer.changesPublished > 0);
+    assert.ok(performance.writer.sqliteRowsChanged >= performance.writer.factsCommitted);
+    assert.equal(
+      performance.writer.checkpoint.completed +
+        performance.writer.checkpoint.blocked +
+        performance.writer.checkpoint.failures,
+      performance.writer.checkpoint.attempts,
+    );
+    assert.equal(
+      performance.source.totals.recordsDecoded +
+        performance.source.totals.decodeRetries +
+        performance.source.totals.decodeFailures,
+      performance.source.totals.decodeAttempts,
+    );
+    assert.ok(performance.source.totals.recordsRead >= performance.source.totals.recordsDecoded);
+    assert.ok(performance.source.totals.factsEmitted >= performance.writer.factsCommitted);
+    assert.equal(performance.source.dimensionOverflowAssignments, 0);
+    assert.ok(performance.source.dimensions.length > 0);
+    assert.ok(performance.source.dimensions.length <= performance.source.dimensionCapacity);
+    assert.equal(
+      performance.source.totals.timings.find((timing) => timing.name === 'adapter_decode')?.latency.samples,
+      performance.source.totals.decodeAttempts,
+    );
+    assert.equal(
+      performance.writer.timings.find((timing) => timing.name === 'writer_total')?.latency.samples,
+      performance.writer.committed,
+    );
+    assert.ok(performance.queries.requestsCompleted > 0);
+    assert.ok(performance.storage.databaseFileBytes > 0);
 
     await assert.rejects(openObservationHost({ ...fixture, ownerLabel: 'competing-host' }), /already owned/i);
     const beforeRefresh = overview.commitSeq;

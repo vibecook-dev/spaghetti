@@ -89,6 +89,14 @@ allocated SQLite pages. Its entity names are part of the versioned contract.
 Compatibility tables (`projects`, `sessions`, `messages`, and their derived
 caches) are intentionally excluded, even while Phase 10 has not retired them.
 
+Post-cutover performance work adds an optional bounded owner-lifetime snapshot
+to this same response. It covers writer/projector/checkpoint stages, query
+queue and execution pressure, physical SQLite sidecars, and source-driver/
+decode/fact-construction totals with at most 128 adapter/stream/driver lanes
+plus one overflow lane. These operational counters are not part of the
+snapshot-consistent durable count transaction and reset when the native owner
+restarts.
+
 The legacy `getStats()` object therefore is not an equality oracle:
 `totalSegments`, `source_files`, compatibility FTS rows, and file size answer
 different questions. Direct parity is asserted for native source identity,
@@ -115,6 +123,12 @@ inventory can aggregate the fact audit store by source without a table scan.
 The additive index is mirrored in Rust and the temporary TypeScript schema
 authority without changing schema version 31; same-version initialization
 reruns `CREATE INDEX IF NOT EXISTS` statements.
+
+Later performance work supersedes that original wide shape with
+`idx_fact_records_source_instance_compact(source_instance_id)`. It remains a
+covering source-count plan while avoiding one repeated fact ID per index row;
+same-version repair removes the Phase 9 shape. See the RFC 011 performance
+optimization design for the measurement and decision.
 
 ## Remaining cutover work
 

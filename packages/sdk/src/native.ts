@@ -139,6 +139,8 @@ export interface SpaghettiEngineOpenOptions {
   queryWorkers?: number;
   /** Diagnostic host label written to the owner metadata sidecar. */
   ownerLabel?: string;
+  /** Internal cold-start hint used by the production observation host. */
+  bootstrapQueryStructures?: boolean;
 }
 
 /** Structured metadata for the process that exclusively owns a database. */
@@ -177,7 +179,7 @@ export interface SpaghettiEngineObservationStatus {
 }
 
 export interface SpaghettiEngineStatus {
-  state: 'running' | 'stopping' | 'stopped';
+  state: 'bootstrapping' | 'running' | 'stopping' | 'stopped';
   databasePath: string;
   acceptingQueries: boolean;
   writerAlive: boolean;
@@ -1092,6 +1094,103 @@ export interface SpaghettiEngineNamedCount {
   count: number;
 }
 
+/** Fixed-bucket, owner-lifetime latency distribution from the native engine. */
+export interface SpaghettiEngineLatencyStats {
+  samples: number;
+  totalMs: number;
+  meanMs: number;
+  maxMs: number;
+  p50UpperMs: number;
+  p95UpperMs: number;
+  p99UpperMs: number;
+}
+
+export interface SpaghettiEngineNamedLatencyStats {
+  name: string;
+  latency: SpaghettiEngineLatencyStats;
+}
+
+export interface SpaghettiEngineCheckpointPerformanceStats {
+  attempts: number;
+  completed: number;
+  blocked: number;
+  failures: number;
+  lastLogFrames: number;
+  lastCheckpointedFrames: number;
+  lastRemainingFrames: number;
+  blockedByReaderMs: number;
+  latency: SpaghettiEngineLatencyStats;
+}
+
+export interface SpaghettiEngineWriterPerformanceStats {
+  uptimeMs: number;
+  commitAttempts: number;
+  committed: number;
+  failed: number;
+  factsCommitted: number;
+  changesPublished: number;
+  sqliteRowsChanged: number;
+  queueDepth: number;
+  queueHighWatermark: number;
+  checkpoint: SpaghettiEngineCheckpointPerformanceStats;
+  timings: SpaghettiEngineNamedLatencyStats[];
+}
+
+export interface SpaghettiEngineQueryPerformanceStats {
+  uptimeMs: number;
+  requestsEnqueued: number;
+  requestsCompleted: number;
+  queueRejections: number;
+  queueDepth: number;
+  queueHighWatermark: number;
+  oldestActiveMs: number;
+  timings: SpaghettiEngineNamedLatencyStats[];
+}
+
+export interface SpaghettiEngineSourcePipelineStats {
+  readAttempts: number;
+  readFailures: number;
+  readRetries: number;
+  readContinuations: number;
+  recordsRead: number;
+  payloadBytesRead: number;
+  decodeAttempts: number;
+  decodeFailures: number;
+  decodeRetries: number;
+  recordsDecoded: number;
+  factsEmitted: number;
+  recordsQuarantined: number;
+  timings: SpaghettiEngineNamedLatencyStats[];
+}
+
+export interface SpaghettiEngineSourceDimensionPerformanceStats {
+  adapterId: string;
+  streamId: string;
+  driverKind: string;
+  pipeline: SpaghettiEngineSourcePipelineStats;
+}
+
+export interface SpaghettiEngineSourcePerformanceStats {
+  uptimeMs: number;
+  dimensionCapacity: number;
+  dimensionOverflowAssignments: number;
+  totals: SpaghettiEngineSourcePipelineStats;
+  dimensions: SpaghettiEngineSourceDimensionPerformanceStats[];
+}
+
+export interface SpaghettiEngineStoragePerformanceStats {
+  databaseFileBytes: number;
+  walFileBytes: number;
+  sharedMemoryFileBytes: number;
+}
+
+export interface SpaghettiEnginePerformanceStats {
+  writer: SpaghettiEngineWriterPerformanceStats;
+  queries: SpaghettiEngineQueryPerformanceStats;
+  source: SpaghettiEngineSourcePerformanceStats;
+  storage: SpaghettiEngineStoragePerformanceStats;
+}
+
 /** Canonical/catalog statistics; compatibility-cache tables are excluded. */
 export interface SpaghettiEngineCanonicalStats {
   contractVersion: number;
@@ -1111,6 +1210,8 @@ export interface SpaghettiEngineCanonicalStats {
   databasePageCount: number;
   databasePageSizeBytes: number;
   allocatedDatabaseBytes: number;
+  /** Bounded owner-lifetime telemetry sampled by the sole native owner. */
+  performance?: SpaghettiEnginePerformanceStats;
 }
 
 export interface SpaghettiEngineUsageScopeOptions {
@@ -1603,6 +1704,8 @@ export interface SpaghettiEngine {
   refreshClaudeObservation(signal?: AbortSignal): Promise<SpaghettiEngineStatus>;
   /** Stop Claude watch registration without disposing the engine. */
   stopClaudeObservation(signal?: AbortSignal): Promise<SpaghettiEngineStatus>;
+  /** Complete a selected cold bootstrap before admitting product queries. */
+  completeQueryBootstrap(): Promise<SpaghettiEngineStatus>;
   cancelPendingQueries(): number;
   dispose(): Promise<SpaghettiEngineStatus>;
 }

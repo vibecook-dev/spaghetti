@@ -1352,6 +1352,33 @@ mod tests {
     fn usage_activity_query_uses_the_session_time_index() {
         let connection = Connection::open_in_memory().unwrap();
         schema::initialize_schema(&connection).unwrap();
+        let installed = connection
+            .prepare("PRAGMA index_list('usage_contributions')")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert!(!installed
+            .iter()
+            .any(|index| index == "idx_usage_contributions_session"));
+
+        let totals_plan = connection
+            .prepare(
+                "EXPLAIN QUERY PLAN SELECT SUM(input_tokens) FROM usage_contributions WHERE session_key = ?1",
+            )
+            .unwrap()
+            .query_map([b"session".as_slice()], |row| row.get::<_, String>(3))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert!(
+            totals_plan.iter().any(|detail| {
+                detail.contains("INDEX idx_usage_contributions_session_time")
+            }),
+            "session totals must retain an indexed lookup after pruning the duplicate index: {totals_plan:?}"
+        );
+
         let mut statement = connection
             .prepare(
                 r#"

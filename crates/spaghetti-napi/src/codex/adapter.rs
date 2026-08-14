@@ -1352,6 +1352,7 @@ mod tests {
                 database_path: database_path.clone(),
                 query_workers: Some(1),
                 owner_label: Some("codex-adapter-test".to_string()),
+                defer_query_structures: false,
             },
             registry,
         )

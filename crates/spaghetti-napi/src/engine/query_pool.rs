@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
@@ -35,6 +35,10 @@ use super::orchestration_query::{
     validate_workflow_page, DelegationPage, DelegationPageRequest, WorkflowDetails,
     WorkflowDetailsRequest, WorkflowMemberPage, WorkflowMemberPageRequest, WorkflowPage,
     WorkflowPageRequest,
+};
+use super::performance::{
+    atomic_max, atomic_saturating_add, duration_ns, LatencyHistogram, NamedLatencySnapshot,
+    QueryPerformanceSnapshot,
 };
 use super::query_identity::{
     decode_entity_id, encode_entity_id, PROJECT_ID_PREFIX, SESSION_ID_PREFIX,
@@ -464,8 +468,37 @@ enum QueryCommand {
         release: Receiver<()>,
     },
     #[cfg(test)]
+    HoldReadSnapshot {
+        entered: Sender<Result<(), EngineError>>,
+        release: Receiver<()>,
+    },
+    #[cfg(test)]
     ProbeWrite(Sender<bool>),
     Shutdown,
+}
+
+struct QueuedQuery {
+    command: QueryCommand,
+    queued_at: Instant,
+    measured: bool,
+}
+
+impl QueuedQuery {
+    fn measured(command: QueryCommand) -> Self {
+        Self {
+            command,
+            queued_at: Instant::now(),
+            measured: true,
+        }
+    }
+
+    fn control(command: QueryCommand) -> Self {
+        Self {
+            command,
+            queued_at: Instant::now(),
+            measured: false,
+        }
+    }
 }
 
 struct QueryControl {
@@ -473,6 +506,18 @@ struct QueryControl {
     stopping: AtomicBool,
     alive_workers: AtomicUsize,
     in_flight: AtomicUsize,
+    telemetry: QueryTelemetry,
+}
+
+struct QueryTelemetry {
+    opened_at: Instant,
+    requests_enqueued: AtomicU64,
+    requests_completed: AtomicU64,
+    queue_rejections: AtomicU64,
+    queue_high_watermark: AtomicU64,
+    queue_wait: LatencyHistogram,
+    execution: LatencyHistogram,
+    active_started_ns: Box<[AtomicU64]>,
 }
 
 /// Transport-neutral, request-scoped cancellation observed by query workers.
@@ -520,12 +565,55 @@ impl QueryCancellationToken {
 }
 
 impl QueryControl {
-    fn new() -> Self {
+    fn new(workers: usize) -> Self {
         Self {
             cancellation_epoch: AtomicU64::new(0),
             stopping: AtomicBool::new(false),
             alive_workers: AtomicUsize::new(0),
             in_flight: AtomicUsize::new(0),
+            telemetry: QueryTelemetry {
+                opened_at: Instant::now(),
+                requests_enqueued: AtomicU64::new(0),
+                requests_completed: AtomicU64::new(0),
+                queue_rejections: AtomicU64::new(0),
+                queue_high_watermark: AtomicU64::new(0),
+                queue_wait: LatencyHistogram::default(),
+                execution: LatencyHistogram::default(),
+                active_started_ns: (0..workers).map(|_| AtomicU64::new(0)).collect(),
+            },
+        }
+    }
+}
+
+impl QueryTelemetry {
+    fn snapshot(&self, queue_depth: usize) -> QueryPerformanceSnapshot {
+        let now_ns = duration_ns(self.opened_at.elapsed());
+        let oldest_started_ns = self
+            .active_started_ns
+            .iter()
+            .map(|started| started.load(Ordering::Acquire))
+            .filter(|started| *started > 0)
+            .min();
+        QueryPerformanceSnapshot {
+            uptime_ns: now_ns,
+            requests_enqueued: self.requests_enqueued.load(Ordering::Acquire),
+            requests_completed: self.requests_completed.load(Ordering::Acquire),
+            queue_rejections: self.queue_rejections.load(Ordering::Acquire),
+            queue_depth: u64::try_from(queue_depth).unwrap_or(u64::MAX),
+            queue_high_watermark: self.queue_high_watermark.load(Ordering::Acquire),
+            oldest_active_ns: oldest_started_ns
+                .map(|started| now_ns.saturating_sub(started))
+                .unwrap_or(0),
+            timings: [
+                ("queue_wait", &self.queue_wait),
+                ("execution", &self.execution),
+            ]
+            .into_iter()
+            .map(|(name, histogram)| NamedLatencySnapshot {
+                name: name.to_string(),
+                latency: histogram.snapshot(),
+            })
+            .collect(),
         }
     }
 }
@@ -545,9 +633,36 @@ impl Drop for InFlightGuard<'_> {
     }
 }
 
+struct QueryMeasurementGuard<'a> {
+    telemetry: &'a QueryTelemetry,
+    worker_id: usize,
+    started_at: Instant,
+}
+
+impl<'a> QueryMeasurementGuard<'a> {
+    fn begin(telemetry: &'a QueryTelemetry, worker_id: usize, queued_at: Instant) -> Self {
+        telemetry.queue_wait.record(queued_at.elapsed());
+        let active_since = duration_ns(telemetry.opened_at.elapsed()).max(1);
+        telemetry.active_started_ns[worker_id].store(active_since, Ordering::Release);
+        Self {
+            telemetry,
+            worker_id,
+            started_at: Instant::now(),
+        }
+    }
+}
+
+impl Drop for QueryMeasurementGuard<'_> {
+    fn drop(&mut self) {
+        self.telemetry.execution.record(self.started_at.elapsed());
+        self.telemetry.active_started_ns[self.worker_id].store(0, Ordering::Release);
+        atomic_saturating_add(&self.telemetry.requests_completed, 1);
+    }
+}
+
 #[derive(Clone)]
 pub struct QueryClient {
-    commands: Sender<QueryCommand>,
+    commands: Sender<QueuedQuery>,
     control: Arc<QueryControl>,
     configured_workers: usize,
 }
@@ -560,16 +675,10 @@ impl QueryClient {
 
         let cancellation_epoch = self.control.cancellation_epoch.load(Ordering::Acquire);
         let (response_tx, response_rx) = bounded(1);
-        match self.commands.try_send(QueryCommand::Overview {
+        self.enqueue(QueryCommand::Overview {
             cancellation_epoch,
             response: response_tx,
-        }) {
-            Ok(()) => {}
-            Err(TrySendError::Full(_)) => return Err(EngineError::QueryQueueFull),
-            Err(TrySendError::Disconnected(_)) => {
-                return Err(EngineError::WorkerUnavailable { worker: "query" });
-            }
-        }
+        })?;
 
         response_rx
             .recv()
@@ -590,7 +699,7 @@ impl QueryClient {
 
         let cancellation_epoch = self.control.cancellation_epoch.load(Ordering::Acquire);
         let (response_tx, response_rx) = bounded(1);
-        match self.commands.try_send(QueryCommand::HistoryProjects {
+        self.enqueue(QueryCommand::HistoryProjects {
             cancellation_epoch,
             request: HistoryProjectPageRequest {
                 cursor: cursor
@@ -599,13 +708,7 @@ impl QueryClient {
                 limit: request.limit,
             },
             response: response_tx,
-        }) {
-            Ok(()) => {}
-            Err(TrySendError::Full(_)) => return Err(EngineError::QueryQueueFull),
-            Err(TrySendError::Disconnected(_)) => {
-                return Err(EngineError::WorkerUnavailable { worker: "query" });
-            }
-        }
+        })?;
 
         response_rx
             .recv()
@@ -633,7 +736,7 @@ impl QueryClient {
 
         let cancellation_epoch = self.control.cancellation_epoch.load(Ordering::Acquire);
         let (response_tx, response_rx) = bounded(1);
-        match self.commands.try_send(QueryCommand::HistorySessions {
+        self.enqueue(QueryCommand::HistorySessions {
             cancellation_epoch,
             request: HistorySessionPageRequest {
                 project_id: encode_entity_id(PROJECT_ID_PREFIX, &project_key),
@@ -643,13 +746,7 @@ impl QueryClient {
                 limit: request.limit,
             },
             response: response_tx,
-        }) {
-            Ok(()) => {}
-            Err(TrySendError::Full(_)) => return Err(EngineError::QueryQueueFull),
-            Err(TrySendError::Disconnected(_)) => {
-                return Err(EngineError::WorkerUnavailable { worker: "query" });
-            }
-        }
+        })?;
 
         response_rx
             .recv()
@@ -925,18 +1022,12 @@ impl QueryClient {
 
         let cancellation_epoch = self.control.cancellation_epoch.load(Ordering::Acquire);
         let (response_tx, response_rx) = bounded(1);
-        match self.commands.try_send(QueryCommand::UsageTotals {
+        self.enqueue(QueryCommand::UsageTotals {
             cancellation_epoch,
             cancellation,
             request,
             response: response_tx,
-        }) {
-            Ok(()) => {}
-            Err(TrySendError::Full(_)) => return Err(EngineError::QueryQueueFull),
-            Err(TrySendError::Disconnected(_)) => {
-                return Err(EngineError::WorkerUnavailable { worker: "query" });
-            }
-        }
+        })?;
 
         response_rx
             .recv()
@@ -963,18 +1054,12 @@ impl QueryClient {
 
         let cancellation_epoch = self.control.cancellation_epoch.load(Ordering::Acquire);
         let (response_tx, response_rx) = bounded(1);
-        match self.commands.try_send(QueryCommand::UsageActivity {
+        self.enqueue(QueryCommand::UsageActivity {
             cancellation_epoch,
             cancellation,
             request,
             response: response_tx,
-        }) {
-            Ok(()) => {}
-            Err(TrySendError::Full(_)) => return Err(EngineError::QueryQueueFull),
-            Err(TrySendError::Disconnected(_)) => {
-                return Err(EngineError::WorkerUnavailable { worker: "query" });
-            }
-        }
+        })?;
 
         response_rx
             .recv()
@@ -1170,16 +1255,7 @@ impl QueryClient {
         }
         let cancellation_epoch = self.control.cancellation_epoch.load(Ordering::Acquire);
         let (response_tx, response_rx) = bounded(1);
-        match self
-            .commands
-            .try_send(command(cancellation_epoch, cancellation, response_tx))
-        {
-            Ok(()) => {}
-            Err(TrySendError::Full(_)) => return Err(EngineError::QueryQueueFull),
-            Err(TrySendError::Disconnected(_)) => {
-                return Err(EngineError::WorkerUnavailable { worker: "query" });
-            }
-        }
+        self.enqueue(command(cancellation_epoch, cancellation, response_tx))?;
         response_rx
             .recv()
             .map_err(|_| EngineError::WorkerUnavailable { worker: "query" })?
@@ -1225,18 +1301,12 @@ impl QueryClient {
 
         let cancellation_epoch = self.control.cancellation_epoch.load(Ordering::Acquire);
         let (response_tx, response_rx) = bounded(1);
-        match self.commands.try_send(QueryCommand::SourceCatalog {
+        self.enqueue(QueryCommand::SourceCatalog {
             cancellation_epoch,
             adapter_id: adapter_id.to_string(),
             stable_key: stable_key.to_vec(),
             response: response_tx,
-        }) {
-            Ok(()) => {}
-            Err(TrySendError::Full(_)) => return Err(EngineError::QueryQueueFull),
-            Err(TrySendError::Disconnected(_)) => {
-                return Err(EngineError::WorkerUnavailable { worker: "query" });
-            }
-        }
+        })?;
 
         response_rx
             .recv()
@@ -1268,6 +1338,10 @@ impl QueryClient {
         self.control.stopping.load(Ordering::Acquire)
     }
 
+    pub fn performance_snapshot(&self) -> QueryPerformanceSnapshot {
+        self.control.telemetry.snapshot(self.commands.len())
+    }
+
     fn ensure_running(&self) -> Result<(), EngineError> {
         if self.control.stopping.load(Ordering::Acquire) {
             Err(EngineError::ShuttingDown)
@@ -1276,17 +1350,56 @@ impl QueryClient {
         }
     }
 
+    fn enqueue(&self, command: QueryCommand) -> Result<(), EngineError> {
+        let queued = QueuedQuery::measured(command);
+        let depth = self.commands.len().saturating_add(1);
+        match self.commands.try_send(queued) {
+            Ok(()) => {
+                atomic_saturating_add(&self.control.telemetry.requests_enqueued, 1);
+                atomic_max(
+                    &self.control.telemetry.queue_high_watermark,
+                    u64::try_from(depth).unwrap_or(u64::MAX),
+                );
+                Ok(())
+            }
+            Err(TrySendError::Full(_)) => {
+                atomic_saturating_add(&self.control.telemetry.queue_rejections, 1);
+                Err(EngineError::QueryQueueFull)
+            }
+            Err(TrySendError::Disconnected(_)) => {
+                Err(EngineError::WorkerUnavailable { worker: "query" })
+            }
+        }
+    }
+
     #[cfg(test)]
     fn hold_worker(&self, entered: Sender<()>, release: Receiver<()>) {
         self.commands
-            .send(QueryCommand::Hold { entered, release })
+            .send(QueuedQuery::control(QueryCommand::Hold {
+                entered,
+                release,
+            }))
+            .unwrap();
+    }
+
+    #[cfg(test)]
+    fn hold_measured_worker(&self, entered: Sender<()>, release: Receiver<()>) {
+        self.enqueue(QueryCommand::Hold { entered, release })
+            .unwrap();
+    }
+
+    #[cfg(test)]
+    fn hold_read_snapshot(&self, entered: Sender<Result<(), EngineError>>, release: Receiver<()>) {
+        self.enqueue(QueryCommand::HoldReadSnapshot { entered, release })
             .unwrap();
     }
 
     #[cfg(test)]
     fn probe_write_rejected(&self) -> bool {
         let (tx, rx) = bounded(1);
-        self.commands.send(QueryCommand::ProbeWrite(tx)).unwrap();
+        self.commands
+            .send(QueuedQuery::control(QueryCommand::ProbeWrite(tx)))
+            .unwrap();
         rx.recv().unwrap()
     }
 }
@@ -1301,7 +1414,7 @@ impl QueryPool {
         let capacity = workers.saturating_mul(QUEUE_DEPTH_PER_WORKER).max(1);
         let (command_tx, command_rx) = bounded(capacity);
         let (ready_tx, ready_rx) = bounded(workers);
-        let control = Arc::new(QueryControl::new());
+        let control = Arc::new(QueryControl::new(workers));
         let mut joins = Vec::with_capacity(workers);
 
         for worker_id in 0..workers {
@@ -1347,7 +1460,7 @@ impl QueryPool {
         if let Some(error) = startup_error {
             control.stopping.store(true, Ordering::Release);
             for _ in 0..workers {
-                let _ = command_tx.send(QueryCommand::Shutdown);
+                let _ = command_tx.send(QueuedQuery::control(QueryCommand::Shutdown));
             }
             for join in joins {
                 let _ = join.join();
@@ -1377,7 +1490,10 @@ impl QueryPool {
         self.client.control.stopping.store(true, Ordering::Release);
         self.client.cancel_pending();
         for _ in 0..self.joins.len() {
-            let _ = self.client.commands.send(QueryCommand::Shutdown);
+            let _ = self
+                .client
+                .commands
+                .send(QueuedQuery::control(QueryCommand::Shutdown));
         }
 
         let mut panic_seen = false;
@@ -1399,9 +1515,9 @@ impl Drop for QueryPool {
 }
 
 fn query_thread(
-    _worker_id: usize,
+    worker_id: usize,
     database_path: PathBuf,
-    commands: Receiver<QueryCommand>,
+    commands: Receiver<QueuedQuery>,
     ready: Sender<Result<(), EngineError>>,
     control: Arc<QueryControl>,
 ) {
@@ -1423,7 +1539,11 @@ fn query_thread(
     // channel close instead of waiting forever for a missing message.
     drop(ready);
 
-    while let Ok(command) = commands.recv() {
+    while let Ok(queued) = commands.recv() {
+        let _measurement = queued
+            .measured
+            .then(|| QueryMeasurementGuard::begin(&control.telemetry, worker_id, queued.queued_at));
+        let command = queued.command;
         match command {
             QueryCommand::Overview {
                 cancellation_epoch,
@@ -1909,6 +2029,26 @@ fn query_thread(
                 let _ = release.recv();
             }
             #[cfg(test)]
+            QueryCommand::HoldReadSnapshot { entered, release } => {
+                let _in_flight = InFlightGuard::enter(&control.in_flight);
+                let started = connection
+                    .execute_batch("BEGIN DEFERRED")
+                    .map_err(|error| query_sqlite_error("begin pinned reader test", error))
+                    .and_then(|()| {
+                        connection
+                            .query_row("SELECT COUNT(*) FROM ingest_commits", [], |_| Ok(()))
+                            .map_err(|error| {
+                                query_sqlite_error("establish pinned reader snapshot", error)
+                            })
+                    });
+                let ready = started.is_ok();
+                let _ = entered.send(started);
+                if ready {
+                    let _ = release.recv();
+                    let _ = connection.execute_batch("ROLLBACK");
+                }
+            }
+            #[cfg(test)]
             QueryCommand::ProbeWrite(response) => {
                 let rejected = connection
                     .execute_batch("CREATE TABLE rfc011_query_must_not_write(value INTEGER)")
@@ -1992,6 +2132,15 @@ fn open_reader(database_path: &PathBuf) -> Result<Connection, EngineError> {
             operation: "configure query mmap window",
             detail: error.to_string(),
         })?;
+    if schema::query_bootstrap_state(&connection)
+        .map_err(|error| EngineError::Sqlite {
+            operation: "read durable query bootstrap state",
+            detail: error.to_string(),
+        })?
+        .is_some()
+    {
+        return Err(EngineError::BootstrapInProgress);
+    }
     connection.set_prepared_statement_cache_capacity(128);
     Ok(connection)
 }
@@ -2778,7 +2927,7 @@ fn read_overview(connection: &Connection) -> Result<QueryOverview, EngineError> 
     Ok(overview)
 }
 
-fn read_source_catalog(
+pub(super) fn read_source_catalog(
     connection: &Connection,
     adapter_id: &str,
     stable_key: &[u8],
@@ -3656,6 +3805,20 @@ mod tests {
         assert!(artifacts.items.is_empty());
         assert!(overview.query_only && overview.read_only);
         assert_eq!(before, after, "a query must not advance database content");
+        let performance = client.performance_snapshot();
+        assert!(performance.requests_enqueued > 0);
+        assert!(performance.requests_completed > 0);
+        assert_eq!(performance.queue_rejections, 0);
+        assert_eq!(
+            performance
+                .timings
+                .iter()
+                .find(|timing| timing.name == "execution")
+                .unwrap()
+                .latency
+                .samples,
+            performance.requests_completed,
+        );
         assert!(client.probe_write_rejected());
 
         pool.shutdown().unwrap();
@@ -3696,6 +3859,85 @@ mod tests {
             client.overview().is_ok(),
             "new epoch should accept new work"
         );
+
+        pool.shutdown().unwrap();
+        writer.shutdown().unwrap();
+    }
+
+    #[test]
+    fn performance_snapshot_reports_active_reader_age() {
+        let dir = tempdir().unwrap();
+        let database = dir.path().join("active-reader.db");
+        let mut writer = WriterRuntime::start(database.clone()).unwrap();
+        let mut pool = QueryPool::start(database, 1).unwrap();
+        let client = pool.client();
+
+        let (entered_tx, entered_rx) = bounded(1);
+        let (release_tx, release_rx) = bounded(1);
+        client.hold_measured_worker(entered_tx, release_rx);
+        entered_rx.recv().unwrap();
+        thread::sleep(Duration::from_millis(2));
+
+        let active = client.performance_snapshot();
+        assert_eq!(active.requests_enqueued, 1);
+        assert_eq!(active.requests_completed, 0);
+        assert!(active.oldest_active_ns >= 1_000_000);
+
+        release_tx.send(()).unwrap();
+        client.overview().unwrap();
+        let released = client.performance_snapshot();
+        assert_eq!(released.requests_enqueued, 2);
+        assert_eq!(released.requests_completed, 2);
+        assert_eq!(released.oldest_active_ns, 0);
+
+        pool.shutdown().unwrap();
+        writer.shutdown().unwrap();
+    }
+
+    #[test]
+    fn checkpoint_reports_pinned_reader_and_reclaims_wal_after_release() {
+        let dir = tempdir().unwrap();
+        let database = dir.path().join("pinned-reader.db");
+        let mut writer = WriterRuntime::start(database.clone()).unwrap();
+        let writer_client = writer.client();
+        let mut pool = QueryPool::start(database.clone(), 1).unwrap();
+        let queries = pool.client();
+
+        let (entered_tx, entered_rx) = bounded(1);
+        let (release_tx, release_rx) = bounded(1);
+        queries.hold_read_snapshot(entered_tx, release_rx);
+        entered_rx.recv().unwrap().unwrap();
+        commit_revisions(&writer_client, 4);
+        thread::sleep(Duration::from_millis(2));
+
+        let blocked = writer_client.checkpoint().unwrap();
+        assert!(blocked.busy || blocked.remaining_frames > 0, "{blocked:?}");
+        assert!(queries.performance_snapshot().oldest_active_ns > 0);
+        let blocked_metrics = writer_client.performance_snapshot().checkpoint;
+        assert_eq!(blocked_metrics.attempts, 1);
+        assert_eq!(blocked_metrics.blocked, 1);
+        assert_eq!(blocked_metrics.completed, 0);
+        assert!(blocked_metrics.last_remaining_frames > 0);
+        assert!(blocked_metrics.blocked_by_reader_ns > 0);
+
+        release_tx.send(()).unwrap();
+        queries.overview().unwrap();
+        let reclaimed = writer_client.checkpoint().unwrap();
+        assert!(!reclaimed.busy, "{reclaimed:?}");
+        assert_eq!(reclaimed.remaining_frames, 0);
+
+        let mut wal_path = database.as_os_str().to_os_string();
+        wal_path.push("-wal");
+        let wal_bytes = std::fs::metadata(PathBuf::from(wal_path))
+            .map(|metadata| metadata.len())
+            .unwrap_or_default();
+        assert_eq!(wal_bytes, 0, "completed TRUNCATE must reclaim the WAL");
+        let recovered_metrics = writer_client.performance_snapshot().checkpoint;
+        assert_eq!(recovered_metrics.attempts, 2);
+        assert_eq!(recovered_metrics.completed, 1);
+        assert_eq!(recovered_metrics.failures, 0);
+        assert_eq!(recovered_metrics.last_remaining_frames, 0);
+        assert!(recovered_metrics.blocked_by_reader_ns > 0);
 
         pool.shutdown().unwrap();
         writer.shutdown().unwrap();
@@ -3954,7 +4196,7 @@ mod tests {
     #[test]
     fn request_cancellation_interrupts_running_sqlite_usage_work() {
         let connection = Connection::open_in_memory().unwrap();
-        let control = Arc::new(QueryControl::new());
+        let control = Arc::new(QueryControl::new(1));
         let cancellation = QueryCancellationToken::default();
         let completed = Arc::new(AtomicBool::new(false));
         let query_completed = Arc::clone(&completed);
@@ -4224,6 +4466,22 @@ mod tests {
         let mut writer = WriterRuntime::start(database.clone()).unwrap();
         let client = writer.client();
         commit_revisions(&client, 4);
+        let writer_performance = client.performance_snapshot();
+        assert_eq!(writer_performance.commit_attempts, 4);
+        assert_eq!(writer_performance.committed, 4);
+        assert_eq!(writer_performance.failed, 0);
+        assert_eq!(writer_performance.facts_committed, 4);
+        assert!(writer_performance.sqlite_rows_changed > 0);
+        assert_eq!(
+            writer_performance
+                .timings
+                .iter()
+                .find(|timing| timing.name == "writer_total")
+                .unwrap()
+                .latency
+                .samples,
+            4,
+        );
 
         let retention = client
             .maintain_change_log(

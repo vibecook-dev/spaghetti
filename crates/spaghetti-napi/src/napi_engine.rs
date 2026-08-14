@@ -15,36 +15,42 @@ use crate::claude::ClaudeCodeAdapter;
 use crate::codex::CodexAdapter;
 use crate::engine::{
     ArtifactDetail, ArtifactPage, ArtifactPageRequest, CanonicalStats, ChangeCursor, ChangeReplay,
-    ChangeReplayRequest, CommitWaitResult, DelegationPage, DelegationPageRequest,
-    DelegationSummary, DurableChange, EngineError, EngineHealthSnapshot, EngineOptions,
-    EngineOverview, EngineStatusSnapshot, HistoryProjectIndexSummary, HistoryProjectPage,
-    HistoryProjectPageRequest, HistoryProjectSummary, HistorySessionIndexSummary,
-    HistorySessionPage, HistorySessionPageRequest, HistorySessionSummary, MemoryDocument,
-    MemoryDocumentPage, MemoryDocumentPageRequest, MessageDetail, MessagePage, MessagePageRequest,
-    NamedCount, ObservationStatusSnapshot, ObservationSupervisorOptions, OwnerMetadata, PlanDetail,
-    PlanPage, PlanPageRequest, QueryCancellationToken, ReconcileOutcome, ReconcileRequest,
-    RunStateLookup, RunStateRequest, RuntimePresenceSnapshot, RuntimeRunEvidence,
+    ChangeReplayRequest, CheckpointPerformanceSnapshot, CommitWaitResult, DelegationPage,
+    DelegationPageRequest, DelegationSummary, DurableChange, EngineError, EngineHealthSnapshot,
+    EngineOptions, EngineOverview, EngineStatusSnapshot, HistoryProjectIndexSummary,
+    HistoryProjectPage, HistoryProjectPageRequest, HistoryProjectSummary,
+    HistorySessionIndexSummary, HistorySessionPage, HistorySessionPageRequest,
+    HistorySessionSummary, MemoryDocument, MemoryDocumentPage, MemoryDocumentPageRequest,
+    MessageDetail, MessagePage, MessagePageRequest, NamedCount, NamedLatencySnapshot,
+    ObservationStatusSnapshot, ObservationSupervisorOptions, OwnerMetadata, PlanDetail, PlanPage,
+    PlanPageRequest, QueryCancellationToken, QueryPerformanceSnapshot, ReconcileOutcome,
+    ReconcileRequest, RunStateLookup, RunStateRequest, RuntimePresenceSnapshot, RuntimeRunEvidence,
     RuntimeRunSnapshot, RuntimeSnapshot, RuntimeSnapshotRequest, SearchHit, SearchPage,
     SearchPageRequest, SessionDetail, SessionDetails, SessionDetailsRequest, SessionIndexDetail,
-    SourceCapabilitySummary, SourcePage, SourcePageRequest, SourceSummary, SpaghettiEngineCore,
-    TaskCollectionPage, TaskCollectionPageRequest, TaskCollectionSummary, TaskDetail, TaskPage,
-    TaskPageRequest, TeamConfigSummary, TeamDetails, TeamDetailsRequest, TeamInboxMessage,
-    TeamInboxMessagePage, TeamInboxMessagePageRequest, TeamInboxPage, TeamInboxPageRequest,
-    TeamInboxSummary, TeamMember, TeamPage, TeamPageRequest, TeamSummary, TimelineFacets,
-    TimelineMessage, TimelinePage, TimelinePageRequest, ToolResultDetail, ToolResultPage,
-    ToolResultPageRequest, UntimedUsageSummary, UsageActivityDay, UsageActivityReport,
-    UsageActivityRequest, UsageAggregate, UsageCoverageSummary, UsageScopeRequest,
-    UsageTokenValues, UsageTotalsReport, WorkflowDetails, WorkflowDetailsRequest, WorkflowMember,
-    WorkflowMemberPage, WorkflowMemberPageRequest, WorkflowPage, WorkflowPageRequest,
-    WorkflowSummary, CHANGE_REPLAY_CONTRACT_VERSION, DEFAULT_CAPABILITY_PAGE_LIMIT,
-    DEFAULT_CHANGE_REPLAY_LIMIT, DEFAULT_COMMIT_WAIT_TIMEOUT_MS, DEFAULT_DETAIL_PAGE_LIMIT,
-    DEFAULT_HISTORY_PAGE_LIMIT, DEFAULT_ORCHESTRATION_PAGE_LIMIT, DEFAULT_RUNTIME_PAGE_LIMIT,
-    DEFAULT_SEARCH_PAGE_LIMIT, DEFAULT_TEAM_PAGE_LIMIT, DEFAULT_TIMELINE_PAGE_LIMIT,
-    MAX_CHANGE_REPLAY_PAYLOAD_BYTES,
+    SourceCapabilitySummary, SourceDimensionPerformanceSnapshot, SourcePage, SourcePageRequest,
+    SourcePerformanceSnapshot, SourcePipelineSnapshot, SourceSummary, SpaghettiEngineCore,
+    StoragePerformanceSnapshot, TaskCollectionPage, TaskCollectionPageRequest,
+    TaskCollectionSummary, TaskDetail, TaskPage, TaskPageRequest, TeamConfigSummary, TeamDetails,
+    TeamDetailsRequest, TeamInboxMessage, TeamInboxMessagePage, TeamInboxMessagePageRequest,
+    TeamInboxPage, TeamInboxPageRequest, TeamInboxSummary, TeamMember, TeamPage, TeamPageRequest,
+    TeamSummary, TimelineFacets, TimelineMessage, TimelinePage, TimelinePageRequest,
+    ToolResultDetail, ToolResultPage, ToolResultPageRequest, UntimedUsageSummary, UsageActivityDay,
+    UsageActivityReport, UsageActivityRequest, UsageAggregate, UsageCoverageSummary,
+    UsageScopeRequest, UsageTokenValues, UsageTotalsReport, WorkflowDetails,
+    WorkflowDetailsRequest, WorkflowMember, WorkflowMemberPage, WorkflowMemberPageRequest,
+    WorkflowPage, WorkflowPageRequest, WorkflowSummary, WriterPerformanceSnapshot,
+    CHANGE_REPLAY_CONTRACT_VERSION, DEFAULT_CAPABILITY_PAGE_LIMIT, DEFAULT_CHANGE_REPLAY_LIMIT,
+    DEFAULT_COMMIT_WAIT_TIMEOUT_MS, DEFAULT_DETAIL_PAGE_LIMIT, DEFAULT_HISTORY_PAGE_LIMIT,
+    DEFAULT_ORCHESTRATION_PAGE_LIMIT, DEFAULT_RUNTIME_PAGE_LIMIT, DEFAULT_SEARCH_PAGE_LIMIT,
+    DEFAULT_TEAM_PAGE_LIMIT, DEFAULT_TIMELINE_PAGE_LIMIT, MAX_CHANGE_REPLAY_PAYLOAD_BYTES,
 };
 use crate::grok::GrokAdapter;
 
 const CLAUDE_ADAPTER_ID: &str = "claude-code";
+
+fn ns_to_ms(value: u64) -> f64 {
+    value as f64 / 1_000_000.0
+}
 
 #[napi(object)]
 #[derive(Debug, Clone)]
@@ -55,6 +61,8 @@ pub struct EngineOpenOptions {
     pub query_workers: Option<u32>,
     /// Diagnostic host label persisted in the owner metadata sidecar.
     pub owner_label: Option<String>,
+    /// Defer reviewed query-only structures for one large fresh bootstrap.
+    pub bootstrap_query_structures: Option<bool>,
 }
 
 #[napi(object)]
@@ -2107,6 +2115,263 @@ impl From<NamedCount> for EngineNamedCount {
 
 #[napi(object)]
 #[derive(Debug, Clone)]
+pub struct EngineLatencyStats {
+    pub samples: f64,
+    pub total_ms: f64,
+    pub mean_ms: f64,
+    pub max_ms: f64,
+    pub p50_upper_ms: f64,
+    pub p95_upper_ms: f64,
+    pub p99_upper_ms: f64,
+}
+
+impl From<crate::engine::LatencySnapshot> for EngineLatencyStats {
+    fn from(value: crate::engine::LatencySnapshot) -> Self {
+        let total_ms = ns_to_ms(value.total_ns);
+        Self {
+            samples: value.samples as f64,
+            total_ms,
+            mean_ms: if value.samples == 0 {
+                0.0
+            } else {
+                total_ms / value.samples as f64
+            },
+            max_ms: ns_to_ms(value.max_ns),
+            p50_upper_ms: ns_to_ms(value.p50_upper_ns),
+            p95_upper_ms: ns_to_ms(value.p95_upper_ns),
+            p99_upper_ms: ns_to_ms(value.p99_upper_ns),
+        }
+    }
+}
+
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct EngineNamedLatencyStats {
+    pub name: String,
+    pub latency: EngineLatencyStats,
+}
+
+impl From<NamedLatencySnapshot> for EngineNamedLatencyStats {
+    fn from(value: NamedLatencySnapshot) -> Self {
+        Self {
+            name: value.name,
+            latency: value.latency.into(),
+        }
+    }
+}
+
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct EngineWriterPerformanceStats {
+    pub uptime_ms: f64,
+    pub commit_attempts: f64,
+    pub committed: f64,
+    pub failed: f64,
+    pub facts_committed: f64,
+    pub changes_published: f64,
+    pub sqlite_rows_changed: f64,
+    pub queue_depth: f64,
+    pub queue_high_watermark: f64,
+    pub checkpoint: EngineCheckpointPerformanceStats,
+    pub timings: Vec<EngineNamedLatencyStats>,
+}
+
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct EngineCheckpointPerformanceStats {
+    pub attempts: f64,
+    pub completed: f64,
+    pub blocked: f64,
+    pub failures: f64,
+    pub last_log_frames: f64,
+    pub last_checkpointed_frames: f64,
+    pub last_remaining_frames: f64,
+    pub blocked_by_reader_ms: f64,
+    pub latency: EngineLatencyStats,
+}
+
+impl From<CheckpointPerformanceSnapshot> for EngineCheckpointPerformanceStats {
+    fn from(value: CheckpointPerformanceSnapshot) -> Self {
+        Self {
+            attempts: value.attempts as f64,
+            completed: value.completed as f64,
+            blocked: value.blocked as f64,
+            failures: value.failures as f64,
+            last_log_frames: value.last_log_frames as f64,
+            last_checkpointed_frames: value.last_checkpointed_frames as f64,
+            last_remaining_frames: value.last_remaining_frames as f64,
+            blocked_by_reader_ms: ns_to_ms(value.blocked_by_reader_ns),
+            latency: value.latency.into(),
+        }
+    }
+}
+
+impl From<WriterPerformanceSnapshot> for EngineWriterPerformanceStats {
+    fn from(value: WriterPerformanceSnapshot) -> Self {
+        Self {
+            uptime_ms: ns_to_ms(value.uptime_ns),
+            commit_attempts: value.commit_attempts as f64,
+            committed: value.committed as f64,
+            failed: value.failed as f64,
+            facts_committed: value.facts_committed as f64,
+            changes_published: value.changes_published as f64,
+            sqlite_rows_changed: value.sqlite_rows_changed as f64,
+            queue_depth: value.queue_depth as f64,
+            queue_high_watermark: value.queue_high_watermark as f64,
+            checkpoint: value.checkpoint.into(),
+            timings: value.timings.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct EngineQueryPerformanceStats {
+    pub uptime_ms: f64,
+    pub requests_enqueued: f64,
+    pub requests_completed: f64,
+    pub queue_rejections: f64,
+    pub queue_depth: f64,
+    pub queue_high_watermark: f64,
+    pub oldest_active_ms: f64,
+    pub timings: Vec<EngineNamedLatencyStats>,
+}
+
+impl From<QueryPerformanceSnapshot> for EngineQueryPerformanceStats {
+    fn from(value: QueryPerformanceSnapshot) -> Self {
+        Self {
+            uptime_ms: ns_to_ms(value.uptime_ns),
+            requests_enqueued: value.requests_enqueued as f64,
+            requests_completed: value.requests_completed as f64,
+            queue_rejections: value.queue_rejections as f64,
+            queue_depth: value.queue_depth as f64,
+            queue_high_watermark: value.queue_high_watermark as f64,
+            oldest_active_ms: ns_to_ms(value.oldest_active_ns),
+            timings: value.timings.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct EngineSourcePipelineStats {
+    pub read_attempts: f64,
+    pub read_failures: f64,
+    pub read_retries: f64,
+    pub read_continuations: f64,
+    pub records_read: f64,
+    pub payload_bytes_read: f64,
+    pub decode_attempts: f64,
+    pub decode_failures: f64,
+    pub decode_retries: f64,
+    pub records_decoded: f64,
+    pub facts_emitted: f64,
+    pub records_quarantined: f64,
+    pub timings: Vec<EngineNamedLatencyStats>,
+}
+
+impl From<SourcePipelineSnapshot> for EngineSourcePipelineStats {
+    fn from(value: SourcePipelineSnapshot) -> Self {
+        Self {
+            read_attempts: value.read_attempts as f64,
+            read_failures: value.read_failures as f64,
+            read_retries: value.read_retries as f64,
+            read_continuations: value.read_continuations as f64,
+            records_read: value.records_read as f64,
+            payload_bytes_read: value.payload_bytes_read as f64,
+            decode_attempts: value.decode_attempts as f64,
+            decode_failures: value.decode_failures as f64,
+            decode_retries: value.decode_retries as f64,
+            records_decoded: value.records_decoded as f64,
+            facts_emitted: value.facts_emitted as f64,
+            records_quarantined: value.records_quarantined as f64,
+            timings: value.timings.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct EngineSourceDimensionPerformanceStats {
+    pub adapter_id: String,
+    pub stream_id: String,
+    pub driver_kind: String,
+    pub pipeline: EngineSourcePipelineStats,
+}
+
+impl From<SourceDimensionPerformanceSnapshot> for EngineSourceDimensionPerformanceStats {
+    fn from(value: SourceDimensionPerformanceSnapshot) -> Self {
+        Self {
+            adapter_id: value.adapter_id,
+            stream_id: value.stream_id,
+            driver_kind: value.driver_kind,
+            pipeline: value.pipeline.into(),
+        }
+    }
+}
+
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct EngineSourcePerformanceStats {
+    pub uptime_ms: f64,
+    pub dimension_capacity: f64,
+    pub dimension_overflow_assignments: f64,
+    pub totals: EngineSourcePipelineStats,
+    pub dimensions: Vec<EngineSourceDimensionPerformanceStats>,
+}
+
+impl From<SourcePerformanceSnapshot> for EngineSourcePerformanceStats {
+    fn from(value: SourcePerformanceSnapshot) -> Self {
+        Self {
+            uptime_ms: ns_to_ms(value.uptime_ns),
+            dimension_capacity: value.dimension_capacity as f64,
+            dimension_overflow_assignments: value.dimension_overflow_assignments as f64,
+            totals: value.totals.into(),
+            dimensions: value.dimensions.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct EngineStoragePerformanceStats {
+    pub database_file_bytes: f64,
+    pub wal_file_bytes: f64,
+    pub shared_memory_file_bytes: f64,
+}
+
+impl From<StoragePerformanceSnapshot> for EngineStoragePerformanceStats {
+    fn from(value: StoragePerformanceSnapshot) -> Self {
+        Self {
+            database_file_bytes: value.database_file_bytes as f64,
+            wal_file_bytes: value.wal_file_bytes as f64,
+            shared_memory_file_bytes: value.shared_memory_file_bytes as f64,
+        }
+    }
+}
+
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct EnginePerformanceStats {
+    pub writer: EngineWriterPerformanceStats,
+    pub queries: EngineQueryPerformanceStats,
+    pub source: EngineSourcePerformanceStats,
+    pub storage: EngineStoragePerformanceStats,
+}
+
+impl From<crate::engine::EnginePerformanceSnapshot> for EnginePerformanceStats {
+    fn from(value: crate::engine::EnginePerformanceSnapshot) -> Self {
+        Self {
+            writer: value.writer.into(),
+            queries: value.queries.into(),
+            source: value.source.into(),
+            storage: value.storage.into(),
+        }
+    }
+}
+
+#[napi(object)]
+#[derive(Debug, Clone)]
 pub struct EngineCanonicalStats {
     pub contract_version: u32,
     pub at_commit_seq: f64,
@@ -2125,6 +2390,7 @@ pub struct EngineCanonicalStats {
     pub database_page_count: f64,
     pub database_page_size_bytes: f64,
     pub allocated_database_bytes: f64,
+    pub performance: Option<EnginePerformanceStats>,
 }
 
 impl From<CanonicalStats> for EngineCanonicalStats {
@@ -2155,6 +2421,7 @@ impl From<CanonicalStats> for EngineCanonicalStats {
             database_page_count: value.database_page_count as f64,
             database_page_size_bytes: value.database_page_size_bytes as f64,
             allocated_database_bytes: value.allocated_database_bytes as f64,
+            performance: value.performance.map(Into::into),
         }
     }
 }
@@ -3789,6 +4056,15 @@ impl SpaghettiEngine {
             .map_err(napi_error)
     }
 
+    /// Finalize a size-gated cold bootstrap and admit the read pool only
+    /// after indexes, canonical FTS, and integrity checks have converged.
+    #[napi(ts_return_type = "Promise<EngineStatus>")]
+    pub fn complete_query_bootstrap(&self) -> AsyncTask<CompleteQueryBootstrapTask> {
+        AsyncTask::new(CompleteQueryBootstrapTask {
+            engine: Arc::clone(&self.inner),
+        })
+    }
+
     /// Deterministically stop readers, stop the writer, and release ownership.
     #[napi(ts_return_type = "Promise<EngineStatus>")]
     pub fn dispose(&self) -> AsyncTask<DisposeTask> {
@@ -3806,6 +4082,10 @@ pub fn open_spaghetti_engine(options: EngineOpenOptions) -> AsyncTask<OpenEngine
 
 pub struct OpenEngineTask {
     options: EngineOpenOptions,
+}
+
+pub struct CompleteQueryBootstrapTask {
+    engine: Arc<SpaghettiEngineCore>,
 }
 
 impl Task for OpenEngineTask {
@@ -3828,11 +4108,26 @@ impl Task for OpenEngineTask {
                 database_path: PathBuf::from(&self.options.db_path),
                 query_workers,
                 owner_label: self.options.owner_label.clone(),
+                defer_query_structures: self.options.bootstrap_query_structures.unwrap_or(false),
             },
             registry,
         )
         .map_err(napi_error)?;
         Ok(SpaghettiEngine { inner })
+    }
+
+    fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
+        Ok(output)
+    }
+}
+
+impl Task for CompleteQueryBootstrapTask {
+    type Output = EngineStatus;
+    type JsValue = EngineStatus;
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        self.engine.complete_query_bootstrap().map_err(napi_error)?;
+        Ok(self.engine.status().into())
     }
 
     fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {

@@ -6,6 +6,7 @@
 //! must execute inside this boundary before the cursor is advanced.
 
 use std::collections::BTreeSet;
+use std::time::Duration;
 
 use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 use serde::{Deserialize, Serialize};
@@ -27,6 +28,12 @@ pub const DEFAULT_CHANGE_LOG_MAX_PAYLOAD_BYTES: u64 = 128 * 1024 * 1024;
 // target; 128 still protects a substantial cursor window, while age/size keep
 // ordinary low-volume live history considerably longer.
 pub const DEFAULT_CHANGE_LOG_MIN_RESUMABLE_COMMITS: u64 = 128;
+// Retention is a bounded housekeeping task, not part of every logical commit.
+// Running it once per small commit group keeps age/size overshoot bounded to
+// at most 31 additional commits while avoiding repeated aggregate/window
+// queries that cannot prune anything inside the protected 128-commit window.
+const AUTOMATIC_CHANGE_LOG_MAINTENANCE_INTERVAL_COMMITS: u64 = 32;
+const AUTOMATIC_CHANGE_LOG_MAINTENANCE_INTERVAL_MS: i64 = 5 * 60 * 1_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ChangeLogRetentionPolicy {
@@ -218,8 +225,27 @@ pub(super) enum CommitStage {
     BeforePublish,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum CommitDetail {
+    HistoryAndFactStorage,
+    SessionIndex,
+    ProjectMemory,
+    PersistedToolResult,
+    InterpretationSettings,
+    RunState,
+    Delegation,
+    Presence,
+    Team,
+    Task,
+    Artifact,
+    Workflow,
+    UsageAggregation,
+}
+
 pub(super) trait CommitHook: Send + Sync {
     fn reach(&self, stage: CommitStage) -> Result<(), EngineError>;
+
+    fn record_detail(&self, _detail: CommitDetail, _elapsed: Duration) {}
 }
 
 struct NoopCommitHook;
@@ -300,12 +326,15 @@ pub(crate) fn apply_observation_commit(
     connection: &mut Connection,
     request: &ObservationCommit,
 ) -> Result<CommitReceipt, EngineError> {
-    apply_observation_commit_with_components(
-        connection,
-        request,
-        &NoProjectionWork,
-        &NoopCommitHook,
-    )
+    apply_observation_commit_with_hook(connection, request, &NoopCommitHook)
+}
+
+pub(super) fn apply_observation_commit_with_hook(
+    connection: &mut Connection,
+    request: &ObservationCommit,
+    hook: &dyn CommitHook,
+) -> Result<CommitReceipt, EngineError> {
+    apply_observation_commit_with_components(connection, request, &NoProjectionWork, hook)
 }
 
 /// Reserve or hydrate the durable identifier adapters need before emitting
@@ -331,7 +360,21 @@ pub(super) fn apply_observation_commit_with_projection(
     request: &ObservationCommit,
     projection_work: &dyn TransactionalProjectionWork,
 ) -> Result<CommitReceipt, EngineError> {
-    apply_observation_commit_with_components(connection, request, projection_work, &NoopCommitHook)
+    apply_observation_commit_with_projection_and_hook(
+        connection,
+        request,
+        projection_work,
+        &NoopCommitHook,
+    )
+}
+
+pub(super) fn apply_observation_commit_with_projection_and_hook(
+    connection: &mut Connection,
+    request: &ObservationCommit,
+    projection_work: &dyn TransactionalProjectionWork,
+    hook: &dyn CommitHook,
+) -> Result<CommitReceipt, EngineError> {
+    apply_observation_commit_with_components(connection, request, projection_work, hook)
 }
 
 pub(super) fn apply_observation_commit_with_components(
@@ -340,25 +383,75 @@ pub(super) fn apply_observation_commit_with_components(
     projection_work: &dyn TransactionalProjectionWork,
     hook: &dyn CommitHook,
 ) -> Result<CommitReceipt, EngineError> {
-    validate_commit(request)?;
-    hook.reach(CommitStage::BeforeTransaction)?;
+    prepare_observation_commit(request, hook)?;
 
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|error| sqlite_error("begin ingest commit", error))?;
-
-    let source_instance_id = upsert_source_instance(&transaction, &request.source)?;
-    let commit_seq = insert_ingest_commit(&transaction, source_instance_id, request)?;
-    let source_stream_id = upsert_source_stream(
+    let receipt = apply_observation_commit_components_in_transaction(
         &transaction,
-        source_instance_id,
-        commit_seq,
-        &request.stream,
+        request,
+        projection_work,
+        hook,
     )?;
-    let existing = read_source_object(&transaction, source_stream_id, &request.object.object_key)?;
+    transaction
+        .commit()
+        .map_err(|error| sqlite_error("commit ingest transaction", error))?;
+    complete_observation_commit(hook)?;
+    Ok(receipt)
+}
+
+pub(super) fn apply_observation_commit_in_transaction(
+    transaction: &Transaction<'_>,
+    request: &ObservationCommit,
+    hook: &dyn CommitHook,
+) -> Result<CommitReceipt, EngineError> {
+    prepare_observation_commit(request, hook)?;
+    apply_observation_commit_components_in_transaction(
+        transaction,
+        request,
+        &NoProjectionWork,
+        hook,
+    )
+}
+
+pub(super) fn apply_observation_commit_with_projection_in_transaction(
+    transaction: &Transaction<'_>,
+    request: &ObservationCommit,
+    projection_work: &dyn TransactionalProjectionWork,
+    hook: &dyn CommitHook,
+) -> Result<CommitReceipt, EngineError> {
+    prepare_observation_commit(request, hook)?;
+    apply_observation_commit_components_in_transaction(transaction, request, projection_work, hook)
+}
+
+fn prepare_observation_commit(
+    request: &ObservationCommit,
+    hook: &dyn CommitHook,
+) -> Result<(), EngineError> {
+    validate_commit(request)?;
+    hook.reach(CommitStage::BeforeTransaction)
+}
+
+pub(super) fn complete_observation_commit(hook: &dyn CommitHook) -> Result<(), EngineError> {
+    hook.reach(CommitStage::AfterCommit)?;
+    hook.reach(CommitStage::BeforePublish)
+}
+
+fn apply_observation_commit_components_in_transaction(
+    transaction: &Transaction<'_>,
+    request: &ObservationCommit,
+    projection_work: &dyn TransactionalProjectionWork,
+    hook: &dyn CommitHook,
+) -> Result<CommitReceipt, EngineError> {
+    let source_instance_id = upsert_source_instance(transaction, &request.source)?;
+    let commit_seq = insert_ingest_commit(transaction, source_instance_id, request)?;
+    let source_stream_id =
+        upsert_source_stream(transaction, source_instance_id, commit_seq, &request.stream)?;
+    let existing = read_source_object(transaction, source_stream_id, &request.object.object_key)?;
     verify_cursor_precondition(request, existing.as_ref())?;
     let source_object_id = reserve_source_object_identity(
-        &transaction,
+        transaction,
         source_stream_id,
         &request.object,
         existing.as_ref(),
@@ -376,55 +469,48 @@ pub(super) fn apply_observation_commit_with_components(
     };
 
     let mut changes = request.changes.clone();
-    changes.extend(projection_work.apply_canonical(&transaction, &projection_context)?);
+    changes.extend(projection_work.apply_canonical(transaction, &projection_context)?);
     hook.reach(CommitStage::MidCanonicalProjection)?;
-    changes.extend(projection_work.apply_runtime(&transaction, &projection_context)?);
+    changes.extend(projection_work.apply_runtime(transaction, &projection_context)?);
     hook.reach(CommitStage::MidRuntimeProjection)?;
-    changes.extend(projection_work.apply_usage(&transaction, &projection_context)?);
+    changes.extend(projection_work.apply_usage(transaction, &projection_context)?);
     hook.reach(CommitStage::MidUsageProjection)?;
     let changes = coalesce_changes(changes);
     validate_changes(&changes)?;
 
-    finalize_source_object(&transaction, source_object_id, commit_seq, &request.object)?;
+    finalize_source_object(transaction, source_object_id, commit_seq, &request.object)?;
     hook.reach(CommitStage::AfterCursorUpdate)?;
 
     write_projection_versions(
-        &transaction,
+        transaction,
         commit_seq,
         request.committed_at,
         &request.projection_versions,
     )?;
     write_record_errors(
-        &transaction,
+        transaction,
         source_object_id,
         commit_seq,
         &request.record_errors,
     )?;
-    write_change_log(&transaction, commit_seq, &changes)?;
+    write_change_log(transaction, commit_seq, &changes)?;
     hook.reach(CommitStage::AfterOutboxInsert)?;
 
-    transaction
-        .execute(
-            "UPDATE ingest_commits SET committed_at = ?1, fact_count = ?2 WHERE commit_seq = ?3",
-            params![
-                request.committed_at,
-                i64::from(request.fact_count),
-                to_i64(commit_seq, "commit sequence")?
-            ],
-        )
-        .map_err(|error| sqlite_error("finalize ingest commit", error))?;
-    prune_change_log(
-        &transaction,
-        ChangeLogRetentionPolicy::default(),
-        request.committed_at,
-    )?;
+    if commit_seq % AUTOMATIC_CHANGE_LOG_MAINTENANCE_INTERVAL_COMMITS == 0
+        && automatic_change_log_maintenance_due(
+            transaction,
+            ChangeLogRetentionPolicy::default(),
+            request.committed_at,
+            commit_seq,
+        )?
+    {
+        prune_change_log(
+            transaction,
+            ChangeLogRetentionPolicy::default(),
+            request.committed_at,
+        )?;
+    }
     hook.reach(CommitStage::BeforeCommit)?;
-    transaction
-        .commit()
-        .map_err(|error| sqlite_error("commit ingest transaction", error))?;
-
-    hook.reach(CommitStage::AfterCommit)?;
-    hook.reach(CommitStage::BeforePublish)?;
 
     Ok(CommitReceipt {
         commit_seq,
@@ -433,6 +519,35 @@ pub(super) fn apply_observation_commit_with_components(
         source_object_id,
         change_count: u32::try_from(changes.len()).unwrap_or(u32::MAX),
     })
+}
+
+fn automatic_change_log_maintenance_due(
+    transaction: &Transaction<'_>,
+    policy: ChangeLogRetentionPolicy,
+    now_ms: i64,
+    watermark: u64,
+) -> Result<bool, EngineError> {
+    let (current_floor, retained_payload_bytes, last_pruned_at): (i64, i64, Option<i64>) =
+        transaction
+            .query_row(
+                r#"
+                SELECT pruned_through_commit_seq, retained_payload_bytes, last_pruned_at
+                FROM change_log_retention_state WHERE singleton = 1
+                "#,
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .map_err(|error| sqlite_error("read automatic retention schedule", error))?;
+    let current_floor = from_i64(current_floor, "automatic retention floor")?;
+    let retained_payload_bytes =
+        from_i64(retained_payload_bytes, "automatic retained payload bytes")?;
+    let protected_floor = watermark.saturating_sub(policy.min_resumable_commits);
+    let size_due =
+        retained_payload_bytes > policy.max_payload_bytes && protected_floor > current_floor;
+    let age_due = last_pruned_at.is_none_or(|last| {
+        now_ms.saturating_sub(last) >= AUTOMATIC_CHANGE_LOG_MAINTENANCE_INTERVAL_MS
+    });
+    Ok(size_due || age_due)
 }
 
 fn coalesce_changes(changes: Vec<ChangeEntry>) -> Vec<ChangeEntry> {
@@ -642,7 +757,41 @@ fn upsert_source_instance(
         .optional()
         .map_err(|error| sqlite_error("read source instance identity", error))?;
     let source_instance_id = match existing_id {
-        Some(id) => from_i64(id, "source instance id")?,
+        Some(id) => {
+            let source_instance_id = from_i64(id, "source instance id")?;
+            transaction
+                .execute(
+                    r#"
+                    UPDATE source_instances
+                    SET display_name = ?2,
+                        adapter_version = ?3,
+                        adapter_contract_version = ?4,
+                        source_schema_versions_json = ?5,
+                        capabilities_json = ?6,
+                        last_seen_at = ?7
+                    WHERE source_instance_id = ?1
+                      AND (
+                        display_name IS NOT ?2 OR
+                        adapter_version IS NOT ?3 OR
+                        adapter_contract_version IS NOT ?4 OR
+                        source_schema_versions_json IS NOT ?5 OR
+                        capabilities_json IS NOT ?6 OR
+                        last_seen_at IS NOT ?7
+                      )
+                    "#,
+                    params![
+                        id,
+                        source.display_name,
+                        source.adapter_version,
+                        i64::from(source.adapter_contract_version),
+                        source_schema_versions_json,
+                        capabilities_json,
+                        source.last_seen_at,
+                    ],
+                )
+                .map_err(|error| sqlite_error("refresh changed source instance", error))?;
+            return Ok(source_instance_id);
+        }
         None => {
             let id = source_instance_catalog_id(&source.adapter_id, &source.stable_key);
             let occupied: Option<(String, Vec<u8>)> = transaction
@@ -661,22 +810,14 @@ fn upsert_source_instance(
             id
         }
     };
-    let id: i64 = transaction
-        .query_row(
+    transaction
+        .execute(
             r#"
             INSERT INTO source_instances (
                 source_instance_id, adapter_id, stable_key, display_name, adapter_version,
                 adapter_contract_version, source_schema_versions_json,
                 capabilities_json, discovered_at, last_seen_at
             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
-            ON CONFLICT(adapter_id, stable_key) DO UPDATE SET
-                display_name = excluded.display_name,
-                adapter_version = excluded.adapter_version,
-                adapter_contract_version = excluded.adapter_contract_version,
-                source_schema_versions_json = excluded.source_schema_versions_json,
-                capabilities_json = excluded.capabilities_json,
-                last_seen_at = excluded.last_seen_at
-            RETURNING source_instance_id
             "#,
             params![
                 to_i64(source_instance_id, "source instance id")?,
@@ -690,10 +831,9 @@ fn upsert_source_instance(
                 source.discovered_at,
                 source.last_seen_at
             ],
-            |row| row.get(0),
         )
-        .map_err(|error| sqlite_error("upsert source instance", error))?;
-    from_i64(id, "source instance id")
+        .map_err(|error| sqlite_error("insert source instance", error))?;
+    Ok(source_instance_id)
 }
 
 fn insert_ingest_commit(
@@ -706,13 +846,15 @@ fn insert_ingest_commit(
             r#"
             INSERT INTO ingest_commits (
                 source_instance_id, reason, started_at, committed_at, fact_count
-            ) VALUES (?1, ?2, ?3, NULL, 0)
+            ) VALUES (?1, ?2, ?3, ?4, ?5)
             RETURNING commit_seq
             "#,
             params![
                 to_i64(source_instance_id, "source instance id")?,
                 request.reason,
-                request.started_at
+                request.started_at,
+                request.committed_at,
+                i64::from(request.fact_count),
             ],
             |row| row.get(0),
         )
@@ -1772,6 +1914,97 @@ mod tests {
     }
 
     #[test]
+    fn unchanged_source_registration_does_not_rewrite_the_hot_catalog_row() {
+        let mut connection = database();
+        let first = request();
+        apply_observation_commit(&mut connection, &first).unwrap();
+        connection
+            .execute_batch(
+                r#"
+                CREATE TEMP TABLE source_instance_updates (marker INTEGER);
+                CREATE TEMP TRIGGER observe_source_instance_update
+                AFTER UPDATE ON source_instances BEGIN
+                  INSERT INTO source_instance_updates VALUES (1);
+                END;
+                "#,
+            )
+            .unwrap();
+
+        let mut second = first.clone();
+        second.object.expected = ExpectedSourceCursor::At {
+            generation: 1,
+            committed_cursor: b"byte:128".to_vec(),
+        };
+        second.object.committed_cursor = b"byte:256".to_vec();
+        second.started_at += 100;
+        second.committed_at += 100;
+        apply_observation_commit(&mut connection, &second).unwrap();
+        let update_count = |connection: &Connection| {
+            connection
+                .query_row("SELECT COUNT(*) FROM source_instance_updates", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap()
+        };
+        assert_eq!(update_count(&connection), 0);
+
+        second.object.expected = ExpectedSourceCursor::At {
+            generation: 1,
+            committed_cursor: b"byte:256".to_vec(),
+        };
+        second.object.committed_cursor = b"byte:384".to_vec();
+        second.source.last_seen_at += 1;
+        second.started_at += 100;
+        second.committed_at += 100;
+        apply_observation_commit(&mut connection, &second).unwrap();
+        assert_eq!(update_count(&connection), 1);
+    }
+
+    #[test]
+    fn automatic_retention_runs_on_a_bounded_commit_cadence() {
+        let mut connection = database();
+        let mut next = request();
+
+        let first_maintenance_at =
+            2_000 + i64::try_from(AUTOMATIC_CHANGE_LOG_MAINTENANCE_INTERVAL_COMMITS).unwrap();
+        for commit_seq in 1..=3 * AUTOMATIC_CHANGE_LOG_MAINTENANCE_INTERVAL_COMMITS {
+            let cursor = format!("byte:{}", commit_seq * 128).into_bytes();
+            if commit_seq > 1 {
+                next.object.expected = ExpectedSourceCursor::At {
+                    generation: 1,
+                    committed_cursor: format!("byte:{}", (commit_seq - 1) * 128).into_bytes(),
+                };
+            }
+            next.object.committed_cursor = cursor;
+            next.started_at = 1_000 + i64::try_from(commit_seq).unwrap();
+            next.committed_at =
+                if commit_seq <= 2 * AUTOMATIC_CHANGE_LOG_MAINTENANCE_INTERVAL_COMMITS {
+                    2_000 + i64::try_from(commit_seq).unwrap()
+                } else {
+                    first_maintenance_at
+                        + AUTOMATIC_CHANGE_LOG_MAINTENANCE_INTERVAL_MS
+                        + i64::try_from(commit_seq).unwrap()
+                };
+            apply_observation_commit(&mut connection, &next).unwrap();
+
+            let last_pruned_at: Option<i64> = connection
+                .query_row(
+                    "SELECT last_pruned_at FROM change_log_retention_state WHERE singleton = 1",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            if commit_seq < AUTOMATIC_CHANGE_LOG_MAINTENANCE_INTERVAL_COMMITS {
+                assert_eq!(last_pruned_at, None);
+            } else if commit_seq < 3 * AUTOMATIC_CHANGE_LOG_MAINTENANCE_INTERVAL_COMMITS {
+                assert_eq!(last_pruned_at, Some(first_maintenance_at));
+            } else {
+                assert_eq!(last_pruned_at, Some(next.committed_at));
+            }
+        }
+    }
+
+    #[test]
     fn catalog_identity_is_independent_of_unrelated_registration_order() {
         fn commit_named(connection: &mut Connection, stable_key: &[u8]) -> CommitReceipt {
             let mut request = request();
@@ -1937,6 +2170,7 @@ mod tests {
             database_path,
             query_workers: Some(1),
             owner_label: Some("postcommit-restart-test".to_string()),
+            defer_query_structures: false,
         })
         .unwrap();
         let replay = engine

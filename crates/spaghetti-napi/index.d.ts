@@ -148,6 +148,11 @@ export declare class SpaghettiEngine {
    * new cancellation epoch and remain valid.
    */
   cancelPendingQueries(): number
+  /**
+   * Finalize a size-gated cold bootstrap and admit the read pool only
+   * after indexes, canonical FTS, and integrity checks have converged.
+   */
+  completeQueryBootstrap(): Promise<EngineStatus>
   /** Deterministically stop readers, stop the writer, and release ownership. */
   dispose(): Promise<EngineStatus>
 }
@@ -242,6 +247,7 @@ export interface EngineCanonicalStats {
   databasePageCount: number
   databasePageSizeBytes: number
   allocatedDatabaseBytes: number
+  performance?: EnginePerformanceStats
 }
 
 export interface EngineCapabilityPageOptions {
@@ -273,6 +279,18 @@ export interface EngineChangeReplayOptions {
   topics?: Array<string>
   /** Page size. Defaults to 100 and is capped at 1,000 in Rust. */
   limit?: number
+}
+
+export interface EngineCheckpointPerformanceStats {
+  attempts: number
+  completed: number
+  blocked: number
+  failures: number
+  lastLogFrames: number
+  lastCheckpointedFrames: number
+  lastRemainingFrames: number
+  blockedByReaderMs: number
+  latency: EngineLatencyStats
 }
 
 export interface EngineCommitWaitOptions {
@@ -467,6 +485,16 @@ export interface EngineHistorySessionPageOptions {
   limit?: number
 }
 
+export interface EngineLatencyStats {
+  samples: number
+  totalMs: number
+  meanMs: number
+  maxMs: number
+  p50UpperMs: number
+  p95UpperMs: number
+  p99UpperMs: number
+}
+
 export interface EngineMemoryDocument {
   documentId: string
   projectId: string
@@ -557,6 +585,11 @@ export interface EngineNamedCount {
   count: number
 }
 
+export interface EngineNamedLatencyStats {
+  name: string
+  latency: EngineLatencyStats
+}
+
 export interface EngineObservationOptions {
   /** Configured native data roots understood by the selected adapter. */
   roots: Array<string>
@@ -590,6 +623,8 @@ export interface EngineOpenOptions {
   queryWorkers?: number
   /** Diagnostic host label persisted in the owner metadata sidecar. */
   ownerLabel?: string
+  /** Defer reviewed query-only structures for one large fresh bootstrap. */
+  bootstrapQueryStructures?: boolean
 }
 
 export interface EngineOverviewResult {
@@ -626,6 +661,13 @@ export interface EngineOwnerMetadata {
   engineVersion: string
 }
 
+export interface EnginePerformanceStats {
+  writer: EngineWriterPerformanceStats
+  queries: EngineQueryPerformanceStats
+  source: EngineSourcePerformanceStats
+  storage: EngineStoragePerformanceStats
+}
+
 export interface EnginePlan {
   planId: string
   adapterId: string
@@ -653,6 +695,17 @@ export interface EnginePlanPage {
   payloadBytes: number
   payloadByteLimit: number
   nextCursor?: string
+}
+
+export interface EngineQueryPerformanceStats {
+  uptimeMs: number
+  requestsEnqueued: number
+  requestsCompleted: number
+  queueRejections: number
+  queueDepth: number
+  queueHighWatermark: number
+  oldestActiveMs: number
+  timings: Array<EngineNamedLatencyStats>
 }
 
 export interface EngineReconcileOptions {
@@ -889,11 +942,42 @@ export interface EngineSourceCapability {
   notes?: string
 }
 
+export interface EngineSourceDimensionPerformanceStats {
+  adapterId: string
+  streamId: string
+  driverKind: string
+  pipeline: EngineSourcePipelineStats
+}
+
 export interface EngineSourcePage {
   contractVersion: number
   atCommitSeq: number
   items: Array<EngineSourceSummary>
   nextCursor?: string
+}
+
+export interface EngineSourcePerformanceStats {
+  uptimeMs: number
+  dimensionCapacity: number
+  dimensionOverflowAssignments: number
+  totals: EngineSourcePipelineStats
+  dimensions: Array<EngineSourceDimensionPerformanceStats>
+}
+
+export interface EngineSourcePipelineStats {
+  readAttempts: number
+  readFailures: number
+  readRetries: number
+  readContinuations: number
+  recordsRead: number
+  payloadBytesRead: number
+  decodeAttempts: number
+  decodeFailures: number
+  decodeRetries: number
+  recordsDecoded: number
+  factsEmitted: number
+  recordsQuarantined: number
+  timings: Array<EngineNamedLatencyStats>
 }
 
 export interface EngineSourceSummary {
@@ -927,6 +1011,12 @@ export interface EngineStatus {
   inFlightQueries: number
   observation: EngineObservationStatus
   owner?: EngineOwnerMetadata
+}
+
+export interface EngineStoragePerformanceStats {
+  databaseFileBytes: number
+  walFileBytes: number
+  sharedMemoryFileBytes: number
 }
 
 export interface EngineTask {
@@ -1514,6 +1604,20 @@ export interface EngineWorkflowSummary {
   sourceObjectId: number
   sourceGeneration: number
   lastCommitSeq: number
+}
+
+export interface EngineWriterPerformanceStats {
+  uptimeMs: number
+  commitAttempts: number
+  committed: number
+  failed: number
+  factsCommitted: number
+  changesPublished: number
+  sqliteRowsChanged: number
+  queueDepth: number
+  queueHighWatermark: number
+  checkpoint: EngineCheckpointPerformanceStats
+  timings: Array<EngineNamedLatencyStats>
 }
 
 /** Returns the semver of the native addon. */

@@ -10,7 +10,7 @@ use std::fs::Metadata;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use rayon::prelude::*;
 use walkdir::WalkDir;
@@ -37,6 +37,7 @@ use super::commit::{
     CommitReceipt, ExpectedSourceCursor, ObservationCommit, SourceCapabilitySpec,
     SourceInstanceSpec, SourceObjectUpdate, SourceRecordError, SourceStreamSpec,
 };
+use super::performance::{SourceDecodeObservation, SourceDecodeOutcome, SourcePerformanceRecorder};
 use super::query_pool::{QueryCancellationToken, SourceCatalogObject, SourceCatalogSnapshot};
 use super::{EngineError, SpaghettiEngineCore};
 
@@ -421,9 +422,11 @@ impl ObservationCoordinator {
             ));
         }
         let started_at = now_unix_ms()?;
-        let lease = self.engine.begin_instance_reconcile(
+        let lease = self.engine.begin_object_reconcile(
             manifest.id.as_str(),
             spec.stable_key.as_bytes(),
+            &target.stream_key,
+            &target.object_key,
             started_at,
         )?;
         let result = (|| {
@@ -505,6 +508,18 @@ impl ObservationCoordinator {
         check_cancellations(&self.cancellations)
     }
 
+    fn source_performance<A: AgentAdapter + ?Sized>(
+        &self,
+        adapter: &A,
+        stream: &StreamSpec,
+    ) -> SourcePerformanceRecorder {
+        self.engine.source_performance_recorder(
+            adapter.manifest().id.as_str(),
+            stream.id.as_str(),
+            stream.driver.kind(),
+        )
+    }
+
     fn finish_reconcile(
         &self,
         lease: super::ObservationLease,
@@ -513,16 +528,10 @@ impl ObservationCoordinator {
     ) -> Result<ReconcileOutcome, EngineError> {
         let finished_at = now_unix_ms().unwrap_or(started_at);
         match result {
-            Ok(outcome) => match self.engine.overview() {
-                Ok(overview) => {
-                    lease.complete(&outcome, overview.commit_seq, finished_at);
-                    Ok(outcome)
-                }
-                Err(error) => {
-                    lease.fail(&error, finished_at);
-                    Err(error)
-                }
-            },
+            Ok(outcome) => {
+                lease.complete(&outcome, self.engine.latest_commit_seq(), finished_at);
+                Ok(outcome)
+            }
             Err(error) => {
                 lease.fail(&error, finished_at);
                 Err(error)
@@ -784,19 +793,28 @@ impl ObservationCoordinator {
         }
         let patterns = SelectorPatterns::new(stream)?;
         let driver = DirectorySnapshot::new(config.clone()).map_err(source_error)?;
-        let scan = driver
-            .scan(
-                root,
-                previous_checkpoint.as_ref(),
-                &|relative: &Path, kind| match kind {
-                    DirectoryEntryKind::Directory => DirectorySelection::Recurse,
-                    DirectoryEntryKind::File if patterns.matches(relative) => {
-                        DirectorySelection::Include
-                    }
-                    DirectoryEntryKind::File => DirectorySelection::Ignore,
-                },
-            )
-            .map_err(source_error)?;
+        let performance = self.source_performance(adapter, stream);
+        let read_started = Instant::now();
+        let scan = driver.scan(
+            root,
+            previous_checkpoint.as_ref(),
+            &|relative: &Path, kind| match kind {
+                DirectoryEntryKind::Directory => DirectorySelection::Recurse,
+                DirectoryEntryKind::File if patterns.matches(relative) => {
+                    DirectorySelection::Include
+                }
+                DirectoryEntryKind::File => DirectorySelection::Ignore,
+            },
+        );
+        performance.record_read(
+            read_started.elapsed(),
+            scan.is_err(),
+            matches!(&scan, Ok(DirectoryScan::RetryTransient)),
+            false,
+            0,
+            0,
+        );
+        let scan = scan.map_err(source_error)?;
         match scan {
             DirectoryScan::Unavailable => {
                 outcome.streams_unavailable = outcome.streams_unavailable.saturating_add(1);
@@ -1265,6 +1283,7 @@ impl ObservationCoordinator {
             .max_records_per_batch
             .min(MAX_APPEND_RECORDS_PER_COMMIT);
         let driver = AppendDelimitedFile::new(config).map_err(source_error)?;
+        let performance = self.source_performance(adapter, stream);
         let mut previous = durable
             .driver_checkpoint
             .as_deref()
@@ -1283,16 +1302,27 @@ impl ObservationCoordinator {
                 record_retry_target(outcome, instance, stream, object);
                 return Ok(());
             }
-            match driver
-                .read_confined(
-                    root,
-                    &object.descriptor.relative_path,
-                    previous.as_ref(),
-                    origin,
-                    force_contract_replay,
-                )
-                .map_err(source_error)?
-            {
+            let read_started = Instant::now();
+            let read = driver.read_confined(
+                root,
+                &object.descriptor.relative_path,
+                previous.as_ref(),
+                origin,
+                force_contract_replay,
+            );
+            let (read_retry, read_continuation, records_read, payload_bytes_read) = read
+                .as_ref()
+                .map(append_read_volume)
+                .unwrap_or((false, false, 0, 0));
+            performance.record_read(
+                read_started.elapsed(),
+                read.is_err(),
+                read_retry,
+                read_continuation,
+                records_read,
+                payload_bytes_read,
+            );
+            match read.map_err(source_error)? {
                 AppendRead::Missing => {
                     if stream.deletion == DeletionPolicy::MirrorSource {
                         self.commit_missing_object_absence(
@@ -1417,6 +1447,7 @@ impl ObservationCoordinator {
                                         stream,
                                         object_context,
                                         source_access,
+                                        &performance,
                                         record,
                                         next_decoder_state.as_deref(),
                                     )?;
@@ -1566,17 +1597,29 @@ impl ObservationCoordinator {
             .map_err(source_error)?;
         let generation_reset = durable.decoder_contract_changed(adapter)
             || durable.object_context_changed(object_context);
-        match ReplaceDocument::new(config.clone())
-            .map_err(source_error)?
-            .read_confined(
-                root,
-                &object.descriptor.relative_path,
-                previous.as_ref(),
-                origin,
-                generation_reset,
-            )
-            .map_err(source_error)?
-        {
+        let performance = self.source_performance(adapter, stream);
+        let driver = ReplaceDocument::new(config.clone()).map_err(source_error)?;
+        let read_started = Instant::now();
+        let read = driver.read_confined(
+            root,
+            &object.descriptor.relative_path,
+            previous.as_ref(),
+            origin,
+            generation_reset,
+        );
+        let (read_retry, read_continuation, records_read, payload_bytes_read) = read
+            .as_ref()
+            .map(replace_read_volume)
+            .unwrap_or((false, false, 0, 0));
+        performance.record_read(
+            read_started.elapsed(),
+            read.is_err(),
+            read_retry,
+            read_continuation,
+            records_read,
+            payload_bytes_read,
+        );
+        match read.map_err(source_error)? {
             ReplaceRead::Missing => {
                 if stream.deletion == DeletionPolicy::MirrorSource {
                     self.commit_missing_object_absence(
@@ -1644,6 +1687,7 @@ impl ObservationCoordinator {
                     object,
                     object_context,
                     source_access,
+                    &performance,
                     &durable,
                     record,
                     checkpoint,
@@ -1662,6 +1706,7 @@ impl ObservationCoordinator {
                         object,
                         object_context,
                         source_access,
+                        &performance,
                         &durable,
                         record,
                         checkpoint,
@@ -1734,6 +1779,7 @@ impl ObservationCoordinator {
         object: &DeclaredObject,
         object_context: &AdapterObjectContext,
         source_access: &ConfinedSourceAccess<'_>,
+        performance: &SourcePerformanceRecorder,
         durable: &DurableObject,
         record: SourceRecord,
         checkpoint: ReplaceCheckpoint,
@@ -1755,6 +1801,7 @@ impl ObservationCoordinator {
             stream,
             object_context,
             source_access,
+            performance,
             &record,
             prior_decoder_state.as_deref(),
         )?;
@@ -1902,22 +1949,34 @@ impl ObservationCoordinator {
         let force_replay = durable.decoder_contract_changed(adapter)
             || durable.object_context_changed(object_context);
         let cancellations = self.cancellations.clone();
-        match SqliteSnapshot::new(config.clone())
-            .map_err(source_error)?
-            .read_confined(
-                root,
-                &object.descriptor.relative_path,
-                previous.as_ref(),
-                origin,
-                force_replay,
-                move || {
-                    cancellations
-                        .iter()
-                        .any(QueryCancellationToken::is_cancelled)
-                },
-            )
-            .map_err(source_error)?
-        {
+        let performance = self.source_performance(adapter, stream);
+        let driver = SqliteSnapshot::new(config.clone()).map_err(source_error)?;
+        let read_started = Instant::now();
+        let read = driver.read_confined(
+            root,
+            &object.descriptor.relative_path,
+            previous.as_ref(),
+            origin,
+            force_replay,
+            move || {
+                cancellations
+                    .iter()
+                    .any(QueryCancellationToken::is_cancelled)
+            },
+        );
+        let (read_retry, read_continuation, records_read, payload_bytes_read) = read
+            .as_ref()
+            .map(sqlite_read_volume)
+            .unwrap_or((false, false, 0, 0));
+        performance.record_read(
+            read_started.elapsed(),
+            read.is_err(),
+            read_retry,
+            read_continuation,
+            records_read,
+            payload_bytes_read,
+        );
+        match read.map_err(source_error)? {
             SqliteRead::Missing => {
                 if stream.deletion == DeletionPolicy::MirrorSource {
                     self.commit_missing_object_absence(
@@ -1964,6 +2023,7 @@ impl ObservationCoordinator {
                     object,
                     object_context,
                     source_access,
+                    &performance,
                     &durable,
                     records,
                     checkpoint.generation,
@@ -2003,22 +2063,34 @@ impl ObservationCoordinator {
         let force_replay = durable.decoder_contract_changed(adapter)
             || durable.object_context_changed(object_context);
         let cancellations = self.cancellations.clone();
-        match KeyValueSnapshot::new(config.clone())
-            .map_err(source_error)?
-            .read_confined(
-                root,
-                &object.descriptor.relative_path,
-                previous.as_ref(),
-                origin,
-                force_replay,
-                move || {
-                    cancellations
-                        .iter()
-                        .any(QueryCancellationToken::is_cancelled)
-                },
-            )
-            .map_err(source_error)?
-        {
+        let performance = self.source_performance(adapter, stream);
+        let driver = KeyValueSnapshot::new(config.clone()).map_err(source_error)?;
+        let read_started = Instant::now();
+        let read = driver.read_confined(
+            root,
+            &object.descriptor.relative_path,
+            previous.as_ref(),
+            origin,
+            force_replay,
+            move || {
+                cancellations
+                    .iter()
+                    .any(QueryCancellationToken::is_cancelled)
+            },
+        );
+        let (read_retry, read_continuation, records_read, payload_bytes_read) = read
+            .as_ref()
+            .map(key_value_read_volume)
+            .unwrap_or((false, false, 0, 0));
+        performance.record_read(
+            read_started.elapsed(),
+            read.is_err(),
+            read_retry,
+            read_continuation,
+            records_read,
+            payload_bytes_read,
+        );
+        match read.map_err(source_error)? {
             KeyValueRead::Missing => {
                 if stream.deletion == DeletionPolicy::MirrorSource {
                     self.commit_missing_object_absence(
@@ -2065,6 +2137,7 @@ impl ObservationCoordinator {
                     object,
                     object_context,
                     source_access,
+                    &performance,
                     &durable,
                     records,
                     checkpoint.generation,
@@ -2087,6 +2160,7 @@ impl ObservationCoordinator {
         object: &DeclaredObject,
         object_context: &AdapterObjectContext,
         source_access: &ConfinedSourceAccess<'_>,
+        performance: &SourcePerformanceRecorder,
         durable: &DurableObject,
         records: Vec<SourceRecord>,
         generation: u64,
@@ -2106,6 +2180,7 @@ impl ObservationCoordinator {
             stream,
             object_context,
             source_access,
+            performance,
             &records,
             prior_decoder_state,
         )?;
@@ -2172,16 +2247,28 @@ impl ObservationCoordinator {
             .transpose()
             .map_err(source_error)?;
         let contract_replay = durable.decoder_contract_changed(adapter);
-        match PresenceObject::new(config.clone())
-            .map_err(source_error)?
-            .read_confined(
-                root,
-                &object.descriptor.relative_path,
-                (!contract_replay).then_some(previous.as_ref()).flatten(),
-                origin,
-            )
-            .map_err(source_error)?
-        {
+        let performance = self.source_performance(adapter, stream);
+        let driver = PresenceObject::new(config.clone()).map_err(source_error)?;
+        let read_started = Instant::now();
+        let read = driver.read_confined(
+            root,
+            &object.descriptor.relative_path,
+            (!contract_replay).then_some(previous.as_ref()).flatten(),
+            origin,
+        );
+        let (read_retry, read_continuation, records_read, payload_bytes_read) = read
+            .as_ref()
+            .map(presence_read_volume)
+            .unwrap_or((false, false, 0, 0));
+        performance.record_read(
+            read_started.elapsed(),
+            read.is_err(),
+            read_retry,
+            read_continuation,
+            records_read,
+            payload_bytes_read,
+        );
+        match read.map_err(source_error)? {
             PresenceRead::RetryTransient => {
                 outcome.retries_required = outcome.retries_required.saturating_add(1);
                 Ok(())
@@ -2217,6 +2304,7 @@ impl ObservationCoordinator {
                     stream,
                     object_context,
                     source_access,
+                    &performance,
                     &record,
                     prior_decoder_state.as_deref(),
                 )?;
@@ -2769,11 +2857,101 @@ struct DecodedSnapshot {
     quarantined_records: u32,
 }
 
+fn source_record_volume(record: &SourceRecord) -> (u64, u64) {
+    (1, u64::try_from(record.payload.len()).unwrap_or(u64::MAX))
+}
+
+fn source_records_volume(records: &[SourceRecord]) -> (u64, u64) {
+    records.iter().fold((0_u64, 0_u64), |total, record| {
+        let current = source_record_volume(record);
+        (
+            total.0.saturating_add(current.0),
+            total.1.saturating_add(current.1),
+        )
+    })
+}
+
+fn append_read_volume(read: &AppendRead) -> (bool, bool, u64, u64) {
+    match read {
+        AppendRead::RetryTransient => (true, false, 0, 0),
+        AppendRead::Batch {
+            items,
+            needs_retry,
+            more_available,
+            ..
+        } => {
+            let (records, bytes) = items.iter().fold((0_u64, 0_u64), |total, item| {
+                let current = match item {
+                    AppendItem::Record(record) => source_record_volume(record),
+                    AppendItem::Quarantined(quarantine) => (1, quarantine.payload_len),
+                };
+                (
+                    total.0.saturating_add(current.0),
+                    total.1.saturating_add(current.1),
+                )
+            });
+            (
+                *needs_retry && !*more_available,
+                *more_available,
+                records,
+                bytes,
+            )
+        }
+        AppendRead::Missing => (false, false, 0, 0),
+    }
+}
+
+fn replace_read_volume(read: &ReplaceRead) -> (bool, bool, u64, u64) {
+    match read {
+        ReplaceRead::RetryTransient => (true, false, 0, 0),
+        ReplaceRead::Record { record, .. } | ReplaceRead::Removed { record, .. } => {
+            let (records, bytes) = source_record_volume(record);
+            (false, false, records, bytes)
+        }
+        ReplaceRead::Quarantined { quarantine, .. } => (false, false, 1, quarantine.payload_len),
+        ReplaceRead::Missing | ReplaceRead::Unchanged { .. } => (false, false, 0, 0),
+    }
+}
+
+fn sqlite_read_volume(read: &SqliteRead) -> (bool, bool, u64, u64) {
+    match read {
+        SqliteRead::RetryTransient => (true, false, 0, 0),
+        SqliteRead::Snapshot { records, .. } => {
+            let (records, bytes) = source_records_volume(records);
+            (false, false, records, bytes)
+        }
+        SqliteRead::Missing | SqliteRead::Unchanged { .. } => (false, false, 0, 0),
+    }
+}
+
+fn key_value_read_volume(read: &KeyValueRead) -> (bool, bool, u64, u64) {
+    match read {
+        KeyValueRead::RetryTransient => (true, false, 0, 0),
+        KeyValueRead::Snapshot { records, .. } => {
+            let (records, bytes) = source_records_volume(records);
+            (false, false, records, bytes)
+        }
+        KeyValueRead::Missing | KeyValueRead::Unchanged { .. } => (false, false, 0, 0),
+    }
+}
+
+fn presence_read_volume(read: &PresenceRead) -> (bool, bool, u64, u64) {
+    match read {
+        PresenceRead::RetryTransient => (true, false, 0, 0),
+        PresenceRead::Observation { record, .. } => {
+            let (records, bytes) = source_record_volume(record);
+            (false, false, records, bytes)
+        }
+        PresenceRead::Unchanged { .. } => (false, false, 0, 0),
+    }
+}
+
 fn decode_snapshot_records<A: AgentAdapter + ?Sized>(
     adapter: &A,
     stream: &StreamSpec,
     object_context: &AdapterObjectContext,
     source_access: &ConfinedSourceAccess<'_>,
+    performance: &SourcePerformanceRecorder,
     records: &[SourceRecord],
     mut decoder_state: Option<Vec<u8>>,
 ) -> Result<Option<DecodedSnapshot>, EngineError> {
@@ -2787,6 +2965,7 @@ fn decode_snapshot_records<A: AgentAdapter + ?Sized>(
             stream,
             object_context,
             source_access,
+            performance,
             record,
             decoder_state.as_deref(),
         )?;
@@ -2878,83 +3057,121 @@ fn decode_record<A: AgentAdapter + ?Sized>(
     stream: &StreamSpec,
     object_context: &AdapterObjectContext,
     source_access: &ConfinedSourceAccess<'_>,
+    performance: &SourcePerformanceRecorder,
     record: &SourceRecord,
     decoder_state: Option<&[u8]>,
 ) -> Result<DecodedRecord, EngineError> {
-    let mut batch = FactBatch::new(FACT_BATCH_LIMIT, DIAGNOSTIC_LIMIT)
-        .map_err(|error| adapter_error("create fact batch", error))?;
-    let disposition = catch_adapter_panic("decode source record", || {
-        adapter.decode_with_access(
-            DecodeContext {
-                decoder: &stream.decoder,
-                object_context,
-                decoder_state,
-            },
-            record,
-            &mut batch,
-            source_access,
-        )
-    })?
-    .map_err(|error| adapter_error("decode source record", error))?;
-    let fact_count = batch.facts().len();
-    match disposition {
-        DecodeDisposition::Applied if fact_count == 0 => {
-            return Err(observation_error(
-                "validate decode disposition",
-                format!(
-                    "adapter returned Applied without facts for stream {}",
-                    stream.id
-                ),
-            ));
+    let started = Instant::now();
+    let mut adapter_elapsed = std::time::Duration::ZERO;
+    let mut batch = match FactBatch::new(FACT_BATCH_LIMIT, DIAGNOSTIC_LIMIT) {
+        Ok(batch) => batch,
+        Err(error) => {
+            performance.record_decode(&SourceDecodeObservation {
+                elapsed: started.elapsed(),
+                adapter_elapsed: std::time::Duration::ZERO,
+                fact_build: std::time::Duration::ZERO,
+                outcome: SourceDecodeOutcome::Failed,
+            });
+            return Err(adapter_error("create fact batch", error));
         }
-        DecodeDisposition::IgnoredKnown | DecodeDisposition::RetryTransient if fact_count != 0 => {
-            return Err(observation_error(
-                "validate decode disposition",
-                format!(
-                    "adapter returned {disposition:?} with {fact_count} facts for stream {}",
-                    stream.id
-                ),
-            ));
+    };
+    let decoded = (|| {
+        let adapter_started = Instant::now();
+        let adapter_result = catch_adapter_panic("decode source record", || {
+            adapter.decode_with_access(
+                DecodeContext {
+                    decoder: &stream.decoder,
+                    object_context,
+                    decoder_state,
+                },
+                record,
+                &mut batch,
+                source_access,
+            )
+        });
+        adapter_elapsed = adapter_started.elapsed();
+        let disposition =
+            adapter_result?.map_err(|error| adapter_error("decode source record", error))?;
+        let fact_count = batch.facts().len();
+        match disposition {
+            DecodeDisposition::Applied if fact_count == 0 => {
+                return Err(observation_error(
+                    "validate decode disposition",
+                    format!(
+                        "adapter returned Applied without facts for stream {}",
+                        stream.id
+                    ),
+                ));
+            }
+            DecodeDisposition::IgnoredKnown | DecodeDisposition::RetryTransient
+                if fact_count != 0 =>
+            {
+                return Err(observation_error(
+                    "validate decode disposition",
+                    format!(
+                        "adapter returned {disposition:?} with {fact_count} facts for stream {}",
+                        stream.id
+                    ),
+                ));
+            }
+            _ => {}
         }
-        _ => {}
-    }
-    for dependency in source_access.revisions()? {
-        batch
-            .add_dependency_read(dependency)
-            .map_err(|error| adapter_error("record source dependency", error))?;
-    }
-    match stream.retention {
-        RawRetentionPolicy::Full => {}
-        RawRetentionPolicy::DiagnosticExcerpt => {
-            let excerpt = diagnostic_excerpt(&record.payload);
-            batch.replace_unknown_record_payloads(&excerpt);
+        for dependency in source_access.revisions()? {
+            batch
+                .add_dependency_read(dependency)
+                .map_err(|error| adapter_error("record source dependency", error))?;
         }
-        RawRetentionPolicy::HashOnly | RawRetentionPolicy::None => {
-            batch.redact_unknown_record_payloads();
+        match stream.retention {
+            RawRetentionPolicy::Full => {}
+            RawRetentionPolicy::DiagnosticExcerpt => {
+                let excerpt = diagnostic_excerpt(&record.payload);
+                batch.replace_unknown_record_payloads(&excerpt);
+            }
+            RawRetentionPolicy::HashOnly | RawRetentionPolicy::None => {
+                batch.redact_unknown_record_payloads();
+            }
         }
-    }
-    let quarantined = batch
-        .diagnostics()
-        .iter()
-        .any(|diagnostic| diagnostic.class == AdapterErrorClass::RecordPermanent);
-    let errors = batch
-        .diagnostics()
-        .iter()
-        .map(|diagnostic| SourceRecordError {
-            generation: record.generation,
-            cursor_start: record.cursor_start.as_bytes().to_vec(),
-            cursor_end: record.cursor_end.as_bytes().to_vec(),
-            payload_hash: record.payload_hash.as_bytes().to_vec(),
-            media_type: record.media_type.as_str().to_string(),
-            raw_payload: retained_diagnostic_payload(stream.retention, &record.payload),
-            error_class: adapter_error_class(diagnostic.class).to_string(),
-            error_message: format!("{}: {}", diagnostic.code, diagnostic.message),
-            adapter_version: adapter.manifest().adapter_version.clone(),
-            contract_version: adapter.manifest().contract_version,
-            last_retry_at: None,
-        })
-        .collect();
-    let next_decoder_state = batch.next_decoder_state().map(ToOwned::to_owned);
+        let quarantined = batch
+            .diagnostics()
+            .iter()
+            .any(|diagnostic| diagnostic.class == AdapterErrorClass::RecordPermanent);
+        let errors = batch
+            .diagnostics()
+            .iter()
+            .map(|diagnostic| SourceRecordError {
+                generation: record.generation,
+                cursor_start: record.cursor_start.as_bytes().to_vec(),
+                cursor_end: record.cursor_end.as_bytes().to_vec(),
+                payload_hash: record.payload_hash.as_bytes().to_vec(),
+                media_type: record.media_type.as_str().to_string(),
+                raw_payload: retained_diagnostic_payload(stream.retention, &record.payload),
+                error_class: adapter_error_class(diagnostic.class).to_string(),
+                error_message: format!("{}: {}", diagnostic.code, diagnostic.message),
+                adapter_version: adapter.manifest().adapter_version.clone(),
+                contract_version: adapter.manifest().contract_version,
+                last_retry_at: None,
+            })
+            .collect();
+        let next_decoder_state = batch.next_decoder_state().map(ToOwned::to_owned);
+        Ok((disposition, errors, next_decoder_state, quarantined))
+    })();
+    let fact_build_time = batch.fact_build_time();
+    let fact_count = u64::try_from(batch.facts().len()).unwrap_or(u64::MAX);
+    let outcome = match &decoded {
+        Ok((DecodeDisposition::RetryTransient, _, _, _)) => SourceDecodeOutcome::Retry,
+        Ok((_, _, _, quarantined)) => SourceDecodeOutcome::Decoded {
+            facts: fact_count,
+            quarantined: *quarantined,
+        },
+        Err(_) => SourceDecodeOutcome::Failed,
+    };
+    performance.record_decode(&SourceDecodeObservation {
+        elapsed: started.elapsed(),
+        adapter_elapsed,
+        fact_build: fact_build_time,
+        outcome,
+    });
+    let (disposition, errors, next_decoder_state, quarantined) = decoded?;
     Ok(DecodedRecord {
         disposition,
         batch,
@@ -4768,6 +4985,7 @@ mod tests {
                 database_path: self.database.clone(),
                 query_workers: Some(1),
                 owner_label: Some("coordinator-test".to_string()),
+                defer_query_structures: false,
             })
             .unwrap()
         }
@@ -4787,6 +5005,7 @@ mod tests {
             database_path,
             query_workers: Some(1),
             owner_label: Some("synthetic-coordinator-test".to_string()),
+            defer_query_structures: false,
         })
         .unwrap()
     }

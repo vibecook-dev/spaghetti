@@ -14,6 +14,7 @@ mod memory_projection;
 mod observation;
 mod orchestration_query;
 mod owner_lock;
+mod performance;
 mod presence_projection;
 mod projection;
 mod query_identity;
@@ -71,6 +72,13 @@ pub use orchestration_query::{
 };
 use owner_lock::DatabaseOwnerLock;
 pub use owner_lock::OwnerMetadata;
+pub use performance::{
+    CheckpointPerformanceSnapshot, EnginePerformanceSnapshot, LatencySnapshot,
+    NamedLatencySnapshot, QueryPerformanceSnapshot, SourceDimensionPerformanceSnapshot,
+    SourcePerformanceSnapshot, SourcePipelineSnapshot, StoragePerformanceSnapshot,
+    WriterPerformanceSnapshot,
+};
+use performance::{SourcePerformanceRecorder, SourceTelemetry};
 pub use query_pool::{
     ChangeCursor, ChangeReplay, ChangeReplayRequest, DurableChange, HistoryProjectIndexSummary,
     HistoryProjectPage, HistoryProjectPageRequest, HistoryProjectSummary,
@@ -165,6 +173,9 @@ pub enum EngineError {
     #[error("engine is shutting down or already stopped")]
     ShuttingDown,
 
+    #[error("query service is unavailable while durable bootstrap finalization is incomplete")]
+    BootstrapInProgress,
+
     #[error("query was cancelled")]
     QueryCancelled,
 
@@ -210,6 +221,7 @@ pub struct EngineOptions {
     pub database_path: PathBuf,
     pub query_workers: Option<usize>,
     pub owner_label: Option<String>,
+    pub defer_query_structures: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -232,7 +244,8 @@ impl LifecyclePhase {
 struct EngineRuntime {
     owner_lock: DatabaseOwnerLock,
     writer: WriterRuntime,
-    queries: QueryPool,
+    queries: Option<QueryPool>,
+    bootstrap_active: bool,
 }
 
 struct Lifecycle {
@@ -401,6 +414,7 @@ pub struct SpaghettiEngineCore {
     query_workers: usize,
     adapters: Arc<AdapterRegistry>,
     observation: Arc<ObservationRuntime>,
+    source_telemetry: Arc<SourceTelemetry>,
     observation_workers: Mutex<Option<Arc<rayon::ThreadPool>>>,
     supervisors: Mutex<Vec<ObservationSupervisor>>,
     lifecycle: Mutex<Lifecycle>,
@@ -437,8 +451,18 @@ impl SpaghettiEngineCore {
         let owner_lock = DatabaseOwnerLock::acquire(&database_path, owner_label)?;
         let owner = owner_lock.metadata().clone();
         let writer = WriterRuntime::start(database_path.clone())?;
-        let queries = QueryPool::start(database_path.clone(), query_workers)?;
-        let latest_commit_seq = queries.client().overview()?.commit_seq;
+        let bootstrap_active =
+            options.defer_query_structures && writer.client().begin_query_bootstrap()?;
+        let queries = if bootstrap_active {
+            None
+        } else {
+            Some(QueryPool::start(database_path.clone(), query_workers)?)
+        };
+        let latest_commit_seq = queries
+            .as_ref()
+            .map(|pool| pool.client().overview().map(|overview| overview.commit_seq))
+            .transpose()?
+            .unwrap_or_default();
         let observation_workers = rayon::ThreadPoolBuilder::new()
             .num_threads(4)
             .thread_name(|index| format!("spaghetti-observe-{index}"))
@@ -454,6 +478,7 @@ impl SpaghettiEngineCore {
             query_workers,
             adapters: Arc::new(adapters),
             observation: ObservationRuntime::new(),
+            source_telemetry: SourceTelemetry::new(),
             observation_workers: Mutex::new(Some(Arc::new(observation_workers))),
             supervisors: Mutex::new(Vec::new()),
             lifecycle: Mutex::new(Lifecycle {
@@ -462,6 +487,7 @@ impl SpaghettiEngineCore {
                     owner_lock,
                     writer,
                     queries,
+                    bootstrap_active,
                 }),
             }),
             commit_notifications: CommitNotifications::new(latest_commit_seq),
@@ -471,19 +497,26 @@ impl SpaghettiEngineCore {
 
     pub fn status(&self) -> EngineStatusSnapshot {
         let lifecycle = self.lock_lifecycle();
-        let (writer_alive, alive_query_workers, in_flight_queries) = lifecycle
+        let (writer_alive, alive_query_workers, in_flight_queries, bootstrap_active) = lifecycle
             .runtime
             .as_ref()
             .map(|runtime| {
                 let writer = runtime.writer.client();
-                let queries = runtime.queries.client();
+                let queries = runtime.queries.as_ref().map(QueryPool::client);
                 (
                     writer.is_alive(),
-                    queries.alive_workers(),
-                    queries.in_flight(),
+                    queries
+                        .as_ref()
+                        .map(QueryClient::alive_workers)
+                        .unwrap_or_default(),
+                    queries
+                        .as_ref()
+                        .map(QueryClient::in_flight)
+                        .unwrap_or_default(),
+                    runtime.bootstrap_active,
                 )
             })
-            .unwrap_or((false, 0, 0));
+            .unwrap_or((false, 0, 0, false));
         let running = lifecycle.phase == LifecyclePhase::Running;
         let mut observation = self.observation.snapshot();
         let latest_commit_seq = self.commit_notifications.latest_commit_seq();
@@ -517,9 +550,13 @@ impl SpaghettiEngineCore {
         }
 
         EngineStatusSnapshot {
-            state: lifecycle.phase.as_str().to_string(),
+            state: if running && bootstrap_active {
+                "bootstrapping".to_string()
+            } else {
+                lifecycle.phase.as_str().to_string()
+            },
             database_path: self.database_path.to_string_lossy().into_owned(),
-            accepting_queries: running,
+            accepting_queries: running && !bootstrap_active,
             writer_alive,
             configured_query_workers: usize_to_u32(self.query_workers),
             alive_query_workers: usize_to_u32(alive_query_workers),
@@ -882,16 +919,33 @@ impl SpaghettiEngineCore {
 
     /// Return one coherent set of canonical and source-catalog counts.
     pub fn canonical_stats(&self) -> Result<CanonicalStats, EngineError> {
-        let (_, queries) = self.clients()?;
-        queries.canonical_stats()
+        self.canonical_stats_cancellable(QueryCancellationToken::default())
     }
 
     pub fn canonical_stats_cancellable(
         &self,
         cancellation: QueryCancellationToken,
     ) -> Result<CanonicalStats, EngineError> {
-        let (_, queries) = self.clients()?;
-        queries.canonical_stats_cancellable(cancellation)
+        let (writer, queries) = self.clients()?;
+        // Performance counters are intentionally owner scoped rather
+        // than part of the SQLite read transaction. Sample them first so this
+        // `getStats` request does not measure itself.
+        let performance = EnginePerformanceSnapshot {
+            writer: writer.performance_snapshot(),
+            queries: queries.performance_snapshot(),
+            source: self.source_telemetry.snapshot(),
+            storage: StoragePerformanceSnapshot {
+                database_file_bytes: file_size(&self.database_path),
+                wal_file_bytes: file_size(&sqlite_sidecar_path(&self.database_path, "-wal")),
+                shared_memory_file_bytes: file_size(&sqlite_sidecar_path(
+                    &self.database_path,
+                    "-shm",
+                )),
+            },
+        };
+        let mut stats = queries.canonical_stats_cancellable(cancellation)?;
+        stats.performance = Some(performance);
+        Ok(stats)
     }
 
     pub fn teams(&self, request: TeamPageRequest) -> Result<TeamPage, EngineError> {
@@ -962,9 +1016,10 @@ impl SpaghettiEngineCore {
         &self,
         request: ObservationCommit,
     ) -> Result<CommitReceipt, EngineError> {
-        let (writer, _) = self.clients()?;
+        let writer = self.writer_client()?;
         let receipt = writer.commit_observation(request)?;
         self.commit_notifications.publish(receipt.commit_seq);
+        writer.record_changes_published(receipt.change_count);
         Ok(receipt)
     }
 
@@ -974,7 +1029,7 @@ impl SpaghettiEngineCore {
         &self,
         source: commit::SourceInstanceSpec,
     ) -> Result<u64, EngineError> {
-        let (writer, _) = self.clients()?;
+        let writer = self.writer_client()?;
         writer.reserve_source_instance(source)
     }
 
@@ -985,9 +1040,10 @@ impl SpaghettiEngineCore {
         request: ObservationCommit,
         batch: FactBatch,
     ) -> Result<CommitReceipt, EngineError> {
-        let (writer, _) = self.clients()?;
+        let writer = self.writer_client()?;
         let receipt = writer.commit_facts(request, batch)?;
         self.commit_notifications.publish(receipt.commit_seq);
+        writer.record_changes_published(receipt.change_count);
         Ok(receipt)
     }
 
@@ -1031,7 +1087,7 @@ impl SpaghettiEngineCore {
         policy: ChangeLogRetentionPolicy,
         now_ms: i64,
     ) -> Result<ChangeLogRetentionSnapshot, EngineError> {
-        let (writer, _) = self.clients()?;
+        let writer = self.writer_client()?;
         writer.maintain_change_log(policy, now_ms)
     }
 
@@ -1043,8 +1099,21 @@ impl SpaghettiEngineCore {
         adapter_id: &str,
         stable_key: &[u8],
     ) -> Result<SourceCatalogSnapshot, EngineError> {
-        let (_, queries) = self.clients()?;
-        queries.source_catalog(adapter_id, stable_key)
+        self.writer_client()?.source_catalog(adapter_id, stable_key)
+    }
+
+    pub(crate) fn source_performance_recorder(
+        &self,
+        adapter_id: &str,
+        stream_id: &str,
+        driver_kind: &str,
+    ) -> SourcePerformanceRecorder {
+        self.source_telemetry
+            .recorder(adapter_id, stream_id, driver_kind)
+    }
+
+    pub(crate) fn latest_commit_seq(&self) -> u64 {
+        self.commit_notifications.latest_commit_seq()
     }
 
     pub fn cancel_pending_queries(&self) -> Result<u64, EngineError> {
@@ -1241,6 +1310,72 @@ impl SpaghettiEngineCore {
         Ok(true)
     }
 
+    /// Rebuild deferred query structures, validate the durable database, and
+    /// only then admit the persistent read pool. This is idempotent so a host
+    /// can safely call it after every startup regardless of whether the size
+    /// gate selected bootstrap mode.
+    pub fn complete_query_bootstrap(&self) -> Result<Option<u64>, EngineError> {
+        let (writer, supervisor_clients) = {
+            let lifecycle = self.lock_lifecycle();
+            if lifecycle.phase != LifecyclePhase::Running {
+                return Err(EngineError::ShuttingDown);
+            }
+            let runtime = lifecycle
+                .runtime
+                .as_ref()
+                .expect("running engine must own its runtime");
+            if !runtime.bootstrap_active {
+                return Ok(None);
+            }
+            let clients = self
+                .lock_supervisors()
+                .iter()
+                .map(ObservationSupervisor::client)
+                .collect::<Vec<_>>();
+            (runtime.writer.client(), clients)
+        };
+
+        let mut paused = Vec::with_capacity(supervisor_clients.len());
+        for client in supervisor_clients {
+            paused.push(client.pause_for_bootstrap()?);
+        }
+        let finalization = writer.finalize_query_bootstrap();
+        let mut resume_result = Ok(());
+        for supervisor in paused {
+            if let Err(error) = supervisor.resume() {
+                if resume_result.is_ok() {
+                    resume_result = Err(error);
+                }
+            }
+        }
+        let snapshot_watermark = finalization?;
+        resume_result?;
+        let mut queries = QueryPool::start(self.database_path.clone(), self.query_workers)?;
+        let latest_commit_seq = queries.client().overview()?.commit_seq;
+
+        let mut lifecycle = self.lock_lifecycle();
+        if lifecycle.phase != LifecyclePhase::Running {
+            drop(lifecycle);
+            let _ = queries.shutdown();
+            return Err(EngineError::ShuttingDown);
+        }
+        let runtime = lifecycle
+            .runtime
+            .as_mut()
+            .expect("running engine must own its runtime");
+        if !runtime.bootstrap_active {
+            drop(lifecycle);
+            let _ = queries.shutdown();
+            return Ok(snapshot_watermark);
+        }
+        debug_assert!(runtime.queries.is_none());
+        runtime.queries = Some(queries);
+        runtime.bootstrap_active = false;
+        drop(lifecycle);
+        self.commit_notifications.publish(latest_commit_seq);
+        Ok(snapshot_watermark)
+    }
+
     /// Stop accepting work, cancel queued queries, join readers, join the
     /// writer, then release ownership. Concurrent callers wait for the first
     /// disposer and observe the same stopped state.
@@ -1289,8 +1424,10 @@ impl SpaghettiEngineCore {
         };
         drop(observation_workers);
 
-        if let Err(error) = runtime.queries.shutdown() {
-            first_error.get_or_insert(error);
+        if let Some(queries) = runtime.queries.as_mut() {
+            if let Err(error) = queries.shutdown() {
+                first_error.get_or_insert(error);
+            }
         }
         if let Err(error) = runtime.writer.shutdown() {
             first_error.get_or_insert(error);
@@ -1311,6 +1448,10 @@ impl SpaghettiEngineCore {
     }
 
     fn clients(&self) -> Result<(WriterClient, QueryClient), EngineError> {
+        Ok((self.writer_client()?, self.query_client()?))
+    }
+
+    fn writer_client(&self) -> Result<WriterClient, EngineError> {
         let lifecycle = self.lock_lifecycle();
         if lifecycle.phase != LifecyclePhase::Running {
             return Err(EngineError::ShuttingDown);
@@ -1319,7 +1460,23 @@ impl SpaghettiEngineCore {
             .runtime
             .as_ref()
             .expect("running engine must own its runtime");
-        Ok((runtime.writer.client(), runtime.queries.client()))
+        Ok(runtime.writer.client())
+    }
+
+    fn query_client(&self) -> Result<QueryClient, EngineError> {
+        let lifecycle = self.lock_lifecycle();
+        if lifecycle.phase != LifecyclePhase::Running {
+            return Err(EngineError::ShuttingDown);
+        }
+        let runtime = lifecycle
+            .runtime
+            .as_ref()
+            .expect("running engine must own its runtime");
+        runtime
+            .queries
+            .as_ref()
+            .map(QueryPool::client)
+            .ok_or(EngineError::BootstrapInProgress)
     }
 
     pub(crate) fn begin_full_reconcile(
@@ -1347,6 +1504,23 @@ impl SpaghettiEngineCore {
     ) -> Result<ObservationLease, EngineError> {
         self.observation
             .begin_instance(adapter_id, stable_key, started_at_unix_ms)
+    }
+
+    pub(crate) fn begin_object_reconcile(
+        &self,
+        adapter_id: &str,
+        stable_key: &[u8],
+        stream_key: &str,
+        object_key: &[u8],
+        started_at_unix_ms: i64,
+    ) -> Result<ObservationLease, EngineError> {
+        self.observation.begin_object(
+            adapter_id,
+            stable_key,
+            stream_key,
+            object_key,
+            started_at_unix_ms,
+        )
     }
 
     fn lock_lifecycle(&self) -> MutexGuard<'_, Lifecycle> {
@@ -1420,6 +1594,18 @@ fn normalize_database_path(path: &Path) -> Result<PathBuf, EngineError> {
     Ok(canonical_parent.join(file_name))
 }
 
+fn sqlite_sidecar_path(database_path: &Path, suffix: &str) -> PathBuf {
+    let mut value = database_path.as_os_str().to_os_string();
+    value.push(suffix);
+    PathBuf::from(value)
+}
+
+fn file_size(path: &Path) -> u64 {
+    fs::metadata(path)
+        .map(|metadata| metadata.len())
+        .unwrap_or(0)
+}
+
 fn usize_to_u32(value: usize) -> u32 {
     u32::try_from(value).unwrap_or(u32::MAX)
 }
@@ -1438,6 +1624,7 @@ mod tests {
             database_path,
             query_workers: Some(2),
             owner_label: Some("engine-test".to_string()),
+            defer_query_structures: false,
         }
     }
 
@@ -1470,6 +1657,34 @@ mod tests {
 
         let reopened = SpaghettiEngineCore::open(options(database)).unwrap();
         reopened.shutdown().unwrap();
+    }
+
+    #[test]
+    fn bootstrap_withholds_queries_until_writer_finalization() {
+        let dir = tempdir().unwrap();
+        let database = dir.path().join("bootstrap.db");
+        let mut bootstrap_options = options(database);
+        bootstrap_options.defer_query_structures = true;
+        let engine = SpaghettiEngineCore::open(bootstrap_options).unwrap();
+
+        let status = engine.status();
+        assert_eq!(status.state, "bootstrapping");
+        assert!(!status.accepting_queries);
+        assert!(status.writer_alive);
+        assert_eq!(status.alive_query_workers, 0);
+        assert!(matches!(
+            engine.overview(),
+            Err(EngineError::BootstrapInProgress)
+        ));
+
+        assert_eq!(engine.complete_query_bootstrap().unwrap(), Some(0));
+        let ready = engine.status();
+        assert_eq!(ready.state, "running");
+        assert!(ready.accepting_queries);
+        assert_eq!(ready.alive_query_workers, 2);
+        assert_eq!(engine.overview().unwrap().commit_seq, 0);
+        assert_eq!(engine.complete_query_bootstrap().unwrap(), None);
+        engine.shutdown().unwrap();
     }
 
     #[test]

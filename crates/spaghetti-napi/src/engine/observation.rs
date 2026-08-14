@@ -95,6 +95,7 @@ impl InstanceKey {
 enum ReconcileScope {
     Adapter(String),
     Instance(InstanceKey),
+    Object(ObjectKey),
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -216,6 +217,35 @@ impl ObservationRuntime {
     ) -> Result<ObservationLease, EngineError> {
         self.begin(
             ReconcileScope::Instance(InstanceKey::new(adapter_id, stable_key)?),
+            ObservationPhase::Reconciling,
+            started_at_unix_ms,
+        )
+    }
+
+    pub(crate) fn begin_object(
+        self: &Arc<Self>,
+        adapter_id: &str,
+        stable_key: &[u8],
+        stream_key: &str,
+        object_key: &[u8],
+        started_at_unix_ms: i64,
+    ) -> Result<ObservationLease, EngineError> {
+        if stream_key.trim().is_empty() {
+            return Err(EngineError::InvalidConfig(
+                "observation source-stream key must not be empty".to_string(),
+            ));
+        }
+        if object_key.is_empty() {
+            return Err(EngineError::InvalidConfig(
+                "observation source-object key must not be empty".to_string(),
+            ));
+        }
+        self.begin(
+            ReconcileScope::Object(ObjectKey {
+                instance: InstanceKey::new(adapter_id, stable_key)?,
+                stream_key: stream_key.to_string(),
+                object_key: object_key.to_vec(),
+            }),
             ObservationPhase::Reconciling,
             started_at_unix_ms,
         )
@@ -407,6 +437,7 @@ impl ObservationRuntime {
         let retry_adapter_id = match &active.scope {
             ReconcileScope::Adapter(adapter_id) => adapter_id.clone(),
             ReconcileScope::Instance(key) => key.adapter_id.clone(),
+            ReconcileScope::Object(key) => key.instance.adapter_id.clone(),
         };
         for target in &outcome.retry_targets {
             let key = ObjectKey {
@@ -458,6 +489,9 @@ impl ObservationRuntime {
             }
             ReconcileScope::Instance(key) => {
                 self.enqueue_instance_locked(state, key.clone(), reason);
+            }
+            ReconcileScope::Object(key) => {
+                self.enqueue_object_locked(state, key.clone(), reason);
             }
         }
         if state.active.is_none() {
@@ -676,6 +710,15 @@ fn acknowledge_scope_locked(
                 object_key.instance != *key || pending.sequence > through_sequence
             });
         }
+        ReconcileScope::Object(key) => {
+            if state
+                .pending_objects
+                .get(key)
+                .is_some_and(|pending| pending.sequence <= through_sequence)
+            {
+                state.pending_objects.remove(key);
+            }
+        }
     }
 }
 
@@ -814,8 +857,47 @@ mod tests {
                 && object_key == b"object"
         ));
 
-        let retry = runtime.begin_instance("adapter", b"instance", 30).unwrap();
+        let retry = runtime
+            .begin_object("adapter", b"instance", "transcript", b"object", 30)
+            .unwrap();
         retry.complete(&ReconcileOutcome::default(), 1, 40);
+        assert!(runtime.next_pending("adapter").is_none());
+    }
+
+    #[test]
+    fn object_retry_completion_does_not_acknowledge_sibling_backlog() {
+        let runtime = ObservationRuntime::with_capacity(4).unwrap();
+        let lease = runtime.begin_full("adapter", 10).unwrap();
+        let target = |object_key: &[u8]| super::super::ReconcileRetryTarget {
+            stable_key: b"instance".to_vec(),
+            stream_key: "transcript".to_string(),
+            object_key: object_key.to_vec(),
+        };
+        lease.complete(
+            &ReconcileOutcome {
+                retries_required: 2,
+                backlog_remaining: 2,
+                retry_targets: vec![target(b"first"), target(b"second")],
+                ..ReconcileOutcome::default()
+            },
+            1,
+            20,
+        );
+
+        let first = runtime
+            .begin_object("adapter", b"instance", "transcript", b"first", 30)
+            .unwrap();
+        first.complete(&ReconcileOutcome::default(), 2, 40);
+
+        assert!(matches!(
+            runtime.next_pending("adapter"),
+            Some(PendingObservationWork::Object { object_key, .. })
+                if object_key == b"second"
+        ));
+        runtime
+            .begin_object("adapter", b"instance", "transcript", b"second", 50)
+            .unwrap()
+            .complete(&ReconcileOutcome::default(), 3, 60);
         assert!(runtime.next_pending("adapter").is_none());
     }
 

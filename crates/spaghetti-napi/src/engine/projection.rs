@@ -5,6 +5,7 @@
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
+use std::time::Instant;
 
 use rusqlite::{
     params, params_from_iter, Connection, OptionalExtension, Params, Transaction,
@@ -12,16 +13,17 @@ use rusqlite::{
 };
 
 use crate::adapter::{
-    DelegationFact, DelegationKind, DelegationMetadataFact, DelegationSpawnFact,
-    DependencyRevision, EntityKey, EvidenceKind, EvidenceStrength, Fact, FactBatch, FactEnvelope,
-    MessageRole, QualifiedTimestamp, RawRetentionPolicy, RelationStrength, SessionFact,
-    TimestampQuality, TokenUsage, UsageAccounting, UsageFact, UsageScope, ValueQuality,
+    DelegationFact, DelegationKind, DelegationMetadataFact, DelegationSpawnFact, EntityKey,
+    EvidenceKind, EvidenceStrength, Fact, FactBatch, FactEnvelope, MessageRole, QualifiedTimestamp,
+    RawRetentionPolicy, RelationStrength, SessionFact, TimestampQuality, TokenUsage,
+    UsageAccounting, UsageFact, UsageScope, ValueQuality,
 };
 
 use super::artifact_projection::apply_artifact_facts;
 use super::commit::{
-    apply_observation_commit_with_projection, ChangeEntry, CommitReceipt, ObservationCommit,
-    ProjectionCommitContext, TransactionalProjectionWork,
+    apply_observation_commit_with_projection, apply_observation_commit_with_projection_and_hook,
+    apply_observation_commit_with_projection_in_transaction, ChangeEntry, CommitDetail, CommitHook,
+    CommitReceipt, ObservationCommit, ProjectionCommitContext, TransactionalProjectionWork,
 };
 use super::memory_projection::apply_project_memory_facts;
 use super::presence_projection::apply_presence_facts;
@@ -30,7 +32,9 @@ use super::settings_projection::apply_interpretation_settings_facts;
 use super::storage_codec::{omitted, BlobEncoder, EncodedBlob};
 use super::task_projection::apply_task_snapshots;
 use super::team_projection::apply_team_snapshots;
-use super::timeline_projection::replace_message_content_blocks;
+use super::timeline_projection::{
+    insert_message_content_blocks, replace_message_content_blocks, MessageContentBlocks,
+};
 use super::tool_result_projection::{
     apply_persisted_tool_result_facts, replace_message_references, replaced_message_reference_keys,
 };
@@ -38,6 +42,8 @@ use super::workflow_projection::apply_workflow_facts;
 use super::EngineError;
 
 const CHANGE_SCHEMA_VERSION: u32 = 1;
+const FACT_INSERT_BATCH_ROWS: usize = 512;
+const MESSAGE_INSERT_BATCH_ROWS: usize = 256;
 
 /// Submit one already-decoded fact batch through the catalog/projection/cursor
 /// transaction. Public changes and the durable fact count are derived here;
@@ -47,6 +53,56 @@ pub(super) fn apply_fact_observation_commit(
     request: &ObservationCommit,
     batch: &FactBatch,
 ) -> Result<CommitReceipt, EngineError> {
+    apply_fact_observation_commit_inner(connection, request, batch, None)
+}
+
+pub(super) fn apply_fact_observation_commit_with_hook(
+    connection: &mut Connection,
+    request: &ObservationCommit,
+    batch: &FactBatch,
+    hook: &dyn CommitHook,
+) -> Result<CommitReceipt, EngineError> {
+    apply_fact_observation_commit_inner(connection, request, batch, Some(hook))
+}
+
+fn apply_fact_observation_commit_inner(
+    connection: &mut Connection,
+    request: &ObservationCommit,
+    batch: &FactBatch,
+    hook: Option<&dyn CommitHook>,
+) -> Result<CommitReceipt, EngineError> {
+    let (request, projection) = prepare_fact_observation_commit(request, batch, hook)?;
+    match hook {
+        Some(hook) => apply_observation_commit_with_projection_and_hook(
+            connection,
+            &request,
+            &projection,
+            hook,
+        ),
+        None => apply_observation_commit_with_projection(connection, &request, &projection),
+    }
+}
+
+pub(super) fn apply_fact_observation_commit_in_transaction(
+    transaction: &Transaction<'_>,
+    request: &ObservationCommit,
+    batch: &FactBatch,
+    hook: &dyn CommitHook,
+) -> Result<CommitReceipt, EngineError> {
+    let (request, projection) = prepare_fact_observation_commit(request, batch, Some(hook))?;
+    apply_observation_commit_with_projection_in_transaction(
+        transaction,
+        &request,
+        &projection,
+        hook,
+    )
+}
+
+fn prepare_fact_observation_commit<'a>(
+    request: &ObservationCommit,
+    batch: &'a FactBatch,
+    hook: Option<&'a dyn CommitHook>,
+) -> Result<(ObservationCommit, FactProjectionWork<'a>), EngineError> {
     if !request.changes.is_empty() {
         return Err(EngineError::InvalidCommit(
             "typed fact commits cannot supply public changes".to_string(),
@@ -76,8 +132,9 @@ pub(super) fn apply_fact_observation_commit(
         encoded_payloads,
         retention: request.stream.retention,
         retracted_run_keys: RefCell::new(BTreeSet::new()),
+        hook,
     };
-    apply_observation_commit_with_projection(connection, &request, &projection)
+    Ok((request, projection))
 }
 
 struct FactProjectionWork<'a> {
@@ -85,6 +142,7 @@ struct FactProjectionWork<'a> {
     encoded_payloads: Vec<EncodedFactPayload>,
     retention: RawRetentionPolicy,
     retracted_run_keys: RefCell<BTreeSet<Vec<u8>>>,
+    hook: Option<&'a dyn CommitHook>,
 }
 
 #[derive(Debug)]
@@ -99,6 +157,7 @@ impl TransactionalProjectionWork for FactProjectionWork<'_> {
         transaction: &Transaction<'_>,
         context: &ProjectionCommitContext,
     ) -> Result<Vec<ChangeEntry>, EngineError> {
+        let history_started = Instant::now();
         if self.retention != context.retention {
             return Err(EngineError::InvalidCommit(
                 "encoded fact retention does not match the committed stream policy".to_string(),
@@ -140,19 +199,11 @@ impl TransactionalProjectionWork for FactProjectionWork<'_> {
         let last_run_facts = last_run_fact_indices(self.batch);
         let existing_message_keys = existing_message_keys(transaction, self.batch)?;
         let mut seen_message_keys = BTreeSet::new();
+        let duplicate_message_keys = duplicate_message_keys(self.batch);
+        let mut new_message_content = Vec::new();
+        persist_facts(transaction, context, self.batch, &self.encoded_payloads)?;
+        persist_canonical_messages(transaction, context, self.batch, &self.encoded_payloads)?;
         for (index, envelope) in self.batch.facts().iter().enumerate() {
-            let encoded = self.encoded_payloads.get(index).ok_or_else(|| {
-                EngineError::InvalidCommit(
-                    "encoded fact payload count did not match fact batch".to_string(),
-                )
-            })?;
-            persist_fact(
-                transaction,
-                context,
-                envelope,
-                self.batch.dependency_reads(),
-                &encoded.audit,
-            )?;
             match &envelope.value {
                 Fact::Session(original) => {
                     let Some((fact, last_index)) =
@@ -233,73 +284,6 @@ impl TransactionalProjectionWork for FactProjectionWork<'_> {
                     let message_key = fact.message.as_bytes();
                     let replaces_existing_message = existing_message_keys.contains(message_key)
                         || !seen_message_keys.insert(message_key.to_vec());
-                    let content = serialize(&fact.content, "serialize canonical content")?;
-                    let native_payload = encoded.message_raw.as_ref().ok_or_else(|| {
-                        EngineError::InvalidCommit(
-                            "message fact is missing encoded native payload".to_string(),
-                        )
-                    })?;
-                    execute_cached(
-                        transaction,
-                        r#"
-                            INSERT INTO canonical_messages (
-                                message_key, session_key, run_key,
-                                native_message_id, native_kind, role,
-                                content_json, source_time, source_time_quality,
-                                parent_native_message_id, model, search_text,
-                                raw_json, raw_json_codec, fact_id, source_object_id,
-                                source_generation, cursor_start, cursor_end,
-                                last_commit_seq
-                            ) VALUES (
-                                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
-                                ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18,
-                                ?19, ?20
-                            )
-                            ON CONFLICT(message_key) DO UPDATE SET
-                                session_key = excluded.session_key,
-                                run_key = excluded.run_key,
-                                native_message_id = excluded.native_message_id,
-                                native_kind = excluded.native_kind,
-                                role = excluded.role,
-                                content_json = excluded.content_json,
-                                source_time = excluded.source_time,
-                                source_time_quality = excluded.source_time_quality,
-                                parent_native_message_id = excluded.parent_native_message_id,
-                                model = excluded.model,
-                                search_text = excluded.search_text,
-                                raw_json = excluded.raw_json,
-                                raw_json_codec = excluded.raw_json_codec,
-                                fact_id = excluded.fact_id,
-                                source_object_id = excluded.source_object_id,
-                                source_generation = excluded.source_generation,
-                                cursor_start = excluded.cursor_start,
-                                cursor_end = excluded.cursor_end,
-                                last_commit_seq = excluded.last_commit_seq
-                            "#,
-                        params![
-                            fact.message.as_bytes(),
-                            fact.session.as_bytes(),
-                            fact.run.as_bytes(),
-                            fact.native_message_id,
-                            fact.native_kind,
-                            message_role(&fact.role),
-                            content,
-                            timestamp_value(fact.source_time.as_ref()),
-                            timestamp_quality(fact.source_time.as_ref()),
-                            fact.parent_native_message_id,
-                            fact.model,
-                            fact.search_text,
-                            native_payload.bytes.as_slice(),
-                            native_payload.codec,
-                            envelope.id.as_bytes().as_slice(),
-                            sqlite_u64(context.source_object_id, "source object id")?,
-                            sqlite_u64(context.generation, "source generation")?,
-                            envelope.provenance.cursor_start,
-                            envelope.provenance.cursor_end,
-                            sqlite_u64(context.commit_seq, "commit sequence")?,
-                        ],
-                    )
-                    .map_err(|error| sqlite_error("project canonical message", error))?;
                     changes.push(upsert_change(
                         "history.message.changed",
                         fact.message.as_bytes(),
@@ -313,14 +297,23 @@ impl TransactionalProjectionWork for FactProjectionWork<'_> {
                         &fact.content,
                         replaces_existing_message,
                     )?);
-                    replace_message_content_blocks(
-                        transaction,
-                        message_key,
-                        fact.session.as_bytes(),
-                        fact.run.as_bytes(),
-                        &fact.content,
-                        replaces_existing_message,
-                    )?;
+                    if replaces_existing_message || duplicate_message_keys.contains(message_key) {
+                        replace_message_content_blocks(
+                            transaction,
+                            message_key,
+                            fact.session.as_bytes(),
+                            fact.run.as_bytes(),
+                            &fact.content,
+                            replaces_existing_message,
+                        )?;
+                    } else {
+                        new_message_content.push(MessageContentBlocks {
+                            message_key,
+                            session_key: fact.session.as_bytes(),
+                            run_key: fact.run.as_bytes(),
+                            content: &fact.content,
+                        });
+                    }
                 }
                 Fact::Run(fact) => {
                     if last_run_facts.get(fact.run.as_bytes()) != Some(&index) {
@@ -388,28 +381,25 @@ impl TransactionalProjectionWork for FactProjectionWork<'_> {
                 | Fact::Usage(_) => {}
             }
         }
-        changes.extend(apply_session_index_facts(
-            transaction,
-            context,
-            self.batch,
-            &changed_session_keys,
-        )?);
-        changes.extend(apply_project_memory_facts(
-            transaction,
-            context,
-            self.batch,
-        )?);
-        changes.extend(apply_persisted_tool_result_facts(
-            transaction,
-            context,
-            self.batch,
-            &changed_tool_references,
-        )?);
-        changes.extend(apply_interpretation_settings_facts(
-            transaction,
-            context,
-            self.batch,
-        )?);
+        insert_message_content_blocks(transaction, &new_message_content)?;
+        self.record_detail(CommitDetail::HistoryAndFactStorage, history_started);
+        changes.extend(self.measure(CommitDetail::SessionIndex, || {
+            apply_session_index_facts(transaction, context, self.batch, &changed_session_keys)
+        })?);
+        changes.extend(self.measure(CommitDetail::ProjectMemory, || {
+            apply_project_memory_facts(transaction, context, self.batch)
+        })?);
+        changes.extend(self.measure(CommitDetail::PersistedToolResult, || {
+            apply_persisted_tool_result_facts(
+                transaction,
+                context,
+                self.batch,
+                &changed_tool_references,
+            )
+        })?);
+        changes.extend(self.measure(CommitDetail::InterpretationSettings, || {
+            apply_interpretation_settings_facts(transaction, context, self.batch)
+        })?);
         Ok(changes)
     }
 
@@ -418,6 +408,7 @@ impl TransactionalProjectionWork for FactProjectionWork<'_> {
         transaction: &Transaction<'_>,
         context: &ProjectionCommitContext,
     ) -> Result<Vec<ChangeEntry>, EngineError> {
+        let run_state_started = Instant::now();
         let mut affected_states = BTreeSet::new();
         if context.replaces_prior_generation {
             affected_states = old_generation_keys(
@@ -485,7 +476,9 @@ impl TransactionalProjectionWork for FactProjectionWork<'_> {
             let state = reduce_run_state(transaction, &run_key, context.commit_seq)?;
             changes.push(state_change(&run_key, state.as_deref())?);
         }
+        self.record_detail(CommitDetail::RunState, run_state_started);
 
+        let delegation_started = Instant::now();
         let mut affected_delegations = BTreeSet::new();
         if context.replaces_prior_generation {
             affected_delegations = old_generation_keys(
@@ -657,12 +650,23 @@ impl TransactionalProjectionWork for FactProjectionWork<'_> {
             changes.push(delegation_change(&child_run_key, &reduction)?);
             changes.push(delegation_conflict_change(&child_run_key, &reduction)?);
         }
+        self.record_detail(CommitDetail::Delegation, delegation_started);
 
-        changes.extend(apply_presence_facts(transaction, context, self.batch)?);
-        changes.extend(apply_team_snapshots(transaction, context, self.batch)?);
-        changes.extend(apply_task_snapshots(transaction, context, self.batch)?);
-        changes.extend(apply_artifact_facts(transaction, context, self.batch)?);
-        changes.extend(apply_workflow_facts(transaction, context, self.batch)?);
+        changes.extend(self.measure(CommitDetail::Presence, || {
+            apply_presence_facts(transaction, context, self.batch)
+        })?);
+        changes.extend(self.measure(CommitDetail::Team, || {
+            apply_team_snapshots(transaction, context, self.batch)
+        })?);
+        changes.extend(self.measure(CommitDetail::Task, || {
+            apply_task_snapshots(transaction, context, self.batch)
+        })?);
+        changes.extend(self.measure(CommitDetail::Artifact, || {
+            apply_artifact_facts(transaction, context, self.batch)
+        })?);
+        changes.extend(self.measure(CommitDetail::Workflow, || {
+            apply_workflow_facts(transaction, context, self.batch)
+        })?);
 
         // Delegation metadata is a replace-document fact. Transcript objects
         // reach this shared projector too; scanning their growing fact ledger
@@ -693,6 +697,7 @@ impl TransactionalProjectionWork for FactProjectionWork<'_> {
         transaction: &Transaction<'_>,
         context: &ProjectionCommitContext,
     ) -> Result<Vec<ChangeEntry>, EngineError> {
+        let usage_started = Instant::now();
         let mut touched_sessions = BTreeSet::new();
         let mut pending_totals = BTreeMap::new();
         let existing_contribution_ids = existing_usage_contribution_ids(transaction, self.batch)?;
@@ -824,7 +829,7 @@ impl TransactionalProjectionWork for FactProjectionWork<'_> {
 
         flush_usage_totals(transaction, pending_totals, context.commit_seq)?;
 
-        touched_sessions
+        let changes = touched_sessions
             .into_iter()
             .map(|session_key| {
                 let exists = transaction
@@ -842,7 +847,28 @@ impl TransactionalProjectionWork for FactProjectionWork<'_> {
                     simple_change("usage.session.changed", &session_key, "delete", None)
                 }
             })
-            .collect()
+            .collect();
+        self.record_detail(CommitDetail::UsageAggregation, usage_started);
+        changes
+    }
+}
+
+impl FactProjectionWork<'_> {
+    fn record_detail(&self, detail: CommitDetail, started_at: Instant) {
+        if let Some(hook) = self.hook {
+            hook.record_detail(detail, started_at.elapsed());
+        }
+    }
+
+    fn measure<T>(
+        &self,
+        detail: CommitDetail,
+        operation: impl FnOnce() -> Result<T, EngineError>,
+    ) -> Result<T, EngineError> {
+        let started_at = Instant::now();
+        let result = operation();
+        self.record_detail(detail, started_at);
+        result
     }
 }
 
@@ -935,6 +961,21 @@ fn last_run_fact_indices(batch: &FactBatch) -> BTreeMap<Vec<u8>, usize> {
         .collect()
 }
 
+fn duplicate_message_keys(batch: &FactBatch) -> BTreeSet<Vec<u8>> {
+    let mut seen = BTreeSet::new();
+    let mut duplicates = BTreeSet::new();
+    for envelope in batch.facts() {
+        let Fact::Message(fact) = &envelope.value else {
+            continue;
+        };
+        let key = fact.message.as_bytes().to_vec();
+        if !seen.insert(key.clone()) {
+            duplicates.insert(key);
+        }
+    }
+    duplicates
+}
+
 fn existing_message_keys(
     transaction: &Transaction<'_>,
     batch: &FactBatch,
@@ -995,25 +1036,48 @@ fn validate_batch_provenance(
     Ok(())
 }
 
-fn persist_fact(
+fn persist_facts(
     transaction: &Transaction<'_>,
     context: &ProjectionCommitContext,
-    envelope: &FactEnvelope,
-    dependencies: &[DependencyRevision],
-    payload: &EncodedBlob,
+    batch: &FactBatch,
+    payloads: &[EncodedFactPayload],
 ) -> Result<(), EngineError> {
-    execute_cached(
-        transaction,
-        r#"
+    if batch.facts().len() != payloads.len() {
+        return Err(EngineError::InvalidCommit(
+            "encoded fact payload count did not match fact batch".to_string(),
+        ));
+    }
+    for dependency in batch.dependency_reads() {
+        if dependency.source_instance_id != context.source_instance_id
+            || dependency.root_name.trim().is_empty()
+            || dependency.object_key.is_empty()
+            || dependency.revision.iter().all(|byte| *byte == 0)
+        {
+            return Err(EngineError::InvalidCommit(
+                "fact dependency revision is incomplete or crosses source instances".to_string(),
+            ));
+        }
+    }
+
+    let source_instance_id = sqlite_u64(context.source_instance_id, "source instance id")?;
+    let source_stream_id = sqlite_u64(context.source_stream_id, "source stream id")?;
+    let source_object_id = sqlite_u64(context.source_object_id, "source object id")?;
+    let source_generation = sqlite_u64(context.generation, "source generation")?;
+    let commit_seq = sqlite_u64(context.commit_seq, "commit sequence")?;
+    for (fact_chunk, payload_chunk) in batch
+        .facts()
+        .chunks(FACT_INSERT_BATCH_ROWS)
+        .zip(payloads.chunks(FACT_INSERT_BATCH_ROWS))
+    {
+        let row = "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+        let sql = format!(
+            r#"
             INSERT INTO fact_records (
                 fact_id, fact_kind, entity_key, source_instance_id,
                 source_stream_id, source_object_id, source_generation,
                 cursor_start, cursor_end, payload_hash, local_fact_ordinal,
                 observed_at, payload_json, payload_codec, last_commit_seq
-            ) VALUES (
-                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
-                ?13, ?14, ?15
-            )
+            ) VALUES {}
             ON CONFLICT(fact_id) DO UPDATE SET
                 fact_kind = excluded.fact_kind,
                 entity_key = excluded.entity_key,
@@ -1030,66 +1094,205 @@ fn persist_fact(
                 payload_codec = excluded.payload_codec,
                 last_commit_seq = excluded.last_commit_seq
             "#,
-        params![
-            envelope.id.as_bytes().as_slice(),
-            envelope.value.kind(),
-            envelope.value.entity_key().map(EntityKey::as_bytes),
-            sqlite_u64(context.source_instance_id, "source instance id")?,
-            sqlite_u64(context.source_stream_id, "source stream id")?,
-            sqlite_u64(context.source_object_id, "source object id")?,
-            sqlite_u64(context.generation, "source generation")?,
-            envelope.provenance.cursor_start,
-            envelope.provenance.cursor_end,
-            envelope.provenance.record_hash.as_slice(),
-            i64::from(envelope.provenance.local_fact_ordinal),
-            envelope.provenance.observed_at,
-            payload.bytes.as_slice(),
-            payload.codec,
-            sqlite_u64(context.commit_seq, "commit sequence")?,
-        ],
-    )
-    .map_err(|error| sqlite_error("persist typed fact", error))?;
+            std::iter::repeat_n(row, fact_chunk.len())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        let mut values = Vec::with_capacity(fact_chunk.len() * 15);
+        for (envelope, payload) in fact_chunk.iter().zip(payload_chunk) {
+            use rusqlite::types::Value;
+
+            values.push(Value::Blob(envelope.id.as_bytes().to_vec()));
+            values.push(Value::Text(envelope.value.kind().to_string()));
+            // Canonical and assertion projections already retain the semantic
+            // entity key and point back to this row by fact_id. Keeping a
+            // second copy in the provenance ledger has no query consumer and
+            // materially amplifies transcript storage; source provenance is
+            // carried by the remaining columns.
+            values.push(Value::Null);
+            values.push(Value::Integer(source_instance_id));
+            values.push(Value::Integer(source_stream_id));
+            values.push(Value::Integer(source_object_id));
+            values.push(Value::Integer(source_generation));
+            values.push(Value::Blob(envelope.provenance.cursor_start.clone()));
+            values.push(Value::Blob(envelope.provenance.cursor_end.clone()));
+            values.push(Value::Blob(envelope.provenance.record_hash.to_vec()));
+            values.push(Value::Integer(i64::from(
+                envelope.provenance.local_fact_ordinal,
+            )));
+            values.push(Value::Integer(envelope.provenance.observed_at));
+            values.push(Value::Blob(payload.audit.bytes.clone()));
+            values.push(Value::Text(payload.audit.codec.to_string()));
+            values.push(Value::Integer(commit_seq));
+        }
+        let result = if fact_chunk.len() == FACT_INSERT_BATCH_ROWS {
+            transaction
+                .prepare_cached(&sql)
+                .and_then(|mut statement| statement.execute(params_from_iter(values.iter())))
+        } else {
+            transaction
+                .prepare(&sql)
+                .and_then(|mut statement| statement.execute(params_from_iter(values.iter())))
+        };
+        result.map_err(|error| sqlite_error("persist typed fact batch", error))?;
+    }
+
     // A cursor-valid same-generation append cannot revisit an already
     // committed fact ID. A contract/source replay advances the generation and
     // cascades old dependencies with the old fact rows. Therefore an empty
     // dependency set has nothing to replace and should not perform a B-tree
     // lookup for every ordinary history fact.
-    if !dependencies.is_empty() {
-        execute_cached(
-            transaction,
-            "DELETE FROM fact_dependency_reads WHERE fact_id = ?1",
-            [envelope.id.as_bytes().as_slice()],
-        )
-        .map_err(|error| sqlite_error("replace fact dependency reads", error))?;
-    }
-    for dependency in dependencies {
-        if dependency.source_instance_id != context.source_instance_id
-            || dependency.root_name.trim().is_empty()
-            || dependency.object_key.is_empty()
-            || dependency.revision.iter().all(|byte| *byte == 0)
-        {
-            return Err(EngineError::InvalidCommit(
-                "fact dependency revision is incomplete or crosses source instances".to_string(),
-            ));
-        }
-        transaction
-            .execute(
-                r#"
+    if !batch.dependency_reads().is_empty() {
+        for envelope in batch.facts() {
+            execute_cached(
+                transaction,
+                "DELETE FROM fact_dependency_reads WHERE fact_id = ?1",
+                [envelope.id.as_bytes().as_slice()],
+            )
+            .map_err(|error| sqlite_error("replace fact dependency reads", error))?;
+            for dependency in batch.dependency_reads() {
+                transaction
+                    .execute(
+                        r#"
                 INSERT INTO fact_dependency_reads (
                     fact_id, source_instance_id, root_name, object_key, revision
                 ) VALUES (?1, ?2, ?3, ?4, ?5)
                 "#,
-                params![
-                    envelope.id.as_bytes().as_slice(),
-                    sqlite_u64(dependency.source_instance_id, "dependency source instance")?,
-                    dependency.root_name,
-                    dependency.object_key,
-                    dependency.revision.as_slice(),
-                ],
-            )
-            .map_err(|error| sqlite_error("persist fact dependency read", error))?;
+                        params![
+                            envelope.id.as_bytes().as_slice(),
+                            sqlite_u64(
+                                dependency.source_instance_id,
+                                "dependency source instance"
+                            )?,
+                            dependency.root_name,
+                            dependency.object_key,
+                            dependency.revision.as_slice(),
+                        ],
+                    )
+                    .map_err(|error| sqlite_error("persist fact dependency read", error))?;
+            }
+        }
     }
     Ok(())
+}
+
+fn persist_canonical_messages(
+    transaction: &Transaction<'_>,
+    context: &ProjectionCommitContext,
+    batch: &FactBatch,
+    payloads: &[EncodedFactPayload],
+) -> Result<(), EngineError> {
+    if batch.facts().len() != payloads.len() {
+        return Err(EngineError::InvalidCommit(
+            "encoded fact payload count did not match fact batch".to_string(),
+        ));
+    }
+    let messages = batch
+        .facts()
+        .iter()
+        .zip(payloads)
+        .filter_map(|(envelope, payload)| match &envelope.value {
+            Fact::Message(fact) => Some((envelope, fact, payload)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let source_object_id = sqlite_u64(context.source_object_id, "source object id")?;
+    let source_generation = sqlite_u64(context.generation, "source generation")?;
+    let commit_seq = sqlite_u64(context.commit_seq, "commit sequence")?;
+    for chunk in messages.chunks(MESSAGE_INSERT_BATCH_ROWS) {
+        let row = "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+        let sql = format!(
+            r#"
+            INSERT INTO canonical_messages (
+                message_key, session_key, run_key, native_message_id,
+                native_kind, role, content_json, source_time,
+                source_time_quality, parent_native_message_id, model,
+                search_text, raw_json, raw_json_codec, fact_id,
+                source_object_id, source_generation, cursor_start,
+                cursor_end, last_commit_seq
+            ) VALUES {}
+            ON CONFLICT(message_key) DO UPDATE SET
+                session_key = excluded.session_key,
+                run_key = excluded.run_key,
+                native_message_id = excluded.native_message_id,
+                native_kind = excluded.native_kind,
+                role = excluded.role,
+                content_json = excluded.content_json,
+                source_time = excluded.source_time,
+                source_time_quality = excluded.source_time_quality,
+                parent_native_message_id = excluded.parent_native_message_id,
+                model = excluded.model,
+                search_text = excluded.search_text,
+                raw_json = excluded.raw_json,
+                raw_json_codec = excluded.raw_json_codec,
+                fact_id = excluded.fact_id,
+                source_object_id = excluded.source_object_id,
+                source_generation = excluded.source_generation,
+                cursor_start = excluded.cursor_start,
+                cursor_end = excluded.cursor_end,
+                last_commit_seq = excluded.last_commit_seq
+            "#,
+            std::iter::repeat_n(row, chunk.len())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        let mut values = Vec::with_capacity(chunk.len() * 20);
+        for (envelope, fact, payload) in chunk {
+            use rusqlite::types::Value;
+
+            let native_payload = payload.message_raw.as_ref().ok_or_else(|| {
+                EngineError::InvalidCommit(
+                    "message fact is missing encoded native payload".to_string(),
+                )
+            })?;
+            values.push(Value::Blob(fact.message.as_bytes().to_vec()));
+            values.push(Value::Blob(fact.session.as_bytes().to_vec()));
+            values.push(Value::Blob(fact.run.as_bytes().to_vec()));
+            values.push(optional_text_value(fact.native_message_id.as_deref()));
+            values.push(Value::Text(fact.native_kind.clone()));
+            values.push(Value::Text(message_role(&fact.role).to_string()));
+            values.push(Value::Blob(serialize(
+                &fact.content,
+                "serialize canonical content",
+            )?));
+            values.push(optional_text_value(timestamp_value(
+                fact.source_time.as_ref(),
+            )));
+            values.push(optional_text_value(timestamp_quality(
+                fact.source_time.as_ref(),
+            )));
+            values.push(optional_text_value(
+                fact.parent_native_message_id.as_deref(),
+            ));
+            values.push(optional_text_value(fact.model.as_deref()));
+            values.push(optional_text_value(fact.search_text.as_deref()));
+            values.push(Value::Blob(native_payload.bytes.clone()));
+            values.push(Value::Text(native_payload.codec.to_string()));
+            values.push(Value::Blob(envelope.id.as_bytes().to_vec()));
+            values.push(Value::Integer(source_object_id));
+            values.push(Value::Integer(source_generation));
+            values.push(Value::Blob(envelope.provenance.cursor_start.clone()));
+            values.push(Value::Blob(envelope.provenance.cursor_end.clone()));
+            values.push(Value::Integer(commit_seq));
+        }
+        let result = if chunk.len() == MESSAGE_INSERT_BATCH_ROWS {
+            transaction
+                .prepare_cached(&sql)
+                .and_then(|mut statement| statement.execute(params_from_iter(values.iter())))
+        } else {
+            transaction
+                .prepare(&sql)
+                .and_then(|mut statement| statement.execute(params_from_iter(values.iter())))
+        };
+        result.map_err(|error| sqlite_error("project canonical message batch", error))?;
+    }
+    Ok(())
+}
+
+fn optional_text_value(value: Option<&str>) -> rusqlite::types::Value {
+    value.map_or(rusqlite::types::Value::Null, |value| {
+        rusqlite::types::Value::Text(value.to_string())
+    })
 }
 
 fn encode_fact_payloads(
@@ -4607,17 +4810,19 @@ mod tests {
         );
         hash_only_request.stream.retention = RawRetentionPolicy::HashOnly;
         apply_fact_observation_commit(&mut connection, &hash_only_request, &batch).unwrap();
-        let (audit_bytes, audit_codec, native_bytes, native_codec, retention): (
+        let (audit_bytes, audit_codec, native_bytes, native_codec, retention, entity_is_null): (
             i64,
             String,
             i64,
             String,
             String,
+            i64,
         ) = connection
             .query_row(
                 r#"
                 SELECT length(fr.payload_json), fr.payload_codec,
-                       length(cm.raw_json), cm.raw_json_codec, ss.raw_retention
+                       length(cm.raw_json), cm.raw_json_codec, ss.raw_retention,
+                       fr.entity_key IS NULL
                 FROM fact_records fr
                 JOIN canonical_messages cm ON cm.fact_id = fr.fact_id
                 JOIN source_streams ss ON ss.source_stream_id = fr.source_stream_id
@@ -4630,6 +4835,7 @@ mod tests {
                         row.get(2)?,
                         row.get(3)?,
                         row.get(4)?,
+                        row.get(5)?,
                     ))
                 },
             )
@@ -4639,6 +4845,100 @@ mod tests {
         assert!(native_bytes < i64::try_from(native_json.len() / 4).unwrap());
         assert_eq!(native_codec, crate::engine::storage_codec::ZSTD_V1_CODEC);
         assert_eq!(retention, "hash_only");
+        assert_eq!(entity_is_null, 1);
+    }
+
+    #[test]
+    fn batched_message_upsert_and_content_replacement_keep_the_last_duplicate() {
+        let first_record = direct_record(1, 0, 1, 20, b"first");
+        let second_record = direct_record(1, 1, 2, 21, b"second");
+        let mut first = tool_message(
+            "duplicate-message",
+            MessageRole::User,
+            vec![ContentBlock::Text {
+                text: "first".to_string(),
+            }],
+        );
+        first.raw_json = br#"{"version":1}"#.to_vec();
+        let mut second = tool_message(
+            "duplicate-message",
+            MessageRole::Assistant,
+            vec![ContentBlock::Thinking {
+                text: "final".to_string(),
+                redacted: false,
+            }],
+        );
+        second.raw_json = br#"{"version":2}"#.to_vec();
+        let mut batch = FactBatch::new(2, 1).unwrap();
+        batch.push(&first_record, Fact::Message(first)).unwrap();
+        batch.push(&second_record, Fact::Message(second)).unwrap();
+        let mut connection = database();
+        apply_fact_observation_commit(
+            &mut connection,
+            &request(
+                ExpectedSourceCursor::Absent,
+                1,
+                second_record.cursor_end.as_bytes().to_vec(),
+                20,
+            ),
+            &batch,
+        )
+        .unwrap();
+
+        assert_eq!(
+            connection
+                .query_row("SELECT role FROM canonical_messages", [], |row| row
+                    .get::<_, String>(0),)
+                .unwrap(),
+            "assistant"
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT content_kind FROM canonical_message_content_blocks",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "thinking"
+        );
+        assert_eq!(count(&connection, "canonical_message_content_blocks"), 1);
+        assert_eq!(count(&connection, "fact_records"), 2);
+    }
+
+    #[test]
+    fn fact_batch_insert_crosses_the_full_chunk_and_tail_boundary() {
+        const FACTS: usize = FACT_INSERT_BATCH_ROWS + 1;
+        let mut batch = FactBatch::new(FACTS, 1).unwrap();
+        let mut last_cursor = Vec::new();
+        for index in 0..FACTS {
+            let record = direct_record(
+                1,
+                u64::try_from(index).unwrap(),
+                u64::try_from(index + 1).unwrap(),
+                20 + i64::try_from(index).unwrap(),
+                b"{}",
+            );
+            last_cursor = record.cursor_end.as_bytes().to_vec();
+            batch
+                .push(
+                    &record,
+                    Fact::UnknownRecord {
+                        native_kind: Some("batch-boundary".to_string()),
+                        raw_payload: Vec::new(),
+                        reason: "batch-boundary".to_string(),
+                    },
+                )
+                .unwrap();
+        }
+        let mut request = request(ExpectedSourceCursor::Absent, 1, last_cursor, 20);
+        request.stream.retention = RawRetentionPolicy::HashOnly;
+        let mut connection = database();
+        apply_fact_observation_commit(&mut connection, &request, &batch).unwrap();
+        assert_eq!(
+            count(&connection, "fact_records"),
+            i64::try_from(FACTS).unwrap()
+        );
     }
 
     #[test]

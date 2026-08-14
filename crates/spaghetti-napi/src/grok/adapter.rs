@@ -1558,6 +1558,7 @@ mod tests {
                 database_path: database_path.clone(),
                 query_workers: Some(1),
                 owner_label: Some("grok-adapter-test".to_string()),
+                defer_query_structures: false,
             },
             registry,
         )
@@ -1619,6 +1620,7 @@ mod tests {
                     database_path: database_path.clone(),
                     query_workers: Some(1),
                     owner_label: Some(format!("grok-{order}")),
+                    defer_query_structures: false,
                 },
                 AdapterRegistry::builder()
                     .register(GrokAdapter::new())
@@ -1746,6 +1748,7 @@ mod tests {
                 database_path: database_path.clone(),
                 query_workers: Some(1),
                 owner_label: Some("grok-sidecar-change".to_string()),
+                defer_query_structures: false,
             },
             AdapterRegistry::builder()
                 .register(GrokAdapter::new())

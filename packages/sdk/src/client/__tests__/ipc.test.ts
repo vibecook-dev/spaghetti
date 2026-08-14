@@ -439,7 +439,33 @@ describe('N-API and IPC semantic parity', { skip: !native }, () => {
       assert.ok(ipcWait.waitedMs >= 1);
       assert.ok(directWait.waitedMs >= 1);
       assert.deepEqual(await ipc.listProjects(), await direct.listProjects());
-      assert.deepEqual(await ipc.getStats(), await direct.getStats());
+      const ipcStats = await ipc.getStats();
+      const directStats = await direct.getStats();
+      const { performance: ipcPerformance, ...ipcDurableStats } = ipcStats;
+      const { performance: directPerformance, ...directDurableStats } = directStats;
+      assert.deepEqual(ipcDurableStats, directDurableStats);
+      for (const performance of [ipcPerformance, directPerformance]) {
+        assert.ok(performance, 'native transport must expose owner performance telemetry');
+        assert.equal(performance.writer.committed, 0);
+        assert.equal(performance.writer.failed, 0);
+        assert.equal(
+          performance.writer.checkpoint.completed +
+            performance.writer.checkpoint.blocked +
+            performance.writer.checkpoint.failures,
+          performance.writer.checkpoint.attempts,
+        );
+        assert.equal(
+          performance.source.totals.recordsDecoded +
+            performance.source.totals.decodeRetries +
+            performance.source.totals.decodeFailures,
+          performance.source.totals.decodeAttempts,
+        );
+        assert.ok(performance.source.dimensionCapacity > 0);
+        assert.ok(performance.source.dimensions.length <= performance.source.dimensionCapacity);
+        assert.ok(performance.queries.requestsCompleted > 0);
+        assert.ok(performance.queries.queueHighWatermark > 0);
+        assert.ok(performance.storage.databaseFileBytes > 0);
+      }
       await assert.rejects(ipc.listProjects({ cursor: 'not-a-cursor' }), (error) =>
         expectClientError(error, 'cursor_invalid'),
       );

@@ -7,7 +7,8 @@
  * SQLite service, or projection implementation.
  */
 
-import { resolve } from 'node:path';
+import { readdir, stat } from 'node:fs/promises';
+import { join, resolve } from 'node:path';
 
 import {
   openSpaghettiEngine,
@@ -48,7 +49,7 @@ export interface ObservationHostOptions {
 }
 
 export interface ObservationHostProgress {
-  stage: 'opening' | 'adapter-scanning' | 'adapter-ready' | 'ready';
+  stage: 'opening' | 'adapter-scanning' | 'adapter-ready' | 'finalizing' | 'ready';
   adapterId?: string;
   /** One-based configured source position. */
   sourceIndex?: number;
@@ -77,6 +78,11 @@ export interface ObservationHost {
   dispose(): Promise<SpaghettiEngineStatus>;
 }
 
+// The controlled crossover was between the 64k (~30 MiB, no benefit) and
+// 131k (~60 MiB, material benefit) production-path corpora. This threshold
+// stays above the accepted <=64k gate while selecting roughly >=100k records.
+const QUERY_BOOTSTRAP_INPUT_THRESHOLD_BYTES = 48 * 1024 * 1024;
+
 /** Open one sole-owner Rust host and start every configured adapter. */
 export async function openObservationHost(options: ObservationHostOptions): Promise<ObservationHost> {
   options.signal?.throwIfAborted();
@@ -87,11 +93,18 @@ export async function openObservationHost(options: ObservationHostOptions): Prom
     sourceCount: sources.length,
     elapsedMs: 0,
   });
+  const bootstrapQueryStructures = await inputMeetsBootstrapThreshold(
+    sources.flatMap((source) => source.roots),
+    QUERY_BOOTSTRAP_INPUT_THRESHOLD_BYTES,
+  );
+  options.signal?.throwIfAborted();
   const engine = await openSpaghettiEngine({
     dbPath: resolveDatabasePath(options.dbPath),
     queryWorkers: options.queryWorkers,
     ownerLabel: options.ownerLabel ?? 'sdk-observation-host',
+    ...(bootstrapQueryStructures ? { bootstrapQueryStructures: true } : {}),
   });
+  const bootstrapActive = engine.status.state === 'bootstrapping';
   let client: SpaghettiClient | undefined;
   try {
     for (const [index, source] of sources.entries()) {
@@ -122,6 +135,23 @@ export async function openObservationHost(options: ObservationHostOptions): Prom
         clearInterval(heartbeat);
       }
       report('adapter-ready');
+    }
+    if (bootstrapActive) {
+      const report = (): void =>
+        emitHostProgress(options, {
+          stage: 'finalizing',
+          sourceCount: sources.length,
+          elapsedMs: Date.now() - startedAt,
+          status: engine.status,
+        });
+      report();
+      const heartbeat = setInterval(report, 1_000);
+      try {
+        await engine.completeQueryBootstrap();
+      } finally {
+        clearInterval(heartbeat);
+      }
+      options.signal?.throwIfAborted();
     }
     client = await openSpaghettiClient({
       transport: new NapiTransport({ engine, ownsEngine: false }),
@@ -279,4 +309,53 @@ function resolveSourceRoot(value: string): string {
     throw new Error('Observation source root must not be empty.');
   }
   return resolve(value);
+}
+
+async function inputMeetsBootstrapThreshold(roots: string[], thresholdBytes: number): Promise<boolean> {
+  const pending = [...new Set(roots)];
+  const visited = new Set<string>();
+  let bytes = 0;
+
+  while (pending.length > 0 && bytes < thresholdBytes) {
+    const current = pending.shift();
+    if (!current || visited.has(current)) continue;
+    visited.add(current);
+    let metadata;
+    try {
+      metadata = await stat(current);
+    } catch {
+      continue;
+    }
+    if (metadata.isFile()) {
+      bytes += metadata.size;
+      continue;
+    }
+    if (!metadata.isDirectory()) continue;
+
+    let entries;
+    try {
+      entries = await readdir(current, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    const files: string[] = [];
+    for (const entry of entries) {
+      const child = join(current, entry.name);
+      if (entry.isDirectory()) pending.push(child);
+      else if (entry.isFile()) files.push(child);
+    }
+    for (let offset = 0; offset < files.length && bytes < thresholdBytes; offset += 64) {
+      const sizes = await Promise.all(
+        files.slice(offset, offset + 64).map(async (file) => {
+          try {
+            return (await stat(file)).size;
+          } catch {
+            return 0;
+          }
+        }),
+      );
+      for (const size of sizes) bytes += size;
+    }
+  }
+  return bytes >= thresholdBytes;
 }

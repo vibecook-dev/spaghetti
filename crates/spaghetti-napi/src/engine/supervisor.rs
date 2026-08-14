@@ -48,6 +48,11 @@ enum SupervisorCommand {
         cancellation: QueryCancellationToken,
         response: Sender<Result<(), EngineError>>,
     },
+    PauseForBootstrap {
+        paused: Sender<Result<(), EngineError>>,
+        resume: Receiver<()>,
+        completed: Sender<Result<(), EngineError>>,
+    },
     Shutdown,
 }
 
@@ -97,6 +102,11 @@ pub(crate) struct ObservationSupervisor {
 pub(crate) struct ObservationSupervisorClient {
     commands: Sender<SupervisorCommand>,
     alive: Arc<AtomicBool>,
+}
+
+pub(crate) struct PausedObservationSupervisor {
+    resume: Option<Sender<()>>,
+    completed: Receiver<Result<(), EngineError>>,
 }
 
 impl ObservationSupervisor {
@@ -271,6 +281,61 @@ impl ObservationSupervisorClient {
                 worker: "observation supervisor",
             })?
     }
+
+    pub(crate) fn pause_for_bootstrap(&self) -> Result<PausedObservationSupervisor, EngineError> {
+        if !self.alive.load(Ordering::Acquire) {
+            return Err(EngineError::WorkerUnavailable {
+                worker: "observation supervisor",
+            });
+        }
+        let (paused_tx, paused_rx) = bounded(1);
+        let (resume_tx, resume_rx) = bounded(1);
+        let (completed_tx, completed_rx) = bounded(1);
+        self.commands
+            .send(SupervisorCommand::PauseForBootstrap {
+                paused: paused_tx,
+                resume: resume_rx,
+                completed: completed_tx,
+            })
+            .map_err(|_| EngineError::WorkerUnavailable {
+                worker: "observation supervisor",
+            })?;
+        paused_rx
+            .recv()
+            .map_err(|_| EngineError::WorkerUnavailable {
+                worker: "observation supervisor",
+            })??;
+        Ok(PausedObservationSupervisor {
+            resume: Some(resume_tx),
+            completed: completed_rx,
+        })
+    }
+}
+
+impl PausedObservationSupervisor {
+    pub(crate) fn resume(mut self) -> Result<(), EngineError> {
+        self.signal_resume()?;
+        self.completed
+            .recv()
+            .map_err(|_| EngineError::WorkerUnavailable {
+                worker: "observation supervisor",
+            })?
+    }
+
+    fn signal_resume(&mut self) -> Result<(), EngineError> {
+        let Some(resume) = self.resume.take() else {
+            return Ok(());
+        };
+        resume.send(()).map_err(|_| EngineError::WorkerUnavailable {
+            worker: "observation supervisor",
+        })
+    }
+}
+
+impl Drop for PausedObservationSupervisor {
+    fn drop(&mut self) {
+        let _ = self.signal_resume();
+    }
 }
 
 impl Drop for ObservationSupervisor {
@@ -361,24 +426,16 @@ fn supervisor_thread<A: AgentAdapter>(adapter: A, context: SupervisorThreadConte
         let _ =
             initial_engine.require_observation_reconcile(&adapter_id, DirtyReason::BackendError);
     }
-    let initial_summary = loop {
-        let summary = drain_pending(
-            &initial_engine,
-            &adapter,
-            &options,
-            &topology,
-            MAX_RECONCILE_PASSES_PER_WAKE,
-            &[cancellation.clone(), startup_cancellation.clone()],
-        );
-        update_polling_after_drain(&mut polling, &summary);
-        handle_backend_failure(&summary, &mut watcher, &watcher_available, &mut polling);
-        if summary.result.is_err() || !summary.immediate_retry {
-            break summary;
-        }
-        // The coordinator remains bounded and cancellable, but known finite
-        // cold backlog must converge before this supervisor reports ready.
-        std::thread::yield_now();
-    };
+    let initial_summary = drain_until_caught_up(
+        &initial_engine,
+        &adapter,
+        &options,
+        &topology,
+        &mut watcher,
+        &watcher_available,
+        &mut polling,
+        &[cancellation.clone(), startup_cancellation.clone()],
+    );
     if let Err(error) = initial_summary.result {
         let _ = ready.send(Err(error));
         return;
@@ -428,6 +485,44 @@ fn supervisor_thread<A: AgentAdapter>(adapter: A, context: SupervisorThreadConte
                             })
                     });
                     let _ = response.send(result);
+                }
+                Ok(SupervisorCommand::PauseForBootstrap { paused, resume, completed }) => {
+                    let Some(engine) = engine.upgrade() else {
+                        let _ = paused.send(Err(EngineError::ShuttingDown));
+                        break;
+                    };
+                    let before = drain_until_caught_up(
+                        &engine,
+                        &adapter,
+                        &options,
+                        &topology,
+                        &mut watcher,
+                        &watcher_available,
+                        &mut polling,
+                        std::slice::from_ref(&cancellation),
+                    );
+                    if let Err(error) = before.result {
+                        let _ = paused.send(Err(error));
+                        continue;
+                    }
+                    if paused.send(Ok(())).is_err() {
+                        continue;
+                    }
+                    // The watcher remains registered and admits dirty state
+                    // while the sole writer rebuilds query structures. The
+                    // worker itself is quiescent until the engine resumes it.
+                    let _ = resume.recv();
+                    let after = drain_until_caught_up(
+                        &engine,
+                        &adapter,
+                        &options,
+                        &topology,
+                        &mut watcher,
+                        &watcher_available,
+                        &mut polling,
+                        std::slice::from_ref(&cancellation),
+                    );
+                    let _ = completed.send(after.result);
                 }
                 Ok(SupervisorCommand::Shutdown) | Err(_) => break,
             },
@@ -522,6 +617,37 @@ fn handle_backend_failure(
         *watcher = None;
         watcher_available.store(false, Ordering::Release);
         polling.record_watcher_unavailable();
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn drain_until_caught_up<A: AgentAdapter>(
+    engine: &Arc<SpaghettiEngineCore>,
+    adapter: &A,
+    options: &ObservationSupervisorOptions,
+    topology: &WatchTopology,
+    watcher: &mut Option<RecommendedWatcher>,
+    watcher_available: &AtomicBool,
+    polling: &mut PollingPolicy,
+    cancellations: &[QueryCancellationToken],
+) -> DrainSummary {
+    loop {
+        let summary = drain_pending(
+            engine,
+            adapter,
+            options,
+            topology,
+            MAX_RECONCILE_PASSES_PER_WAKE,
+            cancellations,
+        );
+        update_polling_after_drain(polling, &summary);
+        handle_backend_failure(&summary, watcher, watcher_available, polling);
+        if summary.result.is_err() || !summary.immediate_retry {
+            return summary;
+        }
+        // Known finite cursor backlog remains bounded per coordinator pass,
+        // but bootstrap readiness waits for every such pass to converge.
+        thread::yield_now();
     }
 }
 
@@ -1003,13 +1129,17 @@ mod tests {
     use tempfile::TempDir;
 
     use crate::adapter::{
-        AdapterError, AdapterManifest, AdapterObjectContext, DecodeContext, DecodeDisposition,
-        DiscoveryContext, FactBatch, SourceInstance, SourceInstanceSpec, SourceObjectDescriptor,
-        StreamSpec,
+        AdapterError, AdapterErrorClass, AdapterId, AdapterManifest, AdapterObjectContext,
+        ConsistencyPolicy, DecodeContext, DecodeDisposition, DecoderId, DeletionPolicy,
+        DiscoveryContext, DriverSpec, EntityScope, FactBatch, ObjectSelector, RawRetentionPolicy,
+        SourceInstance, SourceInstanceKey, SourceInstanceSpec, SourceObjectDescriptor, SourceRoot,
+        StreamAuthority, StreamId, StreamSpec,
     };
     use crate::claude::ClaudeCodeAdapter;
     use crate::engine::EngineOptions;
-    use crate::source::{platform_path_key, SourceCursor, SourceRecord};
+    use crate::source::{
+        platform_path_key, AppendDelimitedConfig, IngestPriority, SourceCursor, SourceRecord,
+    };
 
     use super::*;
 
@@ -1023,6 +1153,74 @@ mod tests {
             worker: "native filesystem watcher",
             detail: "injected unavailable backend".to_string(),
         })
+    }
+
+    fn silent_watcher(
+        _engine: Weak<SpaghettiEngineCore>,
+        _adapter_id: String,
+        _topology: Arc<WatchTopology>,
+        _wake: Sender<()>,
+    ) -> Result<RecommendedWatcher, EngineError> {
+        notify::recommended_watcher(|_| {}).map_err(|error| EngineError::WorkerStart {
+            worker: "test observation watcher",
+            detail: error.to_string(),
+        })
+    }
+
+    #[test]
+    fn startup_drains_more_than_one_wake_of_sibling_object_backlog() {
+        const OBJECTS: usize = MAX_RECONCILE_PASSES_PER_WAKE + 1;
+        // One record beyond the coordinator's bounded 4,096-record pass makes
+        // every object publish a sibling retry target.
+        const RECORDS_PER_OBJECT: usize = 4_097;
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().join("source");
+        std::fs::create_dir_all(&root).unwrap();
+        for index in 0..OBJECTS {
+            std::fs::write(
+                root.join(format!("{index:02}.jsonl")),
+                b"{}\n".repeat(RECORDS_PER_OBJECT),
+            )
+            .unwrap();
+        }
+        let database = temp.path().join("sibling-backlog.db");
+        let engine = open_engine(database);
+        let mut supervisor = ObservationSupervisor::start_with_watcher_factory(
+            Arc::clone(&engine),
+            IgnoredAppendAdapter::new(),
+            ObservationSupervisorOptions::new(vec![root.clone()]),
+            silent_watcher,
+            QueryCancellationToken::default(),
+        )
+        .unwrap();
+
+        let catalog = engine
+            .source_catalog(
+                "ignored-append",
+                &platform_path_key(&root.canonicalize().unwrap()),
+            )
+            .unwrap();
+        let objects = catalog
+            .objects
+            .iter()
+            .filter(|object| object.stream_key == "records")
+            .collect::<Vec<_>>();
+        assert_eq!(objects.len(), OBJECTS);
+        for object in objects {
+            assert_eq!(
+                SourceCursor::from_opaque(object.committed_cursor.clone())
+                    .unwrap()
+                    .append_offset_value(),
+                Some(u64::try_from(RECORDS_PER_OBJECT * 3).unwrap())
+            );
+        }
+        let ready = engine.status().observation;
+        assert_eq!(ready.state, "live", "{ready:?}");
+        assert_eq!(ready.dirty_instances, 0, "{ready:?}");
+        assert!(!ready.full_reconcile_required, "{ready:?}");
+
+        supervisor.shutdown().unwrap();
+        engine.shutdown().unwrap();
     }
 
     #[test]
@@ -1225,6 +1423,54 @@ mod tests {
     }
 
     #[test]
+    fn bootstrap_pause_drains_changes_admitted_during_finalization_before_resume() {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().join("source");
+        std::fs::create_dir_all(&root).unwrap();
+        let settings = root.join("settings.json");
+        std::fs::write(&settings, br#"{"model":"claude-sonnet"}"#).unwrap();
+        let database = temp.path().join("bootstrap-pause.db");
+        let engine = open_engine(database.clone());
+        let mut supervisor = ObservationSupervisor::start_with_watcher_factory(
+            Arc::clone(&engine),
+            ClaudeCodeAdapter::new(),
+            ObservationSupervisorOptions::new(vec![root.clone()]),
+            silent_watcher,
+            QueryCancellationToken::default(),
+        )
+        .unwrap();
+        assert_eq!(effective_settings_model(&database), "claude-sonnet");
+
+        let paused = supervisor.client().pause_for_bootstrap().unwrap();
+        std::fs::write(&settings, br#"{"model":"claude-opus"}"#).unwrap();
+        let topology =
+            discover_topology(&ClaudeCodeAdapter::new(), std::slice::from_ref(&root)).unwrap();
+        route_ingress(
+            &engine,
+            "claude-code",
+            &topology,
+            WatchIngress::Event(
+                Event::new(EventKind::Modify(notify::event::ModifyKind::Any)).add_path(settings),
+            ),
+        );
+        assert_eq!(effective_settings_model(&database), "claude-sonnet");
+        let admitted = engine.status().observation;
+        assert!(
+            admitted.dirty_instances == 1 || admitted.full_reconcile_required,
+            "{admitted:?}"
+        );
+
+        paused.resume().unwrap();
+        assert_eq!(effective_settings_model(&database), "claude-opus");
+        let ready = engine.status().observation;
+        assert_eq!(ready.state, "live", "{ready:?}");
+        assert_eq!(ready.dirty_instances, 0, "{ready:?}");
+
+        supervisor.shutdown().unwrap();
+        engine.shutdown().unwrap();
+    }
+
+    #[test]
     fn native_supervisor_registers_before_scan_and_reconciles_changes() {
         const WAIT: Duration = Duration::from_secs(15);
         let temp = TempDir::new().unwrap();
@@ -1416,6 +1662,88 @@ mod tests {
         gate: Arc<DecodeGate>,
     }
 
+    struct IgnoredAppendAdapter {
+        manifest: AdapterManifest,
+    }
+
+    impl IgnoredAppendAdapter {
+        fn new() -> Self {
+            Self {
+                manifest: AdapterManifest {
+                    id: AdapterId::new("ignored-append").unwrap(),
+                    display_name: "ignored append test adapter".to_string(),
+                    adapter_version: "1.0.0".to_string(),
+                    contract_version: 1,
+                    source_schema_versions: Vec::new(),
+                    capabilities: Vec::new(),
+                },
+            }
+        }
+    }
+
+    impl AgentAdapter for IgnoredAppendAdapter {
+        fn manifest(&self) -> &AdapterManifest {
+            &self.manifest
+        }
+
+        fn discover(
+            &self,
+            context: &DiscoveryContext,
+        ) -> Result<Vec<SourceInstanceSpec>, AdapterError> {
+            context
+                .configured_roots
+                .iter()
+                .map(|root| {
+                    let canonical = root.canonicalize().map_err(|error| {
+                        AdapterError::new(
+                            AdapterErrorClass::Transient,
+                            "root_unavailable",
+                            error.to_string(),
+                        )
+                    })?;
+                    Ok(SourceInstanceSpec {
+                        stable_key: SourceInstanceKey::new(platform_path_key(&canonical))?,
+                        display_name: "ignored append fixture".to_string(),
+                        roots: vec![SourceRoot {
+                            name: "root".to_string(),
+                            path: canonical,
+                        }],
+                        discovery_reason: "supervisor sibling backlog test".to_string(),
+                    })
+                })
+                .collect()
+        }
+
+        fn streams(&self, _instance: &SourceInstance) -> Result<Vec<StreamSpec>, AdapterError> {
+            Ok(vec![StreamSpec {
+                id: StreamId::new("records")?,
+                driver: DriverSpec::AppendDelimited(AppendDelimitedConfig::json_lines()),
+                selector: ObjectSelector {
+                    root_name: "root".to_string(),
+                    include: vec!["*.jsonl".to_string()],
+                    exclude: Vec::new(),
+                },
+                decoder: DecoderId::new("ignored-jsonl-v1")?,
+                authority: StreamAuthority::Canonical,
+                entity_scope: EntityScope::Instance,
+                priority: IngestPriority::Backfill,
+                consistency: ConsistencyPolicy::IncrementalCursor,
+                deletion: DeletionPolicy::MirrorSource,
+                retention: RawRetentionPolicy::HashOnly,
+                capabilities: Vec::new(),
+            }])
+        }
+
+        fn decode(
+            &self,
+            _context: DecodeContext<'_>,
+            _record: &SourceRecord,
+            _output: &mut FactBatch,
+        ) -> Result<DecodeDisposition, AdapterError> {
+            Ok(DecodeDisposition::IgnoredKnown)
+        }
+    }
+
     impl GatedClaudeAdapter {
         fn new(gate: Arc<DecodeGate>) -> Self {
             Self {
@@ -1465,6 +1793,7 @@ mod tests {
             database_path,
             query_workers: Some(1),
             owner_label: Some("supervisor-test".to_string()),
+            defer_query_structures: false,
         })
         .unwrap()
     }
