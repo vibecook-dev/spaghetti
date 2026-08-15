@@ -1,7 +1,7 @@
 # RFC 011 performance optimization design and execution plan
 
 Status: original implementation accepted on 2026-08-13; corpus-shaped follow-up
-optimization and final frozen-corpus rerun in progress on 2026-08-14
+optimization and frozen-corpus rerun accepted on 2026-08-14
 
 This record turns the RFC 010/011 performance requirements into a reproducible
 baseline, documents the production-path findings and rejected spikes, and
@@ -516,16 +516,62 @@ that record. Parent and subagent transcripts could also race to own a shared
 session row; the reducer now deterministically prefers the parent transcript
 and uses stable object identity for peer ties.
 
-### F21 — disk pressure currently invalidates a new frozen-corpus claim
+### F21 — disk pressure invalidated the initial follow-up claim
 
 The reference volume is 99% full with only about 14 GiB available. A retained
 private benchmark directory occupies about 20 GiB, including two stale ~8.4
 GiB derived databases. SQLite commit, checkpoint, and finalization timing at
 that free-space level is not comparable to earlier runs, and a fresh complete
 database plus WAL cannot be created with a safe reserve. The declaration-state
-change therefore remains accepted on synthetic, live, and differential gates,
-but its frozen-corpus wall-clock claim is pending explicit cleanup approval and
-an identical rerun.
+change therefore remained accepted on synthetic, live, and differential gates,
+but its frozen-corpus wall-clock claim was held pending cleanup and an identical
+rerun. F22 records that rerun after the stale artifacts were removed.
+
+### F22 — measured critical path and deferred foreign-key enforcement
+
+After removing stale build artifacts, the current 3,699.3 MiB fixture contains
+1,101,389 JSONL records and produces 1,118,373 native records, 1,078,900
+canonical messages, 2,595,192 facts, and 34,929 logical commits. A storage-free
+ablation retained discovery, reads, decode, fact construction, and scheduling
+but completed in 32.59 seconds. The unchanged production path took 211.33
+seconds on the first cold run and 176.64 seconds after filesystem caches had
+warmed, proving that at least 84.6% of the first run was persistence work and
+also proving that one-run wall deltas are not sufficient evidence.
+
+New non-overlapping finalization telemetry explains 161.88 of the 176.64
+seconds (91.6%): 105.43 seconds in physical write transactions, 24.68 seconds
+in checkpoints, and 31.77 seconds in finalization excluding its two checkpoint
+calls. Transaction time was dominated by canonical projection (32.08 seconds),
+runtime projection (31.50 seconds), preparation (14.49 seconds), and SQLite
+commit (22.97 seconds). Finalization spent 19.36 seconds validating foreign
+keys, database structure, and FTS; deferred indexes took 6.07 seconds, FTS
+rebuild 4.86 seconds, and planner optimization 1.44 seconds. Disabling all
+checkpoints was rejected after it failed to become ready in 628 seconds and
+grew a 17 GiB WAL.
+
+The completed database is 7.55 GB from 3.17 GB of decoded payload. Offline
+`dbstat` attributes 2.75 GB to `canonical_messages`, more than 1 GB to its
+indexes, and about 849 MiB to `run_evidence` plus its observed-state effects.
+All 1,087,781 run-evidence rows on this corpus are the same
+`activity_observed/native_activity` assertion for only 5,178 runs; messages
+already carry the same run, timestamp, fact identity, and provenance. A
+runtime-stage ablation reduced wall time by 36.95 seconds and the database by
+848.9 MiB, but the time result is only an upper bound because that diagnostic
+also relaxed foreign keys. Replacing duplicate activity facts with
+message-derived evidence remains the highest-value schema experiment, not an
+accepted semantic change.
+
+A clean A-B-A experiment then disabled immediate foreign-key enforcement only
+during the reader-free cold build while retaining the exhaustive final audit.
+Controls took 176.64 and 179.46 seconds; the treatment took 168.96 seconds,
+9.09 seconds (5.1%) faster than the control mean with identical durable counts
+and a passing 9.62-second final audit. Physical transaction work fell from
+about 105 seconds to 92.56 seconds; checkpoints absorbed 5.31 seconds of that
+gain. Fault injection proves an orphan still leaves the bootstrap marker set
+and blocks readiness. Immediate enforcement is restored before live writers
+or query readers are admitted. The production implementation then completed
+the same corpus in 167.62 seconds with exact counts, zero retries, a passing
+9.15-second foreign-key audit, 9/9 checkpoints, and a zero-byte final WAL.
 
 ## Controlled spikes and decisions
 
@@ -556,6 +602,7 @@ an identical rerun.
 | Raise SQLite page size from 4 KiB to 8 KiB                                                          | 131k/4,096 objects: DB 613.4 -> 589.3 MiB, time 14.88 -> 15.68 s                                                                             | Rejected; smaller storage did not compensate for slower ingestion                                                         |
 | Use exclusive locking and disable cache spill during bootstrap                                      | Native query-bootstrap lifecycle failed with `database is locked` while starting the read pool                                               | Rejected and reverted; normal locking remains mandatory at the readiness transition                                       |
 | Emit Claude object declarations once per generation                                                | 131k/4,096 objects: 589,824 -> 335,872 facts, 613.2 -> 557.1 MiB, 16.38 -> 14.45 s first-run; repeat median 13.16 s; live p99 7.2 ms        | Landed behind Claude contract v16 with bounded state, exact small/medium differentials, and deterministic parent ownership |
+| Defer cold-build FK enforcement to the exhaustive readiness audit                                  | Frozen-corpus A-B-A: 176.64 / 168.96 / 179.46 s; production: 167.62 s with exact counts, zero retries, and zero final WAL                  | Landed only for reader-free cold bootstrap; fault injection blocks readiness and live enforcement is restored             |
 
 The bulk spike is deliberately not exposed as a production flag. Its lifecycle
 is incomplete until crash recovery, reader quiescence, durable readiness, FTS
@@ -619,20 +666,23 @@ threshold (provisionally 64 MiB or 100,000 records), the owner may enter
 ```text
 acquire owner and writer connection
 persist bootstrap epoch/state
-retain UNIQUE/FK and writer-critical indexes
+retain UNIQUE and writer-critical indexes; defer FK enforcement
 defer an approved list of query-only indexes and canonical FTS triggers
 ingest bounded cursor/fact/projection transactions
 rebuild indexes and FTS on the same writer connection
 PRAGMA optimize
 checkpoint under the reader-free bootstrap policy
-validate counts, FTS coverage, foreign keys, and quick_check
+validate counts, FTS coverage, all foreign keys, and quick_check
 atomically mark projections ready and bootstrap complete
 start query workers and publish ready
 ```
 
 The deferred list is explicit and query-plan-tested. Generation-retraction,
-fact identity, usage-series, reducer, foreign-key, and uniqueness indexes are
-never dropped merely because a load is large.
+fact identity, usage-series, reducer, foreign-key-supporting, and uniqueness
+indexes are never dropped merely because a load is large. Immediate foreign-key
+enforcement is disabled only while the sole trusted writer owns a reader-free
+cold build; the exhaustive final audit must pass before readiness, and live
+enforcement is restored before the query pool starts.
 
 If the process crashes with the marker set, the next owner does not serve
 queries. It verifies the schema and either resumes finalization or recreates

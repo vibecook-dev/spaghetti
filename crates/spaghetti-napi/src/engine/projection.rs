@@ -10718,6 +10718,17 @@ mod tests {
                 .unwrap(),
             0
         );
+        assert!(
+            connection
+                .prepare("PRAGMA foreign_key_check")
+                .unwrap()
+                .query([])
+                .unwrap()
+                .next()
+                .unwrap()
+                .is_none(),
+            "replacement and retraction must remain FK-complete when bootstrap enforcement is deferred"
+        );
     }
 
     #[test]

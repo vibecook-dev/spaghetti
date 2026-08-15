@@ -4,9 +4,10 @@
 //! single-writer ownership structural and keeps N-API objects `Send` without
 //! moving SQLite handles across runtimes.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -489,11 +490,24 @@ fn writer_thread(
                     }
                     ensure_disk_reserve(&database_path)?;
                     if !skip.checkpoints && !skip.finalize {
-                        checkpoints.checkpoint(&connection, &telemetry, true)?;
+                        let started = Instant::now();
+                        let checkpoint = checkpoints.checkpoint(&connection, &telemetry, true);
+                        telemetry.record_bootstrap_phase(
+                            "bootstrap.pre_finalize_checkpoint",
+                            started.elapsed(),
+                        );
+                        checkpoint?;
                     }
-                    let watermark = finalize_query_bootstrap_connection(&mut connection)?;
+                    let watermark =
+                        finalize_query_bootstrap_connection_profiled(&mut connection, &telemetry)?;
                     if !skip.checkpoints && !skip.finalize {
-                        checkpoints.checkpoint(&connection, &telemetry, true)?;
+                        let started = Instant::now();
+                        let checkpoint = checkpoints.checkpoint(&connection, &telemetry, true);
+                        telemetry.record_bootstrap_phase(
+                            "bootstrap.post_finalize_checkpoint",
+                            started.elapsed(),
+                        );
+                        checkpoint?;
                     }
                     bootstrap_active = false;
                     Ok(watermark)
@@ -938,6 +952,7 @@ struct WriterTelemetry {
     artifact: LatencyHistogram,
     workflow: LatencyHistogram,
     usage_aggregation: LatencyHistogram,
+    bootstrap_phases: Mutex<BTreeMap<String, LatencyHistogram>>,
 }
 
 impl WriterTelemetry {
@@ -988,7 +1003,17 @@ impl WriterTelemetry {
             artifact: LatencyHistogram::default(),
             workflow: LatencyHistogram::default(),
             usage_aggregation: LatencyHistogram::default(),
+            bootstrap_phases: Mutex::new(BTreeMap::new()),
         }
+    }
+
+    fn record_bootstrap_phase(&self, name: &str, elapsed: Duration) {
+        self.bootstrap_phases
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .entry(name.to_string())
+            .or_default()
+            .record(elapsed);
     }
 
     fn observe_queue_depth(&self, depth: usize) {
@@ -1071,6 +1096,60 @@ impl WriterTelemetry {
             } else {
                 0
             });
+        let mut timings = [
+            ("queue_wait", &self.queue_wait),
+            ("disk_reserve", &self.disk_reserve),
+            ("prepare", &self.prepare),
+            ("canonical_projection", &self.canonical_projection),
+            ("runtime_projection", &self.runtime_projection),
+            ("usage_projection", &self.usage_projection),
+            ("cursor_and_catalog", &self.cursor_and_catalog),
+            ("change_log", &self.change_log),
+            ("maintenance", &self.maintenance),
+            ("sqlite_commit", &self.sqlite_commit),
+            ("physical_transaction", &self.physical_transaction),
+            ("physical_sqlite_commit", &self.physical_sqlite_commit),
+            ("writer_total", &self.writer_total),
+            ("bootstrap_finalize", &self.bootstrap_finalize),
+            (
+                "projector.history_and_fact_storage",
+                &self.history_and_fact_storage,
+            ),
+            ("projector.session_index", &self.session_index),
+            ("projector.project_memory", &self.project_memory),
+            (
+                "projector.persisted_tool_result",
+                &self.persisted_tool_result,
+            ),
+            (
+                "projector.interpretation_settings",
+                &self.interpretation_settings,
+            ),
+            ("projector.run_state", &self.run_state),
+            ("projector.delegation", &self.delegation),
+            ("projector.presence", &self.presence),
+            ("projector.team", &self.team),
+            ("projector.task", &self.task),
+            ("projector.artifact", &self.artifact),
+            ("projector.workflow", &self.workflow),
+            ("projector.usage_aggregation", &self.usage_aggregation),
+        ]
+        .into_iter()
+        .map(|(name, histogram)| NamedLatencySnapshot {
+            name: name.to_string(),
+            latency: histogram.snapshot(),
+        })
+        .collect::<Vec<_>>();
+        timings.extend(
+            self.bootstrap_phases
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .iter()
+                .map(|(name, histogram)| NamedLatencySnapshot {
+                    name: name.clone(),
+                    latency: histogram.snapshot(),
+                }),
+        );
         WriterPerformanceSnapshot {
             uptime_ns,
             commit_attempts: self.commit_attempts.load(Ordering::Acquire),
@@ -1096,50 +1175,7 @@ impl WriterTelemetry {
                 blocked_by_reader_ns,
                 latency: self.checkpoint.snapshot(),
             },
-            timings: [
-                ("queue_wait", &self.queue_wait),
-                ("disk_reserve", &self.disk_reserve),
-                ("prepare", &self.prepare),
-                ("canonical_projection", &self.canonical_projection),
-                ("runtime_projection", &self.runtime_projection),
-                ("usage_projection", &self.usage_projection),
-                ("cursor_and_catalog", &self.cursor_and_catalog),
-                ("change_log", &self.change_log),
-                ("maintenance", &self.maintenance),
-                ("sqlite_commit", &self.sqlite_commit),
-                ("physical_transaction", &self.physical_transaction),
-                ("physical_sqlite_commit", &self.physical_sqlite_commit),
-                ("writer_total", &self.writer_total),
-                ("bootstrap_finalize", &self.bootstrap_finalize),
-                (
-                    "projector.history_and_fact_storage",
-                    &self.history_and_fact_storage,
-                ),
-                ("projector.session_index", &self.session_index),
-                ("projector.project_memory", &self.project_memory),
-                (
-                    "projector.persisted_tool_result",
-                    &self.persisted_tool_result,
-                ),
-                (
-                    "projector.interpretation_settings",
-                    &self.interpretation_settings,
-                ),
-                ("projector.run_state", &self.run_state),
-                ("projector.delegation", &self.delegation),
-                ("projector.presence", &self.presence),
-                ("projector.team", &self.team),
-                ("projector.task", &self.task),
-                ("projector.artifact", &self.artifact),
-                ("projector.workflow", &self.workflow),
-                ("projector.usage_aggregation", &self.usage_aggregation),
-            ]
-            .into_iter()
-            .map(|(name, histogram)| NamedLatencySnapshot {
-                name: name.to_string(),
-                latency: histogram.snapshot(),
-            })
-            .collect(),
+            timings,
         }
     }
 }
@@ -1477,32 +1513,55 @@ fn query_bootstrap_active(connection: &Connection) -> Result<bool, EngineError> 
 fn finalize_query_bootstrap_connection(
     connection: &mut Connection,
 ) -> Result<Option<u64>, EngineError> {
+    finalize_query_bootstrap_connection_observed(connection, |_, _| {})
+}
+
+fn finalize_query_bootstrap_connection_profiled(
+    connection: &mut Connection,
+    telemetry: &WriterTelemetry,
+) -> Result<Option<u64>, EngineError> {
+    finalize_query_bootstrap_connection_observed(connection, |phase, elapsed| {
+        telemetry.record_bootstrap_phase(&format!("bootstrap.{phase}"), elapsed);
+    })
+}
+
+fn finalize_query_bootstrap_connection_observed<F>(
+    connection: &mut Connection,
+    mut observe: F,
+) -> Result<Option<u64>, EngineError>
+where
+    F: FnMut(&str, Duration),
+{
     if super::ingest_profile::IngestProfileSkip::current().finalize {
         return clear_query_bootstrap_marker(connection);
     }
     // Stay on WAL + NORMAL. Crash recovery already re-runs finalization, so
     // switching a multi-gigabyte file to DELETE + FULL only adds fsyncs.
+    let started = Instant::now();
     schema::set_bootstrap_ingest_pragmas(connection).map_err(|error| EngineError::Sqlite {
         operation: "retain bootstrap cache for index finalization",
         detail: error.to_string(),
     })?;
+    observe("configure_pragmas", started.elapsed());
 
     let skip = super::ingest_profile::IngestProfileSkip::current();
-    let finalization = if skip.relaxes_sqlite_constraints() {
-        schema::finalize_query_bootstrap_skip_fk_check(connection)
-    } else {
-        schema::finalize_query_bootstrap(connection)
-    }
+    let finalization = schema::finalize_query_bootstrap_profiled(
+        connection,
+        !skip.relaxes_sqlite_constraints(),
+        &mut observe,
+    )
     .map_err(|error| EngineError::Sqlite {
         operation: "finalize durable query bootstrap",
         detail: error.to_string(),
     });
+    let started = Instant::now();
     let restore = schema::set_pragmas(connection)
         .map_err(|error| EngineError::Sqlite {
             operation: "restore writer pragmas after query bootstrap",
             detail: error.to_string(),
         })
         .and_then(|()| apply_ingest_profile_pragmas(connection));
+    observe("restore_pragmas", started.elapsed());
     match (finalization, restore) {
         (Ok(watermark), Ok(())) => Ok(watermark),
         (Err(error), _) => Err(error),

@@ -16,6 +16,7 @@
 //! not to reinterpret existing durable rows.
 
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior};
+use std::time::{Duration, Instant};
 use thiserror::Error;
 
 const WRITER_CACHE_KIB: i64 = 128_000;
@@ -2335,7 +2336,7 @@ pub fn begin_query_bootstrap(conn: &mut Connection) -> Result<bool, SchemaError>
 /// durable unavailability marker. The returned watermark is the snapshot
 /// boundary that a newly admitted subscriber must start from.
 pub fn finalize_query_bootstrap(conn: &mut Connection) -> Result<Option<u64>, SchemaError> {
-    finalize_query_bootstrap_inner(conn, true)
+    finalize_query_bootstrap_inner(conn, true, &mut |_, _| {})
 }
 
 /// Isolation-only: rebuild deferred structures without the foreign-key audit.
@@ -2343,16 +2344,33 @@ pub fn finalize_query_bootstrap(conn: &mut Connection) -> Result<Option<u64>, Sc
 pub fn finalize_query_bootstrap_skip_fk_check(
     conn: &mut Connection,
 ) -> Result<Option<u64>, SchemaError> {
-    finalize_query_bootstrap_inner(conn, false)
+    finalize_query_bootstrap_inner(conn, false, &mut |_, _| {})
 }
 
-fn finalize_query_bootstrap_inner(
+/// Finalize a cold bootstrap while exposing non-overlapping phase durations.
+/// The observer is intentionally synchronous: finalization owns the sole
+/// writer, and telemetry must describe the exact operation that delayed
+/// readiness rather than a sampled approximation.
+pub(crate) fn finalize_query_bootstrap_profiled(
     conn: &mut Connection,
     check_foreign_keys: bool,
+    mut observe: impl FnMut(&'static str, Duration),
 ) -> Result<Option<u64>, SchemaError> {
+    finalize_query_bootstrap_inner(conn, check_foreign_keys, &mut observe)
+}
+
+fn finalize_query_bootstrap_inner<F>(
+    conn: &mut Connection,
+    check_foreign_keys: bool,
+    observe: &mut F,
+) -> Result<Option<u64>, SchemaError>
+where
+    F: FnMut(&'static str, Duration),
+{
     if query_bootstrap_state(conn)?.is_none() {
         return Ok(None);
     }
+    let started = Instant::now();
     conn.execute(
         "UPDATE schema_meta SET value = 'finalizing' WHERE key = ?1",
         [BOOTSTRAP_STATE_KEY],
@@ -2362,16 +2380,26 @@ fn finalize_query_bootstrap_inner(
     // sorts avoid an extra spill file; the writer restores interactive pragmas
     // after this function returns.
     conn.pragma_update(None, "temp_store", "MEMORY")?;
-    for (_, sql) in BOOTSTRAP_QUERY_INDEXES {
+    observe("state_and_temp_store", started.elapsed());
+    for (index, sql) in BOOTSTRAP_QUERY_INDEXES {
+        let started = Instant::now();
         conn.execute_batch(sql)?;
+        observe(index, started.elapsed());
     }
+    let started = Instant::now();
     conn.execute_batch(
         "INSERT INTO canonical_message_search_fts(canonical_message_search_fts) VALUES('rebuild')",
     )?;
+    observe("fts_rebuild", started.elapsed());
+    let started = Instant::now();
     conn.execute_batch(CANONICAL_FTS_TRIGGERS_SQL)?;
+    observe("fts_triggers", started.elapsed());
+    let started = Instant::now();
     conn.execute_batch("PRAGMA optimize=0x10002")?;
-    validate_query_bootstrap(conn, check_foreign_keys)?;
+    observe("optimize", started.elapsed());
+    validate_query_bootstrap(conn, check_foreign_keys, observe)?;
 
+    let started = Instant::now();
     let watermark: i64 = conn.query_row(
         "SELECT COALESCE(MAX(commit_seq), 0) FROM ingest_commits WHERE committed_at IS NOT NULL",
         [],
@@ -2399,6 +2427,7 @@ fn finalize_query_bootstrap_inner(
         [BOOTSTRAP_STATE_KEY],
     )?;
     transaction.commit()?;
+    observe("publish_readiness", started.elapsed());
     Ok(Some(u64::try_from(watermark).unwrap_or_default()))
 }
 
@@ -2412,10 +2441,15 @@ pub fn recover_query_bootstrap(conn: &mut Connection) -> Result<bool, SchemaErro
     finalize_query_bootstrap(conn).map(|_| true)
 }
 
-fn validate_query_bootstrap(
+fn validate_query_bootstrap<F>(
     conn: &mut Connection,
     check_foreign_keys: bool,
-) -> Result<(), SchemaError> {
+    observe: &mut F,
+) -> Result<(), SchemaError>
+where
+    F: FnMut(&'static str, Duration),
+{
+    let started = Instant::now();
     for (index, _) in BOOTSTRAP_QUERY_INDEXES {
         let exists: i64 = conn.query_row(
             "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = ?1",
@@ -2440,14 +2474,18 @@ fn validate_query_bootstrap(
             )));
         }
     }
+    observe("validate_structures", started.elapsed());
 
+    let started = Instant::now();
     let quick_check: String = conn.query_row("PRAGMA quick_check(1)", [], |row| row.get(0))?;
     if quick_check != "ok" {
         return Err(SchemaError::BootstrapValidation(format!(
             "quick_check returned {quick_check}"
         )));
     }
+    observe("quick_check", started.elapsed());
     if check_foreign_keys {
+        let started = Instant::now();
         let foreign_key_violation = {
             let mut statement = conn.prepare("PRAGMA foreign_key_check")?;
             let mut rows = statement.query([])?;
@@ -2458,15 +2496,19 @@ fn validate_query_bootstrap(
                 "foreign_key_check found at least one violation".to_string(),
             ));
         }
+        observe("foreign_key_check", started.elapsed());
     }
 
+    let started = Instant::now();
     let transaction = conn.transaction()?;
     let integrity = transaction.execute_batch(
         "INSERT INTO canonical_message_search_fts(canonical_message_search_fts, rank) \
          VALUES('integrity-check', 1)",
     );
     transaction.rollback()?;
-    integrity.map_err(SchemaError::from)
+    integrity.map_err(SchemaError::from)?;
+    observe("fts_integrity_check", started.elapsed());
+    Ok(())
 }
 
 /// Drop per-row FTS and activity triggers during a high-volume import.
@@ -2539,6 +2581,12 @@ pub fn set_pragmas(conn: &Connection) -> Result<(), SchemaError> {
 /// query-bootstrap ingest or index finalization. `set_pragmas` restores the
 /// interactive policy before readers start.
 pub fn set_bootstrap_ingest_pragmas(conn: &Connection) -> Result<(), SchemaError> {
+    // The cold builder is the sole trusted writer and admits no readers. Avoid
+    // millions of repeated parent lookups while inserting; finalization runs
+    // a complete foreign_key_check before it can clear the durable readiness
+    // marker, and set_pragmas restores immediate enforcement before readers or
+    // live commits are admitted.
+    conn.pragma_update(None, "foreign_keys", "OFF")?;
     conn.pragma_update(None, "cache_size", -BOOTSTRAP_CACHE_KIB)?;
     conn.pragma_update(None, "mmap_size", BOOTSTRAP_MMAP_BYTES)?;
     conn.pragma_update(None, "journal_size_limit", BOOTSTRAP_JOURNAL_LIMIT_BYTES)?;
@@ -2833,6 +2881,38 @@ mod tests {
         assert_eq!(query_bootstrap_state(&recovered).unwrap(), None);
         assert_eq!(canonical_search_count(&recovered, "bootstrap"), 1);
         assert!(!recover_query_bootstrap(&mut recovered).unwrap());
+    }
+
+    #[test]
+    fn deferred_foreign_keys_still_block_invalid_bootstrap_readiness() {
+        let mut conn = Connection::open_in_memory().expect("open in-memory db");
+        set_pragmas(&conn).expect("set writer pragmas");
+        initialize_schema(&conn).expect("initialize schema");
+        assert!(begin_query_bootstrap(&mut conn).expect("begin query bootstrap"));
+        set_bootstrap_ingest_pragmas(&conn).expect("set bootstrap pragmas");
+        assert_eq!(
+            conn.query_row("PRAGMA foreign_keys", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+
+        seed_bootstrap_message(&conn);
+        conn.execute(
+            "UPDATE canonical_messages SET fact_id = x'ff' WHERE message_key = x'01'",
+            [],
+        )
+        .expect("inject orphaned message fact");
+        let error = finalize_query_bootstrap(&mut conn).expect_err("orphan must block readiness");
+        assert!(error.to_string().contains("foreign_key_check"));
+        assert!(query_bootstrap_state(&conn).unwrap().is_some());
+
+        conn.execute(
+            "UPDATE canonical_messages SET fact_id = x'01' WHERE message_key = x'01'",
+            [],
+        )
+        .expect("repair orphaned message fact");
+        assert_eq!(finalize_query_bootstrap(&mut conn).unwrap(), Some(1));
+        assert_eq!(query_bootstrap_state(&conn).unwrap(), None);
     }
 
     #[test]
