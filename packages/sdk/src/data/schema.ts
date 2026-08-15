@@ -114,7 +114,9 @@ import type { SqliteService } from '../io/index.js';
 // storage and is decoded only for bounded detail/timeline pages.
 // v43: compact run-evidence reductions retain the exact decisive fact, total
 // count, and maximum activity without indexing one projection row per message.
-export const SCHEMA_VERSION = 43;
+// v44: unambiguous message facts own paired native-activity evidence from the
+// same source observation; compact run evidence keeps its dimensions/count.
+export const SCHEMA_VERSION = 44;
 
 export const TOKEN_ACTIVITY_TRIGGER_NAMES = [
   'token_activity_messages_ai',

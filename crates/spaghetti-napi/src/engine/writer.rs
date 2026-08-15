@@ -709,6 +709,7 @@ fn process_commit_group(
                     request,
                     hook,
                     persist_public_changes,
+                    bootstrap_active,
                 )
             }
             WriterCommand::CommitFacts { request, batch, .. } => {
@@ -718,6 +719,7 @@ fn process_commit_group(
                     batch,
                     hook,
                     persist_public_changes,
+                    bootstrap_active,
                 )
             }
             _ => unreachable!("non-commit command entered a physical commit group"),
@@ -940,6 +942,18 @@ struct WriterTelemetry {
     writer_total: LatencyHistogram,
     bootstrap_finalize: LatencyHistogram,
     history_and_fact_storage: LatencyHistogram,
+    history_preparation: LatencyHistogram,
+    fact_storage: LatencyHistogram,
+    canonical_message_storage: LatencyHistogram,
+    history_projection_walk: LatencyHistogram,
+    content_block_storage: LatencyHistogram,
+    delegation_probe: LatencyHistogram,
+    delegation_projection: LatencyHistogram,
+    delegation_reductions: LatencyHistogram,
+    artifact_preparation: LatencyHistogram,
+    artifact_assertion_writes: LatencyHistogram,
+    artifact_reductions: LatencyHistogram,
+    artifact_cleanup: LatencyHistogram,
     session_index: LatencyHistogram,
     project_memory: LatencyHistogram,
     persisted_tool_result: LatencyHistogram,
@@ -991,6 +1005,18 @@ impl WriterTelemetry {
             writer_total: LatencyHistogram::default(),
             bootstrap_finalize: LatencyHistogram::default(),
             history_and_fact_storage: LatencyHistogram::default(),
+            history_preparation: LatencyHistogram::default(),
+            fact_storage: LatencyHistogram::default(),
+            canonical_message_storage: LatencyHistogram::default(),
+            history_projection_walk: LatencyHistogram::default(),
+            content_block_storage: LatencyHistogram::default(),
+            delegation_probe: LatencyHistogram::default(),
+            delegation_projection: LatencyHistogram::default(),
+            delegation_reductions: LatencyHistogram::default(),
+            artifact_preparation: LatencyHistogram::default(),
+            artifact_assertion_writes: LatencyHistogram::default(),
+            artifact_reductions: LatencyHistogram::default(),
+            artifact_cleanup: LatencyHistogram::default(),
             session_index: LatencyHistogram::default(),
             project_memory: LatencyHistogram::default(),
             persisted_tool_result: LatencyHistogram::default(),
@@ -1115,6 +1141,36 @@ impl WriterTelemetry {
                 "projector.history_and_fact_storage",
                 &self.history_and_fact_storage,
             ),
+            ("projector.history_preparation", &self.history_preparation),
+            ("projector.fact_storage", &self.fact_storage),
+            (
+                "projector.canonical_message_storage",
+                &self.canonical_message_storage,
+            ),
+            (
+                "projector.history_projection_walk",
+                &self.history_projection_walk,
+            ),
+            (
+                "projector.content_block_storage",
+                &self.content_block_storage,
+            ),
+            ("projector.delegation_probe", &self.delegation_probe),
+            (
+                "projector.delegation_projection",
+                &self.delegation_projection,
+            ),
+            (
+                "projector.delegation_reductions",
+                &self.delegation_reductions,
+            ),
+            ("projector.artifact_preparation", &self.artifact_preparation),
+            (
+                "projector.artifact_assertion_writes",
+                &self.artifact_assertion_writes,
+            ),
+            ("projector.artifact_reductions", &self.artifact_reductions),
+            ("projector.artifact_cleanup", &self.artifact_cleanup),
             ("projector.session_index", &self.session_index),
             ("projector.project_memory", &self.project_memory),
             (
@@ -1183,7 +1239,7 @@ impl WriterTelemetry {
 struct CommitTimingHook {
     started_at: Instant,
     marks_ns: [AtomicU64; 8],
-    details_ns: [AtomicU64; 13],
+    details_ns: [AtomicU64; 25],
 }
 
 impl CommitTimingHook {
@@ -1231,6 +1287,18 @@ impl CommitTimingHook {
             .map(|detail| detail.load(Ordering::Acquire));
         for (histogram, elapsed_ns) in [
             &telemetry.history_and_fact_storage,
+            &telemetry.history_preparation,
+            &telemetry.fact_storage,
+            &telemetry.canonical_message_storage,
+            &telemetry.history_projection_walk,
+            &telemetry.content_block_storage,
+            &telemetry.delegation_probe,
+            &telemetry.delegation_projection,
+            &telemetry.delegation_reductions,
+            &telemetry.artifact_preparation,
+            &telemetry.artifact_assertion_writes,
+            &telemetry.artifact_reductions,
+            &telemetry.artifact_cleanup,
             &telemetry.session_index,
             &telemetry.project_memory,
             &telemetry.persisted_tool_result,
@@ -1284,18 +1352,30 @@ impl CommitHook for CommitTimingHook {
         // so retain only fixed per-detail nanoseconds until successful commit.
         let index = match detail {
             CommitDetail::HistoryAndFactStorage => 0,
-            CommitDetail::SessionIndex => 1,
-            CommitDetail::ProjectMemory => 2,
-            CommitDetail::PersistedToolResult => 3,
-            CommitDetail::InterpretationSettings => 4,
-            CommitDetail::RunState => 5,
-            CommitDetail::Delegation => 6,
-            CommitDetail::Presence => 7,
-            CommitDetail::Team => 8,
-            CommitDetail::Task => 9,
-            CommitDetail::Artifact => 10,
-            CommitDetail::Workflow => 11,
-            CommitDetail::UsageAggregation => 12,
+            CommitDetail::HistoryPreparation => 1,
+            CommitDetail::FactStorage => 2,
+            CommitDetail::CanonicalMessageStorage => 3,
+            CommitDetail::HistoryProjectionWalk => 4,
+            CommitDetail::ContentBlockStorage => 5,
+            CommitDetail::DelegationProbe => 6,
+            CommitDetail::DelegationProjection => 7,
+            CommitDetail::DelegationReductions => 8,
+            CommitDetail::ArtifactPreparation => 9,
+            CommitDetail::ArtifactAssertionWrites => 10,
+            CommitDetail::ArtifactReductions => 11,
+            CommitDetail::ArtifactCleanup => 12,
+            CommitDetail::SessionIndex => 13,
+            CommitDetail::ProjectMemory => 14,
+            CommitDetail::PersistedToolResult => 15,
+            CommitDetail::InterpretationSettings => 16,
+            CommitDetail::RunState => 17,
+            CommitDetail::Delegation => 18,
+            CommitDetail::Presence => 19,
+            CommitDetail::Team => 20,
+            CommitDetail::Task => 21,
+            CommitDetail::Artifact => 22,
+            CommitDetail::Workflow => 23,
+            CommitDetail::UsageAggregation => 24,
         };
         self.details_ns[index].store(duration_ns(elapsed), Ordering::Release);
     }
@@ -1513,20 +1593,35 @@ fn query_bootstrap_active(connection: &Connection) -> Result<bool, EngineError> 
 fn finalize_query_bootstrap_connection(
     connection: &mut Connection,
 ) -> Result<Option<u64>, EngineError> {
-    finalize_query_bootstrap_connection_observed(connection, |_, _| {})
+    // This path repairs a durable bootstrap marker found while opening the
+    // writer, so the previous process may have exited during file mutation.
+    // Retain a full structural scan before recovery can admit readers.
+    finalize_query_bootstrap_connection_observed(connection, true, |_, _| {})
 }
 
 fn finalize_query_bootstrap_connection_profiled(
     connection: &mut Connection,
     telemetry: &WriterTelemetry,
 ) -> Result<Option<u64>, EngineError> {
-    finalize_query_bootstrap_connection_observed(connection, |phase, elapsed| {
-        telemetry.record_bootstrap_phase(&format!("bootstrap.{phase}"), elapsed);
-    })
+    // The same live writer created every page in this uninterrupted bootstrap.
+    // SQLite has already reported all writes, commits, checkpoints, and DDL as
+    // successful. Avoid rescanning the complete fresh file here; foreign-key
+    // and FTS semantic audits still gate readiness, and recovery retains the
+    // structural scan above.
+    let check_database_integrity =
+        super::ingest_profile::IngestProfileSkip::current().bootstrap_integrity_deferral;
+    finalize_query_bootstrap_connection_observed(
+        connection,
+        check_database_integrity,
+        |phase, elapsed| {
+            telemetry.record_bootstrap_phase(&format!("bootstrap.{phase}"), elapsed);
+        },
+    )
 }
 
 fn finalize_query_bootstrap_connection_observed<F>(
     connection: &mut Connection,
+    check_database_integrity: bool,
     mut observe: F,
 ) -> Result<Option<u64>, EngineError>
 where
@@ -1545,9 +1640,13 @@ where
     observe("configure_pragmas", started.elapsed());
 
     let skip = super::ingest_profile::IngestProfileSkip::current();
+    let started = Instant::now();
+    super::artifact_projection::rebuild_artifacts_for_bootstrap(connection)?;
+    observe("artifact_rebuild", started.elapsed());
     let finalization = schema::finalize_query_bootstrap_profiled(
         connection,
         !skip.relaxes_sqlite_constraints(),
+        check_database_integrity,
         &mut observe,
     )
     .map_err(|error| EngineError::Sqlite {
@@ -1642,7 +1741,13 @@ fn read_health(connection: &Connection) -> Result<WriterHealth, EngineError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::adapter::RawRetentionPolicy;
+    use crate::adapter::{
+        AdapterId, ArtifactCapture, ArtifactContentFact, ArtifactMetadataEntry,
+        ArtifactMetadataSnapshotFact, ArtifactObservationKind, EntityKey, Fact, QualifiedTimestamp,
+        RawRetentionPolicy, TimestampQuality,
+    };
+    use crate::source::{RecordOrigin, SourceCursor, SourceMediaType, SourceRecord};
+    use rusqlite::OptionalExtension;
     use tempfile::tempdir;
 
     fn grouped_request(index: u8) -> ObservationCommit {
@@ -1703,6 +1808,22 @@ mod tests {
         (
             WriterCommand::Commit {
                 request: Box::new(request),
+                queued_at: Instant::now(),
+                response,
+            },
+            receive,
+        )
+    }
+
+    fn fact_command(
+        request: ObservationCommit,
+        batch: FactBatch,
+    ) -> (WriterCommand, Receiver<Result<CommitReceipt, EngineError>>) {
+        let (response, receive) = bounded(1);
+        (
+            WriterCommand::CommitFacts {
+                request: Box::new(request),
+                batch: Box::new(batch),
                 queued_at: Instant::now(),
                 response,
             },
@@ -1888,6 +2009,169 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM ingest_commits", [], |row| row.get(0))
             .unwrap();
         assert_eq!(commits, 1);
+    }
+
+    #[test]
+    fn bootstrap_finalization_rebuilds_deferred_artifact_state_before_readiness() {
+        let dir = tempdir().unwrap();
+        let database = dir.path().join("bootstrap-artifact.db");
+        let mut connection = open_writer(&database).unwrap();
+        assert!(schema::begin_query_bootstrap(&mut connection).unwrap());
+        schema::set_bootstrap_ingest_pragmas(&connection).unwrap();
+
+        let mut request = grouped_request(1);
+        request.object.committed_cursor = SourceCursor::append_offset(1).into_bytes();
+        let source_instance_id = commit::source_instance_catalog_id(
+            &request.source.adapter_id,
+            &request.source.stable_key,
+        );
+        let source_stream_id =
+            commit::source_stream_catalog_id(source_instance_id, &request.stream.stream_key);
+        let source_object_id =
+            commit::source_object_catalog_id(source_stream_id, &request.object.object_key);
+        let record = SourceRecord::new(
+            &RecordOrigin {
+                source_instance_id,
+                stream_id: source_stream_id,
+                object_id: source_object_id,
+                observed_at: 1,
+                source_timestamp_hint: None,
+                media_type: SourceMediaType::new("application/json").unwrap(),
+            },
+            1,
+            SourceCursor::append_offset(0),
+            SourceCursor::append_offset(1),
+            0,
+            b"bootstrap-artifact".to_vec(),
+        );
+        let adapter = AdapterId::new("writer-group-fixture").unwrap();
+        let artifact = EntityKey::native(&adapter, 1, "artifact", b"artifact-1").unwrap();
+        let session = EntityKey::native(&adapter, 1, "session", b"session-1").unwrap();
+        let source_time = QualifiedTimestamp {
+            value: "2026-08-15T00:00:00.000Z".to_string(),
+            quality: TimestampQuality::NativeExact,
+        };
+        let native_artifact_id = "artifact-hash@v1";
+        let content = b"bootstrap artifact content\n".to_vec();
+        let mut batch = FactBatch::new(2, 1).unwrap();
+        batch
+            .push(
+                &record,
+                Fact::ArtifactMetadataSnapshot(ArtifactMetadataSnapshotFact {
+                    session: session.clone(),
+                    native_message_id: "message-1".to_string(),
+                    native_snapshot_message_id: "snapshot-1".to_string(),
+                    observation_kind: ArtifactObservationKind::Delta,
+                    is_snapshot_update: false,
+                    source_time: Some(source_time.clone()),
+                    artifacts: vec![ArtifactMetadataEntry {
+                        artifact: artifact.clone(),
+                        native_artifact_id: Some(native_artifact_id.to_string()),
+                        tracking_path: "src/bootstrap.rs".to_string(),
+                        real_parent_dir: Some("/fixture".to_string()),
+                        version: 1,
+                        backup_time: source_time,
+                        capture: ArtifactCapture::ContentExpected,
+                    }],
+                }),
+            )
+            .unwrap();
+        batch
+            .push(
+                &record,
+                Fact::ArtifactContent(ArtifactContentFact {
+                    artifact: artifact.clone(),
+                    session,
+                    native_artifact_id: native_artifact_id.to_string(),
+                    native_file_hash: "artifact-hash".to_string(),
+                    version: 1,
+                    size_bytes: content.len() as u64,
+                    content,
+                }),
+            )
+            .unwrap();
+
+        let telemetry = WriterTelemetry::new();
+        let mut checkpoints = CheckpointController::new(&database);
+        let (command, response) = fact_command(request, batch);
+        process_commit_group(
+            &mut connection,
+            &database,
+            &telemetry,
+            &mut checkpoints,
+            vec![command],
+            true,
+            true,
+        );
+        response.recv().unwrap().unwrap();
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM canonical_artifacts", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap(),
+            0
+        );
+        assert!(query_bootstrap_active(&connection).unwrap());
+
+        assert_eq!(
+            finalize_query_bootstrap_connection_profiled(&mut connection, &telemetry).unwrap(),
+            Some(1)
+        );
+        let final_state: (String, String, i64, i64) = connection
+            .query_row(
+                "SELECT resolution_status, content_status, metadata_assertion_count, content_assertion_count FROM canonical_artifacts WHERE artifact_key = ?1",
+                [artifact.as_bytes()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            final_state,
+            ("resolved".to_string(), "captured".to_string(), 1, 1)
+        );
+        assert!(!query_bootstrap_active(&connection).unwrap());
+        let phases = telemetry
+            .snapshot(0)
+            .timings
+            .into_iter()
+            .map(|timing| timing.name)
+            .collect::<Vec<_>>();
+        assert!(phases
+            .iter()
+            .any(|phase| phase == "bootstrap.artifact_rebuild"));
+        assert!(phases
+            .iter()
+            .any(|phase| phase == "bootstrap.foreign_key_check"));
+        assert!(phases
+            .iter()
+            .any(|phase| phase == "bootstrap.fts_integrity_check"));
+        assert!(!phases.iter().any(|phase| phase == "bootstrap.quick_check"));
+        assert_eq!(
+            connection
+                .query_row("PRAGMA foreign_key_check", [], |_| Ok(1_i64))
+                .optional()
+                .unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn recovered_bootstrap_retains_structural_integrity_scan() {
+        let dir = tempdir().unwrap();
+        let database = dir.path().join("recovered-bootstrap.db");
+        let mut connection = open_writer(&database).unwrap();
+        assert!(schema::begin_query_bootstrap(&mut connection).unwrap());
+        let mut phases = Vec::new();
+        assert_eq!(
+            finalize_query_bootstrap_connection_observed(&mut connection, true, |phase, _| {
+                phases.push(phase.to_string());
+            })
+            .unwrap(),
+            Some(0)
+        );
+        assert!(phases.iter().any(|phase| phase == "quick_check"));
+        assert!(phases.iter().any(|phase| phase == "foreign_key_check"));
+        assert!(phases.iter().any(|phase| phase == "fts_integrity_check"));
     }
 
     #[test]

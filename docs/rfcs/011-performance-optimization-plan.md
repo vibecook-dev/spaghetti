@@ -1,7 +1,8 @@
 # RFC 011 performance optimization design and execution plan
 
 Status: original implementation accepted on 2026-08-13; corpus-shaped follow-up
-optimization and frozen-corpus rerun accepted on 2026-08-14
+optimization and frozen-corpus rerun accepted on 2026-08-14; evidence-led
+ingest/finalization architecture revision accepted on 2026-08-15
 
 This record turns the RFC 010/011 performance requirements into a reproducible
 baseline, documents the production-path findings and rejected spikes, and
@@ -61,6 +62,18 @@ returned ready at 565.51 seconds, repaired work afterward, and still omitted
 29,850 session records. The P3/P4 production revision preserves the complete
 output and zero-retry result at 574.80 seconds, 9.4% faster, while reducing the
 durable database from 9,808.2 MiB to 9,214.1 MiB, 6.1% smaller.
+
+The 2026-08-15 investigation stopped using final database size as a proxy for
+latency and instrumented each physical ingest/finalization phase directly. On
+the current immutable 3,706.5 MiB corpus, accepted statement reuse,
+message-owned activity evidence, deferred artifact reduction, and a clean
+bootstrap/recovery validation split reduced a fully converged run to 121.85
+seconds. It retained 1,122,456 decoded native records, 1,082,909 canonical
+messages, 2,604,162 emitted facts, 35,007 commits, zero retries, all mandatory
+foreign-key/FTS readiness audits, and a zero-frame final WAL. The durable
+ledger contains 1,512,372 rows because 1,091,790 message facts now own their
+identical native-activity observation instead of writing a second provenance
+row. Schema v44 forces stale caches through this rebuild.
 
 ## Contract and gates
 
@@ -617,6 +630,180 @@ index graph. This accepts compact projection rows; eliminating the durable
 activity facts themselves remains a separate experiment because they are the
 audit ledger and stable public evidence identities.
 
+### F24 — content-block identity normalization saves space but misses the wall gate
+
+The next audit found that `canonical_message_content_blocks` repeated stable
+message, session, and run identities averaging 154, 86, and 82 bytes on the
+131,072-record fixture. Its table and indexes occupied 105.4 MiB. An offline
+whole-schema spike replaced the message owner with an integer surrogate and
+removed the unused run identity, reducing that projection to 28.1 MiB while
+retaining a narrow covering session-facet index. A more aggressive 6.5 MiB
+shape derived session scope through the message table, but it was rejected
+before production testing: on one 131,072-message session, the two mandatory
+facet queries regressed from about 14.3 ms combined to about 97.7 ms p95.
+
+The query-safe shape passed 362 native tests, the TypeScript rebuild test, and
+exact projection/replacement/FTS checks. Interleaved 131k controls and
+treatments were effectively neutral, so the production decision used a new
+immutable 3,704.8 MiB corpus with 1,104,445 JSONL records. Every run produced
+1,121,471 native records, 1,081,951 canonical messages, 2,602,011 facts,
+34,979 commits, zero retries, and zero final WAL. Treatment-control-treatment
+took 177.26, 168.01, and 165.02 seconds. The 171.14-second treatment mean is
+3.13 seconds (1.9%) slower than control, so the experiment is rejected.
+
+The stage counters explain the miss. The treatment database mean was
+6,290,843,648 bytes, 375.5 MiB (5.9%) below control, and finalization improved
+by 4.33 seconds. However, physical transaction work increased by 3.40 seconds,
+including 1.85 seconds more canonical projection and 1.70 seconds more SQLite
+commit time; checkpoint work also increased by 2.61 seconds. Returning and
+propagating generated surrogates cost more on this write path than the smaller
+derived B-trees saved. Schema v44 and the surrogate projection were therefore
+reverted in full. Future identity normalization must allocate narrow owners
+without a per-message `RETURNING` path and must win wall time, not only storage.
+
+### F25 — reusing fact identity also fails the wall gate
+
+The follow-up removed the generated-surrogate mechanism from F24. Content
+blocks instead reused each canonical message's already-known 32-byte fact ID,
+so the writer needed neither `RETURNING` nor a new allocation. The schema still
+removed the unused run identity and kept the direct, narrow session-facet
+indexes. Existing-message lookup retained the previous fact owner so duplicate
+messages, cross-source corrections, and generation replacement could remove
+the exact superseded blocks. All 362 native tests, the TypeScript schema
+rebuild test, correction/retraction regressions, and the facet query-plan test
+passed.
+
+A clean 131,072-message, one-session treatment-control-treatment gate rejected
+the design before another multi-gigabyte run. Treatments took 9.21 and 9.20
+seconds; the unchanged v43 control took 8.93 seconds. The 9.205-second
+treatment mean is 0.279 seconds (3.1%) slower. Database size fell from 464.7
+MiB to a 395.85 MiB treatment mean (-68.85 MiB, 14.8%), but canonical
+projection increased from 1.794 to a 1.925-second mean and SQLite commit from
+2.250 to a 2.653-second mean. Counts remained exact at 131,072 messages,
+327,682 facts, and 128 commits with zero retries and zero final WAL.
+
+The result isolates the failed premise: generated-ID return was not the only
+reason F24 lost. On this write path, reducing content-block key width and final
+database size does not necessarily reduce transaction time. The fact-ID schema
+v44 was reverted in full. Further work must decompose canonical projection and
+commit amplification directly instead of inferring their cost from final
+B-tree size.
+
+### F26 — direct decomposition replaces storage-shape intuition
+
+The next pass added non-overlapping writer telemetry for history preparation,
+fact storage, canonical-message writes, projection walking, content blocks,
+delegation probes/assertions/reductions, and artifact
+preparation/assertions/reductions/cleanup. A complete 3,706.5 MiB immutable
+corpus run decoded 1,122,456 records into 2,604,162 facts and 1,082,909
+messages across 35,007 commits with zero retries. Its 160.43-second wall time
+contained 87.93 seconds of physical transactions, 33.01 seconds of bootstrap
+finalization, 28.99 seconds of checkpointing, 25.03 seconds of canonical
+projection, 22.71 seconds of SQLite commit, 21.86 seconds of runtime
+projection, and 14.58 seconds of prepare work. Source read and decode took
+about 25 and 29 seconds and overlapped the writer; they were substantial but
+not the five-minute explanation.
+
+History/fact work decomposed to 11.18 seconds of fact storage, 5.78 seconds of
+canonical-message storage, 2.48 seconds of the projection walk, 1.59 seconds
+of preparation, and 1.39 seconds of content-block writes. Delegation's initial
+gate cost only 0.019 seconds; its 9.90-second total was real assertion and
+correlation work, not an accidentally expensive no-op probe. Artifact work
+was the more important architectural smell: 293,487 metadata assertions and
+22,244 content assertions caused about 72,282 incremental reductions and
+roughly 1.2 million cumulative metadata rows to be materialized while only
+35,135 final artifact keys and 293,487 final metadata rows existed.
+
+This decomposition also found stable artifact SQL being prepared repeatedly.
+Switching those operations to the writer's bounded statement cache passed the
+artifact correctness suite. Full-corpus treatment-control-treatment runs took
+156.79, 153.24, and 144.75 seconds. Treatment mean was 150.77 seconds, 2.47
+seconds (1.6%) faster than control; artifact time fell by 4.54 seconds and
+physical transactions by 3.02 seconds. The change is accepted. The larger
+reduction ablation was retained only as an upper bound until F28 supplied a
+crash-safe implementation.
+
+### F27 — a message can own its identical native-activity evidence
+
+Every ordinary adapter message emitted both a durable `Message` fact and an
+`ActivityObserved`/`NativeActivity` evidence fact with the same source record,
+run, and qualified timestamp. The message itself proves that exact activity.
+The common writer now aliases only an unambiguous one-message/one-evidence
+pair: the message fact remains the durable provenance owner, while the compact
+`run_evidence` row keeps the adapter's evidence kind, strength, native state,
+source time, activity maximum, and evidence count. Standalone activity (for
+example Codex token-count events), different timestamps, and ambiguous pairs
+retain independent fact rows. Public evidence identities remain valid fact
+IDs; the decisive fact kind is allowed to be `message`.
+
+A focused regression proves paired ownership, standalone retention,
+ambiguity fallback, projected evidence dimensions, and a clean foreign-key
+audit. The 131,072-message treatment-control-treatment gate took 7.37, 7.71,
+and 6.82 seconds; treatment mean was 8.0% faster, removed exactly 131,072
+durable rows and row changes, and reduced the database by 30.4 MiB.
+
+The production gate used one release binary and the isolated
+`activity-evidence-ownership` control switch. Treatments took 135.77 and
+132.66 seconds; control took 147.65 seconds. The 134.22-second treatment mean
+is 13.44 seconds (9.1%) faster. It removed exactly 1,091,790 fact rows and
+about 252 MiB while retaining 2,604,162 emitted facts, 1,082,909 messages,
+35,007 commits, and zero retries. Fact storage fell from 11.09 to about 7.14
+seconds, physical transactions by about 3.0 seconds, and SQLite row changes
+from 5,635,926 to about 4,544,112. Schema v44 intentionally rebuilds v43
+caches so this ownership rule applies uniformly.
+
+### F28 — cold artifact state is reduced once at the readiness boundary
+
+During reader-inaccessible bootstrap, artifact assertion tables are now the
+sole durable source of truth and incremental canonical reduction is deferred.
+Finalization collects each surviving artifact key and its own maximum
+assertion commit sequence, clears the derived table, and reduces every final
+key exactly once in one atomic transaction. Live ingest remains incremental.
+The rebuild is idempotent: a crash before commit rolls it back; a crash after
+commit but before readiness repeats the same clear/rebuild because the durable
+bootstrap marker remains. Reader admission, foreign-key validation, and FTS
+publication occur only afterward.
+
+Unit and writer-lifecycle regressions prove that canonical rows remain absent
+while queries are deliberately unavailable, the final resolved/captured state
+and per-artifact provenance are exact, a second rebuild is identical, recovery
+repeats safely, and foreign keys are clean. Production
+treatment-control-treatment took 133.53, 132.85, and 128.50 seconds. Treatment
+mean was 131.01 seconds, 1.84 seconds (1.4%) faster despite source-I/O noise.
+The causal counters were stable: artifact projection fell by 4.77 seconds,
+physical transactions by 3.73 seconds, incremental reduction disappeared,
+and the complete 35,135-key rebuild cost only about 0.90 seconds. SQLite row
+changes fell by about 148,700 and the final database by about 2 MiB. This
+accepts the assertion-first/final-reduction architecture rather than the
+semantically incomplete no-reduction ablation.
+
+### F29 — clean bootstrap and crash recovery need different integrity gates
+
+Finalization telemetry showed a serial 30.8-second tail: foreign-key audit
+about 6.3 seconds, `quick_check` 5.6 seconds, FTS rebuild/integrity 7.6 seconds,
+deferred indexes 5.7 seconds, checkpoints 3.5 seconds, and `optimize` 1.2
+seconds. The same live writer had just created every page in an uninterrupted
+fresh database and SQLite had reported every write, commit, checkpoint, and
+DDL operation successful. Re-reading the complete file with `quick_check`
+before the mandatory semantic audits duplicated work. A bootstrap recovered
+from a durable marker is different: the prior process may have exited during
+file mutation and must retain the structural scan.
+
+Clean finalization therefore defers only `quick_check`; it still requires the
+complete foreign-key audit (enforcement was disabled during cold writes), FTS
+integrity, deferred structures, checkpoints, and readiness publication.
+Startup recovery still runs all three integrity families. Tests assert the
+normal phase set omits only `quick_check`, the recovery phase retains it, and
+foreign-key fault injection still blocks readiness.
+
+The same-binary production treatment-control-treatment sequence took 136.26,
+136.76, and 121.85 seconds. The first treatment had anomalously slow source,
+FTS, FK, and optimize scans, but treatment mean was still 129.06 seconds, 7.70
+seconds (5.6%) below control. The isolated control scan cost 5.33 seconds; the
+normalized closing treatment reduced finalization from 30.89 to 25.62 seconds.
+All runs retained exact facts/messages/commits, zero retries, mandatory FK/FTS
+audits, and zero final WAL. The clean/recovery split is accepted.
+
 ## Controlled spikes and decisions
 
 | Spike                                                                                               | Result                                                                                                                                       | Decision                                                                                                                    |
@@ -648,6 +835,12 @@ audit ledger and stable public evidence identities.
 | Emit Claude object declarations once per generation                                                 | 131k/4,096 objects: 589,824 -> 335,872 facts, 613.2 -> 557.1 MiB, 16.38 -> 14.45 s first-run; repeat median 13.16 s; live p99 7.2 ms         | Landed behind Claude contract v16 with bounded state, exact small/medium differentials, and deterministic parent ownership  |
 | Defer cold-build FK enforcement to the exhaustive readiness audit                                   | Frozen-corpus A-B-A: 176.64 / 168.96 / 179.46 s; production: 167.62 s with exact counts, zero retries, and zero final WAL                    | Landed only for reader-free cold bootstrap; fault injection blocks readiness and live enforcement is restored               |
 | Compact run evidence per source-generation/category while preserving counts and exact winners       | Frozen treatment/control/treatment: 177.42 / 208.92 / 165.56 s; mean treatment -17.9%, DB -838 MiB, run-state work -86.7%                    | Landed as schema v43; full fact provenance, runtime counts, decisive IDs, activity maxima, and replacement semantics remain |
+| Normalize content-block message ownership through an integer surrogate                              | Frozen treatment/control/treatment: 177.26 / 168.01 / 165.02 s; mean treatment +1.9% despite DB -375.5 MiB                                   | Rejected and reverted; query-safe shape lost in physical transactions/checkpoints, while the smaller join shape hurt facets |
+| Reuse message fact IDs as content-block owners without `RETURNING`                                  | 131k treatment/control/treatment: 9.21 / 8.93 / 9.20 s; mean treatment +3.1% despite DB -68.9 MiB                                            | Rejected and reverted; narrower B-trees still increased canonical projection and SQLite commit                              |
+| Cache stable artifact projection statements                                                         | Frozen treatment/control/treatment: 156.79 / 153.24 / 144.75 s; mean treatment -1.6%, artifact work -4.54 s                                  | Landed; bounded writer cache retains correctness while removing repeated SQL compilation                                    |
+| Let paired messages own identical native-activity evidence                                          | 131k mean -8.0%; frozen treatment/control/treatment: 135.77 / 147.65 / 132.66 s; mean -9.1%, DB about -252 MiB                               | Landed as schema v44; standalone/ambiguous evidence remains independent and projection semantics stay exact                 |
+| Defer artifact reductions to one atomic bootstrap rebuild                                           | Frozen treatment/control/treatment: 133.53 / 132.85 / 128.50 s; mean -1.4%; artifact work -4.77 s; rebuild 0.90 s                           | Landed only while readers are unavailable; live reduction and crash-safe idempotent recovery remain                         |
+| Defer structural `quick_check` only for an uninterrupted clean build                                 | Frozen treatment/control/treatment: 136.26 / 136.76 / 121.85 s; scan cost 5.33 s; normalized finalization -5.28 s                           | Landed; FK/FTS audits remain mandatory and marker-based recovery retains `quick_check`                                      |
 
 The bulk spike is deliberately not exposed as a production flag. Its lifecycle
 is incomplete until crash recovery, reader quiescence, durable readiness, FTS

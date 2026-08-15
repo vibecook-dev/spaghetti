@@ -7,7 +7,7 @@ import { test } from 'node:test';
 import { createSqliteService } from '../../io/sqlite-service.js';
 import { initializeSchema, SCHEMA_SQL, SCHEMA_VERSION } from '../schema.js';
 
-test('v42 rebuilds for compact run-evidence rows', () => {
+test('v43 rebuilds for message-owned native activity evidence', () => {
   const directory = mkdtempSync(join(tmpdir(), 'spaghetti-schema-migration-'));
   const sqlite = createSqliteService();
   try {

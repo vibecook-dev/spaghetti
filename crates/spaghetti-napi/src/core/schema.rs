@@ -167,7 +167,11 @@ const CANONICAL_FTS_TRIGGERS: &[&str] = &[
 /// retaining exact winner provenance, total evidence counts, and maximum
 /// activity time. This removes per-message projection/index amplification;
 /// fact_records remains the complete durable evidence ledger.
-pub const SCHEMA_VERSION: u32 = 43;
+/// v44: an unambiguous message fact owns its paired native-activity evidence
+/// from the same source record/run/timestamp. The compact run-evidence row
+/// retains the adapter's evidence dimensions and count while the rebuild drops
+/// the second provenance row for the identical source observation.
+pub const SCHEMA_VERSION: u32 = 44;
 
 /// Full DDL for the current schema — lifted verbatim from the TS `SCHEMA_SQL`
 /// template literal. Whitespace differs; structure does not.
@@ -2344,7 +2348,7 @@ pub fn begin_query_bootstrap(conn: &mut Connection) -> Result<bool, SchemaError>
 /// durable unavailability marker. The returned watermark is the snapshot
 /// boundary that a newly admitted subscriber must start from.
 pub fn finalize_query_bootstrap(conn: &mut Connection) -> Result<Option<u64>, SchemaError> {
-    finalize_query_bootstrap_inner(conn, true, &mut |_, _| {})
+    finalize_query_bootstrap_inner(conn, true, true, &mut |_, _| {})
 }
 
 /// Isolation-only: rebuild deferred structures without the foreign-key audit.
@@ -2352,7 +2356,7 @@ pub fn finalize_query_bootstrap(conn: &mut Connection) -> Result<Option<u64>, Sc
 pub fn finalize_query_bootstrap_skip_fk_check(
     conn: &mut Connection,
 ) -> Result<Option<u64>, SchemaError> {
-    finalize_query_bootstrap_inner(conn, false, &mut |_, _| {})
+    finalize_query_bootstrap_inner(conn, false, true, &mut |_, _| {})
 }
 
 /// Finalize a cold bootstrap while exposing non-overlapping phase durations.
@@ -2362,14 +2366,21 @@ pub fn finalize_query_bootstrap_skip_fk_check(
 pub(crate) fn finalize_query_bootstrap_profiled(
     conn: &mut Connection,
     check_foreign_keys: bool,
+    check_database_integrity: bool,
     mut observe: impl FnMut(&'static str, Duration),
 ) -> Result<Option<u64>, SchemaError> {
-    finalize_query_bootstrap_inner(conn, check_foreign_keys, &mut observe)
+    finalize_query_bootstrap_inner(
+        conn,
+        check_foreign_keys,
+        check_database_integrity,
+        &mut observe,
+    )
 }
 
 fn finalize_query_bootstrap_inner<F>(
     conn: &mut Connection,
     check_foreign_keys: bool,
+    check_database_integrity: bool,
     observe: &mut F,
 ) -> Result<Option<u64>, SchemaError>
 where
@@ -2405,7 +2416,7 @@ where
     let started = Instant::now();
     conn.execute_batch("PRAGMA optimize=0x10002")?;
     observe("optimize", started.elapsed());
-    validate_query_bootstrap(conn, check_foreign_keys, observe)?;
+    validate_query_bootstrap(conn, check_foreign_keys, check_database_integrity, observe)?;
 
     let started = Instant::now();
     let watermark: i64 = conn.query_row(
@@ -2452,6 +2463,7 @@ pub fn recover_query_bootstrap(conn: &mut Connection) -> Result<bool, SchemaErro
 fn validate_query_bootstrap<F>(
     conn: &mut Connection,
     check_foreign_keys: bool,
+    check_database_integrity: bool,
     observe: &mut F,
 ) -> Result<(), SchemaError>
 where
@@ -2484,14 +2496,16 @@ where
     }
     observe("validate_structures", started.elapsed());
 
-    let started = Instant::now();
-    let quick_check: String = conn.query_row("PRAGMA quick_check(1)", [], |row| row.get(0))?;
-    if quick_check != "ok" {
-        return Err(SchemaError::BootstrapValidation(format!(
-            "quick_check returned {quick_check}"
-        )));
+    if check_database_integrity {
+        let started = Instant::now();
+        let quick_check: String = conn.query_row("PRAGMA quick_check(1)", [], |row| row.get(0))?;
+        if quick_check != "ok" {
+            return Err(SchemaError::BootstrapValidation(format!(
+                "quick_check returned {quick_check}"
+            )));
+        }
+        observe("quick_check", started.elapsed());
     }
-    observe("quick_check", started.elapsed());
     if check_foreign_keys {
         let started = Instant::now();
         let foreign_key_violation = {
@@ -3472,7 +3486,7 @@ mod tests {
     }
 
     #[test]
-    fn v42_cache_rebuilds_for_compact_run_evidence() {
+    fn v43_cache_rebuilds_for_message_owned_native_activity_evidence() {
         let conn = Connection::open_in_memory().expect("open in-memory db");
         conn.execute_batch(SCHEMA_SQL)
             .expect("install schema fixture");
@@ -3480,7 +3494,7 @@ mod tests {
             "INSERT INTO schema_meta (key, value) VALUES ('version', ?1)",
             [(SCHEMA_VERSION - 1).to_string()],
         )
-        .expect("set v42 version");
+        .expect("set v43 version");
         conn.execute(
             "INSERT INTO projects (slug, original_path, sessions_index, updated_at) \
              VALUES ('preserved', '/tmp/preserved', '[]', 456)",
@@ -3501,7 +3515,7 @@ mod tests {
                 |row| row.get(0),
             )
             .expect("count preserved row");
-        assert_eq!(preserved, 0, "v42 cache used the incompatible row shape");
+        assert_eq!(preserved, 0, "v43 cache retained duplicate activity rows");
         assert!(object_exists(&conn, "index", "idx_run_evidence_compact"));
     }
 

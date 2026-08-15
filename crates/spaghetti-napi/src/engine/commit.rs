@@ -229,6 +229,18 @@ pub(super) enum CommitStage {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum CommitDetail {
     HistoryAndFactStorage,
+    HistoryPreparation,
+    FactStorage,
+    CanonicalMessageStorage,
+    HistoryProjectionWalk,
+    ContentBlockStorage,
+    DelegationProbe,
+    DelegationProjection,
+    DelegationReductions,
+    ArtifactPreparation,
+    ArtifactAssertionWrites,
+    ArtifactReductions,
+    ArtifactCleanup,
     SessionIndex,
     ProjectMemory,
     PersistedToolResult,
@@ -296,6 +308,10 @@ pub(super) struct ProjectionCommitContext {
     /// projectors can skip ownership probes: a brand-new object cannot already
     /// own assertions.
     pub object_is_new: bool,
+    /// The durable database is unavailable to readers until bootstrap
+    /// finalization. Projectors may defer purely derived state that can be
+    /// rebuilt atomically from their durable assertion tables at that gate.
+    pub query_bootstrap: bool,
     pub consistency: ConsistencyPolicy,
     pub retention: RawRetentionPolicy,
 }
@@ -409,6 +425,7 @@ pub(super) fn apply_observation_commit_with_components(
         projection_work,
         hook,
         true,
+        false,
     )?;
     transaction
         .commit()
@@ -422,6 +439,7 @@ pub(super) fn apply_observation_commit_in_transaction(
     request: &ObservationCommit,
     hook: &dyn CommitHook,
     persist_public_changes: bool,
+    query_bootstrap: bool,
 ) -> Result<CommitReceipt, EngineError> {
     prepare_observation_commit(request, hook)?;
     apply_observation_commit_components_in_transaction(
@@ -430,6 +448,7 @@ pub(super) fn apply_observation_commit_in_transaction(
         &NoProjectionWork,
         hook,
         persist_public_changes,
+        query_bootstrap,
     )
 }
 
@@ -439,6 +458,7 @@ pub(super) fn apply_observation_commit_with_projection_in_transaction(
     projection_work: &dyn TransactionalProjectionWork,
     hook: &dyn CommitHook,
     persist_public_changes: bool,
+    query_bootstrap: bool,
 ) -> Result<CommitReceipt, EngineError> {
     prepare_observation_commit(request, hook)?;
     apply_observation_commit_components_in_transaction(
@@ -447,6 +467,7 @@ pub(super) fn apply_observation_commit_with_projection_in_transaction(
         projection_work,
         hook,
         persist_public_changes,
+        query_bootstrap,
     )
 }
 
@@ -469,6 +490,7 @@ fn apply_observation_commit_components_in_transaction(
     projection_work: &dyn TransactionalProjectionWork,
     hook: &dyn CommitHook,
     persist_public_changes: bool,
+    query_bootstrap: bool,
 ) -> Result<CommitReceipt, EngineError> {
     let source_instance_id = upsert_source_instance(transaction, &request.source)?;
     let commit_seq = insert_ingest_commit(transaction, source_instance_id, request)?;
@@ -493,6 +515,7 @@ fn apply_observation_commit_components_in_transaction(
             .as_ref()
             .is_some_and(|stored| stored.generation != request.object.generation),
         object_is_new,
+        query_bootstrap,
         consistency: request.stream.consistency,
         retention: request.stream.retention,
     };

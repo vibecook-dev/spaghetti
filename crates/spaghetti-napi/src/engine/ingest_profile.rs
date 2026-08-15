@@ -15,6 +15,11 @@ pub(crate) struct IngestProfileSkip {
     pub runtime: bool,
     pub delegation: bool,
     pub artifact: bool,
+    pub artifact_reductions: bool,
+    pub artifact_reduction_deferral: bool,
+    pub delegation_reductions: bool,
+    pub activity_evidence_ownership: bool,
+    pub bootstrap_integrity_deferral: bool,
     pub usage: bool,
     pub extras: bool,
 }
@@ -31,6 +36,8 @@ impl IngestProfileSkip {
             || self.runtime
             || self.delegation
             || self.artifact
+            || self.artifact_reductions
+            || self.delegation_reductions
             || self.usage
             || self.extras
     }
@@ -54,6 +61,11 @@ impl IngestProfileSkip {
                 "runtime" => skip.runtime = true,
                 "delegation" => skip.delegation = true,
                 "artifact" => skip.artifact = true,
+                "artifact-reductions" => skip.artifact_reductions = true,
+                "artifact-reduction-deferral" => skip.artifact_reduction_deferral = true,
+                "delegation-reductions" => skip.delegation_reductions = true,
+                "activity-evidence-ownership" => skip.activity_evidence_ownership = true,
+                "bootstrap-integrity-deferral" => skip.bootstrap_integrity_deferral = true,
                 "usage" => skip.usage = true,
                 "extras" => skip.extras = true,
                 "all-writes" => {
@@ -62,6 +74,8 @@ impl IngestProfileSkip {
                     skip.runtime = true;
                     skip.delegation = true;
                     skip.artifact = true;
+                    skip.artifact_reductions = true;
+                    skip.delegation_reductions = true;
                     skip.usage = true;
                     skip.extras = true;
                 }
@@ -90,8 +104,33 @@ mod tests {
     fn all_writes_covers_projection_tables() {
         let skip = IngestProfileSkip::from_tokens("all-writes");
         assert!(skip.facts && skip.messages && skip.runtime && skip.delegation);
-        assert!(skip.artifact && skip.usage && skip.extras);
+        assert!(skip.artifact && skip.artifact_reductions);
+        assert!(skip.delegation_reductions && skip.usage && skip.extras);
+        assert!(!skip.activity_evidence_ownership);
+        assert!(!skip.artifact_reduction_deferral);
+        assert!(!skip.bootstrap_integrity_deferral);
         assert!(!skip.checkpoints && !skip.finalize);
         assert!(skip.relaxes_sqlite_constraints());
+    }
+
+    #[test]
+    fn activity_evidence_ownership_is_an_isolated_control_switch() {
+        let skip = IngestProfileSkip::from_tokens("activity-evidence-ownership");
+        assert!(skip.activity_evidence_ownership);
+        assert!(!skip.relaxes_sqlite_constraints());
+    }
+
+    #[test]
+    fn artifact_reduction_deferral_is_an_isolated_control_switch() {
+        let skip = IngestProfileSkip::from_tokens("artifact-reduction-deferral");
+        assert!(skip.artifact_reduction_deferral);
+        assert!(!skip.relaxes_sqlite_constraints());
+    }
+
+    #[test]
+    fn bootstrap_integrity_deferral_is_an_isolated_control_switch() {
+        let skip = IngestProfileSkip::from_tokens("bootstrap-integrity-deferral");
+        assert!(skip.bootstrap_integrity_deferral);
+        assert!(!skip.relaxes_sqlite_constraints());
     }
 }

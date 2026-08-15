@@ -90,6 +90,7 @@ pub(super) fn apply_fact_observation_commit_in_transaction(
     batch: &FactBatch,
     hook: &dyn CommitHook,
     persist_public_changes: bool,
+    query_bootstrap: bool,
 ) -> Result<CommitReceipt, EngineError> {
     let (request, projection) = prepare_fact_observation_commit(request, batch, Some(hook))?;
     apply_observation_commit_with_projection_in_transaction(
@@ -98,6 +99,7 @@ pub(super) fn apply_fact_observation_commit_in_transaction(
         &projection,
         hook,
         persist_public_changes,
+        query_bootstrap,
     )
 }
 
@@ -130,9 +132,16 @@ fn prepare_fact_observation_commit<'a>(
         request.object.decoder_state = Some(next_decoder_state.to_vec());
     }
     let encoded_payloads = encode_fact_payloads(batch, request.stream.retention)?;
+    let redundant_activity_owners =
+        if super::ingest_profile::IngestProfileSkip::current().activity_evidence_ownership {
+            BTreeMap::new()
+        } else {
+            redundant_activity_evidence_owners(batch)
+        };
     let projection = FactProjectionWork {
         batch,
         encoded_payloads,
+        redundant_activity_owners,
         retention: request.stream.retention,
         delegation_run_invalidations: RefCell::new(BTreeSet::new()),
         hook,
@@ -143,6 +152,11 @@ fn prepare_fact_observation_commit<'a>(
 struct FactProjectionWork<'a> {
     batch: &'a FactBatch,
     encoded_payloads: Vec<EncodedFactPayload>,
+    /// A message already proves activity for its run at the same source
+    /// record and timestamp. Keep the adapter's richer activity dimensions,
+    /// but let the durable message fact own that evidence instead of writing
+    /// a second provenance row for the identical observation.
+    redundant_activity_owners: BTreeMap<Vec<u8>, Vec<u8>>,
     retention: RawRetentionPolicy,
     /// Runs whose presence changed in this logical commit. Delegation
     /// resolution depends on presence, not on the latest provenance-bearing
@@ -211,12 +225,27 @@ impl TransactionalProjectionWork for FactProjectionWork<'_> {
         let mut seen_message_keys = BTreeSet::new();
         let duplicate_message_keys = duplicate_message_keys(self.batch);
         let mut new_message_content = Vec::new();
+        self.record_detail(CommitDetail::HistoryPreparation, history_started);
+        let fact_storage_started = Instant::now();
         if !super::ingest_profile::IngestProfileSkip::current().facts {
-            persist_facts(transaction, context, self.batch, &self.encoded_payloads)?;
+            persist_facts(
+                transaction,
+                context,
+                self.batch,
+                &self.encoded_payloads,
+                &self.redundant_activity_owners,
+            )?;
         }
+        self.record_detail(CommitDetail::FactStorage, fact_storage_started);
+        let message_storage_started = Instant::now();
         if !super::ingest_profile::IngestProfileSkip::current().messages {
             persist_canonical_messages(transaction, context, self.batch, &self.encoded_payloads)?;
         }
+        self.record_detail(
+            CommitDetail::CanonicalMessageStorage,
+            message_storage_started,
+        );
+        let projection_walk_started = Instant::now();
         for (index, envelope) in self.batch.facts().iter().enumerate() {
             match &envelope.value {
                 Fact::Session(original) => {
@@ -404,9 +433,15 @@ impl TransactionalProjectionWork for FactProjectionWork<'_> {
                 | Fact::Usage(_) => {}
             }
         }
+        self.record_detail(CommitDetail::HistoryProjectionWalk, projection_walk_started);
+        let content_block_storage_started = Instant::now();
         if !super::ingest_profile::IngestProfileSkip::current().messages {
             insert_message_content_blocks(transaction, &new_message_content)?;
         }
+        self.record_detail(
+            CommitDetail::ContentBlockStorage,
+            content_block_storage_started,
+        );
         self.delegation_run_invalidations
             .replace(delegation_run_invalidations);
         self.record_detail(CommitDetail::HistoryAndFactStorage, history_started);
@@ -459,7 +494,13 @@ impl TransactionalProjectionWork for FactProjectionWork<'_> {
                 .map_err(|error| sqlite_error("retract replaced run evidence", error))?;
             }
 
-            persist_run_evidence(transaction, context, self.batch, &mut affected_states)?;
+            persist_run_evidence(
+                transaction,
+                context,
+                self.batch,
+                &self.redundant_activity_owners,
+                &mut affected_states,
+            )?;
 
             changes.reserve(affected_states.len());
             for run_key in affected_states {
@@ -483,11 +524,17 @@ impl TransactionalProjectionWork for FactProjectionWork<'_> {
         });
         let changed_runs = self.delegation_run_invalidations.borrow().clone();
         let has_run_fact = !changed_runs.is_empty();
-        if super::ingest_profile::IngestProfileSkip::current().delegation
-            || (context.skip_unowned_replace_document(has_delegation_fact)
-                && !context.replaces_prior_generation
-                && (!has_run_fact || !runs_need_delegation_reduce(transaction, &changed_runs)?))
+        let skip_delegation = if super::ingest_profile::IngestProfileSkip::current().delegation {
+            true
+        } else if context.skip_unowned_replace_document(has_delegation_fact)
+            && !context.replaces_prior_generation
         {
+            !has_run_fact || !runs_need_delegation_reduce(transaction, &changed_runs)?
+        } else {
+            false
+        };
+        self.record_detail(CommitDetail::DelegationProbe, delegation_started);
+        if skip_delegation {
             self.record_detail(CommitDetail::Delegation, delegation_started);
             changes.extend(self.measure(CommitDetail::Presence, || {
                 apply_presence_facts(transaction, context, self.batch)
@@ -500,7 +547,7 @@ impl TransactionalProjectionWork for FactProjectionWork<'_> {
             })?);
             if !super::ingest_profile::IngestProfileSkip::current().artifact {
                 changes.extend(self.measure(CommitDetail::Artifact, || {
-                    apply_artifact_facts(transaction, context, self.batch)
+                    apply_artifact_facts(transaction, context, self.batch, self.hook)
                 })?);
             }
             changes.extend(self.measure(CommitDetail::Workflow, || {
@@ -509,6 +556,7 @@ impl TransactionalProjectionWork for FactProjectionWork<'_> {
             return Ok(changes);
         }
 
+        let delegation_projection_started = Instant::now();
         let mut affected_delegations = BTreeSet::new();
         if context.replaces_prior_generation {
             affected_delegations = old_generation_keys(
@@ -658,29 +706,41 @@ impl TransactionalProjectionWork for FactProjectionWork<'_> {
             affected_metadata.extend(delegation_metadata_children_for_run(transaction, run_key)?);
         }
 
-        for spawn_key in affected_spawns {
-            let reduction = reduce_delegation_spawn(transaction, &spawn_key, context.commit_seq)?;
-            changes.push(delegation_spawn_change(&spawn_key, &reduction)?);
-            changes.push(delegation_spawn_conflict_change(&spawn_key, &reduction)?);
-        }
+        self.record_detail(
+            CommitDetail::DelegationProjection,
+            delegation_projection_started,
+        );
+        let delegation_reductions_started = Instant::now();
+        if !super::ingest_profile::IngestProfileSkip::current().delegation_reductions {
+            for spawn_key in affected_spawns {
+                let reduction =
+                    reduce_delegation_spawn(transaction, &spawn_key, context.commit_seq)?;
+                changes.push(delegation_spawn_change(&spawn_key, &reduction)?);
+                changes.push(delegation_spawn_conflict_change(&spawn_key, &reduction)?);
+            }
 
-        for child_run_key in affected_metadata {
-            let reduction =
-                reduce_delegation_metadata(transaction, &child_run_key, context.commit_seq)?;
-            changes.push(delegation_metadata_change(&child_run_key, &reduction)?);
-            changes.push(delegation_metadata_conflict_change(
-                &child_run_key,
-                &reduction,
-            )?);
-        }
+            for child_run_key in affected_metadata {
+                let reduction =
+                    reduce_delegation_metadata(transaction, &child_run_key, context.commit_seq)?;
+                changes.push(delegation_metadata_change(&child_run_key, &reduction)?);
+                changes.push(delegation_metadata_conflict_change(
+                    &child_run_key,
+                    &reduction,
+                )?);
+            }
 
-        // Native correlation must reduce after both source halves are durable,
-        // so metadata-first and transcript-first arrival produce the same row.
-        for child_run_key in affected_delegations {
-            let reduction = reduce_delegation(transaction, &child_run_key, context.commit_seq)?;
-            changes.push(delegation_change(&child_run_key, &reduction)?);
-            changes.push(delegation_conflict_change(&child_run_key, &reduction)?);
+            // Native correlation must reduce after both source halves are durable,
+            // so metadata-first and transcript-first arrival produce the same row.
+            for child_run_key in affected_delegations {
+                let reduction = reduce_delegation(transaction, &child_run_key, context.commit_seq)?;
+                changes.push(delegation_change(&child_run_key, &reduction)?);
+                changes.push(delegation_conflict_change(&child_run_key, &reduction)?);
+            }
         }
+        self.record_detail(
+            CommitDetail::DelegationReductions,
+            delegation_reductions_started,
+        );
         self.record_detail(CommitDetail::Delegation, delegation_started);
 
         changes.extend(self.measure(CommitDetail::Presence, || {
@@ -694,7 +754,7 @@ impl TransactionalProjectionWork for FactProjectionWork<'_> {
         })?);
         if !super::ingest_profile::IngestProfileSkip::current().artifact {
             changes.extend(self.measure(CommitDetail::Artifact, || {
-                apply_artifact_facts(transaction, context, self.batch)
+                apply_artifact_facts(transaction, context, self.batch, self.hook)
             })?);
         }
         changes.extend(self.measure(CommitDetail::Workflow, || {
@@ -1186,10 +1246,65 @@ struct CompactRunEvidence {
     evidence_count: i64,
 }
 
+type ActivityOwnerKey = (Vec<u8>, Vec<u8>, Vec<u8>, Option<String>, Option<String>);
+
+fn activity_owner_key(
+    envelope: &FactEnvelope,
+    run_key: &[u8],
+    source_time: Option<&QualifiedTimestamp>,
+) -> ActivityOwnerKey {
+    (
+        envelope.provenance.cursor_start.clone(),
+        envelope.provenance.cursor_end.clone(),
+        run_key.to_vec(),
+        timestamp_value(source_time).map(str::to_string),
+        timestamp_quality(source_time).map(str::to_string),
+    )
+}
+
+fn redundant_activity_evidence_owners(batch: &FactBatch) -> BTreeMap<Vec<u8>, Vec<u8>> {
+    let mut messages = BTreeMap::<ActivityOwnerKey, Vec<Vec<u8>>>::new();
+    let mut activity = BTreeMap::<ActivityOwnerKey, Vec<Vec<u8>>>::new();
+    for envelope in batch.facts() {
+        match &envelope.value {
+            Fact::Message(fact) => {
+                let key =
+                    activity_owner_key(envelope, fact.run.as_bytes(), fact.source_time.as_ref());
+                messages
+                    .entry(key)
+                    .or_default()
+                    .push(envelope.id.as_bytes().to_vec());
+            }
+            Fact::RunEvidence(fact)
+                if fact.kind == EvidenceKind::ActivityObserved
+                    && fact.strength == EvidenceStrength::NativeActivity =>
+            {
+                let key =
+                    activity_owner_key(envelope, fact.run.as_bytes(), fact.source_time.as_ref());
+                activity
+                    .entry(key)
+                    .or_default()
+                    .push(envelope.id.as_bytes().to_vec());
+            }
+            _ => {}
+        }
+    }
+
+    activity
+        .into_iter()
+        .filter_map(|(key, evidence_ids)| {
+            let message_ids = messages.get(&key)?;
+            (message_ids.len() == 1 && evidence_ids.len() == 1)
+                .then(|| (evidence_ids[0].clone(), message_ids[0].clone()))
+        })
+        .collect()
+}
+
 fn persist_run_evidence(
     transaction: &Transaction<'_>,
     context: &ProjectionCommitContext,
     batch: &FactBatch,
+    redundant_activity_owners: &BTreeMap<Vec<u8>, Vec<u8>>,
     affected_states: &mut BTreeSet<Vec<u8>>,
 ) -> Result<(), EngineError> {
     let mut summaries = BTreeMap::new();
@@ -1207,7 +1322,10 @@ fn persist_run_evidence(
             .then(|| source_time.clone())
             .flatten();
         let candidate = FoldedRunEvidence {
-            fact_id: envelope.id.as_bytes().to_vec(),
+            fact_id: redundant_activity_owners
+                .get(envelope.id.as_bytes().as_slice())
+                .cloned()
+                .unwrap_or_else(|| envelope.id.as_bytes().to_vec()),
             kind,
             kind_rank: evidence_kind_rank(fact.kind),
             strength_rank: evidence_strength_rank(fact.strength),
@@ -1350,6 +1468,7 @@ fn persist_facts(
     context: &ProjectionCommitContext,
     batch: &FactBatch,
     payloads: &[EncodedFactPayload],
+    redundant_activity_owners: &BTreeMap<Vec<u8>, Vec<u8>>,
 ) -> Result<(), EngineError> {
     if batch.facts().len() != payloads.len() {
         return Err(EngineError::InvalidCommit(
@@ -1373,11 +1492,15 @@ fn persist_facts(
     let source_object_id = sqlite_u64(context.source_object_id, "source object id")?;
     let source_generation = sqlite_u64(context.generation, "source generation")?;
     let commit_seq = sqlite_u64(context.commit_seq, "commit sequence")?;
-    for (fact_chunk, payload_chunk) in batch
+    let durable_facts = batch
         .facts()
-        .chunks(FACT_INSERT_BATCH_ROWS)
-        .zip(payloads.chunks(FACT_INSERT_BATCH_ROWS))
-    {
+        .iter()
+        .zip(payloads)
+        .filter(|(envelope, _)| {
+            !redundant_activity_owners.contains_key(envelope.id.as_bytes().as_slice())
+        })
+        .collect::<Vec<_>>();
+    for fact_chunk in durable_facts.chunks(FACT_INSERT_BATCH_ROWS) {
         let row = "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
         let sql = format!(
             r#"
@@ -1408,7 +1531,7 @@ fn persist_facts(
                 .join(", ")
         );
         let mut values = Vec::with_capacity(fact_chunk.len() * 15);
-        for (envelope, payload) in fact_chunk.iter().zip(payload_chunk) {
+        for (envelope, payload) in fact_chunk {
             use rusqlite::types::Value;
 
             values.push(Value::Blob(envelope.id.as_bytes().to_vec()));
@@ -1453,6 +1576,9 @@ fn persist_facts(
     // lookup for every ordinary history fact.
     if !batch.dependency_reads().is_empty() {
         for envelope in batch.facts() {
+            if redundant_activity_owners.contains_key(envelope.id.as_bytes().as_slice()) {
+                continue;
+            }
             execute_cached(
                 transaction,
                 "DELETE FROM fact_dependency_reads WHERE fact_id = ?1",
@@ -3759,6 +3885,14 @@ mod tests {
     const STREAM: &str = "session-transcripts";
     const DECODER: &str = "claude-session-record";
 
+    struct TestCommitHook;
+
+    impl CommitHook for TestCommitHook {
+        fn reach(&self, _stage: crate::engine::commit::CommitStage) -> Result<(), EngineError> {
+            Ok(())
+        }
+    }
+
     thread_local! {
         static TEST_OBJECT_KEYS: StdRefCell<Vec<Vec<u8>>> = const { StdRefCell::new(Vec::new()) };
     }
@@ -5580,6 +5714,152 @@ mod tests {
     }
 
     #[test]
+    fn paired_message_owns_native_activity_evidence_without_losing_projection_semantics() {
+        let mut connection = database();
+        register_object(&mut connection);
+        let record = direct_record(1, 0, 1, 20, b"message-with-activity");
+        let source_time = exact("2026-08-11T00:00:10.000Z");
+        let run = entity("run", SESSION);
+        let standalone_run = entity("run", "standalone-activity");
+        let mut message = tool_message(
+            "message-with-activity",
+            MessageRole::Assistant,
+            vec![ContentBlock::Text {
+                text: "hello".to_string(),
+            }],
+        );
+        message.source_time = Some(source_time.clone());
+
+        let mut batch = FactBatch::new(3, 1).unwrap();
+        let message_id = batch.push(&record, Fact::Message(message)).unwrap();
+        let redundant_evidence_id = batch
+            .push(
+                &record,
+                Fact::RunEvidence(RunEvidenceFact {
+                    run: run.clone(),
+                    kind: EvidenceKind::ActivityObserved,
+                    strength: EvidenceStrength::NativeActivity,
+                    native_state: Some("response_item/message".to_string()),
+                    source_time: Some(source_time),
+                }),
+            )
+            .unwrap();
+        let standalone_evidence_id = batch
+            .push(
+                &record,
+                Fact::RunEvidence(RunEvidenceFact {
+                    run: standalone_run.clone(),
+                    kind: EvidenceKind::ActivityObserved,
+                    strength: EvidenceStrength::NativeActivity,
+                    native_state: Some("event_msg/token_count".to_string()),
+                    source_time: Some(exact("2026-08-11T00:00:11.000Z")),
+                }),
+            )
+            .unwrap();
+
+        commit_direct_batch(&mut connection, &record, 1, 0, 21, &batch);
+
+        let paired: (Vec<u8>, String, String, i64, Option<String>) = connection
+            .query_row(
+                r#"
+                SELECT re.fact_id, fr.fact_kind, re.evidence_strength,
+                       re.evidence_count, re.native_state
+                FROM run_evidence re
+                JOIN fact_records fr ON fr.fact_id = re.fact_id
+                WHERE re.run_key = ?1
+                "#,
+                [run.as_bytes()],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(paired.0, message_id.as_bytes());
+        assert_eq!(paired.1, "message");
+        assert_eq!(paired.2, "native_activity");
+        assert_eq!(paired.3, 1);
+        assert_eq!(paired.4.as_deref(), Some("response_item/message"));
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM fact_records WHERE fact_id = ?1",
+                    [redundant_evidence_id.as_bytes()],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            0
+        );
+
+        let standalone: (Vec<u8>, String) = connection
+            .query_row(
+                r#"
+                SELECT re.fact_id, fr.fact_kind
+                FROM run_evidence re
+                JOIN fact_records fr ON fr.fact_id = re.fact_id
+                WHERE re.run_key = ?1
+                "#,
+                [standalone_run.as_bytes()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(standalone.0, standalone_evidence_id.as_bytes());
+        assert_eq!(standalone.1, "run_evidence");
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM fact_records", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            connection
+                .query_row("PRAGMA foreign_key_check", [], |_| Ok(1_i64))
+                .optional()
+                .unwrap(),
+            None
+        );
+
+        // If either side is ambiguous, retain every fact instead of guessing
+        // which observation should own the evidence.
+        let ambiguous_record = direct_record(1, 1, 2, 22, b"ambiguous-message-activity");
+        let ambiguous_time = exact("2026-08-11T00:00:12.000Z");
+        let mut ambiguous = FactBatch::new(3, 1).unwrap();
+        for native_message_id in ["ambiguous-one", "ambiguous-two"] {
+            let mut message = tool_message(
+                native_message_id,
+                MessageRole::Assistant,
+                vec![ContentBlock::Text {
+                    text: native_message_id.to_string(),
+                }],
+            );
+            message.source_time = Some(ambiguous_time.clone());
+            ambiguous
+                .push(&ambiguous_record, Fact::Message(message))
+                .unwrap();
+        }
+        ambiguous
+            .push(
+                &ambiguous_record,
+                Fact::RunEvidence(RunEvidenceFact {
+                    run,
+                    kind: EvidenceKind::ActivityObserved,
+                    strength: EvidenceStrength::NativeActivity,
+                    native_state: None,
+                    source_time: Some(ambiguous_time),
+                }),
+            )
+            .unwrap();
+        assert!(redundant_activity_evidence_owners(&ambiguous).is_empty());
+    }
+
+    #[test]
     fn run_evidence_compaction_preserves_count_winner_activity_and_replacement() {
         let mut connection = database();
         register_object(&mut connection);
@@ -5781,7 +6061,11 @@ mod tests {
         assert_eq!(baseline, semantic_snapshot(&cold));
         assert_eq!(count(&cold, "canonical_messages"), 2);
         assert_eq!(count(&cold, "usage_contributions"), 2);
-        assert_eq!(count(&cold, "fact_records"), 8);
+        assert_eq!(
+            count(&cold, "fact_records"),
+            6,
+            "each message owns its paired native-activity observation"
+        );
 
         let before_audit = semantic_snapshot(&cold);
         rebuild_usage_totals_for_audit(&mut cold).unwrap();
@@ -8693,6 +8977,131 @@ mod tests {
                 )
                 .unwrap(),
             0
+        );
+    }
+
+    #[test]
+    fn bootstrap_defers_artifact_reduction_and_rebuilds_final_state_idempotently() {
+        let mut connection = database();
+        let artifact_key = entity("artifact", "bootstrap-artifact");
+        let record = direct_record(1, 0, 1, 20, b"bootstrap-artifact");
+        let mut batch = FactBatch::new(2, 1).unwrap();
+        batch
+            .push(
+                &record,
+                Fact::ArtifactMetadataSnapshot(artifact_metadata_fact(
+                    "bootstrap-metadata",
+                    vec![artifact_metadata_entry(
+                        artifact_key.clone(),
+                        Some("71f902cd51ee4c6e@v1"),
+                        "src/bootstrap.rs",
+                        "2026-08-11T00:00:01.000Z",
+                        ArtifactCapture::ContentExpected,
+                    )],
+                )),
+            )
+            .unwrap();
+        batch
+            .push(
+                &record,
+                Fact::ArtifactContent(artifact_content_fact(
+                    artifact_key.clone(),
+                    "bootstrap content\n",
+                )),
+            )
+            .unwrap();
+
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .unwrap();
+        let request = request(
+            ExpectedSourceCursor::Absent,
+            1,
+            record.cursor_end.as_bytes().to_vec(),
+            21,
+        );
+        let receipt = apply_fact_observation_commit_in_transaction(
+            &transaction,
+            &request,
+            &batch,
+            &TestCommitHook,
+            false,
+            true,
+        )
+        .unwrap();
+        transaction.commit().unwrap();
+        crate::engine::commit::complete_observation_commit(&TestCommitHook).unwrap();
+
+        assert_eq!(count(&connection, "artifact_snapshot_assertions"), 1);
+        assert_eq!(count(&connection, "artifact_metadata_assertions"), 1);
+        assert_eq!(count(&connection, "artifact_content_assertions"), 1);
+        assert_eq!(count(&connection, "canonical_artifacts"), 0);
+
+        assert_eq!(
+            crate::engine::artifact_projection::rebuild_artifacts_for_bootstrap(&mut connection)
+                .unwrap(),
+            1
+        );
+        let canonical = connection
+            .query_row(
+                r#"
+                SELECT resolution_status, content_status,
+                       metadata_assertion_count, content_assertion_count,
+                       last_commit_seq, decisive_content_fact_id
+                FROM canonical_artifacts WHERE artifact_key = ?1
+                "#,
+                [artifact_key.as_bytes()],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, i64>(3)?,
+                        row.get::<_, i64>(4)?,
+                        row.get::<_, Vec<u8>>(5)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(canonical.0, "resolved");
+        assert_eq!(canonical.1, "captured");
+        assert_eq!(canonical.2, 1);
+        assert_eq!(canonical.3, 1);
+        assert_eq!(canonical.4, i64::try_from(receipt.commit_seq).unwrap());
+
+        assert_eq!(
+            crate::engine::artifact_projection::rebuild_artifacts_for_bootstrap(&mut connection)
+                .unwrap(),
+            1
+        );
+        let rebuilt = connection
+            .query_row(
+                r#"
+                SELECT resolution_status, content_status,
+                       metadata_assertion_count, content_assertion_count,
+                       last_commit_seq, decisive_content_fact_id
+                FROM canonical_artifacts WHERE artifact_key = ?1
+                "#,
+                [artifact_key.as_bytes()],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, i64>(3)?,
+                        row.get::<_, i64>(4)?,
+                        row.get::<_, Vec<u8>>(5)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(rebuilt, canonical);
+        assert_eq!(
+            connection
+                .query_row("PRAGMA foreign_key_check", [], |_| Ok(1_i64))
+                .optional()
+                .unwrap(),
+            None
         );
     }
 

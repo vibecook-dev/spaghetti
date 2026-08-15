@@ -8,14 +8,14 @@
 
 use std::collections::BTreeSet;
 
-use rusqlite::{params, Transaction};
+use rusqlite::{params, Connection, Params, Transaction, TransactionBehavior};
 
 use crate::adapter::{
     ArtifactCapture, ArtifactContentFact, ArtifactMetadataEntry, ArtifactMetadataSnapshotFact,
     ArtifactObservationKind, Fact, FactBatch, FactEnvelope, QualifiedTimestamp,
 };
 
-use super::commit::{ChangeEntry, ProjectionCommitContext};
+use super::commit::{ChangeEntry, CommitDetail, CommitHook, ProjectionCommitContext};
 use super::EngineError;
 
 const CHANGE_SCHEMA_VERSION: u32 = 1;
@@ -61,7 +61,9 @@ pub(super) fn apply_artifact_facts(
     transaction: &Transaction<'_>,
     context: &ProjectionCommitContext,
     batch: &FactBatch,
+    hook: Option<&dyn CommitHook>,
 ) -> Result<Vec<ChangeEntry>, EngineError> {
+    let preparation_started = std::time::Instant::now();
     let object_id = sqlite_u64(context.source_object_id, "source object id")?;
     let generation = sqlite_u64(context.generation, "source generation")?;
     let has_metadata_fact = batch
@@ -73,6 +75,7 @@ pub(super) fn apply_artifact_facts(
         .iter()
         .any(|envelope| matches!(envelope.value, Fact::ArtifactContent(_)));
     if context.skip_unowned_replace_document(has_metadata_fact || has_content_fact) {
+        record_detail(hook, CommitDetail::ArtifactPreparation, preparation_started);
         return Ok(Vec::new());
     }
     // A source object allocated by this commit cannot own old assertions.
@@ -111,6 +114,7 @@ pub(super) fn apply_artifact_facts(
         has_metadata_fact || (context.replaces_prior_generation && !metadata_artifacts.is_empty());
     let touches_content = has_content_fact || !content_artifacts.is_empty();
     if !touches_metadata && !touches_content {
+        record_detail(hook, CommitDetail::ArtifactPreparation, preparation_started);
         return Ok(Vec::new());
     }
     let mut affected_artifacts = BTreeSet::new();
@@ -126,26 +130,27 @@ pub(super) fn apply_artifact_facts(
     // checkpoint/delta assertions. Blob documents, in contrast, replace as a
     // whole even when the common driver keeps the same generation.
     if touches_metadata && context.replaces_prior_generation {
-        transaction
-            .execute(
-                r#"
+        execute_cached(
+            transaction,
+            r#"
                 DELETE FROM artifact_snapshot_assertions
                 WHERE source_object_id = ?1 AND source_generation <> ?2
                 "#,
-                params![object_id, generation],
-            )
-            .map_err(|error| {
-                sqlite_error("retract replaced artifact metadata generation", error)
-            })?;
+            params![object_id, generation],
+        )
+        .map_err(|error| sqlite_error("retract replaced artifact metadata generation", error))?;
     }
     if touches_content && !context.object_is_new {
-        transaction
-            .execute(
-                "DELETE FROM artifact_content_assertions WHERE source_object_id = ?1",
-                [object_id],
-            )
-            .map_err(|error| sqlite_error("retract replaced artifact content", error))?;
+        execute_cached(
+            transaction,
+            "DELETE FROM artifact_content_assertions WHERE source_object_id = ?1",
+            [object_id],
+        )
+        .map_err(|error| sqlite_error("retract replaced artifact content", error))?;
     }
+
+    record_detail(hook, CommitDetail::ArtifactPreparation, preparation_started);
+    let assertion_writes_started = std::time::Instant::now();
 
     for envelope in batch.facts() {
         match &envelope.value {
@@ -165,46 +170,132 @@ pub(super) fn apply_artifact_facts(
         }
     }
 
+    record_detail(
+        hook,
+        CommitDetail::ArtifactAssertionWrites,
+        assertion_writes_started,
+    );
+    let reductions_started = std::time::Instant::now();
+
     let mut changes = Vec::new();
-    for artifact_key in affected_artifacts {
-        let reduction = reduce_artifact(transaction, &artifact_key, context.commit_seq)?;
-        changes.push(artifact_change(&artifact_key, &reduction)?);
-        changes.push(artifact_conflict_change(&artifact_key, &reduction)?);
+    let skip = super::ingest_profile::IngestProfileSkip::current();
+    if (!context.query_bootstrap || skip.artifact_reduction_deferral) && !skip.artifact_reductions {
+        for artifact_key in affected_artifacts {
+            let reduction = reduce_artifact(transaction, &artifact_key, context.commit_seq)?;
+            changes.push(artifact_change(&artifact_key, &reduction)?);
+            changes.push(artifact_conflict_change(&artifact_key, &reduction)?);
+        }
     }
+
+    record_detail(hook, CommitDetail::ArtifactReductions, reductions_started);
+    let cleanup_started = std::time::Instant::now();
 
     // Canonical rows now reference the surviving decisive assertions (or have
     // been removed), so superseded audit facts can be deleted safely.
     if touches_content && !context.object_is_new {
-        transaction
-            .execute(
-                r#"
+        execute_cached(
+            transaction,
+            r#"
                 DELETE FROM fact_records
                 WHERE source_object_id = ?1
                   AND fact_kind = 'artifact_content'
                   AND last_commit_seq <> ?2
                 "#,
-                params![
-                    object_id,
-                    sqlite_u64(context.commit_seq, "commit sequence")?,
-                ],
-            )
-            .map_err(|error| sqlite_error("retract replaced artifact content facts", error))?;
+            params![
+                object_id,
+                sqlite_u64(context.commit_seq, "commit sequence")?,
+            ],
+        )
+        .map_err(|error| sqlite_error("retract replaced artifact content facts", error))?;
     }
     if touches_metadata && context.replaces_prior_generation {
-        transaction
-            .execute(
-                r#"
+        execute_cached(
+            transaction,
+            r#"
                 DELETE FROM fact_records
                 WHERE source_object_id = ?1
                   AND source_generation <> ?2
                   AND fact_kind = 'artifact_metadata_snapshot'
                 "#,
-                params![object_id, generation],
-            )
-            .map_err(|error| sqlite_error("retract replaced artifact metadata facts", error))?;
+            params![object_id, generation],
+        )
+        .map_err(|error| sqlite_error("retract replaced artifact metadata facts", error))?;
     }
 
+    record_detail(hook, CommitDetail::ArtifactCleanup, cleanup_started);
+
     Ok(changes)
+}
+
+/// Materialize final artifact state once after a reader-inaccessible cold
+/// bootstrap. Assertion rows are the durable source of truth; rebuilding here
+/// avoids repeatedly reading and rewriting a growing assertion history for
+/// every transcript checkpoint while preserving the live incremental path.
+///
+/// The rebuild is atomic and idempotent. If the process exits before commit,
+/// SQLite rolls it back and the durable bootstrap marker causes startup to
+/// retry. If it exits afterward but before readiness is published, the next
+/// retry replaces the same derived rows.
+pub(super) fn rebuild_artifacts_for_bootstrap(
+    connection: &mut Connection,
+) -> Result<usize, EngineError> {
+    let skip = super::ingest_profile::IngestProfileSkip::current();
+    if skip.artifact_reductions || skip.artifact_reduction_deferral {
+        return Ok(0);
+    }
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|error| sqlite_error("begin bootstrap artifact rebuild", error))?;
+    transaction
+        .execute("DELETE FROM canonical_artifacts", [])
+        .map_err(|error| sqlite_error("clear bootstrap artifact projection", error))?;
+
+    let artifacts = {
+        let mut statement = transaction
+            .prepare_cached(
+                r#"
+                SELECT artifact_key, MAX(last_commit_seq)
+                FROM (
+                    SELECT metadata.artifact_key, snapshot.last_commit_seq
+                    FROM artifact_metadata_assertions AS metadata
+                    JOIN artifact_snapshot_assertions AS snapshot
+                      ON snapshot.fact_id = metadata.fact_id
+                    UNION ALL
+                    SELECT artifact_key, last_commit_seq
+                    FROM artifact_content_assertions
+                )
+                GROUP BY artifact_key
+                ORDER BY artifact_key
+                "#,
+            )
+            .map_err(|error| sqlite_error("prepare bootstrap artifact keys", error))?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, i64>(1)?))
+            })
+            .map_err(|error| sqlite_error("read bootstrap artifact keys", error))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| sqlite_error("collect bootstrap artifact keys", error))?;
+        rows
+    };
+
+    for (artifact_key, last_commit_seq) in &artifacts {
+        let commit_seq = u64::try_from(*last_commit_seq).map_err(|_| EngineError::Sqlite {
+            operation: "validate bootstrap artifact commit sequence",
+            detail: format!("artifact commit sequence is negative: {last_commit_seq}"),
+        })?;
+        reduce_artifact(&transaction, artifact_key, commit_seq)?;
+    }
+    transaction
+        .commit()
+        .map_err(|error| sqlite_error("commit bootstrap artifact rebuild", error))?;
+    Ok(artifacts.len())
+}
+
+fn record_detail(hook: Option<&dyn CommitHook>, detail: CommitDetail, started: std::time::Instant) {
+    if let Some(hook) = hook {
+        hook.record_detail(detail, started.elapsed());
+    }
 }
 
 fn write_metadata_snapshot(
@@ -219,9 +310,9 @@ fn write_metadata_snapshot(
             "artifact metadata message identities must not be empty".to_string(),
         ));
     }
-    transaction
-        .execute(
-            r#"
+    execute_cached(
+        transaction,
+        r#"
             INSERT INTO artifact_snapshot_assertions (
                 fact_id, session_key, native_message_id,
                 native_snapshot_message_id, observation_kind,
@@ -244,28 +335,28 @@ fn write_metadata_snapshot(
                 cursor_end = excluded.cursor_end,
                 last_commit_seq = excluded.last_commit_seq
             "#,
-            params![
-                envelope.id.as_bytes().as_slice(),
-                fact.session.as_bytes(),
-                fact.native_message_id,
-                fact.native_snapshot_message_id,
-                observation_kind(fact.observation_kind),
-                i64::from(fact.is_snapshot_update),
-                timestamp_value(fact.source_time.as_ref()),
-                timestamp_quality(fact.source_time.as_ref()),
-                sqlite_u64(context.source_object_id, "source object id")?,
-                sqlite_u64(context.generation, "source generation")?,
-                envelope.provenance.cursor_end,
-                sqlite_u64(context.commit_seq, "commit sequence")?,
-            ],
-        )
-        .map_err(|error| sqlite_error("project artifact metadata snapshot", error))?;
-    transaction
-        .execute(
-            "DELETE FROM artifact_metadata_assertions WHERE fact_id = ?1",
-            [envelope.id.as_bytes().as_slice()],
-        )
-        .map_err(|error| sqlite_error("replace artifact metadata snapshot children", error))?;
+        params![
+            envelope.id.as_bytes().as_slice(),
+            fact.session.as_bytes(),
+            fact.native_message_id,
+            fact.native_snapshot_message_id,
+            observation_kind(fact.observation_kind),
+            i64::from(fact.is_snapshot_update),
+            timestamp_value(fact.source_time.as_ref()),
+            timestamp_quality(fact.source_time.as_ref()),
+            sqlite_u64(context.source_object_id, "source object id")?,
+            sqlite_u64(context.generation, "source generation")?,
+            envelope.provenance.cursor_end,
+            sqlite_u64(context.commit_seq, "commit sequence")?,
+        ],
+    )
+    .map_err(|error| sqlite_error("project artifact metadata snapshot", error))?;
+    execute_cached(
+        transaction,
+        "DELETE FROM artifact_metadata_assertions WHERE fact_id = ?1",
+        [envelope.id.as_bytes().as_slice()],
+    )
+    .map_err(|error| sqlite_error("replace artifact metadata snapshot children", error))?;
 
     let mut artifact_keys = BTreeSet::new();
     for artifact in &fact.artifacts {
@@ -316,31 +407,31 @@ fn write_metadata_entry(
         ),
         "digest artifact metadata assertion",
     )?;
-    transaction
-        .execute(
-            r#"
+    execute_cached(
+        transaction,
+        r#"
             INSERT INTO artifact_metadata_assertions (
                 fact_id, artifact_key, session_key, native_artifact_id,
                 tracking_path, real_parent_dir, version, backup_time,
                 backup_time_quality, capture_status, metadata_digest
             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
             "#,
-            params![
-                envelope.id.as_bytes().as_slice(),
-                artifact.artifact.as_bytes(),
-                session.as_bytes(),
-                artifact.native_artifact_id,
-                artifact.tracking_path,
-                artifact.real_parent_dir,
-                sqlite_u64(artifact.version, "artifact version")?,
-                artifact.backup_time.value,
-                timestamp_quality(Some(&artifact.backup_time)),
-                capture_status,
-                metadata_digest.as_slice(),
-            ],
-        )
-        .map(|_| ())
-        .map_err(|error| sqlite_error("project artifact metadata entry", error))
+        params![
+            envelope.id.as_bytes().as_slice(),
+            artifact.artifact.as_bytes(),
+            session.as_bytes(),
+            artifact.native_artifact_id,
+            artifact.tracking_path,
+            artifact.real_parent_dir,
+            sqlite_u64(artifact.version, "artifact version")?,
+            artifact.backup_time.value,
+            timestamp_quality(Some(&artifact.backup_time)),
+            capture_status,
+            metadata_digest.as_slice(),
+        ],
+    )
+    .map(|_| ())
+    .map_err(|error| sqlite_error("project artifact metadata entry", error))
 }
 
 fn write_content_assertion(
@@ -370,9 +461,9 @@ fn write_content_assertion(
         ),
         "digest artifact content assertion",
     )?;
-    transaction
-        .execute(
-            r#"
+    execute_cached(
+        transaction,
+        r#"
             INSERT INTO artifact_content_assertions (
                 fact_id, artifact_key, session_key, native_artifact_id,
                 native_file_hash, version, content, size_bytes,
@@ -383,25 +474,25 @@ fn write_content_assertion(
                 ?13, ?14
             )
             "#,
-            params![
-                envelope.id.as_bytes().as_slice(),
-                fact.artifact.as_bytes(),
-                fact.session.as_bytes(),
-                fact.native_artifact_id,
-                fact.native_file_hash,
-                sqlite_u64(fact.version, "artifact version")?,
-                fact.content,
-                sqlite_u64(fact.size_bytes, "artifact size")?,
-                content_digest.as_slice(),
-                assertion_digest.as_slice(),
-                sqlite_u64(context.source_object_id, "source object id")?,
-                sqlite_u64(context.generation, "source generation")?,
-                envelope.provenance.cursor_end,
-                sqlite_u64(context.commit_seq, "commit sequence")?,
-            ],
-        )
-        .map(|_| ())
-        .map_err(|error| sqlite_error("project artifact content assertion", error))
+        params![
+            envelope.id.as_bytes().as_slice(),
+            fact.artifact.as_bytes(),
+            fact.session.as_bytes(),
+            fact.native_artifact_id,
+            fact.native_file_hash,
+            sqlite_u64(fact.version, "artifact version")?,
+            fact.content,
+            sqlite_u64(fact.size_bytes, "artifact size")?,
+            content_digest.as_slice(),
+            assertion_digest.as_slice(),
+            sqlite_u64(context.source_object_id, "source object id")?,
+            sqlite_u64(context.generation, "source generation")?,
+            envelope.provenance.cursor_end,
+            sqlite_u64(context.commit_seq, "commit sequence")?,
+        ],
+    )
+    .map(|_| ())
+    .map_err(|error| sqlite_error("project artifact content assertion", error))
 }
 
 fn reduce_artifact(
@@ -412,12 +503,12 @@ fn reduce_artifact(
     let metadata = read_metadata_assertions(transaction, artifact_key)?;
     let content = read_content_assertions(transaction, artifact_key)?;
     if metadata.is_empty() && content.is_empty() {
-        transaction
-            .execute(
-                "DELETE FROM canonical_artifacts WHERE artifact_key = ?1",
-                [artifact_key],
-            )
-            .map_err(|error| sqlite_error("remove absent canonical artifact", error))?;
+        execute_cached(
+            transaction,
+            "DELETE FROM canonical_artifacts WHERE artifact_key = ?1",
+            [artifact_key],
+        )
+        .map_err(|error| sqlite_error("remove absent canonical artifact", error))?;
         return Ok(ArtifactReduction {
             resolution_status: None,
             content_status: None,
@@ -486,9 +577,9 @@ fn reduce_artifact(
         .map(|assertion| assertion.capture_status.as_str())
         .unwrap_or("unknown");
 
-    transaction
-        .execute(
-            r#"
+    execute_cached(
+        transaction,
+        r#"
             INSERT INTO canonical_artifacts (
                 artifact_key, session_key, native_artifact_id,
                 native_file_hash, version, tracking_path, real_parent_dir,
@@ -526,44 +617,44 @@ fn reduce_artifact(
                 join_conflict = excluded.join_conflict,
                 last_commit_seq = excluded.last_commit_seq
             "#,
-            params![
-                artifact_key,
-                session_key,
-                native_artifact_id,
-                decisive_content.map(|assertion| assertion.native_file_hash.as_str()),
-                version,
-                decisive_metadata.map(|assertion| assertion.tracking_path.as_str()),
-                decisive_metadata.and_then(|assertion| assertion.real_parent_dir.as_deref()),
-                decisive_metadata.map(|assertion| assertion.backup_time.as_str()),
-                decisive_metadata.map(|assertion| assertion.backup_time_quality.as_str()),
-                capture_status,
-                // The decisive assertion is already the durable content
-                // owner. Keep the nullable compatibility column empty on new
-                // databases and have the query join through
-                // decisive_content_fact_id instead of writing every backup
-                // BLOB into SQLite twice.
-                Option::<&[u8]>::None,
-                decisive_content.map(|assertion| assertion.size_bytes),
-                decisive_content.map(|assertion| assertion.content_digest.as_slice()),
-                content_status,
-                resolution_status,
-                decisive_metadata.map(|assertion| assertion.fact_id.as_slice()),
-                decisive_content.map(|assertion| assertion.fact_id.as_slice()),
-                sqlite_usize(
-                    metadata_assertion_count,
-                    "artifact metadata assertion count"
-                )?,
-                sqlite_usize(
-                    competing_metadata_count,
-                    "artifact competing metadata count"
-                )?,
-                sqlite_usize(content_assertion_count, "artifact content assertion count")?,
-                sqlite_usize(competing_content_count, "artifact competing content count")?,
-                i64::from(join_conflict),
-                sqlite_u64(commit_seq, "commit sequence")?,
-            ],
-        )
-        .map_err(|error| sqlite_error("write canonical artifact", error))?;
+        params![
+            artifact_key,
+            session_key,
+            native_artifact_id,
+            decisive_content.map(|assertion| assertion.native_file_hash.as_str()),
+            version,
+            decisive_metadata.map(|assertion| assertion.tracking_path.as_str()),
+            decisive_metadata.and_then(|assertion| assertion.real_parent_dir.as_deref()),
+            decisive_metadata.map(|assertion| assertion.backup_time.as_str()),
+            decisive_metadata.map(|assertion| assertion.backup_time_quality.as_str()),
+            capture_status,
+            // The decisive assertion is already the durable content
+            // owner. Keep the nullable compatibility column empty on new
+            // databases and have the query join through
+            // decisive_content_fact_id instead of writing every backup
+            // BLOB into SQLite twice.
+            Option::<&[u8]>::None,
+            decisive_content.map(|assertion| assertion.size_bytes),
+            decisive_content.map(|assertion| assertion.content_digest.as_slice()),
+            content_status,
+            resolution_status,
+            decisive_metadata.map(|assertion| assertion.fact_id.as_slice()),
+            decisive_content.map(|assertion| assertion.fact_id.as_slice()),
+            sqlite_usize(
+                metadata_assertion_count,
+                "artifact metadata assertion count"
+            )?,
+            sqlite_usize(
+                competing_metadata_count,
+                "artifact competing metadata count"
+            )?,
+            sqlite_usize(content_assertion_count, "artifact content assertion count")?,
+            sqlite_usize(competing_content_count, "artifact competing content count")?,
+            i64::from(join_conflict),
+            sqlite_u64(commit_seq, "commit sequence")?,
+        ],
+    )
+    .map_err(|error| sqlite_error("write canonical artifact", error))?;
 
     Ok(ArtifactReduction {
         resolution_status: Some(resolution_status.to_string()),
@@ -581,7 +672,7 @@ fn read_metadata_assertions(
     artifact_key: &[u8],
 ) -> Result<Vec<MetadataAssertion>, EngineError> {
     let mut statement = transaction
-        .prepare(
+        .prepare_cached(
             r#"
             SELECT fact_id, session_key, native_artifact_id, tracking_path,
                    real_parent_dir, version, backup_time, backup_time_quality,
@@ -618,7 +709,7 @@ fn read_content_assertions(
     artifact_key: &[u8],
 ) -> Result<Vec<ContentAssertion>, EngineError> {
     let mut statement = transaction
-        .prepare(
+        .prepare_cached(
             r#"
             SELECT fact_id, session_key, native_artifact_id, native_file_hash,
                    version, size_bytes, content_digest, assertion_digest
@@ -654,7 +745,7 @@ fn source_object_keys(
     operation: &'static str,
 ) -> Result<BTreeSet<Vec<u8>>, EngineError> {
     let mut statement = transaction
-        .prepare(query)
+        .prepare_cached(query)
         .map_err(|error| sqlite_error(operation, error))?;
     let keys = statement
         .query_map([source_object_id], |row| row.get::<_, Vec<u8>>(0))
@@ -774,6 +865,14 @@ fn sqlite_usize(value: usize, field: &'static str) -> Result<i64, EngineError> {
 fn sqlite_u64(value: u64, field: &'static str) -> Result<i64, EngineError> {
     i64::try_from(value)
         .map_err(|_| EngineError::InvalidCommit(format!("{field} exceeds SQLite integer range")))
+}
+
+fn execute_cached<P: Params>(
+    transaction: &Transaction<'_>,
+    sql: &str,
+    params: P,
+) -> Result<usize, rusqlite::Error> {
+    transaction.prepare_cached(sql)?.execute(params)
 }
 
 fn sqlite_error(operation: &'static str, error: rusqlite::Error) -> EngineError {
