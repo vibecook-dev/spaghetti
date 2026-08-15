@@ -15,6 +15,7 @@ use super::query_identity::{
     RUN_ID_PREFIX, SESSION_ID_PREFIX,
 };
 use super::query_pool::read_committed_watermark;
+use super::storage_codec;
 use super::EngineError;
 
 pub const TIMELINE_QUERY_CONTRACT_VERSION: u32 = 1;
@@ -168,6 +169,11 @@ struct TimelineCursor {
     version: u32,
     at_commit_seq: u64,
     scope_hash: String,
+    /// Latest commit that changed this canonical session. This keeps cursors
+    /// stable across unrelated live commits without rescanning the complete
+    /// session on every page.
+    #[serde(default)]
+    session_revision: u64,
     untimed_rank: u8,
     sort_time: String,
     source_object_id: u64,
@@ -227,8 +233,9 @@ pub(super) fn read_timeline_page(
 
     let transaction = begin_snapshot(connection)?;
     let watermark = read_committed_watermark(&transaction)?;
-    validate_cursor_watermark(cursor.as_ref(), watermark)?;
-    require_session_membership(&transaction, &validated.project_key, &validated.session_key)?;
+    let session_revision =
+        require_session_membership(&transaction, &validated.project_key, &validated.session_key)?;
+    validate_cursor_snapshot(cursor.as_ref(), watermark, session_revision)?;
 
     let facets = read_timeline_facets(&transaction, &validated.session_key)?;
     let (from_where_sql, base_arguments) = timeline_from_where(&validated);
@@ -295,7 +302,8 @@ pub(super) fn read_timeline_page(
                    cm.source_generation, cm.cursor_start, cm.last_commit_seq,
                    CASE WHEN cm.source_time IS NULL THEN 1 ELSE 0 END
                        AS untimed_rank,
-                   COALESCE(cm.source_time, '') AS sort_time
+                   COALESCE(cm.source_time, '') AS sort_time,
+                   cm.content_json_codec
             {from_where_sql}
         )
         SELECT message_key, session_key, project_key, run_key,
@@ -309,7 +317,7 @@ pub(super) fn read_timeline_page(
                parent_native_message_id, model, fact_id, observed_at,
                source_object_id, source_generation, cursor_start,
                last_commit_seq,
-               untimed_rank, sort_time
+               untimed_rank, sort_time, content_json_codec
         FROM timeline_rows
         WHERE ?{cursor_present_parameter} = 0
            OR untimed_rank > ?{cursor_rank_parameter}
@@ -381,6 +389,7 @@ pub(super) fn read_timeline_page(
                     version: TIMELINE_QUERY_CONTRACT_VERSION,
                     at_commit_seq: watermark,
                     scope_hash: validated.scope_hash.clone(),
+                    session_revision,
                     untimed_rank: row.untimed_rank,
                     sort_time: row.sort_time.clone(),
                     source_object_id: row.source_object_id,
@@ -787,7 +796,14 @@ fn decode_timeline_row(row: &Row<'_>) -> Result<TimelineRow, EngineError> {
     let run_key: Vec<u8> = query_get(row, 3, "decode timeline run key")?;
     let parent_run_key: Option<Vec<u8>> = query_get(row, 4, "decode timeline parent run")?;
     let anchor_message_key: Option<Vec<u8>> = query_get(row, 6, "decode timeline branch anchor")?;
-    let content_json: Vec<u8> = query_get(row, 23, "decode timeline content")?;
+    let stored_content_json: Vec<u8> = query_get(row, 23, "read timeline content")?;
+    let content_json_codec: String = query_get(row, 36, "read timeline content codec")?;
+    let content_json = storage_codec::decode(
+        &content_json_codec,
+        &stored_content_json,
+        MAX_TIMELINE_PAGE_PAYLOAD_BYTES as usize,
+        "decode timeline content",
+    )?;
     let blocks: Vec<ContentBlock> =
         serde_json::from_slice(&content_json).map_err(|error| EngineError::Sqlite {
             operation: "decode canonical timeline content JSON",
@@ -898,23 +914,43 @@ fn require_session_membership(
     transaction: &Transaction<'_>,
     project_key: &[u8],
     session_key: &[u8],
-) -> Result<(), EngineError> {
-    let exists = transaction
+) -> Result<u64, EngineError> {
+    let revision = transaction
         .query_row(
-            "SELECT 1 FROM canonical_sessions WHERE session_key = ?1 AND project_key = ?2",
+            r#"
+            SELECT MAX(
+                cs.last_commit_seq,
+                COALESCE((SELECT MAX(cm.last_commit_seq)
+                          FROM canonical_messages cm
+                          WHERE cm.session_key = cs.session_key), 0),
+                COALESCE((SELECT MAX(cr.last_commit_seq)
+                          FROM canonical_runs cr
+                          WHERE cr.session_key = cs.session_key), 0),
+                COALESCE((SELECT MAX(cd.last_commit_seq)
+                          FROM canonical_delegations cd
+                          WHERE cd.session_key = cs.session_key), 0),
+                COALESCE((SELECT MAX(cdm.last_commit_seq)
+                          FROM canonical_delegation_metadata cdm
+                          WHERE cdm.session_key = cs.session_key), 0),
+                COALESCE((SELECT MAX(cds.last_commit_seq)
+                          FROM canonical_delegation_spawns cds
+                          WHERE cds.session_key = cs.session_key), 0)
+            )
+            FROM canonical_sessions cs
+            WHERE cs.session_key = ?1 AND cs.project_key = ?2
+            "#,
             rusqlite::params![session_key, project_key],
-            |_| Ok(()),
+            |row| row.get::<_, i64>(0),
         )
         .optional()
-        .map_err(|error| query_sqlite_error("verify timeline session membership", error))?
-        .is_some();
-    if !exists {
+        .map_err(|error| query_sqlite_error("verify timeline session membership", error))?;
+    let Some(revision) = revision else {
         return Err(EngineError::InvalidQuery(
             "timeline projectId/sessionId does not identify a current canonical session"
                 .to_string(),
         ));
-    }
-    Ok(())
+    };
+    decode_nonnegative_u64(revision, "timeline session revision")
 }
 
 fn literal_match_expression(text: &str) -> String {
@@ -1024,15 +1060,25 @@ fn decode_cursor_blob(
     Ok(bytes)
 }
 
-fn validate_cursor_watermark(
+fn validate_cursor_snapshot(
     cursor: Option<&TimelineCursor>,
     watermark: u64,
+    session_revision: u64,
 ) -> Result<(), EngineError> {
     if let Some(cursor) = cursor {
-        if cursor.at_commit_seq != watermark {
+        // Cursors issued before session revisions existed retain the original
+        // global-watermark rule. New cursors survive commits to other sessions
+        // but restart after this session changes, so replaced/reordered history
+        // cannot create a gap in the keyset walk.
+        let expired = if cursor.session_revision == 0 {
+            cursor.at_commit_seq != watermark
+        } else {
+            cursor.session_revision != session_revision
+        };
+        if expired {
             return Err(EngineError::InvalidQuery(format!(
-                "timeline cursor expired at commit {}; current commit is {watermark}",
-                cursor.at_commit_seq
+                "timeline cursor expired at commit {}; the canonical session changed",
+                cursor.at_commit_seq,
             )));
         }
     }
@@ -1535,7 +1581,7 @@ mod tests {
     }
 
     #[test]
-    fn timeline_keyset_cursor_is_scope_and_watermark_bound() {
+    fn timeline_keyset_cursor_is_scope_and_session_revision_bound() {
         let connection = seeded_connection();
         let first = read_timeline_page(&connection, &request(1)).unwrap();
         assert_eq!(first.items.len(), 1);
@@ -1558,6 +1604,16 @@ mod tests {
         connection
             .execute(
                 "INSERT INTO ingest_commits VALUES (2, 1, 'later', 3, 4, 0)",
+                [],
+            )
+            .unwrap();
+        let mut after_unrelated_commit = request(1);
+        after_unrelated_commit.cursor = Some(cursor.clone());
+        assert!(read_timeline_page(&connection, &after_unrelated_commit).is_ok());
+
+        connection
+            .execute(
+                "UPDATE canonical_messages SET last_commit_seq = 2 WHERE message_key = x'6d31'",
                 [],
             )
             .unwrap();

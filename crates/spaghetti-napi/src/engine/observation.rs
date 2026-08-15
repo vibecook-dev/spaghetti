@@ -325,6 +325,40 @@ impl ObservationRuntime {
         Ok(())
     }
 
+    pub(crate) fn mark_object_dirty(
+        &self,
+        adapter_id: &str,
+        stable_key: &[u8],
+        stream_key: &str,
+        object_key: &[u8],
+        reason: DirtyReason,
+    ) -> Result<(), EngineError> {
+        if stream_key.trim().is_empty() {
+            return Err(EngineError::InvalidConfig(
+                "observation source-stream key must not be empty".to_string(),
+            ));
+        }
+        if object_key.is_empty() {
+            return Err(EngineError::InvalidConfig(
+                "observation source-object key must not be empty".to_string(),
+            ));
+        }
+        let key = ObjectKey {
+            instance: InstanceKey::new(adapter_id, stable_key)?,
+            stream_key: stream_key.to_string(),
+            object_key: object_key.to_vec(),
+        };
+        let mut state = self.lock_state();
+        if !state.accepting {
+            return Err(EngineError::ShuttingDown);
+        }
+        self.enqueue_object_locked(&mut state, key, reason);
+        if state.active.is_none() {
+            state.phase = pending_phase(&state);
+        }
+        Ok(())
+    }
+
     pub(crate) fn mark_adapter_dirty(
         &self,
         adapter_id: &str,

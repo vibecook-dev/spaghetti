@@ -111,7 +111,10 @@ export function FileExplorerPanel({
   const [subagents, setSubagents] = useState<SubagentListItem[]>([]);
   const [worktrees, setWorktrees] = useState<WorktreeInfo[]>([]);
   const [worktreesLoading, setWorktreesLoading] = useState(false);
-  const [artifactLoading, setArtifactLoading] = useState(false);
+  const [artifactLoading, setArtifactLoading] = useState<Set<ArtifactSectionId>>(() => new Set());
+  const [artifactLoaded, setArtifactLoaded] = useState<Set<ArtifactSectionId>>(() => new Set());
+  const artifactRequestsRef = useRef(new Set<string>());
+  const artifactGenerationRef = useRef(0);
   const [preview, setPreview] = useState<{ section: ArtifactSectionId; node: StructureNode } | null>(null);
   const [projectPreview, setProjectPreview] = useState<ProjectFilePreview | null>(null);
 
@@ -168,52 +171,100 @@ export function FileExplorerPanel({
     };
   }, [open, projectPath]);
 
-  // Load artifact trees when a session is selected
+  // A selected session only establishes the artifact scope. Individual
+  // capability queries are loaded when their accordion opens so the visible
+  // transcript never waits behind five hidden Structure reads.
   useEffect(() => {
-    if (!sessionArtifacts) {
-      setPlan(null);
-      setTodos([]);
-      setTask(null);
-      setMemory(null);
-      setSubagents([]);
-      setPreview(null);
+    artifactGenerationRef.current += 1;
+    artifactRequestsRef.current.clear();
+    setArtifactLoading(new Set());
+    setArtifactLoaded(new Set());
+    setPlan(null);
+    setTodos([]);
+    setTask(null);
+    setMemory(null);
+    setSubagents([]);
+    setPreview(null);
+  }, [open, sessionArtifacts?.projectSlug, sessionArtifacts?.sessionId, sessionArtifacts?.sourceId]);
+
+  useEffect(() => {
+    if (!open || !sessionArtifacts) {
       return;
     }
-    let cancelled = false;
-    setArtifactLoading(true);
-    setPreview(null);
     const { projectSlug, sessionId, sourceId, memoryProject } = sessionArtifacts;
-    void (async () => {
-      try {
-        const [p, t, tsk, mem, agents] = await Promise.all([
-          window.spaghetti.getSessionPlan(projectSlug, sessionId),
-          window.spaghetti.getSessionTodos(projectSlug, sessionId),
-          window.spaghetti.getSessionTask(projectSlug, sessionId),
-          window.spaghetti.getProjectMemory(memoryProject ?? projectSlug, memoryProject ? undefined : { sourceId }),
-          window.spaghetti.getSessionSubagents(projectSlug, sessionId, { sourceId }),
-        ]);
-        if (cancelled) return;
-        setPlan((p as PlanShape | null) ?? null);
-        setTodos(flattenTodos(t));
-        setTask((tsk as TaskShape | null) ?? null);
-        setMemory(mem);
-        setSubagents(agents);
-      } catch {
-        if (!cancelled) {
-          setPlan(null);
-          setTodos([]);
-          setTask(null);
-          setMemory(null);
-          setSubagents([]);
+    const generation = artifactGenerationRef.current;
+    const sessionKey = JSON.stringify([sourceId, projectSlug, sessionId]);
+    const requested = [...openSections].filter(
+      (id) => id !== 'worktrees' && !artifactLoaded.has(id) && !artifactRequestsRef.current.has(`${sessionKey}:${id}`),
+    );
+    for (const id of requested) {
+      const requestKey = `${sessionKey}:${id}`;
+      artifactRequestsRef.current.add(requestKey);
+      setArtifactLoading((current) => new Set(current).add(id));
+      void (async () => {
+        try {
+          switch (id) {
+            case 'plans': {
+              const nextPlan =
+                ((await window.spaghetti.getSessionPlan(projectSlug, sessionId)) as PlanShape | null) ?? null;
+              if (generation !== artifactGenerationRef.current) return;
+              setPlan(nextPlan);
+              break;
+            }
+            case 'todos': {
+              const nextTodos = flattenTodos(await window.spaghetti.getSessionTodos(projectSlug, sessionId));
+              if (generation !== artifactGenerationRef.current) return;
+              setTodos(nextTodos);
+              break;
+            }
+            case 'tasks': {
+              const nextTask =
+                ((await window.spaghetti.getSessionTask(projectSlug, sessionId)) as TaskShape | null) ?? null;
+              if (generation !== artifactGenerationRef.current) return;
+              setTask(nextTask);
+              break;
+            }
+            case 'memory': {
+              const nextMemory = await window.spaghetti.getProjectMemory(
+                memoryProject ?? projectSlug,
+                memoryProject ? undefined : { sourceId },
+              );
+              if (generation !== artifactGenerationRef.current) return;
+              setMemory(nextMemory);
+              break;
+            }
+            case 'subagents': {
+              const nextSubagents = await window.spaghetti.getSessionSubagents(projectSlug, sessionId, { sourceId });
+              if (generation !== artifactGenerationRef.current) return;
+              setSubagents(nextSubagents);
+              break;
+            }
+            case 'worktrees':
+              break;
+          }
+        } catch {
+          if (generation !== artifactGenerationRef.current) return;
+          if (id === 'plans') setPlan(null);
+          else if (id === 'todos') setTodos([]);
+          else if (id === 'tasks') setTask(null);
+          else if (id === 'memory') setMemory(null);
+          else if (id === 'subagents') setSubagents([]);
+        } finally {
+          if (generation === artifactGenerationRef.current) {
+            setArtifactLoading((current) => {
+              const next = new Set(current);
+              next.delete(id);
+              return next;
+            });
+            setArtifactLoaded((current) => new Set(current).add(id));
+          }
         }
-      } finally {
-        if (!cancelled) setArtifactLoading(false);
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
+      })();
+    }
   }, [
+    open,
+    openSections,
+    artifactLoaded,
     sessionArtifacts?.projectSlug,
     sessionArtifacts?.sessionId,
     sessionArtifacts?.sourceId,
@@ -569,7 +620,7 @@ export function FileExplorerPanel({
             // for worktrees.
             const ready = scope === 'session' ? Boolean(sessionArtifacts) : projectPath !== null;
             const notReadyPrompt = scope === 'session' ? 'Open a session' : 'Select a project';
-            const loading = scope === 'session' ? artifactLoading : worktreesLoading;
+            const loading = scope === 'session' ? artifactLoading.has(id) : worktreesLoading;
             return (
               <section key={id} className="border-b border-[color:var(--archive-ink-line-soft)]" data-section={id}>
                 <ArtifactToggle label={label} open={isOpen} onToggle={() => toggleSection(id)} />

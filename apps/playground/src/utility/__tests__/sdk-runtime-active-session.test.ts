@@ -128,6 +128,54 @@ describe('active transcript stream routing', () => {
     }
     assert.equal(activeSessionChangeForBatch(stream, { changes: [], timestamp: 103 })?.reason, 'reset');
   });
+
+  test('deduplicates concurrent initial snapshots without sharing stream ownership', async () => {
+    let timelineCalls = 0;
+    let subagentCalls = 0;
+    let resolveTimeline!: (value: Awaited<ReturnType<ObservationService['getSessionTimeline']>>) => void;
+    const timeline = new Promise<Awaited<ReturnType<ObservationService['getSessionTimeline']>>>((resolve) => {
+      resolveTimeline = resolve;
+    });
+    const service = {
+      getSessionTimeline: () => {
+        timelineCalls += 1;
+        return timeline;
+      },
+      getSessionSubagents: async () => {
+        subagentCalls += 1;
+        return [];
+      },
+      getSessionTimelineFacets: async () => {
+        throw new Error('same-snapshot facets should be reused');
+      },
+      dispose: async () => undefined,
+    } as unknown as ObservationService;
+    const runtime = new SdkRuntime({ dbPath: '/tmp/not-opened.db' }, sink());
+    (runtime as unknown as { service: ObservationService }).service = service;
+
+    const request = { sourceId: 'codex', limit: 30 };
+    const first = runtime.openSessionStream('-tmp-project', 'session-1', request);
+    const second = runtime.openSessionStream('-tmp-project', 'session-1', request);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(timelineCalls, 1);
+    assert.equal(subagentCalls, 1);
+
+    resolveTimeline({
+      messages: [],
+      total: 0,
+      facets: { total: 0, messageCounts: {}, toolCounts: {} },
+      hasMore: false,
+    });
+    const [firstSnapshot, secondSnapshot] = await Promise.all([first, second]);
+    assert.notEqual(firstSnapshot.streamId, secondSnapshot.streamId);
+    assert.deepEqual(firstSnapshot.page, secondSnapshot.page);
+    runtime.closeSessionStream(firstSnapshot.streamId);
+    assert.equal(
+      (runtime as unknown as { activeStream: ActiveStreamIdentity | null }).activeStream?.streamId,
+      secondSnapshot.streamId,
+    );
+    await runtime.dispose();
+  });
 });
 
 describe('production observation host status', () => {

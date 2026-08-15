@@ -11,7 +11,7 @@ use std::time::Duration;
 use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 
-use crate::adapter::RawRetentionPolicy;
+use crate::adapter::{ConsistencyPolicy, RawRetentionPolicy};
 
 use super::EngineError;
 
@@ -94,6 +94,7 @@ pub struct SourceStreamSpec {
     pub decoder_key: String,
     pub stream_state: String,
     pub last_reconciled_at: Option<i64>,
+    pub consistency: ConsistencyPolicy,
     pub retention: RawRetentionPolicy,
 }
 
@@ -295,12 +296,16 @@ pub(super) struct ProjectionCommitContext {
     /// projectors can skip ownership probes: a brand-new object cannot already
     /// own assertions.
     pub object_is_new: bool,
+    pub consistency: ConsistencyPolicy,
     pub retention: RawRetentionPolicy,
 }
 
 impl ProjectionCommitContext {
     pub(super) fn skip_unowned_replace_document(&self, has_matching_fact: bool) -> bool {
-        !has_matching_fact && self.object_is_new
+        !has_matching_fact
+            && (self.object_is_new
+                || (!self.replaces_prior_generation
+                    && self.consistency != ConsistencyPolicy::SnapshotReplace))
     }
 }
 
@@ -488,6 +493,7 @@ fn apply_observation_commit_components_in_transaction(
             .as_ref()
             .is_some_and(|stored| stored.generation != request.object.generation),
         object_is_new,
+        consistency: request.stream.consistency,
         retention: request.stream.retention,
     };
 
@@ -1730,6 +1736,7 @@ mod tests {
                 decoder_key: "fixture.jsonl".to_string(),
                 stream_state: "available".to_string(),
                 last_reconciled_at: Some(1_050),
+                consistency: ConsistencyPolicy::IncrementalCursor,
                 retention: RawRetentionPolicy::Full,
             },
             object: SourceObjectUpdate {

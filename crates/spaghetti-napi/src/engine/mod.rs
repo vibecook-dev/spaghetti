@@ -1209,6 +1209,21 @@ impl SpaghettiEngineCore {
             .mark_instance_dirty(adapter_id, stable_key, reason)
     }
 
+    /// Retain a lossless, bounded dirty marker for one known source object.
+    /// Native content events use this path so an append does not rescan every
+    /// object beneath the adapter root.
+    pub(crate) fn mark_observation_object_dirty(
+        &self,
+        adapter_id: &str,
+        stable_key: &[u8],
+        stream_key: &str,
+        object_key: &[u8],
+        reason: crate::source::DirtyReason,
+    ) -> Result<(), EngineError> {
+        self.observation
+            .mark_object_dirty(adapter_id, stable_key, stream_key, object_key, reason)
+    }
+
     /// Escalate an adapter to a full discovery/reconcile pass. Overflow and
     /// watcher-backend failure must use this instead of dropping invalidation.
     pub(crate) fn require_observation_reconcile(

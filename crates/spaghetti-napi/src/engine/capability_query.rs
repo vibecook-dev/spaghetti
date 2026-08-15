@@ -810,7 +810,8 @@ pub(super) fn read_tool_result_page(
             r#"
             SELECT tr.result_key, tr.project_key, tr.session_key,
                    tr.native_project_key, tr.native_session_id,
-                   tr.native_tool_use_id, tr.native_document_path, tr.content,
+                   tr.native_tool_use_id, tr.native_document_path,
+                   decisive.content,
                    tr.size_bytes, tr.resolution_status,
                    tr.correlation_status, tr.tool_call_message_key,
                    tr.tool_result_message_key, tr.decisive_fact_id,
@@ -820,6 +821,8 @@ pub(super) fn read_tool_result_page(
                    fr.source_object_id, fr.source_generation,
                    fr.source_instance_id, si.adapter_id
             FROM canonical_persisted_tool_results tr
+            JOIN persisted_tool_result_assertions decisive
+              ON decisive.fact_id = tr.decisive_fact_id
             JOIN fact_records fr ON fr.fact_id = tr.decisive_fact_id
             JOIN source_instances si
               ON si.source_instance_id = fr.source_instance_id
@@ -898,7 +901,8 @@ pub(super) fn read_artifact_page(
                 SELECT ca.artifact_key, ca.session_key, cs.project_key,
                        ca.native_artifact_id, ca.native_file_hash, ca.version,
                        ca.tracking_path, ca.real_parent_dir, ca.backup_time,
-                       ca.backup_time_quality, ca.capture_status, ca.content,
+                       ca.backup_time_quality, ca.capture_status,
+                       decisive_content.content,
                        ca.size_bytes, ca.content_digest, ca.content_status,
                        ca.resolution_status, ca.decisive_metadata_fact_id,
                        ca.decisive_content_fact_id,
@@ -927,6 +931,8 @@ pub(super) fn read_artifact_page(
                   ON msi.source_instance_id = mfr.source_instance_id
                 LEFT JOIN fact_records cfr
                   ON cfr.fact_id = ca.decisive_content_fact_id
+                LEFT JOIN artifact_content_assertions decisive_content
+                  ON decisive_content.fact_id = ca.decisive_content_fact_id
                 LEFT JOIN source_instances csi
                   ON csi.source_instance_id = cfr.source_instance_id
                 LEFT JOIN canonical_sessions cs

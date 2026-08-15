@@ -489,11 +489,11 @@ fn writer_thread(
                     }
                     ensure_disk_reserve(&database_path)?;
                     if !skip.checkpoints && !skip.finalize {
-                        checkpoints.checkpoint(&connection, &telemetry)?;
+                        checkpoints.checkpoint(&connection, &telemetry, true)?;
                     }
                     let watermark = finalize_query_bootstrap_connection(&mut connection)?;
                     if !skip.checkpoints && !skip.finalize {
-                        checkpoints.checkpoint(&connection, &telemetry)?;
+                        checkpoints.checkpoint(&connection, &telemetry, true)?;
                     }
                     bootstrap_active = false;
                     Ok(watermark)
@@ -512,10 +512,14 @@ fn writer_thread(
                 let _ = response.send(commit::maintain_change_log(&mut connection, policy, now_ms));
             }
             WriterCommand::Checkpoint { response } => {
-                let _ = response.send(checkpoints.checkpoint(&connection, &telemetry));
+                let _ = response.send(checkpoints.checkpoint(&connection, &telemetry, false));
             }
             WriterCommand::Shutdown { response } => {
-                let _ = response.send(checkpoints.checkpoint(&connection, &telemetry));
+                let _ = response.send(checkpoints.checkpoint(
+                    &connection,
+                    &telemetry,
+                    bootstrap_active,
+                ));
                 break 'writer;
             }
         }
@@ -867,17 +871,22 @@ impl CheckpointController {
         {
             return;
         }
-        let _ = self.checkpoint(connection, telemetry);
+        let _ = self.checkpoint(connection, telemetry, bootstrap_active);
     }
 
     fn checkpoint(
         &mut self,
         connection: &Connection,
         telemetry: &WriterTelemetry,
+        reader_free: bool,
     ) -> Result<CheckpointOutcome, EngineError> {
         self.last_attempt = Some(Instant::now());
         let started = Instant::now();
-        let result = controlled_checkpoint(connection);
+        let result = if reader_free {
+            reader_free_checkpoint(connection)
+        } else {
+            controlled_checkpoint(connection)
+        };
         telemetry.record_checkpoint(&result, started.elapsed());
         result
     }
@@ -1315,6 +1324,37 @@ fn controlled_checkpoint(connection: &Connection) -> Result<CheckpointOutcome, E
     })
 }
 
+/// Bootstrap has no query readers by construction, so one TRUNCATE operation
+/// can copy and reclaim the WAL. The live controller must retain its two-step
+/// nonblocking PASSIVE/TRUNCATE protocol because a pinned reader is normal
+/// there; applying that protocol to a reader-free multi-gigabyte build merely
+/// pays a second synchronization boundary for every checkpoint.
+fn reader_free_checkpoint(connection: &Connection) -> Result<CheckpointOutcome, EngineError> {
+    let checkpoint = read_checkpoint_row(
+        connection,
+        "PRAGMA wal_checkpoint(TRUNCATE)",
+        "run reader-free WAL checkpoint",
+    )?;
+    let remaining_frames = if checkpoint.busy {
+        let uncopied = checkpoint
+            .log_frames
+            .saturating_sub(checkpoint.checkpointed_frames);
+        if uncopied == 0 {
+            checkpoint.log_frames
+        } else {
+            uncopied
+        }
+    } else {
+        0
+    };
+    Ok(CheckpointOutcome {
+        busy: checkpoint.busy,
+        log_frames: checkpoint.log_frames,
+        checkpointed_frames: checkpoint.checkpointed_frames,
+        remaining_frames,
+    })
+}
+
 struct CheckpointRow {
     busy: bool,
     log_frames: u64,
@@ -1396,10 +1436,10 @@ fn open_writer(database_path: &PathBuf) -> Result<Connection, EngineError> {
         detail: error.to_string(),
     })?;
     if query_bootstrap_active(&connection)? {
-        let checkpoint = controlled_checkpoint(&connection)?;
+        let checkpoint = reader_free_checkpoint(&connection)?;
         require_reader_free_checkpoint(checkpoint)?;
         finalize_query_bootstrap_connection(&mut connection)?;
-        let checkpoint = controlled_checkpoint(&connection)?;
+        let checkpoint = reader_free_checkpoint(&connection)?;
         require_reader_free_checkpoint(checkpoint)?;
     }
     // Let SQLite refresh bounded planner statistics for tables that need it.
@@ -1565,6 +1605,7 @@ mod tests {
                 decoder_key: "fixture".to_string(),
                 stream_state: "available".to_string(),
                 last_reconciled_at: Some(1),
+                consistency: crate::adapter::ConsistencyPolicy::SnapshotReplace,
                 retention: RawRetentionPolicy::HashOnly,
             },
             object: commit::SourceObjectUpdate {
@@ -1804,6 +1845,43 @@ mod tests {
             telemetry.snapshot(0).checkpoint.attempts,
             0,
             "an empty WAL stays below both live and bootstrap thresholds"
+        );
+    }
+
+    #[test]
+    fn reader_free_bootstrap_checkpoint_copies_and_reclaims_the_wal() {
+        let dir = tempdir().unwrap();
+        let database = dir.path().join("reader-free-checkpoint.db");
+        let connection = open_writer(&database).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE checkpoint_fixture(value BLOB NOT NULL); \
+                 BEGIN IMMEDIATE; \
+                 INSERT INTO checkpoint_fixture(value) VALUES (zeroblob(1048576)); \
+                 COMMIT;",
+            )
+            .unwrap();
+
+        let mut wal_path = database.as_os_str().to_os_string();
+        wal_path.push("-wal");
+        let wal_path = PathBuf::from(wal_path);
+        assert!(
+            std::fs::metadata(&wal_path)
+                .map(|metadata| metadata.len())
+                .unwrap_or_default()
+                > 0,
+            "fixture must create WAL frames before the checkpoint"
+        );
+
+        let checkpoint = reader_free_checkpoint(&connection).unwrap();
+        assert!(!checkpoint.busy, "{checkpoint:?}");
+        assert_eq!(checkpoint.remaining_frames, 0);
+        assert_eq!(
+            std::fs::metadata(wal_path)
+                .map(|metadata| metadata.len())
+                .unwrap_or_default(),
+            0,
+            "reader-free TRUNCATE must reclaim the WAL"
         );
     }
 

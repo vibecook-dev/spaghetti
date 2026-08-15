@@ -110,7 +110,10 @@ import type { SqliteService } from '../io/index.js';
 // streams, and removal of the unused wide fact entity/kind index.
 // v41: canonical FTS uses a filtered external-content view so FTS5 integrity
 // checks cover exactly the non-empty searchable canonical-message subset.
-export const SCHEMA_VERSION = 41;
+// v42: canonical normalized message content uses bounded versioned zstd
+// storage and is decoded only for bounded detail/timeline pages.
+export const SCHEMA_VERSION = 42;
+const MESSAGE_CONTENT_CODEC_MIGRATION_VERSION = 41;
 
 export const TOKEN_ACTIVITY_TRIGGER_NAMES = [
   'token_activity_messages_ai',
@@ -880,6 +883,7 @@ CREATE TABLE IF NOT EXISTS canonical_messages (
   native_kind TEXT NOT NULL,
   role TEXT NOT NULL,
   content_json BLOB NOT NULL,
+  content_json_codec TEXT NOT NULL DEFAULT 'identity',
   source_time TEXT,
   source_time_quality TEXT,
   parent_native_message_id TEXT,
@@ -2061,7 +2065,8 @@ const CURRENT_TABLES = [
  * Initialize the database schema, migrating from older versions if necessary.
  *
  * - Creates `schema_meta` table if it doesn't exist
- * - If the stored version !== SCHEMA_VERSION, drops ALL old + current tables and recreates
+ * - Migrates the additive v41 -> v42 content-codec column in place
+ * - For every other stale version, drops ALL old + current tables and recreates
  * - Inserts / updates the version to SCHEMA_VERSION
  */
 export function initializeSchema(db: SqliteService): void {
@@ -2069,7 +2074,26 @@ export function initializeSchema(db: SqliteService): void {
   db.exec('CREATE TABLE IF NOT EXISTS schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)');
 
   const row = db.get<{ value: string }>(`SELECT value FROM schema_meta WHERE key = 'version'`);
-  const currentVersion = row ? parseInt(row.value, 10) : 0;
+  let currentVersion = row ? parseInt(row.value, 10) : 0;
+
+  // Existing v41 bytes are identity-encoded by definition. Adding a constant
+  // default changes only SQLite schema metadata, so do not discard and
+  // re-ingest a multi-gigabyte compatible cache for this transition.
+  if (currentVersion === MESSAGE_CONTENT_CODEC_MIGRATION_VERSION) {
+    try {
+      db.exec('BEGIN IMMEDIATE');
+      db.exec("ALTER TABLE canonical_messages ADD COLUMN content_json_codec TEXT NOT NULL DEFAULT 'identity'");
+      db.run(`UPDATE schema_meta SET value = ? WHERE key = 'version'`, String(SCHEMA_VERSION));
+      db.exec('COMMIT');
+      currentVersion = SCHEMA_VERSION;
+    } catch {
+      try {
+        db.exec('ROLLBACK');
+      } catch {
+        /* fall through to the rebuild path */
+      }
+    }
+  }
 
   if (currentVersion !== SCHEMA_VERSION) {
     // Drop all legacy tables from previous schema versions

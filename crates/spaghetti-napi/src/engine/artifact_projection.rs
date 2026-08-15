@@ -41,7 +41,6 @@ struct ContentAssertion {
     native_artifact_id: String,
     native_file_hash: String,
     version: i64,
-    content: Vec<u8>,
     size_bytes: i64,
     content_digest: Vec<u8>,
     assertion_digest: Vec<u8>,
@@ -76,23 +75,35 @@ pub(super) fn apply_artifact_facts(
     if context.skip_unowned_replace_document(has_metadata_fact || has_content_fact) {
         return Ok(Vec::new());
     }
-    let metadata_artifacts = source_object_keys(
-        transaction,
-        r#"
-        SELECT DISTINCT metadata.artifact_key
-        FROM artifact_metadata_assertions AS metadata
-        JOIN artifact_snapshot_assertions AS snapshot ON snapshot.fact_id = metadata.fact_id
-        WHERE snapshot.source_object_id = ?1
-        "#,
-        object_id,
-        "read source-owned artifact metadata",
-    )?;
-    let content_artifacts = source_object_keys(
-        transaction,
-        "SELECT DISTINCT artifact_key FROM artifact_content_assertions WHERE source_object_id = ?1",
-        object_id,
-        "read source-owned artifact content",
-    )?;
+    // A source object allocated by this commit cannot own old assertions.
+    // The production corpus contains tens of thousands of one-fact backup
+    // documents, so avoiding two ownership probes on their first (and usually
+    // only) commit removes a large number of tiny indexed reads.
+    let metadata_artifacts = if context.object_is_new {
+        BTreeSet::new()
+    } else {
+        source_object_keys(
+            transaction,
+            r#"
+            SELECT DISTINCT metadata.artifact_key
+            FROM artifact_metadata_assertions AS metadata
+            JOIN artifact_snapshot_assertions AS snapshot ON snapshot.fact_id = metadata.fact_id
+            WHERE snapshot.source_object_id = ?1
+            "#,
+            object_id,
+            "read source-owned artifact metadata",
+        )?
+    };
+    let content_artifacts = if context.object_is_new {
+        BTreeSet::new()
+    } else {
+        source_object_keys(
+            transaction,
+            "SELECT DISTINCT artifact_key FROM artifact_content_assertions WHERE source_object_id = ?1",
+            object_id,
+            "read source-owned artifact content",
+        )?
+    };
     // Append metadata needs no work on a same-generation batch that contains
     // no metadata. Replaceable content still needs an empty deletion commit,
     // while old append metadata is retracted on generation replacement.
@@ -127,7 +138,7 @@ pub(super) fn apply_artifact_facts(
                 sqlite_error("retract replaced artifact metadata generation", error)
             })?;
     }
-    if touches_content {
+    if touches_content && !context.object_is_new {
         transaction
             .execute(
                 "DELETE FROM artifact_content_assertions WHERE source_object_id = ?1",
@@ -163,7 +174,7 @@ pub(super) fn apply_artifact_facts(
 
     // Canonical rows now reference the surviving decisive assertions (or have
     // been removed), so superseded audit facts can be deleted safely.
-    if touches_content {
+    if touches_content && !context.object_is_new {
         transaction
             .execute(
                 r#"
@@ -526,7 +537,12 @@ fn reduce_artifact(
                 decisive_metadata.map(|assertion| assertion.backup_time.as_str()),
                 decisive_metadata.map(|assertion| assertion.backup_time_quality.as_str()),
                 capture_status,
-                decisive_content.map(|assertion| assertion.content.as_slice()),
+                // The decisive assertion is already the durable content
+                // owner. Keep the nullable compatibility column empty on new
+                // databases and have the query join through
+                // decisive_content_fact_id instead of writing every backup
+                // BLOB into SQLite twice.
+                Option::<&[u8]>::None,
                 decisive_content.map(|assertion| assertion.size_bytes),
                 decisive_content.map(|assertion| assertion.content_digest.as_slice()),
                 content_status,
@@ -605,8 +621,7 @@ fn read_content_assertions(
         .prepare(
             r#"
             SELECT fact_id, session_key, native_artifact_id, native_file_hash,
-                   version, content, size_bytes, content_digest,
-                   assertion_digest
+                   version, size_bytes, content_digest, assertion_digest
             FROM artifact_content_assertions
             WHERE artifact_key = ?1
             ORDER BY fact_id
@@ -621,10 +636,9 @@ fn read_content_assertions(
                 native_artifact_id: row.get(2)?,
                 native_file_hash: row.get(3)?,
                 version: row.get(4)?,
-                content: row.get(5)?,
-                size_bytes: row.get(6)?,
-                content_digest: row.get(7)?,
-                assertion_digest: row.get(8)?,
+                size_bytes: row.get(5)?,
+                content_digest: row.get(6)?,
+                assertion_digest: row.get(7)?,
             })
         })
         .map_err(|error| sqlite_error("read artifact content reduction", error))?

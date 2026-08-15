@@ -129,13 +129,17 @@ pub(super) fn apply_persisted_tool_result_facts(
     if context.skip_unowned_replace_document(has_result_fact) && changed_references.is_empty() {
         return Ok(Vec::new());
     }
-    let mut affected_results = source_object_result_keys(transaction, object_id)?;
+    let mut affected_results = if context.object_is_new {
+        BTreeSet::new()
+    } else {
+        source_object_result_keys(transaction, object_id)?
+    };
     let owns_result_document = has_result_fact || !affected_results.is_empty();
     affected_results.extend(result_keys_for_references(transaction, changed_references)?);
 
     // Each immediate .txt file is one complete replace-document object. An
     // empty batch on confirmed absence retracts only that object's assertion.
-    if owns_result_document {
+    if owns_result_document && !context.object_is_new {
         transaction
             .execute(
                 "DELETE FROM persisted_tool_result_assertions WHERE source_object_id = ?1",
@@ -166,7 +170,7 @@ pub(super) fn apply_persisted_tool_result_facts(
 
     // The canonical foreign key now points only at a surviving decisive fact.
     // Transcript-only correlation does not own a replaceable sidecar.
-    if owns_result_document {
+    if owns_result_document && !context.object_is_new {
         transaction
             .execute(
                 r#"
@@ -339,7 +343,7 @@ fn reduce_result(
             )
             SELECT result_key, session_key, project_key, native_project_key,
                    native_session_id, native_tool_use_id, native_document_path,
-                   content, size_bytes, ?2, ?3, ?4, ?5, fact_id, ?6, ?7,
+                   '', size_bytes, ?2, ?3, ?4, ?5, fact_id, ?6, ?7,
                    ?8, ?9, ?10, ?11
             FROM persisted_tool_result_assertions WHERE fact_id = ?1
             ON CONFLICT(result_key) DO UPDATE SET
@@ -453,6 +457,9 @@ fn result_keys_for_references(
     transaction: &Transaction<'_>,
     references: &BTreeSet<ToolReferenceKey>,
 ) -> Result<BTreeSet<Vec<u8>>, EngineError> {
+    if references.is_empty() {
+        return Ok(BTreeSet::new());
+    }
     let mut keys = BTreeSet::new();
     let mut statement = transaction
         .prepare(

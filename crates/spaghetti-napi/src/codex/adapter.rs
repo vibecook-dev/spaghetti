@@ -1416,7 +1416,11 @@ mod tests {
                 r#"{{"type":"not_a_codex_kind","timestamp":"2026-01-01T00:00:00.{index:03}Z"}}"#
             ));
         }
-        fs::write(day.join("rollout-diagnostics.jsonl"), lines.join("\n") + "\n").unwrap();
+        fs::write(
+            day.join("rollout-diagnostics.jsonl"),
+            lines.join("\n") + "\n",
+        )
+        .unwrap();
 
         let temp = TempDir::new().unwrap();
         let database_path = temp.path().join("codex-diagnostics.sqlite");

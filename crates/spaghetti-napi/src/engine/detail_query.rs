@@ -478,7 +478,7 @@ pub(super) fn read_message_page(
                        CASE WHEN cm.source_time IS NULL THEN 1 ELSE 0 END
                            AS untimed_rank,
                        COALESCE(cm.source_time, '') AS sort_time,
-                       cm.raw_json_codec
+                       cm.raw_json_codec, cm.content_json_codec
                 FROM canonical_messages cm
                 JOIN canonical_sessions cs ON cs.session_key = cm.session_key
                 JOIN fact_records fr ON fr.fact_id = cm.fact_id
@@ -493,7 +493,7 @@ pub(super) fn read_message_page(
                    source_generation, last_commit_seq, adapter_id,
                    source_instance_id, observed_at, native_session_id,
                    native_project_key, untimed_rank, sort_time,
-                   raw_json_codec
+                   raw_json_codec, content_json_codec
             FROM message_rows
             WHERE (?3 = 0)
                OR untimed_rank > ?4
@@ -591,7 +591,14 @@ fn decode_message_row(row: &Row<'_>) -> Result<MessageRow, EngineError> {
     let message_key: Vec<u8> = query_get(row, 0, "decode message key")?;
     let session_key: Vec<u8> = query_get(row, 1, "decode message session key")?;
     let project_key: Vec<u8> = query_get(row, 2, "decode message project key")?;
-    let content_json: Vec<u8> = query_get(row, 6, "decode canonical message content")?;
+    let stored_content_json: Vec<u8> = query_get(row, 6, "read canonical message content")?;
+    let content_json_codec: String = query_get(row, 25, "read canonical message content codec")?;
+    let content_json = storage_codec::decode(
+        &content_json_codec,
+        &stored_content_json,
+        MAX_MESSAGE_PAGE_PAYLOAD_BYTES as usize,
+        "decode canonical message content",
+    )?;
     let stored_raw_json: Vec<u8> = query_get(row, 12, "read native message payload")?;
     let raw_json_codec: String = query_get(row, 24, "read native message payload codec")?;
     let raw_json = storage_codec::decode(

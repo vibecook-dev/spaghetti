@@ -22,6 +22,7 @@ import { SourceBadge } from './SourceBadge.js';
 import { ArchiveTranscript } from './ArchiveTranscript.js';
 import { MessageFilterBar, useMessageFilters, countTimelineMessages, filterTimelineMessages } from './filters/index.js';
 import { Btn, LiveDot, Spinner } from './ui.js';
+import { attachCrossPageToolResults, prependTimelinePage, reconcileTimelineTail } from '../lib/timeline-pages.js';
 
 type AnyMsg = Record<string, unknown>;
 
@@ -30,37 +31,6 @@ const NEAR_TOP_PX = 80;
 const NEAR_BOTTOM_PX = 140;
 const LIVE_DEBOUNCE_MS = 80;
 const BRANCH_PAGE_SIZE = 80;
-const timelineFingerprintCache = new WeakMap<object, string>();
-
-function timelineFingerprint(message: ChatSessionMessage): string {
-  const cached = timelineFingerprintCache.get(message);
-  if (cached) return cached;
-  let fingerprint: string;
-  try {
-    fingerprint = JSON.stringify(message);
-  } catch {
-    fingerprint = `${message.timelineId}:${message.timestamp}:${message.type}:${message.content ?? ''}`;
-  }
-  timelineFingerprintCache.set(message, fingerprint);
-  return fingerprint;
-}
-
-/** Preserve object identity for unchanged rows so virtualized Markdown does not re-render. */
-function reconcileTimeline(
-  current: readonly ChatSessionMessage[],
-  incoming: readonly ChatSessionMessage[],
-): ChatSessionMessage[] {
-  const byId = new Map(
-    incoming.filter((message) => message.timelineId).map((message) => [message.timelineId, message]),
-  );
-  const currentIds = new Set(current.map((message) => message.timelineId).filter(Boolean));
-  const preserved = current.map((previous) => {
-    const next = previous.timelineId ? byId.get(previous.timelineId) : undefined;
-    return next && timelineFingerprint(previous) !== timelineFingerprint(next) ? next : previous;
-  });
-  const additions = incoming.filter((message) => !message.timelineId || !currentIds.has(message.timelineId));
-  return [...preserved, ...additions];
-}
 
 interface BranchPageState {
   messages: ChatSessionMessage[];
@@ -134,7 +104,7 @@ export function SessionMessagesView({
   const [branchPages, setBranchPages] = useState<Map<string, BranchPageState>>(() => new Map());
   const [pendingBranchScroll, setPendingBranchScroll] = useState<string | null>(null);
 
-  const cursorRef = useRef<number | undefined>(undefined);
+  const cursorRef = useRef<string | number | undefined>(undefined);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const prevScrollHeightRef = useRef(0);
   const isPrependingRef = useRef(false);
@@ -151,6 +121,7 @@ export function SessionMessagesView({
   const liveRefreshSeqRef = useRef(0);
   const liveNeedsSubagentRefreshRef = useRef(false);
   const activeStreamIdRef = useRef<string | null>(null);
+  const initialStreamPendingRef = useRef(!debugMessages);
   const lastActiveRevisionRef = useRef(0);
   const preOpenActiveChangeRef = useRef<ActiveSessionChange | null>(null);
   const requestLiveRefreshRef = useRef<(refreshSubagents: boolean, reset: boolean) => void>(() => {});
@@ -163,7 +134,7 @@ export function SessionMessagesView({
       {
         messages: ChatSessionMessage[];
         pageMeta: Pick<TimelinePage, 'total' | 'hasMore'>;
-        cursor?: number;
+        cursor?: string | number;
         scrollTop: number;
       }
     >(),
@@ -314,7 +285,7 @@ export function SessionMessagesView({
   );
 
   const chatMessages = useMemo(() => {
-    if (!debugMessages) return timeline;
+    if (!debugMessages) return attachCrossPageToolResults(timeline);
     return filterTimelineMessages({
       messages: debugTimeline,
       visibleTypes,
@@ -434,6 +405,7 @@ export function SessionMessagesView({
     totalRef.current = 0;
     cacheRef.current.clear();
     activeQueryKeyRef.current = '';
+    initialStreamPendingRef.current = !debugMessages;
     setFacets(null);
     setSubagents([]);
     setExpandedBranchToolIds(new Set());
@@ -443,7 +415,7 @@ export function SessionMessagesView({
     setPendingNew(0);
     setError(null);
     resetFilters();
-  }, [session.sessionId, resetFilters]);
+  }, [session.sessionId, resetFilters, debugMessages]);
 
   // Register the sole visible transcript in the UtilityProcess before using
   // its snapshot. Later commits are source-aware stream notifications, so
@@ -453,10 +425,12 @@ export function SessionMessagesView({
     let cancelled = false;
     let openedStreamId: string | null = null;
     const queryKeyAtOpen = queryKey;
+    initialStreamPendingRef.current = true;
     void window.spaghetti
       .openSessionStream(projectSlug, session.sessionId, { sourceId, limit: PAGE_SIZE })
       .then((snapshot) => {
         openedStreamId = snapshot.streamId;
+        initialStreamPendingRef.current = false;
         if (cancelled) {
           void window.spaghetti.closeSessionStream(snapshot.streamId);
           return;
@@ -484,7 +458,11 @@ export function SessionMessagesView({
         }
       })
       .catch((e: unknown) => {
-        if (!cancelled) setError(String(e));
+        initialStreamPendingRef.current = false;
+        if (!cancelled) {
+          setError(String(e));
+          setLoading(false);
+        }
       });
     return () => {
       cancelled = true;
@@ -492,22 +470,6 @@ export function SessionMessagesView({
       lastActiveRevisionRef.current = 0;
       preOpenActiveChangeRef.current = null;
       if (openedStreamId) void window.spaghetti.closeSessionStream(openedStreamId);
-    };
-  }, [debugMessages, projectSlug, session.sessionId, sourceId]);
-
-  useEffect(() => {
-    if (debugMessages) return;
-    let cancelled = false;
-    void window.spaghetti
-      .getSessionSubagents(projectSlug, session.sessionId, { sourceId, includeNested: true })
-      .then((threads) => {
-        if (!cancelled) setSubagents(threads);
-      })
-      .catch((e: unknown) => {
-        if (!cancelled) setError(String(e));
-      });
-    return () => {
-      cancelled = true;
     };
   }, [debugMessages, projectSlug, session.sessionId, sourceId]);
 
@@ -570,7 +532,7 @@ export function SessionMessagesView({
 
     if (thread.spawnToolId) {
       void (async () => {
-        let before: number | undefined;
+        let before: string | number | undefined;
         let accumulated: ChatSessionMessage[] = [];
         // Search navigation must also reveal an old parent Task that is not in
         // the newest page. Walk in large DB pages, stopping as soon as its
@@ -582,7 +544,7 @@ export function SessionMessagesView({
             before,
           });
           const parentMessages = parentPage.messages as ChatSessionMessage[];
-          accumulated = [...parentMessages, ...accumulated];
+          accumulated = parentPage.snapshotReset ? parentMessages : [...parentMessages, ...accumulated];
           const found = parentMessages.some(
             (message) => message.type === 'tool_use' && message.toolUse?.toolId === toolUseId,
           );
@@ -618,25 +580,6 @@ export function SessionMessagesView({
     setBranchPages(new Map());
   }, [queryKey]);
 
-  // Session-wide facets come from normalized DB rows, never the loaded page.
-  useEffect(() => {
-    let cancelled = false;
-    if (debugMessages) {
-      return;
-    }
-    void (async () => {
-      try {
-        const next = await window.spaghetti.getSessionTimelineFacets(projectSlug, session.sessionId, { sourceId });
-        if (!cancelled) setFacets(next);
-      } catch (e: unknown) {
-        if (!cancelled) setError(String(e));
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [projectSlug, session.sessionId, sourceId, debugMessages]);
-
   // Query-keyed pages: changing solo/mute/search starts a DB query across the
   // entire session. Returning to a prior key restores its page and scroll.
   useEffect(() => {
@@ -657,6 +600,10 @@ export function SessionMessagesView({
       });
     }
     activeQueryKeyRef.current = queryKey;
+    if (!previousKey && initialStreamPendingRef.current) {
+      setLoading(true);
+      return;
+    }
     const cached = cacheRef.current.get(queryKey);
     if (cached) {
       setTimeline(cached.messages);
@@ -713,19 +660,23 @@ export function SessionMessagesView({
         if (nearBottomRef.current) {
           shouldScrollToBottomRef.current = true;
           scrollToBottomBehaviorRef.current = 'smooth';
-          setTimeline((current) =>
-            reset
-              ? (page.messages as ChatSessionMessage[])
-              : reconcileTimeline(current, page.messages as ChatSessionMessage[]),
-          );
-          setPageMeta({ total: page.total, hasMore: page.hasMore });
-          cursorRef.current = page.nextCursor;
+          setTimeline((current) => {
+            if (reset || current.length === 0) {
+              cursorRef.current = page.nextCursor;
+              return page.messages as ChatSessionMessage[];
+            }
+            return reconcileTimelineTail(current, page.messages as ChatSessionMessage[]);
+          });
+          setPageMeta((current) => ({
+            total: page.total,
+            hasMore: reset ? page.hasMore : (current?.hasMore ?? page.hasMore),
+          }));
           setPendingNew(0);
         } else {
           setTimeline((current) =>
             reset
               ? (page.messages as ChatSessionMessage[])
-              : reconcileTimeline(current, page.messages as ChatSessionMessage[]),
+              : reconcileTimelineTail(current, page.messages as ChatSessionMessage[]),
           );
           setPageMeta((current) => ({ total: page.total, hasMore: current?.hasMore ?? page.hasMore }));
           if (delta > 0) setPendingNew((count) => count + delta);
@@ -857,9 +808,21 @@ export function SessionMessagesView({
         before: cursorRef.current,
       });
 
+      if (page.snapshotReset) {
+        isPrependingRef.current = false;
+        shouldScrollToBottomRef.current = true;
+        scrollToBottomBehaviorRef.current = 'auto';
+        setTimeline(page.messages as ChatSessionMessage[]);
+        setPageMeta({ total: page.total, hasMore: page.hasMore });
+        cursorRef.current = page.nextCursor;
+        totalRef.current = page.total;
+        setError(null);
+        return;
+      }
+
       if (page.messages.length > 0) {
         isPrependingRef.current = true;
-        setTimeline((prev) => [...(page.messages as ChatSessionMessage[]), ...prev]);
+        setTimeline((prev) => prependTimelinePage(prev, page.messages as ChatSessionMessage[]));
         setPageMeta({ total: page.total, hasMore: page.hasMore });
         cursorRef.current = page.nextCursor;
         totalRef.current = page.total;

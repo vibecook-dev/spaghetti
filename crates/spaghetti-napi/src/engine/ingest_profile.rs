@@ -41,7 +41,11 @@ impl IngestProfileSkip {
 
     fn from_tokens(raw: &str) -> Self {
         let mut skip = Self::default();
-        for token in raw.split(',').map(str::trim).filter(|token| !token.is_empty()) {
+        for token in raw
+            .split(',')
+            .map(str::trim)
+            .filter(|token| !token.is_empty())
+        {
             match token {
                 "checkpoints" => skip.checkpoints = true,
                 "finalize" => skip.finalize = true,

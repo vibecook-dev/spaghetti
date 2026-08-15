@@ -341,6 +341,10 @@ impl PollingPolicy {
         self.watcher_failures >= self.failures_before_fallback
     }
 
+    pub fn has_incomplete_tail(&self) -> bool {
+        self.has_incomplete_tail
+    }
+
     pub fn next_delay_ms(&self, now_ms: u64) -> u64 {
         if self.has_incomplete_tail {
             self.incomplete_retry_ms

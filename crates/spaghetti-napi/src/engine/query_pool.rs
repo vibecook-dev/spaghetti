@@ -3520,6 +3520,7 @@ mod tests {
                 decoder_key: "fixture".to_string(),
                 stream_state: "available".to_string(),
                 last_reconciled_at: None,
+                consistency: crate::adapter::ConsistencyPolicy::IncrementalCursor,
                 retention: crate::adapter::RawRetentionPolicy::Full,
             },
             object: SourceObjectUpdate {

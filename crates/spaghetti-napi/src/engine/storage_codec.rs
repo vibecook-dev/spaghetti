@@ -1,8 +1,8 @@
 //! Versioned compression for large, opaque SQLite payloads.
 //!
-//! JSON used by projections stays plain JSON. Only payloads that are read as
-//! whole blobs cross this boundary, and every compressed column stores its
-//! codec beside it so old identity rows remain readable.
+//! Large values read as bounded whole blobs cross this boundary. Every
+//! compressed column stores its codec beside it so identity rows remain
+//! readable and query code can enforce a decoded-size limit.
 
 use super::EngineError;
 

@@ -1,7 +1,7 @@
 # RFC 011 performance optimization design and execution plan
 
-Status: implementation and local release validation complete on 2026-08-13;
-maintainer release-policy review remains external
+Status: original implementation accepted on 2026-08-13; corpus-shaped follow-up
+optimization and final frozen-corpus rerun in progress on 2026-08-14
 
 This record turns the RFC 010/011 performance requirements into a reproducible
 baseline, documents the production-path findings and rejected spikes, and
@@ -460,6 +460,73 @@ reconcile, generation-replacement, and restart semantics. On the frozen 3.86
 GB corpus, ready remains equal to convergence at 574.80 seconds with zero
 retries, and the database is 6.1% smaller.
 
+### F18 — the frozen corpus rejects oversized physical transactions
+
+The next corpus-shaped profile reached 285.9 seconds for 1,118,236 records,
+5,166,425 facts, 34,909 logical commits, 424 physical transactions, and
+9,701,080 SQLite row changes. Source reads and decoding still overlapped the
+writer and accounted for only 27.5 and 31.9 seconds. Physical transactions,
+checkpoints, finalization, and projection writes remained the limiting path.
+
+A controlled attempt to keep more objects resident, wait longer for group
+formation, and admit up to 131,072 facts per physical transaction reduced the
+physical transaction count from 424 to 164 but regressed wall time from 285.9
+to 379.75 seconds. Physical transaction time rose to 201.8 seconds, SQLite
+commit time to 84.2 seconds, checkpoints to 129.2 seconds, finalization to 58.9
+seconds, and peak RSS to 5.55 GiB. This is direct evidence that fewer/larger
+transactions are not intrinsically better for the production database and
+that the single-object synthetic gate cannot choose corpus transaction policy.
+The experiment was reverted in full.
+
+### F19 — larger pages and exclusive bootstrap locking lost their gates
+
+An 8 KiB page-size spike reduced a 131k/4,096-object database from 613.4 MiB to
+589.3 MiB but slowed it from 14.88 to 15.68 seconds. The default 4 KiB page size
+therefore remains selected. A bootstrap-only `locking_mode=EXCLUSIVE` /
+`cache_spill=OFF` spike failed the query-bootstrap lifecycle test because the
+writer retained a lock when the read pool configured its page cache. It was
+also reverted; startup correctness is not traded for a speculative lock
+optimization.
+
+### F20 — Claude repeated object declarations on every transcript record
+
+Claude differed from the Codex and Grok adapters by emitting a `SessionFact`
+and `RunFact` on almost every transcript line, plus a `DelegationFact` on every
+subagent line. Those are object declarations, not distinct per-message
+observations. A fixed 67-byte, versioned decoder state now emits each
+declaration once per object generation, while still emitting session
+enrichment when cwd, branch, first prompt, or title metadata changes. Message,
+usage, activity-evidence, raw-retention, cursor, and provenance behavior stays
+unchanged. The Claude contract version is bumped so existing objects replay
+from a safe generation boundary.
+
+On the 131,072-record/4,096-object gate, facts fell from 589,824 to 335,872,
+SQLite row changes from 1,081,773 to about 827,900, database size from 613.2 to
+557.1 MiB, and peak RSS from 1,536 to about 1,419 MiB. The first controlled run
+improved from 16.38 to 14.45 seconds; a subsequent three-run median was 13.16
+seconds. The one-object continuation improved from about 18.9 to 12.41
+seconds. A 100-sample one-record live run remained well inside the RFC gate at
+p50 1.6 ms and p99 7.2 ms. Small and medium Claude differentials are exact
+across cold, live, reconcile, generation replacement, and restart.
+
+Making the declarations stateful exposed two correctness bugs that are now
+fixed. An overflow split could previously commit decoder state from the next,
+not-yet-committed record; the state/cursor boundary now uses the state before
+that record. Parent and subagent transcripts could also race to own a shared
+session row; the reducer now deterministically prefers the parent transcript
+and uses stable object identity for peer ties.
+
+### F21 — disk pressure currently invalidates a new frozen-corpus claim
+
+The reference volume is 99% full with only about 14 GiB available. A retained
+private benchmark directory occupies about 20 GiB, including two stale ~8.4
+GiB derived databases. SQLite commit, checkpoint, and finalization timing at
+that free-space level is not comparable to earlier runs, and a fresh complete
+database plus WAL cannot be created with a safe reserve. The declaration-state
+change therefore remains accepted on synthetic, live, and differential gates,
+but its frozen-corpus wall-clock claim is pending explicit cleanup approval and
+an identical rerun.
+
 ## Controlled spikes and decisions
 
 | Spike                                                                                               | Result                                                                                                                                       | Decision                                                                                                                  |
@@ -485,6 +552,10 @@ retries, and the database is 6.1% smaller.
 | Omit the unconsumed generic-ledger entity-key copy                                                  | Entity-only 64k spike was runtime-neutral; DB 375.5 -> 342.9 MiB (-8.7%); canonical/assertion keys and all source provenance remain          | Landed without a schema bump; existing rows remain compatible and reclaim space on rebuild                                |
 | Batch fact, canonical-message, and new content-block writes                                         | Five-run 16k/64k medians 1.176/6.140 s (5.220x); 64k row changes ~1.14M -> 724,910 and WAL ~43 -> 22.3 MiB                                   | Landed with 512/256/512-row bounds and sequential fallback for replacements/duplicates                                    |
 | Repeat the optimized frozen-corpus gate                                                             | 574.80 s ready/converged, complete identical counts, zero retries, 9,214.1 MiB DB                                                            | Accepted; 9.4% faster and 6.1% smaller than the first truthful reference                                                  |
+| Enlarge corpus physical groups and pipeline more objects                                            | Frozen corpus regressed 285.9 -> 379.75 s despite 424 -> 164 physical transactions; commit/checkpoint time and RSS rose sharply              | Rejected and reverted; transaction policy must be corpus-shaped, not selected by the single-object gate                  |
+| Raise SQLite page size from 4 KiB to 8 KiB                                                          | 131k/4,096 objects: DB 613.4 -> 589.3 MiB, time 14.88 -> 15.68 s                                                                             | Rejected; smaller storage did not compensate for slower ingestion                                                         |
+| Use exclusive locking and disable cache spill during bootstrap                                      | Native query-bootstrap lifecycle failed with `database is locked` while starting the read pool                                               | Rejected and reverted; normal locking remains mandatory at the readiness transition                                       |
+| Emit Claude object declarations once per generation                                                | 131k/4,096 objects: 589,824 -> 335,872 facts, 613.2 -> 557.1 MiB, 16.38 -> 14.45 s first-run; repeat median 13.16 s; live p99 7.2 ms        | Landed behind Claude contract v16 with bounded state, exact small/medium differentials, and deterministic parent ownership |
 
 The bulk spike is deliberately not exposed as a production flag. Its lifecycle
 is incomplete until crash recovery, reader quiescence, durable readiness, FTS
@@ -753,6 +824,27 @@ gates pass.
 Local implementation acceptance is complete. Publication of private reports,
 portable absolute thresholds, scale-50 policy, and the final release decision
 remain maintainer-owned policy inputs rather than code gaps.
+
+### P6 — production-corpus follow-up (in progress)
+
+- complete: reject oversized physical groups on the complete frozen corpus;
+- complete: reject 8 KiB pages and exclusive bootstrap locking on their
+  correctness/performance gates;
+- complete: remove repeated Claude session/run/delegation declarations with
+  bounded durable decoder state;
+- complete: make append overflow state/cursor commits atomic and shared Claude
+  session ownership deterministic;
+- complete: pass native tests, small/medium five-mode differentials, the
+  131k/4,096-object gate, and the 100-sample live gate;
+- pending: recover adequate free space, then rerun the identical frozen corpus
+  with reader-free bootstrap checkpointing and contract v16;
+- pending: compare complete canonical counts/digests, row changes, DB/WAL size,
+  physical transaction/checkpoint/finalize time, and peak RSS before making a
+  new production acceptance claim.
+
+Exit: a complete, zero-retry frozen-corpus run has ready equal to convergence,
+semantic parity, a safe disk reserve, and a material wall-clock improvement
+over the 285.9-second reference.
 
 ## Research basis
 

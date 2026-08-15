@@ -205,6 +205,11 @@ describe('multi-adapter observation host', { skip: !native }, () => {
       'codex',
       'grok',
     ]);
+    for (const project of projects) {
+      if (!project.absolutePath) continue;
+      assert.equal(project.folderName, path.basename(project.absolutePath));
+      assert.ok(!project.folderName.startsWith('-tmp-'), `${project.folderName} is a display name, not an encoded cwd`);
+    }
 
     for (const sourceId of ['claude-code', 'codex', 'grok']) {
       const project = projects.find((candidate) => candidate.sourceIds.includes(sourceId));
@@ -230,6 +235,34 @@ describe('multi-adapter observation host', { skip: !native }, () => {
 
     const codexProject = projects.find((project) => project.sourceIds.includes('codex'))!;
     const codexSessions = await service.getSessionList(codexProject, { sourceId: 'codex' });
+    const timelineSession = [...codexSessions].sort((a, b) => b.messageCount - a.messageCount)[0]!;
+    const firstTimelinePage = await service.getSessionTimeline(timelineSession.projectSlug, timelineSession.sessionId, {
+      sourceId: 'codex',
+      limit: 1,
+    });
+    assert.ok(firstTimelinePage.messages.length > 0);
+    assert.ok(firstTimelinePage.facets);
+    assert.equal(firstTimelinePage.facets.total, firstTimelinePage.total);
+    assert.equal(typeof firstTimelinePage.nextCursor, 'string', 'production timelines use Rust keyset cursors');
+    const secondTimelinePage = await service.getSessionTimeline(
+      timelineSession.projectSlug,
+      timelineSession.sessionId,
+      { sourceId: 'codex', limit: 1, before: firstTimelinePage.nextCursor },
+    );
+    assert.ok(secondTimelinePage.messages.length > 0);
+    assert.notEqual(secondTimelinePage.messages[0]?.timelineId, firstTimelinePage.messages[0]?.timelineId);
+    const facets = await service.getSessionTimelineFacets(timelineSession.projectSlug, timelineSession.sessionId, {
+      sourceId: 'codex',
+    });
+    assert.ok(facets.total >= firstTimelinePage.total);
+
+    const activity = await service.getProjectTokenActivity(codexProject, {
+      sourceId: 'codex',
+      from: '2025-08-14',
+      to: '2026-08-14',
+    });
+    assert.ok(activity.days.length > 0, 'the maximum RFC activity window remains queryable');
+
     const rename = codexSessions.find((session) => session.sessionId.includes('019c0001'))!;
     assert.ok(rename);
     const scoped = await service.search({

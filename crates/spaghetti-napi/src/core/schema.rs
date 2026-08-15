@@ -4,15 +4,16 @@
 //! - The full DDL for the Phase 3 dedicated-table schema (core entities,
 //!   indexes, the `search_fts` FTS5 virtual table + content-synced triggers).
 //! - The `SCHEMA_VERSION` constant and `schema_meta`-based version tracking.
-//! - [`initialize_schema`] which creates the schema on a fresh database or
-//!   wipes and rebuilds if the stored version is missing or stale.
+//! - [`initialize_schema`] which creates the schema on a fresh database,
+//!   applies explicitly reviewed compatible migrations, or wipes and rebuilds
+//!   an unknown/stale layout.
 //! - [`set_pragmas`] which applies the same connection-level PRAGMAs the TS
 //!   [`SqliteService`](../../../../packages/sdk/src/io/sqlite-service.ts) sets
 //!   on open.
 //!
-//! Bumping [`SCHEMA_VERSION`] forces a wipe-and-rebuild on the next warm
-//! start. RFC 003 explicitly calls for wipe-on-stale rather than incremental
-//! migrations, so this module mirrors that behaviour exactly.
+//! Schema versions remain wipe-on-stale by default. A version is migrated in
+//! place only when the transition is explicitly allow-listed below and proven
+//! not to reinterpret existing durable rows.
 
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior};
 use thiserror::Error;
@@ -76,8 +77,8 @@ const CANONICAL_FTS_TRIGGERS: &[&str] = &[
     "canonical_messages_search_au",
 ];
 
-/// The current schema version. Bumping this forces a wipe-and-rebuild of all
-/// tables on the next call to [`initialize_schema`].
+/// The current schema version. Bumping this forces a wipe-and-rebuild unless
+/// the preceding version has an explicitly reviewed compatible migration.
 ///
 /// Keep in sync with `SCHEMA_VERSION` in `packages/sdk/src/data/schema.ts`.
 /// v5: `source_id` on source_files/projects/sessions/messages (default
@@ -158,7 +159,11 @@ const CANONICAL_FTS_TRIGGERS: &[&str] = &[
 /// v41: canonical FTS uses a filtered external-content view. This makes the
 /// FTS5 content-integrity contract match the intentionally searchable subset
 /// instead of treating NULL/empty canonical messages as missing documents.
-pub const SCHEMA_VERSION: u32 = 41;
+/// v42: canonical normalized message content uses the same bounded versioned
+/// zstd storage as lossless native payloads. Timeline/detail queries decode
+/// only their bounded page, reducing cold-ingest and checkpoint I/O.
+pub const SCHEMA_VERSION: u32 = 42;
+const MESSAGE_CONTENT_CODEC_MIGRATION_VERSION: u32 = 41;
 
 /// Full DDL for the current schema — lifted verbatim from the TS `SCHEMA_SQL`
 /// template literal. Whitespace differs; structure does not.
@@ -771,6 +776,7 @@ CREATE TABLE IF NOT EXISTS canonical_messages (
   native_kind TEXT NOT NULL,
   role TEXT NOT NULL,
   content_json BLOB NOT NULL,
+  content_json_codec TEXT NOT NULL DEFAULT 'identity',
   source_time TEXT,
   source_time_quality TEXT,
   parent_native_message_id TEXT,
@@ -2576,15 +2582,18 @@ pub fn current_schema_version(conn: &Connection) -> Result<Option<u32>, SchemaEr
 /// necessary.
 ///
 /// - Ensures `schema_meta` exists so the version can be read.
-/// - If the stored version is missing or `!= SCHEMA_VERSION`, drops all
-///   legacy + current tables (and their triggers) and rebuilds from
+/// - Migrates the explicitly compatible v41 -> v42 additive codec column in
+///   one transaction without discarding a multi-gigabyte derived cache.
+/// - If the stored version is otherwise missing or `!= SCHEMA_VERSION`, drops
+///   all legacy + current tables (and their triggers) and rebuilds from
 ///   [`SCHEMA_SQL`].
 /// - Otherwise, reruns [`SCHEMA_SQL`] (`IF NOT EXISTS` creates plus explicit
 ///   `DROP INDEX IF EXISTS` retirement statements are idempotent).
 /// - Writes the current [`SCHEMA_VERSION`] into `schema_meta` after a wipe.
 ///
-/// This mirrors the behaviour of `initializeSchema` in
-/// `packages/sdk/src/data/schema.ts` — wipe-on-stale, never incremental.
+/// This mirrors the compatible-migration allow-list in `initializeSchema` in
+/// `packages/sdk/src/data/schema.ts`; every transition not on that list stays
+/// wipe-on-stale.
 pub fn initialize_schema(conn: &Connection) -> Result<(), SchemaError> {
     // Ensure schema_meta exists so we can read the version.
     conn.execute_batch(
@@ -2592,8 +2601,9 @@ pub fn initialize_schema(conn: &Connection) -> Result<(), SchemaError> {
     )?;
 
     let current = current_schema_version(conn)?;
-
-    let rebuilt = current != Some(SCHEMA_VERSION);
+    let migrated = current == Some(MESSAGE_CONTENT_CODEC_MIGRATION_VERSION)
+        && migrate_message_content_codec(conn).is_ok();
+    let rebuilt = current != Some(SCHEMA_VERSION) && !migrated;
 
     if rebuilt {
         // Drop legacy tables from previous schema versions. Errors here are
@@ -2654,6 +2664,23 @@ pub fn initialize_schema(conn: &Connection) -> Result<(), SchemaError> {
     }
 
     Ok(())
+}
+
+/// v42 adds only a codec discriminator. Existing v41 content bytes are valid
+/// identity payloads, so SQLite can add the column with a constant default by
+/// changing schema metadata rather than rewriting or rebuilding the cache.
+/// The transaction also makes an interrupted upgrade remain recognizably v41.
+fn migrate_message_content_codec(conn: &Connection) -> Result<(), rusqlite::Error> {
+    let transaction = conn.unchecked_transaction()?;
+    transaction.execute_batch(
+        "ALTER TABLE canonical_messages \
+         ADD COLUMN content_json_codec TEXT NOT NULL DEFAULT 'identity'",
+    )?;
+    transaction.execute(
+        "UPDATE schema_meta SET value = ?1 WHERE key = 'version'",
+        [SCHEMA_VERSION.to_string()],
+    )?;
+    transaction.commit()
 }
 
 #[cfg(test)]
@@ -3377,6 +3404,55 @@ mod tests {
     }
 
     #[test]
+    fn v41_codec_migration_preserves_the_existing_cache() {
+        let conn = Connection::open_in_memory().expect("open in-memory db");
+        let v41_schema = SCHEMA_SQL.replace(
+            "  content_json_codec TEXT NOT NULL DEFAULT 'identity',\n",
+            "",
+        );
+        assert_ne!(
+            v41_schema, SCHEMA_SQL,
+            "v41 fixture did not remove the v42 column"
+        );
+        conn.execute_batch(&v41_schema).expect("install v41 schema");
+        conn.execute(
+            "INSERT INTO schema_meta (key, value) VALUES ('version', ?1)",
+            [MESSAGE_CONTENT_CODEC_MIGRATION_VERSION.to_string()],
+        )
+        .expect("set v41 version");
+        conn.execute(
+            "INSERT INTO projects (slug, original_path, sessions_index, updated_at) \
+             VALUES ('preserved', '/tmp/preserved', '[]', 456)",
+            [],
+        )
+        .expect("seed existing cache row");
+
+        initialize_schema(&conn).expect("migrate v41 in place");
+
+        assert_eq!(
+            current_schema_version(&conn).expect("read migrated version"),
+            Some(SCHEMA_VERSION)
+        );
+        let preserved: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM projects WHERE slug = 'preserved'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count preserved row");
+        assert_eq!(preserved, 1, "compatible migration discarded cached data");
+        let codec_default: String = conn
+            .query_row(
+                "SELECT dflt_value FROM pragma_table_info('canonical_messages') \
+                 WHERE name = 'content_json_codec'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read migrated codec column");
+        assert_eq!(codec_default, "'identity'");
+    }
+
+    #[test]
     fn stale_schema_triggers_wipe_and_rebuild() {
         let conn = Connection::open_in_memory().expect("open in-memory db");
         initialize_schema(&conn).expect("first init");
@@ -3389,8 +3465,8 @@ mod tests {
         )
         .expect("insert doomed");
 
-        // Pretend the stored schema is one version behind.
-        let stale_version = SCHEMA_VERSION - 1;
+        // Unknown/older transitions remain wipe-on-stale.
+        let stale_version = SCHEMA_VERSION - 2;
         conn.execute(
             "INSERT INTO schema_meta (key, value) VALUES ('version', ?1) \
              ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -3447,7 +3523,7 @@ mod tests {
             .expect("read inflated page count");
         conn.execute(
             "UPDATE schema_meta SET value = ?1 WHERE key = 'version'",
-            [SCHEMA_VERSION.saturating_sub(1).to_string()],
+            [SCHEMA_VERSION.saturating_sub(2).to_string()],
         )
         .expect("mark stale");
 
@@ -3512,7 +3588,7 @@ mod tests {
         .expect("seed RFC 011 graph");
         conn.execute(
             "UPDATE schema_meta SET value = ?1 WHERE key = 'version'",
-            [SCHEMA_VERSION.saturating_sub(1).to_string()],
+            [SCHEMA_VERSION.saturating_sub(2).to_string()],
         )
         .expect("mark schema stale");
 

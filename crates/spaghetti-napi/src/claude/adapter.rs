@@ -75,6 +75,14 @@ const PROJECT_MEMORY_DECODER: &str = "claude-project-memory-document";
 const PERSISTED_TOOL_RESULT_DECODER: &str = "claude-persisted-tool-result";
 const INTERPRETATION_SETTINGS_DECODER: &str = "claude-interpretation-settings";
 const OBJECT_CONTEXT_VERSION: u32 = 1;
+const TRANSCRIPT_DECODER_STATE_VERSION: u8 = 1;
+const TRANSCRIPT_DECODER_STATE_BYTES: usize = 67;
+const TRANSCRIPT_STATE_SESSION_DECLARED: u8 = 1 << 0;
+const TRANSCRIPT_STATE_RUN_DECLARED: u8 = 1 << 1;
+const TRANSCRIPT_STATE_DELEGATION_DECLARED: u8 = 1 << 2;
+const TRANSCRIPT_STATE_FIRST_PROMPT_DECLARED: u8 = 1 << 3;
+const TRANSCRIPT_STATE_CWD_PRESENT: u8 = 1 << 0;
+const TRANSCRIPT_STATE_BRANCH_PRESENT: u8 = 1 << 1;
 const SUBAGENT_META_MAX_BYTES: usize = 64 * 1024;
 const TEAM_CONFIG_MAX_BYTES: usize = 1024 * 1024;
 const TEAM_INBOX_MAX_BYTES: usize = 4 * 1024 * 1024;
@@ -130,7 +138,7 @@ impl ClaudeCodeAdapter {
                 id: AdapterId::new(ADAPTER_ID).expect("static Claude adapter id is valid"),
                 display_name: "Claude Code".to_string(),
                 adapter_version: env!("CARGO_PKG_VERSION").to_string(),
-                contract_version: 15,
+                contract_version: 16,
                 source_schema_versions: vec![
                     "claude-code-jsonl-v1".to_string(),
                     "claude-code-subagent-meta-v1".to_string(),
@@ -610,14 +618,26 @@ impl AgentAdapter for ClaudeCodeAdapter {
                 if object_context.agent_id.is_some() {
                     return Err(decoder_context_mismatch());
                 }
-                decode_transcript_record(self.adapter_id(), &object_context, record, output)
+                decode_transcript_record(
+                    self.adapter_id(),
+                    &object_context,
+                    context.decoder_state,
+                    record,
+                    output,
+                )
             }
             SUBAGENT_DECODER => {
                 let object_context = ClaudeTranscriptContext::decode(context.object_context)?;
                 if object_context.agent_id.is_none() {
                     return Err(decoder_context_mismatch());
                 }
-                decode_transcript_record(self.adapter_id(), &object_context, record, output)
+                decode_transcript_record(
+                    self.adapter_id(),
+                    &object_context,
+                    context.decoder_state,
+                    record,
+                    output,
+                )
             }
             SUBAGENT_META_DECODER => {
                 let object_context = ClaudeSubagentMetadataContext::decode(context.object_context)?;
@@ -1493,6 +1513,92 @@ impl ClaudeWorkflowContext {
 
     fn decode(context: &AdapterObjectContext) -> Result<Self, AdapterError> {
         decode_object_context(context)
+    }
+}
+
+/// Bounded state for declarations that are properties of a transcript object,
+/// rather than distinct observations on every JSONL line. The fixed binary
+/// representation avoids another JSON encode/decode in Claude's hottest path.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct ClaudeTranscriptDecoderState {
+    session_declared: bool,
+    run_declared: bool,
+    delegation_declared: bool,
+    first_prompt_declared: bool,
+    cwd_hash: Option<[u8; 32]>,
+    git_branch_hash: Option<[u8; 32]>,
+}
+
+impl ClaudeTranscriptDecoderState {
+    fn decode(value: Option<&[u8]>) -> Result<Self, AdapterError> {
+        let Some(value) = value else {
+            return Ok(Self::default());
+        };
+        if value.len() != TRANSCRIPT_DECODER_STATE_BYTES {
+            return Err(AdapterError::new(
+                AdapterErrorClass::StreamFatal,
+                "claude_transcript_decoder_state_length",
+                format!(
+                    "unsupported Claude transcript decoder state length {}",
+                    value.len()
+                ),
+            ));
+        }
+        if value[0] != TRANSCRIPT_DECODER_STATE_VERSION {
+            return Err(AdapterError::new(
+                AdapterErrorClass::StreamFatal,
+                "claude_transcript_decoder_state_version",
+                format!(
+                    "unsupported Claude transcript decoder state version {}",
+                    value[0]
+                ),
+            ));
+        }
+        let flags = value[1];
+        let present = value[2];
+        let mut cwd_hash = [0; 32];
+        cwd_hash.copy_from_slice(&value[3..35]);
+        let mut git_branch_hash = [0; 32];
+        git_branch_hash.copy_from_slice(&value[35..67]);
+        Ok(Self {
+            session_declared: flags & TRANSCRIPT_STATE_SESSION_DECLARED != 0,
+            run_declared: flags & TRANSCRIPT_STATE_RUN_DECLARED != 0,
+            delegation_declared: flags & TRANSCRIPT_STATE_DELEGATION_DECLARED != 0,
+            first_prompt_declared: flags & TRANSCRIPT_STATE_FIRST_PROMPT_DECLARED != 0,
+            cwd_hash: (present & TRANSCRIPT_STATE_CWD_PRESENT != 0).then_some(cwd_hash),
+            git_branch_hash: (present & TRANSCRIPT_STATE_BRANCH_PRESENT != 0)
+                .then_some(git_branch_hash),
+        })
+    }
+
+    fn store(&self, output: &mut FactBatch) -> Result<(), AdapterError> {
+        let mut flags = 0;
+        flags |= u8::from(self.session_declared) * TRANSCRIPT_STATE_SESSION_DECLARED;
+        flags |= u8::from(self.run_declared) * TRANSCRIPT_STATE_RUN_DECLARED;
+        flags |= u8::from(self.delegation_declared) * TRANSCRIPT_STATE_DELEGATION_DECLARED;
+        flags |= u8::from(self.first_prompt_declared) * TRANSCRIPT_STATE_FIRST_PROMPT_DECLARED;
+        let mut present = 0;
+        present |= u8::from(self.cwd_hash.is_some()) * TRANSCRIPT_STATE_CWD_PRESENT;
+        present |= u8::from(self.git_branch_hash.is_some()) * TRANSCRIPT_STATE_BRANCH_PRESENT;
+
+        let mut encoded = Vec::with_capacity(TRANSCRIPT_DECODER_STATE_BYTES);
+        encoded.push(TRANSCRIPT_DECODER_STATE_VERSION);
+        encoded.push(flags);
+        encoded.push(present);
+        encoded.extend_from_slice(self.cwd_hash.as_ref().unwrap_or(&[0; 32]));
+        encoded.extend_from_slice(self.git_branch_hash.as_ref().unwrap_or(&[0; 32]));
+        debug_assert_eq!(encoded.len(), TRANSCRIPT_DECODER_STATE_BYTES);
+        output.set_next_decoder_state(encoded)
+    }
+
+    fn observe_field(slot: &mut Option<[u8; 32]>, value: Option<&str>) -> bool {
+        let Some(value) = value else {
+            return false;
+        };
+        let observed = *blake3::hash(value.as_bytes()).as_bytes();
+        let changed = slot.as_ref() != Some(&observed);
+        *slot = Some(observed);
+        changed
     }
 }
 
@@ -3409,9 +3515,11 @@ fn decode_subagent_metadata(
 fn decode_transcript_record(
     adapter_id: &AdapterId,
     context: &ClaudeTranscriptContext,
+    decoder_state: Option<&[u8]>,
     record: &SourceRecord,
     output: &mut FactBatch,
 ) -> Result<DecodeDisposition, AdapterError> {
+    let mut state = ClaudeTranscriptDecoderState::decode(decoder_state)?;
     let raw = match std::str::from_utf8(&record.payload) {
         Ok(raw) => raw,
         Err(error) => {
@@ -3445,12 +3553,6 @@ fn decode_transcript_record(
     })?;
     let typed = serde_json::from_str::<SessionMessage>(raw);
 
-    let project = EntityKey::native(
-        adapter_id,
-        record.source_instance_id,
-        "project",
-        context.project_slug.as_bytes(),
-    )?;
     let session = EntityKey::native(
         adapter_id,
         record.source_instance_id,
@@ -3470,21 +3572,45 @@ fn decode_transcript_record(
     } else {
         session_metadata::SessionMetadataProjection::default()
     };
-    output.push(
-        record,
-        Fact::Session(SessionFact {
-            session: session.clone(),
-            project,
-            native_session_id: context.session_id.clone(),
-            native_project_key: context.project_slug.clone(),
-            cwd: nonempty_field(&value, "cwd"),
-            git_branch: nonempty_field(&value, "gitBranch"),
-            first_prompt: metadata.human_prompt,
-            ai_title: metadata.ai_title,
-            custom_title: metadata.custom_title,
-            source_time: source_time.clone(),
-        }),
-    )?;
+    let cwd = nonempty_field(&value, "cwd");
+    let git_branch = nonempty_field(&value, "gitBranch");
+    let cwd_changed =
+        ClaudeTranscriptDecoderState::observe_field(&mut state.cwd_hash, cwd.as_deref());
+    let git_branch_changed = ClaudeTranscriptDecoderState::observe_field(
+        &mut state.git_branch_hash,
+        git_branch.as_deref(),
+    );
+    let first_prompt = (!state.first_prompt_declared)
+        .then_some(metadata.human_prompt)
+        .flatten();
+    let session_metadata_changed =
+        first_prompt.is_some() || metadata.ai_title.is_some() || metadata.custom_title.is_some();
+    if !state.session_declared || cwd_changed || git_branch_changed || session_metadata_changed {
+        let project = EntityKey::native(
+            adapter_id,
+            record.source_instance_id,
+            "project",
+            context.project_slug.as_bytes(),
+        )?;
+        let declares_first_prompt = first_prompt.is_some();
+        output.push(
+            record,
+            Fact::Session(SessionFact {
+                session: session.clone(),
+                project,
+                native_session_id: context.session_id.clone(),
+                native_project_key: context.project_slug.clone(),
+                cwd: cwd.clone(),
+                git_branch,
+                first_prompt,
+                ai_title: metadata.ai_title,
+                custom_title: metadata.custom_title,
+                source_time: source_time.clone(),
+            }),
+        )?;
+        state.session_declared = true;
+        state.first_prompt_declared |= declares_first_prompt;
+    }
     let parent_run = if context.agent_id.is_some() {
         Some(EntityKey::native(
             adapter_id,
@@ -3496,33 +3622,39 @@ fn decode_transcript_record(
         None
     };
     let delegation_parent = parent_run.clone();
-    output.push(
-        record,
-        Fact::Run(RunFact {
-            run: run.clone(),
-            session: session.clone(),
-            native_run_id: run_native_key.clone(),
-            parent_run,
-        }),
-    )?;
-    if let Some(agent_id) = &context.agent_id {
+    if !state.run_declared {
         output.push(
             record,
-            Fact::Delegation(DelegationFact {
-                child_run: run.clone(),
-                parent_run: delegation_parent,
+            Fact::Run(RunFact {
+                run: run.clone(),
                 session: session.clone(),
-                kind: DelegationKind::VendorNativeSubagent,
-                relation_strength: RelationStrength::Layout,
-                native_child_id: Some(agent_id.clone()),
-                native_task_id: None,
-                label: None,
-                prompt: None,
-                cwd: nonempty_field(&value, "cwd"),
-                worktree_path: None,
-                source_time: source_time.clone(),
+                native_run_id: run_native_key.clone(),
+                parent_run,
             }),
         )?;
+        state.run_declared = true;
+    }
+    if let Some(agent_id) = &context.agent_id {
+        if !state.delegation_declared || cwd_changed {
+            output.push(
+                record,
+                Fact::Delegation(DelegationFact {
+                    child_run: run.clone(),
+                    parent_run: delegation_parent,
+                    session: session.clone(),
+                    kind: DelegationKind::VendorNativeSubagent,
+                    relation_strength: RelationStrength::Layout,
+                    native_child_id: Some(agent_id.clone()),
+                    native_task_id: None,
+                    label: None,
+                    prompt: None,
+                    cwd,
+                    worktree_path: None,
+                    source_time: source_time.clone(),
+                }),
+            )?;
+            state.delegation_declared = true;
+        }
     }
 
     let native_message_id = projection.uuid.filter(|value| !value.is_empty());
@@ -3554,6 +3686,15 @@ fn decode_transcript_record(
             )
         }
     };
+    let message_native_kind = match &typed {
+        Ok(SessionMessage::User(user))
+            if user.is_compact_summary == Some(true)
+                || user.is_visible_in_transcript_only == Some(true) =>
+        {
+            "compact_summary".to_string()
+        }
+        _ => projection.msg_type.clone(),
+    };
     let spawn_descriptors = delegation_spawn_descriptors(&content);
     output.push(
         record,
@@ -3562,7 +3703,7 @@ fn decode_transcript_record(
             session: session.clone(),
             run: run.clone(),
             native_message_id,
-            native_kind: projection.msg_type,
+            native_kind: message_native_kind,
             role,
             content,
             source_time: source_time.clone(),
@@ -3648,6 +3789,7 @@ fn decode_transcript_record(
             })?;
         }
     }
+    state.store(output)?;
     Ok(DecodeDisposition::Applied)
 }
 
@@ -4337,7 +4479,7 @@ mod tests {
             std::fs::canonicalize(root.path()).unwrap().join("sessions")
         );
         assert_eq!(streams.len(), 16);
-        assert_eq!(adapter.manifest().contract_version, 15);
+        assert_eq!(adapter.manifest().contract_version, 16);
         assert!(adapter
             .manifest()
             .source_schema_versions
@@ -6714,6 +6856,93 @@ mod tests {
         assert_eq!(usage.values.cache_read_tokens, 3);
         assert_eq!(usage.scope, UsageScope::Message);
         assert_eq!(usage.accounting, UsageAccounting::Delta);
+    }
+
+    #[test]
+    fn transcript_state_emits_object_declarations_once_and_late_metadata_once() {
+        let root = TempDir::new().unwrap();
+        let adapter = ClaudeCodeAdapter::new();
+        let object_context = adapter
+            .bootstrap_object(
+                &instance(root.path()),
+                &object(PARENT_STREAM, &format!("project/{SESSION}.jsonl")),
+            )
+            .unwrap();
+        let decoder = DecoderId::new(PARENT_DECODER).unwrap();
+        let first_record = record(
+            format!(
+                r#"{{"type":"assistant","uuid":"m1","timestamp":"2026-08-11T00:00:00Z","sessionId":"{SESSION}","cwd":"/repo","gitBranch":"main","message":{{"model":"claude-sonnet","role":"assistant","content":"hello"}}}}"#
+            )
+            .as_bytes(),
+        );
+        let mut first = FactBatch::new(8, 4).unwrap();
+        adapter
+            .decode(
+                DecodeContext {
+                    decoder: &decoder,
+                    object_context: &object_context,
+                    decoder_state: None,
+                },
+                &first_record,
+                &mut first,
+            )
+            .unwrap();
+        assert!(fact_values(&first).any(|fact| matches!(fact, Fact::Session(_))));
+        assert!(fact_values(&first).any(|fact| matches!(fact, Fact::Run(_))));
+        let first_state = first.next_decoder_state().unwrap().to_vec();
+        assert_eq!(first_state.len(), TRANSCRIPT_DECODER_STATE_BYTES);
+
+        let prompt_record = record(
+            format!(
+                r#"{{"type":"user","uuid":"m2","timestamp":"2026-08-11T00:00:01Z","sessionId":"{SESSION}","cwd":"/repo","gitBranch":"main","message":{{"role":"user","content":"Build the product"}}}}"#
+            )
+            .as_bytes(),
+        );
+        let mut prompt = FactBatch::new(8, 4).unwrap();
+        adapter
+            .decode(
+                DecodeContext {
+                    decoder: &decoder,
+                    object_context: &object_context,
+                    decoder_state: Some(&first_state),
+                },
+                &prompt_record,
+                &mut prompt,
+            )
+            .unwrap();
+        let session = fact_values(&prompt)
+            .find_map(|fact| match fact {
+                Fact::Session(session) => Some(session),
+                _ => None,
+            })
+            .expect("the first human prompt should enrich the session");
+        assert_eq!(session.first_prompt.as_deref(), Some("Build the product"));
+        assert!(!fact_values(&prompt).any(|fact| matches!(fact, Fact::Run(_))));
+        let prompt_state = prompt.next_decoder_state().unwrap().to_vec();
+
+        let later_record = record(
+            format!(
+                r#"{{"type":"user","uuid":"m3","timestamp":"2026-08-11T00:00:02Z","sessionId":"{SESSION}","cwd":"/repo","gitBranch":"main","message":{{"role":"user","content":"Another request"}}}}"#
+            )
+            .as_bytes(),
+        );
+        let mut later = FactBatch::new(8, 4).unwrap();
+        adapter
+            .decode(
+                DecodeContext {
+                    decoder: &decoder,
+                    object_context: &object_context,
+                    decoder_state: Some(&prompt_state),
+                },
+                &later_record,
+                &mut later,
+            )
+            .unwrap();
+        assert!(fact_values(&later).all(|fact| {
+            !matches!(fact, Fact::Session(_) | Fact::Run(_) | Fact::Delegation(_))
+        }));
+        assert!(fact_values(&later).any(|fact| matches!(fact, Fact::Message(_))));
+        assert!(fact_values(&later).any(|fact| matches!(fact, Fact::RunEvidence(_))));
     }
 
     #[test]

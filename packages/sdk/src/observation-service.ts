@@ -48,7 +48,10 @@ import type {
   SpaghettiEngineHistorySession,
   SpaghettiEngineMessageDetail,
   SpaghettiEngineTask,
+  SpaghettiEngineTimelineFacets,
   SpaghettiEngineTimelineMessage,
+  SpaghettiEngineTimelinePage,
+  SpaghettiEngineTimelinePageOptions,
   SpaghettiEngineUsageAggregate,
   SpaghettiEngineWorkflowMember,
 } from './native.js';
@@ -63,6 +66,8 @@ import type { SpaghettiIpcChannel, SpaghettiIpcHost } from './client/index.js';
 
 const PAGE_LIMIT = 200;
 const MAX_CHANGE_ORDINAL = 0xffff_ffff;
+const COMPATIBILITY_QUERY_CONCURRENCY = 8;
+const CURSOR_SNAPSHOT_RESTARTS = 4;
 
 export interface ObservationServiceOptions extends ObservationHostOptions {
   /** Subscribe to committed projection changes. Defaults to true. */
@@ -111,6 +116,15 @@ class RustObservationService extends EventEmitter implements ObservationService 
   private startupAbort: AbortController | null = null;
   private lastProgress: InitProgress | null = null;
   private ready = false;
+  // Canonical entity IDs are immutable for the lifetime of an engine. Keep
+  // the identities already returned by project/session listings so a detail
+  // query does not rescan the entire project catalog before every Rust call.
+  private projectCatalogLoaded = false;
+  private readonly projectsById = new Map<string, SpaghettiEngineHistoryProject>();
+  private readonly sessionsByLocator = new Map<string, ResolvedSession>();
+  private projectLoad: Promise<SpaghettiEngineHistoryProject[]> | null = null;
+  private readonly sessionLoads = new Map<string, Promise<SpaghettiEngineHistorySession[]>>();
+  private readonly sessionResolutions = new Map<string, Promise<ResolvedSession>>();
 
   constructor(private readonly options: ObservationServiceOptions) {
     super();
@@ -272,12 +286,13 @@ class RustObservationService extends EventEmitter implements ObservationService 
 
   async getSessionList(project: ProjectReference, options?: SourceFilter): Promise<SessionListItem[]> {
     const projects = await this.resolveProjects(project, options);
-    const output: SessionListItem[] = [];
-    for (const canonicalProject of projects) {
+    const groups = await mapConcurrent(projects, COMPATIBILITY_QUERY_CONCURRENCY, async (canonicalProject) => {
       const sessions = await this.allSessions(canonicalProject.projectId);
-      for (const session of sessions) output.push(await this.sessionListItem(canonicalProject, session));
-    }
-    return output.sort((a, b) => b.lastUpdate.localeCompare(a.lastUpdate));
+      return await mapConcurrent(sessions, COMPATIBILITY_QUERY_CONCURRENCY, (session) =>
+        this.sessionListItem(canonicalProject, session),
+      );
+    });
+    return groups.flat().sort((a, b) => b.lastUpdate.localeCompare(a.lastUpdate));
   }
 
   async getSessionMessages(
@@ -302,8 +317,12 @@ class RustObservationService extends EventEmitter implements ObservationService 
     options?: SourceFilter,
   ): Promise<TimelineFacets> {
     const resolved = await this.resolveSession(projectSlug, sessionId, options?.sourceId);
-    const rows = await this.timelineRows(resolved);
-    return timelineFacets(rows);
+    const page = await this.requireHost().client.getTimeline({
+      projectId: resolved.project.projectId,
+      sessionId: resolved.session.sessionId,
+      limit: 1,
+    });
+    return compatibilityTimelineFacets(page.facets);
   }
 
   async getSessionTimeline(
@@ -312,7 +331,27 @@ class RustObservationService extends EventEmitter implements ObservationService 
     request: TimelinePageRequest = {},
   ): Promise<TimelinePage> {
     const resolved = await this.resolveSession(projectSlug, sessionId, request.sourceId);
-    return timelinePage(await this.timelineRows(resolved), request);
+    // A numeric cursor can only have come from the retired synchronous
+    // compatibility implementation. Keep that bounded fallback for callers
+    // walking an already-started legacy page, but all new pages use the Rust
+    // timeline query and its opaque keyset cursor.
+    if (typeof request.before === 'number') {
+      return timelinePage(await this.timelineRows(resolved), request);
+    }
+    try {
+      const page = await this.requireHost().client.getTimeline(nativeTimelineRequest(resolved, request));
+      return compatibilityTimelinePage(page, request);
+    } catch (error) {
+      if (typeof request.before !== 'string' || !isExpiredCursor(error)) throw error;
+      // Phase 9 cursors deliberately bind one committed snapshot. Active
+      // transcripts can advance between page requests, so first-party
+      // compatibility consumers restart at page one instead of presenting an
+      // expected snapshot race as a fatal transcript error.
+      const restarted = await this.requireHost().client.getTimeline(
+        nativeTimelineRequest(resolved, { ...request, before: undefined }),
+      );
+      return compatibilityTimelinePage(restarted, request, true);
+    }
   }
 
   async getProjectMemory(project: ProjectReference, options?: SourceFilter): Promise<string | null> {
@@ -338,15 +377,15 @@ class RustObservationService extends EventEmitter implements ObservationService 
   }
 
   async getSessionPlan(projectSlug: string, sessionId: string): Promise<unknown | null> {
-    const resolved = await this.resolveSession(projectSlug, sessionId);
-    const messages = await this.allMessages(resolved);
-    const planSlug = messages
-      .map((message) => recordString(message.nativePayload, 'slug'))
-      .find((value): value is string => Boolean(value));
-    if (!planSlug) return null;
-    const plans = await collectPages((cursor) => this.requireHost().client.listPlans({ cursor, limit: PAGE_LIMIT }));
-    const plan = plans.find((item) => item.nativePlanId === planSlug);
-    return plan ? { slug: plan.nativePlanId, title: plan.title, content: plan.content, size: plan.sizeBytes } : null;
+    await this.resolveSession(projectSlug, sessionId);
+    // RFC 011 intentionally exposes plans as globally scoped documents until
+    // an adapter supplies a durable session-to-plan relation. The retired
+    // implementation tried to reconstruct that missing relation by scanning
+    // every lossless message payload for a Claude-only `slug` field. Besides
+    // being incomplete, that made opening the Plans accordion walk an entire
+    // large transcript and race the live snapshot watermark. Do not invent a
+    // relation: validate the requested session, then report no session plan.
+    return null;
   }
 
   async getSessionTask(projectSlug: string, sessionId: string): Promise<unknown | null> {
@@ -487,7 +526,9 @@ class RustObservationService extends EventEmitter implements ObservationService 
     request: SubagentTimelinePageRequest,
   ): Promise<SubagentTimelinePage> {
     const resolved = await this.resolveSession(projectSlug, sessionId, request.sourceId);
-    let rows = (await this.timelineRows(resolved)).filter((row) => row.nativeChildId === agentId);
+    let rows = (await this.timelineRows(resolved, { branchKind: 'delegated' })).filter(
+      (row) => row.nativeChildId === agentId,
+    );
     if (request.workflowId) {
       const members = await collectPages((cursor) =>
         this.requireHost().client.listWorkflowMembers({ workflowId: request.workflowId!, cursor, limit: PAGE_LIMIT }),
@@ -738,13 +779,46 @@ class RustObservationService extends EventEmitter implements ObservationService 
   }
 
   private async allProjects(): Promise<SpaghettiEngineHistoryProject[]> {
-    return await collectPages((cursor) => this.requireHost().client.listProjects({ cursor, limit: PAGE_LIMIT }));
+    if (this.projectLoad) return await this.projectLoad;
+    const work = collectPages((cursor) => this.requireHost().client.listProjects({ cursor, limit: PAGE_LIMIT })).then(
+      (projects) => {
+        this.projectCatalogLoaded = true;
+        for (const project of projects) this.projectsById.set(project.projectId, project);
+        return projects;
+      },
+    );
+    const tracked = work.finally(() => {
+      if (this.projectLoad === tracked) this.projectLoad = null;
+    });
+    this.projectLoad = tracked;
+    return await tracked;
   }
 
   private async allSessions(projectId: string): Promise<SpaghettiEngineHistorySession[]> {
-    return await collectPages((cursor) =>
+    const pending = this.sessionLoads.get(projectId);
+    if (pending) return await pending;
+    const work = collectPages((cursor) =>
       this.requireHost().client.listSessions({ projectId, cursor, limit: PAGE_LIMIT }),
-    );
+    ).then((sessions) => {
+      const project = this.projectsById.get(projectId);
+      if (project) {
+        for (const session of sessions) {
+          this.sessionsByLocator.set(
+            sessionLocator(project.adapterId, project.nativeProjectKey, session.nativeSessionId),
+            {
+              project,
+              session,
+            },
+          );
+        }
+      }
+      return sessions;
+    });
+    const tracked = work.finally(() => {
+      if (this.sessionLoads.get(projectId) === tracked) this.sessionLoads.delete(projectId);
+    });
+    this.sessionLoads.set(projectId, tracked);
+    return await tracked;
   }
 
   private async resolveProjects(
@@ -765,32 +839,60 @@ class RustObservationService extends EventEmitter implements ObservationService 
   }
 
   private async resolveSession(projectSlug: string, sessionId: string, sourceId?: string): Promise<ResolvedSession> {
-    const projects = (await this.allProjects()).filter(
-      (project) => project.nativeProjectKey === projectSlug && (!sourceId || project.adapterId === sourceId),
-    );
-    for (const project of projects) {
-      const session = (await this.allSessions(project.projectId)).find((item) => item.nativeSessionId === sessionId);
-      if (session) return { project, session };
+    if (sourceId) {
+      const cached = this.sessionsByLocator.get(sessionLocator(sourceId, projectSlug, sessionId));
+      if (cached) return cached;
     }
-    throw new Error(`Canonical session '${sessionId}' was not found in project '${projectSlug}'.`);
+    const resolutionKey = sessionLocator(sourceId ?? '*', projectSlug, sessionId);
+    const pending = this.sessionResolutions.get(resolutionKey);
+    if (pending) return await pending;
+    const work = (async () => {
+      const catalog = this.projectCatalogLoaded ? [...this.projectsById.values()] : await this.allProjects();
+      const projects = catalog.filter(
+        (project) => project.nativeProjectKey === projectSlug && (!sourceId || project.adapterId === sourceId),
+      );
+      for (const project of projects) {
+        const cached = this.sessionsByLocator.get(
+          sessionLocator(project.adapterId, project.nativeProjectKey, sessionId),
+        );
+        if (cached) return cached;
+        const session = (await this.allSessions(project.projectId)).find((item) => item.nativeSessionId === sessionId);
+        if (session) {
+          const resolved = { project, session };
+          this.sessionsByLocator.set(
+            sessionLocator(project.adapterId, project.nativeProjectKey, session.nativeSessionId),
+            resolved,
+          );
+          return resolved;
+        }
+      }
+      throw new Error(`Canonical session '${sessionId}' was not found in project '${projectSlug}'.`);
+    })();
+    const tracked = work.finally(() => {
+      if (this.sessionResolutions.get(resolutionKey) === tracked) this.sessionResolutions.delete(resolutionKey);
+    });
+    this.sessionResolutions.set(resolutionKey, tracked);
+    return await tracked;
   }
 
   private async projectSummaries(options?: SourceFilter): Promise<ProjectSummary[]> {
     const projects = (await this.allProjects()).filter(
       (project) => !options?.sourceId || project.adapterId === options.sourceId,
     );
-    const output: ProjectSummary[] = [];
-    for (const project of projects) {
+    return await mapConcurrent(projects, COMPATIBILITY_QUERY_CONCURRENCY, async (project) => {
       const sessions = await this.allSessions(project.projectId);
       const usage = await this.requireHost().client.getUsage({ projectId: project.projectId });
-      const absolutePath = project.index?.originalPath ?? pathLikeNativeKey(project.nativeProjectKey);
+      const transcriptPath = sessions
+        .map((session) => session.cwd ?? session.index?.projectPath)
+        .find((value): value is string => Boolean(value && pathLikeNativeKey(value)));
+      const absolutePath = project.index?.originalPath ?? transcriptPath ?? pathLikeNativeKey(project.nativeProjectKey);
       const firstActiveAt = minTimestamp(
         sessions.flatMap((session) => [session.firstMessageAt, session.index?.createdAt]),
       );
       const latest = [...sessions].sort((a, b) => sessionActivity(b).localeCompare(sessionActivity(a)))[0];
       const member: ProjectMember = { sourceId: project.adapterId, slug: project.nativeProjectKey };
       const groupKey = absolutePath ? `path:${normalizePath(absolutePath)}` : `member:${JSON.stringify(member)}`;
-      output.push({
+      return {
         canonical: project,
         item: {
           projectId: groupKey,
@@ -809,9 +911,8 @@ class RustObservationService extends EventEmitter implements ObservationService 
           latestPrompt: latest?.customTitle ?? latest?.aiTitle ?? latest?.firstPrompt ?? latest?.index?.summary ?? '',
           hasMemory: project.memoryDocumentCount > 0,
         },
-      });
-    }
-    return output;
+      };
+    });
   }
 
   private async sessionListItem(
@@ -873,8 +974,11 @@ class RustObservationService extends EventEmitter implements ObservationService 
     return detail.session?.messageCount ?? resolved.session.messageCount;
   }
 
-  private async timelineRows(resolved: ResolvedSession): Promise<TimelineRow[]> {
-    const envelopes = await this.timelineEnvelopes(resolved);
+  private async timelineRows(
+    resolved: ResolvedSession,
+    options: Pick<SpaghettiEngineTimelinePageOptions, 'branchKind'> = {},
+  ): Promise<TimelineRow[]> {
+    const envelopes = await this.timelineEnvelopes(resolved, options);
     const chronological = envelopes.reverse();
     const rows: TimelineRow[] = [];
     for (const envelope of chronological) {
@@ -888,15 +992,18 @@ class RustObservationService extends EventEmitter implements ObservationService 
         });
       }
     }
-    attachToolResults(rows);
-    return rows;
+    return attachToolResults(rows);
   }
 
-  private async timelineEnvelopes(resolved: ResolvedSession): Promise<SpaghettiEngineTimelineMessage[]> {
+  private async timelineEnvelopes(
+    resolved: ResolvedSession,
+    options: Pick<SpaghettiEngineTimelinePageOptions, 'branchKind'> = {},
+  ): Promise<SpaghettiEngineTimelineMessage[]> {
     return await collectPages((cursor) =>
       this.requireHost().client.getTimeline({
         projectId: resolved.project.projectId,
         sessionId: resolved.session.sessionId,
+        ...options,
         cursor,
         limit: PAGE_LIMIT,
       }),
@@ -919,19 +1026,148 @@ class RustObservationService extends EventEmitter implements ObservationService 
   }
 }
 
+function sessionLocator(sourceId: string, projectSlug: string, sessionId: string): string {
+  return JSON.stringify([sourceId, projectSlug, sessionId]);
+}
+
 async function collectPages<T>(read: (cursor?: string) => Promise<{ items: T[]; nextCursor?: string }>): Promise<T[]> {
-  const output: T[] = [];
-  let cursor: string | undefined;
-  const seen = new Set<string>();
-  do {
-    const page = await read(cursor);
-    output.push(...page.items);
-    const next = page.nextCursor;
-    if (next && (next === cursor || seen.has(next))) throw new Error('Canonical page cursor did not advance.');
-    if (next) seen.add(next);
-    cursor = next;
-  } while (cursor);
+  for (let attempt = 0; ; attempt++) {
+    try {
+      const output: T[] = [];
+      let cursor: string | undefined;
+      const seen = new Set<string>();
+      do {
+        const page = await read(cursor);
+        output.push(...page.items);
+        const next = page.nextCursor;
+        if (next && (next === cursor || seen.has(next))) throw new Error('Canonical page cursor did not advance.');
+        if (next) seen.add(next);
+        cursor = next;
+      } while (cursor);
+      return output;
+    } catch (error) {
+      if (attempt >= CURSOR_SNAPSHOT_RESTARTS || !isExpiredCursor(error)) throw error;
+    }
+  }
+}
+
+async function mapConcurrent<T, U>(
+  values: readonly T[],
+  concurrency: number,
+  map: (value: T, index: number) => Promise<U>,
+): Promise<U[]> {
+  const output = new Array<U>(values.length);
+  let nextIndex = 0;
+  const workers = Array.from({ length: Math.min(values.length, Math.max(1, concurrency)) }, async () => {
+    for (;;) {
+      const index = nextIndex++;
+      if (index >= values.length) return;
+      output[index] = await map(values[index]!, index);
+    }
+  });
+  await Promise.all(workers);
   return output;
+}
+
+function isExpiredCursor(error: unknown): boolean {
+  if (!error || typeof error !== 'object') return false;
+  const value = error as { code?: unknown; reason?: unknown; message?: unknown };
+  return (
+    value.code === 'cursor_invalid' &&
+    (value.reason === 'expired' || (typeof value.message === 'string' && /expired/i.test(value.message)))
+  );
+}
+
+function nativeTimelineRequest(
+  resolved: ResolvedSession,
+  request: TimelinePageRequest,
+): SpaghettiEngineTimelinePageOptions {
+  const options: SpaghettiEngineTimelinePageOptions = {
+    projectId: resolved.project.projectId,
+    sessionId: resolved.session.sessionId,
+    limit: boundInteger(request.limit ?? 30, 1, PAGE_LIMIT, 30),
+  };
+  if (typeof request.before === 'string') options.cursor = request.before;
+  const search = request.search?.trim();
+  if (search) options.search = search;
+
+  const includeTypes = request.includeTypes?.filter(Boolean) ?? [];
+  const includeTools = request.includeTools?.filter(Boolean) ?? [];
+  const contentKinds = includeTypes.map(displayTypeContentKind);
+  if (includeTypes.length > 0 && contentKinds.every((kind) => kind !== undefined)) {
+    options.includeContentKinds = contentKinds as NonNullable<
+      SpaghettiEngineTimelinePageOptions['includeContentKinds']
+    >;
+    if (includeTools.length > 0) options.includeToolNames = includeTools;
+  } else if (includeTypes.length === 0 && includeTools.length > 0) {
+    options.includeToolNames = includeTools;
+  } else if (includeTools.length === 0 && includeTypes.length > 0 && includeTypes.every(isDisplayRole)) {
+    options.roles = includeTypes;
+  }
+  return options;
+}
+
+function displayTypeContentKind(
+  type: string,
+): NonNullable<SpaghettiEngineTimelinePageOptions['includeContentKinds']>[number] | undefined {
+  if (type === 'thinking') return 'thinking';
+  if (type === 'tool_use') return 'tool_call';
+  if (type === 'tool_result') return 'tool_result';
+  return undefined;
+}
+
+function isDisplayRole(type: string): boolean {
+  return type === 'user' || type === 'assistant' || type === 'system';
+}
+
+function compatibilityTimelinePage(
+  page: SpaghettiEngineTimelinePage,
+  request: TimelinePageRequest,
+  snapshotReset = false,
+): TimelinePage {
+  const rows: TimelineRow[] = [];
+  for (const envelope of [...page.items].reverse()) {
+    for (const message of timelineMessages(envelope)) {
+      rows.push({
+        index: rows.length + 1,
+        adapterId: envelope.adapterId,
+        nativeChildId: envelope.nativeChildId,
+        runId: envelope.runId,
+        message,
+      });
+    }
+  }
+  const filtered = filterTimeline(attachToolResults(rows), request);
+  return {
+    messages: filtered.map((row) => row.message),
+    total: page.total,
+    facets: compatibilityTimelineFacets(page.facets),
+    ...(page.nextCursor ? { nextCursor: page.nextCursor } : {}),
+    hasMore: Boolean(page.nextCursor),
+    ...(snapshotReset ? { snapshotReset: true } : {}),
+  };
+}
+
+function compatibilityTimelineFacets(facets: SpaghettiEngineTimelineFacets): TimelineFacets {
+  const messageCounts: Record<string, number> = {};
+  const toolCounts = Object.fromEntries(facets.toolNames.map((item) => [item.name, item.count]));
+  for (const item of facets.roles) messageCounts[item.name] = (messageCounts[item.name] ?? 0) + item.count;
+  for (const item of facets.nativeKinds) {
+    const type = nativeKindDisplayType(item.name);
+    if (type) messageCounts[type] = (messageCounts[type] ?? 0) + item.count;
+  }
+  for (const item of facets.contentKinds) {
+    const type =
+      item.name === 'thinking'
+        ? 'thinking'
+        : item.name === 'tool_call'
+          ? 'tool_use'
+          : item.name === 'tool_result'
+            ? 'tool_result'
+            : undefined;
+    if (type) messageCounts[type] = (messageCounts[type] ?? 0) + item.count;
+  }
+  return { total: facets.totalMessages, messageCounts, toolCounts };
 }
 
 function usageValues(aggregate: SpaghettiEngineUsageAggregate): TokenUsageSummary {
@@ -1014,12 +1250,6 @@ function durationBetween(first: string, last: string): number {
 
 function boundInteger(value: number, min: number, max: number, fallback: number): number {
   return Number.isFinite(value) ? Math.max(min, Math.min(max, Math.floor(value))) : fallback;
-}
-
-function recordString(value: unknown, key: string): string | undefined {
-  if (!value || typeof value !== 'object') return undefined;
-  const found = (value as Record<string, unknown>)[key];
-  return typeof found === 'string' && found ? found : undefined;
 }
 
 /**
@@ -1157,25 +1387,41 @@ function timelineMessages(item: SpaghettiEngineTimelineMessage): SessionMessage[
     branchToolId: item.branchAnchorMessageId,
   };
   const output: SessionMessage[] = [];
-  const texts = content.filter((block) => block.kind === 'text').map((block) => String(block.text ?? ''));
-  if (texts.length > 0 || content.length === 0) {
+  if (content.length === 0) {
+    const type = nativeKindDisplayType(item.nativeKind) ?? item.role;
     output.push({
       ...base,
-      timelineId: `${item.messageId}:text`,
+      timelineId: `${item.messageId}:empty`,
       uuid: item.nativeMessageId ?? item.messageId,
-      type: item.nativeKind === 'summary' ? 'summary' : item.role,
-      content: texts.join('\n'),
+      type,
+      content: type === 'checkpoint' ? 'Checkpoint Created' : '',
+      ...(type === 'checkpoint'
+        ? { checkpointData: { messageId: item.nativeMessageId ?? item.messageId, isUpdate: false, fileCount: 0 } }
+        : {}),
+      ...(type === 'queue-operation' ? { queueOperation: '' } : {}),
     });
   }
-  let ordinal = 0;
-  for (const block of content) {
+  for (const [ordinal, block] of content.entries()) {
     const kind = String(block.kind ?? 'native');
-    if (kind === 'text') continue;
-    const uuid = `${item.nativeMessageId ?? item.messageId}-${kind}-${ordinal++}`;
-    if (kind === 'thinking') {
+    const timelineId = `${item.messageId}:${ordinal}`;
+    const uuid =
+      ordinal === 0 && item.nativeMessageId
+        ? item.nativeMessageId
+        : `${item.nativeMessageId ?? item.messageId}-${ordinal}`;
+    if (kind === 'text') {
+      const type = nativeKindDisplayType(item.nativeKind) ?? item.role;
       output.push({
         ...base,
-        timelineId: `${item.messageId}:${ordinal}`,
+        timelineId,
+        uuid,
+        type,
+        content: String(block.text ?? ''),
+        ...(type === 'compact_summary' ? { isCompactSummary: true } : {}),
+      });
+    } else if (kind === 'thinking') {
+      output.push({
+        ...base,
+        timelineId,
         uuid,
         type: 'thinking',
         content: String(block.text ?? ''),
@@ -1183,7 +1429,7 @@ function timelineMessages(item: SpaghettiEngineTimelineMessage): SessionMessage[
     } else if (kind === 'tool_call') {
       output.push({
         ...base,
-        timelineId: `${item.messageId}:${ordinal}`,
+        timelineId,
         uuid,
         type: 'tool_use',
         toolUse: {
@@ -1195,7 +1441,7 @@ function timelineMessages(item: SpaghettiEngineTimelineMessage): SessionMessage[
     } else if (kind === 'tool_result') {
       output.push({
         ...base,
-        timelineId: `${item.messageId}:${ordinal}`,
+        timelineId,
         uuid,
         type: 'tool_result',
         toolResult: {
@@ -1207,7 +1453,7 @@ function timelineMessages(item: SpaghettiEngineTimelineMessage): SessionMessage[
     } else {
       output.push({
         ...base,
-        timelineId: `${item.messageId}:${ordinal}`,
+        timelineId,
         uuid,
         type: item.nativeKind || 'system',
         content: textValue(block.value ?? block),
@@ -1215,6 +1461,14 @@ function timelineMessages(item: SpaghettiEngineTimelineMessage): SessionMessage[
     }
   }
   return output;
+}
+
+function nativeKindDisplayType(nativeKind: string): string | undefined {
+  if (nativeKind === 'summary') return 'summary';
+  if (nativeKind === 'compact_summary') return 'compact_summary';
+  if (nativeKind === 'file-history-snapshot') return 'checkpoint';
+  if (nativeKind === 'queue-operation') return 'queue-operation';
+  return undefined;
 }
 
 function objectValue(value: unknown): Record<string, unknown> {
@@ -1231,33 +1485,42 @@ function textValue(value: unknown): string {
   }
 }
 
-function attachToolResults(rows: TimelineRow[]): void {
-  const calls = new Map<string, SessionMessage>();
+function attachToolResults(rows: TimelineRow[]): TimelineRow[] {
+  const calls = new Map<string, SessionMessage[]>();
+  const results = new Map<string, TimelineRow[]>();
   for (const row of rows) {
     const call = row.message.toolUse;
-    if (call?.toolId) calls.set(call.toolId, row.message);
+    if (call?.toolId) {
+      const matching = calls.get(call.toolId) ?? [];
+      matching.push(row.message);
+      calls.set(call.toolId, matching);
+    }
     const result = row.message.toolResult;
     if (result?.toolId) {
-      const owner = calls.get(result.toolId);
-      if (owner?.toolUse) owner.toolUse = { ...owner.toolUse, result };
+      const matching = results.get(result.toolId) ?? [];
+      matching.push(row);
+      results.set(result.toolId, matching);
     }
   }
-}
-
-function timelineFacets(rows: TimelineRow[]): TimelineFacets {
-  const messageCounts: Record<string, number> = {};
-  const toolCounts: Record<string, number> = {};
-  for (const row of rows) {
-    messageCounts[row.message.type] = (messageCounts[row.message.type] ?? 0) + 1;
-    const tool = row.message.toolUse?.toolName;
-    if (tool) toolCounts[tool] = (toolCounts[tool] ?? 0) + 1;
+  const attached = new Set<TimelineRow>();
+  for (const [toolId, resultRows] of results) {
+    const owners = calls.get(toolId);
+    const result = resultRows.at(-1)?.message.toolResult;
+    if (!owners?.length || !result) continue;
+    for (const owner of owners) {
+      if (owner.toolUse) owner.toolUse = { ...owner.toolUse, result };
+    }
+    for (const row of resultRows) attached.add(row);
   }
-  return { total: rows.length, messageCounts, toolCounts };
+  // Claude/Codex result envelopes historically decorate their tool call and
+  // are not rendered a second time. Preserve an unmatched result as a visible
+  // row so page boundaries and genuinely orphaned results never lose data.
+  return rows.filter((row) => !attached.has(row));
 }
 
 function timelinePage(rows: TimelineRow[], request: TimelinePageRequest): TimelinePage {
   const filtered = filterTimeline(rows, request);
-  const before = request.before == null ? Number.MAX_SAFE_INTEGER : request.before;
+  const before = typeof request.before === 'number' ? request.before : Number.MAX_SAFE_INTEGER;
   const eligible = filtered.filter((row) => row.index < before);
   const limit = boundInteger(request.limit ?? 30, 1, 500, 30);
   const newest = eligible.slice(-limit);

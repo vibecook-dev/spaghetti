@@ -25,16 +25,29 @@ export interface TimelineFilter {
 export interface TimelinePageRequest extends TimelineFilter {
   sourceId?: string;
   limit?: number;
-  /** Return rows older than this stable normalized timeline index. */
-  before?: number;
+  /**
+   * Return rows older than this cursor.
+   *
+   * Rust-owned timelines return an opaque keyset cursor. Numeric indexes are
+   * retained only for the repository's legacy compatibility oracle.
+   */
+  before?: string | number;
 }
 
 export interface TimelinePage {
   messages: TimelineMessage[];
   total: number;
+  /** Facets returned by the same Rust snapshot, when available. */
+  facets?: TimelineFacets;
   /** Cursor for the next (older) page. Undefined at the beginning. */
-  nextCursor?: number;
+  nextCursor?: string | number;
   hasMore: boolean;
+  /**
+   * The requested Rust snapshot expired while observation was still
+   * committing. This page is a fresh page-one snapshot and must replace,
+   * rather than prepend to, rows held by the caller.
+   */
+  snapshotReset?: boolean;
 }
 
 /** Independently paginated normalized branch rows (oldest page first). */

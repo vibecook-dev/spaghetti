@@ -20,10 +20,14 @@ function buildWeeks(): { weeks: Date[][]; from: string; to: string; today: strin
   const todayDate = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
   const end = addUtcDays(todayDate, 6 - todayDate.getUTCDay());
   const start = addUtcDays(end, -(WEEK_COUNT * 7 - 1));
+  // The visual grid includes partial boundary weeks, but RFC 011 usage
+  // activity permits at most 366 inclusive days. Query exactly the trailing
+  // year and leave the few leading grid cells empty.
+  const queryStart = addUtcDays(todayDate, -365);
   const weeks = Array.from({ length: WEEK_COUNT }, (_, week) =>
     Array.from({ length: 7 }, (_, day) => addUtcDays(start, week * 7 + day)),
   );
-  return { weeks, from: dateKey(start), to: dateKey(todayDate), today: dateKey(todayDate) };
+  return { weeks, from: dateKey(queryStart), to: dateKey(todayDate), today: dateKey(todayDate) };
 }
 
 function percentile95(values: number[]): number {

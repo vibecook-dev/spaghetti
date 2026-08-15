@@ -36,6 +36,7 @@ import {
   type SourceProgressState,
 } from './lib/source-progress.js';
 import { paperStyle } from './lib/archive-theme.js';
+import { applyProjectLiveActivity } from './lib/project-live-activity.js';
 
 const DEBUG_MODE = (import.meta as ImportMeta & { env: { DEV: boolean } }).env.DEV;
 type DebugSessionModule = typeof import('./dev/debug-session.js');
@@ -126,7 +127,6 @@ function PlaygroundShell() {
   // The reference opens on warm paper; dark parchment is the alternate illumination.
   const [isDark, setIsDark] = useState(false);
   const pendingSessionId = useRef<{ sessionId: string; sourceId?: string } | null>(null);
-  const projectChangeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const sessionChangeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [branchNavigateTarget, setBranchNavigateTarget] = useState<SearchNavigateTarget | null>(null);
   const [liveSessions, setLiveSessions] = useState<Record<string, LiveSessionState>>({});
@@ -136,6 +136,7 @@ function PlaygroundShell() {
   const projectItemRefs = useRef(new Map<string, HTMLButtonElement>());
   const projectItemPositionsRef = useRef(new Map<string, number>());
   const projectItemAnimationsRef = useRef(new Map<string, Animation>());
+  const projectListLoadedRef = useRef(false);
 
   const [sources, setSources] = useState<SourceProgressState[]>(() => initialSourceStates());
   const [progress, setProgress] = useState<ProgressSnapshot | null>(null);
@@ -345,9 +346,12 @@ function PlaygroundShell() {
         return next;
       });
       setLiveClock(receivedAt);
-      // Session-list metadata is cheap and useful while browsing one project.
-      // Whole-library counts are much broader, so refresh those on a slower
-      // lane. The visible transcript has its own exact, session-scoped lane.
+      setProjects((current) => applyProjectLiveActivity(current, batch.changes ?? [], receivedAt));
+      // Session-list metadata is scoped and useful while browsing one
+      // project. Whole-library project/stat queries scan millions of rows, so
+      // live commits update their activity marker locally instead of polling
+      // those broad aggregates. Startup and explicit rebuilds refresh exact
+      // library counts; the visible transcript has its own exact live lane.
       const touchesSelectedProject = (batch.changes ?? []).some(
         (change) =>
           !!change.sourceId &&
@@ -359,12 +363,6 @@ function PlaygroundShell() {
           sessionChangeTimerRef.current = null;
           setSessionChangeNonce((n) => n + 1);
         }, 1000);
-      }
-      if (!projectChangeTimerRef.current) {
-        projectChangeTimerRef.current = setTimeout(() => {
-          projectChangeTimerRef.current = null;
-          setProjectChangeNonce((n) => n + 1);
-        }, 5000);
       }
     });
 
@@ -405,15 +403,17 @@ function PlaygroundShell() {
       unsubChange();
       unsubInitError();
       if (sessionChangeTimerRef.current) clearTimeout(sessionChangeTimerRef.current);
-      if (projectChangeTimerRef.current) clearTimeout(projectChangeTimerRef.current);
     };
   }, []);
 
   useEffect(() => {
     if (!ready) return;
-    window.spaghetti
+    let cancelled = false;
+    void window.spaghetti
       .getProjectList()
-      .then((list) =>
+      .then((list) => {
+        if (cancelled) return;
+        projectListLoadedRef.current = true;
         setProjects(
           debugSession
             ? [
@@ -421,13 +421,24 @@ function PlaygroundShell() {
                 ...list.filter((project) => projectKey(project) !== projectKey(debugSession.DEBUG_PROJECT)),
               ]
             : list,
-        ),
-      )
-      .catch((e: unknown) => setError(String(e)));
-    window.spaghetti
+        );
+      })
+      .catch((e: unknown) => {
+        // Live writes can expire a multi-page snapshot. The service retries
+        // those reads; if a refresh still loses the race, retain the last
+        // complete library instead of replacing a working app with a fatal
+        // loading screen.
+        if (!cancelled && !projectListLoadedRef.current) setError(String(e));
+      });
+    void window.spaghetti
       .getStats()
-      .then(setStats)
+      .then((next) => {
+        if (!cancelled) setStats(next);
+      })
       .catch(() => setStats(null));
+    return () => {
+      cancelled = true;
+    };
   }, [ready, projectChangeNonce, debugSession]);
 
   useEffect(() => {

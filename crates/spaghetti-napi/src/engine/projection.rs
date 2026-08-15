@@ -134,7 +134,7 @@ fn prepare_fact_observation_commit<'a>(
         batch,
         encoded_payloads,
         retention: request.stream.retention,
-        retracted_run_keys: RefCell::new(BTreeSet::new()),
+        delegation_run_invalidations: RefCell::new(BTreeSet::new()),
         hook,
     };
     Ok((request, projection))
@@ -144,7 +144,12 @@ struct FactProjectionWork<'a> {
     batch: &'a FactBatch,
     encoded_payloads: Vec<EncodedFactPayload>,
     retention: RawRetentionPolicy,
-    retracted_run_keys: RefCell<BTreeSet<Vec<u8>>>,
+    /// Runs whose presence changed in this logical commit. Delegation
+    /// resolution depends on presence, not on the latest provenance-bearing
+    /// RunFact. Ordinary transcript batches restate the same run, so treating
+    /// every upsert as an invalidation repeatedly re-reduced all of its child
+    /// delegations during cold ingestion.
+    delegation_run_invalidations: RefCell<BTreeSet<Vec<u8>>>,
     hook: Option<&'a dyn CommitHook>,
 }
 
@@ -152,6 +157,7 @@ struct FactProjectionWork<'a> {
 struct EncodedFactPayload {
     audit: EncodedBlob,
     message_raw: Option<EncodedBlob>,
+    message_content: Option<EncodedBlob>,
 }
 
 impl TransactionalProjectionWork for FactProjectionWork<'_> {
@@ -197,7 +203,8 @@ impl TransactionalProjectionWork for FactProjectionWork<'_> {
                 Vec::new(),
             )
         };
-        self.retracted_run_keys.replace(retracted_run_keys);
+        let existing_run_keys = existing_run_keys(transaction, self.batch)?;
+        let mut delegation_run_invalidations = retracted_run_keys;
         let coalesced_sessions = coalesced_session_projections(self.batch);
         let last_run_facts = last_run_fact_indices(self.batch);
         let existing_message_keys = existing_message_keys(transaction, self.batch)?;
@@ -221,6 +228,9 @@ impl TransactionalProjectionWork for FactProjectionWork<'_> {
                         ));
                     };
                     if *last_index != index {
+                        continue;
+                    }
+                    if !session_source_wins(transaction, context, fact.session.as_bytes())? {
                         continue;
                     }
                     changed_session_keys.insert(fact.session.as_bytes().to_vec());
@@ -329,6 +339,9 @@ impl TransactionalProjectionWork for FactProjectionWork<'_> {
                     if last_run_facts.get(fact.run.as_bytes()) != Some(&index) {
                         continue;
                     }
+                    if !existing_run_keys.contains(fact.run.as_bytes()) {
+                        delegation_run_invalidations.insert(fact.run.as_bytes().to_vec());
+                    }
                     execute_cached(
                         transaction,
                         r#"
@@ -394,6 +407,8 @@ impl TransactionalProjectionWork for FactProjectionWork<'_> {
         if !super::ingest_profile::IngestProfileSkip::current().messages {
             insert_message_content_blocks(transaction, &new_message_content)?;
         }
+        self.delegation_run_invalidations
+            .replace(delegation_run_invalidations);
         self.record_detail(CommitDetail::HistoryAndFactStorage, history_started);
         if !super::ingest_profile::IngestProfileSkip::current().extras {
             changes.extend(self.measure(CommitDetail::SessionIndex, || {
@@ -444,12 +459,8 @@ impl TransactionalProjectionWork for FactProjectionWork<'_> {
                 .map_err(|error| sqlite_error("retract replaced run evidence", error))?;
             }
 
-            let folded = persist_run_evidence(
-                transaction,
-                context,
-                self.batch,
-                &mut affected_states,
-            )?;
+            let folded =
+                persist_run_evidence(transaction, context, self.batch, &mut affected_states)?;
 
             changes.reserve(affected_states.len());
             for run_key in affected_states {
@@ -472,13 +483,7 @@ impl TransactionalProjectionWork for FactProjectionWork<'_> {
                 Fact::Delegation(_) | Fact::DelegationMetadata(_) | Fact::DelegationSpawn(_)
             )
         });
-        let mut changed_runs = self.retracted_run_keys.borrow().clone();
-        changed_runs.extend(self.batch.facts().iter().filter_map(|envelope| {
-            let Fact::Run(fact) = &envelope.value else {
-                return None;
-            };
-            Some(fact.run.as_bytes().to_vec())
-        }));
+        let changed_runs = self.delegation_run_invalidations.borrow().clone();
         let has_run_fact = !changed_runs.is_empty();
         if super::ingest_profile::IngestProfileSkip::current().delegation
             || (context.skip_unowned_replace_document(has_delegation_fact)
@@ -980,6 +985,65 @@ fn replace_if_some<T: Clone>(current: &mut Option<T>, next: &Option<T>) {
     }
 }
 
+struct SessionSourceIdentity {
+    stream_key: String,
+    object_key: Vec<u8>,
+}
+
+/// Multiple independently scheduled objects can establish the same canonical
+/// session. Choose one by adapter-owned stable object identity instead of
+/// commit order so cold, live, and restart projections converge without the
+/// common engine branching on an adapter or stream convention.
+fn session_source_wins(
+    transaction: &Transaction<'_>,
+    context: &ProjectionCommitContext,
+    session_key: &[u8],
+) -> Result<bool, EngineError> {
+    let existing_object_id = transaction
+        .query_row(
+            "SELECT source_object_id FROM canonical_sessions WHERE session_key = ?1",
+            [session_key],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()
+        .map_err(|error| sqlite_error("read canonical session source", error))?;
+    let Some(existing_object_id) = existing_object_id else {
+        return Ok(true);
+    };
+    let incoming_object_id = sqlite_u64(context.source_object_id, "source object id")?;
+    if existing_object_id == incoming_object_id {
+        return Ok(true);
+    }
+
+    let incoming = session_source_identity(transaction, incoming_object_id)?;
+    let existing = session_source_identity(transaction, existing_object_id)?;
+    Ok((incoming.object_key, incoming.stream_key) < (existing.object_key, existing.stream_key))
+}
+
+fn session_source_identity(
+    transaction: &Transaction<'_>,
+    source_object_id: i64,
+) -> Result<SessionSourceIdentity, EngineError> {
+    transaction
+        .query_row(
+            r#"
+            SELECT ss.stream_key, so.object_key
+            FROM source_objects so
+            JOIN source_streams ss
+              ON ss.source_stream_id = so.source_stream_id
+            WHERE so.source_object_id = ?1
+            "#,
+            [source_object_id],
+            |row| {
+                Ok(SessionSourceIdentity {
+                    stream_key: row.get(0)?,
+                    object_key: row.get(1)?,
+                })
+            },
+        )
+        .map_err(|error| sqlite_error("read session source identity", error))
+}
+
 fn last_run_fact_indices(batch: &FactBatch) -> BTreeMap<Vec<u8>, usize> {
     batch
         .facts()
@@ -1039,6 +1103,38 @@ fn existing_message_keys(
         .map_err(|error| sqlite_error("read existing canonical message batch", error))?
         .collect::<Result<BTreeSet<_>, _>>()
         .map_err(|error| sqlite_error("collect existing canonical message batch", error))?;
+    Ok(existing)
+}
+
+fn existing_run_keys(
+    transaction: &Transaction<'_>,
+    batch: &FactBatch,
+) -> Result<BTreeSet<Vec<u8>>, EngineError> {
+    let keys = batch
+        .facts()
+        .iter()
+        .filter_map(|envelope| {
+            let Fact::Run(fact) = &envelope.value else {
+                return None;
+            };
+            Some(fact.run.as_bytes())
+        })
+        .collect::<BTreeSet<_>>();
+    if keys.is_empty() {
+        return Ok(BTreeSet::new());
+    }
+    let placeholders = std::iter::repeat_n("?", keys.len())
+        .collect::<Vec<_>>()
+        .join(",");
+    let sql = format!("SELECT run_key FROM canonical_runs WHERE run_key IN ({placeholders})");
+    let mut statement = transaction
+        .prepare(&sql)
+        .map_err(|error| sqlite_error("prepare existing canonical run batch", error))?;
+    let existing = statement
+        .query_map(params_from_iter(keys), |row| row.get::<_, Vec<u8>>(0))
+        .map_err(|error| sqlite_error("read existing canonical run batch", error))?
+        .collect::<Result<BTreeSet<_>, _>>()
+        .map_err(|error| sqlite_error("collect existing canonical run batch", error))?;
     Ok(existing)
 }
 
@@ -1376,12 +1472,12 @@ fn persist_canonical_messages(
     let source_generation = sqlite_u64(context.generation, "source generation")?;
     let commit_seq = sqlite_u64(context.commit_seq, "commit sequence")?;
     for chunk in messages.chunks(MESSAGE_INSERT_BATCH_ROWS) {
-        let row = "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+        let row = "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
         let sql = format!(
             r#"
             INSERT INTO canonical_messages (
                 message_key, session_key, run_key, native_message_id,
-                native_kind, role, content_json, source_time,
+                native_kind, role, content_json, content_json_codec, source_time,
                 source_time_quality, parent_native_message_id, model,
                 search_text, raw_json, raw_json_codec, fact_id,
                 source_object_id, source_generation, cursor_start,
@@ -1394,6 +1490,7 @@ fn persist_canonical_messages(
                 native_kind = excluded.native_kind,
                 role = excluded.role,
                 content_json = excluded.content_json,
+                content_json_codec = excluded.content_json_codec,
                 source_time = excluded.source_time,
                 source_time_quality = excluded.source_time_quality,
                 parent_native_message_id = excluded.parent_native_message_id,
@@ -1412,7 +1509,7 @@ fn persist_canonical_messages(
                 .collect::<Vec<_>>()
                 .join(", ")
         );
-        let mut values = Vec::with_capacity(chunk.len() * 20);
+        let mut values = Vec::with_capacity(chunk.len() * 21);
         for (envelope, fact, payload) in chunk {
             use rusqlite::types::Value;
 
@@ -1421,16 +1518,19 @@ fn persist_canonical_messages(
                     "message fact is missing encoded native payload".to_string(),
                 )
             })?;
+            let canonical_content = payload.message_content.as_ref().ok_or_else(|| {
+                EngineError::InvalidCommit(
+                    "message fact is missing encoded canonical content".to_string(),
+                )
+            })?;
             values.push(Value::Blob(fact.message.as_bytes().to_vec()));
             values.push(Value::Blob(fact.session.as_bytes().to_vec()));
             values.push(Value::Blob(fact.run.as_bytes().to_vec()));
             values.push(optional_text_value(fact.native_message_id.as_deref()));
             values.push(Value::Text(fact.native_kind.clone()));
             values.push(Value::Text(message_role(&fact.role).to_string()));
-            values.push(Value::Blob(serialize(
-                &fact.content,
-                "serialize canonical content",
-            )?));
+            values.push(Value::Blob(canonical_content.bytes.clone()));
+            values.push(Value::Text(canonical_content.codec.to_string()));
             values.push(optional_text_value(timestamp_value(
                 fact.source_time.as_ref(),
             )));
@@ -1493,13 +1593,28 @@ fn encode_fact_payloads(
             } else {
                 omitted()
             };
-            let message_raw = match &envelope.value {
-                Fact::Message(fact) => Some(
-                    encoder.encode(&fact.raw_json, "compress canonical native message payload")?,
-                ),
-                _ => None,
-            };
-            Ok(EncodedFactPayload { audit, message_raw })
+            let (message_raw, message_content) =
+                match &envelope.value {
+                    Fact::Message(fact) => {
+                        let content = serialize(&fact.content, "serialize canonical content")?;
+                        (
+                            Some(encoder.encode(
+                                &fact.raw_json,
+                                "compress canonical native message payload",
+                            )?),
+                            Some(encoder.encode(
+                                &content,
+                                "compress canonical normalized message content",
+                            )?),
+                        )
+                    }
+                    _ => (None, None),
+                };
+            Ok(EncodedFactPayload {
+                audit,
+                message_raw,
+                message_content,
+            })
         })
         .collect()
 }
@@ -3732,8 +3847,7 @@ mod tests {
         AdapterId, AdapterObjectContext, AgentAdapter, ArtifactCapture, ArtifactContentFact,
         ArtifactMetadataEntry, ArtifactMetadataSnapshotFact, ArtifactObservationKind, ContentBlock,
         DecodeContext, DecoderId, DependencyRevision, EvidenceKind, EvidenceStrength, FactBatch,
-        HookEventSummary,
-        InterpretationSettingsDocumentStatus, InterpretationSettingsFact,
+        HookEventSummary, InterpretationSettingsDocumentStatus, InterpretationSettingsFact,
         InterpretationSettingsLayer, InterpretationSettingsSnapshot, MessageFact,
         PersistedToolResultFact, PlanSnapshotFact, PresenceFact, ProjectMemoryDocumentFact,
         RunEvidenceFact, RunFact, SessionFact, SessionIndexEntrySnapshot, SessionIndexSnapshotFact,
@@ -3835,6 +3949,7 @@ mod tests {
                 decoder_key: DECODER.to_string(),
                 stream_state: "available".to_string(),
                 last_reconciled_at: Some(started_at),
+                consistency: crate::adapter::ConsistencyPolicy::IncrementalCursor,
                 retention: RawRetentionPolicy::Full,
             },
             object: SourceObjectUpdate {
@@ -3875,6 +3990,7 @@ mod tests {
     ) -> ObservationCommit {
         remember_test_object(object_key);
         let mut request = request(expected, generation, committed_cursor, started_at);
+        request.stream.consistency = crate::adapter::ConsistencyPolicy::SnapshotReplace;
         request.object.object_key = object_key.to_vec();
         request.object.display_path = Some(String::from_utf8_lossy(object_key).into_owned());
         request
@@ -4414,6 +4530,27 @@ mod tests {
         .unwrap();
     }
 
+    fn commit_direct_snapshot_batch(
+        connection: &mut Connection,
+        record: &SourceRecord,
+        expected_generation: u64,
+        expected_cursor: u64,
+        clock: i64,
+        batch: &FactBatch,
+    ) {
+        let mut commit = request(
+            ExpectedSourceCursor::At {
+                generation: expected_generation,
+                committed_cursor: SourceCursor::append_offset(expected_cursor).into_bytes(),
+            },
+            record.generation,
+            record.cursor_end.as_bytes().to_vec(),
+            clock,
+        );
+        commit.stream.consistency = crate::adapter::ConsistencyPolicy::SnapshotReplace;
+        apply_fact_observation_commit(connection, &commit, batch).unwrap();
+    }
+
     fn commit_object_batch(
         connection: &mut Connection,
         object_key: &[u8],
@@ -4440,15 +4577,20 @@ mod tests {
         .unwrap();
     }
 
+    struct DecodeCommitState {
+        expected_generation: u64,
+        cursor: Vec<u8>,
+        decoder_state: Option<Vec<u8>>,
+    }
+
     fn decode_commit(
         connection: &mut Connection,
         adapter: &ClaudeCodeAdapter,
         object_context: &AdapterObjectContext,
         record: &SourceRecord,
-        expected_generation: u64,
-        expected_cursor: Vec<u8>,
+        state: &mut DecodeCommitState,
         clock: i64,
-    ) -> Vec<u8> {
+    ) {
         let decoder = DecoderId::new(DECODER).unwrap();
         let mut batch = FactBatch::new(16, 8).unwrap();
         adapter
@@ -4456,29 +4598,29 @@ mod tests {
                 DecodeContext {
                     decoder: &decoder,
                     object_context,
-                    decoder_state: None,
+                    decoder_state: state.decoder_state.as_deref(),
                 },
                 record,
                 &mut batch,
             )
             .unwrap();
         let committed_cursor = record.cursor_end.as_bytes().to_vec();
-        let receipt = apply_fact_observation_commit(
-            connection,
-            &request(
-                ExpectedSourceCursor::At {
-                    generation: expected_generation,
-                    committed_cursor: expected_cursor,
-                },
-                record.generation,
-                committed_cursor.clone(),
-                clock,
-            ),
-            &batch,
-        )
-        .unwrap();
-        assert!(receipt.change_count >= 4);
-        committed_cursor
+        let mut request = request(
+            ExpectedSourceCursor::At {
+                generation: state.expected_generation,
+                committed_cursor: state.cursor.clone(),
+            },
+            record.generation,
+            committed_cursor.clone(),
+            clock,
+        );
+        if batch.next_decoder_state().is_some() {
+            request.object.decoder_state_version = Some(adapter.manifest().contract_version);
+        }
+        let receipt = apply_fact_observation_commit(connection, &request, &batch).unwrap();
+        state.cursor = committed_cursor;
+        state.decoder_state = batch.next_decoder_state().map(ToOwned::to_owned);
+        assert!(receipt.change_count >= 2);
     }
 
     fn append_records(read: AppendRead) -> (Vec<SourceRecord>, AppendCheckpoint) {
@@ -4514,15 +4656,18 @@ mod tests {
         let context = adapter_context(root.path(), &adapter);
         let mut connection = database();
         register_object(&mut connection);
-        let mut cursor = SourceCursor::append_offset(0).into_bytes();
+        let mut state = DecodeCommitState {
+            expected_generation: 1,
+            cursor: SourceCursor::append_offset(0).into_bytes(),
+            decoder_state: None,
+        };
         for (index, record) in records.iter().enumerate() {
-            cursor = decode_commit(
+            decode_commit(
                 &mut connection,
                 &adapter,
                 &context,
                 record,
-                1,
-                cursor,
+                &mut state,
                 30 + index as i64,
             );
         }
@@ -4539,7 +4684,11 @@ mod tests {
         let mut connection = database();
         register_object(&mut connection);
         let mut checkpoint = None;
-        let mut cursor = SourceCursor::append_offset(0).into_bytes();
+        let mut state = DecodeCommitState {
+            expected_generation: 1,
+            cursor: SourceCursor::append_offset(0).into_bytes(),
+            decoder_state: None,
+        };
         for (index, line) in transcript().into_iter().enumerate() {
             let mut file = std::fs::OpenOptions::new()
                 .append(true)
@@ -4559,13 +4708,12 @@ mod tests {
                     .unwrap(),
             );
             assert_eq!(records.len(), 1);
-            cursor = decode_commit(
+            decode_commit(
                 &mut connection,
                 &adapter,
                 &context,
                 &records[0],
-                1,
-                cursor,
+                &mut state,
                 50 + index as i64,
             );
             checkpoint = Some(next_checkpoint);
@@ -4718,6 +4866,7 @@ mod tests {
                 decoder_key: input.decoder.to_string(),
                 stream_state: "available".to_string(),
                 last_reconciled_at: Some(input.clock),
+                consistency: crate::adapter::ConsistencyPolicy::IncrementalCursor,
                 retention: RawRetentionPolicy::Full,
             },
             object: SourceObjectUpdate {
@@ -5169,14 +5318,21 @@ mod tests {
     }
 
     #[test]
-    fn message_storage_keeps_one_compressed_native_copy_and_policy_bound_audit() {
+    fn message_storage_compresses_native_and_normalized_content_with_policy_bound_audit() {
         let native_json = format!(
             "{{\"type\":\"assistant\",\"nativeOnly\":\"{}\"}}",
             "secret-padding-".repeat(1_024)
         )
         .into_bytes();
         let record = direct_record(1, 0, native_json.len() as u64, 20, &native_json);
-        let mut message = tool_message("compact-message", MessageRole::Assistant, Vec::new());
+        let normalized_text = "normalized-padding-".repeat(1_024);
+        let mut message = tool_message(
+            "compact-message",
+            MessageRole::Assistant,
+            vec![ContentBlock::Text {
+                text: normalized_text.clone(),
+            }],
+        );
         message.raw_json = native_json.clone();
         let mut batch = FactBatch::new(1, 1).unwrap();
         batch.push(&record, Fact::Message(message)).unwrap();
@@ -5202,6 +5358,24 @@ mod tests {
             )
             .unwrap(),
             native_json
+        );
+        let normalized = stored.message_content.as_ref().unwrap();
+        assert_eq!(
+            normalized.codec,
+            crate::engine::storage_codec::ZSTD_V1_CODEC
+        );
+        let decoded_normalized = crate::engine::storage_codec::decode(
+            normalized.codec,
+            &normalized.bytes,
+            1024 * 1024,
+            "decode normalized test content",
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<Vec<ContentBlock>>(&decoded_normalized).unwrap(),
+            vec![ContentBlock::Text {
+                text: normalized_text,
+            }]
         );
 
         let full = encode_fact_payloads(&batch, RawRetentionPolicy::Full).unwrap();
@@ -5243,18 +5417,22 @@ mod tests {
         );
         hash_only_request.stream.retention = RawRetentionPolicy::HashOnly;
         apply_fact_observation_commit(&mut connection, &hash_only_request, &batch).unwrap();
-        let (audit_bytes, audit_codec, native_bytes, native_codec, retention, entity_is_null): (
-            i64,
-            String,
-            i64,
-            String,
-            String,
-            i64,
-        ) = connection
+        let (
+            audit_bytes,
+            audit_codec,
+            native_bytes,
+            native_codec,
+            content_bytes,
+            content_codec,
+            retention,
+            entity_is_null,
+        ): (i64, String, i64, String, i64, String, String, i64) = connection
             .query_row(
                 r#"
                 SELECT length(fr.payload_json), fr.payload_codec,
-                       length(cm.raw_json), cm.raw_json_codec, ss.raw_retention,
+                       length(cm.raw_json), cm.raw_json_codec,
+                       length(cm.content_json), cm.content_json_codec,
+                       ss.raw_retention,
                        fr.entity_key IS NULL
                 FROM fact_records fr
                 JOIN canonical_messages cm ON cm.fact_id = fr.fact_id
@@ -5269,6 +5447,8 @@ mod tests {
                         row.get(3)?,
                         row.get(4)?,
                         row.get(5)?,
+                        row.get(6)?,
+                        row.get(7)?,
                     ))
                 },
             )
@@ -5277,6 +5457,8 @@ mod tests {
         assert_eq!(audit_codec, crate::engine::storage_codec::OMITTED_CODEC);
         assert!(native_bytes < i64::try_from(native_json.len() / 4).unwrap());
         assert_eq!(native_codec, crate::engine::storage_codec::ZSTD_V1_CODEC);
+        assert!(content_bytes < 256);
+        assert_eq!(content_codec, crate::engine::storage_codec::ZSTD_V1_CODEC);
         assert_eq!(retention, "hash_only");
         assert_eq!(entity_is_null, 1);
     }
@@ -5505,7 +5687,10 @@ mod tests {
         assert!(!run_evidence_outranks(&declared, &succeeded));
         assert_eq!(run_state_label(succeeded.kind), "succeeded");
         assert_eq!(
-            max_optional_time(started.last_activity_at.clone(), succeeded.last_activity_at.clone()),
+            max_optional_time(
+                started.last_activity_at.clone(),
+                succeeded.last_activity_at.clone()
+            ),
             started.last_activity_at
         );
     }
@@ -5530,24 +5715,26 @@ mod tests {
         assert_eq!(replay_checkpoint.generation, 2);
         let adapter = ClaudeCodeAdapter::new();
         let context = adapter_context(root.path(), &adapter);
-        let mut cursor = checkpoint.cursor().into_bytes();
-        let mut expected_generation = 1;
+        let mut state = DecodeCommitState {
+            expected_generation: 1,
+            cursor: checkpoint.cursor().into_bytes(),
+            decoder_state: None,
+        };
         for (index, record) in records.iter().enumerate() {
-            cursor = decode_commit(
+            decode_commit(
                 &mut cold,
                 &adapter,
                 &context,
                 record,
-                expected_generation,
-                cursor,
+                &mut state,
                 80 + index as i64,
             );
-            expected_generation = 2;
+            state.expected_generation = 2;
         }
         assert_eq!(baseline, semantic_snapshot(&cold));
         assert_eq!(count(&cold, "canonical_messages"), 2);
         assert_eq!(count(&cold, "usage_contributions"), 2);
-        assert_eq!(count(&cold, "fact_records"), 10);
+        assert_eq!(count(&cold, "fact_records"), 8);
 
         let before_audit = semantic_snapshot(&cold);
         rebuild_usage_totals_for_audit(&mut cold).unwrap();
@@ -7083,7 +7270,7 @@ mod tests {
 
         let absent_record = direct_record(1, 2, 3, 40, b"presence-absent");
         let absent = FactBatch::new(1, 1).unwrap();
-        commit_direct_batch(&mut connection, &absent_record, 1, 2, 41, &absent);
+        commit_direct_snapshot_batch(&mut connection, &absent_record, 1, 2, 41, &absent);
         assert_eq!(count(&connection, "canonical_presences"), 0);
         assert_eq!(count(&connection, "presence_assertions"), 0);
         assert_eq!(
@@ -7398,7 +7585,7 @@ mod tests {
 
         let deleted_record = direct_record(1, 2, 3, 40, b"todo-deleted");
         let deleted = FactBatch::new(1, 1).unwrap();
-        commit_direct_batch(&mut connection, &deleted_record, 1, 2, 41, &deleted);
+        commit_direct_snapshot_batch(&mut connection, &deleted_record, 1, 2, 41, &deleted);
         assert_eq!(count(&connection, "canonical_task_collections"), 0);
         assert_eq!(count(&connection, "canonical_tasks"), 0);
         assert_eq!(count(&connection, "task_snapshot_assertions"), 0);
@@ -7887,7 +8074,7 @@ mod tests {
 
         let deleted_record = direct_record(1, 2, 3, 60, b"plan-deleted");
         let deleted = FactBatch::new(1, 1).unwrap();
-        commit_direct_batch(&mut connection, &deleted_record, 1, 2, 61, &deleted);
+        commit_direct_snapshot_batch(&mut connection, &deleted_record, 1, 2, 61, &deleted);
         assert_eq!(count(&connection, "canonical_plans"), 0);
         assert_eq!(count(&connection, "plan_assertions"), 0);
         assert_eq!(
@@ -7986,7 +8173,7 @@ mod tests {
 
         let deleted_record = direct_record(1, 2, 3, 40, b"team-deleted");
         let deleted = FactBatch::new(1, 1).unwrap();
-        commit_direct_batch(&mut connection, &deleted_record, 1, 2, 41, &deleted);
+        commit_direct_snapshot_batch(&mut connection, &deleted_record, 1, 2, 41, &deleted);
         assert_eq!(count(&connection, "canonical_teams"), 0);
         assert_eq!(count(&connection, "canonical_team_members"), 0);
         assert_eq!(count(&connection, "team_snapshot_assertions"), 0);
@@ -8066,7 +8253,7 @@ mod tests {
 
         let deleted_record = direct_record(1, 3, 4, 50, b"inbox-deleted");
         let deleted = FactBatch::new(1, 1).unwrap();
-        commit_direct_batch(&mut connection, &deleted_record, 1, 3, 51, &deleted);
+        commit_direct_snapshot_batch(&mut connection, &deleted_record, 1, 3, 51, &deleted);
         assert_eq!(count(&connection, "canonical_team_inboxes"), 0);
         assert_eq!(count(&connection, "team_inbox_snapshot_assertions"), 0);
     }
@@ -8313,9 +8500,24 @@ mod tests {
         );
         let captured: (String, String, Vec<u8>, i64, i64) = connection
             .query_row(
-                "SELECT resolution_status, content_status, content, metadata_assertion_count, content_assertion_count FROM canonical_artifacts WHERE artifact_key = ?1",
+                r#"
+                SELECT ca.resolution_status, ca.content_status, content.content,
+                       ca.metadata_assertion_count, ca.content_assertion_count
+                FROM canonical_artifacts AS ca
+                LEFT JOIN artifact_content_assertions AS content
+                  ON content.fact_id = ca.decisive_content_fact_id
+                WHERE ca.artifact_key = ?1
+                "#,
                 [artifact_key.as_bytes()],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
             )
             .unwrap();
         assert_eq!(
@@ -8327,6 +8529,17 @@ mod tests {
                 2,
                 1,
             )
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT content IS NULL FROM canonical_artifacts WHERE artifact_key = ?1",
+                    [artifact_key.as_bytes()],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            1,
+            "canonical artifacts reference rather than duplicate decisive content",
         );
 
         let replacement_record = object_record(
@@ -8359,7 +8572,13 @@ mod tests {
         assert_eq!(
             connection
                 .query_row(
-                    "SELECT content FROM canonical_artifacts WHERE artifact_key = ?1",
+                    r#"
+                    SELECT content.content
+                    FROM canonical_artifacts AS ca
+                    JOIN artifact_content_assertions AS content
+                      ON content.fact_id = ca.decisive_content_fact_id
+                    WHERE ca.artifact_key = ?1
+                    "#,
                     [artifact_key.as_bytes()],
                     |row| row.get::<_, Vec<u8>>(0),
                 )
@@ -10321,12 +10540,28 @@ mod tests {
         assert_eq!(
             connection
                 .query_row(
-                    "SELECT content FROM canonical_persisted_tool_results",
+                    r#"
+                    SELECT assertion.content
+                    FROM canonical_persisted_tool_results AS canonical
+                    JOIN persisted_tool_result_assertions AS assertion
+                      ON assertion.fact_id = canonical.decisive_fact_id
+                    "#,
                     [],
                     |row| row.get::<_, String>(0),
                 )
                 .unwrap(),
             "persisted result v2\n"
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT length(content) FROM canonical_persisted_tool_results",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            0,
+            "canonical tool results reference rather than duplicate decisive content",
         );
         assert_eq!(
             connection

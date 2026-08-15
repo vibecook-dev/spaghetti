@@ -525,15 +525,24 @@ impl ObservationCoordinator {
                     "directory membership retries require an instance reconcile",
                 ));
             }
-            let previous = catalog
-                .objects
-                .iter()
-                .find(|object| {
-                    object.stream_key == target.stream_key && object.object_key == target.object_key
-                })
-                .ok_or_else(|| {
-                    observation_error("resume retry object", "source object is not registered")
-                })?;
+            let previous = catalog.objects.iter().find(|object| {
+                object.stream_key == target.stream_key && object.object_key == target.object_key
+            });
+            let Some(previous) = previous else {
+                // A native backend can report a newly created file as a
+                // content modification. The object route has no durable
+                // display path yet, so escalate once to membership discovery
+                // instead of turning that normal race into a recovery loop.
+                self.engine.mark_observation_instance_dirty(
+                    manifest.id.as_str(),
+                    instance.spec.stable_key.as_bytes(),
+                    crate::source::DirtyReason::IdentityChanged,
+                )?;
+                return Ok(ReconcileOutcome {
+                    instances_discovered: 1,
+                    ..ReconcileOutcome::default()
+                });
+            };
             let root = instance
                 .root(&stream.selector.root_name)
                 .map_err(|error| adapter_error("resolve retry source root", error))?;
@@ -1631,6 +1640,14 @@ impl ObservationCoordinator {
                             self.check_cancelled()?;
                             match item {
                                 AppendItem::Record(record) => {
+                                    // If this record overflows the bounded commit batch, the
+                                    // preceding slice must persist the decoder state that
+                                    // produced that slice—not the state produced by the record
+                                    // that will be committed next. Advancing state ahead of its
+                                    // cursor can skip state-dependent facts after a crash.
+                                    let decoder_state_before_record = next_decoder_state.clone();
+                                    let decoder_state_version_before_record =
+                                        next_decoder_state_version;
                                     let decoded = decode_record(
                                         adapter,
                                         stream,
@@ -1644,11 +1661,6 @@ impl ObservationCoordinator {
                                         outcome.retries_required =
                                             outcome.retries_required.saturating_add(1);
                                         return Ok(());
-                                    }
-                                    if let Some(state) = decoded.next_decoder_state.clone() {
-                                        next_decoder_state = Some(state);
-                                        next_decoder_state_version =
-                                            Some(adapter.manifest().contract_version);
                                     }
                                     decoded_count = decoded_count.saturating_add(1);
                                     if decoded.quarantined {
@@ -1677,27 +1689,30 @@ impl ObservationCoordinator {
                                             slice,
                                             std::mem::replace(
                                                 &mut batch,
-                                                FactBatch::new(
-                                                    FACT_BATCH_LIMIT,
-                                                    DIAGNOSTIC_LIMIT,
-                                                )
-                                                .map_err(|error| {
-                                                    adapter_error(
-                                                        "create overflow append fact batch",
-                                                        error,
-                                                    )
-                                                })?,
+                                                FactBatch::new(FACT_BATCH_LIMIT, DIAGNOSTIC_LIMIT)
+                                                    .map_err(|error| {
+                                                        adapter_error(
+                                                            "create overflow append fact batch",
+                                                            error,
+                                                        )
+                                                    })?,
                                             ),
                                             std::mem::take(&mut errors),
-                                            next_decoder_state.clone(),
-                                            next_decoder_state_version,
+                                            decoder_state_before_record.clone(),
+                                            decoder_state_version_before_record,
                                             remaining_generation_change,
                                             reason,
                                             started_at,
                                         )?;
                                         remaining_generation_change = false;
-                                        durable.decoder_state = next_decoder_state.clone();
-                                        durable.decoder_state_version = next_decoder_state_version;
+                                        durable.decoder_state = decoder_state_before_record;
+                                        durable.decoder_state_version =
+                                            decoder_state_version_before_record;
+                                    }
+                                    if let Some(state) = decoded.next_decoder_state.clone() {
+                                        next_decoder_state = Some(state);
+                                        next_decoder_state_version =
+                                            Some(adapter.manifest().contract_version);
                                     }
                                     errors.extend(decoded.errors);
                                     batch.append(decoded.batch).map_err(|error| {
@@ -1728,16 +1743,13 @@ impl ObservationCoordinator {
                                             slice,
                                             std::mem::replace(
                                                 &mut batch,
-                                                FactBatch::new(
-                                                    FACT_BATCH_LIMIT,
-                                                    DIAGNOSTIC_LIMIT,
-                                                )
-                                                .map_err(|error| {
-                                                    adapter_error(
-                                                        "create overflow append fact batch",
-                                                        error,
-                                                    )
-                                                })?,
+                                                FactBatch::new(FACT_BATCH_LIMIT, DIAGNOSTIC_LIMIT)
+                                                    .map_err(|error| {
+                                                        adapter_error(
+                                                            "create overflow append fact batch",
+                                                            error,
+                                                        )
+                                                    })?,
                                             ),
                                             std::mem::take(&mut errors),
                                             next_decoder_state.clone(),
@@ -2863,13 +2875,14 @@ fn check_cancellations(cancellations: &[QueryCancellationToken]) -> Result<(), E
     }
 }
 
-struct SelectorPatterns {
+#[derive(Debug)]
+pub(super) struct SelectorPatterns {
     include: Vec<GlobPattern>,
     exclude: Vec<GlobPattern>,
 }
 
 impl SelectorPatterns {
-    fn new(stream: &StreamSpec) -> Result<Self, EngineError> {
+    pub(super) fn new(stream: &StreamSpec) -> Result<Self, EngineError> {
         let compile = |pattern: &String| {
             GlobPattern::new(pattern).map_err(|detail| {
                 observation_error(
@@ -2894,7 +2907,7 @@ impl SelectorPatterns {
         })
     }
 
-    fn matches(&self, path: &Path) -> bool {
+    pub(super) fn matches(&self, path: &Path) -> bool {
         let components = normal_components(path);
         let Some(components) = components else {
             return false;
@@ -3509,6 +3522,7 @@ fn commit_request<A: AgentAdapter + ?Sized>(
             decoder_key: stream.decoder.as_str().to_string(),
             stream_state: "available".to_string(),
             last_reconciled_at: Some(committed_at),
+            consistency: stream.consistency,
             retention: stream.retention,
         },
         object: SourceObjectUpdate {

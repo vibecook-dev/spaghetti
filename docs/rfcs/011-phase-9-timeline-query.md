@@ -110,9 +110,15 @@ carry identical DDL.
 
 Rows, total, and every facet query run in one SQLite read transaction. Opaque
 versioned keyset cursors bind every normalized filter, order key, and the
-first page's commit watermark. Scope changes, malformed cursors, and a newer
-commit are rejected. Cancellation is checked before queue entry and during
-SQLite execution; the SDK also rejects an already-aborted signal before N-API
+canonical session's latest commit revision. Commits to unrelated sessions no
+longer invalidate an older page cursor, which lets a historical transcript be
+paged while another session is live. A change to the paged session—including
+an append, truncation, or replacement—is rejected so the client can restart
+from a fresh snapshot. Scope changes and malformed cursors are also rejected.
+The revision lookup is a primary-key read rather than a scan of all messages.
+Each page still reports the global `atCommitSeq` of its own coherent read
+transaction. Cancellation is checked before queue entry and during SQLite
+execution; the SDK also rejects an already-aborted signal before N-API
 dispatch.
 
 ## Conformance evidence

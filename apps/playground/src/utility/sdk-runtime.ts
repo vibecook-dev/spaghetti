@@ -88,6 +88,10 @@ export class SdkRuntime {
   private disposed = false;
   private nextStreamId = 1;
   private activeStream: ActiveStreamIdentity | null = null;
+  private readonly sessionSnapshotLoads = new Map<
+    string,
+    Promise<Pick<SessionStreamSnapshot, 'page' | 'facets' | 'subagents'>>
+  >();
   private ownerState: ObservationOwnerStatus['state'] = 'starting';
   private ownerError: string | null = null;
   private lastProgress: InitProgress | null = null;
@@ -197,12 +201,24 @@ export class SdkRuntime {
       const streamId = `session-stream-${this.nextStreamId++}`;
       const stream = { streamId, sourceId, projectSlug, sessionId };
       this.activeStream = stream;
-      const [page, facets, subagents] = await Promise.all([
-        sdk.getSessionTimeline(projectSlug, sessionId, request),
-        sdk.getSessionTimelineFacets(projectSlug, sessionId, { sourceId }),
-        sdk.getSessionSubagents(projectSlug, sessionId, { sourceId, includeNested: true }),
-      ]);
-      return { ...stream, page, facets, subagents };
+      const snapshotKey = JSON.stringify([sourceId, projectSlug, sessionId, request]);
+      let snapshotLoad = this.sessionSnapshotLoads.get(snapshotKey);
+      if (!snapshotLoad) {
+        const work = (async () => {
+          const [page, subagents] = await Promise.all([
+            sdk.getSessionTimeline(projectSlug, sessionId, request),
+            sdk.getSessionSubagents(projectSlug, sessionId, { sourceId, includeNested: true }),
+          ]);
+          const facets = page.facets ?? (await sdk.getSessionTimelineFacets(projectSlug, sessionId, { sourceId }));
+          return { page, facets, subagents };
+        })();
+        const tracked = work.finally(() => {
+          if (this.sessionSnapshotLoads.get(snapshotKey) === tracked) this.sessionSnapshotLoads.delete(snapshotKey);
+        });
+        this.sessionSnapshotLoads.set(snapshotKey, tracked);
+        snapshotLoad = tracked;
+      }
+      return { ...stream, ...(await snapshotLoad) };
     });
   }
 
@@ -324,6 +340,7 @@ export class SdkRuntime {
   private async disposeService(): Promise<void> {
     this.clearEvents();
     this.activeStream = null;
+    this.sessionSnapshotLoads.clear();
     const service = this.service;
     this.service = null;
     this.initPromise = null;
