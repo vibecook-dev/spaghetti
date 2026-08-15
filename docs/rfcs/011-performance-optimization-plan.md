@@ -573,36 +573,81 @@ or query readers are admitted. The production implementation then completed
 the same corpus in 167.62 seconds with exact counts, zero retries, a passing
 9.15-second foreign-key audit, 9/9 checkpoints, and a zero-byte final WAL.
 
+### F23 — compact run-evidence reductions remove per-message projection amplification
+
+The F22 runtime ablation was only an upper bound, so the follow-up preserved
+every `RunEvidenceFact` and its durable `fact_records` provenance. It changed
+only the query projection: `run_evidence` now retains one exact winning fact,
+evidence count, and maximum activity time per
+run/source-object/generation/kind/strength. Runtime evidence counts sum those
+counts, decisive evidence still resolves to the original fact ID and native
+metadata, and generation replacement deletes the old summaries before the
+same bounded reducer runs. The observed-state foreign key cascades winner-ID
+updates during live ingest; cold bootstrap still performs its exhaustive
+foreign-key audit before readiness.
+
+A focused regression proves cursor-ranked decisive evidence with out-of-order
+timestamps, independent maximum activity, terminal precedence, generation
+replacement, exact count preservation, and a clean `foreign_key_check`.
+Runtime-query fixtures separately prove that one compact row reports all seven
+represented evidence facts. The 361-test production-feature native suite, the
+546-test all-feature native suite, and all 313 active SDK tests pass. Medium
+Claude, Codex, and Grok remain exact across cold, live, reconcile, generation
+replacement, and restart. The small Claude corpus retains only its previously
+recorded `canonical_sessions` differential; its cold state is exact and the
+mismatch is outside runtime evidence.
+
+The production comparison froze one immutable 3,701.6 MiB corpus containing
+1,102,826 JSONL records. A treatment-control-treatment sequence produced the
+same 1,119,826 native records, 1,080,334 canonical messages, 2,598,391 facts,
+34,950 commits, zero retries, and zero final WAL in every run. The control took
+208.92 seconds; treatments took 177.42 and 165.56 seconds, averaging 171.49
+seconds. That is 37.43 seconds (17.9%) below control. Both treatments bracket
+the control, so the result does not depend on one favorable cache ordering.
+
+The causal counters match the schema hypothesis. Dedicated run-state work
+fell from 8.545 seconds to a 1.139-second treatment mean (-86.7%); total runtime
+projection fell from 36.283 to 25.675 seconds. SQLite row changes fell from
+6,708,798 to a 5,625,456 mean, almost exactly the eliminated per-message
+projection writes. The database fell from 7,555,858,432 bytes to a
+6,677,094,400-byte treatment mean (-878,764,032 bytes, 11.6%). Physical
+transaction time fell from 117.14 to a 99.04-second mean, while foreign-key
+validation fell from 11.03 to 7.75 seconds because it audits a much smaller
+index graph. This accepts compact projection rows; eliminating the durable
+activity facts themselves remains a separate experiment because they are the
+audit ledger and stable public evidence identities.
+
 ## Controlled spikes and decisions
 
-| Spike                                                                                               | Result                                                                                                                                       | Decision                                                                                                                  |
-| --------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
-| Generation-aware cleanup plus aligned indexes                                                       | 16k: 30.24 -> 26.86 s before batching                                                                                                        | Landed; required for rewrite correctness at scale                                                                         |
-| 64 -> 1,024 record commits                                                                          | 16k: 26.86 -> 10.55 s                                                                                                                        | Landed; matches existing 8 MiB bound                                                                                      |
-| Statement reuse, prefetch, coalescing, usage delta flush                                            | 16k: 10.55 -> 2.65 s                                                                                                                         | Landed                                                                                                                    |
-| Unrelated-projector fast paths                                                                      | 64k: 24.44 -> 13.43 s; 131k: 89.09 -> 42.14 s                                                                                                | Landed                                                                                                                    |
-| Defer selected query indexes and canonical FTS                                                      | 64k: 9.79 s ingest + 3.18 s rebuild = 12.98 s; 131k: 26.36 s + 5.89 s = 32.25 s                                                              | Promising only above a threshold; design writer-owned bootstrap mode                                                      |
-| Rebuild deferred objects through a second SQLite connection while native readers/writer remain open | Isolated spike produced invalid cached-schema/root-page state                                                                                | Rejected; DDL/finalization must be sole-writer-owned with readers quiesced                                                |
-| Raise WAL autocheckpoint from ~64 MiB to ~1 GiB                                                     | 64k regressed from 13.43 s to 18.77 s                                                                                                        | Rejected; close-time checkpoint burst outweighed reduced checkpoint frequency                                             |
-| Tune live WAL checkpoint cadence                                                                    | ~64 MiB gave 64-record p99 143.9 ms; ~16 MiB gave p99 69.1 ms but 64k cold 18.45 s; ~32 MiB gave 100-sample p99 91.4 ms and 64k cold 16.66 s | Landed ~32 MiB as the measured balance; retain adaptive/background checkpointing as future work                           |
-| Standalone Rust delta reducer for run state                                                         | 131k was neutral (41.78 vs 42.14 s) and smaller cases regressed                                                                              | Reverted; revisit only with schema-level, set-oriented arrangements                                                       |
-| Query-plan-aligned run-state reducer indexes                                                        | 64k: 13.62 -> 11.02 s in the controlled one-run comparison; reducer: 1,423.6 -> 386.8 ms; initial 16k/64k medians 1.74/12.13 s               | Landed; both reducer queries are `EXPLAIN QUERY PLAN` tested                                                              |
-| Remove superseded indexes and narrow the source-statistics covering index                           | Final 16k/64k medians: 1.555/8.098 s (5.209x); DB: 94.5/375.5 MiB; 131k continuation: 20.08 s and 751.0 MiB; all 12 query groups pass        | Landed; same-version repair removes old shapes, while source-statistics and usage queries retain tested indexed plans     |
-| Replace hidden autocheckpoint with writer-owned nonblocking checkpoint                              | 16k/64k: 1.559/8.007 s (5.138x), 4/4 and 25/25 complete; live p99: 2.5 ms/37.5 ms; pinned-reader recovery reaches a zero-byte WAL            | Landed; checkpoint progress and reader-blocked time are bounded telemetry, and shutdown retries after query-pool closure  |
-| Add bounded source-pipeline and adapter/stream telemetry                                            | 16k/64k: 1.662/8.597 s (5.173x); 131k: 21.22 s; live p99: 3.2/38.4 ms; 64k read/decode totals: 109.8/662.3 ms                                | Landed; remains inside both regression gates and proves storage/projection, not source decoding, dominates                |
-| Open `node:sqlite` for metrics while the native owner remains live                                  | Reproducible macOS `SIGBUS` in the native writer after 18–19 commits                                                                         | Rejected; all live metrics and queries cross the native read pool, and offline SQLite inspection waits for owner disposal |
-| Give object retry work an instance-scoped lifecycle lease                                           | Frozen corpus silently lost sibling targets; even post-ready repair omitted 29,850 records                                                   | Fixed with exact object-scoped acknowledgement and 17/32-sibling regression gates                                         |
-| Let supervisors poll during deferred-index/FTS finalization                                         | Readiness guard observed an active full reconcile after the writer cleared bootstrap                                                         | Fixed with native drain/pause/finalize/resume/drain barrier; watchers continue admitting changes                          |
-| Durable bootstrap on the frozen 3.86 GB corpus                                                      | 634.37 s ready/converged, 1,112,311 records, 5,138,709 facts, 69,041 commits, zero retries, 9,808.2 MiB DB                                   | Accepted as the first complete-output large-corpus reference report                                                       |
-| Normalize record provenance into a separate `source_records` table                                  | Complete 64k tables/indexes: 89.91 MiB normalized versus 89.88 MiB current; also adds one source-row insert and downstream joins per record  | Rejected; a future surrogate must narrow downstream identities and prove a net whole-schema win                           |
-| Omit the unconsumed generic-ledger entity-key copy                                                  | Entity-only 64k spike was runtime-neutral; DB 375.5 -> 342.9 MiB (-8.7%); canonical/assertion keys and all source provenance remain          | Landed without a schema bump; existing rows remain compatible and reclaim space on rebuild                                |
-| Batch fact, canonical-message, and new content-block writes                                         | Five-run 16k/64k medians 1.176/6.140 s (5.220x); 64k row changes ~1.14M -> 724,910 and WAL ~43 -> 22.3 MiB                                   | Landed with 512/256/512-row bounds and sequential fallback for replacements/duplicates                                    |
-| Repeat the optimized frozen-corpus gate                                                             | 574.80 s ready/converged, complete identical counts, zero retries, 9,214.1 MiB DB                                                            | Accepted; 9.4% faster and 6.1% smaller than the first truthful reference                                                  |
-| Enlarge corpus physical groups and pipeline more objects                                            | Frozen corpus regressed 285.9 -> 379.75 s despite 424 -> 164 physical transactions; commit/checkpoint time and RSS rose sharply              | Rejected and reverted; transaction policy must be corpus-shaped, not selected by the single-object gate                  |
-| Raise SQLite page size from 4 KiB to 8 KiB                                                          | 131k/4,096 objects: DB 613.4 -> 589.3 MiB, time 14.88 -> 15.68 s                                                                             | Rejected; smaller storage did not compensate for slower ingestion                                                         |
-| Use exclusive locking and disable cache spill during bootstrap                                      | Native query-bootstrap lifecycle failed with `database is locked` while starting the read pool                                               | Rejected and reverted; normal locking remains mandatory at the readiness transition                                       |
-| Emit Claude object declarations once per generation                                                | 131k/4,096 objects: 589,824 -> 335,872 facts, 613.2 -> 557.1 MiB, 16.38 -> 14.45 s first-run; repeat median 13.16 s; live p99 7.2 ms        | Landed behind Claude contract v16 with bounded state, exact small/medium differentials, and deterministic parent ownership |
-| Defer cold-build FK enforcement to the exhaustive readiness audit                                  | Frozen-corpus A-B-A: 176.64 / 168.96 / 179.46 s; production: 167.62 s with exact counts, zero retries, and zero final WAL                  | Landed only for reader-free cold bootstrap; fault injection blocks readiness and live enforcement is restored             |
+| Spike                                                                                               | Result                                                                                                                                       | Decision                                                                                                                    |
+| --------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| Generation-aware cleanup plus aligned indexes                                                       | 16k: 30.24 -> 26.86 s before batching                                                                                                        | Landed; required for rewrite correctness at scale                                                                           |
+| 64 -> 1,024 record commits                                                                          | 16k: 26.86 -> 10.55 s                                                                                                                        | Landed; matches existing 8 MiB bound                                                                                        |
+| Statement reuse, prefetch, coalescing, usage delta flush                                            | 16k: 10.55 -> 2.65 s                                                                                                                         | Landed                                                                                                                      |
+| Unrelated-projector fast paths                                                                      | 64k: 24.44 -> 13.43 s; 131k: 89.09 -> 42.14 s                                                                                                | Landed                                                                                                                      |
+| Defer selected query indexes and canonical FTS                                                      | 64k: 9.79 s ingest + 3.18 s rebuild = 12.98 s; 131k: 26.36 s + 5.89 s = 32.25 s                                                              | Promising only above a threshold; design writer-owned bootstrap mode                                                        |
+| Rebuild deferred objects through a second SQLite connection while native readers/writer remain open | Isolated spike produced invalid cached-schema/root-page state                                                                                | Rejected; DDL/finalization must be sole-writer-owned with readers quiesced                                                  |
+| Raise WAL autocheckpoint from ~64 MiB to ~1 GiB                                                     | 64k regressed from 13.43 s to 18.77 s                                                                                                        | Rejected; close-time checkpoint burst outweighed reduced checkpoint frequency                                               |
+| Tune live WAL checkpoint cadence                                                                    | ~64 MiB gave 64-record p99 143.9 ms; ~16 MiB gave p99 69.1 ms but 64k cold 18.45 s; ~32 MiB gave 100-sample p99 91.4 ms and 64k cold 16.66 s | Landed ~32 MiB as the measured balance; retain adaptive/background checkpointing as future work                             |
+| Standalone Rust delta reducer for run state                                                         | 131k was neutral (41.78 vs 42.14 s) and smaller cases regressed                                                                              | Reverted; revisit only with schema-level, set-oriented arrangements                                                         |
+| Query-plan-aligned run-state reducer indexes                                                        | 64k: 13.62 -> 11.02 s in the controlled one-run comparison; reducer: 1,423.6 -> 386.8 ms; initial 16k/64k medians 1.74/12.13 s               | Landed; both reducer queries are `EXPLAIN QUERY PLAN` tested                                                                |
+| Remove superseded indexes and narrow the source-statistics covering index                           | Final 16k/64k medians: 1.555/8.098 s (5.209x); DB: 94.5/375.5 MiB; 131k continuation: 20.08 s and 751.0 MiB; all 12 query groups pass        | Landed; same-version repair removes old shapes, while source-statistics and usage queries retain tested indexed plans       |
+| Replace hidden autocheckpoint with writer-owned nonblocking checkpoint                              | 16k/64k: 1.559/8.007 s (5.138x), 4/4 and 25/25 complete; live p99: 2.5 ms/37.5 ms; pinned-reader recovery reaches a zero-byte WAL            | Landed; checkpoint progress and reader-blocked time are bounded telemetry, and shutdown retries after query-pool closure    |
+| Add bounded source-pipeline and adapter/stream telemetry                                            | 16k/64k: 1.662/8.597 s (5.173x); 131k: 21.22 s; live p99: 3.2/38.4 ms; 64k read/decode totals: 109.8/662.3 ms                                | Landed; remains inside both regression gates and proves storage/projection, not source decoding, dominates                  |
+| Open `node:sqlite` for metrics while the native owner remains live                                  | Reproducible macOS `SIGBUS` in the native writer after 18–19 commits                                                                         | Rejected; all live metrics and queries cross the native read pool, and offline SQLite inspection waits for owner disposal   |
+| Give object retry work an instance-scoped lifecycle lease                                           | Frozen corpus silently lost sibling targets; even post-ready repair omitted 29,850 records                                                   | Fixed with exact object-scoped acknowledgement and 17/32-sibling regression gates                                           |
+| Let supervisors poll during deferred-index/FTS finalization                                         | Readiness guard observed an active full reconcile after the writer cleared bootstrap                                                         | Fixed with native drain/pause/finalize/resume/drain barrier; watchers continue admitting changes                            |
+| Durable bootstrap on the frozen 3.86 GB corpus                                                      | 634.37 s ready/converged, 1,112,311 records, 5,138,709 facts, 69,041 commits, zero retries, 9,808.2 MiB DB                                   | Accepted as the first complete-output large-corpus reference report                                                         |
+| Normalize record provenance into a separate `source_records` table                                  | Complete 64k tables/indexes: 89.91 MiB normalized versus 89.88 MiB current; also adds one source-row insert and downstream joins per record  | Rejected; a future surrogate must narrow downstream identities and prove a net whole-schema win                             |
+| Omit the unconsumed generic-ledger entity-key copy                                                  | Entity-only 64k spike was runtime-neutral; DB 375.5 -> 342.9 MiB (-8.7%); canonical/assertion keys and all source provenance remain          | Landed without a schema bump; existing rows remain compatible and reclaim space on rebuild                                  |
+| Batch fact, canonical-message, and new content-block writes                                         | Five-run 16k/64k medians 1.176/6.140 s (5.220x); 64k row changes ~1.14M -> 724,910 and WAL ~43 -> 22.3 MiB                                   | Landed with 512/256/512-row bounds and sequential fallback for replacements/duplicates                                      |
+| Repeat the optimized frozen-corpus gate                                                             | 574.80 s ready/converged, complete identical counts, zero retries, 9,214.1 MiB DB                                                            | Accepted; 9.4% faster and 6.1% smaller than the first truthful reference                                                    |
+| Enlarge corpus physical groups and pipeline more objects                                            | Frozen corpus regressed 285.9 -> 379.75 s despite 424 -> 164 physical transactions; commit/checkpoint time and RSS rose sharply              | Rejected and reverted; transaction policy must be corpus-shaped, not selected by the single-object gate                     |
+| Raise SQLite page size from 4 KiB to 8 KiB                                                          | 131k/4,096 objects: DB 613.4 -> 589.3 MiB, time 14.88 -> 15.68 s                                                                             | Rejected; smaller storage did not compensate for slower ingestion                                                           |
+| Use exclusive locking and disable cache spill during bootstrap                                      | Native query-bootstrap lifecycle failed with `database is locked` while starting the read pool                                               | Rejected and reverted; normal locking remains mandatory at the readiness transition                                         |
+| Emit Claude object declarations once per generation                                                 | 131k/4,096 objects: 589,824 -> 335,872 facts, 613.2 -> 557.1 MiB, 16.38 -> 14.45 s first-run; repeat median 13.16 s; live p99 7.2 ms         | Landed behind Claude contract v16 with bounded state, exact small/medium differentials, and deterministic parent ownership  |
+| Defer cold-build FK enforcement to the exhaustive readiness audit                                   | Frozen-corpus A-B-A: 176.64 / 168.96 / 179.46 s; production: 167.62 s with exact counts, zero retries, and zero final WAL                    | Landed only for reader-free cold bootstrap; fault injection blocks readiness and live enforcement is restored               |
+| Compact run evidence per source-generation/category while preserving counts and exact winners       | Frozen treatment/control/treatment: 177.42 / 208.92 / 165.56 s; mean treatment -17.9%, DB -838 MiB, run-state work -86.7%                    | Landed as schema v43; full fact provenance, runtime counts, decisive IDs, activity maxima, and replacement semantics remain |
 
 The bulk spike is deliberately not exposed as a production flag. Its lifecycle
 is incomplete until crash recovery, reader quiescence, durable readiness, FTS
@@ -875,7 +920,7 @@ Local implementation acceptance is complete. Publication of private reports,
 portable absolute thresholds, scale-50 policy, and the final release decision
 remain maintainer-owned policy inputs rather than code gaps.
 
-### P6 — production-corpus follow-up (in progress)
+### P6 — production-corpus follow-up (implementation complete)
 
 - complete: reject oversized physical groups on the complete frozen corpus;
 - complete: reject 8 KiB pages and exclusive bootstrap locking on their
@@ -886,15 +931,16 @@ remain maintainer-owned policy inputs rather than code gaps.
   session ownership deterministic;
 - complete: pass native tests, small/medium five-mode differentials, the
   131k/4,096-object gate, and the 100-sample live gate;
-- pending: recover adequate free space, then rerun the identical frozen corpus
-  with reader-free bootstrap checkpointing and contract v16;
-- pending: compare complete canonical counts/digests, row changes, DB/WAL size,
-  physical transaction/checkpoint/finalize time, and peak RSS before making a
-  new production acceptance claim.
+- complete: defer cold-build foreign-key enforcement only behind the exhaustive
+  readiness audit and prove failure injection still blocks readers;
+- complete: compact run-evidence projection rows while preserving the full
+  ledger, public count/winner contract, replacement, and activity semantics;
+- complete: freeze and run a treatment-control-treatment production comparison
+  with identical counts, zero retries/WAL, and full stage/storage telemetry.
 
 Exit: a complete, zero-retry frozen-corpus run has ready equal to convergence,
 semantic parity, a safe disk reserve, and a material wall-clock improvement
-over the 285.9-second reference.
+over both the 285.9-second reference and its exact parent control.
 
 ## Research basis
 

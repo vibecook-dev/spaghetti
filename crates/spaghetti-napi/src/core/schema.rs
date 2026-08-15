@@ -163,8 +163,11 @@ const CANONICAL_FTS_TRIGGERS: &[&str] = &[
 /// v42: canonical normalized message content uses the same bounded versioned
 /// zstd storage as lossless native payloads. Timeline/detail queries decode
 /// only their bounded page, reducing cold-ingest and checkpoint I/O.
-pub const SCHEMA_VERSION: u32 = 42;
-const MESSAGE_CONTENT_CODEC_MIGRATION_VERSION: u32 = 41;
+/// v43: run evidence is compacted per run/source-generation/category while
+/// retaining exact winner provenance, total evidence counts, and maximum
+/// activity time. This removes per-message projection/index amplification;
+/// fact_records remains the complete durable evidence ledger.
+pub const SCHEMA_VERSION: u32 = 43;
 
 /// Full DDL for the current schema — lifted verbatim from the TS `SCHEMA_SQL`
 /// template literal. Whitespace differs; structure does not.
@@ -838,13 +841,15 @@ CREATE TABLE IF NOT EXISTS run_evidence (
   source_object_id INTEGER NOT NULL,
   source_generation INTEGER NOT NULL,
   cursor_end BLOB NOT NULL,
-  last_commit_seq INTEGER NOT NULL
+  last_commit_seq INTEGER NOT NULL,
+  evidence_count INTEGER NOT NULL DEFAULT 1,
+  last_activity_at TEXT
 );
 
 CREATE TABLE IF NOT EXISTS observed_run_states (
   run_key BLOB PRIMARY KEY,
   state TEXT NOT NULL,
-  decisive_evidence_id BLOB NOT NULL REFERENCES run_evidence(fact_id) ON DELETE CASCADE,
+  decisive_evidence_id BLOB NOT NULL REFERENCES run_evidence(fact_id) ON DELETE CASCADE ON UPDATE CASCADE,
   last_activity_at TEXT,
   terminal_at TEXT,
   last_commit_seq INTEGER NOT NULL
@@ -1669,6 +1674,9 @@ CREATE INDEX IF NOT EXISTS idx_canonical_runs_source_generation ON canonical_run
 CREATE INDEX IF NOT EXISTS idx_usage_contributions_session_time ON usage_contributions(session_key, source_time, fact_id);
 CREATE INDEX IF NOT EXISTS idx_usage_contributions_source_generation ON usage_contributions(source_object_id, source_generation);
 DROP INDEX IF EXISTS idx_run_evidence_run_order;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_run_evidence_compact ON run_evidence(
+  run_key, source_object_id, source_generation, evidence_kind, evidence_strength
+);
 CREATE INDEX IF NOT EXISTS idx_run_evidence_decisive ON run_evidence(
   run_key,
   (CASE evidence_kind
@@ -1691,8 +1699,8 @@ CREATE INDEX IF NOT EXISTS idx_run_evidence_decisive ON run_evidence(
   END) DESC,
   source_generation DESC, cursor_end DESC, last_commit_seq DESC, fact_id DESC
 );
-CREATE INDEX IF NOT EXISTS idx_run_evidence_activity_time ON run_evidence(run_key, source_time DESC)
-  WHERE evidence_kind IN ('run_started', 'activity_observed');
+CREATE INDEX IF NOT EXISTS idx_run_evidence_activity_time ON run_evidence(run_key, last_activity_at DESC)
+  WHERE last_activity_at IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_run_evidence_source_generation ON run_evidence(source_object_id, source_generation);
 CREATE INDEX IF NOT EXISTS idx_presence_assertions_presence ON presence_assertions(presence_key, fact_id);
 CREATE INDEX IF NOT EXISTS idx_presence_assertions_source ON presence_assertions(source_object_id, presence_key);
@@ -2630,18 +2638,14 @@ pub fn current_schema_version(conn: &Connection) -> Result<Option<u32>, SchemaEr
 /// necessary.
 ///
 /// - Ensures `schema_meta` exists so the version can be read.
-/// - Migrates the explicitly compatible v41 -> v42 additive codec column in
-///   one transaction without discarding a multi-gigabyte derived cache.
-/// - If the stored version is otherwise missing or `!= SCHEMA_VERSION`, drops
+/// - If the stored version is missing or `!= SCHEMA_VERSION`, drops
 ///   all legacy + current tables (and their triggers) and rebuilds from
 ///   [`SCHEMA_SQL`].
 /// - Otherwise, reruns [`SCHEMA_SQL`] (`IF NOT EXISTS` creates plus explicit
 ///   `DROP INDEX IF EXISTS` retirement statements are idempotent).
 /// - Writes the current [`SCHEMA_VERSION`] into `schema_meta` after a wipe.
 ///
-/// This mirrors the compatible-migration allow-list in `initializeSchema` in
-/// `packages/sdk/src/data/schema.ts`; every transition not on that list stays
-/// wipe-on-stale.
+/// This mirrors `initializeSchema` in `packages/sdk/src/data/schema.ts`.
 pub fn initialize_schema(conn: &Connection) -> Result<(), SchemaError> {
     // Ensure schema_meta exists so we can read the version.
     conn.execute_batch(
@@ -2649,9 +2653,7 @@ pub fn initialize_schema(conn: &Connection) -> Result<(), SchemaError> {
     )?;
 
     let current = current_schema_version(conn)?;
-    let migrated = current == Some(MESSAGE_CONTENT_CODEC_MIGRATION_VERSION)
-        && migrate_message_content_codec(conn).is_ok();
-    let rebuilt = current != Some(SCHEMA_VERSION) && !migrated;
+    let rebuilt = current != Some(SCHEMA_VERSION);
 
     if rebuilt {
         // Drop legacy tables from previous schema versions. Errors here are
@@ -2712,23 +2714,6 @@ pub fn initialize_schema(conn: &Connection) -> Result<(), SchemaError> {
     }
 
     Ok(())
-}
-
-/// v42 adds only a codec discriminator. Existing v41 content bytes are valid
-/// identity payloads, so SQLite can add the column with a constant default by
-/// changing schema metadata rather than rewriting or rebuilding the cache.
-/// The transaction also makes an interrupted upgrade remain recognizably v41.
-fn migrate_message_content_codec(conn: &Connection) -> Result<(), rusqlite::Error> {
-    let transaction = conn.unchecked_transaction()?;
-    transaction.execute_batch(
-        "ALTER TABLE canonical_messages \
-         ADD COLUMN content_json_codec TEXT NOT NULL DEFAULT 'identity'",
-    )?;
-    transaction.execute(
-        "UPDATE schema_meta SET value = ?1 WHERE key = 'version'",
-        [SCHEMA_VERSION.to_string()],
-    )?;
-    transaction.commit()
 }
 
 #[cfg(test)]
@@ -3050,6 +3035,7 @@ mod tests {
             "idx_canonical_messages_source_generation",
             "idx_canonical_runs_source_generation",
             "idx_usage_contributions_source_generation",
+            "idx_run_evidence_compact",
             "idx_run_evidence_decisive",
             "idx_run_evidence_activity_time",
             "idx_run_evidence_source_generation",
@@ -3062,6 +3048,8 @@ mod tests {
             ("source_streams", "raw_retention"),
             ("fact_records", "payload_codec"),
             ("canonical_messages", "raw_json_codec"),
+            ("run_evidence", "evidence_count"),
+            ("run_evidence", "last_activity_at"),
         ] {
             let present: i64 = conn
                 .query_row(
@@ -3413,9 +3401,9 @@ mod tests {
             (
                 r#"
                 EXPLAIN QUERY PLAN
-                SELECT MAX(source_time) FROM run_evidence
+                SELECT MAX(last_activity_at) FROM run_evidence
                 WHERE run_key = ?1
-                  AND evidence_kind IN ('run_started', 'activity_observed')
+                  AND last_activity_at IS NOT NULL
                 "#,
                 "idx_run_evidence_activity_time",
             ),
@@ -3484,22 +3472,15 @@ mod tests {
     }
 
     #[test]
-    fn v41_codec_migration_preserves_the_existing_cache() {
+    fn v42_cache_rebuilds_for_compact_run_evidence() {
         let conn = Connection::open_in_memory().expect("open in-memory db");
-        let v41_schema = SCHEMA_SQL.replace(
-            "  content_json_codec TEXT NOT NULL DEFAULT 'identity',\n",
-            "",
-        );
-        assert_ne!(
-            v41_schema, SCHEMA_SQL,
-            "v41 fixture did not remove the v42 column"
-        );
-        conn.execute_batch(&v41_schema).expect("install v41 schema");
+        conn.execute_batch(SCHEMA_SQL)
+            .expect("install schema fixture");
         conn.execute(
             "INSERT INTO schema_meta (key, value) VALUES ('version', ?1)",
-            [MESSAGE_CONTENT_CODEC_MIGRATION_VERSION.to_string()],
+            [(SCHEMA_VERSION - 1).to_string()],
         )
-        .expect("set v41 version");
+        .expect("set v42 version");
         conn.execute(
             "INSERT INTO projects (slug, original_path, sessions_index, updated_at) \
              VALUES ('preserved', '/tmp/preserved', '[]', 456)",
@@ -3507,7 +3488,7 @@ mod tests {
         )
         .expect("seed existing cache row");
 
-        initialize_schema(&conn).expect("migrate v41 in place");
+        initialize_schema(&conn).expect("rebuild v42 cache");
 
         assert_eq!(
             current_schema_version(&conn).expect("read migrated version"),
@@ -3520,16 +3501,8 @@ mod tests {
                 |row| row.get(0),
             )
             .expect("count preserved row");
-        assert_eq!(preserved, 1, "compatible migration discarded cached data");
-        let codec_default: String = conn
-            .query_row(
-                "SELECT dflt_value FROM pragma_table_info('canonical_messages') \
-                 WHERE name = 'content_json_codec'",
-                [],
-                |row| row.get(0),
-            )
-            .expect("read migrated codec column");
-        assert_eq!(codec_default, "'identity'");
+        assert_eq!(preserved, 0, "v42 cache used the incompatible row shape");
+        assert!(object_exists(&conn, "index", "idx_run_evidence_compact"));
     }
 
     #[test]

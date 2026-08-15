@@ -459,18 +459,16 @@ impl TransactionalProjectionWork for FactProjectionWork<'_> {
                 .map_err(|error| sqlite_error("retract replaced run evidence", error))?;
             }
 
-            let folded =
-                persist_run_evidence(transaction, context, self.batch, &mut affected_states)?;
+            persist_run_evidence(transaction, context, self.batch, &mut affected_states)?;
 
             changes.reserve(affected_states.len());
             for run_key in affected_states {
-                let state = if context.replaces_prior_generation {
-                    reduce_run_state(transaction, &run_key, context.commit_seq)?
-                } else if let Some(candidate) = folded.get(&run_key) {
-                    fold_run_state(transaction, &run_key, candidate, context.commit_seq)?
-                } else {
-                    reduce_run_state(transaction, &run_key, context.commit_seq)?
-                };
+                // run_evidence stores compact per-source/category reductions,
+                // so its bounded SQL reduction is authoritative for both
+                // appends and generation replacement. In particular, an
+                // UPSERT may update the winning fact_id through ON UPDATE
+                // CASCADE before this state row is refreshed.
+                let state = reduce_run_state(transaction, &run_key, context.commit_seq)?;
                 changes.push(state_change(&run_key, state.as_deref())?);
             }
         }
@@ -1178,14 +1176,23 @@ struct FoldedRunEvidence {
     last_activity_at: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+struct CompactRunEvidence {
+    candidate: FoldedRunEvidence,
+    run_key: Vec<u8>,
+    strength: &'static str,
+    native_state: Option<String>,
+    source_time_quality: Option<String>,
+    evidence_count: i64,
+}
+
 fn persist_run_evidence(
     transaction: &Transaction<'_>,
     context: &ProjectionCommitContext,
     batch: &FactBatch,
     affected_states: &mut BTreeSet<Vec<u8>>,
-) -> Result<BTreeMap<Vec<u8>, FoldedRunEvidence>, EngineError> {
-    let mut folded = BTreeMap::new();
-    let mut rows = Vec::new();
+) -> Result<(), EngineError> {
+    let mut summaries = BTreeMap::new();
     let source_object_id = sqlite_u64(context.source_object_id, "source object id")?;
     let source_generation = sqlite_u64(context.generation, "source generation")?;
     let commit_seq = sqlite_u64(context.commit_seq, "commit sequence")?;
@@ -1210,89 +1217,119 @@ fn persist_run_evidence(
             source_time,
             last_activity_at,
         };
-        match folded.get_mut(&run_key) {
-            Some(current) => {
+        affected_states.insert(run_key);
+        let strength = evidence_strength(fact.strength);
+        let summary_key = (fact.run.as_bytes().to_vec(), kind, strength);
+        match summaries.get_mut(&summary_key) {
+            Some(CompactRunEvidence {
+                candidate: current,
+                native_state,
+                source_time_quality,
+                evidence_count,
+                ..
+            }) => {
+                *evidence_count += 1;
+                let last_activity_at = max_optional_time(
+                    current.last_activity_at.clone(),
+                    candidate.last_activity_at.clone(),
+                );
                 if run_evidence_outranks(&candidate, current) {
-                    let last_activity_at = max_optional_time(
-                        current.last_activity_at.clone(),
-                        candidate.last_activity_at.clone(),
-                    );
-                    *current = candidate.clone();
-                    current.last_activity_at = last_activity_at;
-                } else {
-                    current.last_activity_at = max_optional_time(
-                        current.last_activity_at.clone(),
-                        candidate.last_activity_at.clone(),
-                    );
+                    *current = candidate;
+                    *native_state = fact.native_state.clone();
+                    *source_time_quality =
+                        timestamp_quality(fact.source_time.as_ref()).map(str::to_string);
                 }
+                current.last_activity_at = last_activity_at;
             }
             None => {
-                folded.insert(run_key.clone(), candidate);
+                summaries.insert(
+                    summary_key,
+                    CompactRunEvidence {
+                        candidate,
+                        run_key: fact.run.as_bytes().to_vec(),
+                        strength,
+                        native_state: fact.native_state.clone(),
+                        source_time_quality: timestamp_quality(fact.source_time.as_ref())
+                            .map(str::to_string),
+                        evidence_count: 1,
+                    },
+                );
             }
         }
-        affected_states.insert(run_key);
-        rows.push((
-            envelope.id.as_bytes().to_vec(),
-            fact.run.as_bytes().to_vec(),
-            kind,
-            evidence_strength(fact.strength),
-            fact.native_state.clone(),
-            timestamp_value(fact.source_time.as_ref()).map(str::to_string),
-            timestamp_quality(fact.source_time.as_ref()).map(str::to_string),
-            envelope.provenance.cursor_end.clone(),
-        ));
     }
 
+    let rows = summaries.into_values().collect::<Vec<_>>();
     for chunk in rows.chunks(RUN_EVIDENCE_INSERT_BATCH_ROWS) {
-        let row = "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+        let row = "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
         let sql = format!(
             r#"
             INSERT INTO run_evidence (
                 fact_id, run_key, evidence_kind, evidence_strength,
                 native_state, source_time, source_time_quality,
                 source_object_id, source_generation, cursor_end,
-                last_commit_seq
+                last_commit_seq, evidence_count, last_activity_at
             ) VALUES {}
-            ON CONFLICT(fact_id) DO UPDATE SET
-                run_key = excluded.run_key,
-                evidence_kind = excluded.evidence_kind,
-                evidence_strength = excluded.evidence_strength,
-                native_state = excluded.native_state,
-                source_time = excluded.source_time,
-                source_time_quality = excluded.source_time_quality,
-                source_object_id = excluded.source_object_id,
-                source_generation = excluded.source_generation,
-                cursor_end = excluded.cursor_end,
-                last_commit_seq = excluded.last_commit_seq
+            ON CONFLICT(
+                run_key, source_object_id, source_generation,
+                evidence_kind, evidence_strength
+            ) DO UPDATE SET
+                fact_id = CASE WHEN
+                  (excluded.cursor_end, excluded.last_commit_seq, excluded.fact_id) >
+                  (run_evidence.cursor_end, run_evidence.last_commit_seq, run_evidence.fact_id)
+                  THEN excluded.fact_id ELSE run_evidence.fact_id END,
+                native_state = CASE WHEN
+                  (excluded.cursor_end, excluded.last_commit_seq, excluded.fact_id) >
+                  (run_evidence.cursor_end, run_evidence.last_commit_seq, run_evidence.fact_id)
+                  THEN excluded.native_state ELSE run_evidence.native_state END,
+                source_time = CASE WHEN
+                  (excluded.cursor_end, excluded.last_commit_seq, excluded.fact_id) >
+                  (run_evidence.cursor_end, run_evidence.last_commit_seq, run_evidence.fact_id)
+                  THEN excluded.source_time ELSE run_evidence.source_time END,
+                source_time_quality = CASE WHEN
+                  (excluded.cursor_end, excluded.last_commit_seq, excluded.fact_id) >
+                  (run_evidence.cursor_end, run_evidence.last_commit_seq, run_evidence.fact_id)
+                  THEN excluded.source_time_quality ELSE run_evidence.source_time_quality END,
+                cursor_end = CASE WHEN
+                  (excluded.cursor_end, excluded.last_commit_seq, excluded.fact_id) >
+                  (run_evidence.cursor_end, run_evidence.last_commit_seq, run_evidence.fact_id)
+                  THEN excluded.cursor_end ELSE run_evidence.cursor_end END,
+                last_commit_seq = CASE WHEN
+                  (excluded.cursor_end, excluded.last_commit_seq, excluded.fact_id) >
+                  (run_evidence.cursor_end, run_evidence.last_commit_seq, run_evidence.fact_id)
+                  THEN excluded.last_commit_seq ELSE run_evidence.last_commit_seq END,
+                evidence_count = run_evidence.evidence_count + excluded.evidence_count,
+                last_activity_at = CASE
+                  WHEN run_evidence.last_activity_at IS NULL THEN excluded.last_activity_at
+                  WHEN excluded.last_activity_at IS NULL THEN run_evidence.last_activity_at
+                  WHEN excluded.last_activity_at > run_evidence.last_activity_at
+                    THEN excluded.last_activity_at
+                  ELSE run_evidence.last_activity_at
+                END
             "#,
             std::iter::repeat_n(row, chunk.len())
                 .collect::<Vec<_>>()
                 .join(", ")
         );
-        let mut values = Vec::with_capacity(chunk.len() * 11);
-        for (
-            fact_id,
-            run_key,
-            kind,
-            strength,
-            native_state,
-            source_time,
-            source_time_quality,
-            cursor_end,
-        ) in chunk
-        {
+        let mut values = Vec::with_capacity(chunk.len() * 13);
+        for summary in chunk {
             use rusqlite::types::Value;
-            values.push(Value::Blob(fact_id.clone()));
-            values.push(Value::Blob(run_key.clone()));
-            values.push(Value::Text((*kind).to_string()));
-            values.push(Value::Text((*strength).to_string()));
-            values.push(optional_text_value(native_state.as_deref()));
-            values.push(optional_text_value(source_time.as_deref()));
-            values.push(optional_text_value(source_time_quality.as_deref()));
+            values.push(Value::Blob(summary.candidate.fact_id.clone()));
+            values.push(Value::Blob(summary.run_key.clone()));
+            values.push(Value::Text(summary.candidate.kind.to_string()));
+            values.push(Value::Text(summary.strength.to_string()));
+            values.push(optional_text_value(summary.native_state.as_deref()));
+            values.push(optional_text_value(
+                summary.candidate.source_time.as_deref(),
+            ));
+            values.push(optional_text_value(summary.source_time_quality.as_deref()));
             values.push(Value::Integer(source_object_id));
             values.push(Value::Integer(source_generation));
-            values.push(Value::Blob(cursor_end.clone()));
+            values.push(Value::Blob(summary.candidate.cursor_end.clone()));
             values.push(Value::Integer(commit_seq));
+            values.push(Value::Integer(summary.evidence_count));
+            values.push(optional_text_value(
+                summary.candidate.last_activity_at.as_deref(),
+            ));
         }
         let result = if chunk.len() == RUN_EVIDENCE_INSERT_BATCH_ROWS {
             transaction
@@ -1305,7 +1342,7 @@ fn persist_run_evidence(
         };
         result.map_err(|error| sqlite_error("project run evidence batch", error))?;
     }
-    Ok(folded)
+    Ok(())
 }
 
 fn persist_facts(
@@ -1715,116 +1752,6 @@ fn source_object_keys(
     Ok(keys)
 }
 
-fn fold_run_state(
-    transaction: &Transaction<'_>,
-    run_key: &[u8],
-    incoming: &FoldedRunEvidence,
-    commit_seq: u64,
-) -> Result<Option<String>, EngineError> {
-    let current = transaction
-        .query_row(
-            r#"
-            SELECT ors.decisive_evidence_id, re.evidence_kind, re.evidence_strength,
-                   re.source_generation, re.cursor_end, re.last_commit_seq,
-                   re.source_time, ors.last_activity_at
-            FROM observed_run_states ors
-            JOIN run_evidence re ON re.fact_id = ors.decisive_evidence_id
-            WHERE ors.run_key = ?1
-            "#,
-            [run_key],
-            |row| {
-                let kind: String = row.get(1)?;
-                let strength: String = row.get(2)?;
-                Ok(FoldedRunEvidence {
-                    fact_id: row.get(0)?,
-                    kind: evidence_kind_from_stored(&kind),
-                    kind_rank: evidence_kind_rank_stored(&kind),
-                    strength_rank: evidence_strength_rank_stored(&strength),
-                    source_generation: row.get(3)?,
-                    cursor_end: row.get(4)?,
-                    last_commit_seq: row.get(5)?,
-                    source_time: row.get(6)?,
-                    last_activity_at: row.get(7)?,
-                })
-            },
-        )
-        .optional()
-        .map_err(|error| sqlite_error("read current observed run state", error))?;
-
-    let (winner, last_activity_at) = match current {
-        None => (incoming, incoming.last_activity_at.clone()),
-        Some(current) => {
-            let last_activity_at = max_optional_time(
-                current.last_activity_at.clone(),
-                incoming.last_activity_at.clone(),
-            );
-            if run_evidence_outranks(incoming, &current) {
-                (incoming, last_activity_at)
-            } else if last_activity_at != current.last_activity_at {
-                write_observed_run_state(
-                    transaction,
-                    run_key,
-                    current.kind,
-                    &current.fact_id,
-                    last_activity_at.as_deref(),
-                    terminal_at_for_kind(current.kind, current.source_time.as_deref()),
-                    commit_seq,
-                )?;
-                return Ok(Some(run_state_label(current.kind).to_string()));
-            } else {
-                return Ok(Some(run_state_label(current.kind).to_string()));
-            }
-        }
-    };
-
-    write_observed_run_state(
-        transaction,
-        run_key,
-        winner.kind,
-        &winner.fact_id,
-        last_activity_at.as_deref(),
-        terminal_at_for_kind(winner.kind, winner.source_time.as_deref()),
-        commit_seq,
-    )?;
-    Ok(Some(run_state_label(winner.kind).to_string()))
-}
-
-fn write_observed_run_state(
-    transaction: &Transaction<'_>,
-    run_key: &[u8],
-    kind: &str,
-    decisive_evidence_id: &[u8],
-    last_activity_at: Option<&str>,
-    terminal_at: Option<&str>,
-    commit_seq: u64,
-) -> Result<(), EngineError> {
-    transaction
-        .execute(
-            r#"
-            INSERT INTO observed_run_states (
-                run_key, state, decisive_evidence_id, last_activity_at,
-                terminal_at, last_commit_seq
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-            ON CONFLICT(run_key) DO UPDATE SET
-                state = excluded.state,
-                decisive_evidence_id = excluded.decisive_evidence_id,
-                last_activity_at = excluded.last_activity_at,
-                terminal_at = excluded.terminal_at,
-                last_commit_seq = excluded.last_commit_seq
-            "#,
-            params![
-                run_key,
-                run_state_label(kind),
-                decisive_evidence_id,
-                last_activity_at,
-                terminal_at,
-                sqlite_u64(commit_seq, "commit sequence")?,
-            ],
-        )
-        .map_err(|error| sqlite_error("write observed run state", error))?;
-    Ok(())
-}
-
 fn run_evidence_outranks(left: &FoldedRunEvidence, right: &FoldedRunEvidence) -> bool {
     (
         left.kind_rank,
@@ -1880,42 +1807,6 @@ fn evidence_strength_rank(strength: EvidenceStrength) -> i64 {
     }
 }
 
-fn evidence_kind_rank_stored(kind: &str) -> i64 {
-    match kind {
-        "terminal_succeeded" | "terminal_failed" | "terminal_cancelled" => 60,
-        "input_requested" => 50,
-        "waiting_observed" => 45,
-        "run_started" => 40,
-        "activity_observed" => 35,
-        "run_declared" => 20,
-        _ => 0,
-    }
-}
-
-fn evidence_strength_rank_stored(strength: &str) -> i64 {
-    match strength {
-        "native_explicit" => 40,
-        "native_activity" => 30,
-        "presence" => 20,
-        "layout" => 10,
-        _ => 0,
-    }
-}
-
-fn evidence_kind_from_stored(kind: &str) -> &'static str {
-    match kind {
-        "terminal_succeeded" => "terminal_succeeded",
-        "terminal_failed" => "terminal_failed",
-        "terminal_cancelled" => "terminal_cancelled",
-        "input_requested" => "input_requested",
-        "waiting_observed" => "waiting_observed",
-        "run_started" => "run_started",
-        "activity_observed" => "activity_observed",
-        "run_declared" => "run_declared",
-        _ => "unknown",
-    }
-}
-
 fn run_state_label(kind: &str) -> &'static str {
     match kind {
         "terminal_succeeded" => "succeeded",
@@ -1926,15 +1817,6 @@ fn run_state_label(kind: &str) -> &'static str {
         "run_declared" => "declared",
         _ => "unknown",
     }
-}
-
-fn terminal_at_for_kind<'a>(kind: &str, source_time: Option<&'a str>) -> Option<&'a str> {
-    matches!(
-        kind,
-        "terminal_succeeded" | "terminal_failed" | "terminal_cancelled"
-    )
-    .then_some(source_time)
-    .flatten()
 }
 
 fn reduce_run_state(
@@ -2003,9 +1885,9 @@ fn reduce_run_state(
     let last_activity_at = transaction
         .query_row(
             r#"
-            SELECT MAX(source_time) FROM run_evidence
+            SELECT MAX(last_activity_at) FROM run_evidence
             WHERE run_key = ?1
-              AND evidence_kind IN ('run_started', 'activity_observed')
+              AND last_activity_at IS NOT NULL
             "#,
             [run_key],
             |row| row.get::<_, Option<String>>(0),
@@ -4985,6 +4867,7 @@ mod tests {
             };
             let (records, _) = append_records(driver.read(&path, None, &origin, false).unwrap());
             let mut cursor = SourceCursor::append_offset(0).into_bytes();
+            let mut decoder_state = None;
             for record in records {
                 let mut batch = FactBatch::new(16, 8).unwrap();
                 adapter
@@ -4992,32 +4875,33 @@ mod tests {
                         DecodeContext {
                             decoder: &decoder_id,
                             object_context: &object_context,
-                            decoder_state: None,
+                            decoder_state: decoder_state.as_deref(),
                         },
                         &record,
                         &mut batch,
                     )
                     .unwrap();
                 let next_cursor = record.cursor_end.as_bytes().to_vec();
-                apply_fact_observation_commit(
-                    &mut connection,
-                    &shadow_request(ShadowCommit {
-                        stream,
-                        decoder,
-                        object_key: &object_key,
-                        expected: ExpectedSourceCursor::At {
-                            generation: 1,
-                            committed_cursor: cursor,
-                        },
+                let mut request = shadow_request(ShadowCommit {
+                    stream,
+                    decoder,
+                    object_key: &object_key,
+                    expected: ExpectedSourceCursor::At {
                         generation: 1,
-                        committed_cursor: next_cursor.clone(),
-                        clock,
-                        object_context: Some(&object_context),
-                    }),
-                    &batch,
-                )
-                .unwrap();
+                        committed_cursor: cursor,
+                    },
+                    generation: 1,
+                    committed_cursor: next_cursor.clone(),
+                    clock,
+                    object_context: Some(&object_context),
+                });
+                if batch.next_decoder_state().is_some() {
+                    request.object.decoder_state_version =
+                        Some(adapter.manifest().contract_version);
+                }
+                apply_fact_observation_commit(&mut connection, &request, &batch).unwrap();
                 cursor = next_cursor;
+                decoder_state = batch.next_decoder_state().map(ToOwned::to_owned);
                 clock += 2;
             }
         }
@@ -5692,6 +5576,169 @@ mod tests {
                 succeeded.last_activity_at.clone()
             ),
             started.last_activity_at
+        );
+    }
+
+    #[test]
+    fn run_evidence_compaction_preserves_count_winner_activity_and_replacement() {
+        let mut connection = database();
+        register_object(&mut connection);
+        let run = entity("run", SESSION);
+
+        let first_record = direct_record(1, 0, 1, 20, b"activity-newer-time");
+        let mut first = FactBatch::new(1, 1).unwrap();
+        first
+            .push(
+                &first_record,
+                Fact::RunEvidence(RunEvidenceFact {
+                    run: run.clone(),
+                    kind: EvidenceKind::ActivityObserved,
+                    strength: EvidenceStrength::NativeActivity,
+                    native_state: Some("first".to_string()),
+                    source_time: Some(exact("2026-08-11T00:00:10.000Z")),
+                }),
+            )
+            .unwrap();
+        commit_direct_batch(&mut connection, &first_record, 1, 0, 21, &first);
+
+        // Cursor order, not timestamp order, selects the decisive evidence.
+        // The independent activity maximum must nevertheless retain 00:00:10.
+        let second_record = direct_record(1, 1, 2, 22, b"activity-later-cursor");
+        let mut second = FactBatch::new(1, 1).unwrap();
+        let second_id = second
+            .push(
+                &second_record,
+                Fact::RunEvidence(RunEvidenceFact {
+                    run: run.clone(),
+                    kind: EvidenceKind::ActivityObserved,
+                    strength: EvidenceStrength::NativeActivity,
+                    native_state: Some("second".to_string()),
+                    source_time: Some(exact("2026-08-11T00:00:05.000Z")),
+                }),
+            )
+            .unwrap();
+        commit_direct_batch(&mut connection, &second_record, 1, 1, 23, &second);
+
+        let compact: (i64, i64, Vec<u8>, String, Option<String>) = connection
+            .query_row(
+                r#"
+                SELECT COUNT(*), SUM(evidence_count), fact_id, native_state,
+                       last_activity_at
+                FROM run_evidence WHERE run_key = ?1
+                "#,
+                [run.as_bytes()],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(compact.0, 1);
+        assert_eq!(compact.1, 2);
+        assert_eq!(compact.2, second_id.as_bytes());
+        assert_eq!(compact.3, "second");
+        assert_eq!(compact.4.as_deref(), Some("2026-08-11T00:00:10.000Z"));
+        let active: (String, Vec<u8>, Option<String>) = connection
+            .query_row(
+                "SELECT state, decisive_evidence_id, last_activity_at FROM observed_run_states WHERE run_key = ?1",
+                [run.as_bytes()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(active.0, "active");
+        assert_eq!(active.1, second_id.as_bytes());
+        assert_eq!(active.2, compact.4);
+
+        let terminal_record = direct_record(1, 2, 3, 24, b"terminal");
+        let mut terminal = FactBatch::new(1, 1).unwrap();
+        let terminal_id = terminal
+            .push(
+                &terminal_record,
+                Fact::RunEvidence(RunEvidenceFact {
+                    run: run.clone(),
+                    kind: EvidenceKind::TerminalSucceeded,
+                    strength: EvidenceStrength::NativeExplicit,
+                    native_state: Some("done".to_string()),
+                    source_time: Some(exact("2026-08-11T00:00:20.000Z")),
+                }),
+            )
+            .unwrap();
+        commit_direct_batch(&mut connection, &terminal_record, 1, 2, 25, &terminal);
+        let succeeded: (String, Vec<u8>, Option<String>, Option<String>, i64) = connection
+            .query_row(
+                r#"
+                SELECT ors.state, ors.decisive_evidence_id,
+                       ors.last_activity_at, ors.terminal_at,
+                       (SELECT SUM(evidence_count) FROM run_evidence WHERE run_key = ?1)
+                FROM observed_run_states ors WHERE ors.run_key = ?1
+                "#,
+                [run.as_bytes()],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(succeeded.0, "succeeded");
+        assert_eq!(succeeded.1, terminal_id.as_bytes());
+        assert_eq!(succeeded.2.as_deref(), Some("2026-08-11T00:00:10.000Z"));
+        assert_eq!(succeeded.3.as_deref(), Some("2026-08-11T00:00:20.000Z"));
+        assert_eq!(succeeded.4, 3);
+
+        // A new generation must retract both compact categories and their
+        // counts before reducing solely from replacement evidence.
+        let replacement_record = direct_record(2, 0, 1, 26, b"replacement");
+        let mut replacement = FactBatch::new(1, 1).unwrap();
+        let replacement_id = replacement
+            .push(
+                &replacement_record,
+                Fact::RunEvidence(RunEvidenceFact {
+                    run: run.clone(),
+                    kind: EvidenceKind::WaitingObserved,
+                    strength: EvidenceStrength::NativeExplicit,
+                    native_state: Some("waiting".to_string()),
+                    source_time: Some(exact("2026-08-11T00:00:30.000Z")),
+                }),
+            )
+            .unwrap();
+        commit_direct_batch(&mut connection, &replacement_record, 1, 3, 27, &replacement);
+        let replaced: (String, Vec<u8>, i64, i64) = connection
+            .query_row(
+                r#"
+                SELECT ors.state, ors.decisive_evidence_id,
+                       (SELECT COUNT(*) FROM run_evidence WHERE run_key = ?1),
+                       (SELECT SUM(evidence_count) FROM run_evidence WHERE run_key = ?1)
+                FROM observed_run_states ors WHERE ors.run_key = ?1
+                "#,
+                [run.as_bytes()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            replaced,
+            (
+                "waiting".to_string(),
+                replacement_id.as_bytes().to_vec(),
+                1,
+                1
+            )
+        );
+        assert_eq!(
+            connection
+                .query_row("PRAGMA foreign_key_check", [], |_| Ok(1_i64))
+                .optional()
+                .unwrap(),
+            None
         );
     }
 

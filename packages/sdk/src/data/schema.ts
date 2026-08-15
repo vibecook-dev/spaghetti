@@ -112,8 +112,9 @@ import type { SqliteService } from '../io/index.js';
 // checks cover exactly the non-empty searchable canonical-message subset.
 // v42: canonical normalized message content uses bounded versioned zstd
 // storage and is decoded only for bounded detail/timeline pages.
-export const SCHEMA_VERSION = 42;
-const MESSAGE_CONTENT_CODEC_MIGRATION_VERSION = 41;
+// v43: compact run-evidence reductions retain the exact decisive fact, total
+// count, and maximum activity without indexing one projection row per message.
+export const SCHEMA_VERSION = 43;
 
 export const TOKEN_ACTIVITY_TRIGGER_NAMES = [
   'token_activity_messages_ai',
@@ -944,13 +945,15 @@ CREATE TABLE IF NOT EXISTS run_evidence (
   source_object_id INTEGER NOT NULL,
   source_generation INTEGER NOT NULL,
   cursor_end BLOB NOT NULL,
-  last_commit_seq INTEGER NOT NULL
+  last_commit_seq INTEGER NOT NULL,
+  evidence_count INTEGER NOT NULL DEFAULT 1,
+  last_activity_at TEXT
 );
 
 CREATE TABLE IF NOT EXISTS observed_run_states (
   run_key BLOB PRIMARY KEY,
   state TEXT NOT NULL,
-  decisive_evidence_id BLOB NOT NULL REFERENCES run_evidence(fact_id) ON DELETE CASCADE,
+  decisive_evidence_id BLOB NOT NULL REFERENCES run_evidence(fact_id) ON DELETE CASCADE ON UPDATE CASCADE,
   last_activity_at TEXT,
   terminal_at TEXT,
   last_commit_seq INTEGER NOT NULL
@@ -1775,6 +1778,9 @@ CREATE INDEX IF NOT EXISTS idx_canonical_runs_source_generation ON canonical_run
 CREATE INDEX IF NOT EXISTS idx_usage_contributions_session_time ON usage_contributions(session_key, source_time, fact_id);
 CREATE INDEX IF NOT EXISTS idx_usage_contributions_source_generation ON usage_contributions(source_object_id, source_generation);
 DROP INDEX IF EXISTS idx_run_evidence_run_order;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_run_evidence_compact ON run_evidence(
+  run_key, source_object_id, source_generation, evidence_kind, evidence_strength
+);
 CREATE INDEX IF NOT EXISTS idx_run_evidence_decisive ON run_evidence(
   run_key,
   (CASE evidence_kind
@@ -1797,8 +1803,8 @@ CREATE INDEX IF NOT EXISTS idx_run_evidence_decisive ON run_evidence(
   END) DESC,
   source_generation DESC, cursor_end DESC, last_commit_seq DESC, fact_id DESC
 );
-CREATE INDEX IF NOT EXISTS idx_run_evidence_activity_time ON run_evidence(run_key, source_time DESC)
-  WHERE evidence_kind IN ('run_started', 'activity_observed');
+CREATE INDEX IF NOT EXISTS idx_run_evidence_activity_time ON run_evidence(run_key, last_activity_at DESC)
+  WHERE last_activity_at IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_run_evidence_source_generation ON run_evidence(source_object_id, source_generation);
 CREATE INDEX IF NOT EXISTS idx_presence_assertions_presence ON presence_assertions(presence_key, fact_id);
 CREATE INDEX IF NOT EXISTS idx_presence_assertions_source ON presence_assertions(source_object_id, presence_key);
@@ -2065,8 +2071,7 @@ const CURRENT_TABLES = [
  * Initialize the database schema, migrating from older versions if necessary.
  *
  * - Creates `schema_meta` table if it doesn't exist
- * - Migrates the additive v41 -> v42 content-codec column in place
- * - For every other stale version, drops ALL old + current tables and recreates
+ * - For every stale version, drops ALL old + current tables and recreates
  * - Inserts / updates the version to SCHEMA_VERSION
  */
 export function initializeSchema(db: SqliteService): void {
@@ -2074,26 +2079,7 @@ export function initializeSchema(db: SqliteService): void {
   db.exec('CREATE TABLE IF NOT EXISTS schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)');
 
   const row = db.get<{ value: string }>(`SELECT value FROM schema_meta WHERE key = 'version'`);
-  let currentVersion = row ? parseInt(row.value, 10) : 0;
-
-  // Existing v41 bytes are identity-encoded by definition. Adding a constant
-  // default changes only SQLite schema metadata, so do not discard and
-  // re-ingest a multi-gigabyte compatible cache for this transition.
-  if (currentVersion === MESSAGE_CONTENT_CODEC_MIGRATION_VERSION) {
-    try {
-      db.exec('BEGIN IMMEDIATE');
-      db.exec("ALTER TABLE canonical_messages ADD COLUMN content_json_codec TEXT NOT NULL DEFAULT 'identity'");
-      db.run(`UPDATE schema_meta SET value = ? WHERE key = 'version'`, String(SCHEMA_VERSION));
-      db.exec('COMMIT');
-      currentVersion = SCHEMA_VERSION;
-    } catch {
-      try {
-        db.exec('ROLLBACK');
-      } catch {
-        /* fall through to the rebuild path */
-      }
-    }
-  }
+  const currentVersion = row ? parseInt(row.value, 10) : 0;
 
   if (currentVersion !== SCHEMA_VERSION) {
     // Drop all legacy tables from previous schema versions

@@ -212,7 +212,7 @@ pub(super) fn read_run_state(
                    cs.native_session_id, cs.native_project_key,
                    si.adapter_id, fr.source_instance_id,
                    ors.state, ors.last_activity_at, ors.terminal_at,
-                   (SELECT COUNT(*) FROM run_evidence all_re
+                   (SELECT COALESCE(SUM(all_re.evidence_count), 0) FROM run_evidence all_re
                     WHERE all_re.run_key = cr.run_key) AS evidence_count,
                    re.fact_id, re.evidence_kind, re.evidence_strength,
                    re.native_state, re.source_time, re.source_time_quality,
@@ -380,7 +380,7 @@ fn read_run_entries(
                        cs.native_session_id, cs.native_project_key,
                        si.adapter_id, fr.source_instance_id,
                        ors.state, ors.last_activity_at, ors.terminal_at,
-                       (SELECT COUNT(*) FROM run_evidence all_re
+                       (SELECT COALESCE(SUM(all_re.evidence_count), 0) FROM run_evidence all_re
                         WHERE all_re.run_key = cr.run_key) AS evidence_count,
                        re.fact_id, re.evidence_kind, re.evidence_strength,
                        re.native_state, re.source_time, re.source_time_quality,
@@ -1004,10 +1004,11 @@ mod tests {
                     fact_id, run_key, evidence_kind, evidence_strength,
                     native_state, source_time, source_time_quality,
                     source_object_id, source_generation, cursor_end,
-                    last_commit_seq
+                    last_commit_seq, evidence_count, last_activity_at
                 ) VALUES (?1, ?2, 'activity_observed', 'native_activity',
                           'working', '2026-08-12T02:00:00.000Z',
-                          'native_exact', 1, 1, ?3, 1)
+                          'native_exact', 1, 1, ?3, 1, 7,
+                          '2026-08-12T02:00:00.000Z')
                 "#,
                 params![
                     b"evidence-fact".as_slice(),
@@ -1197,6 +1198,7 @@ mod tests {
         );
         assert_eq!(run.presence_count, 1);
         assert_eq!(run.conflicting_presence_count, 0);
+        assert_eq!(run.evidence_count, 7);
         assert!(second.next_cursor.is_none());
 
         let exact = client
@@ -1209,6 +1211,7 @@ mod tests {
         let exact_run = exact.run.unwrap();
         assert_eq!(exact_run.native_run_id, "root");
         assert_eq!(exact_run.state.as_deref(), Some("active"));
+        assert_eq!(exact_run.evidence_count, 7);
         assert_eq!(exact_run.presence_count, 1);
 
         let unknown = client
