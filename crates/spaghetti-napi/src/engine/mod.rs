@@ -58,7 +58,8 @@ pub use commit::{
 };
 use commit::{CommitReceipt, ObservationCommit, ProjectionVersionCommit};
 pub use coordinator::{
-    ObservationCoordinator, ReconcileOutcome, ReconcileRequest, ReconcileRetryTarget,
+    FactFamilyReplayRequest, ObservationCoordinator, ReconcileOutcome, ReconcileRequest,
+    ReconcileRetryTarget,
 };
 pub use detail_query::{
     CanonicalStats, MessageDetail, MessagePage, MessagePageRequest, NamedCount, SessionDetail,
@@ -91,7 +92,7 @@ pub use query_pool::{
     DEFAULT_CHANGE_REPLAY_LIMIT, DEFAULT_HISTORY_PAGE_LIMIT, HISTORY_QUERY_CONTRACT_VERSION,
     MAX_CHANGE_REPLAY_PAYLOAD_BYTES,
 };
-use query_pool::{QueryClient, QueryPool, SourceCatalogSnapshot};
+use query_pool::{QueryClient, QueryPool, SourceCatalogSnapshot, SourceCoverageReplayBaseline};
 pub use runtime_query::{
     RunStateLookup, RunStateRequest, RuntimePresenceSnapshot, RuntimeRunEvidence,
     RuntimeRunSnapshot, RuntimeSnapshot, RuntimeSnapshotEntry, RuntimeSnapshotRequest,
@@ -1163,6 +1164,23 @@ impl SpaghettiEngineCore {
         stable_key: &[u8],
     ) -> Result<SourceCatalogSnapshot, EngineError> {
         self.writer_client()?.source_catalog(adapter_id, stable_key)
+    }
+
+    pub(crate) fn source_coverage_replay_baseline(
+        &self,
+        source_instance_id: u64,
+        owner_id: &str,
+        owner_scope_key: &[u8],
+        family: &str,
+        version: u32,
+    ) -> Result<Option<SourceCoverageReplayBaseline>, EngineError> {
+        self.query_client()?.source_coverage_replay_baseline(
+            source_instance_id,
+            owner_id,
+            owner_scope_key,
+            family,
+            version,
+        )
     }
 
     pub(crate) fn source_performance_recorder(

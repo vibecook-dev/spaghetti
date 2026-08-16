@@ -257,6 +257,26 @@ pub struct SourceCatalogProjectionVersion {
     pub detail: Option<String>,
 }
 
+/// Internal, bounded generation baseline used to resume an explicit
+/// fact-family replay after a process restart. The normalized coverage set is
+/// the durable baseline; this query deliberately exposes no native paths or
+/// adapter payloads.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SourceCoverageReplayBaseline {
+    pub source_instance_id: u64,
+    pub completeness: String,
+    pub last_commit_seq: u64,
+    pub members: Vec<SourceCoverageReplayMember>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct SourceCoverageReplayMember {
+    pub stream_key: Vec<u8>,
+    pub object_key: Vec<u8>,
+    pub generation: u64,
+    pub absent: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ChangeCursor {
     pub commit_seq: u64,
@@ -483,6 +503,15 @@ enum QueryCommand {
         adapter_id: String,
         stable_key: Vec<u8>,
         response: Sender<Result<SourceCatalogSnapshot, EngineError>>,
+    },
+    SourceCoverageReplayBaseline {
+        cancellation_epoch: u64,
+        source_instance_id: u64,
+        owner_id: String,
+        owner_scope_key: Vec<u8>,
+        family: String,
+        version: u32,
+        response: Sender<Result<Option<SourceCoverageReplayBaseline>, EngineError>>,
     },
     #[cfg(test)]
     Hold {
@@ -1352,6 +1381,45 @@ impl QueryClient {
             .map_err(|_| EngineError::WorkerUnavailable { worker: "query" })?
     }
 
+    pub(crate) fn source_coverage_replay_baseline(
+        &self,
+        source_instance_id: u64,
+        owner_id: &str,
+        owner_scope_key: &[u8],
+        family: &str,
+        version: u32,
+    ) -> Result<Option<SourceCoverageReplayBaseline>, EngineError> {
+        if source_instance_id == 0
+            || owner_id.trim().is_empty()
+            || owner_scope_key.is_empty()
+            || family.trim().is_empty()
+            || version == 0
+        {
+            return Err(EngineError::InvalidQuery(
+                "source coverage replay baseline requires a source instance, owner, scope, family, and positive version"
+                    .to_string(),
+            ));
+        }
+        if self.control.stopping.load(Ordering::Acquire) {
+            return Err(EngineError::ShuttingDown);
+        }
+
+        let cancellation_epoch = self.control.cancellation_epoch.load(Ordering::Acquire);
+        let (response_tx, response_rx) = bounded(1);
+        self.enqueue(QueryCommand::SourceCoverageReplayBaseline {
+            cancellation_epoch,
+            source_instance_id,
+            owner_id: owner_id.to_string(),
+            owner_scope_key: owner_scope_key.to_vec(),
+            family: family.to_string(),
+            version,
+            response: response_tx,
+        })?;
+        response_rx
+            .recv()
+            .map_err(|_| EngineError::WorkerUnavailable { worker: "query" })?
+    }
+
     /// Cancel work that was submitted under the current epoch. New requests
     /// capture the incremented epoch and remain valid.
     pub fn cancel_pending(&self) -> u64 {
@@ -2075,6 +2143,37 @@ fn query_thread(
                         }
                     },
                 );
+                let _ = response.send(result);
+            }
+            QueryCommand::SourceCoverageReplayBaseline {
+                cancellation_epoch,
+                source_instance_id,
+                owner_id,
+                owner_scope_key,
+                family,
+                version,
+                response,
+            } => {
+                if is_cancelled(&control, cancellation_epoch) {
+                    let _ = response.send(Err(EngineError::QueryCancelled));
+                    continue;
+                }
+                let _in_flight = InFlightGuard::enter(&control.in_flight);
+                let result = read_source_coverage_replay_baseline(
+                    &connection,
+                    source_instance_id,
+                    &owner_id,
+                    &owner_scope_key,
+                    &family,
+                    version,
+                )
+                .and_then(|baseline| {
+                    if is_cancelled(&control, cancellation_epoch) {
+                        Err(EngineError::QueryCancelled)
+                    } else {
+                        Ok(baseline)
+                    }
+                });
                 let _ = response.send(result);
             }
             #[cfg(test)]
@@ -3238,6 +3337,118 @@ pub(super) fn read_source_catalog(
         objects,
         projection_versions,
     })
+}
+
+fn read_source_coverage_replay_baseline(
+    connection: &Connection,
+    source_instance_id: u64,
+    owner_id: &str,
+    owner_scope_key: &[u8],
+    family: &str,
+    version: u32,
+) -> Result<Option<SourceCoverageReplayBaseline>, EngineError> {
+    let transaction = connection
+        .unchecked_transaction()
+        .map_err(|error| query_sqlite_error("begin source coverage replay baseline", error))?;
+    let set = transaction
+        .query_row(
+            r#"
+            SELECT coverage_set_id, completeness, last_commit_seq
+            FROM source_coverage_sets
+            WHERE source_instance_id = ?1
+              AND owner_id = ?2
+              AND owner_scope_key = ?3
+              AND domain_kind = 'fact_family'
+              AND domain_name = ?4
+              AND domain_version = ?5
+              AND root_entity_key = X''
+            "#,
+            rusqlite::params![
+                to_query_i64(source_instance_id, "source coverage instance")?,
+                owner_id,
+                owner_scope_key,
+                family,
+                i64::from(version),
+            ],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|error| query_sqlite_error("read source coverage replay set", error))?;
+    let Some((coverage_set_id, completeness, last_commit_seq)) = set else {
+        transaction.commit().map_err(|error| {
+            query_sqlite_error("finish empty source coverage replay baseline", error)
+        })?;
+        return Ok(None);
+    };
+
+    let mut statement = transaction
+        .prepare(
+            r#"
+            SELECT stream_key, object_key, generation, 0 AS absent
+            FROM source_coverage_points
+            WHERE coverage_set_id = ?1
+            UNION ALL
+            SELECT stream_key, object_key, generation, 1 AS absent
+            FROM source_coverage_absences
+            WHERE coverage_set_id = ?1
+            ORDER BY stream_key, object_key, generation, absent
+            "#,
+        )
+        .map_err(|error| query_sqlite_error("prepare source coverage replay members", error))?;
+    let rows = statement
+        .query_map([coverage_set_id], |row| {
+            Ok((
+                row.get::<_, Vec<u8>>(0)?,
+                row.get::<_, Vec<u8>>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, i64>(3)?,
+            ))
+        })
+        .map_err(|error| query_sqlite_error("read source coverage replay members", error))?;
+    let mut members = Vec::new();
+    for row in rows {
+        let (stream_key, object_key, generation, absent) =
+            row.map_err(|error| query_sqlite_error("decode source coverage replay member", error))?;
+        if stream_key.len() != 32 || object_key.len() != 32 || !matches!(absent, 0 | 1) {
+            return Err(EngineError::Sqlite {
+                operation: "validate source coverage replay member",
+                detail: "coverage member has an invalid key or absence marker".to_string(),
+            });
+        }
+        members.push(SourceCoverageReplayMember {
+            stream_key,
+            object_key,
+            generation: decode_nonnegative_u64(generation, "coverage replay generation")?,
+            absent: absent == 1,
+        });
+    }
+    if members.windows(2).any(|pair| {
+        pair[0].stream_key == pair[1].stream_key && pair[0].object_key == pair[1].object_key
+    }) {
+        return Err(EngineError::Sqlite {
+            operation: "validate source coverage replay baseline",
+            detail: "coverage baseline contains duplicate stream/object membership".to_string(),
+        });
+    }
+    drop(statement);
+    transaction
+        .commit()
+        .map_err(|error| query_sqlite_error("finish source coverage replay baseline", error))?;
+    Ok(Some(SourceCoverageReplayBaseline {
+        source_instance_id,
+        completeness,
+        last_commit_seq: decode_nonnegative_u64(
+            last_commit_seq,
+            "source coverage replay commit sequence",
+        )?,
+        members,
+    }))
 }
 
 fn count_table(connection: &Connection, table: &'static str) -> Result<u32, EngineError> {

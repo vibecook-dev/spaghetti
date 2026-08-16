@@ -645,12 +645,21 @@ Current landing status (2026-08-16):
   it persists its support-release and verified declaration binding, uses a
   deterministic content digest for no-op suppression, survives restart, moves
   with append progress, and retains a stable replay-required gap after
-  quarantine; and
+  quarantine;
+- added the common coordinator's source-instance-scoped fact-family replay
+  lifecycle for usage-v2. It writes a durable `Pending` marker before reading,
+  freezes normalized coverage as the per-object generation baseline, selects
+  providers by capability declaration, forces untouched append/document/
+  presence/database objects into a replacement generation, and retracts the
+  old generation atomically with the first replay slice. Bounded work keeps
+  the baseline and resumes after restart from replacement-generation cursors;
+  only a complete post-drain barrier replaces coverage and becomes `Ready`,
+  while a new quarantine returns to replay-required `Unavailable`; and
 - kept the candidate capability `unsupported`: private native corpus-scale
   parity, fixture-proven native team-to-actor correlation, exact-repeat
-  public-event suppression, bounded public coverage queries, replay recovery,
-  migration switch, remaining portable fact-family serialization, and rollback
-  window are not yet complete.
+  public-event suppression, bounded public coverage/replay surfaces, migration
+  switch, remaining portable fact-family serialization, and rollback window
+  are not yet complete.
 
 ### C3. Durable migration
 
@@ -685,12 +694,24 @@ advance the commit clock. Coverage identifies the support release and verified
 source declaration, survives restart, records append-cursor progress, and
 keeps a quarantined interval explicitly unavailable until replay.
 
-C3 remains `In progress`: bounded public coverage query exposure, explicit
-replay and quarantine-gap recovery, private corpus-scale comparison,
-transactional default query selection, crash-boundary recovery,
-compatibility-window telemetry, and rollback are still required. The shadow
-query, pack readiness, and internal durable coverage are inspection/migration
-surfaces, not a support-promotion claim.
+The first explicit recovery path is also implemented in the common
+coordinator. `FactFamilyReplayRequest` is scoped to one already-declared source
+instance and currently accepts usage-v2 v1. The coordinator durably marks the
+attempt before provider reads, retains the old coverage set as its crash-safe
+generation baseline, and resumes bounded append work after restart without
+resetting an object that already entered the replacement generation. Tests
+prove ordinary repair cannot clear a gap, explicit replay does, old-generation
+usage is retracted without duplicates, and a five-record replay interrupted at
+a test four-record pass bound completes after engine restart through the same
+path whose production bound is 4,096. This is an engine/coordinator surface;
+public host/N-API/SDK request authorization remains open.
+
+C3 remains `In progress`: bounded public coverage query and replay exposure,
+private corpus-scale comparison, transactional default query selection,
+remaining crash-boundary tests, compatibility-window telemetry, and rollback
+are still required. The shadow query, pack readiness, internal durable
+coverage, and coordinator replay are inspection/migration surfaces, not a
+support-promotion claim.
 
 ### C4. Downstream semantic suite
 

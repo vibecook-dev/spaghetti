@@ -49,7 +49,10 @@ use super::commit::{
     SourceStreamSpec,
 };
 use super::performance::{SourceDecodeObservation, SourceDecodeOutcome, SourcePerformanceRecorder};
-use super::query_pool::{QueryCancellationToken, SourceCatalogObject, SourceCatalogSnapshot};
+use super::query_pool::{
+    QueryCancellationToken, SourceCatalogObject, SourceCatalogSnapshot,
+    SourceCoverageReplayBaseline,
+};
 use super::runtime_semantic_projection::{USAGE_V2_PROJECTION_ID, USAGE_V2_PROJECTION_VERSION};
 use super::source_coverage::DurableCoverageSetUpdate;
 use super::{EngineError, SpaghettiEngineCore};
@@ -67,6 +70,9 @@ const MAX_APPEND_RECORDS_PER_COMMIT: usize = 1_024;
 const SCHEDULER_CAPACITY: usize = 1_024;
 const MAX_OBJECTS_IN_FLIGHT: usize = 16;
 const MAX_UNACKED_COMMITS: usize = 256;
+const USAGE_V2_REPLAY_PENDING_DETAIL: &str =
+    "runtime.usage-v2 explicit replay in progress; replacement coverage not established";
+const USAGE_V2_REPLAY_COMMIT_REASON: &str = "projection.runtime.usage-v2.explicit_replay";
 
 struct CommitLane {
     engine: Arc<SpaghettiEngineCore>,
@@ -143,6 +149,27 @@ impl ReconcileRequest {
         Self {
             configured_roots,
             reason: "manual_reconcile".to_string(),
+        }
+    }
+}
+
+/// Requests an explicit, source-instance-scoped replay of every stream that
+/// declares one fact-family capability. The current coordinator supports the
+/// usage-v2 family; the shape is family-neutral so later projection packs use
+/// the same lifecycle instead of an adapter-private reset path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FactFamilyReplayRequest {
+    pub family: String,
+    pub version: u32,
+    pub reason: String,
+}
+
+impl FactFamilyReplayRequest {
+    pub fn usage_v2(reason: impl Into<String>) -> Self {
+        Self {
+            family: USAGE_V2_PROJECTION_ID.to_string(),
+            version: USAGE_V2_PROJECTION_VERSION,
+            reason: reason.into(),
         }
     }
 }
@@ -266,6 +293,12 @@ impl ProjectionCoverageAttempt {
             .insert(blocker);
     }
 
+    fn has_quarantine(&self) -> bool {
+        self.blockers.values().any(|blockers| {
+            blockers.contains("records_quarantined") || blockers.contains("durable_quarantine")
+        })
+    }
+
     fn detail(&self) -> Option<String> {
         if self.required_streams.is_empty() {
             return Some(
@@ -290,9 +323,154 @@ impl ProjectionCoverageAttempt {
     }
 }
 
+#[derive(Debug, Clone)]
+struct FactFamilyReplayContext {
+    family: String,
+    version: u32,
+    baseline: BTreeMap<(Vec<u8>, Vec<u8>), (u64, bool)>,
+}
+
+impl FactFamilyReplayContext {
+    fn from_durable(
+        family: &str,
+        version: u32,
+        expected_source_instance_id: u64,
+        baseline: SourceCoverageReplayBaseline,
+    ) -> Result<Self, EngineError> {
+        if baseline.source_instance_id != expected_source_instance_id {
+            return Err(observation_error(
+                "start fact-family replay",
+                "coverage baseline belongs to another source instance",
+            ));
+        }
+        if baseline.last_commit_seq == 0
+            || !matches!(
+                baseline.completeness.as_str(),
+                "complete" | "partial" | "unavailable"
+            )
+        {
+            return Err(observation_error(
+                "start fact-family replay",
+                "coverage baseline has invalid completeness or commit provenance",
+            ));
+        }
+        let mut members = BTreeMap::new();
+        for member in baseline.members {
+            if members
+                .insert(
+                    (member.stream_key, member.object_key),
+                    (member.generation, member.absent),
+                )
+                .is_some()
+            {
+                return Err(observation_error(
+                    "start fact-family replay",
+                    "coverage baseline repeats one stream/object member",
+                ));
+            }
+        }
+        Ok(Self {
+            family: family.to_string(),
+            version,
+            baseline: members,
+        })
+    }
+
+    fn stream_is_provider(&self, stream: &StreamSpec) -> bool {
+        stream
+            .capabilities
+            .iter()
+            .any(|capability| capability.as_str() == self.family)
+    }
+
+    fn object_identity(
+        &self,
+        manifest: &AdapterManifest,
+        stream_key: &str,
+        object_key: &[u8],
+    ) -> Result<(Vec<u8>, Vec<u8>), EngineError> {
+        let stream = CoverageStreamKey::derive(manifest.id.as_str(), stream_key.as_bytes())
+            .map_err(|error| {
+                observation_error("match replay stream coverage", error.to_string())
+            })?;
+        let object = CoverageObjectKey::derive(stream_key, object_key).map_err(|error| {
+            observation_error("match replay object coverage", error.to_string())
+        })?;
+        Ok((stream.as_bytes().to_vec(), object.as_bytes().to_vec()))
+    }
+
+    fn force_generation_replay(
+        &self,
+        manifest: &AdapterManifest,
+        stream: &StreamSpec,
+        previous: Option<&SourceCatalogObject>,
+    ) -> Result<bool, EngineError> {
+        if !self.stream_is_provider(stream) {
+            return Ok(false);
+        }
+        let Some(previous) = previous else {
+            // An object created after the durable baseline is already read
+            // from its beginning in a fresh generation.
+            return Ok(false);
+        };
+        let identity =
+            self.object_identity(manifest, previous.stream_key.as_str(), &previous.object_key)?;
+        let Some((baseline_generation, baseline_absent)) = self.baseline.get(&identity).copied()
+        else {
+            // New membership is likewise ingested from its beginning.
+            return Ok(false);
+        };
+        if previous.generation < baseline_generation {
+            return Err(observation_error(
+                "resume fact-family replay",
+                "source generation moved behind its durable coverage baseline",
+            ));
+        }
+        Ok(previous.generation == baseline_generation
+            && !(baseline_absent && previous.state == "absent"))
+    }
+
+    fn verify_replacement(
+        &self,
+        manifest: &AdapterManifest,
+        catalog: &SourceCatalogSnapshot,
+        coverage: &mut ProjectionCoverageAttempt,
+    ) -> Result<(), EngineError> {
+        let mut current = BTreeMap::new();
+        for object in catalog
+            .objects
+            .iter()
+            .filter(|object| coverage.required_streams.contains_key(&object.stream_key))
+        {
+            let identity =
+                self.object_identity(manifest, &object.stream_key, &object.object_key)?;
+            current.insert(identity, (object.generation, object.state.as_str()));
+        }
+        for (identity, (baseline_generation, baseline_absent)) in &self.baseline {
+            let Some((generation, state)) = current.get(identity).copied() else {
+                coverage.block("replay-baseline", "replay_member_missing");
+                continue;
+            };
+            if generation < *baseline_generation {
+                return Err(observation_error(
+                    "verify fact-family replay",
+                    "source generation moved behind its durable coverage baseline",
+                ));
+            }
+            let unchanged_absence =
+                *baseline_absent && state == "absent" && generation == *baseline_generation;
+            if generation == *baseline_generation && !unchanged_absence {
+                coverage.block("replay-baseline", "replay_generation_not_advanced");
+            }
+        }
+        Ok(())
+    }
+}
+
 pub struct ObservationCoordinator {
     engine: Arc<SpaghettiEngineCore>,
     cancellations: Vec<QueryCancellationToken>,
+    max_append_records_per_reconcile: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -710,6 +888,7 @@ impl ObservationCoordinator {
         Self {
             engine,
             cancellations: Vec::new(),
+            max_append_records_per_reconcile: MAX_APPEND_RECORDS_PER_RECONCILE,
         }
     }
 
@@ -720,6 +899,7 @@ impl ObservationCoordinator {
         Self {
             engine,
             cancellations: vec![cancellation],
+            max_append_records_per_reconcile: MAX_APPEND_RECORDS_PER_RECONCILE,
         }
     }
 
@@ -730,6 +910,17 @@ impl ObservationCoordinator {
         Self {
             engine,
             cancellations,
+            max_append_records_per_reconcile: MAX_APPEND_RECORDS_PER_RECONCILE,
+        }
+    }
+
+    #[cfg(test)]
+    fn with_append_record_limit(engine: Arc<SpaghettiEngineCore>, limit: usize) -> Self {
+        assert!(limit > 0 && limit <= MAX_APPEND_RECORDS_PER_RECONCILE);
+        Self {
+            engine,
+            cancellations: Vec::new(),
+            max_append_records_per_reconcile: limit,
         }
     }
 
@@ -772,7 +963,14 @@ impl ObservationCoordinator {
                         "adapter discovered the same stable instance key more than once",
                     ));
                 }
-                self.reconcile_instance(adapter, spec, &request.reason, started_at, &mut outcome)?;
+                self.reconcile_instance(
+                    adapter,
+                    spec,
+                    &request.reason,
+                    started_at,
+                    &mut outcome,
+                    None,
+                )?;
             }
             Ok(outcome)
         })();
@@ -811,7 +1009,101 @@ impl ObservationCoordinator {
                 instances_discovered: 1,
                 ..ReconcileOutcome::default()
             };
-            self.reconcile_instance(adapter, spec, &reason, started_at, &mut outcome)?;
+            self.reconcile_instance(adapter, spec, &reason, started_at, &mut outcome, None)?;
+            Ok(outcome)
+        })();
+        self.finish_reconcile(lease, result, started_at)
+    }
+
+    /// Replay one fact family's declared provider streams for an already
+    /// discovered source instance. The durable coverage set is the baseline:
+    /// every present baseline object must enter a later generation before the
+    /// replacement barrier may become Ready.
+    pub fn replay_declared_instance_fact_family<A: AgentAdapter + ?Sized>(
+        &self,
+        adapter: &A,
+        spec: AdapterSourceInstanceSpec,
+        request: FactFamilyReplayRequest,
+    ) -> Result<ReconcileOutcome, EngineError> {
+        self.check_cancelled()?;
+        validate_fact_family_replay_request(&request)?;
+        let manifest = adapter.manifest();
+        manifest
+            .validate()
+            .map_err(|error| adapter_error("validate adapter manifest", error))?;
+        spec.validate()
+            .map_err(|error| adapter_error("validate source instance identity", error))?;
+        if request.family != USAGE_V2_PROJECTION_ID
+            || request.version != USAGE_V2_PROJECTION_VERSION
+        {
+            return Err(EngineError::InvalidConfig(format!(
+                "fact-family replay is not implemented for {} version {}",
+                request.family, request.version
+            )));
+        }
+        if !declares_usage_v2_projection(manifest) {
+            return Err(EngineError::InvalidConfig(
+                "adapter does not declare supported runtime.usage-v2 evidence".to_string(),
+            ));
+        }
+
+        let started_at = now_unix_ms()?;
+        let lease = self.engine.begin_instance_reconcile(
+            manifest.id.as_str(),
+            spec.stable_key.as_bytes(),
+            started_at,
+        )?;
+        let result = (|| {
+            let catalog = self
+                .engine
+                .source_catalog(manifest.id.as_str(), spec.stable_key.as_bytes())?;
+            let source_instance_id = catalog.source_instance_id.ok_or_else(|| {
+                observation_error(
+                    "start fact-family replay",
+                    "source instance has no durable coverage baseline",
+                )
+            })?;
+            let replay = self.load_fact_family_replay_context(
+                source_instance_id,
+                spec.stable_key.as_bytes(),
+                &request.family,
+                request.version,
+            )?;
+            let committed_at = now_unix_ms()?.max(started_at);
+            let marker_commit =
+                self.engine
+                    .commit_projection_versions(ProjectionVersionCommit {
+                        source_instance_id,
+                        reason: request.reason.clone(),
+                        started_at,
+                        committed_at,
+                        projection_versions: vec![usage_v2_projection_update(
+                            &SourceInstance {
+                                id: source_instance_id,
+                                spec: spec.clone(),
+                            },
+                            ProjectionReadiness::Pending,
+                            Some(USAGE_V2_REPLAY_PENDING_DETAIL),
+                        )],
+                        coverage_sets: Vec::new(),
+                    })?;
+            let mut outcome = ReconcileOutcome {
+                instances_discovered: 1,
+                ..ReconcileOutcome::default()
+            };
+            if let Some(commit_seq) = marker_commit {
+                outcome.commits = outcome.commits.saturating_add(1);
+                outcome.last_commit_seq = Some(commit_seq);
+            }
+            lease.begin_reconciling();
+            self.reconcile_instance(
+                adapter,
+                spec,
+                USAGE_V2_REPLAY_COMMIT_REASON,
+                started_at,
+                &mut outcome,
+                Some(replay),
+            )?;
             Ok(outcome)
         })();
         self.finish_reconcile(lease, result, started_at)
@@ -924,6 +1216,7 @@ impl ObservationCoordinator {
                 &stream,
                 &object,
                 Some(previous),
+                false,
                 &reason,
                 started_at,
                 &mut outcome,
@@ -934,6 +1227,59 @@ impl ObservationCoordinator {
             Ok(outcome)
         })();
         self.finish_reconcile(lease, result, started_at)
+    }
+
+    fn load_fact_family_replay_context(
+        &self,
+        source_instance_id: u64,
+        scope_key: &[u8],
+        family: &str,
+        version: u32,
+    ) -> Result<FactFamilyReplayContext, EngineError> {
+        let baseline = self
+            .engine
+            .source_coverage_replay_baseline(
+                source_instance_id,
+                family,
+                scope_key,
+                family,
+                version,
+            )?
+            .ok_or_else(|| {
+                observation_error(
+                    "start fact-family replay",
+                    "no durable source-coverage baseline exists for the requested family",
+                )
+            })?;
+        FactFamilyReplayContext::from_durable(family, version, source_instance_id, baseline)
+    }
+
+    fn resume_fact_family_replay(
+        &self,
+        instance: &SourceInstance,
+        catalog: &SourceCatalogSnapshot,
+    ) -> Result<Option<FactFamilyReplayContext>, EngineError> {
+        let active = catalog.projection_versions.iter().find(|projection| {
+            projection.projection_id == USAGE_V2_PROJECTION_ID
+                && projection.readiness == "pending"
+                && projection.detail.as_deref() == Some(USAGE_V2_REPLAY_PENDING_DETAIL)
+        });
+        let Some(active) = active else {
+            return Ok(None);
+        };
+        if active.desired_version != USAGE_V2_PROJECTION_VERSION {
+            return Err(observation_error(
+                "resume fact-family replay",
+                "active replay desired version no longer matches the engine contract",
+            ));
+        }
+        self.load_fact_family_replay_context(
+            instance.id,
+            instance.spec.stable_key.as_bytes(),
+            USAGE_V2_PROJECTION_ID,
+            USAGE_V2_PROJECTION_VERSION,
+        )
+        .map(Some)
     }
 
     fn check_cancelled(&self) -> Result<(), EngineError> {
@@ -978,6 +1324,7 @@ impl ObservationCoordinator {
         reason: &str,
         started_at: i64,
         outcome: &mut ReconcileOutcome,
+        requested_replay: Option<FactFamilyReplayContext>,
     ) -> Result<(), EngineError> {
         self.check_cancelled()?;
         spec.validate()
@@ -1012,6 +1359,15 @@ impl ObservationCoordinator {
             id: source_instance_id,
             spec,
         };
+        let replay = match requested_replay {
+            Some(replay) => Some(replay),
+            None => self.resume_fact_family_replay(&instance, &catalog)?,
+        };
+        let reason = if replay.is_some() {
+            USAGE_V2_REPLAY_COMMIT_REASON
+        } else {
+            reason
+        };
         let mut usage_v2_coverage = ProjectionCoverageAttempt::default();
         let mut discovery = DiscoveryIndex::default();
         let streams = catch_adapter_panic("declare source streams", || adapter.streams(&instance))?
@@ -1043,6 +1399,7 @@ impl ObservationCoordinator {
                 &stream,
                 &catalog,
                 &mut discovery,
+                replay.as_ref(),
                 reason,
                 started_at,
                 outcome,
@@ -1071,10 +1428,12 @@ impl ObservationCoordinator {
             started_at,
             usage_v2_coverage,
             outcome,
+            replay.as_ref(),
         )?;
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn finish_instance_projection_readiness(
         &self,
         manifest: &AdapterManifest,
@@ -1083,6 +1442,7 @@ impl ObservationCoordinator {
         started_at: i64,
         mut coverage: ProjectionCoverageAttempt,
         outcome: &mut ReconcileOutcome,
+        replay: Option<&FactFamilyReplayContext>,
     ) -> Result<(), EngineError> {
         if !declares_usage_v2_projection(manifest) {
             return Ok(());
@@ -1106,6 +1466,17 @@ impl ObservationCoordinator {
                 _ => {}
             }
         }
+        if let Some(replay) = replay {
+            if replay.family != USAGE_V2_PROJECTION_ID
+                || replay.version != USAGE_V2_PROJECTION_VERSION
+            {
+                return Err(observation_error(
+                    "finish projection replay",
+                    "replay family/version does not match the usage-v2 projection",
+                ));
+            }
+            replay.verify_replacement(manifest, &current_catalog, &mut coverage)?;
+        }
         let prior = prior_catalog
             .projection_versions
             .iter()
@@ -1118,7 +1489,7 @@ impl ObservationCoordinator {
                     .is_some_and(|detail| detail.contains("records_quarantined"))
         });
         let mut detail = coverage.detail();
-        if sticky_quarantine {
+        if sticky_quarantine && replay.is_none() {
             detail = match detail {
                 Some(current) if coverage_detail_only_quarantine(&current) => prior
                     .and_then(|projection| projection.detail.clone())
@@ -1137,6 +1508,31 @@ impl ObservationCoordinator {
             };
         }
         let committed_at = now_unix_ms()?.max(started_at);
+        if replay.is_some() && detail.is_some() && !coverage.has_quarantine() {
+            // Preserve the old normalized coverage set as the durable replay
+            // baseline. A later pass resumes only baseline objects whose
+            // generation has not advanced yet; bounded append continuation
+            // therefore makes progress instead of restarting from byte zero.
+            let commit_seq = self
+                .engine
+                .commit_projection_versions(ProjectionVersionCommit {
+                    source_instance_id: instance.id,
+                    reason: format!("projection.{USAGE_V2_PROJECTION_ID}.replay_pending"),
+                    started_at,
+                    committed_at,
+                    projection_versions: vec![usage_v2_projection_update(
+                        instance,
+                        ProjectionReadiness::Pending,
+                        Some(USAGE_V2_REPLAY_PENDING_DETAIL),
+                    )],
+                    coverage_sets: Vec::new(),
+                })?;
+            if let Some(commit_seq) = commit_seq {
+                outcome.commits = outcome.commits.saturating_add(1);
+                outcome.last_commit_seq = Some(commit_seq);
+            }
+            return Ok(());
+        }
         let (readiness, state) = if detail.is_none() {
             (ProjectionReadiness::Ready, "ready")
         } else {
@@ -1276,6 +1672,7 @@ impl ObservationCoordinator {
         stream: &StreamSpec,
         catalog: &SourceCatalogSnapshot,
         discovery: &mut DiscoveryIndex,
+        replay: Option<&FactFamilyReplayContext>,
         reason: &str,
         started_at: i64,
         outcome: &mut ReconcileOutcome,
@@ -1288,6 +1685,15 @@ impl ObservationCoordinator {
             .root(&stream.selector.root_name)
             .map_err(|error| adapter_error("resolve source root", error))?;
         if let DriverSpec::DirectorySnapshot(config) = &stream.driver {
+            if replay.is_some_and(|replay| replay.stream_is_provider(stream)) {
+                return Err(observation_error(
+                    "replay fact-family provider stream",
+                    format!(
+                        "directory snapshot stream {} cannot directly provide replayable facts",
+                        stream.id
+                    ),
+                ));
+            }
             self.reconcile_directory_snapshot(
                 adapter, instance, stream, root, catalog, config, reason, started_at, outcome,
             )?;
@@ -1329,10 +1735,17 @@ impl ObservationCoordinator {
                     let prior_key = stored_by_path.get(&display)?;
                     stored_by_key.remove(prior_key)
                 });
+            let force_replay = replay
+                .map(|replay| {
+                    replay.force_generation_replay(adapter.manifest(), stream, previous.as_ref())
+                })
+                .transpose()?
+                .unwrap_or(false);
             work.push(ObjectWork {
                 stream: stream.clone(),
                 object: object.clone(),
                 previous,
+                force_replay,
             });
         }
 
@@ -1375,6 +1788,16 @@ impl ObservationCoordinator {
                     stream: stream.clone(),
                     object,
                     previous: Some(previous.clone()),
+                    force_replay: replay
+                        .map(|replay| {
+                            replay.force_generation_replay(
+                                adapter.manifest(),
+                                stream,
+                                Some(previous),
+                            )
+                        })
+                        .transpose()?
+                        .unwrap_or(false),
                 });
             }
         }
@@ -1611,6 +2034,7 @@ impl ObservationCoordinator {
                             &task.stream,
                             &task.object,
                             task.previous.as_ref(),
+                            task.force_replay,
                             reason,
                             started_at,
                             &mut local,
@@ -1706,6 +2130,7 @@ impl ObservationCoordinator {
         stream: &StreamSpec,
         object: &DeclaredObject,
         previous: Option<&SourceCatalogObject>,
+        force_replay: bool,
         reason: &str,
         started_at: i64,
         outcome: &mut ReconcileOutcome,
@@ -1765,6 +2190,7 @@ impl ObservationCoordinator {
                 durable,
                 &origin,
                 config,
+                force_replay,
                 reason,
                 started_at,
                 outcome,
@@ -1781,6 +2207,7 @@ impl ObservationCoordinator {
                 durable,
                 &origin,
                 config,
+                force_replay,
                 reason,
                 started_at,
                 outcome,
@@ -1797,6 +2224,7 @@ impl ObservationCoordinator {
                 durable,
                 &origin,
                 config,
+                force_replay,
                 reason,
                 started_at,
                 outcome,
@@ -1813,6 +2241,7 @@ impl ObservationCoordinator {
                 durable,
                 &origin,
                 config,
+                force_replay,
                 reason,
                 started_at,
                 outcome,
@@ -1829,6 +2258,7 @@ impl ObservationCoordinator {
                 durable,
                 &origin,
                 config,
+                force_replay,
                 reason,
                 started_at,
                 outcome,
@@ -1968,6 +2398,7 @@ impl ObservationCoordinator {
         mut durable: DurableObject,
         origin: &RecordOrigin,
         config: &crate::source::AppendDelimitedConfig,
+        force_replay: bool,
         reason: &str,
         started_at: i64,
         outcome: &mut ReconcileOutcome,
@@ -1976,7 +2407,8 @@ impl ObservationCoordinator {
         let mut config = config.clone();
         config.max_records_per_batch = config
             .max_records_per_batch
-            .min(MAX_APPEND_RECORDS_PER_COMMIT);
+            .min(MAX_APPEND_RECORDS_PER_COMMIT)
+            .min(self.max_append_records_per_reconcile);
         let driver = AppendDelimitedFile::new(config).map_err(source_error)?;
         let performance = self.source_performance(adapter, stream);
         let semantic_context = fact_semantic_context(adapter, instance, stream, object)?;
@@ -1992,12 +2424,13 @@ impl ObservationCoordinator {
             .transpose()
             .map_err(source_error)?;
         let mut force_contract_replay = durable.driver_checkpoint.is_some()
-            && (durable.decoder_contract_changed(adapter)
+            && (force_replay
+                || durable.decoder_contract_changed(adapter)
                 || durable.object_context_changed(object_context));
         let mut records_seen = 0_usize;
         loop {
             self.check_cancelled()?;
-            if records_seen >= MAX_APPEND_RECORDS_PER_RECONCILE {
+            if records_seen >= self.max_append_records_per_reconcile {
                 outcome.retries_required = outcome.retries_required.saturating_add(1);
                 outcome.backlog_remaining = outcome.backlog_remaining.saturating_add(1);
                 record_retry_target(outcome, instance, stream, object);
@@ -2380,6 +2813,7 @@ impl ObservationCoordinator {
         durable: DurableObject,
         origin: &RecordOrigin,
         config: &crate::source::ReplaceDocumentConfig,
+        force_replay: bool,
         reason: &str,
         started_at: i64,
         outcome: &mut ReconcileOutcome,
@@ -2392,7 +2826,8 @@ impl ObservationCoordinator {
             .map(ReplaceCheckpoint::decode)
             .transpose()
             .map_err(source_error)?;
-        let generation_reset = durable.decoder_contract_changed(adapter)
+        let generation_reset = force_replay
+            || durable.decoder_contract_changed(adapter)
             || durable.object_context_changed(object_context);
         let performance = self.source_performance(adapter, stream);
         let driver = ReplaceDocument::new(config.clone()).map_err(source_error)?;
@@ -2739,6 +3174,7 @@ impl ObservationCoordinator {
         durable: DurableObject,
         origin: &RecordOrigin,
         config: &crate::source::SqliteSnapshotConfig,
+        force_replay: bool,
         reason: &str,
         started_at: i64,
         outcome: &mut ReconcileOutcome,
@@ -2750,7 +3186,8 @@ impl ObservationCoordinator {
             .map(SqliteCheckpoint::decode)
             .transpose()
             .map_err(source_error)?;
-        let force_replay = durable.decoder_contract_changed(adapter)
+        let force_replay = force_replay
+            || durable.decoder_contract_changed(adapter)
             || durable.object_context_changed(object_context);
         let cancellations = self.cancellations.clone();
         let performance = self.source_performance(adapter, stream);
@@ -2856,6 +3293,7 @@ impl ObservationCoordinator {
         durable: DurableObject,
         origin: &RecordOrigin,
         config: &crate::source::KeyValueSnapshotConfig,
+        force_replay: bool,
         reason: &str,
         started_at: i64,
         outcome: &mut ReconcileOutcome,
@@ -2867,7 +3305,8 @@ impl ObservationCoordinator {
             .map(KeyValueCheckpoint::decode)
             .transpose()
             .map_err(source_error)?;
-        let force_replay = durable.decoder_contract_changed(adapter)
+        let force_replay = force_replay
+            || durable.decoder_contract_changed(adapter)
             || durable.object_context_changed(object_context);
         let cancellations = self.cancellations.clone();
         let performance = self.source_performance(adapter, stream);
@@ -3049,6 +3488,7 @@ impl ObservationCoordinator {
         durable: DurableObject,
         origin: &RecordOrigin,
         config: &crate::source::PresenceObjectConfig,
+        force_replay: bool,
         reason: &str,
         started_at: i64,
         outcome: &mut ReconcileOutcome,
@@ -3061,7 +3501,7 @@ impl ObservationCoordinator {
             .map(PresenceCheckpoint::decode)
             .transpose()
             .map_err(source_error)?;
-        let contract_replay = durable.decoder_contract_changed(adapter);
+        let contract_replay = force_replay || durable.decoder_contract_changed(adapter);
         let performance = self.source_performance(adapter, stream);
         let driver = PresenceObject::new(config.clone()).map_err(source_error)?;
         let read_started = Instant::now();
@@ -3184,6 +3624,7 @@ struct ObjectWork {
     stream: StreamSpec,
     object: DeclaredObject,
     previous: Option<SourceCatalogObject>,
+    force_replay: bool,
 }
 
 #[derive(Default)]
@@ -4032,7 +4473,12 @@ fn commit_request<A: AgentAdapter + ?Sized>(
         started_at,
         committed_at,
         fact_count: 0,
-        projection_versions: pending_projection_updates(adapter.manifest(), stream, instance),
+        projection_versions: pending_projection_updates(
+            adapter.manifest(),
+            stream,
+            instance,
+            reason,
+        ),
         record_errors,
         changes: Vec::new(),
     })
@@ -4072,13 +4518,18 @@ fn pending_projection_updates(
     manifest: &AdapterManifest,
     stream: &StreamSpec,
     instance: &SourceInstance,
+    reason: &str,
 ) -> Vec<ProjectionVersionUpdate> {
     (declares_usage_v2_projection(manifest) && stream_declares_usage_v2_projection(stream))
         .then(|| {
             usage_v2_projection_update(
                 instance,
                 ProjectionReadiness::Pending,
-                Some("source reconciliation in progress"),
+                Some(if reason == USAGE_V2_REPLAY_COMMIT_REASON {
+                    USAGE_V2_REPLAY_PENDING_DETAIL
+                } else {
+                    "source reconciliation in progress"
+                }),
             )
         })
         .into_iter()
@@ -4803,6 +5254,23 @@ fn validate_request(request: &ReconcileRequest) -> Result<(), EngineError> {
     Ok(())
 }
 
+fn validate_fact_family_replay_request(
+    request: &FactFamilyReplayRequest,
+) -> Result<(), EngineError> {
+    if request.family.trim().is_empty()
+        || request.family.len() > 256
+        || request.version == 0
+        || request.reason.trim().is_empty()
+        || request.reason.len() > 4 * 1024
+    {
+        return Err(EngineError::InvalidConfig(
+            "fact-family replay requires a bounded family, positive version, and bounded reason"
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
 fn record_commit(outcome: &mut ReconcileOutcome, receipt: &CommitReceipt) {
     outcome.commits = outcome.commits.saturating_add(1);
     outcome.last_commit_seq = Some(receipt.commit_seq);
@@ -5443,6 +5911,165 @@ mod tests {
         assert_ne!(
             advanced_coverage.content_digest,
             unavailable_coverage.content_digest
+        );
+
+        // Repairing/replacing the native file through an ordinary reconcile
+        // is not sufficient proof: the sticky gap remains unavailable even
+        // though the new generation now decodes cleanly.
+        std::fs::write(&transcript, transcript_line("m2", "corrected response")).unwrap();
+        let repaired = fixture.reconcile(&engine);
+        assert_eq!(repaired.records_decoded, 1);
+        let repaired_object = catalog_object(&engine, &fixture.root, "session-transcripts");
+        assert_eq!(
+            projection_version_state(&fixture.database, "runtime.usage-v2").2,
+            "unavailable"
+        );
+        std::fs::write(
+            fixture.root.join("settings.json"),
+            br#"{"model":"claude-sonnet"}"#,
+        )
+        .unwrap();
+        assert_eq!(fixture.reconcile(&engine).records_decoded, 1);
+        let settings_before =
+            catalog_object(&engine, &fixture.root, "interpretation-settings").generation;
+
+        let adapter = ClaudeCodeAdapter::new();
+        let spec = adapter
+            .discover(&DiscoveryContext {
+                configured_roots: vec![fixture.root.clone()],
+                observed_at: now_unix_ms().unwrap(),
+            })
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap();
+        let replayed = ObservationCoordinator::new(Arc::clone(&engine))
+            .replay_declared_instance_fact_family(
+                &adapter,
+                spec,
+                FactFamilyReplayRequest::usage_v2("test corrected coverage replay"),
+            )
+            .unwrap();
+        assert_eq!(replayed.records_decoded, 1);
+        let replayed_object = catalog_object(&engine, &fixture.root, "session-transcripts");
+        assert_eq!(replayed_object.generation, repaired_object.generation + 1);
+        assert_eq!(
+            catalog_object(&engine, &fixture.root, "interpretation-settings").generation,
+            settings_before,
+            "fact-family replay must not reset a stream that does not declare the family"
+        );
+        let ready = projection_version_state(&fixture.database, "runtime.usage-v2");
+        assert_eq!(ready.1, Some(1));
+        assert_eq!(ready.2, "ready");
+        assert_eq!(ready.4, None);
+        let replacement = usage_v2_coverage_state(&fixture.database);
+        assert_eq!(replacement.completeness, "complete");
+        assert_eq!(
+            replacement.point_status.as_deref(),
+            Some("complete_through")
+        );
+        assert_eq!(replacement.error_codes, Vec::<String>::new());
+        assert_eq!(
+            count_rows(&fixture.database, "usage_v2_response_contributions"),
+            1
+        );
+        assert_eq!(
+            count_rows(&fixture.database, "source_record_errors"),
+            1,
+            "historical quarantine diagnostics remain auditable after replacement coverage"
+        );
+
+        let unchanged_after_replay = fixture.reconcile(&engine);
+        assert_eq!(unchanged_after_replay.records_decoded, 0);
+        assert_eq!(unchanged_after_replay.commits, 0);
+    }
+
+    #[test]
+    fn bounded_usage_v2_replay_resumes_after_restart_without_replaying_new_generation() {
+        const TEST_REPLAY_LIMIT: usize = 4;
+        let fixture = ClaudeFixture::new();
+        let transcript = fixture.transcript_path();
+        std::fs::write(&transcript, b"{not-json}\n").unwrap();
+        let engine = fixture.open_engine();
+        assert_eq!(fixture.reconcile(&engine).records_quarantined, 1);
+
+        let mut corrected = Vec::new();
+        for index in 0..=TEST_REPLAY_LIMIT {
+            corrected.extend(transcript_line(
+                &format!("m{index}"),
+                "bounded replay response",
+            ));
+        }
+        std::fs::write(&transcript, corrected).unwrap();
+        let repaired = fixture.reconcile(&engine);
+        assert_eq!(repaired.records_decoded, (TEST_REPLAY_LIMIT + 1) as u32);
+        assert_eq!(
+            projection_version_state(&fixture.database, "runtime.usage-v2").2,
+            "unavailable",
+            "ordinary corrected ingestion cannot clear the old quarantine gap"
+        );
+        let baseline_generation =
+            catalog_object(&engine, &fixture.root, "session-transcripts").generation;
+
+        let adapter = ClaudeCodeAdapter::new();
+        let spec = adapter
+            .discover(&DiscoveryContext {
+                configured_roots: vec![fixture.root.clone()],
+                observed_at: now_unix_ms().unwrap(),
+            })
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap();
+        let partial = ObservationCoordinator::with_append_record_limit(
+            Arc::clone(&engine),
+            TEST_REPLAY_LIMIT,
+        )
+        .replay_declared_instance_fact_family(
+            &adapter,
+            spec,
+            FactFamilyReplayRequest::usage_v2("test bounded restart replay"),
+        )
+        .unwrap();
+        assert_eq!(partial.backlog_remaining, 1);
+        let partial_projection = projection_version_state(&fixture.database, "runtime.usage-v2");
+        assert_eq!(partial_projection.2, "pending");
+        assert_eq!(
+            partial_projection.4.as_deref(),
+            Some(USAGE_V2_REPLAY_PENDING_DETAIL)
+        );
+        let partial_generation =
+            catalog_object(&engine, &fixture.root, "session-transcripts").generation;
+        assert_eq!(partial_generation, baseline_generation + 1);
+        assert_eq!(
+            count_rows(&fixture.database, "usage_v2_response_contributions"),
+            TEST_REPLAY_LIMIT as i64,
+            "the first new-generation slice atomically retracts the old generation"
+        );
+        engine.shutdown().unwrap();
+        drop(engine);
+
+        let restarted = fixture.open_engine();
+        let resumed = fixture.reconcile(&restarted);
+        assert_eq!(resumed.records_decoded, 1);
+        assert_eq!(resumed.backlog_remaining, 0);
+        assert_eq!(
+            catalog_object(&restarted, &fixture.root, "session-transcripts").generation,
+            partial_generation,
+            "restart must continue the replay generation instead of restarting it"
+        );
+        let ready = projection_version_state(&fixture.database, "runtime.usage-v2");
+        assert_eq!(ready.1, Some(USAGE_V2_PROJECTION_VERSION as i64));
+        assert_eq!(ready.2, "ready");
+        assert_eq!(ready.4, None);
+        assert_eq!(
+            count_rows(&fixture.database, "usage_v2_response_contributions"),
+            (TEST_REPLAY_LIMIT + 1) as i64,
+            "resumed replay must neither retain old-generation rows nor duplicate new ones"
+        );
+        assert_eq!(
+            usage_v2_coverage_state(&fixture.database).completeness,
+            "complete"
         );
     }
 
@@ -6342,6 +6969,9 @@ mod tests {
             "source_record_errors" => "SELECT COUNT(*) FROM source_record_errors",
             "canonical_interpretation_settings_documents" => {
                 "SELECT COUNT(*) FROM canonical_interpretation_settings_documents"
+            }
+            "usage_v2_response_contributions" => {
+                "SELECT COUNT(*) FROM usage_v2_response_contributions"
             }
             _ => panic!("unsupported coordinator test table"),
         };

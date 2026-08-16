@@ -742,6 +742,37 @@ replacement coverage. Administrative readiness transitions advance the normal
 durable commit clock but do not update a source object or cursor. Equal
 transitions do not create a commit.
 
+An explicit fact-family replay is source-instance scoped and follows this
+replacement protocol:
+
+1. the coordinator validates the requested family/version and loads the
+   matching normalized coverage set;
+2. before reading provider data, it durably marks the projection `Pending`
+   with an explicit-replay marker while leaving that coverage set unchanged;
+3. provider streams are selected only by their common capability declaration,
+   never by adapter ID or native path convention;
+4. every present object in the frozen baseline must enter a later source
+   generation and replay through its common driver and decoder; a new object
+   is already a full fresh-generation read, while an unchanged explicit
+   absence needs no fabricated generation;
+5. the first transaction in a replacement generation retracts all
+   old-generation usage contributions atomically with its replayed slice;
+6. bounded continuation keeps the baseline coverage and replay marker. After
+   restart, an object still at its baseline generation resets from its
+   beginning, while an object already in the replacement generation continues
+   from its durable cursor; and
+7. only a fully drained attempt atomically publishes replacement coverage and
+   `Ready`. Retry, unavailable-source, or bounded-backlog work stays `Pending`;
+   a new quarantine ends the attempt as `Unavailable` and requires another
+   explicit replay after correction.
+
+An ordinary reconciliation automatically resumes a durable replay marker, but
+cannot create that marker or clear a sticky gap. Historical diagnostic rows
+remain auditable; current readiness is justified by the replacement coverage
+set, not by deleting evidence of the old failure. A directory-membership
+snapshot cannot declare itself a directly replayable fact provider; the member
+content streams it discovers own fact replay.
+
 `projection_status = shadow | not_materialized` states whether the candidate
 query has v2 rows for the requested session; it is distinct from pack
 readiness and from RFC 012A source/fact-family coverage. All three values, rows,
@@ -797,8 +828,11 @@ source-object cursor update. Equal transitions are no-ops, unrelated stream
 commits leave the pack watermark unchanged, and `getRuntimeUsageV2` returns the
 readiness row from the same snapshot as its rows and aggregates. A provider
 record quarantine is sticky `Unavailable`: neither a later append nor a no-op
-scan can claim the skipped evidence was recovered. The future explicit replay
-path owns that recovery.
+scan can claim the skipped evidence was recovered. The common coordinator's
+explicit fact-family replay now owns that recovery: it freezes the normalized
+coverage set as a generation baseline, writes a durable `Pending` marker before
+reading, and replaces coverage only after every present baseline object has
+advanced and all provider work has drained.
 
 Schema v48 now persists the step-3 RFC 012A fact-family coverage set in
 normalized, bounded set/point/absence/error tables. The common administrative
@@ -807,12 +841,14 @@ adapter, canonical source instance, support release, and verified source
 declaration. A deterministic content digest suppresses equal writes; restart,
 cursor advancement, and stable quarantine-gap behavior have focused tests.
 
-Step 3's bounded public coverage query and explicit replay recovery, private
-native corpus-scale qualification/coverage parity, native team-to-actor
-conformance, the default switch in step 6, step 7's compatibility/rollback
-window, and remaining crash boundaries are open. Until those gates pass, the
-candidate capability is unsupported and `getUsage`/`getUsageActivity` retain
-legacy semantics.
+The engine-internal explicit replay/restart path is implemented for usage-v2,
+including bounded append continuation and old-generation retraction without
+duplicate response contributions. A bounded public coverage query and public
+host/SDK replay request, private native corpus-scale qualification/coverage
+parity, native team-to-actor conformance, the default switch in step 6, step
+7's compatibility/rollback window, and remaining crash boundaries are open.
+Until those gates pass, the candidate capability is unsupported and
+`getUsage`/`getUsageActivity` retain legacy semantics.
 
 ## 14. Failure and correction semantics
 
