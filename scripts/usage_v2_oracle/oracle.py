@@ -73,7 +73,7 @@ def _append_cursor(offset: int) -> bytes:
 
 
 def source_record_fallback_key(cursor_start: int, cursor_end: int) -> bytes:
-    """Return Claude decoder-contract-17's framed response fallback key."""
+    """Return the framed response fallback introduced in decoder contract 17."""
 
     return (
         b"source-record-v1\0"

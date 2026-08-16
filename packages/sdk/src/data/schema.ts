@@ -120,7 +120,7 @@ import type { SqliteService } from '../io/index.js';
 // 011 store key, with complete-triple and unique-revision enforcement.
 // v46: non-public RFC 012C response-level usage-v2 shadow state and interned
 // qualified-value evidence beside the retained legacy usage projection.
-export const SCHEMA_VERSION = 46;
+export const SCHEMA_VERSION = 47;
 
 export const TOKEN_ACTIVITY_TRIGGER_NAMES = [
   'token_activity_messages_ai',
@@ -1660,6 +1660,58 @@ CREATE TABLE IF NOT EXISTS usage_v2_qualification_specs (
   )
 );
 
+-- RFC 012C topology-neutral actor identity and orthogonal affiliations. These
+-- are deliberately independent of legacy catalog-local run/team/workflow
+-- keys so every runtime adapter and database-free observer can share them.
+CREATE TABLE IF NOT EXISTS runtime_actor_runs_v2 (
+  actor_run_key BLOB PRIMARY KEY CHECK (length(actor_run_key) = 32),
+  semantic_fact_id BLOB NOT NULL UNIQUE CHECK (length(semantic_fact_id) = 32),
+  fact_revision_id BLOB NOT NULL UNIQUE CHECK (length(fact_revision_id) = 32),
+  source_record_id BLOB NOT NULL CHECK (length(source_record_id) = 32),
+  session_key BLOB NOT NULL CHECK (length(session_key) = 32),
+  role TEXT NOT NULL CHECK (role IN ('root', 'child')),
+  parent_actor_run_key BLOB CHECK (parent_actor_run_key IS NULL OR length(parent_actor_run_key) = 32),
+  native_session_id TEXT,
+  native_actor_id TEXT,
+  native_actor_type TEXT,
+  fact_id BLOB NOT NULL UNIQUE REFERENCES fact_records(fact_id) ON DELETE CASCADE,
+  source_object_id INTEGER NOT NULL,
+  source_generation INTEGER NOT NULL,
+  cursor_end BLOB NOT NULL,
+  last_commit_seq INTEGER NOT NULL,
+  CHECK (role = 'child' OR parent_actor_run_key IS NULL),
+  CHECK (role = 'root' OR parent_actor_run_key IS NOT NULL),
+  CHECK (parent_actor_run_key IS NULL OR parent_actor_run_key <> actor_run_key),
+  CHECK (native_session_id IS NULL OR length(native_session_id) BETWEEN 1 AND 8192),
+  CHECK (native_actor_id IS NULL OR length(native_actor_id) BETWEEN 1 AND 8192),
+  CHECK (native_actor_type IS NULL OR length(native_actor_type) BETWEEN 1 AND 8192)
+);
+
+CREATE TABLE IF NOT EXISTS runtime_actor_affiliations_v2 (
+  affiliation_key BLOB PRIMARY KEY CHECK (length(affiliation_key) = 32),
+  semantic_fact_id BLOB NOT NULL UNIQUE CHECK (length(semantic_fact_id) = 32),
+  fact_revision_id BLOB NOT NULL UNIQUE CHECK (length(fact_revision_id) = 32),
+  source_record_id BLOB NOT NULL CHECK (length(source_record_id) = 32),
+  actor_run_key BLOB NOT NULL CHECK (length(actor_run_key) = 32),
+  session_key BLOB NOT NULL CHECK (length(session_key) = 32),
+  dimension TEXT NOT NULL CHECK (dimension IN ('team', 'workflow')),
+  target_key BLOB NOT NULL CHECK (length(target_key) = 32),
+  member_key BLOB CHECK (member_key IS NULL OR length(member_key) = 32),
+  native_target_id TEXT,
+  native_member_id TEXT,
+  state TEXT NOT NULL CHECK (state IN ('present', 'removed', 'unknown')),
+  effective_at TEXT,
+  effective_at_quality TEXT,
+  fact_id BLOB NOT NULL UNIQUE REFERENCES fact_records(fact_id) ON DELETE CASCADE,
+  source_object_id INTEGER NOT NULL,
+  source_generation INTEGER NOT NULL,
+  cursor_end BLOB NOT NULL,
+  last_commit_seq INTEGER NOT NULL,
+  CHECK (native_target_id IS NULL OR length(native_target_id) BETWEEN 1 AND 8192),
+  CHECK (native_member_id IS NULL OR length(native_member_id) BETWEEN 1 AND 8192),
+  CHECK (effective_at IS NULL OR length(effective_at) BETWEEN 1 AND 8192)
+);
+
 CREATE TABLE IF NOT EXISTS usage_v2_response_contributions (
   usage_key BLOB PRIMARY KEY CHECK (length(usage_key) = 32),
   fact_revision_id BLOB NOT NULL UNIQUE CHECK (length(fact_revision_id) = 32),
@@ -1874,6 +1926,11 @@ CREATE INDEX IF NOT EXISTS idx_usage_contributions_source_generation ON usage_co
 CREATE INDEX IF NOT EXISTS idx_usage_v2_response_session ON usage_v2_response_contributions(session_key, usage_key);
 CREATE INDEX IF NOT EXISTS idx_usage_v2_response_actor ON usage_v2_response_contributions(actor_run_key, usage_key);
 CREATE INDEX IF NOT EXISTS idx_usage_v2_response_source_generation ON usage_v2_response_contributions(source_object_id, source_generation);
+CREATE INDEX IF NOT EXISTS idx_runtime_actor_runs_v2_session ON runtime_actor_runs_v2(session_key, actor_run_key);
+CREATE INDEX IF NOT EXISTS idx_runtime_actor_runs_v2_source_generation ON runtime_actor_runs_v2(source_object_id, source_generation);
+CREATE INDEX IF NOT EXISTS idx_runtime_actor_affiliations_v2_actor ON runtime_actor_affiliations_v2(actor_run_key, dimension, affiliation_key);
+CREATE INDEX IF NOT EXISTS idx_runtime_actor_affiliations_v2_target ON runtime_actor_affiliations_v2(dimension, target_key, state, actor_run_key);
+CREATE INDEX IF NOT EXISTS idx_runtime_actor_affiliations_v2_source_generation ON runtime_actor_affiliations_v2(source_object_id, source_generation);
 DROP INDEX IF EXISTS idx_run_evidence_run_order;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_run_evidence_compact ON run_evidence(
   run_key, source_object_id, source_generation, evidence_kind, evidence_strength
@@ -2119,6 +2176,8 @@ const CURRENT_TABLES = [
   'canonical_presences',
   'presence_assertions',
   'observed_run_states',
+  'runtime_actor_affiliations_v2',
+  'runtime_actor_runs_v2',
   'usage_v2_response_contributions',
   'usage_v2_qualification_specs',
   'usage_totals',

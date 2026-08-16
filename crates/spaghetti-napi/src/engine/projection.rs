@@ -29,6 +29,7 @@ use super::commit::{
 };
 use super::memory_projection::apply_project_memory_facts;
 use super::presence_projection::apply_presence_facts;
+use super::runtime_semantic_projection::apply_runtime_semantic_v2_facts;
 use super::session_index_projection::apply_session_index_facts;
 use super::settings_projection::apply_interpretation_settings_facts;
 use super::storage_codec::{omitted, BlobEncoder, EncodedBlob};
@@ -416,6 +417,8 @@ impl TransactionalProjectionWork for FactProjectionWork<'_> {
                     envelope,
                 )?),
                 Fact::Delegation(_)
+                | Fact::ActorRunRevision(_)
+                | Fact::ActorAffiliationRevision(_)
                 | Fact::SessionIndexSnapshot(_)
                 | Fact::ProjectMemoryDocument(_)
                 | Fact::PersistedToolResult(_)
@@ -478,6 +481,7 @@ impl TransactionalProjectionWork for FactProjectionWork<'_> {
         let run_state_started = Instant::now();
         let mut changes = Vec::new();
         if !super::ingest_profile::IngestProfileSkip::current().runtime {
+            apply_runtime_semantic_v2_facts(transaction, context, self.batch)?;
             let mut affected_states = BTreeSet::new();
             if context.replaces_prior_generation {
                 affected_states = old_generation_keys(
@@ -4159,7 +4163,8 @@ mod tests {
     use walkdir::WalkDir;
 
     use crate::adapter::{
-        AdapterId, AdapterObjectContext, AgentAdapter, ArtifactCapture, ArtifactContentFact,
+        ActorAffiliationDimension, ActorAffiliationRevisionFact, ActorAffiliationState, AdapterId,
+        AdapterObjectContext, AgentAdapter, ArtifactCapture, ArtifactContentFact,
         ArtifactMetadataEntry, ArtifactMetadataSnapshotFact, ArtifactObservationKind, ContentBlock,
         DecodeContext, DecoderId, DependencyRevision, EvidenceKind, EvidenceStrength, FactBatch,
         FactSemanticContext, HookEventSummary, InterpretationSettingsDocumentStatus,
@@ -6658,8 +6663,8 @@ mod tests {
         assert_eq!(count(&cold, "usage_v2_response_contributions"), 2);
         assert_eq!(
             count(&cold, "fact_records"),
-            8,
-            "each message owns its paired activity plus legacy and v2 usage"
+            9,
+            "the actor declaration is retained with each message's activity plus legacy and v2 usage"
         );
 
         let before_audit = semantic_snapshot(&cold);
@@ -6704,6 +6709,7 @@ mod tests {
 
         assert_eq!(count(&connection, "usage_contributions"), 6);
         assert_eq!(count(&connection, "usage_v2_response_contributions"), 3);
+        assert_eq!(count(&connection, "runtime_actor_runs_v2"), 1);
         assert_eq!(
             connection
                 .query_row(
@@ -6809,6 +6815,17 @@ mod tests {
             301,
         );
         assert_eq!(count(&connection, "usage_v2_response_contributions"), 1);
+        assert_eq!(count(&connection, "runtime_actor_runs_v2"), 1);
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT role, source_generation FROM runtime_actor_runs_v2",
+                    [],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+                )
+                .unwrap(),
+            ("root".to_string(), 2)
+        );
         assert_eq!(
             connection
                 .query_row(
@@ -6829,6 +6846,297 @@ mod tests {
                 .unwrap(),
             1
         );
+        assert_eq!(
+            connection
+                .query_row("PRAGMA foreign_key_check", [], |_| Ok(1_i64))
+                .optional()
+                .unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn late_actor_affiliations_regroup_usage_without_copying_or_reburning_responses() {
+        let root = TempDir::new().unwrap();
+        let adapter = ClaudeCodeAdapter::new();
+        let context = adapter_context(root.path(), &adapter);
+        let mut connection = database();
+        register_object(&mut connection);
+        let payload = claude_usage_line("row-1", "api-1", None, 10, 5, Some(2), Some(3));
+        let transcript_record = direct_record(1, 0, payload.len() as u64 + 1, 100, &payload);
+        let mut decode_state = DecodeCommitState {
+            expected_generation: 1,
+            cursor: SourceCursor::append_offset(0).into_bytes(),
+            decoder_state: None,
+        };
+        decode_commit(
+            &mut connection,
+            &adapter,
+            &context,
+            &transcript_record,
+            &mut decode_state,
+            101,
+        );
+        let base_total = connection
+            .query_row(
+                "SELECT SUM(input_tokens) FROM usage_v2_response_contributions",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap();
+        assert_eq!(base_total, 10);
+
+        let workflow_object = b"workflow-affiliation";
+        register_object_key(&mut connection, workflow_object, 110);
+        let workflow_record = object_record(
+            2,
+            1,
+            SourceCursor::append_offset(0),
+            SourceCursor::append_offset(1),
+            111,
+            b"workflow-present",
+        );
+        let mut workflow_batch =
+            FactBatch::new_with_semantic_context(2, 2, semantic_context(workflow_object)).unwrap();
+        let session = workflow_batch
+            .canonical_entity_key("session", SESSION.as_bytes())
+            .unwrap();
+        let actor = workflow_batch
+            .canonical_entity_key("run", SESSION.as_bytes())
+            .unwrap();
+        let workflow = workflow_batch
+            .canonical_entity_key("workflow", b"wf-main")
+            .unwrap();
+        let workflow_affiliation = workflow_batch
+            .canonical_entity_key("actor_affiliation", b"workflow/root/wf-main")
+            .unwrap();
+        workflow_batch
+            .push_native(
+                &workflow_record,
+                b"workflow/root/wf-main",
+                Fact::ActorAffiliationRevision(ActorAffiliationRevisionFact {
+                    affiliation: workflow_affiliation,
+                    actor_run: actor,
+                    session,
+                    dimension: ActorAffiliationDimension::Workflow,
+                    target: workflow,
+                    member: None,
+                    native_target_id: Some("wf-main".to_string()),
+                    native_member_id: None,
+                    state: ActorAffiliationState::Present,
+                    effective_at: None,
+                }),
+            )
+            .unwrap();
+        commit_object_batch(
+            &mut connection,
+            workflow_object,
+            &workflow_record,
+            1,
+            SourceCursor::append_offset(0).into_bytes(),
+            112,
+            &workflow_batch,
+        );
+
+        let grouped_input = |connection: &Connection, dimension: &str| {
+            connection
+                .query_row(
+                    r#"
+                    SELECT COALESCE(SUM(usage.input_tokens), 0)
+                    FROM usage_v2_response_contributions AS usage
+                    JOIN runtime_actor_affiliations_v2 AS affiliation
+                      ON affiliation.actor_run_key = usage.actor_run_key
+                     AND affiliation.session_key = usage.session_key
+                    WHERE affiliation.dimension = ?1
+                      AND affiliation.state = 'present'
+                    "#,
+                    [dimension],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap()
+        };
+        assert_eq!(grouped_input(&connection, "workflow"), 10);
+        assert_eq!(count(&connection, "usage_v2_response_contributions"), 1);
+
+        let team_object = b"team-affiliation";
+        register_object_key(&mut connection, team_object, 120);
+        let team_record = object_record(
+            3,
+            1,
+            SourceCursor::append_offset(0),
+            SourceCursor::append_offset(1),
+            121,
+            b"team-present",
+        );
+        let mut team_batch =
+            FactBatch::new_with_semantic_context(2, 2, semantic_context(team_object)).unwrap();
+        let team = team_batch
+            .canonical_entity_key("team", b"team-alpha")
+            .unwrap();
+        let team_affiliation = team_batch
+            .canonical_entity_key("actor_affiliation", b"team/root/team-alpha")
+            .unwrap();
+        team_batch
+            .push_native(
+                &team_record,
+                b"team/root/team-alpha",
+                Fact::ActorAffiliationRevision(ActorAffiliationRevisionFact {
+                    affiliation: team_affiliation,
+                    actor_run: actor,
+                    session,
+                    dimension: ActorAffiliationDimension::Team,
+                    target: team,
+                    member: None,
+                    native_target_id: Some("team-alpha".to_string()),
+                    native_member_id: None,
+                    state: ActorAffiliationState::Present,
+                    effective_at: None,
+                }),
+            )
+            .unwrap();
+        commit_object_batch(
+            &mut connection,
+            team_object,
+            &team_record,
+            1,
+            SourceCursor::append_offset(0).into_bytes(),
+            122,
+            &team_batch,
+        );
+        assert_eq!(grouped_input(&connection, "workflow"), 10);
+        assert_eq!(grouped_input(&connection, "team"), 10);
+        assert_eq!(count(&connection, "runtime_actor_affiliations_v2"), 2);
+        assert_eq!(count(&connection, "usage_v2_response_contributions"), 1);
+        assert_eq!(
+            connection
+                .query_row(
+                    r#"
+                    SELECT COUNT(DISTINCT usage.usage_key)
+                    FROM usage_v2_response_contributions AS usage
+                    JOIN runtime_actor_affiliations_v2 AS affiliation
+                      ON affiliation.actor_run_key = usage.actor_run_key
+                    WHERE affiliation.state = 'present'
+                    "#,
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            1,
+            "orthogonal affiliations must not manufacture another response contribution"
+        );
+
+        let workflow_removed_record = object_record(
+            2,
+            1,
+            SourceCursor::append_offset(1),
+            SourceCursor::append_offset(2),
+            130,
+            b"workflow-removed",
+        );
+        let mut workflow_removed =
+            FactBatch::new_with_semantic_context(2, 2, semantic_context(workflow_object)).unwrap();
+        workflow_removed
+            .push_native(
+                &workflow_removed_record,
+                b"workflow/root/wf-main",
+                Fact::ActorAffiliationRevision(ActorAffiliationRevisionFact {
+                    affiliation: workflow_affiliation,
+                    actor_run: actor,
+                    session,
+                    dimension: ActorAffiliationDimension::Workflow,
+                    target: workflow,
+                    member: None,
+                    native_target_id: Some("wf-main".to_string()),
+                    native_member_id: None,
+                    state: ActorAffiliationState::Removed,
+                    effective_at: None,
+                }),
+            )
+            .unwrap();
+        commit_object_batch(
+            &mut connection,
+            workflow_object,
+            &workflow_removed_record,
+            1,
+            SourceCursor::append_offset(1).into_bytes(),
+            131,
+            &workflow_removed,
+        );
+        assert_eq!(grouped_input(&connection, "workflow"), 0);
+        assert_eq!(grouped_input(&connection, "team"), 10);
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT SUM(input_tokens) FROM usage_v2_response_contributions",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            base_total,
+            "affiliation corrections adjust grouping, never the burn baseline"
+        );
+
+        let team_unknown_record = object_record(
+            3,
+            1,
+            SourceCursor::append_offset(1),
+            SourceCursor::append_offset(2),
+            140,
+            b"team-unknown",
+        );
+        let mut team_unknown =
+            FactBatch::new_with_semantic_context(2, 2, semantic_context(team_object)).unwrap();
+        team_unknown
+            .push_native(
+                &team_unknown_record,
+                b"team/root/team-alpha",
+                Fact::ActorAffiliationRevision(ActorAffiliationRevisionFact {
+                    affiliation: team_affiliation,
+                    actor_run: actor,
+                    session,
+                    dimension: ActorAffiliationDimension::Team,
+                    target: team,
+                    member: None,
+                    native_target_id: Some("team-alpha".to_string()),
+                    native_member_id: None,
+                    state: ActorAffiliationState::Unknown,
+                    effective_at: None,
+                }),
+            )
+            .unwrap();
+        commit_object_batch(
+            &mut connection,
+            team_object,
+            &team_unknown_record,
+            1,
+            SourceCursor::append_offset(1).into_bytes(),
+            141,
+            &team_unknown,
+        );
+        assert_eq!(grouped_input(&connection, "workflow"), 0);
+        assert_eq!(grouped_input(&connection, "team"), 0);
+
+        let team_reset_record = object_record(
+            3,
+            2,
+            SourceCursor::append_offset(0),
+            SourceCursor::append_offset(1),
+            150,
+            b"team-reset-empty",
+        );
+        let empty_reset =
+            FactBatch::new_with_semantic_context(1, 1, semantic_context(team_object)).unwrap();
+        commit_object_batch(
+            &mut connection,
+            team_object,
+            &team_reset_record,
+            1,
+            SourceCursor::append_offset(2).into_bytes(),
+            151,
+            &empty_reset,
+        );
+        assert_eq!(count(&connection, "runtime_actor_affiliations_v2"), 1);
+        assert_eq!(count(&connection, "usage_v2_response_contributions"), 1);
         assert_eq!(
             connection
                 .query_row("PRAGMA foreign_key_check", [], |_| Ok(1_i64))

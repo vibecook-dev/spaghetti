@@ -18,6 +18,7 @@ const FACT_HASH_BYTES: usize = 32;
 const MAX_ENTITY_KEY_BYTES: usize = 8 * 1024;
 const MAX_USAGE_RESPONSE_KEY_BYTES: usize = 8 * 1024;
 const MAX_USAGE_PROVENANCE_FIELD_BYTES: usize = 256;
+const MAX_RUNTIME_SEMANTIC_TEXT_BYTES: usize = 8 * 1024;
 
 mod base64_bytes {
     use base64::engine::general_purpose::STANDARD;
@@ -505,6 +506,119 @@ pub struct RunFact {
     pub session: EntityKey,
     pub native_run_id: String,
     pub parent_run: Option<EntityKey>,
+}
+
+/// Topology-neutral identity and lineage for one runtime actor. This is the
+/// canonical RFC 012C counterpart to the legacy catalog-local `RunFact` and
+/// deliberately contains no database IDs or adapter-specific actor kinds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ActorRunRole {
+    Root,
+    Child,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActorRunRevisionFact {
+    pub actor_run: CanonicalEntityKey,
+    pub session: CanonicalEntityKey,
+    pub role: ActorRunRole,
+    pub parent_actor_run: Option<CanonicalEntityKey>,
+    pub native_session_id: Option<String>,
+    pub native_actor_id: Option<String>,
+    pub native_actor_type: Option<String>,
+}
+
+impl ActorRunRevisionFact {
+    pub(crate) fn validate(&self) -> Result<(), AdapterError> {
+        match self.role {
+            ActorRunRole::Root if self.parent_actor_run.is_some() => {
+                return Err(AdapterError::invalid_contract(
+                    "root actor run cannot declare a parent actor run",
+                ));
+            }
+            ActorRunRole::Child if self.parent_actor_run.is_none() => {
+                return Err(AdapterError::invalid_contract(
+                    "child actor run must declare a parent actor run",
+                ));
+            }
+            ActorRunRole::Root | ActorRunRole::Child => {}
+        }
+        if self.parent_actor_run.as_ref() == Some(&self.actor_run) {
+            return Err(AdapterError::invalid_contract(
+                "actor run cannot be its own parent",
+            ));
+        }
+        for (field, value) in [
+            ("native_session_id", self.native_session_id.as_deref()),
+            ("native_actor_id", self.native_actor_id.as_deref()),
+            ("native_actor_type", self.native_actor_type.as_deref()),
+        ] {
+            validate_runtime_semantic_text(field, value)?;
+        }
+        Ok(())
+    }
+}
+
+/// Orthogonal affiliation dimensions. An actor may simultaneously belong to
+/// both a team and a workflow; neither dimension changes response identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ActorAffiliationDimension {
+    Team,
+    Workflow,
+}
+
+/// Replaceable affiliation state. `Unknown` records explicit ambiguity;
+/// absence of a fact is not interpreted as either membership or removal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ActorAffiliationState {
+    Present,
+    Removed,
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActorAffiliationRevisionFact {
+    pub affiliation: CanonicalEntityKey,
+    pub actor_run: CanonicalEntityKey,
+    pub session: CanonicalEntityKey,
+    pub dimension: ActorAffiliationDimension,
+    pub target: CanonicalEntityKey,
+    pub member: Option<CanonicalEntityKey>,
+    pub native_target_id: Option<String>,
+    pub native_member_id: Option<String>,
+    pub state: ActorAffiliationState,
+    pub effective_at: Option<QualifiedTimestamp>,
+}
+
+impl ActorAffiliationRevisionFact {
+    pub(crate) fn validate(&self) -> Result<(), AdapterError> {
+        for (field, value) in [
+            ("native_target_id", self.native_target_id.as_deref()),
+            ("native_member_id", self.native_member_id.as_deref()),
+            (
+                "effective_at.value",
+                self.effective_at
+                    .as_ref()
+                    .map(|timestamp| timestamp.value.as_str()),
+            ),
+        ] {
+            validate_runtime_semantic_text(field, value)?;
+        }
+        Ok(())
+    }
+}
+
+fn validate_runtime_semantic_text(field: &str, value: Option<&str>) -> Result<(), AdapterError> {
+    if value.is_some_and(|value| value.is_empty() || value.len() > MAX_RUNTIME_SEMANTIC_TEXT_BYTES)
+    {
+        return Err(AdapterError::invalid_contract(format!(
+            "runtime semantic {field} must contain 1..={MAX_RUNTIME_SEMANTIC_TEXT_BYTES} bytes when present"
+        )));
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1078,6 +1192,8 @@ pub enum Fact {
     InterpretationSettings(InterpretationSettingsFact),
     Message(MessageFact),
     Run(RunFact),
+    ActorRunRevision(ActorRunRevisionFact),
+    ActorAffiliationRevision(ActorAffiliationRevisionFact),
     Delegation(DelegationFact),
     DelegationMetadata(DelegationMetadataFact),
     DelegationSpawn(DelegationSpawnFact),
@@ -1110,6 +1226,8 @@ impl Fact {
             Self::InterpretationSettings(_) => "interpretation_settings",
             Self::Message(_) => "message",
             Self::Run(_) => "run",
+            Self::ActorRunRevision(_) => "runtime.actor-run",
+            Self::ActorAffiliationRevision(_) => "runtime.actor-affiliation",
             Self::Delegation(_) => "delegation",
             Self::DelegationMetadata(_) => "delegation_metadata",
             Self::DelegationSpawn(_) => "delegation_spawn",
@@ -1138,6 +1256,7 @@ impl Fact {
             Self::InterpretationSettings(fact) => Some(&fact.document),
             Self::Message(fact) => Some(&fact.message),
             Self::Run(fact) => Some(&fact.run),
+            Self::ActorRunRevision(_) | Self::ActorAffiliationRevision(_) => None,
             Self::Delegation(fact) => Some(&fact.child_run),
             Self::DelegationMetadata(fact) => Some(&fact.child_run),
             Self::DelegationSpawn(fact) => Some(&fact.spawn),
@@ -1687,6 +1806,78 @@ mod tests {
             raw_payload: Vec::new(),
             reason: "test".to_string(),
         }
+    }
+
+    #[test]
+    fn runtime_actor_contract_keeps_lineage_and_affiliation_state_explicit() {
+        let batch = FactBatch::new_with_semantic_context(1, 1, semantic_context()).unwrap();
+        let session = batch.canonical_entity_key("session", b"session-1").unwrap();
+        let root = batch.canonical_entity_key("run", b"root").unwrap();
+        let child = batch.canonical_entity_key("run", b"child").unwrap();
+        let workflow = batch
+            .canonical_entity_key("workflow", b"workflow-1")
+            .unwrap();
+        let affiliation = batch
+            .canonical_entity_key("actor_affiliation", b"child/workflow-1")
+            .unwrap();
+
+        assert!(ActorRunRevisionFact {
+            actor_run: child,
+            session,
+            role: ActorRunRole::Child,
+            parent_actor_run: Some(root),
+            native_session_id: Some("session-1".to_string()),
+            native_actor_id: Some("child".to_string()),
+            native_actor_type: None,
+        }
+        .validate()
+        .is_ok());
+        assert!(ActorRunRevisionFact {
+            actor_run: child,
+            session,
+            role: ActorRunRole::Child,
+            parent_actor_run: None,
+            native_session_id: None,
+            native_actor_id: None,
+            native_actor_type: None,
+        }
+        .validate()
+        .is_err());
+        assert!(ActorRunRevisionFact {
+            actor_run: root,
+            session,
+            role: ActorRunRole::Root,
+            parent_actor_run: Some(root),
+            native_session_id: None,
+            native_actor_id: None,
+            native_actor_type: None,
+        }
+        .validate()
+        .is_err());
+
+        let valid_affiliation = ActorAffiliationRevisionFact {
+            affiliation,
+            actor_run: child,
+            session,
+            dimension: ActorAffiliationDimension::Workflow,
+            target: workflow,
+            member: None,
+            native_target_id: Some("workflow-1".to_string()),
+            native_member_id: Some("child".to_string()),
+            state: ActorAffiliationState::Removed,
+            effective_at: None,
+        };
+        assert!(valid_affiliation.validate().is_ok());
+        assert_eq!(
+            Fact::ActorAffiliationRevision(valid_affiliation.clone()).kind(),
+            "runtime.actor-affiliation"
+        );
+        assert!(ActorAffiliationRevisionFact {
+            native_member_id: Some(String::new()),
+            ..valid_affiliation
+        }
+        .validate()
+        .is_err());
     }
 
     #[test]

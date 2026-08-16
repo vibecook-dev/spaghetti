@@ -9,8 +9,9 @@ The oracle deliberately differs from `runtime_observation_census` in one
 important respect: every token bucket is independently qualified. An omitted
 bucket becomes `unknown/missing`; it never becomes numeric zero. The primary
 Claude response key is a non-empty `message.id`. When that field is absent,
-the oracle reproduces decoder-contract-17's object/generation-scoped framed
-cursor fallback. `requestId` remains metadata.
+the oracle reproduces the object/generation-scoped framed cursor fallback
+introduced in decoder contract 17 and retained unchanged by contract 18.
+`requestId` remains metadata.
 
 Run the fixture contract and checked-in report comparison with:
 

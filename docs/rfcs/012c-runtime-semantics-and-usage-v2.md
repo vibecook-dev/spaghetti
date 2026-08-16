@@ -287,12 +287,11 @@ ActorAffiliationRevision {
   actor_run_key
   affiliation_key
   revision_key
-  team_key?
-  native_team_id?
-  team_name?
+  dimension: Team | Workflow
+  target_key
   member_key?
-  workflow_key?
-  native_workflow_id?
+  native_target_id?
+  native_member_id?
   state: Present | Removed | Unknown
   effective_at?
   provenance
@@ -305,6 +304,11 @@ actor's messages, tasks, or usage into a new contribution identity.
 `affiliation_key` identifies one actor/relation-dimension/target relation; a
 team revision cannot overwrite a workflow relation or vice versa. The context
 below is their deterministic union.
+
+The dimension/target representation is the normalized fact shape. It avoids a
+union with several competing optional identifiers while leaving the derived
+consumer context typed by dimension. `Removed` and `Unknown` remain current
+explicit revisions but do not qualify as present grouping edges.
 
 Reducers also expose a delivery/query context derived from accepted revisions:
 

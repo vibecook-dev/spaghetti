@@ -21,10 +21,12 @@ pub use contract::{
     SourceSnapshot, StreamAuthority, StreamId, StreamSpec, SupportLevel,
 };
 pub use facts::{
-    ArtifactCapture, ArtifactContentFact, ArtifactMetadataEntry, ArtifactMetadataSnapshotFact,
-    ArtifactObservationKind, ContentBlock, DelegationFact, DelegationKind, DelegationMetadataFact,
-    DelegationSpawnFact, EntityKey, EvidenceKind, EvidenceStrength, Fact, FactBatch, FactEnvelope,
-    FactId, FactProvenance, FactSemanticContext, FactSemanticRevision, HookEventSummary,
+    ActorAffiliationDimension, ActorAffiliationRevisionFact, ActorAffiliationState,
+    ActorRunRevisionFact, ActorRunRole, ArtifactCapture, ArtifactContentFact,
+    ArtifactMetadataEntry, ArtifactMetadataSnapshotFact, ArtifactObservationKind, ContentBlock,
+    DelegationFact, DelegationKind, DelegationMetadataFact, DelegationSpawnFact, EntityKey,
+    EvidenceKind, EvidenceStrength, Fact, FactBatch, FactEnvelope, FactId, FactProvenance,
+    FactSemanticContext, FactSemanticRevision, HookEventSummary,
     InterpretationSettingsDocumentStatus, InterpretationSettingsFact, InterpretationSettingsLayer,
     InterpretationSettingsSnapshot, MessageFact, MessageRole, PersistedToolResultFact,
     PlanSnapshotFact, PresenceFact, ProjectMemoryDocumentFact, QualifiedTimestamp,

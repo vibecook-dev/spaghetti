@@ -21,6 +21,7 @@ mod projection;
 mod query_identity;
 mod query_pool;
 mod runtime_query;
+mod runtime_semantic_projection;
 mod search_query;
 mod session_index_projection;
 mod settings_projection;

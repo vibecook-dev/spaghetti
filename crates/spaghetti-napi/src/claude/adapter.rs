@@ -11,9 +11,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::adapter::{
-    AdapterDiagnostic, AdapterError, AdapterErrorClass, AdapterId, AdapterManifest,
-    AdapterObjectContext, AdapterSupportBinding, AgentAdapter, ArtifactCapture,
-    ArtifactContentFact, ArtifactMetadataEntry, ArtifactMetadataSnapshotFact,
+    ActorAffiliationDimension, ActorAffiliationRevisionFact, ActorAffiliationState,
+    ActorRunRevisionFact, ActorRunRole, AdapterDiagnostic, AdapterError, AdapterErrorClass,
+    AdapterId, AdapterManifest, AdapterObjectContext, AdapterSupportBinding, AgentAdapter,
+    ArtifactCapture, ArtifactContentFact, ArtifactMetadataEntry, ArtifactMetadataSnapshotFact,
     ArtifactObservationKind, Availability, CapabilityDeclaration, CapabilityGranularity,
     CapabilityId, CapabilitySupport, ConsistencyPolicy, ContentBlock, DecodeContext,
     DecodeDisposition, DecoderId, DelegationFact, DelegationKind, DelegationMetadataFact,
@@ -145,11 +146,11 @@ impl ClaudeCodeAdapter {
                 id: AdapterId::new(ADAPTER_ID).expect("static Claude adapter id is valid"),
                 display_name: "Claude Code".to_string(),
                 adapter_version: env!("CARGO_PKG_VERSION").to_string(),
-                contract_version: 17,
+                contract_version: 18,
                 support_binding: Some(
                     AdapterSupportBinding::new(
                         env!("CARGO_PKG_VERSION"),
-                        17,
+                        18,
                         "sha256:34362f099f219181dfff3e50faef974882b656c5955e03d9cf1f4e8af7b986d3",
                         "sha256:17a0f1aa7490b5c03a525f7606a7a02ee6d1919cc8b9b776597843f1edbf1ebe",
                         "sha256:689c86b9770544f826da37e72d1c4a1a37153fad4091372b954bba90ca2d5f7c",
@@ -2753,6 +2754,19 @@ fn decode_workflow_journal(
         "{}\0{}\0{}",
         context.native_session_id, context.native_workflow_id, native_agent_id
     );
+    let canonical_session =
+        output.canonical_entity_key("session", context.native_session_id.as_bytes())?;
+    let canonical_actor_run =
+        output.canonical_entity_key("run", child_run_native_key.as_bytes())?;
+    let canonical_workflow =
+        output.canonical_entity_key("workflow", &workflow_native_key(context))?;
+    let canonical_member = output.canonical_entity_key("workflow_member", &member_native_key)?;
+    let mut affiliation_native_key = Vec::new();
+    push_key_component(&mut affiliation_native_key, b"workflow");
+    push_key_component(&mut affiliation_native_key, child_run_native_key.as_bytes());
+    push_key_component(&mut affiliation_native_key, &workflow_native_key(context));
+    let canonical_affiliation =
+        output.canonical_entity_key("actor_affiliation", &affiliation_native_key)?;
     output.push(
         record,
         Fact::WorkflowMemberEvent(WorkflowMemberEventFact {
@@ -2782,10 +2796,26 @@ fn decode_workflow_journal(
                 context.project_slug.as_bytes(),
             )?,
             native_workflow_id: context.native_workflow_id.clone(),
-            native_agent_id,
+            native_agent_id: native_agent_id.clone(),
             native_event_key,
             kind,
             result,
+        }),
+    )?;
+    output.push_native(
+        record,
+        &affiliation_native_key,
+        Fact::ActorAffiliationRevision(ActorAffiliationRevisionFact {
+            affiliation: canonical_affiliation,
+            actor_run: canonical_actor_run,
+            session: canonical_session,
+            dimension: ActorAffiliationDimension::Workflow,
+            target: canonical_workflow,
+            member: Some(canonical_member),
+            native_target_id: Some(context.native_workflow_id.clone()),
+            native_member_id: Some(native_agent_id),
+            state: ActorAffiliationState::Present,
+            effective_at: None,
         }),
     )?;
     Ok(DecodeDisposition::Applied)
@@ -3652,6 +3682,31 @@ fn decode_transcript_record(
                 session: session.clone(),
                 native_run_id: run_native_key.clone(),
                 parent_run,
+            }),
+        )?;
+        let actor_run = output.canonical_entity_key("run", run_native_key.as_bytes())?;
+        let canonical_session =
+            output.canonical_entity_key("session", context.session_id.as_bytes())?;
+        let parent_actor_run = context
+            .agent_id
+            .as_ref()
+            .map(|_| output.canonical_entity_key("run", context.session_id.as_bytes()))
+            .transpose()?;
+        output.push_native(
+            record,
+            run_native_key.as_bytes(),
+            Fact::ActorRunRevision(ActorRunRevisionFact {
+                actor_run,
+                session: canonical_session,
+                role: if context.agent_id.is_some() {
+                    ActorRunRole::Child
+                } else {
+                    ActorRunRole::Root
+                },
+                parent_actor_run,
+                native_session_id: Some(context.session_id.clone()),
+                native_actor_id: context.agent_id.clone(),
+                native_actor_type: None,
             }),
         )?;
         state.run_declared = true;
@@ -4631,7 +4686,12 @@ mod tests {
         batch.facts().iter().map(|FactEnvelope { value, .. }| value)
     }
 
-    fn semantic_transcript_batch(max_facts: usize, max_diagnostics: usize) -> FactBatch {
+    fn semantic_batch(
+        stream: &str,
+        object_key: &str,
+        max_facts: usize,
+        max_diagnostics: usize,
+    ) -> FactBatch {
         FactBatch::new_with_semantic_context(
             max_facts,
             max_diagnostics,
@@ -4639,13 +4699,22 @@ mod tests {
                 &AdapterId::new(ADAPTER_ID).unwrap(),
                 1,
                 b"fixture-root",
-                PARENT_STREAM.as_bytes(),
-                format!("project/{SESSION}.jsonl").as_bytes(),
+                stream.as_bytes(),
+                object_key.as_bytes(),
                 1,
             )
             .unwrap(),
         )
         .unwrap()
+    }
+
+    fn semantic_transcript_batch(max_facts: usize, max_diagnostics: usize) -> FactBatch {
+        semantic_batch(
+            PARENT_STREAM,
+            &format!("project/{SESSION}.jsonl"),
+            max_facts,
+            max_diagnostics,
+        )
     }
 
     #[test]
@@ -4678,7 +4747,7 @@ mod tests {
             std::fs::canonicalize(root.path()).unwrap().join("sessions")
         );
         assert_eq!(streams.len(), 16);
-        assert_eq!(adapter.manifest().contract_version, 17);
+        assert_eq!(adapter.manifest().contract_version, 18);
         assert!(adapter
             .manifest()
             .source_schema_versions
@@ -6168,7 +6237,7 @@ mod tests {
               }
             }"#,
         );
-        let mut batch = FactBatch::new(16, 8).unwrap();
+        let mut batch = semantic_transcript_batch(16, 8);
         assert_eq!(
             adapter
                 .decode(
@@ -6241,7 +6310,7 @@ mod tests {
               }
             }"#,
         );
-        let mut delta_batch = FactBatch::new(16, 8).unwrap();
+        let mut delta_batch = semantic_transcript_batch(16, 8);
         adapter
             .decode(
                 DecodeContext {
@@ -6302,7 +6371,7 @@ mod tests {
               }
             }"#,
         );
-        let mut batch = FactBatch::new(16, 8).unwrap();
+        let mut batch = semantic_transcript_batch(16, 8);
         assert_eq!(
             adapter
                 .decode(
@@ -6338,7 +6407,7 @@ mod tests {
               }
             }"#,
         );
-        let mut missing_batch = FactBatch::new(16, 8).unwrap();
+        let mut missing_batch = semantic_transcript_batch(16, 8);
         adapter
             .decode(
                 DecodeContext {
@@ -6609,7 +6678,8 @@ mod tests {
             .unwrap();
         let decoder = DecoderId::new(WORKFLOW_JOURNAL_DECODER).unwrap();
         let started_record = record(br#"{"type":"started","agentId":"a1","key":"step-1"}"#);
-        let mut started_batch = FactBatch::new(2, 2).unwrap();
+        let journal_object = format!("project/{SESSION}/subagents/workflows/wf_main/journal.jsonl");
+        let mut started_batch = semantic_batch(WORKFLOW_JOURNAL_STREAM, &journal_object, 3, 2);
         adapter
             .decode(
                 DecodeContext {
@@ -6643,10 +6713,26 @@ mod tests {
             )
             .unwrap()
         );
+        let affiliation = fact_values(&started_batch)
+            .find_map(|fact| match fact {
+                Fact::ActorAffiliationRevision(affiliation) => Some(affiliation),
+                _ => None,
+            })
+            .expect("workflow journal should emit canonical affiliation evidence");
+        assert_eq!(affiliation.dimension, ActorAffiliationDimension::Workflow);
+        assert_eq!(affiliation.state, ActorAffiliationState::Present);
+        assert_eq!(
+            affiliation.actor_run,
+            started_batch
+                .canonical_entity_key("run", child_context.run_native_key().as_bytes())
+                .unwrap()
+        );
+        assert_eq!(affiliation.native_target_id.as_deref(), Some("wf_main"));
+        assert_eq!(affiliation.native_member_id.as_deref(), Some("a1"));
 
         let result_record =
             record(br#"{"type":"result","agentId":"a1","key":"step-1","result":{"answer":42}}"#);
-        let mut result_batch = FactBatch::new(2, 2).unwrap();
+        let mut result_batch = semantic_batch(WORKFLOW_JOURNAL_STREAM, &journal_object, 3, 2);
         adapter
             .decode(
                 DecodeContext {
@@ -7035,7 +7121,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(disposition, DecodeDisposition::Applied);
-        assert_eq!(batch.facts().len(), 6);
+        assert_eq!(batch.facts().len(), 7);
         let message = fact_values(&batch)
             .find_map(|fact| match fact {
                 Fact::Message(message) => Some(message),
@@ -7084,6 +7170,15 @@ mod tests {
             Some("claude-sonnet")
         );
         assert!(semantic_revision.is_some());
+        let actor = fact_values(&batch)
+            .find_map(|fact| match fact {
+                Fact::ActorRunRevision(actor) => Some(actor),
+                _ => None,
+            })
+            .expect("first transcript record should declare its canonical actor");
+        assert_eq!(actor.role, ActorRunRole::Root);
+        assert_eq!(actor.actor_run, usage_v2.actor_run);
+        assert_eq!(actor.session, usage_v2.session);
     }
 
     #[test]
@@ -7187,7 +7282,7 @@ mod tests {
             )
             .as_bytes(),
         );
-        let mut first = FactBatch::new(8, 4).unwrap();
+        let mut first = semantic_transcript_batch(8, 4);
         adapter
             .decode(
                 DecodeContext {
@@ -7201,6 +7296,7 @@ mod tests {
             .unwrap();
         assert!(fact_values(&first).any(|fact| matches!(fact, Fact::Session(_))));
         assert!(fact_values(&first).any(|fact| matches!(fact, Fact::Run(_))));
+        assert!(fact_values(&first).any(|fact| matches!(fact, Fact::ActorRunRevision(_))));
         let first_state = first.next_decoder_state().unwrap().to_vec();
         assert_eq!(first_state.len(), TRANSCRIPT_DECODER_STATE_BYTES);
 
@@ -7210,7 +7306,7 @@ mod tests {
             )
             .as_bytes(),
         );
-        let mut prompt = FactBatch::new(8, 4).unwrap();
+        let mut prompt = semantic_transcript_batch(8, 4);
         adapter
             .decode(
                 DecodeContext {
@@ -7238,7 +7334,7 @@ mod tests {
             )
             .as_bytes(),
         );
-        let mut later = FactBatch::new(8, 4).unwrap();
+        let mut later = semantic_transcript_batch(8, 4);
         adapter
             .decode(
                 DecodeContext {
@@ -7251,7 +7347,10 @@ mod tests {
             )
             .unwrap();
         assert!(fact_values(&later).all(|fact| {
-            !matches!(fact, Fact::Session(_) | Fact::Run(_) | Fact::Delegation(_))
+            !matches!(
+                fact,
+                Fact::Session(_) | Fact::Run(_) | Fact::ActorRunRevision(_) | Fact::Delegation(_)
+            )
         }));
         assert!(fact_values(&later).any(|fact| matches!(fact, Fact::Message(_))));
         assert!(fact_values(&later).any(|fact| matches!(fact, Fact::RunEvidence(_))));
@@ -7273,7 +7372,7 @@ mod tests {
         replay_record.object_id = first_record.object_id + 100;
         replay_record.generation = first_record.generation + 3;
         let decode_message = |record: &SourceRecord| {
-            let mut batch = FactBatch::new(4, 2).unwrap();
+            let mut batch = semantic_transcript_batch(6, 2);
             adapter
                 .decode(
                     DecodeContext {
@@ -7316,7 +7415,7 @@ mod tests {
             )
             .as_bytes(),
         );
-        let mut batch = FactBatch::new(8, 4).unwrap();
+        let mut batch = semantic_transcript_batch(9, 4);
         adapter
             .decode(
                 DecodeContext {
@@ -7415,14 +7514,9 @@ mod tests {
     fn subagent_context_preserves_parent_and_workflow_identity() {
         let root = TempDir::new().unwrap();
         let adapter = ClaudeCodeAdapter::new();
+        let relative = format!("project/{SESSION}/subagents/workflows/w1/agents/agent-a1.jsonl");
         let context = adapter
-            .bootstrap_object(
-                &instance(root.path()),
-                &object(
-                    SUBAGENT_STREAM,
-                    &format!("project/{SESSION}/subagents/workflows/w1/agents/agent-a1.jsonl"),
-                ),
-            )
+            .bootstrap_object(&instance(root.path()), &object(SUBAGENT_STREAM, &relative))
             .unwrap();
         let decoded = ClaudeTranscriptContext::decode(&context).unwrap();
         assert_eq!(decoded.session_id, SESSION);
@@ -7435,7 +7529,7 @@ mod tests {
             )
             .as_bytes(),
         );
-        let mut batch = FactBatch::new(8, 4).unwrap();
+        let mut batch = semantic_batch(SUBAGENT_STREAM, &relative, 9, 4);
         adapter
             .decode(
                 DecodeContext {
@@ -7458,6 +7552,15 @@ mod tests {
         assert_eq!(delegation.native_child_id.as_deref(), Some("a1"));
         assert_eq!(delegation.cwd.as_deref(), Some("/repo/.worktrees/a1"));
         assert!(delegation.parent_run.is_some());
+        let actor = fact_values(&batch)
+            .find_map(|fact| match fact {
+                Fact::ActorRunRevision(actor) => Some(actor),
+                _ => None,
+            })
+            .expect("child transcript should declare a canonical actor");
+        assert_eq!(actor.role, ActorRunRole::Child);
+        assert!(actor.parent_actor_run.is_some());
+        assert_eq!(actor.native_actor_id.as_deref(), Some("a1"));
     }
 
     #[test]

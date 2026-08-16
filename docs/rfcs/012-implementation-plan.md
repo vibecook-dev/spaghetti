@@ -572,13 +572,14 @@ Current landing status (2026-08-16):
   native-ID versus source-record fallback, four independently qualified
   buckets, optional qualified model/effort evidence, and mandatory RFC 012A
   semantic revision identity;
-- advanced the Claude decoder contract to 17 and dual-emitted the canonical
-  response fact beside the unchanged legacy row-delta fact. Non-empty
+- introduced usage-v2 in Claude decoder contract 17, retained that response
+  identity unchanged in contract 18, and dual-emitted the canonical response
+  fact beside the unchanged legacy row-delta fact. Non-empty
   `message.id` is primary, `requestId` is correlation metadata only, exact zero
   survives, absent buckets remain `Unknown/Missing`, and a malformed usage
   object emits a bounded diagnostic without dropping the message or replacing
   the last valid shadow contribution;
-- added schema v46's private shadow reducer: qualification metadata is interned,
+- added schema v46's private usage shadow reducer: qualification metadata is interned,
   one latest row is stored per canonical response fact, source order rejects a
   stale overwrite, downward revisions replace rather than subtract, and
   generation replacement retracts the old response namespace in the source
@@ -593,10 +594,18 @@ Current landing status (2026-08-16):
   session, and aggregate scope, including qualified unknown coverage, exact
   zero, framed fallback identity, malformed non-erasure, request-ID reuse, and
   generation cleanup; and
+- added schema v47's topology-neutral `runtime.actor-run` and
+  `runtime.actor-affiliation` projections. Root/child transcripts now emit one
+  canonical actor declaration, workflow journals emit replaceable workflow
+  affiliation evidence using the identical child key, and the common reducer
+  handles `Present`, `Removed`, `Unknown`, late arrival, orthogonal team plus
+  workflow dimensions, and generation retraction without copying or reburning
+  a response; and
 - kept the candidate capability `unsupported`: private native corpus-scale
-  parity, exact-repeat public-event suppression, affiliation regrouping,
-  readiness/replay orchestration, public query and migration switch, portable
-  public serialization, and rollback window are not yet complete.
+  parity, fixture-proven native team-to-actor correlation, exact-repeat
+  public-event suppression, readiness/replay orchestration, public query and
+  migration switch, portable public serialization, and rollback window are not
+  yet complete.
 
 ### C3. Durable migration
 
