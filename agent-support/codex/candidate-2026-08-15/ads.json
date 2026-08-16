@@ -1,0 +1,66 @@
+{
+  "schema_version": 1,
+  "ads_id": "codex-ads-2026-08-15-candidate",
+  "adapter_id": "codex",
+  "status": "candidate",
+  "native_artifact": {
+    "family": "codex",
+    "target": "local rollout shape observed 2026-08-15; distributable pin pending",
+    "identification": { "state": "recognized_unverified", "version_markers": ["session-meta.cli-version", "rollout.record-type"], "artifact_digest": null },
+    "platforms": ["darwin"],
+    "relevant_flags": [],
+    "claim_refs": ["codex-artifact-target-open"]
+  },
+  "source_instance": {
+    "identity_contract_version": 1,
+    "derivation": "configured_canonical_root",
+    "canonical_roots": [
+      { "root_id": "home", "relative_to": "configured_root", "relative_path": "", "required": true },
+      { "root_id": "sessions", "relative_to": "configured_root", "relative_path": "sessions", "required": false }
+    ],
+    "move_behavior": "new_instance",
+    "clone_behavior": "new_instance",
+    "replacement_behavior": "same_instance",
+    "cross_device_behavior": "new_instance",
+    "access_policy": "configured_roots_only",
+    "claim_refs": ["codex-source-observed", "codex-identity-open"]
+  },
+  "object_families": [
+    {
+      "family_id": "rollout-transcript",
+      "source_schema_versions": ["codex-rollout-jsonl-v1"],
+      "stream_ids": ["rollout-sessions"],
+      "native_shapes": ["sessions/**/rollout-*.jsonl"],
+      "framing": "json_lines",
+      "lifecycle": ["append", "partial_write", "truncate", "rotate", "delete", "recreate"],
+      "identity_inputs": ["source instance", "rollout path", "session_meta native ID", "record generation and cursor"],
+      "disposition": "mapped",
+      "timestamp_quality": "mixed",
+      "missing_vs_zero": "distinct",
+      "unknown_field_policy": "retain_bounded",
+      "claim_refs": ["codex-source-observed", "codex-semantic-fixtures-open"]
+    }
+  ],
+  "entity_identity_rules": [
+    { "entity_kind": "project", "primary_inputs": ["source instance", "session_meta cwd"], "fallback_inputs": ["rollout path"], "reuse_behavior": "unverified", "supersession_behavior": "unverified", "claim_refs": ["codex-identity-open"] },
+    { "entity_kind": "session", "primary_inputs": ["source instance", "session_meta native ID"], "fallback_inputs": ["rollout object identity"], "reuse_behavior": "never_reuse", "supersession_behavior": "generation_scoped", "claim_refs": ["codex-identity-open"] },
+    { "entity_kind": "actor", "primary_inputs": ["session", "root actor role"], "fallback_inputs": [], "reuse_behavior": "never_reuse", "supersession_behavior": "generation_scoped", "claim_refs": ["codex-semantic-fixtures-open"] }
+  ],
+  "association_rules": [
+    { "association_id": "session-project", "from_kind": "session", "to_kind": "project", "precedence": ["session_meta cwd", "rollout locator"], "conflict_behavior": "retain_conflict", "claim_refs": ["codex-identity-open"] }
+  ],
+  "join_rules": [],
+  "scope_program_manifest": "agent-support/codex/candidate-2026-08-15/scope-programs.json",
+  "size_limits": [
+    { "limit_id": "jsonl-record", "applies_to": "rollout records", "max_bytes": 4194304, "claim_refs": ["codex-source-observed"] },
+    { "limit_id": "jsonl-batch", "applies_to": "rollout batches", "max_bytes": 8388608, "claim_refs": ["codex-source-observed"] }
+  ],
+  "privacy": {
+    "raw_capture_policy": "private_never_commit",
+    "committed_fixture_policy": "deterministically_sanitized_or_synthetic",
+    "retention": "hash_only",
+    "prohibited_categories": ["account-identifiers", "credentials", "native-paths", "prompts", "secrets", "titles"],
+    "claim_refs": ["codex-privacy-policy"]
+  },
+  "claim_refs": ["codex-artifact-target-open", "codex-source-observed", "codex-identity-open", "codex-semantic-fixtures-open", "codex-scope-open", "codex-privacy-policy"]
+}

@@ -1,0 +1,187 @@
+{
+  "canonical_source_instance_key": "v1:mMnURqrMaAbj_UMIojFvr5vGVIFi3JCcc_UTjHMcf2E",
+  "coverage": {
+    "baseline": {
+      "completeness": "complete",
+      "coverage_domain": {
+        "family": "runtime.usage-v2",
+        "kind": "fact_family",
+        "version": 1
+      },
+      "coverage_set_contract_version": 1,
+      "explicit_absence_or_deletion": [],
+      "explicit_errors": [],
+      "membership_revision": "v1:Up3RqSE5g49YtzL63uFtRuykhY0GLdTm-Z_JdpHkezs",
+      "points": [
+        {
+          "adapter_id": "claude-code",
+          "coverage_contract_version": 1,
+          "coverage_domain": {
+            "family": "runtime.usage-v2",
+            "kind": "fact_family",
+            "version": 1
+          },
+          "generation": 1,
+          "object_key": "v1:n8jLglcQCGY5Ya2FjultjZI_E5ty4dJm-RqYv74Bj4U",
+          "position": {
+            "kind": "append_cursor",
+            "monotonic_order": 10,
+            "opaque": "v1:rkfmaEDgxpeMLNEY1sx8ruAs-4WmqzvlcnY-pbb1els"
+          },
+          "provenance": {},
+          "source_instance_key": "v1:mMnURqrMaAbj_UMIojFvr5vGVIFi3JCcc_UTjHMcf2E",
+          "status": {
+            "kind": "complete_through"
+          },
+          "stream_key": "v1:Jrq5h2YFsTIslxnR2xsAneD7jZASIzw4Klwp9dn1pUE"
+        }
+      ],
+      "scope": {
+        "adapter_id": "claude-code",
+        "source_instance_key": "v1:mMnURqrMaAbj_UMIojFvr5vGVIFi3JCcc_UTjHMcf2E",
+        "source_or_scope_declaration_digest": "v1:ZHiflaOj_S8EO-Hgvtx-eEZfiUbjG2LEKukpktBSRSM",
+        "support_release_id": "claude-code@fixture-v1"
+      }
+    },
+    "dominant": {
+      "completeness": "complete",
+      "coverage_domain": {
+        "family": "runtime.usage-v2",
+        "kind": "fact_family",
+        "version": 1
+      },
+      "coverage_set_contract_version": 1,
+      "explicit_absence_or_deletion": [],
+      "explicit_errors": [],
+      "membership_revision": "v1:Up3RqSE5g49YtzL63uFtRuykhY0GLdTm-Z_JdpHkezs",
+      "points": [
+        {
+          "adapter_id": "claude-code",
+          "coverage_contract_version": 1,
+          "coverage_domain": {
+            "family": "runtime.usage-v2",
+            "kind": "fact_family",
+            "version": 1
+          },
+          "generation": 1,
+          "object_key": "v1:n8jLglcQCGY5Ya2FjultjZI_E5ty4dJm-RqYv74Bj4U",
+          "position": {
+            "kind": "append_cursor",
+            "monotonic_order": 20,
+            "opaque": "v1:ORKKxmFLokLup6qkdtODLRTlGLdbdMbVrHR5Tr6cLg8"
+          },
+          "provenance": {},
+          "source_instance_key": "v1:mMnURqrMaAbj_UMIojFvr5vGVIFi3JCcc_UTjHMcf2E",
+          "status": {
+            "kind": "complete_through"
+          },
+          "stream_key": "v1:Jrq5h2YFsTIslxnR2xsAneD7jZASIzw4Klwp9dn1pUE"
+        }
+      ],
+      "scope": {
+        "adapter_id": "claude-code",
+        "source_instance_key": "v1:mMnURqrMaAbj_UMIojFvr5vGVIFi3JCcc_UTjHMcf2E",
+        "source_or_scope_declaration_digest": "v1:ZHiflaOj_S8EO-Hgvtx-eEZfiUbjG2LEKukpktBSRSM",
+        "support_release_id": "claude-code@fixture-v1"
+      }
+    },
+    "expected": {
+      "baseline_vs_dominant": "behind",
+      "dominant_vs_baseline": "dominates",
+      "reset_vs_baseline": "incomparable"
+    },
+    "reset": {
+      "completeness": "complete",
+      "coverage_domain": {
+        "family": "runtime.usage-v2",
+        "kind": "fact_family",
+        "version": 1
+      },
+      "coverage_set_contract_version": 1,
+      "explicit_absence_or_deletion": [],
+      "explicit_errors": [],
+      "membership_revision": "v1:Up3RqSE5g49YtzL63uFtRuykhY0GLdTm-Z_JdpHkezs",
+      "points": [
+        {
+          "adapter_id": "claude-code",
+          "coverage_contract_version": 1,
+          "coverage_domain": {
+            "family": "runtime.usage-v2",
+            "kind": "fact_family",
+            "version": 1
+          },
+          "generation": 2,
+          "object_key": "v1:n8jLglcQCGY5Ya2FjultjZI_E5ty4dJm-RqYv74Bj4U",
+          "position": {
+            "kind": "append_cursor",
+            "monotonic_order": 20,
+            "opaque": "v1:ORKKxmFLokLup6qkdtODLRTlGLdbdMbVrHR5Tr6cLg8"
+          },
+          "provenance": {},
+          "source_instance_key": "v1:mMnURqrMaAbj_UMIojFvr5vGVIFi3JCcc_UTjHMcf2E",
+          "status": {
+            "kind": "complete_through"
+          },
+          "stream_key": "v1:Jrq5h2YFsTIslxnR2xsAneD7jZASIzw4Klwp9dn1pUE"
+        }
+      ],
+      "scope": {
+        "adapter_id": "claude-code",
+        "source_instance_key": "v1:mMnURqrMaAbj_UMIojFvr5vGVIFi3JCcc_UTjHMcf2E",
+        "source_or_scope_declaration_digest": "v1:ZHiflaOj_S8EO-Hgvtx-eEZfiUbjG2LEKukpktBSRSM",
+        "support_release_id": "claude-code@fixture-v1"
+      }
+    }
+  },
+  "external_entity_ref": {
+    "entity_key": "v1:Cug1FooplPowQd4nwsvTKmVYYkGyJ7wg_lt29jDwLmg",
+    "external_entity_reference_version": 1
+  },
+  "fixture_contract_version": 1,
+  "native_identity_claim": {
+    "entity_ref": {
+      "entity_key": "v1:Cug1FooplPowQd4nwsvTKmVYYkGyJ7wg_lt29jDwLmg",
+      "external_entity_reference_version": 1
+    },
+    "identity": {
+      "authority": "transcript",
+      "completeness": "complete",
+      "provenance": [
+        {
+          "fact_revision_id": "v1:ao2_0XRSfvfaaZN0loQYOQVOyQX244IoUSF93cOKI0w",
+          "semantic_reference_contract_version": 1
+        }
+      ],
+      "quality": "native_claimed",
+      "value": {
+        "native_id": "session-1",
+        "native_namespace": "claude-code/session"
+      }
+    }
+  },
+  "qualified_known_zero": {
+    "authority": "native-response",
+    "completeness": "partial",
+    "effective_at": 1776211200000,
+    "provenance": [
+      {
+        "fact_revision_id": "v1:ao2_0XRSfvfaaZN0loQYOQVOyQX244IoUSF93cOKI0w",
+        "semantic_reference_contract_version": 1
+      }
+    ],
+    "quality": "exact",
+    "value": 0
+  },
+  "qualified_unknown": {
+    "authority": "native-response",
+    "completeness": "unknown",
+    "provenance": [],
+    "quality": "unknown",
+    "unknown_reason": "withheld",
+    "value": null
+  },
+  "semantic_revision_ref": {
+    "fact_revision_id": "v1:ao2_0XRSfvfaaZN0loQYOQVOyQX244IoUSF93cOKI0w",
+    "semantic_reference_contract_version": 1
+  }
+}

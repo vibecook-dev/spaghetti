@@ -1,0 +1,57 @@
+{
+  "schema_version": 1,
+  "manifest_id": "grok-evidence-2026-08-15-candidate",
+  "adapter_id": "grok",
+  "ads_id": "grok-ads-2026-08-15-candidate",
+  "sanitizer": { "version": 1, "prohibited_scan": "pass", "raw_capture_committed": false },
+  "claims": [
+    {
+      "claim_id": "grok-artifact-target-open",
+      "statement": "The session-sidecar family is recognizable, but the current Grok artifact and version range have not been pinned for support promotion.",
+      "state": "open",
+      "sources": [
+        { "kind": "code_reference", "path": "crates/spaghetti-napi/src/grok/adapter.rs", "sha256": null, "locator": "GrokAdapter::new manifest" }
+      ]
+    },
+    {
+      "claim_id": "grok-source-observed",
+      "statement": "The Rust adapter has bounded membership, history, summary, event, signal, and known-ignored update stream implementations.",
+      "state": "observed",
+      "sources": [
+        { "kind": "code_reference", "path": "crates/spaghetti-napi/src/grok/adapter.rs", "sha256": null, "locator": "AgentAdapter::discover and AgentAdapter::streams" }
+      ]
+    },
+    {
+      "claim_id": "grok-identity-open",
+      "statement": "Summary context and same-directory sidecar joins are implemented, but move, clone, reuse, missing-sidecar, and precedence claims lack independent fixtures.",
+      "state": "degraded",
+      "sources": [
+        { "kind": "code_reference", "path": "crates/spaghetti-napi/src/grok/adapter.rs", "sha256": null, "locator": "bootstrap_grok_object_context and entity_keys" }
+      ]
+    },
+    {
+      "claim_id": "grok-semantic-fixtures-open",
+      "statement": "Independent sanitized fixtures for history, clocks, usage signals, events, ignored updates, resets, and unknown records remain to be authored.",
+      "state": "open",
+      "sources": [
+        { "kind": "design_record", "path": "docs/rfcs/012a-agent-adaptation-and-engine-boundaries.md", "sha256": null, "locator": "Standard adaptation workflow" }
+      ]
+    },
+    {
+      "claim_id": "grok-scope-open",
+      "statement": "Known history plus bounded sibling sidecars are declared but not yet connected to the common observer or lifecycle conformance.",
+      "state": "open",
+      "sources": [
+        { "kind": "design_record", "path": "docs/rfcs/012d-session-scoped-observation.md", "sha256": null, "locator": "Common scoped observation contract" }
+      ]
+    },
+    {
+      "claim_id": "grok-privacy-policy",
+      "statement": "Raw captures are private and any future committed Grok fixtures must be deterministic synthetic or sanitized evidence.",
+      "state": "observed",
+      "sources": [
+        { "kind": "design_record", "path": "docs/rfcs/012a-agent-adaptation-and-engine-boundaries.md", "sha256": null, "locator": "Security and privacy" }
+      ]
+    }
+  ]
+}

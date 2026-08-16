@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "declaration_id": "codex-sources-2026-08-15-candidate",
+  "adapter_id": "codex",
+  "ads_id": "codex-ads-2026-08-15-candidate",
+  "status": "candidate",
+  "streams": [
+    {
+      "stream_id": "rollout-sessions",
+      "family_id": "rollout-transcript",
+      "root_id": "sessions",
+      "relative_patterns": ["**/rollout-*.jsonl"],
+      "primitive": "AppendDelimited",
+      "topologies": ["durable"],
+      "implementation_state": "existing",
+      "decoder_id": "codex-rollout-record",
+      "authority": "canonical",
+      "bounds": { "max_record_bytes": 4194304, "max_batch_bytes": 8388608, "max_records_per_batch": 1024, "max_entries": 250000, "max_depth": 64 },
+      "lifecycle": ["append", "partial_write", "truncate", "identity_change", "delete", "recreate"],
+      "overlap_strategy": "full_only",
+      "safe_decoder_state_boundary": "object_generation_cursor",
+      "disposition_ownership": ["native-family:rollout-transcript"],
+      "claim_refs": ["codex-source-observed", "codex-semantic-fixtures-open"]
+    }
+  ],
+  "claim_refs": ["codex-source-observed", "codex-semantic-fixtures-open"]
+}

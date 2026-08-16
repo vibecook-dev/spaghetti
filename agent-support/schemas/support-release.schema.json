@@ -1,0 +1,188 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://spaghetti.dev/schemas/rfc012a/support-release-v1.json",
+  "title": "RFC 012A support-release ledger entry",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "support_release_id",
+    "adapter_id",
+    "status",
+    "artifact_compatibility",
+    "references",
+    "versions",
+    "capabilities",
+    "stream_contracts",
+    "reports",
+    "sanitizer_review",
+    "lifecycle",
+    "known_limitations",
+    "drift_signatures",
+    "promotion_blockers"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "support_release_id": { "$ref": "#/$defs/id" },
+    "adapter_id": { "$ref": "#/$defs/id" },
+    "status": { "enum": ["candidate", "promoted", "retired"] },
+    "artifact_compatibility": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["family", "platforms", "exact_versions", "ranges", "required_markers", "forward_catalog_only"],
+      "properties": {
+        "family": { "$ref": "#/$defs/id" },
+        "platforms": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/id" }, "uniqueItems": true },
+        "exact_versions": { "type": "array", "items": { "type": "string", "minLength": 1 }, "uniqueItems": true },
+        "ranges": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["minimum", "minimum_inclusive", "maximum", "maximum_inclusive"],
+            "properties": {
+              "minimum": { "type": "string", "minLength": 1 },
+              "minimum_inclusive": { "type": "boolean" },
+              "maximum": { "type": "string", "minLength": 1 },
+              "maximum_inclusive": { "type": "boolean" }
+            }
+          }
+        },
+        "required_markers": { "type": "array", "items": { "$ref": "#/$defs/id" }, "uniqueItems": true },
+        "forward_catalog_only": { "type": "boolean" }
+      }
+    },
+    "references": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ads", "source_declaration", "scope_program", "evidence", "conformance"],
+      "properties": {
+        "ads": { "$ref": "#/$defs/fileRef" },
+        "source_declaration": { "$ref": "#/$defs/fileRef" },
+        "scope_program": { "$ref": "#/$defs/fileRef" },
+        "evidence": { "$ref": "#/$defs/fileRef" },
+        "conformance": { "$ref": "#/$defs/fileRef" }
+      }
+    },
+    "versions": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "adapter_package",
+        "decoder_contract",
+        "decoder_state",
+        "source_record_identity",
+        "fact_identity",
+        "external_entity_reference",
+        "semantic_revision_reference",
+        "coverage",
+        "durable_contracts",
+        "observation_contracts"
+      ],
+      "properties": {
+        "adapter_package": { "type": "string", "minLength": 1 },
+        "decoder_contract": { "$ref": "#/$defs/positive" },
+        "decoder_state": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/positive" }, "uniqueItems": true },
+        "source_record_identity": { "$ref": "#/$defs/positive" },
+        "fact_identity": { "$ref": "#/$defs/positive" },
+        "external_entity_reference": { "$ref": "#/$defs/positive" },
+        "semantic_revision_reference": { "$ref": "#/$defs/positive" },
+        "coverage": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/positive" }, "uniqueItems": true },
+        "durable_contracts": { "type": "object", "additionalProperties": { "$ref": "#/$defs/positive" } },
+        "observation_contracts": { "type": "object", "additionalProperties": { "$ref": "#/$defs/positive" } }
+      }
+    },
+    "capabilities": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["capability_id", "topology", "level", "notes"],
+        "properties": {
+          "capability_id": { "$ref": "#/$defs/id" },
+          "topology": { "enum": ["catalog", "durable", "scoped"] },
+          "level": { "enum": ["supported", "degraded", "unsupported"] },
+          "notes": { "type": ["string", "null"] }
+        }
+      }
+    },
+    "stream_contracts": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["stream_id", "overlap_strategy", "safe_decoder_state_boundary"],
+        "properties": {
+          "stream_id": { "$ref": "#/$defs/id" },
+          "overlap_strategy": { "enum": ["commit_catalog_facts", "idempotent_overlap", "disjoint_catalog_family", "full_only"] },
+          "safe_decoder_state_boundary": { "enum": ["object_generation_cursor", "object_generation_revision", "stateless_record", "full_snapshot"] }
+        }
+      }
+    },
+    "reports": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["conformance_sha256", "performance_sha256"],
+      "properties": {
+        "conformance_sha256": { "$ref": "#/$defs/nullableDigest" },
+        "performance_sha256": { "$ref": "#/$defs/nullableDigest" }
+      }
+    },
+    "sanitizer_review": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "reviewed_at", "reviewer"],
+      "properties": {
+        "status": { "enum": ["pending", "approved", "rejected"] },
+        "reviewed_at": { "type": ["string", "null"] },
+        "reviewer": { "type": ["string", "null"] }
+      }
+    },
+    "lifecycle": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["candidate_at", "promoted_at", "retired_at", "supersedes", "superseded_by"],
+      "properties": {
+        "candidate_at": { "type": "string", "minLength": 1 },
+        "promoted_at": { "type": ["string", "null"] },
+        "retired_at": { "type": ["string", "null"] },
+        "supersedes": { "type": ["string", "null"] },
+        "superseded_by": { "type": ["string", "null"] }
+      }
+    },
+    "known_limitations": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+    "drift_signatures": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["signature_id", "family_id", "fields", "state", "claim_refs"],
+        "properties": {
+          "signature_id": { "$ref": "#/$defs/id" },
+          "family_id": { "$ref": "#/$defs/id" },
+          "fields": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 }, "uniqueItems": true },
+          "state": { "enum": ["open", "classified", "resolved", "incompatible"] },
+          "claim_refs": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/id" }, "uniqueItems": true }
+        }
+      }
+    },
+    "promotion_blockers": { "type": "array", "items": { "type": "string", "minLength": 1 } }
+  },
+  "$defs": {
+    "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$" },
+    "positive": { "type": "integer", "minimum": 1 },
+    "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "nullableDigest": { "oneOf": [{ "$ref": "#/$defs/digest" }, { "type": "null" }] },
+    "fileRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256"],
+      "properties": {
+        "path": { "type": "string", "minLength": 1 },
+        "sha256": { "$ref": "#/$defs/digest" }
+      }
+    }
+  }
+}

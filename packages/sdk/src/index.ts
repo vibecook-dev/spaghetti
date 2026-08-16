@@ -14,6 +14,10 @@ export * from './data/segment-types.js';
 export * from './data/summary-types.js';
 export * from './data/timeline-query.js';
 
+// RFC 012A topology-independent identity, qualification, and coverage wire
+// contracts. Rust derives references; portable consumers validate and compare.
+export * from './contracts/rfc012a.js';
+
 // Transport-neutral async client and the sole-owner production service.
 export * from './client/index.js';
 export * from './observation.js';

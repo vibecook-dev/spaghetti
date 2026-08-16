@@ -1,0 +1,140 @@
+{
+  "schema_version": 1,
+  "ads_id": "grok-ads-2026-08-15-candidate",
+  "adapter_id": "grok",
+  "status": "candidate",
+  "native_artifact": {
+    "family": "grok",
+    "target": "local session-directory shape observed 2026-08-15; distributable pin pending",
+    "identification": { "state": "recognized_unverified", "version_markers": ["summary.shape", "event.type", "signal.shape"], "artifact_digest": null },
+    "platforms": ["darwin"],
+    "relevant_flags": [],
+    "claim_refs": ["grok-artifact-target-open"]
+  },
+  "source_instance": {
+    "identity_contract_version": 1,
+    "derivation": "configured_canonical_root",
+    "canonical_roots": [
+      { "root_id": "home", "relative_to": "configured_root", "relative_path": "", "required": true },
+      { "root_id": "sessions", "relative_to": "configured_root", "relative_path": "sessions", "required": false }
+    ],
+    "move_behavior": "new_instance",
+    "clone_behavior": "new_instance",
+    "replacement_behavior": "same_instance",
+    "cross_device_behavior": "new_instance",
+    "access_policy": "configured_roots_only",
+    "claim_refs": ["grok-source-observed", "grok-identity-open"]
+  },
+  "object_families": [
+    {
+      "family_id": "session-membership",
+      "source_schema_versions": ["grok-native-object-membership-v1"],
+      "stream_ids": ["session-membership"],
+      "native_shapes": ["bounded membership of session sidecar filenames"],
+      "framing": "directory_membership",
+      "lifecycle": ["membership_change", "delete", "recreate"],
+      "identity_inputs": ["source instance", "relative sidecar path", "file identity"],
+      "disposition": "mapped",
+      "timestamp_quality": "filesystem_only",
+      "missing_vs_zero": "not_applicable",
+      "unknown_field_policy": "measure_only",
+      "claim_refs": ["grok-source-observed"]
+    },
+    {
+      "family_id": "chat-history",
+      "source_schema_versions": ["grok-chat-history-jsonl-v1"],
+      "stream_ids": ["chat-history"],
+      "native_shapes": ["<session>/chat_history.jsonl"],
+      "framing": "json_lines",
+      "lifecycle": ["append", "partial_write", "truncate", "rotate", "delete", "recreate"],
+      "identity_inputs": ["session directory context", "record generation and cursor"],
+      "disposition": "mapped",
+      "timestamp_quality": "mixed",
+      "missing_vs_zero": "distinct",
+      "unknown_field_policy": "retain_bounded",
+      "claim_refs": ["grok-source-observed", "grok-semantic-fixtures-open"]
+    },
+    {
+      "family_id": "session-summary",
+      "source_schema_versions": ["grok-summary-json-v1"],
+      "stream_ids": ["session-summaries"],
+      "native_shapes": ["<session>/summary.json"],
+      "framing": "json_document",
+      "lifecycle": ["replace", "delete", "recreate"],
+      "identity_inputs": ["session directory", "native session and project fields"],
+      "disposition": "mapped",
+      "timestamp_quality": "mixed",
+      "missing_vs_zero": "distinct",
+      "unknown_field_policy": "retain_bounded",
+      "claim_refs": ["grok-source-observed", "grok-identity-open"]
+    },
+    {
+      "family_id": "session-event",
+      "source_schema_versions": ["grok-events-jsonl-v1"],
+      "stream_ids": ["session-events"],
+      "native_shapes": ["<session>/events.jsonl"],
+      "framing": "json_lines",
+      "lifecycle": ["append", "partial_write", "truncate", "rotate", "delete", "recreate"],
+      "identity_inputs": ["session context", "event generation and cursor"],
+      "disposition": "mapped",
+      "timestamp_quality": "mixed",
+      "missing_vs_zero": "distinct",
+      "unknown_field_policy": "retain_bounded",
+      "claim_refs": ["grok-source-observed", "grok-semantic-fixtures-open"]
+    },
+    {
+      "family_id": "session-signal",
+      "source_schema_versions": ["grok-signals-json-v1"],
+      "stream_ids": ["session-signals"],
+      "native_shapes": ["<session>/signals.json"],
+      "framing": "json_document",
+      "lifecycle": ["replace", "delete", "recreate"],
+      "identity_inputs": ["session directory", "signal document revision"],
+      "disposition": "mapped",
+      "timestamp_quality": "mixed",
+      "missing_vs_zero": "distinct",
+      "unknown_field_policy": "retain_bounded",
+      "claim_refs": ["grok-source-observed", "grok-semantic-fixtures-open"]
+    },
+    {
+      "family_id": "ui-update",
+      "source_schema_versions": ["grok-ui-updates-jsonl-unversioned"],
+      "stream_ids": ["ignored-ui-updates"],
+      "native_shapes": ["<session>/updates.jsonl"],
+      "framing": "json_lines",
+      "lifecycle": ["append", "partial_write", "truncate", "rotate", "delete", "recreate"],
+      "identity_inputs": ["session directory", "record generation and cursor"],
+      "disposition": "ignored_known",
+      "timestamp_quality": "mixed",
+      "missing_vs_zero": "not_applicable",
+      "unknown_field_policy": "measure_only",
+      "claim_refs": ["grok-source-observed", "grok-semantic-fixtures-open"]
+    }
+  ],
+  "entity_identity_rules": [
+    { "entity_kind": "project", "primary_inputs": ["source instance", "summary native cwd/project key"], "fallback_inputs": ["encoded session directory"], "reuse_behavior": "unverified", "supersession_behavior": "unverified", "claim_refs": ["grok-identity-open"] },
+    { "entity_kind": "session", "primary_inputs": ["source instance", "summary native session ID"], "fallback_inputs": ["session directory identity"], "reuse_behavior": "unverified", "supersession_behavior": "generation_scoped", "claim_refs": ["grok-identity-open"] },
+    { "entity_kind": "actor", "primary_inputs": ["session", "root actor role"], "fallback_inputs": [], "reuse_behavior": "never_reuse", "supersession_behavior": "generation_scoped", "claim_refs": ["grok-semantic-fixtures-open"] }
+  ],
+  "association_rules": [
+    { "association_id": "session-project", "from_kind": "session", "to_kind": "project", "precedence": ["summary native project key", "summary cwd", "encoded directory"], "conflict_behavior": "retain_conflict", "claim_refs": ["grok-identity-open"] }
+  ],
+  "join_rules": [
+    { "join_id": "session-sidecars", "inputs": ["session directory", "summary", "chat history", "events", "signals"], "output": "one native session context", "max_fan_out": 5, "ambiguous_behavior": "report_unavailable", "claim_refs": ["grok-source-observed", "grok-identity-open"] }
+  ],
+  "scope_program_manifest": "agent-support/grok/candidate-2026-08-15/scope-programs.json",
+  "size_limits": [
+    { "limit_id": "jsonl-record", "applies_to": "history, event, and ignored update records", "max_bytes": 4194304, "claim_refs": ["grok-source-observed"] },
+    { "limit_id": "jsonl-batch", "applies_to": "history, event, and ignored update batches", "max_bytes": 8388608, "claim_refs": ["grok-source-observed"] },
+    { "limit_id": "summary-document", "applies_to": "summary documents", "max_bytes": 1048576, "claim_refs": ["grok-source-observed"] },
+    { "limit_id": "signal-document", "applies_to": "signal documents", "max_bytes": 262144, "claim_refs": ["grok-source-observed"] }
+  ],
+  "privacy": {
+    "raw_capture_policy": "private_never_commit",
+    "committed_fixture_policy": "deterministically_sanitized_or_synthetic",
+    "retention": "hash_only",
+    "prohibited_categories": ["account-identifiers", "credentials", "native-paths", "prompts", "secrets", "titles"],
+    "claim_refs": ["grok-privacy-policy"]
+  },
+  "claim_refs": ["grok-artifact-target-open", "grok-source-observed", "grok-identity-open", "grok-semantic-fixtures-open", "grok-scope-open", "grok-privacy-policy"]
+}

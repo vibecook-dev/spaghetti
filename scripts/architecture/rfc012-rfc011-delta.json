@@ -1,0 +1,249 @@
+{
+  "schema_version": 1,
+  "normative_document": "docs/rfcs/012-evidence-backed-adapters-and-progressive-readiness.md",
+  "contracts": [
+    {
+      "id": "X0-DB-AUTHORITY",
+      "disposition": "retained",
+      "owners": ["RFC011", "RFC012"],
+      "legacy_behavior": "One Rust database owner and writer publish typed pure queries asynchronously.",
+      "target_behavior": "The durable topology keeps the RFC 011 ownership and query laws unchanged.",
+      "migration": "No semantic migration; retain the architecture ownership ratchet.",
+      "rollback": "Existing RFC 011 owner and query paths remain the rollback authority.",
+      "evidence": [
+        {
+          "state": "implemented",
+          "target": "scripts/architecture/check_rfc011_boundaries.py",
+          "claim": "The shipped runtime graph rejects a second database/query authority."
+        }
+      ]
+    },
+    {
+      "id": "X0-RECONCILIATION-ORDER",
+      "disposition": "retained",
+      "owners": ["RFC011", "RFC012A"],
+      "legacy_behavior": "Notifications are hints; generations and per-object source order govern reconciliation.",
+      "target_behavior": "Both topologies retain generation and source-order authority while delivery clocks stay non-authoritative.",
+      "migration": "Add common coverage fixtures without replacing durable ordering.",
+      "rollback": "The durable RFC 011 reconciliation loop remains selectable.",
+      "evidence": [
+        {
+          "state": "implemented",
+          "target": "crates/spaghetti-napi/src/engine/observation.rs",
+          "claim": "Durable observation coalesces hints into bounded reconciliation work."
+        },
+        {
+          "state": "planned",
+          "target": "docs/rfcs/012-implementation-plan.md",
+          "claim": "A1 coverage comparison fixtures prove common ordering semantics."
+        }
+      ]
+    },
+    {
+      "id": "X0-ADAPTER-BOUNDARY",
+      "disposition": "strengthened",
+      "owners": ["RFC012A"],
+      "legacy_behavior": "Adapters emit storage-agnostic facts without receiving a database handle.",
+      "target_behavior": "Adapters additionally receive no private watcher, cursor, queue, query, or delivery authority.",
+      "migration": "Replace remaining private mechanics with declared common source and scope primitives.",
+      "rollback": "Legacy adapters stay behind compatibility selection until their declarations pass conformance.",
+      "evidence": [
+        {
+          "state": "implemented",
+          "target": "scripts/architecture/check_rfc011_boundaries.py",
+          "claim": "Architecture checks reject adapter-to-storage and common-to-concrete-adapter edges."
+        },
+        {
+          "state": "planned",
+          "target": "docs/rfcs/012a-agent-adaptation-and-engine-boundaries.md",
+          "claim": "A2 declaration checks reject adapter-private mechanics."
+        }
+      ]
+    },
+    {
+      "id": "X0-DECODE-TOPOLOGY",
+      "disposition": "amended",
+      "owners": ["RFC012", "RFC012A"],
+      "legacy_behavior": "Backfill and live ingestion share decoders and projections.",
+      "target_behavior": "Durable and scoped topologies share source-record identity, decoder, facts, provenance, and reducers but use distinct delivery projections.",
+      "migration": "Add topology-parity fixtures before enabling the scoped observer.",
+      "rollback": "Keep the durable topology and legacy single-file tail until parity and migration gates pass.",
+      "evidence": [
+        {
+          "state": "planned",
+          "target": "docs/rfcs/012-implementation-plan.md",
+          "claim": "A1 and D4 compare durable and scoped semantic digests at equal coverage."
+        }
+      ]
+    },
+    {
+      "id": "X0-DURABLE-ATOMICITY",
+      "disposition": "retained",
+      "owners": ["RFC011", "RFC012D"],
+      "legacy_behavior": "Durable cursor, fact, projection, and outbox publication is commit-atomic.",
+      "target_behavior": "Durable atomicity remains; the non-persistent observer uses explicit bootstrap and epoch barriers instead.",
+      "migration": "Keep durable transaction fixtures and add scoped barrier/reset fixtures.",
+      "rollback": "Disable the scoped observer without changing durable transactions.",
+      "evidence": [
+        {
+          "state": "implemented",
+          "target": "crates/spaghetti-napi/src/engine/commit.rs",
+          "claim": "The durable writer commits source, fact, projection, and change state together."
+        },
+        {
+          "state": "planned",
+          "target": "docs/rfcs/012d-session-scoped-observation.md",
+          "claim": "D3 tests observer bootstrap, reset, overflow, and replacement barriers."
+        }
+      ]
+    },
+    {
+      "id": "X0-SCOPED-OBSERVATION",
+      "disposition": "amended",
+      "owners": ["RFC012", "RFC012D"],
+      "legacy_behavior": "Runtime observation is delivered through durable changes after commit.",
+      "target_behavior": "A non-authoritative, database-free observer may deliver the same semantic evidence for one declared session scope.",
+      "migration": "Shadow the scoped observer against durable facts before Chopsticks switches.",
+      "rollback": "Keep watchSessionTranscript and durable observation until the compatibility window closes.",
+      "evidence": [
+        {
+          "state": "planned",
+          "target": "docs/rfcs/012d-session-scoped-observation.md",
+          "claim": "D1-D4 implement and migrate the store-free observer."
+        }
+      ]
+    },
+    {
+      "id": "X0-DECLARED-ADAPTER-MECHANICS",
+      "disposition": "superseded",
+      "owners": ["RFC012A"],
+      "legacy_behavior": "Adapters may discover sources or reconcile entities through implementation-defined callbacks.",
+      "target_behavior": "Only bounded declarations, restricted joins, and common runtime mechanics are conforming.",
+      "migration": "Inventory each callback and map it to an approved primitive or an unsupported disposition.",
+      "rollback": "Unmigrated adapters remain on an explicitly versioned legacy support release; no new escape hatch is allowed.",
+      "evidence": [
+        {
+          "state": "planned",
+          "target": "docs/rfcs/012a-agent-adaptation-and-engine-boundaries.md",
+          "claim": "A2/A3 support manifests classify every production mechanic."
+        }
+      ]
+    },
+    {
+      "id": "X0-USAGE-V2",
+      "disposition": "superseded",
+      "owners": ["RFC012C"],
+      "legacy_behavior": "Usage-bearing native rows contribute through the RFC 011 accounting model.",
+      "target_behavior": "Canonical usage is a qualified response-level revision keyed primarily by native message identity.",
+      "migration": "Build usage-v2 in shadow, compare with an independent response-group oracle, then switch transactionally.",
+      "rollback": "Retain legacy usage rows and query selection through the migration window.",
+      "evidence": [
+        {
+          "state": "implemented",
+          "target": "scripts/runtime_observation_census/census.py",
+          "claim": "The independent census demonstrates repeated usage rows per response group."
+        },
+        {
+          "state": "planned",
+          "target": "docs/rfcs/012c-runtime-semantics-and-usage-v2.md",
+          "claim": "C2/C3 define oracle parity, switch, and rollback fixtures."
+        }
+      ]
+    },
+    {
+      "id": "X0-CATALOG-READINESS",
+      "disposition": "refined",
+      "owners": ["RFC012B"],
+      "legacy_behavior": "Projection readiness uses generic pack states including StaleSafe.",
+      "target_behavior": "Catalog readiness is coverage-plan-, epoch-, and snapshot-specific; unrelated packs retain their own versioned readiness.",
+      "migration": "Introduce the catalog pack and transition table beside the blocking compatibility path.",
+      "rollback": "Select blocking full-search startup and retain the last accepted durable catalog.",
+      "evidence": [
+        {
+          "state": "planned",
+          "target": "docs/rfcs/012b-catalog-readiness-and-progressive-startup.md",
+          "claim": "B1-B4 cover transition, warm-state, and progressive-host behavior."
+        }
+      ]
+    },
+    {
+      "id": "X0-COMMON-FACTS",
+      "disposition": "retained",
+      "owners": ["RFC012A", "RFC012C"],
+      "legacy_behavior": "Common message, content, run, and deterministic fact identities feed durable projections.",
+      "target_behavior": "Existing facts remain until an explicitly versioned family contract replaces their representation.",
+      "migration": "Add versioned revisions in parallel and compare reduced semantic state.",
+      "rollback": "Keep legacy fact/projector readers through each family migration window.",
+      "evidence": [
+        {
+          "state": "implemented",
+          "target": "crates/spaghetti-napi/src/adapter/facts.rs",
+          "claim": "The common fact batch and deterministic legacy fact IDs remain covered by Rust tests."
+        },
+        {
+          "state": "planned",
+          "target": "docs/rfcs/012c-runtime-semantics-and-usage-v2.md",
+          "claim": "C1/C4 add versioned revision and reducer parity fixtures."
+        }
+      ]
+    },
+    {
+      "id": "X0-CROSS-TOPOLOGY-IDENTITY",
+      "disposition": "strengthened",
+      "owners": ["RFC012A"],
+      "legacy_behavior": "Source instances and facts have deterministic engine-local identities.",
+      "target_behavior": "Persistable external entity and semantic revision references are restart-stable and equal across durable and scoped topologies.",
+      "migration": "Introduce versioned canonical references beside legacy runtime-ID-based keys, then migrate each family explicitly.",
+      "rollback": "Legacy internal keys remain readable but are never exposed as RFC 012 references.",
+      "evidence": [
+        {
+          "state": "implemented",
+          "target": "crates/spaghetti-napi/fixtures/contracts/rfc012a-v1.json",
+          "claim": "Rust derives the v1 references and coverage fixture; the portable TypeScript SDK validates it and agrees on comparison outcomes."
+        },
+        {
+          "state": "planned",
+          "target": "docs/rfcs/012-implementation-plan.md",
+          "claim": "Each durable fact family and scoped observer event migrates from legacy runtime-ID-based keys to the canonical references."
+        }
+      ]
+    },
+    {
+      "id": "X0-FIXED-SNAPSHOT-PAGINATION",
+      "disposition": "strengthened",
+      "owners": ["RFC011", "RFC012C"],
+      "legacy_behavior": "Query results carry at_commit_seq and use stable keyset pagination.",
+      "target_behavior": "Aggregate-facing history/runtime continuations remain on one retained snapshot or fail with explicit expiration.",
+      "migration": "Add snapshot identity to the affected cursor contracts and test concurrent commits.",
+      "rollback": "Legacy non-aggregate query endpoints remain available during cursor-version migration.",
+      "evidence": [
+        {
+          "state": "implemented",
+          "target": "scripts/bench-queries.ts",
+          "claim": "Existing query conformance covers stable keyset pagination."
+        },
+        {
+          "state": "planned",
+          "target": "docs/rfcs/012c-runtime-semantics-and-usage-v2.md",
+          "claim": "C1/C4 add fixed-snapshot and expiration fixtures."
+        }
+      ]
+    },
+    {
+      "id": "X0-DURABLE-LIVE-HANDOFF",
+      "disposition": "refined",
+      "owners": ["RFC012A", "RFC012C"],
+      "legacy_behavior": "A durable commit watermark participates in live-update handoff.",
+      "target_behavior": "at_commit_seq remains durable-only; semantic references and comparable source/family coverage reconcile scoped evidence.",
+      "migration": "Expose common references and coverage on durable pages and observer barriers before enabling merge.",
+      "rollback": "Consumers may disable the scoped overlay and read durable state only.",
+      "evidence": [
+        {
+          "state": "planned",
+          "target": "docs/rfcs/012-implementation-plan.md",
+          "claim": "C4/D4 exercise deduplication, overlay retirement, correction, and incomparable coverage."
+        }
+      ]
+    }
+  ]
+}

@@ -3,6 +3,7 @@
 - **Status:** Draft
 - **Created:** 2026-08-10
 - **Revised:** 2026-08-12
+- **Amended by:** [RFC 012 section 4.4](./012-evidence-backed-adapters-and-progressive-readiness.md#44-relationship-to-rfc-011) for the enumerated scoped-observation, adapter-boundary, usage-v2, catalog-readiness, and aggregate-facing query-reconciliation contracts; unlisted RFC 011 invariants remain in force
 - **Authors:** James Yong, contributors
 - **Target:** `spaghetti`
 - **Type:** Architecture / migration / adapter contract / public API
@@ -241,30 +242,30 @@ The query side is not a third ingest plane. It is a read-only service over commi
 
 ## 7. Terminology
 
-| Term | Definition |
-|---|---|
-| **Adapter** | Agent-specific code that discovers native sources, declares streams, decodes native records, performs native joins, and declares capabilities. |
-| **Source instance** | One discovered installation/account/profile/root for an adapter, such as a Claude home directory or a Codex state root. |
-| **Stream** | A declared logical feed within a source instance, such as session transcripts, team configs, or a source-owned database query. |
-| **Source object** | The independently cursorable unit inside a stream: one JSONL file, one replaceable document, one directory snapshot, one database partition, or one key range. |
-| **Generation** | A monotonic epoch for a source object. Truncation, replacement, incompatible rewrite, or identity change creates a new generation. |
-| **Cursor** | An opaque, durable position within one generation, such as a byte offset, row watermark, revision, content hash, or key range token. |
-| **Source record** | One framed, provenance-bearing unit emitted by a source driver for adapter decoding. |
-| **Native record** | The adapter's parsed representation of a source record before cross-agent semantic mapping. |
-| **Fact** | A typed, idempotent semantic observation emitted by an adapter. Facts contain provenance and do not perform storage writes. |
-| **Evidence** | A fact that supports a runtime-state conclusion, including its strength, subject, and source provenance. |
-| **Projection** | A deterministic materialized view built from committed facts: history, runtime state, usage, search, or change feed. |
-| **Observed state** | Durable state justified by committed evidence. |
-| **Assessment** | Ephemeral interpretation using current time or optional process probes, such as `stale` or `possibly_waiting`. |
-| **Commit sequence** | A database-monotonic identifier allocated to one committed ingest batch. It orders Spaghetti commits, not vendor causality. |
-| **Change log/outbox** | Durable post-commit changes keyed by commit sequence and ordinal, used for replayable subscriptions. |
-| **Database owner** | The one live `SpaghettiEngine` authorized to migrate and mutate a Spaghetti database and coordinate its read connections. |
-| **Writer lane** | The single ordered Rust actor/connection that performs every Spaghetti database mutation. |
-| **Query worker** | A bounded Rust worker that owns one long-lived read-only SQLite connection and executes typed requests. |
-| **Query pack** | A versioned public query surface backed by a universal core or optional capability pack. |
-| **Commit watermark** | The highest committed Spaghetti sequence represented by a query snapshot or result page. |
-| **Client transport** | N-API or IPC implementation of the same typed `SpaghettiClient` semantics. |
-| **Reconcile** | Compare source reality with committed source-object state and ingest the delta or rebuild an affected projection. |
+| Term                  | Definition                                                                                                                                                     |
+| --------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Adapter**           | Agent-specific code that discovers native sources, declares streams, decodes native records, performs native joins, and declares capabilities.                 |
+| **Source instance**   | One discovered installation/account/profile/root for an adapter, such as a Claude home directory or a Codex state root.                                        |
+| **Stream**            | A declared logical feed within a source instance, such as session transcripts, team configs, or a source-owned database query.                                 |
+| **Source object**     | The independently cursorable unit inside a stream: one JSONL file, one replaceable document, one directory snapshot, one database partition, or one key range. |
+| **Generation**        | A monotonic epoch for a source object. Truncation, replacement, incompatible rewrite, or identity change creates a new generation.                             |
+| **Cursor**            | An opaque, durable position within one generation, such as a byte offset, row watermark, revision, content hash, or key range token.                           |
+| **Source record**     | One framed, provenance-bearing unit emitted by a source driver for adapter decoding.                                                                           |
+| **Native record**     | The adapter's parsed representation of a source record before cross-agent semantic mapping.                                                                    |
+| **Fact**              | A typed, idempotent semantic observation emitted by an adapter. Facts contain provenance and do not perform storage writes.                                    |
+| **Evidence**          | A fact that supports a runtime-state conclusion, including its strength, subject, and source provenance.                                                       |
+| **Projection**        | A deterministic materialized view built from committed facts: history, runtime state, usage, search, or change feed.                                           |
+| **Observed state**    | Durable state justified by committed evidence.                                                                                                                 |
+| **Assessment**        | Ephemeral interpretation using current time or optional process probes, such as `stale` or `possibly_waiting`.                                                 |
+| **Commit sequence**   | A database-monotonic identifier allocated to one committed ingest batch. It orders Spaghetti commits, not vendor causality.                                    |
+| **Change log/outbox** | Durable post-commit changes keyed by commit sequence and ordinal, used for replayable subscriptions.                                                           |
+| **Database owner**    | The one live `SpaghettiEngine` authorized to migrate and mutate a Spaghetti database and coordinate its read connections.                                      |
+| **Writer lane**       | The single ordered Rust actor/connection that performs every Spaghetti database mutation.                                                                      |
+| **Query worker**      | A bounded Rust worker that owns one long-lived read-only SQLite connection and executes typed requests.                                                        |
+| **Query pack**        | A versioned public query surface backed by a universal core or optional capability pack.                                                                       |
+| **Commit watermark**  | The highest committed Spaghetti sequence represented by a query snapshot or result page.                                                                       |
+| **Client transport**  | N-API or IPC implementation of the same typed `SpaghettiClient` semantics.                                                                                     |
+| **Reconcile**         | Compare source reality with committed source-object state and ingest the delta or rebuild an affected projection.                                              |
 
 ## 8. North-star architecture
 
@@ -530,24 +531,24 @@ Normative constraints:
 
 ### 10.5 Boundary examples
 
-| Concern | Owner | Reason |
-|---|---|---|
-| Watch a root and recover from overflow | Common engine | Correctness mechanism |
-| Determine that `projects/*/*.jsonl` is a Claude session | Claude adapter | Native layout |
-| Frame newline-terminated records and retain partial tail | Common source driver | Reusable append semantic |
-| Interpret a Claude `assistant` object | Claude adapter | Native schema |
-| Assign `source_object_id`, generation, and cursor | Common engine | Idempotency and recovery |
-| Correlate a Claude subagent transcript to its parent | Claude adapter | Native identifiers/joins |
-| Reduce evidence to current run state | Common reducer | Product semantics |
-| Decide which Claude event means explicit completion | Claude adapter | Native interpretation |
-| Write `messages`, usage materializations, and outbox | Common store/projections | Atomic consistency |
-| Read Codex rollout rows or Grok sidecars | Corresponding adapter through source access | Native source |
-| Report usage as exact/estimated and its scope | Adapter declares; common reducer enforces | Native semantics plus common honesty |
-| Reconnect a subscriber from sequence 42,000 | Common engine | Delivery contract |
-| Execute cross-agent FTS ranking and pagination | Common query engine | Canonical product semantics |
-| Decode a Claude-only native field into an extension fact | Claude adapter | Native interpretation |
-| Expose a versioned Claude extension query | Common extension-query registry over stored extension facts | Stable storage and client contract |
-| Format a timestamp or localize a status label | TypeScript presentation layer | UI-only concern |
+| Concern                                                  | Owner                                                       | Reason                               |
+| -------------------------------------------------------- | ----------------------------------------------------------- | ------------------------------------ |
+| Watch a root and recover from overflow                   | Common engine                                               | Correctness mechanism                |
+| Determine that `projects/*/*.jsonl` is a Claude session  | Claude adapter                                              | Native layout                        |
+| Frame newline-terminated records and retain partial tail | Common source driver                                        | Reusable append semantic             |
+| Interpret a Claude `assistant` object                    | Claude adapter                                              | Native schema                        |
+| Assign `source_object_id`, generation, and cursor        | Common engine                                               | Idempotency and recovery             |
+| Correlate a Claude subagent transcript to its parent     | Claude adapter                                              | Native identifiers/joins             |
+| Reduce evidence to current run state                     | Common reducer                                              | Product semantics                    |
+| Decide which Claude event means explicit completion      | Claude adapter                                              | Native interpretation                |
+| Write `messages`, usage materializations, and outbox     | Common store/projections                                    | Atomic consistency                   |
+| Read Codex rollout rows or Grok sidecars                 | Corresponding adapter through source access                 | Native source                        |
+| Report usage as exact/estimated and its scope            | Adapter declares; common reducer enforces                   | Native semantics plus common honesty |
+| Reconnect a subscriber from sequence 42,000              | Common engine                                               | Delivery contract                    |
+| Execute cross-agent FTS ranking and pagination           | Common query engine                                         | Canonical product semantics          |
+| Decode a Claude-only native field into an extension fact | Claude adapter                                              | Native interpretation                |
+| Expose a versioned Claude extension query                | Common extension-query registry over stored extension facts | Stable storage and client contract   |
+| Format a timestamp or localize a status label            | TypeScript presentation layer                               | UI-only concern                      |
 
 ### 10.6 Query boundary
 
@@ -1955,40 +1956,19 @@ The TypeScript SDK exposes one transport-neutral asynchronous interface:
 
 ```ts
 export interface SpaghettiClient {
-  listProjects(
-    request?: ListProjectsRequest,
-    options?: QueryOptions,
-  ): Promise<Page<ProjectSummary>>;
+  listProjects(request?: ListProjectsRequest, options?: QueryOptions): Promise<Page<ProjectSummary>>;
 
-  listSessions(
-    request: ListSessionsRequest,
-    options?: QueryOptions,
-  ): Promise<Page<SessionSummary>>;
+  listSessions(request: ListSessionsRequest, options?: QueryOptions): Promise<Page<SessionSummary>>;
 
-  getTimeline(
-    request: TimelineRequest,
-    options?: QueryOptions,
-  ): Promise<TimelinePage>;
+  getTimeline(request: TimelineRequest, options?: QueryOptions): Promise<TimelinePage>;
 
-  search(
-    request: SearchRequest,
-    options?: QueryOptions,
-  ): Promise<SearchPage>;
+  search(request: SearchRequest, options?: QueryOptions): Promise<SearchPage>;
 
-  getUsage(
-    request: UsageRequest,
-    options?: QueryOptions,
-  ): Promise<UsageReport>;
+  getUsage(request: UsageRequest, options?: QueryOptions): Promise<UsageReport>;
 
-  getRuntimeSnapshot(
-    request?: RuntimeSnapshotRequest,
-    options?: QueryOptions,
-  ): Promise<RuntimeSnapshot>;
+  getRuntimeSnapshot(request?: RuntimeSnapshotRequest, options?: QueryOptions): Promise<RuntimeSnapshot>;
 
-  subscribe(
-    request: SubscribeRequest,
-    options?: SubscribeOptions,
-  ): AsyncIterable<CommittedChangeBatch>;
+  subscribe(request: SubscribeRequest, options?: SubscribeOptions): AsyncIterable<CommittedChangeBatch>;
 
   dispose(): Promise<void>;
 }
@@ -2372,16 +2352,16 @@ Claude is the first reference adapter because it exercises the broadest set of r
 
 At minimum:
 
-| Stream | Driver | Semantic output |
-|---|---|---|
-| Parent session transcripts | `AppendDelimitedFile` | sessions, messages, content blocks, usage, run evidence |
-| Subagent transcripts | `AppendDelimitedFile` | child runs, messages, activity, terminal evidence, parent links |
-| Team configuration | `ReplaceDocument` or `DirectorySnapshot` | teams, membership snapshots, member metadata |
-| Team inboxes | `ReplaceDocument` per inbox or directory snapshot | inbox messages, read state, sender/recipient relations |
-| Active-session files | `PresenceObject` | presence evidence and source availability |
-| Tasks/todos/plans | `ReplaceDocument` / `DirectorySnapshot` | capability-pack snapshots |
-| Artifacts/file history | appropriate snapshot driver | artifact relations and history metadata |
-| Settings relevant to interpretation | `ReplaceDocument` | adapter configuration/version evidence, not general user settings export |
+| Stream                              | Driver                                            | Semantic output                                                          |
+| ----------------------------------- | ------------------------------------------------- | ------------------------------------------------------------------------ |
+| Parent session transcripts          | `AppendDelimitedFile`                             | sessions, messages, content blocks, usage, run evidence                  |
+| Subagent transcripts                | `AppendDelimitedFile`                             | child runs, messages, activity, terminal evidence, parent links          |
+| Team configuration                  | `ReplaceDocument` or `DirectorySnapshot`          | teams, membership snapshots, member metadata                             |
+| Team inboxes                        | `ReplaceDocument` per inbox or directory snapshot | inbox messages, read state, sender/recipient relations                   |
+| Active-session files                | `PresenceObject`                                  | presence evidence and source availability                                |
+| Tasks/todos/plans                   | `ReplaceDocument` / `DirectorySnapshot`           | capability-pack snapshots                                                |
+| Artifacts/file history              | appropriate snapshot driver                       | artifact relations and history metadata                                  |
+| Settings relevant to interpretation | `ReplaceDocument`                                 | adapter configuration/version evidence, not general user settings export |
 
 #### Native responsibilities
 
@@ -2423,12 +2403,12 @@ Codex uses its own rollout format and metadata flow; it should not be forced thr
 
 Likely streams include:
 
-| Stream | Driver | Semantic output |
-|---|---|---|
-| Rollout/session logs | `AppendDelimitedFile` | session metadata, messages, runs, lifecycle evidence |
-| Token-count records | same append stream, adapter decode route | scoped usage facts with native accounting semantics |
-| Child/internal rollouts when supported | append or snapshot as discovered | delegation relations and child runtime facts |
-| Source metadata snapshots | `ReplaceDocument` where needed | session/model/project metadata |
+| Stream                                 | Driver                                   | Semantic output                                      |
+| -------------------------------------- | ---------------------------------------- | ---------------------------------------------------- |
+| Rollout/session logs                   | `AppendDelimitedFile`                    | session metadata, messages, runs, lifecycle evidence |
+| Token-count records                    | same append stream, adapter decode route | scoped usage facts with native accounting semantics  |
+| Child/internal rollouts when supported | append or snapshot as discovered         | delegation relations and child runtime facts         |
+| Source metadata snapshots              | `ReplaceDocument` where needed           | session/model/project metadata                       |
 
 #### Migration from hooks
 
@@ -2446,13 +2426,13 @@ Grok demonstrates why one logical session may depend on an append stream plus re
 
 #### Declared streams
 
-| Stream | Driver | Semantic output |
-|---|---|---|
-| `chat_history.jsonl` | `AppendDelimitedFile` | messages and base session facts |
-| `summary.json` | `ReplaceDocument` | summary/session metadata |
-| `events.jsonl` or equivalent | append/snapshot according to native behavior | timestamps, lifecycle, extension facts |
-| `signals.json` or equivalent | `ReplaceDocument` | usage/session sidecar observations |
-| Session directory membership | `DirectorySnapshot` | session creation/removal and reconcile triggers |
+| Stream                       | Driver                                       | Semantic output                                 |
+| ---------------------------- | -------------------------------------------- | ----------------------------------------------- |
+| `chat_history.jsonl`         | `AppendDelimitedFile`                        | messages and base session facts                 |
+| `summary.json`               | `ReplaceDocument`                            | summary/session metadata                        |
+| `events.jsonl` or equivalent | append/snapshot according to native behavior | timestamps, lifecycle, extension facts          |
+| `signals.json` or equivalent | `ReplaceDocument`                            | usage/session sidecar observations              |
+| Session directory membership | `DirectorySnapshot`                          | session creation/removal and reconcile triggers |
 
 #### Entity reconciliation
 
@@ -3017,18 +2997,18 @@ Metrics include end-to-end p50/p95/p99, SQLite time, queue time, conversion time
 
 The first implementation should prefer mature components and replace them only after profiling isolates a limitation:
 
-| Concern | Initial choice | Policy |
-|---|---|---|
-| Filesystem notifications | `notify` | Events are dirty hints; direct per-OS backends only after measured need |
-| Reconcile traversal | `ignore` parallel walker | Apply source selectors and ignore rules during traversal |
-| Native callback ingress | bounded channel | Queue full marks dirty; never silently trust a dropped stream |
-| SQLite | `rusqlite` long-lived connections | One writer, small read pool, WAL, prepared statements |
-| Query scheduling | bounded Rust worker pool | Connection per worker; interactive/bulk fairness |
-| N-API | asynchronous task/Promise surface | No synchronous database work on Node thread |
-| IPC | framed versioned request/response | Same domain DTOs and errors as N-API |
-| Pagination | keyset cursor by default | Offset retained only for bounded compatibility cases |
-| Content hashing | `blake3` on demand | Never hash every append by default |
-| Metrics | `tracing` plus counters/histograms | Include queue, query, boundary, WAL, and convergence metrics |
+| Concern                  | Initial choice                     | Policy                                                                  |
+| ------------------------ | ---------------------------------- | ----------------------------------------------------------------------- |
+| Filesystem notifications | `notify`                           | Events are dirty hints; direct per-OS backends only after measured need |
+| Reconcile traversal      | `ignore` parallel walker           | Apply source selectors and ignore rules during traversal                |
+| Native callback ingress  | bounded channel                    | Queue full marks dirty; never silently trust a dropped stream           |
+| SQLite                   | `rusqlite` long-lived connections  | One writer, small read pool, WAL, prepared statements                   |
+| Query scheduling         | bounded Rust worker pool           | Connection per worker; interactive/bulk fairness                        |
+| N-API                    | asynchronous task/Promise surface  | No synchronous database work on Node thread                             |
+| IPC                      | framed versioned request/response  | Same domain DTOs and errors as N-API                                    |
+| Pagination               | keyset cursor by default           | Offset retained only for bounded compatibility cases                    |
+| Content hashing          | `blake3` on demand                 | Never hash every append by default                                      |
+| Metrics                  | `tracing` plus counters/histograms | Include queue, query, boundary, WAL, and convergence metrics            |
 
 ## 28. Observability and operations
 

@@ -1,0 +1,53 @@
+{
+  "schema_version": 1,
+  "declaration_id": "grok-sources-2026-08-15-candidate",
+  "adapter_id": "grok",
+  "ads_id": "grok-ads-2026-08-15-candidate",
+  "status": "candidate",
+  "streams": [
+    {
+      "stream_id": "session-membership", "family_id": "session-membership", "root_id": "sessions",
+      "relative_patterns": ["**/chat_history.jsonl", "**/summary.json", "**/events.jsonl", "**/signals.json"],
+      "primitive": "DirectoryMembership", "topologies": ["durable"], "implementation_state": "existing", "decoder_id": "grok-session-membership", "authority": "supplemental",
+      "bounds": { "max_entries": 100000, "max_depth": 8 },
+      "lifecycle": ["membership_change", "identity_change", "delete", "recreate"], "overlap_strategy": "full_only", "safe_decoder_state_boundary": "full_snapshot",
+      "disposition_ownership": ["native-family:session-membership"], "claim_refs": ["grok-source-observed"]
+    },
+    {
+      "stream_id": "chat-history", "family_id": "chat-history", "root_id": "sessions", "relative_patterns": ["**/chat_history.jsonl"],
+      "primitive": "AppendDelimited", "topologies": ["durable"], "implementation_state": "existing", "decoder_id": "grok-chat-record", "authority": "canonical",
+      "bounds": { "max_record_bytes": 4194304, "max_batch_bytes": 8388608, "max_records_per_batch": 1024, "max_entries": 250000, "max_depth": 64 },
+      "lifecycle": ["append", "partial_write", "truncate", "identity_change", "delete", "recreate"], "overlap_strategy": "full_only", "safe_decoder_state_boundary": "object_generation_cursor",
+      "disposition_ownership": ["native-family:chat-history"], "claim_refs": ["grok-source-observed", "grok-semantic-fixtures-open"]
+    },
+    {
+      "stream_id": "session-summaries", "family_id": "session-summary", "root_id": "sessions", "relative_patterns": ["**/summary.json"],
+      "primitive": "ReplaceDocument", "topologies": ["durable"], "implementation_state": "existing", "decoder_id": "grok-summary", "authority": "supplemental",
+      "bounds": { "max_object_bytes": 1048576, "max_entries": 250000, "max_depth": 64 },
+      "lifecycle": ["replace", "identity_change", "delete", "recreate"], "overlap_strategy": "full_only", "safe_decoder_state_boundary": "object_generation_revision",
+      "disposition_ownership": ["native-family:session-summary"], "claim_refs": ["grok-source-observed", "grok-identity-open"]
+    },
+    {
+      "stream_id": "session-events", "family_id": "session-event", "root_id": "sessions", "relative_patterns": ["**/events.jsonl"],
+      "primitive": "AppendDelimited", "topologies": ["durable"], "implementation_state": "existing", "decoder_id": "grok-event", "authority": "supplemental",
+      "bounds": { "max_record_bytes": 4194304, "max_batch_bytes": 8388608, "max_records_per_batch": 1024, "max_entries": 250000, "max_depth": 64 },
+      "lifecycle": ["append", "partial_write", "truncate", "identity_change", "delete", "recreate"], "overlap_strategy": "full_only", "safe_decoder_state_boundary": "object_generation_cursor",
+      "disposition_ownership": ["native-family:session-event"], "claim_refs": ["grok-source-observed", "grok-semantic-fixtures-open"]
+    },
+    {
+      "stream_id": "session-signals", "family_id": "session-signal", "root_id": "sessions", "relative_patterns": ["**/signals.json"],
+      "primitive": "ReplaceDocument", "topologies": ["durable"], "implementation_state": "existing", "decoder_id": "grok-signals", "authority": "supplemental",
+      "bounds": { "max_object_bytes": 262144, "max_entries": 250000, "max_depth": 64 },
+      "lifecycle": ["replace", "identity_change", "delete", "recreate"], "overlap_strategy": "full_only", "safe_decoder_state_boundary": "object_generation_revision",
+      "disposition_ownership": ["native-family:session-signal"], "claim_refs": ["grok-source-observed", "grok-semantic-fixtures-open"]
+    },
+    {
+      "stream_id": "ignored-ui-updates", "family_id": "ui-update", "root_id": "sessions", "relative_patterns": ["**/updates.jsonl"],
+      "primitive": "AppendDelimited", "topologies": ["durable"], "implementation_state": "existing", "decoder_id": "grok-ignored-update", "authority": "ignored_derived",
+      "bounds": { "max_record_bytes": 4194304, "max_batch_bytes": 8388608, "max_records_per_batch": 1024, "max_entries": 250000, "max_depth": 64 },
+      "lifecycle": ["append", "partial_write", "truncate", "identity_change", "delete", "recreate"], "overlap_strategy": "full_only", "safe_decoder_state_boundary": "stateless_record",
+      "disposition_ownership": ["native-family:ui-update"], "claim_refs": ["grok-source-observed", "grok-semantic-fixtures-open"]
+    }
+  ],
+  "claim_refs": ["grok-source-observed", "grok-identity-open", "grok-semantic-fixtures-open"]
+}

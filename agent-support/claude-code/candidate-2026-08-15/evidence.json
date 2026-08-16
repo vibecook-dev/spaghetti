@@ -1,0 +1,100 @@
+{
+  "schema_version": 1,
+  "manifest_id": "claude-code-evidence-2026-08-15-candidate",
+  "adapter_id": "claude-code",
+  "ads_id": "claude-code-ads-2026-08-15-candidate",
+  "sanitizer": {
+    "version": 1,
+    "prohibited_scan": "pass",
+    "raw_capture_committed": false
+  },
+  "claims": [
+    {
+      "claim_id": "claude-artifact-target-open",
+      "statement": "The current native family is recognizable, but the distributable/version target and artifact digest have not yet been pinned for promotion.",
+      "state": "open",
+      "sources": [
+        { "kind": "code_reference", "path": "crates/spaghetti-napi/src/claude/adapter.rs", "sha256": null, "locator": "ClaudeCodeAdapter::new manifest" }
+      ]
+    },
+    {
+      "claim_id": "claude-instance-roots",
+      "statement": "The adapter confines one configured source instance to home, projects, teams, and sessions roots derived from the canonical configured root.",
+      "state": "observed",
+      "sources": [
+        { "kind": "code_reference", "path": "crates/spaghetti-napi/src/claude/adapter.rs", "sha256": null, "locator": "AgentAdapter::discover" }
+      ]
+    },
+    {
+      "claim_id": "claude-source-map",
+      "statement": "Sixteen bounded native stream families are implemented by the current Rust adapter with the selectors and driver bounds declared in this candidate.",
+      "state": "observed",
+      "sources": [
+        { "kind": "design_record", "path": "docs/rfcs/011-claude-adapter-source-map.md", "sha256": null, "locator": "Implemented streams" },
+        { "kind": "code_reference", "path": "crates/spaghetti-napi/src/claude/adapter.rs", "sha256": null, "locator": "AgentAdapter::streams" }
+      ]
+    },
+    {
+      "claim_id": "claude-identity-rules",
+      "statement": "Current object bootstrap code validates transcript, descendant, workflow, task, artifact, and settings path shapes before deriving native keys; cross-device and reuse conformance remains incomplete.",
+      "state": "degraded",
+      "sources": [
+        { "kind": "design_record", "path": "docs/rfcs/011-claude-adapter-source-map.md", "sha256": null, "locator": "Installation and source identity; Implemented streams" },
+        { "kind": "code_reference", "path": "crates/spaghetti-napi/src/claude/adapter.rs", "sha256": null, "locator": "bootstrap_object" }
+      ]
+    },
+    {
+      "claim_id": "claude-runtime-semantics-open",
+      "statement": "Actor-scoped usage-v2, effective model/effort/mode, interaction lifecycle, and team/workflow correlation require RFC 012C fixture-backed reducers before support promotion.",
+      "state": "open",
+      "sources": [
+        { "kind": "design_record", "path": "docs/rfcs/012c-runtime-semantics-and-usage-v2.md", "sha256": null, "locator": "Normative runtime facts and release gates" }
+      ]
+    },
+    {
+      "claim_id": "claude-scope-relations-open",
+      "statement": "The bounded root/descendant/team/task/artifact relations are a reviewable candidate but are not yet executable through the common scoped observer.",
+      "state": "open",
+      "sources": [
+        { "kind": "design_record", "path": "docs/rfcs/012d-session-scoped-observation.md", "sha256": null, "locator": "Claude scope and release gates" },
+        { "kind": "code_reference", "path": "packages/sdk/src/sources/claude-code/live/session-tail.ts", "sha256": null, "locator": "legacy compatibility tail to replace" }
+      ]
+    },
+    {
+      "claim_id": "claude-privacy-policy",
+      "statement": "Raw production captures are forbidden in the repository and committed fixture evidence must be synthetic or deterministically sanitized.",
+      "state": "observed",
+      "sources": [
+        { "kind": "design_record", "path": "docs/rfcs/012a-agent-adaptation-and-engine-boundaries.md", "sha256": null, "locator": "Security and privacy" }
+      ]
+    },
+    {
+      "claim_id": "claude-drift-bridge-accounts",
+      "statement": "Bridge-session rows have newly observed ownerAccountUuid and ownerOrganizationUuid fields; their semantic and disclosure treatment is intentionally unresolved.",
+      "state": "open",
+      "sources": [
+        {
+          "kind": "sanitized_fixture",
+          "path": "agent-support/claude-code/candidate-2026-08-15/fixtures/drift/bridge-session-account-fields.json",
+          "sha256": "sha256:0ccd6159504affeca81f73770c6b570ecbad8aa9f3d925a03919eddb85101dcd",
+          "locator": "synthetic shape preserving field names and value categories"
+        },
+        { "kind": "census_report", "path": "docs/rfcs/012-implementation-plan.md", "sha256": null, "locator": "A1 landing evidence: current Claude drift" }
+      ]
+    },
+    {
+      "claim_id": "claude-drift-active-name-since",
+      "statement": "Active-session documents have a newly observed nameSince field; its timestamp semantics and transition behavior are intentionally unresolved.",
+      "state": "open",
+      "sources": [
+        {
+          "kind": "sanitized_fixture",
+          "path": "agent-support/claude-code/candidate-2026-08-15/fixtures/drift/active-session-name-since.json",
+          "sha256": "sha256:f408ad3c30fcbcde463ac7100074d8d71fcca707c3bd54d4cc60337a5a082299",
+          "locator": "synthetic shape preserving numeric timestamp category"
+        },
+        { "kind": "census_report", "path": "docs/rfcs/012-implementation-plan.md", "sha256": null, "locator": "A1 landing evidence: current Claude drift" }
+      ]
+    }
+  ]
+}

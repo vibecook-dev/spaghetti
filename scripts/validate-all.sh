@@ -44,9 +44,10 @@ SKIP=0
 SKIP_CODE=78
 
 run_suite() {
-  local title="$1" script="$2" status=0
+  local title="$1" status=0
+  shift
   echo "=== $title ==="
-  "$PYTHON" "$script" 2>&1 | tail -3 || status=$?
+  "$PYTHON" "$@" 2>&1 | tail -3 || status=$?
   case "$status" in
     0) PASS=$((PASS+1)) ;;
     "$SKIP_CODE") SKIP=$((SKIP+1)) ;;
@@ -59,6 +60,9 @@ run_suite "Session/Message Types" scripts/validate_sessions_and_messages.py
 run_suite "Config/Settings Types" scripts/validate_config_and_settings.py
 run_suite "Secondary Data Types" scripts/validate_secondary_data.py
 run_suite "RFC 011 Architecture Boundaries" scripts/architecture/check_rfc011_boundaries.py
+run_suite "RFC 012 / RFC 011 Compatibility Ledger" scripts/architecture/check_rfc012_delta.py
+run_suite "RFC 012A Agent Support Contracts" scripts/agent_support/validate.py
+run_suite "RFC 012A Agent Support Tooling" -m unittest scripts.agent_support.test_contracts
 
 echo "=============================="
 echo "Validation suites: $PASS passed, $FAIL failed, $SKIP skipped"

@@ -46,6 +46,10 @@ ADAPTER_STORAGE_FORBIDDEN_RE = re.compile(
     r"\b(?:crate::(?:engine|orchestrate|napi_engine|core::(?:schema|writer|event))"
     r"|rusqlite|napi)(?:::|\b)"
 )
+RFC012_SEMANTIC_FORBIDDEN_RE = re.compile(
+    r"(?:\bcrate::|\bsuper::(?:contract|facts|registry)(?:::|\b)"
+    r"|\brusqlite(?:::|\b)|\bnapi(?:::|\b))"
+)
 MIGRATED_CLIENT_CONSUMERS = (
     "apps/playground/src/main/canonical-queries.ts",
     "packages/sdk/src/observation-shadow.ts",
@@ -320,6 +324,14 @@ def discover_rust_adapter_storage_boundary_violations() -> set[str]:
     }
 
 
+def discover_rfc012_semantic_boundary_violations() -> set[str]:
+    """The RFC 012A base model cannot depend on adapters, sources, or topology."""
+    path = REPO_ROOT / "crates/spaghetti-napi/src/adapter/semantic.rs"
+    if not path.exists() or RFC012_SEMANTIC_FORBIDDEN_RE.search(production_rust_text(path)):
+        return {repo_path(path)}
+    return set()
+
+
 def discover_migrated_client_direct_engine_queries() -> set[str]:
     """Once a consumer moves to SpaghettiClient, direct N-API reads cannot return."""
     return {
@@ -442,6 +454,7 @@ DISCOVERERS: dict[str, Callable[[], set[str]]] = {
     "rust_legacy_oracle_default_exposure": discover_rust_legacy_oracle_default_exposure,
     "rust_source_boundary_violations": discover_rust_source_boundary_violations,
     "rust_adapter_storage_boundary_violations": discover_rust_adapter_storage_boundary_violations,
+    "rfc012_semantic_boundary_violations": discover_rfc012_semantic_boundary_violations,
     "migrated_client_direct_engine_queries": discover_migrated_client_direct_engine_queries,
     "portable_client_runtime_boundary_violations": discover_portable_client_runtime_boundary_violations,
     "playground_main_sdk_owner_bypasses": discover_playground_main_sdk_owner_bypasses,

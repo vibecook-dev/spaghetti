@@ -6,6 +6,7 @@
 mod contract;
 mod facts;
 mod registry;
+mod semantic;
 
 pub use contract::{
     AdapterDiagnostic, AdapterError, AdapterErrorClass, AdapterId, AdapterManifest,
@@ -32,3 +33,15 @@ pub use facts::{
     WorkflowMemberEventKind, WorkflowSnapshotFact, WorkflowStatus,
 };
 pub use registry::{AdapterRegistry, AdapterRegistryBuilder};
+pub use semantic::{
+    compare_coverage, CanonicalEntityKey, CanonicalFactId, CanonicalSourceInstanceKey,
+    ContractCompleteness, CoverageAbsence, CoverageAbsenceKind, CoverageComparison,
+    CoverageDeclarationDigest, CoverageDomain, CoverageError, CoverageMembershipRevision,
+    CoverageObjectKey, CoveragePosition, CoveragePositionKind, CoveragePositionRef,
+    CoverageProvenance, CoverageScope, CoverageSetCompleteness, CoverageStatus, CoverageStreamKey,
+    ExternalEntityRef, FactRevisionId, NativeIdentity, NativeIdentityClaim, QualifiedUnknownReason,
+    QualifiedValue, QualifiedValueQuality, SemanticContractError, SemanticRevisionRef,
+    SourceCoveragePoint, SourceCoverageSet, SourceRecordId, EXTERNAL_ENTITY_REFERENCE_VERSION,
+    SEMANTIC_REFERENCE_CONTRACT_VERSION, SOURCE_COVERAGE_CONTRACT_VERSION,
+    SOURCE_COVERAGE_SET_CONTRACT_VERSION,
+};

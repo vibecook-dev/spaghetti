@@ -1,0 +1,16 @@
+{
+  "_fixture": {
+    "fixture_kind": "synthetic-native-shape",
+    "format": "json",
+    "sanitization": "synthetic",
+    "sanitizer_version": 1
+  },
+  "data": {
+    "bridgeSessionId": "fixture-id-002",
+    "lastSequenceNum": 7,
+    "ownerAccountUuid": "fixture-id-003",
+    "ownerOrganizationUuid": "fixture-id-004",
+    "sessionId": "fixture-id-001",
+    "type": "bridge-session"
+  }
+}

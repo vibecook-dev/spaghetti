@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://spaghetti.dev/schemas/rfc012a/conformance-manifest-v1.json",
+  "title": "RFC 012A conformance manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "manifest_id", "adapter_id", "support_release_id", "checks"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "manifest_id": { "$ref": "#/$defs/id" },
+    "adapter_id": { "$ref": "#/$defs/id" },
+    "support_release_id": { "$ref": "#/$defs/id" },
+    "checks": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["check_id", "requirement", "status", "command", "report_sha256", "claim_refs"],
+        "properties": {
+          "check_id": { "$ref": "#/$defs/id" },
+          "requirement": { "type": "string", "minLength": 1 },
+          "status": { "enum": ["planned", "pass", "fail", "not_applicable"] },
+          "command": { "type": ["string", "null"] },
+          "report_sha256": { "$ref": "#/$defs/nullableDigest" },
+          "claim_refs": { "type": "array", "items": { "$ref": "#/$defs/id" }, "uniqueItems": true }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$" },
+    "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "nullableDigest": { "oneOf": [{ "$ref": "#/$defs/digest" }, { "type": "null" }] }
+  }
+}

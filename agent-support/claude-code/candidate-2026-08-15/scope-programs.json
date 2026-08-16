@@ -1,0 +1,104 @@
+{
+  "schema_version": 1,
+  "declaration_id": "claude-code-session-scope-2026-08-15-candidate",
+  "adapter_id": "claude-code",
+  "ads_id": "claude-code-ads-2026-08-15-candidate",
+  "status": "incomplete",
+  "roots": ["home", "projects", "sessions", "teams"],
+  "programs": [
+    {
+      "program_id": "observe-root-session-and-descendants",
+      "root_entity_kind": "session",
+      "relations": [
+        {
+          "relation_id": "root-transcript",
+          "primitive": "KnownObject",
+          "access_root": "projects",
+          "locator": "known-transcript",
+          "identity_inputs": ["native-session-id", "transcript-locator"],
+          "bounds": { "max_fan_out": 1, "max_depth": 1, "max_objects": 1, "max_bytes": 1073741824, "max_rows": 0 },
+          "unavailable_behavior": "record_unavailable",
+          "claim_refs": ["claude-scope-relations-open"]
+        },
+        {
+          "relation_id": "descendant-transcripts",
+          "primitive": "ChildDirectoryByNativeId",
+          "access_root": "projects",
+          "locator": "{project}/{session}/subagents",
+          "identity_inputs": ["project-key", "native-session-id"],
+          "bounds": { "max_fan_out": 256, "max_depth": 5, "max_objects": 512, "max_bytes": 2147483648, "max_rows": 0 },
+          "unavailable_behavior": "skip_optional",
+          "claim_refs": ["claude-scope-relations-open", "claude-identity-rules"]
+        },
+        {
+          "relation_id": "descendant-metadata",
+          "primitive": "SiblingObject",
+          "access_root": "projects",
+          "locator": "{actor-transcript}.meta.json",
+          "identity_inputs": ["actor-transcript-object"],
+          "bounds": { "max_fan_out": 1, "max_depth": 1, "max_objects": 256, "max_bytes": 16777216, "max_rows": 0 },
+          "unavailable_behavior": "skip_optional",
+          "claim_refs": ["claude-scope-relations-open", "claude-identity-rules"]
+        },
+        {
+          "relation_id": "workflow-records",
+          "primitive": "ChildDirectoryByNativeId",
+          "access_root": "projects",
+          "locator": "{project}/{session}/workflows",
+          "identity_inputs": ["project-key", "native-session-id", "observed-workflow-id"],
+          "bounds": { "max_fan_out": 64, "max_depth": 2, "max_objects": 128, "max_bytes": 134217728, "max_rows": 0 },
+          "unavailable_behavior": "skip_optional",
+          "claim_refs": ["claude-scope-relations-open", "claude-runtime-semantics-open"]
+        },
+        {
+          "relation_id": "team-config-from-evidence",
+          "primitive": "ReferencedObjectFromField",
+          "access_root": "teams",
+          "locator": "{team}/config.json",
+          "identity_inputs": ["observed-team-name"],
+          "bounds": { "max_fan_out": 8, "max_depth": 2, "max_objects": 8, "max_bytes": 8388608, "max_rows": 0 },
+          "unavailable_behavior": "skip_optional",
+          "claim_refs": ["claude-scope-relations-open", "claude-runtime-semantics-open"]
+        },
+        {
+          "relation_id": "active-session-from-process-evidence",
+          "primitive": "ReferencedObjectFromField",
+          "access_root": "sessions",
+          "locator": "{pid}.json",
+          "identity_inputs": ["observed-pid", "native-session-id"],
+          "bounds": { "max_fan_out": 8, "max_depth": 1, "max_objects": 8, "max_bytes": 524288, "max_rows": 0 },
+          "unavailable_behavior": "skip_optional",
+          "claim_refs": ["claude-scope-relations-open", "claude-drift-active-name-since"]
+        },
+        {
+          "relation_id": "task-artifacts-from-evidence",
+          "primitive": "ArtifactLocatorFromEvidence",
+          "access_root": "home",
+          "locator": "task-artifact-locator",
+          "identity_inputs": ["native-session-id", "actor-key", "task-or-plan-evidence"],
+          "bounds": { "max_fan_out": 256, "max_depth": 3, "max_objects": 512, "max_bytes": 268435456, "max_rows": 0 },
+          "unavailable_behavior": "skip_optional",
+          "claim_refs": ["claude-scope-relations-open", "claude-runtime-semantics-open"]
+        },
+        {
+          "relation_id": "file-artifacts-from-evidence",
+          "primitive": "ArtifactLocatorFromEvidence",
+          "access_root": "home",
+          "locator": "file-history-artifact-locator",
+          "identity_inputs": ["native-session-id", "backup-name", "artifact-version"],
+          "bounds": { "max_fan_out": 1024, "max_depth": 3, "max_objects": 2048, "max_bytes": 2147483648, "max_rows": 0 },
+          "unavailable_behavior": "skip_optional",
+          "claim_refs": ["claude-scope-relations-open"]
+        }
+      ],
+      "claim_refs": ["claude-scope-relations-open", "claude-identity-rules", "claude-runtime-semantics-open"]
+    }
+  ],
+  "blockers": [
+    "Prove every RFC 012D Claude relation against sanitized lifecycle fixtures.",
+    "Replace conceptual task/file artifact locators with executable common-engine declaration parameters.",
+    "Add future descendant and team inbox membership relations with measured bounds.",
+    "Wire the declarations to the common scoped observer and its access telemetry."
+  ],
+  "claim_refs": ["claude-scope-relations-open"]
+}

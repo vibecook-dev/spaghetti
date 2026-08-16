@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "declaration_id": "grok-session-scope-2026-08-15-candidate",
+  "adapter_id": "grok",
+  "ads_id": "grok-ads-2026-08-15-candidate",
+  "status": "incomplete",
+  "roots": ["sessions"],
+  "programs": [
+    {
+      "program_id": "observe-session-sidecars",
+      "root_entity_kind": "session",
+      "relations": [
+        { "relation_id": "root-history", "primitive": "KnownObject", "access_root": "sessions", "locator": "known-chat-history", "identity_inputs": ["native-session-id", "history-locator"], "bounds": { "max_fan_out": 1, "max_depth": 1, "max_objects": 1, "max_bytes": 2147483648, "max_rows": 0 }, "unavailable_behavior": "record_unavailable", "claim_refs": ["grok-scope-open"] },
+        { "relation_id": "summary-sidecar", "primitive": "SiblingObject", "access_root": "sessions", "locator": "summary.json", "identity_inputs": ["history-object"], "bounds": { "max_fan_out": 1, "max_depth": 1, "max_objects": 1, "max_bytes": 1048576, "max_rows": 0 }, "unavailable_behavior": "skip_optional", "claim_refs": ["grok-scope-open", "grok-identity-open"] },
+        { "relation_id": "events-sidecar", "primitive": "SiblingObject", "access_root": "sessions", "locator": "events.jsonl", "identity_inputs": ["history-object"], "bounds": { "max_fan_out": 1, "max_depth": 1, "max_objects": 1, "max_bytes": 2147483648, "max_rows": 0 }, "unavailable_behavior": "skip_optional", "claim_refs": ["grok-scope-open"] },
+        { "relation_id": "signals-sidecar", "primitive": "SiblingObject", "access_root": "sessions", "locator": "signals.json", "identity_inputs": ["history-object"], "bounds": { "max_fan_out": 1, "max_depth": 1, "max_objects": 1, "max_bytes": 262144, "max_rows": 0 }, "unavailable_behavior": "skip_optional", "claim_refs": ["grok-scope-open"] }
+      ],
+      "claim_refs": ["grok-scope-open", "grok-identity-open"]
+    }
+  ],
+  "blockers": [
+    "Capture sanitized lifecycle and cross-sidecar precedence fixtures.",
+    "Prove reset, partial-line, missing-sidecar, and simultaneous-write behavior.",
+    "Wire the sibling declarations to the common scoped observer."
+  ],
+  "claim_refs": ["grok-scope-open"]
+}

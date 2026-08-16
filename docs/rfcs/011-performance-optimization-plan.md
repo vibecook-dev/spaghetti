@@ -75,6 +75,16 @@ ledger contains 1,512,372 rows because 1,091,790 message facts now own their
 identical native-activity observation instead of writing a second provenance
 row. Schema v44 forces stale caches through this rebuild.
 
+A production-shaped playground replay on the same date resolved why the UI
+still reported approximately 3 minutes 30 seconds. The playground auto-detected
+Claude, Codex, and Grok and reached host readiness in 206.89 seconds: 115.60
+seconds of Claude ingestion, 55.39 seconds of sequential Codex/Grok ingestion,
+and 35.87 seconds of bootstrap finalization. It processed 1,969,824 records and
+built an 8.25 GB database, so it was materially larger than the 1,122,456-record
+single-fixture reference. The full decomposition, limitations, and next
+evidence gates are recorded in
+[`011-playground-cold-start-profile-2026-08-15.md`](./011-playground-cold-start-profile-2026-08-15.md).
+
 ## Contract and gates
 
 RFC 010 section 26.9 and RFC 011 section 27.9 remain authoritative:
@@ -803,6 +813,27 @@ seconds (5.6%) below control. The isolated control scan cost 5.33 seconds; the
 normalized closing treatment reduced finalization from 30.89 to 25.62 seconds.
 All runs retained exact facts/messages/commits, zero retries, mandatory FK/FTS
 audits, and zero final WAL. The clean/recovery split is accepted.
+
+### F30 — the playground adds two serial adapters and a larger finalization tail
+
+A fresh production-host replay reproduced playground readiness at 206.89
+seconds. Seven non-overlapping stages account for the clock: 0.04 seconds of
+preflight/owner open, 115.60 seconds for Claude, 34.22 seconds for Codex, 21.17
+seconds for Grok, 35.87 seconds for bootstrap finalization, 0.13 seconds for the
+canonical catalog probe, and about 0.002 seconds for subscription cursor setup.
+The host starts adapters sequentially, so the first three scan stages add
+directly. The service also drops the host's `finalizing` progress event, hiding
+the final 35.87-second stage from the playground without causing it.
+
+The replay read 1,969,824 records, emitted 3,702,939 facts, committed 37,771
+logical transactions, changed 6,543,287 SQLite rows, and allocated an 8.25 GB
+database. Physical writer transactions accumulated 105.92 seconds and ten
+checkpoints accumulated 43.13 seconds. The database also contained 457,311
+permanent unknown-record diagnostics: 398,745 from Grok and 58,560 from Codex.
+Grok read/decode totaled only 2.18 seconds against 21.17 seconds of adapter wall
+time, making compact equivalent diagnostic retention the next controlled
+hypothesis. No optimization is accepted from this single live-corpus replay;
+the standalone report specifies the required frozen T-C-T gates.
 
 ## Controlled spikes and decisions
 

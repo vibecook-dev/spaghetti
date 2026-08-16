@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "declaration_id": "codex-session-scope-2026-08-15-candidate",
+  "adapter_id": "codex",
+  "ads_id": "codex-ads-2026-08-15-candidate",
+  "status": "incomplete",
+  "roots": ["sessions"],
+  "programs": [
+    {
+      "program_id": "observe-root-rollout",
+      "root_entity_kind": "session",
+      "relations": [
+        {
+          "relation_id": "root-rollout",
+          "primitive": "KnownObject",
+          "access_root": "sessions",
+          "locator": "known-rollout",
+          "identity_inputs": ["native-session-id", "rollout-locator"],
+          "bounds": { "max_fan_out": 1, "max_depth": 1, "max_objects": 1, "max_bytes": 2147483648, "max_rows": 0 },
+          "unavailable_behavior": "record_unavailable",
+          "claim_refs": ["codex-scope-open"]
+        }
+      ],
+      "claim_refs": ["codex-scope-open"]
+    }
+  ],
+  "blockers": [
+    "Capture sanitized rollout lifecycle and runtime semantic fixtures.",
+    "Prove attach-before-create, reset, partial-line, and bounded observer behavior.",
+    "Wire the known-object declaration to the common scoped observer."
+  ],
+  "claim_refs": ["codex-scope-open"]
+}
