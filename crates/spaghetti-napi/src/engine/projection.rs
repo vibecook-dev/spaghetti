@@ -4153,6 +4153,8 @@ mod tests {
     use std::io::Write;
     use std::path::Path;
 
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use base64::Engine as _;
     use tempfile::TempDir;
     use walkdir::WalkDir;
 
@@ -4190,6 +4192,8 @@ mod tests {
     const PROJECT: &str = "-Users-fixture-project";
     const STREAM: &str = "session-transcripts";
     const DECODER: &str = "claude-session-record";
+    const SUBAGENT_STREAM: &str = "subagent-transcripts";
+    const SUBAGENT_DECODER: &str = "claude-subagent-record";
 
     struct TestCommitHook;
 
@@ -6831,6 +6835,411 @@ mod tests {
                 .optional()
                 .unwrap(),
             None
+        );
+    }
+
+    fn oracle_u64(value: &serde_json::Value, label: &str) -> u64 {
+        value
+            .as_u64()
+            .unwrap_or_else(|| panic!("oracle {label} must be an unsigned integer"))
+    }
+
+    fn assert_usage_v2_oracle_totals(
+        connection: &Connection,
+        scope: Option<(&str, &[u8])>,
+        expected: &serde_json::Value,
+    ) {
+        for (column, label) in [
+            ("input_tokens", "input_tokens"),
+            ("output_tokens", "output_tokens"),
+            ("cache_creation_input_tokens", "cache_creation_input_tokens"),
+            ("cache_read_input_tokens", "cache_read_input_tokens"),
+        ] {
+            let select = format!(
+                "SELECT COUNT(*), COUNT({column}), COALESCE(SUM({column}), 0) FROM usage_v2_response_contributions"
+            );
+            let (responses, known, total): (i64, i64, i64) = match scope {
+                Some((scope_column, scope_key)) => connection
+                    .query_row(
+                        &format!("{select} WHERE {scope_column} = ?1"),
+                        [scope_key],
+                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                    )
+                    .unwrap(),
+                None => connection
+                    .query_row(&select, [], |row| {
+                        Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+                    })
+                    .unwrap(),
+            };
+            let expected_bucket = &expected[label];
+            assert_eq!(
+                u64::try_from(total).unwrap(),
+                oracle_u64(&expected_bucket["knownValue"], "knownValue"),
+                "{label} known total diverged from the independent oracle"
+            );
+            assert_eq!(
+                u64::try_from(known).unwrap(),
+                oracle_u64(&expected_bucket["knownResponses"], "knownResponses"),
+                "{label} known coverage diverged from the independent oracle"
+            );
+            assert_eq!(
+                u64::try_from(responses - known).unwrap(),
+                oracle_u64(&expected_bucket["unknownResponses"], "unknownResponses"),
+                "{label} unknown coverage diverged from the independent oracle"
+            );
+            let expected_completeness = if responses == known {
+                "complete"
+            } else {
+                "partial"
+            };
+            assert_eq!(
+                expected_bucket["completeness"].as_str(),
+                Some(expected_completeness)
+            );
+        }
+    }
+
+    #[test]
+    fn usage_v2_projection_matches_independent_qualified_oracle() {
+        let repository = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let fixture: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(repository.join(
+                "agent-support/claude-code/candidate-2026-08-15/fixtures/usage-v2/response-revisions.json",
+            ))
+            .unwrap(),
+        )
+        .unwrap();
+        let oracle: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(repository.join(
+                "agent-support/claude-code/candidate-2026-08-15/reports/usage-v2-oracle-v1.json",
+            ))
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(oracle["oracleContractVersion"], 1);
+
+        let root = TempDir::new().unwrap();
+        let adapter = ClaudeCodeAdapter::new();
+        let source_instance = SourceInstance {
+            id: 1,
+            spec: AdapterSourceInstanceSpec {
+                identity_contract_version: 1,
+                stable_key: SourceInstanceKey::new(b"fixture-root".to_vec()).unwrap(),
+                display_name: "fixture".to_string(),
+                roots: vec![SourceRoot {
+                    name: "projects".to_string(),
+                    path: root.path().to_path_buf(),
+                }],
+                discovery_reason: "fixture".to_string(),
+            },
+        };
+        let mut connection = database();
+        let source_instance_id = source_instance_catalog_id("claude-code", b"fixture-root");
+        let mut actor_keys = BTreeMap::<String, Vec<u8>>::new();
+        let mut session_keys = BTreeMap::<String, Vec<u8>>::new();
+        let mut object_ids = BTreeMap::<String, i64>::new();
+        let mut accepted_revisions = 0_u64;
+        let mut malformed_snapshots = 0_u64;
+        let mut clock = 10_i64;
+
+        for native_object in fixture["scenario"]["objects"].as_array().unwrap() {
+            let object_label = native_object["objectId"].as_str().unwrap();
+            let session_label = native_object["sessionId"].as_str().unwrap();
+            let actor_label = native_object["actorId"].as_str().unwrap();
+            let role = native_object["role"].as_str().unwrap();
+            let (object_stream, decoder) = if role == "root" {
+                (STREAM, DECODER)
+            } else {
+                (SUBAGENT_STREAM, SUBAGENT_DECODER)
+            };
+            let stream_id = source_stream_catalog_id(source_instance_id, object_stream);
+            let object_key = object_label.as_bytes();
+            let relative_path = if role == "root" {
+                Path::new(&format!("{PROJECT}/{SESSION}.jsonl")).to_path_buf()
+            } else {
+                Path::new(&format!(
+                    "{PROJECT}/{SESSION}/subagents/agent-{actor_label}.jsonl"
+                ))
+                .to_path_buf()
+            };
+            let object_context = adapter
+                .bootstrap_object(
+                    &source_instance,
+                    &SourceObjectDescriptor {
+                        stream_id: StreamId::new(object_stream).unwrap(),
+                        object_key: object_key.to_vec(),
+                        relative_path: relative_path.clone(),
+                    },
+                )
+                .unwrap();
+            let mut registration = request(
+                ExpectedSourceCursor::Absent,
+                1,
+                SourceCursor::append_offset(0).into_bytes(),
+                clock,
+            );
+            registration.stream.stream_key = object_stream.to_string();
+            registration.stream.decoder_key = decoder.to_string();
+            registration.object.object_key = object_key.to_vec();
+            registration.object.display_path = Some(relative_path.to_string_lossy().into_owned());
+            apply_observation_commit(&mut connection, &registration).unwrap();
+            let object_catalog_id =
+                crate::engine::commit::source_object_catalog_id(stream_id, object_key)
+                    .try_into()
+                    .unwrap();
+            object_ids.insert(object_label.to_string(), object_catalog_id);
+            let mut state = DecodeCommitState {
+                expected_generation: 1,
+                cursor: SourceCursor::append_offset(0).into_bytes(),
+                decoder_state: None,
+            };
+            let mut prior_generation = None;
+
+            for generation_doc in native_object["generations"].as_array().unwrap() {
+                let generation = generation_doc["generation"].as_u64().unwrap();
+                if prior_generation.is_some() {
+                    state.decoder_state = None;
+                }
+                prior_generation = Some(generation);
+                for entry in generation_doc["records"].as_array().unwrap() {
+                    let cursor_start = entry["cursorStart"].as_u64().unwrap();
+                    let cursor_end = entry["cursorEnd"].as_u64().unwrap();
+                    let payload = serde_json::to_vec(&entry["record"]).unwrap();
+                    let record = SourceRecord::new(
+                        &RecordOrigin {
+                            source_instance_id,
+                            stream_id,
+                            object_id: u64::try_from(object_catalog_id).unwrap(),
+                            observed_at: clock,
+                            source_timestamp_hint: None,
+                            media_type: SourceMediaType::new("application/x-ndjson").unwrap(),
+                        },
+                        generation,
+                        SourceCursor::append_offset(cursor_start),
+                        SourceCursor::append_offset(cursor_end),
+                        0,
+                        payload,
+                    );
+                    let mut batch = FactBatch::new_with_semantic_context(
+                        16,
+                        8,
+                        FactSemanticContext::new(
+                            &AdapterId::new("claude-code").unwrap(),
+                            1,
+                            b"fixture-root",
+                            object_stream.as_bytes(),
+                            object_key,
+                            1,
+                        )
+                        .unwrap(),
+                    )
+                    .unwrap();
+                    adapter
+                        .decode(
+                            DecodeContext {
+                                decoder: &DecoderId::new(decoder).unwrap(),
+                                object_context: &object_context,
+                                decoder_state: state.decoder_state.as_deref(),
+                            },
+                            &record,
+                            &mut batch,
+                        )
+                        .unwrap();
+                    malformed_snapshots += batch
+                        .diagnostics()
+                        .iter()
+                        .filter(|diagnostic| {
+                            matches!(
+                                diagnostic.code.as_str(),
+                                "claude_usage_v2_shape" | "claude_usage_v2_bucket"
+                            )
+                        })
+                        .count() as u64;
+                    for envelope in batch.facts() {
+                        let Fact::UsageRevisionV2(fact) = &envelope.value else {
+                            continue;
+                        };
+                        accepted_revisions += 1;
+                        match actor_keys.entry(actor_label.to_string()) {
+                            std::collections::btree_map::Entry::Vacant(entry) => {
+                                entry.insert(fact.actor_run.as_bytes().to_vec());
+                            }
+                            std::collections::btree_map::Entry::Occupied(entry) => {
+                                assert_eq!(entry.get().as_slice(), fact.actor_run.as_bytes());
+                            }
+                        }
+                        match session_keys.entry(session_label.to_string()) {
+                            std::collections::btree_map::Entry::Vacant(entry) => {
+                                entry.insert(fact.session.as_bytes().to_vec());
+                            }
+                            std::collections::btree_map::Entry::Occupied(entry) => {
+                                assert_eq!(entry.get().as_slice(), fact.session.as_bytes());
+                            }
+                        }
+                    }
+
+                    let committed_cursor = record.cursor_end.as_bytes().to_vec();
+                    let mut commit = request(
+                        ExpectedSourceCursor::At {
+                            generation: state.expected_generation,
+                            committed_cursor: state.cursor.clone(),
+                        },
+                        generation,
+                        committed_cursor.clone(),
+                        clock + 1,
+                    );
+                    commit.stream.stream_key = object_stream.to_string();
+                    commit.stream.decoder_key = decoder.to_string();
+                    commit.object.object_key = object_key.to_vec();
+                    commit.object.display_path = Some(relative_path.to_string_lossy().into_owned());
+                    if batch.next_decoder_state().is_some() {
+                        commit.object.decoder_state_version =
+                            Some(adapter.manifest().contract_version);
+                    }
+                    apply_fact_observation_commit(&mut connection, &commit, &batch).unwrap();
+                    state.expected_generation = generation;
+                    state.cursor = committed_cursor;
+                    state.decoder_state = batch.next_decoder_state().map(ToOwned::to_owned);
+                    clock += 2;
+                }
+            }
+        }
+
+        assert_eq!(
+            accepted_revisions,
+            oracle_u64(
+                &oracle["observations"]["acceptedRevisions"],
+                "acceptedRevisions"
+            )
+        );
+        assert_eq!(
+            malformed_snapshots,
+            oracle_u64(
+                &oracle["observations"]["malformedSnapshots"],
+                "malformedSnapshots"
+            )
+        );
+        assert_eq!(
+            u64::try_from(count(&connection, "usage_v2_response_contributions")).unwrap(),
+            oracle_u64(&oracle["finalState"]["responseCount"], "responseCount")
+        );
+        assert_usage_v2_oracle_totals(&connection, None, &oracle["finalState"]["aggregate"]);
+        for actor in oracle["finalState"]["actors"].as_array().unwrap() {
+            let actor_label = actor["actorId"].as_str().unwrap();
+            assert_usage_v2_oracle_totals(
+                &connection,
+                Some(("actor_run_key", &actor_keys[actor_label])),
+                &actor["totals"],
+            );
+        }
+        for session in oracle["finalState"]["sessions"].as_array().unwrap() {
+            let session_label = session["sessionId"].as_str().unwrap();
+            assert_usage_v2_oracle_totals(
+                &connection,
+                Some(("session_key", &session_keys[session_label])),
+                &session["totals"],
+            );
+        }
+
+        let root_object = object_ids["fixture-id-002"];
+        let corrected: (i64, i64, i64, i64, Vec<u8>, Vec<u8>) = connection
+            .query_row(
+                r#"
+                SELECT u.input_tokens, u.output_tokens,
+                       u.cache_creation_input_tokens, u.cache_read_input_tokens,
+                       f.cursor_start, f.cursor_end
+                FROM usage_v2_response_contributions u
+                JOIN fact_records f ON f.fact_id = u.fact_id
+                WHERE u.source_object_id = ?1 AND u.response_key = ?2
+                "#,
+                params![root_object, b"fixture-id-020".as_slice()],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            (corrected.0, corrected.1, corrected.2, corrected.3),
+            (8, 4, 1, 2)
+        );
+        assert_eq!(
+            SourceCursor::from_opaque(corrected.4)
+                .unwrap()
+                .append_offset_value(),
+            Some(300)
+        );
+        assert_eq!(
+            SourceCursor::from_opaque(corrected.5)
+                .unwrap()
+                .append_offset_value(),
+            Some(400)
+        );
+
+        let fallback: (Vec<u8>, i64, Option<i64>, String) = connection
+            .query_row(
+                r#"
+                SELECT response_key, input_tokens, output_tokens, response_identity
+                FROM usage_v2_response_contributions
+                WHERE source_object_id = ?1 AND response_identity = 'source_record_fallback'
+                "#,
+                [root_object],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            URL_SAFE_NO_PAD.encode(fallback.0),
+            "c291cmNlLXJlY29yZC12MQAAAAAAAAAACgEBAAAAAAAAAlgAAAAAAAAACgEBAAAAAAAAArw"
+        );
+        assert_eq!(
+            (fallback.1, fallback.2, fallback.3),
+            (0, None, "source_record_fallback".to_string())
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM usage_v2_response_contributions WHERE source_object_id = ?1 AND request_id = 'fixture-id-030'",
+                    [root_object],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            2,
+            "requestId is metadata and must not merge the two root responses"
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM usage_v2_response_contributions WHERE response_key = ?1",
+                    [b"fixture-id-021".as_slice()],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            2,
+            "the same native response ID in two source objects is two contributions"
+        );
+        let child_object = object_ids["fixture-id-004"];
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*), MIN(source_generation), MAX(source_generation), SUM(input_tokens) FROM usage_v2_response_contributions WHERE source_object_id = ?1",
+                    [child_object],
+                    |row| Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, i64>(3)?,
+                    )),
+                )
+                .unwrap(),
+            (2, 2, 2, 10),
+            "generation two must completely replace the child object's 99-token generation"
         );
     }
 

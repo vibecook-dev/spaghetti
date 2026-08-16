@@ -37,6 +37,7 @@
     "experiment:runtime-observation-census": "python3 scripts/runtime_observation_census/census.py",
     "test:catalog-census": "python3 scripts/catalog_census/test_census.py",
     "test:runtime-observation-census": "python3 scripts/runtime_observation_census/test_census.py",
+    "test:usage-v2-oracle": "python3 scripts/usage_v2_oracle/test_oracle.py",
     "agent-support:validate": "python3 scripts/agent_support/validate.py",
     "test:agent-support": "python3 -m unittest scripts.agent_support.test_contracts",
     "test:packages": "pnpm --filter @vibecook/spaghetti-sdk test && pnpm --filter @vibecook/spaghetti test",

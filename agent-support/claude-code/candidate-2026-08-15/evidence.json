@@ -45,12 +45,25 @@
     },
     {
       "claim_id": "claude-runtime-semantics-open",
-      "statement": "Canonical actor-scoped response usage revisions and a durable response-replacement shadow reducer are implemented; the independent corpus oracle, public usage migration, affiliation grouping, effective model/effort/mode, interaction lifecycle, and team/workflow correlation remain required before support promotion.",
+      "statement": "Canonical actor-scoped response usage revisions, a durable response-replacement shadow reducer, and independent frozen sanitized-oracle parity at response, actor, and session scope are implemented; private native corpus-scale parity, public usage migration, affiliation grouping, effective model/effort/mode, interaction lifecycle, and team/workflow correlation remain required before support promotion.",
       "state": "degraded",
       "sources": [
         { "kind": "design_record", "path": "docs/rfcs/012c-runtime-semantics-and-usage-v2.md", "sha256": null, "locator": "Normative runtime facts and release gates" },
         { "kind": "code_reference", "path": "crates/spaghetti-napi/src/claude/adapter.rs", "sha256": null, "locator": "claude_usage_v2_fact" },
-        { "kind": "code_reference", "path": "crates/spaghetti-napi/src/engine/projection.rs", "sha256": null, "locator": "apply_usage_v2_facts" }
+        { "kind": "code_reference", "path": "crates/spaghetti-napi/src/engine/projection.rs", "sha256": null, "locator": "apply_usage_v2_facts and usage_v2_projection_matches_independent_qualified_oracle" },
+        { "kind": "code_reference", "path": "scripts/usage_v2_oracle/oracle.py", "sha256": null, "locator": "independent qualified response reducer" },
+        {
+          "kind": "sanitized_fixture",
+          "path": "agent-support/claude-code/candidate-2026-08-15/fixtures/usage-v2/response-revisions.json",
+          "sha256": "sha256:1fd95da4905faa0302f0563224e018f367996e1eef701fd587f90f2177878893",
+          "locator": "root and child response revisions, missing buckets, malformed correction, and generation reset"
+        },
+        {
+          "kind": "experiment_report",
+          "path": "agent-support/claude-code/candidate-2026-08-15/reports/usage-v2-oracle-v1.json",
+          "sha256": "sha256:555ba85bca79f18c500c243d618bd40bc1ce468e4a801951f89fa72ac0324e95",
+          "locator": "oracle contract v1 qualified response, actor, session, and aggregate report"
+        }
       ]
     },
     {

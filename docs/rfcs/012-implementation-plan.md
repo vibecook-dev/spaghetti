@@ -127,8 +127,8 @@ prerequisite for early vertical slices.
 | B3. Durable catalog/query snapshots      | 012B                | Not started | atomic pack plus snapshot pagination conformance               |
 | B4. Progressive host and UX              | 012B                | Not started | cold/warm UI topology and migration tests                      |
 | B5. Catalog performance calibration      | 012B                | Not started | reproducible gate-amendment report                             |
-| C1. Runtime semantic contracts           | 012C                | Not started | actor/usage/state/interaction serialization fixtures           |
-| C2. Usage-v2 shadow projection           | 012C                | Not started | independent qualified-bucket oracle parity                     |
+| C1. Runtime semantic contracts           | 012C                | In progress | actor/usage/state/interaction serialization fixtures           |
+| C2. Usage-v2 shadow projection           | 012C                | In progress | frozen oracle plus native corpus/affiliation parity            |
 | C3. Durable usage migration              | 012C                | Not started | transactional switch and rollback tests                        |
 | C4. Runtime semantic downstream suite    | 012C                | Not started | typed consumers plus durable/live merge without native parsing |
 | D1. Store-free observer kernel           | 012D                | In progress | attach/bootstrap/poll/close, no SQLite/global scan             |
@@ -587,10 +587,16 @@ Current landing status (2026-08-16):
   evolving/upward/downward counters, missing buckets, absent and reused
   `requestId`, actor/session attribution, legacy/v2 numeric divergence, and
   generation reset while keeping the legacy query unchanged; and
-- kept the candidate capability `unsupported`: the independent frozen-corpus
-  oracle, exact-repeat public-event suppression, affiliation regrouping,
+- added an adapter/SDK/database-independent Python oracle, a sanitized frozen
+  root-and-child source-record fixture, and a digest-bound report. The real
+  parent/subagent decoders and durable reducer match it at response, actor,
+  session, and aggregate scope, including qualified unknown coverage, exact
+  zero, framed fallback identity, malformed non-erasure, request-ID reuse, and
+  generation cleanup; and
+- kept the candidate capability `unsupported`: private native corpus-scale
+  parity, exact-repeat public-event suppression, affiliation regrouping,
   readiness/replay orchestration, public query and migration switch, portable
-  serialization, and rollback window are not yet complete.
+  public serialization, and rollback window are not yet complete.
 
 ### C3. Durable migration
 

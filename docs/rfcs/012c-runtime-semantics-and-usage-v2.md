@@ -716,7 +716,9 @@ FTS remain compared to their existing accepted oracles; usage is deliberately
 compared to the new v2 oracle.
 
 Current implementation status (2026-08-16): steps 1 and 2 have landed as a
-non-public shadow. Claude decoder contract 17 emits a canonical
+non-public shadow, and step 4 now has frozen sanitized conformance-corpus
+evidence at response, actor, session, and aggregate scope. Claude decoder
+contract 17 emits a canonical
 `runtime.usage-v2` fact beside the unchanged legacy delta. The fact uses
 non-empty `message.id` first, an object/generation/source-record fallback when
 it is absent, canonical session and actor-run keys, independently qualified
@@ -730,10 +732,13 @@ non-duplication, evolving and downward counters, exact zero, missing buckets,
 absent and reused `requestId`, actor/session grouping, malformed-snapshot
 non-erasure, and generation replacement. The legacy projection remains the
 only public usage path and intentionally retains its old row-additive result.
-Steps 3 through 7 remain open: a frozen-corpus oracle independent of the
-adapter, qualification/coverage comparison at corpus scale, affiliation
-regrouping, readiness/replay orchestration, public query serialization and
-atomic selection, and the compatibility/rollback window.
+The independent Python oracle imports no adapter, SDK, or database code; its
+digest-bound root/child fixture and report are consumed by a Rust integration
+test that exercises the real parent and subagent streams plus the durable
+reducer. Step 3, private native corpus-scale qualification/coverage parity, the
+affiliation cases in steps 4 and 5, steps 6 and 7, readiness/replay
+orchestration, public query serialization, and the compatibility/rollback
+window remain open.
 
 ## 14. Failure and correction semantics
 

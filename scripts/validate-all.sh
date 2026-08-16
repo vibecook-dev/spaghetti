@@ -63,6 +63,7 @@ run_suite "RFC 011 Architecture Boundaries" scripts/architecture/check_rfc011_bo
 run_suite "RFC 012 / RFC 011 Compatibility Ledger" scripts/architecture/check_rfc012_delta.py
 run_suite "RFC 012A Agent Support Contracts" scripts/agent_support/validate.py
 run_suite "RFC 012A Agent Support Tooling" -m unittest scripts.agent_support.test_contracts
+run_suite "RFC 012C Usage-v2 Oracle" scripts/usage_v2_oracle/test_oracle.py
 
 echo "=============================="
 echo "Validation suites: $PASS passed, $FAIL failed, $SKIP skipped"
