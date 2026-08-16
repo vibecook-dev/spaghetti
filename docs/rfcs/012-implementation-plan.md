@@ -241,11 +241,16 @@ Current landing status (2026-08-16):
   no canonical reference, duplicate canonical revisions fail before ordinal
   mutation, dependency-derived facts can supply an explicit semantic revision
   rather than pretending the primary record owns the change, and the shared
-  durable/scoped decode boundary supplies the same context; and
-- retained A1 as `In progress`: built-in fact-family migration, durable
-  persistence/query exposure, full semantic reduction, tier/view
-  compositionality, N-API fixture parity, and full-only versus composed reducer
-  digests remain.
+  durable/scoped decode boundary supplies the same context;
+- preserved explicit semantic identities in the durable fact transaction beside
+  the RFC 011 storage key: schema v45 stores the complete nullable
+  source-record/fact/revision triple, rejects partial or non-32-byte triples,
+  rejects duplicate non-null revision identities, leaves legacy rows null, and
+  removes the identities with their owning generation; transaction tests prove
+  a uniqueness failure cannot advance the source cursor; and
+- retained A1 as `In progress`: built-in fact-family migration, durable query
+  exposure, full semantic reduction, tier/view compositionality, N-API fixture
+  parity, and full-only versus composed reducer digests remain.
 
 The repository-wide native-surface validator also discovered current Claude
 drift that predates this model slice: `bridge-session` records now include
@@ -654,11 +659,13 @@ Current landing status (2026-08-16):
 
 D1 remains `In progress`: watcher-before-scan, multi-object discovery/cursor
 orchestration, declared relation-backed decoder dependency access, built-in
-canonical fact-revision adoption plus durable preservation and semantic
-reduction/events, the public ordered multiplexer and poll/readiness barriers,
-coverage, overflow/resync epochs, artifact mediation, cancellation waiting, the
-trusted native version-probe driver, and the complete public request are not yet
-implemented.
+canonical fact-revision adoption plus semantic reduction/events, durable query
+exposure, the public ordered multiplexer and poll/readiness barriers, coverage,
+overflow/resync epochs, artifact mediation, cancellation waiting, the trusted
+native version-probe driver, and the complete public request are not yet
+implemented. The generic fact ledger now preserves an explicit semantic
+revision atomically when a decoder supplies one; that storage seam alone does
+not make a legacy built-in fact canonical or observable.
 
 ### D2. Claude scope composition
 

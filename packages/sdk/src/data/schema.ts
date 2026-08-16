@@ -116,7 +116,9 @@ import type { SqliteService } from '../io/index.js';
 // count, and maximum activity without indexing one projection row per message.
 // v44: unambiguous message facts own paired native-activity evidence from the
 // same source observation; compact run evidence keeps its dimensions/count.
-export const SCHEMA_VERSION = 44;
+// v45: nullable RFC 012A source-record/fact/revision identity beside the RFC
+// 011 store key, with complete-triple and unique-revision enforcement.
+export const SCHEMA_VERSION = 45;
 
 export const TOKEN_ACTIVITY_TRIGGER_NAMES = [
   'token_activity_messages_ai',
@@ -636,6 +638,9 @@ CREATE TABLE IF NOT EXISTS fact_records (
   fact_id BLOB PRIMARY KEY,
   fact_kind TEXT NOT NULL,
   entity_key BLOB,
+  semantic_source_record_id BLOB,
+  semantic_fact_id BLOB,
+  semantic_fact_revision_id BLOB,
   source_instance_id INTEGER NOT NULL REFERENCES source_instances(source_instance_id) ON DELETE CASCADE,
   source_stream_id INTEGER NOT NULL REFERENCES source_streams(source_stream_id) ON DELETE CASCADE,
   source_object_id INTEGER NOT NULL REFERENCES source_objects(source_object_id) ON DELETE CASCADE,
@@ -647,7 +652,19 @@ CREATE TABLE IF NOT EXISTS fact_records (
   observed_at INTEGER NOT NULL,
   payload_json BLOB NOT NULL,
   payload_codec TEXT NOT NULL DEFAULT 'identity',
-  last_commit_seq INTEGER NOT NULL REFERENCES ingest_commits(commit_seq) ON DELETE RESTRICT
+  last_commit_seq INTEGER NOT NULL REFERENCES ingest_commits(commit_seq) ON DELETE RESTRICT,
+  CHECK (
+    (semantic_source_record_id IS NULL AND semantic_fact_id IS NULL AND semantic_fact_revision_id IS NULL)
+    OR
+    (
+      semantic_source_record_id IS NOT NULL
+      AND semantic_fact_id IS NOT NULL
+      AND semantic_fact_revision_id IS NOT NULL
+      AND length(semantic_source_record_id) = 32
+      AND length(semantic_fact_id) = 32
+      AND length(semantic_fact_revision_id) = 32
+    )
+  )
 );
 
 CREATE TABLE IF NOT EXISTS fact_dependency_reads (
@@ -1743,6 +1760,7 @@ CREATE INDEX IF NOT EXISTS idx_change_log_topic_cursor ON change_log(topic, comm
 CREATE INDEX IF NOT EXISTS idx_projection_versions_readiness ON projection_versions(readiness, projection_id);
 CREATE INDEX IF NOT EXISTS idx_source_record_errors_commit ON source_record_errors(first_commit_seq);
 CREATE INDEX IF NOT EXISTS idx_fact_records_object_generation ON fact_records(source_object_id, source_generation);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_fact_records_semantic_revision ON fact_records(semantic_fact_revision_id) WHERE semantic_fact_revision_id IS NOT NULL;
 DROP INDEX IF EXISTS idx_fact_records_source_instance;
 CREATE INDEX IF NOT EXISTS idx_fact_records_source_instance_compact ON fact_records(source_instance_id);
 CREATE INDEX IF NOT EXISTS idx_canonical_sessions_project ON canonical_sessions(project_key, session_key);

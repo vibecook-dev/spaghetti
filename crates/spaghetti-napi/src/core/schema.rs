@@ -171,7 +171,10 @@ const CANONICAL_FTS_TRIGGERS: &[&str] = &[
 /// from the same source record/run/timestamp. The compact run-evidence row
 /// retains the adapter's evidence dimensions and count while the rebuild drops
 /// the second provenance row for the identical source observation.
-pub const SCHEMA_VERSION: u32 = 44;
+/// v45: explicit RFC 012A source-record/fact/revision identities are retained
+/// beside the RFC 011 storage key. Legacy facts keep an all-NULL semantic
+/// triple; a partial triple or duplicate semantic revision is rejected.
+pub const SCHEMA_VERSION: u32 = 45;
 
 /// Full DDL for the current schema — lifted verbatim from the TS `SCHEMA_SQL`
 /// template literal. Whitespace differs; structure does not.
@@ -534,6 +537,9 @@ CREATE TABLE IF NOT EXISTS fact_records (
   fact_id BLOB PRIMARY KEY,
   fact_kind TEXT NOT NULL,
   entity_key BLOB,
+  semantic_source_record_id BLOB,
+  semantic_fact_id BLOB,
+  semantic_fact_revision_id BLOB,
   source_instance_id INTEGER NOT NULL REFERENCES source_instances(source_instance_id) ON DELETE CASCADE,
   source_stream_id INTEGER NOT NULL REFERENCES source_streams(source_stream_id) ON DELETE CASCADE,
   source_object_id INTEGER NOT NULL REFERENCES source_objects(source_object_id) ON DELETE CASCADE,
@@ -545,7 +551,19 @@ CREATE TABLE IF NOT EXISTS fact_records (
   observed_at INTEGER NOT NULL,
   payload_json BLOB NOT NULL,
   payload_codec TEXT NOT NULL DEFAULT 'identity',
-  last_commit_seq INTEGER NOT NULL REFERENCES ingest_commits(commit_seq) ON DELETE RESTRICT
+  last_commit_seq INTEGER NOT NULL REFERENCES ingest_commits(commit_seq) ON DELETE RESTRICT,
+  CHECK (
+    (semantic_source_record_id IS NULL AND semantic_fact_id IS NULL AND semantic_fact_revision_id IS NULL)
+    OR
+    (
+      semantic_source_record_id IS NOT NULL
+      AND semantic_fact_id IS NOT NULL
+      AND semantic_fact_revision_id IS NOT NULL
+      AND length(semantic_source_record_id) = 32
+      AND length(semantic_fact_id) = 32
+      AND length(semantic_fact_revision_id) = 32
+    )
+  )
 );
 
 CREATE TABLE IF NOT EXISTS fact_dependency_reads (
@@ -1641,6 +1659,7 @@ CREATE INDEX IF NOT EXISTS idx_change_log_topic_cursor ON change_log(topic, comm
 CREATE INDEX IF NOT EXISTS idx_projection_versions_readiness ON projection_versions(readiness, projection_id);
 CREATE INDEX IF NOT EXISTS idx_source_record_errors_commit ON source_record_errors(first_commit_seq);
 CREATE INDEX IF NOT EXISTS idx_fact_records_object_generation ON fact_records(source_object_id, source_generation);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_fact_records_semantic_revision ON fact_records(semantic_fact_revision_id) WHERE semantic_fact_revision_id IS NOT NULL;
 DROP INDEX IF EXISTS idx_fact_records_source_instance;
 CREATE INDEX IF NOT EXISTS idx_fact_records_source_instance_compact ON fact_records(source_instance_id);
 CREATE INDEX IF NOT EXISTS idx_canonical_sessions_project ON canonical_sessions(project_key, session_key);
@@ -3045,6 +3064,7 @@ mod tests {
         ));
         assert!(object_exists(&conn, "table", "canonical_messages"));
         for index in [
+            "idx_fact_records_semantic_revision",
             "idx_canonical_sessions_source_generation",
             "idx_canonical_messages_source_generation",
             "idx_canonical_runs_source_generation",
@@ -3061,6 +3081,9 @@ mod tests {
         for (table, column) in [
             ("source_streams", "raw_retention"),
             ("fact_records", "payload_codec"),
+            ("fact_records", "semantic_source_record_id"),
+            ("fact_records", "semantic_fact_id"),
+            ("fact_records", "semantic_fact_revision_id"),
             ("canonical_messages", "raw_json_codec"),
             ("run_evidence", "evidence_count"),
             ("run_evidence", "last_activity_at"),

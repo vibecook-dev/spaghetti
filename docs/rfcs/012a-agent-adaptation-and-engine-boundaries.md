@@ -265,11 +265,14 @@ an explicit stable key/subkey. A fact whose value also depends on declared side
 evidence supplies an explicit semantic revision key containing that dependency
 revision instead of pretending the primary record alone owns the change. The
 legacy `FactBatch::push` path deliberately emits no canonical revision, so a
-local ordinal is never silently promoted into cross-topology identity. Public
-scoped projection remains gated on migrating the relevant built-in fact
-families, preserving the revision durably, and running the owning semantic
-reducers. Undeclared decoder dependency access fails closed until it is
-composed through an authorized scope relation.
+local ordinal is never silently promoted into cross-topology identity. The
+durable fact transaction preserves a supplied revision as an all-or-none
+`SourceRecordId`/`FactId`/`FactRevisionId` triple beside the RFC 011 key; schema
+constraints reject malformed or duplicate revision identities, while legacy
+facts remain explicitly null. Public scoped projection remains gated on
+migrating the relevant built-in fact families, exposing durable semantic reads,
+and running the owning semantic reducers. Undeclared decoder dependency access
+fails closed until it is composed through an authorized scope relation.
 Attachment may precede root-object creation; each later pass receives a fresh
 declared ledger; close prevents new passes; and the pass report contains neither
 granted paths nor native content. Architecture ratchets prevent the scoped seam

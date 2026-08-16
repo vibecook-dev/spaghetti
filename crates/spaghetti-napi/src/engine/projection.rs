@@ -1501,18 +1501,23 @@ fn persist_facts(
         })
         .collect::<Vec<_>>();
     for fact_chunk in durable_facts.chunks(FACT_INSERT_BATCH_ROWS) {
-        let row = "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+        let row = "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
         let sql = format!(
             r#"
             INSERT INTO fact_records (
-                fact_id, fact_kind, entity_key, source_instance_id,
-                source_stream_id, source_object_id, source_generation,
-                cursor_start, cursor_end, payload_hash, local_fact_ordinal,
-                observed_at, payload_json, payload_codec, last_commit_seq
+                fact_id, fact_kind, entity_key, semantic_source_record_id,
+                semantic_fact_id, semantic_fact_revision_id,
+                source_instance_id, source_stream_id, source_object_id,
+                source_generation, cursor_start, cursor_end, payload_hash,
+                local_fact_ordinal, observed_at, payload_json, payload_codec,
+                last_commit_seq
             ) VALUES {}
             ON CONFLICT(fact_id) DO UPDATE SET
                 fact_kind = excluded.fact_kind,
                 entity_key = excluded.entity_key,
+                semantic_source_record_id = excluded.semantic_source_record_id,
+                semantic_fact_id = excluded.semantic_fact_id,
+                semantic_fact_revision_id = excluded.semantic_fact_revision_id,
                 source_instance_id = excluded.source_instance_id,
                 source_stream_id = excluded.source_stream_id,
                 source_object_id = excluded.source_object_id,
@@ -1530,7 +1535,7 @@ fn persist_facts(
                 .collect::<Vec<_>>()
                 .join(", ")
         );
-        let mut values = Vec::with_capacity(fact_chunk.len() * 15);
+        let mut values = Vec::with_capacity(fact_chunk.len() * 18);
         for (envelope, payload) in fact_chunk {
             use rusqlite::types::Value;
 
@@ -1542,6 +1547,18 @@ fn persist_facts(
             // materially amplifies transcript storage; source provenance is
             // carried by the remaining columns.
             values.push(Value::Null);
+            match envelope.semantic_revision {
+                Some(semantic) => {
+                    values.push(Value::Blob(semantic.source_record_id.as_bytes().to_vec()));
+                    values.push(Value::Blob(semantic.fact_id.as_bytes().to_vec()));
+                    values.push(Value::Blob(semantic.fact_revision_id.as_bytes().to_vec()));
+                }
+                None => {
+                    values.push(Value::Null);
+                    values.push(Value::Null);
+                    values.push(Value::Null);
+                }
+            }
             values.push(Value::Integer(source_instance_id));
             values.push(Value::Integer(source_stream_id));
             values.push(Value::Integer(source_object_id));
@@ -3855,15 +3872,16 @@ mod tests {
         AdapterId, AdapterObjectContext, AgentAdapter, ArtifactCapture, ArtifactContentFact,
         ArtifactMetadataEntry, ArtifactMetadataSnapshotFact, ArtifactObservationKind, ContentBlock,
         DecodeContext, DecoderId, DependencyRevision, EvidenceKind, EvidenceStrength, FactBatch,
-        HookEventSummary, InterpretationSettingsDocumentStatus, InterpretationSettingsFact,
-        InterpretationSettingsLayer, InterpretationSettingsSnapshot, MessageFact,
-        PersistedToolResultFact, PlanSnapshotFact, PresenceFact, ProjectMemoryDocumentFact,
-        RunEvidenceFact, RunFact, SessionFact, SessionIndexEntrySnapshot, SessionIndexSnapshotFact,
-        SourceInstance, SourceInstanceKey, SourceInstanceSpec as AdapterSourceInstanceSpec,
-        SourceObjectDescriptor, SourceRoot, StreamId, TaskCollectionKind, TaskItemSnapshot,
-        TaskSnapshotCoverage, TaskSnapshotFact, TaskStatus, TeamInboxMessageSnapshot,
-        TeamInboxSnapshotFact, TeamMemberSnapshot, TeamSnapshotFact, WorkflowMemberEventFact,
-        WorkflowMemberEventKind, WorkflowSnapshotFact, WorkflowStatus,
+        FactSemanticContext, HookEventSummary, InterpretationSettingsDocumentStatus,
+        InterpretationSettingsFact, InterpretationSettingsLayer, InterpretationSettingsSnapshot,
+        MessageFact, PersistedToolResultFact, PlanSnapshotFact, PresenceFact,
+        ProjectMemoryDocumentFact, RunEvidenceFact, RunFact, SessionFact,
+        SessionIndexEntrySnapshot, SessionIndexSnapshotFact, SourceInstance, SourceInstanceKey,
+        SourceInstanceSpec as AdapterSourceInstanceSpec, SourceObjectDescriptor, SourceRoot,
+        StreamId, TaskCollectionKind, TaskItemSnapshot, TaskSnapshotCoverage, TaskSnapshotFact,
+        TaskStatus, TeamInboxMessageSnapshot, TeamInboxSnapshotFact, TeamMemberSnapshot,
+        TeamSnapshotFact, WorkflowMemberEventFact, WorkflowMemberEventKind, WorkflowSnapshotFact,
+        WorkflowStatus,
     };
     use crate::claude::ClaudeCodeAdapter;
     use crate::core::schema;
@@ -4064,6 +4082,18 @@ mod tests {
             source_timestamp_hint: None,
             media_type: SourceMediaType::new("application/x-ndjson").unwrap(),
         }
+    }
+
+    fn semantic_context(object_key: &[u8]) -> FactSemanticContext {
+        FactSemanticContext::new(
+            &AdapterId::new("claude-code").unwrap(),
+            1,
+            b"fixture-root",
+            STREAM.as_bytes(),
+            object_key,
+            1,
+        )
+        .unwrap()
     }
 
     fn object_catalog_id(object_key: &[u8]) -> i64 {
@@ -5664,6 +5694,214 @@ mod tests {
         assert_eq!(
             count(&connection, "fact_records"),
             i64::try_from(FACTS).unwrap()
+        );
+    }
+
+    #[test]
+    fn canonical_fact_revision_persists_atomically_while_legacy_rows_remain_null() {
+        let mut connection = database();
+        let canonical_record = direct_record(1, 0, 1, 20, b"canonical");
+        let mut canonical =
+            FactBatch::new_with_semantic_context(1, 1, semantic_context(b"fixture-transcript"))
+                .unwrap();
+        canonical
+            .push_derived(
+                &canonical_record,
+                b"unknown-record",
+                Fact::UnknownRecord {
+                    native_kind: Some("fixture".to_string()),
+                    raw_payload: Vec::new(),
+                    reason: "canonical".to_string(),
+                },
+            )
+            .unwrap();
+        let semantic = canonical.facts()[0].semantic_revision.unwrap();
+        apply_fact_observation_commit(
+            &mut connection,
+            &request(
+                ExpectedSourceCursor::Absent,
+                1,
+                canonical_record.cursor_end.as_bytes().to_vec(),
+                20,
+            ),
+            &canonical,
+        )
+        .unwrap();
+
+        let stored = connection
+            .query_row(
+                "SELECT semantic_source_record_id, semantic_fact_id, semantic_fact_revision_id FROM fact_records",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, Option<Vec<u8>>>(0)?,
+                        row.get::<_, Option<Vec<u8>>>(1)?,
+                        row.get::<_, Option<Vec<u8>>>(2)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            stored.0.as_deref(),
+            Some(semantic.source_record_id.as_bytes().as_slice())
+        );
+        assert_eq!(
+            stored.1.as_deref(),
+            Some(semantic.fact_id.as_bytes().as_slice())
+        );
+        assert_eq!(
+            stored.2.as_deref(),
+            Some(semantic.fact_revision_id.as_bytes().as_slice())
+        );
+        assert!(connection
+            .execute(
+                "UPDATE fact_records SET semantic_fact_id = NULL WHERE fact_id = ?1",
+                [canonical.facts()[0].id.as_bytes().as_slice()],
+            )
+            .is_err());
+
+        let legacy_record = direct_record(1, 1, 2, 30, b"legacy");
+        let mut legacy = FactBatch::new(1, 1).unwrap();
+        let legacy_id = legacy
+            .push(
+                &legacy_record,
+                Fact::UnknownRecord {
+                    native_kind: Some("fixture".to_string()),
+                    raw_payload: Vec::new(),
+                    reason: "legacy".to_string(),
+                },
+            )
+            .unwrap();
+        apply_fact_observation_commit(
+            &mut connection,
+            &request(
+                ExpectedSourceCursor::At {
+                    generation: 1,
+                    committed_cursor: canonical_record.cursor_end.as_bytes().to_vec(),
+                },
+                1,
+                legacy_record.cursor_end.as_bytes().to_vec(),
+                30,
+            ),
+            &legacy,
+        )
+        .unwrap();
+        let legacy_semantic_columns: i64 = connection
+            .query_row(
+                "SELECT (semantic_source_record_id IS NULL) + (semantic_fact_id IS NULL) + (semantic_fact_revision_id IS NULL) FROM fact_records WHERE fact_id = ?1",
+                [legacy_id.as_bytes().as_slice()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(legacy_semantic_columns, 3);
+
+        apply_fact_observation_commit(
+            &mut connection,
+            &request(
+                ExpectedSourceCursor::At {
+                    generation: 1,
+                    committed_cursor: legacy_record.cursor_end.as_bytes().to_vec(),
+                },
+                2,
+                SourceCursor::append_offset(0).into_bytes(),
+                40,
+            ),
+            &FactBatch::new(1, 1).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(count(&connection, "fact_records"), 0);
+    }
+
+    #[test]
+    fn durable_semantic_revision_is_unique_across_legacy_fact_rows() {
+        let mut connection = database();
+        remember_test_object(b"fixture-transcript");
+        let first_record = object_record(
+            1,
+            1,
+            SourceCursor::append_offset(0),
+            SourceCursor::append_offset(1),
+            20,
+            b"same",
+        );
+        let mut first =
+            FactBatch::new_with_semantic_context(1, 1, semantic_context(b"fixture-transcript"))
+                .unwrap();
+        first
+            .push_derived(
+                &first_record,
+                b"unknown-record",
+                Fact::UnknownRecord {
+                    native_kind: Some("fixture".to_string()),
+                    raw_payload: Vec::new(),
+                    reason: "same".to_string(),
+                },
+            )
+            .unwrap();
+        apply_fact_observation_commit(
+            &mut connection,
+            &request(
+                ExpectedSourceCursor::Absent,
+                1,
+                first_record.cursor_end.as_bytes().to_vec(),
+                20,
+            ),
+            &first,
+        )
+        .unwrap();
+
+        register_object_key(&mut connection, b"duplicate-view", 30);
+        let duplicate_record = object_record(
+            2,
+            1,
+            SourceCursor::append_offset(0),
+            SourceCursor::append_offset(1),
+            40,
+            b"same",
+        );
+        let mut duplicate =
+            FactBatch::new_with_semantic_context(1, 1, semantic_context(b"fixture-transcript"))
+                .unwrap();
+        duplicate
+            .push_derived(
+                &duplicate_record,
+                b"unknown-record",
+                Fact::UnknownRecord {
+                    native_kind: Some("fixture".to_string()),
+                    raw_payload: Vec::new(),
+                    reason: "same".to_string(),
+                },
+            )
+            .unwrap();
+        assert_ne!(first.facts()[0].id, duplicate.facts()[0].id);
+        assert_eq!(
+            first.facts()[0].semantic_revision,
+            duplicate.facts()[0].semantic_revision
+        );
+        let duplicate_request = request_for_object(
+            b"duplicate-view",
+            ExpectedSourceCursor::At {
+                generation: 1,
+                committed_cursor: SourceCursor::append_offset(0).into_bytes(),
+            },
+            1,
+            duplicate_record.cursor_end.as_bytes().to_vec(),
+            40,
+        );
+        assert!(
+            apply_fact_observation_commit(&mut connection, &duplicate_request, &duplicate).is_err()
+        );
+        assert_eq!(count(&connection, "fact_records"), 1);
+        let duplicate_cursor: Vec<u8> = connection
+            .query_row(
+                "SELECT committed_cursor FROM source_objects WHERE object_key = ?1",
+                [b"duplicate-view".as_slice()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            duplicate_cursor,
+            SourceCursor::append_offset(0).into_bytes()
         );
     }
 
