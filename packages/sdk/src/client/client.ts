@@ -227,6 +227,13 @@ class DefaultSpaghettiClient implements SpaghettiClient {
     return this.query('getUsageActivity', request, options);
   }
 
+  getRuntimeUsageV2(
+    request: SpaghettiClientRequestMap['getRuntimeUsageV2'],
+    options?: SpaghettiQueryOptions,
+  ): Promise<SpaghettiClientResponseMap['getRuntimeUsageV2']> {
+    return this.query('getRuntimeUsageV2', request, options);
+  }
+
   getRuntimeSnapshot(
     request?: Exclude<SpaghettiClientRequestMap['getRuntimeSnapshot'], undefined>,
     options?: SpaghettiQueryOptions,

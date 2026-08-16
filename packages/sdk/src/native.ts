@@ -1312,6 +1312,157 @@ export interface SpaghettiEngineUsageActivity {
   lastCommitSeq?: number;
 }
 
+/** Query one response-revision usage page from the RFC 012C shadow projection. */
+export interface SpaghettiEngineRuntimeUsageV2Options extends SpaghettiEngineHistoryPageOptions {
+  /** Opaque project identity returned by {@link SpaghettiEngine.listHistoryProjects}. */
+  projectId: string;
+  /** Opaque session identity returned by {@link SpaghettiEngine.listHistorySessions}. */
+  sessionId: string;
+  /** Optional RFC 012A actor entity reference returned by a prior page. */
+  actorRunRef?: string;
+  /** Optional affiliation dimension. It must be paired with affiliationTargetRef. */
+  affiliationDimension?: 'team' | 'workflow';
+  /** RFC 012A team/workflow target entity reference paired with affiliationDimension. */
+  affiliationTargetRef?: string;
+}
+
+export interface SpaghettiEngineRuntimeUsageV2ExternalEntityRef {
+  externalEntityReferenceVersion: number;
+  entityKey: string;
+}
+
+export interface SpaghettiEngineRuntimeUsageV2SemanticRevisionRef {
+  semanticReferenceContractVersion: number;
+  factRevisionId: string;
+}
+
+export interface SpaghettiEngineRuntimeUsageV2ValueProvenance {
+  nativeField: string;
+  normalizationContractVersion: number;
+}
+
+export type SpaghettiEngineRuntimeUsageV2Quality = 'exact' | 'native_claimed' | 'derived' | 'estimated' | 'unknown';
+export type SpaghettiEngineRuntimeUsageV2Completeness = 'complete' | 'partial' | 'unknown';
+export type SpaghettiEngineRuntimeUsageV2UnknownReason =
+  | 'missing'
+  | 'unsupported'
+  | 'withheld'
+  | 'not_yet_observed'
+  | 'ambiguous'
+  | 'malformed';
+export type SpaghettiEngineRuntimeUsageV2Authority = 'native_response' | 'adapter_derived';
+
+export interface SpaghettiEngineRuntimeUsageV2TokenValue {
+  value?: number;
+  quality: SpaghettiEngineRuntimeUsageV2Quality;
+  authority: SpaghettiEngineRuntimeUsageV2Authority;
+  completeness: SpaghettiEngineRuntimeUsageV2Completeness;
+  unknownReason?: SpaghettiEngineRuntimeUsageV2UnknownReason;
+  effectiveAt?: number;
+  provenance: SpaghettiEngineRuntimeUsageV2ValueProvenance;
+}
+
+export interface SpaghettiEngineRuntimeUsageV2TextValue {
+  value?: string;
+  quality: SpaghettiEngineRuntimeUsageV2Quality;
+  authority: SpaghettiEngineRuntimeUsageV2Authority;
+  completeness: SpaghettiEngineRuntimeUsageV2Completeness;
+  unknownReason?: SpaghettiEngineRuntimeUsageV2UnknownReason;
+  effectiveAt?: number;
+  provenance: SpaghettiEngineRuntimeUsageV2ValueProvenance;
+}
+
+export interface SpaghettiEngineRuntimeUsageV2Response {
+  usageKey: string;
+  semanticRevisionRef: SpaghettiEngineRuntimeUsageV2SemanticRevisionRef;
+  sourceRecordRef: string;
+  sessionRef: SpaghettiEngineRuntimeUsageV2ExternalEntityRef;
+  actorRunRef: SpaghettiEngineRuntimeUsageV2ExternalEntityRef;
+  responseKeyBase64: string;
+  responseIdentity: 'native_message_id' | 'source_record_fallback';
+  nativeMessageId?: string;
+  requestId?: string;
+  inputTokens: SpaghettiEngineRuntimeUsageV2TokenValue;
+  outputTokens: SpaghettiEngineRuntimeUsageV2TokenValue;
+  cacheCreationInputTokens: SpaghettiEngineRuntimeUsageV2TokenValue;
+  cacheReadInputTokens: SpaghettiEngineRuntimeUsageV2TokenValue;
+  model?: SpaghettiEngineRuntimeUsageV2TextValue;
+  effort?: SpaghettiEngineRuntimeUsageV2TextValue;
+  sourceTime?: string;
+  sourceTimeQuality?: SpaghettiEngineTimestampQuality;
+  observedAtUnixMs: number;
+  sourceGeneration: number;
+  lastCommitSeq: number;
+}
+
+export interface SpaghettiEngineRuntimeUsageV2Affiliation {
+  affiliationRef: SpaghettiEngineRuntimeUsageV2ExternalEntityRef;
+  semanticRevisionRef: SpaghettiEngineRuntimeUsageV2SemanticRevisionRef;
+  dimension: 'team' | 'workflow';
+  targetRef: SpaghettiEngineRuntimeUsageV2ExternalEntityRef;
+  memberRef?: SpaghettiEngineRuntimeUsageV2ExternalEntityRef;
+  nativeTargetId?: string;
+  nativeMemberId?: string;
+  state: 'present' | 'removed' | 'unknown';
+  effectiveAt?: string;
+  effectiveAtQuality?: SpaghettiEngineTimestampQuality;
+  observedAtUnixMs: number;
+  sourceGeneration: number;
+  lastCommitSeq: number;
+}
+
+export interface SpaghettiEngineRuntimeUsageV2ActorContext {
+  actorRunRef: SpaghettiEngineRuntimeUsageV2ExternalEntityRef;
+  semanticRevisionRef: SpaghettiEngineRuntimeUsageV2SemanticRevisionRef;
+  sessionRef: SpaghettiEngineRuntimeUsageV2ExternalEntityRef;
+  role: 'root' | 'child';
+  parentActorRunRef?: SpaghettiEngineRuntimeUsageV2ExternalEntityRef;
+  nativeSessionId?: string;
+  nativeActorId?: string;
+  nativeActorType?: string;
+  /** Current revisions, including explicit removed and unknown relations. */
+  affiliations: SpaghettiEngineRuntimeUsageV2Affiliation[];
+  observedAtUnixMs: number;
+  sourceGeneration: number;
+  lastCommitSeq: number;
+}
+
+export interface SpaghettiEngineRuntimeUsageV2BucketAggregate {
+  knownTokens: number;
+  knownResponseCount: number;
+  exactResponseCount: number;
+  nonExactResponseCount: number;
+  unknownResponseCount: number;
+  completeness: SpaghettiEngineRuntimeUsageV2Completeness;
+}
+
+export interface SpaghettiEngineRuntimeUsageV2Aggregate {
+  responseCount: number;
+  actorCount: number;
+  inputTokens: SpaghettiEngineRuntimeUsageV2BucketAggregate;
+  outputTokens: SpaghettiEngineRuntimeUsageV2BucketAggregate;
+  cacheCreationInputTokens: SpaghettiEngineRuntimeUsageV2BucketAggregate;
+  cacheReadInputTokens: SpaghettiEngineRuntimeUsageV2BucketAggregate;
+}
+
+export interface SpaghettiEngineRuntimeUsageV2Page {
+  contractVersion: number;
+  atCommitSeq: number;
+  /** `shadow` is queryable; `not_materialized` means this session has no v2 projection yet. */
+  projectionStatus: 'shadow' | 'not_materialized';
+  projectId: string;
+  sessionId: string;
+  sessionRef?: SpaghettiEngineRuntimeUsageV2ExternalEntityRef;
+  actorRunRef?: string;
+  affiliationDimension?: 'team' | 'workflow';
+  affiliationTargetRef?: string;
+  aggregate: SpaghettiEngineRuntimeUsageV2Aggregate;
+  items: SpaghettiEngineRuntimeUsageV2Response[];
+  /** Actor contexts referenced by this page, not an unbounded session actor list. */
+  actors: SpaghettiEngineRuntimeUsageV2ActorContext[];
+  nextCursor?: string;
+}
+
 export interface SpaghettiEngineRuntimeSnapshotOptions extends SpaghettiEngineHistoryPageOptions {
   /** Optional project scope. Omit it to retain orphan run/presence evidence. */
   projectId?: string;
@@ -1670,6 +1821,10 @@ export interface SpaghettiEngine {
     options: SpaghettiEngineUsageActivityOptions,
     signal?: AbortSignal,
   ): Promise<SpaghettiEngineUsageActivity>;
+  getRuntimeUsageV2(
+    options: SpaghettiEngineRuntimeUsageV2Options,
+    signal?: AbortSignal,
+  ): Promise<SpaghettiEngineRuntimeUsageV2Page>;
   getRuntimeSnapshot(
     options?: SpaghettiEngineRuntimeSnapshotOptions,
     signal?: AbortSignal,

@@ -98,6 +98,12 @@ export declare class SpaghettiEngine {
    */
   getUsageActivity(options: EngineUsageActivityOptions, signal?: AbortSignal | undefined | null): Promise<EngineUsageActivity>
   /**
+   * Page canonical response-level usage revisions and their current actor
+   * and affiliation context. This is an explicitly shadow-only RFC 012C
+   * surface; legacy additive usage queries remain unchanged.
+   */
+  getRuntimeUsageV2(options: EngineRuntimeUsageV2Options, signal?: AbortSignal | undefined | null): Promise<EngineRuntimeUsageV2Page>
+  /**
    * Return durable run-state and current registry-presence evidence. This
    * intentionally does not probe PIDs or synthesize freshness assessments.
    */
@@ -844,6 +850,145 @@ export interface EngineRuntimeSnapshotOptions {
   cursor?: string
   /** Page size. Defaults to 50 and is capped by the Rust query engine. */
   limit?: number
+}
+
+export interface EngineRuntimeUsageV2ActorContext {
+  actorRunRef: EngineRuntimeUsageV2ExternalEntityRef
+  semanticRevisionRef: EngineRuntimeUsageV2SemanticRevisionRef
+  sessionRef: EngineRuntimeUsageV2ExternalEntityRef
+  role: string
+  parentActorRunRef?: EngineRuntimeUsageV2ExternalEntityRef
+  nativeSessionId?: string
+  nativeActorId?: string
+  nativeActorType?: string
+  affiliations: Array<EngineRuntimeUsageV2Affiliation>
+  observedAtUnixMs: number
+  sourceGeneration: number
+  lastCommitSeq: number
+}
+
+export interface EngineRuntimeUsageV2Affiliation {
+  affiliationRef: EngineRuntimeUsageV2ExternalEntityRef
+  semanticRevisionRef: EngineRuntimeUsageV2SemanticRevisionRef
+  dimension: string
+  targetRef: EngineRuntimeUsageV2ExternalEntityRef
+  memberRef?: EngineRuntimeUsageV2ExternalEntityRef
+  nativeTargetId?: string
+  nativeMemberId?: string
+  state: string
+  effectiveAt?: string
+  effectiveAtQuality?: string
+  observedAtUnixMs: number
+  sourceGeneration: number
+  lastCommitSeq: number
+}
+
+export interface EngineRuntimeUsageV2Aggregate {
+  responseCount: number
+  actorCount: number
+  inputTokens: EngineRuntimeUsageV2BucketAggregate
+  outputTokens: EngineRuntimeUsageV2BucketAggregate
+  cacheCreationInputTokens: EngineRuntimeUsageV2BucketAggregate
+  cacheReadInputTokens: EngineRuntimeUsageV2BucketAggregate
+}
+
+export interface EngineRuntimeUsageV2BucketAggregate {
+  knownTokens: number
+  knownResponseCount: number
+  exactResponseCount: number
+  nonExactResponseCount: number
+  unknownResponseCount: number
+  completeness: string
+}
+
+export interface EngineRuntimeUsageV2ExternalEntityRef {
+  externalEntityReferenceVersion: number
+  entityKey: string
+}
+
+export interface EngineRuntimeUsageV2Options {
+  /** Opaque project identity returned by `listHistoryProjects`. */
+  projectId: string
+  /** Opaque session identity returned by `listHistorySessions`. */
+  sessionId: string
+  /** Optional RFC 012A actor entity reference returned by this query. */
+  actorRunRef?: string
+  /** Optional `team` or `workflow` dimension; requires a target reference. */
+  affiliationDimension?: string
+  /** RFC 012A team/workflow target entity reference paired with dimension. */
+  affiliationTargetRef?: string
+  cursor?: string
+  /** Page size. Defaults to 50 and is capped by the Rust query pack. */
+  limit?: number
+}
+
+export interface EngineRuntimeUsageV2Page {
+  contractVersion: number
+  atCommitSeq: number
+  projectionStatus: string
+  projectId: string
+  sessionId: string
+  sessionRef?: EngineRuntimeUsageV2ExternalEntityRef
+  actorRunRef?: string
+  affiliationDimension?: string
+  affiliationTargetRef?: string
+  aggregate: EngineRuntimeUsageV2Aggregate
+  items: Array<EngineRuntimeUsageV2Response>
+  actors: Array<EngineRuntimeUsageV2ActorContext>
+  nextCursor?: string
+}
+
+export interface EngineRuntimeUsageV2Response {
+  usageKey: string
+  semanticRevisionRef: EngineRuntimeUsageV2SemanticRevisionRef
+  sourceRecordRef: string
+  sessionRef: EngineRuntimeUsageV2ExternalEntityRef
+  actorRunRef: EngineRuntimeUsageV2ExternalEntityRef
+  responseKeyBase64: string
+  responseIdentity: string
+  nativeMessageId?: string
+  requestId?: string
+  inputTokens: EngineRuntimeUsageV2TokenValue
+  outputTokens: EngineRuntimeUsageV2TokenValue
+  cacheCreationInputTokens: EngineRuntimeUsageV2TokenValue
+  cacheReadInputTokens: EngineRuntimeUsageV2TokenValue
+  model?: EngineRuntimeUsageV2TextValue
+  effort?: EngineRuntimeUsageV2TextValue
+  sourceTime?: string
+  sourceTimeQuality?: string
+  observedAtUnixMs: number
+  sourceGeneration: number
+  lastCommitSeq: number
+}
+
+export interface EngineRuntimeUsageV2SemanticRevisionRef {
+  semanticReferenceContractVersion: number
+  factRevisionId: string
+}
+
+export interface EngineRuntimeUsageV2TextValue {
+  value?: string
+  quality: string
+  authority: string
+  completeness: string
+  unknownReason?: string
+  effectiveAt?: number
+  provenance: EngineRuntimeUsageV2ValueProvenance
+}
+
+export interface EngineRuntimeUsageV2TokenValue {
+  value?: number
+  quality: string
+  authority: string
+  completeness: string
+  unknownReason?: string
+  effectiveAt?: number
+  provenance: EngineRuntimeUsageV2ValueProvenance
+}
+
+export interface EngineRuntimeUsageV2ValueProvenance {
+  nativeField: string
+  normalizationContractVersion: number
 }
 
 export interface EngineSearchHit {

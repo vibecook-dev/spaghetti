@@ -505,6 +505,7 @@ describe('NapiTransport dispatch', () => {
     await client.getStats();
     await client.getUsage({ projectId: 'project' });
     await client.getUsageActivity({ projectId: 'project', from: '2026-08-01', to: '2026-08-12' });
+    await client.getRuntimeUsageV2({ projectId: 'project', sessionId: 'session' });
     await client.getRuntimeSnapshot();
     await client.getRunState({ runId: 'run' });
     await client.listTeams();
@@ -539,6 +540,7 @@ describe('NapiTransport dispatch', () => {
         'getStats',
         'getUsage',
         'getUsageActivity',
+        'getRuntimeUsageV2',
         'getRuntimeSnapshot',
         'getRunState',
         'listTeams',
@@ -625,6 +627,10 @@ describe('embedded SpaghettiClient', { skip: !native }, () => {
     await assert.rejects(client.replayChanges({ limit: 0 }), (error) => errorCode(error, 'invalid_request'));
     await assert.rejects(client.listProjects({ cursor: 'not-a-cursor' }), (error) =>
       errorCode(error, 'cursor_invalid'),
+    );
+    await assert.rejects(
+      client.getRuntimeUsageV2({ projectId: 'not-a-project-id', sessionId: 'not-a-session-id' }),
+      (error) => errorCode(error, 'invalid_request'),
     );
     await assert.rejects(client.search({ text: 'x'.repeat(70_000) }), (error) => errorCode(error, 'invalid_request'));
 

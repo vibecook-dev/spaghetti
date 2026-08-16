@@ -719,30 +719,46 @@ computes bucket quality/coverage as well as values. History, capability, and
 FTS remain compared to their existing accepted oracles; usage is deliberately
 compared to the new v2 oracle.
 
-Current implementation status (2026-08-16): steps 1 and 2 have landed as a
-non-public shadow, and step 4 now has frozen sanitized conformance-corpus
-evidence at response, actor, session, and aggregate scope. Claude decoder
-contract 17 emits a canonical
-`runtime.usage-v2` fact beside the unchanged legacy delta. The fact uses
+Current implementation status (2026-08-16): steps 1 and 2 have landed as an
+explicitly non-default shadow, and step 4 now has frozen sanitized
+conformance-corpus evidence at response, actor, session, and aggregate scope.
+Claude decoder contract 17 introduced a canonical `runtime.usage-v2` fact
+beside the unchanged legacy delta; contract 18 retains that identity and adds
+canonical actor and workflow-affiliation evidence. The usage fact uses
 non-empty `message.id` first, an object/generation/source-record fallback when
 it is absent, canonical session and actor-run keys, independently qualified
 buckets, optional model/effort assertions, and an RFC 012A semantic revision.
 Schema v46 interns qualification evidence and retains one source-ordered latest
 revision per response; later snapshots, including downward corrections,
 replace the prior row and a generation reset retracts the old namespace.
+Schema v47 retains current topology-neutral actor and affiliation revisions
+without copying usage contributions.
 
 Focused conformance proves topology-independent identities, exact-repeat
 non-duplication, evolving and downward counters, exact zero, missing buckets,
 absent and reused `requestId`, actor/session grouping, malformed-snapshot
 non-erasure, and generation replacement. The legacy projection remains the
-only public usage path and intentionally retains its old row-additive result.
+only default usage path and intentionally retains its old row-additive result.
 The independent Python oracle imports no adapter, SDK, or database code; its
 digest-bound root/child fixture and report are consumed by a Rust integration
 test that exercises the real parent and subagent streams plus the durable
-reducer. Step 3, private native corpus-scale qualification/coverage parity, the
-affiliation cases in steps 4 and 5, steps 6 and 7, readiness/replay
-orchestration, public query serialization, and the compatibility/rollback
-window remain open.
+reducer.
+
+The versioned `getRuntimeUsageV2` query contract v1 is now available through
+Rust, N-API, and the transport-neutral SDK as a shadow inspection surface. It
+returns response-level semantic revision references, canonical session and
+actor references, qualified buckets/model/effort, page-local actor contexts,
+all current affiliation revisions, and scope-wide qualified aggregates. Actor
+and present team/workflow filters regroup the same response identities. Every
+page and aggregate shares a commit snapshot; continuation is bound to its full
+scope and fails after the snapshot watermark changes. A session without a v2
+mapping reports `not_materialized`, never legacy fallback.
+
+Step 3, common source/family coverage and readiness, private native corpus-scale
+qualification/coverage parity, native team-to-actor conformance, the default
+switch in step 6, step 7's compatibility/rollback window, and crash/replay
+orchestration remain open. Until those gates pass, the candidate capability is
+unsupported and `getUsage`/`getUsageActivity` retain legacy semantics.
 
 ## 14. Failure and correction semantics
 

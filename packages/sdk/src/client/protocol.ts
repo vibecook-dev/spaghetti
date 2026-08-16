@@ -61,6 +61,7 @@ export interface SpaghettiClientRequestMap {
   getStats: undefined;
   getUsage: EngineRequest<'getUsage'>;
   getUsageActivity: EngineRequest<'getUsageActivity'>;
+  getRuntimeUsageV2: EngineRequest<'getRuntimeUsageV2'>;
   getRuntimeSnapshot: EngineRequest<'getRuntimeSnapshot'>;
   getRunState: GetRunStateRequest;
   listTeams: EngineRequest<'listTeams'>;
@@ -95,6 +96,7 @@ export interface SpaghettiClientResponseMap {
   getStats: EngineResult<'getStats'>;
   getUsage: EngineResult<'getUsage'>;
   getUsageActivity: EngineResult<'getUsageActivity'>;
+  getRuntimeUsageV2: EngineResult<'getRuntimeUsageV2'>;
   getRuntimeSnapshot: EngineResult<'getRuntimeSnapshot'>;
   getRunState: EngineResult<'getRunState'>;
   listTeams: EngineResult<'listTeams'>;
@@ -130,6 +132,7 @@ export const SPAGHETTI_CLIENT_METHODS = completeMethodList([
   'getStats',
   'getUsage',
   'getUsageActivity',
+  'getRuntimeUsageV2',
   'getRuntimeSnapshot',
   'getRunState',
   'listTeams',
@@ -398,6 +401,10 @@ export interface SpaghettiClient {
     request: SpaghettiClientRequestMap['getUsageActivity'],
     options?: SpaghettiQueryOptions,
   ): Promise<SpaghettiClientResponseMap['getUsageActivity']>;
+  getRuntimeUsageV2(
+    request: SpaghettiClientRequestMap['getRuntimeUsageV2'],
+    options?: SpaghettiQueryOptions,
+  ): Promise<SpaghettiClientResponseMap['getRuntimeUsageV2']>;
   getRuntimeSnapshot(
     request?: Exclude<SpaghettiClientRequestMap['getRuntimeSnapshot'], undefined>,
     options?: SpaghettiQueryOptions,

@@ -22,6 +22,7 @@ mod query_identity;
 mod query_pool;
 mod runtime_query;
 mod runtime_semantic_projection;
+mod runtime_usage_query;
 mod search_query;
 mod session_index_projection;
 mod settings_projection;
@@ -94,6 +95,14 @@ pub use runtime_query::{
     RunStateLookup, RunStateRequest, RuntimePresenceSnapshot, RuntimeRunEvidence,
     RuntimeRunSnapshot, RuntimeSnapshot, RuntimeSnapshotEntry, RuntimeSnapshotRequest,
     DEFAULT_RUNTIME_PAGE_LIMIT, RUNTIME_QUERY_CONTRACT_VERSION,
+};
+pub use runtime_usage_query::{
+    RuntimeUsageV2ActorContext, RuntimeUsageV2Affiliation, RuntimeUsageV2Aggregate,
+    RuntimeUsageV2BucketAggregate, RuntimeUsageV2ExternalEntityRef, RuntimeUsageV2Page,
+    RuntimeUsageV2PageRequest, RuntimeUsageV2Response, RuntimeUsageV2SemanticRevisionRef,
+    RuntimeUsageV2TextValue, RuntimeUsageV2TokenValue, RuntimeUsageV2ValueProvenance,
+    DEFAULT_RUNTIME_USAGE_V2_PAGE_LIMIT, MAX_RUNTIME_USAGE_V2_PAGE_LIMIT,
+    RUNTIME_USAGE_V2_QUERY_CONTRACT_VERSION,
 };
 pub use search_query::{
     SearchHit, SearchPage, SearchPageRequest, DEFAULT_SEARCH_PAGE_LIMIT,
@@ -867,6 +876,17 @@ impl SpaghettiEngineCore {
     ) -> Result<UsageActivityReport, EngineError> {
         let (_, queries) = self.clients()?;
         queries.usage_activity_cancellable(request, cancellation)
+    }
+
+    /// Page RFC 012C response-level usage shadow state for one verified
+    /// session, optionally narrowed to an actor or one present affiliation.
+    pub fn runtime_usage_v2_cancellable(
+        &self,
+        request: RuntimeUsageV2PageRequest,
+        cancellation: QueryCancellationToken,
+    ) -> Result<RuntimeUsageV2Page, EngineError> {
+        let (_, queries) = self.clients()?;
+        queries.runtime_usage_v2_cancellable(request, cancellation)
     }
 
     /// Return one keyset-paged snapshot of durable run state and current

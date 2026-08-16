@@ -25,7 +25,11 @@ use crate::engine::{
     ObservationStatusSnapshot, ObservationSupervisorOptions, OwnerMetadata, PlanDetail, PlanPage,
     PlanPageRequest, QueryCancellationToken, QueryPerformanceSnapshot, ReconcileOutcome,
     ReconcileRequest, RunStateLookup, RunStateRequest, RuntimePresenceSnapshot, RuntimeRunEvidence,
-    RuntimeRunSnapshot, RuntimeSnapshot, RuntimeSnapshotRequest, SearchHit, SearchPage,
+    RuntimeRunSnapshot, RuntimeSnapshot, RuntimeSnapshotRequest, RuntimeUsageV2ActorContext,
+    RuntimeUsageV2Affiliation, RuntimeUsageV2Aggregate, RuntimeUsageV2BucketAggregate,
+    RuntimeUsageV2ExternalEntityRef, RuntimeUsageV2Page, RuntimeUsageV2PageRequest,
+    RuntimeUsageV2Response, RuntimeUsageV2SemanticRevisionRef, RuntimeUsageV2TextValue,
+    RuntimeUsageV2TokenValue, RuntimeUsageV2ValueProvenance, SearchHit, SearchPage,
     SearchPageRequest, SessionDetail, SessionDetails, SessionDetailsRequest, SessionIndexDetail,
     SourceCapabilitySummary, SourceDimensionPerformanceSnapshot, SourcePage, SourcePageRequest,
     SourcePerformanceSnapshot, SourcePipelineSnapshot, SourceSummary, SpaghettiEngineCore,
@@ -41,8 +45,9 @@ use crate::engine::{
     WorkflowPage, WorkflowPageRequest, WorkflowSummary, WriterPerformanceSnapshot,
     CHANGE_REPLAY_CONTRACT_VERSION, DEFAULT_CAPABILITY_PAGE_LIMIT, DEFAULT_CHANGE_REPLAY_LIMIT,
     DEFAULT_COMMIT_WAIT_TIMEOUT_MS, DEFAULT_DETAIL_PAGE_LIMIT, DEFAULT_HISTORY_PAGE_LIMIT,
-    DEFAULT_ORCHESTRATION_PAGE_LIMIT, DEFAULT_RUNTIME_PAGE_LIMIT, DEFAULT_SEARCH_PAGE_LIMIT,
-    DEFAULT_TEAM_PAGE_LIMIT, DEFAULT_TIMELINE_PAGE_LIMIT, MAX_CHANGE_REPLAY_PAYLOAD_BYTES,
+    DEFAULT_ORCHESTRATION_PAGE_LIMIT, DEFAULT_RUNTIME_PAGE_LIMIT,
+    DEFAULT_RUNTIME_USAGE_V2_PAGE_LIMIT, DEFAULT_SEARCH_PAGE_LIMIT, DEFAULT_TEAM_PAGE_LIMIT,
+    DEFAULT_TIMELINE_PAGE_LIMIT, MAX_CHANGE_REPLAY_PAYLOAD_BYTES,
 };
 use crate::grok::GrokAdapter;
 
@@ -2650,6 +2655,336 @@ impl From<UsageActivityReport> for EngineUsageActivity {
 
 #[napi(object)]
 #[derive(Debug, Clone)]
+pub struct EngineRuntimeUsageV2Options {
+    /// Opaque project identity returned by `listHistoryProjects`.
+    pub project_id: String,
+    /// Opaque session identity returned by `listHistorySessions`.
+    pub session_id: String,
+    /// Optional RFC 012A actor entity reference returned by this query.
+    pub actor_run_ref: Option<String>,
+    /// Optional `team` or `workflow` dimension; requires a target reference.
+    pub affiliation_dimension: Option<String>,
+    /// RFC 012A team/workflow target entity reference paired with dimension.
+    pub affiliation_target_ref: Option<String>,
+    pub cursor: Option<String>,
+    /// Page size. Defaults to 50 and is capped by the Rust query pack.
+    pub limit: Option<u32>,
+}
+
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct EngineRuntimeUsageV2ExternalEntityRef {
+    pub external_entity_reference_version: u32,
+    pub entity_key: String,
+}
+
+impl From<RuntimeUsageV2ExternalEntityRef> for EngineRuntimeUsageV2ExternalEntityRef {
+    fn from(value: RuntimeUsageV2ExternalEntityRef) -> Self {
+        Self {
+            external_entity_reference_version: value.external_entity_reference_version,
+            entity_key: value.entity_key,
+        }
+    }
+}
+
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct EngineRuntimeUsageV2SemanticRevisionRef {
+    pub semantic_reference_contract_version: u32,
+    pub fact_revision_id: String,
+}
+
+impl From<RuntimeUsageV2SemanticRevisionRef> for EngineRuntimeUsageV2SemanticRevisionRef {
+    fn from(value: RuntimeUsageV2SemanticRevisionRef) -> Self {
+        Self {
+            semantic_reference_contract_version: value.semantic_reference_contract_version,
+            fact_revision_id: value.fact_revision_id,
+        }
+    }
+}
+
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct EngineRuntimeUsageV2ValueProvenance {
+    pub native_field: String,
+    pub normalization_contract_version: u32,
+}
+
+impl From<RuntimeUsageV2ValueProvenance> for EngineRuntimeUsageV2ValueProvenance {
+    fn from(value: RuntimeUsageV2ValueProvenance) -> Self {
+        Self {
+            native_field: value.native_field,
+            normalization_contract_version: value.normalization_contract_version,
+        }
+    }
+}
+
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct EngineRuntimeUsageV2TokenValue {
+    pub value: Option<f64>,
+    pub quality: String,
+    pub authority: String,
+    pub completeness: String,
+    pub unknown_reason: Option<String>,
+    pub effective_at: Option<f64>,
+    pub provenance: EngineRuntimeUsageV2ValueProvenance,
+}
+
+impl From<RuntimeUsageV2TokenValue> for EngineRuntimeUsageV2TokenValue {
+    fn from(value: RuntimeUsageV2TokenValue) -> Self {
+        Self {
+            value: value.value.map(|value| value as f64),
+            quality: value.quality,
+            authority: value.authority,
+            completeness: value.completeness,
+            unknown_reason: value.unknown_reason,
+            effective_at: value.effective_at.map(|value| value as f64),
+            provenance: value.provenance.into(),
+        }
+    }
+}
+
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct EngineRuntimeUsageV2TextValue {
+    pub value: Option<String>,
+    pub quality: String,
+    pub authority: String,
+    pub completeness: String,
+    pub unknown_reason: Option<String>,
+    pub effective_at: Option<f64>,
+    pub provenance: EngineRuntimeUsageV2ValueProvenance,
+}
+
+impl From<RuntimeUsageV2TextValue> for EngineRuntimeUsageV2TextValue {
+    fn from(value: RuntimeUsageV2TextValue) -> Self {
+        Self {
+            value: value.value,
+            quality: value.quality,
+            authority: value.authority,
+            completeness: value.completeness,
+            unknown_reason: value.unknown_reason,
+            effective_at: value.effective_at.map(|value| value as f64),
+            provenance: value.provenance.into(),
+        }
+    }
+}
+
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct EngineRuntimeUsageV2Response {
+    pub usage_key: String,
+    pub semantic_revision_ref: EngineRuntimeUsageV2SemanticRevisionRef,
+    pub source_record_ref: String,
+    pub session_ref: EngineRuntimeUsageV2ExternalEntityRef,
+    pub actor_run_ref: EngineRuntimeUsageV2ExternalEntityRef,
+    pub response_key_base64: String,
+    pub response_identity: String,
+    pub native_message_id: Option<String>,
+    pub request_id: Option<String>,
+    pub input_tokens: EngineRuntimeUsageV2TokenValue,
+    pub output_tokens: EngineRuntimeUsageV2TokenValue,
+    pub cache_creation_input_tokens: EngineRuntimeUsageV2TokenValue,
+    pub cache_read_input_tokens: EngineRuntimeUsageV2TokenValue,
+    pub model: Option<EngineRuntimeUsageV2TextValue>,
+    pub effort: Option<EngineRuntimeUsageV2TextValue>,
+    pub source_time: Option<String>,
+    pub source_time_quality: Option<String>,
+    pub observed_at_unix_ms: f64,
+    pub source_generation: f64,
+    pub last_commit_seq: f64,
+}
+
+impl From<RuntimeUsageV2Response> for EngineRuntimeUsageV2Response {
+    fn from(value: RuntimeUsageV2Response) -> Self {
+        Self {
+            usage_key: value.usage_key,
+            semantic_revision_ref: value.semantic_revision_ref.into(),
+            source_record_ref: value.source_record_ref,
+            session_ref: value.session_ref.into(),
+            actor_run_ref: value.actor_run_ref.into(),
+            response_key_base64: value.response_key_base64,
+            response_identity: value.response_identity,
+            native_message_id: value.native_message_id,
+            request_id: value.request_id,
+            input_tokens: value.input_tokens.into(),
+            output_tokens: value.output_tokens.into(),
+            cache_creation_input_tokens: value.cache_creation_input_tokens.into(),
+            cache_read_input_tokens: value.cache_read_input_tokens.into(),
+            model: value.model.map(Into::into),
+            effort: value.effort.map(Into::into),
+            source_time: value.source_time,
+            source_time_quality: value.source_time_quality,
+            observed_at_unix_ms: value.observed_at_unix_ms as f64,
+            source_generation: value.source_generation as f64,
+            last_commit_seq: value.last_commit_seq as f64,
+        }
+    }
+}
+
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct EngineRuntimeUsageV2Affiliation {
+    pub affiliation_ref: EngineRuntimeUsageV2ExternalEntityRef,
+    pub semantic_revision_ref: EngineRuntimeUsageV2SemanticRevisionRef,
+    pub dimension: String,
+    pub target_ref: EngineRuntimeUsageV2ExternalEntityRef,
+    pub member_ref: Option<EngineRuntimeUsageV2ExternalEntityRef>,
+    pub native_target_id: Option<String>,
+    pub native_member_id: Option<String>,
+    pub state: String,
+    pub effective_at: Option<String>,
+    pub effective_at_quality: Option<String>,
+    pub observed_at_unix_ms: f64,
+    pub source_generation: f64,
+    pub last_commit_seq: f64,
+}
+
+impl From<RuntimeUsageV2Affiliation> for EngineRuntimeUsageV2Affiliation {
+    fn from(value: RuntimeUsageV2Affiliation) -> Self {
+        Self {
+            affiliation_ref: value.affiliation_ref.into(),
+            semantic_revision_ref: value.semantic_revision_ref.into(),
+            dimension: value.dimension,
+            target_ref: value.target_ref.into(),
+            member_ref: value.member_ref.map(Into::into),
+            native_target_id: value.native_target_id,
+            native_member_id: value.native_member_id,
+            state: value.state,
+            effective_at: value.effective_at,
+            effective_at_quality: value.effective_at_quality,
+            observed_at_unix_ms: value.observed_at_unix_ms as f64,
+            source_generation: value.source_generation as f64,
+            last_commit_seq: value.last_commit_seq as f64,
+        }
+    }
+}
+
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct EngineRuntimeUsageV2ActorContext {
+    pub actor_run_ref: EngineRuntimeUsageV2ExternalEntityRef,
+    pub semantic_revision_ref: EngineRuntimeUsageV2SemanticRevisionRef,
+    pub session_ref: EngineRuntimeUsageV2ExternalEntityRef,
+    pub role: String,
+    pub parent_actor_run_ref: Option<EngineRuntimeUsageV2ExternalEntityRef>,
+    pub native_session_id: Option<String>,
+    pub native_actor_id: Option<String>,
+    pub native_actor_type: Option<String>,
+    pub affiliations: Vec<EngineRuntimeUsageV2Affiliation>,
+    pub observed_at_unix_ms: f64,
+    pub source_generation: f64,
+    pub last_commit_seq: f64,
+}
+
+impl From<RuntimeUsageV2ActorContext> for EngineRuntimeUsageV2ActorContext {
+    fn from(value: RuntimeUsageV2ActorContext) -> Self {
+        Self {
+            actor_run_ref: value.actor_run_ref.into(),
+            semantic_revision_ref: value.semantic_revision_ref.into(),
+            session_ref: value.session_ref.into(),
+            role: value.role,
+            parent_actor_run_ref: value.parent_actor_run_ref.map(Into::into),
+            native_session_id: value.native_session_id,
+            native_actor_id: value.native_actor_id,
+            native_actor_type: value.native_actor_type,
+            affiliations: value.affiliations.into_iter().map(Into::into).collect(),
+            observed_at_unix_ms: value.observed_at_unix_ms as f64,
+            source_generation: value.source_generation as f64,
+            last_commit_seq: value.last_commit_seq as f64,
+        }
+    }
+}
+
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct EngineRuntimeUsageV2BucketAggregate {
+    pub known_tokens: f64,
+    pub known_response_count: f64,
+    pub exact_response_count: f64,
+    pub non_exact_response_count: f64,
+    pub unknown_response_count: f64,
+    pub completeness: String,
+}
+
+impl From<RuntimeUsageV2BucketAggregate> for EngineRuntimeUsageV2BucketAggregate {
+    fn from(value: RuntimeUsageV2BucketAggregate) -> Self {
+        Self {
+            known_tokens: value.known_tokens as f64,
+            known_response_count: value.known_response_count as f64,
+            exact_response_count: value.exact_response_count as f64,
+            non_exact_response_count: value.non_exact_response_count as f64,
+            unknown_response_count: value.unknown_response_count as f64,
+            completeness: value.completeness.to_string(),
+        }
+    }
+}
+
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct EngineRuntimeUsageV2Aggregate {
+    pub response_count: f64,
+    pub actor_count: f64,
+    pub input_tokens: EngineRuntimeUsageV2BucketAggregate,
+    pub output_tokens: EngineRuntimeUsageV2BucketAggregate,
+    pub cache_creation_input_tokens: EngineRuntimeUsageV2BucketAggregate,
+    pub cache_read_input_tokens: EngineRuntimeUsageV2BucketAggregate,
+}
+
+impl From<RuntimeUsageV2Aggregate> for EngineRuntimeUsageV2Aggregate {
+    fn from(value: RuntimeUsageV2Aggregate) -> Self {
+        Self {
+            response_count: value.response_count as f64,
+            actor_count: value.actor_count as f64,
+            input_tokens: value.input_tokens.into(),
+            output_tokens: value.output_tokens.into(),
+            cache_creation_input_tokens: value.cache_creation_input_tokens.into(),
+            cache_read_input_tokens: value.cache_read_input_tokens.into(),
+        }
+    }
+}
+
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct EngineRuntimeUsageV2Page {
+    pub contract_version: u32,
+    pub at_commit_seq: f64,
+    pub projection_status: String,
+    pub project_id: String,
+    pub session_id: String,
+    pub session_ref: Option<EngineRuntimeUsageV2ExternalEntityRef>,
+    pub actor_run_ref: Option<String>,
+    pub affiliation_dimension: Option<String>,
+    pub affiliation_target_ref: Option<String>,
+    pub aggregate: EngineRuntimeUsageV2Aggregate,
+    pub items: Vec<EngineRuntimeUsageV2Response>,
+    pub actors: Vec<EngineRuntimeUsageV2ActorContext>,
+    pub next_cursor: Option<String>,
+}
+
+impl From<RuntimeUsageV2Page> for EngineRuntimeUsageV2Page {
+    fn from(value: RuntimeUsageV2Page) -> Self {
+        Self {
+            contract_version: value.contract_version,
+            at_commit_seq: value.at_commit_seq as f64,
+            projection_status: value.projection_status,
+            project_id: value.project_id,
+            session_id: value.session_id,
+            session_ref: value.session_ref.map(Into::into),
+            actor_run_ref: value.actor_run_ref,
+            affiliation_dimension: value.affiliation_dimension,
+            affiliation_target_ref: value.affiliation_target_ref,
+            aggregate: value.aggregate.into(),
+            items: value.items.into_iter().map(Into::into).collect(),
+            actors: value.actors.into_iter().map(Into::into).collect(),
+            next_cursor: value.next_cursor,
+        }
+    }
+}
+
+#[napi(object)]
+#[derive(Debug, Clone)]
 pub struct EngineRuntimeSnapshotOptions {
     /// Optional opaque project identity. When omitted, orphan presence/run
     /// evidence remains visible rather than being silently dropped.
@@ -3800,6 +4135,30 @@ impl SpaghettiEngine {
         )
     }
 
+    /// Page canonical response-level usage revisions and their current actor
+    /// and affiliation context. This is an explicitly shadow-only RFC 012C
+    /// surface; legacy additive usage queries remain unchanged.
+    #[napi(ts_return_type = "Promise<EngineRuntimeUsageV2Page>")]
+    pub fn get_runtime_usage_v2(
+        &self,
+        options: EngineRuntimeUsageV2Options,
+        signal: Option<AbortSignal>,
+    ) -> AsyncTask<RuntimeUsageV2Task> {
+        let cancellation = QueryCancellationToken::default();
+        if let Some(signal) = signal.as_ref() {
+            let abort_cancellation = cancellation.clone();
+            signal.on_abort(move || abort_cancellation.cancel());
+        }
+        AsyncTask::with_optional_signal(
+            RuntimeUsageV2Task {
+                engine: Arc::clone(&self.inner),
+                options,
+                cancellation,
+            },
+            signal,
+        )
+    }
+
     /// Return durable run-state and current registry-presence evidence. This
     /// intentionally does not probe PIDs or synthesize freshness assessments.
     #[napi(ts_return_type = "Promise<EngineRuntimeSnapshot>")]
@@ -4292,6 +4651,12 @@ pub struct UsageTotalsTask {
 pub struct UsageActivityTask {
     engine: Arc<SpaghettiEngineCore>,
     options: EngineUsageActivityOptions,
+    cancellation: QueryCancellationToken,
+}
+
+pub struct RuntimeUsageV2Task {
+    engine: Arc<SpaghettiEngineCore>,
+    options: EngineRuntimeUsageV2Options,
     cancellation: QueryCancellationToken,
 }
 
@@ -4972,6 +5337,36 @@ impl Task for UsageActivityTask {
                     session_id: self.options.session_id.clone(),
                     from: self.options.from.clone(),
                     to: self.options.to.clone(),
+                },
+                self.cancellation.clone(),
+            )
+            .map(Into::into)
+            .map_err(napi_error)
+    }
+
+    fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
+        Ok(output)
+    }
+}
+
+impl Task for RuntimeUsageV2Task {
+    type Output = EngineRuntimeUsageV2Page;
+    type JsValue = EngineRuntimeUsageV2Page;
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        self.engine
+            .runtime_usage_v2_cancellable(
+                RuntimeUsageV2PageRequest {
+                    project_id: self.options.project_id.clone(),
+                    session_id: self.options.session_id.clone(),
+                    actor_run_ref: self.options.actor_run_ref.clone(),
+                    affiliation_dimension: self.options.affiliation_dimension.clone(),
+                    affiliation_target_ref: self.options.affiliation_target_ref.clone(),
+                    cursor: self.options.cursor.clone(),
+                    limit: self
+                        .options
+                        .limit
+                        .unwrap_or(DEFAULT_RUNTIME_USAGE_V2_PAGE_LIMIT),
                 },
                 self.cancellation.clone(),
             )

@@ -47,6 +47,10 @@ use super::runtime_query::{
     read_run_state, read_runtime_snapshot, validate_run_state_request, validate_runtime_request,
     RunStateLookup, RunStateRequest, RuntimeSnapshot, RuntimeSnapshotRequest,
 };
+use super::runtime_usage_query::{
+    read_runtime_usage_v2_page, validate_runtime_usage_v2_page, RuntimeUsageV2Page,
+    RuntimeUsageV2PageRequest,
+};
 use super::search_query::{read_search_page, validate_search_page, SearchPage, SearchPageRequest};
 use super::team_query::{
     read_team_details, read_team_inbox_page, read_team_message_page, read_team_page,
@@ -402,6 +406,12 @@ enum QueryCommand {
         cancellation: QueryCancellationToken,
         request: UsageActivityRequest,
         response: Sender<Result<UsageActivityReport, EngineError>>,
+    },
+    RuntimeUsageV2 {
+        cancellation_epoch: u64,
+        cancellation: QueryCancellationToken,
+        request: RuntimeUsageV2PageRequest,
+        response: Sender<Result<RuntimeUsageV2Page, EngineError>>,
     },
     RuntimeSnapshot {
         cancellation_epoch: u64,
@@ -1064,6 +1074,23 @@ impl QueryClient {
         response_rx
             .recv()
             .map_err(|_| EngineError::WorkerUnavailable { worker: "query" })?
+    }
+
+    pub fn runtime_usage_v2_cancellable(
+        &self,
+        request: RuntimeUsageV2PageRequest,
+        cancellation: QueryCancellationToken,
+    ) -> Result<RuntimeUsageV2Page, EngineError> {
+        validate_runtime_usage_v2_page(&request)?;
+        self.send_cancellable(
+            cancellation,
+            |cancellation_epoch, cancellation, response| QueryCommand::RuntimeUsageV2 {
+                cancellation_epoch,
+                cancellation,
+                request,
+                response,
+            },
+        )
     }
 
     pub fn runtime_snapshot(
@@ -1854,6 +1881,22 @@ fn query_thread(
                     cancellation_epoch,
                     &cancellation,
                     || read_usage_activity(&connection, &request),
+                );
+                let _ = response.send(result);
+            }
+            QueryCommand::RuntimeUsageV2 {
+                cancellation_epoch,
+                cancellation,
+                request,
+                response,
+            } => {
+                let _in_flight = InFlightGuard::enter(&control.in_flight);
+                let result = run_cancellable_query(
+                    &connection,
+                    &control,
+                    cancellation_epoch,
+                    &cancellation,
+                    || read_runtime_usage_v2_page(&connection, &request),
                 );
                 let _ = response.send(result);
             }

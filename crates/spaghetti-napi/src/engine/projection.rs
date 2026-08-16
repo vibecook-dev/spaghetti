@@ -4192,6 +4192,10 @@ mod tests {
         apply_observation_commit, source_instance_catalog_id, source_stream_catalog_id,
         ExpectedSourceCursor, SourceInstanceSpec, SourceObjectUpdate, SourceStreamSpec,
     };
+    use crate::engine::query_identity::{encode_entity_id, PROJECT_ID_PREFIX, SESSION_ID_PREFIX};
+    use crate::engine::runtime_usage_query::{
+        read_runtime_usage_v2_page, RuntimeUsageV2PageRequest,
+    };
 
     const SESSION: &str = "01234567-89ab-cdef-0123-456789abcdef";
     const PROJECT: &str = "-Users-fixture-project";
@@ -5192,6 +5196,20 @@ mod tests {
     fn count(connection: &Connection, table: &str) -> i64 {
         let sql = format!("SELECT COUNT(*) FROM {table}");
         connection.query_row(&sql, [], |row| row.get(0)).unwrap()
+    }
+
+    fn persisted_project_session_ids(connection: &Connection) -> (String, String) {
+        let (project_key, session_key) = connection
+            .query_row(
+                "SELECT project_key, session_key FROM canonical_sessions ORDER BY session_key LIMIT 1",
+                [],
+                |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?)),
+            )
+            .unwrap();
+        (
+            encode_entity_id(PROJECT_ID_PREFIX, &project_key),
+            encode_entity_id(SESSION_ID_PREFIX, &session_key),
+        )
     }
 
     fn usage_fact(
@@ -6800,6 +6818,64 @@ mod tests {
             (1, 1)
         );
 
+        let (project_id, session_id) = persisted_project_session_ids(&connection);
+        let first_page = read_runtime_usage_v2_page(
+            &connection,
+            &RuntimeUsageV2PageRequest {
+                project_id: project_id.clone(),
+                session_id: session_id.clone(),
+                actor_run_ref: None,
+                affiliation_dimension: None,
+                affiliation_target_ref: None,
+                cursor: None,
+                limit: 2,
+            },
+        )
+        .unwrap();
+        assert_eq!(first_page.projection_status, "shadow");
+        assert_eq!(first_page.aggregate.response_count, 3);
+        assert_eq!(first_page.aggregate.actor_count, 1);
+        assert_eq!(first_page.aggregate.input_tokens.known_tokens, 12);
+        assert_eq!(first_page.items.len(), 2);
+        assert_eq!(first_page.actors.len(), 1);
+        assert!(first_page.session_ref.is_some());
+        let cursor = first_page.next_cursor.clone().expect("third response page");
+        let actor_run_ref = first_page.actors[0].actor_run_ref.entity_key.clone();
+        let second_page = read_runtime_usage_v2_page(
+            &connection,
+            &RuntimeUsageV2PageRequest {
+                project_id: project_id.clone(),
+                session_id: session_id.clone(),
+                actor_run_ref: None,
+                affiliation_dimension: None,
+                affiliation_target_ref: None,
+                cursor: Some(cursor.clone()),
+                limit: 2,
+            },
+        )
+        .unwrap();
+        assert_eq!(second_page.aggregate, first_page.aggregate);
+        assert_eq!(second_page.items.len(), 1);
+        assert!(second_page.next_cursor.is_none());
+        assert_eq!(
+            read_runtime_usage_v2_page(
+                &connection,
+                &RuntimeUsageV2PageRequest {
+                    project_id: project_id.clone(),
+                    session_id: session_id.clone(),
+                    actor_run_ref: Some(actor_run_ref),
+                    affiliation_dimension: None,
+                    affiliation_target_ref: None,
+                    cursor: None,
+                    limit: 10,
+                },
+            )
+            .unwrap()
+            .aggregate
+            .response_count,
+            3
+        );
+
         // A generation correction owns a fresh response namespace and retracts
         // every contribution from the replaced transcript before replay.
         state.decoder_state = None;
@@ -6814,6 +6890,21 @@ mod tests {
             &mut state,
             301,
         );
+        assert!(matches!(
+            read_runtime_usage_v2_page(
+                &connection,
+                &RuntimeUsageV2PageRequest {
+                    project_id: project_id.clone(),
+                    session_id: session_id.clone(),
+                    actor_run_ref: None,
+                    affiliation_dimension: None,
+                    affiliation_target_ref: None,
+                    cursor: Some(cursor),
+                    limit: 2,
+                },
+            ),
+            Err(EngineError::InvalidQuery(message)) if message.contains("cursor expired")
+        ));
         assert_eq!(count(&connection, "usage_v2_response_contributions"), 1);
         assert_eq!(count(&connection, "runtime_actor_runs_v2"), 1);
         assert_eq!(
@@ -6957,6 +7048,22 @@ mod tests {
         };
         assert_eq!(grouped_input(&connection, "workflow"), 10);
         assert_eq!(count(&connection, "usage_v2_response_contributions"), 1);
+        let (project_id, session_id) = persisted_project_session_ids(&connection);
+        let workflow_target_ref = format!("v1:{}", URL_SAFE_NO_PAD.encode(workflow.as_bytes()));
+        let workflow_scope = || RuntimeUsageV2PageRequest {
+            project_id: project_id.clone(),
+            session_id: session_id.clone(),
+            actor_run_ref: None,
+            affiliation_dimension: Some("workflow".to_string()),
+            affiliation_target_ref: Some(workflow_target_ref.clone()),
+            cursor: None,
+            limit: 10,
+        };
+        let workflow_page = read_runtime_usage_v2_page(&connection, &workflow_scope()).unwrap();
+        assert_eq!(workflow_page.aggregate.response_count, 1);
+        assert_eq!(workflow_page.items.len(), 1);
+        assert_eq!(workflow_page.actors[0].affiliations.len(), 1);
+        assert_eq!(workflow_page.actors[0].affiliations[0].state, "present");
 
         let team_object = b"team-affiliation";
         register_object_key(&mut connection, team_object, 120);
@@ -7064,6 +7171,9 @@ mod tests {
         );
         assert_eq!(grouped_input(&connection, "workflow"), 0);
         assert_eq!(grouped_input(&connection, "team"), 10);
+        let removed_page = read_runtime_usage_v2_page(&connection, &workflow_scope()).unwrap();
+        assert_eq!(removed_page.aggregate.response_count, 0);
+        assert!(removed_page.items.is_empty());
         assert_eq!(
             connection
                 .query_row(

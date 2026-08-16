@@ -15,8 +15,8 @@
     "ads": { "path": "agent-support/claude-code/candidate-2026-08-15/ads.json", "sha256": "sha256:34362f099f219181dfff3e50faef974882b656c5955e03d9cf1f4e8af7b986d3" },
     "source_declaration": { "path": "agent-support/claude-code/candidate-2026-08-15/source-declarations.json", "sha256": "sha256:17a0f1aa7490b5c03a525f7606a7a02ee6d1919cc8b9b776597843f1edbf1ebe" },
     "scope_program": { "path": "agent-support/claude-code/candidate-2026-08-15/scope-programs.json", "sha256": "sha256:689c86b9770544f826da37e72d1c4a1a37153fad4091372b954bba90ca2d5f7c" },
-    "evidence": { "path": "agent-support/claude-code/candidate-2026-08-15/evidence.json", "sha256": "sha256:e9ce38ed54dafe7bb33a33f25c58eaa5ac155aebfd8fb27515acbd2377d844b1" },
-    "conformance": { "path": "agent-support/claude-code/candidate-2026-08-15/conformance.json", "sha256": "sha256:8a40fcdbb999e8d78193545bd82d89fdcfe8e54653faa9510835ffb672012d7b" }
+    "evidence": { "path": "agent-support/claude-code/candidate-2026-08-15/evidence.json", "sha256": "sha256:5dcf831a0d9aba49efa323bd9d8098f487001e7a4018e9e854c65161e2421724" },
+    "conformance": { "path": "agent-support/claude-code/candidate-2026-08-15/conformance.json", "sha256": "sha256:d24f19a3e6183746d9a487e29cf9df493e81bf4581344a858ccb3cda224c72b8" }
   },
   "versions": {
     "adapter_package": "0.7.0",
@@ -33,7 +33,7 @@
   "capabilities": [
     { "capability_id": "project-session-catalog", "topology": "catalog", "level": "unsupported", "notes": "RFC 012B catalog assertions and tier composition are not implemented." },
     { "capability_id": "history-and-secondary-facts", "topology": "durable", "level": "supported", "notes": "Current Rust adapter streams project to the existing database, but this candidate is not runtime-selectable." },
-    { "capability_id": "usage-v2-runtime-semantics", "topology": "durable", "level": "unsupported", "notes": "Canonical response and actor revisions, durable response/affiliation shadow reducers, workflow correlation, and independent frozen sanitized-oracle parity are implemented; private native corpus-scale parity, native team-to-actor correlation, readiness, and public query migration remain pending." },
+    { "capability_id": "usage-v2-runtime-semantics", "topology": "durable", "level": "unsupported", "notes": "Canonical response and actor revisions, durable response/affiliation shadow reducers, workflow correlation, independent frozen sanitized-oracle parity, and the versioned public shadow query are implemented; source/family coverage, private native corpus-scale parity, native team-to-actor correlation, readiness, and default query migration remain pending." },
     { "capability_id": "root-descendant-observation", "topology": "scoped", "level": "unsupported", "notes": "ScopeProgram is incomplete and common observer delivery is pending." },
     { "capability_id": "interaction-lifecycle", "topology": "scoped", "level": "unsupported", "notes": "AskUserQuestion lifecycle facts and correction delivery are pending." }
   ],
@@ -60,7 +60,7 @@
   "lifecycle": { "candidate_at": "2026-08-15", "promoted_at": null, "retired_at": null, "supersedes": null, "superseded_by": null },
   "known_limitations": [
     "Candidate entries never confer runtime support.",
-    "Catalog/readiness, usage-v2 public query/migration, interaction, and scoped observation contracts are not implemented.",
+    "Catalog/readiness, usage-v2 coverage/readiness/default migration, interaction, and scoped observation contracts are not implemented.",
     "Source-instance move/clone and identity reuse behavior lack adversarial conformance.",
     "Durable and observation public contract version maps are not yet assigned."
   ],

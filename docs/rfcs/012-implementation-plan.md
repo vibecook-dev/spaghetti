@@ -129,7 +129,7 @@ prerequisite for early vertical slices.
 | B5. Catalog performance calibration      | 012B                | Not started | reproducible gate-amendment report                             |
 | C1. Runtime semantic contracts           | 012C                | In progress | actor/usage/state/interaction serialization fixtures           |
 | C2. Usage-v2 shadow projection           | 012C                | In progress | frozen oracle plus native corpus/affiliation parity            |
-| C3. Durable usage migration              | 012C                | Not started | transactional switch and rollback tests                        |
+| C3. Durable usage migration              | 012C                | In progress | transactional switch and rollback tests                        |
 | C4. Runtime semantic downstream suite    | 012C                | Not started | typed consumers plus durable/live merge without native parsing |
 | D1. Store-free observer kernel           | 012D                | In progress | attach/bootstrap/poll/close, no SQLite/global scan             |
 | D2. Claude scope composition             | 012D                | Not started | root/current/future actor and sidecar conformance              |
@@ -600,12 +600,19 @@ Current landing status (2026-08-16):
   affiliation evidence using the identical child key, and the common reducer
   handles `Present`, `Removed`, `Unknown`, late arrival, orthogonal team plus
   workflow dimensions, and generation retraction without copying or reburning
-  a response; and
+  a response;
+- added the versioned `getRuntimeUsageV2` shadow query across Rust, N-API, and
+  the transport-neutral SDK. It validates legacy project/session membership,
+  returns canonical session/actor/revision references, pages one response
+  revision per contribution with independently qualified buckets, reports
+  actor context and all current affiliation revisions, supports actor and
+  present team/workflow filters without copying contributions, and binds
+  continuation to one commit watermark or fails an expired cursor; and
 - kept the candidate capability `unsupported`: private native corpus-scale
   parity, fixture-proven native team-to-actor correlation, exact-repeat
-  public-event suppression, readiness/replay orchestration, public query and
-  migration switch, portable public serialization, and rollback window are not
-  yet complete.
+  public-event suppression, source/family coverage and readiness/replay
+  orchestration, migration switch, remaining portable fact-family
+  serialization, and rollback window are not yet complete.
 
 ### C3. Durable migration
 
@@ -613,6 +620,22 @@ Build usage-v2 beside legacy usage. Keep v2 readiness non-ready during replay,
 compare against the independent oracle, then switch the versioned query in one
 transaction. Retain the legacy projection during the compatibility window and
 test crash/restart at each migration boundary.
+
+Current landing status (2026-08-16): the first read-only migration slice is
+implemented. `getRuntimeUsageV2` exposes query contract v1 only as
+`projectionStatus = shadow`; it does not alter `getUsage` or
+`getUsageActivity`. A valid legacy project/session scope with no canonical v2
+session mapping returns `not_materialized` and qualified-unknown aggregate
+coverage rather than silently falling back to row-additive usage. Response
+pages and aggregates share one SQLite snapshot, cursors are scoped to all
+filters and expire on a newer commit, and tests cover pagination, actor
+filtering, present-affiliation regrouping/removal, and reset expiration.
+
+C3 remains `In progress`: projection readiness and source/family coverage,
+replay orchestration, private corpus-scale comparison, transactional default
+query selection, crash-boundary recovery, compatibility-window telemetry, and
+rollback are still required. The shadow query is an inspection/migration
+surface, not a support-promotion claim.
 
 ### C4. Downstream semantic suite
 
@@ -703,12 +726,13 @@ Current landing status (2026-08-16):
 D1 remains `In progress`: watcher-before-scan, multi-object discovery/cursor
 orchestration, declared relation-backed decoder dependency access, built-in
 canonical fact-revision adoption beyond the usage-v2 shadow plus scoped semantic
-reduction/events, durable query exposure, the public ordered multiplexer and
-poll/readiness barriers, coverage, overflow/resync epochs, artifact mediation,
-cancellation waiting, the trusted native version-probe driver, and the complete
-public request are not yet implemented. The generic fact ledger now preserves
-an explicit semantic revision atomically when a decoder supplies one; that
-storage seam alone does not make a legacy built-in fact canonical or observable.
+reduction/events, coverage-complete durable query exposure, the public ordered
+multiplexer and poll/readiness barriers, coverage, overflow/resync epochs,
+artifact mediation, cancellation waiting, the trusted native version-probe
+driver, and the complete public request are not yet implemented. The generic
+fact ledger now preserves an explicit semantic revision atomically when a
+decoder supplies one; that storage seam alone does not make a legacy built-in
+fact canonical or observable.
 
 ### D2. Claude scope composition
 
