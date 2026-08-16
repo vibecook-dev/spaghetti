@@ -278,6 +278,19 @@ pub(super) enum CommitDetail {
     UsageAggregation,
 }
 
+/// Deterministic seams around an administrative projection/coverage commit.
+/// The final seam runs after SQLite durability but before the caller receives
+/// its receipt, modeling process death during acknowledgement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ProjectionCommitStage {
+    BeforeTransaction,
+    AfterCommitInsert,
+    AfterProjectionVersions,
+    AfterCoverageReplacement,
+    BeforeCommit,
+    AfterCommit,
+}
+
 pub(super) trait CommitHook: Send + Sync {
     fn reach(&self, stage: CommitStage) -> Result<(), EngineError>;
 
@@ -288,6 +301,18 @@ struct NoopCommitHook;
 
 impl CommitHook for NoopCommitHook {
     fn reach(&self, _stage: CommitStage) -> Result<(), EngineError> {
+        Ok(())
+    }
+}
+
+pub(super) trait ProjectionCommitHook: Send + Sync {
+    fn reach(&self, stage: ProjectionCommitStage) -> Result<(), EngineError>;
+}
+
+struct NoopProjectionCommitHook;
+
+impl ProjectionCommitHook for NoopProjectionCommitHook {
+    fn reach(&self, _stage: ProjectionCommitStage) -> Result<(), EngineError> {
         Ok(())
     }
 }
@@ -416,7 +441,16 @@ pub(super) fn apply_projection_version_commit(
     connection: &mut Connection,
     request: &ProjectionVersionCommit,
 ) -> Result<Option<ProjectionVersionReceipt>, EngineError> {
+    apply_projection_version_commit_with_hook(connection, request, &NoopProjectionCommitHook)
+}
+
+pub(super) fn apply_projection_version_commit_with_hook(
+    connection: &mut Connection,
+    request: &ProjectionVersionCommit,
+    hook: &dyn ProjectionCommitHook,
+) -> Result<Option<ProjectionVersionReceipt>, EngineError> {
     validate_projection_version_commit(request)?;
+    hook.reach(ProjectionCommitStage::BeforeTransaction)?;
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|error| sqlite_error("begin projection version commit", error))?;
@@ -465,6 +499,7 @@ pub(super) fn apply_projection_version_commit(
             ],
         )
         .map_err(|error| sqlite_error("insert projection version commit", error))?;
+    hook.reach(ProjectionCommitStage::AfterCommitInsert)?;
     let commit_seq = from_i64(
         transaction.last_insert_rowid(),
         "projection version commit sequence",
@@ -475,6 +510,7 @@ pub(super) fn apply_projection_version_commit(
         request.committed_at,
         &request.projection_versions,
     )?;
+    hook.reach(ProjectionCommitStage::AfterProjectionVersions)?;
     source_coverage::replace_sets(
         &transaction,
         request.source_instance_id,
@@ -482,9 +518,12 @@ pub(super) fn apply_projection_version_commit(
         request.committed_at,
         &request.coverage_sets,
     )?;
+    hook.reach(ProjectionCommitStage::AfterCoverageReplacement)?;
+    hook.reach(ProjectionCommitStage::BeforeCommit)?;
     transaction
         .commit()
         .map_err(|error| sqlite_error("commit projection version transition", error))?;
+    hook.reach(ProjectionCommitStage::AfterCommit)?;
     Ok(Some(ProjectionVersionReceipt {
         commit_seq,
         source_instance_id: request.source_instance_id,
@@ -1835,6 +1874,10 @@ fn sqlite_error(operation: &'static str, error: rusqlite::Error) -> EngineError 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::adapter::{
+        CanonicalSourceInstanceKey, CoverageDeclarationDigest, CoverageDomain,
+        CoverageMembershipRevision, CoverageScope, CoverageSetCompleteness, SourceCoverageSet,
+    };
     use crate::core::schema;
     use crate::engine::{ChangeReplayRequest, EngineOptions, SpaghettiEngineCore};
     use tempfile::tempdir;
@@ -1846,6 +1889,20 @@ mod tests {
             if stage == self.0 {
                 Err(EngineError::InjectedFailure {
                     stage: stage_name(stage),
+                })
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    struct FailProjectionAt(ProjectionCommitStage);
+
+    impl ProjectionCommitHook for FailProjectionAt {
+        fn reach(&self, stage: ProjectionCommitStage) -> Result<(), EngineError> {
+            if stage == self.0 {
+                Err(EngineError::InjectedFailure {
+                    stage: projection_stage_name(stage),
                 })
             } else {
                 Ok(())
@@ -1924,9 +1981,20 @@ mod tests {
         }
     }
 
-    fn database() -> Connection {
-        let connection = Connection::open_in_memory().unwrap();
-        schema::initialize_schema(&connection).unwrap();
+    fn projection_stage_name(stage: ProjectionCommitStage) -> &'static str {
+        match stage {
+            ProjectionCommitStage::BeforeTransaction => "before projection transaction",
+            ProjectionCommitStage::AfterCommitInsert => "after projection commit insert",
+            ProjectionCommitStage::AfterProjectionVersions => "after projection version writes",
+            ProjectionCommitStage::AfterCoverageReplacement => {
+                "after projection coverage replacement"
+            }
+            ProjectionCommitStage::BeforeCommit => "before projection commit",
+            ProjectionCommitStage::AfterCommit => "after projection commit",
+        }
+    }
+
+    fn initialize_fixture_tables(connection: &Connection) {
         connection
             .execute_batch(
                 r#"
@@ -1945,6 +2013,12 @@ mod tests {
                 "#,
             )
             .unwrap();
+    }
+
+    fn database() -> Connection {
+        let connection = Connection::open_in_memory().unwrap();
+        schema::initialize_schema(&connection).unwrap();
+        initialize_fixture_tables(&connection);
         connection
     }
 
@@ -2033,12 +2107,60 @@ mod tests {
         }
     }
 
+    fn usage_v2_projection_commit(source_instance_id: u64) -> ProjectionVersionCommit {
+        let domain = CoverageDomain::FactFamily {
+            family: "runtime.usage-v2".to_string(),
+            version: 1,
+        };
+        let source_instance_key = CanonicalSourceInstanceKey::derive(1, b"fixture-root").unwrap();
+        let coverage = SourceCoverageSet::new(
+            domain,
+            CoverageScope {
+                adapter_id: "fixture".to_string(),
+                source_instance_key,
+                root_entity_key: None,
+                support_release_id: "fixture-support-release".to_string(),
+                source_or_scope_declaration_digest: CoverageDeclarationDigest::derive(
+                    b"fixture-source-declaration",
+                )
+                .unwrap(),
+            },
+            CoverageMembershipRevision::derive(b"fixture-empty-membership").unwrap(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            CoverageSetCompleteness::Complete,
+        )
+        .unwrap();
+        ProjectionVersionCommit {
+            source_instance_id,
+            reason: "projection.runtime.usage-v2.ready".to_string(),
+            started_at: 1_300,
+            committed_at: 1_301,
+            projection_versions: vec![ProjectionVersionUpdate {
+                projection_id: "runtime.usage-v2".to_string(),
+                scope_key: b"fixture-root".to_vec(),
+                desired_version: 1,
+                completed_version: Some(1),
+                readiness: ProjectionReadiness::Ready,
+                detail: None,
+            }],
+            coverage_sets: vec![DurableCoverageSetUpdate {
+                owner_id: "runtime.usage-v2".to_string(),
+                owner_scope_key: b"fixture-root".to_vec(),
+                set: coverage,
+            }],
+            coverage_preconditions: Vec::new(),
+        }
+    }
+
     fn count(connection: &Connection, table: &'static str) -> i64 {
         let sql = match table {
             "source_instances" => "SELECT COUNT(*) FROM source_instances",
             "source_objects" => "SELECT COUNT(*) FROM source_objects",
             "ingest_commits" => "SELECT COUNT(*) FROM ingest_commits",
             "projection_versions" => "SELECT COUNT(*) FROM projection_versions",
+            "source_coverage_sets" => "SELECT COUNT(*) FROM source_coverage_sets",
             "source_record_errors" => "SELECT COUNT(*) FROM source_record_errors",
             "change_log" => "SELECT COUNT(*) FROM change_log",
             "fixture_canonical" => "SELECT COUNT(*) FROM fixture_canonical",
@@ -2217,6 +2339,138 @@ mod tests {
                 )
                 .unwrap(),
             (1, 1, "ready".to_string(), 3, None)
+        );
+    }
+
+    #[test]
+    fn projection_and_coverage_precommit_failure_seams_roll_back_together() {
+        let stages = [
+            ProjectionCommitStage::BeforeTransaction,
+            ProjectionCommitStage::AfterCommitInsert,
+            ProjectionCommitStage::AfterProjectionVersions,
+            ProjectionCommitStage::AfterCoverageReplacement,
+            ProjectionCommitStage::BeforeCommit,
+        ];
+
+        for stage in stages {
+            let mut connection = database();
+            let source = apply_observation_commit(&mut connection, &request()).unwrap();
+            let migration = usage_v2_projection_commit(source.source_instance_id);
+            let result = apply_projection_version_commit_with_hook(
+                &mut connection,
+                &migration,
+                &FailProjectionAt(stage),
+            );
+            assert!(
+                matches!(result, Err(EngineError::InjectedFailure { .. })),
+                "stage {stage:?} returned {result:?}"
+            );
+            assert_eq!(count(&connection, "ingest_commits"), 1, "{stage:?}");
+            assert_eq!(
+                count(&connection, "source_coverage_sets"),
+                0,
+                "{stage:?} leaked coverage"
+            );
+            assert_eq!(
+                connection
+                    .query_row(
+                        "SELECT COUNT(*) FROM projection_versions WHERE projection_id = 'runtime.usage-v2'",
+                        [],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .unwrap(),
+                0,
+                "{stage:?} leaked readiness"
+            );
+
+            let receipt = apply_projection_version_commit(&mut connection, &migration)
+                .unwrap()
+                .expect("retry after a precommit crash must apply once");
+            assert_eq!(receipt.commit_seq, 2, "{stage:?}");
+            assert_eq!(count(&connection, "ingest_commits"), 2, "{stage:?}");
+            assert_eq!(count(&connection, "source_coverage_sets"), 1, "{stage:?}");
+            assert_eq!(
+                connection
+                    .query_row(
+                        r#"
+                        SELECT projection.readiness,
+                               projection.last_commit_seq,
+                               coverage.completeness,
+                               coverage.last_commit_seq
+                        FROM projection_versions AS projection
+                        JOIN source_coverage_sets AS coverage
+                          ON coverage.owner_id = projection.projection_id
+                         AND coverage.owner_scope_key = projection.scope_key
+                        WHERE projection.projection_id = 'runtime.usage-v2'
+                        "#,
+                        [],
+                        |row| {
+                            Ok((
+                                row.get::<_, String>(0)?,
+                                row.get::<_, i64>(1)?,
+                                row.get::<_, String>(2)?,
+                                row.get::<_, i64>(3)?,
+                            ))
+                        },
+                    )
+                    .unwrap(),
+                ("ready".to_string(), 2, "complete".to_string(), 2),
+                "{stage:?} did not converge atomically"
+            );
+        }
+    }
+
+    #[test]
+    fn projection_postcommit_ack_loss_is_restart_idempotent() {
+        let directory = tempdir().unwrap();
+        let database_path = directory.path().join("projection-postcommit-restart.db");
+        let source_instance_id;
+
+        {
+            let mut connection = Connection::open(&database_path).unwrap();
+            schema::initialize_schema(&connection).unwrap();
+            initialize_fixture_tables(&connection);
+            source_instance_id = apply_observation_commit(&mut connection, &request())
+                .unwrap()
+                .source_instance_id;
+            let migration = usage_v2_projection_commit(source_instance_id);
+            let result = apply_projection_version_commit_with_hook(
+                &mut connection,
+                &migration,
+                &FailProjectionAt(ProjectionCommitStage::AfterCommit),
+            );
+            assert!(matches!(result, Err(EngineError::InjectedFailure { .. })));
+            assert_eq!(count(&connection, "ingest_commits"), 2);
+            assert_eq!(count(&connection, "source_coverage_sets"), 1);
+        }
+
+        let mut connection = Connection::open(&database_path).unwrap();
+        schema::initialize_schema(&connection).unwrap();
+        let migration = usage_v2_projection_commit(source_instance_id);
+        assert!(
+            apply_projection_version_commit(&mut connection, &migration)
+                .unwrap()
+                .is_none(),
+            "retry after restart must recognize the durable transition"
+        );
+        assert_eq!(count(&connection, "ingest_commits"), 2);
+        assert_eq!(count(&connection, "source_coverage_sets"), 1);
+        assert_eq!(
+            connection
+                .query_row(
+                    r#"
+                    SELECT projection.last_commit_seq, coverage.last_commit_seq
+                    FROM projection_versions AS projection
+                    JOIN source_coverage_sets AS coverage
+                      ON coverage.owner_id = projection.projection_id
+                     AND coverage.owner_scope_key = projection.scope_key
+                    WHERE projection.projection_id = 'runtime.usage-v2'
+                    "#,
+                    [],
+                    |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+                )
+                .unwrap(),
+            (2, 2)
         );
     }
 

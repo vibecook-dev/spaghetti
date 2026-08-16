@@ -741,11 +741,18 @@ again against the leased replay baseline, and atomically by the writer before
 roots, writer rollback, successful replacement, and post-success token expiry.
 The transport-neutral query/IPC protocol deliberately remains read-only.
 
+The readiness/coverage administrative commit now has deterministic fault
+seams before its transaction, after commit-row allocation, after readiness
+writes, after coverage replacement, immediately before SQLite commit, and
+after durability but before acknowledgement. Tests prove every precommit
+failure leaks neither half and retries to one shared commit sequence; an
+after-commit error survives database reopen and an equal retry is a no-op.
+
 C3 remains `In progress`: private corpus-scale comparison, transactional
-default query selection, remaining crash-boundary tests, compatibility-window
+default query selection and its crash boundaries, compatibility-window
 telemetry, and rollback are still required. The shadow query, pack readiness,
-durable coverage query, and authorized coordinator replay are
-inspection/migration surfaces, not a support-promotion claim.
+durable coverage query, and authorized coordinator replay are inspection/
+migration surfaces, not a support-promotion claim.
 
 ### C4. Downstream semantic suite
 

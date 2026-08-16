@@ -742,6 +742,15 @@ replacement coverage. Administrative readiness transitions advance the normal
 durable commit clock but do not update a source object or cursor. Equal
 transitions do not create a commit.
 
+Readiness and its replacement coverage set are one administrative SQLite
+transaction. Failure before the transaction, after commit-row allocation,
+after readiness writes, after coverage replacement, or immediately before
+commit exposes neither half and a retry applies exactly once. Failure after
+SQLite commit but before acknowledgement exposes both halves at the same
+commit sequence; after restart, retry observes the equal durable transition as
+a no-op. A migration therefore recovers from acknowledgement ambiguity by
+reading durable state, never by assuming that an error means rollback.
+
 An explicit fact-family replay is source-instance scoped and follows this
 replacement protocol:
 
@@ -874,10 +883,12 @@ empty complete set.
 
 The explicit replay/restart path and its public stale-safe authorization are
 implemented for usage-v2, including bounded append continuation and
-old-generation retraction without duplicate response contributions. Private
-native corpus-scale qualification/coverage parity, native team-to-actor
-conformance, the default switch in step 6, step 7's compatibility/rollback
-window, and remaining crash boundaries are open.
+old-generation retraction without duplicate response contributions. The
+administrative readiness/coverage transaction is fault-tested at every
+precommit seam and after-commit acknowledgement loss, including restart and
+idempotent retry. Private native corpus-scale qualification/coverage parity,
+native team-to-actor conformance, the default switch in step 6, step 7's
+compatibility/rollback window, and their crash boundaries are open.
 Until those gates pass, the candidate capability is unsupported and
 `getUsage`/`getUsageActivity` retain legacy semantics.
 
