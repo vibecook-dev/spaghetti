@@ -670,7 +670,7 @@ decoder state and returns:
 ```text
 FactBatch {
   facts[]                 # each has FactId, FactRevisionId, and ownership
-  diagnostics[]
+  diagnostics[]           # each permanent diagnostic is unscoped or has a non-empty capability scope
   retained_native_evidence?
   next_decoder_state?
   disposition
@@ -681,6 +681,23 @@ Facts use common semantic contracts owned by RFC 012B and RFC 012C. Both the
 durable and scoped topologies invoke the same decoder revision for a given
 record family. The decoder receives no startup-tier, projection-destination,
 database-presence, or observer-delivery flag that could change emitted facts.
+
+A permanent diagnostic has exactly one coverage consequence:
+
+- **unscoped** means the record may invalidate every capability declared by
+  the stream; or
+- **capability-scoped** names a non-empty subset of declared capabilities and
+  invalidates only those fact-family coverage sets.
+
+The engine must retain and aggregate both forms as generic audit/quarantine
+evidence. When it evaluates one fact family, however, it counts only unscoped
+diagnostics and diagnostics whose scope contains that family. A diagnostic
+scoped exclusively to another capability cannot make this family incomplete.
+An adapter must use the conservative unscoped form whenever it cannot prove a
+narrower scope, and it must include every capability whose semantic evidence
+could have been lost. Empty scopes are invalid. Changing diagnostic scope is a
+decoder-contract change and requires replay before new coverage semantics can
+be claimed.
 
 ### 5.3 Mapping dispositions
 

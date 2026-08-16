@@ -9,8 +9,9 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::time::{Duration, Instant};
 
 use crate::adapter::{
-    AdapterError, AdapterErrorClass, AdapterObjectContext, AgentAdapter, DecodeContext,
-    DecodeDisposition, DecoderId, FactBatch, FactSemanticContext, RawRetentionPolicy, SourceAccess,
+    AdapterError, AdapterErrorClass, AdapterObjectContext, AgentAdapter, CapabilityId,
+    DecodeContext, DecodeDisposition, DecoderId, FactBatch, FactSemanticContext,
+    RawRetentionPolicy, SourceAccess,
 };
 use crate::source::SourceRecord;
 
@@ -37,6 +38,8 @@ pub(crate) struct DecodedFactBatch {
     pub batch: FactBatch,
     pub next_decoder_state: Option<Vec<u8>>,
     pub quarantined: bool,
+    pub unscoped_permanent_diagnostic: bool,
+    pub diagnostic_coverage_gaps: Vec<CapabilityId>,
 }
 
 /// A decode attempt always reports timing, including controlled failures.
@@ -133,12 +136,16 @@ fn finish_decode(
         .diagnostics()
         .iter()
         .any(|diagnostic| diagnostic.class == AdapterErrorClass::RecordPermanent);
+    let unscoped_permanent_diagnostic = batch.has_unscoped_permanent_diagnostic();
+    let diagnostic_coverage_gaps = batch.diagnostic_coverage_gaps().iter().cloned().collect();
     let next_decoder_state = batch.next_decoder_state().map(ToOwned::to_owned);
     Ok(DecodedFactBatch {
         disposition,
         batch,
         next_decoder_state,
         quarantined,
+        unscoped_permanent_diagnostic,
+        diagnostic_coverage_gaps,
     })
 }
 

@@ -734,13 +734,17 @@ state with no durable version row; it is never persisted and never aliases
 `Ready`. A transaction that changes rows supplied by a usage-v2 provider
 stream writes `Pending` atomically with those rows. `Ready` requires a later
 barrier after every declared provider stream has drained without retry,
-quarantine, incomplete tail, bounded-backlog remainder, unavailable source, or
-dependency-access denial. `Unavailable` retains an honest reason. A
-record-quarantine coverage gap cannot recover merely because the cursor later
-has no work or new records append; an explicit replay/revalidation must prove
-replacement coverage. Administrative readiness transitions advance the normal
-durable commit clock but do not update a source object or cursor. Equal
-transitions do not create a commit.
+applicable quarantine, incomplete tail, bounded-backlog remainder, unavailable
+source, or dependency-access denial. For one fact family, applicable
+quarantine is an unscoped permanent diagnostic or a diagnostic whose non-empty
+capability scope includes that family, as defined by RFC 012A. A diagnostic
+scoped exclusively to another capability remains durable audit evidence but
+cannot contaminate this family's coverage. `Unavailable` retains an honest
+reason. A record-quarantine coverage gap cannot recover merely because the
+cursor later has no work or new records append; an explicit replay/revalidation
+must prove replacement coverage. Administrative readiness transitions advance
+the normal durable commit clock but do not update a source object or cursor.
+Equal transitions do not create a commit.
 
 Readiness and its replacement coverage set are one administrative SQLite
 transaction. Failure before the transaction, after commit-row allocation,
@@ -817,7 +821,10 @@ explicitly non-default shadow, and step 4 now has frozen sanitized
 conformance-corpus evidence at response, actor, session, and aggregate scope.
 Claude decoder contract 17 introduced a canonical `runtime.usage-v2` fact
 beside the unchanged legacy delta; contract 18 retains that identity and adds
-canonical actor and workflow-affiliation evidence. The usage fact uses
+canonical actor and workflow-affiliation evidence. Contract 19 retains those
+semantic identities and adds capability-scoped permanent-diagnostic coverage;
+existing contract-18 state must replay before it can claim the narrower
+coverage result. The usage fact uses
 non-empty `message.id` first, an object/generation/source-record fallback when
 it is absent, canonical session and actor-run keys, independently qualified
 buckets, optional model/effort assertions, and an RFC 012A semantic revision.
@@ -868,6 +875,12 @@ writer replaces it atomically with the readiness barrier and binds it to the
 adapter, canonical source instance, support release, and verified source
 declaration. A deterministic content digest suppresses equal writes; restart,
 cursor advancement, and stable quarantine-gap behavior have focused tests.
+Coverage membership uses a two-pass canonical streaming digest, preserving
+the prior digest for small inputs while bounding memory and admitting native
+corpora beyond the former 64 KiB aggregate serialization limit. Targeted
+provider-object reconciliation invokes the same instance-wide post-drain
+barrier as a full scan, so it cannot leave exact recovered evidence stuck in
+`Pending`.
 
 The generic `getFactFamilyCoverage` query contract v1 now exposes those sets
 through Rust, N-API, and the transport-neutral SDK. A caller supplies an opaque
@@ -886,9 +899,22 @@ implemented for usage-v2, including bounded append continuation and
 old-generation retraction without duplicate response contributions. The
 administrative readiness/coverage transaction is fault-tested at every
 precommit seam and after-commit acknowledgement loss, including restart and
-idempotent retry. Private native corpus-scale qualification/coverage parity,
-native team-to-actor conformance, the default switch in step 6, step 7's
-compatibility/rollback window, and their crash boundaries are open.
+idempotent retry.
+
+The private native corpus gate also passes on a stable ephemeral source clone.
+An adapter/SDK/database-independent census matched the durable projection
+exactly for 149,369 response groups, 5,044 actors, 854 sessions, the root/child
+partition, fallback and model counts, every qualified bucket total, and zero
+unknown responses. All 5,182 declared transcript objects produced complete
+coverage and `Ready` v1. Six retained typed-projection diagnostics were scoped
+outside usage-v2 and remained visible as audit evidence without manufacturing
+a usage gap. The committed aggregate-only report is
+[`usage-v2-private-parity-v1.json`](../../agent-support/claude-code/candidate-2026-08-15/reports/usage-v2-private-parity-v1.json)
+with digest
+`sha256:2d84af3dd9bcfb91e727b8d0e067679b1637e61b0a343957a09b8f42c303176e`.
+
+Native team-to-actor conformance, the default switch in step 6, step 7's
+compatibility/rollback window, and their crash boundaries remain open.
 Until those gates pass, the candidate capability is unsupported and
 `getUsage`/`getUsageActivity` retain legacy semantics.
 

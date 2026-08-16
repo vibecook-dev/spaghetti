@@ -59,12 +59,40 @@ class RuntimeObservationCensusTest(unittest.TestCase):
 
             self.assertEqual(usage["usageBearingAssistantRows"], 4)
             self.assertEqual(usage["fileScopedResponseGroups"], 2)
+            self.assertEqual(usage["usageActorFiles"], 1)
+            self.assertEqual(usage["usageSessions"], 1)
+            self.assertEqual(usage["rootResponseGroups"], 2)
+            self.assertEqual(usage["childResponseGroups"], 0)
             self.assertEqual(usage["repeatedRowsBeyondFirst"], 2)
             self.assertEqual(usage["groupsWithChangedCounters"], 1)
             self.assertEqual(usage["groupsWithDownwardCorrection"], 1)
             self.assertEqual(usage["latestResponseSnapshotTotal"]["input_tokens"], 16)
             self.assertEqual(usage["latestResponseSnapshotTotal"]["output_tokens"], 6)
             self.assertEqual(usage["legacyPerRowDeltaTotal"]["input_tokens"], 36)
+            self.assertEqual(usage["groupsWithAllBucketsKnown"], 2)
+            self.assertEqual(usage["latestResponseUnknownGroups"]["input_tokens"], 0)
+
+    def test_preserves_latest_missing_bucket_as_unknown_instead_of_zero(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            project = root / "project"
+            project.mkdir()
+            transcript = project / "session.jsonl"
+            first = assistant("row-1", "response-1", "request-1", (10, 1, 2, 3))
+            correction = assistant("row-2", "response-1", "request-1", (9, 2, 0, 4))
+            del correction["message"]["usage"]["cache_creation_input_tokens"]  # type: ignore[index]
+            append(transcript, first)
+            append(transcript, correction)
+
+            usage = analyze(root)["usage"]
+
+            self.assertEqual(usage["fileScopedResponseGroups"], 1)
+            self.assertEqual(usage["groupsWithAllBucketsKnown"], 0)
+            self.assertEqual(
+                usage["latestResponseUnknownGroups"]["cache_creation_input_tokens"],
+                1,
+            )
+            self.assertEqual(usage["latestResponseSnapshotTotal"]["cache_creation_input_tokens"], 0)
 
     def test_scopes_response_identity_to_file_and_treats_request_id_as_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

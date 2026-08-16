@@ -147,12 +147,12 @@ impl ClaudeCodeAdapter {
                 id: AdapterId::new(ADAPTER_ID).expect("static Claude adapter id is valid"),
                 display_name: "Claude Code".to_string(),
                 adapter_version: env!("CARGO_PKG_VERSION").to_string(),
-                contract_version: 18,
+                contract_version: 19,
                 support_binding: Some(
                     AdapterSupportBinding::new(
                         "claude-code-support-2026-08-15-candidate",
                         env!("CARGO_PKG_VERSION"),
-                        18,
+                        19,
                         "sha256:2ed3c1c7cdc0c9a0ac198e92a3265e4f2563be688572cb70d710d1ee44ff6aef",
                         "sha256:17a0f1aa7490b5c03a525f7606a7a02ee6d1919cc8b9b776597843f1edbf1ebe",
                         "sha256:689c86b9770544f826da37e72d1c4a1a37153fad4091372b954bba90ca2d5f7c",
@@ -867,6 +867,12 @@ fn transcript_capabilities() -> Vec<CapabilityId> {
     .into_iter()
     .map(|id| CapabilityId::new(id).expect("static Claude stream capability id is valid"))
     .collect()
+}
+
+fn capability_ids(ids: &[&str]) -> Vec<CapabilityId> {
+    ids.iter()
+        .map(|id| CapabilityId::new(*id).expect("static Claude capability id is valid"))
+        .collect()
 }
 
 fn subagent_metadata_capabilities() -> Vec<CapabilityId> {
@@ -3753,11 +3759,14 @@ fn decode_transcript_record(
     let (role, content, parent_native_message_id, model) = match &typed {
         Ok(message) => decode_message_content(message, &value),
         Err(error) => {
-            output.push_diagnostic(AdapterDiagnostic {
-                class: AdapterErrorClass::RecordPermanent,
-                code: "claude_typed_projection_loss".to_string(),
-                message: format!("type={}: {error}", projection.msg_type),
-            })?;
+            output.push_scoped_diagnostic(
+                AdapterDiagnostic {
+                    class: AdapterErrorClass::RecordPermanent,
+                    code: "claude_typed_projection_loss".to_string(),
+                    message: format!("type={}: {error}", projection.msg_type),
+                },
+                capability_ids(&[HISTORY_MESSAGES, HISTORY_CONTENT_BLOCKS, RUNTIME_SUBAGENTS]),
+            )?;
             (
                 role_from_kind(&projection.msg_type),
                 Vec::new(),
@@ -3872,11 +3881,14 @@ fn decode_transcript_record(
         }
         Ok(None) => {}
         Err(detail) => {
-            output.push_diagnostic(AdapterDiagnostic {
-                class: AdapterErrorClass::RecordPermanent,
-                code: "claude_artifact_projection_loss".to_string(),
-                message: detail,
-            })?;
+            output.push_scoped_diagnostic(
+                AdapterDiagnostic {
+                    class: AdapterErrorClass::RecordPermanent,
+                    code: "claude_artifact_projection_loss".to_string(),
+                    message: detail,
+                },
+                capability_ids(&[RUNTIME_ARTIFACTS]),
+            )?;
         }
     }
     state.store(output)?;
@@ -3900,11 +3912,19 @@ fn claude_usage_v2_fact(
         return Ok(None);
     };
     let Some(native_usage) = native_usage.as_object() else {
-        output.push_diagnostic(AdapterDiagnostic {
-            class: AdapterErrorClass::RecordPermanent,
-            code: "claude_usage_v2_shape".to_string(),
-            message: "Claude message.usage must be an object".to_string(),
-        })?;
+        output.push_scoped_diagnostic(
+            AdapterDiagnostic {
+                class: AdapterErrorClass::RecordPermanent,
+                code: "claude_usage_v2_shape".to_string(),
+                message: "Claude message.usage must be an object".to_string(),
+            },
+            capability_ids(&[
+                RUNTIME_USAGE_V2,
+                USAGE_INPUT_TOKENS,
+                USAGE_OUTPUT_TOKENS,
+                USAGE_CACHE_TOKENS,
+            ]),
+        )?;
         return Ok(None);
     };
     let native_message_id = message
@@ -3945,11 +3965,19 @@ fn claude_usage_v2_fact(
     let buckets = match buckets {
         Ok(buckets) => buckets,
         Err(message) => {
-            output.push_diagnostic(AdapterDiagnostic {
-                class: AdapterErrorClass::RecordPermanent,
-                code: "claude_usage_v2_bucket".to_string(),
-                message,
-            })?;
+            output.push_scoped_diagnostic(
+                AdapterDiagnostic {
+                    class: AdapterErrorClass::RecordPermanent,
+                    code: "claude_usage_v2_bucket".to_string(),
+                    message,
+                },
+                capability_ids(&[
+                    RUNTIME_USAGE_V2,
+                    USAGE_INPUT_TOKENS,
+                    USAGE_OUTPUT_TOKENS,
+                    USAGE_CACHE_TOKENS,
+                ]),
+            )?;
             return Ok(None);
         }
     };
@@ -4755,7 +4783,7 @@ mod tests {
             std::fs::canonicalize(root.path()).unwrap().join("sessions")
         );
         assert_eq!(streams.len(), 16);
-        assert_eq!(adapter.manifest().contract_version, 18);
+        assert_eq!(adapter.manifest().contract_version, 19);
         assert!(adapter
             .manifest()
             .source_schema_versions
@@ -6547,6 +6575,15 @@ mod tests {
             .diagnostics()
             .iter()
             .any(|diagnostic| diagnostic.code == "claude_artifact_projection_loss"));
+        assert!(!batch.has_unscoped_permanent_diagnostic());
+        assert!(batch
+            .diagnostic_coverage_gaps()
+            .iter()
+            .any(|capability| capability.as_str() == RUNTIME_ARTIFACTS));
+        assert!(!batch
+            .diagnostic_coverage_gaps()
+            .iter()
+            .any(|capability| capability.as_str() == RUNTIME_USAGE_V2));
 
         // Missing is not equivalent to the native format's explicit null:
         // silently accepting it would manufacture positive non-capture.
@@ -7466,6 +7503,11 @@ mod tests {
             .diagnostics()
             .iter()
             .any(|diagnostic| diagnostic.code == "claude_usage_v2_bucket"));
+        assert!(!malformed_batch.has_unscoped_permanent_diagnostic());
+        assert!(malformed_batch
+            .diagnostic_coverage_gaps()
+            .iter()
+            .any(|capability| capability.as_str() == RUNTIME_USAGE_V2));
     }
 
     #[test]
@@ -7676,6 +7718,8 @@ mod tests {
         assert_eq!(disposition, DecodeDisposition::PreservedUnknown);
         assert!(matches!(batch.facts()[0].value, Fact::UnknownRecord { .. }));
         assert_eq!(batch.diagnostics().len(), 1);
+        assert!(batch.has_unscoped_permanent_diagnostic());
+        assert!(batch.diagnostic_coverage_gaps().is_empty());
     }
 
     #[test]

@@ -1,0 +1,224 @@
+{
+  "schemaVersion": 1,
+  "experiment": "rfc012c-usage-v2-private-corpus-parity",
+  "adapterId": "claude-code",
+  "source": "~/.claude",
+  "sourceCapture": "ephemeral-isolated-clone",
+  "sourceSetDigestBefore": "de178e1fed71fe03da1ea12cc2fd72fc8e54e535a9c0fccf5662e01a1627f7a1",
+  "sourceSetDigestAfter": "de178e1fed71fe03da1ea12cc2fd72fc8e54e535a9c0fccf5662e01a1627f7a1",
+  "sourceStable": true,
+  "exact": true,
+  "atCommitSeq": 35118,
+  "independent": {
+    "responseGroups": 149369,
+    "actorFiles": 5044,
+    "sessions": 854,
+    "rootResponseGroups": 64033,
+    "childResponseGroups": 85336,
+    "fallbackResponses": 0,
+    "responsesWithModel": 149369,
+    "totals": {
+      "cache_creation_input_tokens": 1746182910,
+      "cache_read_input_tokens": 32271692703,
+      "input_tokens": 14392212,
+      "output_tokens": 127101015
+    },
+    "unknownResponses": {
+      "cache_creation_input_tokens": 0,
+      "cache_read_input_tokens": 0,
+      "input_tokens": 0,
+      "output_tokens": 0
+    },
+    "declaredTranscriptObjects": 5182
+  },
+  "durable": {
+    "responses": 149369,
+    "actors": 5044,
+    "sessions": 854,
+    "rootResponses": 64033,
+    "childResponses": 85336,
+    "fallbackResponses": 0,
+    "responsesWithModel": 149369,
+    "totals": {
+      "input_tokens": 14392212,
+      "output_tokens": 127101015,
+      "cache_creation_input_tokens": 1746182910,
+      "cache_read_input_tokens": 32271692703
+    },
+    "unknownResponses": {
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cache_creation_input_tokens": 0,
+      "cache_read_input_tokens": 0
+    },
+    "coverage": {
+      "sets": 1,
+      "completeness": "complete",
+      "readiness": "ready",
+      "completedVersion": 1,
+      "detail": null,
+      "points": 5182,
+      "absences": 0,
+      "errors": 0,
+      "errorCodes": {}
+    },
+    "providerDiagnostics": {
+      "records": 6,
+      "codes": {
+        "claude_typed_projection_loss": 6
+      }
+    }
+  },
+  "checks": [
+    {
+      "name": "source snapshot stable",
+      "expected": true,
+      "actual": true,
+      "exact": true
+    },
+    {
+      "name": "response groups",
+      "expected": 149369,
+      "actual": 149369,
+      "exact": true
+    },
+    {
+      "name": "actor files",
+      "expected": 5044,
+      "actual": 5044,
+      "exact": true
+    },
+    {
+      "name": "sessions",
+      "expected": 854,
+      "actual": 854,
+      "exact": true
+    },
+    {
+      "name": "root response groups",
+      "expected": 64033,
+      "actual": 64033,
+      "exact": true
+    },
+    {
+      "name": "child response groups",
+      "expected": 85336,
+      "actual": 85336,
+      "exact": true
+    },
+    {
+      "name": "fallback responses",
+      "expected": 0,
+      "actual": 0,
+      "exact": true
+    },
+    {
+      "name": "responses with model",
+      "expected": 149369,
+      "actual": 149369,
+      "exact": true
+    },
+    {
+      "name": "input_tokens total",
+      "expected": 14392212,
+      "actual": 14392212,
+      "exact": true
+    },
+    {
+      "name": "input_tokens unknown responses",
+      "expected": 0,
+      "actual": 0,
+      "exact": true
+    },
+    {
+      "name": "output_tokens total",
+      "expected": 127101015,
+      "actual": 127101015,
+      "exact": true
+    },
+    {
+      "name": "output_tokens unknown responses",
+      "expected": 0,
+      "actual": 0,
+      "exact": true
+    },
+    {
+      "name": "cache_creation_input_tokens total",
+      "expected": 1746182910,
+      "actual": 1746182910,
+      "exact": true
+    },
+    {
+      "name": "cache_creation_input_tokens unknown responses",
+      "expected": 0,
+      "actual": 0,
+      "exact": true
+    },
+    {
+      "name": "cache_read_input_tokens total",
+      "expected": 32271692703,
+      "actual": 32271692703,
+      "exact": true
+    },
+    {
+      "name": "cache_read_input_tokens unknown responses",
+      "expected": 0,
+      "actual": 0,
+      "exact": true
+    },
+    {
+      "name": "coverage sets",
+      "expected": 1,
+      "actual": 1,
+      "exact": true
+    },
+    {
+      "name": "coverage completeness",
+      "expected": "complete",
+      "actual": "complete",
+      "exact": true
+    },
+    {
+      "name": "projection readiness",
+      "expected": "ready",
+      "actual": "ready",
+      "exact": true
+    },
+    {
+      "name": "projection completed version",
+      "expected": 1,
+      "actual": 1,
+      "exact": true
+    },
+    {
+      "name": "projection detail",
+      "expected": null,
+      "actual": null,
+      "exact": true
+    },
+    {
+      "name": "coverage points",
+      "expected": 5182,
+      "actual": 5182,
+      "exact": true
+    },
+    {
+      "name": "coverage absences",
+      "expected": 0,
+      "actual": 0,
+      "exact": true
+    },
+    {
+      "name": "coverage errors",
+      "expected": 0,
+      "actual": 0,
+      "exact": true
+    }
+  ],
+  "timing": {
+    "sourceCaptureElapsedMs": 19676.801,
+    "ingestElapsedMs": 306202.101,
+    "totalElapsedMs": 361099.036
+  },
+  "privacy": "Aggregate counts, token totals, readiness, coverage counts, and source metadata digest only. No native paths, identifiers, model values, prompts, answers, or raw payloads."
+}

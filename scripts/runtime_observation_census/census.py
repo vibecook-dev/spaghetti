@@ -20,6 +20,7 @@ from typing import Any, Iterable
 
 
 UsageTuple = tuple[int, int, int, int]
+UsageKnownTuple = tuple[bool, bool, bool, bool]
 
 USAGE_KEYS = (
     "input_tokens",
@@ -153,6 +154,7 @@ def source_set_digest(files: Iterable[tuple[Path, int, int]], root: Path) -> str
 class UsageGroup:
     first: UsageTuple
     latest: UsageTuple
+    latest_known: UsageKnownTuple
     rows: int = 1
     changed_revisions: int = 0
     exact_repeats: int = 0
@@ -161,10 +163,13 @@ class UsageGroup:
     mixed_request_ids: bool = False
     model_present: bool = False
     effort_present: bool = False
+    latest_model_present: bool = False
+    latest_effort_present: bool = False
 
     def revise(
         self,
         usage: UsageTuple,
+        known: UsageKnownTuple,
         request_id: str | None,
         model_present: bool,
         effort_present: bool,
@@ -179,8 +184,11 @@ class UsageGroup:
         if request_id != self.request_id:
             self.mixed_request_ids = True
         self.latest = usage
+        self.latest_known = known
         self.model_present |= model_present
         self.effort_present |= effort_present
+        self.latest_model_present = model_present
+        self.latest_effort_present = effort_present
 
 
 def content_blocks(record: dict[str, Any]) -> Iterable[dict[str, Any]]:
@@ -263,6 +271,10 @@ def analyze(root: Path) -> dict[str, Any]:
     usage_rows_with_effort = 0
     legacy_delta_total: UsageTuple = (0, 0, 0, 0)
     groups: dict[tuple[int, str], UsageGroup] = {}
+    usage_file_indexes: set[int] = set()
+    usage_sessions: set[tuple[str, str]] = set()
+    root_response_groups = 0
+    child_response_groups = 0
     request_to_response: dict[tuple[int, str], str] = {}
     request_ids_with_multiple_responses: set[tuple[int, str]] = set()
 
@@ -335,6 +347,8 @@ def analyze(root: Path) -> dict[str, Any]:
                 if usage is None:
                     malformed_usage_rows += 1
                     continue
+                native_usage = message["usage"]
+                known = tuple(key in native_usage for key in USAGE_KEYS)
                 usage_rows += 1
                 legacy_delta_total = add_usage(legacy_delta_total, usage)
                 response_id = nonempty_string(message.get("id"))
@@ -359,15 +373,31 @@ def analyze(root: Path) -> dict[str, Any]:
                 group_key = (file_index, response_key)
                 group = groups.get(group_key)
                 if group is None:
+                    usage_file_indexes.add(file_index)
+                    session_component = relative.stem if len(relative.parts) == 2 else relative.parts[1]
+                    usage_sessions.add((relative.parts[0], session_component))
+                    if role == "root":
+                        root_response_groups += 1
+                    else:
+                        child_response_groups += 1
                     groups[group_key] = UsageGroup(
                         first=usage,
                         latest=usage,
+                        latest_known=known,  # type: ignore[arg-type]
                         request_id=request_id,
                         model_present=model_present,
                         effort_present=effort_present,
+                        latest_model_present=model_present,
+                        latest_effort_present=effort_present,
                     )
                 else:
-                    group.revise(usage, request_id, model_present, effort_present)
+                    group.revise(
+                        usage,
+                        known,  # type: ignore[arg-type]
+                        request_id,
+                        model_present,
+                        effort_present,
+                    )
 
         if file_records:
             files_with_records += 1
@@ -390,6 +420,10 @@ def analyze(root: Path) -> dict[str, Any]:
     mixed_request_groups = 0
     groups_with_model = 0
     groups_with_effort = 0
+    latest_groups_with_model = 0
+    latest_groups_with_effort = 0
+    groups_with_all_buckets_known = 0
+    latest_unknown_groups = [0, 0, 0, 0]
     for group in groups.values():
         response_snapshot_total = add_usage(response_snapshot_total, group.latest)
         response_first_total = add_usage(response_first_total, group.first)
@@ -401,6 +435,11 @@ def analyze(root: Path) -> dict[str, Any]:
         mixed_request_groups += int(group.mixed_request_ids)
         groups_with_model += int(group.model_present)
         groups_with_effort += int(group.effort_present)
+        latest_groups_with_model += int(group.latest_model_present)
+        latest_groups_with_effort += int(group.latest_effort_present)
+        groups_with_all_buckets_known += int(all(group.latest_known))
+        for index, known in enumerate(group.latest_known):
+            latest_unknown_groups[index] += int(not known)
 
     root_files = sum(not is_child_transcript(path.relative_to(root)) for path in paths)
     child_files = len(paths) - root_files
@@ -442,6 +481,10 @@ def analyze(root: Path) -> dict[str, Any]:
             "usageBearingAssistantRows": usage_rows,
             "malformedUsageRows": malformed_usage_rows,
             "fileScopedResponseGroups": len(groups),
+            "usageActorFiles": len(usage_file_indexes),
+            "usageSessions": len(usage_sessions),
+            "rootResponseGroups": root_response_groups,
+            "childResponseGroups": child_response_groups,
             "repeatedRowsBeyondFirst": repeated_rows,
             "groupsWithMultipleRows": repeated_groups,
             "groupsWithChangedCounters": changed_revision_groups,
@@ -455,6 +498,10 @@ def analyze(root: Path) -> dict[str, Any]:
             "groupsWithModel": groups_with_model,
             "rowsWithEffort": usage_rows_with_effort,
             "groupsWithEffort": groups_with_effort,
+            "latestGroupsWithModel": latest_groups_with_model,
+            "latestGroupsWithEffort": latest_groups_with_effort,
+            "groupsWithAllBucketsKnown": groups_with_all_buckets_known,
+            "latestResponseUnknownGroups": usage_json(tuple(latest_unknown_groups)),
             "legacyPerRowDeltaTotal": usage_json(legacy_delta_total),
             "firstResponseSnapshotTotal": usage_json(response_first_total),
             "latestResponseSnapshotTotal": usage_json(response_snapshot_total),

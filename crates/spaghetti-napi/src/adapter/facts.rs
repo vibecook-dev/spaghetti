@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -10,8 +10,8 @@ use crate::source::SourceRecord;
 
 use super::{
     AdapterDiagnostic, AdapterError, AdapterId, CanonicalEntityKey, CanonicalFactId,
-    CanonicalSourceInstanceKey, ContractCompleteness, DependencyRevision, FactRevisionId,
-    QualifiedValue, QualifiedValueQuality, SemanticRevisionRef, SourceRecordId,
+    CanonicalSourceInstanceKey, CapabilityId, ContractCompleteness, DependencyRevision,
+    FactRevisionId, QualifiedValue, QualifiedValueQuality, SemanticRevisionRef, SourceRecordId,
 };
 
 const FACT_HASH_BYTES: usize = 32;
@@ -1291,6 +1291,8 @@ pub struct FactBatch {
     max_diagnostics: usize,
     facts: Vec<FactEnvelope>,
     diagnostics: Vec<AdapterDiagnostic>,
+    unscoped_permanent_diagnostic: bool,
+    diagnostic_coverage_gaps: BTreeSet<CapabilityId>,
     dependency_reads: Vec<DependencyRevision>,
     next_decoder_state: Option<Vec<u8>>,
     next_record_ordinals: BTreeMap<RecordFactKey, u32>,
@@ -1374,6 +1376,8 @@ impl FactBatch {
             max_diagnostics,
             facts: Vec::new(),
             diagnostics: Vec::new(),
+            unscoped_permanent_diagnostic: false,
+            diagnostic_coverage_gaps: BTreeSet::new(),
             dependency_reads: Vec::new(),
             next_decoder_state: None,
             next_record_ordinals: BTreeMap::new(),
@@ -1610,13 +1614,44 @@ impl FactBatch {
     }
 
     pub fn push_diagnostic(&mut self, diagnostic: AdapterDiagnostic) -> Result<(), AdapterError> {
+        self.ensure_diagnostic_capacity()?;
+        if diagnostic.class == super::AdapterErrorClass::RecordPermanent {
+            self.unscoped_permanent_diagnostic = true;
+        }
+        self.diagnostics.push(diagnostic);
+        Ok(())
+    }
+
+    /// Retain a record diagnostic while limiting its coverage consequence to
+    /// the declared capabilities whose evidence the decoder could not prove.
+    /// An empty scope is invalid: adapters must use `push_diagnostic` when the
+    /// loss may affect every capability supplied by the stream.
+    pub fn push_scoped_diagnostic(
+        &mut self,
+        diagnostic: AdapterDiagnostic,
+        affected_capabilities: impl IntoIterator<Item = CapabilityId>,
+    ) -> Result<(), AdapterError> {
+        let affected_capabilities = affected_capabilities.into_iter().collect::<BTreeSet<_>>();
+        if affected_capabilities.is_empty() {
+            return Err(AdapterError::invalid_contract(
+                "scoped diagnostic must affect at least one capability",
+            ));
+        }
+        self.ensure_diagnostic_capacity()?;
+        if diagnostic.class == super::AdapterErrorClass::RecordPermanent {
+            self.diagnostic_coverage_gaps.extend(affected_capabilities);
+        }
+        self.diagnostics.push(diagnostic);
+        Ok(())
+    }
+
+    fn ensure_diagnostic_capacity(&self) -> Result<(), AdapterError> {
         if self.diagnostics.len() == self.max_diagnostics {
             return Err(AdapterError::invalid_contract(format!(
                 "fact batch exceeds {} diagnostics",
                 self.max_diagnostics
             )));
         }
-        self.diagnostics.push(diagnostic);
         Ok(())
     }
 
@@ -1670,6 +1705,9 @@ impl FactBatch {
         }
         self.facts.append(&mut other.facts);
         self.diagnostics.append(&mut other.diagnostics);
+        self.unscoped_permanent_diagnostic |= other.unscoped_permanent_diagnostic;
+        self.diagnostic_coverage_gaps
+            .append(&mut other.diagnostic_coverage_gaps);
         self.semantic_revisions
             .append(&mut other.semantic_revisions);
         for dependency in other.dependency_reads {
@@ -1692,6 +1730,14 @@ impl FactBatch {
 
     pub fn diagnostics(&self) -> &[AdapterDiagnostic] {
         &self.diagnostics
+    }
+
+    pub(crate) fn has_unscoped_permanent_diagnostic(&self) -> bool {
+        self.unscoped_permanent_diagnostic
+    }
+
+    pub(crate) fn diagnostic_coverage_gaps(&self) -> &BTreeSet<CapabilityId> {
+        &self.diagnostic_coverage_gaps
     }
 
     pub fn dependency_reads(&self) -> &[DependencyRevision] {

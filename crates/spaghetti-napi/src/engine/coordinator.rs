@@ -16,15 +16,16 @@ use walkdir::WalkDir;
 
 use crate::adapter::{
     AdapterError, AdapterErrorClass, AdapterManifest, AdapterObjectContext, AgentAdapter,
-    Availability, CanonicalSourceInstanceKey, CapabilityGranularity, CoverageAbsence,
+    Availability, CanonicalSourceInstanceKey, CapabilityGranularity, CapabilityId, CoverageAbsence,
     CoverageAbsenceKind, CoverageDeclarationDigest, CoverageDomain, CoverageError,
-    CoverageMembershipRevision, CoverageObjectKey, CoveragePosition, CoveragePositionKind,
-    CoverageProvenance, CoverageScope, CoverageSetCompleteness, CoverageStatus, CoverageStreamKey,
-    DecodeDisposition, DeletionPolicy, DependencyRevision, DiscoveryContext, DriverSpec, FactBatch,
-    FactSemanticContext, RawRetentionPolicy, SourceAccess, SourceCoveragePoint, SourceCoverageSet,
-    SourceInstance, SourceInstanceSpec as AdapterSourceInstanceSpec, SourceListedObject,
-    SourceObjectDescriptor, SourceObjectList, SourceObjectListRequest, SourceQuery, SourceRows,
-    SourceSnapshot, StreamAuthority, StreamSpec, SupportLevel,
+    CoverageMembershipRevision, CoverageMembershipRevisionBuilder, CoverageObjectKey,
+    CoveragePosition, CoveragePositionKind, CoverageProvenance, CoverageScope,
+    CoverageSetCompleteness, CoverageStatus, CoverageStreamKey, DecodeDisposition, DeletionPolicy,
+    DependencyRevision, DiscoveryContext, DriverSpec, FactBatch, FactSemanticContext,
+    RawRetentionPolicy, SourceAccess, SourceCoveragePoint, SourceCoverageSet, SourceInstance,
+    SourceInstanceSpec as AdapterSourceInstanceSpec, SourceListedObject, SourceObjectDescriptor,
+    SourceObjectList, SourceObjectListRequest, SourceQuery, SourceRows, SourceSnapshot,
+    StreamAuthority, StreamSpec, SupportLevel,
 };
 use crate::decode_runtime::{
     decode_record as decode_adapter_record, diagnostic_excerpt, DecodeRuntimeLimits,
@@ -214,6 +215,8 @@ pub struct ReconcileOutcome {
     pub objects_removed: u32,
     pub records_decoded: u32,
     pub records_quarantined: u32,
+    pub(crate) unscoped_records_quarantined: u32,
+    pub(crate) capability_records_quarantined: BTreeMap<String, u32>,
     pub retries_required: u32,
     pub incomplete_tail_retries: u32,
     pub dependency_access_attempts: u64,
@@ -251,10 +254,16 @@ struct ProjectionBlockers {
 }
 
 impl ProjectionBlockers {
-    fn capture(outcome: &ReconcileOutcome) -> Self {
+    fn capture_for(outcome: &ReconcileOutcome, capability: &str) -> Self {
         Self {
             streams_unavailable: outcome.streams_unavailable,
-            records_quarantined: outcome.records_quarantined,
+            records_quarantined: outcome.unscoped_records_quarantined.saturating_add(
+                outcome
+                    .capability_records_quarantined
+                    .get(capability)
+                    .copied()
+                    .unwrap_or_default(),
+            ),
             retries_required: outcome.retries_required,
             incomplete_tail_retries: outcome.incomplete_tail_retries,
             backlog_remaining: outcome.backlog_remaining,
@@ -1251,17 +1260,26 @@ impl ObservationCoordinator {
                 id: source_instance_id,
                 spec,
             };
-            let stream =
+            let streams =
                 catch_adapter_panic("declare retry source stream", || adapter.streams(&instance))?
-                    .map_err(|error| adapter_error("declare retry source stream", error))?
-                    .into_iter()
-                    .find(|stream| stream.id.as_str() == target.stream_key)
-                    .ok_or_else(|| {
-                        observation_error(
-                            "resume retry object",
-                            format!("adapter no longer declares stream {}", target.stream_key),
-                        )
-                    })?;
+                    .map_err(|error| adapter_error("declare retry source stream", error))?;
+            let mut usage_v2_coverage = ProjectionCoverageAttempt::default();
+            if declares_usage_v2_projection(manifest) {
+                for candidate in &streams {
+                    if stream_declares_usage_v2_projection(candidate) {
+                        usage_v2_coverage.require_stream(candidate);
+                    }
+                }
+            }
+            let stream = streams
+                .into_iter()
+                .find(|stream| stream.id.as_str() == target.stream_key)
+                .ok_or_else(|| {
+                    observation_error(
+                        "resume retry object",
+                        format!("adapter no longer declares stream {}", target.stream_key),
+                    )
+                })?;
             stream
                 .validate(&instance)
                 .map_err(|error| adapter_error("validate retry source stream", error))?;
@@ -1308,6 +1326,12 @@ impl ObservationCoordinator {
                 objects_discovered: 1,
                 ..ReconcileOutcome::default()
             };
+            let usage_v2_stream = declares_usage_v2_projection(manifest)
+                && stream_declares_usage_v2_projection(&stream);
+            let replay = usage_v2_stream
+                .then(|| self.resume_fact_family_replay(&instance, &catalog))
+                .transpose()?
+                .flatten();
             lease.begin_reconciling();
             let mut lane = CommitLane::new(Arc::clone(&self.engine));
             self.reconcile_object(
@@ -1324,6 +1348,27 @@ impl ObservationCoordinator {
             )?;
             lane.flush()?;
             lane.apply_to(&mut outcome);
+            if usage_v2_stream {
+                usage_v2_coverage.note_outcome(
+                    stream.id.as_str(),
+                    ProjectionBlockers::default(),
+                    ProjectionBlockers::capture_for(&outcome, USAGE_V2_PROJECTION_ID),
+                );
+                // A provider commit publishes Pending in the same source
+                // transaction. Object-scoped watcher and recovery work must
+                // close that transition with the same instance-wide coverage
+                // barrier as a full reconcile; otherwise a successfully
+                // drained retry leaves truthful data behind stale Pending.
+                self.finish_instance_projection_readiness(
+                    manifest,
+                    &instance,
+                    &catalog,
+                    started_at,
+                    usage_v2_coverage,
+                    &mut outcome,
+                    replay.as_ref(),
+                )?;
+            }
             Ok(outcome)
         })();
         self.finish_reconcile(lease, result, started_at)
@@ -1489,7 +1534,8 @@ impl ObservationCoordinator {
             if usage_v2_stream {
                 usage_v2_coverage.require_stream(&stream);
             }
-            let projection_blockers = ProjectionBlockers::capture(outcome);
+            let projection_blockers =
+                ProjectionBlockers::capture_for(outcome, USAGE_V2_PROJECTION_ID);
             outcome.streams_reconciled = outcome.streams_reconciled.saturating_add(1);
             scheduled_objects.extend(self.collect_stream_work(
                 adapter,
@@ -1506,7 +1552,7 @@ impl ObservationCoordinator {
                 usage_v2_coverage.note_outcome(
                     stream.id.as_str(),
                     projection_blockers,
-                    ProjectionBlockers::capture(outcome),
+                    ProjectionBlockers::capture_for(outcome, USAGE_V2_PROJECTION_ID),
                 );
             }
         }
@@ -2183,7 +2229,10 @@ impl ObservationCoordinator {
                             projection_coverage.note_outcome(
                                 &stream_key,
                                 ProjectionBlockers::default(),
-                                ProjectionBlockers::capture(&local),
+                                ProjectionBlockers::capture_for(
+                                    &local,
+                                    USAGE_V2_PROJECTION_ID,
+                                ),
                             );
                         }
                         merge_outcome(outcome, local);
@@ -2446,7 +2495,7 @@ impl ObservationCoordinator {
                 .map_err(|error| adapter_error("create path quarantine fact batch", error))?,
             lane,
         )?;
-        outcome.records_quarantined = outcome.records_quarantined.saturating_add(1);
+        record_unscoped_quarantines(outcome, 1);
         outcome.objects_changed = outcome.objects_changed.saturating_add(1);
         Ok(())
     }
@@ -2673,6 +2722,8 @@ impl ObservationCoordinator {
                         let mut next_decoder_state_version = prior_decoder_state_version;
                         let mut decoded_count = 0_u32;
                         let mut quarantined_count = 0_u32;
+                        let mut unscoped_quarantined_count = 0_u32;
+                        let mut capability_quarantined_counts = BTreeMap::new();
                         let mut remaining_generation_change = generation_changed;
                         let mut last_included: Option<AppendCheckpoint> = None;
                         for item in &items {
@@ -2704,6 +2755,14 @@ impl ObservationCoordinator {
                                     if decoded.quarantined {
                                         quarantined_count = quarantined_count.saturating_add(1);
                                     }
+                                    if decoded.unscoped_permanent_diagnostic {
+                                        unscoped_quarantined_count =
+                                            unscoped_quarantined_count.saturating_add(1);
+                                    }
+                                    increment_capability_quarantines(
+                                        &mut capability_quarantined_counts,
+                                        &decoded.diagnostic_coverage_gaps,
+                                    );
                                     if !batch.can_append(&decoded.batch)
                                         || errors.len().saturating_add(decoded.errors.len())
                                             > DIAGNOSTIC_LIMIT
@@ -2763,6 +2822,8 @@ impl ObservationCoordinator {
                                 }
                                 AppendItem::Quarantined(quarantine) => {
                                     quarantined_count = quarantined_count.saturating_add(1);
+                                    unscoped_quarantined_count =
+                                        unscoped_quarantined_count.saturating_add(1);
                                     if errors.len() >= DIAGNOSTIC_LIMIT {
                                         let Some(slice) = last_included.as_ref() else {
                                             return Err(observation_error(
@@ -2829,9 +2890,12 @@ impl ObservationCoordinator {
                         durable.decoder_state_version = next_decoder_state_version;
                         outcome.records_decoded =
                             outcome.records_decoded.saturating_add(decoded_count);
-                        outcome.records_quarantined = outcome
-                            .records_quarantined
-                            .saturating_add(quarantined_count);
+                        record_quarantines(
+                            outcome,
+                            quarantined_count,
+                            unscoped_quarantined_count,
+                            capability_quarantined_counts,
+                        );
                         outcome.objects_changed = outcome.objects_changed.saturating_add(1);
                     }
                     previous = Some(checkpoint);
@@ -3097,7 +3161,7 @@ impl ObservationCoordinator {
                     })?,
                     lane,
                 )?;
-                outcome.records_quarantined = outcome.records_quarantined.saturating_add(1);
+                record_unscoped_quarantines(outcome, 1);
                 outcome.objects_changed = outcome.objects_changed.saturating_add(1);
                 Ok(())
             }
@@ -3222,12 +3286,19 @@ impl ObservationCoordinator {
                         })?,
                         lane,
                     )?;
-                    outcome.records_quarantined = outcome.records_quarantined.saturating_add(1);
+                    record_unscoped_quarantines(outcome, 1);
                     outcome.objects_changed = outcome.objects_changed.saturating_add(1);
                     Ok(())
                 }
             };
         }
+        let mut capability_quarantined_records = BTreeMap::new();
+        increment_capability_quarantines(
+            &mut capability_quarantined_records,
+            &decoded.diagnostic_coverage_gaps,
+        );
+        let quarantined_records = u32::from(decoded.quarantined);
+        let unscoped_quarantined_records = u32::from(decoded.unscoped_permanent_diagnostic);
         let request = commit_request(
             adapter,
             instance,
@@ -3251,9 +3322,12 @@ impl ObservationCoordinator {
         )?;
         self.commit_facts_on(request, decoded.batch, lane)?;
         outcome.records_decoded = outcome.records_decoded.saturating_add(1);
-        if decoded.quarantined {
-            outcome.records_quarantined = outcome.records_quarantined.saturating_add(1);
-        }
+        record_quarantines(
+            outcome,
+            quarantined_records,
+            unscoped_quarantined_records,
+            capability_quarantined_records,
+        );
         outcome.objects_changed = outcome.objects_changed.saturating_add(1);
         if removed {
             outcome.objects_removed = outcome.objects_removed.saturating_add(1);
@@ -3568,9 +3642,12 @@ impl ObservationCoordinator {
         outcome.records_decoded = outcome
             .records_decoded
             .saturating_add(bounded_u32(records.len()));
-        outcome.records_quarantined = outcome
-            .records_quarantined
-            .saturating_add(decoded.quarantined_records);
+        record_quarantines(
+            outcome,
+            decoded.quarantined_records,
+            decoded.unscoped_quarantined_records,
+            decoded.capability_quarantined_records,
+        );
         outcome.objects_changed = outcome.objects_changed.saturating_add(1);
         Ok(())
     }
@@ -3672,6 +3749,13 @@ impl ObservationCoordinator {
                     outcome.retries_required = outcome.retries_required.saturating_add(1);
                     return Ok(());
                 }
+                let mut capability_quarantined_records = BTreeMap::new();
+                increment_capability_quarantines(
+                    &mut capability_quarantined_records,
+                    &decoded.diagnostic_coverage_gaps,
+                );
+                let quarantined_records = u32::from(decoded.quarantined);
+                let unscoped_quarantined_records = u32::from(decoded.unscoped_permanent_diagnostic);
                 let request = commit_request(
                     adapter,
                     instance,
@@ -3695,9 +3779,12 @@ impl ObservationCoordinator {
                 )?;
                 self.commit_facts_on(request, decoded.batch, lane)?;
                 outcome.records_decoded = outcome.records_decoded.saturating_add(1);
-                if decoded.quarantined {
-                    outcome.records_quarantined = outcome.records_quarantined.saturating_add(1);
-                }
+                record_quarantines(
+                    outcome,
+                    quarantined_records,
+                    unscoped_quarantined_records,
+                    capability_quarantined_records,
+                );
                 outcome.objects_changed = outcome.objects_changed.saturating_add(1);
                 if removed {
                     outcome.objects_removed = outcome.objects_removed.saturating_add(1);
@@ -4220,6 +4307,8 @@ struct DecodedRecord {
     errors: Vec<SourceRecordError>,
     next_decoder_state: Option<Vec<u8>>,
     quarantined: bool,
+    unscoped_permanent_diagnostic: bool,
+    diagnostic_coverage_gaps: Vec<CapabilityId>,
 }
 
 struct DecodedSnapshot {
@@ -4227,6 +4316,8 @@ struct DecodedSnapshot {
     errors: Vec<SourceRecordError>,
     next_decoder_state: Option<Vec<u8>>,
     quarantined_records: u32,
+    unscoped_quarantined_records: u32,
+    capability_quarantined_records: BTreeMap<String, u32>,
 }
 
 fn source_record_volume(record: &SourceRecord) -> (u64, u64) {
@@ -4336,6 +4427,8 @@ fn decode_snapshot_records<A: AgentAdapter + ?Sized>(
         .map_err(|error| adapter_error("create database snapshot fact batch", error))?;
     let mut errors = Vec::new();
     let mut quarantined_records = 0_u32;
+    let mut unscoped_quarantined_records = 0_u32;
+    let mut capability_quarantined_records = BTreeMap::new();
     for record in records {
         let decoded = decode_record(
             adapter,
@@ -4355,6 +4448,13 @@ fn decode_snapshot_records<A: AgentAdapter + ?Sized>(
         if decoded.quarantined {
             quarantined_records = quarantined_records.saturating_add(1);
         }
+        if decoded.unscoped_permanent_diagnostic {
+            unscoped_quarantined_records = unscoped_quarantined_records.saturating_add(1);
+        }
+        increment_capability_quarantines(
+            &mut capability_quarantined_records,
+            &decoded.diagnostic_coverage_gaps,
+        );
         batch
             .append(decoded.batch)
             .map_err(|error| adapter_error("merge database snapshot facts", error))?;
@@ -4364,6 +4464,8 @@ fn decode_snapshot_records<A: AgentAdapter + ?Sized>(
         errors,
         next_decoder_state: decoder_state,
         quarantined_records,
+        unscoped_quarantined_records,
+        capability_quarantined_records,
     }))
 }
 
@@ -4506,6 +4608,8 @@ fn decode_record<A: AgentAdapter + ?Sized>(
         errors,
         next_decoder_state: decoded.next_decoder_state,
         quarantined: decoded.quarantined,
+        unscoped_permanent_diagnostic: decoded.unscoped_permanent_diagnostic,
+        diagnostic_coverage_gaps: decoded.diagnostic_coverage_gaps,
     })
 }
 
@@ -4683,21 +4787,47 @@ fn usage_v2_coverage_set_update(
     // particular, the first quarantine and the following unchanged poll must
     // not alternate between a per-record error and a generic sticky error.
     let replay_gap = incomplete_detail.is_some_and(|detail| detail.contains("records_quarantined"));
-    let mut membership = b"runtime.usage-v2/source-membership/v1".to_vec();
-    let mut points = Vec::new();
-    let mut absences = Vec::new();
+    const MEMBERSHIP_PREFIX: &[u8] = b"runtime.usage-v2/source-membership/v1";
+    let mut membership_bytes = MEMBERSHIP_PREFIX.len();
     for stream in attempt.required_streams.keys() {
-        append_membership_component(&mut membership, stream.as_bytes());
+        membership_bytes = checked_membership_component_len(membership_bytes, stream.as_bytes())?;
     }
     for object in catalog
         .objects
         .iter()
         .filter(|object| attempt.required_streams.contains_key(&object.stream_key))
     {
-        append_membership_component(&mut membership, object.stream_key.as_bytes());
-        append_membership_component(&mut membership, &object.object_key);
-        membership.extend_from_slice(&object.generation.to_be_bytes());
-        membership.push(u8::from(object.state == "absent"));
+        membership_bytes =
+            checked_membership_component_len(membership_bytes, object.stream_key.as_bytes())?;
+        membership_bytes = checked_membership_component_len(membership_bytes, &object.object_key)?;
+        membership_bytes = checked_membership_len(
+            membership_bytes,
+            std::mem::size_of::<u64>() + std::mem::size_of::<u8>(),
+        )?;
+    }
+    let mut membership = CoverageMembershipRevision::begin_streaming(membership_bytes)
+        .map_err(|error| observation_error("build usage-v2 coverage", error.to_string()))?;
+    membership
+        .update(MEMBERSHIP_PREFIX)
+        .map_err(|error| observation_error("build usage-v2 coverage", error.to_string()))?;
+    let mut points = Vec::new();
+    let mut absences = Vec::new();
+    for stream in attempt.required_streams.keys() {
+        append_membership_component(&mut membership, stream.as_bytes())?;
+    }
+    for object in catalog
+        .objects
+        .iter()
+        .filter(|object| attempt.required_streams.contains_key(&object.stream_key))
+    {
+        append_membership_component(&mut membership, object.stream_key.as_bytes())?;
+        append_membership_component(&mut membership, &object.object_key)?;
+        membership
+            .update(&object.generation.to_be_bytes())
+            .map_err(|error| observation_error("build usage-v2 coverage", error.to_string()))?;
+        membership
+            .update(&[u8::from(object.state == "absent")])
+            .map_err(|error| observation_error("build usage-v2 coverage", error.to_string()))?;
 
         let stream_key =
             CoverageStreamKey::derive(manifest.id.as_str(), object.stream_key.as_bytes())
@@ -4794,7 +4924,8 @@ fn usage_v2_coverage_set_update(
     errors.sort();
     errors.dedup();
 
-    let membership_revision = CoverageMembershipRevision::derive(&membership)
+    let membership_revision = membership
+        .finish()
         .map_err(|error| observation_error("build usage-v2 coverage", error.to_string()))?;
     let completeness = if incomplete_detail.is_none() {
         CoverageSetCompleteness::Complete
@@ -4824,9 +4955,39 @@ fn usage_v2_coverage_set_update(
     })
 }
 
-fn append_membership_component(output: &mut Vec<u8>, component: &[u8]) {
-    output.extend_from_slice(&(component.len() as u64).to_be_bytes());
-    output.extend_from_slice(component);
+fn checked_membership_len(current: usize, additional: usize) -> Result<usize, EngineError> {
+    current.checked_add(additional).ok_or_else(|| {
+        observation_error(
+            "build usage-v2 coverage",
+            "coverage membership encoded length overflow",
+        )
+    })
+}
+
+fn checked_membership_component_len(
+    current: usize,
+    component: &[u8],
+) -> Result<usize, EngineError> {
+    let current = checked_membership_len(current, std::mem::size_of::<u64>())?;
+    checked_membership_len(current, component.len())
+}
+
+fn append_membership_component(
+    output: &mut CoverageMembershipRevisionBuilder,
+    component: &[u8],
+) -> Result<(), EngineError> {
+    let length = u64::try_from(component.len()).map_err(|_| {
+        observation_error(
+            "build usage-v2 coverage",
+            "coverage membership component length exceeds u64",
+        )
+    })?;
+    output
+        .update(&length.to_be_bytes())
+        .map_err(|error| observation_error("build usage-v2 coverage", error.to_string()))?;
+    output
+        .update(component)
+        .map_err(|error| observation_error("build usage-v2 coverage", error.to_string()))
 }
 
 fn normalized_coverage_blocker(blocker: &str) -> &str {
@@ -5458,6 +5619,39 @@ fn append_checkpoint_through(
     next
 }
 
+fn increment_capability_quarantines(
+    counts: &mut BTreeMap<String, u32>,
+    capabilities: &[CapabilityId],
+) {
+    for capability in capabilities {
+        let count = counts.entry(capability.as_str().to_string()).or_default();
+        *count = count.saturating_add(1);
+    }
+}
+
+fn record_quarantines(
+    outcome: &mut ReconcileOutcome,
+    records: u32,
+    unscoped_records: u32,
+    capability_records: BTreeMap<String, u32>,
+) {
+    outcome.records_quarantined = outcome.records_quarantined.saturating_add(records);
+    outcome.unscoped_records_quarantined = outcome
+        .unscoped_records_quarantined
+        .saturating_add(unscoped_records);
+    for (capability, records) in capability_records {
+        let count = outcome
+            .capability_records_quarantined
+            .entry(capability)
+            .or_default();
+        *count = count.saturating_add(records);
+    }
+}
+
+fn record_unscoped_quarantines(outcome: &mut ReconcileOutcome, records: u32) {
+    record_quarantines(outcome, records, records, BTreeMap::new());
+}
+
 fn merge_outcome(target: &mut ReconcileOutcome, source: ReconcileOutcome) {
     target.instances_discovered = target
         .instances_discovered
@@ -5489,6 +5683,16 @@ fn merge_outcome(target: &mut ReconcileOutcome, source: ReconcileOutcome) {
     target.records_quarantined = target
         .records_quarantined
         .saturating_add(source.records_quarantined);
+    target.unscoped_records_quarantined = target
+        .unscoped_records_quarantined
+        .saturating_add(source.unscoped_records_quarantined);
+    for (capability, records) in source.capability_records_quarantined {
+        let count = target
+            .capability_records_quarantined
+            .entry(capability)
+            .or_default();
+        *count = count.saturating_add(records);
+    }
     target.retries_required = target
         .retries_required
         .saturating_add(source.retries_required);
@@ -5992,6 +6196,136 @@ mod tests {
             projection_version_state(&fixture.database, "runtime.usage-v2"),
             (1, Some(1), "ready".to_string(), 2, None),
             "a non-provider stream must not move the usage-v2 readiness clock"
+        );
+    }
+
+    #[test]
+    fn provider_object_reconcile_closes_pending_with_instance_coverage_barrier() {
+        let fixture = ClaudeFixture::new();
+        let transcript = fixture.transcript_path();
+        std::fs::write(&transcript, transcript_line("m1", "initial usage")).unwrap();
+        let engine = fixture.open_engine();
+        assert_eq!(fixture.reconcile(&engine).commits, 2);
+
+        let mut append = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&transcript)
+            .unwrap();
+        append
+            .write_all(&transcript_line("m2", "targeted usage"))
+            .unwrap();
+        append.flush().unwrap();
+
+        let adapter = ClaudeCodeAdapter::new();
+        let spec = adapter
+            .discover(&DiscoveryContext {
+                configured_roots: vec![fixture.root.clone()],
+                observed_at: now_unix_ms().unwrap(),
+            })
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap();
+        let object = catalog_object(&engine, &fixture.root, "session-transcripts");
+        let target = ReconcileRetryTarget {
+            stable_key: spec.stable_key.as_bytes().to_vec(),
+            stream_key: object.stream_key,
+            object_key: object.object_key,
+        };
+        let update = ObservationCoordinator::new(Arc::clone(&engine))
+            .reconcile_declared_object(&adapter, spec, &target, "test targeted provider update")
+            .unwrap();
+
+        assert_eq!(update.records_decoded, 1);
+        assert_eq!(
+            update.commits, 2,
+            "the provider data commit must be followed by its coverage barrier"
+        );
+        assert_eq!(
+            projection_version_state(&fixture.database, "runtime.usage-v2"),
+            (1, Some(1), "ready".to_string(), 4, None)
+        );
+        let coverage = usage_v2_coverage_state(&fixture.database);
+        assert_eq!(coverage.completeness, "complete");
+        assert_eq!(coverage.last_commit_seq, 4);
+        assert_eq!(coverage.point_count, 1);
+        assert_eq!(
+            coverage.monotonic_order,
+            Some(std::fs::metadata(transcript).unwrap().len())
+        );
+        assert_eq!(
+            count_rows(&fixture.database, "usage_v2_response_contributions"),
+            2
+        );
+    }
+
+    #[test]
+    fn non_usage_diagnostic_does_not_create_a_usage_v2_coverage_gap() {
+        let fixture = ClaudeFixture::new();
+        let mut transcript = transcript_line("m1", "usage remains covered");
+        transcript.extend_from_slice(
+            br#"{"type":"file-history-delta","messageId":"delta-bad","snapshotMessageId":"checkpoint","trackingPath":"src/lib.rs","backup":{"backupFileName":"71f902cd51ee4c6e@v2","version":3,"backupTime":"2026-08-11T20:01:00.000Z"}}"#,
+        );
+        transcript.push(b'\n');
+        std::fs::write(fixture.transcript_path(), transcript).unwrap();
+        let engine = fixture.open_engine();
+
+        let outcome = fixture.reconcile(&engine);
+        assert_eq!(outcome.records_quarantined, 1);
+        assert_eq!(outcome.unscoped_records_quarantined, 0);
+        assert_eq!(
+            outcome
+                .capability_records_quarantined
+                .get("runtime.artifacts"),
+            Some(&1)
+        );
+        assert!(!outcome
+            .capability_records_quarantined
+            .contains_key(USAGE_V2_PROJECTION_ID));
+        assert_eq!(
+            projection_version_state(&fixture.database, USAGE_V2_PROJECTION_ID).2,
+            "ready"
+        );
+        assert_eq!(
+            usage_v2_coverage_state(&fixture.database).completeness,
+            "complete"
+        );
+        assert_eq!(
+            count_rows(&fixture.database, "usage_v2_response_contributions"),
+            1
+        );
+        assert_eq!(count_rows(&fixture.database, "source_record_errors"), 1);
+    }
+
+    #[test]
+    fn usage_scoped_diagnostic_blocks_usage_v2_coverage() {
+        let fixture = ClaudeFixture::new();
+        let malformed = format!(
+            r#"{{"type":"assistant","uuid":"row-bad","timestamp":"2026-08-11T00:00:01Z","sessionId":"{SESSION}","cwd":"/repo","message":{{"model":"claude-sonnet","id":"api-bad","type":"message","role":"assistant","content":[],"usage":{{"input_tokens":"bad"}}}}}}"#
+        );
+        std::fs::write(fixture.transcript_path(), format!("{malformed}\n")).unwrap();
+        let engine = fixture.open_engine();
+
+        let outcome = fixture.reconcile(&engine);
+        assert_eq!(outcome.records_quarantined, 1);
+        assert_eq!(outcome.unscoped_records_quarantined, 0);
+        assert_eq!(
+            outcome
+                .capability_records_quarantined
+                .get(USAGE_V2_PROJECTION_ID),
+            Some(&1)
+        );
+        assert_eq!(
+            projection_version_state(&fixture.database, USAGE_V2_PROJECTION_ID).2,
+            "unavailable"
+        );
+        assert_eq!(
+            usage_v2_coverage_state(&fixture.database).error_codes,
+            vec!["coverage_gap_requires_explicit_replay".to_string()]
+        );
+        assert_eq!(
+            count_rows(&fixture.database, "usage_v2_response_contributions"),
+            0
         );
     }
 

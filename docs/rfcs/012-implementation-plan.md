@@ -128,7 +128,7 @@ prerequisite for early vertical slices.
 | B4. Progressive host and UX              | 012B                | Not started | cold/warm UI topology and migration tests                      |
 | B5. Catalog performance calibration      | 012B                | Not started | reproducible gate-amendment report                             |
 | C1. Runtime semantic contracts           | 012C                | In progress | actor/usage/state/interaction serialization fixtures           |
-| C2. Usage-v2 shadow projection           | 012C                | In progress | frozen oracle plus native corpus/affiliation parity            |
+| C2. Usage-v2 shadow projection           | 012C                | In progress | frozen/private corpus plus native affiliation parity           |
 | C3. Durable usage migration              | 012C                | In progress | transactional switch and rollback tests                        |
 | C4. Runtime semantic downstream suite    | 012C                | Not started | typed consumers plus durable/live merge without native parsing |
 | D1. Store-free observer kernel           | 012D                | In progress | attach/bootstrap/poll/close, no SQLite/global scan             |
@@ -593,8 +593,11 @@ Current landing status (2026-08-16):
   buckets, optional qualified model/effort evidence, and mandatory RFC 012A
   semantic revision identity;
 - introduced usage-v2 in Claude decoder contract 17, retained that response
-  identity unchanged in contract 18, and dual-emitted the canonical response
-  fact beside the unchanged legacy row-delta fact. Non-empty
+  identity unchanged in contract 18, and moved to contract 19 when permanent
+  diagnostics gained capability-scoped coverage consequences. Contract 19
+  forces existing contract-18 databases through replay while preserving the
+  same response identity and dual-emitting the canonical response fact beside
+  the unchanged legacy row-delta fact. Non-empty
   `message.id` is primary, `requestId` is correlation metadata only, exact zero
   survives, absent buckets remain `Unknown/Missing`, and a malformed usage
   object emits a bounded diagnostic without dropping the message or replacing
@@ -671,10 +674,27 @@ Current landing status (2026-08-16):
   roots, and writer-side mismatches create no commit. The host injects only its
   configured roots; the transport-neutral query/IPC client stays read-only;
   and
-- kept the candidate capability `unsupported`: private native corpus-scale
-  parity, fixture-proven native team-to-actor correlation, exact-repeat
-  public-event suppression, migration switch, remaining portable fact-family
-  serialization, and rollback window are not yet complete.
+- made coverage construction corpus-bounded without changing its identity:
+  membership length is counted before a second canonical streaming digest
+  pass, small inputs remain digest-compatible, and inputs above the previous
+  64 KiB serialization ceiling no longer require one aggregate allocation.
+  Targeted object recovery now closes the same instance-wide provider barrier
+  as a full scan, while capability-scoped diagnostics keep unrelated retained
+  projection loss auditable without contaminating usage-v2 coverage;
+- passed the private native corpus-scale gate on a stable ephemeral clone. The
+  independent census and durable reducer matched exactly across 149,369
+  responses, 5,044 actors, 854 sessions, root/child partition, model and
+  fallback counts, all four token totals, and zero unknown buckets. All 5,182
+  declared transcript objects produced complete coverage and Ready v1; six
+  retained `claude_typed_projection_loss` diagnostics correctly remained
+  audit evidence outside usage-v2 coverage. The aggregate-only report is
+  [`usage-v2-private-parity-v1.json`](../../agent-support/claude-code/candidate-2026-08-15/reports/usage-v2-private-parity-v1.json)
+  (`sha256:2d84af3dd9bcfb91e727b8d0e067679b1637e61b0a343957a09b8f42c303176e`);
+  and
+- kept the candidate capability `unsupported`: fixture-proven native
+  team-to-actor correlation, exact-repeat public-event suppression, migration
+  switch, remaining portable fact-family serialization, and rollback window
+  are not yet complete.
 
 ### C3. Durable migration
 
@@ -748,11 +768,11 @@ after durability but before acknowledgement. Tests prove every precommit
 failure leaks neither half and retries to one shared commit sequence; an
 after-commit error survives database reopen and an equal retry is a no-op.
 
-C3 remains `In progress`: private corpus-scale comparison, transactional
-default query selection and its crash boundaries, compatibility-window
-telemetry, and rollback are still required. The shadow query, pack readiness,
-durable coverage query, and authorized coordinator replay are inspection/
-migration surfaces, not a support-promotion claim.
+C3 remains `In progress`: the exact private corpus-scale comparison gate is
+closed, but transactional default query selection and its crash boundaries,
+compatibility-window telemetry, and rollback are still required. The shadow
+query, pack readiness, durable coverage query, and authorized coordinator
+replay are inspection/migration surfaces, not a support-promotion claim.
 
 ### C4. Downstream semantic suite
 
