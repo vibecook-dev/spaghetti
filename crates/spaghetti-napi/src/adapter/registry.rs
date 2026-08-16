@@ -190,11 +190,12 @@ mod tests {
         SourceInstanceSpec, SourceObjectDescriptor, StreamSpec, SupportBundleDocument,
     };
     use crate::scoped_observation::{
-        ScopedAppendDecodeOutcome, ScopedAppendDecoderConfig, ScopedAppendDeliveryPhase,
-        ScopedAppendObservation, ScopedAppendReconcileRequest, ScopedDecodeFailureClass,
-        ScopedDecodedAppendBatch, ScopedDecodedAppendItem, ScopedKnownAppendObject,
+        ScopedAdmissionError, ScopedAppendDecodeOutcome, ScopedAppendDecoderConfig,
+        ScopedAppendDeliveryPhase, ScopedAppendObservation, ScopedAppendReconcileRequest,
+        ScopedDecodeFailureClass, ScopedDecodedAppendItem, ScopedKnownAppendObject,
         ScopedKnownObjectGrant, ScopedKnownObjectReadRequest, ScopedObjectRead,
         ScopedObservationAccessError, ScopedObservationAccessHost, ScopedObservationAccessRequest,
+        ScopedObservationAdmissionLane, ScopedObservationQueueLimits, ScopedQueuedObservationFrame,
         ScopedSourceFailureClass,
     };
     use crate::source::{
@@ -421,17 +422,32 @@ mod tests {
         .unwrap()
     }
 
+    fn admission_lane(
+        max_data_events: u64,
+        max_retained_native_bytes: u64,
+        max_control_items: usize,
+    ) -> ScopedObservationAdmissionLane {
+        ScopedObservationAdmissionLane::new(ScopedObservationQueueLimits {
+            max_data_events,
+            max_retained_native_bytes,
+            max_control_items,
+        })
+        .unwrap()
+    }
+
     fn decode_and_admit_ignored(
         host: &ScopedObservationAccessHost,
         object: &mut ScopedKnownAppendObject,
         observation: &ScopedAppendObservation,
-    ) -> ScopedDecodedAppendBatch {
+    ) {
         let decoded = decode_scoped(host, object, observation);
         let ScopedAppendDecodeOutcome::Ready(batch) = decoded else {
             panic!("fixture decoder must not request a retry");
         };
-        object.admit_decoded(observation, &batch).unwrap();
-        batch
+        let mut lane = admission_lane(64, 64 * 1024, 4);
+        if let Err(failure) = lane.admit(object, observation, batch) {
+            panic!("fixture admission failed: {}", failure.error);
+        }
     }
 
     impl AgentAdapter for EmptyAdapter {
@@ -1036,10 +1052,12 @@ mod tests {
 
         let replay_pass = host.begin_pass().unwrap();
         let replay = object.reconcile(&replay_pass, request()).unwrap();
-        assert!(matches!(
-            object.admit_decoded(&replay, &first_decoded),
-            Err(ScopedObservationAccessError::ObservationNotPending)
-        ));
+        let mut lane = admission_lane(16, 0, 4);
+        let mismatch = lane
+            .admit(&mut object, &replay, first_decoded)
+            .expect_err("old decoded receipt must not admit a replay observation");
+        assert_eq!(mismatch.error, ScopedAdmissionError::ObservationMismatch);
+        assert!(lane.is_empty());
         let ScopedAppendDecodeOutcome::Ready(replay_decoded) =
             decode_scoped(&host, &mut object, &replay)
         else {
@@ -1057,7 +1075,37 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(replay_fact_ids, first_fact_ids);
         assert!(object.decoder_state().is_none());
-        object.admit_decoded(&replay, &replay_decoded).unwrap();
+        let mut full_lane = admission_lane(1, 0, 1);
+        let backpressure = full_lane
+            .admit(&mut object, &replay, replay_decoded)
+            .expect_err("two decoded events must not enter one event slot");
+        assert_eq!(backpressure.error, ScopedAdmissionError::DataQueueFull);
+        assert!(full_lane.is_empty());
+        assert!(object.checkpoint().is_none());
+        assert!(object.decoder_state().is_none());
+        let replay_decoded = backpressure.decoded;
+        let replay_receipt = match lane.admit(&mut object, &replay, replay_decoded) {
+            Ok(receipt) => receipt,
+            Err(failure) => panic!("replay admission failed: {}", failure.error),
+        };
+        assert_eq!(replay_receipt.data_events, 2);
+        assert_eq!(replay_receipt.control_items, 0);
+        assert_eq!(lane.queued_data_events(), 2);
+        assert!(matches!(
+            lane.pop_next(),
+            Some(ScopedQueuedObservationFrame::Decoded {
+                lane_ordinal: 1,
+                ..
+            })
+        ));
+        assert!(matches!(
+            lane.pop_next(),
+            Some(ScopedQueuedObservationFrame::Decoded {
+                lane_ordinal: 2,
+                ..
+            })
+        ));
+        assert!(lane.is_empty());
         assert_eq!(object.checkpoint().unwrap().committed_offset, 8);
         assert_eq!(object.decoder_state(), Some(b"onetwo".as_slice()));
         drop(replay_pass);
@@ -1090,11 +1138,113 @@ mod tests {
         };
         assert_eq!(correction_decoded.items.len(), 1);
         assert_eq!(object.decoder_state(), Some(b"onetwo".as_slice()));
-        object
-            .admit_decoded(&correction, &correction_decoded)
-            .unwrap();
+        let correction_receipt = match lane.admit(&mut object, &correction, correction_decoded) {
+            Ok(receipt) => receipt,
+            Err(failure) => panic!("correction admission failed: {}", failure.error),
+        };
+        assert_eq!(correction_receipt.control_items, 1);
+        assert_eq!(correction_receipt.through_lane_ordinal, 4);
+        assert!(matches!(
+            lane.pop_next(),
+            Some(ScopedQueuedObservationFrame::Reset {
+                lane_ordinal: 3,
+                reset: crate::scoped_observation::ScopedAppendReset {
+                    reason: AppendTransition::Truncated,
+                    ..
+                },
+                ..
+            })
+        ));
+        assert!(matches!(
+            lane.pop_next(),
+            Some(ScopedQueuedObservationFrame::Decoded {
+                lane_ordinal: 4,
+                ..
+            })
+        ));
         assert_eq!(object.checkpoint().unwrap().generation, 2);
         assert_eq!(object.decoder_state(), Some(b"fresh".as_slice()));
+    }
+
+    #[test]
+    fn scoped_admission_lane_bounds_actual_retained_native_bytes() {
+        let registry = stateful_supported_fixture_registry();
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().join("retained-native-root");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("session.jsonl"), b"one\n").unwrap();
+        let host =
+            ScopedObservationAccessHost::authorize(&registry, scoped_access_request(root.clone()))
+                .unwrap();
+        let mut config = AppendDelimitedConfig::json_lines();
+        config.max_record_bytes = 64;
+        config.max_batch_bytes = 64;
+        config.max_records_per_batch = 4;
+        config.prefix_anchor_bytes = 16;
+        let mut object = scoped_append_object(
+            AppendDelimitedFile::new(config).unwrap(),
+            RawRetentionPolicy::Full,
+        );
+        let identity = [ScopeIdentityInput {
+            name: "native-session-id",
+            value: b"retained-native-session",
+        }];
+        let origin = RecordOrigin {
+            source_instance_id: 1,
+            stream_id: 2,
+            object_id: 3,
+            observed_at: 4,
+            source_timestamp_hint: None,
+            media_type: SourceMediaType::new("application/x-ndjson").unwrap(),
+        };
+        let pass = host.begin_pass().unwrap();
+        let observation = object
+            .reconcile(
+                &pass,
+                ScopedAppendReconcileRequest {
+                    relation_id: "root-object",
+                    identity_inputs: &identity,
+                    access_phase: AccessPhase::Initial,
+                    parent_token: None,
+                    depth: 1,
+                    max_bytes: 64,
+                    origin: &origin,
+                    force_contract_replay: false,
+                },
+            )
+            .unwrap();
+        let ScopedAppendDecodeOutcome::Ready(decoded) =
+            decode_scoped(&host, &mut object, &observation)
+        else {
+            panic!("expected decoded append batch");
+        };
+
+        let mut too_small = admission_lane(1, 5, 1);
+        let backpressure = too_small
+            .admit(&mut object, &observation, decoded)
+            .expect_err("two retained copies of the three-byte payload require six bytes");
+        assert_eq!(
+            backpressure.error,
+            ScopedAdmissionError::RetainedNativeQueueFull
+        );
+        assert_eq!(too_small.queued_retained_native_bytes(), 0);
+        assert!(object.checkpoint().is_none());
+        assert!(object.decoder_state().is_none());
+
+        let mut exact = admission_lane(1, 6, 1);
+        let receipt = match exact.admit(&mut object, &observation, backpressure.decoded) {
+            Ok(receipt) => receipt,
+            Err(failure) => panic!("exact retained-byte admission failed: {}", failure.error),
+        };
+        assert_eq!(receipt.retained_native_bytes, 6);
+        assert_eq!(exact.queued_retained_native_bytes(), 6);
+        assert!(matches!(
+            exact.pop_next(),
+            Some(ScopedQueuedObservationFrame::Decoded { .. })
+        ));
+        assert_eq!(exact.queued_retained_native_bytes(), 0);
+        assert_eq!(object.checkpoint().unwrap().committed_offset, 4);
+        assert_eq!(object.decoder_state(), Some(b"one".as_slice()));
     }
 
     #[test]

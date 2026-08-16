@@ -245,12 +245,23 @@ durable coordinator and provisional scoped host both call that boundary. The
 scoped append object binds one decoder, object context, retention policy, and
 finite output bounds for its lifetime; callers cannot switch state domains
 between reconciliations. Its transaction stages ordered `FactBatch` output and
-next decoder state, then advances decoder state and source checkpoint together only after
-admission of the matching unforgeable decoded-batch receipt; a raw read or
-receipt from another observation cannot advance either. Retry, decode failure,
-or discard advances neither, and a source generation reset starts with empty
-decoder state. Undeclared decoder dependency access fails closed until it is
-composed through an authorized scope relation.
+next decoder state. A bounded internal lane separately accounts decoded-event
+weight, actual retained-native bytes, and reset controls; it admits a complete
+unit with reset before replay data and only then advances decoder state and
+source checkpoint using the matching unforgeable decoded-batch receipt. A raw
+read or receipt from another observation cannot advance either. Backpressure
+returns the decoded batch unchanged for retry; decode failure or discard also
+advances neither, and a source generation reset starts with empty decoder
+state. Its lane ordinal is an internal queue coordinate, not an RFC 012D
+`observer_sequence`.
+
+This provisional lane stores decoded facts rather than public semantic events.
+The current `FactBatch` still carries the RFC 011 store-oriented `FactId`; it
+must not invent a delivery-only replacement for the canonical `FactRevisionId`
+and `SemanticRevisionRef` required by this RFC. Public scoped projection remains
+gated on attaching those canonical identities to actual emitted fact families.
+Undeclared decoder dependency access fails closed until it is composed through
+an authorized scope relation.
 Attachment may precede root-object creation; each later pass receives a fresh
 declared ledger; close prevents new passes; and the pass report contains neither
 granted paths nor native content. Architecture ratchets prevent the scoped seam

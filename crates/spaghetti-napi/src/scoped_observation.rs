@@ -5,15 +5,15 @@
 //! artifact probing and the complete RFC 012D request contract must remain a
 //! trusted Rust-host concern until their portable contracts are frozen.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use crate::adapter::{
     AdapterError, AdapterErrorClass, AdapterId, AdapterObjectContext, AdapterRegistry,
     AgentAdapter, CompatibilityDecision, ContractVersionOffer, ContractVersionRequest,
-    DecodeDisposition, DecoderId, FactBatch, NativeArtifactProbe, RawRetentionPolicy,
+    DecodeDisposition, DecoderId, Fact, FactBatch, NativeArtifactProbe, RawRetentionPolicy,
     ScopeRelationPrimitive, SourceAccess, SourceObjectList, SourceObjectListRequest, SourceQuery,
     SourceRows, SourceSnapshot, SupportOperation, TypedAccessAuthorization,
 };
@@ -120,6 +120,7 @@ pub struct ScopedAppendReset {
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct ScopedAppendObservation {
+    object_token: u64,
     admission_token: u64,
     pub phase: ScopedAppendDeliveryPhase,
     pub reset_before_items: Option<ScopedAppendReset>,
@@ -158,6 +159,7 @@ pub enum ScopedDecodedAppendItem {
 }
 
 pub struct ScopedDecodedAppendBatch {
+    object_token: u64,
     admission_token: u64,
     pub items: Vec<ScopedDecodedAppendItem>,
 }
@@ -165,6 +167,290 @@ pub struct ScopedDecodedAppendBatch {
 pub enum ScopedAppendDecodeOutcome {
     Ready(ScopedDecodedAppendBatch),
     RetryTransient,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScopedObservationQueueLimits {
+    pub max_data_events: u64,
+    pub max_retained_native_bytes: u64,
+    pub max_control_items: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum ScopedAdmissionError {
+    #[error("scoped observation queue limits are invalid")]
+    InvalidLimits,
+    #[error("decoded batch does not belong to the pending observation")]
+    ObservationMismatch,
+    #[error("pending observation has not completed decoding")]
+    ObservationNotDecoded,
+    #[error("scoped decoded-data event capacity is full")]
+    DataQueueFull,
+    #[error("scoped retained-native byte capacity is full")]
+    RetainedNativeQueueFull,
+    #[error("scoped lifecycle/control capacity is full")]
+    ControlQueueFull,
+    #[error("scoped admission accounting or sequence range is exhausted")]
+    CapacityExhausted,
+}
+
+pub struct ScopedAdmissionFailure {
+    pub error: ScopedAdmissionError,
+    pub decoded: ScopedDecodedAppendBatch,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScopedAdmissionReceipt {
+    object_token: u64,
+    admission_token: u64,
+    pub through_lane_ordinal: u64,
+    pub data_events: u64,
+    pub retained_native_bytes: u64,
+    pub control_items: u32,
+}
+
+pub enum ScopedQueuedObservationFrame {
+    Reset {
+        lane_ordinal: u64,
+        phase: ScopedAppendDeliveryPhase,
+        reset: ScopedAppendReset,
+    },
+    Decoded {
+        lane_ordinal: u64,
+        phase: ScopedAppendDeliveryPhase,
+        item: ScopedDecodedAppendItem,
+    },
+}
+
+impl ScopedQueuedObservationFrame {
+    pub fn lane_ordinal(&self) -> u64 {
+        match self {
+            Self::Reset { lane_ordinal, .. } | Self::Decoded { lane_ordinal, .. } => *lane_ordinal,
+        }
+    }
+}
+
+struct QueuedDecodedFrame {
+    lane_ordinal: u64,
+    phase: ScopedAppendDeliveryPhase,
+    item: ScopedDecodedAppendItem,
+    data_events: u64,
+    retained_native_bytes: u64,
+}
+
+struct QueuedResetFrame {
+    lane_ordinal: u64,
+    phase: ScopedAppendDeliveryPhase,
+    reset: ScopedAppendReset,
+}
+
+/// Two bounded internal capacity domains multiplexed by one admission ordinal.
+/// The ordinal is not an RFC 012D `observer_sequence`; public sequencing begins
+/// only after canonical semantic projection is available.
+pub struct ScopedObservationAdmissionLane {
+    limits: ScopedObservationQueueLimits,
+    decoded: VecDeque<QueuedDecodedFrame>,
+    controls: VecDeque<QueuedResetFrame>,
+    queued_data_events: u64,
+    queued_retained_native_bytes: u64,
+    next_lane_ordinal: u64,
+}
+
+impl ScopedObservationAdmissionLane {
+    pub fn new(limits: ScopedObservationQueueLimits) -> Result<Self, ScopedAdmissionError> {
+        if limits.max_data_events == 0 || limits.max_control_items == 0 {
+            return Err(ScopedAdmissionError::InvalidLimits);
+        }
+        Ok(Self {
+            limits,
+            decoded: VecDeque::new(),
+            controls: VecDeque::new(),
+            queued_data_events: 0,
+            queued_retained_native_bytes: 0,
+            next_lane_ordinal: 1,
+        })
+    }
+
+    /// Atomically admit the reset control and decoded data, then commit the
+    /// matching object's cursor/decoder state. Capacity failure returns the
+    /// still-owned decoded batch and leaves the object unchanged.
+    pub fn admit(
+        &mut self,
+        object: &mut ScopedKnownAppendObject,
+        observation: &ScopedAppendObservation,
+        mut decoded: ScopedDecodedAppendBatch,
+    ) -> Result<ScopedAdmissionReceipt, ScopedAdmissionFailure> {
+        if let Err(error) = object.validate_admission(observation, &decoded) {
+            return Err(ScopedAdmissionFailure {
+                error: admission_validation_error(error),
+                decoded,
+            });
+        }
+
+        let mut measurements = Vec::with_capacity(decoded.items.len());
+        let mut data_events = 0_u64;
+        let mut retained_native_bytes = 0_u64;
+        for item in &decoded.items {
+            let measurement = match decoded_item_measurement(item) {
+                Some(measurement) => measurement,
+                None => {
+                    return Err(ScopedAdmissionFailure {
+                        error: ScopedAdmissionError::CapacityExhausted,
+                        decoded,
+                    });
+                }
+            };
+            let Some(next_events) = data_events.checked_add(measurement.0) else {
+                return Err(ScopedAdmissionFailure {
+                    error: ScopedAdmissionError::CapacityExhausted,
+                    decoded,
+                });
+            };
+            let Some(next_bytes) = retained_native_bytes.checked_add(measurement.1) else {
+                return Err(ScopedAdmissionFailure {
+                    error: ScopedAdmissionError::CapacityExhausted,
+                    decoded,
+                });
+            };
+            data_events = next_events;
+            retained_native_bytes = next_bytes;
+            measurements.push(measurement);
+        }
+        let control_items = usize::from(observation.reset_before_items.is_some());
+        if self
+            .queued_data_events
+            .checked_add(data_events)
+            .is_none_or(|value| value > self.limits.max_data_events)
+        {
+            return Err(ScopedAdmissionFailure {
+                error: ScopedAdmissionError::DataQueueFull,
+                decoded,
+            });
+        }
+        if self
+            .queued_retained_native_bytes
+            .checked_add(retained_native_bytes)
+            .is_none_or(|value| value > self.limits.max_retained_native_bytes)
+        {
+            return Err(ScopedAdmissionFailure {
+                error: ScopedAdmissionError::RetainedNativeQueueFull,
+                decoded,
+            });
+        }
+        let Some(next_control_items) = self.controls.len().checked_add(control_items) else {
+            return Err(ScopedAdmissionFailure {
+                error: ScopedAdmissionError::CapacityExhausted,
+                decoded,
+            });
+        };
+        if next_control_items > self.limits.max_control_items {
+            return Err(ScopedAdmissionFailure {
+                error: ScopedAdmissionError::ControlQueueFull,
+                decoded,
+            });
+        }
+        let Some(frame_count) = control_items.checked_add(decoded.items.len()) else {
+            return Err(ScopedAdmissionFailure {
+                error: ScopedAdmissionError::CapacityExhausted,
+                decoded,
+            });
+        };
+        let Ok(frame_count) = u64::try_from(frame_count) else {
+            return Err(ScopedAdmissionFailure {
+                error: ScopedAdmissionError::CapacityExhausted,
+                decoded,
+            });
+        };
+        let Some(after_ordinal) = self.next_lane_ordinal.checked_add(frame_count) else {
+            return Err(ScopedAdmissionFailure {
+                error: ScopedAdmissionError::CapacityExhausted,
+                decoded,
+            });
+        };
+
+        let mut lane_ordinal = self.next_lane_ordinal;
+        if let Some(reset) = observation.reset_before_items {
+            self.controls.push_back(QueuedResetFrame {
+                lane_ordinal,
+                phase: observation.phase,
+                reset,
+            });
+            lane_ordinal += 1;
+        }
+        for (item, (item_events, item_bytes)) in decoded.items.drain(..).zip(measurements) {
+            self.decoded.push_back(QueuedDecodedFrame {
+                lane_ordinal,
+                phase: observation.phase,
+                item,
+                data_events: item_events,
+                retained_native_bytes: item_bytes,
+            });
+            lane_ordinal += 1;
+        }
+        debug_assert_eq!(lane_ordinal, after_ordinal);
+        self.next_lane_ordinal = after_ordinal;
+        self.queued_data_events += data_events;
+        self.queued_retained_native_bytes += retained_native_bytes;
+        object.commit_admission();
+
+        Ok(ScopedAdmissionReceipt {
+            object_token: observation.object_token,
+            admission_token: observation.admission_token,
+            through_lane_ordinal: after_ordinal
+                .checked_sub(1)
+                .expect("scoped lane ordinals start at one"),
+            data_events,
+            retained_native_bytes,
+            control_items: control_items as u32,
+        })
+    }
+
+    pub fn pop_next(&mut self) -> Option<ScopedQueuedObservationFrame> {
+        let take_control = match (self.controls.front(), self.decoded.front()) {
+            (Some(control), Some(decoded)) => control.lane_ordinal < decoded.lane_ordinal,
+            (Some(_), None) => true,
+            (None, Some(_)) => false,
+            (None, None) => return None,
+        };
+        if take_control {
+            let control = self.controls.pop_front().expect("control front exists");
+            return Some(ScopedQueuedObservationFrame::Reset {
+                lane_ordinal: control.lane_ordinal,
+                phase: control.phase,
+                reset: control.reset,
+            });
+        }
+        let decoded = self.decoded.pop_front().expect("decoded front exists");
+        self.queued_data_events = self
+            .queued_data_events
+            .checked_sub(decoded.data_events)
+            .expect("queued decoded event accounting cannot underflow");
+        self.queued_retained_native_bytes = self
+            .queued_retained_native_bytes
+            .checked_sub(decoded.retained_native_bytes)
+            .expect("queued retained-native accounting cannot underflow");
+        Some(ScopedQueuedObservationFrame::Decoded {
+            lane_ordinal: decoded.lane_ordinal,
+            phase: decoded.phase,
+            item: decoded.item,
+        })
+    }
+
+    pub fn queued_data_events(&self) -> u64 {
+        self.queued_data_events
+    }
+
+    pub fn queued_retained_native_bytes(&self) -> u64 {
+        self.queued_retained_native_bytes
+    }
+
+    pub fn queued_control_items(&self) -> usize {
+        self.controls.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.controls.is_empty() && self.decoded.is_empty()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -533,6 +819,7 @@ impl Drop for ScopedObservationAccessPass {
 /// In-memory cursor/generation state for one exact append-delimited root. It
 /// does not own a store, query service, watcher, or public event queue.
 pub struct ScopedKnownAppendObject {
+    object_token: u64,
     driver: AppendDelimitedFile,
     decoder: ScopedAppendDecoderConfig,
     checkpoint: Option<AppendCheckpoint>,
@@ -559,7 +846,9 @@ impl ScopedKnownAppendObject {
         decoder: ScopedAppendDecoderConfig,
     ) -> Result<Self, ScopedObservationAccessError> {
         validate_decode_bounds(&decoder)?;
+        let object_token = next_scoped_object_token()?;
         Ok(Self {
+            object_token,
             driver,
             decoder,
             checkpoint: None,
@@ -666,6 +955,7 @@ impl ScopedKnownAppendObject {
             staged_decoder_state: None,
         });
         Ok(ScopedAppendObservation {
+            object_token: self.object_token,
             admission_token,
             phase,
             reset_before_items,
@@ -685,7 +975,9 @@ impl ScopedKnownAppendObject {
             .pending
             .as_ref()
             .ok_or(ScopedObservationAccessError::ObservationNotPending)?;
-        if pending.admission_token != observation.admission_token {
+        if observation.object_token != self.object_token
+            || pending.admission_token != observation.admission_token
+        {
             return Err(ScopedObservationAccessError::ObservationNotPending);
         }
         if pending.staged_decoder_state.is_some() {
@@ -748,38 +1040,48 @@ impl ScopedKnownAppendObject {
             .expect("pending observation remains owned during synchronous decode");
         pending.staged_decoder_state = Some(next_decoder_state);
         Ok(ScopedAppendDecodeOutcome::Ready(ScopedDecodedAppendBatch {
+            object_token: observation.object_token,
             admission_token: observation.admission_token,
             items: decoded_items,
         }))
     }
 
-    /// Advance decoder state and source cursor together only after the decoded
-    /// facts and any reset control have entered the ordered observer lane.
-    pub fn admit_decoded(
-        &mut self,
+    fn validate_admission(
+        &self,
         observation: &ScopedAppendObservation,
         decoded: &ScopedDecodedAppendBatch,
     ) -> Result<(), ScopedObservationAccessError> {
-        if decoded.admission_token != observation.admission_token {
+        if observation.object_token != self.object_token
+            || decoded.object_token != self.object_token
+            || decoded.admission_token != observation.admission_token
+        {
             return Err(ScopedObservationAccessError::ObservationNotPending);
         }
-        let Some(pending) = self.pending.take() else {
+        let Some(pending) = self.pending.as_ref() else {
             return Err(ScopedObservationAccessError::ObservationNotPending);
         };
         if pending.admission_token != observation.admission_token {
-            self.pending = Some(pending);
             return Err(ScopedObservationAccessError::ObservationNotPending);
         }
-        let Some(decoder_state) = pending.staged_decoder_state else {
-            self.pending = Some(pending);
+        if pending.staged_decoder_state.is_none() {
             return Err(ScopedObservationAccessError::ObservationNotDecoded);
-        };
+        }
+        Ok(())
+    }
+
+    fn commit_admission(&mut self) {
+        let pending = self
+            .pending
+            .take()
+            .expect("validated scoped admission retains its pending state");
+        let decoder_state = pending
+            .staged_decoder_state
+            .expect("validated scoped admission has staged decoder state");
         self.checkpoint = pending.checkpoint;
         self.decoder_state = decoder_state;
         self.bootstrap_blocked = pending.bootstrap_blocked;
         self.root_present = pending.root_present;
         self.bootstrap_observed = true;
-        Ok(())
     }
 
     /// Discard a read that could not be admitted. Its native access remains in
@@ -792,7 +1094,9 @@ impl ScopedKnownAppendObject {
         let Some(pending) = self.pending.take() else {
             return Err(ScopedObservationAccessError::ObservationNotPending);
         };
-        if pending.admission_token != observation.admission_token {
+        if observation.object_token != self.object_token
+            || pending.admission_token != observation.admission_token
+        {
             self.pending = Some(pending);
             return Err(ScopedObservationAccessError::ObservationNotPending);
         }
@@ -898,6 +1202,52 @@ fn decode_failure_class(error: &AdapterError) -> ScopedDecodeFailureClass {
         AdapterErrorClass::AdapterFatal => ScopedDecodeFailureClass::AdapterFatal,
         AdapterErrorClass::InvalidContract => ScopedDecodeFailureClass::InvalidContract,
     }
+}
+
+fn admission_validation_error(error: ScopedObservationAccessError) -> ScopedAdmissionError {
+    match error {
+        ScopedObservationAccessError::ObservationNotDecoded => {
+            ScopedAdmissionError::ObservationNotDecoded
+        }
+        _ => ScopedAdmissionError::ObservationMismatch,
+    }
+}
+
+fn decoded_item_measurement(item: &ScopedDecodedAppendItem) -> Option<(u64, u64)> {
+    match item {
+        ScopedDecodedAppendItem::DriverQuarantine(_) => Some((1, 0)),
+        ScopedDecodedAppendItem::Record {
+            evidence, batch, ..
+        } => {
+            let semantic_items = batch
+                .facts()
+                .len()
+                .checked_add(batch.diagnostics().len())?
+                .max(1);
+            let data_events = u64::try_from(semantic_items).ok()?;
+            let mut retained_native_bytes = match &evidence.retained_payload {
+                Some(payload) => u64::try_from(payload.len()).ok()?,
+                None => 0,
+            };
+            for fact in batch.facts() {
+                if let Fact::UnknownRecord { raw_payload, .. } = &fact.value {
+                    retained_native_bytes = retained_native_bytes
+                        .checked_add(u64::try_from(raw_payload.len()).ok()?)?;
+                }
+            }
+            Some((data_events, retained_native_bytes))
+        }
+    }
+}
+
+static NEXT_SCOPED_OBJECT_TOKEN: AtomicU64 = AtomicU64::new(1);
+
+fn next_scoped_object_token() -> Result<u64, ScopedObservationAccessError> {
+    NEXT_SCOPED_OBJECT_TOKEN
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+            current.checked_add(1)
+        })
+        .map_err(|_| ScopedObservationAccessError::ObservationSequenceExhausted)
 }
 
 fn validate_decode_bounds(

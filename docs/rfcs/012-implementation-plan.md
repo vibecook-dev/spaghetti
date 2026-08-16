@@ -231,8 +231,9 @@ Current landing status (2026-08-15):
 - added an architecture ratchet preventing the base semantic module from
   importing source, adapter, store, query, delivery, N-API, or concrete-agent
   layers; and
-- retained A1 as `In progress`: tier/view compositionality, actual durable and
-  scoped family adoption, N-API fixture parity, and full-only versus composed
+- retained A1 as `In progress`: tier/view compositionality, adoption of
+  canonical `FactRevisionId`/`SemanticRevisionRef` values by actual durable and
+  scoped fact families, N-API fixture parity, and full-only versus composed
   reducer digests remain.
 
 The repository-wide native-surface validator also discovered current Claude
@@ -351,6 +352,16 @@ Current landing status (2026-08-16):
   decoder state on a source generation change, and leaves both unchanged on
   retry, failure, or discard; retained evidence obeys the selected raw policy,
   and undeclared decoder dependency access fails closed;
+- added a bounded internal scoped-admission lane with independent decoded-data,
+  retained-native-byte, and reset-control limits; admission is all-or-nothing,
+  returns the unchanged decoded batch on backpressure, queues reset before
+  replay data, and commits source cursor plus decoder state only after the
+  complete unit is resident. Its internal lane ordinal is not an RFC 012D
+  `observer_sequence`;
+- kept that provisional lane fact-based rather than inventing delivery events:
+  current `FactBatch` output still carries the RFC 011 store-oriented `FactId`,
+  so public semantic projection remains gated on actual canonical
+  `FactRevisionId`/`SemanticRevisionRef` adoption;
 - integrated contract and tooling checks into `pnpm validate`.
 
 A2 remains `In progress`: the internal scoped composition now owns the
@@ -613,6 +624,12 @@ Current landing status (2026-08-16):
   read or mismatched receipt cannot advance either, retry/failure/discard
   advances neither, generation reset clears prior decoder state, and undeclared
   decoder dependency access fails closed;
+- a bounded internal admission lane independently limits decoded-event weight,
+  actual retained-native bytes, and reset controls; it admits reset before
+  replay data, rejects the whole unit on pressure while returning it for retry,
+  and only then commits the paired source cursor and decoder state. The lane
+  ordinal is internal ordering, not public `observer_sequence` or semantic
+  identity;
 - one pass is active at a time, a later pass receives fresh bounds, close is
   idempotent, and the frozen access report excludes paths, identity values, and
   content; and
@@ -620,10 +637,11 @@ Current landing status (2026-08-16):
   and premature public export from this provisional composition root.
 
 D1 remains `In progress`: watcher-before-scan, multi-object discovery/cursor
-orchestration, declared relation-backed decoder dependency access, semantic
-reduction/events, poll/readiness barriers, queue/control lanes, coverage,
-resync epochs, artifact mediation, cancellation waiting, the trusted native
-version-probe driver, and the complete public request are not yet implemented.
+orchestration, declared relation-backed decoder dependency access, canonical
+fact-revision adoption plus semantic reduction/events, the public ordered
+multiplexer and poll/readiness barriers, coverage, overflow/resync epochs,
+artifact mediation, cancellation waiting, the trusted native version-probe
+driver, and the complete public request are not yet implemented.
 
 ### D2. Claude scope composition
 
