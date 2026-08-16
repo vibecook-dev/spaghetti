@@ -12,11 +12,11 @@
     "forward_catalog_only": false
   },
   "references": {
-    "ads": { "path": "agent-support/claude-code/candidate-2026-08-15/ads.json", "sha256": "sha256:34362f099f219181dfff3e50faef974882b656c5955e03d9cf1f4e8af7b986d3" },
+    "ads": { "path": "agent-support/claude-code/candidate-2026-08-15/ads.json", "sha256": "sha256:2ed3c1c7cdc0c9a0ac198e92a3265e4f2563be688572cb70d710d1ee44ff6aef" },
     "source_declaration": { "path": "agent-support/claude-code/candidate-2026-08-15/source-declarations.json", "sha256": "sha256:17a0f1aa7490b5c03a525f7606a7a02ee6d1919cc8b9b776597843f1edbf1ebe" },
     "scope_program": { "path": "agent-support/claude-code/candidate-2026-08-15/scope-programs.json", "sha256": "sha256:689c86b9770544f826da37e72d1c4a1a37153fad4091372b954bba90ca2d5f7c" },
-    "evidence": { "path": "agent-support/claude-code/candidate-2026-08-15/evidence.json", "sha256": "sha256:39f4bbaf6cb76b785a34147103e3afbeac20becaa136282471dcd484b9ce81a5" },
-    "conformance": { "path": "agent-support/claude-code/candidate-2026-08-15/conformance.json", "sha256": "sha256:ea4c044c60311a4975daaa6088ec58e767b9cadedf550454a975b2194a11f6c4" }
+    "evidence": { "path": "agent-support/claude-code/candidate-2026-08-15/evidence.json", "sha256": "sha256:f4ccebc9a8b3d5e574cb049660de42c2d1c8bc8189822ce6d85b2f146158e51c" },
+    "conformance": { "path": "agent-support/claude-code/candidate-2026-08-15/conformance.json", "sha256": "sha256:da761a680be64fb6628df7bc1e2f95db59b1c99911fcba7e63e40d1e408579cc" }
   },
   "versions": {
     "adapter_package": "0.7.0",
@@ -63,11 +63,13 @@
     "Catalog readiness, bounded public usage-v2 coverage queries, replay recovery and default migration, interaction, and scoped observation contracts are not implemented.",
     "Source-instance move/clone and identity reuse behavior lack adversarial conformance.",
     "Active-session nameSince remains opaque native metadata and cannot drive common ordering, activity, or lifecycle semantics without transition fixtures.",
+    "Settings autoMode remains sensitive native-only policy configuration and cannot establish effective runtime mode without transition fixtures.",
     "Durable and observation public contract version maps are not yet assigned."
   ],
   "drift_signatures": [
     { "signature_id": "bridge-session-owner-fields", "family_id": "session-transcript", "fields": ["ownerAccountUuid", "ownerOrganizationUuid"], "state": "classified", "claim_refs": ["claude-drift-bridge-accounts"] },
-    { "signature_id": "active-session-name-since", "family_id": "active-session", "fields": ["nameSince"], "state": "classified", "claim_refs": ["claude-drift-active-name-since"] }
+    { "signature_id": "active-session-name-since", "family_id": "active-session", "fields": ["nameSince"], "state": "classified", "claim_refs": ["claude-drift-active-name-since"] },
+    { "signature_id": "settings-auto-mode", "family_id": "interpretation-settings", "fields": ["autoMode.environment", "autoMode.allow", "autoMode.soft_deny"], "state": "classified", "claim_refs": ["claude-drift-auto-mode"] }
   ],
   "promotion_blockers": [
     "Pin the native distributable/version and required markers with sanitized fixtures.",

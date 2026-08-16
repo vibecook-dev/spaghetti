@@ -254,7 +254,7 @@
       "timestamp_quality": "filesystem_only",
       "missing_vs_zero": "distinct",
       "unknown_field_policy": "measure_only",
-      "claim_refs": ["claude-source-map", "claude-privacy-policy"]
+      "claim_refs": ["claude-source-map", "claude-privacy-policy", "claude-drift-auto-mode"]
     }
   ],
   "entity_identity_rules": [

@@ -494,6 +494,8 @@ Rules:
   it is not an instantaneous change notification;
 - a launch or settings value is configured intent until runtime evidence
   confirms it;
+- a native settings `autoMode` policy object is sensitive configured intent,
+  not evidence that session mode or permission mode became effective;
 - a native transition may establish an effective boundary at its native time;
 - absence of evidence produces unknown, not inherited global default; and
 - session mode and permission mode remain separate dimensions.

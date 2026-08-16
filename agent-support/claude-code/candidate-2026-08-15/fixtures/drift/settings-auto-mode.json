@@ -1,0 +1,18 @@
+{
+  "_fixture": {
+    "fixture_kind": "synthetic-native-shape",
+    "format": "json",
+    "sanitization": "synthetic",
+    "sanitizer_version": 1
+  },
+  "data": {
+    "autoMode": {
+      "allow": ["[fixture-text-002]"],
+      "environment": ["[fixture-text-001]"],
+      "soft_deny": ["[fixture-text-003]"]
+    },
+    "permissions": {
+      "allow": []
+    }
+  }
+}

@@ -263,14 +263,17 @@ Current landing status (2026-08-16):
 
 The repository-wide native-surface validator also discovered current Claude
 drift that predates this model slice: `bridge-session` records now include
-`ownerAccountUuid`/`ownerOrganizationUuid`, and an active-session document
-includes `nameSince`. No native values were copied into RFC evidence. A3 now
-classifies the owner UUIDs as sensitive `native-only` bridge correlation
-metadata and `nameSince` as an opaque `native-only` timestamp-like field. The
-native TypeScript/Rust shapes accept them, but common identities, FTS, logs,
-telemetry, runtime events, activity, ordering, and presence semantics do not.
-Synthetic shape fixtures and positive/native-only projection tests back that
-decision; numeric shape is explicitly not treated as transition evidence.
+`ownerAccountUuid`/`ownerOrganizationUuid`, an active-session document includes
+`nameSince`, and `settings.json` includes an `autoMode` policy object. No native
+values were copied into RFC evidence. A3 classifies the owner UUIDs as sensitive
+`native-only` bridge correlation metadata, `nameSince` as an opaque
+`native-only` timestamp-like field, and `autoMode` as sensitive `native-only`
+configuration rather than effective runtime-mode evidence. The native
+TypeScript/Rust shapes accept them, but common identities, FTS, logs, telemetry,
+runtime events, activity, ordering, presence, and effective-mode semantics do
+not. Synthetic shape fixtures and positive/native-only projection tests back
+those decisions; numeric or configuration shape alone is explicitly not
+treated as transition evidence.
 
 ### A2. ADS, declarations, and support tooling
 
@@ -431,12 +434,14 @@ Current landing status (2026-08-16):
 - recorded unsupported catalog and scoped topologies explicitly instead of
   presenting existing durable adapters as full RFC 012 support; and
 - classified Claude `ownerAccountUuid`/`ownerOrganizationUuid` as sensitive
-  `native-only` bridge correlation metadata and `nameSince` as opaque
-  `native-only` timestamp-like metadata; added the optional agent-native
-  TypeScript/Rust fields and reader preservation, while conformance tests prove
-  that none becomes common identity, FTS, runtime semantics, activity, or
-  ordering. Both signatures remain explicit in the support ledger as
-  `classified`, not silently treated as resolved semantic mappings.
+  `native-only` bridge correlation metadata, `nameSince` as opaque
+  `native-only` timestamp-like metadata, and the structured `autoMode` policy
+  as sensitive `native-only` configuration rather than effective runtime mode;
+  added agent-native TypeScript/Rust acceptance and preservation where policy
+  allows, while conformance tests prove that none becomes common identity, FTS,
+  logs, runtime semantics, activity, ordering, or effective-mode state. All
+  three signatures remain explicit in the support ledger as `classified`, not
+  silently treated as resolved semantic mappings.
 
 A3 remains `In progress`: no artifact version is pinned; Codex/Grok still need
 independent sanitized transition corpora; Claude needs the complete executable

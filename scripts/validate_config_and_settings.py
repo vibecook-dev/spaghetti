@@ -41,6 +41,8 @@ SETTINGS_FIELDS_REQUIRED = set()  # permissions was required in type but may be 
 SETTINGS_ALL_FIELDS = interface_fields("SettingsFile", "claude/toplevel-files-data.ts")
 SETTINGS_FIELDS_OPTIONAL = SETTINGS_ALL_FIELDS - SETTINGS_FIELDS_REQUIRED
 
+AUTO_MODE_FIELDS = interface_fields("AutoModeConfig", "claude/toplevel-files-data.ts")
+
 # PermissionsConfig fields
 PERMISSIONS_FIELDS_REQUIRED = {"allow"}
 PERMISSIONS_FIELDS_OPTIONAL = {"deny"}
@@ -268,6 +270,28 @@ def validate_settings():
                 fail(f"{fname} statusLine: EXTRA keys: {sorted(sl_extra)}")
             else:
                 ok(f"{fname} statusLine: keys match")
+
+        # autoMode contains policy/environment strings. Validate only its
+        # shape and never print native values into the conformance report.
+        if "autoMode" in data:
+            auto_mode = data["autoMode"]
+            if not isinstance(auto_mode, dict):
+                fail(f"{fname} autoMode: expected object")
+            else:
+                missing, extra = check_keys(
+                    f"{fname} autoMode", auto_mode.keys(), AUTO_MODE_FIELDS
+                )
+                if not missing and not extra:
+                    invalid = [
+                        field
+                        for field in AUTO_MODE_FIELDS
+                        if not isinstance(auto_mode[field], list)
+                        or not all(isinstance(item, str) for item in auto_mode[field])
+                    ]
+                    if invalid:
+                        fail(f"{fname} autoMode: non-string arrays: {sorted(invalid)}")
+                    else:
+                        ok(f"{fname} autoMode: values are string arrays")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

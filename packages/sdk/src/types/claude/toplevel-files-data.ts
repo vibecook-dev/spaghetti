@@ -22,6 +22,20 @@ export interface HookMatcher {
   hooks: HookCommand[];
 }
 
+/**
+ * Native Claude auto-mode policy input.
+ *
+ * Entries may contain environment assignments and command/policy patterns.
+ * They remain available only on the agent-native settings surface and must
+ * not be copied into common settings, logs, telemetry, or runtime mode facts
+ * until their effective transition semantics are fixture-proven.
+ */
+export interface AutoModeConfig {
+  environment: string[];
+  allow: string[];
+  soft_deny: string[];
+}
+
 export interface ExtraKnownMarketplace {
   source: {
     source: string;
@@ -55,6 +69,8 @@ export interface SettingsFile {
   skipAutoPermissionPrompt?: boolean;
   /** Co-authorship trailers Claude Code appends, e.g. `{ commit: '' }`. */
   attribution?: Record<string, string>;
+  /** Sensitive native-only auto-mode policy; not effective runtime mode. */
+  autoMode?: AutoModeConfig;
 }
 
 export interface DailyActivity {

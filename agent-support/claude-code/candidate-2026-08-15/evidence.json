@@ -120,6 +120,23 @@
         { "kind": "code_reference", "path": "packages/sdk/src/sources/claude-code/active-sessions.ts", "sha256": null, "locator": "agent-native nameSince preservation" },
         { "kind": "conformance_test", "path": "crates/spaghetti-napi/src/claude/adapter.rs", "sha256": null, "locator": "classified_native_drift_name_since_does_not_change_presence_semantics" }
       ]
+    },
+    {
+      "claim_id": "claude-drift-auto-mode",
+      "statement": "Observed settings autoMode is classified as sensitive native-only policy configuration. Its environment, allow, and soft_deny string arrays remain available through the agent-native settings API, while hash-only durable ingest excludes their values from normalized settings, logs, telemetry, runtime events, and effective-mode state until native transition semantics are fixture-proven.",
+      "state": "degraded",
+      "sources": [
+        {
+          "kind": "sanitized_fixture",
+          "path": "agent-support/claude-code/candidate-2026-08-15/fixtures/drift/settings-auto-mode.json",
+          "sha256": "sha256:dabfdda2438273ed7b59ae1ed4afefe25882006bd64c12975d93d51af35c690f",
+          "locator": "synthetic shape preserving policy field names and string-array categories"
+        },
+        { "kind": "design_record", "path": "docs/rfcs/012a-agent-adaptation-and-engine-boundaries.md", "sha256": null, "locator": "Mapping dispositions: native-only field classification" },
+        { "kind": "code_reference", "path": "packages/sdk/src/types/claude/toplevel-files-data.ts", "sha256": null, "locator": "AutoModeConfig native-only policy shape" },
+        { "kind": "conformance_test", "path": "packages/sdk/src/sources/claude-code/parser/__tests__/config-parser-settings-local.test.ts", "sha256": null, "locator": "new settings.json keys are typed on SettingsFile" },
+        { "kind": "conformance_test", "path": "crates/spaghetti-napi/src/claude/adapter.rs", "sha256": null, "locator": "classified_native_drift_auto_mode_stays_native_only" }
+      ]
     }
   ]
 }

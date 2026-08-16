@@ -153,7 +153,7 @@ impl ClaudeCodeAdapter {
                         "claude-code-support-2026-08-15-candidate",
                         env!("CARGO_PKG_VERSION"),
                         18,
-                        "sha256:34362f099f219181dfff3e50faef974882b656c5955e03d9cf1f4e8af7b986d3",
+                        "sha256:2ed3c1c7cdc0c9a0ac198e92a3265e4f2563be688572cb70d710d1ee44ff6aef",
                         "sha256:17a0f1aa7490b5c03a525f7606a7a02ee6d1919cc8b9b776597843f1edbf1ebe",
                         "sha256:689c86b9770544f826da37e72d1c4a1a37153fad4091372b954bba90ca2d5f7c",
                     )
@@ -5574,6 +5574,63 @@ mod tests {
             "SECRET_REPO",
             "SECRET_UNKNOWN",
         ] {
+            assert!(!audit.contains(secret));
+        }
+        assert!(fact_values(&batch).all(|fact| {
+            !matches!(
+                fact,
+                Fact::Session(_) | Fact::Message(_) | Fact::Run(_) | Fact::RunEvidence(_)
+            )
+        }));
+    }
+
+    #[test]
+    fn classified_native_drift_auto_mode_stays_native_only() {
+        let root = TempDir::new().unwrap();
+        let adapter = ClaudeCodeAdapter::new();
+        let object_context = adapter
+            .bootstrap_object(
+                &instance(root.path()),
+                &object(INTERPRETATION_SETTINGS_STREAM, "settings.json"),
+            )
+            .unwrap();
+        let payload = br#"{
+          "permissions":{"allow":[]},
+          "autoMode":{
+            "environment":["SECRET_AUTO_ENV=enabled"],
+            "allow":["SECRET_AUTO_ALLOW"],
+            "soft_deny":["SECRET_AUTO_DENY"]
+          }
+        }"#;
+        let mut batch = FactBatch::new(2, 2).unwrap();
+        assert_eq!(
+            adapter
+                .decode(
+                    DecodeContext {
+                        decoder: &DecoderId::new(INTERPRETATION_SETTINGS_DECODER).unwrap(),
+                        object_context: &object_context,
+                        decoder_state: None,
+                    },
+                    &document_record(payload),
+                    &mut batch,
+                )
+                .unwrap(),
+            DecodeDisposition::Applied
+        );
+        assert!(batch.diagnostics().is_empty());
+        let Fact::InterpretationSettings(settings) = &batch.facts()[0].value else {
+            panic!("expected interpretation settings");
+        };
+        assert_eq!(
+            settings.settings,
+            Some(
+                decode_interpretation_settings_snapshot(br#"{"permissions":{"allow":[]}}"#)
+                    .unwrap()
+            ),
+            "native policy configuration is not effective runtime-mode evidence"
+        );
+        let audit = serde_json::to_string(&batch.facts()[0].value).unwrap();
+        for secret in ["SECRET_AUTO_ENV", "SECRET_AUTO_ALLOW", "SECRET_AUTO_DENY"] {
             assert!(!audit.contains(secret));
         }
         assert!(fact_values(&batch).all(|fact| {

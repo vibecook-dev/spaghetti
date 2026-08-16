@@ -68,6 +68,11 @@ describe('ConfigParser settings.local.json', () => {
         agentPushNotifEnabled: true,
         promptSuggestionEnabled: true,
         skipWorkflowUsageWarning: true,
+        autoMode: {
+          environment: ['FIXTURE_MODE=enabled'],
+          allow: ['fixture-allow-pattern'],
+          soft_deny: ['fixture-deny-pattern'],
+        },
       }),
     );
     const s = parser.parseConfig(rootDir).settings;
@@ -76,6 +81,11 @@ describe('ConfigParser settings.local.json', () => {
     assert.equal(s.agentPushNotifEnabled, true);
     assert.equal(s.promptSuggestionEnabled, true);
     assert.equal(s.skipWorkflowUsageWarning, true);
+    assert.deepEqual(s.autoMode, {
+      environment: ['FIXTURE_MODE=enabled'],
+      allow: ['fixture-allow-pattern'],
+      soft_deny: ['fixture-deny-pattern'],
+    });
   });
 
   test('cache/my-closed-issues.json is retained without assuming an upstream record schema', () => {
