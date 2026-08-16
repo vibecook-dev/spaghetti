@@ -276,6 +276,13 @@ describe('persistent SpaghettiEngine', { skip: !native }, () => {
     assert.equal(explicitV2Totals.usageV2?.inputTokens.knownTokens, 12);
     assert.equal(explicitV2Totals.atCommitSeq, selectedLegacyTotals.atCommitSeq);
 
+    const compatibility = await engine.getRuntimeUsageCompatibility({ scopes: [{ projectId, sessionId }] });
+    assert.equal(compatibility.status, 'ready');
+    assert.equal(compatibility.comparisonStatus, 'incomparable');
+    assert.equal(compatibility.inputTokens?.relation, 'equal');
+    assert.equal(compatibility.cacheCreationInputTokens?.relation, 'incomparable');
+    assert.equal(compatibility.cacheCreationInputTokens?.absoluteDeltaTokens, undefined);
+
     await assert.rejects(
       engine.getRuntimeUsageTotals({ scopes: [{ projectId }, { projectId, sessionId }] }),
       /must not overlap/i,
@@ -425,10 +432,46 @@ describe('persistent SpaghettiEngine', { skip: !native }, () => {
             type: 'message',
             role: 'assistant',
             content: [{ type: 'text', text: `usage response ${index}` }],
-            usage: { input_tokens: (index + 1) * 10, output_tokens: index + 1 },
+            usage: {
+              input_tokens: (index + 1) * 10,
+              output_tokens: index + 1,
+              cache_creation_input_tokens: 0,
+              cache_read_input_tokens: 0,
+            },
           },
         })}\n`,
       );
+      if (index === 0) {
+        appendFileSync(
+          transcriptPath,
+          `${JSON.stringify({
+            type: 'assistant',
+            uuid: '0bbbbbbb-bbbb-cccc-dddd-eeeeeeeeeeee',
+            parentUuid: null,
+            timestamp: '2026-08-11T00:00:00.001Z',
+            sessionId: sessionIds[index],
+            cwd: '/tmp/usage-0',
+            version: '1',
+            gitBranch: 'main',
+            isSidechain: false,
+            userType: 'external',
+            requestId: 'request-0',
+            message: {
+              model: 'claude-sonnet',
+              id: 'response-0',
+              type: 'message',
+              role: 'assistant',
+              content: [{ type: 'text', text: 'usage response 0 revised' }],
+              usage: {
+                input_tokens: 12,
+                output_tokens: 2,
+                cache_creation_input_tokens: 0,
+                cache_read_input_tokens: 0,
+              },
+            },
+          })}\n`,
+        );
+      }
     }
 
     const engine = await openTracked(dbPath, 'sdk-usage-vector-test');
@@ -456,8 +499,8 @@ describe('persistent SpaghettiEngine', { skip: !native }, () => {
     });
     assert.equal(shadowV2.status, 'resolved');
     assert.equal(shadowV2.usageV2?.responseCount, 2);
-    assert.equal(shadowV2.usageV2?.inputTokens.knownTokens, 30);
-    assert.equal(shadowV2.usageV2?.outputTokens.knownTokens, 3);
+    assert.equal(shadowV2.usageV2?.inputTokens.knownTokens, 32);
+    assert.equal(shadowV2.usageV2?.outputTokens.knownTokens, 4);
     const reversedShadowV2 = await engine.getRuntimeUsageTotals({
       scopes: [...members].reverse(),
       requestedQueryId: 'runtime.usage-v2',
@@ -467,6 +510,34 @@ describe('persistent SpaghettiEngine', { skip: !native }, () => {
       shadowV2.selectionVector.map((item) => item.selectionScopeRef),
     );
     assert.deepEqual(reversedShadowV2.usageV2, shadowV2.usageV2);
+
+    const telemetryBefore = (await engine.getStats()).performance?.queries.runtimeUsageCompatibility;
+    assert.equal(telemetryBefore?.samples, 0);
+    const comparison = await engine.getRuntimeUsageCompatibility({ scopes: members });
+    assert.equal(comparison.status, 'ready');
+    assert.equal(comparison.comparisonStatus, 'different');
+    assert.match(comparison.comparisonRef, /^v1:/);
+    assert.equal(comparison.legacy.contributionCount, 3);
+    assert.equal(comparison.usageV2?.responseCount, 2);
+    assert.equal(comparison.inputTokens?.relation, 'legacy_higher');
+    assert.equal(comparison.inputTokens?.legacyCombinedTokens, 42);
+    assert.equal(comparison.inputTokens?.v2KnownTokens, 32);
+    assert.equal(comparison.inputTokens?.absoluteDeltaTokens, 10);
+    assert.equal(comparison.outputTokens?.relation, 'legacy_higher');
+    assert.equal(comparison.outputTokens?.absoluteDeltaTokens, 1);
+    assert.equal(comparison.cacheCreationInputTokens?.relation, 'equal');
+    assert.equal(comparison.cacheReadInputTokens?.relation, 'equal');
+    assert.equal(JSON.stringify(comparison).includes(base), false);
+    const reversedComparison = await engine.getRuntimeUsageCompatibility({ scopes: [...members].reverse() });
+    assert.equal(reversedComparison.comparisonRef, comparison.comparisonRef);
+    const compatibilityTelemetry = (await engine.getStats()).performance?.queries.runtimeUsageCompatibility;
+    assert.equal(compatibilityTelemetry?.samples, 2);
+    assert.equal(compatibilityTelemetry?.readySamples, 2);
+    assert.equal(compatibilityTelemetry?.differentSamples, 2);
+    assert.equal(compatibilityTelemetry?.legacyHigherBuckets, 4);
+    assert.equal(compatibilityTelemetry?.equalBuckets, 4);
+    assert.equal(compatibilityTelemetry?.sampledAbsoluteDeltaTokens, 22);
+    assert.equal(compatibilityTelemetry?.maxAbsoluteDeltaTokens, 10);
 
     const promote = async (member: (typeof members)[number]) => {
       const current = await engine.getRuntimeUsageV2({ ...member, limit: 1 });
@@ -501,7 +572,7 @@ describe('persistent SpaghettiEngine', { skip: !native }, () => {
     assert.equal(selectedV2.status, 'resolved');
     assert.equal(selectedV2.resolvedQuery?.queryId, 'runtime.usage-v2');
     assert.equal(selectedV2.usageV2?.responseCount, 2);
-    assert.equal(selectedV2.usageV2?.inputTokens.knownTokens, 30);
+    assert.equal(selectedV2.usageV2?.inputTokens.knownTokens, 32);
     assert.equal(selectedV2.legacy, undefined);
 
     appendFileSync(transcriptPaths[0]!, '{"type":"assistant"');
@@ -512,6 +583,38 @@ describe('persistent SpaghettiEngine', { skip: !native }, () => {
     assert.equal(selectedButUnready.legacy, undefined);
     assert.equal(selectedButUnready.usageV2, undefined);
     assert.ok(selectedButUnready.selectionVector.some((item) => !item.v2Eligible));
+
+    const unavailableComparison = await engine.getRuntimeUsageCompatibility({ scopes: members });
+    assert.equal(unavailableComparison.status, 'not_ready');
+    assert.equal(unavailableComparison.comparisonStatus, 'not_ready');
+    assert.equal(unavailableComparison.usageV2, undefined);
+    assert.equal(unavailableComparison.inputTokens, undefined);
+    const telemetryAfterUnavailable = (await engine.getStats()).performance?.queries.runtimeUsageCompatibility;
+    assert.equal(telemetryAfterUnavailable?.samples, 3);
+    assert.equal(telemetryAfterUnavailable?.notReadySamples, 1);
+
+    const rollback = async (member: (typeof members)[number]) => {
+      const current = await engine.getRuntimeUsageV2({ ...member, limit: 1 });
+      return await engine.selectRuntimeUsageQuery({
+        ...member,
+        targetQueryId: 'legacy.usage',
+        expectedMaterialized: current.querySelection.materialized,
+        expectedSelectedQueryId: current.querySelection.selected.queryId,
+        expectedSelectedContractVersion: current.querySelection.selected.contractVersion,
+        expectedSelectionEpoch: current.querySelection.selectionEpoch,
+        reason: 'sdk composite unhealthy rollback drill',
+      });
+    };
+    await rollback(members[0]!);
+    assert.equal((await engine.getRuntimeUsageTotals({ scopes: members })).status, 'mixed_selection');
+    await rollback(members[1]!);
+    const restoredLegacy = await engine.getRuntimeUsageTotals({ scopes: members });
+    assert.equal(restoredLegacy.status, 'resolved');
+    assert.equal(restoredLegacy.resolvedQuery?.queryId, 'legacy.usage');
+    assert.ok(restoredLegacy.legacy);
+    const retainedV2 = await engine.getRuntimeUsageV2({ ...members[1]!, limit: 10 });
+    assert.equal(retainedV2.projectionStatus, 'shadow');
+    assert.equal(retainedV2.aggregate.responseCount, 1);
   });
 
   test('starts, refreshes, and stops native Claude observation', async () => {

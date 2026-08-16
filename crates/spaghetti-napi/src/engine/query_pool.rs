@@ -43,7 +43,7 @@ use super::orchestration_query::{
 };
 use super::performance::{
     atomic_max, atomic_saturating_add, duration_ns, LatencyHistogram, NamedLatencySnapshot,
-    QueryPerformanceSnapshot,
+    QueryPerformanceSnapshot, RuntimeUsageCompatibilityTelemetrySnapshot,
 };
 use super::query_identity::{
     decode_entity_id, encode_entity_id, PROJECT_ID_PREFIX, SESSION_ID_PREFIX,
@@ -59,7 +59,9 @@ use super::runtime_usage_query::{
     RuntimeUsageV2PageRequest,
 };
 use super::runtime_usage_totals_query::{
-    read_runtime_usage_totals, validate_runtime_usage_totals, RuntimeUsageTotalsReport,
+    read_runtime_usage_compatibility, read_runtime_usage_totals,
+    validate_runtime_usage_compatibility, validate_runtime_usage_totals,
+    RuntimeUsageCompatibilityReport, RuntimeUsageCompatibilityRequest, RuntimeUsageTotalsReport,
     RuntimeUsageTotalsRequest,
 };
 use super::search_query::{read_search_page, validate_search_page, SearchPage, SearchPageRequest};
@@ -465,6 +467,12 @@ enum QueryCommand {
         request: RuntimeUsageTotalsRequest,
         response: Sender<Result<RuntimeUsageTotalsReport, EngineError>>,
     },
+    RuntimeUsageCompatibility {
+        cancellation_epoch: u64,
+        cancellation: QueryCancellationToken,
+        request: RuntimeUsageCompatibilityRequest,
+        response: Sender<Result<RuntimeUsageCompatibilityReport, EngineError>>,
+    },
     RuntimeUsageQuerySelectionTarget {
         cancellation_epoch: u64,
         cancellation: QueryCancellationToken,
@@ -607,6 +615,24 @@ struct QueryTelemetry {
     queue_wait: LatencyHistogram,
     execution: LatencyHistogram,
     active_started_ns: Box<[AtomicU64]>,
+    runtime_usage_compatibility: RuntimeUsageCompatibilityTelemetry,
+}
+
+struct RuntimeUsageCompatibilityTelemetry {
+    samples: AtomicU64,
+    ready_samples: AtomicU64,
+    not_ready_samples: AtomicU64,
+    equal_samples: AtomicU64,
+    different_samples: AtomicU64,
+    incomparable_samples: AtomicU64,
+    equal_buckets: AtomicU64,
+    legacy_higher_buckets: AtomicU64,
+    v2_higher_buckets: AtomicU64,
+    incomparable_buckets: AtomicU64,
+    sampled_absolute_delta_tokens: AtomicU64,
+    max_absolute_delta_tokens: AtomicU64,
+    first_at_commit_seq: AtomicU64,
+    last_at_commit_seq: AtomicU64,
 }
 
 /// Transport-neutral, request-scoped cancellation observed by query workers.
@@ -669,6 +695,7 @@ impl QueryControl {
                 queue_wait: LatencyHistogram::default(),
                 execution: LatencyHistogram::default(),
                 active_started_ns: (0..workers).map(|_| AtomicU64::new(0)).collect(),
+                runtime_usage_compatibility: RuntimeUsageCompatibilityTelemetry::new(),
             },
         }
     }
@@ -693,6 +720,7 @@ impl QueryTelemetry {
             oldest_active_ns: oldest_started_ns
                 .map(|started| now_ns.saturating_sub(started))
                 .unwrap_or(0),
+            runtime_usage_compatibility: self.runtime_usage_compatibility.snapshot(),
             timings: [
                 ("queue_wait", &self.queue_wait),
                 ("execution", &self.execution),
@@ -703,6 +731,95 @@ impl QueryTelemetry {
                 latency: histogram.snapshot(),
             })
             .collect(),
+        }
+    }
+}
+
+impl RuntimeUsageCompatibilityTelemetry {
+    fn new() -> Self {
+        Self {
+            samples: AtomicU64::new(0),
+            ready_samples: AtomicU64::new(0),
+            not_ready_samples: AtomicU64::new(0),
+            equal_samples: AtomicU64::new(0),
+            different_samples: AtomicU64::new(0),
+            incomparable_samples: AtomicU64::new(0),
+            equal_buckets: AtomicU64::new(0),
+            legacy_higher_buckets: AtomicU64::new(0),
+            v2_higher_buckets: AtomicU64::new(0),
+            incomparable_buckets: AtomicU64::new(0),
+            sampled_absolute_delta_tokens: AtomicU64::new(0),
+            max_absolute_delta_tokens: AtomicU64::new(0),
+            first_at_commit_seq: AtomicU64::new(u64::MAX),
+            last_at_commit_seq: AtomicU64::new(0),
+        }
+    }
+
+    fn record(&self, report: &RuntimeUsageCompatibilityReport) {
+        let _ = self
+            .first_at_commit_seq
+            .fetch_min(report.at_commit_seq, Ordering::AcqRel);
+        atomic_max(&self.last_at_commit_seq, report.at_commit_seq);
+        match report.status.as_str() {
+            "ready" => atomic_saturating_add(&self.ready_samples, 1),
+            "not_ready" => atomic_saturating_add(&self.not_ready_samples, 1),
+            _ => {}
+        }
+        match report.comparison_status.as_str() {
+            "equal" => atomic_saturating_add(&self.equal_samples, 1),
+            "different" => atomic_saturating_add(&self.different_samples, 1),
+            "incomparable" => atomic_saturating_add(&self.incomparable_samples, 1),
+            "not_ready" => {}
+            _ => {}
+        }
+        for bucket in [
+            report.input_tokens.as_ref(),
+            report.output_tokens.as_ref(),
+            report.cache_creation_input_tokens.as_ref(),
+            report.cache_read_input_tokens.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            match bucket.relation.as_str() {
+                "equal" => atomic_saturating_add(&self.equal_buckets, 1),
+                "legacy_higher" => atomic_saturating_add(&self.legacy_higher_buckets, 1),
+                "v2_higher" => atomic_saturating_add(&self.v2_higher_buckets, 1),
+                "incomparable" => atomic_saturating_add(&self.incomparable_buckets, 1),
+                _ => continue,
+            }
+            if let Some(delta) = bucket.absolute_delta_tokens {
+                atomic_saturating_add(&self.sampled_absolute_delta_tokens, delta);
+                atomic_max(&self.max_absolute_delta_tokens, delta);
+            }
+        }
+        // Publish the sample count last. A snapshot that observes a non-zero
+        // count through its acquire load can then also observe the initialized
+        // commit bounds and classifications for that sample.
+        atomic_saturating_add(&self.samples, 1);
+    }
+
+    fn snapshot(&self) -> RuntimeUsageCompatibilityTelemetrySnapshot {
+        let samples = self.samples.load(Ordering::Acquire);
+        RuntimeUsageCompatibilityTelemetrySnapshot {
+            samples,
+            ready_samples: self.ready_samples.load(Ordering::Acquire),
+            not_ready_samples: self.not_ready_samples.load(Ordering::Acquire),
+            equal_samples: self.equal_samples.load(Ordering::Acquire),
+            different_samples: self.different_samples.load(Ordering::Acquire),
+            incomparable_samples: self.incomparable_samples.load(Ordering::Acquire),
+            equal_buckets: self.equal_buckets.load(Ordering::Acquire),
+            legacy_higher_buckets: self.legacy_higher_buckets.load(Ordering::Acquire),
+            v2_higher_buckets: self.v2_higher_buckets.load(Ordering::Acquire),
+            incomparable_buckets: self.incomparable_buckets.load(Ordering::Acquire),
+            sampled_absolute_delta_tokens: self
+                .sampled_absolute_delta_tokens
+                .load(Ordering::Acquire),
+            max_absolute_delta_tokens: self.max_absolute_delta_tokens.load(Ordering::Acquire),
+            first_at_commit_seq: (samples > 0)
+                .then(|| self.first_at_commit_seq.load(Ordering::Acquire)),
+            last_at_commit_seq: (samples > 0)
+                .then(|| self.last_at_commit_seq.load(Ordering::Acquire)),
         }
     }
 }
@@ -1181,6 +1298,23 @@ impl QueryClient {
         self.send_cancellable(
             cancellation,
             |cancellation_epoch, cancellation, response| QueryCommand::RuntimeUsageTotals {
+                cancellation_epoch,
+                cancellation,
+                request,
+                response,
+            },
+        )
+    }
+
+    pub fn runtime_usage_compatibility_cancellable(
+        &self,
+        request: RuntimeUsageCompatibilityRequest,
+        cancellation: QueryCancellationToken,
+    ) -> Result<RuntimeUsageCompatibilityReport, EngineError> {
+        validate_runtime_usage_compatibility(&request)?;
+        self.send_cancellable(
+            cancellation,
+            |cancellation_epoch, cancellation, response| QueryCommand::RuntimeUsageCompatibility {
                 cancellation_epoch,
                 cancellation,
                 request,
@@ -2102,6 +2236,25 @@ fn query_thread(
                     &cancellation,
                     || read_runtime_usage_totals(&connection, &request),
                 );
+                let _ = response.send(result);
+            }
+            QueryCommand::RuntimeUsageCompatibility {
+                cancellation_epoch,
+                cancellation,
+                request,
+                response,
+            } => {
+                let _in_flight = InFlightGuard::enter(&control.in_flight);
+                let result = run_cancellable_query(
+                    &connection,
+                    &control,
+                    cancellation_epoch,
+                    &cancellation,
+                    || read_runtime_usage_compatibility(&connection, &request),
+                );
+                if let Ok(report) = &result {
+                    control.telemetry.runtime_usage_compatibility.record(report);
+                }
                 let _ = response.send(result);
             }
             QueryCommand::RuntimeUsageQuerySelectionTarget {

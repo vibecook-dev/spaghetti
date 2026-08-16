@@ -89,9 +89,9 @@ use owner_lock::DatabaseOwnerLock;
 pub use owner_lock::OwnerMetadata;
 pub use performance::{
     CheckpointPerformanceSnapshot, EnginePerformanceSnapshot, LatencySnapshot,
-    NamedLatencySnapshot, QueryPerformanceSnapshot, SourceDimensionPerformanceSnapshot,
-    SourcePerformanceSnapshot, SourcePipelineSnapshot, StoragePerformanceSnapshot,
-    WriterPerformanceSnapshot,
+    NamedLatencySnapshot, QueryPerformanceSnapshot, RuntimeUsageCompatibilityTelemetrySnapshot,
+    SourceDimensionPerformanceSnapshot, SourcePerformanceSnapshot, SourcePipelineSnapshot,
+    StoragePerformanceSnapshot, WriterPerformanceSnapshot,
 };
 use performance::{SourcePerformanceRecorder, SourceTelemetry};
 pub use query_pool::{
@@ -118,8 +118,10 @@ pub use runtime_usage_query::{
     RUNTIME_USAGE_QUERY_SELECTION_CONTRACT_VERSION, RUNTIME_USAGE_V2_QUERY_CONTRACT_VERSION,
 };
 pub use runtime_usage_totals_query::{
-    RuntimeUsageLegacyTotals, RuntimeUsageTotalsReport, RuntimeUsageTotalsRequest,
-    RuntimeUsageTotalsSelectionScope, MAX_RUNTIME_USAGE_TOTALS_SCOPES,
+    RuntimeUsageCompatibilityBucket, RuntimeUsageCompatibilityReport,
+    RuntimeUsageCompatibilityRequest, RuntimeUsageLegacyTotals, RuntimeUsageTotalsReport,
+    RuntimeUsageTotalsRequest, RuntimeUsageTotalsSelectionScope, MAX_RUNTIME_USAGE_TOTALS_SCOPES,
+    RUNTIME_USAGE_COMPATIBILITY_QUERY_CONTRACT_VERSION,
     RUNTIME_USAGE_TOTALS_QUERY_CONTRACT_VERSION, SELECTED_RUNTIME_USAGE_QUERY_ID,
 };
 pub use search_query::{
@@ -971,6 +973,17 @@ impl SpaghettiEngineCore {
     ) -> Result<RuntimeUsageTotalsReport, EngineError> {
         let (_, queries) = self.clients()?;
         queries.runtime_usage_totals_cancellable(request, cancellation)
+    }
+
+    /// Compare the retained legacy and eligible usage-v2 aggregate arms under
+    /// one snapshot. The query records only bounded owner-lifetime counters.
+    pub fn runtime_usage_compatibility_cancellable(
+        &self,
+        request: RuntimeUsageCompatibilityRequest,
+        cancellation: QueryCancellationToken,
+    ) -> Result<RuntimeUsageCompatibilityReport, EngineError> {
+        let (_, queries) = self.clients()?;
+        queries.runtime_usage_compatibility_cancellable(request, cancellation)
     }
 
     /// Compare-and-set one source instance's runtime usage query selection.

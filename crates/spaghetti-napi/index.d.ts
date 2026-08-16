@@ -109,6 +109,11 @@ export declare class SpaghettiEngine {
    */
   getRuntimeUsageTotals(options: EngineRuntimeUsageTotalsOptions, signal?: AbortSignal | undefined | null): Promise<EngineRuntimeUsageTotals>
   /**
+   * Compare retained legacy and fully eligible usage-v2 totals without
+   * treating their intentional semantic divergence as an automatic error.
+   */
+  getRuntimeUsageCompatibility(options: EngineRuntimeUsageCompatibilityOptions, signal?: AbortSignal | undefined | null): Promise<EngineRuntimeUsageCompatibility>
+  /**
    * Atomically promote or roll back one source-scoped runtime usage query.
    * Promotion requires a Ready/complete v2 barrier at commit time; rollback
    * remains available if that projection later becomes unhealthy.
@@ -826,6 +831,7 @@ export interface EngineQueryPerformanceStats {
   queueDepth: number
   queueHighWatermark: number
   oldestActiveMs: number
+  runtimeUsageCompatibility: EngineRuntimeUsageCompatibilityTelemetryStats
   timings: Array<EngineNamedLatencyStats>
 }
 
@@ -965,6 +971,55 @@ export interface EngineRuntimeSnapshotOptions {
   cursor?: string
   /** Page size. Defaults to 50 and is capped by the Rust query engine. */
   limit?: number
+}
+
+export interface EngineRuntimeUsageCompatibility {
+  contractVersion: number
+  atCommitSeq: number
+  comparisonRef: string
+  status: string
+  comparisonStatus: string
+  scopes: Array<EngineUsageScopeOptions>
+  selectionVector: Array<EngineRuntimeUsageTotalsSelectionScope>
+  legacy: EngineUsageAggregate
+  usageV2?: EngineRuntimeUsageV2Aggregate
+  inputTokens?: EngineRuntimeUsageCompatibilityBucket
+  outputTokens?: EngineRuntimeUsageCompatibilityBucket
+  cacheCreationInputTokens?: EngineRuntimeUsageCompatibilityBucket
+  cacheReadInputTokens?: EngineRuntimeUsageCompatibilityBucket
+}
+
+export interface EngineRuntimeUsageCompatibilityBucket {
+  legacyExactTokens: number
+  legacyEstimatedTokens: number
+  legacyCombinedTokens: number
+  v2KnownTokens: number
+  v2UnknownResponseCount: number
+  v2Completeness: string
+  relation: string
+  absoluteDeltaTokens?: number
+}
+
+export interface EngineRuntimeUsageCompatibilityOptions {
+  /** One to 128 canonical project/session scopes. Scopes must not overlap. */
+  scopes: Array<EngineUsageScopeOptions>
+}
+
+export interface EngineRuntimeUsageCompatibilityTelemetryStats {
+  samples: number
+  readySamples: number
+  notReadySamples: number
+  equalSamples: number
+  differentSamples: number
+  incomparableSamples: number
+  equalBuckets: number
+  legacyHigherBuckets: number
+  v2HigherBuckets: number
+  incomparableBuckets: number
+  sampledAbsoluteDeltaTokens: number
+  maxAbsoluteDeltaTokens: number
+  firstAtCommitSeq?: number
+  lastAtCommitSeq?: number
 }
 
 export interface EngineRuntimeUsageLegacyTotals {

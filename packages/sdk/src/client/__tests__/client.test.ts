@@ -507,6 +507,7 @@ describe('NapiTransport dispatch', () => {
     await client.getUsageActivity({ projectId: 'project', from: '2026-08-01', to: '2026-08-12' });
     await client.getRuntimeUsageV2({ projectId: 'project', sessionId: 'session' });
     await client.getRuntimeUsageTotals({ scopes: [{ projectId: 'project' }] });
+    await client.getRuntimeUsageCompatibility({ scopes: [{ projectId: 'project' }] });
     await client.getFactFamilyCoverage({
       projectId: 'project',
       sessionId: 'session',
@@ -550,6 +551,7 @@ describe('NapiTransport dispatch', () => {
         'getUsageActivity',
         'getRuntimeUsageV2',
         'getRuntimeUsageTotals',
+        'getRuntimeUsageCompatibility',
         'getFactFamilyCoverage',
         'getRuntimeSnapshot',
         'getRunState',

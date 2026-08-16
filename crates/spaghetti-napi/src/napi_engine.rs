@@ -27,7 +27,9 @@ use crate::engine::{
     ObservationStatusSnapshot, ObservationSupervisorOptions, OwnerMetadata, PlanDetail, PlanPage,
     PlanPageRequest, QueryCancellationToken, QueryPerformanceSnapshot, ReconcileOutcome,
     ReconcileRequest, RunStateLookup, RunStateRequest, RuntimePresenceSnapshot, RuntimeRunEvidence,
-    RuntimeRunSnapshot, RuntimeSnapshot, RuntimeSnapshotRequest, RuntimeUsageLegacyTotals,
+    RuntimeRunSnapshot, RuntimeSnapshot, RuntimeSnapshotRequest, RuntimeUsageCompatibilityBucket,
+    RuntimeUsageCompatibilityReport, RuntimeUsageCompatibilityRequest,
+    RuntimeUsageCompatibilityTelemetrySnapshot, RuntimeUsageLegacyTotals,
     RuntimeUsageQuerySelection, RuntimeUsageQuerySelectionCommand,
     RuntimeUsageQuerySelectionResult, RuntimeUsageQuerySelectionValue, RuntimeUsageTotalsReport,
     RuntimeUsageTotalsRequest, RuntimeUsageTotalsSelectionScope, RuntimeUsageV2ActorContext,
@@ -2237,6 +2239,48 @@ impl From<WriterPerformanceSnapshot> for EngineWriterPerformanceStats {
 
 #[napi(object)]
 #[derive(Debug, Clone)]
+pub struct EngineRuntimeUsageCompatibilityTelemetryStats {
+    pub samples: f64,
+    pub ready_samples: f64,
+    pub not_ready_samples: f64,
+    pub equal_samples: f64,
+    pub different_samples: f64,
+    pub incomparable_samples: f64,
+    pub equal_buckets: f64,
+    pub legacy_higher_buckets: f64,
+    pub v2_higher_buckets: f64,
+    pub incomparable_buckets: f64,
+    pub sampled_absolute_delta_tokens: f64,
+    pub max_absolute_delta_tokens: f64,
+    pub first_at_commit_seq: Option<f64>,
+    pub last_at_commit_seq: Option<f64>,
+}
+
+impl From<RuntimeUsageCompatibilityTelemetrySnapshot>
+    for EngineRuntimeUsageCompatibilityTelemetryStats
+{
+    fn from(value: RuntimeUsageCompatibilityTelemetrySnapshot) -> Self {
+        Self {
+            samples: value.samples as f64,
+            ready_samples: value.ready_samples as f64,
+            not_ready_samples: value.not_ready_samples as f64,
+            equal_samples: value.equal_samples as f64,
+            different_samples: value.different_samples as f64,
+            incomparable_samples: value.incomparable_samples as f64,
+            equal_buckets: value.equal_buckets as f64,
+            legacy_higher_buckets: value.legacy_higher_buckets as f64,
+            v2_higher_buckets: value.v2_higher_buckets as f64,
+            incomparable_buckets: value.incomparable_buckets as f64,
+            sampled_absolute_delta_tokens: value.sampled_absolute_delta_tokens as f64,
+            max_absolute_delta_tokens: value.max_absolute_delta_tokens as f64,
+            first_at_commit_seq: value.first_at_commit_seq.map(|value| value as f64),
+            last_at_commit_seq: value.last_at_commit_seq.map(|value| value as f64),
+        }
+    }
+}
+
+#[napi(object)]
+#[derive(Debug, Clone)]
 pub struct EngineQueryPerformanceStats {
     pub uptime_ms: f64,
     pub requests_enqueued: f64,
@@ -2245,6 +2289,7 @@ pub struct EngineQueryPerformanceStats {
     pub queue_depth: f64,
     pub queue_high_watermark: f64,
     pub oldest_active_ms: f64,
+    pub runtime_usage_compatibility: EngineRuntimeUsageCompatibilityTelemetryStats,
     pub timings: Vec<EngineNamedLatencyStats>,
 }
 
@@ -2258,6 +2303,7 @@ impl From<QueryPerformanceSnapshot> for EngineQueryPerformanceStats {
             queue_depth: value.queue_depth as f64,
             queue_high_watermark: value.queue_high_watermark as f64,
             oldest_active_ms: ns_to_ms(value.oldest_active_ns),
+            runtime_usage_compatibility: value.runtime_usage_compatibility.into(),
             timings: value.timings.into_iter().map(Into::into).collect(),
         }
     }
@@ -3297,6 +3343,86 @@ impl From<RuntimeUsageTotalsReport> for EngineRuntimeUsageTotals {
             selection_vector: value.selection_vector.into_iter().map(Into::into).collect(),
             legacy: value.legacy.map(Into::into),
             usage_v2: value.usage_v2.map(Into::into),
+        }
+    }
+}
+
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct EngineRuntimeUsageCompatibilityOptions {
+    /// One to 128 canonical project/session scopes. Scopes must not overlap.
+    pub scopes: Vec<EngineUsageScopeOptions>,
+}
+
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct EngineRuntimeUsageCompatibilityBucket {
+    pub legacy_exact_tokens: f64,
+    pub legacy_estimated_tokens: f64,
+    pub legacy_combined_tokens: f64,
+    pub v2_known_tokens: f64,
+    pub v2_unknown_response_count: f64,
+    pub v2_completeness: String,
+    pub relation: String,
+    pub absolute_delta_tokens: Option<f64>,
+}
+
+impl From<RuntimeUsageCompatibilityBucket> for EngineRuntimeUsageCompatibilityBucket {
+    fn from(value: RuntimeUsageCompatibilityBucket) -> Self {
+        Self {
+            legacy_exact_tokens: value.legacy_exact_tokens as f64,
+            legacy_estimated_tokens: value.legacy_estimated_tokens as f64,
+            legacy_combined_tokens: value.legacy_combined_tokens as f64,
+            v2_known_tokens: value.v2_known_tokens as f64,
+            v2_unknown_response_count: value.v2_unknown_response_count as f64,
+            v2_completeness: value.v2_completeness,
+            relation: value.relation,
+            absolute_delta_tokens: value.absolute_delta_tokens.map(|value| value as f64),
+        }
+    }
+}
+
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct EngineRuntimeUsageCompatibility {
+    pub contract_version: u32,
+    pub at_commit_seq: f64,
+    pub comparison_ref: String,
+    pub status: String,
+    pub comparison_status: String,
+    pub scopes: Vec<EngineUsageScopeOptions>,
+    pub selection_vector: Vec<EngineRuntimeUsageTotalsSelectionScope>,
+    pub legacy: EngineUsageAggregate,
+    pub usage_v2: Option<EngineRuntimeUsageV2Aggregate>,
+    pub input_tokens: Option<EngineRuntimeUsageCompatibilityBucket>,
+    pub output_tokens: Option<EngineRuntimeUsageCompatibilityBucket>,
+    pub cache_creation_input_tokens: Option<EngineRuntimeUsageCompatibilityBucket>,
+    pub cache_read_input_tokens: Option<EngineRuntimeUsageCompatibilityBucket>,
+}
+
+impl From<RuntimeUsageCompatibilityReport> for EngineRuntimeUsageCompatibility {
+    fn from(value: RuntimeUsageCompatibilityReport) -> Self {
+        Self {
+            contract_version: value.contract_version,
+            at_commit_seq: value.at_commit_seq as f64,
+            comparison_ref: value.comparison_ref,
+            status: value.status,
+            comparison_status: value.comparison_status,
+            scopes: value
+                .scopes
+                .into_iter()
+                .map(|scope| EngineUsageScopeOptions {
+                    project_id: scope.project_id,
+                    session_id: scope.session_id,
+                })
+                .collect(),
+            selection_vector: value.selection_vector.into_iter().map(Into::into).collect(),
+            legacy: value.legacy.into(),
+            usage_v2: value.usage_v2.map(Into::into),
+            input_tokens: value.input_tokens.map(Into::into),
+            output_tokens: value.output_tokens.map(Into::into),
+            cache_creation_input_tokens: value.cache_creation_input_tokens.map(Into::into),
+            cache_read_input_tokens: value.cache_read_input_tokens.map(Into::into),
         }
     }
 }
@@ -4576,6 +4702,25 @@ impl SpaghettiEngine {
         )
     }
 
+    /// Compare retained legacy and fully eligible usage-v2 totals without
+    /// treating their intentional semantic divergence as an automatic error.
+    #[napi(ts_return_type = "Promise<EngineRuntimeUsageCompatibility>")]
+    pub fn get_runtime_usage_compatibility(
+        &self,
+        options: EngineRuntimeUsageCompatibilityOptions,
+        signal: Option<AbortSignal>,
+    ) -> AsyncTask<RuntimeUsageCompatibilityTask> {
+        let cancellation = cancellation_for_signal(signal.as_ref());
+        AsyncTask::with_optional_signal(
+            RuntimeUsageCompatibilityTask {
+                engine: Arc::clone(&self.inner),
+                options,
+                cancellation,
+            },
+            signal,
+        )
+    }
+
     /// Atomically promote or roll back one source-scoped runtime usage query.
     /// Promotion requires a Ready/complete v2 barrier at commit time; rollback
     /// remains available if that projection later becomes unhealthy.
@@ -5143,6 +5288,12 @@ pub struct RuntimeUsageV2Task {
 pub struct RuntimeUsageTotalsTask {
     engine: Arc<SpaghettiEngineCore>,
     options: EngineRuntimeUsageTotalsOptions,
+    cancellation: QueryCancellationToken,
+}
+
+pub struct RuntimeUsageCompatibilityTask {
+    engine: Arc<SpaghettiEngineCore>,
+    options: EngineRuntimeUsageCompatibilityOptions,
     cancellation: QueryCancellationToken,
 }
 
@@ -5905,6 +6056,35 @@ impl Task for RuntimeUsageTotalsTask {
                         .requested_query_id
                         .clone()
                         .unwrap_or_else(|| SELECTED_RUNTIME_USAGE_QUERY_ID.to_string()),
+                },
+                self.cancellation.clone(),
+            )
+            .map(Into::into)
+            .map_err(napi_error)
+    }
+
+    fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
+        Ok(output)
+    }
+}
+
+impl Task for RuntimeUsageCompatibilityTask {
+    type Output = EngineRuntimeUsageCompatibility;
+    type JsValue = EngineRuntimeUsageCompatibility;
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        self.engine
+            .runtime_usage_compatibility_cancellable(
+                RuntimeUsageCompatibilityRequest {
+                    scopes: self
+                        .options
+                        .scopes
+                        .iter()
+                        .map(|scope| UsageScopeRequest {
+                            project_id: scope.project_id.clone(),
+                            session_id: scope.session_id.clone(),
+                        })
+                        .collect(),
                 },
                 self.cancellation.clone(),
             )

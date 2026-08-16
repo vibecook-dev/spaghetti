@@ -797,10 +797,18 @@ two source instances, deterministic request reordering, one-sided and complete
 promotion, explicit legacy compatibility, and a selected v2 vector becoming
 unready without fallback.
 
-The remaining C3 work is compatibility-window telemetry and the release
-rollback drill. `getUsage`/`getUsageActivity` remain explicitly legacy; new
-composite/default consumers migrate to `getRuntimeUsageTotals`, and this
-landing alone is not a support-promotion claim.
+The read-only compatibility sampler, bounded owner-lifetime telemetry, and
+unhealthy-v2 rollback drill are now implemented. The sampler compares both
+labeled arms under one snapshot, classifies each bucket as equal,
+legacy-higher, v2-higher, or incomparable, and never treats expected semantic
+divergence as oracle failure. It retains only fixed counters/delta summaries
+and commit bounds. The two-source drill proves partial rollback is visibly
+mixed, complete rollback restores legacy, and v2 shadow rows survive.
+
+The remaining C3 gate is collection and review of a representative external
+compatibility-window report. `getUsage`/`getUsageActivity` remain explicitly
+legacy; new composite/default consumers migrate to `getRuntimeUsageTotals`,
+and this implementation evidence alone is not a support-promotion claim.
 
 ### C4. Downstream semantic suite
 

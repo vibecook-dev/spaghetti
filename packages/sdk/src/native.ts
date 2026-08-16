@@ -1136,6 +1136,24 @@ export interface SpaghettiEngineWriterPerformanceStats {
   timings: SpaghettiEngineNamedLatencyStats[];
 }
 
+/** Bounded owner-lifetime samples; repeated comparison queries remain visible. */
+export interface SpaghettiEngineRuntimeUsageCompatibilityTelemetryStats {
+  samples: number;
+  readySamples: number;
+  notReadySamples: number;
+  equalSamples: number;
+  differentSamples: number;
+  incomparableSamples: number;
+  equalBuckets: number;
+  legacyHigherBuckets: number;
+  v2HigherBuckets: number;
+  incomparableBuckets: number;
+  sampledAbsoluteDeltaTokens: number;
+  maxAbsoluteDeltaTokens: number;
+  firstAtCommitSeq?: number;
+  lastAtCommitSeq?: number;
+}
+
 export interface SpaghettiEngineQueryPerformanceStats {
   uptimeMs: number;
   requestsEnqueued: number;
@@ -1144,6 +1162,7 @@ export interface SpaghettiEngineQueryPerformanceStats {
   queueDepth: number;
   queueHighWatermark: number;
   oldestActiveMs: number;
+  runtimeUsageCompatibility: SpaghettiEngineRuntimeUsageCompatibilityTelemetryStats;
   timings: SpaghettiEngineNamedLatencyStats[];
 }
 
@@ -1518,6 +1537,40 @@ export interface SpaghettiEngineRuntimeUsageTotals {
   legacy?: SpaghettiEngineRuntimeUsageLegacyTotals;
   /** Present exactly when the resolved query is runtime.usage-v2. */
   usageV2?: SpaghettiEngineRuntimeUsageV2Aggregate;
+}
+
+export interface SpaghettiEngineRuntimeUsageCompatibilityOptions {
+  /** One to 128 canonical scopes. Project-wide and session scopes may not overlap. */
+  scopes: SpaghettiEngineUsageScopeOptions[];
+}
+
+export interface SpaghettiEngineRuntimeUsageCompatibilityBucket {
+  legacyExactTokens: number;
+  legacyEstimatedTokens: number;
+  legacyCombinedTokens: number;
+  v2KnownTokens: number;
+  v2UnknownResponseCount: number;
+  v2Completeness: SpaghettiEngineRuntimeUsageV2Completeness;
+  relation: 'equal' | 'legacy_higher' | 'v2_higher' | 'incomparable';
+  /** Absent only when the v2 bucket is incomplete and therefore incomparable. */
+  absoluteDeltaTokens?: number;
+}
+
+export interface SpaghettiEngineRuntimeUsageCompatibility {
+  contractVersion: number;
+  atCommitSeq: number;
+  /** Opaque, request-order-independent identity for this scope set and commit. */
+  comparisonRef: string;
+  status: 'ready' | 'not_ready';
+  comparisonStatus: 'equal' | 'different' | 'incomparable' | 'not_ready';
+  scopes: SpaghettiEngineUsageScopeOptions[];
+  selectionVector: SpaghettiEngineRuntimeUsageTotalsSelectionScope[];
+  legacy: SpaghettiEngineUsageAggregate;
+  usageV2?: SpaghettiEngineRuntimeUsageV2Aggregate;
+  inputTokens?: SpaghettiEngineRuntimeUsageCompatibilityBucket;
+  outputTokens?: SpaghettiEngineRuntimeUsageCompatibilityBucket;
+  cacheCreationInputTokens?: SpaghettiEngineRuntimeUsageCompatibilityBucket;
+  cacheReadInputTokens?: SpaghettiEngineRuntimeUsageCompatibilityBucket;
 }
 
 /**
@@ -2052,6 +2105,10 @@ export interface SpaghettiEngine {
     options: SpaghettiEngineRuntimeUsageTotalsOptions,
     signal?: AbortSignal,
   ): Promise<SpaghettiEngineRuntimeUsageTotals>;
+  getRuntimeUsageCompatibility(
+    options: SpaghettiEngineRuntimeUsageCompatibilityOptions,
+    signal?: AbortSignal,
+  ): Promise<SpaghettiEngineRuntimeUsageCompatibility>;
   selectRuntimeUsageQuery(
     options: SpaghettiEngineRuntimeUsageQuerySelectionOptions,
     signal?: AbortSignal,

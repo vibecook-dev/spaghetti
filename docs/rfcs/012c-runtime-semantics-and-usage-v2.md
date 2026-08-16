@@ -829,6 +829,58 @@ legacy during their compatibility window. Composite/default consumers migrate
 to `getRuntimeUsageTotals`; they must not aggregate several independent legacy
 or v2 calls after selection negotiation.
 
+Compatibility observation uses the separate read-only
+`getRuntimeUsageCompatibility` contract v1. It accepts the same bounded,
+non-overlapping scope vector and reads the vector, retained legacy aggregate,
+eligible v2 aggregate, and comparison under one SQLite snapshot. It does not
+require v2 to be selected, so a release controller can sample shadow behavior
+before promotion. An empty contributing vector, or any contributing source
+that fails the current v2 guard, returns `not_ready`, the legacy aggregate, and
+no v2 or bucket comparison; it never compares a partial projection as if it
+were complete.
+
+For each of the four native token buckets, a ready comparison reports legacy
+exact, estimated, and combined tokens; v2 known tokens, unknown-response count,
+and completeness; and one relation:
+
+```text
+equal | legacy_higher | v2_higher | incomparable
+```
+
+The absolute delta is present only for comparable buckets. The report summary
+is `equal`, `different`, `incomparable`, or `not_ready`. `different` is
+descriptive, not a correctness failure: response-revision v2 is expected to be
+lower than row-additive legacy data when native responses were repeated.
+Independent oracle parity remains the correctness authority. Missing v2
+buckets remain `incomparable`; zero is comparable only when native evidence
+made zero explicit. A versioned opaque `comparison_ref` is deterministic for
+the unordered scope set and commit watermark so an external collector can
+deduplicate retries without learning native identities.
+
+Successful comparison reads feed fixed, owner-lifetime telemetry under the
+query performance snapshot: ready/not-ready and summary counts, bucket
+relations, sampled absolute-delta sum and maximum, and first/last commit
+watermarks. Repeated samples are intentionally counted; the sum is sampling
+telemetry, not a deduplicated corpus total. The engine retains no scope labels,
+paths, response identities, payloads, or per-sample rows, and the query writes
+nothing to SQLite. A release window collector must persist the bounded
+snapshots it uses as promotion evidence; engine restart begins a new
+owner-lifetime window.
+
+The release rollback drill is normative:
+
+1. capture the last compatibility snapshot and every source selection epoch;
+2. make at least one selected v2 source non-ready and prove selected aggregate
+   queries return no fallback arm;
+3. compare-and-set each contributing source to its retained legacy target;
+4. accept `mixed_selection` while only part of the vector has rolled back;
+5. prove the complete vector resolves legacy after the final rollback; and
+6. prove v2 rows remain queryable as shadow state, so repair and later
+   re-promotion require neither native reparsing nor database deletion.
+
+Rollback failure, stale authorization, or a source omitted from the vector is
+a failed drill, not permission to force a global selector.
+
 `Untracked` is a query-boundary representation for legacy/directly constructed
 state with no durable version row; it is never persisted and never aliases
 `Ready`. A transaction that changes rows supplied by a usage-v2 provider
@@ -1034,6 +1086,17 @@ simultaneous source instances, request-order independence, legacy defaults,
 one-sided promotion, explicit legacy during the mixed interval, full v2
 promotion, and loss of readiness from an incomplete tail.
 
+The read-only `getRuntimeUsageCompatibility` contract and fixed owner-lifetime
+telemetry are also implemented across the same boundaries. Focused native
+tests use a repeated native response to prove a directional legacy-higher
+delta without treating expected semantic divergence as failure, explicit-zero
+cache buckets to prove comparable equality, missing buckets to prove
+incomparability, request-order-independent comparison references, repeated
+sample accounting, and a non-ready vector that emits no v2 comparison. The
+same two-source fixture performs the release rollback sequence while one v2
+source is unhealthy: the intermediate vector is mixed, the completed vector
+resolves legacy, and the v2 rows remain available in shadow state.
+
 The private native corpus gate also passes on a stable ephemeral source clone.
 An adapter/SDK/database-independent census matched the durable projection
 exactly for 149,369 response groups, 5,044 actors, 854 sessions, the root/child
@@ -1046,8 +1109,8 @@ a usage gap. The committed aggregate-only report is
 with digest
 `sha256:2d84af3dd9bcfb91e727b8d0e067679b1637e61b0a343957a09b8f42c303176e`.
 
-Native team-to-actor conformance and step 7's compatibility telemetry and
-release rollback drill remain open. Until those gates pass, the candidate
+Native team-to-actor conformance and collection of a representative external
+compatibility-window report remain open. Until those gates pass, the candidate
 capability is unsupported and `getUsage`/`getUsageActivity` retain legacy
 semantics.
 

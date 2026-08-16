@@ -26,6 +26,7 @@ use super::usage_query::{
 use super::EngineError;
 
 pub const RUNTIME_USAGE_TOTALS_QUERY_CONTRACT_VERSION: u32 = 1;
+pub const RUNTIME_USAGE_COMPATIBILITY_QUERY_CONTRACT_VERSION: u32 = 1;
 pub const MAX_RUNTIME_USAGE_TOTALS_SCOPES: usize = 128;
 pub const SELECTED_RUNTIME_USAGE_QUERY_ID: &str = "selected";
 
@@ -72,6 +73,41 @@ pub struct RuntimeUsageTotalsReport {
     pub usage_v2: Option<RuntimeUsageV2Aggregate>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeUsageCompatibilityRequest {
+    pub scopes: Vec<UsageScopeRequest>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeUsageCompatibilityBucket {
+    pub legacy_exact_tokens: u64,
+    pub legacy_estimated_tokens: u64,
+    pub legacy_combined_tokens: u64,
+    pub v2_known_tokens: u64,
+    pub v2_unknown_response_count: u64,
+    pub v2_completeness: String,
+    pub relation: String,
+    pub absolute_delta_tokens: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeUsageCompatibilityReport {
+    pub contract_version: u32,
+    pub at_commit_seq: u64,
+    /// Stable for the same unordered scope set at the same commit watermark.
+    pub comparison_ref: String,
+    pub status: String,
+    pub comparison_status: String,
+    pub scopes: Vec<UsageScopeRequest>,
+    pub selection_vector: Vec<RuntimeUsageTotalsSelectionScope>,
+    pub legacy: UsageAggregate,
+    pub usage_v2: Option<RuntimeUsageV2Aggregate>,
+    pub input_tokens: Option<RuntimeUsageCompatibilityBucket>,
+    pub output_tokens: Option<RuntimeUsageCompatibilityBucket>,
+    pub cache_creation_input_tokens: Option<RuntimeUsageCompatibilityBucket>,
+    pub cache_read_input_tokens: Option<RuntimeUsageCompatibilityBucket>,
+}
+
 #[derive(Debug)]
 struct ValidatedScope {
     project_key: Vec<u8>,
@@ -111,6 +147,16 @@ pub(super) fn validate_runtime_usage_totals(
     request: &RuntimeUsageTotalsRequest,
 ) -> Result<(), EngineError> {
     validate_request(request).map(|_| ())
+}
+
+pub(super) fn validate_runtime_usage_compatibility(
+    request: &RuntimeUsageCompatibilityRequest,
+) -> Result<(), EngineError> {
+    validate_request(&RuntimeUsageTotalsRequest {
+        scopes: request.scopes.clone(),
+        requested_query_id: RUNTIME_USAGE_V2_QUERY_ID.to_string(),
+    })
+    .map(|_| ())
 }
 
 pub(super) fn read_runtime_usage_totals(
@@ -156,6 +202,99 @@ pub(super) fn read_runtime_usage_totals(
         selection_vector,
         legacy,
         usage_v2,
+    })
+}
+
+pub(super) fn read_runtime_usage_compatibility(
+    connection: &Connection,
+    request: &RuntimeUsageCompatibilityRequest,
+) -> Result<RuntimeUsageCompatibilityReport, EngineError> {
+    let totals_request = RuntimeUsageTotalsRequest {
+        scopes: request.scopes.clone(),
+        requested_query_id: RUNTIME_USAGE_V2_QUERY_ID.to_string(),
+    };
+    let validated = validate_request(&totals_request)?;
+    let transaction = connection
+        .unchecked_transaction()
+        .map_err(|error| query_sqlite_error("begin runtime usage compatibility snapshot", error))?;
+    let at_commit_seq = read_committed_watermark(&transaction)?;
+    validate_session_membership(&transaction, &validated)?;
+    let selection_vector = read_selection_vector(&transaction, &validated)?;
+    let legacy_totals = read_legacy_totals(&transaction, &validated)?;
+    let comparison_ref = comparison_ref(&validated, at_commit_seq);
+
+    if selection_vector.is_empty() || !selection_vector.iter().all(|scope| scope.v2_eligible) {
+        finish_snapshot(transaction)?;
+        return Ok(RuntimeUsageCompatibilityReport {
+            contract_version: RUNTIME_USAGE_COMPATIBILITY_QUERY_CONTRACT_VERSION,
+            at_commit_seq,
+            comparison_ref,
+            status: "not_ready".to_string(),
+            comparison_status: "not_ready".to_string(),
+            scopes: request.scopes.clone(),
+            selection_vector,
+            legacy: legacy_totals.aggregate,
+            usage_v2: None,
+            input_tokens: None,
+            output_tokens: None,
+            cache_creation_input_tokens: None,
+            cache_read_input_tokens: None,
+        });
+    }
+
+    let usage_v2 = read_usage_v2_totals(&transaction, &validated)?;
+    let input_tokens = compatibility_bucket(
+        legacy_totals.aggregate.exact.input_tokens,
+        legacy_totals.aggregate.estimated.input_tokens,
+        legacy_totals.aggregate.combined.input_tokens,
+        usage_v2.input_tokens,
+    );
+    let output_tokens = compatibility_bucket(
+        legacy_totals.aggregate.exact.output_tokens,
+        legacy_totals.aggregate.estimated.output_tokens,
+        legacy_totals.aggregate.combined.output_tokens,
+        usage_v2.output_tokens,
+    );
+    let cache_creation_input_tokens = compatibility_bucket(
+        legacy_totals.aggregate.exact.cache_creation_tokens,
+        legacy_totals.aggregate.estimated.cache_creation_tokens,
+        legacy_totals.aggregate.combined.cache_creation_tokens,
+        usage_v2.cache_creation_input_tokens,
+    );
+    let cache_read_input_tokens = compatibility_bucket(
+        legacy_totals.aggregate.exact.cache_read_tokens,
+        legacy_totals.aggregate.estimated.cache_read_tokens,
+        legacy_totals.aggregate.combined.cache_read_tokens,
+        usage_v2.cache_read_input_tokens,
+    );
+    let relations = [
+        input_tokens.relation.as_str(),
+        output_tokens.relation.as_str(),
+        cache_creation_input_tokens.relation.as_str(),
+        cache_read_input_tokens.relation.as_str(),
+    ];
+    let comparison_status = if relations.contains(&"incomparable") {
+        "incomparable"
+    } else if relations.iter().all(|relation| *relation == "equal") {
+        "equal"
+    } else {
+        "different"
+    };
+    finish_snapshot(transaction)?;
+    Ok(RuntimeUsageCompatibilityReport {
+        contract_version: RUNTIME_USAGE_COMPATIBILITY_QUERY_CONTRACT_VERSION,
+        at_commit_seq,
+        comparison_ref,
+        status: "ready".to_string(),
+        comparison_status: comparison_status.to_string(),
+        scopes: request.scopes.clone(),
+        selection_vector,
+        legacy: legacy_totals.aggregate,
+        usage_v2: Some(usage_v2),
+        input_tokens: Some(input_tokens),
+        output_tokens: Some(output_tokens),
+        cache_creation_input_tokens: Some(cache_creation_input_tokens),
+        cache_read_input_tokens: Some(cache_read_input_tokens),
     })
 }
 
@@ -622,6 +761,66 @@ fn selection_scope_ref(adapter_id: &str, stable_key: &[u8]) -> String {
     hasher.update(&(stable_key.len() as u64).to_be_bytes());
     hasher.update(stable_key);
     opaque_ref(hasher.finalize().as_bytes())
+}
+
+fn comparison_ref(request: &ValidatedRequest, at_commit_seq: u64) -> String {
+    let mut scopes = request
+        .scopes
+        .iter()
+        .map(|scope| (scope.project_key.as_slice(), scope.session_key.as_deref()))
+        .collect::<Vec<_>>();
+    scopes.sort();
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"spaghetti/runtime-usage-compatibility/v1\0");
+    hasher.update(&at_commit_seq.to_be_bytes());
+    for (project_key, session_key) in scopes {
+        hasher.update(&(project_key.len() as u64).to_be_bytes());
+        hasher.update(project_key);
+        match session_key {
+            Some(session_key) => {
+                hasher.update(&[1]);
+                hasher.update(&(session_key.len() as u64).to_be_bytes());
+                hasher.update(session_key);
+            }
+            None => {
+                hasher.update(&[0]);
+            }
+        }
+    }
+    opaque_ref(hasher.finalize().as_bytes())
+}
+
+fn compatibility_bucket(
+    legacy_exact_tokens: u64,
+    legacy_estimated_tokens: u64,
+    legacy_combined_tokens: u64,
+    usage_v2: super::runtime_usage_query::RuntimeUsageV2BucketAggregate,
+) -> RuntimeUsageCompatibilityBucket {
+    let (relation, absolute_delta_tokens) = if usage_v2.completeness != "complete" {
+        ("incomparable", None)
+    } else if legacy_combined_tokens == usage_v2.known_tokens {
+        ("equal", Some(0))
+    } else if legacy_combined_tokens > usage_v2.known_tokens {
+        (
+            "legacy_higher",
+            Some(legacy_combined_tokens - usage_v2.known_tokens),
+        )
+    } else {
+        (
+            "v2_higher",
+            Some(usage_v2.known_tokens - legacy_combined_tokens),
+        )
+    };
+    RuntimeUsageCompatibilityBucket {
+        legacy_exact_tokens,
+        legacy_estimated_tokens,
+        legacy_combined_tokens,
+        v2_known_tokens: usage_v2.known_tokens,
+        v2_unknown_response_count: usage_v2.unknown_response_count,
+        v2_completeness: usage_v2.completeness.to_string(),
+        relation: relation.to_string(),
+        absolute_delta_tokens,
+    }
 }
 
 fn legacy_metadata_from_row(row: &Row<'_>) -> rusqlite::Result<LegacyMetadata> {
