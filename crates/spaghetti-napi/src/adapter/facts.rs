@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::fmt;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
@@ -7,7 +8,10 @@ use serde_json::Value;
 
 use crate::source::SourceRecord;
 
-use super::{AdapterDiagnostic, AdapterError, AdapterId, DependencyRevision};
+use super::{
+    AdapterDiagnostic, AdapterError, AdapterId, CanonicalFactId, CanonicalSourceInstanceKey,
+    DependencyRevision, FactRevisionId, SemanticRevisionRef, SourceRecordId,
+};
 
 const FACT_HASH_BYTES: usize = 32;
 const MAX_ENTITY_KEY_BYTES: usize = 8 * 1024;
@@ -107,6 +111,82 @@ impl fmt::Debug for FactId {
             .field(&blake3::Hash::from_bytes(self.0).to_hex().as_str())
             .finish()
     }
+}
+
+/// Stable RFC 012A identity inputs bound before adapter decoding. This context
+/// deliberately excludes numeric catalog IDs, database state, observation
+/// phase, and delivery sequence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FactSemanticContext {
+    adapter_id: AdapterId,
+    source_instance_key: CanonicalSourceInstanceKey,
+    stream_key: Arc<[u8]>,
+    object_key: Arc<[u8]>,
+    framing_contract_version: u32,
+}
+
+impl FactSemanticContext {
+    pub fn new(
+        adapter_id: &AdapterId,
+        source_instance_identity_contract_version: u32,
+        stable_instance_discriminator: &[u8],
+        stream_key: &[u8],
+        object_key: &[u8],
+        framing_contract_version: u32,
+    ) -> Result<Self, AdapterError> {
+        let source_instance_key = CanonicalSourceInstanceKey::derive(
+            source_instance_identity_contract_version,
+            stable_instance_discriminator,
+        )
+        .map_err(semantic_identity_error)?;
+        // Validate every remaining component at binding time rather than
+        // allowing the first record to discover an invalid object contract.
+        SourceRecordId::derive(
+            adapter_id.as_str(),
+            &source_instance_key,
+            stream_key,
+            object_key,
+            1,
+            b"semantic-context-validation",
+            framing_contract_version,
+        )
+        .map_err(semantic_identity_error)?;
+        Ok(Self {
+            adapter_id: adapter_id.clone(),
+            source_instance_key,
+            stream_key: Arc::from(stream_key),
+            object_key: Arc::from(object_key),
+            framing_contract_version,
+        })
+    }
+
+    pub fn source_instance_key(&self) -> CanonicalSourceInstanceKey {
+        self.source_instance_key
+    }
+
+    pub fn source_record_id(&self, record: &SourceRecord) -> Result<SourceRecordId, AdapterError> {
+        let logical_position = logical_record_position(record);
+        SourceRecordId::derive(
+            self.adapter_id.as_str(),
+            &self.source_instance_key,
+            self.stream_key.as_ref(),
+            self.object_key.as_ref(),
+            record.generation,
+            &logical_position,
+            self.framing_contract_version,
+        )
+        .map_err(semantic_identity_error)
+    }
+}
+
+/// Parallel RFC 012A identity carried while the RFC 011 store key remains the
+/// durable primary key during migration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FactSemanticRevision {
+    pub source_record_id: SourceRecordId,
+    pub fact_id: CanonicalFactId,
+    pub fact_revision_id: FactRevisionId,
+    pub semantic_revision_ref: SemanticRevisionRef,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -904,6 +984,8 @@ impl Fact {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FactEnvelope {
     pub id: FactId,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub semantic_revision: Option<FactSemanticRevision>,
     pub provenance: FactProvenance,
     pub value: Fact,
 }
@@ -916,7 +998,49 @@ pub struct FactBatch {
     dependency_reads: Vec<DependencyRevision>,
     next_decoder_state: Option<Vec<u8>>,
     next_record_ordinals: BTreeMap<RecordFactKey, u32>,
+    semantic_context: Option<FactSemanticContext>,
+    semantic_revisions: std::collections::BTreeSet<FactRevisionId>,
+    semantic_record_cache: Option<Box<SemanticRecordCache>>,
     fact_build_time: Duration,
+}
+
+struct SemanticRecordCache {
+    generation: u64,
+    cursor_start: Vec<u8>,
+    cursor_end: Vec<u8>,
+    snapshot_ordinal: Option<u32>,
+    source_record_id: SourceRecordId,
+}
+
+impl SemanticRecordCache {
+    fn matches(&self, record: &SourceRecord) -> bool {
+        self.generation == record.generation
+            && self.cursor_start == record.cursor_start.as_bytes()
+            && self.cursor_end == record.cursor_end.as_bytes()
+            && self.snapshot_ordinal
+                == record
+                    .cursor_start
+                    .append_offset_value()
+                    .zip(record.cursor_end.append_offset_value())
+                    .is_none()
+                    .then_some(record.ordinal_in_batch)
+    }
+
+    fn new(record: &SourceRecord, source_record_id: SourceRecordId) -> Self {
+        let snapshot_ordinal = record
+            .cursor_start
+            .append_offset_value()
+            .zip(record.cursor_end.append_offset_value())
+            .is_none()
+            .then_some(record.ordinal_in_batch);
+        Self {
+            generation: record.generation,
+            cursor_start: record.cursor_start.as_bytes().to_vec(),
+            cursor_end: record.cursor_end.as_bytes().to_vec(),
+            snapshot_ordinal,
+            source_record_id,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -957,11 +1081,108 @@ impl FactBatch {
             dependency_reads: Vec::new(),
             next_decoder_state: None,
             next_record_ordinals: BTreeMap::new(),
+            semantic_context: None,
+            semantic_revisions: std::collections::BTreeSet::new(),
+            semantic_record_cache: None,
             fact_build_time: Duration::ZERO,
         })
     }
 
+    pub(crate) fn new_with_semantic_context(
+        max_facts: usize,
+        max_diagnostics: usize,
+        semantic_context: FactSemanticContext,
+    ) -> Result<Self, AdapterError> {
+        let mut batch = Self::new(max_facts, max_diagnostics)?;
+        batch.semantic_context = Some(semantic_context);
+        Ok(batch)
+    }
+
+    /// Legacy RFC 011 emission. It intentionally does not synthesize an RFC
+    /// 012A revision from the local ordinal; adapters migrate each fact family
+    /// through `push_native` or `push_derived` with an explicit semantic key.
     pub fn push(&mut self, record: &SourceRecord, value: Fact) -> Result<FactId, AdapterError> {
+        self.push_internal(record, value, None)
+    }
+
+    /// Emit a replaceable native fact whose stable key may span several source
+    /// records. The source record is the default semantic revision boundary.
+    pub fn push_native(
+        &mut self,
+        record: &SourceRecord,
+        stable_native_fact_key: &[u8],
+        value: Fact,
+    ) -> Result<FactId, AdapterError> {
+        let semantic =
+            self.semantic_revision(record, value.kind(), true, stable_native_fact_key, None)?;
+        self.push_internal(record, value, Some(semantic))
+    }
+
+    /// Emit a native fact whose revision is not fully owned by the primary
+    /// source record (for example, one incorporating a declared dependency
+    /// revision). The explicit revision key must encode every semantic input
+    /// under the fact family's versioned contract.
+    pub fn push_native_with_revision(
+        &mut self,
+        record: &SourceRecord,
+        stable_native_fact_key: &[u8],
+        source_or_semantic_revision: &[u8],
+        value: Fact,
+    ) -> Result<FactId, AdapterError> {
+        let semantic = self.semantic_revision(
+            record,
+            value.kind(),
+            true,
+            stable_native_fact_key,
+            Some(source_or_semantic_revision),
+        )?;
+        self.push_internal(record, value, Some(semantic))
+    }
+
+    /// Emit a record-owned fact. The caller-provided subkey is part of the
+    /// versioned decoder contract and distinguishes same-kind facts without
+    /// depending on map iteration, batching, or scheduling.
+    pub fn push_derived(
+        &mut self,
+        record: &SourceRecord,
+        deterministic_semantic_subkey: &[u8],
+        value: Fact,
+    ) -> Result<FactId, AdapterError> {
+        let semantic = self.semantic_revision(
+            record,
+            value.kind(),
+            false,
+            deterministic_semantic_subkey,
+            None,
+        )?;
+        self.push_internal(record, value, Some(semantic))
+    }
+
+    /// Emit a record-derived fact with an explicit semantic revision key when
+    /// the primary source record alone does not own the decoded value.
+    pub fn push_derived_with_revision(
+        &mut self,
+        record: &SourceRecord,
+        deterministic_semantic_subkey: &[u8],
+        source_or_semantic_revision: &[u8],
+        value: Fact,
+    ) -> Result<FactId, AdapterError> {
+        let semantic = self.semantic_revision(
+            record,
+            value.kind(),
+            false,
+            deterministic_semantic_subkey,
+            Some(source_or_semantic_revision),
+        )?;
+        self.push_internal(record, value, Some(semantic))
+    }
+
+    fn push_internal(
+        &mut self,
+        record: &SourceRecord,
+        value: Fact,
+        semantic_revision: Option<FactSemanticRevision>,
+    ) -> Result<FactId, AdapterError> {
         let started = Instant::now();
         let result = (|| {
             if self.facts.len() == self.max_facts {
@@ -969,6 +1190,13 @@ impl FactBatch {
                     "fact batch exceeds {} facts",
                     self.max_facts
                 )));
+            }
+            if semantic_revision.as_ref().is_some_and(|semantic| {
+                self.semantic_revisions.contains(&semantic.fact_revision_id)
+            }) {
+                return Err(AdapterError::invalid_contract(
+                    "fact batch emitted the same canonical fact revision more than once",
+                ));
             }
             let ordinal = self
                 .next_record_ordinals
@@ -980,8 +1208,13 @@ impl FactBatch {
             })?;
             let provenance = FactProvenance::from_record(record, local_fact_ordinal);
             let id = provenance.fact_id(value.kind());
+            if let Some(semantic) = semantic_revision {
+                let inserted = self.semantic_revisions.insert(semantic.fact_revision_id);
+                debug_assert!(inserted, "canonical revision was checked before mutation");
+            }
             self.facts.push(FactEnvelope {
                 id,
+                semantic_revision,
                 provenance,
                 value,
             });
@@ -989,6 +1222,56 @@ impl FactBatch {
         })();
         self.fact_build_time = self.fact_build_time.saturating_add(started.elapsed());
         result
+    }
+
+    fn semantic_revision(
+        &mut self,
+        record: &SourceRecord,
+        fact_kind: &str,
+        native: bool,
+        semantic_key: &[u8],
+        explicit_revision: Option<&[u8]>,
+    ) -> Result<FactSemanticRevision, AdapterError> {
+        let context = self.semantic_context.as_ref().ok_or_else(|| {
+            AdapterError::invalid_contract(
+                "canonical fact emission requires a bound semantic decode context",
+            )
+        })?;
+        let source_record_id = match &self.semantic_record_cache {
+            Some(cache) if cache.matches(record) => cache.source_record_id,
+            _ => {
+                let source_record_id = context.source_record_id(record)?;
+                self.semantic_record_cache =
+                    Some(Box::new(SemanticRecordCache::new(record, source_record_id)));
+                source_record_id
+            }
+        };
+        let fact_id = if native {
+            CanonicalFactId::native(
+                context.adapter_id.as_str(),
+                &context.source_instance_key,
+                fact_kind,
+                semantic_key,
+            )
+        } else {
+            CanonicalFactId::derived(
+                context.adapter_id.as_str(),
+                &context.source_instance_key,
+                fact_kind,
+                &source_record_id,
+                semantic_key,
+            )
+        }
+        .map_err(semantic_identity_error)?;
+        let revision_key = explicit_revision.unwrap_or_else(|| source_record_id.as_bytes());
+        let fact_revision_id =
+            FactRevisionId::derive(&fact_id, 1, revision_key).map_err(semantic_identity_error)?;
+        Ok(FactSemanticRevision {
+            source_record_id,
+            fact_id,
+            fact_revision_id,
+            semantic_revision_ref: SemanticRevisionRef::new(fact_revision_id),
+        })
     }
 
     pub fn push_diagnostic(&mut self, diagnostic: AdapterDiagnostic) -> Result<(), AdapterError> {
@@ -1032,8 +1315,28 @@ impl FactBatch {
                 self.max_facts, self.max_diagnostics
             )));
         }
+        if other
+            .semantic_revisions
+            .iter()
+            .any(|revision| self.semantic_revisions.contains(revision))
+        {
+            return Err(AdapterError::invalid_contract(
+                "fact batch merge repeats a canonical fact revision",
+            ));
+        }
+        match (&self.semantic_context, &other.semantic_context) {
+            (Some(current), Some(incoming)) if current != incoming => {
+                return Err(AdapterError::invalid_contract(
+                    "fact batch merge crosses canonical source object contexts",
+                ));
+            }
+            (None, Some(incoming)) => self.semantic_context = Some(incoming.clone()),
+            _ => {}
+        }
         self.facts.append(&mut other.facts);
         self.diagnostics.append(&mut other.diagnostics);
+        self.semantic_revisions
+            .append(&mut other.semantic_revisions);
         for dependency in other.dependency_reads {
             self.add_dependency_read(dependency)?;
         }
@@ -1099,10 +1402,36 @@ impl FactBatch {
     }
 }
 
+fn logical_record_position(record: &SourceRecord) -> Vec<u8> {
+    let append_range = record
+        .cursor_start
+        .append_offset_value()
+        .zip(record.cursor_end.append_offset_value());
+    let mut position = Vec::new();
+    match append_range {
+        Some((start, end)) => {
+            position.push(1);
+            position.extend_from_slice(&start.to_be_bytes());
+            position.extend_from_slice(&end.to_be_bytes());
+        }
+        None => {
+            position.push(2);
+            push_component(&mut position, record.cursor_start.as_bytes());
+            push_component(&mut position, record.cursor_end.as_bytes());
+            position.extend_from_slice(&record.ordinal_in_batch.to_be_bytes());
+        }
+    }
+    position
+}
+
+fn semantic_identity_error(error: super::SemanticContractError) -> AdapterError {
+    AdapterError::invalid_contract(format!("invalid canonical fact identity: {error}"))
+}
+
 #[cfg(test)]
 mod tests {
     use crate::adapter::AdapterErrorClass;
-    use crate::source::{RecordOrigin, SourceCursor, SourceMediaType, SourceRecord};
+    use crate::source::{RecordOrigin, Revision, SourceCursor, SourceMediaType, SourceRecord};
 
     use super::*;
 
@@ -1122,6 +1451,26 @@ mod tests {
             0,
             b"{}".to_vec(),
         )
+    }
+
+    fn semantic_context() -> FactSemanticContext {
+        FactSemanticContext::new(
+            &AdapterId::new("fixture").unwrap(),
+            1,
+            b"stable-source-instance",
+            b"transcript",
+            b"session.jsonl",
+            1,
+        )
+        .unwrap()
+    }
+
+    fn unknown() -> Fact {
+        Fact::UnknownRecord {
+            native_kind: Some("fixture".to_string()),
+            raw_payload: Vec::new(),
+            reason: "test".to_string(),
+        }
     }
 
     #[test]
@@ -1195,6 +1544,173 @@ mod tests {
 
         assert_eq!(grouped_second, isolated_second);
         assert_eq!(grouped.facts()[1].provenance.local_fact_ordinal, 0);
+    }
+
+    #[test]
+    fn canonical_revision_ignores_catalog_ids_observation_time_and_append_batch_ordinal() {
+        let first = record();
+        let replay = SourceRecord::new(
+            &RecordOrigin {
+                source_instance_id: 101,
+                stream_id: 202,
+                object_id: 303,
+                observed_at: 9_999,
+                source_timestamp_hint: None,
+                media_type: SourceMediaType::new("application/json").unwrap(),
+            },
+            first.generation,
+            first.cursor_start.clone(),
+            first.cursor_end.clone(),
+            77,
+            first.payload.clone(),
+        );
+        let mut durable = FactBatch::new_with_semantic_context(4, 4, semantic_context()).unwrap();
+        durable
+            .push_derived(&first, b"unknown-record", unknown())
+            .unwrap();
+        let mut scoped = FactBatch::new_with_semantic_context(4, 4, semantic_context()).unwrap();
+        scoped
+            .push_derived(&replay, b"unknown-record", unknown())
+            .unwrap();
+
+        assert_ne!(durable.facts()[0].id, scoped.facts()[0].id);
+        assert_eq!(
+            durable.facts()[0].semantic_revision,
+            scoped.facts()[0].semantic_revision
+        );
+
+        let mut reset = replay;
+        reset.generation = reset.generation.checked_add(1).unwrap();
+        assert_ne!(
+            semantic_context().source_record_id(&first).unwrap(),
+            semantic_context().source_record_id(&reset).unwrap()
+        );
+    }
+
+    #[test]
+    fn native_fact_keeps_identity_and_changes_revision_across_source_records() {
+        let first = record();
+        let second = SourceRecord::new(
+            &RecordOrigin {
+                source_instance_id: 1,
+                stream_id: 2,
+                object_id: 3,
+                observed_at: 5,
+                source_timestamp_hint: None,
+                media_type: SourceMediaType::new("application/json").unwrap(),
+            },
+            1,
+            SourceCursor::append_offset(3),
+            SourceCursor::append_offset(6),
+            0,
+            b"[]".to_vec(),
+        );
+        let mut first_batch =
+            FactBatch::new_with_semantic_context(4, 4, semantic_context()).unwrap();
+        first_batch
+            .push_native(&first, b"native-message-1", unknown())
+            .unwrap();
+        let mut correction =
+            FactBatch::new_with_semantic_context(4, 4, semantic_context()).unwrap();
+        correction
+            .push_native(&second, b"native-message-1", unknown())
+            .unwrap();
+        let first_semantic = first_batch.facts()[0].semantic_revision.unwrap();
+        let correction_semantic = correction.facts()[0].semantic_revision.unwrap();
+
+        assert_eq!(first_semantic.fact_id, correction_semantic.fact_id);
+        assert_ne!(
+            first_semantic.fact_revision_id,
+            correction_semantic.fact_revision_id
+        );
+        assert_ne!(
+            first_semantic.semantic_revision_ref,
+            correction_semantic.semantic_revision_ref
+        );
+    }
+
+    #[test]
+    fn explicit_dependency_revision_changes_revision_without_rekeying_fact() {
+        let record = record();
+        let mut before = FactBatch::new_with_semantic_context(2, 2, semantic_context()).unwrap();
+        before
+            .push_native_with_revision(
+                &record,
+                b"native-message-1",
+                b"dependency-revision-1",
+                unknown(),
+            )
+            .unwrap();
+        let mut after = FactBatch::new_with_semantic_context(2, 2, semantic_context()).unwrap();
+        after
+            .push_native_with_revision(
+                &record,
+                b"native-message-1",
+                b"dependency-revision-2",
+                unknown(),
+            )
+            .unwrap();
+        let before = before.facts()[0].semantic_revision.unwrap();
+        let after = after.facts()[0].semantic_revision.unwrap();
+
+        assert_eq!(before.source_record_id, after.source_record_id);
+        assert_eq!(before.fact_id, after.fact_id);
+        assert_ne!(before.fact_revision_id, after.fact_revision_id);
+
+        let mut invalid = FactBatch::new_with_semantic_context(1, 1, semantic_context()).unwrap();
+        assert!(invalid
+            .push_native_with_revision(&record, b"native-message-1", b"", unknown())
+            .is_err());
+        assert!(invalid.facts().is_empty());
+    }
+
+    #[test]
+    fn snapshot_record_ordinal_is_part_of_canonical_record_identity() {
+        let cursor_start = SourceCursor::snapshot(Revision::digest(b"before"));
+        let cursor_end = SourceCursor::snapshot(Revision::digest(b"after"));
+        let origin = RecordOrigin {
+            source_instance_id: 1,
+            stream_id: 2,
+            object_id: 3,
+            observed_at: 4,
+            source_timestamp_hint: None,
+            media_type: SourceMediaType::new("application/json").unwrap(),
+        };
+        let first = SourceRecord::new(
+            &origin,
+            2,
+            cursor_start.clone(),
+            cursor_end.clone(),
+            0,
+            b"same".to_vec(),
+        );
+        let second = SourceRecord::new(&origin, 2, cursor_start, cursor_end, 1, b"same".to_vec());
+
+        assert_ne!(
+            semantic_context().source_record_id(&first).unwrap(),
+            semantic_context().source_record_id(&second).unwrap()
+        );
+    }
+
+    #[test]
+    fn duplicate_canonical_revision_is_rejected_without_consuming_legacy_ordinal() {
+        let record = record();
+        let mut batch = FactBatch::new_with_semantic_context(4, 4, semantic_context()).unwrap();
+        batch.push_derived(&record, b"first", unknown()).unwrap();
+        assert!(batch.push_derived(&record, b"first", unknown()).is_err());
+        batch.push_derived(&record, b"second", unknown()).unwrap();
+
+        assert_eq!(batch.facts().len(), 2);
+        assert_eq!(batch.facts()[1].provenance.local_fact_ordinal, 1);
+    }
+
+    #[test]
+    fn canonical_emission_without_bound_context_fails_closed() {
+        let mut batch = FactBatch::new(1, 1).unwrap();
+        assert!(batch
+            .push_native(&record(), b"native-message-1", unknown())
+            .is_err());
+        assert!(batch.facts().is_empty());
     }
 
     #[test]

@@ -256,12 +256,20 @@ state. Its lane ordinal is an internal queue coordinate, not an RFC 012D
 `observer_sequence`.
 
 This provisional lane stores decoded facts rather than public semantic events.
-The current `FactBatch` still carries the RFC 011 store-oriented `FactId`; it
-must not invent a delivery-only replacement for the canonical `FactRevisionId`
-and `SemanticRevisionRef` required by this RFC. Public scoped projection remains
-gated on attaching those canonical identities to actual emitted fact families.
-Undeclared decoder dependency access fails closed until it is composed through
-an authorized scope relation.
+The shared decode boundary now binds a topology-neutral context from the
+versioned stable source-instance discriminator plus stream, object, and framing
+keys. A parallel `FactSemanticRevision` can therefore carry `SourceRecordId`,
+canonical fact identity, `FactRevisionId`, and `SemanticRevisionRef` without
+changing the RFC 011 store key. Native and record-derived emission APIs require
+an explicit stable key/subkey. A fact whose value also depends on declared side
+evidence supplies an explicit semantic revision key containing that dependency
+revision instead of pretending the primary record alone owns the change. The
+legacy `FactBatch::push` path deliberately emits no canonical revision, so a
+local ordinal is never silently promoted into cross-topology identity. Public
+scoped projection remains gated on migrating the relevant built-in fact
+families, preserving the revision durably, and running the owning semantic
+reducers. Undeclared decoder dependency access fails closed until it is
+composed through an authorized scope relation.
 Attachment may precede root-object creation; each later pass receives a fresh
 declared ledger; close prevents new passes; and the pass report contains neither
 granted paths nor native content. Architecture ratchets prevent the scoped seam

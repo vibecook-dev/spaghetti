@@ -223,6 +223,7 @@ impl AgentAdapter for ClaudeCodeAdapter {
                 ));
             }
             instances.push(SourceInstanceSpec {
+                identity_contract_version: 1,
                 stable_key: SourceInstanceKey::new(platform_path_key(&canonical))?,
                 display_name: format!("Claude Code ({})", canonical.to_string_lossy()),
                 roots: vec![
@@ -4357,6 +4358,7 @@ mod tests {
         SourceInstance {
             id: 7,
             spec: SourceInstanceSpec {
+                identity_contract_version: 1,
                 stable_key: SourceInstanceKey::new(platform_path_key(root)).unwrap(),
                 display_name: "fixture".to_string(),
                 roots: vec![SourceRoot {

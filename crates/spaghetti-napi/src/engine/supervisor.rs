@@ -1892,6 +1892,7 @@ mod tests {
                         )
                     })?;
                     Ok(SourceInstanceSpec {
+                        identity_contract_version: 1,
                         stable_key: SourceInstanceKey::new(platform_path_key(&canonical))?,
                         display_name: "ignored append fixture".to_string(),
                         roots: vec![SourceRoot {

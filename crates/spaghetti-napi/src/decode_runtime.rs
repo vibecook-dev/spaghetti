@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 use crate::adapter::{
     AdapterError, AdapterErrorClass, AdapterObjectContext, AgentAdapter, DecodeContext,
-    DecodeDisposition, DecoderId, FactBatch, RawRetentionPolicy, SourceAccess,
+    DecodeDisposition, DecoderId, FactBatch, FactSemanticContext, RawRetentionPolicy, SourceAccess,
 };
 use crate::source::SourceRecord;
 
@@ -26,6 +26,7 @@ pub(crate) struct DecodeRuntimeRequest<'a, A: AgentAdapter + ?Sized> {
     pub object_context: &'a AdapterObjectContext,
     pub source_access: &'a dyn SourceAccess,
     pub record: &'a SourceRecord,
+    pub semantic_context: &'a FactSemanticContext,
     pub decoder_state: Option<&'a [u8]>,
     pub retention: RawRetentionPolicy,
     pub limits: DecodeRuntimeLimits,
@@ -48,7 +49,11 @@ pub(crate) struct DecodeRuntimeAttempt {
 pub(crate) fn decode_record<A: AgentAdapter + ?Sized>(
     request: DecodeRuntimeRequest<'_, A>,
 ) -> DecodeRuntimeAttempt {
-    let mut batch = match FactBatch::new(request.limits.max_facts, request.limits.max_diagnostics) {
+    let mut batch = match FactBatch::new_with_semantic_context(
+        request.limits.max_facts,
+        request.limits.max_diagnostics,
+        request.semantic_context.clone(),
+    ) {
         Ok(batch) => batch,
         Err(error) => {
             return DecodeRuntimeAttempt {
@@ -283,8 +288,9 @@ mod tests {
                 FixtureMode::AppliedEmpty => Ok(DecodeDisposition::Applied),
                 FixtureMode::Panic => panic!("fixture decode panic"),
                 FixtureMode::StatefulUnknown | FixtureMode::RetryWithFact => {
-                    output.push(
+                    output.push_derived(
                         record,
+                        b"unknown-record",
                         Fact::UnknownRecord {
                             native_kind: Some("fixture".to_string()),
                             raw_payload: record.payload.clone(),
@@ -361,12 +367,22 @@ mod tests {
     ) -> DecodeRuntimeAttempt {
         let decoder = DecoderId::new("fixture-v1").unwrap();
         let object_context = AdapterObjectContext::empty();
+        let semantic_context = FactSemanticContext::new(
+            &adapter.manifest().id,
+            1,
+            b"fixture-source-instance",
+            b"fixture-records",
+            b"record.jsonl",
+            1,
+        )
+        .unwrap();
         decode_record(DecodeRuntimeRequest {
             adapter,
             decoder: &decoder,
             object_context: &object_context,
             source_access: &NoSourceAccess,
             record,
+            semantic_context: &semantic_context,
             decoder_state: state,
             retention,
             limits: DecodeRuntimeLimits {
@@ -404,6 +420,11 @@ mod tests {
             Some(b"prior-quarantine".as_slice())
         );
         assert_eq!(first.batch.facts()[0].id, replay.batch.facts()[0].id);
+        assert!(first.batch.facts()[0].semantic_revision.is_some());
+        assert_eq!(
+            first.batch.facts()[0].semantic_revision,
+            replay.batch.facts()[0].semantic_revision
+        );
         let Fact::UnknownRecord { raw_payload, .. } = &first.batch.facts()[0].value else {
             panic!("expected retained unknown fact");
         };

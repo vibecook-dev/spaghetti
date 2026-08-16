@@ -186,8 +186,9 @@ mod tests {
     use crate::adapter::{
         verify_support_release_bundle, AdapterManifest, AdapterObjectContext,
         AdapterSupportBinding, DecodeContext, DecodeDisposition, DecoderId, DiscoveryContext, Fact,
-        FactBatch, RawRetentionPolicy, Sha256Digest, SourceAccess, SourceInstance,
-        SourceInstanceSpec, SourceObjectDescriptor, StreamSpec, SupportBundleDocument,
+        FactBatch, FactSemanticContext, RawRetentionPolicy, Sha256Digest, SourceAccess,
+        SourceInstance, SourceInstanceSpec, SourceObjectDescriptor, StreamSpec,
+        SupportBundleDocument,
     };
     use crate::scoped_observation::{
         ScopedAdmissionError, ScopedAppendDecodeOutcome, ScopedAppendDecoderConfig,
@@ -414,10 +415,23 @@ mod tests {
             ScopedAppendDecoderConfig {
                 decoder: DecoderId::new("fixture-decoder").unwrap(),
                 object_context: AdapterObjectContext::empty(),
+                semantic_context: fixture_semantic_context(),
                 retention,
                 max_facts_per_record: 16,
                 max_diagnostics_per_record: 16,
             },
+        )
+        .unwrap()
+    }
+
+    fn fixture_semantic_context() -> FactSemanticContext {
+        FactSemanticContext::new(
+            &AdapterId::new("fixture").unwrap(),
+            1,
+            b"fixture-source-instance",
+            b"fixture-transcript",
+            b"session.jsonl",
+            1,
         )
         .unwrap()
     }
@@ -486,8 +500,9 @@ mod tests {
             if record.payload == b"retry" {
                 return Ok(DecodeDisposition::RetryTransient);
             }
-            output.push(
+            output.push_derived(
                 record,
+                b"fixture-unknown-record",
                 Fact::UnknownRecord {
                     native_kind: Some("fixture".to_string()),
                     raw_payload: record.payload.clone(),
@@ -800,6 +815,7 @@ mod tests {
             ScopedAppendDecoderConfig {
                 decoder: DecoderId::new("fixture-decoder").unwrap(),
                 object_context: AdapterObjectContext::empty(),
+                semantic_context: fixture_semantic_context(),
                 retention: RawRetentionPolicy::None,
                 max_facts_per_record: 0,
                 max_diagnostics_per_record: 16,
@@ -1045,6 +1061,18 @@ mod tests {
                 batch.facts()[0].id
             })
             .collect::<Vec<_>>();
+        let first_semantic_revisions = first_decoded
+            .items
+            .iter()
+            .map(|item| {
+                let ScopedDecodedAppendItem::Record { batch, .. } = item else {
+                    panic!("expected decoded record");
+                };
+                batch.facts()[0]
+                    .semantic_revision
+                    .expect("fixture adapter uses canonical derived emission")
+            })
+            .collect::<Vec<_>>();
         assert!(object.checkpoint().is_none());
         assert!(object.decoder_state().is_none());
         object.discard(&first).unwrap();
@@ -1073,7 +1101,20 @@ mod tests {
                 batch.facts()[0].id
             })
             .collect::<Vec<_>>();
+        let replay_semantic_revisions = replay_decoded
+            .items
+            .iter()
+            .map(|item| {
+                let ScopedDecodedAppendItem::Record { batch, .. } = item else {
+                    panic!("expected decoded replay record");
+                };
+                batch.facts()[0]
+                    .semantic_revision
+                    .expect("fixture adapter uses canonical derived emission")
+            })
+            .collect::<Vec<_>>();
         assert_eq!(replay_fact_ids, first_fact_ids);
+        assert_eq!(replay_semantic_revisions, first_semantic_revisions);
         assert!(object.decoder_state().is_none());
         let mut full_lane = admission_lane(1, 0, 1);
         let backpressure = full_lane

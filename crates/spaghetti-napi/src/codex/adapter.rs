@@ -119,6 +119,7 @@ impl AgentAdapter for CodexAdapter {
                     ));
                 }
                 Ok(SourceInstanceSpec {
+                    identity_contract_version: 1,
                     stable_key: SourceInstanceKey::new(platform_path_key(&canonical))?,
                     display_name: format!("Codex ({})", canonical.to_string_lossy()),
                     roots: vec![

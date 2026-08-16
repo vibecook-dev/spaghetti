@@ -206,10 +206,25 @@ pub struct SourceRoot {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceInstanceSpec {
+    /// Version of the ADS-declared derivation for this stable source instance
+    /// discriminator. It is semantic identity input, not a catalog schema or
+    /// database registration version.
+    pub identity_contract_version: u32,
     pub stable_key: SourceInstanceKey,
     pub display_name: String,
     pub roots: Vec<SourceRoot>,
     pub discovery_reason: String,
+}
+
+impl SourceInstanceSpec {
+    pub fn validate(&self) -> Result<(), AdapterError> {
+        if self.identity_contract_version == 0 {
+            return Err(AdapterError::invalid_contract(
+                "source instance identity contract version must be greater than zero",
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -258,6 +273,20 @@ impl DriverSpec {
             Self::Presence(_) => "presence_object",
             Self::SqliteSnapshot(_) => "sqlite_snapshot",
             Self::KeyValueSnapshot(_) => "key_value_snapshot",
+        }
+    }
+
+    /// Version of the logical native-record framing contract. Different
+    /// physical views implementing the same framing must return the same
+    /// value so RFC 012A `SourceRecordId` remains topology-independent.
+    pub fn framing_contract_version(&self) -> u32 {
+        match self {
+            Self::AppendDelimited(_)
+            | Self::ReplaceDocument(_)
+            | Self::DirectorySnapshot(_)
+            | Self::Presence(_)
+            | Self::SqliteSnapshot(_)
+            | Self::KeyValueSnapshot(_) => 1,
         }
     }
 }
@@ -328,6 +357,7 @@ pub struct StreamSpec {
 
 impl StreamSpec {
     pub fn validate(&self, instance: &SourceInstance) -> Result<(), AdapterError> {
+        instance.spec.validate()?;
         if self.selector.include.is_empty() {
             return Err(AdapterError::invalid_contract(format!(
                 "stream {} has no include selector",
@@ -688,6 +718,18 @@ mod tests {
         let context = AdapterObjectContext::new(2, b"opaque".to_vec()).unwrap();
         assert_eq!(context.version(), 2);
         assert_eq!(context.payload(), b"opaque");
+    }
+
+    #[test]
+    fn source_instance_requires_a_versioned_identity_derivation() {
+        let instance = SourceInstanceSpec {
+            identity_contract_version: 0,
+            stable_key: SourceInstanceKey::new(b"fixture".to_vec()).unwrap(),
+            display_name: "fixture".to_string(),
+            roots: Vec::new(),
+            discovery_reason: "test".to_string(),
+        };
+        assert!(instance.validate().is_err());
     }
 
     #[test]

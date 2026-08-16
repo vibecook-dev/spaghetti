@@ -13,9 +13,10 @@ use std::sync::Arc;
 use crate::adapter::{
     AdapterError, AdapterErrorClass, AdapterId, AdapterObjectContext, AdapterRegistry,
     AgentAdapter, CompatibilityDecision, ContractVersionOffer, ContractVersionRequest,
-    DecodeDisposition, DecoderId, Fact, FactBatch, NativeArtifactProbe, RawRetentionPolicy,
-    ScopeRelationPrimitive, SourceAccess, SourceObjectList, SourceObjectListRequest, SourceQuery,
-    SourceRows, SourceSnapshot, SupportOperation, TypedAccessAuthorization,
+    DecodeDisposition, DecoderId, Fact, FactBatch, FactSemanticContext, NativeArtifactProbe,
+    RawRetentionPolicy, ScopeRelationPrimitive, SourceAccess, SourceObjectList,
+    SourceObjectListRequest, SourceQuery, SourceRows, SourceSnapshot, SupportOperation,
+    TypedAccessAuthorization,
 };
 use crate::decode_runtime::{
     decode_record, diagnostic_excerpt, DecodeRuntimeLimits, DecodeRuntimeRequest,
@@ -99,6 +100,7 @@ pub struct ScopedAppendReconcileRequest<'a> {
 pub struct ScopedAppendDecoderConfig {
     pub decoder: DecoderId,
     pub object_context: AdapterObjectContext,
+    pub semantic_context: FactSemanticContext,
     pub retention: RawRetentionPolicy,
     pub max_facts_per_record: usize,
     pub max_diagnostics_per_record: usize,
@@ -218,7 +220,7 @@ pub enum ScopedQueuedObservationFrame {
     Decoded {
         lane_ordinal: u64,
         phase: ScopedAppendDeliveryPhase,
-        item: ScopedDecodedAppendItem,
+        item: Box<ScopedDecodedAppendItem>,
     },
 }
 
@@ -233,7 +235,7 @@ impl ScopedQueuedObservationFrame {
 struct QueuedDecodedFrame {
     lane_ordinal: u64,
     phase: ScopedAppendDeliveryPhase,
-    item: ScopedDecodedAppendItem,
+    item: Box<ScopedDecodedAppendItem>,
     data_events: u64,
     retained_native_bytes: u64,
 }
@@ -381,7 +383,7 @@ impl ScopedObservationAdmissionLane {
             self.decoded.push_back(QueuedDecodedFrame {
                 lane_ordinal,
                 phase: observation.phase,
-                item,
+                item: Box::new(item),
                 data_events: item_events,
                 retained_native_bytes: item_bytes,
             });
@@ -1001,6 +1003,7 @@ impl ScopedKnownAppendObject {
                             object_context: &self.decoder.object_context,
                             source_access,
                             record,
+                            semantic_context: &self.decoder.semantic_context,
                             decoder_state: next_decoder_state.as_deref(),
                             retention: self.decoder.retention,
                             limits: DecodeRuntimeLimits {

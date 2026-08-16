@@ -220,7 +220,7 @@ Gate:
 - existing source tests pass without store/query access in adapters; and
 - no physical extraction is required to claim the logical gate.
 
-Current landing status (2026-08-15):
+Current landing status (2026-08-16):
 
 - implemented the parallel Rust RFC 012A v1 semantic model for qualified
   values, canonical source/entity/record/fact/revision keys, external entity
@@ -230,11 +230,22 @@ Current landing status (2026-08-15):
   and comparison tests;
 - added an architecture ratchet preventing the base semantic module from
   importing source, adapter, store, query, delivery, N-API, or concrete-agent
-  layers; and
-- retained A1 as `In progress`: tier/view compositionality, adoption of
-  canonical `FactRevisionId`/`SemanticRevisionRef` values by actual durable and
-  scoped fact families, N-API fixture parity, and full-only versus composed
-  reducer digests remain.
+  layers;
+- bound a topology-neutral semantic decode context from the ADS identity
+  version plus stable source-instance/stream/object/framing inputs; it derives
+  append record identity without batch ordinal and snapshot-row identity with
+  its stable row ordinal, while excluding catalog IDs, observation time,
+  startup phase, and delivery order;
+- added a parallel `FactSemanticRevision` envelope and explicit native-keyed
+  and record-derived emission APIs. Legacy `FactBatch::push` deliberately emits
+  no canonical reference, duplicate canonical revisions fail before ordinal
+  mutation, dependency-derived facts can supply an explicit semantic revision
+  rather than pretending the primary record owns the change, and the shared
+  durable/scoped decode boundary supplies the same context; and
+- retained A1 as `In progress`: built-in fact-family migration, durable
+  persistence/query exposure, full semantic reduction, tier/view
+  compositionality, N-API fixture parity, and full-only versus composed reducer
+  digests remain.
 
 The repository-wide native-surface validator also discovered current Claude
 drift that predates this model slice: `bridge-session` records now include
@@ -359,9 +370,10 @@ Current landing status (2026-08-16):
   complete unit is resident. Its internal lane ordinal is not an RFC 012D
   `observer_sequence`;
 - kept that provisional lane fact-based rather than inventing delivery events:
-  current `FactBatch` output still carries the RFC 011 store-oriented `FactId`,
-  so public semantic projection remains gated on actual canonical
-  `FactRevisionId`/`SemanticRevisionRef` adoption;
+  `FactBatch` now supports a parallel explicit canonical revision while
+  retaining the RFC 011 store-oriented `FactId`, but legacy emissions receive
+  no synthesized fallback. Public semantic projection remains gated on
+  built-in family adoption, durable preservation, and reducer ownership;
 - integrated contract and tooling checks into `pnpm validate`.
 
 A2 remains `In progress`: the internal scoped composition now owns the
@@ -630,6 +642,10 @@ Current landing status (2026-08-16):
   and only then commits the paired source cursor and decoder state. The lane
   ordinal is internal ordering, not public `observer_sequence` or semantic
   identity;
+- the scoped decoder binding carries the same topology-neutral semantic context
+  as durable decode; canonical fixture emissions replay to equal
+  `FactRevisionId`/`SemanticRevisionRef` values even when numeric catalog IDs,
+  observation times, and append batch ordinals differ;
 - one pass is active at a time, a later pass receives fresh bounds, close is
   idempotent, and the frozen access report excludes paths, identity values, and
   content; and
@@ -637,11 +653,12 @@ Current landing status (2026-08-16):
   and premature public export from this provisional composition root.
 
 D1 remains `In progress`: watcher-before-scan, multi-object discovery/cursor
-orchestration, declared relation-backed decoder dependency access, canonical
-fact-revision adoption plus semantic reduction/events, the public ordered
-multiplexer and poll/readiness barriers, coverage, overflow/resync epochs,
-artifact mediation, cancellation waiting, the trusted native version-probe
-driver, and the complete public request are not yet implemented.
+orchestration, declared relation-backed decoder dependency access, built-in
+canonical fact-revision adoption plus durable preservation and semantic
+reduction/events, the public ordered multiplexer and poll/readiness barriers,
+coverage, overflow/resync epochs, artifact mediation, cancellation waiting, the
+trusted native version-probe driver, and the complete public request are not yet
+implemented.
 
 ### D2. Claude scope composition
 

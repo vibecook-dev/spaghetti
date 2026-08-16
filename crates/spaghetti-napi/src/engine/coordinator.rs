@@ -17,10 +17,10 @@ use walkdir::WalkDir;
 use crate::adapter::{
     AdapterError, AdapterErrorClass, AdapterManifest, AdapterObjectContext, AgentAdapter,
     Availability, CapabilityGranularity, DecodeDisposition, DeletionPolicy, DependencyRevision,
-    DiscoveryContext, DriverSpec, FactBatch, RawRetentionPolicy, SourceAccess, SourceInstance,
-    SourceInstanceSpec as AdapterSourceInstanceSpec, SourceListedObject, SourceObjectDescriptor,
-    SourceObjectList, SourceObjectListRequest, SourceQuery, SourceRows, SourceSnapshot,
-    StreamAuthority, StreamSpec, SupportLevel,
+    DiscoveryContext, DriverSpec, FactBatch, FactSemanticContext, RawRetentionPolicy, SourceAccess,
+    SourceInstance, SourceInstanceSpec as AdapterSourceInstanceSpec, SourceListedObject,
+    SourceObjectDescriptor, SourceObjectList, SourceObjectListRequest, SourceQuery, SourceRows,
+    SourceSnapshot, StreamAuthority, StreamSpec, SupportLevel,
 };
 use crate::decode_runtime::{
     decode_record as decode_adapter_record, diagnostic_excerpt, DecodeRuntimeLimits,
@@ -868,6 +868,8 @@ impl ObservationCoordinator {
         outcome: &mut ReconcileOutcome,
     ) -> Result<(), EngineError> {
         self.check_cancelled()?;
+        spec.validate()
+            .map_err(|error| adapter_error("validate source instance identity", error))?;
         let manifest = adapter.manifest();
         let catalog = self
             .engine
@@ -1729,6 +1731,12 @@ impl ObservationCoordinator {
             .min(MAX_APPEND_RECORDS_PER_COMMIT);
         let driver = AppendDelimitedFile::new(config).map_err(source_error)?;
         let performance = self.source_performance(adapter, stream);
+        let semantic_context = fact_semantic_context(adapter, instance, stream, object)?;
+        let decode_binding = DurableDecodeBinding {
+            stream,
+            object_context,
+            semantic_context: &semantic_context,
+        };
         let mut previous = durable
             .driver_checkpoint
             .as_deref()
@@ -1900,8 +1908,7 @@ impl ObservationCoordinator {
                                         next_decoder_state_version;
                                     let decoded = decode_record(
                                         adapter,
-                                        stream,
-                                        object_context,
+                                        &decode_binding,
                                         source_access,
                                         &performance,
                                         record,
@@ -2341,10 +2348,15 @@ impl ObservationCoordinator {
         let prior_decoder_state_version = (!generation_changed)
             .then_some(durable.decoder_state_version)
             .flatten();
-        let decoded = decode_record(
-            adapter,
+        let semantic_context = fact_semantic_context(adapter, instance, stream, object)?;
+        let decode_binding = DurableDecodeBinding {
             stream,
             object_context,
+            semantic_context: &semantic_context,
+        };
+        let decoded = decode_record(
+            adapter,
+            &decode_binding,
             source_access,
             performance,
             &record,
@@ -2725,10 +2737,15 @@ impl ObservationCoordinator {
         let prior_decoder_state = (!generation_changed)
             .then(|| durable.decoder_state.clone())
             .flatten();
-        let decoded = decode_snapshot_records(
-            adapter,
+        let semantic_context = fact_semantic_context(adapter, instance, stream, object)?;
+        let decode_binding = DurableDecodeBinding {
             stream,
             object_context,
+            semantic_context: &semantic_context,
+        };
+        let decoded = decode_snapshot_records(
+            adapter,
+            &decode_binding,
             source_access,
             performance,
             &records,
@@ -2849,10 +2866,15 @@ impl ObservationCoordinator {
                 let prior_decoder_state_version = (!generation_changed)
                     .then_some(durable.decoder_state_version)
                     .flatten();
-                let decoded = decode_record(
-                    adapter,
+                let semantic_context = fact_semantic_context(adapter, instance, stream, object)?;
+                let decode_binding = DurableDecodeBinding {
                     stream,
                     object_context,
+                    semantic_context: &semantic_context,
+                };
+                let decoded = decode_record(
+                    adapter,
+                    &decode_binding,
                     source_access,
                     &performance,
                     &record,
@@ -3507,10 +3529,15 @@ fn presence_read_volume(read: &PresenceRead) -> (bool, bool, u64, u64) {
     }
 }
 
+struct DurableDecodeBinding<'a> {
+    stream: &'a StreamSpec,
+    object_context: &'a AdapterObjectContext,
+    semantic_context: &'a FactSemanticContext,
+}
+
 fn decode_snapshot_records<A: AgentAdapter + ?Sized>(
     adapter: &A,
-    stream: &StreamSpec,
-    object_context: &AdapterObjectContext,
+    binding: &DurableDecodeBinding<'_>,
     source_access: &ConfinedSourceAccess<'_>,
     performance: &SourcePerformanceRecorder,
     records: &[SourceRecord],
@@ -3523,8 +3550,7 @@ fn decode_snapshot_records<A: AgentAdapter + ?Sized>(
     for record in records {
         let decoded = decode_record(
             adapter,
-            stream,
-            object_context,
+            binding,
             source_access,
             performance,
             record,
@@ -3615,8 +3641,7 @@ fn availability_name(availability: Availability) -> &'static str {
 
 fn decode_record<A: AgentAdapter + ?Sized>(
     adapter: &A,
-    stream: &StreamSpec,
-    object_context: &AdapterObjectContext,
+    binding: &DurableDecodeBinding<'_>,
     source_access: &ConfinedSourceAccess<'_>,
     performance: &SourcePerformanceRecorder,
     record: &SourceRecord,
@@ -3625,12 +3650,13 @@ fn decode_record<A: AgentAdapter + ?Sized>(
     let started = Instant::now();
     let attempt = decode_adapter_record(DecodeRuntimeRequest {
         adapter,
-        decoder: &stream.decoder,
-        object_context,
+        decoder: &binding.stream.decoder,
+        object_context: binding.object_context,
         source_access,
         record,
+        semantic_context: binding.semantic_context,
         decoder_state,
-        retention: stream.retention,
+        retention: binding.stream.retention,
         limits: DecodeRuntimeLimits {
             max_facts: FACT_BATCH_LIMIT,
             max_diagnostics: DIAGNOSTIC_LIMIT,
@@ -3658,7 +3684,7 @@ fn decode_record<A: AgentAdapter + ?Sized>(
                 cursor_end: record.cursor_end.as_bytes().to_vec(),
                 payload_hash: record.payload_hash.as_bytes().to_vec(),
                 media_type: record.media_type.as_str().to_string(),
-                raw_payload: retained_diagnostic_payload(stream.retention, &record.payload),
+                raw_payload: retained_diagnostic_payload(binding.stream.retention, &record.payload),
                 error_class: adapter_error_class(diagnostic.class).to_string(),
                 error_message: format!("{}: {}", diagnostic.code, diagnostic.message),
                 adapter_version: adapter.manifest().adapter_version.clone(),
@@ -3822,6 +3848,23 @@ fn driver_checkpoint_version(driver: &DriverSpec) -> u32 {
         | DriverSpec::SqliteSnapshot(_)
         | DriverSpec::KeyValueSnapshot(_) => 1,
     }
+}
+
+fn fact_semantic_context<A: AgentAdapter + ?Sized>(
+    adapter: &A,
+    instance: &SourceInstance,
+    stream: &StreamSpec,
+    object: &DeclaredObject,
+) -> Result<FactSemanticContext, EngineError> {
+    FactSemanticContext::new(
+        &adapter.manifest().id,
+        instance.spec.identity_contract_version,
+        instance.spec.stable_key.as_bytes(),
+        stream.id.as_str().as_bytes(),
+        &object.descriptor.object_key,
+        stream.driver.framing_contract_version(),
+    )
+    .map_err(|error| adapter_error("bind canonical fact identity", error))
 }
 
 fn media_type(path: &Path) -> Result<SourceMediaType, EngineError> {
@@ -4572,6 +4615,7 @@ mod tests {
         let instance = SourceInstance {
             id: 41,
             spec: AdapterSourceInstanceSpec {
+                identity_contract_version: 1,
                 stable_key: SourceInstanceKey::new(b"source-access-root".to_vec()).unwrap(),
                 display_name: "source access".to_string(),
                 roots: vec![crate::adapter::SourceRoot {
@@ -5493,6 +5537,7 @@ mod tests {
                     )
                 })?;
                 Ok(AdapterSourceInstanceSpec {
+                    identity_contract_version: 1,
                     stable_key: SourceInstanceKey::new(platform_path_key(&canonical))?,
                     display_name: canonical.to_string_lossy().into_owned(),
                     roots: vec![SourceRoot {

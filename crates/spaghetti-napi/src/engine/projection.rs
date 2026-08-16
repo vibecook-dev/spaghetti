@@ -3923,6 +3923,7 @@ mod tests {
                 &SourceInstance {
                     id: 1,
                     spec: AdapterSourceInstanceSpec {
+                        identity_contract_version: 1,
                         stable_key: SourceInstanceKey::new(b"fixture-root".to_vec()).unwrap(),
                         display_name: "fixture".to_string(),
                         roots: vec![SourceRoot {
@@ -4971,6 +4972,7 @@ mod tests {
             let instance = SourceInstance {
                 id: registration.source_instance_id,
                 spec: AdapterSourceInstanceSpec {
+                    identity_contract_version: 1,
                     stable_key: SourceInstanceKey::new(b"phase4-shadow-fixture".to_vec()).unwrap(),
                     display_name: "shadow".to_string(),
                     roots: vec![SourceRoot {
