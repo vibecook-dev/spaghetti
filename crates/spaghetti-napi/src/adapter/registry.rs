@@ -185,12 +185,14 @@ mod tests {
 
     use crate::adapter::{
         verify_support_release_bundle, AdapterManifest, AdapterObjectContext,
-        AdapterSupportBinding, DecodeContext, DecodeDisposition, DiscoveryContext, FactBatch,
-        Sha256Digest, SourceInstance, SourceInstanceSpec, SourceObjectDescriptor, StreamSpec,
-        SupportBundleDocument,
+        AdapterSupportBinding, DecodeContext, DecodeDisposition, DecoderId, DiscoveryContext, Fact,
+        FactBatch, RawRetentionPolicy, Sha256Digest, SourceAccess, SourceInstance,
+        SourceInstanceSpec, SourceObjectDescriptor, StreamSpec, SupportBundleDocument,
     };
     use crate::scoped_observation::{
-        ScopedAppendDeliveryPhase, ScopedAppendReconcileRequest, ScopedKnownAppendObject,
+        ScopedAppendDecodeOutcome, ScopedAppendDecoderConfig, ScopedAppendDeliveryPhase,
+        ScopedAppendObservation, ScopedAppendReconcileRequest, ScopedDecodeFailureClass,
+        ScopedDecodedAppendBatch, ScopedDecodedAppendItem, ScopedKnownAppendObject,
         ScopedKnownObjectGrant, ScopedKnownObjectReadRequest, ScopedObjectRead,
         ScopedObservationAccessError, ScopedObservationAccessHost, ScopedObservationAccessRequest,
         ScopedSourceFailureClass,
@@ -205,6 +207,8 @@ mod tests {
 
     struct EmptyAdapter {
         manifest: AdapterManifest,
+        decode_statefully: bool,
+        request_dependency_access: bool,
     }
 
     impl EmptyAdapter {
@@ -220,7 +224,19 @@ mod tests {
                     source_schema_versions: Vec::new(),
                     capabilities: Vec::new(),
                 },
+                decode_statefully: false,
+                request_dependency_access: false,
             }
+        }
+
+        fn with_stateful_decode(mut self) -> Self {
+            self.decode_statefully = true;
+            self
+        }
+
+        fn with_dependency_access(mut self) -> Self {
+            self.request_dependency_access = true;
+            self
         }
 
         fn with_support(
@@ -314,6 +330,31 @@ mod tests {
             .unwrap()
     }
 
+    fn stateful_supported_fixture_registry() -> AdapterRegistry {
+        let (catalog, binding, scope_programs) = promoted_fixture_catalog();
+        AdapterRegistryBuilder::new()
+            .register(
+                EmptyAdapter::new("fixture")
+                    .with_support(binding, scope_programs)
+                    .with_stateful_decode(),
+            )
+            .build_supported(catalog)
+            .unwrap()
+    }
+
+    fn dependency_supported_fixture_registry() -> AdapterRegistry {
+        let (catalog, binding, scope_programs) = promoted_fixture_catalog();
+        AdapterRegistryBuilder::new()
+            .register(
+                EmptyAdapter::new("fixture")
+                    .with_support(binding, scope_programs)
+                    .with_stateful_decode()
+                    .with_dependency_access(),
+            )
+            .build_supported(catalog)
+            .unwrap()
+    }
+
     fn scoped_access_request(root: PathBuf) -> ScopedObservationAccessRequest {
         ScopedObservationAccessRequest {
             adapter_id: "fixture".to_string(),
@@ -355,6 +396,44 @@ mod tests {
         }
     }
 
+    fn decode_scoped(
+        host: &ScopedObservationAccessHost,
+        object: &mut ScopedKnownAppendObject,
+        observation: &ScopedAppendObservation,
+    ) -> ScopedAppendDecodeOutcome {
+        host.decode_append(object, observation).unwrap()
+    }
+
+    fn scoped_append_object(
+        driver: AppendDelimitedFile,
+        retention: RawRetentionPolicy,
+    ) -> ScopedKnownAppendObject {
+        ScopedKnownAppendObject::new(
+            driver,
+            ScopedAppendDecoderConfig {
+                decoder: DecoderId::new("fixture-decoder").unwrap(),
+                object_context: AdapterObjectContext::empty(),
+                retention,
+                max_facts_per_record: 16,
+                max_diagnostics_per_record: 16,
+            },
+        )
+        .unwrap()
+    }
+
+    fn decode_and_admit_ignored(
+        host: &ScopedObservationAccessHost,
+        object: &mut ScopedKnownAppendObject,
+        observation: &ScopedAppendObservation,
+    ) -> ScopedDecodedAppendBatch {
+        let decoded = decode_scoped(host, object, observation);
+        let ScopedAppendDecodeOutcome::Ready(batch) = decoded else {
+            panic!("fixture decoder must not request a retry");
+        };
+        object.admit_decoded(observation, &batch).unwrap();
+        batch
+    }
+
     impl AgentAdapter for EmptyAdapter {
         fn manifest(&self) -> &AdapterManifest {
             &self.manifest
@@ -381,11 +460,41 @@ mod tests {
 
         fn decode(
             &self,
-            _context: DecodeContext<'_>,
-            _record: &SourceRecord,
-            _output: &mut FactBatch,
+            context: DecodeContext<'_>,
+            record: &SourceRecord,
+            output: &mut FactBatch,
         ) -> Result<DecodeDisposition, AdapterError> {
-            Ok(DecodeDisposition::IgnoredKnown)
+            if !self.decode_statefully {
+                return Ok(DecodeDisposition::IgnoredKnown);
+            }
+            if record.payload == b"retry" {
+                return Ok(DecodeDisposition::RetryTransient);
+            }
+            output.push(
+                record,
+                Fact::UnknownRecord {
+                    native_kind: Some("fixture".to_string()),
+                    raw_payload: record.payload.clone(),
+                    reason: "fixture".to_string(),
+                },
+            )?;
+            let mut state = context.decoder_state.unwrap_or_default().to_vec();
+            state.extend_from_slice(&record.payload);
+            output.set_next_decoder_state(state)?;
+            Ok(DecodeDisposition::PreservedUnknown)
+        }
+
+        fn decode_with_access(
+            &self,
+            context: DecodeContext<'_>,
+            record: &SourceRecord,
+            output: &mut FactBatch,
+            source_access: &dyn SourceAccess,
+        ) -> Result<DecodeDisposition, AdapterError> {
+            if self.request_dependency_access {
+                source_access.read_object("root", std::path::Path::new("sidecar.json"), 16)?;
+            }
+            self.decode(context, record, output)
         }
     }
 
@@ -669,6 +778,24 @@ mod tests {
     }
 
     #[test]
+    fn scoped_append_decoder_binding_rejects_unbounded_output_configuration() {
+        let result = ScopedKnownAppendObject::new(
+            AppendDelimitedFile::new(AppendDelimitedConfig::json_lines()).unwrap(),
+            ScopedAppendDecoderConfig {
+                decoder: DecoderId::new("fixture-decoder").unwrap(),
+                object_context: AdapterObjectContext::empty(),
+                retention: RawRetentionPolicy::None,
+                max_facts_per_record: 0,
+                max_diagnostics_per_record: 16,
+            },
+        );
+        assert!(matches!(
+            result,
+            Err(ScopedObservationAccessError::InvalidDecodeBounds)
+        ));
+    }
+
+    #[test]
     fn scoped_append_kernel_keeps_cursor_partial_and_reset_state_without_a_store() {
         let registry = supported_fixture_registry();
         let temp = TempDir::new().unwrap();
@@ -682,7 +809,10 @@ mod tests {
         config.max_batch_bytes = 128;
         config.max_records_per_batch = 16;
         config.prefix_anchor_bytes = 16;
-        let mut object = ScopedKnownAppendObject::new(AppendDelimitedFile::new(config).unwrap());
+        let mut object = scoped_append_object(
+            AppendDelimitedFile::new(config).unwrap(),
+            RawRetentionPolicy::None,
+        );
         assert!(matches!(
             object.complete_bootstrap(),
             Err(ScopedObservationAccessError::BootstrapNotDrained)
@@ -715,7 +845,7 @@ mod tests {
         assert_eq!(missing.phase, ScopedAppendDeliveryPhase::Bootstrap);
         assert!(!missing.root_present);
         assert!(matches!(&missing.read, AppendRead::Missing));
-        object.admit(&missing).unwrap();
+        decode_and_admit_ignored(&host, &mut object, &missing);
         assert_eq!(
             missing_pass.finish().relations()[0].trace[0].outcome,
             AccessOutcome::Unavailable
@@ -774,7 +904,7 @@ mod tests {
         let replay = object.reconcile(&replay_pass, reconcile(64)).unwrap();
         assert_eq!(replay.phase, ScopedAppendDeliveryPhase::Live);
         assert_eq!(&replay.read, &initial.read);
-        object.admit(&replay).unwrap();
+        decode_and_admit_ignored(&host, &mut object, &replay);
         assert_eq!(object.checkpoint().unwrap().committed_offset, 4);
         drop(replay_pass);
 
@@ -802,7 +932,7 @@ mod tests {
             panic!("expected completed partial record");
         };
         assert_eq!(record.payload, b"partial-done");
-        object.admit(&continued).unwrap();
+        decode_and_admit_ignored(&host, &mut object, &continued);
         drop(continued_pass);
 
         std::fs::write(root.join("session.jsonl"), b"replacement\n").unwrap();
@@ -821,10 +951,209 @@ mod tests {
         };
         assert_eq!(record.generation, 2);
         assert_eq!(record.payload, b"replacement");
-        object.admit(&correction).unwrap();
+        decode_and_admit_ignored(&host, &mut object, &correction);
         assert_eq!(object.checkpoint().unwrap().generation, 2);
         assert!(object.root_present());
         assert!(!object.bootstrap_active());
+    }
+
+    #[test]
+    fn scoped_decode_transaction_commits_cursor_and_decoder_state_together() {
+        let registry = stateful_supported_fixture_registry();
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().join("decoded-append-root");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("session.jsonl"), b"one\ntwo\n").unwrap();
+        let host =
+            ScopedObservationAccessHost::authorize(&registry, scoped_access_request(root.clone()))
+                .unwrap();
+        let mut config = AppendDelimitedConfig::json_lines();
+        config.max_record_bytes = 128;
+        config.max_batch_bytes = 128;
+        config.max_records_per_batch = 16;
+        config.prefix_anchor_bytes = 16;
+        let mut object = scoped_append_object(
+            AppendDelimitedFile::new(config).unwrap(),
+            RawRetentionPolicy::HashOnly,
+        );
+        let identity = [ScopeIdentityInput {
+            name: "native-session-id",
+            value: b"decoded-session",
+        }];
+        let origin = RecordOrigin {
+            source_instance_id: 100,
+            stream_id: 200,
+            object_id: 300,
+            observed_at: 400,
+            source_timestamp_hint: None,
+            media_type: SourceMediaType::new("application/x-ndjson").unwrap(),
+        };
+        let request = || ScopedAppendReconcileRequest {
+            relation_id: "root-object",
+            identity_inputs: &identity,
+            access_phase: AccessPhase::Initial,
+            parent_token: None,
+            depth: 1,
+            max_bytes: 128,
+            origin: &origin,
+            force_contract_replay: false,
+        };
+
+        let first_pass = host.begin_pass().unwrap();
+        let first = object.reconcile(&first_pass, request()).unwrap();
+        let ScopedAppendDecodeOutcome::Ready(first_decoded) =
+            decode_scoped(&host, &mut object, &first)
+        else {
+            panic!("expected decoded append batch");
+        };
+        assert_eq!(first_decoded.items.len(), 2);
+        let first_fact_ids = first_decoded
+            .items
+            .iter()
+            .map(|item| {
+                let ScopedDecodedAppendItem::Record {
+                    evidence,
+                    disposition,
+                    batch,
+                    ..
+                } = item
+                else {
+                    panic!("expected decoded record");
+                };
+                assert_eq!(*disposition, DecodeDisposition::PreservedUnknown);
+                assert!(evidence.retained_payload.is_none());
+                let Fact::UnknownRecord { raw_payload, .. } = &batch.facts()[0].value else {
+                    panic!("expected retained unknown fact");
+                };
+                assert!(raw_payload.is_empty());
+                batch.facts()[0].id
+            })
+            .collect::<Vec<_>>();
+        assert!(object.checkpoint().is_none());
+        assert!(object.decoder_state().is_none());
+        object.discard(&first).unwrap();
+        drop(first_pass);
+
+        let replay_pass = host.begin_pass().unwrap();
+        let replay = object.reconcile(&replay_pass, request()).unwrap();
+        assert!(matches!(
+            object.admit_decoded(&replay, &first_decoded),
+            Err(ScopedObservationAccessError::ObservationNotPending)
+        ));
+        let ScopedAppendDecodeOutcome::Ready(replay_decoded) =
+            decode_scoped(&host, &mut object, &replay)
+        else {
+            panic!("expected replay decode");
+        };
+        let replay_fact_ids = replay_decoded
+            .items
+            .iter()
+            .map(|item| {
+                let ScopedDecodedAppendItem::Record { batch, .. } = item else {
+                    panic!("expected decoded replay record");
+                };
+                batch.facts()[0].id
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(replay_fact_ids, first_fact_ids);
+        assert!(object.decoder_state().is_none());
+        object.admit_decoded(&replay, &replay_decoded).unwrap();
+        assert_eq!(object.checkpoint().unwrap().committed_offset, 8);
+        assert_eq!(object.decoder_state(), Some(b"onetwo".as_slice()));
+        drop(replay_pass);
+
+        let mut append = OpenOptions::new()
+            .append(true)
+            .open(root.join("session.jsonl"))
+            .unwrap();
+        append.write_all(b"retry\n").unwrap();
+        append.flush().unwrap();
+        let retry_pass = host.begin_pass().unwrap();
+        let retry = object.reconcile(&retry_pass, request()).unwrap();
+        assert!(matches!(
+            decode_scoped(&host, &mut object, &retry),
+            ScopedAppendDecodeOutcome::RetryTransient
+        ));
+        assert_eq!(object.checkpoint().unwrap().committed_offset, 8);
+        assert_eq!(object.decoder_state(), Some(b"onetwo".as_slice()));
+        object.discard(&retry).unwrap();
+        drop(retry_pass);
+
+        std::fs::write(root.join("session.jsonl"), b"fresh\n").unwrap();
+        let correction_pass = host.begin_pass().unwrap();
+        let correction = object.reconcile(&correction_pass, request()).unwrap();
+        assert_eq!(correction.phase, ScopedAppendDeliveryPhase::Correction);
+        let ScopedAppendDecodeOutcome::Ready(correction_decoded) =
+            decode_scoped(&host, &mut object, &correction)
+        else {
+            panic!("expected correction decode");
+        };
+        assert_eq!(correction_decoded.items.len(), 1);
+        assert_eq!(object.decoder_state(), Some(b"onetwo".as_slice()));
+        object
+            .admit_decoded(&correction, &correction_decoded)
+            .unwrap();
+        assert_eq!(object.checkpoint().unwrap().generation, 2);
+        assert_eq!(object.decoder_state(), Some(b"fresh".as_slice()));
+    }
+
+    #[test]
+    fn scoped_decode_dependency_access_fails_closed_without_a_declared_relation() {
+        let registry = dependency_supported_fixture_registry();
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().join("dependency-denied-root");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("session.jsonl"), b"one\n").unwrap();
+        let host =
+            ScopedObservationAccessHost::authorize(&registry, scoped_access_request(root.clone()))
+                .unwrap();
+        let mut config = AppendDelimitedConfig::json_lines();
+        config.max_record_bytes = 64;
+        config.max_batch_bytes = 64;
+        config.max_records_per_batch = 4;
+        config.prefix_anchor_bytes = 16;
+        let mut object = scoped_append_object(
+            AppendDelimitedFile::new(config).unwrap(),
+            RawRetentionPolicy::None,
+        );
+        let identity = [ScopeIdentityInput {
+            name: "native-session-id",
+            value: b"dependency-denied-session",
+        }];
+        let origin = RecordOrigin {
+            source_instance_id: 1,
+            stream_id: 2,
+            object_id: 3,
+            observed_at: 4,
+            source_timestamp_hint: None,
+            media_type: SourceMediaType::new("application/x-ndjson").unwrap(),
+        };
+        let pass = host.begin_pass().unwrap();
+        let observation = object
+            .reconcile(
+                &pass,
+                ScopedAppendReconcileRequest {
+                    relation_id: "root-object",
+                    identity_inputs: &identity,
+                    access_phase: AccessPhase::Initial,
+                    parent_token: None,
+                    depth: 1,
+                    max_bytes: 64,
+                    origin: &origin,
+                    force_contract_replay: false,
+                },
+            )
+            .unwrap();
+
+        assert!(matches!(
+            host.decode_append(&mut object, &observation),
+            Err(ScopedObservationAccessError::Decode(
+                ScopedDecodeFailureClass::InvalidContract
+            ))
+        ));
+        assert!(object.checkpoint().is_none());
+        assert!(object.decoder_state().is_none());
+        object.discard(&observation).unwrap();
     }
 
     #[test]
@@ -842,7 +1171,10 @@ mod tests {
         config.max_batch_bytes = 16;
         config.max_records_per_batch = 1;
         config.prefix_anchor_bytes = 16;
-        let mut object = ScopedKnownAppendObject::new(AppendDelimitedFile::new(config).unwrap());
+        let mut object = scoped_append_object(
+            AppendDelimitedFile::new(config).unwrap(),
+            RawRetentionPolicy::None,
+        );
         let identity = [ScopeIdentityInput {
             name: "native-session-id",
             value: b"bounded-bootstrap-session",
@@ -880,7 +1212,7 @@ mod tests {
             object.complete_bootstrap(),
             Err(ScopedObservationAccessError::BootstrapNotDrained)
         ));
-        object.admit(&first).unwrap();
+        decode_and_admit_ignored(&host, &mut object, &first);
         drop(first_pass);
         assert!(matches!(
             object.complete_bootstrap(),
@@ -897,7 +1229,7 @@ mod tests {
                 ..
             }
         ));
-        object.admit(&second).unwrap();
+        decode_and_admit_ignored(&host, &mut object, &second);
         drop(second_pass);
         object.complete_bootstrap().unwrap();
         assert!(!object.bootstrap_active());

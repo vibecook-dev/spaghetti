@@ -11,15 +11,21 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use crate::adapter::{
-    AdapterId, AdapterRegistry, CompatibilityDecision, ContractVersionOffer,
-    ContractVersionRequest, NativeArtifactProbe, ScopeRelationPrimitive, SupportOperation,
-    TypedAccessAuthorization,
+    AdapterError, AdapterErrorClass, AdapterId, AdapterObjectContext, AdapterRegistry,
+    AgentAdapter, CompatibilityDecision, ContractVersionOffer, ContractVersionRequest,
+    DecodeDisposition, DecoderId, FactBatch, NativeArtifactProbe, RawRetentionPolicy,
+    ScopeRelationPrimitive, SourceAccess, SourceObjectList, SourceObjectListRequest, SourceQuery,
+    SourceRows, SourceSnapshot, SupportOperation, TypedAccessAuthorization,
+};
+use crate::decode_runtime::{
+    decode_record, diagnostic_excerpt, DecodeRuntimeLimits, DecodeRuntimeRequest,
 };
 use crate::source::{
     confined_relative_path_key, read_stable_file_confined, AccessBudgetError, AccessObjectToken,
-    AccessOperation, AccessOutcome, AccessPhase, AppendCheckpoint, AppendDelimitedFile, AppendRead,
-    AppendTransition, AuthorizedScopeAccessPlan, RecordOrigin, Revision, ScopeAccessReport,
-    ScopeAccessRequest, ScopeIdentityInput, SourceDriverError, StableRead,
+    AccessOperation, AccessOutcome, AccessPhase, AppendCheckpoint, AppendDelimitedFile, AppendItem,
+    AppendRead, AppendTransition, AuthorizedScopeAccessPlan, DriverQuarantine, RecordHash,
+    RecordOrigin, Revision, ScopeAccessReport, ScopeAccessRequest, ScopeIdentityInput,
+    SourceCursor, SourceDriverError, SourceMediaType, SourceRecord, SourceRecordState, StableRead,
 };
 
 /// One exact host-approved object locator. The locator is installed during
@@ -85,6 +91,19 @@ pub struct ScopedAppendReconcileRequest<'a> {
     pub force_contract_replay: bool,
 }
 
+/// Immutable decoder binding for one scoped append object. Selection is still
+/// a trusted Rust-host responsibility until the complete RFC 012D root/stream
+/// contract is frozen, but callers cannot switch decoder state domains between
+/// reconciliations.
+#[derive(Debug, Clone)]
+pub struct ScopedAppendDecoderConfig {
+    pub decoder: DecoderId,
+    pub object_context: AdapterObjectContext,
+    pub retention: RawRetentionPolicy,
+    pub max_facts_per_record: usize,
+    pub max_diagnostics_per_record: usize,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScopedAppendDeliveryPhase {
     Bootstrap,
@@ -110,6 +129,45 @@ pub struct ScopedAppendObservation {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScopedDecodedRecordEvidence {
+    pub source_instance_id: u64,
+    pub stream_id: u64,
+    pub object_id: u64,
+    pub generation: u64,
+    pub cursor_start: SourceCursor,
+    pub cursor_end: SourceCursor,
+    pub ordinal_in_batch: u32,
+    pub observed_at: i64,
+    pub source_timestamp_hint: Option<i64>,
+    pub media_type: SourceMediaType,
+    pub state: SourceRecordState,
+    pub payload_hash: RecordHash,
+    /// Present only when the selected retention policy permits bounded native
+    /// evidence. Hash-only/none never copy the raw source payload.
+    pub retained_payload: Option<Vec<u8>>,
+}
+
+pub enum ScopedDecodedAppendItem {
+    Record {
+        evidence: Box<ScopedDecodedRecordEvidence>,
+        disposition: DecodeDisposition,
+        batch: FactBatch,
+        quarantined: bool,
+    },
+    DriverQuarantine(DriverQuarantine),
+}
+
+pub struct ScopedDecodedAppendBatch {
+    admission_token: u64,
+    pub items: Vec<ScopedDecodedAppendItem>,
+}
+
+pub enum ScopedAppendDecodeOutcome {
+    Ready(ScopedDecodedAppendBatch),
+    RetryTransient,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ScopedObjectRead {
     Available { bytes: Vec<u8>, revision: Revision },
     Unavailable,
@@ -126,6 +184,15 @@ pub enum ScopedSourceFailureClass {
     Unstable,
     Database,
     Io,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScopedDecodeFailureClass {
+    Transient,
+    RecordPermanent,
+    StreamFatal,
+    AdapterFatal,
+    InvalidContract,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -146,8 +213,16 @@ pub enum ScopedObservationAccessError {
     ObservationPending,
     #[error("the scoped append observation does not match the pending admission")]
     ObservationNotPending,
+    #[error("the scoped append observation has already completed decoding")]
+    ObservationAlreadyDecoded,
+    #[error("the scoped append observation has not completed decoding")]
+    ObservationNotDecoded,
     #[error("the scoped append admission sequence is exhausted")]
     ObservationSequenceExhausted,
+    #[error("invalid scoped decoder bounds")]
+    InvalidDecodeBounds,
+    #[error("scoped adapter decode failed: {0:?}")]
+    Decode(ScopedDecodeFailureClass),
     #[error("scoped source access failed: {0:?}")]
     Source(ScopedSourceFailureClass),
     #[error(transparent)]
@@ -163,6 +238,7 @@ struct ScopedObservationAccessState {
 /// authorization and exact grants. It creates a fresh access ledger only at a
 /// common-runtime pass boundary and never exposes the authorization itself.
 pub struct ScopedObservationAccessHost {
+    adapter: Arc<dyn AgentAdapter>,
     compatibility: CompatibilityDecision,
     authorization: TypedAccessAuthorization,
     program_id: String,
@@ -177,6 +253,11 @@ impl ScopedObservationAccessHost {
     ) -> Result<Self, ScopedObservationAccessError> {
         let adapter_id = AdapterId::new(request.adapter_id.as_str())
             .map_err(|error| ScopedObservationAccessError::Authorization(error.to_string()))?;
+        let adapter = registry.get(&adapter_id).cloned().ok_or_else(|| {
+            ScopedObservationAccessError::Authorization(format!(
+                "adapter {adapter_id} is not registered"
+            ))
+        })?;
         let (compatibility, authorization) = registry
             .authorize_typed_access(
                 &adapter_id,
@@ -192,6 +273,7 @@ impl ScopedObservationAccessHost {
         let plan = AuthorizedScopeAccessPlan::from_authorized_program(program)?;
         let known_objects = validate_known_object_grants(&plan, request.known_objects)?;
         Ok(Self {
+            adapter,
             compatibility,
             authorization,
             program_id: request.program_id,
@@ -205,6 +287,24 @@ impl ScopedObservationAccessHost {
 
     pub fn compatibility(&self) -> &CompatibilityDecision {
         &self.compatibility
+    }
+
+    /// Decode one already-read append observation through the exact adapter
+    /// selected during authorization. Dependency access is fail-closed until
+    /// scoped relation-backed `SourceAccess` composition lands.
+    pub fn decode_append(
+        &self,
+        object: &mut ScopedKnownAppendObject,
+        observation: &ScopedAppendObservation,
+    ) -> Result<ScopedAppendDecodeOutcome, ScopedObservationAccessError> {
+        if self.state.closed.load(Ordering::Acquire) {
+            return Err(ScopedObservationAccessError::Closed);
+        }
+        object.decode(
+            self.adapter.as_ref(),
+            observation,
+            &ScopedDependencyAccessDenied,
+        )
     }
 
     pub fn begin_pass(&self) -> Result<ScopedObservationAccessPass, ScopedObservationAccessError> {
@@ -434,7 +534,9 @@ impl Drop for ScopedObservationAccessPass {
 /// does not own a store, query service, watcher, or public event queue.
 pub struct ScopedKnownAppendObject {
     driver: AppendDelimitedFile,
+    decoder: ScopedAppendDecoderConfig,
     checkpoint: Option<AppendCheckpoint>,
+    decoder_state: Option<Vec<u8>>,
     bootstrap_active: bool,
     bootstrap_observed: bool,
     bootstrap_blocked: bool,
@@ -448,20 +550,27 @@ struct PendingAppendState {
     checkpoint: Option<AppendCheckpoint>,
     bootstrap_blocked: bool,
     root_present: bool,
+    staged_decoder_state: Option<Option<Vec<u8>>>,
 }
 
 impl ScopedKnownAppendObject {
-    pub fn new(driver: AppendDelimitedFile) -> Self {
-        Self {
+    pub fn new(
+        driver: AppendDelimitedFile,
+        decoder: ScopedAppendDecoderConfig,
+    ) -> Result<Self, ScopedObservationAccessError> {
+        validate_decode_bounds(&decoder)?;
+        Ok(Self {
             driver,
+            decoder,
             checkpoint: None,
+            decoder_state: None,
             bootstrap_active: true,
             bootstrap_observed: false,
             bootstrap_blocked: false,
             root_present: false,
             next_admission_token: 1,
             pending: None,
-        }
+        })
     }
 
     pub fn reconcile(
@@ -554,6 +663,7 @@ impl ScopedKnownAppendObject {
             checkpoint: next_checkpoint,
             bootstrap_blocked: next_bootstrap_blocked,
             root_present: next_root_present,
+            staged_decoder_state: None,
         });
         Ok(ScopedAppendObservation {
             admission_token,
@@ -565,12 +675,94 @@ impl ScopedKnownAppendObject {
         })
     }
 
-    /// Advance the cursor only after the observation's records and any reset
-    /// control have been admitted to the ordered observer lane.
-    pub fn admit(
+    fn decode(
+        &mut self,
+        adapter: &dyn AgentAdapter,
+        observation: &ScopedAppendObservation,
+        source_access: &dyn SourceAccess,
+    ) -> Result<ScopedAppendDecodeOutcome, ScopedObservationAccessError> {
+        let pending = self
+            .pending
+            .as_ref()
+            .ok_or(ScopedObservationAccessError::ObservationNotPending)?;
+        if pending.admission_token != observation.admission_token {
+            return Err(ScopedObservationAccessError::ObservationNotPending);
+        }
+        if pending.staged_decoder_state.is_some() {
+            return Err(ScopedObservationAccessError::ObservationAlreadyDecoded);
+        }
+
+        let mut next_decoder_state = if observation.reset_before_items.is_some() {
+            None
+        } else {
+            self.decoder_state.clone()
+        };
+        let mut decoded_items = Vec::new();
+        if let AppendRead::Batch { items, .. } = &observation.read {
+            decoded_items.reserve(items.len());
+            for item in items {
+                match item {
+                    AppendItem::Record(record) => {
+                        let attempt = decode_record(DecodeRuntimeRequest {
+                            adapter,
+                            decoder: &self.decoder.decoder,
+                            object_context: &self.decoder.object_context,
+                            source_access,
+                            record,
+                            decoder_state: next_decoder_state.as_deref(),
+                            retention: self.decoder.retention,
+                            limits: DecodeRuntimeLimits {
+                                max_facts: self.decoder.max_facts_per_record,
+                                max_diagnostics: self.decoder.max_diagnostics_per_record,
+                            },
+                        });
+                        let decoded = attempt.result.map_err(|error| {
+                            ScopedObservationAccessError::Decode(decode_failure_class(&error))
+                        })?;
+                        if decoded.disposition == DecodeDisposition::RetryTransient {
+                            return Ok(ScopedAppendDecodeOutcome::RetryTransient);
+                        }
+                        if let Some(state) = decoded.next_decoder_state.clone() {
+                            next_decoder_state = Some(state);
+                        }
+                        decoded_items.push(ScopedDecodedAppendItem::Record {
+                            evidence: Box::new(scoped_record_evidence(
+                                record,
+                                self.decoder.retention,
+                            )),
+                            disposition: decoded.disposition,
+                            batch: decoded.batch,
+                            quarantined: decoded.quarantined,
+                        });
+                    }
+                    AppendItem::Quarantined(quarantine) => decoded_items.push(
+                        ScopedDecodedAppendItem::DriverQuarantine(quarantine.clone()),
+                    ),
+                }
+            }
+        }
+
+        let pending = self
+            .pending
+            .as_mut()
+            .expect("pending observation remains owned during synchronous decode");
+        pending.staged_decoder_state = Some(next_decoder_state);
+        Ok(ScopedAppendDecodeOutcome::Ready(ScopedDecodedAppendBatch {
+            admission_token: observation.admission_token,
+            items: decoded_items,
+        }))
+    }
+
+    /// Advance decoder state and source cursor together only after the decoded
+    /// facts and any reset control have entered the ordered observer lane.
+    pub fn admit_decoded(
         &mut self,
         observation: &ScopedAppendObservation,
+        decoded: &ScopedDecodedAppendBatch,
     ) -> Result<(), ScopedObservationAccessError> {
+        if decoded.admission_token != observation.admission_token {
+            return Err(ScopedObservationAccessError::ObservationNotPending);
+        }
         let Some(pending) = self.pending.take() else {
             return Err(ScopedObservationAccessError::ObservationNotPending);
         };
@@ -578,7 +770,12 @@ impl ScopedKnownAppendObject {
             self.pending = Some(pending);
             return Err(ScopedObservationAccessError::ObservationNotPending);
         }
+        let Some(decoder_state) = pending.staged_decoder_state else {
+            self.pending = Some(pending);
+            return Err(ScopedObservationAccessError::ObservationNotDecoded);
+        };
         self.checkpoint = pending.checkpoint;
+        self.decoder_state = decoder_state;
         self.bootstrap_blocked = pending.bootstrap_blocked;
         self.root_present = pending.root_present;
         self.bootstrap_observed = true;
@@ -618,6 +815,10 @@ impl ScopedKnownAppendObject {
 
     pub fn checkpoint(&self) -> Option<&AppendCheckpoint> {
         self.checkpoint.as_ref()
+    }
+
+    pub fn decoder_state(&self) -> Option<&[u8]> {
+        self.decoder_state.as_deref()
     }
 
     pub fn root_present(&self) -> bool {
@@ -687,4 +888,87 @@ fn source_failure_class(error: &SourceDriverError) -> ScopedSourceFailureClass {
         SourceDriverError::Database(_) => ScopedSourceFailureClass::Database,
         SourceDriverError::Io { .. } => ScopedSourceFailureClass::Io,
     }
+}
+
+fn decode_failure_class(error: &AdapterError) -> ScopedDecodeFailureClass {
+    match error.class {
+        AdapterErrorClass::Transient => ScopedDecodeFailureClass::Transient,
+        AdapterErrorClass::RecordPermanent => ScopedDecodeFailureClass::RecordPermanent,
+        AdapterErrorClass::StreamFatal => ScopedDecodeFailureClass::StreamFatal,
+        AdapterErrorClass::AdapterFatal => ScopedDecodeFailureClass::AdapterFatal,
+        AdapterErrorClass::InvalidContract => ScopedDecodeFailureClass::InvalidContract,
+    }
+}
+
+fn validate_decode_bounds(
+    decoder: &ScopedAppendDecoderConfig,
+) -> Result<(), ScopedObservationAccessError> {
+    const MAX_FACTS_PER_RECORD: usize = 8_192;
+    const MAX_DIAGNOSTICS_PER_RECORD: usize = 256;
+    if decoder.max_facts_per_record == 0
+        || decoder.max_facts_per_record > MAX_FACTS_PER_RECORD
+        || decoder.max_diagnostics_per_record == 0
+        || decoder.max_diagnostics_per_record > MAX_DIAGNOSTICS_PER_RECORD
+    {
+        return Err(ScopedObservationAccessError::InvalidDecodeBounds);
+    }
+    Ok(())
+}
+
+fn scoped_record_evidence(
+    record: &SourceRecord,
+    retention: RawRetentionPolicy,
+) -> ScopedDecodedRecordEvidence {
+    let retained_payload = match retention {
+        RawRetentionPolicy::None | RawRetentionPolicy::HashOnly => None,
+        RawRetentionPolicy::DiagnosticExcerpt => Some(diagnostic_excerpt(&record.payload)),
+        RawRetentionPolicy::Full => Some(record.payload.clone()),
+    };
+    ScopedDecodedRecordEvidence {
+        source_instance_id: record.source_instance_id,
+        stream_id: record.stream_id,
+        object_id: record.object_id,
+        generation: record.generation,
+        cursor_start: record.cursor_start.clone(),
+        cursor_end: record.cursor_end.clone(),
+        ordinal_in_batch: record.ordinal_in_batch,
+        observed_at: record.observed_at,
+        source_timestamp_hint: record.source_timestamp_hint,
+        media_type: record.media_type.clone(),
+        state: record.state,
+        payload_hash: record.payload_hash,
+        retained_payload,
+    }
+}
+
+struct ScopedDependencyAccessDenied;
+
+impl SourceAccess for ScopedDependencyAccessDenied {
+    fn read_object(
+        &self,
+        _root_name: &str,
+        _relative_path: &std::path::Path,
+        _max_bytes: usize,
+    ) -> Result<SourceSnapshot, AdapterError> {
+        Err(scoped_dependency_access_error())
+    }
+
+    fn query_source_db(&self, _query: &SourceQuery) -> Result<SourceRows, AdapterError> {
+        Err(scoped_dependency_access_error())
+    }
+
+    fn list_objects(
+        &self,
+        _request: &SourceObjectListRequest,
+    ) -> Result<SourceObjectList, AdapterError> {
+        Err(scoped_dependency_access_error())
+    }
+}
+
+fn scoped_dependency_access_error() -> AdapterError {
+    AdapterError::new(
+        AdapterErrorClass::InvalidContract,
+        "scoped_dependency_access_undeclared",
+        "decoder requested dependency access without a scoped relation-backed grant",
+    )
 }

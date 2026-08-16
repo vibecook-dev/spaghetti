@@ -238,11 +238,24 @@ anchor bytes, allowing the pass to prove actual access against its reservation
 without charging the entire historical file for each append. The provisional
 root kernel does not advance that driver's checkpoint on read: explicit
 ordered-lane admission applies it, discard leaves it unchanged for replay, and
-one pending observation blocks another read. Attachment may precede root-object
-creation; each later pass receives a fresh declared ledger; close prevents new
-passes; and the pass report contains neither granted paths nor native content.
-An architecture ratchet prevents this internal seam from depending on the
-store, N-API, or a concrete adapter and prevents it from becoming a public host
+one pending observation blocks another read. A shared store-agnostic decode
+runtime now owns adapter invocation, panic containment, mapping-disposition
+validation, raw-retention enforcement, and decoder-state extraction. The
+durable coordinator and provisional scoped host both call that boundary. The
+scoped append object binds one decoder, object context, retention policy, and
+finite output bounds for its lifetime; callers cannot switch state domains
+between reconciliations. Its transaction stages ordered `FactBatch` output and
+next decoder state, then advances decoder state and source checkpoint together only after
+admission of the matching unforgeable decoded-batch receipt; a raw read or
+receipt from another observation cannot advance either. Retry, decode failure,
+or discard advances neither, and a source generation reset starts with empty
+decoder state. Undeclared decoder dependency access fails closed until it is
+composed through an authorized scope relation.
+Attachment may precede root-object creation; each later pass receives a fresh
+declared ledger; close prevents new passes; and the pass report contains neither
+granted paths nor native content. Architecture ratchets prevent the scoped seam
+and shared decode runtime from depending on the store, N-API, delivery sinks, or
+a concrete adapter, and prevent the scoped seam from becoming a public host
 contract before RFC 012D freezes the complete request and probe semantics.
 
 ## 4. Logical subsystem dependency law
@@ -295,6 +308,8 @@ Architecture checks reject:
   event queues, or query services;
 - `observation-projection` or `observer-api` reading durable query state;
 - `store-query` matching on concrete agent IDs or importing concrete adapters;
+- `decode-runtime` importing a durable/scoped projection, delivery sink,
+  composition root, or concrete adapter;
 - `semantic-reducers` importing agent-native structs or source paths;
 - public queries invoking adapter decoders, source access, hydration, or
   projection repair;

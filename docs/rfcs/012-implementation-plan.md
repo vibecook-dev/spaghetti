@@ -339,11 +339,24 @@ Current landing status (2026-08-16):
   checkpoint advancement now requires explicit ordered-lane admission, while
   discard leaves the cursor unchanged for deterministic replay and a pending
   observation blocks both another read and bootstrap completion;
+- extracted adapter invocation, panic containment, disposition validation, raw
+  retention, and decoder-state extraction from the durable coordinator into a
+  shared store-agnostic decode runtime; the durable coordinator and provisional
+  scoped host now call the same boundary, guarded by an architecture ratchet;
+- added a scoped append decode transaction that stages ordered record facts and
+  next decoder state under one lifetime-bound decoder/object-context/retention/
+  finite-output configuration, commits decoder state and source checkpoint
+  together only after admission of the matching unforgeable decoded-batch
+  receipt, rejects a raw read or receipt from another observation, resets
+  decoder state on a source generation change, and leaves both unchanged on
+  retry, failure, or discard; retained evidence obeys the selected raw policy,
+  and undeclared decoder dependency access fails closed;
 - integrated contract and tooling checks into `pnpm validate`.
 
-A2 remains `In progress`: the internal scoped access composition now owns the
-authorized plan lifecycle and executes its first common confined primitive, but
-no catalog, durable, or public scoped-observer host does; the access-report IPC
+A2 remains `In progress`: the internal scoped composition now owns the
+authorized plan lifecycle, executes its first common confined primitive, and
+reuses the store-agnostic decode boundary, but no catalog, durable, or public
+scoped-observer host owns the full strict lifecycle; the access-report IPC
 retrieval shape and trusted native-probe/grant request are not yet frozen;
 adapter registrations must move from the explicit legacy path to the strict
 promoted catalog after the first support release is promoted; and the remaining
@@ -593,6 +606,13 @@ Current landing status (2026-08-16):
   reset-before-items descriptor; its cursor advances only after explicit
   admission, and discarded/unacknowledged batches cannot silently skip source
   records;
+- complete append records pass through the same store-agnostic decoder boundary
+  as durable ingestion; scoped facts and decoder state are staged in memory,
+  raw evidence is policy-bounded, and source cursor plus decoder state advance
+  atomically only after admission of the matching decoded-batch receipt; a raw
+  read or mismatched receipt cannot advance either, retry/failure/discard
+  advances neither, generation reset clears prior decoder state, and undeclared
+  decoder dependency access fails closed;
 - one pass is active at a time, a later pass receives fresh bounds, close is
   idempotent, and the frozen access report excludes paths, identity values, and
   content; and
@@ -600,10 +620,10 @@ Current landing status (2026-08-16):
   and premature public export from this provisional composition root.
 
 D1 remains `In progress`: watcher-before-scan, multi-object discovery/cursor
-orchestration, store-free decode/reduction, events, poll/readiness barriers,
-queue/control lanes, coverage, resync epochs, artifact mediation, cancellation
-waiting, the trusted native version-probe driver, and the complete public
-request are not yet implemented.
+orchestration, declared relation-backed decoder dependency access, semantic
+reduction/events, poll/readiness barriers, queue/control lanes, coverage,
+resync epochs, artifact mediation, cancellation waiting, the trusted native
+version-probe driver, and the complete public request are not yet implemented.
 
 ### D2. Claude scope composition
 

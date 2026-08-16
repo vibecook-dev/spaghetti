@@ -60,6 +60,10 @@ RFC012_SCOPED_HOST_FORBIDDEN_RE = re.compile(
     r"\b(?:crate::(?:claude|codex|grok|core|engine|napi_engine|orchestrate)"
     r"|rusqlite|napi)(?:::|\b)"
 )
+RFC012_DECODE_RUNTIME_FORBIDDEN_RE = re.compile(
+    r"\b(?:crate::(?:claude|codex|grok|core|engine|napi_engine|orchestrate|scoped_observation)"
+    r"|rusqlite|napi)(?:::|\b)"
+)
 BUILTIN_ADAPTER_PATHS = (
     "crates/spaghetti-napi/src/claude/adapter.rs",
     "crates/spaghetti-napi/src/codex/adapter.rs",
@@ -402,6 +406,17 @@ def discover_rfc012_scoped_host_boundary_violations() -> set[str]:
     return found
 
 
+def discover_rfc012_decode_runtime_boundary_violations() -> set[str]:
+    """The shared decoder boundary cannot depend on a sink or concrete adapter."""
+    relative = "crates/spaghetti-napi/src/decode_runtime.rs"
+    path = REPO_ROOT / relative
+    if not path.exists() or RFC012_DECODE_RUNTIME_FORBIDDEN_RE.search(
+        production_rust_text(path)
+    ):
+        return {relative}
+    return set()
+
+
 def discover_migrated_client_direct_engine_queries() -> set[str]:
     """Once a consumer moves to SpaghettiClient, direct N-API reads cannot return."""
     return {
@@ -529,6 +544,7 @@ DISCOVERERS: dict[str, Callable[[], set[str]]] = {
     "rfc012_support_boundary_violations": discover_rfc012_support_boundary_violations,
     "rfc012_adapter_support_binding_gaps": discover_rfc012_adapter_support_binding_gaps,
     "rfc012_scoped_host_boundary_violations": discover_rfc012_scoped_host_boundary_violations,
+    "rfc012_decode_runtime_boundary_violations": discover_rfc012_decode_runtime_boundary_violations,
     "migrated_client_direct_engine_queries": discover_migrated_client_direct_engine_queries,
     "portable_client_runtime_boundary_violations": discover_portable_client_runtime_boundary_violations,
     "playground_main_sdk_owner_bypasses": discover_playground_main_sdk_owner_bypasses,

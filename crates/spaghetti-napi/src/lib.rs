@@ -26,6 +26,7 @@ pub mod adapter;
 pub mod claude;
 pub mod codex;
 pub mod core;
+mod decode_runtime;
 pub mod engine;
 pub mod grok;
 mod napi_engine;

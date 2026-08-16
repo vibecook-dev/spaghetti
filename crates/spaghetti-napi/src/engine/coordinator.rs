@@ -16,11 +16,15 @@ use walkdir::WalkDir;
 
 use crate::adapter::{
     AdapterError, AdapterErrorClass, AdapterManifest, AdapterObjectContext, AgentAdapter,
-    Availability, CapabilityGranularity, DecodeContext, DecodeDisposition, DeletionPolicy,
-    DependencyRevision, DiscoveryContext, DriverSpec, FactBatch, RawRetentionPolicy, SourceAccess,
-    SourceInstance, SourceInstanceSpec as AdapterSourceInstanceSpec, SourceListedObject,
-    SourceObjectDescriptor, SourceObjectList, SourceObjectListRequest, SourceQuery, SourceRows,
-    SourceSnapshot, StreamAuthority, StreamSpec, SupportLevel,
+    Availability, CapabilityGranularity, DecodeDisposition, DeletionPolicy, DependencyRevision,
+    DiscoveryContext, DriverSpec, FactBatch, RawRetentionPolicy, SourceAccess, SourceInstance,
+    SourceInstanceSpec as AdapterSourceInstanceSpec, SourceListedObject, SourceObjectDescriptor,
+    SourceObjectList, SourceObjectListRequest, SourceQuery, SourceRows, SourceSnapshot,
+    StreamAuthority, StreamSpec, SupportLevel,
+};
+use crate::decode_runtime::{
+    decode_record as decode_adapter_record, diagnostic_excerpt, DecodeRuntimeLimits,
+    DecodeRuntimeRequest,
 };
 use crate::source::{
     confined_relative_path_key, AccessBudget, AccessBudgetError, AccessBudgetSnapshot,
@@ -3619,80 +3623,33 @@ fn decode_record<A: AgentAdapter + ?Sized>(
     decoder_state: Option<&[u8]>,
 ) -> Result<DecodedRecord, EngineError> {
     let started = Instant::now();
-    let mut adapter_elapsed = std::time::Duration::ZERO;
-    let mut batch = match FactBatch::new(FACT_BATCH_LIMIT, DIAGNOSTIC_LIMIT) {
-        Ok(batch) => batch,
-        Err(error) => {
-            performance.record_decode(&SourceDecodeObservation {
-                elapsed: started.elapsed(),
-                adapter_elapsed: std::time::Duration::ZERO,
-                fact_build: std::time::Duration::ZERO,
-                outcome: SourceDecodeOutcome::Failed,
-            });
-            return Err(adapter_error("create fact batch", error));
-        }
-    };
+    let attempt = decode_adapter_record(DecodeRuntimeRequest {
+        adapter,
+        decoder: &stream.decoder,
+        object_context,
+        source_access,
+        record,
+        decoder_state,
+        retention: stream.retention,
+        limits: DecodeRuntimeLimits {
+            max_facts: FACT_BATCH_LIMIT,
+            max_diagnostics: DIAGNOSTIC_LIMIT,
+        },
+    });
+    let adapter_elapsed = attempt.adapter_elapsed;
+    let fact_build_time = attempt.fact_build_time;
     let decoded = (|| {
-        let adapter_started = Instant::now();
-        let adapter_result = catch_adapter_panic("decode source record", || {
-            adapter.decode_with_access(
-                DecodeContext {
-                    decoder: &stream.decoder,
-                    object_context,
-                    decoder_state,
-                },
-                record,
-                &mut batch,
-                source_access,
-            )
-        });
-        adapter_elapsed = adapter_started.elapsed();
-        let disposition =
-            adapter_result?.map_err(|error| adapter_error("decode source record", error))?;
-        let fact_count = batch.facts().len();
-        match disposition {
-            DecodeDisposition::Applied if fact_count == 0 => {
-                return Err(observation_error(
-                    "validate decode disposition",
-                    format!(
-                        "adapter returned Applied without facts for stream {}",
-                        stream.id
-                    ),
-                ));
-            }
-            DecodeDisposition::IgnoredKnown | DecodeDisposition::RetryTransient
-                if fact_count != 0 =>
-            {
-                return Err(observation_error(
-                    "validate decode disposition",
-                    format!(
-                        "adapter returned {disposition:?} with {fact_count} facts for stream {}",
-                        stream.id
-                    ),
-                ));
-            }
-            _ => {}
-        }
+        let mut decoded = attempt
+            .result
+            .map_err(|error| adapter_error("decode source record", error))?;
         for dependency in source_access.revisions()? {
-            batch
+            decoded
+                .batch
                 .add_dependency_read(dependency)
                 .map_err(|error| adapter_error("record source dependency", error))?;
         }
-        match stream.retention {
-            RawRetentionPolicy::Full => {}
-            RawRetentionPolicy::DiagnosticExcerpt => {
-                let excerpt = diagnostic_excerpt(&record.payload);
-                batch.replace_unknown_record_payloads(&excerpt);
-            }
-            RawRetentionPolicy::HashOnly | RawRetentionPolicy::None => {
-                batch.redact_unknown_record_payloads();
-            }
-        }
-        let quarantined = batch
-            .diagnostics()
-            .iter()
-            .any(|diagnostic| diagnostic.class == AdapterErrorClass::RecordPermanent);
-        let errors = batch
+        let errors = decoded
+            .batch
             .diagnostics()
             .iter()
             .map(|diagnostic| SourceRecordError {
@@ -3709,16 +3666,15 @@ fn decode_record<A: AgentAdapter + ?Sized>(
                 last_retry_at: None,
             })
             .collect();
-        let next_decoder_state = batch.next_decoder_state().map(ToOwned::to_owned);
-        Ok((disposition, errors, next_decoder_state, quarantined))
+        Ok((decoded, errors))
     })();
-    let fact_build_time = batch.fact_build_time();
-    let fact_count = u64::try_from(batch.facts().len()).unwrap_or(u64::MAX);
     let outcome = match &decoded {
-        Ok((DecodeDisposition::RetryTransient, _, _, _)) => SourceDecodeOutcome::Retry,
-        Ok((_, _, _, quarantined)) => SourceDecodeOutcome::Decoded {
-            facts: fact_count,
-            quarantined: *quarantined,
+        Ok((decoded, _)) if decoded.disposition == DecodeDisposition::RetryTransient => {
+            SourceDecodeOutcome::Retry
+        }
+        Ok((decoded, _)) => SourceDecodeOutcome::Decoded {
+            facts: u64::try_from(decoded.batch.facts().len()).unwrap_or(u64::MAX),
+            quarantined: decoded.quarantined,
         },
         Err(_) => SourceDecodeOutcome::Failed,
     };
@@ -3728,13 +3684,13 @@ fn decode_record<A: AgentAdapter + ?Sized>(
         fact_build: fact_build_time,
         outcome,
     });
-    let (disposition, errors, next_decoder_state, quarantined) = decoded?;
+    let (decoded, errors) = decoded?;
     Ok(DecodedRecord {
-        disposition,
-        batch,
+        disposition: decoded.disposition,
+        batch: decoded.batch,
         errors,
-        next_decoder_state,
-        quarantined,
+        next_decoder_state: decoded.next_decoder_state,
+        quarantined: decoded.quarantined,
     })
 }
 
@@ -3922,9 +3878,6 @@ fn snapshot_decode_error<A: AgentAdapter + ?Sized>(
         last_retry_at,
     }
 }
-
-const MAX_DIAGNOSTIC_EXCERPT_BYTES: usize = 1_024;
-const MAX_DIAGNOSTIC_SHAPE_ITEMS: usize = 16;
 
 fn retained_diagnostic_payload(retention: RawRetentionPolicy, payload: &[u8]) -> Option<Vec<u8>> {
     match retention {
@@ -4260,81 +4213,6 @@ fn source_access_error(error: SourceDriverError) -> AdapterError {
     AdapterError::new(class, "source_access_read", error.to_string())
 }
 
-/// Produce useful quarantine context without retaining native values or even
-/// native JSON property names. Dynamic property names can themselves contain
-/// secrets, so only their hashes and value kinds are exposed.
-fn diagnostic_excerpt(payload: &[u8]) -> Vec<u8> {
-    let payload_hash = blake3::hash(payload).to_hex().to_string();
-    let shape = match serde_json::from_slice::<serde_json::Value>(payload) {
-        Ok(serde_json::Value::Object(object)) => {
-            let keys = object
-                .iter()
-                .take(MAX_DIAGNOSTIC_SHAPE_ITEMS)
-                .map(|(key, value)| {
-                    let key_hash = blake3::hash(key.as_bytes()).to_hex().to_string();
-                    serde_json::json!({
-                        "key_hash": &key_hash[..12],
-                        "value_kind": json_value_kind(value),
-                    })
-                })
-                .collect::<Vec<_>>();
-            serde_json::json!({
-                "kind": "json_object",
-                "bytes": payload.len(),
-                "hash": payload_hash,
-                "members": object.len(),
-                "shape": keys,
-                "truncated": object.len() > MAX_DIAGNOSTIC_SHAPE_ITEMS,
-            })
-        }
-        Ok(serde_json::Value::Array(array)) => {
-            let items = array
-                .iter()
-                .take(MAX_DIAGNOSTIC_SHAPE_ITEMS)
-                .map(json_value_kind)
-                .collect::<Vec<_>>();
-            serde_json::json!({
-                "kind": "json_array",
-                "bytes": payload.len(),
-                "hash": payload_hash,
-                "items": array.len(),
-                "item_kinds": items,
-                "truncated": array.len() > MAX_DIAGNOSTIC_SHAPE_ITEMS,
-            })
-        }
-        Ok(value) => serde_json::json!({
-            "kind": json_value_kind(&value),
-            "bytes": payload.len(),
-            "hash": payload_hash,
-        }),
-        Err(_) => serde_json::json!({
-            "kind": "opaque",
-            "bytes": payload.len(),
-            "hash": payload_hash,
-        }),
-    };
-    let encoded = serde_json::to_vec(&shape).unwrap_or_else(|_| {
-        format!(r#"{{"kind":"redacted","bytes":{}}}"#, payload.len()).into_bytes()
-    });
-    debug_assert!(encoded.len() <= MAX_DIAGNOSTIC_EXCERPT_BYTES);
-    if encoded.len() <= MAX_DIAGNOSTIC_EXCERPT_BYTES {
-        encoded
-    } else {
-        encoded[..MAX_DIAGNOSTIC_EXCERPT_BYTES].to_vec()
-    }
-}
-
-fn json_value_kind(value: &serde_json::Value) -> &'static str {
-    match value {
-        serde_json::Value::Null => "null",
-        serde_json::Value::Bool(_) => "boolean",
-        serde_json::Value::Number(_) => "number",
-        serde_json::Value::String(_) => "string",
-        serde_json::Value::Array(_) => "array",
-        serde_json::Value::Object(_) => "object",
-    }
-}
-
 fn modified_ns(metadata: &Metadata) -> Option<i64> {
     metadata
         .modified()
@@ -4609,10 +4487,11 @@ mod tests {
     use tempfile::TempDir;
 
     use crate::adapter::{
-        AdapterId, AdapterManifest, ConsistencyPolicy, DecoderId, EntityScope, Fact,
+        AdapterId, AdapterManifest, ConsistencyPolicy, DecodeContext, DecoderId, EntityScope, Fact,
         ObjectSelector, SourceInstanceKey, SourceRoot, StreamId,
     };
     use crate::claude::ClaudeCodeAdapter;
+    use crate::decode_runtime::MAX_DIAGNOSTIC_EXCERPT_BYTES;
     use crate::engine::EngineOptions;
     use crate::source::{
         platform_path_key, DirectorySnapshotConfig, IngestPriority, KeyValueRecord,
