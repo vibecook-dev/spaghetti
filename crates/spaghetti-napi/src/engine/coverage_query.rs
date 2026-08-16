@@ -80,6 +80,33 @@ pub struct FactFamilyCoveragePage {
     pub next_cursor: Option<String>,
 }
 
+/// Private source target selected by a public replay authorization. Native
+/// stable keys never cross the Rust boundary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct FactFamilyReplayTarget {
+    pub source_instance_id: u64,
+    pub stable_key: Vec<u8>,
+    pub adapter_id: String,
+    pub canonical_source_instance_key: Vec<u8>,
+    pub content_digest: Vec<u8>,
+    pub source_instance_ref: String,
+    pub content_digest_ref: String,
+    pub coverage_last_commit_seq: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct FactFamilyReplayTargetRequest {
+    pub project_id: String,
+    pub session_id: String,
+    pub owner_id: String,
+    pub family: String,
+    pub family_version: u32,
+    pub adapter_id: String,
+    pub expected_source_instance_ref: String,
+    pub expected_content_digest_ref: String,
+    pub expected_coverage_last_commit_seq: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct FactFamilyCoverageCursor {
     version: u32,
@@ -203,6 +230,135 @@ pub(super) fn read_fact_family_coverage_page(
         coverage: Some(coverage),
         items,
         next_cursor,
+    })
+}
+
+pub(super) fn validate_fact_family_replay_target(
+    request: &FactFamilyReplayTargetRequest,
+) -> Result<(), EngineError> {
+    validate_request(&FactFamilyCoveragePageRequest {
+        project_id: request.project_id.clone(),
+        session_id: request.session_id.clone(),
+        owner_id: request.owner_id.clone(),
+        family: request.family.clone(),
+        family_version: request.family_version,
+        cursor: None,
+        limit: 1,
+    })?;
+    for (label, value) in [
+        ("replay adapter id", request.adapter_id.as_str()),
+        (
+            "expected source instance reference",
+            request.expected_source_instance_ref.as_str(),
+        ),
+        (
+            "expected coverage content digest reference",
+            request.expected_content_digest_ref.as_str(),
+        ),
+    ] {
+        if value.trim().is_empty() || value.len() > MAX_COVERAGE_IDENTIFIER_BYTES {
+            return Err(EngineError::InvalidQuery(format!(
+                "{label} must be non-empty and at most {MAX_COVERAGE_IDENTIFIER_BYTES} bytes"
+            )));
+        }
+    }
+    if request.expected_coverage_last_commit_seq == 0 {
+        return Err(EngineError::InvalidQuery(
+            "expected coverage commit sequence must be greater than zero".to_string(),
+        ));
+    }
+    validate_opaque_ref(
+        &request.expected_source_instance_ref,
+        "expected source instance reference",
+    )?;
+    validate_opaque_ref(
+        &request.expected_content_digest_ref,
+        "expected coverage content digest reference",
+    )?;
+    Ok(())
+}
+
+pub(super) fn read_fact_family_replay_target(
+    connection: &Connection,
+    request: &FactFamilyReplayTargetRequest,
+) -> Result<FactFamilyReplayTarget, EngineError> {
+    validate_fact_family_replay_target(request)?;
+    let project_key = decode_entity_id(&request.project_id, PROJECT_ID_PREFIX, "project id")?;
+    let session_key = decode_entity_id(&request.session_id, SESSION_ID_PREFIX, "session id")?;
+    let transaction = connection
+        .unchecked_transaction()
+        .map_err(|error| query_sqlite_error("begin fact-family replay authorization", error))?;
+    let (source_instance_id, stable_key) =
+        resolve_source_scope(&transaction, &project_key, &session_key)?;
+    let row = transaction
+        .query_row(
+            r#"
+            SELECT adapter_id, canonical_source_instance_key,
+                   content_digest, last_commit_seq
+            FROM source_coverage_sets
+            WHERE source_instance_id = ?1
+              AND owner_id = ?2
+              AND owner_scope_key = ?3
+              AND domain_kind = 'fact_family'
+              AND domain_name = ?4
+              AND domain_version = ?5
+              AND root_entity_key = X''
+            "#,
+            params![
+                query_i64(source_instance_id, "coverage source instance")?,
+                request.owner_id,
+                stable_key,
+                request.family,
+                i64::from(request.family_version),
+            ],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Vec<u8>>(1)?,
+                    row.get::<_, Vec<u8>>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|error| query_sqlite_error("read fact-family replay authorization", error))?
+        .ok_or_else(|| {
+            EngineError::InvalidQuery(
+                "no durable source coverage exists for the requested replay scope".to_string(),
+            )
+        })?;
+    let (adapter_id, source_instance_key, content_digest, last_commit_seq) = row;
+    if source_instance_key.len() != 32 || content_digest.len() != 32 {
+        return Err(EngineError::Sqlite {
+            operation: "validate fact-family replay authorization",
+            detail: "coverage authorization contains an invalid common identity".to_string(),
+        });
+    }
+    let source_instance_ref = opaque_ref(&source_instance_key);
+    let content_digest_ref = opaque_ref(&content_digest);
+    let coverage_last_commit_seq = nonnegative_u64(
+        last_commit_seq,
+        "fact-family replay coverage commit sequence",
+    )?;
+    if adapter_id != request.adapter_id
+        || source_instance_ref != request.expected_source_instance_ref
+        || content_digest_ref != request.expected_content_digest_ref
+        || coverage_last_commit_seq != request.expected_coverage_last_commit_seq
+    {
+        return Err(EngineError::InvalidQuery(
+            "fact-family replay authorization is stale or belongs to another scope".to_string(),
+        ));
+    }
+    finish_snapshot(transaction)?;
+    Ok(FactFamilyReplayTarget {
+        source_instance_id,
+        stable_key,
+        adapter_id,
+        canonical_source_instance_key: source_instance_key,
+        content_digest,
+        source_instance_ref,
+        content_digest_ref,
+        coverage_last_commit_seq,
     })
 }
 
@@ -637,6 +793,23 @@ fn opaque_ref(value: &[u8]) -> String {
         "{OPAQUE_COVERAGE_REFERENCE_VERSION}:{}",
         URL_SAFE_NO_PAD.encode(value)
     )
+}
+
+fn validate_opaque_ref(value: &str, label: &'static str) -> Result<(), EngineError> {
+    let Some(encoded) = value.strip_prefix(&format!("{OPAQUE_COVERAGE_REFERENCE_VERSION}:")) else {
+        return Err(EngineError::InvalidQuery(format!(
+            "{label} has an unsupported reference version"
+        )));
+    };
+    let decoded = URL_SAFE_NO_PAD
+        .decode(encoded)
+        .map_err(|_| EngineError::InvalidQuery(format!("{label} is not valid base64url")))?;
+    if decoded.len() != 32 {
+        return Err(EngineError::InvalidQuery(format!(
+            "{label} must contain one 32-byte common identity"
+        )));
+    }
+    Ok(())
 }
 
 fn finish_snapshot(transaction: Transaction<'_>) -> Result<(), EngineError> {

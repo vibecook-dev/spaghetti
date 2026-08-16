@@ -13,6 +13,8 @@ import { join, resolve } from 'node:path';
 import {
   openSpaghettiEngine,
   type SpaghettiEngine,
+  type SpaghettiEngineFactFamilyReplayOptions,
+  type SpaghettiEngineFactFamilyReplayResult,
   type SpaghettiEngineHealth,
   type SpaghettiEngineStatus,
 } from './native.js';
@@ -65,6 +67,12 @@ export interface ObservationHostSnapshot {
   health: SpaghettiEngineHealth;
 }
 
+/**
+ * Host-authorized replay command. Native roots are deliberately omitted: the
+ * sole-owner host injects only the roots configured for `adapterId`.
+ */
+export type ObservationHostFactFamilyReplayRequest = Omit<SpaghettiEngineFactFamilyReplayOptions, 'roots'>;
+
 export interface ObservationHost {
   readonly databasePath: string;
   readonly sources: ReadonlyArray<{ adapterId: string; roots: readonly string[] }>;
@@ -73,6 +81,10 @@ export interface ObservationHost {
   readonly clientInfo: SpaghettiClientInfo;
   snapshot(signal?: AbortSignal): Promise<ObservationHostSnapshot>;
   refresh(adapterId?: string, signal?: AbortSignal): Promise<SpaghettiEngineStatus>;
+  replayFactFamily(
+    request: ObservationHostFactFamilyReplayRequest,
+    signal?: AbortSignal,
+  ): Promise<SpaghettiEngineFactFamilyReplayResult>;
   stop(adapterId: string, signal?: AbortSignal): Promise<SpaghettiEngineStatus>;
   serveIpc(channel: SpaghettiIpcChannel, transportKind?: string): SpaghettiIpcHost;
   dispose(): Promise<SpaghettiEngineStatus>;
@@ -222,6 +234,24 @@ class NativeObservationHost implements ObservationHost {
     let status = this.engine.status;
     for (const id of adapterIds) status = await this.engine.refreshObservation(id, signal);
     return status;
+  }
+
+  async replayFactFamily(
+    request: ObservationHostFactFamilyReplayRequest,
+    signal?: AbortSignal,
+  ): Promise<SpaghettiEngineFactFamilyReplayResult> {
+    this.assertRunning();
+    const adapterId = this.requireConfiguredAdapter(request.adapterId);
+    const source = this.sources.find((candidate) => candidate.adapterId === adapterId);
+    if (!source) throw new Error(`Adapter ${adapterId} is not configured on this observation host.`);
+    return await this.engine.replayFactFamily(
+      {
+        ...request,
+        adapterId,
+        roots: [...source.roots],
+      },
+      signal,
+    );
   }
 
   stop(adapterId: string, signal?: AbortSignal): Promise<SpaghettiEngineStatus> {

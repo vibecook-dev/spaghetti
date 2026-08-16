@@ -24,8 +24,9 @@ use super::capability_query::{
     TaskCollectionPageRequest, TaskPage, TaskPageRequest, ToolResultPage, ToolResultPageRequest,
 };
 use super::coverage_query::{
-    read_fact_family_coverage_page, validate_fact_family_coverage_page, FactFamilyCoveragePage,
-    FactFamilyCoveragePageRequest,
+    read_fact_family_coverage_page, read_fact_family_replay_target,
+    validate_fact_family_coverage_page, validate_fact_family_replay_target, FactFamilyCoveragePage,
+    FactFamilyCoveragePageRequest, FactFamilyReplayTarget, FactFamilyReplayTargetRequest,
 };
 use super::detail_query::{
     read_canonical_stats, read_message_page, read_session_details, read_source_page,
@@ -268,7 +269,10 @@ pub struct SourceCatalogProjectionVersion {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SourceCoverageReplayBaseline {
     pub source_instance_id: u64,
+    pub adapter_id: String,
+    pub canonical_source_instance_key: Vec<u8>,
     pub completeness: String,
+    pub content_digest: Vec<u8>,
     pub last_commit_seq: u64,
     pub members: Vec<SourceCoverageReplayMember>,
 }
@@ -454,6 +458,12 @@ enum QueryCommand {
         cancellation: QueryCancellationToken,
         request: FactFamilyCoveragePageRequest,
         response: Sender<Result<FactFamilyCoveragePage, EngineError>>,
+    },
+    FactFamilyReplayTarget {
+        cancellation_epoch: u64,
+        cancellation: QueryCancellationToken,
+        request: FactFamilyReplayTargetRequest,
+        response: Sender<Result<FactFamilyReplayTarget, EngineError>>,
     },
     RuntimeSnapshot {
         cancellation_epoch: u64,
@@ -1153,6 +1163,23 @@ impl QueryClient {
         self.send_cancellable(
             cancellation,
             |cancellation_epoch, cancellation, response| QueryCommand::FactFamilyCoverage {
+                cancellation_epoch,
+                cancellation,
+                request,
+                response,
+            },
+        )
+    }
+
+    pub(crate) fn fact_family_replay_target_cancellable(
+        &self,
+        request: FactFamilyReplayTargetRequest,
+        cancellation: QueryCancellationToken,
+    ) -> Result<FactFamilyReplayTarget, EngineError> {
+        validate_fact_family_replay_target(&request)?;
+        self.send_cancellable(
+            cancellation,
+            |cancellation_epoch, cancellation, response| QueryCommand::FactFamilyReplayTarget {
                 cancellation_epoch,
                 cancellation,
                 request,
@@ -2020,6 +2047,22 @@ fn query_thread(
                     cancellation_epoch,
                     &cancellation,
                     || read_fact_family_coverage_page(&connection, &request),
+                );
+                let _ = response.send(result);
+            }
+            QueryCommand::FactFamilyReplayTarget {
+                cancellation_epoch,
+                cancellation,
+                request,
+                response,
+            } => {
+                let _in_flight = InFlightGuard::enter(&control.in_flight);
+                let result = run_cancellable_query(
+                    &connection,
+                    &control,
+                    cancellation_epoch,
+                    &cancellation,
+                    || read_fact_family_replay_target(&connection, &request),
                 );
                 let _ = response.send(result);
             }
@@ -3396,7 +3439,8 @@ fn read_source_coverage_replay_baseline(
     let set = transaction
         .query_row(
             r#"
-            SELECT coverage_set_id, completeness, last_commit_seq
+            SELECT coverage_set_id, adapter_id, canonical_source_instance_key,
+                   completeness, content_digest, last_commit_seq
             FROM source_coverage_sets
             WHERE source_instance_id = ?1
               AND owner_id = ?2
@@ -3417,18 +3461,35 @@ fn read_source_coverage_replay_baseline(
                 Ok((
                     row.get::<_, i64>(0)?,
                     row.get::<_, String>(1)?,
-                    row.get::<_, i64>(2)?,
+                    row.get::<_, Vec<u8>>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, Vec<u8>>(4)?,
+                    row.get::<_, i64>(5)?,
                 ))
             },
         )
         .optional()
         .map_err(|error| query_sqlite_error("read source coverage replay set", error))?;
-    let Some((coverage_set_id, completeness, last_commit_seq)) = set else {
+    let Some((
+        coverage_set_id,
+        adapter_id,
+        canonical_source_instance_key,
+        completeness,
+        content_digest,
+        last_commit_seq,
+    )) = set
+    else {
         transaction.commit().map_err(|error| {
             query_sqlite_error("finish empty source coverage replay baseline", error)
         })?;
         return Ok(None);
     };
+    if canonical_source_instance_key.len() != 32 || content_digest.len() != 32 {
+        return Err(EngineError::Sqlite {
+            operation: "validate source coverage replay baseline",
+            detail: "coverage baseline contains an invalid common identity".to_string(),
+        });
+    }
 
     let mut statement = transaction
         .prepare(
@@ -3485,7 +3546,10 @@ fn read_source_coverage_replay_baseline(
         .map_err(|error| query_sqlite_error("finish source coverage replay baseline", error))?;
     Ok(Some(SourceCoverageReplayBaseline {
         source_instance_id,
+        adapter_id,
+        canonical_source_instance_key,
         completeness,
+        content_digest,
         last_commit_seq: decode_nonnegative_u64(
             last_commit_seq,
             "source coverage replay commit sequence",

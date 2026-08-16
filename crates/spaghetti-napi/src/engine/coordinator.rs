@@ -54,7 +54,7 @@ use super::query_pool::{
     SourceCoverageReplayBaseline,
 };
 use super::runtime_semantic_projection::{USAGE_V2_PROJECTION_ID, USAGE_V2_PROJECTION_VERSION};
-use super::source_coverage::DurableCoverageSetUpdate;
+use super::source_coverage::{DurableCoverageSetPrecondition, DurableCoverageSetUpdate};
 use super::{EngineError, SpaghettiEngineCore};
 
 // One default append-driver batch can contain 1,024 records. Built-in
@@ -159,18 +159,46 @@ impl ReconcileRequest {
 /// the same lifecycle instead of an adapter-private reset path.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FactFamilyReplayRequest {
+    pub owner_id: String,
     pub family: String,
     pub version: u32,
     pub reason: String,
+    authorization: Option<FactFamilyReplayAuthorization>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FactFamilyReplayAuthorization {
+    adapter_id: String,
+    canonical_source_instance_key: Vec<u8>,
+    content_digest: Vec<u8>,
+    coverage_last_commit_seq: u64,
 }
 
 impl FactFamilyReplayRequest {
     pub fn usage_v2(reason: impl Into<String>) -> Self {
         Self {
+            owner_id: USAGE_V2_PROJECTION_ID.to_string(),
             family: USAGE_V2_PROJECTION_ID.to_string(),
             version: USAGE_V2_PROJECTION_VERSION,
             reason: reason.into(),
+            authorization: None,
         }
+    }
+
+    pub(crate) fn authorized(
+        mut self,
+        adapter_id: String,
+        canonical_source_instance_key: Vec<u8>,
+        content_digest: Vec<u8>,
+        coverage_last_commit_seq: u64,
+    ) -> Self {
+        self.authorization = Some(FactFamilyReplayAuthorization {
+            adapter_id,
+            canonical_source_instance_key,
+            content_digest,
+            coverage_last_commit_seq,
+        });
+        self
     }
 }
 
@@ -328,13 +356,14 @@ struct FactFamilyReplayContext {
     family: String,
     version: u32,
     baseline: BTreeMap<(Vec<u8>, Vec<u8>), (u64, bool)>,
+    precondition: DurableCoverageSetPrecondition,
 }
 
 impl FactFamilyReplayContext {
     fn from_durable(
-        family: &str,
-        version: u32,
+        request: &FactFamilyReplayRequest,
         expected_source_instance_id: u64,
+        owner_scope_key: &[u8],
         baseline: SourceCoverageReplayBaseline,
     ) -> Result<Self, EngineError> {
         if baseline.source_instance_id != expected_source_instance_id {
@@ -354,6 +383,19 @@ impl FactFamilyReplayContext {
                 "coverage baseline has invalid completeness or commit provenance",
             ));
         }
+        if let Some(authorization) = &request.authorization {
+            if authorization.adapter_id != baseline.adapter_id
+                || authorization.canonical_source_instance_key
+                    != baseline.canonical_source_instance_key
+                || authorization.content_digest != baseline.content_digest
+                || authorization.coverage_last_commit_seq != baseline.last_commit_seq
+            {
+                return Err(EngineError::InvalidConfig(
+                    "fact-family replay authorization is stale or belongs to another scope"
+                        .to_string(),
+                ));
+            }
+        }
         let mut members = BTreeMap::new();
         for member in baseline.members {
             if members
@@ -370,9 +412,19 @@ impl FactFamilyReplayContext {
             }
         }
         Ok(Self {
-            family: family.to_string(),
-            version,
+            family: request.family.clone(),
+            version: request.version,
             baseline: members,
+            precondition: DurableCoverageSetPrecondition {
+                owner_id: request.owner_id.clone(),
+                owner_scope_key: owner_scope_key.to_vec(),
+                family: request.family.clone(),
+                family_version: request.version,
+                adapter_id: baseline.adapter_id,
+                canonical_source_instance_key: baseline.canonical_source_instance_key,
+                expected_content_digest: baseline.content_digest,
+                expected_last_commit_seq: baseline.last_commit_seq,
+            },
         })
     }
 
@@ -1019,6 +1071,53 @@ impl ObservationCoordinator {
     /// discovered source instance. The durable coverage set is the baseline:
     /// every present baseline object must enter a later generation before the
     /// replacement barrier may become Ready.
+    pub(crate) fn replay_discovered_fact_family<A: AgentAdapter + ?Sized>(
+        &self,
+        adapter: &A,
+        configured_roots: Vec<PathBuf>,
+        target_stable_key: &[u8],
+        request: FactFamilyReplayRequest,
+    ) -> Result<ReconcileOutcome, EngineError> {
+        self.check_cancelled()?;
+        validate_request(&ReconcileRequest {
+            configured_roots: configured_roots.clone(),
+            reason: request.reason.clone(),
+        })?;
+        validate_fact_family_replay_request(&request)?;
+        let manifest = adapter.manifest();
+        manifest
+            .validate()
+            .map_err(|error| adapter_error("validate adapter manifest", error))?;
+        let observed_at = now_unix_ms()?;
+        let instances = catch_adapter_panic("discover replay source instance", || {
+            adapter.discover(&DiscoveryContext {
+                configured_roots,
+                observed_at,
+            })
+        })?
+        .map_err(|error| adapter_error("discover replay source instance", error))?;
+        let mut instance_keys = BTreeSet::new();
+        let mut selected = None;
+        for spec in instances {
+            let key = spec.stable_key.as_bytes().to_vec();
+            if !instance_keys.insert(key.clone()) {
+                return Err(observation_error(
+                    "validate replay source discovery",
+                    "adapter discovered the same stable instance key more than once",
+                ));
+            }
+            if key == target_stable_key {
+                selected = Some(spec);
+            }
+        }
+        let selected = selected.ok_or_else(|| {
+            EngineError::InvalidConfig(
+                "configured roots do not resolve the authorized replay source instance".to_string(),
+            )
+        })?;
+        self.replay_declared_instance_fact_family(adapter, selected, request)
+    }
+
     pub fn replay_declared_instance_fact_family<A: AgentAdapter + ?Sized>(
         &self,
         adapter: &A,
@@ -1033,12 +1132,13 @@ impl ObservationCoordinator {
             .map_err(|error| adapter_error("validate adapter manifest", error))?;
         spec.validate()
             .map_err(|error| adapter_error("validate source instance identity", error))?;
-        if request.family != USAGE_V2_PROJECTION_ID
+        if request.owner_id != USAGE_V2_PROJECTION_ID
+            || request.family != USAGE_V2_PROJECTION_ID
             || request.version != USAGE_V2_PROJECTION_VERSION
         {
             return Err(EngineError::InvalidConfig(format!(
-                "fact-family replay is not implemented for {} version {}",
-                request.family, request.version
+                "fact-family replay is not implemented for owner {} family {} version {}",
+                request.owner_id, request.family, request.version
             )));
         }
         if !declares_usage_v2_projection(manifest) {
@@ -1066,8 +1166,7 @@ impl ObservationCoordinator {
             let replay = self.load_fact_family_replay_context(
                 source_instance_id,
                 spec.stable_key.as_bytes(),
-                &request.family,
-                request.version,
+                &request,
             )?;
             let committed_at = now_unix_ms()?.max(started_at);
             let marker_commit =
@@ -1086,6 +1185,7 @@ impl ObservationCoordinator {
                             Some(USAGE_V2_REPLAY_PENDING_DETAIL),
                         )],
                         coverage_sets: Vec::new(),
+                        coverage_preconditions: vec![replay.precondition.clone()],
                     })?;
             let mut outcome = ReconcileOutcome {
                 instances_discovered: 1,
@@ -1233,17 +1333,16 @@ impl ObservationCoordinator {
         &self,
         source_instance_id: u64,
         scope_key: &[u8],
-        family: &str,
-        version: u32,
+        request: &FactFamilyReplayRequest,
     ) -> Result<FactFamilyReplayContext, EngineError> {
         let baseline = self
             .engine
             .source_coverage_replay_baseline(
                 source_instance_id,
-                family,
+                &request.owner_id,
                 scope_key,
-                family,
-                version,
+                &request.family,
+                request.version,
             )?
             .ok_or_else(|| {
                 observation_error(
@@ -1251,7 +1350,7 @@ impl ObservationCoordinator {
                     "no durable source-coverage baseline exists for the requested family",
                 )
             })?;
-        FactFamilyReplayContext::from_durable(family, version, source_instance_id, baseline)
+        FactFamilyReplayContext::from_durable(request, source_instance_id, scope_key, baseline)
     }
 
     fn resume_fact_family_replay(
@@ -1276,8 +1375,7 @@ impl ObservationCoordinator {
         self.load_fact_family_replay_context(
             instance.id,
             instance.spec.stable_key.as_bytes(),
-            USAGE_V2_PROJECTION_ID,
-            USAGE_V2_PROJECTION_VERSION,
+            &FactFamilyReplayRequest::usage_v2("resume durable explicit replay"),
         )
         .map(Some)
     }
@@ -1526,6 +1624,7 @@ impl ObservationCoordinator {
                         Some(USAGE_V2_REPLAY_PENDING_DETAIL),
                     )],
                     coverage_sets: Vec::new(),
+                    coverage_preconditions: Vec::new(),
                 })?;
             if let Some(commit_seq) = commit_seq {
                 outcome.commits = outcome.commits.saturating_add(1);
@@ -1558,6 +1657,7 @@ impl ObservationCoordinator {
                     detail.as_deref(),
                 )],
                 coverage_sets: vec![coverage_set],
+                coverage_preconditions: Vec::new(),
             })?;
         if let Some(commit_seq) = commit_seq {
             outcome.commits = outcome.commits.saturating_add(1);
@@ -5257,16 +5357,31 @@ fn validate_request(request: &ReconcileRequest) -> Result<(), EngineError> {
 fn validate_fact_family_replay_request(
     request: &FactFamilyReplayRequest,
 ) -> Result<(), EngineError> {
-    if request.family.trim().is_empty()
+    if request.owner_id.trim().is_empty()
+        || request.owner_id.len() > 256
+        || request.family.trim().is_empty()
         || request.family.len() > 256
         || request.version == 0
         || request.reason.trim().is_empty()
         || request.reason.len() > 4 * 1024
     {
         return Err(EngineError::InvalidConfig(
-            "fact-family replay requires a bounded family, positive version, and bounded reason"
+            "fact-family replay requires a bounded owner/family, positive version, and bounded reason"
                 .to_string(),
         ));
+    }
+    if let Some(authorization) = &request.authorization {
+        if authorization.adapter_id.trim().is_empty()
+            || authorization.adapter_id.len() > 256
+            || authorization.canonical_source_instance_key.len() != 32
+            || authorization.content_digest.len() != 32
+            || authorization.coverage_last_commit_seq == 0
+        {
+            return Err(EngineError::InvalidConfig(
+                "fact-family replay authorization has an empty, unbounded, or invalid field"
+                    .to_string(),
+            ));
+        }
     }
     Ok(())
 }
@@ -5513,8 +5628,8 @@ mod tests {
     use tempfile::TempDir;
 
     use crate::adapter::{
-        AdapterId, AdapterManifest, ConsistencyPolicy, DecodeContext, DecoderId, EntityScope, Fact,
-        ObjectSelector, SourceInstanceKey, SourceRoot, StreamId,
+        AdapterId, AdapterManifest, AdapterRegistry, ConsistencyPolicy, DecodeContext, DecoderId,
+        EntityScope, Fact, ObjectSelector, SourceInstanceKey, SourceRoot, StreamId,
     };
     use crate::claude::ClaudeCodeAdapter;
     use crate::decode_runtime::MAX_DIAGNOSTIC_EXCERPT_BYTES;
@@ -5930,6 +6045,7 @@ mod tests {
                 QueryCancellationToken::default(),
             )
             .unwrap();
+        let first_coverage_authorization = first_coverage_page.coverage.clone().unwrap();
         assert_eq!(first_coverage_page.items.len(), 1);
         assert_eq!(first_coverage_page.items[0].kind, "point");
         let first_coverage_cursor = first_coverage_page.next_cursor.unwrap();
@@ -5993,6 +6109,30 @@ mod tests {
             ),
             Err(EngineError::InvalidQuery(detail)) if detail.contains("cursor expired")
         ));
+        assert!(matches!(
+            engine.replay_fact_family_cancellable(
+                crate::engine::FactFamilyReplayCommand {
+                    adapter_id: first_coverage_authorization.adapter_id.clone(),
+                    configured_roots: vec![fixture.root.clone()],
+                    project_id: project_id.clone(),
+                    session_id: session_id.clone(),
+                    owner_id: USAGE_V2_PROJECTION_ID.to_string(),
+                    family: USAGE_V2_PROJECTION_ID.to_string(),
+                    family_version: USAGE_V2_PROJECTION_VERSION,
+                    expected_source_instance_ref: first_coverage_authorization
+                        .source_instance_ref
+                        .clone(),
+                    expected_content_digest_ref: first_coverage_authorization
+                        .content_digest_ref
+                        .clone(),
+                    expected_coverage_last_commit_seq: first_coverage_authorization
+                        .last_commit_seq,
+                    reason: "stale authorization must fail".to_string(),
+                },
+                QueryCancellationToken::default(),
+            ),
+            Err(EngineError::InvalidQuery(detail)) if detail.contains("authorization is stale")
+        ));
 
         // Repairing/replacing the native file through an ordinary reconcile
         // is not sufficient proof: the sticky gap remains unavailable even
@@ -6014,24 +6154,119 @@ mod tests {
         let settings_before =
             catalog_object(&engine, &fixture.root, "interpretation-settings").generation;
 
-        let adapter = ClaudeCodeAdapter::new();
-        let spec = adapter
-            .discover(&DiscoveryContext {
-                configured_roots: vec![fixture.root.clone()],
-                observed_at: now_unix_ms().unwrap(),
-            })
+        let replay_authorization = engine
+            .fact_family_coverage_cancellable(
+                coverage_request(None),
+                QueryCancellationToken::default(),
+            )
             .unwrap()
-            .into_iter()
-            .next()
+            .coverage
             .unwrap();
-        let replayed = ObservationCoordinator::new(Arc::clone(&engine))
-            .replay_declared_instance_fact_family(
-                &adapter,
-                spec,
-                FactFamilyReplayRequest::usage_v2("test corrected coverage replay"),
+        let wrong_root_path = fixture.root.parent().unwrap().join("other-source");
+        std::fs::create_dir_all(&wrong_root_path).unwrap();
+        let wrong_root = engine.replay_fact_family_cancellable(
+            crate::engine::FactFamilyReplayCommand {
+                adapter_id: replay_authorization.adapter_id.clone(),
+                configured_roots: vec![wrong_root_path],
+                project_id: project_id.clone(),
+                session_id: session_id.clone(),
+                owner_id: USAGE_V2_PROJECTION_ID.to_string(),
+                family: USAGE_V2_PROJECTION_ID.to_string(),
+                family_version: USAGE_V2_PROJECTION_VERSION,
+                expected_source_instance_ref: replay_authorization.source_instance_ref.clone(),
+                expected_content_digest_ref: replay_authorization.content_digest_ref.clone(),
+                expected_coverage_last_commit_seq: replay_authorization.last_commit_seq,
+                reason: "wrong configured root must fail".to_string(),
+            },
+            QueryCancellationToken::default(),
+        );
+        assert!(
+            matches!(
+                &wrong_root,
+                Err(EngineError::InvalidConfig(detail)) if detail.contains("configured roots")
+            ),
+            "unexpected wrong-root result: {wrong_root:?}"
+        );
+        let connection =
+            Connection::open_with_flags(&fixture.database, OpenFlags::SQLITE_OPEN_READ_ONLY)
+                .unwrap();
+        let (source_instance_id, owner_scope_key, canonical_source_instance_key) = connection
+            .query_row(
+                r#"
+                SELECT source_instance_id, owner_scope_key,
+                       canonical_source_instance_key
+                FROM source_coverage_sets
+                WHERE owner_id = 'runtime.usage-v2'
+                "#,
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, Vec<u8>>(1)?,
+                        row.get::<_, Vec<u8>>(2)?,
+                    ))
+                },
             )
             .unwrap();
-        assert_eq!(replayed.records_decoded, 1);
+        drop(connection);
+        let commits_before_stale_writer = count_rows(&fixture.database, "ingest_commits");
+        let now = now_unix_ms().unwrap();
+        let stale_writer = engine.commit_projection_versions(ProjectionVersionCommit {
+            source_instance_id: u64::try_from(source_instance_id).unwrap(),
+            reason: "test stale replay writer authorization".to_string(),
+            started_at: now,
+            committed_at: now,
+            projection_versions: vec![ProjectionVersionUpdate {
+                projection_id: USAGE_V2_PROJECTION_ID.to_string(),
+                scope_key: owner_scope_key.clone(),
+                desired_version: USAGE_V2_PROJECTION_VERSION,
+                completed_version: None,
+                readiness: ProjectionReadiness::Pending,
+                detail: Some(USAGE_V2_REPLAY_PENDING_DETAIL.to_string()),
+            }],
+            coverage_sets: Vec::new(),
+            coverage_preconditions: vec![
+                crate::engine::source_coverage::DurableCoverageSetPrecondition {
+                    owner_id: USAGE_V2_PROJECTION_ID.to_string(),
+                    owner_scope_key,
+                    family: USAGE_V2_PROJECTION_ID.to_string(),
+                    family_version: USAGE_V2_PROJECTION_VERSION,
+                    adapter_id: "claude-code".to_string(),
+                    canonical_source_instance_key,
+                    expected_content_digest: vec![0; 32],
+                    expected_last_commit_seq: replay_authorization.last_commit_seq,
+                },
+            ],
+        });
+        assert!(matches!(
+            stale_writer,
+            Err(EngineError::InvalidCommit(detail)) if detail.contains("authorization is stale")
+        ));
+        assert_eq!(
+            count_rows(&fixture.database, "ingest_commits"),
+            commits_before_stale_writer,
+            "writer-side replay authorization failure must roll back the transition"
+        );
+        let replayed = engine
+            .replay_fact_family_cancellable(
+                crate::engine::FactFamilyReplayCommand {
+                    adapter_id: replay_authorization.adapter_id.clone(),
+                    configured_roots: vec![fixture.root.clone()],
+                    project_id: project_id.clone(),
+                    session_id: session_id.clone(),
+                    owner_id: USAGE_V2_PROJECTION_ID.to_string(),
+                    family: USAGE_V2_PROJECTION_ID.to_string(),
+                    family_version: USAGE_V2_PROJECTION_VERSION,
+                    expected_source_instance_ref: replay_authorization.source_instance_ref,
+                    expected_content_digest_ref: replay_authorization.content_digest_ref,
+                    expected_coverage_last_commit_seq: replay_authorization.last_commit_seq,
+                    reason: "test corrected coverage replay".to_string(),
+                },
+                QueryCancellationToken::default(),
+            )
+            .unwrap();
+        assert_eq!(replayed.contract_version, 1);
+        assert_eq!(replayed.outcome.records_decoded, 1);
         let replayed_object = catalog_object(&engine, &fixture.root, "session-transcripts");
         assert_eq!(replayed_object.generation, repaired_object.generation + 1);
         assert_eq!(
@@ -6987,12 +7222,18 @@ mod tests {
         }
 
         fn open_engine(&self) -> Arc<SpaghettiEngineCore> {
-            SpaghettiEngineCore::open(EngineOptions {
-                database_path: self.database.clone(),
-                query_workers: Some(1),
-                owner_label: Some("coordinator-test".to_string()),
-                defer_query_structures: false,
-            })
+            SpaghettiEngineCore::open_with_registry(
+                EngineOptions {
+                    database_path: self.database.clone(),
+                    query_workers: Some(1),
+                    owner_label: Some("coordinator-test".to_string()),
+                    defer_query_structures: false,
+                },
+                AdapterRegistry::builder()
+                    .register(ClaudeCodeAdapter::new())
+                    .build_legacy()
+                    .unwrap(),
+            )
             .unwrap()
         }
 

@@ -15,8 +15,8 @@
     "ads": { "path": "agent-support/claude-code/candidate-2026-08-15/ads.json", "sha256": "sha256:2ed3c1c7cdc0c9a0ac198e92a3265e4f2563be688572cb70d710d1ee44ff6aef" },
     "source_declaration": { "path": "agent-support/claude-code/candidate-2026-08-15/source-declarations.json", "sha256": "sha256:17a0f1aa7490b5c03a525f7606a7a02ee6d1919cc8b9b776597843f1edbf1ebe" },
     "scope_program": { "path": "agent-support/claude-code/candidate-2026-08-15/scope-programs.json", "sha256": "sha256:689c86b9770544f826da37e72d1c4a1a37153fad4091372b954bba90ca2d5f7c" },
-    "evidence": { "path": "agent-support/claude-code/candidate-2026-08-15/evidence.json", "sha256": "sha256:6cafdd25fee9f5d0003b51e4dd87d6e015feaf1054676da362c15139cc6c5098" },
-    "conformance": { "path": "agent-support/claude-code/candidate-2026-08-15/conformance.json", "sha256": "sha256:d45dff0fef70b7d45d378a4ac54c46b000c6a309af7261d9ab3d9976474e25b0" }
+    "evidence": { "path": "agent-support/claude-code/candidate-2026-08-15/evidence.json", "sha256": "sha256:0ea3f3728efc3c1d19a42c5c8414c0eb458f9e8f9197c6ef774b7e768a9faeee" },
+    "conformance": { "path": "agent-support/claude-code/candidate-2026-08-15/conformance.json", "sha256": "sha256:bfdee9ddc3e9b0dd3f39930eee4d5646923f3a8e43e30f6bde16da3e532ebf48" }
   },
   "versions": {
     "adapter_package": "0.7.0",
@@ -33,7 +33,7 @@
   "capabilities": [
     { "capability_id": "project-session-catalog", "topology": "catalog", "level": "unsupported", "notes": "RFC 012B catalog assertions and tier composition are not implemented." },
     { "capability_id": "history-and-secondary-facts", "topology": "durable", "level": "supported", "notes": "Current Rust adapter streams project to the existing database, but this candidate is not runtime-selectable." },
-    { "capability_id": "usage-v2-runtime-semantics", "topology": "durable", "level": "unsupported", "notes": "Canonical response and actor revisions, durable response/affiliation shadow reducers, workflow correlation, independent frozen sanitized-oracle parity, the versioned public shadow query, writer-owned pack readiness, normalized durable source/family coverage with a generic bounded public query, and engine-internal crash-resumable replay recovery are implemented; public replay authorization/exposure, private native corpus-scale parity, native team-to-actor correlation, and default query migration remain pending." },
+    { "capability_id": "usage-v2-runtime-semantics", "topology": "durable", "level": "unsupported", "notes": "Canonical response and actor revisions, durable response/affiliation shadow reducers, workflow correlation, independent frozen sanitized-oracle parity, the versioned public shadow query, writer-owned pack readiness, normalized durable source/family coverage with a generic bounded public query, crash-resumable replay recovery, and stale-safe public replay authorization through N-API and the sole-owner host are implemented; private native corpus-scale parity, native team-to-actor correlation, and default query migration remain pending." },
     { "capability_id": "root-descendant-observation", "topology": "scoped", "level": "unsupported", "notes": "ScopeProgram is incomplete and common observer delivery is pending." },
     { "capability_id": "interaction-lifecycle", "topology": "scoped", "level": "unsupported", "notes": "AskUserQuestion lifecycle facts and correction delivery are pending." }
   ],
@@ -60,7 +60,7 @@
   "lifecycle": { "candidate_at": "2026-08-15", "promoted_at": null, "retired_at": null, "supersedes": null, "superseded_by": null },
   "known_limitations": [
     "Candidate entries never confer runtime support.",
-    "Catalog readiness, public usage-v2 replay authorization/exposure and default migration, interaction, and scoped observation contracts are not implemented.",
+    "Catalog readiness, usage-v2 default migration, interaction, and scoped observation contracts are not implemented.",
     "Source-instance move/clone and identity reuse behavior lack adversarial conformance.",
     "Active-session nameSince remains opaque native metadata and cannot drive common ordering, activity, or lifecycle semantics without transition fixtures.",
     "Settings autoMode remains sensitive native-only policy configuration and cannot establish effective runtime mode without transition fixtures.",

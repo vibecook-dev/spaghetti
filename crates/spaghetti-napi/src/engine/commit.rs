@@ -174,6 +174,7 @@ pub struct ProjectionVersionCommit {
     pub committed_at: i64,
     pub projection_versions: Vec<ProjectionVersionUpdate>,
     pub coverage_sets: Vec<DurableCoverageSetUpdate>,
+    pub coverage_preconditions: Vec<source_coverage::DurableCoverageSetPrecondition>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -434,6 +435,11 @@ pub(super) fn apply_projection_version_commit(
             "projection version commit references an unknown source instance".to_string(),
         ));
     }
+    source_coverage::assert_preconditions(
+        &transaction,
+        request.source_instance_id,
+        &request.coverage_preconditions,
+    )?;
     let projection_versions_changed =
         projection_versions_changed(&transaction, &request.projection_versions)?;
     let coverage_changed = source_coverage::updates_changed(&transaction, &request.coverage_sets)?;
@@ -810,6 +816,7 @@ fn validate_projection_version_commit(
     }
     validate_projection_versions(&request.projection_versions)?;
     source_coverage::validate_updates(&request.coverage_sets)?;
+    source_coverage::validate_preconditions(&request.coverage_preconditions)?;
     for coverage in &request.coverage_sets {
         if !request.projection_versions.iter().any(|projection| {
             projection.projection_id == coverage.owner_id
@@ -2160,6 +2167,7 @@ mod tests {
             committed_at: 1_301,
             projection_versions: vec![pending.clone()],
             coverage_sets: Vec::new(),
+            coverage_preconditions: Vec::new(),
         };
         let receipt = apply_projection_version_commit(&mut connection, &pending_request)
             .unwrap()
@@ -2188,6 +2196,7 @@ mod tests {
                 ..pending
             }],
             coverage_sets: Vec::new(),
+            coverage_preconditions: Vec::new(),
         };
         let ready = apply_projection_version_commit(&mut connection, &ready_request)
             .unwrap()

@@ -1562,6 +1562,40 @@ export interface SpaghettiEngineFactFamilyCoveragePage {
   nextCursor?: string;
 }
 
+/**
+ * Explicit replacement command authorized by one coverage snapshot. All
+ * `expected*` fields must be copied from the same materialized coverage set.
+ */
+export interface SpaghettiEngineFactFamilyReplayOptions {
+  /** Open adapter identifier registered by the native composition root. */
+  adapterId: string;
+  /** Configured native data roots understood by the selected adapter. */
+  roots: string[];
+  projectId: string;
+  sessionId: string;
+  ownerId: string;
+  family: string;
+  familyVersion: number;
+  expectedSourceInstanceRef: string;
+  expectedContentDigestRef: string;
+  expectedCoverageLastCommitSeq: number;
+  /** Bounded durable audit reason for this replacement command. */
+  reason: string;
+}
+
+export interface SpaghettiEngineFactFamilyReplayResult {
+  contractVersion: number;
+  projectId: string;
+  sessionId: string;
+  ownerId: string;
+  family: string;
+  familyVersion: number;
+  authorizedSourceInstanceRef: string;
+  authorizedContentDigestRef: string;
+  authorizedCoverageLastCommitSeq: number;
+  outcome: SpaghettiEngineReconcileResult;
+}
+
 export interface SpaghettiEngineRuntimeSnapshotOptions extends SpaghettiEngineHistoryPageOptions {
   /** Optional project scope. Omit it to retain orphan run/presence evidence. */
   projectId?: string;
@@ -1928,6 +1962,10 @@ export interface SpaghettiEngine {
     options: SpaghettiEngineFactFamilyCoverageOptions,
     signal?: AbortSignal,
   ): Promise<SpaghettiEngineFactFamilyCoveragePage>;
+  replayFactFamily(
+    options: SpaghettiEngineFactFamilyReplayOptions,
+    signal?: AbortSignal,
+  ): Promise<SpaghettiEngineFactFamilyReplayResult>;
   getRuntimeSnapshot(
     options?: SpaghettiEngineRuntimeSnapshotOptions,
     signal?: AbortSignal,

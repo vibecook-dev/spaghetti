@@ -181,6 +181,71 @@ describe('multi-adapter observation host', { skip: !native }, () => {
     assert.equal(afterRestart.commitSeq, beforeRefresh);
   });
 
+  test('authorizes fact-family replay against current coverage and configured roots', async () => {
+    const fixture = multiAdapterFixture();
+    const host = await openObservationHost({
+      dbPath: fixture.dbPath,
+      sources: [fixture.sources[0]!],
+      ownerLabel: 'fact-family-replay-host-test',
+    });
+    hosts.push(host);
+    assert.equal(
+      (host.clientInfo.methods as readonly string[]).includes('replayFactFamily'),
+      false,
+      'the transport-neutral client must remain read-only',
+    );
+
+    const projects = await host.client.listProjects({ limit: 10 });
+    const projectId = projects.items[0]?.projectId;
+    assert.ok(projectId);
+    const sessions = await host.client.listSessions({ projectId, limit: 10 });
+    const sessionId = sessions.items[0]?.sessionId;
+    assert.ok(sessionId);
+    const coverage = await host.client.getFactFamilyCoverage({
+      projectId,
+      sessionId,
+      ownerId: 'runtime.usage-v2',
+      family: 'runtime.usage-v2',
+      familyVersion: 1,
+      limit: 1,
+    });
+    assert.equal(coverage.status, 'materialized');
+    assert.ok(coverage.coverage);
+
+    await assert.rejects(
+      host.replayFactFamily({
+        adapterId: 'codex',
+        projectId,
+        sessionId,
+        ownerId: 'runtime.usage-v2',
+        family: 'runtime.usage-v2',
+        familyVersion: 1,
+        expectedSourceInstanceRef: coverage.coverage.sourceInstanceRef,
+        expectedContentDigestRef: coverage.coverage.contentDigestRef,
+        expectedCoverageLastCommitSeq: coverage.coverage.lastCommitSeq,
+        reason: 'unconfigured adapter must fail',
+      }),
+      /not configured/i,
+    );
+    const request = {
+      adapterId: 'claude-code',
+      projectId,
+      sessionId,
+      ownerId: 'runtime.usage-v2',
+      family: 'runtime.usage-v2',
+      familyVersion: 1,
+      expectedSourceInstanceRef: coverage.coverage.sourceInstanceRef,
+      expectedContentDigestRef: coverage.coverage.contentDigestRef,
+      expectedCoverageLastCommitSeq: coverage.coverage.lastCommitSeq,
+      reason: 'host explicit replay contract test',
+    };
+    const replay = await host.replayFactFamily(request);
+    assert.equal(replay.contractVersion, 1);
+    assert.equal(replay.authorizedCoverageLastCommitSeq, request.expectedCoverageLastCommitSeq);
+    assert.ok(replay.outcome.recordsDecoded > 0);
+    await assert.rejects(host.replayFactFamily(request), /authorization is stale/i);
+  });
+
   test('serves one source-neutral product API for Claude, Codex, and Grok', async () => {
     const fixture = multiAdapterFixture();
     const service = createObservationService({

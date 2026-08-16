@@ -766,6 +766,25 @@ replacement protocol:
    a new quarantine ends the attempt as `Unavailable` and requires another
    explicit replay after correction.
 
+The public replay authorization is an optimistic compare-and-set, not a bare
+reset switch. A caller must first read one materialized
+`getFactFamilyCoverage` set and echo its `source_instance_ref`,
+`content_digest_ref`, and coverage `last_commit_seq`, together with the exact
+project/session, owner, family/version, adapter, configured roots, and a bounded
+audit reason. The engine resolves the opaque scope to one private source stable
+key before discovery, rechecks the authorization after acquiring the instance
+reconcile lease, and the writer compares the same set identity/digest/commit in
+the transaction that publishes `Pending`. A stale token, cross-scope token,
+wrong adapter, wrong configured root, or failed writer comparison creates no
+commit and advances no generation.
+
+Low-level N-API exposes `replayFactFamily` with explicit roots. The sole-owner
+observation host exposes the same command without a roots field and injects
+only the roots configured for that adapter. The transport-neutral query/IPC
+client remains read-only and cannot initiate replay. Successful return means
+the bounded replay attempt ran; callers re-read coverage/readiness to determine
+whether it reached `Ready`, remains `Pending`, or ended `Unavailable`.
+
 An ordinary reconciliation automatically resumes a durable replay marker, but
 cannot create that marker or clear a sticky gap. Historical diagnostic rows
 remain auditable; current readiness is justified by the replacement coverage
@@ -853,12 +872,12 @@ position, record, revision, membership, declaration, and content identities
 are versioned opaque common references. `not_materialized` is distinct from an
 empty complete set.
 
-The engine-internal explicit replay/restart path is implemented for usage-v2,
-including bounded append continuation and old-generation retraction without
-duplicate response contributions. A public host/SDK replay request with an
-authorization contract, private native corpus-scale qualification/coverage
-parity, native team-to-actor conformance, the default switch in step 6, step
-7's compatibility/rollback window, and remaining crash boundaries are open.
+The explicit replay/restart path and its public stale-safe authorization are
+implemented for usage-v2, including bounded append continuation and
+old-generation retraction without duplicate response contributions. Private
+native corpus-scale qualification/coverage parity, native team-to-actor
+conformance, the default switch in step 6, step 7's compatibility/rollback
+window, and remaining crash boundaries are open.
 Until those gates pass, the candidate capability is unsupported and
 `getUsage`/`getUsageActivity` retain legacy semantics.
 

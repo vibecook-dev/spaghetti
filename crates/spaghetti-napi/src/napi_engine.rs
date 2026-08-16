@@ -19,34 +19,35 @@ use crate::engine::{
     DelegationPageRequest, DelegationSummary, DurableChange, EngineError, EngineHealthSnapshot,
     EngineOptions, EngineOverview, EngineStatusSnapshot, FactFamilyCoverageItem,
     FactFamilyCoveragePage, FactFamilyCoveragePageRequest, FactFamilyCoverageSetSummary,
-    HistoryProjectIndexSummary, HistoryProjectPage, HistoryProjectPageRequest,
-    HistoryProjectSummary, HistorySessionIndexSummary, HistorySessionPage,
-    HistorySessionPageRequest, HistorySessionSummary, MemoryDocument, MemoryDocumentPage,
-    MemoryDocumentPageRequest, MessageDetail, MessagePage, MessagePageRequest, NamedCount,
-    NamedLatencySnapshot, ObservationStatusSnapshot, ObservationSupervisorOptions, OwnerMetadata,
-    PlanDetail, PlanPage, PlanPageRequest, QueryCancellationToken, QueryPerformanceSnapshot,
-    ReconcileOutcome, ReconcileRequest, RunStateLookup, RunStateRequest, RuntimePresenceSnapshot,
-    RuntimeRunEvidence, RuntimeRunSnapshot, RuntimeSnapshot, RuntimeSnapshotRequest,
-    RuntimeUsageV2ActorContext, RuntimeUsageV2Affiliation, RuntimeUsageV2Aggregate,
-    RuntimeUsageV2BucketAggregate, RuntimeUsageV2ExternalEntityRef, RuntimeUsageV2Page,
-    RuntimeUsageV2PageRequest, RuntimeUsageV2ProjectionReadiness, RuntimeUsageV2Response,
-    RuntimeUsageV2SemanticRevisionRef, RuntimeUsageV2TextValue, RuntimeUsageV2TokenValue,
-    RuntimeUsageV2ValueProvenance, SearchHit, SearchPage, SearchPageRequest, SessionDetail,
-    SessionDetails, SessionDetailsRequest, SessionIndexDetail, SourceCapabilitySummary,
-    SourceDimensionPerformanceSnapshot, SourcePage, SourcePageRequest, SourcePerformanceSnapshot,
-    SourcePipelineSnapshot, SourceSummary, SpaghettiEngineCore, StoragePerformanceSnapshot,
-    TaskCollectionPage, TaskCollectionPageRequest, TaskCollectionSummary, TaskDetail, TaskPage,
-    TaskPageRequest, TeamConfigSummary, TeamDetails, TeamDetailsRequest, TeamInboxMessage,
-    TeamInboxMessagePage, TeamInboxMessagePageRequest, TeamInboxPage, TeamInboxPageRequest,
-    TeamInboxSummary, TeamMember, TeamPage, TeamPageRequest, TeamSummary, TimelineFacets,
-    TimelineMessage, TimelinePage, TimelinePageRequest, ToolResultDetail, ToolResultPage,
-    ToolResultPageRequest, UntimedUsageSummary, UsageActivityDay, UsageActivityReport,
-    UsageActivityRequest, UsageAggregate, UsageCoverageSummary, UsageScopeRequest,
-    UsageTokenValues, UsageTotalsReport, WorkflowDetails, WorkflowDetailsRequest, WorkflowMember,
-    WorkflowMemberPage, WorkflowMemberPageRequest, WorkflowPage, WorkflowPageRequest,
-    WorkflowSummary, WriterPerformanceSnapshot, CHANGE_REPLAY_CONTRACT_VERSION,
-    DEFAULT_CAPABILITY_PAGE_LIMIT, DEFAULT_CHANGE_REPLAY_LIMIT, DEFAULT_COMMIT_WAIT_TIMEOUT_MS,
-    DEFAULT_DETAIL_PAGE_LIMIT, DEFAULT_FACT_FAMILY_COVERAGE_PAGE_LIMIT, DEFAULT_HISTORY_PAGE_LIMIT,
+    FactFamilyReplayCommand, FactFamilyReplayResult, HistoryProjectIndexSummary,
+    HistoryProjectPage, HistoryProjectPageRequest, HistoryProjectSummary,
+    HistorySessionIndexSummary, HistorySessionPage, HistorySessionPageRequest,
+    HistorySessionSummary, MemoryDocument, MemoryDocumentPage, MemoryDocumentPageRequest,
+    MessageDetail, MessagePage, MessagePageRequest, NamedCount, NamedLatencySnapshot,
+    ObservationStatusSnapshot, ObservationSupervisorOptions, OwnerMetadata, PlanDetail, PlanPage,
+    PlanPageRequest, QueryCancellationToken, QueryPerformanceSnapshot, ReconcileOutcome,
+    ReconcileRequest, RunStateLookup, RunStateRequest, RuntimePresenceSnapshot, RuntimeRunEvidence,
+    RuntimeRunSnapshot, RuntimeSnapshot, RuntimeSnapshotRequest, RuntimeUsageV2ActorContext,
+    RuntimeUsageV2Affiliation, RuntimeUsageV2Aggregate, RuntimeUsageV2BucketAggregate,
+    RuntimeUsageV2ExternalEntityRef, RuntimeUsageV2Page, RuntimeUsageV2PageRequest,
+    RuntimeUsageV2ProjectionReadiness, RuntimeUsageV2Response, RuntimeUsageV2SemanticRevisionRef,
+    RuntimeUsageV2TextValue, RuntimeUsageV2TokenValue, RuntimeUsageV2ValueProvenance, SearchHit,
+    SearchPage, SearchPageRequest, SessionDetail, SessionDetails, SessionDetailsRequest,
+    SessionIndexDetail, SourceCapabilitySummary, SourceDimensionPerformanceSnapshot, SourcePage,
+    SourcePageRequest, SourcePerformanceSnapshot, SourcePipelineSnapshot, SourceSummary,
+    SpaghettiEngineCore, StoragePerformanceSnapshot, TaskCollectionPage, TaskCollectionPageRequest,
+    TaskCollectionSummary, TaskDetail, TaskPage, TaskPageRequest, TeamConfigSummary, TeamDetails,
+    TeamDetailsRequest, TeamInboxMessage, TeamInboxMessagePage, TeamInboxMessagePageRequest,
+    TeamInboxPage, TeamInboxPageRequest, TeamInboxSummary, TeamMember, TeamPage, TeamPageRequest,
+    TeamSummary, TimelineFacets, TimelineMessage, TimelinePage, TimelinePageRequest,
+    ToolResultDetail, ToolResultPage, ToolResultPageRequest, UntimedUsageSummary, UsageActivityDay,
+    UsageActivityReport, UsageActivityRequest, UsageAggregate, UsageCoverageSummary,
+    UsageScopeRequest, UsageTokenValues, UsageTotalsReport, WorkflowDetails,
+    WorkflowDetailsRequest, WorkflowMember, WorkflowMemberPage, WorkflowMemberPageRequest,
+    WorkflowPage, WorkflowPageRequest, WorkflowSummary, WriterPerformanceSnapshot,
+    CHANGE_REPLAY_CONTRACT_VERSION, DEFAULT_CAPABILITY_PAGE_LIMIT, DEFAULT_CHANGE_REPLAY_LIMIT,
+    DEFAULT_COMMIT_WAIT_TIMEOUT_MS, DEFAULT_DETAIL_PAGE_LIMIT,
+    DEFAULT_FACT_FAMILY_COVERAGE_PAGE_LIMIT, DEFAULT_HISTORY_PAGE_LIMIT,
     DEFAULT_ORCHESTRATION_PAGE_LIMIT, DEFAULT_RUNTIME_PAGE_LIMIT,
     DEFAULT_RUNTIME_USAGE_V2_PAGE_LIMIT, DEFAULT_SEARCH_PAGE_LIMIT, DEFAULT_TEAM_PAGE_LIMIT,
     DEFAULT_TIMELINE_PAGE_LIMIT, MAX_CHANGE_REPLAY_PAYLOAD_BYTES,
@@ -2780,6 +2781,60 @@ pub struct EngineFactFamilyCoveragePage {
     pub next_cursor: Option<String>,
 }
 
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct EngineFactFamilyReplayOptions {
+    /// Open adapter identifier registered by the native composition root.
+    pub adapter_id: String,
+    /// Configured native data roots understood by the selected adapter.
+    pub roots: Vec<String>,
+    pub project_id: String,
+    pub session_id: String,
+    pub owner_id: String,
+    pub family: String,
+    pub family_version: u32,
+    /// Echoed from `getFactFamilyCoverage().coverage.sourceInstanceRef`.
+    pub expected_source_instance_ref: String,
+    /// Echoed from `getFactFamilyCoverage().coverage.contentDigestRef`.
+    pub expected_content_digest_ref: String,
+    /// Echoed from `getFactFamilyCoverage().coverage.lastCommitSeq`.
+    pub expected_coverage_last_commit_seq: f64,
+    /// Bounded durable audit reason for this replacement command.
+    pub reason: String,
+}
+
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct EngineFactFamilyReplayResult {
+    pub contract_version: u32,
+    pub project_id: String,
+    pub session_id: String,
+    pub owner_id: String,
+    pub family: String,
+    pub family_version: u32,
+    pub authorized_source_instance_ref: String,
+    pub authorized_content_digest_ref: String,
+    pub authorized_coverage_last_commit_seq: f64,
+    pub outcome: EngineReconcileResult,
+}
+
+impl From<FactFamilyReplayResult> for EngineFactFamilyReplayResult {
+    fn from(value: FactFamilyReplayResult) -> Self {
+        Self {
+            contract_version: value.contract_version,
+            project_id: value.project_id,
+            session_id: value.session_id,
+            owner_id: value.owner_id,
+            family: value.family,
+            family_version: value.family_version,
+            authorized_source_instance_ref: value.authorized_source_instance_ref,
+            authorized_content_digest_ref: value.authorized_content_digest_ref,
+            authorized_coverage_last_commit_seq: value.authorized_coverage_last_commit_seq as f64,
+            outcome: value.outcome.into(),
+        }
+    }
+}
+
 impl From<FactFamilyCoveragePage> for EngineFactFamilyCoveragePage {
     fn from(value: FactFamilyCoveragePage) -> Self {
         Self {
@@ -4338,6 +4393,25 @@ impl SpaghettiEngine {
         )
     }
 
+    /// Replace one fact family's durable evidence after a caller explicitly
+    /// echoes the current source, digest, and coverage commit authorization.
+    #[napi(ts_return_type = "Promise<EngineFactFamilyReplayResult>")]
+    pub fn replay_fact_family(
+        &self,
+        options: EngineFactFamilyReplayOptions,
+        signal: Option<AbortSignal>,
+    ) -> AsyncTask<FactFamilyReplayTask> {
+        let cancellation = cancellation_for_signal(signal.as_ref());
+        AsyncTask::with_optional_signal(
+            FactFamilyReplayTask {
+                engine: Arc::clone(&self.inner),
+                options,
+                cancellation,
+            },
+            signal,
+        )
+    }
+
     /// Return durable run-state and current registry-presence evidence. This
     /// intentionally does not probe PIDs or synthesize freshness assessments.
     #[napi(ts_return_type = "Promise<EngineRuntimeSnapshot>")]
@@ -4842,6 +4916,12 @@ pub struct RuntimeUsageV2Task {
 pub struct FactFamilyCoverageTask {
     engine: Arc<SpaghettiEngineCore>,
     options: EngineFactFamilyCoverageOptions,
+    cancellation: QueryCancellationToken,
+}
+
+pub struct FactFamilyReplayTask {
+    engine: Arc<SpaghettiEngineCore>,
+    options: EngineFactFamilyReplayOptions,
     cancellation: QueryCancellationToken,
 }
 
@@ -5594,6 +5674,43 @@ impl Task for FactFamilyCoverageTask {
     }
 }
 
+impl Task for FactFamilyReplayTask {
+    type Output = EngineFactFamilyReplayResult;
+    type JsValue = EngineFactFamilyReplayResult;
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        validate_roots(&self.options.roots, "replayFactFamily")?;
+        let expected_coverage_last_commit_seq = safe_u64_from_js(
+            self.options.expected_coverage_last_commit_seq,
+            "expectedCoverageLastCommitSeq",
+            false,
+        )?;
+        self.engine
+            .replay_fact_family_cancellable(
+                FactFamilyReplayCommand {
+                    adapter_id: self.options.adapter_id.clone(),
+                    configured_roots: self.options.roots.iter().map(PathBuf::from).collect(),
+                    project_id: self.options.project_id.clone(),
+                    session_id: self.options.session_id.clone(),
+                    owner_id: self.options.owner_id.clone(),
+                    family: self.options.family.clone(),
+                    family_version: self.options.family_version,
+                    expected_source_instance_ref: self.options.expected_source_instance_ref.clone(),
+                    expected_content_digest_ref: self.options.expected_content_digest_ref.clone(),
+                    expected_coverage_last_commit_seq,
+                    reason: self.options.reason.clone(),
+                },
+                self.cancellation.clone(),
+            )
+            .map(Into::into)
+            .map_err(napi_error)
+    }
+
+    fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
+        Ok(output)
+    }
+}
+
 impl Task for RuntimeSnapshotTask {
     type Output = EngineRuntimeSnapshot;
     type JsValue = EngineRuntimeSnapshot;
@@ -5779,6 +5896,26 @@ fn cancellation_for_signal(signal: Option<&AbortSignal>) -> QueryCancellationTok
         signal.on_abort(move || abort_cancellation.cancel());
     }
     cancellation
+}
+
+fn safe_u64_from_js(value: f64, label: &'static str, allow_zero: bool) -> Result<u64> {
+    const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
+    let minimum = if allow_zero { 0.0 } else { 1.0 };
+    if !value.is_finite() || value.fract() != 0.0 || !(minimum..=MAX_SAFE_INTEGER).contains(&value)
+    {
+        return Err(Error::new(
+            Status::InvalidArg,
+            format!(
+                "{label} must be a {} safe integer",
+                if allow_zero {
+                    "non-negative"
+                } else {
+                    "positive"
+                }
+            ),
+        ));
+    }
+    Ok(value as u64)
 }
 
 fn change_cursor_from_js(value: EngineChangeCursor) -> Result<ChangeCursor> {

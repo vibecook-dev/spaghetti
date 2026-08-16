@@ -270,6 +270,26 @@ describe('persistent SpaghettiEngine', { skip: !native }, () => {
     assert.match(coverage.items[0]?.streamRef ?? '', /^v1:/);
     assert.match(coverage.items[0]?.objectRef ?? '', /^v1:/);
     assert.equal(JSON.stringify(coverage).includes(root), false);
+
+    const replayOptions = {
+      adapterId: 'claude-code',
+      roots: [root],
+      projectId,
+      sessionId,
+      ownerId: 'runtime.usage-v2',
+      family: 'runtime.usage-v2',
+      familyVersion: 1,
+      expectedSourceInstanceRef: coverage.coverage!.sourceInstanceRef,
+      expectedContentDigestRef: coverage.coverage!.contentDigestRef,
+      expectedCoverageLastCommitSeq: coverage.coverage!.lastCommitSeq,
+      reason: 'sdk explicit replay contract test',
+    };
+    const replay = await engine.replayFactFamily(replayOptions);
+    assert.equal(replay.contractVersion, 1);
+    assert.equal(replay.authorizedSourceInstanceRef, replayOptions.expectedSourceInstanceRef);
+    assert.equal(replay.authorizedContentDigestRef, replayOptions.expectedContentDigestRef);
+    assert.equal(replay.outcome.recordsDecoded, 1);
+    await assert.rejects(engine.replayFactFamily(replayOptions), /authorization is stale/i);
   });
 
   test('starts, refreshes, and stops native Claude observation', async () => {

@@ -136,6 +136,7 @@ use writer::{WriterClient, WriterRuntime};
 
 const DEFAULT_QUERY_WORKERS: usize = 2;
 const MAX_QUERY_WORKERS: usize = 16;
+pub const FACT_FAMILY_REPLAY_COMMAND_CONTRACT_VERSION: u32 = 1;
 pub const DEFAULT_COMMIT_WAIT_TIMEOUT_MS: u32 = 30_000;
 pub const MAX_COMMIT_WAIT_TIMEOUT_MS: u32 = 300_000;
 
@@ -241,6 +242,39 @@ pub struct EngineOptions {
     pub query_workers: Option<usize>,
     pub owner_label: Option<String>,
     pub defer_query_structures: bool,
+}
+
+/// Explicit administrative command that replaces one fact family's durable
+/// evidence for a source instance selected through an opaque project/session
+/// scope. The three expected coverage fields form a stale-safe authorization
+/// copied from `getFactFamilyCoverage`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FactFamilyReplayCommand {
+    pub adapter_id: String,
+    pub configured_roots: Vec<PathBuf>,
+    pub project_id: String,
+    pub session_id: String,
+    pub owner_id: String,
+    pub family: String,
+    pub family_version: u32,
+    pub expected_source_instance_ref: String,
+    pub expected_content_digest_ref: String,
+    pub expected_coverage_last_commit_seq: u64,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FactFamilyReplayResult {
+    pub contract_version: u32,
+    pub project_id: String,
+    pub session_id: String,
+    pub owner_id: String,
+    pub family: String,
+    pub family_version: u32,
+    pub authorized_source_instance_ref: String,
+    pub authorized_content_digest_ref: String,
+    pub authorized_coverage_last_commit_seq: u64,
+    pub outcome: ReconcileOutcome,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1234,6 +1268,78 @@ impl SpaghettiEngineCore {
         let adapter = self.registered_adapter(adapter_id)?;
         ObservationCoordinator::with_cancellation(Arc::clone(self), cancellation)
             .reconcile(adapter.as_ref(), request)
+    }
+
+    /// Execute one explicitly authorized, source-instance-scoped fact-family
+    /// replacement through the same common discovery, drivers, decoder, and
+    /// writer lane as ordinary observation.
+    pub fn replay_fact_family_cancellable(
+        self: &Arc<Self>,
+        command: FactFamilyReplayCommand,
+        cancellation: QueryCancellationToken,
+    ) -> Result<FactFamilyReplayResult, EngineError> {
+        if command.configured_roots.is_empty()
+            || command.reason.trim().is_empty()
+            || command.reason.len() > 4 * 1024
+        {
+            return Err(EngineError::InvalidConfig(
+                "fact-family replay requires configured roots and a bounded reason".to_string(),
+            ));
+        }
+        if command.owner_id != runtime_semantic_projection::USAGE_V2_PROJECTION_ID
+            || command.family != runtime_semantic_projection::USAGE_V2_PROJECTION_ID
+            || command.family_version != runtime_semantic_projection::USAGE_V2_PROJECTION_VERSION
+        {
+            return Err(EngineError::InvalidConfig(format!(
+                "fact-family replay is not implemented for owner {} family {} version {}",
+                command.owner_id, command.family, command.family_version
+            )));
+        }
+        let target = self.query_client()?.fact_family_replay_target_cancellable(
+            coverage_query::FactFamilyReplayTargetRequest {
+                project_id: command.project_id.clone(),
+                session_id: command.session_id.clone(),
+                owner_id: command.owner_id.clone(),
+                family: command.family.clone(),
+                family_version: command.family_version,
+                adapter_id: command.adapter_id.clone(),
+                expected_source_instance_ref: command.expected_source_instance_ref.clone(),
+                expected_content_digest_ref: command.expected_content_digest_ref.clone(),
+                expected_coverage_last_commit_seq: command.expected_coverage_last_commit_seq,
+            },
+            cancellation.clone(),
+        )?;
+        if target.source_instance_id == 0 || target.adapter_id != command.adapter_id {
+            return Err(EngineError::InvalidQuery(
+                "fact-family replay target is invalid or belongs to another adapter".to_string(),
+            ));
+        }
+        let adapter = self.registered_adapter(&command.adapter_id)?;
+        let request = FactFamilyReplayRequest::usage_v2(command.reason.clone()).authorized(
+            target.adapter_id.clone(),
+            target.canonical_source_instance_key,
+            target.content_digest,
+            target.coverage_last_commit_seq,
+        );
+        let outcome = ObservationCoordinator::with_cancellation(Arc::clone(self), cancellation)
+            .replay_discovered_fact_family(
+                adapter.as_ref(),
+                command.configured_roots,
+                &target.stable_key,
+                request,
+            )?;
+        Ok(FactFamilyReplayResult {
+            contract_version: FACT_FAMILY_REPLAY_COMMAND_CONTRACT_VERSION,
+            project_id: command.project_id,
+            session_id: command.session_id,
+            owner_id: command.owner_id,
+            family: command.family,
+            family_version: command.family_version,
+            authorized_source_instance_ref: target.source_instance_ref,
+            authorized_content_digest_ref: target.content_digest_ref,
+            authorized_coverage_last_commit_seq: target.coverage_last_commit_seq,
+            outcome,
+        })
     }
 
     pub fn start_registered_observation(

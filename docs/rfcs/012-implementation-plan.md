@@ -662,11 +662,19 @@ Current landing status (2026-08-16):
   deterministic order at one commit watermark, expires stale or cross-scope
   cursors, distinguishes `not_materialized`, and returns only versioned opaque
   common references rather than native paths or object keys; and
+- exposed `replayFactFamily` through N-API and the sole-owner observation host
+  with a compare-and-set authorization copied from one materialized coverage
+  set. The command resolves project/session scope before source discovery,
+  rechecks the source/digest/commit after acquiring the instance lease, and
+  makes the writer compare that same authorization in the transaction that
+  marks replay `Pending`. Stale/cross-scope tokens, wrong adapters, wrong host
+  roots, and writer-side mismatches create no commit. The host injects only its
+  configured roots; the transport-neutral query/IPC client stays read-only;
+  and
 - kept the candidate capability `unsupported`: private native corpus-scale
   parity, fixture-proven native team-to-actor correlation, exact-repeat
-  public-event suppression, public replay authorization/exposure, migration
-  switch, remaining portable fact-family serialization, and rollback window
-  are not yet complete.
+  public-event suppression, migration switch, remaining portable fact-family
+  serialization, and rollback window are not yet complete.
 
 ### C3. Durable migration
 
@@ -710,8 +718,7 @@ resetting an object that already entered the replacement generation. Tests
 prove ordinary repair cannot clear a gap, explicit replay does, old-generation
 usage is retracted without duplicates, and a five-record replay interrupted at
 a test four-record pass bound completes after engine restart through the same
-path whose production bound is 4,096. This is an engine/coordinator surface;
-public host/N-API/SDK request authorization remains open.
+path whose production bound is 4,096.
 
 The bounded public coverage inspection surface is now implemented as
 `getFactFamilyCoverage` contract v1 across Rust, N-API, and the
@@ -723,12 +730,22 @@ Focused Rust tests cover complete and unavailable sets, pagination, stale
 cursor rejection, restart stability, and reference privacy; the persistent SDK
 test exercises the native boundary.
 
-C3 remains `In progress`: public replay authorization and host/N-API/SDK
-exposure, private corpus-scale comparison, transactional default query
-selection, remaining crash-boundary tests, compatibility-window telemetry, and
-rollback are still required. The shadow query, pack readiness, durable coverage
-query, and coordinator replay are inspection/migration surfaces, not a
-support-promotion claim.
+The public recovery command is also implemented. Low-level N-API
+`replayFactFamily` requires explicit configured roots and a current coverage
+authorization; `ObservationHost.replayFactFamily` removes the roots parameter
+and injects only the selected adapter's configured roots. The authorization is
+the source-instance reference, content digest, and coverage commit sequence
+from one materialized coverage set. It is checked during scope resolution,
+again against the leased replay baseline, and atomically by the writer before
+`Pending`. Focused Rust and SDK tests cover stale tokens, unconfigured/wrong
+roots, writer rollback, successful replacement, and post-success token expiry.
+The transport-neutral query/IPC protocol deliberately remains read-only.
+
+C3 remains `In progress`: private corpus-scale comparison, transactional
+default query selection, remaining crash-boundary tests, compatibility-window
+telemetry, and rollback are still required. The shadow query, pack readiness,
+durable coverage query, and authorized coordinator replay are
+inspection/migration surfaces, not a support-promotion claim.
 
 ### C4. Downstream semantic suite
 

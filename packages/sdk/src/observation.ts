@@ -8,6 +8,7 @@ export {
 export {
   openObservationHost,
   type ObservationHost,
+  type ObservationHostFactFamilyReplayRequest,
   type ObservationHostOptions,
   type ObservationHostProgress,
   type ObservationHostSnapshot,

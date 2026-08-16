@@ -1934,6 +1934,7 @@ mod tests {
                 detail: None,
             }],
             coverage_sets: Vec::new(),
+            coverage_preconditions: Vec::new(),
         };
         assert!(client
             .commit_projection_versions(request.clone())

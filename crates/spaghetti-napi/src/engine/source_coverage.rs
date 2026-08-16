@@ -31,6 +31,21 @@ pub(crate) struct DurableCoverageSetUpdate {
     pub set: SourceCoverageSet,
 }
 
+/// Compare-and-set guard for an administrative transition justified by one
+/// previously inspected coverage set. The writer evaluates this inside the
+/// same immediate transaction that publishes the transition.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DurableCoverageSetPrecondition {
+    pub owner_id: String,
+    pub owner_scope_key: Vec<u8>,
+    pub family: String,
+    pub family_version: u32,
+    pub adapter_id: String,
+    pub canonical_source_instance_key: Vec<u8>,
+    pub expected_content_digest: Vec<u8>,
+    pub expected_last_commit_seq: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct CoverageStorageIdentity {
     owner_id: String,
@@ -121,6 +136,96 @@ pub(crate) fn validate_updates(updates: &[DurableCoverageSetUpdate]) -> Result<(
         if !identities.insert(update.identity()) {
             return Err(invalid(
                 "coverage commit replaces the same owner/domain/scope more than once",
+            ));
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_preconditions(
+    preconditions: &[DurableCoverageSetPrecondition],
+) -> Result<(), EngineError> {
+    if preconditions.len() > MAX_COVERAGE_SET_UPDATES {
+        return Err(invalid(format!(
+            "coverage precondition count exceeds {MAX_COVERAGE_SET_UPDATES}"
+        )));
+    }
+    let mut identities = BTreeSet::new();
+    for precondition in preconditions {
+        if precondition.owner_id.trim().is_empty()
+            || precondition.owner_id.len() > MAX_COVERAGE_OWNER_ID_BYTES
+            || precondition.owner_scope_key.is_empty()
+            || precondition.owner_scope_key.len() > MAX_COVERAGE_OWNER_SCOPE_BYTES
+            || precondition.family.trim().is_empty()
+            || precondition.family.len() > MAX_COVERAGE_OWNER_ID_BYTES
+            || precondition.family_version == 0
+            || precondition.adapter_id.trim().is_empty()
+            || precondition.adapter_id.len() > MAX_COVERAGE_OWNER_ID_BYTES
+            || precondition.canonical_source_instance_key.len() != 32
+            || precondition.expected_content_digest.len() != 32
+            || precondition.expected_last_commit_seq == 0
+        {
+            return Err(invalid(
+                "coverage precondition has an empty, unbounded, or invalid field",
+            ));
+        }
+        if !identities.insert((
+            precondition.owner_id.as_str(),
+            precondition.owner_scope_key.as_slice(),
+            precondition.family.as_str(),
+            precondition.family_version,
+        )) {
+            return Err(invalid("coverage precondition repeats one family scope"));
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn assert_preconditions(
+    transaction: &Transaction<'_>,
+    source_instance_id: u64,
+    preconditions: &[DurableCoverageSetPrecondition],
+) -> Result<(), EngineError> {
+    for precondition in preconditions {
+        let matches = transaction
+            .query_row(
+                r#"
+                SELECT 1
+                FROM source_coverage_sets
+                WHERE source_instance_id = ?1
+                  AND owner_id = ?2
+                  AND owner_scope_key = ?3
+                  AND domain_kind = 'fact_family'
+                  AND domain_name = ?4
+                  AND domain_version = ?5
+                  AND root_entity_key = X''
+                  AND adapter_id = ?6
+                  AND canonical_source_instance_key = ?7
+                  AND content_digest = ?8
+                  AND last_commit_seq = ?9
+                "#,
+                params![
+                    sqlite_u64(source_instance_id, "coverage precondition source instance")?,
+                    precondition.owner_id,
+                    precondition.owner_scope_key,
+                    precondition.family,
+                    i64::from(precondition.family_version),
+                    precondition.adapter_id,
+                    precondition.canonical_source_instance_key,
+                    precondition.expected_content_digest,
+                    sqlite_u64(
+                        precondition.expected_last_commit_seq,
+                        "coverage precondition commit sequence"
+                    )?,
+                ],
+                |_| Ok(()),
+            )
+            .optional()
+            .map_err(|error| sqlite_error("check source coverage precondition", error))?
+            .is_some();
+        if !matches {
+            return Err(EngineError::InvalidCommit(
+                "fact-family replay authorization is stale or belongs to another scope".to_string(),
             ));
         }
     }

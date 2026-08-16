@@ -110,6 +110,11 @@ export declare class SpaghettiEngine {
    */
   getFactFamilyCoverage(options: EngineFactFamilyCoverageOptions, signal?: AbortSignal | undefined | null): Promise<EngineFactFamilyCoveragePage>
   /**
+   * Replace one fact family's durable evidence after a caller explicitly
+   * echoes the current source, digest, and coverage commit authorization.
+   */
+  replayFactFamily(options: EngineFactFamilyReplayOptions, signal?: AbortSignal | undefined | null): Promise<EngineFactFamilyReplayResult>
+  /**
    * Return durable run-state and current registry-presence evidence. This
    * intentionally does not probe PIDs or synthesize freshness assessments.
    */
@@ -451,6 +456,39 @@ export interface EngineFactFamilyCoverageSetSummary {
   contentDigestRef: string
   lastCommitSeq: number
   updatedAtUnixMs: number
+}
+
+export interface EngineFactFamilyReplayOptions {
+  /** Open adapter identifier registered by the native composition root. */
+  adapterId: string
+  /** Configured native data roots understood by the selected adapter. */
+  roots: Array<string>
+  projectId: string
+  sessionId: string
+  ownerId: string
+  family: string
+  familyVersion: number
+  /** Echoed from `getFactFamilyCoverage().coverage.sourceInstanceRef`. */
+  expectedSourceInstanceRef: string
+  /** Echoed from `getFactFamilyCoverage().coverage.contentDigestRef`. */
+  expectedContentDigestRef: string
+  /** Echoed from `getFactFamilyCoverage().coverage.lastCommitSeq`. */
+  expectedCoverageLastCommitSeq: number
+  /** Bounded durable audit reason for this replacement command. */
+  reason: string
+}
+
+export interface EngineFactFamilyReplayResult {
+  contractVersion: number
+  projectId: string
+  sessionId: string
+  ownerId: string
+  family: string
+  familyVersion: number
+  authorizedSourceInstanceRef: string
+  authorizedContentDigestRef: string
+  authorizedCoverageLastCommitSeq: number
+  outcome: EngineReconcileResult
 }
 
 export interface EngineHealth {

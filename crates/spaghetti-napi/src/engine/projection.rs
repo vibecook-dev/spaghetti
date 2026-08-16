@@ -6855,6 +6855,7 @@ mod tests {
                     detail: None,
                 }],
                 coverage_sets: Vec::new(),
+                coverage_preconditions: Vec::new(),
             },
         )
         .unwrap()
