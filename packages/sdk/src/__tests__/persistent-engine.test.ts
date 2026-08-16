@@ -116,7 +116,7 @@ describe('persistent SpaghettiEngine', { skip: !native }, () => {
     assert.equal(first.objectsDiscovered, 1);
     assert.equal(first.objectsRegistered, 1);
     assert.equal(first.recordsDecoded, 1);
-    assert.equal(first.commits, 1);
+    assert.equal(first.commits, 2, 'one source commit plus one usage-v2 readiness barrier');
     assert.equal((first.lastCommitSeq ?? 0) > 0, true);
     assert.equal(engine.status.observation.state, 'live');
     assert.equal(engine.status.observation.reconcilesTotal, 1);
@@ -201,6 +201,56 @@ describe('persistent SpaghettiEngine', { skip: !native }, () => {
     });
     assert.deepEqual(afterSnapshot.changes, []);
     assert.equal(afterSnapshot.hasMore, false);
+  });
+
+  test('returns usage-v2 rows and writer-owned readiness in one native snapshot', async () => {
+    const dbPath = temporaryDatabase();
+    const root = path.join(path.dirname(dbPath), 'claude-usage-v2');
+    const project = path.join(root, 'projects', '-tmp-usage-v2-project');
+    mkdirSync(project, { recursive: true });
+    writeFileSync(
+      path.join(project, `${SESSION_ID}.jsonl`),
+      `${JSON.stringify({
+        type: 'assistant',
+        uuid: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+        parentUuid: null,
+        timestamp: '2026-08-12T00:00:00.000Z',
+        sessionId: SESSION_ID,
+        cwd: '/tmp/usage-v2-project',
+        version: '1',
+        gitBranch: 'main',
+        isSidechain: false,
+        userType: 'external',
+        requestId: 'request-1',
+        message: {
+          model: 'claude-sonnet',
+          id: 'response-1',
+          type: 'message',
+          role: 'assistant',
+          content: [{ type: 'text', text: 'usage response' }],
+          usage: { input_tokens: 12, output_tokens: 3 },
+        },
+      })}\n`,
+    );
+    const engine = await openTracked(dbPath, 'sdk-usage-v2-test');
+    await engine.reconcileClaude({ roots: [root], reason: 'sdk_usage_v2_fixture' });
+
+    const projects = await engine.listHistoryProjects({ limit: 10 });
+    const projectId = projects.items[0]?.projectId;
+    assert.ok(projectId);
+    const sessions = await engine.listHistorySessions({ projectId, limit: 10 });
+    const sessionId = sessions.items[0]?.sessionId;
+    assert.ok(sessionId);
+    const usage = await engine.getRuntimeUsageV2({ projectId, sessionId, limit: 10 });
+
+    assert.equal(usage.projectionStatus, 'shadow');
+    assert.equal(usage.projectionReadiness.projectionId, 'runtime.usage-v2');
+    assert.equal(usage.projectionReadiness.state, 'ready');
+    assert.equal(usage.projectionReadiness.completedVersion, 1);
+    assert.equal(usage.projectionReadiness.lastCommitSeq, usage.atCommitSeq);
+    assert.equal(usage.aggregate.responseCount, 1);
+    assert.equal(usage.aggregate.inputTokens.knownTokens, 12);
+    assert.equal(usage.items[0]?.nativeMessageId, 'response-1');
   });
 
   test('starts, refreshes, and stops native Claude observation', async () => {

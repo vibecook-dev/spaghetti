@@ -607,11 +607,22 @@ Current landing status (2026-08-16):
   revision per contribution with independently qualified buckets, reports
   actor context and all current affiliation revisions, supports actor and
   present team/workflow filters without copying contributions, and binds
-  continuation to one commit watermark or fails an expired cursor; and
+  continuation to one commit watermark or fails an expired cursor;
+- added writer-owned projection-version transitions for `runtime.usage-v2`.
+  Commits from only the transcript streams that declare this family atomically
+  set the pack to `Pending`; a separate zero-fact administrative transaction on
+  the same durable commit clock establishes `Ready` or `Unavailable` after the
+  bounded reconciliation drains. Equal transitions are true no-ops, unrelated
+  sidecar commits cannot churn the pack clock, and the public query returns the
+  readiness row from the same SQLite snapshot as responses and aggregates;
+- made quarantine gaps fail closed: record quarantine on a provider stream
+  establishes sticky `Unavailable` readiness, and a later append or no-op scan
+  cannot fabricate recovered coverage. Clearing that state is deliberately
+  reserved for the explicit replay/revalidation path still required by C3; and
 - kept the candidate capability `unsupported`: private native corpus-scale
   parity, fixture-proven native team-to-actor correlation, exact-repeat
-  public-event suppression, source/family coverage and readiness/replay
-  orchestration, migration switch, remaining portable fact-family
+  public-event suppression, durable source/family coverage and replay
+  recovery, migration switch, remaining portable fact-family
   serialization, and rollback window are not yet complete.
 
 ### C3. Durable migration
@@ -621,8 +632,9 @@ compare against the independent oracle, then switch the versioned query in one
 transaction. Retain the legacy projection during the compatibility window and
 test crash/restart at each migration boundary.
 
-Current landing status (2026-08-16): the first read-only migration slice is
-implemented. `getRuntimeUsageV2` exposes query contract v1 only as
+Current landing status (2026-08-16): the read-only shadow and its first durable
+readiness slice are implemented. `getRuntimeUsageV2` exposes query contract v1
+only as
 `projectionStatus = shadow`; it does not alter `getUsage` or
 `getUsageActivity`. A valid legacy project/session scope with no canonical v2
 session mapping returns `not_materialized` and qualified-unknown aggregate
@@ -631,11 +643,19 @@ pages and aggregates share one SQLite snapshot, cursors are scoped to all
 filters and expire on a newer commit, and tests cover pagination, actor
 filtering, present-affiliation regrouping/removal, and reset expiration.
 
-C3 remains `In progress`: projection readiness and source/family coverage,
-replay orchestration, private corpus-scale comparison, transactional default
-query selection, crash-boundary recovery, compatibility-window telemetry, and
-rollback are still required. The shadow query is an inspection/migration
-surface, not a support-promotion claim.
+`projectionReadiness` is now independently versioned and writer-owned. A
+provider-stream data transaction publishes `Pending` with its rows; the
+post-drain barrier publishes `Ready` or `Unavailable` without touching source
+cursors. The transition has a durable commit sequence, is visible in the same
+query snapshot, survives restart, and does not move for settings/presence/task
+streams that do not provide usage-v2. Provider quarantine is sticky rather
+than becoming ready after its cursor has skipped the failed record.
+
+C3 remains `In progress`: durable source/family coverage sets, explicit replay
+and quarantine-gap recovery, private corpus-scale comparison, transactional
+default query selection, crash-boundary recovery, compatibility-window
+telemetry, and rollback are still required. The shadow query and pack
+readiness are inspection/migration surfaces, not a support-promotion claim.
 
 ### C4. Downstream semantic suite
 

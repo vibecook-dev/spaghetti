@@ -4189,8 +4189,10 @@ mod tests {
 
     use super::*;
     use crate::engine::commit::{
-        apply_observation_commit, source_instance_catalog_id, source_stream_catalog_id,
-        ExpectedSourceCursor, SourceInstanceSpec, SourceObjectUpdate, SourceStreamSpec,
+        apply_observation_commit, apply_projection_version_commit, source_instance_catalog_id,
+        source_stream_catalog_id, ExpectedSourceCursor, ProjectionReadiness,
+        ProjectionVersionCommit, ProjectionVersionUpdate, SourceInstanceSpec, SourceObjectUpdate,
+        SourceStreamSpec,
     };
     use crate::engine::query_identity::{encode_entity_id, PROJECT_ID_PREFIX, SESSION_ID_PREFIX};
     use crate::engine::runtime_usage_query::{
@@ -6819,20 +6821,53 @@ mod tests {
         );
 
         let (project_id, session_id) = persisted_project_session_ids(&connection);
-        let first_page = read_runtime_usage_v2_page(
-            &connection,
-            &RuntimeUsageV2PageRequest {
-                project_id: project_id.clone(),
-                session_id: session_id.clone(),
-                actor_run_ref: None,
-                affiliation_dimension: None,
-                affiliation_target_ref: None,
-                cursor: None,
-                limit: 2,
+        let page_request = RuntimeUsageV2PageRequest {
+            project_id: project_id.clone(),
+            session_id: session_id.clone(),
+            actor_run_ref: None,
+            affiliation_dimension: None,
+            affiliation_target_ref: None,
+            cursor: None,
+            limit: 2,
+        };
+        let untracked_page = read_runtime_usage_v2_page(&connection, &page_request).unwrap();
+        assert_eq!(untracked_page.projection_status, "shadow");
+        assert_eq!(untracked_page.projection_readiness.state, "untracked");
+        assert_eq!(untracked_page.projection_readiness.desired_version, 1);
+        assert!(untracked_page
+            .projection_readiness
+            .completed_version
+            .is_none());
+
+        let readiness_receipt = apply_projection_version_commit(
+            &mut connection,
+            &ProjectionVersionCommit {
+                source_instance_id: source_instance_catalog_id("claude-code", b"fixture-root"),
+                reason: "projection.runtime.usage-v2.ready".to_string(),
+                started_at: 300,
+                committed_at: 301,
+                projection_versions: vec![ProjectionVersionUpdate {
+                    projection_id: "runtime.usage-v2".to_string(),
+                    scope_key: b"fixture-root".to_vec(),
+                    desired_version: 1,
+                    completed_version: Some(1),
+                    readiness: ProjectionReadiness::Ready,
+                    detail: None,
+                }],
             },
         )
-        .unwrap();
+        .unwrap()
+        .expect("ready transition advances the fixed query watermark");
+        let first_page = read_runtime_usage_v2_page(&connection, &page_request).unwrap();
         assert_eq!(first_page.projection_status, "shadow");
+        assert_eq!(first_page.projection_readiness.state, "ready");
+        assert_eq!(first_page.projection_readiness.desired_version, 1);
+        assert_eq!(first_page.projection_readiness.completed_version, Some(1));
+        assert_eq!(
+            first_page.projection_readiness.last_commit_seq,
+            Some(readiness_receipt.commit_seq)
+        );
+        assert_eq!(first_page.at_commit_seq, readiness_receipt.commit_seq);
         assert_eq!(first_page.aggregate.response_count, 3);
         assert_eq!(first_page.aggregate.actor_count, 1);
         assert_eq!(first_page.aggregate.input_tokens.known_tokens, 12);

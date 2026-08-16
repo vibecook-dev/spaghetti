@@ -45,7 +45,7 @@
     },
     {
       "claim_id": "claude-runtime-semantics-open",
-      "statement": "Canonical actor-scoped response usage revisions, topology-neutral root/child actor declarations, durable response-replacement and affiliation reducers, Claude workflow correlation, independent frozen sanitized-oracle parity, and a versioned public shadow query across Rust, N-API, and the transport-neutral SDK are implemented. Common tests prove snapshot-bound pagination, actor and present-affiliation filtering, late workflow/team regrouping plus removal, ambiguity, and generation retraction without duplicate contributions; source/family coverage, private native corpus-scale parity, the default usage migration, fixture-proven native team-to-actor correlation, effective model/effort/mode, and interaction lifecycle remain required before support promotion.",
+      "statement": "Canonical actor-scoped response usage revisions, topology-neutral root/child actor declarations, durable response-replacement and affiliation reducers, Claude workflow correlation, independent frozen sanitized-oracle parity, and a versioned public shadow query across Rust, N-API, and the transport-neutral SDK are implemented. Writer-owned pack readiness now moves provider-stream commits through Pending to a query-visible Ready or Unavailable barrier without cursor fabrication or unrelated-stream churn, and quarantine gaps fail closed until replay. Common tests prove snapshot-bound pagination, actor and present-affiliation filtering, late workflow/team regrouping plus removal, ambiguity, and generation retraction without duplicate contributions; persistable source/family coverage, explicit replay recovery, private native corpus-scale parity, the default usage migration, fixture-proven native team-to-actor correlation, effective model/effort/mode, and interaction lifecycle remain required before support promotion.",
       "state": "degraded",
       "sources": [
         { "kind": "design_record", "path": "docs/rfcs/012c-runtime-semantics-and-usage-v2.md", "sha256": null, "locator": "Normative runtime facts and release gates" },
@@ -53,6 +53,8 @@
         { "kind": "code_reference", "path": "crates/spaghetti-napi/src/engine/projection.rs", "sha256": null, "locator": "apply_usage_v2_facts and usage_v2_projection_matches_independent_qualified_oracle" },
         { "kind": "code_reference", "path": "crates/spaghetti-napi/src/engine/runtime_semantic_projection.rs", "sha256": null, "locator": "common actor and affiliation reducer" },
         { "kind": "code_reference", "path": "crates/spaghetti-napi/src/engine/runtime_usage_query.rs", "sha256": null, "locator": "fixed-snapshot usage-v2 shadow page, aggregate, and actor/affiliation context" },
+        { "kind": "code_reference", "path": "crates/spaghetti-napi/src/engine/commit.rs", "sha256": null, "locator": "writer-owned idempotent projection-version administrative commit" },
+        { "kind": "code_reference", "path": "crates/spaghetti-napi/src/engine/coordinator.rs", "sha256": null, "locator": "provider-stream pending updates and post-drain usage-v2 readiness barrier" },
         { "kind": "code_reference", "path": "packages/sdk/src/client/protocol.ts", "sha256": null, "locator": "transport-neutral getRuntimeUsageV2 method" },
         { "kind": "code_reference", "path": "scripts/usage_v2_oracle/oracle.py", "sha256": null, "locator": "independent qualified response reducer" },
         {

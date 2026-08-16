@@ -118,6 +118,7 @@ const HISTORY_CONTENT_BLOCKS: &str = "history.content_blocks";
 const HISTORY_TIMESTAMPS: &str = "history.timestamps";
 const HISTORY_MODEL_IDENTITY: &str = "history.model_identity";
 const RUNTIME_SESSION_ACTIVITY: &str = "runtime.session_activity";
+const RUNTIME_USAGE_V2: &str = "runtime.usage-v2";
 const RUNTIME_SUBAGENTS: &str = "runtime.subagents";
 const RUNTIME_TEAMS: &str = "runtime.teams";
 const RUNTIME_TEAM_INBOX: &str = "runtime.team_inbox";
@@ -742,6 +743,7 @@ fn claude_capabilities() -> Vec<CapabilityDeclaration> {
         live_native(HISTORY_TIMESTAMPS, CapabilityGranularity::Message),
         live_native(HISTORY_MODEL_IDENTITY, CapabilityGranularity::Message),
         live_native(RUNTIME_SESSION_ACTIVITY, CapabilityGranularity::Run),
+        live_native(RUNTIME_USAGE_V2, CapabilityGranularity::Message),
         capability(
             RUNTIME_SUBAGENTS,
             SupportLevel::Derived,
@@ -851,6 +853,7 @@ fn transcript_capabilities() -> Vec<CapabilityId> {
         HISTORY_TIMESTAMPS,
         HISTORY_MODEL_IDENTITY,
         RUNTIME_SESSION_ACTIVITY,
+        RUNTIME_USAGE_V2,
         USAGE_INPUT_TOKENS,
         USAGE_OUTPUT_TOKENS,
         USAGE_CACHE_TOKENS,

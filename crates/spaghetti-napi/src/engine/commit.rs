@@ -16,6 +16,8 @@ use crate::adapter::{ConsistencyPolicy, RawRetentionPolicy};
 use super::EngineError;
 
 const MAX_DRIVER_CHECKPOINT_BYTES: usize = 64 * 1024 * 1024;
+const MAX_PROJECTION_VERSION_UPDATES: usize = 64;
+const MAX_PROJECTION_SCOPE_KEY_BYTES: usize = 4 * 1024;
 const CHANGE_LOG_ROW_OVERHEAD_BYTES: u64 = 24;
 
 /// Default durable replay window. Size is measured as the encoded change
@@ -160,6 +162,18 @@ pub struct ProjectionVersionUpdate {
     pub detail: Option<String>,
 }
 
+/// Writer-owned administrative transition for one or more common projection
+/// packs. It advances the same durable commit clock as source ingestion while
+/// touching no source cursor or adapter-owned object.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectionVersionCommit {
+    pub source_instance_id: u64,
+    pub reason: String,
+    pub started_at: i64,
+    pub committed_at: i64,
+    pub projection_versions: Vec<ProjectionVersionUpdate>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChangeEntry {
     pub topic: String,
@@ -208,6 +222,12 @@ pub struct CommitReceipt {
     pub source_stream_id: u64,
     pub source_object_id: u64,
     pub change_count: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProjectionVersionReceipt {
+    pub commit_seq: u64,
+    pub source_instance_id: u64,
 }
 
 /// Deterministic transaction seams used by process-like crash tests. The
@@ -384,6 +404,73 @@ pub(super) fn reserve_source_instance(
         .commit()
         .map_err(|error| sqlite_error("commit source instance reservation", error))?;
     Ok(source_instance_id)
+}
+
+/// Atomically advance common projection-pack readiness on the durable commit
+/// clock without fabricating a source-object update. Equal transitions are a
+/// true no-op so an unchanged reconciliation does not churn commit watermarks.
+pub(super) fn apply_projection_version_commit(
+    connection: &mut Connection,
+    request: &ProjectionVersionCommit,
+) -> Result<Option<ProjectionVersionReceipt>, EngineError> {
+    validate_projection_version_commit(request)?;
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|error| sqlite_error("begin projection version commit", error))?;
+    let source_instance_id = to_i64(request.source_instance_id, "source instance id")?;
+    let source_exists = transaction
+        .query_row(
+            "SELECT 1 FROM source_instances WHERE source_instance_id = ?1",
+            [source_instance_id],
+            |_| Ok(()),
+        )
+        .optional()
+        .map_err(|error| sqlite_error("validate projection source instance", error))?
+        .is_some();
+    if !source_exists {
+        return Err(EngineError::InvalidCommit(
+            "projection version commit references an unknown source instance".to_string(),
+        ));
+    }
+    if !projection_versions_changed(&transaction, &request.projection_versions)? {
+        transaction
+            .commit()
+            .map_err(|error| sqlite_error("finish unchanged projection version commit", error))?;
+        return Ok(None);
+    }
+
+    transaction
+        .execute(
+            r#"
+            INSERT INTO ingest_commits (
+                source_instance_id, reason, started_at, committed_at, fact_count
+            ) VALUES (?1, ?2, ?3, ?4, 0)
+            "#,
+            params![
+                source_instance_id,
+                request.reason,
+                request.started_at,
+                request.committed_at,
+            ],
+        )
+        .map_err(|error| sqlite_error("insert projection version commit", error))?;
+    let commit_seq = from_i64(
+        transaction.last_insert_rowid(),
+        "projection version commit sequence",
+    )?;
+    write_projection_versions(
+        &transaction,
+        commit_seq,
+        request.committed_at,
+        &request.projection_versions,
+    )?;
+    transaction
+        .commit()
+        .map_err(|error| sqlite_error("commit projection version transition", error))?;
+    Ok(Some(ProjectionVersionReceipt {
+        commit_seq,
+        source_instance_id: request.source_instance_id,
+    }))
 }
 
 pub(super) fn apply_observation_commit_with_projection(
@@ -679,8 +766,65 @@ fn validate_commit(request: &ObservationCommit) -> Result<(), EngineError> {
         }
     }
 
-    for projection in &request.projection_versions {
+    validate_projection_versions(&request.projection_versions)?;
+
+    validate_changes(&request.changes)?;
+
+    for error in &request.record_errors {
+        require_bytes("record_error.payload_hash", &error.payload_hash)?;
+        require_text("record_error.media_type", &error.media_type)?;
+        require_text("record_error.error_class", &error.error_class)?;
+        require_text("record_error.error_message", &error.error_message)?;
+        require_text("record_error.adapter_version", &error.adapter_version)?;
+        to_i64(error.generation, "record error generation")?;
+    }
+    Ok(())
+}
+
+fn validate_projection_version_commit(
+    request: &ProjectionVersionCommit,
+) -> Result<(), EngineError> {
+    to_i64(request.source_instance_id, "source instance id")?;
+    require_text("projection commit reason", &request.reason)?;
+    if request.committed_at < request.started_at {
+        return Err(EngineError::InvalidCommit(
+            "projection commit time must not precede its start".to_string(),
+        ));
+    }
+    if request.projection_versions.is_empty() {
+        return Err(EngineError::InvalidCommit(
+            "projection version commit requires at least one update".to_string(),
+        ));
+    }
+    validate_projection_versions(&request.projection_versions)
+}
+
+fn validate_projection_versions(
+    projections: &[ProjectionVersionUpdate],
+) -> Result<(), EngineError> {
+    if projections.len() > MAX_PROJECTION_VERSION_UPDATES {
+        return Err(EngineError::InvalidCommit(format!(
+            "projection update count exceeds {MAX_PROJECTION_VERSION_UPDATES}"
+        )));
+    }
+    let mut identities = BTreeSet::new();
+    for projection in projections {
         require_text("projection.projection_id", &projection.projection_id)?;
+        require_bytes("projection.scope_key", &projection.scope_key)?;
+        if projection.scope_key.len() > MAX_PROJECTION_SCOPE_KEY_BYTES {
+            return Err(EngineError::InvalidCommit(format!(
+                "projection scope key exceeds {MAX_PROJECTION_SCOPE_KEY_BYTES} bytes"
+            )));
+        }
+        if let Some(detail) = &projection.detail {
+            require_text("projection.detail", detail)?;
+        }
+        if !identities.insert((&projection.projection_id, &projection.scope_key)) {
+            return Err(EngineError::InvalidCommit(format!(
+                "projection {} updates the same scope more than once",
+                projection.projection_id
+            )));
+        }
         if projection.desired_version == 0 {
             return Err(EngineError::InvalidCommit(
                 "projection desired_version must be greater than zero".to_string(),
@@ -703,17 +847,6 @@ fn validate_commit(request: &ObservationCommit) -> Result<(), EngineError> {
             }
             _ => {}
         }
-    }
-
-    validate_changes(&request.changes)?;
-
-    for error in &request.record_errors {
-        require_bytes("record_error.payload_hash", &error.payload_hash)?;
-        require_text("record_error.media_type", &error.media_type)?;
-        require_text("record_error.error_class", &error.error_class)?;
-        require_text("record_error.error_message", &error.error_message)?;
-        require_text("record_error.adapter_version", &error.adapter_version)?;
-        to_i64(error.generation, "record error generation")?;
     }
     Ok(())
 }
@@ -1222,6 +1355,50 @@ fn write_projection_versions(
             .map_err(|error| sqlite_error("write projection version", error))?;
     }
     Ok(())
+}
+
+fn projection_versions_changed(
+    transaction: &Transaction<'_>,
+    projections: &[ProjectionVersionUpdate],
+) -> Result<bool, EngineError> {
+    let mut statement = transaction
+        .prepare_cached(
+            r#"
+            SELECT desired_version, completed_version, readiness, detail
+            FROM projection_versions
+            WHERE projection_id = ?1 AND scope_key = ?2
+            "#,
+        )
+        .map_err(|error| sqlite_error("prepare projection version comparison", error))?;
+    for projection in projections {
+        let current = statement
+            .query_row(
+                params![projection.projection_id, projection.scope_key],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, Option<i64>>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(|error| sqlite_error("compare projection version", error))?;
+        let desired = i64::from(projection.desired_version);
+        let completed = projection.completed_version.map(i64::from);
+        if current.as_ref()
+            != Some(&(
+                desired,
+                completed,
+                projection.readiness.as_str().to_string(),
+                projection.detail.clone(),
+            ))
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn write_record_errors(
@@ -1938,6 +2115,74 @@ mod tests {
             )
             .unwrap();
         assert_eq!(projection, (5, "ready".to_string(), 1));
+    }
+
+    #[test]
+    fn projection_readiness_advances_the_commit_clock_without_source_cursor_churn() {
+        let mut connection = database();
+        let source = apply_observation_commit(&mut connection, &request()).unwrap();
+        let pending = ProjectionVersionUpdate {
+            projection_id: "runtime.usage-v2".to_string(),
+            scope_key: b"fixture-root".to_vec(),
+            desired_version: 1,
+            completed_version: None,
+            readiness: ProjectionReadiness::Pending,
+            detail: Some("source reconciliation in progress".to_string()),
+        };
+        let pending_request = ProjectionVersionCommit {
+            source_instance_id: source.source_instance_id,
+            reason: "projection.runtime.usage-v2.pending".to_string(),
+            started_at: 1_300,
+            committed_at: 1_301,
+            projection_versions: vec![pending.clone()],
+        };
+        let receipt = apply_projection_version_commit(&mut connection, &pending_request)
+            .unwrap()
+            .expect("first transition advances the commit clock");
+        assert_eq!(receipt.commit_seq, 2);
+        assert_eq!(count(&connection, "ingest_commits"), 2);
+        assert_eq!(count(&connection, "source_objects"), 1);
+        assert_eq!(count(&connection, "change_log"), 2);
+        assert!(
+            apply_projection_version_commit(&mut connection, &pending_request)
+                .unwrap()
+                .is_none(),
+            "an equal transition must not churn the durable watermark"
+        );
+        assert_eq!(count(&connection, "ingest_commits"), 2);
+
+        let ready_request = ProjectionVersionCommit {
+            source_instance_id: source.source_instance_id,
+            reason: "projection.runtime.usage-v2.ready".to_string(),
+            started_at: 1_400,
+            committed_at: 1_401,
+            projection_versions: vec![ProjectionVersionUpdate {
+                completed_version: Some(1),
+                readiness: ProjectionReadiness::Ready,
+                detail: None,
+                ..pending
+            }],
+        };
+        let ready = apply_projection_version_commit(&mut connection, &ready_request)
+            .unwrap()
+            .expect("readiness transition advances the commit clock");
+        assert_eq!(ready.commit_seq, 3);
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT desired_version, completed_version, readiness, last_commit_seq, detail FROM projection_versions WHERE projection_id = 'runtime.usage-v2'",
+                    [],
+                    |row| Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, i64>(3)?,
+                        row.get::<_, Option<String>>(4)?,
+                    )),
+                )
+                .unwrap(),
+            (1, 1, "ready".to_string(), 3, None)
+        );
     }
 
     #[test]

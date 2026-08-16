@@ -40,11 +40,13 @@ use crate::source::{
 
 use super::commit::{
     source_object_catalog_id, source_stream_catalog_id, CommitReceipt, ExpectedSourceCursor,
-    ObservationCommit, SourceCapabilitySpec, SourceInstanceSpec, SourceObjectUpdate,
-    SourceRecordError, SourceStreamSpec,
+    ObservationCommit, ProjectionReadiness, ProjectionVersionCommit, ProjectionVersionUpdate,
+    SourceCapabilitySpec, SourceInstanceSpec, SourceObjectUpdate, SourceRecordError,
+    SourceStreamSpec,
 };
 use super::performance::{SourceDecodeObservation, SourceDecodeOutcome, SourcePerformanceRecorder};
 use super::query_pool::{QueryCancellationToken, SourceCatalogObject, SourceCatalogSnapshot};
+use super::runtime_semantic_projection::{USAGE_V2_PROJECTION_ID, USAGE_V2_PROJECTION_VERSION};
 use super::{EngineError, SpaghettiEngineCore};
 
 // One default append-driver batch can contain 1,024 records. Built-in
@@ -176,6 +178,108 @@ pub struct ReconcileRetryTarget {
     pub stable_key: Vec<u8>,
     pub stream_key: String,
     pub object_key: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct ProjectionBlockers {
+    streams_unavailable: u32,
+    records_quarantined: u32,
+    retries_required: u32,
+    incomplete_tail_retries: u32,
+    backlog_remaining: u32,
+    dependency_access_denials: u64,
+}
+
+impl ProjectionBlockers {
+    fn capture(outcome: &ReconcileOutcome) -> Self {
+        Self {
+            streams_unavailable: outcome.streams_unavailable,
+            records_quarantined: outcome.records_quarantined,
+            retries_required: outcome.retries_required,
+            incomplete_tail_retries: outcome.incomplete_tail_retries,
+            backlog_remaining: outcome.backlog_remaining,
+            dependency_access_denials: outcome.dependency_access_denials,
+        }
+    }
+
+    fn increases_since(self, previous: Self) -> Vec<&'static str> {
+        let mut blockers = Vec::new();
+        if self.streams_unavailable > previous.streams_unavailable {
+            blockers.push("streams_unavailable");
+        }
+        if self.records_quarantined > previous.records_quarantined {
+            blockers.push("records_quarantined");
+        }
+        if self.retries_required > previous.retries_required {
+            blockers.push("retries_required");
+        }
+        if self.incomplete_tail_retries > previous.incomplete_tail_retries {
+            blockers.push("incomplete_tail_retries");
+        }
+        if self.backlog_remaining > previous.backlog_remaining {
+            blockers.push("backlog_remaining");
+        }
+        if self.dependency_access_denials > previous.dependency_access_denials {
+            blockers.push("dependency_access_denials");
+        }
+        blockers
+    }
+}
+
+#[derive(Debug, Default)]
+struct ProjectionCoverageAttempt {
+    required_streams: BTreeSet<String>,
+    blockers: BTreeMap<String, BTreeSet<&'static str>>,
+}
+
+impl ProjectionCoverageAttempt {
+    fn require_stream(&mut self, stream_key: &str) {
+        self.required_streams.insert(stream_key.to_string());
+    }
+
+    fn note_outcome(
+        &mut self,
+        stream_key: &str,
+        previous: ProjectionBlockers,
+        current: ProjectionBlockers,
+    ) {
+        for blocker in current.increases_since(previous) {
+            self.blockers
+                .entry(stream_key.to_string())
+                .or_default()
+                .insert(blocker);
+        }
+    }
+
+    fn block(&mut self, stream_key: &str, blocker: &'static str) {
+        self.blockers
+            .entry(stream_key.to_string())
+            .or_default()
+            .insert(blocker);
+    }
+
+    fn detail(&self) -> Option<String> {
+        if self.required_streams.is_empty() {
+            return Some(
+                "adapter declares runtime.usage-v2 but no source stream provides it".to_string(),
+            );
+        }
+        if self.blockers.is_empty() {
+            return None;
+        }
+        let streams = self
+            .blockers
+            .iter()
+            .map(|(stream, blockers)| {
+                format!(
+                    "{stream}={}",
+                    blockers.iter().copied().collect::<Vec<_>>().join("+")
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        Some(format!("runtime.usage-v2 coverage incomplete: {streams}"))
+    }
 }
 
 pub struct ObservationCoordinator {
@@ -900,6 +1004,7 @@ impl ObservationCoordinator {
             id: source_instance_id,
             spec,
         };
+        let mut usage_v2_coverage = ProjectionCoverageAttempt::default();
         let mut discovery = DiscoveryIndex::default();
         let streams = catch_adapter_panic("declare source streams", || adapter.streams(&instance))?
             .map_err(|error| adapter_error("declare source streams", error))?;
@@ -917,6 +1022,12 @@ impl ObservationCoordinator {
                     format!("adapter declared stream {} more than once", stream.id),
                 ));
             }
+            let usage_v2_stream = declares_usage_v2_projection(manifest)
+                && stream_declares_usage_v2_projection(&stream);
+            if usage_v2_stream {
+                usage_v2_coverage.require_stream(stream.id.as_str());
+            }
+            let projection_blockers = ProjectionBlockers::capture(outcome);
             outcome.streams_reconciled = outcome.streams_reconciled.saturating_add(1);
             scheduled_objects.extend(self.collect_stream_work(
                 adapter,
@@ -928,6 +1039,13 @@ impl ObservationCoordinator {
                 started_at,
                 outcome,
             )?);
+            if usage_v2_stream {
+                usage_v2_coverage.note_outcome(
+                    stream.id.as_str(),
+                    projection_blockers,
+                    ProjectionBlockers::capture(outcome),
+                );
+            }
         }
         self.execute_scheduled_objects(
             adapter,
@@ -936,7 +1054,101 @@ impl ObservationCoordinator {
             reason,
             started_at,
             outcome,
+            &mut usage_v2_coverage,
         )?;
+        self.finish_instance_projection_readiness(
+            manifest,
+            &instance,
+            &catalog,
+            started_at,
+            usage_v2_coverage,
+            outcome,
+        )?;
+        Ok(())
+    }
+
+    fn finish_instance_projection_readiness(
+        &self,
+        manifest: &AdapterManifest,
+        instance: &SourceInstance,
+        prior_catalog: &SourceCatalogSnapshot,
+        started_at: i64,
+        mut coverage: ProjectionCoverageAttempt,
+        outcome: &mut ReconcileOutcome,
+    ) -> Result<(), EngineError> {
+        if !declares_usage_v2_projection(manifest) {
+            return Ok(());
+        }
+        let current_catalog = self
+            .engine
+            .source_catalog(manifest.id.as_str(), instance.spec.stable_key.as_bytes())?;
+        if current_catalog.source_instance_id != Some(instance.id) {
+            return Err(observation_error(
+                "finish projection readiness",
+                "source catalog identity changed before the readiness barrier",
+            ));
+        }
+        for object in &current_catalog.objects {
+            if !coverage.required_streams.contains(&object.stream_key) {
+                continue;
+            }
+            match object.state.as_str() {
+                "quarantined" => coverage.block(&object.stream_key, "durable_quarantine"),
+                "retrying" => coverage.block(&object.stream_key, "durable_retry"),
+                _ => {}
+            }
+        }
+        let prior = prior_catalog
+            .projection_versions
+            .iter()
+            .find(|projection| projection.projection_id == USAGE_V2_PROJECTION_ID);
+        let sticky_quarantine = prior.is_some_and(|projection| {
+            projection.readiness == "unavailable"
+                && projection
+                    .detail
+                    .as_deref()
+                    .is_some_and(|detail| detail.contains("records_quarantined"))
+        });
+        let mut detail = coverage.detail();
+        if sticky_quarantine {
+            detail = match detail {
+                Some(current) if current.contains("records_quarantined") => Some(current),
+                Some(current) => Some(format!(
+                    "{current}; retained=records_quarantined_requires_explicit_replay"
+                )),
+                None => prior
+                    .and_then(|projection| projection.detail.clone())
+                    .or_else(|| {
+                        Some(
+                            "runtime.usage-v2 coverage incomplete: records_quarantined requires explicit replay"
+                                .to_string(),
+                        )
+                    }),
+            };
+        }
+        let committed_at = now_unix_ms()?.max(started_at);
+        let (readiness, state) = if detail.is_none() {
+            (ProjectionReadiness::Ready, "ready")
+        } else {
+            (ProjectionReadiness::Unavailable, "unavailable")
+        };
+        let commit_seq = self
+            .engine
+            .commit_projection_versions(ProjectionVersionCommit {
+                source_instance_id: instance.id,
+                reason: format!("projection.{USAGE_V2_PROJECTION_ID}.{state}"),
+                started_at,
+                committed_at,
+                projection_versions: vec![usage_v2_projection_update(
+                    instance,
+                    readiness,
+                    detail.as_deref(),
+                )],
+            })?;
+        if let Some(commit_seq) = commit_seq {
+            outcome.commits = outcome.commits.saturating_add(1);
+            outcome.last_commit_seq = Some(commit_seq);
+        }
         Ok(())
     }
 
@@ -1275,6 +1487,7 @@ impl ObservationCoordinator {
         reason: &str,
         started_at: i64,
         outcome: &mut ReconcileOutcome,
+        projection_coverage: &mut ProjectionCoverageAttempt,
     ) -> Result<(), EngineError> {
         if work.is_empty() {
             return Ok(());
@@ -1368,6 +1581,7 @@ impl ObservationCoordinator {
                         }
                     };
                     let key = scheduled.key;
+                    let stream_key = task.stream.id.as_str().to_string();
                     let result_tx = result_tx.clone();
                     let engine = Arc::clone(&self.engine);
                     scope.spawn(move |_| {
@@ -1388,7 +1602,13 @@ impl ObservationCoordinator {
                             let _ = lane.flush();
                         }
                         lane.apply_to(&mut local);
-                        let _ = result_tx.send((key, result, local, lane.pending.take()));
+                        let _ = result_tx.send((
+                            key,
+                            stream_key,
+                            result,
+                            local,
+                            lane.pending.take(),
+                        ));
                     });
                     in_flight = in_flight.saturating_add(1);
                 }
@@ -1406,13 +1626,20 @@ impl ObservationCoordinator {
                     break;
                 }
                 match result_rx.recv() {
-                    Ok((key, result, local, pending)) => {
+                    Ok((key, stream_key, result, local, pending)) => {
                         in_flight = in_flight.saturating_sub(1);
                         if !scheduler.complete(&key) {
                             first_error.get_or_insert(observation_error(
                                 "complete source object work",
                                 "scheduler lost an in-flight object key",
                             ));
+                        }
+                        if projection_coverage.required_streams.contains(&stream_key) {
+                            projection_coverage.note_outcome(
+                                &stream_key,
+                                ProjectionBlockers::default(),
+                                ProjectionBlockers::capture(&local),
+                            );
                         }
                         merge_outcome(outcome, local);
                         if let Err(error) = result {
@@ -3784,10 +4011,57 @@ fn commit_request<A: AgentAdapter + ?Sized>(
         started_at,
         committed_at,
         fact_count: 0,
-        projection_versions: Vec::new(),
+        projection_versions: pending_projection_updates(adapter.manifest(), stream, instance),
         record_errors,
         changes: Vec::new(),
     })
+}
+
+fn declares_usage_v2_projection(manifest: &AdapterManifest) -> bool {
+    manifest.capabilities.iter().any(|capability| {
+        capability.id.as_str() == USAGE_V2_PROJECTION_ID
+            && capability.support.level != SupportLevel::Unsupported
+    })
+}
+
+fn stream_declares_usage_v2_projection(stream: &StreamSpec) -> bool {
+    stream
+        .capabilities
+        .iter()
+        .any(|capability| capability.as_str() == USAGE_V2_PROJECTION_ID)
+}
+
+fn usage_v2_projection_update(
+    instance: &SourceInstance,
+    readiness: ProjectionReadiness,
+    detail: Option<&str>,
+) -> ProjectionVersionUpdate {
+    ProjectionVersionUpdate {
+        projection_id: USAGE_V2_PROJECTION_ID.to_string(),
+        scope_key: instance.spec.stable_key.as_bytes().to_vec(),
+        desired_version: USAGE_V2_PROJECTION_VERSION,
+        completed_version: (readiness == ProjectionReadiness::Ready)
+            .then_some(USAGE_V2_PROJECTION_VERSION),
+        readiness,
+        detail: detail.map(str::to_string),
+    }
+}
+
+fn pending_projection_updates(
+    manifest: &AdapterManifest,
+    stream: &StreamSpec,
+    instance: &SourceInstance,
+) -> Vec<ProjectionVersionUpdate> {
+    (declares_usage_v2_projection(manifest) && stream_declares_usage_v2_projection(stream))
+        .then(|| {
+            usage_v2_projection_update(
+                instance,
+                ProjectionReadiness::Pending,
+                Some("source reconciliation in progress"),
+            )
+        })
+        .into_iter()
+        .collect()
 }
 
 fn previous_display_relative(object: &SourceCatalogObject, root: &Path) -> Option<PathBuf> {
@@ -4697,8 +4971,12 @@ mod tests {
         assert_eq!(initial.records_decoded, 1);
         assert_eq!(
             count_rows(&fixture.database, "ingest_commits"),
-            1,
-            "new objects must persist identity in the first data commit, not a pending-only catalog transaction"
+            2,
+            "the first data commit owns object identity and pending readiness; one following administrative commit establishes ready"
+        );
+        assert_eq!(
+            projection_version_state(&fixture.database, "runtime.usage-v2"),
+            (1, Some(1), "ready".to_string(), 2, None)
         );
         assert_eq!(count_rows(&fixture.database, "canonical_messages"), 1);
         let first_instance_id = initial_source_instance_id(&fixture.database);
@@ -4719,6 +4997,12 @@ mod tests {
         let resumed = fixture.reconcile(&restarted);
         assert_eq!(resumed.objects_registered, 0);
         assert_eq!(resumed.records_decoded, 1);
+        assert_eq!(resumed.commits, 2);
+        assert_eq!(count_rows(&fixture.database, "ingest_commits"), 4);
+        assert_eq!(
+            projection_version_state(&fixture.database, "runtime.usage-v2"),
+            (1, Some(1), "ready".to_string(), 4, None)
+        );
         assert_eq!(count_rows(&fixture.database, "canonical_messages"), 2);
         assert_ne!(first_instance_id, 0);
         assert_eq!(
@@ -4769,10 +5053,85 @@ mod tests {
         let outcome = fixture.reconcile(&engine);
         assert_eq!(outcome.records_decoded, 10);
         assert_eq!(
-            outcome.commits, 1,
-            "a new append object persists identity in the same data commit as its first records"
+            outcome.commits, 2,
+            "one bounded data commit is followed by one projection completion barrier"
         );
         assert_eq!(count_rows(&fixture.database, "canonical_messages"), 10);
+    }
+
+    #[test]
+    fn unrelated_stream_commits_do_not_churn_usage_v2_readiness() {
+        let fixture = ClaudeFixture::new();
+        std::fs::write(
+            fixture.transcript_path(),
+            transcript_line("m1", "usage source"),
+        )
+        .unwrap();
+        let engine = fixture.open_engine();
+        let initial = fixture.reconcile(&engine);
+        assert_eq!(initial.commits, 2);
+        assert_eq!(
+            projection_version_state(&fixture.database, "runtime.usage-v2"),
+            (1, Some(1), "ready".to_string(), 2, None)
+        );
+
+        std::fs::write(
+            fixture.root.join("settings.json"),
+            br#"{"model":"claude-opus"}"#,
+        )
+        .unwrap();
+        let settings_only = fixture.reconcile(&engine);
+        assert_eq!(settings_only.records_decoded, 1);
+        assert_eq!(settings_only.commits, 1);
+        assert_eq!(count_rows(&fixture.database, "ingest_commits"), 3);
+        assert_eq!(
+            projection_version_state(&fixture.database, "runtime.usage-v2"),
+            (1, Some(1), "ready".to_string(), 2, None),
+            "a non-provider stream must not move the usage-v2 readiness clock"
+        );
+    }
+
+    #[test]
+    fn quarantined_usage_v2_coverage_stays_unavailable_until_explicit_replay() {
+        let fixture = ClaudeFixture::new();
+        let transcript = fixture.transcript_path();
+        std::fs::write(&transcript, b"{not-json}\n").unwrap();
+        let engine = fixture.open_engine();
+
+        let initial = fixture.reconcile(&engine);
+        assert_eq!(initial.records_quarantined, 1);
+        let unavailable = projection_version_state(&fixture.database, "runtime.usage-v2");
+        assert_eq!(unavailable.0, 1);
+        assert_eq!(unavailable.1, None);
+        assert_eq!(unavailable.2, "unavailable");
+        assert!(unavailable
+            .4
+            .as_deref()
+            .is_some_and(|detail| detail.contains("session-transcripts=records_quarantined")));
+
+        let unchanged = fixture.reconcile(&engine);
+        assert_eq!(unchanged.records_quarantined, 0);
+        assert_eq!(unchanged.commits, 0);
+        assert_eq!(
+            projection_version_state(&fixture.database, "runtime.usage-v2"),
+            unavailable,
+            "passing an already-quarantined cursor cannot prove the missing family coverage"
+        );
+
+        let mut append = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&transcript)
+            .unwrap();
+        append
+            .write_all(&transcript_line("m2", "later valid response"))
+            .unwrap();
+        append.flush().unwrap();
+        let appended = fixture.reconcile(&engine);
+        assert_eq!(appended.records_decoded, 1);
+        assert_eq!(appended.commits, 2);
+        let still_unavailable = projection_version_state(&fixture.database, "runtime.usage-v2");
+        assert_eq!(still_unavailable.2, "unavailable");
+        assert_eq!(still_unavailable.4, unavailable.4);
     }
 
     #[test]
@@ -5123,6 +5482,11 @@ mod tests {
         assert_eq!(initial.records_quarantined, 1);
         assert_eq!(count_rows(&fixture.database, "canonical_messages"), 1);
         assert_eq!(count_rows(&fixture.database, "source_record_errors"), 1);
+        assert_eq!(
+            projection_version_state(&fixture.database, "runtime.usage-v2").2,
+            "ready",
+            "an unrelated presence-sidecar quarantine must not block transcript usage coverage"
+        );
         let quarantined = catalog_object(&engine, &fixture.root, "active-sessions");
         assert_eq!(quarantined.state, "quarantined");
 
@@ -5680,6 +6044,34 @@ mod tests {
                 "SELECT error_class, retry_count FROM source_record_errors LIMIT 1",
                 [],
                 |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap()
+    }
+
+    fn projection_version_state(
+        database: &Path,
+        projection_id: &str,
+    ) -> (i64, Option<i64>, String, i64, Option<String>) {
+        let connection =
+            Connection::open_with_flags(database, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+        connection
+            .query_row(
+                r#"
+                SELECT desired_version, completed_version, readiness,
+                       last_commit_seq, detail
+                FROM projection_versions
+                WHERE projection_id = ?1
+                "#,
+                [projection_id],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
             )
             .unwrap()
     }

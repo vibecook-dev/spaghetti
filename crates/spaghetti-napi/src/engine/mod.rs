@@ -55,7 +55,7 @@ pub use commit::{
     ChangeLogRetentionPolicy, ChangeLogRetentionSnapshot, DEFAULT_CHANGE_LOG_MAX_AGE_MS,
     DEFAULT_CHANGE_LOG_MAX_PAYLOAD_BYTES, DEFAULT_CHANGE_LOG_MIN_RESUMABLE_COMMITS,
 };
-use commit::{CommitReceipt, ObservationCommit};
+use commit::{CommitReceipt, ObservationCommit, ProjectionVersionCommit};
 pub use coordinator::{
     ObservationCoordinator, ReconcileOutcome, ReconcileRequest, ReconcileRetryTarget,
 };
@@ -99,10 +99,10 @@ pub use runtime_query::{
 pub use runtime_usage_query::{
     RuntimeUsageV2ActorContext, RuntimeUsageV2Affiliation, RuntimeUsageV2Aggregate,
     RuntimeUsageV2BucketAggregate, RuntimeUsageV2ExternalEntityRef, RuntimeUsageV2Page,
-    RuntimeUsageV2PageRequest, RuntimeUsageV2Response, RuntimeUsageV2SemanticRevisionRef,
-    RuntimeUsageV2TextValue, RuntimeUsageV2TokenValue, RuntimeUsageV2ValueProvenance,
-    DEFAULT_RUNTIME_USAGE_V2_PAGE_LIMIT, MAX_RUNTIME_USAGE_V2_PAGE_LIMIT,
-    RUNTIME_USAGE_V2_QUERY_CONTRACT_VERSION,
+    RuntimeUsageV2PageRequest, RuntimeUsageV2ProjectionReadiness, RuntimeUsageV2Response,
+    RuntimeUsageV2SemanticRevisionRef, RuntimeUsageV2TextValue, RuntimeUsageV2TokenValue,
+    RuntimeUsageV2ValueProvenance, DEFAULT_RUNTIME_USAGE_V2_PAGE_LIMIT,
+    MAX_RUNTIME_USAGE_V2_PAGE_LIMIT, RUNTIME_USAGE_V2_QUERY_CONTRACT_VERSION,
 };
 pub use search_query::{
     SearchHit, SearchPage, SearchPageRequest, DEFAULT_SEARCH_PAGE_LIMIT,
@@ -1061,6 +1061,22 @@ impl SpaghettiEngineCore {
     ) -> Result<u64, EngineError> {
         let writer = self.writer_client()?;
         writer.reserve_source_instance(source)
+    }
+
+    /// Advance common projection readiness on the same durable commit clock as
+    /// ingestion. Equal transitions are suppressed by the writer.
+    pub(crate) fn commit_projection_versions(
+        &self,
+        request: ProjectionVersionCommit,
+    ) -> Result<Option<u64>, EngineError> {
+        let writer = self.writer_client()?;
+        let receipt = writer.commit_projection_versions(request)?;
+        if let Some(receipt) = receipt {
+            self.commit_notifications.publish(receipt.commit_seq);
+            Ok(Some(receipt.commit_seq))
+        } else {
+            Ok(None)
+        }
     }
 
     /// Commit storage-agnostic adapter facts through the common projectors.

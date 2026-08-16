@@ -926,6 +926,7 @@ export interface EngineRuntimeUsageV2Page {
   contractVersion: number
   atCommitSeq: number
   projectionStatus: string
+  projectionReadiness: EngineRuntimeUsageV2ProjectionReadiness
   projectId: string
   sessionId: string
   sessionRef?: EngineRuntimeUsageV2ExternalEntityRef
@@ -936,6 +937,16 @@ export interface EngineRuntimeUsageV2Page {
   items: Array<EngineRuntimeUsageV2Response>
   actors: Array<EngineRuntimeUsageV2ActorContext>
   nextCursor?: string
+}
+
+export interface EngineRuntimeUsageV2ProjectionReadiness {
+  projectionId: string
+  desiredVersion: number
+  completedVersion?: number
+  state: string
+  lastCommitSeq?: number
+  updatedAtUnixMs?: number
+  detail?: string
 }
 
 export interface EngineRuntimeUsageV2Response {

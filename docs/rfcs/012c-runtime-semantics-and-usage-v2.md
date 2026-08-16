@@ -713,6 +713,38 @@ Migration proceeds as follows:
 7. retain the legacy projection through the compatibility window so rollback
    does not require reparsing or database deletion.
 
+The shadow query exposes pack readiness separately from migration selection:
+
+```text
+UsageV2ProjectionReadiness {
+  projection_id: "runtime.usage-v2"
+  desired_version
+  completed_version?
+  state: Ready | StaleSafe | Pending | Unavailable | Untracked
+  last_commit_seq?
+  updated_at?
+  detail?
+}
+```
+
+`Untracked` is a query-boundary representation for legacy/directly constructed
+state with no durable version row; it is never persisted and never aliases
+`Ready`. A transaction that changes rows supplied by a usage-v2 provider
+stream writes `Pending` atomically with those rows. `Ready` requires a later
+barrier after every declared provider stream has drained without retry,
+quarantine, incomplete tail, bounded-backlog remainder, unavailable source, or
+dependency-access denial. `Unavailable` retains an honest reason. A
+record-quarantine coverage gap cannot recover merely because the cursor later
+has no work or new records append; an explicit replay/revalidation must prove
+replacement coverage. Administrative readiness transitions advance the normal
+durable commit clock but do not update a source object or cursor. Equal
+transitions do not create a commit.
+
+`projection_status = shadow | not_materialized` states whether the candidate
+query has v2 rows for the requested session; it is distinct from pack
+readiness and from RFC 012A source/fact-family coverage. All three values, rows,
+and aggregates returned by one page belong to its advertised `at_commit_seq`.
+
 The independent oracle groups native records without importing adapter code,
 selects the last complete response revision in the current generation, and
 computes bucket quality/coverage as well as values. History, capability, and
@@ -754,11 +786,24 @@ page and aggregate shares a commit snapshot; continuation is bound to its full
 scope and fails after the snapshot watermark changes. A session without a v2
 mapping reports `not_materialized`, never legacy fallback.
 
-Step 3, common source/family coverage and readiness, private native corpus-scale
-qualification/coverage parity, native team-to-actor conformance, the default
-switch in step 6, step 7's compatibility/rollback window, and crash/replay
-orchestration remain open. Until those gates pass, the candidate capability is
-unsupported and `getUsage`/`getUsageActivity` retain legacy semantics.
+The first step-3 projection-readiness slice is also durable. Only streams whose
+common capability list includes `runtime.usage-v2` can atomically set its pack
+to `Pending` in a source transaction. After those provider streams drain, the
+common coordinator uses a zero-fact administrative transaction on the same
+commit clock to establish `Ready` or `Unavailable`; it never fabricates a
+source-object cursor update. Equal transitions are no-ops, unrelated stream
+commits leave the pack watermark unchanged, and `getRuntimeUsageV2` returns the
+readiness row from the same snapshot as its rows and aggregates. A provider
+record quarantine is sticky `Unavailable`: neither a later append nor a no-op
+scan can claim the skipped evidence was recovered. The future explicit replay
+path owns that recovery.
+
+Step 3's persistable source/fact-family coverage set and explicit replay
+recovery, private native corpus-scale qualification/coverage parity, native
+team-to-actor conformance, the default switch in step 6, step 7's
+compatibility/rollback window, and remaining crash boundaries are open. Until
+those gates pass, the candidate capability is unsupported and
+`getUsage`/`getUsageActivity` retain legacy semantics.
 
 ## 14. Failure and correction semantics
 

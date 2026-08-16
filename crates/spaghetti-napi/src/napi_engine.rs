@@ -28,12 +28,12 @@ use crate::engine::{
     RuntimeRunSnapshot, RuntimeSnapshot, RuntimeSnapshotRequest, RuntimeUsageV2ActorContext,
     RuntimeUsageV2Affiliation, RuntimeUsageV2Aggregate, RuntimeUsageV2BucketAggregate,
     RuntimeUsageV2ExternalEntityRef, RuntimeUsageV2Page, RuntimeUsageV2PageRequest,
-    RuntimeUsageV2Response, RuntimeUsageV2SemanticRevisionRef, RuntimeUsageV2TextValue,
-    RuntimeUsageV2TokenValue, RuntimeUsageV2ValueProvenance, SearchHit, SearchPage,
-    SearchPageRequest, SessionDetail, SessionDetails, SessionDetailsRequest, SessionIndexDetail,
-    SourceCapabilitySummary, SourceDimensionPerformanceSnapshot, SourcePage, SourcePageRequest,
-    SourcePerformanceSnapshot, SourcePipelineSnapshot, SourceSummary, SpaghettiEngineCore,
-    StoragePerformanceSnapshot, TaskCollectionPage, TaskCollectionPageRequest,
+    RuntimeUsageV2ProjectionReadiness, RuntimeUsageV2Response, RuntimeUsageV2SemanticRevisionRef,
+    RuntimeUsageV2TextValue, RuntimeUsageV2TokenValue, RuntimeUsageV2ValueProvenance, SearchHit,
+    SearchPage, SearchPageRequest, SessionDetail, SessionDetails, SessionDetailsRequest,
+    SessionIndexDetail, SourceCapabilitySummary, SourceDimensionPerformanceSnapshot, SourcePage,
+    SourcePageRequest, SourcePerformanceSnapshot, SourcePipelineSnapshot, SourceSummary,
+    SpaghettiEngineCore, StoragePerformanceSnapshot, TaskCollectionPage, TaskCollectionPageRequest,
     TaskCollectionSummary, TaskDetail, TaskPage, TaskPageRequest, TeamConfigSummary, TeamDetails,
     TeamDetailsRequest, TeamInboxMessage, TeamInboxMessagePage, TeamInboxMessagePageRequest,
     TeamInboxPage, TeamInboxPageRequest, TeamInboxSummary, TeamMember, TeamPage, TeamPageRequest,
@@ -2947,10 +2947,37 @@ impl From<RuntimeUsageV2Aggregate> for EngineRuntimeUsageV2Aggregate {
 
 #[napi(object)]
 #[derive(Debug, Clone)]
+pub struct EngineRuntimeUsageV2ProjectionReadiness {
+    pub projection_id: String,
+    pub desired_version: u32,
+    pub completed_version: Option<u32>,
+    pub state: String,
+    pub last_commit_seq: Option<f64>,
+    pub updated_at_unix_ms: Option<f64>,
+    pub detail: Option<String>,
+}
+
+impl From<RuntimeUsageV2ProjectionReadiness> for EngineRuntimeUsageV2ProjectionReadiness {
+    fn from(value: RuntimeUsageV2ProjectionReadiness) -> Self {
+        Self {
+            projection_id: value.projection_id,
+            desired_version: value.desired_version,
+            completed_version: value.completed_version,
+            state: value.state,
+            last_commit_seq: value.last_commit_seq.map(|value| value as f64),
+            updated_at_unix_ms: value.updated_at_unix_ms.map(|value| value as f64),
+            detail: value.detail,
+        }
+    }
+}
+
+#[napi(object)]
+#[derive(Debug, Clone)]
 pub struct EngineRuntimeUsageV2Page {
     pub contract_version: u32,
     pub at_commit_seq: f64,
     pub projection_status: String,
+    pub projection_readiness: EngineRuntimeUsageV2ProjectionReadiness,
     pub project_id: String,
     pub session_id: String,
     pub session_ref: Option<EngineRuntimeUsageV2ExternalEntityRef>,
@@ -2969,6 +2996,7 @@ impl From<RuntimeUsageV2Page> for EngineRuntimeUsageV2Page {
             contract_version: value.contract_version,
             at_commit_seq: value.at_commit_seq as f64,
             projection_status: value.projection_status,
+            projection_readiness: value.projection_readiness.into(),
             project_id: value.project_id,
             session_id: value.session_id,
             session_ref: value.session_ref.map(Into::into),

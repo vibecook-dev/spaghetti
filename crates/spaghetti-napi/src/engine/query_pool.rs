@@ -208,6 +208,7 @@ pub struct SourceCatalogSnapshot {
     pub adapter_contract_version: Option<u32>,
     pub streams: Vec<SourceCatalogStream>,
     pub objects: Vec<SourceCatalogObject>,
+    pub projection_versions: Vec<SourceCatalogProjectionVersion>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -243,6 +244,17 @@ pub struct SourceCatalogObject {
     pub decoder_contract_version: u32,
     pub last_commit_seq: Option<u64>,
     pub state: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceCatalogProjectionVersion {
+    pub projection_id: String,
+    pub desired_version: u32,
+    pub completed_version: Option<u32>,
+    pub readiness: String,
+    pub last_commit_seq: Option<u64>,
+    pub updated_at: i64,
+    pub detail: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -3000,6 +3012,7 @@ pub(super) fn read_source_catalog(
             adapter_contract_version: None,
             streams: Vec::new(),
             objects: Vec::new(),
+            projection_versions: Vec::new(),
         });
     };
     let source_instance_id = decode_nonnegative_u64(source_instance_id, "source instance id")?;
@@ -3171,6 +3184,50 @@ pub(super) fn read_source_catalog(
         objects
     };
 
+    let projection_versions = {
+        let mut statement = transaction
+            .prepare(
+                r#"
+                SELECT projection_id, desired_version, completed_version,
+                       readiness, last_commit_seq, updated_at, detail
+                FROM projection_versions
+                WHERE scope_key = ?1
+                ORDER BY projection_id
+                "#,
+            )
+            .map_err(|error| query_sqlite_error("prepare source projection versions", error))?;
+        let rows = statement
+            .query_map([stable_key], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, Option<i64>>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, Option<i64>>(4)?,
+                    row.get::<_, i64>(5)?,
+                    row.get::<_, Option<String>>(6)?,
+                ))
+            })
+            .map_err(|error| query_sqlite_error("read source projection versions", error))?;
+        let mut versions = Vec::new();
+        for row in rows {
+            let (projection_id, desired, completed, readiness, commit, updated_at, detail) =
+                row.map_err(|error| query_sqlite_error("decode source projection version", error))?;
+            versions.push(SourceCatalogProjectionVersion {
+                projection_id,
+                desired_version: decode_nonnegative_u32(desired, "projection desired version")?,
+                completed_version: completed
+                    .map(|value| decode_nonnegative_u32(value, "projection completed version"))
+                    .transpose()?,
+                readiness,
+                last_commit_seq: decode_optional_u64(commit, "projection commit sequence")?,
+                updated_at,
+                detail,
+            });
+        }
+        versions
+    };
+
     transaction
         .commit()
         .map_err(|error| query_sqlite_error("finish source catalog snapshot", error))?;
@@ -3179,6 +3236,7 @@ pub(super) fn read_source_catalog(
         adapter_contract_version: Some(adapter_contract_version),
         streams,
         objects,
+        projection_versions,
     })
 }
 

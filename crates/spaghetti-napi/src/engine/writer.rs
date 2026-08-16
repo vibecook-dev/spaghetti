@@ -55,6 +55,11 @@ enum WriterCommand {
         source: Box<commit::SourceInstanceSpec>,
         response: Sender<Result<u64, EngineError>>,
     },
+    CommitProjectionVersions {
+        request: Box<commit::ProjectionVersionCommit>,
+        queued_at: Instant,
+        response: Sender<Result<Option<commit::ProjectionVersionReceipt>, EngineError>>,
+    },
     SourceCatalog {
         adapter_id: String,
         stable_key: Vec<u8>,
@@ -134,6 +139,26 @@ impl WriterClient {
         self.commands
             .send(WriterCommand::ReserveSourceInstance {
                 source: Box::new(source),
+                response: response_tx,
+            })
+            .map_err(|_| EngineError::WorkerUnavailable { worker: "writer" })?;
+        response_rx
+            .recv()
+            .map_err(|_| EngineError::WorkerUnavailable { worker: "writer" })?
+    }
+
+    pub(crate) fn commit_projection_versions(
+        &self,
+        request: commit::ProjectionVersionCommit,
+    ) -> Result<Option<commit::ProjectionVersionReceipt>, EngineError> {
+        if !self.alive.load(Ordering::Acquire) {
+            return Err(EngineError::WorkerUnavailable { worker: "writer" });
+        }
+        let (response_tx, response_rx) = bounded(1);
+        self.commands
+            .send(WriterCommand::CommitProjectionVersions {
+                request: Box::new(request),
+                queued_at: Instant::now(),
                 response: response_tx,
             })
             .map_err(|_| EngineError::WorkerUnavailable { worker: "writer" })?;
@@ -450,6 +475,44 @@ fn writer_thread(
                 let result = ensure_disk_reserve(&database_path)
                     .and_then(|()| commit::reserve_source_instance(&mut connection, &source));
                 let _ = response.send(result);
+            }
+            WriterCommand::CommitProjectionVersions {
+                request,
+                queued_at,
+                response,
+            } => {
+                telemetry.queue_wait.record(queued_at.elapsed());
+                let reserve_started = Instant::now();
+                let reserve = ensure_disk_reserve(&database_path);
+                telemetry.disk_reserve.record(reserve_started.elapsed());
+                let rows_before = sqlite_total_changes(&connection);
+                let started = Instant::now();
+                let result = reserve.and_then(|()| {
+                    commit::apply_projection_version_commit(&mut connection, &request)
+                });
+                let elapsed = started.elapsed();
+                telemetry.writer_total.record(elapsed);
+                let committed = matches!(result, Ok(Some(_)));
+                match &result {
+                    Ok(Some(_)) => {
+                        atomic_saturating_add(&telemetry.commit_attempts, 1);
+                        atomic_saturating_add(&telemetry.committed, 1);
+                        atomic_saturating_add(
+                            &telemetry.sqlite_rows_changed,
+                            sqlite_total_changes(&connection).saturating_sub(rows_before),
+                        );
+                        telemetry.physical_transaction.record(elapsed);
+                    }
+                    Ok(None) => {}
+                    Err(_) => {
+                        atomic_saturating_add(&telemetry.commit_attempts, 1);
+                        atomic_saturating_add(&telemetry.failed, 1);
+                    }
+                }
+                let _ = response.send(result);
+                if committed {
+                    checkpoints.maybe_checkpoint(&connection, &telemetry, bootstrap_active);
+                }
             }
             WriterCommand::SourceCatalog {
                 adapter_id,
@@ -1848,6 +1911,51 @@ mod tests {
             client.health(),
             Err(EngineError::WorkerUnavailable { worker: "writer" })
         ));
+    }
+
+    #[test]
+    fn projection_administration_counts_only_durable_writer_commits() {
+        let dir = tempdir().unwrap();
+        let database = dir.path().join("projection-telemetry.db");
+        let mut runtime = WriterRuntime::start(database.clone()).unwrap();
+        let client = runtime.client();
+        let source = client.commit_observation(grouped_request(1)).unwrap();
+        let request = commit::ProjectionVersionCommit {
+            source_instance_id: source.source_instance_id,
+            reason: "projection.runtime.usage-v2.ready".to_string(),
+            started_at: 3,
+            committed_at: 4,
+            projection_versions: vec![commit::ProjectionVersionUpdate {
+                projection_id: "runtime.usage-v2".to_string(),
+                scope_key: vec![1],
+                desired_version: 1,
+                completed_version: Some(1),
+                readiness: commit::ProjectionReadiness::Ready,
+                detail: None,
+            }],
+        };
+        assert!(client
+            .commit_projection_versions(request.clone())
+            .unwrap()
+            .is_some());
+        assert!(client
+            .commit_projection_versions(request)
+            .unwrap()
+            .is_none());
+
+        let snapshot = client.performance_snapshot();
+        assert_eq!(snapshot.commit_attempts, 2);
+        assert_eq!(snapshot.committed, 2);
+        assert_eq!(snapshot.failed, 0);
+        runtime.shutdown().unwrap();
+        assert_eq!(
+            Connection::open(database)
+                .unwrap()
+                .query_row("SELECT COUNT(*) FROM ingest_commits", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            2
+        );
     }
 
     #[test]

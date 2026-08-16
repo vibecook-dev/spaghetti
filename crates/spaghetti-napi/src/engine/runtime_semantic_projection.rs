@@ -14,6 +14,12 @@ use crate::adapter::{
 use super::commit::ProjectionCommitContext;
 use super::EngineError;
 
+/// Common adapter capability and durable projection-pack identifier. Concrete
+/// adapters may declare it, but only the common reducer/query stack interprets
+/// its readiness lifecycle.
+pub(super) const USAGE_V2_PROJECTION_ID: &str = "runtime.usage-v2";
+pub(super) const USAGE_V2_PROJECTION_VERSION: u32 = 1;
+
 pub(super) fn apply_runtime_semantic_v2_facts(
     transaction: &Transaction<'_>,
     context: &ProjectionCommitContext,

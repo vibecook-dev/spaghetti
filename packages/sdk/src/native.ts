@@ -1445,11 +1445,24 @@ export interface SpaghettiEngineRuntimeUsageV2Aggregate {
   cacheReadInputTokens: SpaghettiEngineRuntimeUsageV2BucketAggregate;
 }
 
+export interface SpaghettiEngineRuntimeUsageV2ProjectionReadiness {
+  projectionId: 'runtime.usage-v2';
+  desiredVersion: number;
+  completedVersion?: number;
+  /** `untracked` is explicit legacy/direct-fixture state, never an alias for ready. */
+  state: 'ready' | 'stale_safe' | 'pending' | 'unavailable' | 'untracked';
+  lastCommitSeq?: number;
+  updatedAtUnixMs?: number;
+  detail?: string;
+}
+
 export interface SpaghettiEngineRuntimeUsageV2Page {
   contractVersion: number;
   atCommitSeq: number;
   /** `shadow` is queryable; `not_materialized` means this session has no v2 projection yet. */
   projectionStatus: 'shadow' | 'not_materialized';
+  /** Writer-owned readiness at the same atCommitSeq as rows and aggregates. */
+  projectionReadiness: SpaghettiEngineRuntimeUsageV2ProjectionReadiness;
   projectId: string;
   sessionId: string;
   sessionRef?: SpaghettiEngineRuntimeUsageV2ExternalEntityRef;

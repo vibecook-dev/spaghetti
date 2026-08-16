@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 
 use super::query_identity::{decode_entity_id, PROJECT_ID_PREFIX, SESSION_ID_PREFIX};
 use super::query_pool::read_committed_watermark;
+use super::runtime_semantic_projection::{USAGE_V2_PROJECTION_ID, USAGE_V2_PROJECTION_VERSION};
 use super::EngineError;
 
 pub const RUNTIME_USAGE_V2_QUERY_CONTRACT_VERSION: u32 = 1;
@@ -164,10 +165,22 @@ pub struct RuntimeUsageV2Aggregate {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeUsageV2ProjectionReadiness {
+    pub projection_id: String,
+    pub desired_version: u32,
+    pub completed_version: Option<u32>,
+    pub state: String,
+    pub last_commit_seq: Option<u64>,
+    pub updated_at_unix_ms: Option<i64>,
+    pub detail: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeUsageV2Page {
     pub contract_version: u32,
     pub at_commit_seq: u64,
     pub projection_status: String,
+    pub projection_readiness: RuntimeUsageV2ProjectionReadiness,
     pub project_id: String,
     pub session_id: String,
     pub session_ref: Option<RuntimeUsageV2ExternalEntityRef>,
@@ -231,6 +244,9 @@ pub(super) fn read_runtime_usage_v2_page(
         }
     }
     require_session_membership(&transaction, &validated.project_key, &validated.session_key)?;
+    let projection_scope_key =
+        resolve_projection_scope_key(&transaction, &validated.project_key, &validated.session_key)?;
+    let projection_readiness = read_projection_readiness(&transaction, &projection_scope_key)?;
     let canonical_session_key = resolve_canonical_session_key(
         &transaction,
         &validated.project_key,
@@ -243,6 +259,7 @@ pub(super) fn read_runtime_usage_v2_page(
             contract_version: RUNTIME_USAGE_V2_QUERY_CONTRACT_VERSION,
             at_commit_seq: watermark,
             projection_status: "not_materialized".to_string(),
+            projection_readiness,
             project_id: request.project_id.clone(),
             session_id: request.session_id.clone(),
             session_ref: None,
@@ -306,6 +323,7 @@ pub(super) fn read_runtime_usage_v2_page(
         contract_version: RUNTIME_USAGE_V2_QUERY_CONTRACT_VERSION,
         at_commit_seq: watermark,
         projection_status: "shadow".to_string(),
+        projection_readiness,
         project_id: request.project_id.clone(),
         session_id: request.session_id.clone(),
         session_ref: Some(session_ref),
@@ -403,6 +421,94 @@ fn require_session_membership(
         ));
     }
     Ok(())
+}
+
+fn resolve_projection_scope_key(
+    transaction: &Transaction<'_>,
+    project_key: &[u8],
+    session_key: &[u8],
+) -> Result<Vec<u8>, EngineError> {
+    transaction
+        .query_row(
+            r#"
+            SELECT source.stable_key
+            FROM canonical_sessions AS session
+            JOIN source_objects AS object
+              ON object.source_object_id = session.source_object_id
+            JOIN source_streams AS stream
+              ON stream.source_stream_id = object.source_stream_id
+            JOIN source_instances AS source
+              ON source.source_instance_id = stream.source_instance_id
+            WHERE session.project_key = ?1 AND session.session_key = ?2
+            "#,
+            params![project_key, session_key],
+            |row| row.get(0),
+        )
+        .map_err(|error| query_sqlite_error("resolve runtime usage-v2 projection scope", error))
+}
+
+fn read_projection_readiness(
+    transaction: &Transaction<'_>,
+    projection_scope_key: &[u8],
+) -> Result<RuntimeUsageV2ProjectionReadiness, EngineError> {
+    let row = transaction
+        .query_row(
+            r#"
+            SELECT desired_version, completed_version, readiness,
+                   last_commit_seq, updated_at, detail
+            FROM projection_versions
+            WHERE projection_id = ?1 AND scope_key = ?2
+            "#,
+            params![USAGE_V2_PROJECTION_ID, projection_scope_key],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, Option<i64>>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<i64>>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|error| query_sqlite_error("read runtime usage-v2 projection readiness", error))?;
+    let Some((desired, completed, state, last_commit_seq, updated_at, detail)) = row else {
+        return Ok(RuntimeUsageV2ProjectionReadiness {
+            projection_id: USAGE_V2_PROJECTION_ID.to_string(),
+            desired_version: USAGE_V2_PROJECTION_VERSION,
+            completed_version: None,
+            state: "untracked".to_string(),
+            last_commit_seq: None,
+            updated_at_unix_ms: None,
+            detail: Some("projection readiness has not been established".to_string()),
+        });
+    };
+    if !matches!(
+        state.as_str(),
+        "ready" | "stale_safe" | "pending" | "unavailable"
+    ) {
+        return Err(EngineError::Sqlite {
+            operation: "decode runtime usage-v2 projection readiness",
+            detail: format!("projection has unknown readiness state {state}"),
+        });
+    }
+    Ok(RuntimeUsageV2ProjectionReadiness {
+        projection_id: USAGE_V2_PROJECTION_ID.to_string(),
+        desired_version: nonnegative_u32(desired, "projection desired version")
+            .map_err(|error| query_sqlite_error("decode projection desired version", error))?,
+        completed_version: completed
+            .map(|value| nonnegative_u32(value, "projection completed version"))
+            .transpose()
+            .map_err(|error| query_sqlite_error("decode projection completed version", error))?,
+        state,
+        last_commit_seq: last_commit_seq
+            .map(|value| nonnegative_u64(value, "projection commit sequence"))
+            .transpose()
+            .map_err(|error| query_sqlite_error("decode projection commit sequence", error))?,
+        updated_at_unix_ms: Some(updated_at),
+        detail,
+    })
 }
 
 fn resolve_canonical_session_key(
