@@ -7,8 +7,8 @@
 use rusqlite::{params, Transaction};
 
 use crate::adapter::{
-    ActorAffiliationDimension, ActorAffiliationState, ActorRunRole, Fact, FactBatch, FactEnvelope,
-    QualifiedTimestamp, TimestampQuality,
+    ActorAffiliationDimension, ActorAffiliationState, ActorRunRole, ConsistencyPolicy, Fact,
+    FactBatch, FactEnvelope, QualifiedTimestamp, TimestampQuality,
 };
 
 use super::commit::ProjectionCommitContext;
@@ -25,19 +25,38 @@ pub(super) fn apply_runtime_semantic_v2_facts(
     context: &ProjectionCommitContext,
     batch: &FactBatch,
 ) -> Result<(), EngineError> {
-    if context.replaces_prior_generation {
-        let source_object_id = sqlite_u64(context.source_object_id, "source object id")?;
-        let generation = sqlite_u64(context.generation, "source generation")?;
+    let has_affiliation_fact = batch
+        .facts()
+        .iter()
+        .any(|envelope| matches!(envelope.value, Fact::ActorAffiliationRevision(_)));
+    let owns_affiliation_snapshot = context.consistency == ConsistencyPolicy::SnapshotReplace
+        && !context.skip_unowned_replace_document(has_affiliation_fact);
+    if owns_affiliation_snapshot {
+        transaction
+            .execute(
+                "DELETE FROM runtime_actor_affiliations_v2 WHERE source_object_id = ?1",
+                [sqlite_u64(context.source_object_id, "source object id")?],
+            )
+            .map_err(|error| sqlite_error("retract replaced actor affiliation snapshot", error))?;
+    } else if context.replaces_prior_generation {
         transaction
             .execute(
                 "DELETE FROM runtime_actor_affiliations_v2 WHERE source_object_id = ?1 AND source_generation <> ?2",
-                params![source_object_id, generation],
+                params![
+                    sqlite_u64(context.source_object_id, "source object id")?,
+                    sqlite_u64(context.generation, "source generation")?,
+                ],
             )
             .map_err(|error| sqlite_error("retract replaced actor affiliations", error))?;
+    }
+    if context.replaces_prior_generation {
         transaction
             .execute(
                 "DELETE FROM runtime_actor_runs_v2 WHERE source_object_id = ?1 AND source_generation <> ?2",
-                params![source_object_id, generation],
+                params![
+                    sqlite_u64(context.source_object_id, "source object id")?,
+                    sqlite_u64(context.generation, "source generation")?,
+                ],
             )
             .map_err(|error| sqlite_error("retract replaced actor runs", error))?;
     }
@@ -186,6 +205,22 @@ pub(super) fn apply_runtime_semantic_v2_facts(
             }
             _ => {}
         }
+    }
+    if owns_affiliation_snapshot {
+        transaction
+            .execute(
+                r#"
+                DELETE FROM fact_records
+                WHERE source_object_id = ?1
+                  AND fact_kind = 'runtime.actor-affiliation'
+                  AND last_commit_seq <> ?2
+                "#,
+                params![
+                    sqlite_u64(context.source_object_id, "source object id")?,
+                    sqlite_u64(context.commit_seq, "commit sequence")?,
+                ],
+            )
+            .map_err(|error| sqlite_error("retract replaced actor affiliation facts", error))?;
     }
     Ok(())
 }

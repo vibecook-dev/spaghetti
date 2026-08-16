@@ -1109,8 +1109,18 @@ a usage gap. The committed aggregate-only report is
 with digest
 `sha256:2d84af3dd9bcfb91e727b8d0e067679b1637e61b0a343957a09b8f42c303176e`.
 
-Native team-to-actor conformance and collection of a representative external
-compatibility-window report remain open. Until those gates pass, the candidate
+Native team-to-actor conformance also passes under decoder contract 20. Team
+config `leadSessionId` plus an exactly-one lead member establishes the root
+edge; zero or multiple matches fail closed as retained unknown evidence;
+subagent metadata `teamName` plus `name` establishes a child edge for the actor
+owned by that sidecar path. Both produce the same canonical team/member
+namespace without comparing opaque transcript filenames to config agent IDs.
+Snapshot replacement retracts an edited or deleted sidecar's prior edge while
+leaving actor usage untouched. The aggregate-only native census report is
+[`team-affiliation-census-v1.json`](../../agent-support/claude-code/candidate-2026-08-15/reports/team-affiliation-census-v1.json).
+
+Collection of a representative external compatibility-window report remains
+open. Until that and the remaining runtime-family gates pass, the candidate
 capability is unsupported and `getUsage`/`getUsageActivity` retain legacy
 semantics.
 

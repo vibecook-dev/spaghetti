@@ -273,7 +273,7 @@
   ],
   "join_rules": [
     { "join_id": "parent-subagent", "inputs": ["parent transcript agent spawn", "subagent transcript path", "optional metadata"], "output": "actor parent and child correlation", "max_fan_out": 256, "ambiguous_behavior": "report_ambiguous", "claim_refs": ["claude-identity-rules", "claude-scope-relations-open"] },
-    { "join_id": "actor-team-member", "inputs": ["actor native IDs", "team config members"], "output": "orthogonal team membership", "max_fan_out": 16, "ambiguous_behavior": "report_ambiguous", "claim_refs": ["claude-runtime-semantics-open"] },
+    { "join_id": "actor-team-member", "inputs": ["team config leadSessionId plus exactly-one lead member", "subagent metadata teamName plus name", "team directory plus unique config member name"], "output": "orthogonal team membership", "max_fan_out": 16, "ambiguous_behavior": "report_ambiguous", "claim_refs": ["claude-runtime-semantics-open"] },
     { "join_id": "actor-workflow-member", "inputs": ["subagent workflow path", "workflow run", "workflow journal"], "output": "orthogonal workflow membership", "max_fan_out": 256, "ambiguous_behavior": "report_ambiguous", "claim_refs": ["claude-runtime-semantics-open", "claude-scope-relations-open"] }
   ],
   "scope_program_manifest": "agent-support/claude-code/candidate-2026-08-15/scope-programs.json",

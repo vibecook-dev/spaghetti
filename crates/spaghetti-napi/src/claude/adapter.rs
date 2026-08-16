@@ -147,13 +147,13 @@ impl ClaudeCodeAdapter {
                 id: AdapterId::new(ADAPTER_ID).expect("static Claude adapter id is valid"),
                 display_name: "Claude Code".to_string(),
                 adapter_version: env!("CARGO_PKG_VERSION").to_string(),
-                contract_version: 19,
+                contract_version: 20,
                 support_binding: Some(
                     AdapterSupportBinding::new(
                         "claude-code-support-2026-08-15-candidate",
                         env!("CARGO_PKG_VERSION"),
-                        19,
-                        "sha256:2ed3c1c7cdc0c9a0ac198e92a3265e4f2563be688572cb70d710d1ee44ff6aef",
+                        20,
+                        "sha256:1d8b81547812a87b71e983fede40ac7cb130bbbe7252017fd3bd4a95b9bc98fa",
                         "sha256:17a0f1aa7490b5c03a525f7606a7a02ee6d1919cc8b9b776597843f1edbf1ebe",
                         "sha256:689c86b9770544f826da37e72d1c4a1a37153fad4091372b954bba90ca2d5f7c",
                     )
@@ -878,6 +878,7 @@ fn capability_ids(ids: &[&str]) -> Vec<CapabilityId> {
 fn subagent_metadata_capabilities() -> Vec<CapabilityId> {
     [
         RUNTIME_SUBAGENTS,
+        RUNTIME_TEAMS,
         SOURCE_LIVE,
         SOURCE_RECONCILE,
         SOURCE_RESUME_CURSOR,
@@ -1684,6 +1685,8 @@ struct ClaudeSubagentMetadataDocument {
     #[serde(default)]
     name: Option<String>,
     #[serde(default)]
+    team_name: Option<String>,
+    #[serde(default)]
     spawn_depth: Option<u32>,
     #[serde(default)]
     worktree_path: Option<String>,
@@ -1983,10 +1986,26 @@ fn decode_team_config(
             backend_type: member.backend_type.as_deref().and_then(nonempty),
         });
     }
-    let lead_member = members
+    let mut lead_member_matches = members
         .iter()
-        .find(|member| member.native_agent_id == native_lead_agent_id)
-        .map(|member| member.member.clone());
+        .filter(|member| member.native_agent_id == native_lead_agent_id);
+    let Some(lead_member_snapshot) = lead_member_matches.next() else {
+        return preserve_team_config_contract_loss(
+            record,
+            output,
+            "does not contain its declared lead member",
+        );
+    };
+    if lead_member_matches.next().is_some() {
+        return preserve_team_config_contract_loss(
+            record,
+            output,
+            "contains an ambiguous declared lead member",
+        );
+    }
+    let lead_member = Some(lead_member_snapshot.member.clone());
+    let lead_member_name = Some(lead_member_snapshot.native_name.clone());
+    let created_at = epoch_millis_timestamp(document.created_at);
     output.push(
         record,
         Fact::TeamSnapshot(TeamSnapshotFact {
@@ -1994,18 +2013,27 @@ fn decode_team_config(
             native_team_id: context.native_team_id.clone(),
             name,
             description: document.description.as_deref().and_then(nonempty),
-            created_at: epoch_millis_timestamp(document.created_at),
+            created_at: created_at.clone(),
             lead_member,
-            native_lead_agent_id,
+            native_lead_agent_id: native_lead_agent_id.clone(),
             lead_session: EntityKey::native(
                 adapter_id,
                 record.source_instance_id,
                 "session",
                 native_lead_session_id.as_bytes(),
             )?,
-            native_lead_session_id,
+            native_lead_session_id: native_lead_session_id.clone(),
             members,
         }),
+    )?;
+    emit_team_affiliation(
+        record,
+        output,
+        &native_lead_session_id,
+        &native_lead_session_id,
+        &context.native_team_id,
+        lead_member_name.as_deref(),
+        Some(created_at),
     )?;
     Ok(DecodeDisposition::Applied)
 }
@@ -3500,10 +3528,54 @@ fn team_member_key(
     native_team_id: &str,
     native_member_name: &str,
 ) -> Result<EntityKey, AdapterError> {
+    let native_key = team_member_native_key(native_team_id, native_member_name);
+    EntityKey::native(adapter_id, source_instance_id, "team_member", &native_key)
+}
+
+fn team_member_native_key(native_team_id: &str, native_member_name: &str) -> Vec<u8> {
     let mut native_key = Vec::new();
     push_key_component(&mut native_key, native_team_id.as_bytes());
     push_key_component(&mut native_key, native_member_name.as_bytes());
-    EntityKey::native(adapter_id, source_instance_id, "team_member", &native_key)
+    native_key
+}
+
+fn emit_team_affiliation(
+    record: &SourceRecord,
+    output: &mut FactBatch,
+    native_session_id: &str,
+    run_native_key: &str,
+    native_team_id: &str,
+    native_member_name: Option<&str>,
+    effective_at: Option<QualifiedTimestamp>,
+) -> Result<(), AdapterError> {
+    let mut affiliation_native_key = Vec::new();
+    push_key_component(&mut affiliation_native_key, b"team");
+    push_key_component(&mut affiliation_native_key, run_native_key.as_bytes());
+    push_key_component(&mut affiliation_native_key, native_team_id.as_bytes());
+    let member = native_member_name
+        .map(|name| {
+            output
+                .canonical_entity_key("team_member", &team_member_native_key(native_team_id, name))
+        })
+        .transpose()?;
+    output.push_native(
+        record,
+        &affiliation_native_key,
+        Fact::ActorAffiliationRevision(ActorAffiliationRevisionFact {
+            affiliation: output
+                .canonical_entity_key("actor_affiliation", &affiliation_native_key)?,
+            actor_run: output.canonical_entity_key("run", run_native_key.as_bytes())?,
+            session: output.canonical_entity_key("session", native_session_id.as_bytes())?,
+            dimension: ActorAffiliationDimension::Team,
+            target: output.canonical_entity_key("team", native_team_id.as_bytes())?,
+            member,
+            native_target_id: Some(native_team_id.to_string()),
+            native_member_id: native_member_name.map(str::to_string),
+            state: ActorAffiliationState::Present,
+            effective_at,
+        }),
+    )?;
+    Ok(())
 }
 
 fn epoch_millis_timestamp(value: i64) -> QualifiedTimestamp {
@@ -3548,6 +3620,8 @@ fn decode_subagent_metadata(
     let agent_id = context.agent_id.as_deref().ok_or_else(|| {
         AdapterError::invalid_contract("subagent metadata context has no native child id")
     })?;
+    let native_member_name = document.name.as_deref().and_then(nonempty);
+    let native_team_id = document.team_name.as_deref().and_then(nonempty);
     let session = EntityKey::native(
         adapter_id,
         record.source_instance_id,
@@ -3569,12 +3643,25 @@ fn decode_subagent_metadata(
             native_child_id: agent_id.to_string(),
             agent_type,
             description: document.description.as_deref().and_then(nonempty),
-            name: document.name.as_deref().and_then(nonempty),
+            name: native_member_name.clone(),
             spawn_depth: document.spawn_depth,
             worktree_path: document.worktree_path.as_deref().and_then(nonempty),
             native_task_id: document.tool_use_id.as_deref().and_then(nonempty),
         }),
     )?;
+    if let (Some(native_team_id), Some(native_member_name)) =
+        (native_team_id.as_deref(), native_member_name.as_deref())
+    {
+        emit_team_affiliation(
+            record,
+            output,
+            &context.session_id,
+            &run_native_key,
+            native_team_id,
+            Some(native_member_name),
+            None,
+        )?;
+    }
     Ok(DecodeDisposition::Applied)
 }
 
@@ -4783,7 +4870,7 @@ mod tests {
             std::fs::canonicalize(root.path()).unwrap().join("sessions")
         );
         assert_eq!(streams.len(), 16);
-        assert_eq!(adapter.manifest().contract_version, 19);
+        assert_eq!(adapter.manifest().contract_version, 20);
         assert!(adapter
             .manifest()
             .source_schema_versions
@@ -7213,7 +7300,7 @@ mod tests {
               }]
             }"#,
         );
-        let mut batch = FactBatch::new(8, 4).unwrap();
+        let mut batch = semantic_batch(TEAM_CONFIG_STREAM, "alpha/config.json", 8, 4);
         let disposition = adapter
             .decode(
                 DecodeContext {
@@ -7227,10 +7314,13 @@ mod tests {
             .unwrap();
 
         assert_eq!(disposition, DecodeDisposition::Applied);
-        assert_eq!(batch.facts().len(), 1);
-        let Fact::TeamSnapshot(snapshot) = &batch.facts()[0].value else {
-            panic!("expected team snapshot");
-        };
+        assert_eq!(batch.facts().len(), 2);
+        let snapshot = fact_values(&batch)
+            .find_map(|fact| match fact {
+                Fact::TeamSnapshot(snapshot) => Some(snapshot),
+                _ => None,
+            })
+            .expect("expected team snapshot");
         assert_eq!(snapshot.native_team_id, "alpha");
         assert_eq!(snapshot.name, "alpha");
         assert_eq!(snapshot.native_lead_agent_id, "lead@alpha");
@@ -7243,7 +7333,176 @@ mod tests {
         assert_eq!(snapshot.members[0].native_name, "team-lead");
         assert_eq!(snapshot.members[0].subscriptions, ["changes"]);
         assert_eq!(snapshot.members[0].backend_type.as_deref(), Some("tmux"));
+        let affiliation = fact_values(&batch)
+            .find_map(|fact| match fact {
+                Fact::ActorAffiliationRevision(affiliation) => Some(affiliation),
+                _ => None,
+            })
+            .expect("team config should affiliate the root lead");
+        assert_eq!(affiliation.dimension, ActorAffiliationDimension::Team);
+        assert_eq!(affiliation.state, ActorAffiliationState::Present);
+        assert_eq!(affiliation.native_target_id.as_deref(), Some("alpha"));
+        assert_eq!(affiliation.native_member_id.as_deref(), Some("team-lead"));
+        assert_eq!(
+            affiliation.actor_run,
+            batch
+                .canonical_entity_key("run", SESSION.as_bytes())
+                .unwrap()
+        );
         assert!(fact_values(&batch).all(|fact| !matches!(fact, Fact::RunEvidence(_))));
+    }
+
+    #[test]
+    fn team_config_preserves_an_ambiguous_lead_member_as_unknown() {
+        let root = TempDir::new().unwrap();
+        let adapter = ClaudeCodeAdapter::new();
+        let object_context = adapter
+            .bootstrap_object(
+                &instance(root.path()),
+                &object(TEAM_CONFIG_STREAM, "alpha/config.json"),
+            )
+            .unwrap();
+        let record = record(
+            br#"{
+              "name":"alpha",
+              "createdAt":1786406400000,
+              "leadAgentId":"shared-lead-id",
+              "leadSessionId":"01234567-89ab-cdef-0123-456789abcdef",
+              "members":[
+                {"agentId":"shared-lead-id","name":"first","joinedAt":1786406400001,"tmuxPaneId":"%1","cwd":"/repo","subscriptions":[]},
+                {"agentId":"shared-lead-id","name":"second","joinedAt":1786406400002,"tmuxPaneId":"%2","cwd":"/repo","subscriptions":[]}
+              ]
+            }"#,
+        );
+        let mut batch = semantic_batch(TEAM_CONFIG_STREAM, "alpha/config.json", 8, 4);
+        assert_eq!(
+            adapter
+                .decode(
+                    DecodeContext {
+                        decoder: &DecoderId::new(TEAM_CONFIG_DECODER).unwrap(),
+                        object_context: &object_context,
+                        decoder_state: None,
+                    },
+                    &record,
+                    &mut batch,
+                )
+                .unwrap(),
+            DecodeDisposition::PreservedUnknown
+        );
+        assert_eq!(batch.facts().len(), 1);
+        assert!(matches!(batch.facts()[0].value, Fact::UnknownRecord { .. }));
+    }
+
+    #[test]
+    fn native_team_config_and_subagent_metadata_share_canonical_affiliation_keys() {
+        let repository = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let fixture = repository
+            .join("agent-support/claude-code/candidate-2026-08-15/fixtures/team-affiliation");
+        let team_fixture: Value =
+            serde_json::from_slice(&std::fs::read(fixture.join("team-config.json")).unwrap())
+                .unwrap();
+        let metadata_fixture: Value =
+            serde_json::from_slice(&std::fs::read(fixture.join("subagent-meta.json")).unwrap())
+                .unwrap();
+        let team_payload = serde_json::to_vec(&team_fixture["data"]).unwrap();
+        let metadata_payload = serde_json::to_vec(&metadata_fixture["data"]).unwrap();
+        let native_team_id = team_fixture["data"]["name"].as_str().unwrap();
+        let native_child_member_id = metadata_fixture["data"]["name"].as_str().unwrap();
+        let root = TempDir::new().unwrap();
+        let adapter = ClaudeCodeAdapter::new();
+
+        let team_relative = format!("{native_team_id}/config.json");
+        let team_context = adapter
+            .bootstrap_object(
+                &instance(root.path()),
+                &object(TEAM_CONFIG_STREAM, &team_relative),
+            )
+            .unwrap();
+        let mut team_batch = semantic_batch(TEAM_CONFIG_STREAM, &team_relative, 8, 4);
+        adapter
+            .decode(
+                DecodeContext {
+                    decoder: &DecoderId::new(TEAM_CONFIG_DECODER).unwrap(),
+                    object_context: &team_context,
+                    decoder_state: None,
+                },
+                &document_record(&team_payload),
+                &mut team_batch,
+            )
+            .unwrap();
+
+        let child_relative = format!("fixture-project/{SESSION}/subagents/agent-child.meta.json");
+        let child_context = adapter
+            .bootstrap_object(
+                &instance(root.path()),
+                &object(SUBAGENT_META_STREAM, &child_relative),
+            )
+            .unwrap();
+        let child_decoded = ClaudeSubagentMetadataContext::decode(&child_context)
+            .unwrap()
+            .child;
+        let mut child_batch = semantic_batch(SUBAGENT_META_STREAM, &child_relative, 8, 4);
+        adapter
+            .decode(
+                DecodeContext {
+                    decoder: &DecoderId::new(SUBAGENT_META_DECODER).unwrap(),
+                    object_context: &child_context,
+                    decoder_state: None,
+                },
+                &document_record(&metadata_payload),
+                &mut child_batch,
+            )
+            .unwrap();
+
+        let root_affiliation = fact_values(&team_batch)
+            .find_map(|fact| match fact {
+                Fact::ActorAffiliationRevision(affiliation) => Some(affiliation),
+                _ => None,
+            })
+            .expect("team config should emit root affiliation");
+        let child_affiliation = fact_values(&child_batch)
+            .find_map(|fact| match fact {
+                Fact::ActorAffiliationRevision(affiliation) => Some(affiliation),
+                _ => None,
+            })
+            .expect("team metadata should emit child affiliation");
+        assert_eq!(root_affiliation.target, child_affiliation.target);
+        assert_ne!(root_affiliation.member, child_affiliation.member);
+        assert_eq!(
+            child_affiliation.native_target_id.as_deref(),
+            Some(native_team_id)
+        );
+        assert_eq!(
+            child_affiliation.native_member_id.as_deref(),
+            Some(native_child_member_id)
+        );
+        assert_eq!(
+            child_affiliation.actor_run,
+            child_batch
+                .canonical_entity_key("run", child_decoded.run_native_key().as_bytes())
+                .unwrap()
+        );
+        assert_eq!(
+            child_affiliation.member,
+            Some(
+                team_batch
+                    .canonical_entity_key(
+                        "team_member",
+                        &team_member_native_key(native_team_id, native_child_member_id),
+                    )
+                    .unwrap(),
+            )
+        );
+        assert!(team_batch
+            .facts()
+            .iter()
+            .all(|fact| fact.semantic_revision.is_some()
+                || !matches!(fact.value, Fact::ActorAffiliationRevision(_))));
+        assert!(child_batch
+            .facts()
+            .iter()
+            .all(|fact| fact.semantic_revision.is_some()
+                || !matches!(fact.value, Fact::ActorAffiliationRevision(_))));
     }
 
     #[test]

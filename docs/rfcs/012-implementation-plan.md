@@ -690,11 +690,20 @@ Current landing status (2026-08-16):
   audit evidence outside usage-v2 coverage. The aggregate-only report is
   [`usage-v2-private-parity-v1.json`](../../agent-support/claude-code/candidate-2026-08-15/reports/usage-v2-private-parity-v1.json)
   (`sha256:2d84af3dd9bcfb91e727b8d0e067679b1637e61b0a343957a09b8f42c303176e`);
-  and
-- kept the candidate capability `unsupported`: fixture-proven native
-  team-to-actor correlation, exact-repeat public-event suppression, remaining
-  portable fact-family serialization, and the compatibility telemetry window
-  are not yet complete.
+- added decoder contract 20's native team-to-actor correlation. Team configs
+  affiliate the root through `leadSessionId` plus an exactly-one lead-member
+  match; zero or multiple matches fail closed as retained unknown evidence;
+  child sidecars affiliate the path-owned actor through native `teamName` plus
+  member `name`. Both derive the same canonical team/member keys without
+  filename guessing. Replace-document edits and deletion retract only the
+  sidecar-owned grouping edge and never copy, burn, or retract actor usage. An
+  aggregate-only native census found 26/26 valid configs with exactly one lead
+  member, 20 unique current child joins, and zero ambiguous joins; sanitized
+  root/child fixtures plus an end-to-end query test cover late arrival,
+  filtering, update, and deletion; and
+- kept the candidate capability `unsupported`: exact-repeat public-event
+  suppression, remaining portable fact-family serialization, and the external
+  compatibility telemetry window are not yet complete.
 
 ### C3. Durable migration
 

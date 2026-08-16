@@ -8,7 +8,7 @@
 
 import { afterEach, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { appendFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -21,6 +21,9 @@ const tempDirs: string[] = [];
 const SESSION_ID = '11111111-2222-3333-4444-555555555555';
 const GROK_FIXTURE = fileURLToPath(
   new URL('../../../../crates/spaghetti-napi/fixtures/small-grok/.grok', import.meta.url),
+);
+const TEAM_AFFILIATION_FIXTURE = fileURLToPath(
+  new URL('../../../../agent-support/claude-code/candidate-2026-08-15/fixtures/team-affiliation/', import.meta.url),
 );
 
 function temporaryDatabase(): string {
@@ -399,6 +402,159 @@ describe('persistent SpaghettiEngine', { skip: !native }, () => {
     const retriedRollback = await engine.selectRuntimeUsageQuery(rollbackRequest);
     assert.equal(retriedRollback.atCommitSeq, rolledBack.atCommitSeq);
     assert.deepEqual(retriedRollback.selection, rolledBack.selection);
+  });
+
+  test('correlates native team leads and child metadata without copying actor usage', async () => {
+    const dbPath = temporaryDatabase();
+    const teamSessionId = '01234567-89ab-cdef-0123-456789abcdef';
+    const teamConfig = JSON.parse(readFileSync(path.join(TEAM_AFFILIATION_FIXTURE, 'team-config.json'), 'utf8'))
+      .data as {
+      name: string;
+      leadAgentId: string;
+      leadSessionId: string;
+      members: Array<{ agentId: string; name: string }>;
+    };
+    const childMetadata = JSON.parse(readFileSync(path.join(TEAM_AFFILIATION_FIXTURE, 'subagent-meta.json'), 'utf8'))
+      .data as { agentType: string; name: string; teamName: string };
+    teamConfig.leadSessionId = teamSessionId;
+    const root = path.join(path.dirname(dbPath), 'claude-team-affiliation');
+    const project = path.join(root, 'projects', '-fixture-team-project');
+    const childDir = path.join(project, teamSessionId, 'subagents');
+    const teamDir = path.join(root, 'teams', teamConfig.name);
+    mkdirSync(childDir, { recursive: true });
+    mkdirSync(teamDir, { recursive: true });
+    writeFileSync(
+      path.join(project, `${teamSessionId}.jsonl`),
+      `${JSON.stringify({
+        type: 'assistant',
+        uuid: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+        parentUuid: null,
+        timestamp: '2026-08-12T00:00:00.000Z',
+        sessionId: teamSessionId,
+        cwd: '/fixture/project',
+        version: '1',
+        gitBranch: 'main',
+        isSidechain: false,
+        userType: 'external',
+        requestId: 'root-request',
+        message: {
+          model: 'fixture-model',
+          id: 'root-response',
+          type: 'message',
+          role: 'assistant',
+          content: [{ type: 'text', text: 'root response' }],
+          usage: {
+            input_tokens: 10,
+            output_tokens: 1,
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: 0,
+          },
+        },
+      })}\n`,
+    );
+    writeFileSync(
+      path.join(childDir, 'agent-child.jsonl'),
+      `${JSON.stringify({
+        type: 'assistant',
+        uuid: 'bbbbbbbb-bbbb-cccc-dddd-eeeeeeeeeeee',
+        parentUuid: null,
+        timestamp: '2026-08-12T00:00:01.000Z',
+        sessionId: teamSessionId,
+        cwd: '/fixture/project',
+        version: '1',
+        gitBranch: 'main',
+        isSidechain: true,
+        userType: 'external',
+        requestId: 'child-request',
+        message: {
+          model: 'fixture-model',
+          id: 'child-response',
+          type: 'message',
+          role: 'assistant',
+          content: [{ type: 'text', text: 'child response' }],
+          usage: {
+            input_tokens: 20,
+            output_tokens: 2,
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: 0,
+          },
+        },
+      })}\n`,
+    );
+    writeFileSync(path.join(childDir, 'agent-child.meta.json'), JSON.stringify(childMetadata));
+    const configPath = path.join(teamDir, 'config.json');
+    writeFileSync(configPath, JSON.stringify(teamConfig));
+
+    const engine = await openTracked(dbPath, 'sdk-team-affiliation-test');
+    await engine.reconcileClaude({ roots: [root], reason: 'sdk_team_affiliation_fixture' });
+    const projects = await engine.listHistoryProjects({ limit: 10 });
+    const projectId = projects.items[0]?.projectId;
+    assert.ok(projectId);
+    const sessions = await engine.listHistorySessions({ projectId, limit: 10 });
+    const sessionId = sessions.items[0]?.sessionId;
+    assert.ok(sessionId);
+
+    const usage = await engine.getRuntimeUsageV2({ projectId, sessionId, limit: 10 });
+    assert.equal(usage.aggregate.responseCount, 2);
+    assert.equal(usage.aggregate.inputTokens.knownTokens, 30);
+    assert.equal(usage.actors.length, 2);
+    const rootActor = usage.actors.find((actor) => actor.role === 'root');
+    const childActor = usage.actors.find((actor) => actor.role === 'child');
+    assert.ok(rootActor);
+    assert.ok(childActor);
+    const rootTeam = rootActor.affiliations.find(
+      (affiliation) => affiliation.dimension === 'team' && affiliation.state === 'present',
+    );
+    const childTeam = childActor.affiliations.find(
+      (affiliation) => affiliation.dimension === 'team' && affiliation.state === 'present',
+    );
+    assert.ok(rootTeam);
+    assert.ok(childTeam);
+    assert.equal(rootTeam.targetRef.entityKey, childTeam.targetRef.entityKey);
+    assert.notEqual(rootTeam.memberRef?.entityKey, childTeam.memberRef?.entityKey);
+    assert.equal(
+      rootTeam.nativeMemberId,
+      teamConfig.members.find((member) => member.agentId === teamConfig.leadAgentId)?.name,
+    );
+    assert.equal(childTeam.nativeMemberId, childMetadata.name);
+
+    const teamUsage = await engine.getRuntimeUsageV2({
+      projectId,
+      sessionId,
+      affiliationDimension: 'team',
+      affiliationTargetRef: rootTeam.targetRef.entityKey,
+      limit: 10,
+    });
+    assert.equal(teamUsage.aggregate.responseCount, 2);
+    assert.equal(teamUsage.aggregate.inputTokens.knownTokens, 30);
+
+    writeFileSync(
+      path.join(childDir, 'agent-child.meta.json'),
+      JSON.stringify({ agentType: childMetadata.agentType, name: childMetadata.name }),
+    );
+    await engine.reconcileClaude({ roots: [root], reason: 'sdk_team_child_removed' });
+    const rootOnly = await engine.getRuntimeUsageV2({
+      projectId,
+      sessionId,
+      affiliationDimension: 'team',
+      affiliationTargetRef: rootTeam.targetRef.entityKey,
+      limit: 10,
+    });
+    assert.equal(rootOnly.aggregate.responseCount, 1);
+    assert.equal(rootOnly.aggregate.inputTokens.knownTokens, 10);
+    assert.equal((await engine.getRuntimeUsageV2({ projectId, sessionId, limit: 10 })).aggregate.responseCount, 2);
+
+    rmSync(configPath);
+    await engine.reconcileClaude({ roots: [root], reason: 'sdk_team_root_removed' });
+    const noTeamUsage = await engine.getRuntimeUsageV2({
+      projectId,
+      sessionId,
+      affiliationDimension: 'team',
+      affiliationTargetRef: rootTeam.targetRef.entityKey,
+      limit: 10,
+    });
+    assert.equal(noTeamUsage.aggregate.responseCount, 0);
+    assert.equal((await engine.getRuntimeUsageV2({ projectId, sessionId, limit: 10 })).aggregate.responseCount, 2);
   });
 
   test('negotiates a composite usage source vector without mixing contracts', async () => {

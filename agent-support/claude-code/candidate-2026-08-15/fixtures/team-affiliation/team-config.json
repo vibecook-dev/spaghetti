@@ -1,0 +1,38 @@
+{
+  "_fixture": {
+    "fixture_kind": "synthetic-native-shape",
+    "format": "json",
+    "sanitization": "synthetic",
+    "sanitizer_version": 1
+  },
+  "data": {
+    "name": "[fixture-text-001]",
+    "description": "[fixture-text-004]",
+    "createdAt": 1700000000000,
+    "leadAgentId": "fixture-id-001",
+    "leadSessionId": "fixture-id-003",
+    "members": [
+      {
+        "agentId": "fixture-id-001",
+        "name": "[fixture-text-002]",
+        "agentType": "[fixture-text-005]",
+        "joinedAt": 1700000001000,
+        "tmuxPaneId": "fixture-id-004",
+        "cwd": "fixture://path/001",
+        "subscriptions": [],
+        "backendType": "[fixture-text-006]"
+      },
+      {
+        "agentId": "fixture-id-002",
+        "name": "[fixture-text-003]",
+        "agentType": "[fixture-text-007]",
+        "model": "claude-fixture",
+        "joinedAt": 1700000002000,
+        "tmuxPaneId": "fixture-id-005",
+        "cwd": "fixture://path/001",
+        "subscriptions": ["[fixture-text-008]"],
+        "backendType": "[fixture-text-006]"
+      }
+    ]
+  }
+}
