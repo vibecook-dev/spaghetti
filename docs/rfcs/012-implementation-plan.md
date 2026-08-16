@@ -315,15 +315,24 @@ Current landing status (2026-08-16):
   locators; named identity and relation/operation mismatches fail before source
   access; phases share one pass budget; and candidate Grok declarations execute
   as a non-authorizing conformance fixture;
+- made scoped authorization require a negotiated observation contract and
+  embed the exact promoted scope declaration plus release/declaration digests;
+  only a program selected from that opaque Rust authorization can construct an
+  `AuthorizedScopeAccessPlan`, while durable-only, unknown-program, candidate,
+  and missing-observation paths fail closed;
+- added an authorization-bound v1 access report with bounded relation traces,
+  no native locators/values, a canonical SHA-256 digest, mutation verification,
+  and a shared portable fixture verified independently by Rust, Python, and
+  TypeScript;
 - integrated contract and tooling checks into `pnpm validate`.
 
-A2 remains `In progress`: the compiler is not yet instantiated by catalog,
-durable, or scoped-observer execution under a carried Rust authorization; the
-bounded trace needs an authorized diagnostic retrieval/digest surface; adapter
-registrations must move from the explicit legacy path to the strict promoted
-catalog after the first support release is promoted; and public N-API/IPC host
-boundaries must carry the Rust-issued support authorization into source access
-rather than merely exposing portable classification/selection conformance.
+A2 remains `In progress`: no catalog, durable, or scoped-observer host yet owns
+the new authorized plan lifecycle; the access-report IPC retrieval shape is not
+yet frozen; adapter registrations must move from the explicit legacy path to
+the strict promoted catalog after the first support release is promoted; and
+public N-API/IPC host boundaries must carry the Rust-issued support
+authorization into actual source access rather than merely exposing portable
+classification/selection conformance.
 
 ### A3. Current-agent candidates
 

@@ -369,13 +369,18 @@ function parseSupportRelease(value: unknown): SupportReleaseDescriptor {
 
 function parseNativeArtifactProbe(value: unknown): NativeArtifactProbe {
   const input = record(value, 'native artifact probe');
-  if (input.version !== null && input.version !== undefined && typeof input.version !== 'string') {
+  const rawVersion = input.version;
+  let version: string | null;
+  if (rawVersion === null || rawVersion === undefined) {
+    version = null;
+  } else if (typeof rawVersion === 'string') {
+    version = rawVersion;
+  } else {
     throw new ContractValidationError('probed artifact version must be a string or null');
   }
   if (typeof input.contradictory_markers !== 'boolean') {
     throw new ContractValidationError('contradictory_markers must be boolean');
   }
-  const version = input.version === undefined ? null : input.version;
   if (typeof version === 'string' && (version.length === 0 || version.length > 128 || version.trim() !== version)) {
     throw new ContractValidationError('probed artifact version must be non-empty and canonical');
   }

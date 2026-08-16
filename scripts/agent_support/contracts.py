@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import re
 from dataclasses import dataclass, field
 from enum import Enum
@@ -10,6 +11,7 @@ from typing import Any, Iterable, Mapping, Sequence
 
 SUPPORT_SELECTION_CONTRACT_VERSION = 1
 CONTRACT_VERSION_SELECTION_VERSION = 1
+SCOPE_ACCESS_REPORT_CONTRACT_VERSION = 1
 
 
 class CompatibilityClass(str, Enum):
@@ -350,6 +352,155 @@ def select_contract_versions(
 
 class AccessBoundExceeded(RuntimeError):
     """A declared scope relation tried to exceed its common-engine budget."""
+
+
+class AccessReportError(ValueError):
+    """A scope access report cannot be encoded by the v1 canonical contract."""
+
+
+_ACCESS_OPERATION_CODES = {
+    "object_read": 1,
+    "parameterized_query": 2,
+    "object_listing": 3,
+}
+_ACCESS_PHASE_CODES = {"initial": 1, "revalidation": 2}
+_ACCESS_OUTCOME_CODES = {
+    "available": 1,
+    "unavailable": 2,
+    "oversized": 3,
+    "failed": 4,
+    "abandoned": 5,
+    "denied": 6,
+}
+_ACCESS_LIMIT_CODES = {
+    "max_fan_out": 1,
+    "max_depth": 2,
+    "max_objects": 3,
+    "max_bytes": 4,
+    "max_rows": 5,
+    "reservation": 6,
+}
+
+
+def scope_access_report_digest(report: Mapping[str, Any]) -> str:
+    """Return the RFC 012A v1 canonical SHA-256 integrity digest."""
+
+    digest = hashlib.sha256()
+    digest.update(b"spaghetti/rfc012a/scope-access-report/v1\0")
+    _report_u32(digest, report["scope_access_report_contract_version"])
+    _report_component(digest, _report_text(report["adapter_id"]))
+    _report_component(digest, _report_text(report["support_release_id"]))
+    _report_component(digest, _report_digest_bytes(report["support_release_digest"]))
+    _report_component(digest, _report_digest_bytes(report["scope_program_digest"]))
+    _report_component(digest, _report_text(report["declaration_id"]))
+    _report_component(digest, _report_text(report["program_id"]))
+    _report_u32(digest, report["selection_contract_version"])
+    _report_u32(digest, report["observation_contract_version"])
+    relations = report["relations"]
+    _report_u64(digest, len(relations))
+    for relation in relations:
+        _report_relation(digest, relation)
+    return f"sha256:{digest.hexdigest()}"
+
+
+def verify_scope_access_report_digest(report: Mapping[str, Any]) -> bool:
+    expected = _report_digest_bytes(report["digest"])
+    return scope_access_report_digest(report) == f"sha256:{expected.hex()}"
+
+
+def _report_relation(digest: Any, relation: Mapping[str, Any]) -> None:
+    _report_u32(digest, relation["access_trace_contract_version"])
+    _report_component(digest, _report_text(relation["relation_id"]))
+    bounds = relation["bounds"]
+    _report_u64(digest, bounds["max_fan_out"])
+    _report_u32(digest, bounds["max_depth"])
+    _report_u64(digest, bounds["max_objects"])
+    _report_u64(digest, bounds["max_bytes"])
+    _report_u64(digest, bounds["max_rows"])
+    for field_name in (
+        "attempts",
+        "reservations_granted",
+        "completed",
+        "denied",
+        "abandoned",
+        "objects_accessed",
+        "bytes_read",
+        "rows_read",
+    ):
+        _report_u64(digest, relation[field_name])
+    _report_u32(digest, relation["max_depth_observed"])
+    for field_name in ("bytes_reserved", "rows_reserved", "trace_entries_dropped"):
+        _report_u64(digest, relation[field_name])
+    trace = relation["trace"]
+    _report_u64(digest, len(trace))
+    for entry in trace:
+        _report_trace_entry(digest, entry)
+
+
+def _report_trace_entry(digest: Any, entry: Mapping[str, Any]) -> None:
+    _report_u32(digest, entry["access_trace_contract_version"])
+    _report_u64(digest, entry["sequence"])
+    _report_component(digest, _report_text(entry["relation_id"]))
+    _report_code(digest, _ACCESS_OPERATION_CODES, entry["operation"], "operation")
+    _report_code(digest, _ACCESS_PHASE_CODES, entry["phase"], "phase")
+    parent = entry["parent_token"]
+    if parent is None:
+        digest.update(b"\x00")
+    else:
+        digest.update(b"\x01")
+        _report_component(digest, _report_digest_bytes(parent))
+    _report_component(digest, _report_digest_bytes(entry["object_token"]))
+    _report_u32(digest, entry["depth"])
+    for field_name in ("reserved_bytes", "reserved_rows", "bytes_read", "rows_read"):
+        _report_u64(digest, entry[field_name])
+    _report_code(digest, _ACCESS_OUTCOME_CODES, entry["outcome"], "outcome")
+    denied_limit = entry["denied_limit"]
+    if denied_limit is None:
+        digest.update(b"\x00")
+    else:
+        digest.update(b"\x01")
+        _report_code(digest, _ACCESS_LIMIT_CODES, denied_limit, "denied limit")
+
+
+def _report_code(digest: Any, codes: Mapping[str, int], value: Any, label: str) -> None:
+    if value not in codes:
+        raise AccessReportError(f"unknown access-report {label}: {value!r}")
+    digest.update(bytes((codes[value],)))
+
+
+def _report_text(value: Any) -> bytes:
+    if not isinstance(value, str):
+        raise AccessReportError("access-report text value must be a string")
+    return value.encode("utf-8")
+
+
+def _report_digest_bytes(value: Any) -> bytes:
+    if (
+        not isinstance(value, list)
+        or len(value) != 32
+        or any(not isinstance(item, int) or isinstance(item, bool) or not 0 <= item <= 255 for item in value)
+    ):
+        raise AccessReportError("access-report digest/token must contain 32 bytes")
+    return bytes(value)
+
+
+def _report_component(digest: Any, value: bytes) -> None:
+    _report_u64(digest, len(value))
+    digest.update(value)
+
+
+def _report_u32(digest: Any, value: Any) -> None:
+    _report_unsigned(digest, value, 4)
+
+
+def _report_u64(digest: Any, value: Any) -> None:
+    _report_unsigned(digest, value, 8)
+
+
+def _report_unsigned(digest: Any, value: Any, width: int) -> None:
+    if not isinstance(value, int) or isinstance(value, bool) or not 0 <= value < 1 << (width * 8):
+        raise AccessReportError(f"access-report value does not fit u{width * 8}")
+    digest.update(value.to_bytes(width, "big"))
 
 
 @dataclass(frozen=True)

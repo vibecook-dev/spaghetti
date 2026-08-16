@@ -12,7 +12,9 @@ from scripts.agent_support.contracts import (
     ContractSelectionError,
     RuntimeProbe,
     classify_runtime,
+    scope_access_report_digest,
     select_contract_versions,
+    verify_scope_access_report_digest,
 )
 from scripts.agent_support.sanitize_fixture import sanitize_document, scan_prohibited
 from scripts.agent_support.validate import (
@@ -272,6 +274,23 @@ class AccessBudgetTests(unittest.TestCase):
         with self.assertRaisesRegex(AccessBoundExceeded, "max_fan_out"):
             budget.consume("object-c", bytes_read=0)
         self.assertEqual(budget.totals, {"objects": 2, "bytes": 100, "rows": 4, "max_depth": 3})
+
+    def test_shared_access_report_digest_fixture_matches_rust(self) -> None:
+        fixture_path = (
+            REPO_ROOT
+            / "crates/spaghetti-napi/fixtures/contracts/rfc012a-access-report-v1.json"
+        )
+        fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
+        self.assertEqual(fixture["fixture_contract_version"], 1)
+        self.assertEqual(
+            scope_access_report_digest(fixture["report"]),
+            fixture["expected_digest"],
+        )
+        self.assertTrue(verify_scope_access_report_digest(fixture["report"]))
+
+        tampered = copy.deepcopy(fixture["report"])
+        tampered["relations"][0]["rows_read"] += 1
+        self.assertFalse(verify_scope_access_report_digest(tampered))
 
 
 class SchemaAndRepositoryTests(unittest.TestCase):

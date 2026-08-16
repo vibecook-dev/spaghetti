@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
@@ -57,6 +58,204 @@ const supportFixture = JSON.parse(
   ),
 ) as SupportFixture;
 
+type AccessOperation = 'object_read' | 'parameterized_query' | 'object_listing';
+type AccessPhase = 'initial' | 'revalidation';
+type AccessOutcome = 'available' | 'unavailable' | 'oversized' | 'failed' | 'abandoned' | 'denied';
+type AccessLimit = 'max_fan_out' | 'max_depth' | 'max_objects' | 'max_bytes' | 'max_rows' | 'reservation';
+
+interface AccessTraceWire {
+  access_trace_contract_version: number;
+  sequence: number;
+  relation_id: string;
+  operation: AccessOperation;
+  phase: AccessPhase;
+  parent_token: number[] | null;
+  object_token: number[];
+  depth: number;
+  reserved_bytes: number;
+  reserved_rows: number;
+  bytes_read: number;
+  rows_read: number;
+  outcome: AccessOutcome;
+  denied_limit: AccessLimit | null;
+}
+
+interface AccessRelationWire {
+  access_trace_contract_version: number;
+  relation_id: string;
+  bounds: {
+    max_fan_out: number;
+    max_depth: number;
+    max_objects: number;
+    max_bytes: number;
+    max_rows: number;
+  };
+  attempts: number;
+  reservations_granted: number;
+  completed: number;
+  denied: number;
+  abandoned: number;
+  objects_accessed: number;
+  bytes_read: number;
+  rows_read: number;
+  max_depth_observed: number;
+  bytes_reserved: number;
+  rows_reserved: number;
+  trace_entries_dropped: number;
+  trace: AccessTraceWire[];
+}
+
+interface ScopeAccessReportWire {
+  scope_access_report_contract_version: number;
+  adapter_id: string;
+  support_release_id: string;
+  support_release_digest: number[];
+  scope_program_digest: number[];
+  declaration_id: string;
+  program_id: string;
+  selection_contract_version: number;
+  observation_contract_version: number;
+  relations: AccessRelationWire[];
+  digest: number[];
+}
+
+interface AccessReportFixture {
+  fixture_contract_version: number;
+  report: ScopeAccessReportWire;
+  expected_digest: string;
+}
+
+const accessReportFixture = JSON.parse(
+  readFileSync(
+    new URL('../../../../../crates/spaghetti-napi/fixtures/contracts/rfc012a-access-report-v1.json', import.meta.url),
+    'utf8',
+  ),
+) as AccessReportFixture;
+
+const accessOperationCodes: Record<AccessOperation, number> = {
+  object_read: 1,
+  parameterized_query: 2,
+  object_listing: 3,
+};
+const accessPhaseCodes: Record<AccessPhase, number> = { initial: 1, revalidation: 2 };
+const accessOutcomeCodes: Record<AccessOutcome, number> = {
+  available: 1,
+  unavailable: 2,
+  oversized: 3,
+  failed: 4,
+  abandoned: 5,
+  denied: 6,
+};
+const accessLimitCodes: Record<AccessLimit, number> = {
+  max_fan_out: 1,
+  max_depth: 2,
+  max_objects: 3,
+  max_bytes: 4,
+  max_rows: 5,
+  reservation: 6,
+};
+
+function pushU8(chunks: Buffer[], value: number): void {
+  chunks.push(Buffer.from([value]));
+}
+
+function pushU32(chunks: Buffer[], value: number): void {
+  const encoded = Buffer.alloc(4);
+  encoded.writeUInt32BE(value);
+  chunks.push(encoded);
+}
+
+function pushU64(chunks: Buffer[], value: number): void {
+  assert.ok(Number.isSafeInteger(value) && value >= 0, 'fixture u64 must be a non-negative safe integer');
+  const encoded = Buffer.alloc(8);
+  encoded.writeBigUInt64BE(BigInt(value));
+  chunks.push(encoded);
+}
+
+function pushComponent(chunks: Buffer[], value: Uint8Array): void {
+  pushU64(chunks, value.byteLength);
+  chunks.push(Buffer.from(value));
+}
+
+function pushText(chunks: Buffer[], value: string): void {
+  pushComponent(chunks, Buffer.from(value, 'utf8'));
+}
+
+function pushToken(chunks: Buffer[], value: number[]): void {
+  assert.equal(value.length, 32);
+  pushComponent(chunks, Uint8Array.from(value));
+}
+
+function pushAccessTrace(chunks: Buffer[], entry: AccessTraceWire): void {
+  pushU32(chunks, entry.access_trace_contract_version);
+  pushU64(chunks, entry.sequence);
+  pushText(chunks, entry.relation_id);
+  pushU8(chunks, accessOperationCodes[entry.operation]);
+  pushU8(chunks, accessPhaseCodes[entry.phase]);
+  if (entry.parent_token === null) {
+    pushU8(chunks, 0);
+  } else {
+    pushU8(chunks, 1);
+    pushToken(chunks, entry.parent_token);
+  }
+  pushToken(chunks, entry.object_token);
+  pushU32(chunks, entry.depth);
+  for (const value of [entry.reserved_bytes, entry.reserved_rows, entry.bytes_read, entry.rows_read]) {
+    pushU64(chunks, value);
+  }
+  pushU8(chunks, accessOutcomeCodes[entry.outcome]);
+  if (entry.denied_limit === null) {
+    pushU8(chunks, 0);
+  } else {
+    pushU8(chunks, 1);
+    pushU8(chunks, accessLimitCodes[entry.denied_limit]);
+  }
+}
+
+function pushAccessRelation(chunks: Buffer[], relation: AccessRelationWire): void {
+  pushU32(chunks, relation.access_trace_contract_version);
+  pushText(chunks, relation.relation_id);
+  pushU64(chunks, relation.bounds.max_fan_out);
+  pushU32(chunks, relation.bounds.max_depth);
+  pushU64(chunks, relation.bounds.max_objects);
+  pushU64(chunks, relation.bounds.max_bytes);
+  pushU64(chunks, relation.bounds.max_rows);
+  for (const value of [
+    relation.attempts,
+    relation.reservations_granted,
+    relation.completed,
+    relation.denied,
+    relation.abandoned,
+    relation.objects_accessed,
+    relation.bytes_read,
+    relation.rows_read,
+  ]) {
+    pushU64(chunks, value);
+  }
+  pushU32(chunks, relation.max_depth_observed);
+  for (const value of [relation.bytes_reserved, relation.rows_reserved, relation.trace_entries_dropped]) {
+    pushU64(chunks, value);
+  }
+  pushU64(chunks, relation.trace.length);
+  for (const entry of relation.trace) pushAccessTrace(chunks, entry);
+}
+
+function scopeAccessReportDigest(report: ScopeAccessReportWire): string {
+  const chunks = [Buffer.from('spaghetti/rfc012a/scope-access-report/v1\0', 'utf8')];
+  pushU32(chunks, report.scope_access_report_contract_version);
+  pushText(chunks, report.adapter_id);
+  pushText(chunks, report.support_release_id);
+  pushToken(chunks, report.support_release_digest);
+  pushToken(chunks, report.scope_program_digest);
+  pushText(chunks, report.declaration_id);
+  pushText(chunks, report.program_id);
+  pushU32(chunks, report.selection_contract_version);
+  pushU32(chunks, report.observation_contract_version);
+  pushU64(chunks, report.relations.length);
+  for (const relation of report.relations) pushAccessRelation(chunks, relation);
+  return `sha256:${createHash('sha256').update(Buffer.concat(chunks)).digest('hex')}`;
+}
+
 test('Rust RFC 012A v1 fixture validates in the portable SDK', () => {
   assert.equal(fixture.fixture_contract_version, 1);
   assert.equal(parseExternalEntityRef(fixture.external_entity_ref).external_entity_reference_version, 1);
@@ -100,6 +299,19 @@ test('Rust, Python, and TypeScript contract negotiation agree', () => {
   const incompatible = structuredClone(supportFixture.contract_request) as { model_major: number };
   incompatible.model_major += 1;
   assert.throws(() => selectContractVersions(incompatible, supportFixture.contract_offer), ContractValidationError);
+});
+
+test('Rust, Python, and TypeScript access-report digests agree', () => {
+  assert.equal(accessReportFixture.fixture_contract_version, 1);
+  assert.equal(scopeAccessReportDigest(accessReportFixture.report), accessReportFixture.expected_digest);
+  assert.equal(
+    `sha256:${Buffer.from(accessReportFixture.report.digest).toString('hex')}`,
+    accessReportFixture.expected_digest,
+  );
+
+  const tampered = structuredClone(accessReportFixture.report);
+  tampered.relations[0]!.rows_read += 1;
+  assert.notEqual(scopeAccessReportDigest(tampered), accessReportFixture.expected_digest);
 });
 
 test('incompatible majors and malformed complete coverage are rejected', () => {

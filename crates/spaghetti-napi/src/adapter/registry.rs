@@ -184,7 +184,10 @@ mod tests {
         Sha256Digest, SourceInstance, SourceInstanceSpec, SourceObjectDescriptor, StreamSpec,
         SupportBundleDocument,
     };
-    use crate::source::SourceRecord;
+    use crate::source::{
+        AccessOperation, AccessOutcome, AccessPhase, AuthorizedScopeAccessPlan, ScopeAccessReport,
+        ScopeAccessRequest, ScopeIdentityInput, SourceRecord,
+    };
 
     use super::*;
 
@@ -410,5 +413,92 @@ mod tests {
             authorization.operation().support_release_id(),
             Some("fixture-release")
         );
+        assert!(authorization
+            .select_scope_program("observe-session")
+            .is_err());
+
+        let missing_observation_contract = registry.authorize_typed_access(
+            &AdapterId::new("fixture").unwrap(),
+            &NativeArtifactProbe {
+                family: "fixture".to_string(),
+                platform: "test".to_string(),
+                version: Some("1.0.0".to_string()),
+                markers: vec!["fixture.marker".to_string()],
+                contradictory_markers: false,
+            },
+            SupportOperation::ScopedTypedObservation,
+            &request,
+            &offer,
+        );
+        assert!(missing_observation_contract
+            .unwrap_err()
+            .to_string()
+            .contains("observation contract"));
+
+        let mut scoped_request = request;
+        scoped_request.observation_contract_versions = Some(vec![1]);
+        let mut scoped_offer = offer;
+        scoped_offer.observation_contract_versions = vec![1];
+        let (_, scoped_authorization) = registry
+            .authorize_typed_access(
+                &AdapterId::new("fixture").unwrap(),
+                &NativeArtifactProbe {
+                    family: "fixture".to_string(),
+                    platform: "test".to_string(),
+                    version: Some("1.0.0".to_string()),
+                    markers: vec!["fixture.marker".to_string()],
+                    contradictory_markers: false,
+                },
+                SupportOperation::ScopedTypedObservation,
+                &scoped_request,
+                &scoped_offer,
+            )
+            .unwrap();
+        let program = scoped_authorization
+            .select_scope_program("observe-session")
+            .unwrap();
+        let plan = AuthorizedScopeAccessPlan::from_authorized_program(program).unwrap();
+        assert_eq!(plan.adapter_id(), "fixture");
+        assert_eq!(plan.support_release_id(), "fixture-release");
+
+        let empty_report = plan.report();
+        assert!(empty_report.verify_digest());
+        let empty_digest = empty_report.digest();
+        let identity = [ScopeIdentityInput {
+            name: "native-session-id",
+            value: b"secret-session-id",
+        }];
+        plan.reserve(ScopeAccessRequest {
+            relation_id: "root-object",
+            operation: AccessOperation::ObjectRead,
+            phase: AccessPhase::Initial,
+            parent_token: None,
+            identity_inputs: &identity,
+            depth: 1,
+            max_bytes: 128,
+            max_rows: 0,
+        })
+        .unwrap()
+        .complete(64, 0, AccessOutcome::Available)
+        .unwrap();
+        let report = plan.report();
+        assert!(report.verify_digest());
+        assert_eq!(
+            report.digest().to_string(),
+            "sha256:3d061fe88fd820c3bebf534b13276ee0b4258f957da006dfa0628ddd97924e52"
+        );
+        assert_ne!(report.digest(), empty_digest);
+        let encoded = serde_json::to_string(&report).unwrap();
+        assert!(!encoded.contains("secret-session-id"));
+
+        let report_value = serde_json::to_value(report).unwrap();
+        let mut unknown_field = report_value.clone();
+        unknown_field["unexpected"] = serde_json::json!(true);
+        assert!(serde_json::from_value::<ScopeAccessReport>(unknown_field).is_err());
+
+        let mut tampered = report_value;
+        tampered["relations"][0]["bytes_read"] = serde_json::json!(65);
+        let tampered: ScopeAccessReport = serde_json::from_value(tampered).unwrap();
+        assert!(!tampered.verify_digest());
     }
 }

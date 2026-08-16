@@ -206,6 +206,27 @@ public-contract selection may authorize native access. The current durable and
 scoped hosts do not yet carry that authorization into this plan, so this slice
 does not promote any built-in support release.
 
+The authorization-to-plan seam is also explicit. A scoped typed authorization
+is issued only when an observation contract version was negotiated. It embeds
+the selected adapter, verified support-release digest, scope-program digest,
+and the exact promoted parsed declaration. The common runtime may select only a
+program present in that embedded declaration and may construct an
+`AuthorizedScopeAccessPlan` only from that borrowed selection. A durable or
+catalog authorization, an authorization without observation semantics, an
+unknown program ID, or an incomplete/candidate declaration cannot construct
+that runtime plan.
+
+An authorized plan exposes a bounded v1 access report containing the adapter,
+support release and declaration bindings, selected contract/program versions,
+per-relation bounds/counters, and bounded opaque-token traces. The report
+contains no locator, native path, payload, or native identity value. A canonical
+SHA-256 integrity digest covers all report content fields and detects mutation;
+it is not a signature or a transferable source-access capability. The Rust
+report shape, canonical v1 content encoding, and digest are frozen by the
+shared `rfc012a-access-report-v1.json` fixture, which is evaluated by
+independent Rust, Python, and TypeScript implementations. The exact IPC wrapper
+and retrieval API remain provisional.
+
 ## 4. Logical subsystem dependency law
 
 ### 4.1 Logical subsystems
@@ -747,6 +768,12 @@ pass, never an adapter retry escape hatch. A declaration that requires a
 worst-case second content read during revalidation must budget both reads or use
 a proven cheaper common primitive. Per-observer scheduling/rate and total
 resource ceilings remain separate RFC 012D runtime limits.
+
+Raw relation-ledger snapshots are not a host diagnostic API. Runtime retrieval
+uses the authorized bounded access report, which binds the trace to the selected
+support release, scope declaration, program, and observation contract. A future
+wire/IPC representation must preserve that binding and verify the report digest
+before treating it as conformance evidence.
 
 ## 8. Agent Data Surface
 

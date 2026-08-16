@@ -9,13 +9,15 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::adapter::{
-    ScopeProgramManifest, ScopeProgramStatus, ScopeRelationDeclaration, ScopeRelationPrimitive,
-    ScopeUnavailableBehavior,
+    AuthorizedScopeProgram, ScopeProgramManifest, ScopeProgramStatus, ScopeRelationDeclaration,
+    ScopeRelationPrimitive, ScopeUnavailableBehavior,
 };
 
 pub const ACCESS_TRACE_CONTRACT_VERSION: u32 = 1;
+pub const SCOPE_ACCESS_REPORT_CONTRACT_VERSION: u32 = 1;
 pub const DEFAULT_ACCESS_TRACE_CAPACITY: usize = 256;
 
 const MAX_RELATION_ID_BYTES: usize = 128;
@@ -23,6 +25,7 @@ const MAX_TRACE_CAPACITY: usize = 16_384;
 const MAX_IDENTITY_VALUE_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ScopeAccessBounds {
     pub max_fan_out: u64,
     pub max_depth: u32,
@@ -41,6 +44,11 @@ impl ScopeAccessBounds {
             return Err(AccessBudgetError::InvalidConfig(
                 "access fan-out, depth, object, and byte bounds must be greater than zero"
                     .to_string(),
+            ));
+        }
+        if self.max_fan_out > self.max_objects {
+            return Err(AccessBudgetError::InvalidConfig(
+                "access max_fan_out cannot exceed max_objects".to_string(),
             ));
         }
         Ok(())
@@ -122,6 +130,7 @@ pub enum AccessLimit {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AccessTraceEntry {
     pub access_trace_contract_version: u32,
     pub sequence: u64,
@@ -140,6 +149,7 @@ pub struct AccessTraceEntry {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AccessBudgetSnapshot {
     pub access_trace_contract_version: u32,
     pub relation_id: String,
@@ -231,6 +241,70 @@ pub struct ScopeAccessPlan {
     status: ScopeProgramStatus,
     program_id: String,
     relations: BTreeMap<String, CompiledScopeRelation>,
+}
+
+/// One authorized, bounded reconciliation-pass ledger. It can only be created
+/// from a program selected by Rust support authorization. Clones share the
+/// same budgets and therefore cannot refill the pass.
+#[derive(Clone)]
+pub struct AuthorizedScopeAccessPlan {
+    inner: ScopeAccessPlan,
+    support_release_id: String,
+    support_release_digest: [u8; 32],
+    scope_program_digest: [u8; 32],
+    selection_contract_version: u32,
+    observation_contract_version: u32,
+}
+
+impl AuthorizedScopeAccessPlan {
+    pub fn from_authorized_program(
+        authorization: AuthorizedScopeProgram<'_>,
+    ) -> Result<Self, AccessBudgetError> {
+        let inner = ScopeAccessPlan::for_program(
+            authorization.scope_programs(),
+            authorization.program_id(),
+        )?;
+        if inner.status() != ScopeProgramStatus::Promoted {
+            return Err(AccessBudgetError::InvalidConfig(
+                "authorized scope access requires a promoted declaration".to_string(),
+            ));
+        }
+        Ok(Self {
+            inner,
+            support_release_id: authorization.support_release_id().to_string(),
+            support_release_digest: *authorization.support_release_digest().as_bytes(),
+            scope_program_digest: *authorization.scope_program_digest().as_bytes(),
+            selection_contract_version: authorization.selection_contract_version(),
+            observation_contract_version: authorization.observation_contract_version(),
+        })
+    }
+
+    pub fn adapter_id(&self) -> &str {
+        self.inner.adapter_id()
+    }
+
+    pub fn declaration_id(&self) -> &str {
+        self.inner.declaration_id()
+    }
+
+    pub fn program_id(&self) -> &str {
+        self.inner.program_id()
+    }
+
+    pub fn support_release_id(&self) -> &str {
+        &self.support_release_id
+    }
+
+    pub fn reserve(
+        &self,
+        request: ScopeAccessRequest<'_>,
+    ) -> Result<ScopeAccessReservation, AccessBudgetError> {
+        self.inner.reserve(request)
+    }
+
+    pub fn report(&self) -> ScopeAccessReport {
+        ScopeAccessReport::new(self)
+    }
 }
 
 #[derive(Clone)]
@@ -365,13 +439,13 @@ impl ScopeAccessPlan {
         })
     }
 
-    pub fn snapshot(&self, relation_id: &str) -> Option<AccessBudgetSnapshot> {
+    fn snapshot(&self, relation_id: &str) -> Option<AccessBudgetSnapshot> {
         self.relations
             .get(relation_id)
             .map(|relation| relation.budget.snapshot())
     }
 
-    pub fn snapshots(&self) -> Vec<AccessBudgetSnapshot> {
+    fn snapshots(&self) -> Vec<AccessBudgetSnapshot> {
         self.relations
             .values()
             .map(|relation| relation.budget.snapshot())
@@ -384,6 +458,286 @@ impl ScopeAccessPlan {
             relation_id: relation_id.to_string(),
             reason,
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScopeAccessReportDigest([u8; 32]);
+
+impl ScopeAccessReportDigest {
+    pub fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for ScopeAccessReportDigest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("sha256:")?;
+        for byte in self.0 {
+            write!(formatter, "{byte:02x}")?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScopeAccessReport {
+    scope_access_report_contract_version: u32,
+    adapter_id: String,
+    support_release_id: String,
+    support_release_digest: [u8; 32],
+    scope_program_digest: [u8; 32],
+    declaration_id: String,
+    program_id: String,
+    selection_contract_version: u32,
+    observation_contract_version: u32,
+    relations: Vec<AccessBudgetSnapshot>,
+    digest: ScopeAccessReportDigest,
+}
+
+impl ScopeAccessReport {
+    fn new(plan: &AuthorizedScopeAccessPlan) -> Self {
+        let mut report = Self {
+            scope_access_report_contract_version: SCOPE_ACCESS_REPORT_CONTRACT_VERSION,
+            adapter_id: plan.adapter_id().to_string(),
+            support_release_id: plan.support_release_id.clone(),
+            support_release_digest: plan.support_release_digest,
+            scope_program_digest: plan.scope_program_digest,
+            declaration_id: plan.declaration_id().to_string(),
+            program_id: plan.program_id().to_string(),
+            selection_contract_version: plan.selection_contract_version,
+            observation_contract_version: plan.observation_contract_version,
+            relations: plan.inner.snapshots(),
+            digest: ScopeAccessReportDigest([0; 32]),
+        };
+        report.digest = report.calculate_digest();
+        report
+    }
+
+    pub fn adapter_id(&self) -> &str {
+        &self.adapter_id
+    }
+
+    pub fn contract_version(&self) -> u32 {
+        self.scope_access_report_contract_version
+    }
+
+    pub fn support_release_id(&self) -> &str {
+        &self.support_release_id
+    }
+
+    pub fn support_release_digest(&self) -> &[u8; 32] {
+        &self.support_release_digest
+    }
+
+    pub fn scope_program_digest(&self) -> &[u8; 32] {
+        &self.scope_program_digest
+    }
+
+    pub fn declaration_id(&self) -> &str {
+        &self.declaration_id
+    }
+
+    pub fn program_id(&self) -> &str {
+        &self.program_id
+    }
+
+    pub fn selection_contract_version(&self) -> u32 {
+        self.selection_contract_version
+    }
+
+    pub fn observation_contract_version(&self) -> u32 {
+        self.observation_contract_version
+    }
+
+    pub fn relations(&self) -> &[AccessBudgetSnapshot] {
+        &self.relations
+    }
+
+    pub fn digest(&self) -> ScopeAccessReportDigest {
+        self.digest
+    }
+
+    pub fn verify_digest(&self) -> bool {
+        self.has_canonical_structure() && self.digest == self.calculate_digest()
+    }
+
+    fn has_canonical_structure(&self) -> bool {
+        if self.scope_access_report_contract_version != SCOPE_ACCESS_REPORT_CONTRACT_VERSION
+            || self.adapter_id.is_empty()
+            || self.support_release_id.is_empty()
+            || self.declaration_id.is_empty()
+            || self.program_id.is_empty()
+            || self.selection_contract_version == 0
+            || self.observation_contract_version == 0
+            || self.relations.is_empty()
+        {
+            return false;
+        }
+        let mut previous_relation: Option<&str> = None;
+        for relation in &self.relations {
+            if relation.access_trace_contract_version != ACCESS_TRACE_CONTRACT_VERSION
+                || relation.bounds.validate().is_err()
+                || relation.trace.len() > MAX_TRACE_CAPACITY
+                || previous_relation
+                    .is_some_and(|previous| previous >= relation.relation_id.as_str())
+            {
+                return false;
+            }
+            previous_relation = Some(&relation.relation_id);
+            let mut previous_sequence = 0;
+            for entry in &relation.trace {
+                if entry.access_trace_contract_version != ACCESS_TRACE_CONTRACT_VERSION
+                    || entry.relation_id != relation.relation_id
+                    || entry.sequence <= previous_sequence
+                {
+                    return false;
+                }
+                previous_sequence = entry.sequence;
+            }
+        }
+        true
+    }
+
+    fn calculate_digest(&self) -> ScopeAccessReportDigest {
+        let mut hasher = Sha256::new();
+        hasher.update(b"spaghetti/rfc012a/scope-access-report/v1\0");
+        hash_u32(&mut hasher, self.scope_access_report_contract_version);
+        report_hash_component(&mut hasher, self.adapter_id.as_bytes());
+        report_hash_component(&mut hasher, self.support_release_id.as_bytes());
+        report_hash_component(&mut hasher, &self.support_release_digest);
+        report_hash_component(&mut hasher, &self.scope_program_digest);
+        report_hash_component(&mut hasher, self.declaration_id.as_bytes());
+        report_hash_component(&mut hasher, self.program_id.as_bytes());
+        hash_u32(&mut hasher, self.selection_contract_version);
+        hash_u32(&mut hasher, self.observation_contract_version);
+        hash_u64(&mut hasher, self.relations.len() as u64);
+        for relation in &self.relations {
+            hash_access_budget_snapshot(&mut hasher, relation);
+        }
+        ScopeAccessReportDigest(hasher.finalize().into())
+    }
+}
+
+fn hash_access_budget_snapshot(hasher: &mut Sha256, snapshot: &AccessBudgetSnapshot) {
+    hash_u32(hasher, snapshot.access_trace_contract_version);
+    report_hash_component(hasher, snapshot.relation_id.as_bytes());
+    hash_u64(hasher, snapshot.bounds.max_fan_out);
+    hash_u32(hasher, snapshot.bounds.max_depth);
+    hash_u64(hasher, snapshot.bounds.max_objects);
+    hash_u64(hasher, snapshot.bounds.max_bytes);
+    hash_u64(hasher, snapshot.bounds.max_rows);
+    for value in [
+        snapshot.attempts,
+        snapshot.reservations_granted,
+        snapshot.completed,
+        snapshot.denied,
+        snapshot.abandoned,
+        snapshot.objects_accessed,
+        snapshot.bytes_read,
+        snapshot.rows_read,
+    ] {
+        hash_u64(hasher, value);
+    }
+    hash_u32(hasher, snapshot.max_depth_observed);
+    for value in [
+        snapshot.bytes_reserved,
+        snapshot.rows_reserved,
+        snapshot.trace_entries_dropped,
+        snapshot.trace.len() as u64,
+    ] {
+        hash_u64(hasher, value);
+    }
+    for entry in &snapshot.trace {
+        hash_access_trace_entry(hasher, entry);
+    }
+}
+
+fn hash_access_trace_entry(hasher: &mut Sha256, entry: &AccessTraceEntry) {
+    hash_u32(hasher, entry.access_trace_contract_version);
+    hash_u64(hasher, entry.sequence);
+    report_hash_component(hasher, entry.relation_id.as_bytes());
+    hash_u8(hasher, access_operation_code(entry.operation));
+    hash_u8(hasher, access_phase_code(entry.phase));
+    match entry.parent_token {
+        Some(token) => {
+            hash_u8(hasher, 1);
+            report_hash_component(hasher, token.as_bytes());
+        }
+        None => hash_u8(hasher, 0),
+    }
+    report_hash_component(hasher, entry.object_token.as_bytes());
+    hash_u32(hasher, entry.depth);
+    for value in [
+        entry.reserved_bytes,
+        entry.reserved_rows,
+        entry.bytes_read,
+        entry.rows_read,
+    ] {
+        hash_u64(hasher, value);
+    }
+    hash_u8(hasher, access_outcome_code(entry.outcome));
+    match entry.denied_limit {
+        Some(limit) => {
+            hash_u8(hasher, 1);
+            hash_u8(hasher, access_limit_code(limit));
+        }
+        None => hash_u8(hasher, 0),
+    }
+}
+
+fn report_hash_component(hasher: &mut Sha256, value: &[u8]) {
+    hasher.update((value.len() as u64).to_be_bytes());
+    hasher.update(value);
+}
+
+fn hash_u8(hasher: &mut Sha256, value: u8) {
+    hasher.update([value]);
+}
+
+fn hash_u32(hasher: &mut Sha256, value: u32) {
+    hasher.update(value.to_be_bytes());
+}
+
+fn hash_u64(hasher: &mut Sha256, value: u64) {
+    hasher.update(value.to_be_bytes());
+}
+
+fn access_operation_code(value: AccessOperation) -> u8 {
+    match value {
+        AccessOperation::ObjectRead => 1,
+        AccessOperation::ParameterizedQuery => 2,
+        AccessOperation::ObjectListing => 3,
+    }
+}
+
+fn access_phase_code(value: AccessPhase) -> u8 {
+    match value {
+        AccessPhase::Initial => 1,
+        AccessPhase::Revalidation => 2,
+    }
+}
+
+fn access_outcome_code(value: AccessOutcome) -> u8 {
+    match value {
+        AccessOutcome::Available => 1,
+        AccessOutcome::Unavailable => 2,
+        AccessOutcome::Oversized => 3,
+        AccessOutcome::Failed => 4,
+        AccessOutcome::Abandoned => 5,
+        AccessOutcome::Denied => 6,
+    }
+}
+
+fn access_limit_code(value: AccessLimit) -> u8 {
+    match value {
+        AccessLimit::MaxFanOut => 1,
+        AccessLimit::MaxDepth => 2,
+        AccessLimit::MaxObjects => 3,
+        AccessLimit::MaxBytes => 4,
+        AccessLimit::MaxRows => 5,
+        AccessLimit::Reservation => 6,
     }
 }
 
@@ -882,6 +1236,13 @@ mod tests {
     use super::*;
 
     #[derive(Deserialize)]
+    struct SharedAccessReportFixture {
+        fixture_contract_version: u32,
+        report: ScopeAccessReport,
+        expected_digest: String,
+    }
+
+    #[derive(Deserialize)]
     struct SharedAccessFixture {
         fixture_contract_version: u32,
         relation_id: String,
@@ -930,6 +1291,19 @@ mod tests {
             "../../fixtures/contracts/rfc012a-access-v1.json"
         ))
         .unwrap()
+    }
+
+    #[test]
+    fn scope_access_report_matches_the_portable_digest_fixture() {
+        let fixture: SharedAccessReportFixture = serde_json::from_str(include_str!(
+            "../../fixtures/contracts/rfc012a-access-report-v1.json"
+        ))
+        .unwrap();
+        assert_eq!(fixture.fixture_contract_version, 1);
+        let calculated = fixture.report.calculate_digest();
+        assert_eq!(calculated.to_string(), fixture.expected_digest);
+        assert_eq!(calculated, fixture.report.digest());
+        assert!(fixture.report.verify_digest());
     }
 
     fn bounds() -> ScopeAccessBounds {

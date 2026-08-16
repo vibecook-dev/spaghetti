@@ -21,9 +21,10 @@ mod conformance;
 pub use access::{
     AccessBudget, AccessBudgetError, AccessBudgetSnapshot, AccessLimit, AccessObjectToken,
     AccessOperation, AccessOutcome, AccessPhase, AccessReservation, AccessReservationRequest,
-    AccessTraceEntry, ScopeAccessBounds, ScopeAccessDenial, ScopeAccessPlan, ScopeAccessRequest,
+    AccessTraceEntry, AuthorizedScopeAccessPlan, ScopeAccessBounds, ScopeAccessDenial,
+    ScopeAccessPlan, ScopeAccessReport, ScopeAccessReportDigest, ScopeAccessRequest,
     ScopeAccessReservation, ScopeIdentityInput, ACCESS_TRACE_CONTRACT_VERSION,
-    DEFAULT_ACCESS_TRACE_CAPACITY,
+    DEFAULT_ACCESS_TRACE_CAPACITY, SCOPE_ACCESS_REPORT_CONTRACT_VERSION,
 };
 pub use append_delimited::{
     AppendCheckpoint, AppendDelimitedConfig, AppendDelimitedFile, AppendItem, AppendRead,

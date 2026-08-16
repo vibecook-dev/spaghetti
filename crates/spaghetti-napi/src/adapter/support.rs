@@ -12,7 +12,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use super::scope::{ScopeProgramManifest, ScopeProgramStatus};
+use super::scope::{ScopeProgramDeclaration, ScopeProgramManifest, ScopeProgramStatus};
 
 pub const SUPPORT_SELECTION_CONTRACT_VERSION: u32 = 1;
 pub const CONTRACT_VERSION_SELECTION_VERSION: u32 = 1;
@@ -1213,11 +1213,22 @@ impl SupportCatalog {
         release.verify_adapter_binding(adapter_id, binding)?;
         release.verify_scope_programs(scope_programs)?;
         let contracts = select_contract_versions(request, offer)?;
+        if operation == SupportOperation::ScopedTypedObservation
+            && contracts.observation_contract_version.is_none()
+        {
+            return Err(SupportContractError::invalid(
+                "scoped typed observation requires a negotiated observation contract",
+            ));
+        }
         Ok((
             decision,
             TypedAccessAuthorization {
                 operation: operation_authorization,
                 contracts,
+                adapter_id: adapter_id.to_string(),
+                support_release_digest: release.release_digest,
+                scope_program_digest: release.adapter_binding.scope_program_digest,
+                scope_programs: release.scope_programs.clone(),
             },
         ))
     }
@@ -1438,6 +1449,10 @@ fn select_preferred(
 pub struct TypedAccessAuthorization {
     operation: OperationAuthorization,
     contracts: ContractVersionSelection,
+    adapter_id: String,
+    support_release_digest: Sha256Digest,
+    scope_program_digest: Sha256Digest,
+    scope_programs: ScopeProgramManifest,
 }
 
 impl TypedAccessAuthorization {
@@ -1447,6 +1462,86 @@ impl TypedAccessAuthorization {
 
     pub fn contracts(&self) -> &ContractVersionSelection {
         &self.contracts
+    }
+
+    pub fn select_scope_program(
+        &self,
+        program_id: &str,
+    ) -> Result<AuthorizedScopeProgram<'_>, SupportContractError> {
+        if self.operation.operation != SupportOperation::ScopedTypedObservation
+            || self.contracts.observation_contract_version.is_none()
+        {
+            return Err(SupportContractError::invalid(
+                "typed authorization does not permit scoped observation",
+            ));
+        }
+        if self.scope_programs.status != ScopeProgramStatus::Promoted {
+            return Err(SupportContractError::invalid(
+                "scoped authorization does not contain a promoted scope declaration",
+            ));
+        }
+        let program = self.scope_programs.program(program_id).ok_or_else(|| {
+            SupportContractError::invalid(format!(
+                "scope program {program_id:?} is not present in the authorized support release"
+            ))
+        })?;
+        Ok(AuthorizedScopeProgram {
+            authorization: self,
+            program,
+        })
+    }
+}
+
+/// A program selected from the exact promoted declaration embedded in a
+/// Rust-issued scoped-observation authorization. It borrows the authorization
+/// and cannot be serialized or constructed by an adapter.
+#[derive(Debug)]
+pub struct AuthorizedScopeProgram<'a> {
+    authorization: &'a TypedAccessAuthorization,
+    program: &'a ScopeProgramDeclaration,
+}
+
+impl AuthorizedScopeProgram<'_> {
+    pub fn adapter_id(&self) -> &str {
+        &self.authorization.adapter_id
+    }
+
+    pub fn support_release_id(&self) -> &str {
+        self.authorization
+            .operation
+            .support_release_id()
+            .expect("scoped typed authorization always selects a support release")
+    }
+
+    pub fn support_release_digest(&self) -> Sha256Digest {
+        self.authorization.support_release_digest
+    }
+
+    pub fn scope_program_digest(&self) -> Sha256Digest {
+        self.authorization.scope_program_digest
+    }
+
+    pub fn selection_contract_version(&self) -> u32 {
+        self.authorization.contracts.selection_contract_version
+    }
+
+    pub fn observation_contract_version(&self) -> u32 {
+        self.authorization
+            .contracts
+            .observation_contract_version
+            .expect("scoped typed authorization always negotiates observation semantics")
+    }
+
+    pub fn declaration_id(&self) -> &str {
+        &self.authorization.scope_programs.declaration_id
+    }
+
+    pub fn program_id(&self) -> &str {
+        &self.program.program_id
+    }
+
+    pub(crate) fn scope_programs(&self) -> &ScopeProgramManifest {
+        &self.authorization.scope_programs
     }
 }
 
@@ -1618,7 +1713,7 @@ mod tests {
         let binding = fixture_binding();
         let scope_programs =
             fixture_scope_manifest("fixture-agent", SupportReleaseStatus::Promoted);
-        let (exact, durable) = catalog
+        let (exact_decision, durable) = catalog
             .authorize_typed_access(
                 AdapterSupportRegistration::new("fixture-agent", &binding, &scope_programs),
                 &exact.probe,
@@ -1628,13 +1723,29 @@ mod tests {
             )
             .unwrap();
         assert_eq!(
-            exact.compatibility_class,
+            exact_decision.compatibility_class,
             CompatibilityClass::ExactSupported
         );
         assert_eq!(
             durable.operation().support_release_id(),
             Some("fixture-support-v1")
         );
+        assert!(durable.select_scope_program("observe-session").is_err());
+
+        let (_, scoped) = catalog
+            .authorize_typed_access(
+                AdapterSupportRegistration::new("fixture-agent", &binding, &scope_programs),
+                &exact.probe,
+                SupportOperation::ScopedTypedObservation,
+                &fixture.contract_request,
+                &fixture.contract_offer,
+            )
+            .unwrap();
+        let program = scoped.select_scope_program("observe-session").unwrap();
+        assert_eq!(program.adapter_id(), "fixture-agent");
+        assert_eq!(program.support_release_id(), "fixture-support-v1");
+        assert_eq!(program.observation_contract_version(), 1);
+        assert!(scoped.select_scope_program("unknown-program").is_err());
 
         let forward = fixture
             .runtime_cases
