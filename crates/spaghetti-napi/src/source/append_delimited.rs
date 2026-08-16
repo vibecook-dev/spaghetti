@@ -139,6 +139,9 @@ pub enum AppendRead {
         needs_retry: bool,
         more_available: bool,
         snapshot_len: u64,
+        /// Exact bytes read from the source handle, including continuity and
+        /// checkpoint prefix anchors. Metadata reads are not byte payloads.
+        bytes_read: u64,
     },
 }
 
@@ -181,7 +184,14 @@ impl AppendDelimitedFile {
         let Some(file) = open_confined_file(parent, file_name)? else {
             return Ok(AppendRead::Missing);
         };
-        self.read_opened(file, path, previous, origin, force_contract_replay)
+        self.read_opened(
+            file,
+            path,
+            previous,
+            origin,
+            force_contract_replay,
+            u64::MAX,
+        )
     }
 
     pub fn read_confined(
@@ -196,7 +206,45 @@ impl AppendDelimitedFile {
         let Some(file) = open_confined_file(root, relative_path)? else {
             return Ok(AppendRead::Missing);
         };
-        self.read_opened(file, &path, previous, origin, force_contract_replay)
+        self.read_opened(
+            file,
+            &path,
+            previous,
+            origin,
+            force_contract_replay,
+            u64::MAX,
+        )
+    }
+
+    /// Confined append read with an exact physical source-byte ceiling. The
+    /// limit covers framing plus continuity/checkpoint anchors and is enforced
+    /// before each operating-system read.
+    pub fn read_confined_bounded(
+        &self,
+        root: &Path,
+        relative_path: &Path,
+        previous: Option<&AppendCheckpoint>,
+        origin: &RecordOrigin,
+        force_contract_replay: bool,
+        max_read_bytes: u64,
+    ) -> Result<AppendRead, SourceDriverError> {
+        if max_read_bytes == 0 {
+            return Err(SourceDriverError::InvalidConfig(
+                "append physical read limit must be greater than zero".to_string(),
+            ));
+        }
+        let path = root.join(relative_path);
+        let Some(file) = open_confined_file(root, relative_path)? else {
+            return Ok(AppendRead::Missing);
+        };
+        self.read_opened(
+            file,
+            &path,
+            previous,
+            origin,
+            force_contract_replay,
+            max_read_bytes,
+        )
     }
 
     fn read_opened(
@@ -206,7 +254,13 @@ impl AppendDelimitedFile {
         previous: Option<&AppendCheckpoint>,
         origin: &RecordOrigin,
         force_contract_replay: bool,
+        max_read_bytes: u64,
     ) -> Result<AppendRead, SourceDriverError> {
+        let mut accounting = ReadAccounting::new(max_read_bytes);
+        let mut read_context = ReadContext {
+            path,
+            accounting: &mut accounting,
+        };
         let initial_metadata = file
             .metadata()
             .map_err(|error| io_error("reading metadata for", path, error))?;
@@ -219,7 +273,7 @@ impl AppendDelimitedFile {
             &identity,
             previous,
             force_contract_replay,
-            path,
+            &mut read_context,
         )?;
 
         let framed = self.frame(
@@ -228,9 +282,9 @@ impl AppendDelimitedFile {
             snapshot_len,
             generation,
             origin,
-            path,
+            &mut read_context,
         )?;
-        let prefix = self.prefix_anchor(&mut file, framed.committed_offset, path)?;
+        let prefix = self.prefix_anchor(&mut file, framed.committed_offset, &mut read_context)?;
 
         let handle_metadata = file
             .metadata()
@@ -271,6 +325,7 @@ impl AppendDelimitedFile {
             needs_retry: framed.incomplete_suffix_len > 0 || framed.more_available,
             more_available: framed.more_available,
             snapshot_len,
+            bytes_read: accounting.consumed,
         })
     }
 
@@ -281,7 +336,7 @@ impl AppendDelimitedFile {
         identity: &FileIdentity,
         previous: Option<&AppendCheckpoint>,
         force_contract_replay: bool,
-        path: &Path,
+        context: &mut ReadContext<'_>,
     ) -> Result<(u64, u64, AppendTransition), SourceDriverError> {
         let Some(previous) = previous else {
             return Ok((1, 0, AppendTransition::Initial));
@@ -308,7 +363,7 @@ impl AppendDelimitedFile {
                 AppendTransition::Truncated,
             ));
         }
-        if !verify_prefix(file, previous, path)? {
+        if !verify_prefix(file, previous, context)? {
             return Ok((
                 next_generation(previous.generation)?,
                 0,
@@ -329,10 +384,10 @@ impl AppendDelimitedFile {
         snapshot_len: u64,
         generation: u64,
         origin: &RecordOrigin,
-        path: &Path,
+        context: &mut ReadContext<'_>,
     ) -> Result<FramedBatch, SourceDriverError> {
         file.seek(SeekFrom::Start(start_offset))
-            .map_err(|error| io_error("seeking", path, error))?;
+            .map_err(|error| io_error("seeking", context.path, error))?;
 
         let mut output = FramedBatch::new(start_offset);
         let mut pending = PendingRecord::new(self.config.max_record_bytes);
@@ -344,9 +399,9 @@ impl AppendDelimitedFile {
             let wanted =
                 usize::try_from((snapshot_len - read_offset).min(READ_BUFFER_BYTES as u64))
                     .expect("bounded read length always fits usize");
-            let count = file
-                .read(&mut buffer[..wanted])
-                .map_err(|error| io_error("reading", path, error))?;
+            let count = context
+                .accounting
+                .read(file, &mut buffer[..wanted], context.path)?;
             if count == 0 {
                 return Ok(FramedBatch::transient(output));
             }
@@ -404,7 +459,7 @@ impl AppendDelimitedFile {
         &self,
         file: &mut File,
         committed_offset: u64,
-        path: &Path,
+        context: &mut ReadContext<'_>,
     ) -> Result<PrefixAnchor, SourceDriverError> {
         let len = committed_offset.min(self.config.prefix_anchor_bytes as u64);
         let start = committed_offset - len;
@@ -416,10 +471,14 @@ impl AppendDelimitedFile {
             });
         }
         file.seek(SeekFrom::Start(start))
-            .map_err(|error| io_error("seeking to prefix anchor in", path, error))?;
+            .map_err(|error| io_error("seeking to prefix anchor in", context.path, error))?;
         let mut bytes = vec![0; len as usize];
-        file.read_exact(&mut bytes)
-            .map_err(|error| io_error("reading prefix anchor from", path, error))?;
+        context.accounting.read_exact(
+            file,
+            &mut bytes,
+            "reading prefix anchor from",
+            context.path,
+        )?;
         Ok(PrefixAnchor {
             start,
             len,
@@ -538,19 +597,79 @@ struct PrefixAnchor {
     hash: Revision,
 }
 
+struct ReadAccounting {
+    limit: u64,
+    consumed: u64,
+}
+
+struct ReadContext<'a> {
+    path: &'a Path,
+    accounting: &'a mut ReadAccounting,
+}
+
+impl ReadAccounting {
+    fn new(limit: u64) -> Self {
+        Self { limit, consumed: 0 }
+    }
+
+    fn read(
+        &mut self,
+        file: &mut File,
+        buffer: &mut [u8],
+        path: &Path,
+    ) -> Result<usize, SourceDriverError> {
+        let remaining = self.limit.saturating_sub(self.consumed);
+        if remaining == 0 && !buffer.is_empty() {
+            return Err(self.limit_error());
+        }
+        let allowed = buffer
+            .len()
+            .min(usize::try_from(remaining).unwrap_or(usize::MAX));
+        let count = file
+            .read(&mut buffer[..allowed])
+            .map_err(|error| io_error("reading", path, error))?;
+        self.consumed = self.consumed.saturating_add(count as u64);
+        Ok(count)
+    }
+
+    fn read_exact(
+        &mut self,
+        file: &mut File,
+        buffer: &mut [u8],
+        operation: &'static str,
+        path: &Path,
+    ) -> Result<(), SourceDriverError> {
+        if buffer.len() as u64 > self.limit.saturating_sub(self.consumed) {
+            return Err(self.limit_error());
+        }
+        file.read_exact(buffer)
+            .map_err(|error| io_error(operation, path, error))?;
+        self.consumed = self.consumed.saturating_add(buffer.len() as u64);
+        Ok(())
+    }
+
+    fn limit_error(&self) -> SourceDriverError {
+        SourceDriverError::LimitExceeded(format!(
+            "append source reads exceed {} byte access reservation",
+            self.limit
+        ))
+    }
+}
+
 fn verify_prefix(
     file: &mut File,
     checkpoint: &AppendCheckpoint,
-    path: &Path,
+    context: &mut ReadContext<'_>,
 ) -> Result<bool, SourceDriverError> {
     if checkpoint.prefix_len == 0 {
         return Ok(true);
     }
     file.seek(SeekFrom::Start(checkpoint.prefix_start))
-        .map_err(|error| io_error("seeking to verify prefix in", path, error))?;
+        .map_err(|error| io_error("seeking to verify prefix in", context.path, error))?;
     let mut bytes = vec![0; checkpoint.prefix_len as usize];
-    file.read_exact(&mut bytes)
-        .map_err(|error| io_error("verifying prefix in", path, error))?;
+    context
+        .accounting
+        .read_exact(file, &mut bytes, "verifying prefix in", context.path)?;
     Ok(Revision::digest(&bytes) == checkpoint.prefix_hash)
 }
 
@@ -773,6 +892,50 @@ mod tests {
         assert_eq!(second.len(), 1);
         assert_eq!(checkpoint.committed_offset, 8);
         assert!(!retry && !more);
+    }
+
+    #[test]
+    fn bounded_read_reports_physical_bytes_and_fails_before_overrun() {
+        let root = TempDir::new().unwrap();
+        let relative = Path::new("stream.jsonl");
+        let path = root.path().join(relative);
+        std::fs::write(&path, b"one\ntwo\n").unwrap();
+        let driver = driver();
+
+        assert!(matches!(
+            driver.read_confined_bounded(root.path(), relative, None, &origin(), false, 15),
+            Err(SourceDriverError::LimitExceeded(_))
+        ));
+        let read = driver
+            .read_confined_bounded(root.path(), relative, None, &origin(), false, 16)
+            .unwrap();
+        let AppendRead::Batch {
+            checkpoint,
+            bytes_read,
+            ..
+        } = read
+        else {
+            panic!("expected append batch");
+        };
+        assert_eq!(bytes_read, 16); // 8 framed bytes + 8-byte checkpoint anchor.
+
+        let mut append = OpenOptions::new().append(true).open(&path).unwrap();
+        append.write_all(b"three\n").unwrap();
+        append.flush().unwrap();
+        let read = driver
+            .read_confined_bounded(
+                root.path(),
+                relative,
+                Some(&checkpoint),
+                &origin(),
+                false,
+                28,
+            )
+            .unwrap();
+        let AppendRead::Batch { bytes_read, .. } = read else {
+            panic!("expected continued append batch");
+        };
+        assert_eq!(bytes_read, 28); // 8 verify + 6 append + 14 new anchor.
     }
 
     #[test]

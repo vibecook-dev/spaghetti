@@ -330,6 +330,15 @@ Current landing status (2026-08-16):
   object creation, emits the frozen path/content-free report, and fails closed
   after idempotent close; plus an architecture ratchet preventing store,
   N-API, concrete-adapter, or premature public-host dependencies;
+- extended the common append driver with an enforced physical-read ceiling and
+  exact framing/continuity-anchor byte accounting, then added store-free root
+  append state that owns its checkpoint/generation, retains partial suffixes,
+  blocks bootstrap completion until bounded batches drain, distinguishes cold
+  bootstrap and live post-attach creation from correction, and carries an
+  explicit reset-before-items descriptor on truncate/replacement replay;
+  checkpoint advancement now requires explicit ordered-lane admission, while
+  discard leaves the cursor unchanged for deterministic replay and a pending
+  observation blocks both another read and bootstrap completion;
 - integrated contract and tooling checks into `pnpm validate`.
 
 A2 remains `In progress`: the internal scoped access composition now owns the
@@ -577,17 +586,24 @@ Current landing status (2026-08-16):
 - one host-approved known object can be absent at attachment, created later,
   and read through the common symlink-safe confined file primitive only after
   a declaration-sized reservation;
+- the same granted root can run through the common append driver under a hard
+  physical-byte ceiling; its in-memory kernel retains cursor/generation and
+  partial-record state, prevents an early bootstrap barrier while more bounded
+  batches remain, and classifies true generation changes as correction with a
+  reset-before-items descriptor; its cursor advances only after explicit
+  admission, and discarded/unacknowledged batches cannot silently skip source
+  records;
 - one pass is active at a time, a later pass receives fresh bounds, close is
   idempotent, and the frozen access report excludes paths, identity values, and
   content; and
 - the architecture checker forbids store/query/N-API/concrete-adapter imports
   and premature public export from this provisional composition root.
 
-D1 remains `In progress`: watcher-before-scan, append framing/cursors,
-store-free decode/reduction, events, poll/readiness, queue/control lanes,
-coverage, resync epochs, artifact mediation, cancellation waiting, the trusted
-native version-probe driver, and the complete public request are not yet
-implemented.
+D1 remains `In progress`: watcher-before-scan, multi-object discovery/cursor
+orchestration, store-free decode/reduction, events, poll/readiness barriers,
+queue/control lanes, coverage, resync epochs, artifact mediation, cancellation
+waiting, the trusted native version-probe driver, and the complete public
+request are not yet implemented.
 
 ### D2. Claude scope composition
 

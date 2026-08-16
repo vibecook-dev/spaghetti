@@ -177,6 +177,9 @@ impl AdapterRegistry {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
+    use std::fs::OpenOptions;
+    use std::io::Write;
+    use std::path::PathBuf;
 
     use tempfile::TempDir;
 
@@ -187,12 +190,15 @@ mod tests {
         SupportBundleDocument,
     };
     use crate::scoped_observation::{
+        ScopedAppendDeliveryPhase, ScopedAppendReconcileRequest, ScopedKnownAppendObject,
         ScopedKnownObjectGrant, ScopedKnownObjectReadRequest, ScopedObjectRead,
         ScopedObservationAccessError, ScopedObservationAccessHost, ScopedObservationAccessRequest,
+        ScopedSourceFailureClass,
     };
     use crate::source::{
-        AccessOperation, AccessOutcome, AccessPhase, AuthorizedScopeAccessPlan, ScopeAccessReport,
-        ScopeAccessRequest, ScopeIdentityInput, SourceRecord,
+        AccessOperation, AccessOutcome, AccessPhase, AppendDelimitedConfig, AppendDelimitedFile,
+        AppendItem, AppendRead, AppendTransition, AuthorizedScopeAccessPlan, RecordOrigin,
+        ScopeAccessReport, ScopeAccessRequest, ScopeIdentityInput, SourceMediaType, SourceRecord,
     };
 
     use super::*;
@@ -298,6 +304,55 @@ mod tests {
             binding,
             scope_programs,
         )
+    }
+
+    fn supported_fixture_registry() -> AdapterRegistry {
+        let (catalog, binding, scope_programs) = promoted_fixture_catalog();
+        AdapterRegistryBuilder::new()
+            .register(EmptyAdapter::new("fixture").with_support(binding, scope_programs))
+            .build_supported(catalog)
+            .unwrap()
+    }
+
+    fn scoped_access_request(root: PathBuf) -> ScopedObservationAccessRequest {
+        ScopedObservationAccessRequest {
+            adapter_id: "fixture".to_string(),
+            artifact_probe: NativeArtifactProbe {
+                family: "fixture".to_string(),
+                platform: "test".to_string(),
+                version: Some("1.0.0".to_string()),
+                markers: vec!["fixture.marker".to_string()],
+                contradictory_markers: false,
+            },
+            contract_request: ContractVersionRequest {
+                selection_contract_version: 1,
+                model_major: 1,
+                external_entity_reference_version: 1,
+                semantic_revision_reference_version: 1,
+                coverage_contract_versions: vec![1],
+                fact_family_versions: BTreeMap::new(),
+                query_pack_versions: None,
+                observation_contract_versions: Some(vec![1]),
+            },
+            contract_offer: ContractVersionOffer {
+                selection_contract_version: 1,
+                model_major: 1,
+                external_entity_reference_versions: vec![1],
+                semantic_revision_reference_versions: vec![1],
+                coverage_contract_versions: vec![1],
+                fact_family_versions: BTreeMap::new(),
+                query_pack_versions: Vec::new(),
+                observation_contract_versions: vec![1],
+            },
+            program_id: "observe-session".to_string(),
+            known_objects: vec![ScopedKnownObjectGrant {
+                relation_id: "root-object".to_string(),
+                access_root: "root".to_string(),
+                locator_id: "known-object".to_string(),
+                root,
+                relative_path: "session.jsonl".into(),
+            }],
+        }
     }
 
     impl AgentAdapter for EmptyAdapter {
@@ -510,54 +565,11 @@ mod tests {
 
     #[test]
     fn scoped_host_owns_authorization_confined_access_and_report_lifecycle() {
-        let (catalog, binding, scope_programs) = promoted_fixture_catalog();
-        let registry = AdapterRegistryBuilder::new()
-            .register(EmptyAdapter::new("fixture").with_support(binding, scope_programs))
-            .build_supported(catalog)
-            .unwrap();
-        let contract_request = ContractVersionRequest {
-            selection_contract_version: 1,
-            model_major: 1,
-            external_entity_reference_version: 1,
-            semantic_revision_reference_version: 1,
-            coverage_contract_versions: vec![1],
-            fact_family_versions: BTreeMap::new(),
-            query_pack_versions: None,
-            observation_contract_versions: Some(vec![1]),
-        };
-        let contract_offer = ContractVersionOffer {
-            selection_contract_version: 1,
-            model_major: 1,
-            external_entity_reference_versions: vec![1],
-            semantic_revision_reference_versions: vec![1],
-            coverage_contract_versions: vec![1],
-            fact_family_versions: BTreeMap::new(),
-            query_pack_versions: Vec::new(),
-            observation_contract_versions: vec![1],
-        };
+        let registry = supported_fixture_registry();
         let temp = TempDir::new().unwrap();
         let root = temp.path().join("authorized-root");
         std::fs::create_dir_all(&root).unwrap();
-        let request = ScopedObservationAccessRequest {
-            adapter_id: "fixture".to_string(),
-            artifact_probe: NativeArtifactProbe {
-                family: "fixture".to_string(),
-                platform: "test".to_string(),
-                version: Some("1.0.0".to_string()),
-                markers: vec!["fixture.marker".to_string()],
-                contradictory_markers: false,
-            },
-            contract_request,
-            contract_offer,
-            program_id: "observe-session".to_string(),
-            known_objects: vec![ScopedKnownObjectGrant {
-                relation_id: "root-object".to_string(),
-                access_root: "root".to_string(),
-                locator_id: "known-object".to_string(),
-                root: root.clone(),
-                relative_path: "session.jsonl".into(),
-            }],
-        };
+        let request = scoped_access_request(root.clone());
 
         let dropped_host_request = request.clone();
         let mut escaped_request = request.clone();
@@ -654,5 +666,241 @@ mod tests {
             }),
             Err(ScopedObservationAccessError::Closed)
         ));
+    }
+
+    #[test]
+    fn scoped_append_kernel_keeps_cursor_partial_and_reset_state_without_a_store() {
+        let registry = supported_fixture_registry();
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().join("append-root");
+        std::fs::create_dir_all(&root).unwrap();
+        let host =
+            ScopedObservationAccessHost::authorize(&registry, scoped_access_request(root.clone()))
+                .unwrap();
+        let mut config = AppendDelimitedConfig::json_lines();
+        config.max_record_bytes = 128;
+        config.max_batch_bytes = 128;
+        config.max_records_per_batch = 16;
+        config.prefix_anchor_bytes = 16;
+        let mut object = ScopedKnownAppendObject::new(AppendDelimitedFile::new(config).unwrap());
+        assert!(matches!(
+            object.complete_bootstrap(),
+            Err(ScopedObservationAccessError::BootstrapNotDrained)
+        ));
+        let identity = [ScopeIdentityInput {
+            name: "native-session-id",
+            value: b"private-session-id",
+        }];
+        let origin = RecordOrigin {
+            source_instance_id: 1,
+            stream_id: 2,
+            object_id: 3,
+            observed_at: 4,
+            source_timestamp_hint: None,
+            media_type: SourceMediaType::new("application/x-ndjson").unwrap(),
+        };
+        let reconcile = |max_bytes| ScopedAppendReconcileRequest {
+            relation_id: "root-object",
+            identity_inputs: &identity,
+            access_phase: AccessPhase::Initial,
+            parent_token: None,
+            depth: 1,
+            max_bytes,
+            origin: &origin,
+            force_contract_replay: false,
+        };
+
+        let missing_pass = host.begin_pass().unwrap();
+        let missing = object.reconcile(&missing_pass, reconcile(64)).unwrap();
+        assert_eq!(missing.phase, ScopedAppendDeliveryPhase::Bootstrap);
+        assert!(!missing.root_present);
+        assert!(matches!(&missing.read, AppendRead::Missing));
+        object.admit(&missing).unwrap();
+        assert_eq!(
+            missing_pass.finish().relations()[0].trace[0].outcome,
+            AccessOutcome::Unavailable
+        );
+        object.complete_bootstrap().unwrap();
+        assert!(matches!(
+            object.complete_bootstrap(),
+            Err(ScopedObservationAccessError::BootstrapAlreadyComplete)
+        ));
+
+        std::fs::write(root.join("session.jsonl"), b"one\npartial").unwrap();
+        let limited_pass = host.begin_pass().unwrap();
+        assert!(matches!(
+            object.reconcile(&limited_pass, reconcile(4)),
+            Err(ScopedObservationAccessError::Source(
+                ScopedSourceFailureClass::LimitExceeded
+            ))
+        ));
+        let limited_report = limited_pass.finish();
+        assert_eq!(limited_report.relations()[0].bytes_read, 4);
+        assert_eq!(
+            limited_report.relations()[0].trace[0].outcome,
+            AccessOutcome::Failed
+        );
+
+        let initial_pass = host.begin_pass().unwrap();
+        let initial = object.reconcile(&initial_pass, reconcile(64)).unwrap();
+        assert_eq!(initial.phase, ScopedAppendDeliveryPhase::Live);
+        assert!(initial.reset_before_items.is_none());
+        let AppendRead::Batch {
+            items,
+            checkpoint,
+            transition,
+            needs_retry,
+            more_available,
+            bytes_read,
+            ..
+        } = &initial.read
+        else {
+            panic!("expected initial append batch");
+        };
+        assert_eq!(*transition, AppendTransition::Initial);
+        assert!(*needs_retry);
+        assert!(!*more_available);
+        assert_eq!(checkpoint.incomplete_suffix_len, 7);
+        assert_eq!(*bytes_read, 15);
+        let AppendItem::Record(record) = &items[0] else {
+            panic!("expected framed record");
+        };
+        assert_eq!(record.payload, b"one");
+        assert!(object.checkpoint().is_none());
+        object.discard(&initial).unwrap();
+        assert_eq!(initial_pass.finish().relations()[0].bytes_read, *bytes_read);
+
+        let replay_pass = host.begin_pass().unwrap();
+        let replay = object.reconcile(&replay_pass, reconcile(64)).unwrap();
+        assert_eq!(replay.phase, ScopedAppendDeliveryPhase::Live);
+        assert_eq!(&replay.read, &initial.read);
+        object.admit(&replay).unwrap();
+        assert_eq!(object.checkpoint().unwrap().committed_offset, 4);
+        drop(replay_pass);
+
+        let mut append = OpenOptions::new()
+            .append(true)
+            .open(root.join("session.jsonl"))
+            .unwrap();
+        append.write_all(b"-done\n").unwrap();
+        append.flush().unwrap();
+        let continued_pass = host.begin_pass().unwrap();
+        let continued = object.reconcile(&continued_pass, reconcile(64)).unwrap();
+        assert_eq!(continued.phase, ScopedAppendDeliveryPhase::Live);
+        let AppendRead::Batch {
+            items,
+            transition,
+            checkpoint,
+            ..
+        } = &continued.read
+        else {
+            panic!("expected continued append batch");
+        };
+        assert_eq!(*transition, AppendTransition::Continued);
+        assert_eq!(checkpoint.generation, 1);
+        let AppendItem::Record(record) = &items[0] else {
+            panic!("expected completed partial record");
+        };
+        assert_eq!(record.payload, b"partial-done");
+        object.admit(&continued).unwrap();
+        drop(continued_pass);
+
+        std::fs::write(root.join("session.jsonl"), b"replacement\n").unwrap();
+        let correction_pass = host.begin_pass().unwrap();
+        let correction = object.reconcile(&correction_pass, reconcile(64)).unwrap();
+        assert_eq!(correction.phase, ScopedAppendDeliveryPhase::Correction);
+        let reset = correction.reset_before_items.unwrap();
+        assert_eq!(reset.old_generation, 1);
+        assert_eq!(reset.new_generation, 2);
+        assert_eq!(reset.reason, AppendTransition::Truncated);
+        let AppendRead::Batch { items, .. } = &correction.read else {
+            panic!("expected correction batch");
+        };
+        let AppendItem::Record(record) = &items[0] else {
+            panic!("expected replacement record");
+        };
+        assert_eq!(record.generation, 2);
+        assert_eq!(record.payload, b"replacement");
+        object.admit(&correction).unwrap();
+        assert_eq!(object.checkpoint().unwrap().generation, 2);
+        assert!(object.root_present());
+        assert!(!object.bootstrap_active());
+    }
+
+    #[test]
+    fn scoped_append_bootstrap_barrier_waits_for_bounded_batch_drain() {
+        let registry = supported_fixture_registry();
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().join("bounded-bootstrap-root");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("session.jsonl"), b"one\ntwo\n").unwrap();
+        let host =
+            ScopedObservationAccessHost::authorize(&registry, scoped_access_request(root.clone()))
+                .unwrap();
+        let mut config = AppendDelimitedConfig::json_lines();
+        config.max_record_bytes = 16;
+        config.max_batch_bytes = 16;
+        config.max_records_per_batch = 1;
+        config.prefix_anchor_bytes = 16;
+        let mut object = ScopedKnownAppendObject::new(AppendDelimitedFile::new(config).unwrap());
+        let identity = [ScopeIdentityInput {
+            name: "native-session-id",
+            value: b"bounded-bootstrap-session",
+        }];
+        let origin = RecordOrigin {
+            source_instance_id: 10,
+            stream_id: 20,
+            object_id: 30,
+            observed_at: 40,
+            source_timestamp_hint: None,
+            media_type: SourceMediaType::new("application/x-ndjson").unwrap(),
+        };
+        let request = || ScopedAppendReconcileRequest {
+            relation_id: "root-object",
+            identity_inputs: &identity,
+            access_phase: AccessPhase::Initial,
+            parent_token: None,
+            depth: 1,
+            max_bytes: 64,
+            origin: &origin,
+            force_contract_replay: false,
+        };
+
+        let first_pass = host.begin_pass().unwrap();
+        let first = object.reconcile(&first_pass, request()).unwrap();
+        assert_eq!(first.phase, ScopedAppendDeliveryPhase::Bootstrap);
+        assert!(matches!(
+            &first.read,
+            AppendRead::Batch {
+                more_available: true,
+                ..
+            }
+        ));
+        assert!(matches!(
+            object.complete_bootstrap(),
+            Err(ScopedObservationAccessError::BootstrapNotDrained)
+        ));
+        object.admit(&first).unwrap();
+        drop(first_pass);
+        assert!(matches!(
+            object.complete_bootstrap(),
+            Err(ScopedObservationAccessError::BootstrapNotDrained)
+        ));
+
+        let second_pass = host.begin_pass().unwrap();
+        let second = object.reconcile(&second_pass, request()).unwrap();
+        assert_eq!(second.phase, ScopedAppendDeliveryPhase::Bootstrap);
+        assert!(matches!(
+            &second.read,
+            AppendRead::Batch {
+                more_available: false,
+                ..
+            }
+        ));
+        object.admit(&second).unwrap();
+        drop(second_pass);
+        object.complete_bootstrap().unwrap();
+        assert!(!object.bootstrap_active());
+        assert_eq!(object.checkpoint().unwrap().committed_offset, 8);
     }
 }

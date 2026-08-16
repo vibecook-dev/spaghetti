@@ -232,7 +232,13 @@ and retrieval API remain provisional.
 The provisional scoped composition root keeps the artifact probe inside the
 trusted Rust host, validates exact known-object grants only after strict
 support/contract/program selection, reserves before a confined source read,
-and owns one active bounded pass at a time. Attachment may precede root-object
+and owns one active bounded pass at a time. The common append driver also
+accepts a hard physical-read ceiling and reports exact framing plus continuity-
+anchor bytes, allowing the pass to prove actual access against its reservation
+without charging the entire historical file for each append. The provisional
+root kernel does not advance that driver's checkpoint on read: explicit
+ordered-lane admission applies it, discard leaves it unchanged for replay, and
+one pending observation blocks another read. Attachment may precede root-object
 creation; each later pass receives a fresh declared ledger; close prevents new
 passes; and the pass report contains neither granted paths nor native content.
 An architecture ratchet prevents this internal seam from depending on the
