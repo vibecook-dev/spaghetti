@@ -3268,6 +3268,14 @@ pub struct EngineReconcileResult {
     pub records_quarantined: u32,
     pub retries_required: u32,
     pub incomplete_tail_retries: u32,
+    pub dependency_access_attempts: f64,
+    pub dependency_access_denials: f64,
+    pub dependency_access_abandoned: f64,
+    pub dependency_objects_accessed: f64,
+    pub dependency_bytes_read: f64,
+    pub dependency_rows_read: f64,
+    pub dependency_max_depth: u32,
+    pub dependency_trace_entries_dropped: f64,
     pub commits: u32,
     pub last_commit_seq: Option<f64>,
 }
@@ -3287,6 +3295,14 @@ impl From<ReconcileOutcome> for EngineReconcileResult {
             records_quarantined: value.records_quarantined,
             retries_required: value.retries_required,
             incomplete_tail_retries: value.incomplete_tail_retries,
+            dependency_access_attempts: value.dependency_access_attempts as f64,
+            dependency_access_denials: value.dependency_access_denials as f64,
+            dependency_access_abandoned: value.dependency_access_abandoned as f64,
+            dependency_objects_accessed: value.dependency_objects_accessed as f64,
+            dependency_bytes_read: value.dependency_bytes_read as f64,
+            dependency_rows_read: value.dependency_rows_read as f64,
+            dependency_max_depth: value.dependency_max_depth,
+            dependency_trace_entries_dropped: value.dependency_trace_entries_dropped as f64,
             commits: value.commits,
             last_commit_seq: value.last_commit_seq.map(|value| value as f64),
         }
@@ -4101,7 +4117,7 @@ impl Task for OpenEngineTask {
             .register(ClaudeCodeAdapter::new())
             .register(CodexAdapter::new())
             .register(GrokAdapter::new())
-            .build()
+            .build_legacy()
             .map_err(|error| Error::new(Status::InvalidArg, error.to_string()))?;
         let inner = SpaghettiEngineCore::open_with_registry(
             EngineOptions {
@@ -5180,4 +5196,169 @@ fn validate_roots(roots: &[String], operation: &str) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod support_binding_tests {
+    use crate::adapter::{
+        verify_support_release_bundle, AgentAdapter, SupportBundleDocument, SupportReleaseStatus,
+    };
+    use crate::claude::ClaudeCodeAdapter;
+    use crate::codex::CodexAdapter;
+    use crate::grok::GrokAdapter;
+
+    #[test]
+    fn compiled_adapters_match_their_digest_bound_candidate_packages() {
+        assert_candidate_binding(
+            &ClaudeCodeAdapter::new(),
+            include_bytes!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../agent-support/claude-code/candidate-2026-08-15/support-release.json"
+            )),
+            &[
+                SupportBundleDocument::new(
+                    "agent-support/claude-code/candidate-2026-08-15/ads.json",
+                    include_bytes!(concat!(
+                        env!("CARGO_MANIFEST_DIR"),
+                        "/../../agent-support/claude-code/candidate-2026-08-15/ads.json"
+                    )),
+                ),
+                SupportBundleDocument::new(
+                    "agent-support/claude-code/candidate-2026-08-15/source-declarations.json",
+                    include_bytes!(concat!(
+                        env!("CARGO_MANIFEST_DIR"),
+                        "/../../agent-support/claude-code/candidate-2026-08-15/source-declarations.json"
+                    )),
+                ),
+                SupportBundleDocument::new(
+                    "agent-support/claude-code/candidate-2026-08-15/scope-programs.json",
+                    include_bytes!(concat!(
+                        env!("CARGO_MANIFEST_DIR"),
+                        "/../../agent-support/claude-code/candidate-2026-08-15/scope-programs.json"
+                    )),
+                ),
+                SupportBundleDocument::new(
+                    "agent-support/claude-code/candidate-2026-08-15/evidence.json",
+                    include_bytes!(concat!(
+                        env!("CARGO_MANIFEST_DIR"),
+                        "/../../agent-support/claude-code/candidate-2026-08-15/evidence.json"
+                    )),
+                ),
+                SupportBundleDocument::new(
+                    "agent-support/claude-code/candidate-2026-08-15/conformance.json",
+                    include_bytes!(concat!(
+                        env!("CARGO_MANIFEST_DIR"),
+                        "/../../agent-support/claude-code/candidate-2026-08-15/conformance.json"
+                    )),
+                ),
+            ],
+        );
+        assert_candidate_binding(
+            &CodexAdapter::new(),
+            include_bytes!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../agent-support/codex/candidate-2026-08-15/support-release.json"
+            )),
+            &[
+                SupportBundleDocument::new(
+                    "agent-support/codex/candidate-2026-08-15/ads.json",
+                    include_bytes!(concat!(
+                        env!("CARGO_MANIFEST_DIR"),
+                        "/../../agent-support/codex/candidate-2026-08-15/ads.json"
+                    )),
+                ),
+                SupportBundleDocument::new(
+                    "agent-support/codex/candidate-2026-08-15/source-declarations.json",
+                    include_bytes!(concat!(
+                        env!("CARGO_MANIFEST_DIR"),
+                        "/../../agent-support/codex/candidate-2026-08-15/source-declarations.json"
+                    )),
+                ),
+                SupportBundleDocument::new(
+                    "agent-support/codex/candidate-2026-08-15/scope-programs.json",
+                    include_bytes!(concat!(
+                        env!("CARGO_MANIFEST_DIR"),
+                        "/../../agent-support/codex/candidate-2026-08-15/scope-programs.json"
+                    )),
+                ),
+                SupportBundleDocument::new(
+                    "agent-support/codex/candidate-2026-08-15/evidence.json",
+                    include_bytes!(concat!(
+                        env!("CARGO_MANIFEST_DIR"),
+                        "/../../agent-support/codex/candidate-2026-08-15/evidence.json"
+                    )),
+                ),
+                SupportBundleDocument::new(
+                    "agent-support/codex/candidate-2026-08-15/conformance.json",
+                    include_bytes!(concat!(
+                        env!("CARGO_MANIFEST_DIR"),
+                        "/../../agent-support/codex/candidate-2026-08-15/conformance.json"
+                    )),
+                ),
+            ],
+        );
+        assert_candidate_binding(
+            &GrokAdapter::new(),
+            include_bytes!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../agent-support/grok/candidate-2026-08-15/support-release.json"
+            )),
+            &[
+                SupportBundleDocument::new(
+                    "agent-support/grok/candidate-2026-08-15/ads.json",
+                    include_bytes!(concat!(
+                        env!("CARGO_MANIFEST_DIR"),
+                        "/../../agent-support/grok/candidate-2026-08-15/ads.json"
+                    )),
+                ),
+                SupportBundleDocument::new(
+                    "agent-support/grok/candidate-2026-08-15/source-declarations.json",
+                    include_bytes!(concat!(
+                        env!("CARGO_MANIFEST_DIR"),
+                        "/../../agent-support/grok/candidate-2026-08-15/source-declarations.json"
+                    )),
+                ),
+                SupportBundleDocument::new(
+                    "agent-support/grok/candidate-2026-08-15/scope-programs.json",
+                    include_bytes!(concat!(
+                        env!("CARGO_MANIFEST_DIR"),
+                        "/../../agent-support/grok/candidate-2026-08-15/scope-programs.json"
+                    )),
+                ),
+                SupportBundleDocument::new(
+                    "agent-support/grok/candidate-2026-08-15/evidence.json",
+                    include_bytes!(concat!(
+                        env!("CARGO_MANIFEST_DIR"),
+                        "/../../agent-support/grok/candidate-2026-08-15/evidence.json"
+                    )),
+                ),
+                SupportBundleDocument::new(
+                    "agent-support/grok/candidate-2026-08-15/conformance.json",
+                    include_bytes!(concat!(
+                        env!("CARGO_MANIFEST_DIR"),
+                        "/../../agent-support/grok/candidate-2026-08-15/conformance.json"
+                    )),
+                ),
+            ],
+        );
+    }
+
+    fn assert_candidate_binding(
+        adapter: &dyn AgentAdapter,
+        release_json: &[u8],
+        documents: &[SupportBundleDocument<'_>],
+    ) {
+        let release = verify_support_release_bundle(release_json, documents).unwrap();
+        let manifest = adapter.manifest();
+        release
+            .verify_adapter_binding(
+                manifest.id.as_str(),
+                manifest
+                    .support_binding
+                    .as_ref()
+                    .expect("built-in adapter must declare its support binding"),
+            )
+            .unwrap();
+        assert_eq!(release.descriptor().status, SupportReleaseStatus::Candidate);
+    }
 }

@@ -1595,6 +1595,14 @@ export interface SpaghettiEngineReconcileResult {
   recordsQuarantined: number;
   retriesRequired: number;
   incompleteTailRetries: number;
+  dependencyAccessAttempts: number;
+  dependencyAccessDenials: number;
+  dependencyAccessAbandoned: number;
+  dependencyObjectsAccessed: number;
+  dependencyBytesRead: number;
+  dependencyRowsRead: number;
+  dependencyMaxDepth: number;
+  dependencyTraceEntriesDropped: number;
   commits: number;
   lastCommitSeq?: number;
 }

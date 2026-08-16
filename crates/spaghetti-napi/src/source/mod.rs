@@ -3,6 +3,7 @@
 //! Drivers in this module identify and frame native source records. They do
 //! not parse agent formats, produce facts, write SQLite, or publish changes.
 
+mod access;
 mod append_delimited;
 mod directory_snapshot;
 mod file;
@@ -17,6 +18,12 @@ mod sqlite_snapshot;
 #[cfg(test)]
 mod conformance;
 
+pub use access::{
+    AccessBudget, AccessBudgetError, AccessBudgetSnapshot, AccessLimit, AccessObjectToken,
+    AccessOperation, AccessOutcome, AccessPhase, AccessReservation, AccessReservationRequest,
+    AccessTraceEntry, ScopeAccessBounds, ACCESS_TRACE_CONTRACT_VERSION,
+    DEFAULT_ACCESS_TRACE_CAPACITY,
+};
 pub use append_delimited::{
     AppendCheckpoint, AppendDelimitedConfig, AppendDelimitedFile, AppendItem, AppendRead,
     AppendTransition,

@@ -504,9 +504,9 @@ def validate_repository() -> tuple[list[Bundle], list[str]]:
     if len(schemas) != len(DOCUMENT_SCHEMAS):
         return [], errors
 
-    release_paths = sorted(SUPPORT_ROOT.glob("*/candidate-*/support-release.json"))
+    release_paths = sorted(SUPPORT_ROOT.glob("*/*/support-release.json"))
     if not release_paths:
-        errors.append("agent-support: no candidate support releases found")
+        errors.append("agent-support: no support releases found")
         return [], errors
     bundles: list[Bundle] = []
     release_ids: list[str] = []
@@ -530,7 +530,16 @@ def main() -> int:
             print(f"ERROR: {error}")
         print(f"RFC 012A support contracts: {len(errors)} error(s), {len(bundles)} loaded bundle(s)")
         return 1
-    print(f"RFC 012A support contracts: {len(bundles)} candidate bundle(s) valid and non-selectable")
+    statuses: dict[str, int] = {"candidate": 0, "promoted": 0, "retired": 0}
+    for bundle in bundles:
+        status = bundle.document("support-release.json")["status"]
+        statuses[status] = statuses.get(status, 0) + 1
+    print(
+        "RFC 012A support contracts: "
+        f"{len(bundles)} release bundle(s) valid "
+        f"({statuses['promoted']} promoted, {statuses['candidate']} candidate, "
+        f"{statuses['retired']} retired); only promoted releases are selectable"
+    )
     return 0
 
 

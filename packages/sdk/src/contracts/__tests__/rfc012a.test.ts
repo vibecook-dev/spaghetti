@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
 import {
+  classifyRuntimeSupport,
   compareCoverage,
   ContractValidationError,
   parseExternalEntityRef,
@@ -10,6 +11,7 @@ import {
   parseQualifiedValue,
   parseSemanticRevisionRef,
   parseSourceCoverageSet,
+  selectContractVersions,
   type SourceCoverageSet,
 } from '../rfc012a.js';
 
@@ -39,6 +41,22 @@ const fixture = JSON.parse(
   ),
 ) as ContractFixture;
 
+interface SupportFixture {
+  fixture_contract_version: number;
+  releases: unknown[];
+  runtime_cases: Array<{ name: string; probe: unknown; expected: unknown }>;
+  contract_request: unknown;
+  contract_offer: unknown;
+  expected_contract_selection: unknown;
+}
+
+const supportFixture = JSON.parse(
+  readFileSync(
+    new URL('../../../../../crates/spaghetti-napi/fixtures/contracts/rfc012a-support-v1.json', import.meta.url),
+    'utf8',
+  ),
+) as SupportFixture;
+
 test('Rust RFC 012A v1 fixture validates in the portable SDK', () => {
   assert.equal(fixture.fixture_contract_version, 1);
   assert.equal(parseExternalEntityRef(fixture.external_entity_ref).external_entity_reference_version, 1);
@@ -60,6 +78,28 @@ test('Rust and TypeScript coverage comparison outcomes agree', () => {
   partial.completeness = 'partial';
   partial.points[0]!.status = { kind: 'partial' };
   assert.equal(compareCoverage(partial, partial), 'equal');
+});
+
+test('Rust, Python, and TypeScript support classification agree', () => {
+  assert.equal(supportFixture.fixture_contract_version, 1);
+  for (const runtimeCase of supportFixture.runtime_cases) {
+    assert.deepEqual(
+      classifyRuntimeSupport(runtimeCase.probe, supportFixture.releases),
+      runtimeCase.expected,
+      runtimeCase.name,
+    );
+  }
+});
+
+test('Rust, Python, and TypeScript contract negotiation agree', () => {
+  assert.deepEqual(
+    selectContractVersions(supportFixture.contract_request, supportFixture.contract_offer),
+    supportFixture.expected_contract_selection,
+  );
+
+  const incompatible = structuredClone(supportFixture.contract_request) as { model_major: number };
+  incompatible.model_major += 1;
+  assert.throws(() => selectContractVersions(incompatible, supportFixture.contract_offer), ContractValidationError);
 });
 
 test('incompatible majors and malformed complete coverage are rejected', () => {

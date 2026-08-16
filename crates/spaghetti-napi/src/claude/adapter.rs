@@ -12,23 +12,24 @@ use serde_json::Value;
 
 use crate::adapter::{
     AdapterDiagnostic, AdapterError, AdapterErrorClass, AdapterId, AdapterManifest,
-    AdapterObjectContext, AgentAdapter, ArtifactCapture, ArtifactContentFact,
-    ArtifactMetadataEntry, ArtifactMetadataSnapshotFact, ArtifactObservationKind, Availability,
-    CapabilityDeclaration, CapabilityGranularity, CapabilityId, CapabilitySupport,
-    ConsistencyPolicy, ContentBlock, DecodeContext, DecodeDisposition, DecoderId, DelegationFact,
-    DelegationKind, DelegationMetadataFact, DelegationSpawnFact, DeletionPolicy, DiscoveryContext,
-    DriverSpec, EntityKey, EntityScope, EvidenceKind, EvidenceStrength, Fact, FactBatch,
-    HookEventSummary, InterpretationSettingsDocumentStatus, InterpretationSettingsFact,
-    InterpretationSettingsLayer, InterpretationSettingsSnapshot, MessageFact, MessageRole,
-    ObjectSelector, PersistedToolResultFact, PlanSnapshotFact, PresenceFact,
-    ProjectMemoryDocumentFact, QualifiedTimestamp, RawRetentionPolicy, RelationStrength,
-    RunEvidenceFact, RunFact, SessionFact, SessionIndexEntrySnapshot, SessionIndexSnapshotFact,
-    SourceInstance, SourceInstanceKey, SourceInstanceSpec, SourceObjectDescriptor, SourceRoot,
-    StreamAuthority, StreamId, StreamSpec, SupportLevel, TaskCollectionKind, TaskItemSnapshot,
-    TaskSnapshotCoverage, TaskSnapshotFact, TaskStatus, TeamInboxMessageSnapshot,
-    TeamInboxSnapshotFact, TeamMemberSnapshot, TeamSnapshotFact, TimestampQuality, TokenUsage,
-    UsageAccounting, UsageFact, UsageScope, ValueQuality, WorkflowMemberEventFact,
-    WorkflowMemberEventKind, WorkflowSnapshotFact, WorkflowStatus,
+    AdapterObjectContext, AdapterSupportBinding, AgentAdapter, ArtifactCapture,
+    ArtifactContentFact, ArtifactMetadataEntry, ArtifactMetadataSnapshotFact,
+    ArtifactObservationKind, Availability, CapabilityDeclaration, CapabilityGranularity,
+    CapabilityId, CapabilitySupport, ConsistencyPolicy, ContentBlock, DecodeContext,
+    DecodeDisposition, DecoderId, DelegationFact, DelegationKind, DelegationMetadataFact,
+    DelegationSpawnFact, DeletionPolicy, DiscoveryContext, DriverSpec, EntityKey, EntityScope,
+    EvidenceKind, EvidenceStrength, Fact, FactBatch, HookEventSummary,
+    InterpretationSettingsDocumentStatus, InterpretationSettingsFact, InterpretationSettingsLayer,
+    InterpretationSettingsSnapshot, MessageFact, MessageRole, ObjectSelector,
+    PersistedToolResultFact, PlanSnapshotFact, PresenceFact, ProjectMemoryDocumentFact,
+    QualifiedTimestamp, RawRetentionPolicy, RelationStrength, RunEvidenceFact, RunFact,
+    SessionFact, SessionIndexEntrySnapshot, SessionIndexSnapshotFact, SourceInstance,
+    SourceInstanceKey, SourceInstanceSpec, SourceObjectDescriptor, SourceRoot, StreamAuthority,
+    StreamId, StreamSpec, SupportLevel, TaskCollectionKind, TaskItemSnapshot, TaskSnapshotCoverage,
+    TaskSnapshotFact, TaskStatus, TeamInboxMessageSnapshot, TeamInboxSnapshotFact,
+    TeamMemberSnapshot, TeamSnapshotFact, TimestampQuality, TokenUsage, UsageAccounting, UsageFact,
+    UsageScope, ValueQuality, WorkflowMemberEventFact, WorkflowMemberEventKind,
+    WorkflowSnapshotFact, WorkflowStatus,
 };
 use crate::claude::message_extractor;
 use crate::claude::session_metadata;
@@ -139,6 +140,16 @@ impl ClaudeCodeAdapter {
                 display_name: "Claude Code".to_string(),
                 adapter_version: env!("CARGO_PKG_VERSION").to_string(),
                 contract_version: 16,
+                support_binding: Some(
+                    AdapterSupportBinding::new(
+                        env!("CARGO_PKG_VERSION"),
+                        16,
+                        "sha256:34362f099f219181dfff3e50faef974882b656c5955e03d9cf1f4e8af7b986d3",
+                        "sha256:17a0f1aa7490b5c03a525f7606a7a02ee6d1919cc8b9b776597843f1edbf1ebe",
+                        "sha256:689c86b9770544f826da37e72d1c4a1a37153fad4091372b954bba90ca2d5f7c",
+                    )
+                    .expect("static Claude support binding is valid"),
+                ),
                 source_schema_versions: vec![
                     "claude-code-jsonl-v1".to_string(),
                     "claude-code-subagent-meta-v1".to_string(),

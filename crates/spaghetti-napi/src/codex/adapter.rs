@@ -11,13 +11,13 @@ use serde_json::{Map, Value};
 
 use crate::adapter::{
     AdapterDiagnostic, AdapterError, AdapterErrorClass, AdapterId, AdapterManifest,
-    AdapterObjectContext, AgentAdapter, Availability, CapabilityDeclaration, CapabilityGranularity,
-    CapabilityId, CapabilitySupport, ConsistencyPolicy, ContentBlock, DecodeContext,
-    DecodeDisposition, DecoderId, DeletionPolicy, DiscoveryContext, DriverSpec, EntityKey,
-    EntityScope, EvidenceKind, EvidenceStrength, Fact, FactBatch, MessageFact, MessageRole,
-    ObjectSelector, QualifiedTimestamp, RawRetentionPolicy, RunEvidenceFact, RunFact, SessionFact,
-    SourceInstance, SourceInstanceKey, SourceInstanceSpec, SourceObjectDescriptor, SourceRoot,
-    StreamAuthority, StreamId, StreamSpec, SupportLevel, TimestampQuality, TokenUsage,
+    AdapterObjectContext, AdapterSupportBinding, AgentAdapter, Availability, CapabilityDeclaration,
+    CapabilityGranularity, CapabilityId, CapabilitySupport, ConsistencyPolicy, ContentBlock,
+    DecodeContext, DecodeDisposition, DecoderId, DeletionPolicy, DiscoveryContext, DriverSpec,
+    EntityKey, EntityScope, EvidenceKind, EvidenceStrength, Fact, FactBatch, MessageFact,
+    MessageRole, ObjectSelector, QualifiedTimestamp, RawRetentionPolicy, RunEvidenceFact, RunFact,
+    SessionFact, SourceInstance, SourceInstanceKey, SourceInstanceSpec, SourceObjectDescriptor,
+    SourceRoot, StreamAuthority, StreamId, StreamSpec, SupportLevel, TimestampQuality, TokenUsage,
     UsageAccounting, UsageFact, UsageScope, ValueQuality,
 };
 use crate::source::{
@@ -56,6 +56,16 @@ impl CodexAdapter {
                 display_name: "Codex".to_string(),
                 adapter_version: env!("CARGO_PKG_VERSION").to_string(),
                 contract_version: 1,
+                support_binding: Some(
+                    AdapterSupportBinding::new(
+                        env!("CARGO_PKG_VERSION"),
+                        1,
+                        "sha256:0256d195021bb939f4af366b631eaf04c9121a880380852fde9913331673961e",
+                        "sha256:c4d6d49516dc525fb7b3d514924c1024b6998a1831c44c9c6b7936f96163c25b",
+                        "sha256:7990862cac4b59164dd8d25218077cce33e12fc15b66086e2763fcf6057a9fa5",
+                    )
+                    .expect("static Codex support binding is valid"),
+                ),
                 source_schema_versions: vec!["codex-rollout-jsonl-v1".to_string()],
                 capabilities: codex_capabilities(),
             },

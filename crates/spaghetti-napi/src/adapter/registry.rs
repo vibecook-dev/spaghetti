@@ -2,7 +2,11 @@ use std::collections::BTreeMap;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::Arc;
 
-use super::{AdapterError, AdapterId, AgentAdapter};
+use super::{
+    AdapterError, AdapterId, AgentAdapter, CompatibilityDecision, ContractVersionOffer,
+    ContractVersionRequest, NativeArtifactProbe, SupportCatalog, SupportOperation,
+    TypedAccessAuthorization,
+};
 
 pub struct AdapterRegistryBuilder {
     adapters: Vec<Arc<dyn AgentAdapter>>,
@@ -24,6 +28,26 @@ impl AdapterRegistryBuilder {
     }
 
     pub fn build(self) -> Result<AdapterRegistry, AdapterError> {
+        self.build_inner(None)
+    }
+
+    /// Explicit compatibility path for hosts that predate promoted RFC 012A
+    /// support packages. This registry cannot mint typed-access authority.
+    pub fn build_legacy(self) -> Result<AdapterRegistry, AdapterError> {
+        self.build_inner(None)
+    }
+
+    pub fn build_supported(
+        self,
+        support_catalog: Arc<SupportCatalog>,
+    ) -> Result<AdapterRegistry, AdapterError> {
+        self.build_inner(Some(support_catalog))
+    }
+
+    fn build_inner(
+        self,
+        support_catalog: Option<Arc<SupportCatalog>>,
+    ) -> Result<AdapterRegistry, AdapterError> {
         let mut adapters = BTreeMap::new();
         for adapter in self.adapters {
             let manifest =
@@ -35,6 +59,17 @@ impl AdapterRegistryBuilder {
                     )
                 })?;
             manifest.validate()?;
+            if let Some(catalog) = &support_catalog {
+                let binding = manifest.support_binding.as_ref().ok_or_else(|| {
+                    AdapterError::invalid_contract(format!(
+                        "adapter {} has no digest-bound support manifest",
+                        manifest.id
+                    ))
+                })?;
+                catalog
+                    .verify_adapter_binding(manifest.id.as_str(), binding, true)
+                    .map_err(|error| AdapterError::invalid_contract(error.to_string()))?;
+            }
             let id = manifest.id;
             if adapters.insert(id.clone(), adapter).is_some() {
                 return Err(AdapterError::invalid_contract(format!(
@@ -42,7 +77,10 @@ impl AdapterRegistryBuilder {
                 )));
             }
         }
-        Ok(AdapterRegistry { adapters })
+        Ok(AdapterRegistry {
+            adapters,
+            support_catalog,
+        })
     }
 }
 
@@ -54,6 +92,7 @@ impl Default for AdapterRegistryBuilder {
 
 pub struct AdapterRegistry {
     adapters: BTreeMap<AdapterId, Arc<dyn AgentAdapter>>,
+    support_catalog: Option<Arc<SupportCatalog>>,
 }
 
 impl AdapterRegistry {
@@ -79,13 +118,54 @@ impl AdapterRegistry {
     pub fn is_empty(&self) -> bool {
         self.adapters.is_empty()
     }
+
+    pub fn enforces_promoted_support(&self) -> bool {
+        self.support_catalog.is_some()
+    }
+
+    pub fn authorize_typed_access(
+        &self,
+        adapter_id: &AdapterId,
+        probe: &NativeArtifactProbe,
+        operation: SupportOperation,
+        request: &ContractVersionRequest,
+        offer: &ContractVersionOffer,
+    ) -> Result<(CompatibilityDecision, TypedAccessAuthorization), AdapterError> {
+        let adapter = self.get(adapter_id).ok_or_else(|| {
+            AdapterError::invalid_contract(format!("adapter {adapter_id} is not registered"))
+        })?;
+        let binding = adapter.manifest().support_binding.as_ref().ok_or_else(|| {
+            AdapterError::invalid_contract(format!(
+                "adapter {adapter_id} has no digest-bound support manifest"
+            ))
+        })?;
+        let catalog = self.support_catalog.as_ref().ok_or_else(|| {
+            AdapterError::invalid_contract(
+                "adapter registry was built through the explicit legacy compatibility path",
+            )
+        })?;
+        catalog
+            .authorize_typed_access(
+                adapter_id.as_str(),
+                binding,
+                probe,
+                operation,
+                request,
+                offer,
+            )
+            .map_err(|error| AdapterError::invalid_contract(error.to_string()))
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use crate::adapter::{
-        AdapterManifest, AdapterObjectContext, DecodeContext, DecodeDisposition, DiscoveryContext,
-        FactBatch, SourceInstance, SourceInstanceSpec, SourceObjectDescriptor, StreamSpec,
+        verify_support_release_bundle, AdapterManifest, AdapterObjectContext,
+        AdapterSupportBinding, DecodeContext, DecodeDisposition, DiscoveryContext, FactBatch,
+        Sha256Digest, SourceInstance, SourceInstanceSpec, SourceObjectDescriptor, StreamSpec,
+        SupportBundleDocument,
     };
     use crate::source::SourceRecord;
 
@@ -103,11 +183,80 @@ mod tests {
                     display_name: id.to_string(),
                     adapter_version: "1.0.0".to_string(),
                     contract_version: 1,
+                    support_binding: None,
                     source_schema_versions: Vec::new(),
                     capabilities: Vec::new(),
                 },
             }
         }
+
+        fn with_support_binding(mut self, binding: AdapterSupportBinding) -> Self {
+            self.manifest.support_binding = Some(binding);
+            self
+        }
+    }
+
+    fn promoted_fixture_catalog() -> (Arc<SupportCatalog>, AdapterSupportBinding) {
+        let documents = [
+            (
+                "ads",
+                "support/ads.json",
+                br#"{"adapter_id":"fixture"}"#.as_slice(),
+            ),
+            (
+                "source_declaration",
+                "support/source.json",
+                br#"{"adapter_id":"fixture"}"#.as_slice(),
+            ),
+            (
+                "scope_program",
+                "support/scope.json",
+                br#"{"adapter_id":"fixture"}"#.as_slice(),
+            ),
+            (
+                "evidence",
+                "support/evidence.json",
+                br#"{"adapter_id":"fixture"}"#.as_slice(),
+            ),
+            (
+                "conformance",
+                "support/conformance.json",
+                br#"{"adapter_id":"fixture","support_release_id":"fixture-release"}"#.as_slice(),
+            ),
+        ];
+        let references = documents
+            .iter()
+            .map(|(kind, path, bytes)| {
+                (
+                    (*kind).to_string(),
+                    serde_json::json!({"path": path, "sha256": Sha256Digest::of(bytes).to_string()}),
+                )
+            })
+            .collect::<serde_json::Map<_, _>>();
+        let release_json = serde_json::to_vec(&serde_json::json!({
+            "schema_version": 1,
+            "support_release_id": "fixture-release",
+            "adapter_id": "fixture",
+            "status": "promoted",
+            "artifact_compatibility": {
+                "family": "fixture",
+                "platforms": ["test"],
+                "exact_versions": ["1.0.0"],
+                "ranges": [],
+                "required_markers": ["fixture.marker"],
+                "forward_catalog_only": false
+            },
+            "references": references,
+            "versions": {"adapter_package": "1.0.0", "decoder_contract": 1}
+        }))
+        .unwrap();
+        let bundle_documents = documents
+            .iter()
+            .map(|(_, path, bytes)| SupportBundleDocument::new(path, bytes))
+            .collect::<Vec<_>>();
+        let release = verify_support_release_bundle(&release_json, &bundle_documents).unwrap();
+        let binding = release.adapter_binding().clone();
+        (Arc::new(SupportCatalog::new([release]).unwrap()), binding)
     }
 
     impl AgentAdapter for EmptyAdapter {
@@ -162,5 +311,61 @@ mod tests {
             .unwrap();
         assert_eq!(registry.len(), 2);
         assert!(registry.get(&AdapterId::new("two").unwrap()).is_some());
+    }
+
+    #[test]
+    fn supported_registry_requires_and_retains_a_promoted_digest_binding() {
+        let (catalog, binding) = promoted_fixture_catalog();
+        let missing = AdapterRegistryBuilder::new()
+            .register(EmptyAdapter::new("fixture"))
+            .build_supported(Arc::clone(&catalog));
+        assert!(missing.err().unwrap().to_string().contains("digest-bound"));
+
+        let registry = AdapterRegistryBuilder::new()
+            .register(EmptyAdapter::new("fixture").with_support_binding(binding))
+            .build_supported(catalog)
+            .unwrap();
+        assert!(registry.enforces_promoted_support());
+
+        let request = ContractVersionRequest {
+            selection_contract_version: 1,
+            model_major: 1,
+            external_entity_reference_version: 1,
+            semantic_revision_reference_version: 1,
+            coverage_contract_versions: vec![1],
+            fact_family_versions: BTreeMap::new(),
+            query_pack_versions: Some(vec![1]),
+            observation_contract_versions: None,
+        };
+        let offer = ContractVersionOffer {
+            selection_contract_version: 1,
+            model_major: 1,
+            external_entity_reference_versions: vec![1],
+            semantic_revision_reference_versions: vec![1],
+            coverage_contract_versions: vec![1],
+            fact_family_versions: BTreeMap::new(),
+            query_pack_versions: vec![1],
+            observation_contract_versions: Vec::new(),
+        };
+        let (decision, authorization) = registry
+            .authorize_typed_access(
+                &AdapterId::new("fixture").unwrap(),
+                &NativeArtifactProbe {
+                    family: "fixture".to_string(),
+                    platform: "test".to_string(),
+                    version: Some("1.0.0".to_string()),
+                    markers: vec!["fixture.marker".to_string()],
+                    contradictory_markers: false,
+                },
+                SupportOperation::DurableHistoryRuntime,
+                &request,
+                &offer,
+            )
+            .unwrap();
+        assert_eq!(decision.support_release_id(), Some("fixture-release"));
+        assert_eq!(
+            authorization.operation().support_release_id(),
+            Some("fixture-release")
+        );
     }
 }

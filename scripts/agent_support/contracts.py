@@ -8,11 +8,27 @@ from enum import Enum
 from typing import Any, Iterable, Mapping, Sequence
 
 
+SUPPORT_SELECTION_CONTRACT_VERSION = 1
+CONTRACT_VERSION_SELECTION_VERSION = 1
+
+
 class CompatibilityClass(str, Enum):
     EXACT_SUPPORTED = "ExactSupported"
     RANGE_SUPPORTED = "RangeSupported"
     RECOGNIZED_UNVERIFIED = "RecognizedUnverified"
     UNKNOWN_OR_INCOMPATIBLE = "UnknownOrIncompatible"
+
+
+class CompatibilityReason(str, Enum):
+    EXACT_PROMOTED_VERSION = "exact_promoted_version"
+    FIXTURE_BACKED_RANGE = "fixture_backed_range"
+    PROMOTED_FORWARD_CATALOG_ONLY = "promoted_forward_catalog_only"
+    NO_MATCHING_PROMOTED_RELEASE = "no_matching_promoted_release"
+    REQUIRED_NATIVE_MARKER_ABSENT = "required_native_marker_absent"
+    PLATFORM_NOT_DECLARED = "platform_not_declared"
+    UNRECOGNIZED_ARTIFACT_FAMILY = "unrecognized_artifact_family"
+    CONTRADICTORY_NATIVE_MARKERS = "contradictory_native_markers"
+    AMBIGUOUS_PROMOTED_RELEASE = "ambiguous_promoted_release"
 
 
 _PERMISSIONS: dict[CompatibilityClass, dict[str, bool]] = {
@@ -58,10 +74,34 @@ class RuntimeProbe:
 
 @dataclass(frozen=True)
 class CompatibilityResult:
+    support_selection_contract_version: int
     compatibility_class: CompatibilityClass
     support_release_id: str | None
-    reason: str
+    reason: CompatibilityReason
     permissions: Mapping[str, bool]
+
+
+class SupportContractError(ValueError):
+    """A support declaration is invalid or cannot produce an unambiguous decision."""
+
+
+def _result(
+    compatibility_class: CompatibilityClass,
+    support_release_id: str | None,
+    reason: CompatibilityReason,
+    *,
+    catalog_override: bool = False,
+) -> CompatibilityResult:
+    permissions = dict(_PERMISSIONS[compatibility_class])
+    if catalog_override:
+        permissions["catalog"] = True
+    return CompatibilityResult(
+        SUPPORT_SELECTION_CONTRACT_VERSION,
+        compatibility_class,
+        support_release_id,
+        reason,
+        permissions,
+    )
 
 
 def _version_tuple(value: str) -> tuple[int, ...]:
@@ -91,13 +131,31 @@ def _inside_range(version: str, version_range: Mapping[str, Any]) -> bool:
 def classify_runtime(probe: RuntimeProbe, releases: Iterable[Mapping[str, Any]]) -> CompatibilityResult:
     """Classify one native artifact without allowing candidates to confer support."""
 
-    entries = [entry for entry in releases if entry["artifact_compatibility"]["family"] == probe.family]
+    release_list = list(releases)
+    release_ids = [str(entry["support_release_id"]) for entry in release_list]
+    if len(release_ids) != len(set(release_ids)):
+        raise SupportContractError("duplicate support release id")
+    numeric_range_errors = validate_numeric_ranges(release_list)
+    if numeric_range_errors:
+        raise SupportContractError(numeric_range_errors[0])
+
+    entries = [
+        entry
+        for entry in release_list
+        if entry["artifact_compatibility"]["family"] == probe.family
+    ]
     if not entries:
-        selected = CompatibilityClass.UNKNOWN_OR_INCOMPATIBLE
-        return CompatibilityResult(selected, None, "unrecognized artifact family", _PERMISSIONS[selected])
+        return _result(
+            CompatibilityClass.UNKNOWN_OR_INCOMPATIBLE,
+            None,
+            CompatibilityReason.UNRECOGNIZED_ARTIFACT_FAMILY,
+        )
     if probe.contradictory_markers:
-        selected = CompatibilityClass.UNKNOWN_OR_INCOMPATIBLE
-        return CompatibilityResult(selected, None, "contradictory native markers", _PERMISSIONS[selected])
+        return _result(
+            CompatibilityClass.UNKNOWN_OR_INCOMPATIBLE,
+            None,
+            CompatibilityReason.CONTRADICTORY_NATIVE_MARKERS,
+        )
 
     family_platforms = {
         platform
@@ -105,64 +163,86 @@ def classify_runtime(probe: RuntimeProbe, releases: Iterable[Mapping[str, Any]])
         for platform in entry["artifact_compatibility"]["platforms"]
     }
     if probe.platform not in family_platforms:
-        selected = CompatibilityClass.UNKNOWN_OR_INCOMPATIBLE
-        return CompatibilityResult(selected, None, "platform is not declared for this family", _PERMISSIONS[selected])
+        return _result(
+            CompatibilityClass.UNKNOWN_OR_INCOMPATIBLE,
+            None,
+            CompatibilityReason.PLATFORM_NOT_DECLARED,
+        )
 
-    promoted = [entry for entry in entries if entry["status"] == "promoted"]
-    marker_mismatch = False
-    for entry in sorted(promoted, key=lambda value: value["support_release_id"], reverse=True):
+    promoted_on_platform = [
+        entry
+        for entry in entries
+        if entry["status"] == "promoted"
+        and probe.platform in entry["artifact_compatibility"]["platforms"]
+    ]
+    marker_compatible = []
+    for entry in promoted_on_platform:
         compatibility = entry["artifact_compatibility"]
-        if probe.platform not in compatibility["platforms"]:
-            continue
         required_markers = set(compatibility["required_markers"])
-        if not required_markers.issubset(probe.markers):
-            marker_mismatch = True
-            continue
-        if probe.version is None:
-            continue
-        if probe.version in compatibility["exact_versions"]:
-            selected = CompatibilityClass.EXACT_SUPPORTED
-            return CompatibilityResult(
-                selected,
-                entry["support_release_id"],
-                "exact promoted artifact version and markers",
-                _PERMISSIONS[selected],
-            )
-        if any(_inside_range(probe.version, item) for item in compatibility["ranges"]):
-            selected = CompatibilityClass.RANGE_SUPPORTED
-            return CompatibilityResult(
-                selected,
-                entry["support_release_id"],
-                "fixture-backed promoted compatibility range",
-                _PERMISSIONS[selected],
-            )
+        if required_markers.issubset(probe.markers):
+            marker_compatible.append(entry)
 
-    if marker_mismatch and promoted:
-        selected = CompatibilityClass.UNKNOWN_OR_INCOMPATIBLE
-        return CompatibilityResult(selected, None, "required native marker is absent", _PERMISSIONS[selected])
-    selected = CompatibilityClass.RECOGNIZED_UNVERIFIED
-    permissions = dict(_PERMISSIONS[selected])
-    forward_catalog_release = next(
-        (
-            entry
-            for entry in promoted
-            if probe.platform in entry["artifact_compatibility"]["platforms"]
-            and entry["artifact_compatibility"]["forward_catalog_only"]
-            and set(entry["artifact_compatibility"]["required_markers"]).issubset(probe.markers)
-        ),
+    matches: list[tuple[Mapping[str, Any], CompatibilityClass]] = []
+    if probe.version is not None:
+        for entry in marker_compatible:
+            compatibility = entry["artifact_compatibility"]
+            if probe.version in compatibility["exact_versions"]:
+                matches.append((entry, CompatibilityClass.EXACT_SUPPORTED))
+                continue
+            try:
+                inside_declared_range = any(
+                    _inside_range(probe.version, item)
+                    for item in compatibility["ranges"]
+                )
+            except ValueError:
+                inside_declared_range = False
+            if inside_declared_range:
+                matches.append((entry, CompatibilityClass.RANGE_SUPPORTED))
+
+    if len(matches) > 1:
+        return _result(
+            CompatibilityClass.UNKNOWN_OR_INCOMPATIBLE,
+            None,
+            CompatibilityReason.AMBIGUOUS_PROMOTED_RELEASE,
+        )
+    if matches:
+        entry, selected = matches[0]
+        reason = (
+            CompatibilityReason.EXACT_PROMOTED_VERSION
+            if selected is CompatibilityClass.EXACT_SUPPORTED
+            else CompatibilityReason.FIXTURE_BACKED_RANGE
+        )
+        return _result(selected, str(entry["support_release_id"]), reason)
+
+    if promoted_on_platform and not marker_compatible:
+        return _result(
+            CompatibilityClass.UNKNOWN_OR_INCOMPATIBLE,
+            None,
+            CompatibilityReason.REQUIRED_NATIVE_MARKER_ABSENT,
+        )
+
+    forward_catalog = [
+        entry
+        for entry in marker_compatible
+        if entry["artifact_compatibility"]["forward_catalog_only"]
+    ]
+    if len(forward_catalog) > 1:
+        return _result(
+            CompatibilityClass.UNKNOWN_OR_INCOMPATIBLE,
+            None,
+            CompatibilityReason.AMBIGUOUS_PROMOTED_RELEASE,
+        )
+    if forward_catalog:
+        return _result(
+            CompatibilityClass.RECOGNIZED_UNVERIFIED,
+            str(forward_catalog[0]["support_release_id"]),
+            CompatibilityReason.PROMOTED_FORWARD_CATALOG_ONLY,
+            catalog_override=True,
+        )
+    return _result(
+        CompatibilityClass.RECOGNIZED_UNVERIFIED,
         None,
-    )
-    if forward_catalog_release is not None:
-        permissions["catalog"] = True
-    return CompatibilityResult(
-        selected,
-        forward_catalog_release["support_release_id"] if forward_catalog_release is not None else None,
-        (
-            "recognized artifact is limited to a promoted forward-compatible catalog path"
-            if forward_catalog_release is not None
-            else "recognized artifact has no matching promoted support release"
-        ),
-        permissions,
+        CompatibilityReason.NO_MATCHING_PROMOTED_RELEASE,
     )
 
 
@@ -170,10 +250,14 @@ class ContractSelectionError(ValueError):
     """Raised before source access when public semantic versions are incompatible."""
 
 
-_BASE_VERSION_FIELDS = (
-    "external_entity_reference_version",
-    "semantic_revision_reference_version",
-)
+def _validated_versions(value: Any, label: str, *, require_nonempty: bool) -> list[int]:
+    if not isinstance(value, list) or (require_nonempty and not value):
+        raise ContractSelectionError(f"{label} must be a version list")
+    if any(not isinstance(version, int) or isinstance(version, bool) or version <= 0 for version in value):
+        raise ContractSelectionError(f"{label} contains an invalid version")
+    if len(value) != len(set(value)):
+        raise ContractSelectionError(f"{label} contains duplicate versions")
+    return value
 
 
 def select_contract_versions(
@@ -185,13 +269,29 @@ def select_contract_versions(
     consumer preferences. No silent downgrade or unknown-family drop occurs.
     """
 
+    if requested.get("selection_contract_version") != CONTRACT_VERSION_SELECTION_VERSION:
+        raise ContractSelectionError("unsupported contract-version selection request version")
+    if offered.get("selection_contract_version") != CONTRACT_VERSION_SELECTION_VERSION:
+        raise ContractSelectionError("unsupported contract-version offer version")
     if requested.get("model_major") != offered.get("model_major"):
         raise ContractSelectionError("incompatible base model major")
-    selection: dict[str, Any] = {"model_major": requested["model_major"]}
+    if not isinstance(requested.get("model_major"), int) or requested["model_major"] <= 0:
+        raise ContractSelectionError("model major must be greater than zero")
+    selection: dict[str, Any] = {
+        "selection_contract_version": CONTRACT_VERSION_SELECTION_VERSION,
+        "model_major": requested["model_major"],
+    }
 
-    for field_name in _BASE_VERSION_FIELDS:
+    for field_name, offer_field_name in (
+        ("external_entity_reference_version", "external_entity_reference_versions"),
+        ("semantic_revision_reference_version", "semantic_revision_reference_versions"),
+    ):
         requested_version = requested.get(field_name)
-        offered_versions = offered.get(field_name, [])
+        if not isinstance(requested_version, int) or isinstance(requested_version, bool) or requested_version <= 0:
+            raise ContractSelectionError(f"invalid {field_name}: {requested_version}")
+        offered_versions = _validated_versions(
+            offered.get(offer_field_name), offer_field_name, require_nonempty=True
+        )
         if requested_version not in offered_versions:
             raise ContractSelectionError(f"unsupported {field_name}: {requested_version}")
         selection[field_name] = requested_version
@@ -203,8 +303,20 @@ def select_contract_versions(
     ):
         requested_versions = requested.get(field_name)
         if requested_versions is None:
+            if field_name == "coverage_contract_versions":
+                raise ContractSelectionError("coverage_contract_versions is required")
+            selection[field_name.removesuffix("s")] = None
             continue
-        offered_versions = set(offered.get(field_name, []))
+        requested_versions = _validated_versions(
+            requested_versions, f"requested {field_name}", require_nonempty=True
+        )
+        offered_versions = set(
+            _validated_versions(
+                offered.get(field_name),
+                f"offered {field_name}",
+                require_nonempty=field_name == "coverage_contract_versions",
+            )
+        )
         selected = next((version for version in requested_versions if version in offered_versions), None)
         if selected is None:
             raise ContractSelectionError(f"no compatible {field_name}")
@@ -212,11 +324,22 @@ def select_contract_versions(
 
     requested_families = requested.get("fact_family_versions", {})
     offered_families = offered.get("fact_family_versions", {})
+    if not isinstance(requested_families, Mapping) or not isinstance(offered_families, Mapping):
+        raise ContractSelectionError("fact_family_versions must be an object")
     selected_families: dict[str, int] = {}
     for family, preferences in requested_families.items():
         if family not in offered_families:
             raise ContractSelectionError(f"required fact family is absent: {family}")
-        offered_versions = set(offered_families[family])
+        preferences = _validated_versions(
+            preferences, f"requested fact family {family}", require_nonempty=True
+        )
+        offered_versions = set(
+            _validated_versions(
+                offered_families[family],
+                f"offered fact family {family}",
+                require_nonempty=True,
+            )
+        )
         selected = next((version for version in preferences if version in offered_versions), None)
         if selected is None:
             raise ContractSelectionError(f"no compatible fact-family version: {family}")

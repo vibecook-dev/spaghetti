@@ -261,7 +261,7 @@ The checker rejects unrestricted discovery functions, unbounded relation
 fan-out, absent evidence, duplicate semantic ownership, and unclassified native
 families.
 
-Current landing status (2026-08-15):
+Current landing status (2026-08-16):
 
 - added strict v1 JSON Schemas for ADS, source declarations, restricted scope
   programs, evidence manifests, conformance manifests, and support-release
@@ -276,14 +276,44 @@ Current landing status (2026-08-15):
   credential forms;
 - added executable exact/range/unverified/incompatible classification,
   pre-access public contract selection, and relation-level access budget
-  accounting with overflow tests; and
+  accounting with overflow tests;
+- moved runtime support classification and contract selection into an
+  agent-neutral Rust authority, made catalog/durable/scoped access depend on a
+  private non-serializable authorization, and made support authorization run
+  before negotiation so candidates cannot inspect the offered typed surface;
+- froze one shared support/selection fixture executed by Rust, the independent
+  Python tooling, and the portable TypeScript SDK, including opaque exact
+  versions, forward-catalog degradation, candidate denial, preference order,
+  and incompatible rejection;
+- added an architecture ratchet preventing support selection from depending on
+  source, topology, persistence, N-API, or concrete adapters;
+- added bounded in-memory support-package verification for the ledger plus all
+  five referenced documents, including canonical confined paths, SHA-256
+  bindings, adapter identity, and conformance release identity; bound every
+  built-in adapter manifest to its package/decoder and ADS/source/scope
+  digests; and added a strict registry path that admits only matching promoted
+  packages while keeping the current zero-promotion N-API host on an explicit
+  non-authorizing legacy path;
+- made repository validation discover candidate, promoted, and retired bundle
+  directories instead of silently ignoring future promoted releases, and
+  added tests that compare all three compiled adapter manifests with their
+  current digest-bound candidate packages;
+- implemented the agent-neutral Rust access budget with pre-access worst-case
+  reservation, per-parent fan-out, total object/byte/row/depth enforcement,
+  conservative failed/abandoned accounting, hashed object tokens, and bounded
+  phase-tagged traces; wired adapter dependency object reads, parameterized
+  queries, listings, and consistency revalidation through it; exposed aggregate
+  counters on reconcile results; and added a ratchet preventing adapters from
+  minting tokens or reserving native access; and
 - integrated contract and tooling checks into `pnpm validate`.
 
-A2 remains `In progress`: access telemetry/budget accounting still needs to be
-wired into the Rust source and observer runtimes; adapter manifests must be
-mechanically compared with promoted declarations; unrestricted scope access
-needs a Rust dependency/API ratchet; and public N-API/IPC boundaries must call
-the version selector rather than merely having its conformance oracle.
+A2 remains `In progress`: promoted `ScopeProgram` relation bounds still need to
+instantiate these budgets in the catalog and scoped-observer runtimes; the
+bounded trace needs an authorized diagnostic retrieval/digest surface; adapter
+registrations must move from the explicit legacy path to the strict promoted
+catalog after the first support release is promoted; and public N-API/IPC host
+boundaries must carry the Rust-issued support authorization into source access
+rather than merely exposing portable classification/selection conformance.
 
 ### A3. Current-agent candidates
 

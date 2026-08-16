@@ -46,9 +46,20 @@ ADAPTER_STORAGE_FORBIDDEN_RE = re.compile(
     r"\b(?:crate::(?:engine|orchestrate|napi_engine|core::(?:schema|writer|event))"
     r"|rusqlite|napi)(?:::|\b)"
 )
+RFC012_ADAPTER_ACCESS_AUTHORITY_RE = re.compile(
+    r"\b(?:AccessBudget|AccessReservation|AccessReservationRequest|AccessObjectToken)\b"
+)
 RFC012_SEMANTIC_FORBIDDEN_RE = re.compile(
     r"(?:\bcrate::|\bsuper::(?:contract|facts|registry)(?:::|\b)"
     r"|\brusqlite(?:::|\b)|\bnapi(?:::|\b))"
+)
+RFC012_SUPPORT_FORBIDDEN_RE = re.compile(
+    r"(?:\bcrate::|\bsuper::(?:::|\b)|\brusqlite(?:::|\b)|\bnapi(?:::|\b))"
+)
+BUILTIN_ADAPTER_PATHS = (
+    "crates/spaghetti-napi/src/claude/adapter.rs",
+    "crates/spaghetti-napi/src/codex/adapter.rs",
+    "crates/spaghetti-napi/src/grok/adapter.rs",
 )
 MIGRATED_CLIENT_CONSUMERS = (
     "apps/playground/src/main/canonical-queries.ts",
@@ -324,12 +335,46 @@ def discover_rust_adapter_storage_boundary_violations() -> set[str]:
     }
 
 
+def discover_rfc012_adapter_access_authority_violations() -> set[str]:
+    """Adapters may declare bounds but cannot reserve or mint native access."""
+    root = REPO_ROOT / "crates/spaghetti-napi/src"
+    paths = list((root / "adapter").rglob("*.rs"))
+    paths.extend(
+        path
+        for adapter in ("claude", "codex", "grok")
+        if (path := root / adapter / "adapter.rs").exists()
+    )
+    return {
+        repo_path(path)
+        for path in sorted(paths)
+        if RFC012_ADAPTER_ACCESS_AUTHORITY_RE.search(production_rust_text(path))
+    }
+
+
 def discover_rfc012_semantic_boundary_violations() -> set[str]:
     """The RFC 012A base model cannot depend on adapters, sources, or topology."""
     path = REPO_ROOT / "crates/spaghetti-napi/src/adapter/semantic.rs"
     if not path.exists() or RFC012_SEMANTIC_FORBIDDEN_RE.search(production_rust_text(path)):
         return {repo_path(path)}
     return set()
+
+
+def discover_rfc012_support_boundary_violations() -> set[str]:
+    """Support selection cannot inspect sources or acquire runtime authority itself."""
+    path = REPO_ROOT / "crates/spaghetti-napi/src/adapter/support.rs"
+    if not path.exists() or RFC012_SUPPORT_FORBIDDEN_RE.search(production_rust_text(path)):
+        return {repo_path(path)}
+    return set()
+
+
+def discover_rfc012_adapter_support_binding_gaps() -> set[str]:
+    """Built-in adapters must bind their package and declaration digests."""
+    found: set[str] = set()
+    for relative in BUILTIN_ADAPTER_PATHS:
+        text = production_rust_text(REPO_ROOT / relative)
+        if "support_binding: Some(" not in text or "AdapterSupportBinding::new(" not in text:
+            found.add(relative)
+    return found
 
 
 def discover_migrated_client_direct_engine_queries() -> set[str]:
@@ -454,7 +499,10 @@ DISCOVERERS: dict[str, Callable[[], set[str]]] = {
     "rust_legacy_oracle_default_exposure": discover_rust_legacy_oracle_default_exposure,
     "rust_source_boundary_violations": discover_rust_source_boundary_violations,
     "rust_adapter_storage_boundary_violations": discover_rust_adapter_storage_boundary_violations,
+    "rfc012_adapter_access_authority_violations": discover_rfc012_adapter_access_authority_violations,
     "rfc012_semantic_boundary_violations": discover_rfc012_semantic_boundary_violations,
+    "rfc012_support_boundary_violations": discover_rfc012_support_boundary_violations,
+    "rfc012_adapter_support_binding_gaps": discover_rfc012_adapter_support_binding_gaps,
     "migrated_client_direct_engine_queries": discover_migrated_client_direct_engine_queries,
     "portable_client_runtime_boundary_violations": discover_portable_client_runtime_boundary_violations,
     "playground_main_sdk_owner_bypasses": discover_playground_main_sdk_owner_bypasses,

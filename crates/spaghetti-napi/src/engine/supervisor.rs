@@ -1862,6 +1862,7 @@ mod tests {
                     display_name: "ignored append test adapter".to_string(),
                     adapter_version: "1.0.0".to_string(),
                     contract_version: 1,
+                    support_binding: None,
                     source_schema_versions: Vec::new(),
                     capabilities: Vec::new(),
                 },

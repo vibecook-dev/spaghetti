@@ -1,0 +1,284 @@
+{
+  "fixture_contract_version": 1,
+  "releases": [
+    {
+      "support_release_id": "candidate-only-support-v1",
+      "status": "candidate",
+      "artifact_compatibility": {
+        "family": "candidate-agent",
+        "platforms": ["darwin"],
+        "exact_versions": ["1.0.0"],
+        "ranges": [],
+        "required_markers": ["candidate.marker"],
+        "forward_catalog_only": true
+      }
+    },
+    {
+      "support_release_id": "fixture-support-v1",
+      "status": "promoted",
+      "artifact_compatibility": {
+        "family": "fixture-agent",
+        "platforms": ["darwin"],
+        "exact_versions": ["1.2.3", "1.2.3-beta"],
+        "ranges": [
+          {
+            "minimum": "2.0.0",
+            "minimum_inclusive": true,
+            "maximum": "2.4.0",
+            "maximum_inclusive": false
+          }
+        ],
+        "required_markers": ["native.marker"],
+        "forward_catalog_only": true
+      }
+    }
+  ],
+  "runtime_cases": [
+    {
+      "name": "exact",
+      "probe": {
+        "family": "fixture-agent",
+        "platform": "darwin",
+        "version": "1.2.3",
+        "markers": ["native.marker"],
+        "contradictory_markers": false
+      },
+      "expected": {
+        "support_selection_contract_version": 1,
+        "compatibility_class": "ExactSupported",
+        "support_release_id": "fixture-support-v1",
+        "reason": "exact_promoted_version",
+        "permissions": {
+          "version_probe": true,
+          "catalog": true,
+          "durable": true,
+          "scoped_observation": true,
+          "bounded_drift": true
+        }
+      }
+    },
+    {
+      "name": "opaque-exact",
+      "probe": {
+        "family": "fixture-agent",
+        "platform": "darwin",
+        "version": "1.2.3-beta",
+        "markers": ["native.marker"],
+        "contradictory_markers": false
+      },
+      "expected": {
+        "support_selection_contract_version": 1,
+        "compatibility_class": "ExactSupported",
+        "support_release_id": "fixture-support-v1",
+        "reason": "exact_promoted_version",
+        "permissions": {
+          "version_probe": true,
+          "catalog": true,
+          "durable": true,
+          "scoped_observation": true,
+          "bounded_drift": true
+        }
+      }
+    },
+    {
+      "name": "range",
+      "probe": {
+        "family": "fixture-agent",
+        "platform": "darwin",
+        "version": "2.3",
+        "markers": ["native.marker"],
+        "contradictory_markers": false
+      },
+      "expected": {
+        "support_selection_contract_version": 1,
+        "compatibility_class": "RangeSupported",
+        "support_release_id": "fixture-support-v1",
+        "reason": "fixture_backed_range",
+        "permissions": {
+          "version_probe": true,
+          "catalog": true,
+          "durable": true,
+          "scoped_observation": true,
+          "bounded_drift": true
+        }
+      }
+    },
+    {
+      "name": "forward-catalog",
+      "probe": {
+        "family": "fixture-agent",
+        "platform": "darwin",
+        "version": "9.0.0",
+        "markers": ["native.marker"],
+        "contradictory_markers": false
+      },
+      "expected": {
+        "support_selection_contract_version": 1,
+        "compatibility_class": "RecognizedUnverified",
+        "support_release_id": "fixture-support-v1",
+        "reason": "promoted_forward_catalog_only",
+        "permissions": {
+          "version_probe": true,
+          "catalog": true,
+          "durable": false,
+          "scoped_observation": false,
+          "bounded_drift": true
+        }
+      }
+    },
+    {
+      "name": "missing-marker",
+      "probe": {
+        "family": "fixture-agent",
+        "platform": "darwin",
+        "version": "1.2.3",
+        "markers": [],
+        "contradictory_markers": false
+      },
+      "expected": {
+        "support_selection_contract_version": 1,
+        "compatibility_class": "UnknownOrIncompatible",
+        "support_release_id": null,
+        "reason": "required_native_marker_absent",
+        "permissions": {
+          "version_probe": true,
+          "catalog": false,
+          "durable": false,
+          "scoped_observation": false,
+          "bounded_drift": false
+        }
+      }
+    },
+    {
+      "name": "unknown-platform",
+      "probe": {
+        "family": "fixture-agent",
+        "platform": "linux",
+        "version": "1.2.3",
+        "markers": ["native.marker"],
+        "contradictory_markers": false
+      },
+      "expected": {
+        "support_selection_contract_version": 1,
+        "compatibility_class": "UnknownOrIncompatible",
+        "support_release_id": null,
+        "reason": "platform_not_declared",
+        "permissions": {
+          "version_probe": true,
+          "catalog": false,
+          "durable": false,
+          "scoped_observation": false,
+          "bounded_drift": false
+        }
+      }
+    },
+    {
+      "name": "unknown-family",
+      "probe": {
+        "family": "unknown-agent",
+        "platform": "darwin",
+        "version": "1.0.0",
+        "markers": [],
+        "contradictory_markers": false
+      },
+      "expected": {
+        "support_selection_contract_version": 1,
+        "compatibility_class": "UnknownOrIncompatible",
+        "support_release_id": null,
+        "reason": "unrecognized_artifact_family",
+        "permissions": {
+          "version_probe": true,
+          "catalog": false,
+          "durable": false,
+          "scoped_observation": false,
+          "bounded_drift": false
+        }
+      }
+    },
+    {
+      "name": "candidate-only-family",
+      "probe": {
+        "family": "candidate-agent",
+        "platform": "darwin",
+        "version": "1.0.0",
+        "markers": ["candidate.marker"],
+        "contradictory_markers": false
+      },
+      "expected": {
+        "support_selection_contract_version": 1,
+        "compatibility_class": "RecognizedUnverified",
+        "support_release_id": null,
+        "reason": "no_matching_promoted_release",
+        "permissions": {
+          "version_probe": true,
+          "catalog": false,
+          "durable": false,
+          "scoped_observation": false,
+          "bounded_drift": true
+        }
+      }
+    },
+    {
+      "name": "contradictory-markers",
+      "probe": {
+        "family": "fixture-agent",
+        "platform": "darwin",
+        "version": "1.2.3",
+        "markers": ["native.marker"],
+        "contradictory_markers": true
+      },
+      "expected": {
+        "support_selection_contract_version": 1,
+        "compatibility_class": "UnknownOrIncompatible",
+        "support_release_id": null,
+        "reason": "contradictory_native_markers",
+        "permissions": {
+          "version_probe": true,
+          "catalog": false,
+          "durable": false,
+          "scoped_observation": false,
+          "bounded_drift": false
+        }
+      }
+    }
+  ],
+  "contract_request": {
+    "selection_contract_version": 1,
+    "model_major": 1,
+    "external_entity_reference_version": 1,
+    "semantic_revision_reference_version": 1,
+    "coverage_contract_versions": [2, 1],
+    "fact_family_versions": {
+      "interaction": [1],
+      "usage": [2]
+    },
+    "query_pack_versions": [2, 1],
+    "observation_contract_versions": [2, 1]
+  },
+  "contract_offer": {
+    "selection_contract_version": 1,
+    "model_major": 1,
+    "external_entity_reference_versions": [1],
+    "semantic_revision_reference_versions": [1],
+    "coverage_contract_versions": [1],
+    "fact_family_versions": {
+      "interaction": [1],
+      "usage": [1, 2]
+    },
+    "query_pack_versions": [1],
+    "observation_contract_versions": [1]
+  },
+  "expected_contract_selection": {
+    "selection_contract_version": 1,
+    "model_major": 1,
+    "external_entity_reference_version": 1,
+    "semantic_revision_reference_version": 1,
+    "coverage_contract_version": 1,
+    "fact_family_versions": {
+      "interaction": 1,
+      "usage": 2
+    },
+    "query_pack_version": 1,
+    "observation_contract_version": 1
+  }
+}

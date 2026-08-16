@@ -8,6 +8,102 @@ export const EXTERNAL_ENTITY_REFERENCE_VERSION = 1 as const;
 export const SEMANTIC_REFERENCE_CONTRACT_VERSION = 1 as const;
 export const SOURCE_COVERAGE_CONTRACT_VERSION = 1 as const;
 export const SOURCE_COVERAGE_SET_CONTRACT_VERSION = 1 as const;
+export const SUPPORT_SELECTION_CONTRACT_VERSION = 1 as const;
+export const CONTRACT_VERSION_SELECTION_VERSION = 1 as const;
+
+export type SupportReleaseStatus = 'candidate' | 'promoted' | 'retired';
+
+export interface ArtifactVersionRange {
+  minimum: string;
+  minimum_inclusive: boolean;
+  maximum: string;
+  maximum_inclusive: boolean;
+}
+
+export interface ArtifactCompatibilityDeclaration {
+  family: string;
+  platforms: string[];
+  exact_versions: string[];
+  ranges: ArtifactVersionRange[];
+  required_markers: string[];
+  forward_catalog_only: boolean;
+}
+
+export interface SupportReleaseDescriptor {
+  support_release_id: string;
+  status: SupportReleaseStatus;
+  artifact_compatibility: ArtifactCompatibilityDeclaration;
+}
+
+export interface NativeArtifactProbe {
+  family: string;
+  platform: string;
+  version: string | null;
+  markers: string[];
+  contradictory_markers: boolean;
+}
+
+export type CompatibilityClass = 'ExactSupported' | 'RangeSupported' | 'RecognizedUnverified' | 'UnknownOrIncompatible';
+
+export type CompatibilityReason =
+  | 'exact_promoted_version'
+  | 'fixture_backed_range'
+  | 'promoted_forward_catalog_only'
+  | 'no_matching_promoted_release'
+  | 'required_native_marker_absent'
+  | 'platform_not_declared'
+  | 'unrecognized_artifact_family'
+  | 'contradictory_native_markers'
+  | 'ambiguous_promoted_release';
+
+export interface OperationPermissions {
+  version_probe: boolean;
+  catalog: boolean;
+  durable: boolean;
+  scoped_observation: boolean;
+  bounded_drift: boolean;
+}
+
+export interface CompatibilityDecision {
+  support_selection_contract_version: typeof SUPPORT_SELECTION_CONTRACT_VERSION;
+  compatibility_class: CompatibilityClass;
+  support_release_id: string | null;
+  reason: CompatibilityReason;
+  permissions: OperationPermissions;
+}
+
+export interface ContractVersionRequest {
+  selection_contract_version: typeof CONTRACT_VERSION_SELECTION_VERSION;
+  model_major: number;
+  external_entity_reference_version: number;
+  semantic_revision_reference_version: number;
+  coverage_contract_versions: number[];
+  fact_family_versions: Record<string, number[]>;
+  query_pack_versions?: number[];
+  observation_contract_versions?: number[];
+}
+
+export interface ContractVersionOffer {
+  selection_contract_version: typeof CONTRACT_VERSION_SELECTION_VERSION;
+  model_major: number;
+  external_entity_reference_versions: number[];
+  semantic_revision_reference_versions: number[];
+  coverage_contract_versions: number[];
+  fact_family_versions: Record<string, number[]>;
+  query_pack_versions: number[];
+  observation_contract_versions: number[];
+}
+
+export interface ContractVersionSelection {
+  selection_contract_version: typeof CONTRACT_VERSION_SELECTION_VERSION;
+  model_major: number;
+  external_entity_reference_version: number;
+  semantic_revision_reference_version: number;
+  coverage_contract_version: number;
+  fact_family_versions: Record<string, number>;
+  query_pack_version: number | null;
+  observation_contract_version: number | null;
+}
 
 declare const opaqueReferenceBrand: unique symbol;
 export type OpaqueContractReference = string & {
@@ -175,6 +271,395 @@ function positiveInteger(value: unknown, label: string): number {
   const result = nonNegativeInteger(value, label);
   if (result === 0) throw new ContractValidationError(`${label} must be greater than zero`);
   return result;
+}
+
+function canonicalStringList(value: unknown, label: string, requireNonempty: boolean): string[] {
+  if (!Array.isArray(value) || (requireNonempty && value.length === 0)) {
+    throw new ContractValidationError(`${label} must be ${requireNonempty ? 'a non-empty' : 'an'} array`);
+  }
+  const result = value.map((entry) => nonEmptyString(entry, label));
+  if (new Set(result).size !== result.length) {
+    throw new ContractValidationError(`${label} contains duplicate values`);
+  }
+  return result;
+}
+
+function versionList(value: unknown, label: string, requireNonempty: boolean): number[] {
+  if (!Array.isArray(value) || (requireNonempty && value.length === 0)) {
+    throw new ContractValidationError(`${label} must be ${requireNonempty ? 'a non-empty' : 'an'} version array`);
+  }
+  const result = value.map((entry) => positiveInteger(entry, label));
+  if (new Set(result).size !== result.length) {
+    throw new ContractValidationError(`${label} contains duplicate versions`);
+  }
+  return result;
+}
+
+function parseDottedVersion(value: string): bigint[] {
+  if (value.length > 128 || !/^[0-9]+(?:\.[0-9]+)*$/.test(value)) {
+    throw new ContractValidationError(`artifact range version ${JSON.stringify(value)} is not dotted numeric`);
+  }
+  const parts = value.split('.');
+  if (parts.length > 16) {
+    throw new ContractValidationError('dotted artifact version exceeds 16 components');
+  }
+  return parts.map((part) => BigInt(part));
+}
+
+function compareDottedVersions(left: bigint[], right: bigint[]): number {
+  const count = Math.max(left.length, right.length);
+  for (let index = 0; index < count; index += 1) {
+    const leftPart = left[index] ?? 0n;
+    const rightPart = right[index] ?? 0n;
+    if (leftPart < rightPart) return -1;
+    if (leftPart > rightPart) return 1;
+  }
+  return 0;
+}
+
+function parseArtifactRange(value: unknown): ArtifactVersionRange {
+  const input = record(value, 'artifact version range');
+  const minimum = nonEmptyString(input.minimum, 'artifact range minimum');
+  const maximum = nonEmptyString(input.maximum, 'artifact range maximum');
+  if (typeof input.minimum_inclusive !== 'boolean' || typeof input.maximum_inclusive !== 'boolean') {
+    throw new ContractValidationError('artifact range inclusivity must be boolean');
+  }
+  const order = compareDottedVersions(parseDottedVersion(minimum), parseDottedVersion(maximum));
+  if (order > 0) throw new ContractValidationError('artifact version range minimum exceeds maximum');
+  if (order === 0 && !(input.minimum_inclusive && input.maximum_inclusive)) {
+    throw new ContractValidationError('artifact version range is empty');
+  }
+  return {
+    minimum,
+    minimum_inclusive: input.minimum_inclusive,
+    maximum,
+    maximum_inclusive: input.maximum_inclusive,
+  };
+}
+
+function parseSupportRelease(value: unknown): SupportReleaseDescriptor {
+  const input = record(value, 'support release');
+  if (!['candidate', 'promoted', 'retired'].includes(input.status as string)) {
+    throw new ContractValidationError('support release has an unsupported status');
+  }
+  const compatibility = record(input.artifact_compatibility, 'artifact compatibility');
+  if (!Array.isArray(compatibility.ranges)) {
+    throw new ContractValidationError('artifact compatibility ranges must be an array');
+  }
+  if (typeof compatibility.forward_catalog_only !== 'boolean') {
+    throw new ContractValidationError('forward_catalog_only must be boolean');
+  }
+  const exactVersions = canonicalStringList(compatibility.exact_versions, 'exact artifact versions', false);
+  if (exactVersions.some((version) => version.length > 128)) {
+    throw new ContractValidationError('exact artifact version exceeds 128 bytes');
+  }
+  return {
+    support_release_id: nonEmptyString(input.support_release_id, 'support release id'),
+    status: input.status as SupportReleaseStatus,
+    artifact_compatibility: {
+      family: nonEmptyString(compatibility.family, 'artifact family'),
+      platforms: canonicalStringList(compatibility.platforms, 'artifact platforms', true),
+      exact_versions: exactVersions,
+      ranges: compatibility.ranges.map(parseArtifactRange),
+      required_markers: canonicalStringList(compatibility.required_markers, 'required native markers', false),
+      forward_catalog_only: compatibility.forward_catalog_only,
+    },
+  };
+}
+
+function parseNativeArtifactProbe(value: unknown): NativeArtifactProbe {
+  const input = record(value, 'native artifact probe');
+  if (input.version !== null && input.version !== undefined && typeof input.version !== 'string') {
+    throw new ContractValidationError('probed artifact version must be a string or null');
+  }
+  if (typeof input.contradictory_markers !== 'boolean') {
+    throw new ContractValidationError('contradictory_markers must be boolean');
+  }
+  const version = input.version === undefined ? null : input.version;
+  if (typeof version === 'string' && (version.length === 0 || version.length > 128 || version.trim() !== version)) {
+    throw new ContractValidationError('probed artifact version must be non-empty and canonical');
+  }
+  return {
+    family: nonEmptyString(input.family, 'probed artifact family'),
+    platform: nonEmptyString(input.platform, 'probed artifact platform'),
+    version,
+    markers: canonicalStringList(input.markers, 'probed native markers', false),
+    contradictory_markers: input.contradictory_markers,
+  };
+}
+
+const supportedPermissions: OperationPermissions = {
+  version_probe: true,
+  catalog: true,
+  durable: true,
+  scoped_observation: true,
+  bounded_drift: true,
+};
+
+const recognizedPermissions: OperationPermissions = {
+  version_probe: true,
+  catalog: false,
+  durable: false,
+  scoped_observation: false,
+  bounded_drift: true,
+};
+
+const incompatiblePermissions: OperationPermissions = {
+  version_probe: true,
+  catalog: false,
+  durable: false,
+  scoped_observation: false,
+  bounded_drift: false,
+};
+
+function compatibilityDecision(
+  compatibilityClass: CompatibilityClass,
+  supportReleaseId: string | null,
+  reason: CompatibilityReason,
+  permissions: OperationPermissions,
+): CompatibilityDecision {
+  return {
+    support_selection_contract_version: SUPPORT_SELECTION_CONTRACT_VERSION,
+    compatibility_class: compatibilityClass,
+    support_release_id: supportReleaseId,
+    reason,
+    permissions: { ...permissions },
+  };
+}
+
+function rangeContains(range: ArtifactVersionRange, version: string): boolean {
+  let candidate: bigint[];
+  try {
+    candidate = parseDottedVersion(version);
+  } catch {
+    return false;
+  }
+  const lower = compareDottedVersions(candidate, parseDottedVersion(range.minimum));
+  const upper = compareDottedVersions(candidate, parseDottedVersion(range.maximum));
+  return (
+    (lower > 0 || (lower === 0 && range.minimum_inclusive)) && (upper < 0 || (upper === 0 && range.maximum_inclusive))
+  );
+}
+
+export function classifyRuntimeSupport(probeInput: unknown, releasesInput: unknown): CompatibilityDecision {
+  const probe = parseNativeArtifactProbe(probeInput);
+  if (!Array.isArray(releasesInput)) {
+    throw new ContractValidationError('support releases must be an array');
+  }
+  const releases = releasesInput.map(parseSupportRelease);
+  const releaseIds = releases.map((release) => release.support_release_id);
+  if (new Set(releaseIds).size !== releaseIds.length) {
+    throw new ContractValidationError('duplicate support release id');
+  }
+
+  const familyEntries = releases.filter((release) => release.artifact_compatibility.family === probe.family);
+  if (familyEntries.length === 0) {
+    return compatibilityDecision(
+      'UnknownOrIncompatible',
+      null,
+      'unrecognized_artifact_family',
+      incompatiblePermissions,
+    );
+  }
+  if (probe.contradictory_markers) {
+    return compatibilityDecision(
+      'UnknownOrIncompatible',
+      null,
+      'contradictory_native_markers',
+      incompatiblePermissions,
+    );
+  }
+  if (!familyEntries.some((release) => release.artifact_compatibility.platforms.includes(probe.platform))) {
+    return compatibilityDecision('UnknownOrIncompatible', null, 'platform_not_declared', incompatiblePermissions);
+  }
+
+  const promotedOnPlatform = familyEntries.filter(
+    (release) => release.status === 'promoted' && release.artifact_compatibility.platforms.includes(probe.platform),
+  );
+  const probeMarkers = new Set(probe.markers);
+  const markerCompatible = promotedOnPlatform.filter((release) =>
+    release.artifact_compatibility.required_markers.every((marker) => probeMarkers.has(marker)),
+  );
+  const matches: Array<[SupportReleaseDescriptor, 'ExactSupported' | 'RangeSupported']> = [];
+  if (probe.version !== null) {
+    for (const release of markerCompatible) {
+      const declaration = release.artifact_compatibility;
+      if (declaration.exact_versions.includes(probe.version)) {
+        matches.push([release, 'ExactSupported']);
+      } else if (declaration.ranges.some((range) => rangeContains(range, probe.version!))) {
+        matches.push([release, 'RangeSupported']);
+      }
+    }
+  }
+  if (matches.length > 1) {
+    return compatibilityDecision('UnknownOrIncompatible', null, 'ambiguous_promoted_release', incompatiblePermissions);
+  }
+  const match = matches[0];
+  if (match !== undefined) {
+    const [release, compatibilityClass] = match;
+    return compatibilityDecision(
+      compatibilityClass,
+      release.support_release_id,
+      compatibilityClass === 'ExactSupported' ? 'exact_promoted_version' : 'fixture_backed_range',
+      supportedPermissions,
+    );
+  }
+  if (promotedOnPlatform.length > 0 && markerCompatible.length === 0) {
+    return compatibilityDecision(
+      'UnknownOrIncompatible',
+      null,
+      'required_native_marker_absent',
+      incompatiblePermissions,
+    );
+  }
+  const forwardCatalog = markerCompatible.filter((release) => release.artifact_compatibility.forward_catalog_only);
+  if (forwardCatalog.length > 1) {
+    return compatibilityDecision('UnknownOrIncompatible', null, 'ambiguous_promoted_release', incompatiblePermissions);
+  }
+  if (forwardCatalog[0] !== undefined) {
+    return compatibilityDecision(
+      'RecognizedUnverified',
+      forwardCatalog[0].support_release_id,
+      'promoted_forward_catalog_only',
+      { ...recognizedPermissions, catalog: true },
+    );
+  }
+  return compatibilityDecision('RecognizedUnverified', null, 'no_matching_promoted_release', recognizedPermissions);
+}
+
+function parseFactFamilyVersions(value: unknown, label: string): Record<string, number[]> {
+  const input = record(value, `${label} fact families`);
+  return Object.fromEntries(
+    Object.entries(input).map(([family, versions]) => [
+      nonEmptyString(family, `${label} fact family`),
+      versionList(versions, `${label} fact family ${family}`, true),
+    ]),
+  );
+}
+
+function parseContractVersionRequest(value: unknown): ContractVersionRequest {
+  const input = record(value, 'contract version request');
+  if (input.selection_contract_version !== CONTRACT_VERSION_SELECTION_VERSION) {
+    throw new ContractValidationError('unsupported contract-version selection request version');
+  }
+  const result: ContractVersionRequest = {
+    selection_contract_version: CONTRACT_VERSION_SELECTION_VERSION,
+    model_major: positiveInteger(input.model_major, 'requested model major'),
+    external_entity_reference_version: positiveInteger(
+      input.external_entity_reference_version,
+      'requested external entity reference version',
+    ),
+    semantic_revision_reference_version: positiveInteger(
+      input.semantic_revision_reference_version,
+      'requested semantic revision reference version',
+    ),
+    coverage_contract_versions: versionList(
+      input.coverage_contract_versions,
+      'requested coverage contract versions',
+      true,
+    ),
+    fact_family_versions: parseFactFamilyVersions(input.fact_family_versions, 'requested'),
+  };
+  if (input.query_pack_versions !== undefined) {
+    result.query_pack_versions = versionList(input.query_pack_versions, 'requested query pack versions', true);
+  }
+  if (input.observation_contract_versions !== undefined) {
+    result.observation_contract_versions = versionList(
+      input.observation_contract_versions,
+      'requested observation contract versions',
+      true,
+    );
+  }
+  return result;
+}
+
+function parseContractVersionOffer(value: unknown): ContractVersionOffer {
+  const input = record(value, 'contract version offer');
+  if (input.selection_contract_version !== CONTRACT_VERSION_SELECTION_VERSION) {
+    throw new ContractValidationError('unsupported contract-version offer version');
+  }
+  return {
+    selection_contract_version: CONTRACT_VERSION_SELECTION_VERSION,
+    model_major: positiveInteger(input.model_major, 'offered model major'),
+    external_entity_reference_versions: versionList(
+      input.external_entity_reference_versions,
+      'offered external entity reference versions',
+      true,
+    ),
+    semantic_revision_reference_versions: versionList(
+      input.semantic_revision_reference_versions,
+      'offered semantic revision reference versions',
+      true,
+    ),
+    coverage_contract_versions: versionList(
+      input.coverage_contract_versions,
+      'offered coverage contract versions',
+      true,
+    ),
+    fact_family_versions: parseFactFamilyVersions(input.fact_family_versions, 'offered'),
+    query_pack_versions: versionList(input.query_pack_versions, 'offered query pack versions', false),
+    observation_contract_versions: versionList(
+      input.observation_contract_versions,
+      'offered observation contract versions',
+      false,
+    ),
+  };
+}
+
+function selectPreferred(label: string, requested: number[], offered: number[]): number {
+  const selected = requested.find((version) => offered.includes(version));
+  if (selected === undefined) throw new ContractValidationError(`no compatible ${label} version`);
+  return selected;
+}
+
+export function selectContractVersions(requestInput: unknown, offerInput: unknown): ContractVersionSelection {
+  const request = parseContractVersionRequest(requestInput);
+  const offer = parseContractVersionOffer(offerInput);
+  if (request.model_major !== offer.model_major) {
+    throw new ContractValidationError('incompatible base model major');
+  }
+  if (!offer.external_entity_reference_versions.includes(request.external_entity_reference_version)) {
+    throw new ContractValidationError(
+      `unsupported external entity reference version ${request.external_entity_reference_version}`,
+    );
+  }
+  if (!offer.semantic_revision_reference_versions.includes(request.semantic_revision_reference_version)) {
+    throw new ContractValidationError(
+      `unsupported semantic revision reference version ${request.semantic_revision_reference_version}`,
+    );
+  }
+  const factFamilyVersions: Record<string, number> = {};
+  for (const [family, requested] of Object.entries(request.fact_family_versions)) {
+    const offered = offer.fact_family_versions[family];
+    if (offered === undefined) {
+      throw new ContractValidationError(`required fact family is absent: ${family}`);
+    }
+    factFamilyVersions[family] = selectPreferred(`fact family ${family}`, requested, offered);
+  }
+  return {
+    selection_contract_version: CONTRACT_VERSION_SELECTION_VERSION,
+    model_major: request.model_major,
+    external_entity_reference_version: request.external_entity_reference_version,
+    semantic_revision_reference_version: request.semantic_revision_reference_version,
+    coverage_contract_version: selectPreferred(
+      'coverage contract',
+      request.coverage_contract_versions,
+      offer.coverage_contract_versions,
+    ),
+    fact_family_versions: factFamilyVersions,
+    query_pack_version:
+      request.query_pack_versions === undefined
+        ? null
+        : selectPreferred('query pack', request.query_pack_versions, offer.query_pack_versions),
+    observation_contract_version:
+      request.observation_contract_versions === undefined
+        ? null
+        : selectPreferred(
+            'observation contract',
+            request.observation_contract_versions,
+            offer.observation_contract_versions,
+          ),
+  };
 }
 
 export function parseOpaqueContractReference(value: unknown, label = 'opaque reference'): OpaqueContractReference {

@@ -14,14 +14,15 @@ use serde_json::{Map, Value};
 
 use crate::adapter::{
     AdapterDiagnostic, AdapterError, AdapterErrorClass, AdapterId, AdapterManifest,
-    AdapterObjectContext, AgentAdapter, Availability, CapabilityDeclaration, CapabilityGranularity,
-    CapabilityId, CapabilitySupport, ConsistencyPolicy, ContentBlock, DecodeContext,
-    DecodeDisposition, DecoderId, DeletionPolicy, DiscoveryContext, DriverSpec, EntityKey,
-    EntityScope, EvidenceKind, EvidenceStrength, Fact, FactBatch, MessageFact, MessageRole,
-    ObjectSelector, QualifiedTimestamp, RawRetentionPolicy, RunEvidenceFact, RunFact, SessionFact,
-    SourceAccess, SourceInstance, SourceInstanceKey, SourceInstanceSpec, SourceObjectDescriptor,
-    SourceRoot, SourceSnapshot, StreamAuthority, StreamId, StreamSpec, SupportLevel,
-    TimestampQuality, TokenUsage, UsageAccounting, UsageFact, UsageScope, ValueQuality,
+    AdapterObjectContext, AdapterSupportBinding, AgentAdapter, Availability, CapabilityDeclaration,
+    CapabilityGranularity, CapabilityId, CapabilitySupport, ConsistencyPolicy, ContentBlock,
+    DecodeContext, DecodeDisposition, DecoderId, DeletionPolicy, DiscoveryContext, DriverSpec,
+    EntityKey, EntityScope, EvidenceKind, EvidenceStrength, Fact, FactBatch, MessageFact,
+    MessageRole, ObjectSelector, QualifiedTimestamp, RawRetentionPolicy, RunEvidenceFact, RunFact,
+    SessionFact, SourceAccess, SourceInstance, SourceInstanceKey, SourceInstanceSpec,
+    SourceObjectDescriptor, SourceRoot, SourceSnapshot, StreamAuthority, StreamId, StreamSpec,
+    SupportLevel, TimestampQuality, TokenUsage, UsageAccounting, UsageFact, UsageScope,
+    ValueQuality,
 };
 use crate::source::{
     platform_path_key, read_stable_file_confined, AppendDelimitedConfig, DirectorySnapshotConfig,
@@ -72,6 +73,16 @@ impl GrokAdapter {
                 display_name: "Grok".to_string(),
                 adapter_version: env!("CARGO_PKG_VERSION").to_string(),
                 contract_version: 1,
+                support_binding: Some(
+                    AdapterSupportBinding::new(
+                        env!("CARGO_PKG_VERSION"),
+                        1,
+                        "sha256:5a6fd2d1adda4dad702b421a18dd0fbe40fec16bc68d7fc99cf65c7b913a2c18",
+                        "sha256:1dbb22fc2da9db80190903b1290679abaad8301d9df1a6e0d3e54dfac6c0e60c",
+                        "sha256:2da094e844d59bb1d8cabcc6797fe4a0a2ccf61eaba95c31249fa6beedead173",
+                    )
+                    .expect("static Grok support binding is valid"),
+                ),
                 source_schema_versions: vec![
                     "grok-chat-history-jsonl-v1".to_string(),
                     "grok-summary-json-v1".to_string(),
@@ -1568,6 +1579,12 @@ mod tests {
             .unwrap();
         assert_eq!(first.records_quarantined, 0);
         assert_eq!(first.retries_required, 0);
+        assert!(first.dependency_access_attempts > 0);
+        assert!(first.dependency_objects_accessed > 0);
+        assert!(first.dependency_bytes_read > 0);
+        assert_eq!(first.dependency_access_denials, 0);
+        assert_eq!(first.dependency_access_abandoned, 0);
+        assert_eq!(first.dependency_max_depth, 1);
         let second = engine
             .reconcile_adapter(ADAPTER_ID, ReconcileRequest::manual(vec![fixture]))
             .unwrap();

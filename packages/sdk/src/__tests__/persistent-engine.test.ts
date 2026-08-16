@@ -11,6 +11,7 @@ import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import { loadNativeAddon, openSpaghettiEngine, type SpaghettiEngine } from '../index.js';
 
@@ -18,6 +19,9 @@ const native = loadNativeAddon();
 const engines: SpaghettiEngine[] = [];
 const tempDirs: string[] = [];
 const SESSION_ID = '11111111-2222-3333-4444-555555555555';
+const GROK_FIXTURE = fileURLToPath(
+  new URL('../../../../crates/spaghetti-napi/fixtures/small-grok/.grok', import.meta.url),
+);
 
 function temporaryDatabase(): string {
   const dir = mkdtempSync(path.join(tmpdir(), 'spaghetti-engine-'));
@@ -133,6 +137,23 @@ describe('persistent SpaghettiEngine', { skip: !native }, () => {
     assert.equal(engine.status.observation.dirtyInstances, 0);
     assert.equal(engine.status.observation.fullReconcileRequired, false);
     assert.equal(engine.status.observation.recoveryRequired, false);
+  });
+
+  test('reports common dependency-access accounting through N-API', async () => {
+    const engine = await openTracked(temporaryDatabase(), 'sdk-access-accounting-test');
+    const result = await engine.reconcileAdapter({
+      adapterId: 'grok',
+      roots: [GROK_FIXTURE],
+      reason: 'sdk_access_fixture',
+    });
+
+    assert.ok(result.dependencyAccessAttempts > 0);
+    assert.ok(result.dependencyObjectsAccessed > 0);
+    assert.ok(result.dependencyBytesRead > 0);
+    assert.equal(result.dependencyAccessDenials, 0);
+    assert.equal(result.dependencyAccessAbandoned, 0);
+    assert.equal(result.dependencyMaxDepth, 1);
+    assert.equal(result.dependencyTraceEntriesDropped, 0);
   });
 
   test('reports canonical observation history separately from compatibility tables', async () => {

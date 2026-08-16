@@ -23,13 +23,15 @@ use crate::adapter::{
     SourceSnapshot, StreamAuthority, StreamSpec, SupportLevel,
 };
 use crate::source::{
-    confined_relative_path_key, AppendCheckpoint, AppendDelimitedFile, AppendItem, AppendRead,
+    confined_relative_path_key, AccessBudget, AccessBudgetError, AccessBudgetSnapshot,
+    AccessObjectToken, AccessOperation, AccessOutcome, AccessPhase, AccessReservation,
+    AccessReservationRequest, AppendCheckpoint, AppendDelimitedFile, AppendItem, AppendRead,
     BoundedScheduler, DirectoryCheckpoint, DirectoryEntryKind, DirectoryScan, DirectorySelection,
     DirectorySnapshot, DirtyReason, KeyValueCheckpoint, KeyValueRead, KeyValueSnapshot,
     MalformedRevisionGuard, MalformedRevisionPolicy, ParseFailureDecision, PresenceCheckpoint,
     PresenceObject, PresenceRead, RecordOrigin, ReplaceCheckpoint, ReplaceDocument, ReplaceRead,
-    Revision, ScheduleOutcome, ScheduledWork, SourceCursor, SourceDriverError, SourceMediaType,
-    SourceRecord, SqliteCheckpoint, SqliteRead, SqliteSnapshot, WorkKey,
+    Revision, ScheduleOutcome, ScheduledWork, ScopeAccessBounds, SourceCursor, SourceDriverError,
+    SourceMediaType, SourceRecord, SqliteCheckpoint, SqliteRead, SqliteSnapshot, WorkKey,
 };
 
 use super::commit::{
@@ -148,6 +150,14 @@ pub struct ReconcileOutcome {
     pub records_quarantined: u32,
     pub retries_required: u32,
     pub incomplete_tail_retries: u32,
+    pub dependency_access_attempts: u64,
+    pub dependency_access_denials: u64,
+    pub dependency_access_abandoned: u64,
+    pub dependency_objects_accessed: u64,
+    pub dependency_bytes_read: u64,
+    pub dependency_rows_read: u64,
+    pub dependency_max_depth: u32,
+    pub dependency_trace_entries_dropped: u64,
     /// Retry work caused only by the deliberate per-pass record bound. The
     /// supervisor may resume this immediately without treating it like an
     /// unstable or incomplete source.
@@ -190,17 +200,68 @@ struct ConfinedSourceAccess<'a> {
     instance: &'a SourceInstance,
     cancellations: &'a [QueryCancellationToken],
     reads: Mutex<Vec<TrackedDependency>>,
+    budget: AccessBudget,
 }
 
 impl<'a> ConfinedSourceAccess<'a> {
     const MAX_READ_BYTES: usize = 64 * 1024 * 1024;
+    const MAX_QUERY_ROWS: usize = 16_384;
+    const MAX_LISTING_ENTRIES: usize = 10_000;
+    const MAX_LISTING_ACCOUNTED_BYTES_PER_OBJECT: usize = 16 * 1024;
+    const MAX_LISTING_RETURN_BYTES: usize =
+        Self::MAX_LISTING_ENTRIES * Self::MAX_LISTING_ACCOUNTED_BYTES_PER_OBJECT;
+    const ACCESS_RELATION_ID: &'static str = "adapter-dependency";
 
     fn new(instance: &'a SourceInstance, cancellations: &'a [QueryCancellationToken]) -> Self {
         Self {
             instance,
             cancellations,
             reads: Mutex::new(Vec::new()),
+            budget: AccessBudget::new(
+                Self::ACCESS_RELATION_ID,
+                ScopeAccessBounds {
+                    max_fan_out: Self::MAX_LISTING_ENTRIES as u64,
+                    max_depth: 1,
+                    max_objects: Self::MAX_LISTING_ENTRIES as u64,
+                    max_bytes: (2 * Self::MAX_LISTING_RETURN_BYTES) as u64,
+                    max_rows: (2 * Self::MAX_QUERY_ROWS) as u64,
+                },
+            )
+            .expect("fixed adapter-dependency access bounds must be valid"),
         }
+    }
+
+    fn access_snapshot(&self) -> AccessBudgetSnapshot {
+        self.budget.snapshot()
+    }
+
+    fn reserve_access(
+        &self,
+        operation: AccessOperation,
+        phase: AccessPhase,
+        root_name: &str,
+        object_key: &[u8],
+        max_bytes: usize,
+        max_rows: usize,
+    ) -> Result<AccessReservation, AccessBudgetError> {
+        let operation_tag = match operation {
+            AccessOperation::ObjectRead => b"object".as_slice(),
+            AccessOperation::ParameterizedQuery => b"query".as_slice(),
+            AccessOperation::ObjectListing => b"listing".as_slice(),
+        };
+        let object_token = AccessObjectToken::derive(
+            self.budget.relation_id(),
+            &[operation_tag, root_name.as_bytes(), object_key],
+        )?;
+        self.budget.reserve(AccessReservationRequest {
+            operation,
+            phase,
+            parent_token: None,
+            object_token,
+            depth: 1,
+            max_bytes: u64::try_from(max_bytes).unwrap_or(u64::MAX),
+            max_rows: u64::try_from(max_rows).unwrap_or(u64::MAX),
+        })
     }
 
     fn revisions(&self) -> Result<Vec<DependencyRevision>, EngineError> {
@@ -220,6 +281,31 @@ impl<'a> ConfinedSourceAccess<'a> {
             .clone();
         for read in reads {
             check_cancellations(self.cancellations)?;
+            let (operation, max_bytes, max_rows) = match &read.kind {
+                TrackedDependencyKind::Object { max_bytes, .. } => {
+                    (AccessOperation::ObjectRead, *max_bytes, 0)
+                }
+                TrackedDependencyKind::Query(query) => (
+                    AccessOperation::ParameterizedQuery,
+                    query.bounds.max_snapshot_bytes,
+                    query.bounds.max_rows,
+                ),
+                TrackedDependencyKind::Listing(request) => (
+                    AccessOperation::ObjectListing,
+                    listing_reservation_bytes(request.max_entries),
+                    request.max_entries,
+                ),
+            };
+            let reservation = self
+                .reserve_access(
+                    operation,
+                    AccessPhase::Revalidation,
+                    &read.revision.root_name,
+                    &read.revision.object_key,
+                    max_bytes,
+                    max_rows,
+                )
+                .map_err(access_budget_engine_error)?;
             let current = match &read.kind {
                 TrackedDependencyKind::Object {
                     relative_path,
@@ -231,21 +317,39 @@ impl<'a> ConfinedSourceAccess<'a> {
                     relative_path,
                     *max_bytes,
                 )
-                .map(|snapshot| snapshot.revision),
+                .map(|snapshot| {
+                    let measurement = snapshot_access_measurement(&snapshot);
+                    (snapshot.revision, measurement)
+                }),
                 TrackedDependencyKind::Query(query) => {
                     source_query_snapshot(self.instance.id, &read.root, query, self.cancellations)
-                        .map(|rows| rows.revision)
+                        .map(|rows| {
+                            let measurement = rows_access_measurement(&rows);
+                            (rows.revision, measurement)
+                        })
                 }
                 TrackedDependencyKind::Listing(request) => {
                     source_object_listing(self.instance.id, &read.root, request, self.cancellations)
-                        .map(|listing| listing.revision)
+                        .map(|listing| {
+                            let measurement = listing_access_measurement(&listing);
+                            (listing.revision, measurement)
+                        })
                 }
             };
-            let current = match current {
-                Ok(revision) => revision,
-                Err(SourceDriverError::Unstable(_)) => return Ok(true),
-                Err(error) => return Err(source_error(error)),
+            let (current, measurement) = match current {
+                Ok(value) => value,
+                Err(SourceDriverError::Unstable(_)) => {
+                    reservation.fail_conservative();
+                    return Ok(true);
+                }
+                Err(error) => {
+                    reservation.fail_conservative();
+                    return Err(source_error(error));
+                }
             };
+            reservation
+                .complete(measurement.bytes, measurement.rows, measurement.outcome)
+                .map_err(access_budget_engine_error)?;
             if current != read.revision {
                 return Ok(true);
             }
@@ -294,15 +398,30 @@ impl SourceAccess for ConfinedSourceAccess<'_> {
             )));
         }
         let root = self.instance.root(root_name)?.to_path_buf();
+        let object_key = confined_relative_path_key(relative_path).map_err(source_access_error)?;
+        let reservation = self
+            .reserve_access(
+                AccessOperation::ObjectRead,
+                AccessPhase::Initial,
+                root_name,
+                &object_key,
+                max_bytes,
+                0,
+            )
+            .map_err(source_access_budget_error)?;
         let snapshot =
-            dependency_snapshot(self.instance.id, root_name, &root, relative_path, max_bytes)
-                .map_err(|error| {
-                    AdapterError::new(
-                        AdapterErrorClass::Transient,
-                        "source_access_read",
-                        error.to_string(),
-                    )
-                })?;
+            match dependency_snapshot(self.instance.id, root_name, &root, relative_path, max_bytes)
+            {
+                Ok(snapshot) => snapshot,
+                Err(error) => {
+                    reservation.fail_conservative();
+                    return Err(source_access_error(error));
+                }
+            };
+        let measurement = snapshot_access_measurement(&snapshot);
+        reservation
+            .complete(measurement.bytes, measurement.rows, measurement.outcome)
+            .map_err(source_access_budget_error)?;
         let tracked = TrackedDependency {
             revision: snapshot.revision.clone(),
             root,
@@ -319,8 +438,28 @@ impl SourceAccess for ConfinedSourceAccess<'_> {
         check_cancellations(self.cancellations).map_err(|_| source_access_cancelled())?;
         validate_source_query_bounds(query)?;
         let root = self.instance.root(&query.root_name)?.to_path_buf();
-        let rows = source_query_snapshot(self.instance.id, &root, query, self.cancellations)
-            .map_err(source_access_error)?;
+        let object_key = source_query_dependency_key(query).map_err(source_access_error)?;
+        let reservation = self
+            .reserve_access(
+                AccessOperation::ParameterizedQuery,
+                AccessPhase::Initial,
+                &query.root_name,
+                &object_key,
+                query.bounds.max_snapshot_bytes,
+                query.bounds.max_rows,
+            )
+            .map_err(source_access_budget_error)?;
+        let rows = match source_query_snapshot(self.instance.id, &root, query, self.cancellations) {
+            Ok(rows) => rows,
+            Err(error) => {
+                reservation.fail_conservative();
+                return Err(source_access_error(error));
+            }
+        };
+        let measurement = rows_access_measurement(&rows);
+        reservation
+            .complete(measurement.bytes, measurement.rows, measurement.outcome)
+            .map_err(source_access_budget_error)?;
         self.track(TrackedDependency {
             revision: rows.revision.clone(),
             root,
@@ -334,14 +473,38 @@ impl SourceAccess for ConfinedSourceAccess<'_> {
         request: &SourceObjectListRequest,
     ) -> Result<SourceObjectList, AdapterError> {
         check_cancellations(self.cancellations).map_err(|_| source_access_cancelled())?;
-        if request.max_entries == 0 || request.max_entries > 10_000 || request.include.is_empty() {
+        if request.max_entries == 0
+            || request.max_entries > Self::MAX_LISTING_ENTRIES
+            || request.include.is_empty()
+        {
             return Err(AdapterError::invalid_contract(
                 "source object listing requires include patterns and a 1..=10000 entry bound",
             ));
         }
         let root = self.instance.root(&request.root_name)?.to_path_buf();
-        let listing = source_object_listing(self.instance.id, &root, request, self.cancellations)
-            .map_err(source_access_error)?;
+        let object_key = source_listing_dependency_key(request).map_err(source_access_error)?;
+        let reservation = self
+            .reserve_access(
+                AccessOperation::ObjectListing,
+                AccessPhase::Initial,
+                &request.root_name,
+                &object_key,
+                listing_reservation_bytes(request.max_entries),
+                request.max_entries,
+            )
+            .map_err(source_access_budget_error)?;
+        let listing =
+            match source_object_listing(self.instance.id, &root, request, self.cancellations) {
+                Ok(listing) => listing,
+                Err(error) => {
+                    reservation.fail_conservative();
+                    return Err(source_access_error(error));
+                }
+            };
+        let measurement = listing_access_measurement(&listing);
+        reservation
+            .complete(measurement.bytes, measurement.rows, measurement.outcome)
+            .map_err(source_access_budget_error)?;
         self.track(TrackedDependency {
             revision: listing.revision.clone(),
             root,
@@ -349,6 +512,81 @@ impl SourceAccess for ConfinedSourceAccess<'_> {
         })?;
         Ok(listing)
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct AccessMeasurement {
+    bytes: u64,
+    rows: u64,
+    outcome: AccessOutcome,
+}
+
+fn snapshot_access_measurement(snapshot: &SourceSnapshot) -> AccessMeasurement {
+    AccessMeasurement {
+        bytes: snapshot
+            .payload
+            .as_ref()
+            .map_or(0, |payload| payload.len() as u64),
+        rows: 0,
+        outcome: if snapshot.oversized {
+            AccessOutcome::Oversized
+        } else if snapshot.payload.is_some() {
+            AccessOutcome::Available
+        } else {
+            AccessOutcome::Unavailable
+        },
+    }
+}
+
+fn rows_access_measurement(rows: &SourceRows) -> AccessMeasurement {
+    AccessMeasurement {
+        bytes: rows.rows.iter().fold(0_u64, |total, row| {
+            total.saturating_add(row.encode().len() as u64)
+        }),
+        rows: rows.rows.len() as u64,
+        outcome: if rows.available {
+            AccessOutcome::Available
+        } else {
+            AccessOutcome::Unavailable
+        },
+    }
+}
+
+fn listing_access_measurement(listing: &SourceObjectList) -> AccessMeasurement {
+    AccessMeasurement {
+        bytes: listing.objects.iter().fold(0_u64, |total, object| {
+            // The binary-safe object key encodes the relative path. Account a
+            // second copy plus fixed metadata because the returned structure
+            // carries both the path and key alongside size/mtime fields.
+            total.saturating_add(
+                (object.object_key.len() as u64)
+                    .saturating_mul(2)
+                    .saturating_add(24),
+            )
+        }),
+        rows: listing.objects.len() as u64,
+        outcome: if listing.available {
+            AccessOutcome::Available
+        } else {
+            AccessOutcome::Unavailable
+        },
+    }
+}
+
+fn listing_reservation_bytes(max_entries: usize) -> usize {
+    max_entries.saturating_mul(ConfinedSourceAccess::MAX_LISTING_ACCOUNTED_BYTES_PER_OBJECT)
+}
+
+fn source_access_budget_error(error: AccessBudgetError) -> AdapterError {
+    AdapterError::new(
+        AdapterErrorClass::InvalidContract,
+        "source_access_budget",
+        error.to_string(),
+    )
+}
+
+fn access_budget_engine_error(error: AccessBudgetError) -> EngineError {
+    observation_error("enforce source access budget", error.to_string())
 }
 
 impl ObservationCoordinator {
@@ -1226,10 +1464,12 @@ impl ObservationCoordinator {
         })? {
             Ok(context) => context,
             Err(error) if error.class == AdapterErrorClass::RecordPermanent => {
-                return self.quarantine_object_path(
+                let result = self.quarantine_object_path(
                     adapter, instance, stream, object, previous, error, reason, started_at,
                     outcome, lane,
-                )
+                );
+                apply_access_snapshot(outcome, &source_access.access_snapshot());
+                return result;
             }
             Err(error) => return Err(adapter_error("bootstrap source object", error)),
         };
@@ -1342,7 +1582,13 @@ impl ObservationCoordinator {
             ),
             DriverSpec::DirectorySnapshot(_) => unreachable!("rejected before object discovery"),
         };
-        if result.is_ok() && source_access.changed_since_read()? {
+        let dependency_changed = if result.is_ok() {
+            source_access.changed_since_read()
+        } else {
+            Ok(false)
+        };
+        apply_access_snapshot(outcome, &source_access.access_snapshot());
+        if dependency_changed? {
             outcome.retries_required = outcome.retries_required.saturating_add(1);
             record_retry_target(outcome, instance, stream, object);
         }
@@ -4230,6 +4476,28 @@ fn merge_outcome(target: &mut ReconcileOutcome, source: ReconcileOutcome) {
     target.incomplete_tail_retries = target
         .incomplete_tail_retries
         .saturating_add(source.incomplete_tail_retries);
+    target.dependency_access_attempts = target
+        .dependency_access_attempts
+        .saturating_add(source.dependency_access_attempts);
+    target.dependency_access_denials = target
+        .dependency_access_denials
+        .saturating_add(source.dependency_access_denials);
+    target.dependency_access_abandoned = target
+        .dependency_access_abandoned
+        .saturating_add(source.dependency_access_abandoned);
+    target.dependency_objects_accessed = target
+        .dependency_objects_accessed
+        .saturating_add(source.dependency_objects_accessed);
+    target.dependency_bytes_read = target
+        .dependency_bytes_read
+        .saturating_add(source.dependency_bytes_read);
+    target.dependency_rows_read = target
+        .dependency_rows_read
+        .saturating_add(source.dependency_rows_read);
+    target.dependency_max_depth = target.dependency_max_depth.max(source.dependency_max_depth);
+    target.dependency_trace_entries_dropped = target
+        .dependency_trace_entries_dropped
+        .saturating_add(source.dependency_trace_entries_dropped);
     target.backlog_remaining = target
         .backlog_remaining
         .saturating_add(source.backlog_remaining);
@@ -4240,6 +4508,33 @@ fn merge_outcome(target: &mut ReconcileOutcome, source: ReconcileOutcome) {
     }
     target.commits = target.commits.saturating_add(source.commits);
     target.last_commit_seq = target.last_commit_seq.max(source.last_commit_seq);
+}
+
+fn apply_access_snapshot(outcome: &mut ReconcileOutcome, snapshot: &AccessBudgetSnapshot) {
+    outcome.dependency_access_attempts = outcome
+        .dependency_access_attempts
+        .saturating_add(snapshot.attempts);
+    outcome.dependency_access_denials = outcome
+        .dependency_access_denials
+        .saturating_add(snapshot.denied);
+    outcome.dependency_access_abandoned = outcome
+        .dependency_access_abandoned
+        .saturating_add(snapshot.abandoned);
+    outcome.dependency_objects_accessed = outcome
+        .dependency_objects_accessed
+        .saturating_add(snapshot.objects_accessed);
+    outcome.dependency_bytes_read = outcome
+        .dependency_bytes_read
+        .saturating_add(snapshot.bytes_read);
+    outcome.dependency_rows_read = outcome
+        .dependency_rows_read
+        .saturating_add(snapshot.rows_read);
+    outcome.dependency_max_depth = outcome
+        .dependency_max_depth
+        .max(snapshot.max_depth_observed);
+    outcome.dependency_trace_entries_dropped = outcome
+        .dependency_trace_entries_dropped
+        .saturating_add(snapshot.trace_entries_dropped);
 }
 
 fn record_retry_target(
@@ -4444,9 +4739,27 @@ mod tests {
             .execute("UPDATE items SET value = 'two' WHERE id = 1", [])
             .unwrap();
         assert!(access.changed_since_read().unwrap());
+        let access_snapshot = access.access_snapshot();
+        assert_eq!(access_snapshot.attempts, 8);
+        assert_eq!(access_snapshot.completed, 8);
+        assert_eq!(access_snapshot.denied, 0);
+        assert_eq!(access_snapshot.abandoned, 0);
+        assert_eq!(access_snapshot.objects_accessed, 3);
+        assert!(access_snapshot.bytes_read > 0);
+        assert_eq!(access_snapshot.rows_read, 5);
+        assert_eq!(access_snapshot.max_depth_observed, 1);
+        assert_eq!(
+            access_snapshot
+                .trace
+                .iter()
+                .filter(|entry| entry.phase == AccessPhase::Revalidation)
+                .count(),
+            5
+        );
         assert!(access
             .read_object("sessions", Path::new("../escape"), 1_024)
             .is_err());
+        assert_eq!(access.access_snapshot().attempts, 8);
     }
 
     #[test]
@@ -5279,6 +5592,7 @@ mod tests {
             display_name: id.to_string(),
             adapter_version: "1.0.0".to_string(),
             contract_version: 1,
+            support_binding: None,
             source_schema_versions: Vec::new(),
             capabilities: Vec::new(),
         }

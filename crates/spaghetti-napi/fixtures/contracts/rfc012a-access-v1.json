@@ -1,0 +1,50 @@
+{
+  "fixture_contract_version": 1,
+  "relation_id": "descendants",
+  "bounds": {
+    "max_fan_out": 2,
+    "max_depth": 3,
+    "max_objects": 3,
+    "max_bytes": 100,
+    "max_rows": 4
+  },
+  "operations": [
+    {
+      "object_identity": "object-a",
+      "depth": 2,
+      "max_bytes": 40,
+      "max_rows": 1,
+      "bytes_read": 40,
+      "rows_read": 1,
+      "outcome": "available"
+    },
+    {
+      "object_identity": "object-b",
+      "depth": 3,
+      "max_bytes": 60,
+      "max_rows": 3,
+      "bytes_read": 60,
+      "rows_read": 3,
+      "outcome": "available"
+    }
+  ],
+  "denied_operation": {
+    "object_identity": "object-c",
+    "depth": 1,
+    "max_bytes": 0,
+    "max_rows": 0,
+    "expected_limit": "max_fan_out"
+  },
+  "expected": {
+    "attempts": 3,
+    "reservations_granted": 2,
+    "completed": 2,
+    "denied": 1,
+    "objects_accessed": 2,
+    "bytes_read": 100,
+    "rows_read": 4,
+    "max_depth_observed": 3,
+    "bytes_reserved": 0,
+    "rows_reserved": 0
+  }
+}

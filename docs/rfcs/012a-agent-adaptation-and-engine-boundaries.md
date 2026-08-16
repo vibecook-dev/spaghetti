@@ -1,7 +1,8 @@
 # RFC 012A: Agent adaptation and common-engine boundaries
 
-- **Status:** Ratified semantic contract; exact APIs remain provisional until
-  their cross-language fixtures pass
+- **Status:** Ratified semantic contract; base-wire and support-selection v1
+  slices frozen, remaining exact APIs provisional until their cross-language
+  fixtures pass
 - **Created:** 2026-08-15
 - **Ratified:** 2026-08-15
 - **Parent:** [RFC 012 umbrella](./012-evidence-backed-adapters-and-progressive-readiness.md)
@@ -86,6 +87,8 @@ pinned native artifact
 | Source and scoped-relation primitive semantics               | Semantic contract       |
 | RFC 012A v1 opaque reference encoding                        | Frozen contract fixture |
 | RFC 012A v1 coverage wire/comparator                         | Frozen contract fixture |
+| RFC 012A v1 runtime support classification                   | Frozen contract fixture |
+| RFC 012A v1 public contract-version selection                | Frozen contract fixture |
 | Exact Rust trait and serialized manifest shapes              | Proposed API            |
 | Physical crate names                                         | Implementation detail   |
 | Support-ledger storage format                                | Proposed API            |
@@ -118,9 +121,64 @@ external or semantic references. The Rust implementation keeps the new model
 parallel to those types so each fact family can migrate through a versioned
 shadow path.
 
-This slice does not freeze complete N-API requests, adapter manifests, support
-ledger serialization, or child-RFC payloads. Those remain proposed until their
-own cross-language fixtures pass.
+This slice does not freeze complete N-API host requests, adapter manifests,
+support-ledger serialization, or child-RFC payloads. Those remain proposed
+until their own cross-language fixtures pass.
+
+### 3.2 Frozen RFC 012A v1 support-selection slice
+
+The first A2 implementation slice freezes the shared
+[`rfc012a-support-v1.json`](../../crates/spaghetti-napi/fixtures/contracts/rfc012a-support-v1.json)
+fixture and these rules:
+
+- `support_selection_contract_version` and
+  `selection_contract_version` are both `1`;
+- candidate and retired releases never confer runtime support, including a
+  forward-catalog permission;
+- exact versions are opaque canonical strings, while range endpoints and range
+  comparison are dotted numeric values;
+- more than one matching promoted release fails closed as
+  `ambiguous_promoted_release`; release-list order is never a tie-breaker;
+- every decision publishes a class, optional promoted support-release ID,
+  structured reason, and the five operation permissions from section 10.3;
+- catalog, durable, and scoped typed access require a private authorization
+  issued from that decision plus an explicit compatible contract selection;
+  serialized decisions do not contain an access capability; and
+- support authorization runs before contract negotiation, so a candidate or
+  incompatible artifact cannot use malformed requests to inspect the offered
+  typed contract surface.
+
+Rust is the runtime authority. The independent Python tool and portable
+TypeScript SDK execute the same fixture as conformance oracles; neither can
+mint the Rust access capability. The exact N-API/IPC host wrapper that carries
+the request remains provisional until Rust-issued support authorization is
+carried through the host into source access.
+
+The Rust authority verifies an in-memory support package before it can enter a
+runtime catalog: the ledger and each ADS, source declaration, scope program,
+evidence manifest, and conformance manifest are bounded; reference paths are
+canonical confined relative paths; every reference has an exact SHA-256
+binding; and adapter/conformance identities agree with the ledger. A compiled
+adapter independently binds its package version, decoder contract, and
+ADS/source/scope digests. The strict registry accepts that adapter only when at
+least one matching release is promoted. Candidate packages may be verified for
+conformance but cannot satisfy strict registration or mint typed access.
+
+There are currently zero promoted built-in support releases. The existing
+public N-API engine therefore names and uses an explicit legacy compatibility
+registry, which cannot authorize the new typed contract. Moving that host to
+the strict registry is a promotion/integration gate, not an implicit upgrade
+of the current candidate packages.
+
+The initial common access-ledger implementation reserves declared worst-case
+bytes and rows before native access, counts distinct hashed objects and
+per-parent fan-out, and commits actual usage afterward. Failed, panicked, or
+otherwise abandoned reads consume their reservation conservatively. Its trace
+is bounded and contains relation IDs, opaque object tokens, operation/phase,
+bounds, counts, outcomes, and limit names rather than native paths or payloads.
+Adapters may declare bounds but cannot mint tokens or reservations. This
+implementation shape remains provisional until promoted scope declarations and
+the scoped observer execute it through cross-topology fixtures.
 
 ## 4. Logical subsystem dependency law
 
@@ -759,26 +817,54 @@ their own state machines without upgrading the permitted behavior above.
 ### 10.4 Public contract compatibility
 
 Every Rust/N-API/IPC/TypeScript boundary selects an explicit compatible set of
-base-model and fact-family versions before returning typed data:
+base-model and fact-family versions before returning typed data. Version `1`
+uses three distinct shapes:
 
 ```text
-ContractVersionSelection {
+ContractVersionRequest {
+  selection_contract_version
   model_major
   external_entity_reference_version
   semantic_revision_reference_version
-  coverage_contract_versions
-  fact_family_versions
-  query_pack_versions?
+  coverage_contract_versions[]
+  fact_family_versions{family -> preferred_versions[]}
+  query_pack_versions[]?
+  observation_contract_versions[]?
+}
+
+ContractVersionOffer {
+  selection_contract_version
+  model_major
+  external_entity_reference_versions[]
+  semantic_revision_reference_versions[]
+  coverage_contract_versions[]
+  fact_family_versions{family -> offered_versions[]}
+  query_pack_versions[]
+  observation_contract_versions[]
+}
+
+ContractVersionSelection {
+  selection_contract_version
+  model_major
+  external_entity_reference_version
+  semantic_revision_reference_version
+  coverage_contract_version
+  fact_family_versions{family -> version}
+  query_pack_version?
   observation_contract_version?
 }
 ```
 
+Request arrays are ordered consumer preferences. Selection takes the first
+offered value, requires every requested fact family, rejects zero/duplicate or
+empty required version sets, and never silently drops a requested family.
 An incompatible semantic major fails before source access or typed delivery.
 An additive minor may be selected only when the older side can preserve unknown
 variants as a bounded typed-unknown value rather than silently dropping them.
 Native unknown evidence and an unknown transport/schema variant are distinct.
-The exact negotiation DTO belongs to the public query or observer owner, but
-silent best-effort decoding across incompatible versions is forbidden.
+Child query and observer contracts embed or reference this selection rather
+than redefining it. Silent best-effort decoding across incompatible versions
+is forbidden.
 
 ## 11. Support ledger
 
@@ -869,8 +955,10 @@ independent conformance tooling
 The initial repository realization uses `agent-support/<adapter>/<candidate>/`
 for the five independently versioned contract/evidence documents and sanitized
 fixtures, `agent-support/schemas/` for their strict schemas, and
-`scripts/agent_support/` for independent validation, sanitization, runtime
-classification, contract selection, and access-budget conformance. Directory
+`scripts/agent_support/` for independent validation, sanitization, and
+access-budget conformance. Runtime support classification, contract selection,
+and typed-access authorization live in the common Rust adapter boundary;
+Python and the portable SDK verify the shared conformance fixture. Directory
 presence never promotes support: only a digest-bound ledger entry with
 `status: promoted` is selectable.
 

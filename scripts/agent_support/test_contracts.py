@@ -89,6 +89,34 @@ class SanitizerTests(unittest.TestCase):
 
 
 class CompatibilityTests(unittest.TestCase):
+    def test_shared_runtime_support_fixture_matches_rust(self) -> None:
+        fixture_path = (
+            REPO_ROOT
+            / "crates/spaghetti-napi/fixtures/contracts/rfc012a-support-v1.json"
+        )
+        fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
+        self.assertEqual(fixture["fixture_contract_version"], 1)
+        for case in fixture["runtime_cases"]:
+            probe = case["probe"]
+            result = classify_runtime(
+                RuntimeProbe(
+                    probe["family"],
+                    probe["platform"],
+                    probe["version"],
+                    frozenset(probe["markers"]),
+                    probe["contradictory_markers"],
+                ),
+                fixture["releases"],
+            )
+            actual = {
+                "support_selection_contract_version": result.support_selection_contract_version,
+                "compatibility_class": result.compatibility_class.value,
+                "support_release_id": result.support_release_id,
+                "reason": result.reason.value,
+                "permissions": dict(result.permissions),
+            }
+            self.assertEqual(actual, case["expected"], case["name"])
+
     def test_all_four_runtime_classes(self) -> None:
         release = promoted_release()
         exact = classify_runtime(
@@ -152,6 +180,7 @@ class CompatibilityTests(unittest.TestCase):
 class ContractSelectionTests(unittest.TestCase):
     def setUp(self) -> None:
         self.requested = {
+            "selection_contract_version": 1,
             "model_major": 1,
             "external_entity_reference_version": 1,
             "semantic_revision_reference_version": 1,
@@ -161,9 +190,10 @@ class ContractSelectionTests(unittest.TestCase):
             "fact_family_versions": {"usage": [2], "interaction": [1]},
         }
         self.offered = {
+            "selection_contract_version": 1,
             "model_major": 1,
-            "external_entity_reference_version": [1],
-            "semantic_revision_reference_version": [1],
+            "external_entity_reference_versions": [1],
+            "semantic_revision_reference_versions": [1],
             "coverage_contract_versions": [1],
             "query_pack_versions": [1],
             "observation_contract_versions": [1],
@@ -176,6 +206,19 @@ class ContractSelectionTests(unittest.TestCase):
         self.assertEqual(selection["observation_contract_version"], 1)
         self.assertEqual(selection["fact_family_versions"], {"usage": 2, "interaction": 1})
 
+    def test_shared_contract_selection_fixture_matches_rust(self) -> None:
+        fixture_path = (
+            REPO_ROOT
+            / "crates/spaghetti-napi/fixtures/contracts/rfc012a-support-v1.json"
+        )
+        fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
+        self.assertEqual(
+            select_contract_versions(
+                fixture["contract_request"], fixture["contract_offer"]
+            ),
+            fixture["expected_contract_selection"],
+        )
+
     def test_incompatible_major_and_family_fail(self) -> None:
         wrong_major = dict(self.offered, model_major=2)
         with self.assertRaisesRegex(ContractSelectionError, "model major"):
@@ -187,6 +230,40 @@ class ContractSelectionTests(unittest.TestCase):
 
 
 class AccessBudgetTests(unittest.TestCase):
+    def test_shared_access_budget_fixture_matches_rust(self) -> None:
+        fixture_path = (
+            REPO_ROOT
+            / "crates/spaghetti-napi/fixtures/contracts/rfc012a-access-v1.json"
+        )
+        fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
+        budget = AccessBudget(fixture["relation_id"], **fixture["bounds"])
+        for operation in fixture["operations"]:
+            budget.consume(
+                operation["object_identity"],
+                bytes_read=operation["bytes_read"],
+                rows_read=operation["rows_read"],
+                depth=operation["depth"],
+            )
+        denied = fixture["denied_operation"]
+        with self.assertRaisesRegex(
+            AccessBoundExceeded, denied["expected_limit"]
+        ):
+            budget.consume(
+                denied["object_identity"],
+                bytes_read=denied["max_bytes"],
+                rows_read=denied["max_rows"],
+                depth=denied["depth"],
+            )
+        self.assertEqual(
+            budget.totals,
+            {
+                "objects": fixture["expected"]["objects_accessed"],
+                "bytes": fixture["expected"]["bytes_read"],
+                "rows": fixture["expected"]["rows_read"],
+                "max_depth": fixture["expected"]["max_depth_observed"],
+            },
+        )
+
     def test_records_at_bound_and_rejects_overflow_without_mutation(self) -> None:
         budget = AccessBudget("descendants", max_fan_out=2, max_depth=3, max_objects=3, max_bytes=100, max_rows=4)
         budget.consume("object-a", bytes_read=40, rows_read=1, depth=2)

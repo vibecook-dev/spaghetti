@@ -9,6 +9,7 @@ use crate::source::{
     SqliteSnapshotConfig,
 };
 
+use super::support::AdapterSupportBinding;
 use super::FactBatch;
 
 macro_rules! string_id {
@@ -133,6 +134,7 @@ pub struct AdapterManifest {
     pub display_name: String,
     pub adapter_version: String,
     pub contract_version: u32,
+    pub support_binding: Option<AdapterSupportBinding>,
     pub source_schema_versions: Vec<String>,
     pub capabilities: Vec<CapabilityDeclaration>,
 }
@@ -153,6 +155,18 @@ impl AdapterManifest {
             return Err(AdapterError::invalid_contract(
                 "adapter contract version must be greater than zero",
             ));
+        }
+        if let Some(binding) = &self.support_binding {
+            if binding.adapter_package_version() != self.adapter_version {
+                return Err(AdapterError::invalid_contract(
+                    "adapter support binding package version differs from its manifest",
+                ));
+            }
+            if binding.decoder_contract_version() != self.contract_version {
+                return Err(AdapterError::invalid_contract(
+                    "adapter support binding decoder contract differs from its manifest",
+                ));
+            }
         }
         let mut capability_ids = BTreeSet::new();
         for capability in &self.capabilities {
@@ -675,6 +689,7 @@ mod tests {
             display_name: "Fixture".to_string(),
             adapter_version: "1".to_string(),
             contract_version: 1,
+            support_binding: None,
             source_schema_versions: Vec::new(),
             capabilities: vec![capability.clone(), capability],
         };
