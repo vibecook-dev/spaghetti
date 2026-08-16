@@ -27,17 +27,18 @@ use crate::engine::{
     ObservationStatusSnapshot, ObservationSupervisorOptions, OwnerMetadata, PlanDetail, PlanPage,
     PlanPageRequest, QueryCancellationToken, QueryPerformanceSnapshot, ReconcileOutcome,
     ReconcileRequest, RunStateLookup, RunStateRequest, RuntimePresenceSnapshot, RuntimeRunEvidence,
-    RuntimeRunSnapshot, RuntimeSnapshot, RuntimeSnapshotRequest, RuntimeUsageQuerySelection,
-    RuntimeUsageQuerySelectionCommand, RuntimeUsageQuerySelectionResult,
-    RuntimeUsageQuerySelectionValue, RuntimeUsageV2ActorContext, RuntimeUsageV2Affiliation,
-    RuntimeUsageV2Aggregate, RuntimeUsageV2BucketAggregate, RuntimeUsageV2ExternalEntityRef,
-    RuntimeUsageV2Page, RuntimeUsageV2PageRequest, RuntimeUsageV2ProjectionReadiness,
-    RuntimeUsageV2Response, RuntimeUsageV2SemanticRevisionRef, RuntimeUsageV2TextValue,
-    RuntimeUsageV2TokenValue, RuntimeUsageV2ValueProvenance, SearchHit, SearchPage,
-    SearchPageRequest, SessionDetail, SessionDetails, SessionDetailsRequest, SessionIndexDetail,
-    SourceCapabilitySummary, SourceDimensionPerformanceSnapshot, SourcePage, SourcePageRequest,
-    SourcePerformanceSnapshot, SourcePipelineSnapshot, SourceSummary, SpaghettiEngineCore,
-    StoragePerformanceSnapshot, TaskCollectionPage, TaskCollectionPageRequest,
+    RuntimeRunSnapshot, RuntimeSnapshot, RuntimeSnapshotRequest, RuntimeUsageLegacyTotals,
+    RuntimeUsageQuerySelection, RuntimeUsageQuerySelectionCommand,
+    RuntimeUsageQuerySelectionResult, RuntimeUsageQuerySelectionValue, RuntimeUsageTotalsReport,
+    RuntimeUsageTotalsRequest, RuntimeUsageTotalsSelectionScope, RuntimeUsageV2ActorContext,
+    RuntimeUsageV2Affiliation, RuntimeUsageV2Aggregate, RuntimeUsageV2BucketAggregate,
+    RuntimeUsageV2ExternalEntityRef, RuntimeUsageV2Page, RuntimeUsageV2PageRequest,
+    RuntimeUsageV2ProjectionReadiness, RuntimeUsageV2Response, RuntimeUsageV2SemanticRevisionRef,
+    RuntimeUsageV2TextValue, RuntimeUsageV2TokenValue, RuntimeUsageV2ValueProvenance, SearchHit,
+    SearchPage, SearchPageRequest, SessionDetail, SessionDetails, SessionDetailsRequest,
+    SessionIndexDetail, SourceCapabilitySummary, SourceDimensionPerformanceSnapshot, SourcePage,
+    SourcePageRequest, SourcePerformanceSnapshot, SourcePipelineSnapshot, SourceSummary,
+    SpaghettiEngineCore, StoragePerformanceSnapshot, TaskCollectionPage, TaskCollectionPageRequest,
     TaskCollectionSummary, TaskDetail, TaskPage, TaskPageRequest, TeamConfigSummary, TeamDetails,
     TeamDetailsRequest, TeamInboxMessage, TeamInboxMessagePage, TeamInboxMessagePageRequest,
     TeamInboxPage, TeamInboxPageRequest, TeamInboxSummary, TeamMember, TeamPage, TeamPageRequest,
@@ -52,7 +53,7 @@ use crate::engine::{
     DEFAULT_FACT_FAMILY_COVERAGE_PAGE_LIMIT, DEFAULT_HISTORY_PAGE_LIMIT,
     DEFAULT_ORCHESTRATION_PAGE_LIMIT, DEFAULT_RUNTIME_PAGE_LIMIT,
     DEFAULT_RUNTIME_USAGE_V2_PAGE_LIMIT, DEFAULT_SEARCH_PAGE_LIMIT, DEFAULT_TEAM_PAGE_LIMIT,
-    DEFAULT_TIMELINE_PAGE_LIMIT, MAX_CHANGE_REPLAY_PAYLOAD_BYTES,
+    DEFAULT_TIMELINE_PAGE_LIMIT, MAX_CHANGE_REPLAY_PAYLOAD_BYTES, SELECTED_RUNTIME_USAGE_QUERY_ID,
 };
 use crate::grok::GrokAdapter;
 
@@ -3201,6 +3202,105 @@ impl From<RuntimeUsageQuerySelection> for EngineRuntimeUsageQuerySelection {
     }
 }
 
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct EngineRuntimeUsageTotalsOptions {
+    /// One to 128 canonical project/session scopes. Scopes must not overlap.
+    pub scopes: Vec<EngineUsageScopeOptions>,
+    /// Defaults to `selected`; explicit legacy and usage-v2 requests are also
+    /// available for compatibility and shadow comparison.
+    pub requested_query_id: Option<String>,
+}
+
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct EngineRuntimeUsageTotalsSelectionScope {
+    pub selection_scope_ref: String,
+    pub adapter_id: String,
+    pub session_count: f64,
+    pub query_selection: EngineRuntimeUsageQuerySelection,
+    pub projection_readiness: EngineRuntimeUsageV2ProjectionReadiness,
+    pub coverage_status: String,
+    pub v2_eligible: bool,
+}
+
+impl From<RuntimeUsageTotalsSelectionScope> for EngineRuntimeUsageTotalsSelectionScope {
+    fn from(value: RuntimeUsageTotalsSelectionScope) -> Self {
+        Self {
+            selection_scope_ref: value.selection_scope_ref,
+            adapter_id: value.adapter_id,
+            session_count: value.session_count as f64,
+            query_selection: value.query_selection.into(),
+            projection_readiness: value.projection_readiness.into(),
+            coverage_status: value.coverage_status,
+            v2_eligible: value.v2_eligible,
+        }
+    }
+}
+
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct EngineRuntimeUsageLegacyTotals {
+    pub aggregate: EngineUsageAggregate,
+    pub coverage: Vec<EngineUsageCoverage>,
+    pub first_source_time: Option<String>,
+    pub last_source_time: Option<String>,
+    pub first_observed_at_unix_ms: Option<f64>,
+    pub last_observed_at_unix_ms: Option<f64>,
+    pub last_commit_seq: Option<f64>,
+}
+
+impl From<RuntimeUsageLegacyTotals> for EngineRuntimeUsageLegacyTotals {
+    fn from(value: RuntimeUsageLegacyTotals) -> Self {
+        Self {
+            aggregate: value.aggregate.into(),
+            coverage: value.coverage.into_iter().map(Into::into).collect(),
+            first_source_time: value.first_source_time,
+            last_source_time: value.last_source_time,
+            first_observed_at_unix_ms: value.first_observed_at_unix_ms.map(|value| value as f64),
+            last_observed_at_unix_ms: value.last_observed_at_unix_ms.map(|value| value as f64),
+            last_commit_seq: value.last_commit_seq.map(|value| value as f64),
+        }
+    }
+}
+
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct EngineRuntimeUsageTotals {
+    pub contract_version: u32,
+    pub at_commit_seq: f64,
+    pub requested_query_id: String,
+    pub status: String,
+    pub resolved_query: Option<EngineRuntimeUsageQuerySelectionValue>,
+    pub scopes: Vec<EngineUsageScopeOptions>,
+    pub selection_vector: Vec<EngineRuntimeUsageTotalsSelectionScope>,
+    pub legacy: Option<EngineRuntimeUsageLegacyTotals>,
+    pub usage_v2: Option<EngineRuntimeUsageV2Aggregate>,
+}
+
+impl From<RuntimeUsageTotalsReport> for EngineRuntimeUsageTotals {
+    fn from(value: RuntimeUsageTotalsReport) -> Self {
+        Self {
+            contract_version: value.contract_version,
+            at_commit_seq: value.at_commit_seq as f64,
+            requested_query_id: value.requested_query_id,
+            status: value.status,
+            resolved_query: value.resolved_query.map(Into::into),
+            scopes: value
+                .scopes
+                .into_iter()
+                .map(|scope| EngineUsageScopeOptions {
+                    project_id: scope.project_id,
+                    session_id: scope.session_id,
+                })
+                .collect(),
+            selection_vector: value.selection_vector.into_iter().map(Into::into).collect(),
+            legacy: value.legacy.map(Into::into),
+            usage_v2: value.usage_v2.map(Into::into),
+        }
+    }
+}
+
 /// Compare-and-set authorization for the source instance resolved through one
 /// session. Every expected field must come from one `getRuntimeUsageV2()` page.
 #[napi(object)]
@@ -4457,6 +4557,25 @@ impl SpaghettiEngine {
         )
     }
 
+    /// Negotiate every contributing source selection under one snapshot and
+    /// return exactly one labeled legacy or usage-v2 aggregate arm.
+    #[napi(ts_return_type = "Promise<EngineRuntimeUsageTotals>")]
+    pub fn get_runtime_usage_totals(
+        &self,
+        options: EngineRuntimeUsageTotalsOptions,
+        signal: Option<AbortSignal>,
+    ) -> AsyncTask<RuntimeUsageTotalsTask> {
+        let cancellation = cancellation_for_signal(signal.as_ref());
+        AsyncTask::with_optional_signal(
+            RuntimeUsageTotalsTask {
+                engine: Arc::clone(&self.inner),
+                options,
+                cancellation,
+            },
+            signal,
+        )
+    }
+
     /// Atomically promote or roll back one source-scoped runtime usage query.
     /// Promotion requires a Ready/complete v2 barrier at commit time; rollback
     /// remains available if that projection later becomes unhealthy.
@@ -5018,6 +5137,12 @@ pub struct UsageActivityTask {
 pub struct RuntimeUsageV2Task {
     engine: Arc<SpaghettiEngineCore>,
     options: EngineRuntimeUsageV2Options,
+    cancellation: QueryCancellationToken,
+}
+
+pub struct RuntimeUsageTotalsTask {
+    engine: Arc<SpaghettiEngineCore>,
+    options: EngineRuntimeUsageTotalsOptions,
     cancellation: QueryCancellationToken,
 }
 
@@ -5746,6 +5871,40 @@ impl Task for RuntimeUsageV2Task {
                         .options
                         .limit
                         .unwrap_or(DEFAULT_RUNTIME_USAGE_V2_PAGE_LIMIT),
+                },
+                self.cancellation.clone(),
+            )
+            .map(Into::into)
+            .map_err(napi_error)
+    }
+
+    fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
+        Ok(output)
+    }
+}
+
+impl Task for RuntimeUsageTotalsTask {
+    type Output = EngineRuntimeUsageTotals;
+    type JsValue = EngineRuntimeUsageTotals;
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        self.engine
+            .runtime_usage_totals_cancellable(
+                RuntimeUsageTotalsRequest {
+                    scopes: self
+                        .options
+                        .scopes
+                        .iter()
+                        .map(|scope| UsageScopeRequest {
+                            project_id: scope.project_id.clone(),
+                            session_id: scope.session_id.clone(),
+                        })
+                        .collect(),
+                    requested_query_id: self
+                        .options
+                        .requested_query_id
+                        .clone()
+                        .unwrap_or_else(|| SELECTED_RUNTIME_USAGE_QUERY_ID.to_string()),
                 },
                 self.cancellation.clone(),
             )

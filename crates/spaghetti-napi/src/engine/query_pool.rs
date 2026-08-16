@@ -58,6 +58,10 @@ use super::runtime_usage_query::{
     RuntimeUsageQuerySelectionTarget, RuntimeUsageQuerySelectionTargetRequest, RuntimeUsageV2Page,
     RuntimeUsageV2PageRequest,
 };
+use super::runtime_usage_totals_query::{
+    read_runtime_usage_totals, validate_runtime_usage_totals, RuntimeUsageTotalsReport,
+    RuntimeUsageTotalsRequest,
+};
 use super::search_query::{read_search_page, validate_search_page, SearchPage, SearchPageRequest};
 use super::team_query::{
     read_team_details, read_team_inbox_page, read_team_message_page, read_team_page,
@@ -454,6 +458,12 @@ enum QueryCommand {
         cancellation: QueryCancellationToken,
         request: RuntimeUsageV2PageRequest,
         response: Sender<Result<RuntimeUsageV2Page, EngineError>>,
+    },
+    RuntimeUsageTotals {
+        cancellation_epoch: u64,
+        cancellation: QueryCancellationToken,
+        request: RuntimeUsageTotalsRequest,
+        response: Sender<Result<RuntimeUsageTotalsReport, EngineError>>,
     },
     RuntimeUsageQuerySelectionTarget {
         cancellation_epoch: u64,
@@ -1154,6 +1164,23 @@ impl QueryClient {
         self.send_cancellable(
             cancellation,
             |cancellation_epoch, cancellation, response| QueryCommand::RuntimeUsageV2 {
+                cancellation_epoch,
+                cancellation,
+                request,
+                response,
+            },
+        )
+    }
+
+    pub fn runtime_usage_totals_cancellable(
+        &self,
+        request: RuntimeUsageTotalsRequest,
+        cancellation: QueryCancellationToken,
+    ) -> Result<RuntimeUsageTotalsReport, EngineError> {
+        validate_runtime_usage_totals(&request)?;
+        self.send_cancellable(
+            cancellation,
+            |cancellation_epoch, cancellation, response| QueryCommand::RuntimeUsageTotals {
                 cancellation_epoch,
                 cancellation,
                 request,
@@ -2058,6 +2085,22 @@ fn query_thread(
                     cancellation_epoch,
                     &cancellation,
                     || read_runtime_usage_v2_page(&connection, &request),
+                );
+                let _ = response.send(result);
+            }
+            QueryCommand::RuntimeUsageTotals {
+                cancellation_epoch,
+                cancellation,
+                request,
+                response,
+            } => {
+                let _in_flight = InFlightGuard::enter(&control.in_flight);
+                let result = run_cancellable_query(
+                    &connection,
+                    &control,
+                    cancellation_epoch,
+                    &cancellation,
+                    || read_runtime_usage_totals(&connection, &request),
                 );
                 let _ = response.send(result);
             }

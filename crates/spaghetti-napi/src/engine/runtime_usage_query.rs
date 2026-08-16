@@ -504,9 +504,9 @@ fn require_session_membership(
     Ok(())
 }
 
-struct RuntimeUsageSourceScope {
-    source_instance_id: u64,
-    stable_key: Vec<u8>,
+pub(super) struct RuntimeUsageSourceScope {
+    pub source_instance_id: u64,
+    pub stable_key: Vec<u8>,
 }
 
 fn resolve_source_scope(
@@ -538,7 +538,7 @@ fn resolve_source_scope(
         .map_err(|error| query_sqlite_error("resolve runtime usage-v2 projection scope", error))
 }
 
-fn read_query_selection(
+pub(super) fn read_query_selection(
     transaction: &Transaction<'_>,
     source_scope: &RuntimeUsageSourceScope,
 ) -> Result<RuntimeUsageQuerySelection, EngineError> {
@@ -637,14 +637,14 @@ fn read_query_selection(
     }))
 }
 
-fn opaque_ref(value: &[u8]) -> String {
+pub(super) fn opaque_ref(value: &[u8]) -> String {
     format!(
         "{OPAQUE_REFERENCE_VERSION}:{}",
         URL_SAFE_NO_PAD.encode(value)
     )
 }
 
-fn read_projection_readiness(
+pub(super) fn read_projection_readiness(
     transaction: &Transaction<'_>,
     projection_scope_key: &[u8],
 ) -> Result<RuntimeUsageV2ProjectionReadiness, EngineError> {
@@ -830,7 +830,7 @@ fn read_aggregate(
         .map_err(|error| query_sqlite_error("read runtime usage-v2 aggregate", error))
 }
 
-fn bucket_aggregate_from_row(
+pub(super) fn bucket_aggregate_from_row(
     row: &Row<'_>,
     offset: usize,
     response_count: u64,

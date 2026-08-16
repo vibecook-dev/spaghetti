@@ -62,6 +62,7 @@ export interface SpaghettiClientRequestMap {
   getUsage: EngineRequest<'getUsage'>;
   getUsageActivity: EngineRequest<'getUsageActivity'>;
   getRuntimeUsageV2: EngineRequest<'getRuntimeUsageV2'>;
+  getRuntimeUsageTotals: EngineRequest<'getRuntimeUsageTotals'>;
   getFactFamilyCoverage: EngineRequest<'getFactFamilyCoverage'>;
   getRuntimeSnapshot: EngineRequest<'getRuntimeSnapshot'>;
   getRunState: GetRunStateRequest;
@@ -98,6 +99,7 @@ export interface SpaghettiClientResponseMap {
   getUsage: EngineResult<'getUsage'>;
   getUsageActivity: EngineResult<'getUsageActivity'>;
   getRuntimeUsageV2: EngineResult<'getRuntimeUsageV2'>;
+  getRuntimeUsageTotals: EngineResult<'getRuntimeUsageTotals'>;
   getFactFamilyCoverage: EngineResult<'getFactFamilyCoverage'>;
   getRuntimeSnapshot: EngineResult<'getRuntimeSnapshot'>;
   getRunState: EngineResult<'getRunState'>;
@@ -135,6 +137,7 @@ export const SPAGHETTI_CLIENT_METHODS = completeMethodList([
   'getUsage',
   'getUsageActivity',
   'getRuntimeUsageV2',
+  'getRuntimeUsageTotals',
   'getFactFamilyCoverage',
   'getRuntimeSnapshot',
   'getRunState',
@@ -408,6 +411,10 @@ export interface SpaghettiClient {
     request: SpaghettiClientRequestMap['getRuntimeUsageV2'],
     options?: SpaghettiQueryOptions,
   ): Promise<SpaghettiClientResponseMap['getRuntimeUsageV2']>;
+  getRuntimeUsageTotals(
+    request: SpaghettiClientRequestMap['getRuntimeUsageTotals'],
+    options?: SpaghettiQueryOptions,
+  ): Promise<SpaghettiClientResponseMap['getRuntimeUsageTotals']>;
   getFactFamilyCoverage(
     request: SpaghettiClientRequestMap['getFactFamilyCoverage'],
     options?: SpaghettiQueryOptions,

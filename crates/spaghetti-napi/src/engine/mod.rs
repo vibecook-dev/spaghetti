@@ -24,6 +24,7 @@ mod query_pool;
 mod runtime_query;
 mod runtime_semantic_projection;
 mod runtime_usage_query;
+mod runtime_usage_totals_query;
 mod search_query;
 mod session_index_projection;
 mod settings_projection;
@@ -115,6 +116,11 @@ pub use runtime_usage_query::{
     RuntimeUsageV2TextValue, RuntimeUsageV2TokenValue, RuntimeUsageV2ValueProvenance,
     DEFAULT_RUNTIME_USAGE_V2_PAGE_LIMIT, MAX_RUNTIME_USAGE_V2_PAGE_LIMIT,
     RUNTIME_USAGE_QUERY_SELECTION_CONTRACT_VERSION, RUNTIME_USAGE_V2_QUERY_CONTRACT_VERSION,
+};
+pub use runtime_usage_totals_query::{
+    RuntimeUsageLegacyTotals, RuntimeUsageTotalsReport, RuntimeUsageTotalsRequest,
+    RuntimeUsageTotalsSelectionScope, MAX_RUNTIME_USAGE_TOTALS_SCOPES,
+    RUNTIME_USAGE_TOTALS_QUERY_CONTRACT_VERSION, SELECTED_RUNTIME_USAGE_QUERY_ID,
 };
 pub use search_query::{
     SearchHit, SearchPage, SearchPageRequest, DEFAULT_SEARCH_PAGE_LIMIT,
@@ -954,6 +960,17 @@ impl SpaghettiEngineCore {
     ) -> Result<RuntimeUsageV2Page, EngineError> {
         let (_, queries) = self.clients()?;
         queries.runtime_usage_v2_cancellable(request, cancellation)
+    }
+
+    /// Resolve a complete source-selection vector and return exactly one
+    /// labeled aggregate arm under the same durable read snapshot.
+    pub fn runtime_usage_totals_cancellable(
+        &self,
+        request: RuntimeUsageTotalsRequest,
+        cancellation: QueryCancellationToken,
+    ) -> Result<RuntimeUsageTotalsReport, EngineError> {
+        let (_, queries) = self.clients()?;
+        queries.runtime_usage_totals_cancellable(request, cancellation)
     }
 
     /// Compare-and-set one source instance's runtime usage query selection.

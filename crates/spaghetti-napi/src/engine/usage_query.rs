@@ -120,10 +120,10 @@ pub(super) struct ValidatedUsageScope {
 }
 
 #[derive(Debug, Clone, Copy)]
-struct UsageMetadata {
-    exact_contribution_count: u64,
-    estimated_contribution_count: u64,
-    session_count: u64,
+pub(super) struct UsageMetadata {
+    pub exact_contribution_count: u64,
+    pub estimated_contribution_count: u64,
+    pub session_count: u64,
 }
 
 #[derive(Debug)]
@@ -644,7 +644,7 @@ fn usage_window_metadata_from_row(row: &Row<'_>) -> rusqlite::Result<UsageWindow
     })
 }
 
-fn usage_coverage_from_row(row: &Row<'_>) -> rusqlite::Result<UsageCoverageSummary> {
+pub(super) fn usage_coverage_from_row(row: &Row<'_>) -> rusqlite::Result<UsageCoverageSummary> {
     Ok(UsageCoverageSummary {
         scope: row.get(0)?,
         accounting: row.get(1)?,
@@ -657,7 +657,10 @@ fn usage_coverage_from_row(row: &Row<'_>) -> rusqlite::Result<UsageCoverageSumma
     })
 }
 
-fn token_values_from_row(row: &Row<'_>, offset: usize) -> rusqlite::Result<UsageTokenValues> {
+pub(super) fn token_values_from_row(
+    row: &Row<'_>,
+    offset: usize,
+) -> rusqlite::Result<UsageTokenValues> {
     token_values([
         nonnegative_u64(row.get(offset)?, "input tokens")?,
         nonnegative_u64(row.get(offset + 1)?, "output tokens")?,
@@ -692,7 +695,7 @@ fn combine_tokens(
     .map_err(|error| query_sqlite_error("combine usage token values", error))
 }
 
-fn usage_aggregate(
+pub(super) fn usage_aggregate(
     exact: UsageTokenValues,
     estimated: UsageTokenValues,
     metadata: UsageMetadata,

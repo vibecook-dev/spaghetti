@@ -234,6 +234,13 @@ class DefaultSpaghettiClient implements SpaghettiClient {
     return this.query('getRuntimeUsageV2', request, options);
   }
 
+  getRuntimeUsageTotals(
+    request: SpaghettiClientRequestMap['getRuntimeUsageTotals'],
+    options?: SpaghettiQueryOptions,
+  ): Promise<SpaghettiClientResponseMap['getRuntimeUsageTotals']> {
+    return this.query('getRuntimeUsageTotals', request, options);
+  }
+
   getFactFamilyCoverage(
     request: SpaghettiClientRequestMap['getFactFamilyCoverage'],
     options?: SpaghettiQueryOptions,

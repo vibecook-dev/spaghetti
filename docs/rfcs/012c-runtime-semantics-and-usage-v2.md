@@ -788,9 +788,46 @@ contributing source has a compatible selection and complete comparable
 coverage. Otherwise it fails selection negotiation or uses an explicitly
 requested legacy contract. It cannot combine row-additive legacy usage for one
 source with response-revision v2 usage for another under one unqualified
-aggregate. Until that aggregate contract lands, `getUsage` and
-`getUsageActivity` remain explicitly legacy even when a source-scoped v2
-detail query reports itself selected.
+aggregate.
+
+The aggregate negotiation boundary is `getRuntimeUsageTotals` contract v1. A
+request contains one to 128 canonical project/session scopes and a
+`requested_query_id` of `selected`, `legacy.usage`, or `runtime.usage-v2`.
+Scopes may not overlap: a project-wide scope cannot appear beside a
+session-specific scope for the same project, and an exact scope cannot be
+repeated. The engine resolves every distinct source instance that contributes
+a canonical session to those scopes and reads the full selection vector,
+readiness, coverage, and aggregates in one SQLite snapshot.
+
+Every vector member reports a query-local opaque selection-scope reference,
+adapter ID, contributing session count, durable `UsageQuerySelection`, current
+usage-v2 readiness, normalized coverage status, and whether the exact v2
+promotion guard is currently satisfied. The query-local scope reference exists
+even before fact-family coverage and is only an opaque vector-member identity;
+it must not be treated as RFC 012A's canonical `source_instance_ref`.
+
+`selected` resolves only when every non-empty vector member selects the same
+supported query and contract version. A mixed vector returns
+`mixed_selection`, no resolved query, and no aggregate. A uniform v2 vector
+whose current readiness/coverage guard is not satisfied returns `not_ready`
+and no aggregate; it never falls back to legacy. A uniform unsupported tuple
+returns `unsupported_selection`. An empty contributing vector resolves to the
+immutable legacy compatibility default. `legacy.usage` is an explicit
+compatibility request and resolves regardless of the current vector.
+`runtime.usage-v2` is an explicit shadow/comparison request, but resolves only
+when every contributing member satisfies the same v2 guard as promotion.
+
+A `resolved` response contains exactly one discriminated aggregate arm:
+`legacy` preserves the existing contribution-based values and coverage, while
+`usage_v2` preserves response counts, actor counts, independently qualified
+token buckets, and unknown counts. Consumers must branch on the resolved query
+and must not coerce the two shapes into one unlabeled total. The requested
+scopes, vector, resolution, and selected aggregate all share `at_commit_seq`.
+
+The pre-existing `getUsage` and `getUsageActivity` contracts remain explicitly
+legacy during their compatibility window. Composite/default consumers migrate
+to `getRuntimeUsageTotals`; they must not aggregate several independent legacy
+or v2 calls after selection negotiation.
 
 `Untracked` is a query-boundary representation for legacy/directly constructed
 state with no durable version row; it is never persisted and never aliases
@@ -880,11 +917,10 @@ computes bucket quality/coverage as well as values. History, capability, and
 FTS remain compared to their existing accepted oracles; usage is deliberately
 compared to the new v2 oracle.
 
-Current implementation status (2026-08-16): steps 1 through 5 have landed, and
-the source-scoped selection mechanism for step 6 is implemented without yet
-routing the unqualified multi-source aggregates through v2. Frozen sanitized
-and private native-corpus evidence cover response, actor, session, and
-aggregate scope.
+Current implementation status (2026-08-16): steps 1 through 6 have landed,
+including source-scoped selection and the non-mixing composite aggregate
+boundary. Frozen sanitized and private native-corpus evidence cover response,
+actor, session, and aggregate scope.
 Claude decoder contract 17 introduced a canonical `runtime.usage-v2` fact
 beside the unchanged legacy delta; contract 18 retains that identity and adds
 canonical actor and workflow-affiliation evidence. Contract 19 retains those
@@ -903,8 +939,9 @@ without copying usage contributions.
 Focused conformance proves topology-independent identities, exact-repeat
 non-duplication, evolving and downward counters, exact zero, missing buckets,
 absent and reused `requestId`, actor/session grouping, malformed-snapshot
-non-erasure, and generation replacement. The legacy projection remains the
-only default usage path and intentionally retains its old row-additive result.
+non-erasure, and generation replacement. The compatibility `getUsage` and
+`getUsageActivity` paths intentionally retain their old row-additive result;
+the selected aggregate boundary routes independently.
 The independent Python oracle imports no adapter, SDK, or database code; its
 digest-bound root/child fixture and report are consumed by a Rust integration
 test that exercises the real parent and subagent streams plus the durable
@@ -985,6 +1022,18 @@ versioned v2 page returns selection/readiness/data under one snapshot and uses
 available while v2 is `Pending`, preserves both projections, advances the
 epoch, and supports idempotent retry.
 
+`getRuntimeUsageTotals` contract v1 is implemented through Rust, N-API, and the
+transport-neutral client. It validates one to 128 non-overlapping scopes,
+resolves a deterministic vector of every contributing source, and reads that
+vector plus readiness, coverage, and the chosen aggregate in one SQLite
+snapshot. Explicit v2 can inspect a fully eligible shadow vector before
+promotion. The selected path returns no aggregate for a mixed vector or a
+selected-but-unready v2 vector and never silently falls back. A resolved result
+contains exactly one labeled legacy or v2 arm. Native-boundary tests cover two
+simultaneous source instances, request-order independence, legacy defaults,
+one-sided promotion, explicit legacy during the mixed interval, full v2
+promotion, and loss of readiness from an incomplete tail.
+
 The private native corpus gate also passes on a stable ephemeral source clone.
 An adapter/SDK/database-independent census matched the durable projection
 exactly for 149,369 response groups, 5,044 actors, 854 sessions, the root/child
@@ -997,8 +1046,7 @@ a usage gap. The committed aggregate-only report is
 with digest
 `sha256:2d84af3dd9bcfb91e727b8d0e067679b1637e61b0a343957a09b8f42c303176e`.
 
-Native team-to-actor conformance, step 6's non-mixing multi-source selection
-vector and aggregate default routing, and step 7's compatibility telemetry and
+Native team-to-actor conformance and step 7's compatibility telemetry and
 release rollback drill remain open. Until those gates pass, the candidate
 capability is unsupported and `getUsage`/`getUsageActivity` retain legacy
 semantics.

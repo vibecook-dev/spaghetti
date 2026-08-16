@@ -104,6 +104,11 @@ export declare class SpaghettiEngine {
    */
   getRuntimeUsageV2(options: EngineRuntimeUsageV2Options, signal?: AbortSignal | undefined | null): Promise<EngineRuntimeUsageV2Page>
   /**
+   * Negotiate every contributing source selection under one snapshot and
+   * return exactly one labeled legacy or usage-v2 aggregate arm.
+   */
+  getRuntimeUsageTotals(options: EngineRuntimeUsageTotalsOptions, signal?: AbortSignal | undefined | null): Promise<EngineRuntimeUsageTotals>
+  /**
    * Atomically promote or roll back one source-scoped runtime usage query.
    * Promotion requires a Ready/complete v2 barrier at commit time; rollback
    * remains available if that projection later becomes unhealthy.
@@ -962,6 +967,16 @@ export interface EngineRuntimeSnapshotOptions {
   limit?: number
 }
 
+export interface EngineRuntimeUsageLegacyTotals {
+  aggregate: EngineUsageAggregate
+  coverage: Array<EngineUsageCoverage>
+  firstSourceTime?: string
+  lastSourceTime?: string
+  firstObservedAtUnixMs?: number
+  lastObservedAtUnixMs?: number
+  lastCommitSeq?: number
+}
+
 export interface EngineRuntimeUsageQuerySelection {
   contractVersion: number
   queryPackId: string
@@ -1001,6 +1016,38 @@ export interface EngineRuntimeUsageQuerySelectionResult {
 export interface EngineRuntimeUsageQuerySelectionValue {
   queryId: string
   contractVersion: number
+}
+
+export interface EngineRuntimeUsageTotals {
+  contractVersion: number
+  atCommitSeq: number
+  requestedQueryId: string
+  status: string
+  resolvedQuery?: EngineRuntimeUsageQuerySelectionValue
+  scopes: Array<EngineUsageScopeOptions>
+  selectionVector: Array<EngineRuntimeUsageTotalsSelectionScope>
+  legacy?: EngineRuntimeUsageLegacyTotals
+  usageV2?: EngineRuntimeUsageV2Aggregate
+}
+
+export interface EngineRuntimeUsageTotalsOptions {
+  /** One to 128 canonical project/session scopes. Scopes must not overlap. */
+  scopes: Array<EngineUsageScopeOptions>
+  /**
+   * Defaults to `selected`; explicit legacy and usage-v2 requests are also
+   * available for compatibility and shadow comparison.
+   */
+  requestedQueryId?: string
+}
+
+export interface EngineRuntimeUsageTotalsSelectionScope {
+  selectionScopeRef: string
+  adapterId: string
+  sessionCount: number
+  querySelection: EngineRuntimeUsageQuerySelection
+  projectionReadiness: EngineRuntimeUsageV2ProjectionReadiness
+  coverageStatus: string
+  v2Eligible: boolean
 }
 
 export interface EngineRuntimeUsageV2ActorContext {

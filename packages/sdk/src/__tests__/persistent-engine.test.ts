@@ -8,7 +8,7 @@
 
 import { afterEach, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -256,6 +256,41 @@ describe('persistent SpaghettiEngine', { skip: !native }, () => {
     assert.equal(usage.aggregate.inputTokens.knownTokens, 12);
     assert.equal(usage.items[0]?.nativeMessageId, 'response-1');
 
+    const selectedLegacyTotals = await engine.getRuntimeUsageTotals({ scopes: [{ projectId, sessionId }] });
+    assert.equal(selectedLegacyTotals.status, 'resolved');
+    assert.equal(selectedLegacyTotals.resolvedQuery?.queryId, 'legacy.usage');
+    assert.equal(selectedLegacyTotals.selectionVector.length, 1);
+    assert.match(selectedLegacyTotals.selectionVector[0]?.selectionScopeRef ?? '', /^v1:/);
+    assert.equal(selectedLegacyTotals.selectionVector[0]?.v2Eligible, true);
+    assert.ok(selectedLegacyTotals.legacy);
+    assert.equal(selectedLegacyTotals.usageV2, undefined);
+
+    const explicitV2Totals = await engine.getRuntimeUsageTotals({
+      scopes: [{ projectId, sessionId }],
+      requestedQueryId: 'runtime.usage-v2',
+    });
+    assert.equal(explicitV2Totals.status, 'resolved');
+    assert.equal(explicitV2Totals.resolvedQuery?.queryId, 'runtime.usage-v2');
+    assert.equal(explicitV2Totals.legacy, undefined);
+    assert.equal(explicitV2Totals.usageV2?.responseCount, 1);
+    assert.equal(explicitV2Totals.usageV2?.inputTokens.knownTokens, 12);
+    assert.equal(explicitV2Totals.atCommitSeq, selectedLegacyTotals.atCommitSeq);
+
+    await assert.rejects(
+      engine.getRuntimeUsageTotals({ scopes: [{ projectId }, { projectId, sessionId }] }),
+      /must not overlap/i,
+    );
+    await assert.rejects(engine.getRuntimeUsageTotals({ scopes: [] }), /between 1 and 128 scopes/i);
+    await assert.rejects(
+      engine.getRuntimeUsageTotals({
+        scopes: [
+          { projectId, sessionId },
+          { projectId, sessionId },
+        ],
+      }),
+      /duplicate scope/i,
+    );
+
     const coverage = await engine.getFactFamilyCoverage({
       projectId,
       sessionId,
@@ -329,6 +364,10 @@ describe('persistent SpaghettiEngine', { skip: !native }, () => {
     const selectedUsage = await engine.getRuntimeUsageV2({ projectId, sessionId, limit: 10 });
     assert.equal(selectedUsage.projectionStatus, 'selected');
     assert.deepEqual(selectedUsage.querySelection, promoted.selection);
+    const selectedV2Totals = await engine.getRuntimeUsageTotals({ scopes: [{ projectId, sessionId }] });
+    assert.equal(selectedV2Totals.status, 'resolved');
+    assert.equal(selectedV2Totals.resolvedQuery?.queryId, 'runtime.usage-v2');
+    assert.equal(selectedV2Totals.usageV2?.responseCount, 1);
 
     const rollbackRequest = {
       projectId,
@@ -345,10 +384,134 @@ describe('persistent SpaghettiEngine', { skip: !native }, () => {
     assert.equal(rolledBack.selection.rollback.queryId, 'legacy.usage');
     assert.equal(rolledBack.selection.selectionEpoch, 2);
     assert.equal((await engine.getRuntimeUsageV2({ projectId, sessionId, limit: 10 })).projectionStatus, 'shadow');
+    assert.equal(
+      (await engine.getRuntimeUsageTotals({ scopes: [{ projectId, sessionId }] })).resolvedQuery?.queryId,
+      'legacy.usage',
+    );
 
     const retriedRollback = await engine.selectRuntimeUsageQuery(rollbackRequest);
     assert.equal(retriedRollback.atCommitSeq, rolledBack.atCommitSeq);
     assert.deepEqual(retriedRollback.selection, rolledBack.selection);
+  });
+
+  test('negotiates a composite usage source vector without mixing contracts', async () => {
+    const dbPath = temporaryDatabase();
+    const base = path.dirname(dbPath);
+    const roots = [path.join(base, 'claude-usage-a'), path.join(base, 'claude-usage-b')];
+    const sessionIds = ['aaaaaaaa-1111-2222-3333-444444444444', 'bbbbbbbb-1111-2222-3333-444444444444'];
+    const transcriptPaths: string[] = [];
+    for (const [index, root] of roots.entries()) {
+      const project = path.join(root, 'projects', `-tmp-usage-${index}`);
+      mkdirSync(project, { recursive: true });
+      const transcriptPath = path.join(project, `${sessionIds[index]}.jsonl`);
+      transcriptPaths.push(transcriptPath);
+      writeFileSync(
+        transcriptPath,
+        `${JSON.stringify({
+          type: 'assistant',
+          uuid: `${index}aaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee`,
+          parentUuid: null,
+          timestamp: `2026-08-1${index + 1}T00:00:00.000Z`,
+          sessionId: sessionIds[index],
+          cwd: `/tmp/usage-${index}`,
+          version: '1',
+          gitBranch: 'main',
+          isSidechain: false,
+          userType: 'external',
+          requestId: `request-${index}`,
+          message: {
+            model: 'claude-sonnet',
+            id: `response-${index}`,
+            type: 'message',
+            role: 'assistant',
+            content: [{ type: 'text', text: `usage response ${index}` }],
+            usage: { input_tokens: (index + 1) * 10, output_tokens: index + 1 },
+          },
+        })}\n`,
+      );
+    }
+
+    const engine = await openTracked(dbPath, 'sdk-usage-vector-test');
+    await engine.reconcileClaude({ roots, reason: 'sdk_usage_vector_fixture' });
+    const projects = (await engine.listHistoryProjects({ limit: 10 })).items;
+    assert.equal(projects.length, 2);
+    const members = await Promise.all(
+      projects.map(async (project) => {
+        const session = (await engine.listHistorySessions({ projectId: project.projectId, limit: 10 })).items[0];
+        assert.ok(session);
+        return { projectId: project.projectId, sessionId: session.sessionId };
+      }),
+    );
+
+    const legacy = await engine.getRuntimeUsageTotals({ scopes: members });
+    assert.equal(legacy.status, 'resolved');
+    assert.equal(legacy.resolvedQuery?.queryId, 'legacy.usage');
+    assert.equal(legacy.selectionVector.length, 2);
+    assert.equal(new Set(legacy.selectionVector.map((item) => item.selectionScopeRef)).size, 2);
+    assert.ok(legacy.selectionVector.every((item) => item.v2Eligible));
+
+    const shadowV2 = await engine.getRuntimeUsageTotals({
+      scopes: members,
+      requestedQueryId: 'runtime.usage-v2',
+    });
+    assert.equal(shadowV2.status, 'resolved');
+    assert.equal(shadowV2.usageV2?.responseCount, 2);
+    assert.equal(shadowV2.usageV2?.inputTokens.knownTokens, 30);
+    assert.equal(shadowV2.usageV2?.outputTokens.knownTokens, 3);
+    const reversedShadowV2 = await engine.getRuntimeUsageTotals({
+      scopes: [...members].reverse(),
+      requestedQueryId: 'runtime.usage-v2',
+    });
+    assert.deepEqual(
+      reversedShadowV2.selectionVector.map((item) => item.selectionScopeRef),
+      shadowV2.selectionVector.map((item) => item.selectionScopeRef),
+    );
+    assert.deepEqual(reversedShadowV2.usageV2, shadowV2.usageV2);
+
+    const promote = async (member: (typeof members)[number]) => {
+      const current = await engine.getRuntimeUsageV2({ ...member, limit: 1 });
+      return await engine.selectRuntimeUsageQuery({
+        ...member,
+        targetQueryId: 'runtime.usage-v2',
+        expectedMaterialized: current.querySelection.materialized,
+        expectedSelectedQueryId: current.querySelection.selected.queryId,
+        expectedSelectedContractVersion: current.querySelection.selected.contractVersion,
+        expectedSelectionEpoch: current.querySelection.selectionEpoch,
+        reason: 'sdk composite vector promotion',
+      });
+    };
+
+    await promote(members[0]!);
+    const mixed = await engine.getRuntimeUsageTotals({ scopes: members });
+    assert.equal(mixed.status, 'mixed_selection');
+    assert.equal(mixed.resolvedQuery, undefined);
+    assert.equal(mixed.legacy, undefined);
+    assert.equal(mixed.usageV2, undefined);
+
+    const explicitLegacy = await engine.getRuntimeUsageTotals({
+      scopes: members,
+      requestedQueryId: 'legacy.usage',
+    });
+    assert.equal(explicitLegacy.status, 'resolved');
+    assert.equal(explicitLegacy.resolvedQuery?.queryId, 'legacy.usage');
+    assert.ok(explicitLegacy.legacy);
+
+    await promote(members[1]!);
+    const selectedV2 = await engine.getRuntimeUsageTotals({ scopes: members });
+    assert.equal(selectedV2.status, 'resolved');
+    assert.equal(selectedV2.resolvedQuery?.queryId, 'runtime.usage-v2');
+    assert.equal(selectedV2.usageV2?.responseCount, 2);
+    assert.equal(selectedV2.usageV2?.inputTokens.knownTokens, 30);
+    assert.equal(selectedV2.legacy, undefined);
+
+    appendFileSync(transcriptPaths[0]!, '{"type":"assistant"');
+    await engine.reconcileClaude({ roots, reason: 'sdk_usage_vector_incomplete_tail' });
+    const selectedButUnready = await engine.getRuntimeUsageTotals({ scopes: members });
+    assert.equal(selectedButUnready.status, 'not_ready');
+    assert.equal(selectedButUnready.resolvedQuery?.queryId, 'runtime.usage-v2');
+    assert.equal(selectedButUnready.legacy, undefined);
+    assert.equal(selectedButUnready.usageV2, undefined);
+    assert.ok(selectedButUnready.selectionVector.some((item) => !item.v2Eligible));
   });
 
   test('starts, refreshes, and stops native Claude observation', async () => {

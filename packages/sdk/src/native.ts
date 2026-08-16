@@ -1475,6 +1475,51 @@ export interface SpaghettiEngineRuntimeUsageQuerySelection {
   updatedAtUnixMs?: number;
 }
 
+export type SpaghettiEngineRuntimeUsageTotalsQueryId = 'selected' | 'legacy.usage' | 'runtime.usage-v2';
+
+export interface SpaghettiEngineRuntimeUsageTotalsOptions {
+  /** One to 128 canonical scopes. Project-wide and session scopes may not overlap. */
+  scopes: SpaghettiEngineUsageScopeOptions[];
+  /** Defaults to `selected`; explicit values support compatibility and shadow comparison. */
+  requestedQueryId?: SpaghettiEngineRuntimeUsageTotalsQueryId;
+}
+
+export interface SpaghettiEngineRuntimeUsageTotalsSelectionScope {
+  /** Query-local opaque vector identity; not an RFC 012A sourceInstanceRef. */
+  selectionScopeRef: string;
+  adapterId: string;
+  sessionCount: number;
+  querySelection: SpaghettiEngineRuntimeUsageQuerySelection;
+  projectionReadiness: SpaghettiEngineRuntimeUsageV2ProjectionReadiness;
+  coverageStatus: 'complete' | 'partial' | 'unavailable' | 'not_materialized' | 'inconsistent';
+  /** True only when the current v2 promotion guard is satisfied. */
+  v2Eligible: boolean;
+}
+
+export interface SpaghettiEngineRuntimeUsageLegacyTotals {
+  aggregate: SpaghettiEngineUsageAggregate;
+  coverage: SpaghettiEngineUsageCoverage[];
+  firstSourceTime?: string;
+  lastSourceTime?: string;
+  firstObservedAtUnixMs?: number;
+  lastObservedAtUnixMs?: number;
+  lastCommitSeq?: number;
+}
+
+export interface SpaghettiEngineRuntimeUsageTotals {
+  contractVersion: number;
+  atCommitSeq: number;
+  requestedQueryId: SpaghettiEngineRuntimeUsageTotalsQueryId;
+  status: 'resolved' | 'mixed_selection' | 'not_ready' | 'unsupported_selection';
+  resolvedQuery?: SpaghettiEngineRuntimeUsageQuerySelectionValue;
+  scopes: SpaghettiEngineUsageScopeOptions[];
+  selectionVector: SpaghettiEngineRuntimeUsageTotalsSelectionScope[];
+  /** Present exactly when the resolved query is legacy.usage. */
+  legacy?: SpaghettiEngineRuntimeUsageLegacyTotals;
+  /** Present exactly when the resolved query is runtime.usage-v2. */
+  usageV2?: SpaghettiEngineRuntimeUsageV2Aggregate;
+}
+
 /**
  * Compare-and-set authorization for the source instance resolved through one
  * session. Copy every expected field from one `getRuntimeUsageV2()` page.
@@ -2003,6 +2048,10 @@ export interface SpaghettiEngine {
     options: SpaghettiEngineRuntimeUsageV2Options,
     signal?: AbortSignal,
   ): Promise<SpaghettiEngineRuntimeUsageV2Page>;
+  getRuntimeUsageTotals(
+    options: SpaghettiEngineRuntimeUsageTotalsOptions,
+    signal?: AbortSignal,
+  ): Promise<SpaghettiEngineRuntimeUsageTotals>;
   selectRuntimeUsageQuery(
     options: SpaghettiEngineRuntimeUsageQuerySelectionOptions,
     signal?: AbortSignal,

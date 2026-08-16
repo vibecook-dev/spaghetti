@@ -692,9 +692,9 @@ Current landing status (2026-08-16):
   (`sha256:2d84af3dd9bcfb91e727b8d0e067679b1637e61b0a343957a09b8f42c303176e`);
   and
 - kept the candidate capability `unsupported`: fixture-proven native
-  team-to-actor correlation, exact-repeat public-event suppression, aggregate
-  default routing, remaining portable fact-family serialization, and the
-  compatibility telemetry window are not yet complete.
+  team-to-actor correlation, exact-repeat public-event suppression, remaining
+  portable fact-family serialization, and the compatibility telemetry window
+  are not yet complete.
 
 ### C3. Durable migration
 
@@ -788,12 +788,19 @@ SDK tests cover the implicit default, promotion, stale rejection, rollback,
 idempotent retry, host forwarding, and the read-only client boundary.
 
 C3 remains `In progress`: private parity, source-scoped selection, its crash
-boundaries, and rollback are closed. The remaining work is a non-mixing
-multi-source selection vector and actual aggregate default routing, followed
-by compatibility-window telemetry and the release rollback drill.
-`getUsage`/`getUsageActivity` therefore remain explicitly legacy; selecting v2
-currently changes the versioned v2 detail surface, not the unqualified product
-aggregate, and is not a support-promotion claim.
+boundaries, rollback, and the bounded non-mixing aggregate vector are closed.
+`getRuntimeUsageTotals` now validates one to 128 non-overlapping canonical
+scopes, negotiates every contributing source under one read snapshot, returns
+a typed non-result for mixed/unready selection, and exposes exactly one labeled
+legacy or usage-v2 aggregate arm after resolution. Native-boundary tests cover
+two source instances, deterministic request reordering, one-sided and complete
+promotion, explicit legacy compatibility, and a selected v2 vector becoming
+unready without fallback.
+
+The remaining C3 work is compatibility-window telemetry and the release
+rollback drill. `getUsage`/`getUsageActivity` remain explicitly legacy; new
+composite/default consumers migrate to `getRuntimeUsageTotals`, and this
+landing alone is not a support-promotion claim.
 
 ### C4. Downstream semantic suite
 
