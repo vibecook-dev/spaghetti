@@ -612,6 +612,11 @@ Rules:
 9. Object keys and positions exposed outside the engine are opaque and
    policy-safe. Raw paths, database keys, or other sensitive locators require a
    separately authorized evidence field.
+10. A durable topology stores coverage in a bounded, pageable representation
+    and replaces it atomically with the projection/readiness transition whose
+    claim it supports. The representation and support/declaration binding
+    survive restart. A deterministic content digest may suppress equal writes,
+    but cannot replace the inspectable set, points, absences, and errors.
 
 The common versioned model/SDK supplies a semantic operation equivalent to:
 

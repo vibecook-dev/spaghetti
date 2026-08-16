@@ -124,6 +124,7 @@ impl Sha256Digest {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AdapterSupportBinding {
+    support_release_id: String,
     adapter_package_version: String,
     decoder_contract_version: u32,
     ads_digest: Sha256Digest,
@@ -133,12 +134,15 @@ pub struct AdapterSupportBinding {
 
 impl AdapterSupportBinding {
     pub fn new(
+        support_release_id: impl Into<String>,
         adapter_package_version: impl Into<String>,
         decoder_contract_version: u32,
         ads_digest: &str,
         source_declaration_digest: &str,
         scope_program_digest: &str,
     ) -> Result<Self, SupportContractError> {
+        let support_release_id = support_release_id.into();
+        validate_identifier("support release id", &support_release_id)?;
         let adapter_package_version = adapter_package_version.into();
         validate_version("adapter package version", &adapter_package_version)?;
         if decoder_contract_version == 0 {
@@ -147,12 +151,17 @@ impl AdapterSupportBinding {
             ));
         }
         Ok(Self {
+            support_release_id,
             adapter_package_version,
             decoder_contract_version,
             ads_digest: Sha256Digest::parse(ads_digest)?,
             source_declaration_digest: Sha256Digest::parse(source_declaration_digest)?,
             scope_program_digest: Sha256Digest::parse(scope_program_digest)?,
         })
+    }
+
+    pub fn support_release_id(&self) -> &str {
+        &self.support_release_id
     }
 
     pub fn adapter_package_version(&self) -> &str {
@@ -689,6 +698,7 @@ pub fn verify_support_release_bundle(
     }
 
     let adapter_binding = AdapterSupportBinding {
+        support_release_id: descriptor.support_release_id.clone(),
         adapter_package_version: release.versions.adapter_package,
         decoder_contract_version: release.versions.decoder_contract,
         ads_digest: ads_digest.expect("support reference set always includes ADS"),
@@ -1579,8 +1589,9 @@ mod tests {
         .unwrap()
     }
 
-    fn fixture_binding() -> AdapterSupportBinding {
+    fn fixture_binding(support_release_id: &str) -> AdapterSupportBinding {
         AdapterSupportBinding {
+            support_release_id: support_release_id.to_string(),
             adapter_package_version: "1.0.0".to_string(),
             decoder_contract_version: 1,
             ads_digest: Sha256Digest::of(b"fixture-ads"),
@@ -1633,12 +1644,11 @@ mod tests {
     }
 
     fn fixture_catalog(releases: &[SupportReleaseDescriptor]) -> SupportCatalog {
-        let binding = fixture_binding();
         SupportCatalog::new(releases.iter().map(|descriptor| VerifiedSupportRelease {
             release_digest: Sha256Digest::of(descriptor.support_release_id.as_bytes()),
             adapter_id: descriptor.artifact_compatibility.family.clone(),
             descriptor: descriptor.clone(),
-            adapter_binding: binding.clone(),
+            adapter_binding: fixture_binding(&descriptor.support_release_id),
             scope_programs: fixture_scope_manifest(
                 &descriptor.artifact_compatibility.family,
                 descriptor.status,
@@ -1686,7 +1696,7 @@ mod tests {
 
         let mut malformed_request = fixture.contract_request;
         malformed_request.selection_contract_version = 0;
-        let binding = fixture_binding();
+        let binding = fixture_binding("candidate-only-support-v1");
         let scope_programs =
             fixture_scope_manifest("candidate-agent", SupportReleaseStatus::Candidate);
         let error = catalog
@@ -1710,7 +1720,7 @@ mod tests {
             .iter()
             .find(|case| case.name == "exact")
             .unwrap();
-        let binding = fixture_binding();
+        let binding = fixture_binding("fixture-support-v1");
         let scope_programs =
             fixture_scope_manifest("fixture-agent", SupportReleaseStatus::Promoted);
         let (exact_decision, durable) = catalog

@@ -798,12 +798,19 @@ record quarantine is sticky `Unavailable`: neither a later append nor a no-op
 scan can claim the skipped evidence was recovered. The future explicit replay
 path owns that recovery.
 
-Step 3's persistable source/fact-family coverage set and explicit replay
-recovery, private native corpus-scale qualification/coverage parity, native
-team-to-actor conformance, the default switch in step 6, step 7's
-compatibility/rollback window, and remaining crash boundaries are open. Until
-those gates pass, the candidate capability is unsupported and
-`getUsage`/`getUsageActivity` retain legacy semantics.
+Schema v48 now persists the step-3 RFC 012A fact-family coverage set in
+normalized, bounded set/point/absence/error tables. The common administrative
+writer replaces it atomically with the readiness barrier and binds it to the
+adapter, canonical source instance, support release, and verified source
+declaration. A deterministic content digest suppresses equal writes; restart,
+cursor advancement, and stable quarantine-gap behavior have focused tests.
+
+Step 3's bounded public coverage query and explicit replay recovery, private
+native corpus-scale qualification/coverage parity, native team-to-actor
+conformance, the default switch in step 6, step 7's compatibility/rollback
+window, and remaining crash boundaries are open. Until those gates pass, the
+candidate capability is unsupported and `getUsage`/`getUsageActivity` retain
+legacy semantics.
 
 ## 14. Failure and correction semantics
 

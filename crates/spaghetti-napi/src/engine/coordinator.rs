@@ -16,8 +16,12 @@ use walkdir::WalkDir;
 
 use crate::adapter::{
     AdapterError, AdapterErrorClass, AdapterManifest, AdapterObjectContext, AgentAdapter,
-    Availability, CapabilityGranularity, DecodeDisposition, DeletionPolicy, DependencyRevision,
-    DiscoveryContext, DriverSpec, FactBatch, FactSemanticContext, RawRetentionPolicy, SourceAccess,
+    Availability, CanonicalSourceInstanceKey, CapabilityGranularity, CoverageAbsence,
+    CoverageAbsenceKind, CoverageDeclarationDigest, CoverageDomain, CoverageError,
+    CoverageMembershipRevision, CoverageObjectKey, CoveragePosition, CoveragePositionKind,
+    CoverageProvenance, CoverageScope, CoverageSetCompleteness, CoverageStatus, CoverageStreamKey,
+    DecodeDisposition, DeletionPolicy, DependencyRevision, DiscoveryContext, DriverSpec, FactBatch,
+    FactSemanticContext, RawRetentionPolicy, SourceAccess, SourceCoveragePoint, SourceCoverageSet,
     SourceInstance, SourceInstanceSpec as AdapterSourceInstanceSpec, SourceListedObject,
     SourceObjectDescriptor, SourceObjectList, SourceObjectListRequest, SourceQuery, SourceRows,
     SourceSnapshot, StreamAuthority, StreamSpec, SupportLevel,
@@ -47,6 +51,7 @@ use super::commit::{
 use super::performance::{SourceDecodeObservation, SourceDecodeOutcome, SourcePerformanceRecorder};
 use super::query_pool::{QueryCancellationToken, SourceCatalogObject, SourceCatalogSnapshot};
 use super::runtime_semantic_projection::{USAGE_V2_PROJECTION_ID, USAGE_V2_PROJECTION_VERSION};
+use super::source_coverage::DurableCoverageSetUpdate;
 use super::{EngineError, SpaghettiEngineCore};
 
 // One default append-driver batch can contain 1,024 records. Built-in
@@ -228,13 +233,16 @@ impl ProjectionBlockers {
 
 #[derive(Debug, Default)]
 struct ProjectionCoverageAttempt {
-    required_streams: BTreeSet<String>,
+    required_streams: BTreeMap<String, CoveragePositionKind>,
     blockers: BTreeMap<String, BTreeSet<&'static str>>,
 }
 
 impl ProjectionCoverageAttempt {
-    fn require_stream(&mut self, stream_key: &str) {
-        self.required_streams.insert(stream_key.to_string());
+    fn require_stream(&mut self, stream: &StreamSpec) {
+        self.required_streams.insert(
+            stream.id.as_str().to_string(),
+            coverage_position_kind(&stream.driver),
+        );
     }
 
     fn note_outcome(
@@ -1025,7 +1033,7 @@ impl ObservationCoordinator {
             let usage_v2_stream = declares_usage_v2_projection(manifest)
                 && stream_declares_usage_v2_projection(&stream);
             if usage_v2_stream {
-                usage_v2_coverage.require_stream(stream.id.as_str());
+                usage_v2_coverage.require_stream(&stream);
             }
             let projection_blockers = ProjectionBlockers::capture(outcome);
             outcome.streams_reconciled = outcome.streams_reconciled.saturating_add(1);
@@ -1089,7 +1097,7 @@ impl ObservationCoordinator {
             ));
         }
         for object in &current_catalog.objects {
-            if !coverage.required_streams.contains(&object.stream_key) {
+            if !coverage.required_streams.contains_key(&object.stream_key) {
                 continue;
             }
             match object.state.as_str() {
@@ -1112,7 +1120,9 @@ impl ObservationCoordinator {
         let mut detail = coverage.detail();
         if sticky_quarantine {
             detail = match detail {
-                Some(current) if current.contains("records_quarantined") => Some(current),
+                Some(current) if coverage_detail_only_quarantine(&current) => prior
+                    .and_then(|projection| projection.detail.clone())
+                    .or(Some(current)),
                 Some(current) => Some(format!(
                     "{current}; retained=records_quarantined_requires_explicit_replay"
                 )),
@@ -1132,6 +1142,13 @@ impl ObservationCoordinator {
         } else {
             (ProjectionReadiness::Unavailable, "unavailable")
         };
+        let coverage_set = usage_v2_coverage_set_update(
+            manifest,
+            instance,
+            &current_catalog,
+            &coverage,
+            detail.as_deref(),
+        )?;
         let commit_seq = self
             .engine
             .commit_projection_versions(ProjectionVersionCommit {
@@ -1144,6 +1161,7 @@ impl ObservationCoordinator {
                     readiness,
                     detail.as_deref(),
                 )],
+                coverage_sets: vec![coverage_set],
             })?;
         if let Some(commit_seq) = commit_seq {
             outcome.commits = outcome.commits.saturating_add(1);
@@ -1634,7 +1652,10 @@ impl ObservationCoordinator {
                                 "scheduler lost an in-flight object key",
                             ));
                         }
-                        if projection_coverage.required_streams.contains(&stream_key) {
+                        if projection_coverage
+                            .required_streams
+                            .contains_key(&stream_key)
+                        {
                             projection_coverage.note_outcome(
                                 &stream_key,
                                 ProjectionBlockers::default(),
@@ -4064,6 +4085,226 @@ fn pending_projection_updates(
         .collect()
 }
 
+fn coverage_position_kind(driver: &DriverSpec) -> CoveragePositionKind {
+    match driver {
+        DriverSpec::AppendDelimited(_) => CoveragePositionKind::AppendCursor,
+        DriverSpec::ReplaceDocument(_) | DriverSpec::Presence(_) => {
+            CoveragePositionKind::DocumentRevision
+        }
+        DriverSpec::DirectorySnapshot(_) => CoveragePositionKind::SnapshotRevision,
+        DriverSpec::SqliteSnapshot(_) => CoveragePositionKind::DatabaseWatermark,
+        DriverSpec::KeyValueSnapshot(_) => CoveragePositionKind::KeyRangeToken,
+    }
+}
+
+fn usage_v2_coverage_set_update(
+    manifest: &AdapterManifest,
+    instance: &SourceInstance,
+    catalog: &SourceCatalogSnapshot,
+    attempt: &ProjectionCoverageAttempt,
+    incomplete_detail: Option<&str>,
+) -> Result<DurableCoverageSetUpdate, EngineError> {
+    let support = manifest.support_binding.as_ref().ok_or_else(|| {
+        observation_error(
+            "build usage-v2 coverage",
+            "a typed fact-family coverage set requires a digest-bound support release",
+        )
+    })?;
+    let source_instance_key = CanonicalSourceInstanceKey::derive(
+        instance.spec.identity_contract_version,
+        instance.spec.stable_key.as_bytes(),
+    )
+    .map_err(|error| observation_error("build usage-v2 coverage", error.to_string()))?;
+    // The support binding contains the verified SHA-256 declaration digest,
+    // not a second copy of the declaration bytes. RFC 012A's opaque coverage
+    // digest therefore binds that verified digest as its stable input.
+    let declaration_digest =
+        CoverageDeclarationDigest::derive(support.source_declaration_digest().as_bytes())
+            .map_err(|error| observation_error("build usage-v2 coverage", error.to_string()))?;
+
+    let domain = CoverageDomain::FactFamily {
+        family: USAGE_V2_PROJECTION_ID.to_string(),
+        version: USAGE_V2_PROJECTION_VERSION,
+    };
+    // Once a decode gap has quarantined evidence, later cursor progress cannot
+    // prove the missing fact-family interval. Keep the normalized set stable
+    // until the explicit replay path starts a replacement attempt. In
+    // particular, the first quarantine and the following unchanged poll must
+    // not alternate between a per-record error and a generic sticky error.
+    let replay_gap = incomplete_detail.is_some_and(|detail| detail.contains("records_quarantined"));
+    let mut membership = b"runtime.usage-v2/source-membership/v1".to_vec();
+    let mut points = Vec::new();
+    let mut absences = Vec::new();
+    for stream in attempt.required_streams.keys() {
+        append_membership_component(&mut membership, stream.as_bytes());
+    }
+    for object in catalog
+        .objects
+        .iter()
+        .filter(|object| attempt.required_streams.contains_key(&object.stream_key))
+    {
+        append_membership_component(&mut membership, object.stream_key.as_bytes());
+        append_membership_component(&mut membership, &object.object_key);
+        membership.extend_from_slice(&object.generation.to_be_bytes());
+        membership.push(u8::from(object.state == "absent"));
+
+        let stream_key =
+            CoverageStreamKey::derive(manifest.id.as_str(), object.stream_key.as_bytes())
+                .map_err(|error| observation_error("build usage-v2 coverage", error.to_string()))?;
+        let object_key = CoverageObjectKey::derive(&object.stream_key, &object.object_key)
+            .map_err(|error| observation_error("build usage-v2 coverage", error.to_string()))?;
+        if object.state == "absent" {
+            absences.push(CoverageAbsence {
+                stream_key,
+                object_key,
+                generation: object.generation,
+                kind: CoverageAbsenceKind::Absent,
+            });
+            continue;
+        }
+
+        let kind = *attempt
+            .required_streams
+            .get(&object.stream_key)
+            .expect("provider object was filtered by the required stream map");
+        let cursor =
+            SourceCursor::from_opaque(object.committed_cursor.clone()).map_err(source_error)?;
+        let position = CoveragePosition::derive(
+            kind,
+            &object.committed_cursor,
+            (kind == CoveragePositionKind::AppendCursor)
+                .then(|| cursor.append_offset_value())
+                .flatten(),
+        )
+        .map_err(|error| observation_error("build usage-v2 coverage", error.to_string()))?;
+        let status = if replay_gap {
+            CoverageStatus::Unavailable {
+                reason: "coverage_gap_requires_explicit_replay".to_string(),
+            }
+        } else {
+            match object.state.as_str() {
+                "active" if kind == CoveragePositionKind::AppendCursor => {
+                    CoverageStatus::CompleteThrough
+                }
+                "active" => CoverageStatus::ExactSnapshot,
+                "retrying" | "pending" => CoverageStatus::Partial,
+                "quarantined" => CoverageStatus::Unavailable {
+                    reason: "durable_quarantine".to_string(),
+                },
+                other => CoverageStatus::Unavailable {
+                    reason: format!("unknown_source_state_{other}"),
+                },
+            }
+        };
+        points.push(
+            SourceCoveragePoint::new(
+                domain.clone(),
+                manifest.id.as_str(),
+                source_instance_key,
+                stream_key,
+                object_key,
+                object.generation,
+                Some(position),
+                status,
+                CoverageProvenance::default(),
+            )
+            .map_err(|error| observation_error("build usage-v2 coverage", error.to_string()))?,
+        );
+    }
+    points.sort_by_key(|point| (point.stream_key, point.object_key, point.generation));
+    absences.sort();
+
+    let mut errors = Vec::new();
+    for (stream, blockers) in &attempt.blockers {
+        let stream_key = CoverageStreamKey::derive(manifest.id.as_str(), stream.as_bytes())
+            .map_err(|error| observation_error("build usage-v2 coverage", error.to_string()))?;
+        for blocker in blockers {
+            errors.push(CoverageError {
+                stream_key: Some(stream_key),
+                object_key: None,
+                code: normalized_coverage_blocker(blocker).to_string(),
+            });
+        }
+    }
+    if replay_gap {
+        errors.retain(|error| error.code != "durable_quarantine");
+        errors.push(CoverageError {
+            stream_key: None,
+            object_key: None,
+            code: "coverage_gap_requires_explicit_replay".to_string(),
+        });
+    } else if incomplete_detail.is_some() && errors.is_empty() {
+        errors.push(CoverageError {
+            stream_key: None,
+            object_key: None,
+            code: "coverage_incomplete".to_string(),
+        });
+    }
+    errors.sort();
+    errors.dedup();
+
+    let membership_revision = CoverageMembershipRevision::derive(&membership)
+        .map_err(|error| observation_error("build usage-v2 coverage", error.to_string()))?;
+    let completeness = if incomplete_detail.is_none() {
+        CoverageSetCompleteness::Complete
+    } else {
+        CoverageSetCompleteness::Unavailable
+    };
+    let set = SourceCoverageSet::new(
+        domain,
+        CoverageScope {
+            adapter_id: manifest.id.as_str().to_string(),
+            source_instance_key,
+            root_entity_key: None,
+            support_release_id: support.support_release_id().to_string(),
+            source_or_scope_declaration_digest: declaration_digest,
+        },
+        membership_revision,
+        points,
+        absences,
+        errors,
+        completeness,
+    )
+    .map_err(|error| observation_error("build usage-v2 coverage", error.to_string()))?;
+    Ok(DurableCoverageSetUpdate {
+        owner_id: USAGE_V2_PROJECTION_ID.to_string(),
+        owner_scope_key: instance.spec.stable_key.as_bytes().to_vec(),
+        set,
+    })
+}
+
+fn append_membership_component(output: &mut Vec<u8>, component: &[u8]) {
+    output.extend_from_slice(&(component.len() as u64).to_be_bytes());
+    output.extend_from_slice(component);
+}
+
+fn normalized_coverage_blocker(blocker: &str) -> &str {
+    match blocker {
+        "records_quarantined" => "durable_quarantine",
+        "retries_required" => "durable_retry",
+        other => other,
+    }
+}
+
+fn coverage_detail_only_quarantine(detail: &str) -> bool {
+    let Some((_, streams)) = detail.split_once(':') else {
+        return false;
+    };
+    let mut found = false;
+    for blocker in streams.split(',').flat_map(|stream| {
+        stream
+            .split_once('=')
+            .map_or("", |(_, blockers)| blockers)
+            .split('+')
+    }) {
+        if !matches!(blocker.trim(), "durable_quarantine" | "records_quarantined") {
+            return false;
+        }
+        found = true;
+    }
+    found
+}
+
 fn previous_display_relative(object: &SourceCatalogObject, root: &Path) -> Option<PathBuf> {
     let display = object.display_path.as_deref()?;
     let relative = PathBuf::from(display);
@@ -4800,7 +5041,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
-    use rusqlite::{Connection, OpenFlags};
+    use rusqlite::{Connection, OpenFlags, OptionalExtension};
     use tempfile::TempDir;
 
     use crate::adapter::{
@@ -5060,6 +5301,46 @@ mod tests {
     }
 
     #[test]
+    fn usage_v2_coverage_is_durable_and_restart_stable() {
+        let fixture = ClaudeFixture::new();
+        let transcript = fixture.transcript_path();
+        std::fs::write(&transcript, transcript_line("m1", "covered")).unwrap();
+
+        let first = fixture.open_engine();
+        let initial = fixture.reconcile(&first);
+        assert_eq!(initial.commits, 2);
+        let covered = usage_v2_coverage_state(&fixture.database);
+        assert_eq!(covered.set_contract_version, 1);
+        assert_eq!(covered.coverage_contract_version, 1);
+        assert_eq!(covered.domain_kind, "fact_family");
+        assert_eq!(covered.domain_name, "runtime.usage-v2");
+        assert_eq!(covered.domain_version, 1);
+        assert_eq!(covered.adapter_id, "claude-code");
+        assert_eq!(
+            covered.support_release_id,
+            "claude-code-support-2026-08-15-candidate"
+        );
+        assert_eq!(covered.completeness, "complete");
+        assert_eq!(covered.last_commit_seq, 2);
+        assert_eq!(covered.point_count, 1);
+        assert_eq!(covered.absence_count, 0);
+        assert_eq!(covered.point_status.as_deref(), Some("complete_through"));
+        assert_eq!(covered.position_kind.as_deref(), Some("append_cursor"));
+        assert_eq!(
+            covered.monotonic_order,
+            Some(std::fs::metadata(&transcript).unwrap().len())
+        );
+        assert_eq!(covered.unavailable_reason, None);
+        assert!(covered.error_codes.is_empty());
+        first.shutdown().unwrap();
+
+        let restarted = fixture.open_engine();
+        let unchanged = fixture.reconcile(&restarted);
+        assert_eq!(unchanged.commits, 0);
+        assert_eq!(usage_v2_coverage_state(&fixture.database), covered);
+    }
+
+    #[test]
     fn unrelated_stream_commits_do_not_churn_usage_v2_readiness() {
         let fixture = ClaudeFixture::new();
         std::fs::write(
@@ -5108,6 +5389,21 @@ mod tests {
             .4
             .as_deref()
             .is_some_and(|detail| detail.contains("session-transcripts=records_quarantined")));
+        let unavailable_coverage = usage_v2_coverage_state(&fixture.database);
+        assert_eq!(unavailable_coverage.completeness, "unavailable");
+        assert_eq!(unavailable_coverage.last_commit_seq, 2);
+        assert_eq!(
+            unavailable_coverage.point_status.as_deref(),
+            Some("unavailable")
+        );
+        assert_eq!(
+            unavailable_coverage.unavailable_reason.as_deref(),
+            Some("coverage_gap_requires_explicit_replay")
+        );
+        assert_eq!(
+            unavailable_coverage.error_codes,
+            vec!["coverage_gap_requires_explicit_replay".to_string()]
+        );
 
         let unchanged = fixture.reconcile(&engine);
         assert_eq!(unchanged.records_quarantined, 0);
@@ -5116,6 +5412,11 @@ mod tests {
             projection_version_state(&fixture.database, "runtime.usage-v2"),
             unavailable,
             "passing an already-quarantined cursor cannot prove the missing family coverage"
+        );
+        assert_eq!(
+            usage_v2_coverage_state(&fixture.database),
+            unavailable_coverage,
+            "the sticky gap must not rewrite its normalized coverage snapshot"
         );
 
         let mut append = std::fs::OpenOptions::new()
@@ -5132,6 +5433,17 @@ mod tests {
         let still_unavailable = projection_version_state(&fixture.database, "runtime.usage-v2");
         assert_eq!(still_unavailable.2, "unavailable");
         assert_eq!(still_unavailable.4, unavailable.4);
+        let advanced_coverage = usage_v2_coverage_state(&fixture.database);
+        assert_eq!(advanced_coverage.completeness, "unavailable");
+        assert_eq!(advanced_coverage.last_commit_seq, 4);
+        assert_eq!(
+            advanced_coverage.error_codes,
+            unavailable_coverage.error_codes
+        );
+        assert_ne!(
+            advanced_coverage.content_digest,
+            unavailable_coverage.content_digest
+        );
     }
 
     #[test]
@@ -6034,6 +6346,139 @@ mod tests {
             _ => panic!("unsupported coordinator test table"),
         };
         connection.query_row(sql, [], |row| row.get(0)).unwrap()
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    struct UsageV2CoverageState {
+        set_contract_version: i64,
+        coverage_contract_version: i64,
+        domain_kind: String,
+        domain_name: String,
+        domain_version: i64,
+        adapter_id: String,
+        support_release_id: String,
+        completeness: String,
+        content_digest: Vec<u8>,
+        last_commit_seq: i64,
+        point_count: i64,
+        absence_count: i64,
+        point_status: Option<String>,
+        unavailable_reason: Option<String>,
+        position_kind: Option<String>,
+        monotonic_order: Option<u64>,
+        error_codes: Vec<String>,
+    }
+
+    fn usage_v2_coverage_state(database: &Path) -> UsageV2CoverageState {
+        let connection =
+            Connection::open_with_flags(database, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+        let (
+            coverage_set_id,
+            set_contract_version,
+            coverage_contract_version,
+            domain_kind,
+            domain_name,
+            domain_version,
+            adapter_id,
+            support_release_id,
+            completeness,
+            content_digest,
+            last_commit_seq,
+        ) = connection
+            .query_row(
+                r#"
+                SELECT coverage_set_id, coverage_set_contract_version,
+                       coverage_contract_version, domain_kind, domain_name,
+                       domain_version, adapter_id, support_release_id,
+                       completeness, content_digest, last_commit_seq
+                FROM source_coverage_sets
+                WHERE owner_id = 'runtime.usage-v2'
+                "#,
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                        row.get(7)?,
+                        row.get(8)?,
+                        row.get(9)?,
+                        row.get(10)?,
+                    ))
+                },
+            )
+            .unwrap();
+        let point = connection
+            .query_row(
+                r#"
+                SELECT status, unavailable_reason, position_kind, monotonic_order
+                FROM source_coverage_points
+                WHERE coverage_set_id = ?1
+                ORDER BY stream_key, object_key, generation
+                LIMIT 1
+                "#,
+                [coverage_set_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, Option<u64>>(3)?,
+                    ))
+                },
+            )
+            .optional()
+            .unwrap();
+        let point_count = connection
+            .query_row(
+                "SELECT COUNT(*) FROM source_coverage_points WHERE coverage_set_id = ?1",
+                [coverage_set_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let absence_count = connection
+            .query_row(
+                "SELECT COUNT(*) FROM source_coverage_absences WHERE coverage_set_id = ?1",
+                [coverage_set_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let mut error_statement = connection
+            .prepare(
+                "SELECT error_code FROM source_coverage_errors WHERE coverage_set_id = ?1 ORDER BY error_ordinal",
+            )
+            .unwrap();
+        let error_codes = error_statement
+            .query_map([coverage_set_id], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<Vec<String>, _>>()
+            .unwrap();
+        let (point_status, unavailable_reason, position_kind, monotonic_order) = point
+            .map(|(status, reason, kind, order)| (Some(status), reason, kind, order))
+            .unwrap_or((None, None, None, None));
+        UsageV2CoverageState {
+            set_contract_version,
+            coverage_contract_version,
+            domain_kind,
+            domain_name,
+            domain_version,
+            adapter_id,
+            support_release_id,
+            completeness,
+            content_digest,
+            last_commit_seq,
+            point_count,
+            absence_count,
+            point_status,
+            unavailable_reason,
+            position_kind,
+            monotonic_order,
+            error_codes,
+        }
     }
 
     fn record_error_state(database: &Path) -> (String, i64) {

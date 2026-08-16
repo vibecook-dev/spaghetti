@@ -62,6 +62,7 @@ impl CodexAdapter {
                 contract_version: 1,
                 support_binding: Some(
                     AdapterSupportBinding::new(
+                        "codex-support-2026-08-15-candidate",
                         env!("CARGO_PKG_VERSION"),
                         1,
                         "sha256:0256d195021bb939f4af366b631eaf04c9121a880380852fde9913331673961e",

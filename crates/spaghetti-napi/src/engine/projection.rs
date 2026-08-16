@@ -6854,6 +6854,7 @@ mod tests {
                     readiness: ProjectionReadiness::Ready,
                     detail: None,
                 }],
+                coverage_sets: Vec::new(),
             },
         )
         .unwrap()

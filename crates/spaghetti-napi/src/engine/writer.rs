@@ -1933,6 +1933,7 @@ mod tests {
                 readiness: commit::ProjectionReadiness::Ready,
                 detail: None,
             }],
+            coverage_sets: Vec::new(),
         };
         assert!(client
             .commit_projection_versions(request.clone())

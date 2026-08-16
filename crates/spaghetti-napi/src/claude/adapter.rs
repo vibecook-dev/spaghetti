@@ -150,6 +150,7 @@ impl ClaudeCodeAdapter {
                 contract_version: 18,
                 support_binding: Some(
                     AdapterSupportBinding::new(
+                        "claude-code-support-2026-08-15-candidate",
                         env!("CARGO_PKG_VERSION"),
                         18,
                         "sha256:34362f099f219181dfff3e50faef974882b656c5955e03d9cf1f4e8af7b986d3",

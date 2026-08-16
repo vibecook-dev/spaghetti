@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::adapter::{ConsistencyPolicy, RawRetentionPolicy};
 
+use super::source_coverage::{self, DurableCoverageSetUpdate};
 use super::EngineError;
 
 const MAX_DRIVER_CHECKPOINT_BYTES: usize = 64 * 1024 * 1024;
@@ -172,6 +173,7 @@ pub struct ProjectionVersionCommit {
     pub started_at: i64,
     pub committed_at: i64,
     pub projection_versions: Vec<ProjectionVersionUpdate>,
+    pub coverage_sets: Vec<DurableCoverageSetUpdate>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -432,7 +434,10 @@ pub(super) fn apply_projection_version_commit(
             "projection version commit references an unknown source instance".to_string(),
         ));
     }
-    if !projection_versions_changed(&transaction, &request.projection_versions)? {
+    let projection_versions_changed =
+        projection_versions_changed(&transaction, &request.projection_versions)?;
+    let coverage_changed = source_coverage::updates_changed(&transaction, &request.coverage_sets)?;
+    if !projection_versions_changed && !coverage_changed {
         transaction
             .commit()
             .map_err(|error| sqlite_error("finish unchanged projection version commit", error))?;
@@ -463,6 +468,13 @@ pub(super) fn apply_projection_version_commit(
         commit_seq,
         request.committed_at,
         &request.projection_versions,
+    )?;
+    source_coverage::replace_sets(
+        &transaction,
+        request.source_instance_id,
+        commit_seq,
+        request.committed_at,
+        &request.coverage_sets,
     )?;
     transaction
         .commit()
@@ -796,7 +808,19 @@ fn validate_projection_version_commit(
             "projection version commit requires at least one update".to_string(),
         ));
     }
-    validate_projection_versions(&request.projection_versions)
+    validate_projection_versions(&request.projection_versions)?;
+    source_coverage::validate_updates(&request.coverage_sets)?;
+    for coverage in &request.coverage_sets {
+        if !request.projection_versions.iter().any(|projection| {
+            projection.projection_id == coverage.owner_id
+                && projection.scope_key == coverage.owner_scope_key
+        }) {
+            return Err(EngineError::InvalidCommit(
+                "source coverage update has no matching projection owner transition".to_string(),
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn validate_projection_versions(
@@ -2135,6 +2159,7 @@ mod tests {
             started_at: 1_300,
             committed_at: 1_301,
             projection_versions: vec![pending.clone()],
+            coverage_sets: Vec::new(),
         };
         let receipt = apply_projection_version_commit(&mut connection, &pending_request)
             .unwrap()
@@ -2162,6 +2187,7 @@ mod tests {
                 detail: None,
                 ..pending
             }],
+            coverage_sets: Vec::new(),
         };
         let ready = apply_projection_version_commit(&mut connection, &ready_request)
             .unwrap()

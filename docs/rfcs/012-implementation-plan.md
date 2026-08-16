@@ -247,11 +247,19 @@ Current landing status (2026-08-16):
   source-record/fact/revision triple, rejects partial or non-32-byte triples,
   rejects duplicate non-null revision identities, leaves legacy rows null, and
   removes the identities with their owning generation; transaction tests prove
-  a uniqueness failure cannot advance the source cursor; and
+  a uniqueness failure cannot advance the source cursor;
+- added schema v48's normalized durable coverage storage. Common writer-owned
+  administrative transitions atomically replace bounded coverage-set metadata,
+  points, explicit absences/deletions, and errors beside their projection owner;
+  content digests make equal replacements true no-ops, and the stored scope is
+  bound to the adapter, canonical source instance, verified source-declaration
+  digest, and explicit support-release ID. Restart and quarantine-gap tests
+  prove that the representation survives and does not churn on an unchanged
+  scan; and
 - retained A1 as `In progress`: usage-v2 is the first built-in family on the
-  canonical seam, while the remaining fact-family migrations, durable query
-  exposure, full semantic reduction, tier/view compositionality, N-API fixture
-  parity, and full-only versus composed reducer digests remain.
+  canonical seam, while bounded public coverage query exposure, the remaining
+  fact-family migrations, full semantic reduction, tier/view compositionality,
+  N-API fixture parity, and full-only versus composed reducer digests remain.
 
 The repository-wide native-surface validator also discovered current Claude
 drift that predates this model slice: `bridge-session` records now include
@@ -625,12 +633,19 @@ Current landing status (2026-08-16):
 - made quarantine gaps fail closed: record quarantine on a provider stream
   establishes sticky `Unavailable` readiness, and a later append or no-op scan
   cannot fabricate recovered coverage. Clearing that state is deliberately
-  reserved for the explicit replay/revalidation path still required by C3; and
+  reserved for the explicit replay/revalidation path still required by C3;
+- added schema v48's normalized durable RFC 012A source/fact-family coverage.
+  The common administrative writer atomically replaces one bounded set of
+  points, explicit absences/deletions, and errors with the readiness barrier;
+  it persists its support-release and verified declaration binding, uses a
+  deterministic content digest for no-op suppression, survives restart, moves
+  with append progress, and retains a stable replay-required gap after
+  quarantine; and
 - kept the candidate capability `unsupported`: private native corpus-scale
   parity, fixture-proven native team-to-actor correlation, exact-repeat
-  public-event suppression, durable source/family coverage and replay
-  recovery, migration switch, remaining portable fact-family
-  serialization, and rollback window are not yet complete.
+  public-event suppression, bounded public coverage queries, replay recovery,
+  migration switch, remaining portable fact-family serialization, and rollback
+  window are not yet complete.
 
 ### C3. Durable migration
 
@@ -658,11 +673,19 @@ query snapshot, survives restart, and does not move for settings/presence/task
 streams that do not provide usage-v2. Provider quarantine is sticky rather
 than becoming ready after its cursor has skipped the failed record.
 
-C3 remains `In progress`: durable source/family coverage sets, explicit replay
-and quarantine-gap recovery, private corpus-scale comparison, transactional
-default query selection, crash-boundary recovery, compatibility-window
-telemetry, and rollback are still required. The shadow query and pack
-readiness are inspection/migration surfaces, not a support-promotion claim.
+Schema v48 now stores the corresponding RFC 012A fact-family coverage as
+normalized, bounded sets/points/absences/errors. The post-drain administrative
+transaction replaces coverage and readiness atomically; equal content does not
+advance the commit clock. Coverage identifies the support release and verified
+source declaration, survives restart, records append-cursor progress, and
+keeps a quarantined interval explicitly unavailable until replay.
+
+C3 remains `In progress`: bounded public coverage query exposure, explicit
+replay and quarantine-gap recovery, private corpus-scale comparison,
+transactional default query selection, crash-boundary recovery,
+compatibility-window telemetry, and rollback are still required. The shadow
+query, pack readiness, and internal durable coverage are inspection/migration
+surfaces, not a support-promotion claim.
 
 ### C4. Downstream semantic suite
 

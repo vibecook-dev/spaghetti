@@ -120,7 +120,11 @@ import type { SqliteService } from '../io/index.js';
 // 011 store key, with complete-triple and unique-revision enforcement.
 // v46: non-public RFC 012C response-level usage-v2 shadow state and interned
 // qualified-value evidence beside the retained legacy usage projection.
-export const SCHEMA_VERSION = 47;
+// v47: topology-neutral runtime actor and affiliation revisions used to
+// regroup usage without copying response contributions.
+// v48: normalized, persistable RFC 012A source/fact-family coverage sets,
+// points, absences, and errors owned by common projection transitions.
+export const SCHEMA_VERSION = 48;
 
 export const TOKEN_ACTIVITY_TRIGGER_NAMES = [
   'token_activity_messages_ai',
@@ -612,6 +616,78 @@ CREATE TABLE IF NOT EXISTS projection_versions (
   updated_at INTEGER NOT NULL,
   detail TEXT,
   PRIMARY KEY (projection_id, scope_key)
+);
+
+CREATE TABLE IF NOT EXISTS source_coverage_sets (
+  coverage_set_id INTEGER PRIMARY KEY,
+  source_instance_id INTEGER NOT NULL REFERENCES source_instances(source_instance_id) ON DELETE CASCADE,
+  owner_id TEXT NOT NULL,
+  owner_scope_key BLOB NOT NULL,
+  coverage_set_contract_version INTEGER NOT NULL CHECK (coverage_set_contract_version > 0),
+  coverage_contract_version INTEGER NOT NULL CHECK (coverage_contract_version > 0),
+  domain_kind TEXT NOT NULL CHECK (domain_kind IN ('decode', 'fact_family', 'projection_pack')),
+  domain_name TEXT NOT NULL,
+  domain_version INTEGER NOT NULL,
+  adapter_id TEXT NOT NULL,
+  canonical_source_instance_key BLOB NOT NULL CHECK (length(canonical_source_instance_key) = 32),
+  root_entity_key BLOB NOT NULL DEFAULT X'' CHECK (length(root_entity_key) IN (0, 32)),
+  support_release_id TEXT NOT NULL,
+  declaration_digest BLOB NOT NULL CHECK (length(declaration_digest) = 32),
+  membership_revision BLOB NOT NULL CHECK (length(membership_revision) = 32),
+  completeness TEXT NOT NULL CHECK (completeness IN ('complete', 'partial', 'unavailable')),
+  content_digest BLOB NOT NULL CHECK (length(content_digest) = 32),
+  last_commit_seq INTEGER NOT NULL REFERENCES ingest_commits(commit_seq) ON DELETE RESTRICT,
+  updated_at INTEGER NOT NULL,
+  CHECK (
+    (domain_kind = 'decode' AND domain_name = '' AND domain_version = 0)
+    OR
+    (domain_kind IN ('fact_family', 'projection_pack') AND length(domain_name) > 0 AND domain_version > 0)
+  ),
+  UNIQUE (owner_id, owner_scope_key, domain_kind, domain_name, domain_version, root_entity_key)
+);
+
+CREATE TABLE IF NOT EXISTS source_coverage_points (
+  coverage_set_id INTEGER NOT NULL REFERENCES source_coverage_sets(coverage_set_id) ON DELETE CASCADE,
+  stream_key BLOB NOT NULL CHECK (length(stream_key) = 32),
+  object_key BLOB NOT NULL CHECK (length(object_key) = 32),
+  generation INTEGER NOT NULL CHECK (generation >= 0),
+  position_kind TEXT CHECK (position_kind IN ('append_cursor', 'document_revision', 'snapshot_revision', 'database_watermark', 'key_range_token')),
+  position_ref BLOB CHECK (position_ref IS NULL OR length(position_ref) = 32),
+  monotonic_order INTEGER CHECK (monotonic_order IS NULL OR monotonic_order >= 0),
+  status TEXT NOT NULL CHECK (status IN ('complete_through', 'exact_snapshot', 'partial', 'unavailable')),
+  unavailable_reason TEXT,
+  source_record_id BLOB CHECK (source_record_id IS NULL OR length(source_record_id) = 32),
+  semantic_revision_ref BLOB CHECK (semantic_revision_ref IS NULL OR length(semantic_revision_ref) = 32),
+  observed_at INTEGER,
+  PRIMARY KEY (coverage_set_id, stream_key, object_key, generation),
+  CHECK (
+    (position_kind IS NULL AND position_ref IS NULL AND monotonic_order IS NULL)
+    OR
+    (position_kind IS NOT NULL AND position_ref IS NOT NULL)
+  ),
+  CHECK (
+    (status = 'unavailable' AND unavailable_reason IS NOT NULL AND length(unavailable_reason) > 0)
+    OR
+    (status != 'unavailable' AND unavailable_reason IS NULL)
+  )
+);
+
+CREATE TABLE IF NOT EXISTS source_coverage_absences (
+  coverage_set_id INTEGER NOT NULL REFERENCES source_coverage_sets(coverage_set_id) ON DELETE CASCADE,
+  stream_key BLOB NOT NULL CHECK (length(stream_key) = 32),
+  object_key BLOB NOT NULL CHECK (length(object_key) = 32),
+  generation INTEGER NOT NULL CHECK (generation >= 0),
+  absence_kind TEXT NOT NULL CHECK (absence_kind IN ('absent', 'deleted')),
+  PRIMARY KEY (coverage_set_id, stream_key, object_key, generation)
+);
+
+CREATE TABLE IF NOT EXISTS source_coverage_errors (
+  coverage_set_id INTEGER NOT NULL REFERENCES source_coverage_sets(coverage_set_id) ON DELETE CASCADE,
+  error_ordinal INTEGER NOT NULL CHECK (error_ordinal >= 0),
+  stream_key BLOB CHECK (stream_key IS NULL OR length(stream_key) = 32),
+  object_key BLOB CHECK (object_key IS NULL OR length(object_key) = 32),
+  error_code TEXT NOT NULL,
+  PRIMARY KEY (coverage_set_id, error_ordinal)
 );
 
 CREATE TABLE IF NOT EXISTS source_record_errors (
@@ -1884,6 +1960,8 @@ CREATE INDEX IF NOT EXISTS idx_ingest_commits_source_seq ON ingest_commits(sourc
 CREATE INDEX IF NOT EXISTS idx_ingest_commits_retention ON ingest_commits(committed_at, commit_seq);
 CREATE INDEX IF NOT EXISTS idx_change_log_topic_cursor ON change_log(topic, commit_seq, ordinal);
 CREATE INDEX IF NOT EXISTS idx_projection_versions_readiness ON projection_versions(readiness, projection_id);
+CREATE INDEX IF NOT EXISTS idx_source_coverage_sets_instance_owner ON source_coverage_sets(source_instance_id, owner_id);
+CREATE INDEX IF NOT EXISTS idx_source_coverage_points_object ON source_coverage_points(stream_key, object_key, coverage_set_id);
 CREATE INDEX IF NOT EXISTS idx_source_record_errors_commit ON source_record_errors(first_commit_seq);
 CREATE INDEX IF NOT EXISTS idx_fact_records_object_generation ON fact_records(source_object_id, source_generation);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_fact_records_semantic_revision ON fact_records(semantic_fact_revision_id) WHERE semantic_fact_revision_id IS NOT NULL;
@@ -2191,6 +2269,10 @@ const CURRENT_TABLES = [
   'source_record_errors',
   'change_log',
   'change_log_retention_state',
+  'source_coverage_errors',
+  'source_coverage_absences',
+  'source_coverage_points',
+  'source_coverage_sets',
   'projection_versions',
   'source_objects',
   'source_streams',

@@ -79,6 +79,7 @@ impl GrokAdapter {
                 contract_version: 1,
                 support_binding: Some(
                     AdapterSupportBinding::new(
+                        "grok-support-2026-08-15-candidate",
                         env!("CARGO_PKG_VERSION"),
                         1,
                         "sha256:5a6fd2d1adda4dad702b421a18dd0fbe40fec16bc68d7fc99cf65c7b913a2c18",

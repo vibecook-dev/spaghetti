@@ -26,6 +26,7 @@ mod runtime_usage_query;
 mod search_query;
 mod session_index_projection;
 mod settings_projection;
+mod source_coverage;
 mod storage_codec;
 mod supervisor;
 mod task_projection;
