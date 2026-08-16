@@ -22,13 +22,15 @@ use crate::adapter::{
     InterpretationSettingsDocumentStatus, InterpretationSettingsFact, InterpretationSettingsLayer,
     InterpretationSettingsSnapshot, MessageFact, MessageRole, ObjectSelector,
     PersistedToolResultFact, PlanSnapshotFact, PresenceFact, ProjectMemoryDocumentFact,
-    QualifiedTimestamp, RawRetentionPolicy, RelationStrength, RunEvidenceFact, RunFact,
-    ScopeProgramManifest, SessionFact, SessionIndexEntrySnapshot, SessionIndexSnapshotFact,
-    SourceInstance, SourceInstanceKey, SourceInstanceSpec, SourceObjectDescriptor, SourceRoot,
-    StreamAuthority, StreamId, StreamSpec, SupportLevel, TaskCollectionKind, TaskItemSnapshot,
-    TaskSnapshotCoverage, TaskSnapshotFact, TaskStatus, TeamInboxMessageSnapshot,
-    TeamInboxSnapshotFact, TeamMemberSnapshot, TeamSnapshotFact, TimestampQuality, TokenUsage,
-    UsageAccounting, UsageFact, UsageScope, ValueQuality, WorkflowMemberEventFact,
+    QualifiedTimestamp, QualifiedUnknownReason, QualifiedValue, QualifiedValueQuality,
+    RawRetentionPolicy, RelationStrength, RunEvidenceFact, RunFact, ScopeProgramManifest,
+    SessionFact, SessionIndexEntrySnapshot, SessionIndexSnapshotFact, SourceInstance,
+    SourceInstanceKey, SourceInstanceSpec, SourceObjectDescriptor, SourceRoot, StreamAuthority,
+    StreamId, StreamSpec, SupportLevel, TaskCollectionKind, TaskItemSnapshot, TaskSnapshotCoverage,
+    TaskSnapshotFact, TaskStatus, TeamInboxMessageSnapshot, TeamInboxSnapshotFact,
+    TeamMemberSnapshot, TeamSnapshotFact, TimestampQuality, TokenUsage, UsageAccounting,
+    UsageBucketsV2, UsageFact, UsageQualifiedValue, UsageResponseIdentity, UsageRevisionV2Fact,
+    UsageScope, UsageValueAuthority, UsageValueProvenance, ValueQuality, WorkflowMemberEventFact,
     WorkflowMemberEventKind, WorkflowSnapshotFact, WorkflowStatus,
 };
 use crate::claude::message_extractor;
@@ -143,11 +145,11 @@ impl ClaudeCodeAdapter {
                 id: AdapterId::new(ADAPTER_ID).expect("static Claude adapter id is valid"),
                 display_name: "Claude Code".to_string(),
                 adapter_version: env!("CARGO_PKG_VERSION").to_string(),
-                contract_version: 16,
+                contract_version: 17,
                 support_binding: Some(
                     AdapterSupportBinding::new(
                         env!("CARGO_PKG_VERSION"),
-                        16,
+                        17,
                         "sha256:34362f099f219181dfff3e50faef974882b656c5955e03d9cf1f4e8af7b986d3",
                         "sha256:17a0f1aa7490b5c03a525f7606a7a02ee6d1919cc8b9b776597843f1edbf1ebe",
                         "sha256:689c86b9770544f826da37e72d1c4a1a37153fad4091372b954bba90ca2d5f7c",
@@ -3765,6 +3767,11 @@ fn decode_transcript_record(
             }),
         )?;
     }
+    if let Some((semantic_key, fact)) =
+        claude_usage_v2_fact(context, record, &value, source_time.clone(), output)?
+    {
+        output.push_native_object_scoped(record, &semantic_key, Fact::UsageRevisionV2(fact))?;
+    }
     for descriptor in spawn_descriptors {
         let mut native_spawn_key = Vec::new();
         push_key_component(&mut native_spawn_key, run_native_key.as_bytes());
@@ -3811,6 +3818,160 @@ fn decode_transcript_record(
     }
     state.store(output)?;
     Ok(DecodeDisposition::Applied)
+}
+
+fn claude_usage_v2_fact(
+    context: &ClaudeTranscriptContext,
+    record: &SourceRecord,
+    value: &Value,
+    source_time: Option<QualifiedTimestamp>,
+    output: &mut FactBatch,
+) -> Result<Option<(Vec<u8>, UsageRevisionV2Fact)>, AdapterError> {
+    if value.get("type").and_then(Value::as_str) != Some("assistant") {
+        return Ok(None);
+    }
+    let Some(message) = value.get("message").and_then(Value::as_object) else {
+        return Ok(None);
+    };
+    let Some(native_usage) = message.get("usage") else {
+        return Ok(None);
+    };
+    let Some(native_usage) = native_usage.as_object() else {
+        output.push_diagnostic(AdapterDiagnostic {
+            class: AdapterErrorClass::RecordPermanent,
+            code: "claude_usage_v2_shape".to_string(),
+            message: "Claude message.usage must be an object".to_string(),
+        })?;
+        return Ok(None);
+    };
+    let native_message_id = message
+        .get("id")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned);
+    let (response_key, response_identity) = match native_message_id.as_deref() {
+        Some(native_message_id) => (
+            native_message_id.as_bytes().to_vec(),
+            UsageResponseIdentity::NativeMessageId,
+        ),
+        None => (
+            usage_source_record_fallback_key(record),
+            UsageResponseIdentity::SourceRecordFallback,
+        ),
+    };
+    let mut semantic_key = Vec::with_capacity(response_key.len() + 16);
+    semantic_key.push(match response_identity {
+        UsageResponseIdentity::NativeMessageId => 1,
+        UsageResponseIdentity::SourceRecordFallback => 2,
+    });
+    push_key_component(&mut semantic_key, &response_key);
+
+    let session = output.canonical_entity_key("session", context.session_id.as_bytes())?;
+    let actor_run = output.canonical_entity_key("run", context.run_native_key().as_bytes())?;
+    let buckets = (|| {
+        Ok::<_, String>(UsageBucketsV2 {
+            input_tokens: claude_usage_value(native_usage, "input_tokens")?,
+            output_tokens: claude_usage_value(native_usage, "output_tokens")?,
+            cache_creation_input_tokens: claude_usage_value(
+                native_usage,
+                "cache_creation_input_tokens",
+            )?,
+            cache_read_input_tokens: claude_usage_value(native_usage, "cache_read_input_tokens")?,
+        })
+    })();
+    let buckets = match buckets {
+        Ok(buckets) => buckets,
+        Err(message) => {
+            output.push_diagnostic(AdapterDiagnostic {
+                class: AdapterErrorClass::RecordPermanent,
+                code: "claude_usage_v2_bucket".to_string(),
+                message,
+            })?;
+            return Ok(None);
+        }
+    };
+    let fact = UsageRevisionV2Fact {
+        session,
+        actor_run,
+        response_key,
+        response_identity,
+        native_message_id,
+        request_id: value
+            .get("requestId")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned),
+        buckets,
+        model: message
+            .get("model")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .map(|model| claude_exact_usage_value(model.to_string(), "message.model")),
+        effort: None,
+        source_time,
+    };
+    fact.validate()?;
+    Ok(Some((semantic_key, fact)))
+}
+
+fn claude_usage_value(
+    usage: &serde_json::Map<String, Value>,
+    field: &str,
+) -> Result<UsageQualifiedValue<u64>, String> {
+    match usage.get(field) {
+        Some(value) => value.as_u64().map_or_else(
+            || {
+                Err(format!(
+                    "Claude message.usage.{field} must be an unsigned integer"
+                ))
+            },
+            |value| {
+                Ok(claude_exact_usage_value(
+                    value,
+                    &format!("message.usage.{field}"),
+                ))
+            },
+        ),
+        None => QualifiedValue::from_parts(
+            None,
+            QualifiedValueQuality::Unknown,
+            UsageValueAuthority::NativeResponse,
+            crate::adapter::ContractCompleteness::Unknown,
+            Some(QualifiedUnknownReason::Missing),
+            None,
+            UsageValueProvenance {
+                native_field: format!("message.usage.{field}"),
+                normalization_contract_version: 1,
+            },
+        )
+        .map_err(|error| format!("invalid Claude usage-v2 missing-bucket value: {error}")),
+    }
+}
+
+fn claude_exact_usage_value<T>(value: T, native_field: &str) -> UsageQualifiedValue<T> {
+    QualifiedValue::from_parts(
+        Some(value),
+        QualifiedValueQuality::Exact,
+        UsageValueAuthority::NativeResponse,
+        crate::adapter::ContractCompleteness::Complete,
+        None,
+        None,
+        UsageValueProvenance {
+            native_field: native_field.to_string(),
+            normalization_contract_version: 1,
+        },
+    )
+    .expect("static Claude usage-v2 qualified value is valid")
+}
+
+fn usage_source_record_fallback_key(record: &SourceRecord) -> Vec<u8> {
+    let mut key = Vec::with_capacity(
+        record.cursor_start.as_bytes().len() + record.cursor_end.as_bytes().len() + 32,
+    );
+    key.extend_from_slice(b"source-record-v1\0");
+    push_key_component(&mut key, record.cursor_start.as_bytes());
+    push_key_component(&mut key, record.cursor_end.as_bytes());
+    key
 }
 
 fn artifact_metadata_snapshot(
@@ -4347,7 +4508,7 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
-    use crate::adapter::{FactEnvelope, SourceInstance};
+    use crate::adapter::{FactEnvelope, FactSemanticContext, SourceInstance};
     use crate::source::{
         AppendDelimitedFile, AppendItem, AppendRead, RecordOrigin, SourceMediaType,
     };
@@ -4470,6 +4631,23 @@ mod tests {
         batch.facts().iter().map(|FactEnvelope { value, .. }| value)
     }
 
+    fn semantic_transcript_batch(max_facts: usize, max_diagnostics: usize) -> FactBatch {
+        FactBatch::new_with_semantic_context(
+            max_facts,
+            max_diagnostics,
+            FactSemanticContext::new(
+                &AdapterId::new(ADAPTER_ID).unwrap(),
+                1,
+                b"fixture-root",
+                PARENT_STREAM.as_bytes(),
+                format!("project/{SESSION}.jsonl").as_bytes(),
+                1,
+            )
+            .unwrap(),
+        )
+        .unwrap()
+    }
+
     #[test]
     fn discovery_and_streams_are_declarative_and_use_common_drivers() {
         let root = TempDir::new().unwrap();
@@ -4500,7 +4678,7 @@ mod tests {
             std::fs::canonicalize(root.path()).unwrap().join("sessions")
         );
         assert_eq!(streams.len(), 16);
-        assert_eq!(adapter.manifest().contract_version, 16);
+        assert_eq!(adapter.manifest().contract_version, 17);
         assert!(adapter
             .manifest()
             .source_schema_versions
@@ -6844,7 +7022,7 @@ mod tests {
             )
             .as_bytes(),
         );
-        let mut batch = FactBatch::new(8, 4).unwrap();
+        let mut batch = semantic_transcript_batch(8, 4);
         let disposition = adapter
             .decode(
                 DecodeContext {
@@ -6857,7 +7035,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(disposition, DecodeDisposition::Applied);
-        assert_eq!(batch.facts().len(), 5);
+        assert_eq!(batch.facts().len(), 6);
         let message = fact_values(&batch)
             .find_map(|fact| match fact {
                 Fact::Message(message) => Some(message),
@@ -6877,6 +7055,119 @@ mod tests {
         assert_eq!(usage.values.cache_read_tokens, 3);
         assert_eq!(usage.scope, UsageScope::Message);
         assert_eq!(usage.accounting, UsageAccounting::Delta);
+        let (usage_v2, semantic_revision) = batch
+            .facts()
+            .iter()
+            .find_map(|envelope| match &envelope.value {
+                Fact::UsageRevisionV2(usage) => Some((usage, envelope.semantic_revision.as_ref())),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(usage_v2.response_key, b"api1");
+        assert_eq!(
+            usage_v2.response_identity,
+            UsageResponseIdentity::NativeMessageId
+        );
+        assert_eq!(usage_v2.native_message_id.as_deref(), Some("api1"));
+        assert_eq!(usage_v2.request_id.as_deref(), Some("r1"));
+        assert_eq!(usage_v2.buckets.input_tokens.value, Some(10));
+        assert_eq!(usage_v2.buckets.cache_read_input_tokens.value, Some(3));
+        assert_eq!(
+            usage_v2.buckets.input_tokens.quality,
+            QualifiedValueQuality::Exact
+        );
+        assert_eq!(
+            usage_v2
+                .model
+                .as_ref()
+                .and_then(|value| value.value.as_deref()),
+            Some("claude-sonnet")
+        );
+        assert!(semantic_revision.is_some());
+    }
+
+    #[test]
+    fn usage_v2_preserves_exact_zero_fallback_and_malformed_snapshot_boundaries() {
+        let root = TempDir::new().unwrap();
+        let adapter = ClaudeCodeAdapter::new();
+        let object_context = adapter
+            .bootstrap_object(
+                &instance(root.path()),
+                &object(PARENT_STREAM, &format!("project/{SESSION}.jsonl")),
+            )
+            .unwrap();
+        let fallback_record = record(
+            format!(
+                r#"{{"type":"assistant","uuid":"row-zero","timestamp":"2026-08-11T00:00:00Z","sessionId":"{SESSION}","cwd":"/repo","message":{{"model":"claude-sonnet","type":"message","role":"assistant","content":[],"usage":{{"input_tokens":0}}}}}}"#
+            )
+            .as_bytes(),
+        );
+        let mut fallback_batch = semantic_transcript_batch(8, 8);
+        assert_eq!(
+            adapter
+                .decode(
+                    DecodeContext {
+                        decoder: &DecoderId::new(PARENT_DECODER).unwrap(),
+                        object_context: &object_context,
+                        decoder_state: None,
+                    },
+                    &fallback_record,
+                    &mut fallback_batch,
+                )
+                .unwrap(),
+            DecodeDisposition::Applied
+        );
+        assert!(fact_values(&fallback_batch).all(|fact| !matches!(fact, Fact::Usage(_))));
+        let fallback = fact_values(&fallback_batch)
+            .find_map(|fact| match fact {
+                Fact::UsageRevisionV2(fact) => Some(fact),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(
+            fallback.response_identity,
+            UsageResponseIdentity::SourceRecordFallback
+        );
+        assert!(fallback.native_message_id.is_none());
+        assert!(fallback.request_id.is_none());
+        assert_eq!(fallback.buckets.input_tokens.value, Some(0));
+        assert_eq!(
+            fallback.buckets.input_tokens.quality,
+            QualifiedValueQuality::Exact
+        );
+        assert_eq!(fallback.buckets.output_tokens.value, None);
+        assert_eq!(
+            fallback.buckets.output_tokens.unknown_reason,
+            Some(QualifiedUnknownReason::Missing)
+        );
+
+        let malformed_record = record(
+            format!(
+                r#"{{"type":"assistant","uuid":"row-bad","timestamp":"2026-08-11T00:00:01Z","sessionId":"{SESSION}","cwd":"/repo","message":{{"model":"claude-sonnet","id":"api-bad","type":"message","role":"assistant","content":[],"usage":{{"input_tokens":"bad"}}}}}}"#
+            )
+            .as_bytes(),
+        );
+        let mut malformed_batch = semantic_transcript_batch(8, 8);
+        assert_eq!(
+            adapter
+                .decode(
+                    DecodeContext {
+                        decoder: &DecoderId::new(PARENT_DECODER).unwrap(),
+                        object_context: &object_context,
+                        decoder_state: None,
+                    },
+                    &malformed_record,
+                    &mut malformed_batch,
+                )
+                .unwrap(),
+            DecodeDisposition::Applied
+        );
+        assert!(fact_values(&malformed_batch).any(|fact| matches!(fact, Fact::Message(_))));
+        assert!(fact_values(&malformed_batch).all(|fact| !matches!(fact, Fact::UsageRevisionV2(_))));
+        assert!(malformed_batch
+            .diagnostics()
+            .iter()
+            .any(|diagnostic| diagnostic.code == "claude_usage_v2_bucket"));
     }
 
     #[test]

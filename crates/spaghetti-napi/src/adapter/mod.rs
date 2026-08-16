@@ -31,9 +31,10 @@ pub use facts::{
     RelationStrength, RunEvidenceFact, RunFact, SessionFact, SessionIndexEntrySnapshot,
     SessionIndexSnapshotFact, TaskCollectionKind, TaskItemSnapshot, TaskSnapshotCoverage,
     TaskSnapshotFact, TaskStatus, TeamInboxMessageSnapshot, TeamInboxSnapshotFact,
-    TeamMemberSnapshot, TeamSnapshotFact, TimestampQuality, TokenUsage, UsageAccounting, UsageFact,
-    UsageScope, ValueQuality, WorkflowMemberEventFact, WorkflowMemberEventKind,
-    WorkflowSnapshotFact, WorkflowStatus,
+    TeamMemberSnapshot, TeamSnapshotFact, TimestampQuality, TokenUsage, UsageAccounting,
+    UsageBucketsV2, UsageFact, UsageQualifiedValue, UsageResponseIdentity, UsageRevisionV2Fact,
+    UsageScope, UsageValueAuthority, UsageValueProvenance, ValueQuality, WorkflowMemberEventFact,
+    WorkflowMemberEventKind, WorkflowSnapshotFact, WorkflowStatus,
 };
 pub use registry::{AdapterRegistry, AdapterRegistryBuilder};
 pub use scope::{

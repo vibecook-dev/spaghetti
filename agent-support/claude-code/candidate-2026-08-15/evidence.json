@@ -45,10 +45,12 @@
     },
     {
       "claim_id": "claude-runtime-semantics-open",
-      "statement": "Actor-scoped usage-v2, effective model/effort/mode, interaction lifecycle, and team/workflow correlation require RFC 012C fixture-backed reducers before support promotion.",
-      "state": "open",
+      "statement": "Canonical actor-scoped response usage revisions and a durable response-replacement shadow reducer are implemented; the independent corpus oracle, public usage migration, affiliation grouping, effective model/effort/mode, interaction lifecycle, and team/workflow correlation remain required before support promotion.",
+      "state": "degraded",
       "sources": [
-        { "kind": "design_record", "path": "docs/rfcs/012c-runtime-semantics-and-usage-v2.md", "sha256": null, "locator": "Normative runtime facts and release gates" }
+        { "kind": "design_record", "path": "docs/rfcs/012c-runtime-semantics-and-usage-v2.md", "sha256": null, "locator": "Normative runtime facts and release gates" },
+        { "kind": "code_reference", "path": "crates/spaghetti-napi/src/claude/adapter.rs", "sha256": null, "locator": "claude_usage_v2_fact" },
+        { "kind": "code_reference", "path": "crates/spaghetti-napi/src/engine/projection.rs", "sha256": null, "locator": "apply_usage_v2_facts" }
       ]
     },
     {

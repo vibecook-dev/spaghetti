@@ -248,7 +248,8 @@ Current landing status (2026-08-16):
   rejects duplicate non-null revision identities, leaves legacy rows null, and
   removes the identities with their owning generation; transaction tests prove
   a uniqueness failure cannot advance the source cursor; and
-- retained A1 as `In progress`: built-in fact-family migration, durable query
+- retained A1 as `In progress`: usage-v2 is the first built-in family on the
+  canonical seam, while the remaining fact-family migrations, durable query
   exposure, full semantic reduction, tier/view compositionality, N-API fixture
   parity, and full-only versus composed reducer digests remain.
 
@@ -564,6 +565,33 @@ The independent oracle groups native evidence without adapter imports and
 checks response, actor, session, affiliation-group, and aggregate values plus
 quality/coverage.
 
+Current landing status (2026-08-16):
+
+- added the agent-neutral `runtime.usage-v2` response fact with canonical
+  session/actor keys, object-and-generation-scoped response identity, explicit
+  native-ID versus source-record fallback, four independently qualified
+  buckets, optional qualified model/effort evidence, and mandatory RFC 012A
+  semantic revision identity;
+- advanced the Claude decoder contract to 17 and dual-emitted the canonical
+  response fact beside the unchanged legacy row-delta fact. Non-empty
+  `message.id` is primary, `requestId` is correlation metadata only, exact zero
+  survives, absent buckets remain `Unknown/Missing`, and a malformed usage
+  object emits a bounded diagnostic without dropping the message or replacing
+  the last valid shadow contribution;
+- added schema v46's private shadow reducer: qualification metadata is interned,
+  one latest row is stored per canonical response fact, source order rejects a
+  stale overwrite, downward revisions replace rather than subtract, and
+  generation replacement retracts the old response namespace in the source
+  transaction;
+- proved topology-independent response identity and exercised exact repeats,
+  evolving/upward/downward counters, missing buckets, absent and reused
+  `requestId`, actor/session attribution, legacy/v2 numeric divergence, and
+  generation reset while keeping the legacy query unchanged; and
+- kept the candidate capability `unsupported`: the independent frozen-corpus
+  oracle, exact-repeat public-event suppression, affiliation regrouping,
+  readiness/replay orchestration, public query and migration switch, portable
+  serialization, and rollback window are not yet complete.
+
 ### C3. Durable migration
 
 Build usage-v2 beside legacy usage. Keep v2 readiness non-ready during replay,
@@ -659,13 +687,13 @@ Current landing status (2026-08-16):
 
 D1 remains `In progress`: watcher-before-scan, multi-object discovery/cursor
 orchestration, declared relation-backed decoder dependency access, built-in
-canonical fact-revision adoption plus semantic reduction/events, durable query
-exposure, the public ordered multiplexer and poll/readiness barriers, coverage,
-overflow/resync epochs, artifact mediation, cancellation waiting, the trusted
-native version-probe driver, and the complete public request are not yet
-implemented. The generic fact ledger now preserves an explicit semantic
-revision atomically when a decoder supplies one; that storage seam alone does
-not make a legacy built-in fact canonical or observable.
+canonical fact-revision adoption beyond the usage-v2 shadow plus scoped semantic
+reduction/events, durable query exposure, the public ordered multiplexer and
+poll/readiness barriers, coverage, overflow/resync epochs, artifact mediation,
+cancellation waiting, the trusted native version-probe driver, and the complete
+public request are not yet implemented. The generic fact ledger now preserves
+an explicit semantic revision atomically when a decoder supplies one; that
+storage seam alone does not make a legacy built-in fact canonical or observable.
 
 ### D2. Claude scope composition
 

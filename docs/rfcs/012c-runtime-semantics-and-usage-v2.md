@@ -715,6 +715,26 @@ computes bucket quality/coverage as well as values. History, capability, and
 FTS remain compared to their existing accepted oracles; usage is deliberately
 compared to the new v2 oracle.
 
+Current implementation status (2026-08-16): steps 1 and 2 have landed as a
+non-public shadow. Claude decoder contract 17 emits a canonical
+`runtime.usage-v2` fact beside the unchanged legacy delta. The fact uses
+non-empty `message.id` first, an object/generation/source-record fallback when
+it is absent, canonical session and actor-run keys, independently qualified
+buckets, optional model/effort assertions, and an RFC 012A semantic revision.
+Schema v46 interns qualification evidence and retains one source-ordered latest
+revision per response; later snapshots, including downward corrections,
+replace the prior row and a generation reset retracts the old namespace.
+
+Focused conformance proves topology-independent identities, exact-repeat
+non-duplication, evolving and downward counters, exact zero, missing buckets,
+absent and reused `requestId`, actor/session grouping, malformed-snapshot
+non-erasure, and generation replacement. The legacy projection remains the
+only public usage path and intentionally retains its old row-additive result.
+Steps 3 through 7 remain open: a frozen-corpus oracle independent of the
+adapter, qualification/coverage comparison at corpus scale, affiliation
+regrouping, readiness/replay orchestration, public query serialization and
+atomic selection, and the compatibility/rollback window.
+
 ## 14. Failure and correction semantics
 
 - A malformed usage snapshot does not erase the latest valid contribution; it

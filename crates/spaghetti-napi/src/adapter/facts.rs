@@ -9,12 +9,15 @@ use serde_json::Value;
 use crate::source::SourceRecord;
 
 use super::{
-    AdapterDiagnostic, AdapterError, AdapterId, CanonicalFactId, CanonicalSourceInstanceKey,
-    DependencyRevision, FactRevisionId, SemanticRevisionRef, SourceRecordId,
+    AdapterDiagnostic, AdapterError, AdapterId, CanonicalEntityKey, CanonicalFactId,
+    CanonicalSourceInstanceKey, ContractCompleteness, DependencyRevision, FactRevisionId,
+    QualifiedValue, QualifiedValueQuality, SemanticRevisionRef, SourceRecordId,
 };
 
 const FACT_HASH_BYTES: usize = 32;
 const MAX_ENTITY_KEY_BYTES: usize = 8 * 1024;
+const MAX_USAGE_RESPONSE_KEY_BYTES: usize = 8 * 1024;
+const MAX_USAGE_PROVENANCE_FIELD_BYTES: usize = 256;
 
 mod base64_bytes {
     use base64::engine::general_purpose::STANDARD;
@@ -176,6 +179,41 @@ impl FactSemanticContext {
             self.framing_contract_version,
         )
         .map_err(semantic_identity_error)
+    }
+
+    fn canonical_entity_key(
+        &self,
+        entity_kind: &str,
+        stable_native_entity_key: &[u8],
+    ) -> Result<CanonicalEntityKey, AdapterError> {
+        CanonicalEntityKey::derive(
+            self.adapter_id.as_str(),
+            &self.source_instance_key,
+            entity_kind,
+            stable_native_entity_key,
+        )
+        .map_err(semantic_identity_error)
+    }
+
+    fn object_scoped_native_fact_key(
+        &self,
+        generation: u64,
+        stable_native_fact_key: &[u8],
+    ) -> Result<Vec<u8>, AdapterError> {
+        if stable_native_fact_key.is_empty() {
+            return Err(AdapterError::invalid_contract(
+                "object-scoped native fact key must not be empty",
+            ));
+        }
+        let mut key = Vec::with_capacity(
+            self.stream_key.len() + self.object_key.len() + stable_native_fact_key.len() + 64,
+        );
+        key.extend_from_slice(b"object-scoped-native-fact-v1\0");
+        push_component(&mut key, self.stream_key.as_ref());
+        push_component(&mut key, self.object_key.as_ref());
+        key.extend_from_slice(&generation.to_be_bytes());
+        push_component(&mut key, stable_native_fact_key);
+        Ok(key)
     }
 }
 
@@ -895,6 +933,142 @@ pub struct UsageFact {
     pub source_time: Option<QualifiedTimestamp>,
 }
 
+/// How a native usage response is identified inside one source object and
+/// generation. The enclosing canonical fact key supplies that scope.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UsageResponseIdentity {
+    NativeMessageId,
+    SourceRecordFallback,
+}
+
+/// Agent-neutral authority classification for a qualified runtime value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UsageValueAuthority {
+    NativeResponse,
+    AdapterDerived,
+}
+
+/// Bounded evidence describing how one common value maps to native evidence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UsageValueProvenance {
+    pub native_field: String,
+    pub normalization_contract_version: u32,
+}
+
+pub type UsageQualifiedValue<T> = QualifiedValue<T, UsageValueAuthority, UsageValueProvenance>;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UsageBucketsV2 {
+    pub input_tokens: UsageQualifiedValue<u64>,
+    pub output_tokens: UsageQualifiedValue<u64>,
+    pub cache_creation_input_tokens: UsageQualifiedValue<u64>,
+    pub cache_read_input_tokens: UsageQualifiedValue<u64>,
+}
+
+/// RFC 012C response-level, replaceable usage snapshot. `FactSemanticRevision`
+/// owns its public usage/revision identity; this payload carries the typed
+/// reducer value and stable canonical session/actor attribution.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UsageRevisionV2Fact {
+    pub session: CanonicalEntityKey,
+    pub actor_run: CanonicalEntityKey,
+    #[serde(with = "base64_bytes")]
+    pub response_key: Vec<u8>,
+    pub response_identity: UsageResponseIdentity,
+    pub native_message_id: Option<String>,
+    pub request_id: Option<String>,
+    pub buckets: UsageBucketsV2,
+    pub model: Option<UsageQualifiedValue<String>>,
+    pub effort: Option<UsageQualifiedValue<String>>,
+    pub source_time: Option<QualifiedTimestamp>,
+}
+
+impl UsageRevisionV2Fact {
+    pub(crate) fn validate(&self) -> Result<(), AdapterError> {
+        if self.response_key.is_empty() || self.response_key.len() > MAX_USAGE_RESPONSE_KEY_BYTES {
+            return Err(AdapterError::invalid_contract(format!(
+                "usage-v2 response key must contain 1..={MAX_USAGE_RESPONSE_KEY_BYTES} bytes"
+            )));
+        }
+        match self.response_identity {
+            UsageResponseIdentity::NativeMessageId => {
+                let native_message_id = self
+                    .native_message_id
+                    .as_deref()
+                    .filter(|value| !value.is_empty())
+                    .ok_or_else(|| {
+                        AdapterError::invalid_contract(
+                            "native usage response identity requires native_message_id",
+                        )
+                    })?;
+                if self.response_key != native_message_id.as_bytes() {
+                    return Err(AdapterError::invalid_contract(
+                        "native usage response key must equal native_message_id",
+                    ));
+                }
+            }
+            UsageResponseIdentity::SourceRecordFallback => {
+                if self.native_message_id.is_some() {
+                    return Err(AdapterError::invalid_contract(
+                        "source-record usage fallback cannot claim a native_message_id",
+                    ));
+                }
+            }
+        }
+        if self
+            .request_id
+            .as_ref()
+            .is_some_and(|value| value.is_empty())
+        {
+            return Err(AdapterError::invalid_contract(
+                "usage-v2 request_id must be non-empty when present",
+            ));
+        }
+        for value in [
+            &self.buckets.input_tokens,
+            &self.buckets.output_tokens,
+            &self.buckets.cache_creation_input_tokens,
+            &self.buckets.cache_read_input_tokens,
+        ] {
+            validate_usage_qualified_value(value)?;
+        }
+        for value in [&self.model, &self.effort].into_iter().flatten() {
+            validate_usage_qualified_value(value)?;
+            if value.value.as_ref().is_some_and(|value| value.is_empty()) {
+                return Err(AdapterError::invalid_contract(
+                    "usage-v2 model/effort value must be non-empty",
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+fn validate_usage_qualified_value<T>(value: &UsageQualifiedValue<T>) -> Result<(), AdapterError> {
+    let unknown = value.quality == QualifiedValueQuality::Unknown;
+    if unknown != value.value.is_none() || unknown != value.unknown_reason.is_some() {
+        return Err(AdapterError::invalid_contract(
+            "usage-v2 qualified value must pair unknown quality with an absent value and reason",
+        ));
+    }
+    if unknown && value.completeness == ContractCompleteness::Complete {
+        return Err(AdapterError::invalid_contract(
+            "unknown usage-v2 value cannot claim complete coverage",
+        ));
+    }
+    if value.provenance.native_field.is_empty()
+        || value.provenance.native_field.len() > MAX_USAGE_PROVENANCE_FIELD_BYTES
+        || value.provenance.normalization_contract_version == 0
+    {
+        return Err(AdapterError::invalid_contract(
+            "usage-v2 value provenance is empty, oversized, or unversioned",
+        ));
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Fact {
     Session(SessionFact),
@@ -918,6 +1092,7 @@ pub enum Fact {
     WorkflowMemberEvent(WorkflowMemberEventFact),
     RunEvidence(RunEvidenceFact),
     Usage(UsageFact),
+    UsageRevisionV2(UsageRevisionV2Fact),
     UnknownRecord {
         native_kind: Option<String>,
         raw_payload: Vec<u8>,
@@ -949,6 +1124,7 @@ impl Fact {
             Self::WorkflowMemberEvent(_) => "workflow_member_event",
             Self::RunEvidence(_) => "run_evidence",
             Self::Usage(_) => "usage",
+            Self::UsageRevisionV2(_) => "runtime.usage-v2",
             Self::UnknownRecord { .. } => "unknown_record",
         }
     }
@@ -976,6 +1152,7 @@ impl Fact {
             Self::WorkflowMemberEvent(fact) => Some(&fact.member),
             Self::RunEvidence(fact) => Some(&fact.run),
             Self::Usage(fact) => Some(&fact.subject),
+            Self::UsageRevisionV2(_) => None,
             Self::UnknownRecord { .. } => None,
         }
     }
@@ -1116,6 +1293,45 @@ impl FactBatch {
         let semantic =
             self.semantic_revision(record, value.kind(), true, stable_native_fact_key, None)?;
         self.push_internal(record, value, Some(semantic))
+    }
+
+    /// Emit a replaceable native fact whose identity is local to the stable
+    /// source stream/object/generation tuple. This is the required shape for
+    /// response IDs that vendors only guarantee within one transcript.
+    pub fn push_native_object_scoped(
+        &mut self,
+        record: &SourceRecord,
+        stable_native_fact_key: &[u8],
+        value: Fact,
+    ) -> Result<FactId, AdapterError> {
+        let semantic_key = self
+            .semantic_context
+            .as_ref()
+            .ok_or_else(|| {
+                AdapterError::invalid_contract(
+                    "canonical fact emission requires a bound semantic decode context",
+                )
+            })?
+            .object_scoped_native_fact_key(record.generation, stable_native_fact_key)?;
+        let semantic = self.semantic_revision(record, value.kind(), true, &semantic_key, None)?;
+        self.push_internal(record, value, Some(semantic))
+    }
+
+    /// Derive an RFC 012A entity identity from the same topology-neutral source
+    /// context used for canonical fact revisions.
+    pub fn canonical_entity_key(
+        &self,
+        entity_kind: &str,
+        stable_native_entity_key: &[u8],
+    ) -> Result<CanonicalEntityKey, AdapterError> {
+        self.semantic_context
+            .as_ref()
+            .ok_or_else(|| {
+                AdapterError::invalid_contract(
+                    "canonical entity derivation requires a bound semantic decode context",
+                )
+            })?
+            .canonical_entity_key(entity_kind, stable_native_entity_key)
     }
 
     /// Emit a native fact whose revision is not fully owned by the primary
@@ -1626,6 +1842,79 @@ mod tests {
         assert_ne!(
             first_semantic.semantic_revision_ref,
             correction_semantic.semantic_revision_ref
+        );
+    }
+
+    #[test]
+    fn object_scoped_native_identity_is_topology_stable_and_generation_local() {
+        let first = record();
+        let topology_replay = SourceRecord::new(
+            &RecordOrigin {
+                source_instance_id: 101,
+                stream_id: 202,
+                object_id: 303,
+                observed_at: 9_999,
+                source_timestamp_hint: None,
+                media_type: SourceMediaType::new("application/json").unwrap(),
+            },
+            first.generation,
+            first.cursor_start.clone(),
+            first.cursor_end.clone(),
+            0,
+            first.payload.clone(),
+        );
+        let mut durable = FactBatch::new_with_semantic_context(2, 2, semantic_context()).unwrap();
+        let durable_session = durable
+            .canonical_entity_key("session", b"native-session")
+            .unwrap();
+        durable
+            .push_native_object_scoped(&first, b"response-1", unknown())
+            .unwrap();
+        let mut scoped = FactBatch::new_with_semantic_context(2, 2, semantic_context()).unwrap();
+        let scoped_session = scoped
+            .canonical_entity_key("session", b"native-session")
+            .unwrap();
+        scoped
+            .push_native_object_scoped(&topology_replay, b"response-1", unknown())
+            .unwrap();
+        assert_eq!(durable_session, scoped_session);
+        assert_eq!(
+            durable.facts()[0].semantic_revision,
+            scoped.facts()[0].semantic_revision
+        );
+
+        let other_object_context = FactSemanticContext::new(
+            &AdapterId::new("fixture").unwrap(),
+            1,
+            b"stable-source-instance",
+            b"transcript",
+            b"other-session.jsonl",
+            1,
+        )
+        .unwrap();
+        let mut other_object =
+            FactBatch::new_with_semantic_context(1, 1, other_object_context).unwrap();
+        other_object
+            .push_native_object_scoped(&first, b"response-1", unknown())
+            .unwrap();
+        assert_ne!(
+            durable.facts()[0].semantic_revision.unwrap().fact_id,
+            other_object.facts()[0].semantic_revision.unwrap().fact_id
+        );
+
+        let mut next_generation_record = first.clone();
+        next_generation_record.generation = 2;
+        let mut next_generation =
+            FactBatch::new_with_semantic_context(1, 1, semantic_context()).unwrap();
+        next_generation
+            .push_native_object_scoped(&next_generation_record, b"response-1", unknown())
+            .unwrap();
+        assert_ne!(
+            durable.facts()[0].semantic_revision.unwrap().fact_id,
+            next_generation.facts()[0]
+                .semantic_revision
+                .unwrap()
+                .fact_id
         );
     }
 

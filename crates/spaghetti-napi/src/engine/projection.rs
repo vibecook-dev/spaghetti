@@ -13,10 +13,12 @@ use rusqlite::{
 };
 
 use crate::adapter::{
-    DelegationFact, DelegationKind, DelegationMetadataFact, DelegationSpawnFact, EntityKey,
-    EvidenceKind, EvidenceStrength, Fact, FactBatch, FactEnvelope, MessageRole, QualifiedTimestamp,
+    ContractCompleteness, DelegationFact, DelegationKind, DelegationMetadataFact,
+    DelegationSpawnFact, EntityKey, EvidenceKind, EvidenceStrength, Fact, FactBatch, FactEnvelope,
+    MessageRole, QualifiedTimestamp, QualifiedUnknownReason, QualifiedValueQuality,
     RawRetentionPolicy, RelationStrength, SessionFact, TimestampQuality, TokenUsage,
-    UsageAccounting, UsageFact, UsageScope, ValueQuality,
+    UsageAccounting, UsageFact, UsageQualifiedValue, UsageResponseIdentity, UsageScope,
+    UsageValueAuthority, ValueQuality,
 };
 
 use super::artifact_projection::apply_artifact_facts;
@@ -430,7 +432,8 @@ impl TransactionalProjectionWork for FactProjectionWork<'_> {
                 | Fact::WorkflowSnapshot(_)
                 | Fact::WorkflowMemberEvent(_)
                 | Fact::RunEvidence(_)
-                | Fact::Usage(_) => {}
+                | Fact::Usage(_)
+                | Fact::UsageRevisionV2(_) => {}
             }
         }
         self.record_detail(CommitDetail::HistoryProjectionWalk, projection_walk_started);
@@ -794,6 +797,7 @@ impl TransactionalProjectionWork for FactProjectionWork<'_> {
             return Ok(Vec::new());
         }
         let usage_started = Instant::now();
+        apply_usage_v2_facts(transaction, context, self.batch)?;
         let mut touched_sessions = BTreeSet::new();
         let mut pending_totals = BTreeMap::new();
         let existing_contribution_ids = existing_usage_contribution_ids(transaction, self.batch)?;
@@ -2981,6 +2985,290 @@ fn canonical_run_exists(
         .map_err(|error| sqlite_error("read delegation run presence", error))
 }
 
+fn apply_usage_v2_facts(
+    transaction: &Transaction<'_>,
+    context: &ProjectionCommitContext,
+    batch: &FactBatch,
+) -> Result<(), EngineError> {
+    if context.replaces_prior_generation {
+        transaction
+            .execute(
+                "DELETE FROM usage_v2_response_contributions WHERE source_object_id = ?1 AND source_generation <> ?2",
+                params![
+                    sqlite_u64(context.source_object_id, "source object id")?,
+                    sqlite_u64(context.generation, "source generation")?,
+                ],
+            )
+            .map_err(|error| sqlite_error("retract replaced usage-v2 contributions", error))?;
+    }
+
+    for envelope in batch.facts() {
+        let Fact::UsageRevisionV2(fact) = &envelope.value else {
+            continue;
+        };
+        fact.validate().map_err(|error| {
+            EngineError::InvalidCommit(format!("invalid usage-v2 fact: {error}"))
+        })?;
+        let semantic = envelope.semantic_revision.ok_or_else(|| {
+            EngineError::InvalidCommit(
+                "usage-v2 fact is missing its mandatory semantic revision".to_string(),
+            )
+        })?;
+        if semantic.semantic_revision_ref.fact_revision_id != semantic.fact_revision_id {
+            return Err(EngineError::InvalidCommit(
+                "usage-v2 semantic reference does not match its fact revision".to_string(),
+            ));
+        }
+
+        let input_qualification =
+            intern_usage_v2_qualification(transaction, &fact.buckets.input_tokens)?;
+        let output_qualification =
+            intern_usage_v2_qualification(transaction, &fact.buckets.output_tokens)?;
+        let cache_creation_qualification =
+            intern_usage_v2_qualification(transaction, &fact.buckets.cache_creation_input_tokens)?;
+        let cache_read_qualification =
+            intern_usage_v2_qualification(transaction, &fact.buckets.cache_read_input_tokens)?;
+        let model_qualification = fact
+            .model
+            .as_ref()
+            .map(|value| intern_usage_v2_qualification(transaction, value))
+            .transpose()?;
+        let effort_qualification = fact
+            .effort
+            .as_ref()
+            .map(|value| intern_usage_v2_qualification(transaction, value))
+            .transpose()?;
+
+        let affected = execute_cached(
+            transaction,
+            r#"
+                INSERT INTO usage_v2_response_contributions (
+                    usage_key, fact_revision_id, source_record_id, fact_id,
+                    session_key, actor_run_key, response_key, response_identity,
+                    native_message_id, request_id,
+                    input_tokens, input_qualification_key, input_effective_at,
+                    output_tokens, output_qualification_key, output_effective_at,
+                    cache_creation_input_tokens, cache_creation_qualification_key,
+                    cache_creation_effective_at, cache_read_input_tokens,
+                    cache_read_qualification_key, cache_read_effective_at,
+                    model, model_qualification_key, model_effective_at,
+                    effort, effort_qualification_key, effort_effective_at,
+                    source_time, source_time_quality, source_object_id,
+                    source_generation, cursor_end, last_commit_seq
+                ) VALUES (
+                    ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
+                    ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23,
+                    ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33, ?34
+                )
+                ON CONFLICT(usage_key) DO UPDATE SET
+                    fact_revision_id = excluded.fact_revision_id,
+                    source_record_id = excluded.source_record_id,
+                    fact_id = excluded.fact_id,
+                    session_key = excluded.session_key,
+                    actor_run_key = excluded.actor_run_key,
+                    response_key = excluded.response_key,
+                    response_identity = excluded.response_identity,
+                    native_message_id = excluded.native_message_id,
+                    request_id = excluded.request_id,
+                    input_tokens = excluded.input_tokens,
+                    input_qualification_key = excluded.input_qualification_key,
+                    input_effective_at = excluded.input_effective_at,
+                    output_tokens = excluded.output_tokens,
+                    output_qualification_key = excluded.output_qualification_key,
+                    output_effective_at = excluded.output_effective_at,
+                    cache_creation_input_tokens = excluded.cache_creation_input_tokens,
+                    cache_creation_qualification_key = excluded.cache_creation_qualification_key,
+                    cache_creation_effective_at = excluded.cache_creation_effective_at,
+                    cache_read_input_tokens = excluded.cache_read_input_tokens,
+                    cache_read_qualification_key = excluded.cache_read_qualification_key,
+                    cache_read_effective_at = excluded.cache_read_effective_at,
+                    model = excluded.model,
+                    model_qualification_key = excluded.model_qualification_key,
+                    model_effective_at = excluded.model_effective_at,
+                    effort = excluded.effort,
+                    effort_qualification_key = excluded.effort_qualification_key,
+                    effort_effective_at = excluded.effort_effective_at,
+                    source_time = excluded.source_time,
+                    source_time_quality = excluded.source_time_quality,
+                    source_object_id = excluded.source_object_id,
+                    source_generation = excluded.source_generation,
+                    cursor_end = excluded.cursor_end,
+                    last_commit_seq = excluded.last_commit_seq
+                WHERE excluded.cursor_end > usage_v2_response_contributions.cursor_end
+                   OR (
+                     excluded.cursor_end = usage_v2_response_contributions.cursor_end
+                     AND excluded.fact_revision_id = usage_v2_response_contributions.fact_revision_id
+                   )
+            "#,
+            params![
+                semantic.fact_id.as_bytes().as_slice(),
+                semantic.fact_revision_id.as_bytes().as_slice(),
+                semantic.source_record_id.as_bytes().as_slice(),
+                envelope.id.as_bytes().as_slice(),
+                fact.session.as_bytes().as_slice(),
+                fact.actor_run.as_bytes().as_slice(),
+                fact.response_key,
+                usage_v2_response_identity(fact.response_identity),
+                fact.native_message_id,
+                fact.request_id,
+                sqlite_optional_u64(fact.buckets.input_tokens.value, "usage-v2 input tokens")?,
+                input_qualification.as_slice(),
+                fact.buckets.input_tokens.effective_at,
+                sqlite_optional_u64(fact.buckets.output_tokens.value, "usage-v2 output tokens")?,
+                output_qualification.as_slice(),
+                fact.buckets.output_tokens.effective_at,
+                sqlite_optional_u64(
+                    fact.buckets.cache_creation_input_tokens.value,
+                    "usage-v2 cache creation tokens",
+                )?,
+                cache_creation_qualification.as_slice(),
+                fact.buckets.cache_creation_input_tokens.effective_at,
+                sqlite_optional_u64(
+                    fact.buckets.cache_read_input_tokens.value,
+                    "usage-v2 cache read tokens",
+                )?,
+                cache_read_qualification.as_slice(),
+                fact.buckets.cache_read_input_tokens.effective_at,
+                fact.model.as_ref().and_then(|value| value.value.as_deref()),
+                model_qualification.as_ref().map(<[u8; 32]>::as_slice),
+                fact.model.as_ref().and_then(|value| value.effective_at),
+                fact.effort.as_ref().and_then(|value| value.value.as_deref()),
+                effort_qualification.as_ref().map(<[u8; 32]>::as_slice),
+                fact.effort.as_ref().and_then(|value| value.effective_at),
+                timestamp_value(fact.source_time.as_ref()),
+                timestamp_quality(fact.source_time.as_ref()),
+                sqlite_u64(context.source_object_id, "source object id")?,
+                sqlite_u64(context.generation, "source generation")?,
+                envelope.provenance.cursor_end,
+                sqlite_u64(context.commit_seq, "commit sequence")?,
+            ],
+        )
+        .map_err(|error| sqlite_error("write usage-v2 response contribution", error))?;
+        if affected != 1 {
+            return Err(EngineError::InvalidCommit(
+                "usage-v2 revision arrived behind the accepted source cursor".to_string(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn intern_usage_v2_qualification<T>(
+    transaction: &Transaction<'_>,
+    value: &UsageQualifiedValue<T>,
+) -> Result<[u8; 32], EngineError> {
+    let key = usage_v2_qualification_key(value);
+    let affected = execute_cached(
+        transaction,
+        r#"
+            INSERT INTO usage_v2_qualification_specs (
+                qualification_key, quality, completeness, unknown_reason,
+                authority, native_field, normalization_contract_version
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            ON CONFLICT(qualification_key) DO UPDATE SET
+                qualification_key = excluded.qualification_key
+            WHERE quality = excluded.quality
+              AND completeness = excluded.completeness
+              AND unknown_reason IS excluded.unknown_reason
+              AND authority = excluded.authority
+              AND native_field = excluded.native_field
+              AND normalization_contract_version = excluded.normalization_contract_version
+        "#,
+        params![
+            key.as_slice(),
+            usage_v2_quality(value.quality),
+            usage_v2_completeness(value.completeness),
+            value.unknown_reason.map(usage_v2_unknown_reason),
+            usage_v2_authority(value.authority),
+            value.provenance.native_field,
+            i64::from(value.provenance.normalization_contract_version),
+        ],
+    )
+    .map_err(|error| sqlite_error("intern usage-v2 qualification", error))?;
+    if affected != 1 {
+        return Err(EngineError::InvalidCommit(
+            "usage-v2 qualification digest collision".to_string(),
+        ));
+    }
+    Ok(key)
+}
+
+fn usage_v2_qualification_key<T>(value: &UsageQualifiedValue<T>) -> [u8; 32] {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"spaghetti-usage-v2-qualification-v1\0");
+    for component in [
+        usage_v2_quality(value.quality).as_bytes(),
+        usage_v2_completeness(value.completeness).as_bytes(),
+        value
+            .unknown_reason
+            .map(usage_v2_unknown_reason)
+            .unwrap_or("")
+            .as_bytes(),
+        usage_v2_authority(value.authority).as_bytes(),
+        value.provenance.native_field.as_bytes(),
+    ] {
+        hasher.update(&(component.len() as u64).to_be_bytes());
+        hasher.update(component);
+    }
+    hasher.update(
+        &value
+            .provenance
+            .normalization_contract_version
+            .to_be_bytes(),
+    );
+    *hasher.finalize().as_bytes()
+}
+
+fn sqlite_optional_u64(
+    value: Option<u64>,
+    field: &'static str,
+) -> Result<Option<i64>, EngineError> {
+    value.map(|value| sqlite_u64(value, field)).transpose()
+}
+
+fn usage_v2_response_identity(identity: UsageResponseIdentity) -> &'static str {
+    match identity {
+        UsageResponseIdentity::NativeMessageId => "native_message_id",
+        UsageResponseIdentity::SourceRecordFallback => "source_record_fallback",
+    }
+}
+
+fn usage_v2_quality(quality: QualifiedValueQuality) -> &'static str {
+    match quality {
+        QualifiedValueQuality::Exact => "exact",
+        QualifiedValueQuality::NativeClaimed => "native_claimed",
+        QualifiedValueQuality::Derived => "derived",
+        QualifiedValueQuality::Estimated => "estimated",
+        QualifiedValueQuality::Unknown => "unknown",
+    }
+}
+
+fn usage_v2_completeness(completeness: ContractCompleteness) -> &'static str {
+    match completeness {
+        ContractCompleteness::Complete => "complete",
+        ContractCompleteness::Partial => "partial",
+        ContractCompleteness::Unknown => "unknown",
+    }
+}
+
+fn usage_v2_unknown_reason(reason: QualifiedUnknownReason) -> &'static str {
+    match reason {
+        QualifiedUnknownReason::Missing => "missing",
+        QualifiedUnknownReason::Unsupported => "unsupported",
+        QualifiedUnknownReason::Withheld => "withheld",
+        QualifiedUnknownReason::NotYetObserved => "not_yet_observed",
+        QualifiedUnknownReason::Ambiguous => "ambiguous",
+        QualifiedUnknownReason::Malformed => "malformed",
+    }
+}
+
+fn usage_v2_authority(authority: UsageValueAuthority) -> &'static str {
+    match authority {
+        UsageValueAuthority::NativeResponse => "native_response",
+        UsageValueAuthority::AdapterDerived => "adapter_derived",
+    }
+}
+
 #[derive(Debug, Clone)]
 struct UsageContribution {
     fact_id: Vec<u8>,
@@ -3928,6 +4216,66 @@ mod tests {
         ]
     }
 
+    fn claude_usage_line(
+        uuid: &str,
+        response_id: &str,
+        request_id: Option<&str>,
+        input: u64,
+        output: u64,
+        cache_creation: Option<u64>,
+        cache_read: Option<u64>,
+    ) -> Vec<u8> {
+        let mut value = serde_json::json!({
+            "type": "assistant",
+            "uuid": uuid,
+            "parentUuid": null,
+            "timestamp": "2026-08-11T00:00:00Z",
+            "sessionId": SESSION,
+            "cwd": "/fixture/project",
+            "version": "1",
+            "gitBranch": "main",
+            "isSidechain": false,
+            "userType": "external",
+            "message": {
+                "model": "claude-sonnet",
+                "id": response_id,
+                "type": "message",
+                "role": "assistant",
+                "content": [],
+                "usage": {
+                    "input_tokens": input,
+                    "output_tokens": output,
+                },
+            },
+        });
+        let object = value.as_object_mut().unwrap();
+        if let Some(request_id) = request_id {
+            object.insert(
+                "requestId".to_string(),
+                serde_json::Value::String(request_id.to_string()),
+            );
+        }
+        let usage = object
+            .get_mut("message")
+            .and_then(serde_json::Value::as_object_mut)
+            .and_then(|message| message.get_mut("usage"))
+            .and_then(serde_json::Value::as_object_mut)
+            .unwrap();
+        if let Some(value) = cache_creation {
+            usage.insert(
+                "cache_creation_input_tokens".to_string(),
+                serde_json::Value::from(value),
+            );
+        }
+        if let Some(value) = cache_read {
+            usage.insert(
+                "cache_read_input_tokens".to_string(),
+                serde_json::Value::from(value),
+            );
+        }
+        serde_json::to_vec(&value).unwrap()
+    }
+
     fn database() -> Connection {
         TEST_OBJECT_KEYS.with(|keys| keys.borrow_mut().clear());
         let connection = Connection::open_in_memory().unwrap();
@@ -4639,7 +4987,9 @@ mod tests {
         clock: i64,
     ) {
         let decoder = DecoderId::new(DECODER).unwrap();
-        let mut batch = FactBatch::new(16, 8).unwrap();
+        let mut batch =
+            FactBatch::new_with_semantic_context(16, 8, semantic_context(b"fixture-transcript"))
+                .unwrap();
         adapter
             .decode(
                 DecodeContext {
@@ -6301,15 +6651,187 @@ mod tests {
         assert_eq!(baseline, semantic_snapshot(&cold));
         assert_eq!(count(&cold, "canonical_messages"), 2);
         assert_eq!(count(&cold, "usage_contributions"), 2);
+        assert_eq!(count(&cold, "usage_v2_response_contributions"), 2);
         assert_eq!(
             count(&cold, "fact_records"),
-            6,
-            "each message owns its paired native-activity observation"
+            8,
+            "each message owns its paired activity plus legacy and v2 usage"
         );
 
         let before_audit = semantic_snapshot(&cold);
         rebuild_usage_totals_for_audit(&mut cold).unwrap();
         assert_eq!(before_audit, semantic_snapshot(&cold));
+    }
+
+    #[test]
+    fn usage_v2_replaces_response_snapshots_without_changing_legacy_usage() {
+        let root = TempDir::new().unwrap();
+        let adapter = ClaudeCodeAdapter::new();
+        let context = adapter_context(root.path(), &adapter);
+        let mut connection = database();
+        register_object(&mut connection);
+        let mut state = DecodeCommitState {
+            expected_generation: 1,
+            cursor: SourceCursor::append_offset(0).into_bytes(),
+            decoder_state: None,
+        };
+        let rows = [
+            claude_usage_line("row-1", "api-1", Some("shared"), 10, 5, Some(2), Some(3)),
+            claude_usage_line("row-2", "api-1", Some("shared"), 10, 5, Some(2), Some(3)),
+            claude_usage_line("row-3", "api-1", Some("shared"), 14, 6, Some(3), Some(4)),
+            claude_usage_line("row-4", "api-1", Some("shared"), 8, 4, Some(1), Some(2)),
+            claude_usage_line("row-5", "api-2", Some("shared"), 3, 2, Some(0), Some(1)),
+            claude_usage_line("row-6", "api-3", None, 1, 1, None, None),
+        ];
+        let mut offset = 0_u64;
+        for (index, payload) in rows.iter().enumerate() {
+            let end = offset + payload.len() as u64 + 1;
+            let record = direct_record(1, offset, end, 100 + index as i64, payload);
+            decode_commit(
+                &mut connection,
+                &adapter,
+                &context,
+                &record,
+                &mut state,
+                200 + index as i64,
+            );
+            offset = end;
+        }
+
+        assert_eq!(count(&connection, "usage_contributions"), 6);
+        assert_eq!(count(&connection, "usage_v2_response_contributions"), 3);
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT SUM(exact_input_tokens) FROM usage_totals",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            46
+        );
+        let v2_totals: (i64, i64, i64, i64) = connection
+            .query_row(
+                r#"
+                SELECT SUM(input_tokens), SUM(output_tokens),
+                       SUM(cache_creation_input_tokens),
+                       SUM(cache_read_input_tokens)
+                FROM usage_v2_response_contributions
+                "#,
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(v2_totals, (12, 7, 1, 3));
+        let corrected: (i64, i64, i64, i64, Option<String>) = connection
+            .query_row(
+                r#"
+                SELECT input_tokens, output_tokens,
+                       cache_creation_input_tokens, cache_read_input_tokens,
+                       request_id
+                FROM usage_v2_response_contributions
+                WHERE response_key = ?1
+                "#,
+                [b"api-1".as_slice()],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(corrected, (8, 4, 1, 2, Some("shared".to_string())));
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM usage_v2_response_contributions WHERE request_id = 'shared'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            2,
+            "a reused requestId must not merge distinct message.id responses"
+        );
+        let missing_cache: (Option<i64>, String, String, Option<String>) = connection
+            .query_row(
+                r#"
+                SELECT u.cache_read_input_tokens, q.quality, q.completeness,
+                       q.unknown_reason
+                FROM usage_v2_response_contributions u
+                JOIN usage_v2_qualification_specs q
+                  ON q.qualification_key = u.cache_read_qualification_key
+                WHERE u.response_key = ?1
+                "#,
+                [b"api-3".as_slice()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            missing_cache,
+            (
+                None,
+                "unknown".to_string(),
+                "unknown".to_string(),
+                Some("missing".to_string())
+            )
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(DISTINCT session_key), COUNT(DISTINCT actor_run_key) FROM usage_v2_response_contributions",
+                    [],
+                    |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+                )
+                .unwrap(),
+            (1, 1)
+        );
+
+        // A generation correction owns a fresh response namespace and retracts
+        // every contribution from the replaced transcript before replay.
+        state.decoder_state = None;
+        let replacement = claude_usage_line("row-new", "api-1", None, 4, 2, Some(0), Some(0));
+        let replacement_record =
+            direct_record(2, 0, replacement.len() as u64 + 1, 300, &replacement);
+        decode_commit(
+            &mut connection,
+            &adapter,
+            &context,
+            &replacement_record,
+            &mut state,
+            301,
+        );
+        assert_eq!(count(&connection, "usage_v2_response_contributions"), 1);
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT input_tokens FROM usage_v2_response_contributions",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            4
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM fact_records WHERE fact_kind = 'runtime.usage-v2'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            connection
+                .query_row("PRAGMA foreign_key_check", [], |_| Ok(1_i64))
+                .optional()
+                .unwrap(),
+            None
+        );
     }
 
     #[test]

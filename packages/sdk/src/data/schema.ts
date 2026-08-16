@@ -118,7 +118,9 @@ import type { SqliteService } from '../io/index.js';
 // same source observation; compact run evidence keeps its dimensions/count.
 // v45: nullable RFC 012A source-record/fact/revision identity beside the RFC
 // 011 store key, with complete-triple and unique-revision enforcement.
-export const SCHEMA_VERSION = 45;
+// v46: non-public RFC 012C response-level usage-v2 shadow state and interned
+// qualified-value evidence beside the retained legacy usage projection.
+export const SCHEMA_VERSION = 46;
 
 export const TOKEN_ACTIVITY_TRIGGER_NAMES = [
   'token_activity_messages_ai',
@@ -1639,6 +1641,78 @@ CREATE TABLE IF NOT EXISTS usage_contributions (
   last_commit_seq INTEGER NOT NULL
 );
 
+-- RFC 012C shadow projection. Repeated qualification metadata is interned so
+-- response rows retain full value quality/provenance without multiplying the
+-- same agent-field strings across the corpus.
+CREATE TABLE IF NOT EXISTS usage_v2_qualification_specs (
+  qualification_key BLOB PRIMARY KEY CHECK (length(qualification_key) = 32),
+  quality TEXT NOT NULL,
+  completeness TEXT NOT NULL,
+  unknown_reason TEXT,
+  authority TEXT NOT NULL,
+  native_field TEXT NOT NULL,
+  normalization_contract_version INTEGER NOT NULL CHECK (normalization_contract_version > 0),
+  CHECK (length(native_field) BETWEEN 1 AND 256),
+  CHECK (
+    (quality = 'unknown' AND unknown_reason IS NOT NULL AND completeness <> 'complete')
+    OR
+    (quality <> 'unknown' AND unknown_reason IS NULL)
+  )
+);
+
+CREATE TABLE IF NOT EXISTS usage_v2_response_contributions (
+  usage_key BLOB PRIMARY KEY CHECK (length(usage_key) = 32),
+  fact_revision_id BLOB NOT NULL UNIQUE CHECK (length(fact_revision_id) = 32),
+  source_record_id BLOB NOT NULL CHECK (length(source_record_id) = 32),
+  fact_id BLOB NOT NULL UNIQUE REFERENCES fact_records(fact_id) ON DELETE CASCADE,
+  session_key BLOB NOT NULL CHECK (length(session_key) = 32),
+  actor_run_key BLOB NOT NULL CHECK (length(actor_run_key) = 32),
+  response_key BLOB NOT NULL CHECK (length(response_key) BETWEEN 1 AND 8192),
+  response_identity TEXT NOT NULL CHECK (response_identity IN ('native_message_id', 'source_record_fallback')),
+  native_message_id TEXT,
+  request_id TEXT,
+  input_tokens INTEGER CHECK (input_tokens IS NULL OR input_tokens >= 0),
+  input_qualification_key BLOB NOT NULL REFERENCES usage_v2_qualification_specs(qualification_key),
+  input_effective_at INTEGER,
+  output_tokens INTEGER CHECK (output_tokens IS NULL OR output_tokens >= 0),
+  output_qualification_key BLOB NOT NULL REFERENCES usage_v2_qualification_specs(qualification_key),
+  output_effective_at INTEGER,
+  cache_creation_input_tokens INTEGER CHECK (cache_creation_input_tokens IS NULL OR cache_creation_input_tokens >= 0),
+  cache_creation_qualification_key BLOB NOT NULL REFERENCES usage_v2_qualification_specs(qualification_key),
+  cache_creation_effective_at INTEGER,
+  cache_read_input_tokens INTEGER CHECK (cache_read_input_tokens IS NULL OR cache_read_input_tokens >= 0),
+  cache_read_qualification_key BLOB NOT NULL REFERENCES usage_v2_qualification_specs(qualification_key),
+  cache_read_effective_at INTEGER,
+  model TEXT,
+  model_qualification_key BLOB REFERENCES usage_v2_qualification_specs(qualification_key),
+  model_effective_at INTEGER,
+  effort TEXT,
+  effort_qualification_key BLOB REFERENCES usage_v2_qualification_specs(qualification_key),
+  effort_effective_at INTEGER,
+  source_time TEXT,
+  source_time_quality TEXT,
+  source_object_id INTEGER NOT NULL,
+  source_generation INTEGER NOT NULL,
+  cursor_end BLOB NOT NULL,
+  last_commit_seq INTEGER NOT NULL,
+  CHECK (request_id IS NULL OR length(request_id) > 0),
+  CHECK (
+    (response_identity = 'native_message_id' AND native_message_id IS NOT NULL AND length(native_message_id) > 0)
+    OR
+    (response_identity = 'source_record_fallback' AND native_message_id IS NULL)
+  ),
+  CHECK (
+    (model IS NULL AND model_qualification_key IS NULL AND model_effective_at IS NULL)
+    OR
+    (model_qualification_key IS NOT NULL AND (model IS NULL OR length(model) > 0))
+  ),
+  CHECK (
+    (effort IS NULL AND effort_qualification_key IS NULL AND effort_effective_at IS NULL)
+    OR
+    (effort_qualification_key IS NOT NULL AND (effort IS NULL OR length(effort) > 0))
+  )
+);
+
 CREATE INDEX IF NOT EXISTS idx_usage_contributions_series_cursor
 ON usage_contributions (
   series_key, source_generation, cursor_end, fact_id
@@ -1797,6 +1871,9 @@ CREATE INDEX IF NOT EXISTS idx_canonical_runs_commit ON canonical_runs(last_comm
 CREATE INDEX IF NOT EXISTS idx_canonical_runs_source_generation ON canonical_runs(source_object_id, source_generation);
 CREATE INDEX IF NOT EXISTS idx_usage_contributions_session_time ON usage_contributions(session_key, source_time, fact_id);
 CREATE INDEX IF NOT EXISTS idx_usage_contributions_source_generation ON usage_contributions(source_object_id, source_generation);
+CREATE INDEX IF NOT EXISTS idx_usage_v2_response_session ON usage_v2_response_contributions(session_key, usage_key);
+CREATE INDEX IF NOT EXISTS idx_usage_v2_response_actor ON usage_v2_response_contributions(actor_run_key, usage_key);
+CREATE INDEX IF NOT EXISTS idx_usage_v2_response_source_generation ON usage_v2_response_contributions(source_object_id, source_generation);
 DROP INDEX IF EXISTS idx_run_evidence_run_order;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_run_evidence_compact ON run_evidence(
   run_key, source_object_id, source_generation, evidence_kind, evidence_strength
@@ -2042,6 +2119,8 @@ const CURRENT_TABLES = [
   'canonical_presences',
   'presence_assertions',
   'observed_run_states',
+  'usage_v2_response_contributions',
+  'usage_v2_qualification_specs',
   'usage_totals',
   'usage_contributions',
   'run_evidence',
