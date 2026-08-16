@@ -53,7 +53,9 @@ use super::runtime_query::{
     RunStateLookup, RunStateRequest, RuntimeSnapshot, RuntimeSnapshotRequest,
 };
 use super::runtime_usage_query::{
-    read_runtime_usage_v2_page, validate_runtime_usage_v2_page, RuntimeUsageV2Page,
+    read_runtime_usage_query_selection_target, read_runtime_usage_v2_page,
+    validate_runtime_usage_query_selection_target, validate_runtime_usage_v2_page,
+    RuntimeUsageQuerySelectionTarget, RuntimeUsageQuerySelectionTargetRequest, RuntimeUsageV2Page,
     RuntimeUsageV2PageRequest,
 };
 use super::search_query::{read_search_page, validate_search_page, SearchPage, SearchPageRequest};
@@ -452,6 +454,12 @@ enum QueryCommand {
         cancellation: QueryCancellationToken,
         request: RuntimeUsageV2PageRequest,
         response: Sender<Result<RuntimeUsageV2Page, EngineError>>,
+    },
+    RuntimeUsageQuerySelectionTarget {
+        cancellation_epoch: u64,
+        cancellation: QueryCancellationToken,
+        request: RuntimeUsageQuerySelectionTargetRequest,
+        response: Sender<Result<RuntimeUsageQuerySelectionTarget, EngineError>>,
     },
     FactFamilyCoverage {
         cancellation_epoch: u64,
@@ -1150,6 +1158,25 @@ impl QueryClient {
                 cancellation,
                 request,
                 response,
+            },
+        )
+    }
+
+    pub(crate) fn runtime_usage_query_selection_target_cancellable(
+        &self,
+        request: RuntimeUsageQuerySelectionTargetRequest,
+        cancellation: QueryCancellationToken,
+    ) -> Result<RuntimeUsageQuerySelectionTarget, EngineError> {
+        validate_runtime_usage_query_selection_target(&request)?;
+        self.send_cancellable(
+            cancellation,
+            |cancellation_epoch, cancellation, response| {
+                QueryCommand::RuntimeUsageQuerySelectionTarget {
+                    cancellation_epoch,
+                    cancellation,
+                    request,
+                    response,
+                }
             },
         )
     }
@@ -2031,6 +2058,22 @@ fn query_thread(
                     cancellation_epoch,
                     &cancellation,
                     || read_runtime_usage_v2_page(&connection, &request),
+                );
+                let _ = response.send(result);
+            }
+            QueryCommand::RuntimeUsageQuerySelectionTarget {
+                cancellation_epoch,
+                cancellation,
+                request,
+                response,
+            } => {
+                let _in_flight = InFlightGuard::enter(&control.in_flight);
+                let result = run_cancellable_query(
+                    &connection,
+                    &control,
+                    cancellation_epoch,
+                    &cancellation,
+                    || read_runtime_usage_query_selection_target(&connection, &request),
                 );
                 let _ = response.send(result);
             }

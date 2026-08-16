@@ -104,6 +104,12 @@ export declare class SpaghettiEngine {
    */
   getRuntimeUsageV2(options: EngineRuntimeUsageV2Options, signal?: AbortSignal | undefined | null): Promise<EngineRuntimeUsageV2Page>
   /**
+   * Atomically promote or roll back one source-scoped runtime usage query.
+   * Promotion requires a Ready/complete v2 barrier at commit time; rollback
+   * remains available if that projection later becomes unhealthy.
+   */
+  selectRuntimeUsageQuery(options: EngineRuntimeUsageQuerySelectionOptions, signal?: AbortSignal | undefined | null): Promise<EngineRuntimeUsageQuerySelectionResult>
+  /**
    * Page normalized RFC 012A coverage for one fact family using opaque
    * common identities. The result shares one durable commit watermark and
    * never exposes native paths or object keys.
@@ -956,6 +962,47 @@ export interface EngineRuntimeSnapshotOptions {
   limit?: number
 }
 
+export interface EngineRuntimeUsageQuerySelection {
+  contractVersion: number
+  queryPackId: string
+  sourceInstanceRef?: string
+  materialized: boolean
+  selected: EngineRuntimeUsageQuerySelectionValue
+  rollback: EngineRuntimeUsageQuerySelectionValue
+  selectionEpoch: number
+  lastCommitSeq?: number
+  updatedAtUnixMs?: number
+}
+
+/**
+ * Compare-and-set authorization for the source instance resolved through one
+ * session. Every expected field must come from one `getRuntimeUsageV2()` page.
+ */
+export interface EngineRuntimeUsageQuerySelectionOptions {
+  projectId: string
+  sessionId: string
+  targetQueryId: string
+  expectedMaterialized: boolean
+  expectedSelectedQueryId: string
+  expectedSelectedContractVersion: number
+  expectedSelectionEpoch: number
+  /** Bounded durable audit reason for this selection change. */
+  reason: string
+}
+
+export interface EngineRuntimeUsageQuerySelectionResult {
+  contractVersion: number
+  atCommitSeq: number
+  projectId: string
+  sessionId: string
+  selection: EngineRuntimeUsageQuerySelection
+}
+
+export interface EngineRuntimeUsageQuerySelectionValue {
+  queryId: string
+  contractVersion: number
+}
+
 export interface EngineRuntimeUsageV2ActorContext {
   actorRunRef: EngineRuntimeUsageV2ExternalEntityRef
   semanticRevisionRef: EngineRuntimeUsageV2SemanticRevisionRef
@@ -1031,6 +1078,7 @@ export interface EngineRuntimeUsageV2Page {
   atCommitSeq: number
   projectionStatus: string
   projectionReadiness: EngineRuntimeUsageV2ProjectionReadiness
+  querySelection: EngineRuntimeUsageQuerySelection
   projectId: string
   sessionId: string
   sessionRef?: EngineRuntimeUsageV2ExternalEntityRef

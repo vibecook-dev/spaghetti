@@ -194,6 +194,11 @@ describe('multi-adapter observation host', { skip: !native }, () => {
       false,
       'the transport-neutral client must remain read-only',
     );
+    assert.equal(
+      (host.clientInfo.methods as readonly string[]).includes('selectRuntimeUsageQuery'),
+      false,
+      'query selection must remain an owner-only mutation',
+    );
 
     const projects = await host.client.listProjects({ limit: 10 });
     const projectId = projects.items[0]?.projectId;
@@ -244,6 +249,23 @@ describe('multi-adapter observation host', { skip: !native }, () => {
     assert.equal(replay.authorizedCoverageLastCommitSeq, request.expectedCoverageLastCommitSeq);
     assert.ok(replay.outcome.recordsDecoded > 0);
     await assert.rejects(host.replayFactFamily(request), /authorization is stale/i);
+
+    const usage = await host.client.getRuntimeUsageV2({ projectId, sessionId, limit: 1 });
+    const promoted = await host.selectRuntimeUsageQuery({
+      projectId,
+      sessionId,
+      targetQueryId: 'runtime.usage-v2',
+      expectedMaterialized: usage.querySelection.materialized,
+      expectedSelectedQueryId: usage.querySelection.selected.queryId,
+      expectedSelectedContractVersion: usage.querySelection.selected.contractVersion,
+      expectedSelectionEpoch: usage.querySelection.selectionEpoch,
+      reason: 'observation host usage-v2 promotion smoke test',
+    });
+    assert.equal(promoted.selection.selected.queryId, 'runtime.usage-v2');
+    assert.equal(
+      (await host.client.getRuntimeUsageV2({ projectId, sessionId, limit: 1 })).projectionStatus,
+      'selected',
+    );
   });
 
   test('serves one source-neutral product API for Claude, Codex, and Grok', async () => {

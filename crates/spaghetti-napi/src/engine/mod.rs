@@ -43,7 +43,7 @@ mod writer;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::adapter::{AdapterRegistry, FactBatch};
 pub use capability_query::{
@@ -57,7 +57,10 @@ pub use commit::{
     ChangeLogRetentionPolicy, ChangeLogRetentionSnapshot, DEFAULT_CHANGE_LOG_MAX_AGE_MS,
     DEFAULT_CHANGE_LOG_MAX_PAYLOAD_BYTES, DEFAULT_CHANGE_LOG_MIN_RESUMABLE_COMMITS,
 };
-use commit::{CommitReceipt, ObservationCommit, ProjectionVersionCommit};
+use commit::{
+    CommitReceipt, ObservationCommit, ProjectionVersionCommit, QueryPackProjectionGuard,
+    QueryPackSelectionExpectation, QueryPackSelectionUpdate, QueryPackSelectionValue,
+};
 pub use coordinator::{
     FactFamilyReplayRequest, ObservationCoordinator, ReconcileOutcome, ReconcileRequest,
     ReconcileRetryTarget,
@@ -105,12 +108,13 @@ pub use runtime_query::{
     DEFAULT_RUNTIME_PAGE_LIMIT, RUNTIME_QUERY_CONTRACT_VERSION,
 };
 pub use runtime_usage_query::{
-    RuntimeUsageV2ActorContext, RuntimeUsageV2Affiliation, RuntimeUsageV2Aggregate,
-    RuntimeUsageV2BucketAggregate, RuntimeUsageV2ExternalEntityRef, RuntimeUsageV2Page,
-    RuntimeUsageV2PageRequest, RuntimeUsageV2ProjectionReadiness, RuntimeUsageV2Response,
-    RuntimeUsageV2SemanticRevisionRef, RuntimeUsageV2TextValue, RuntimeUsageV2TokenValue,
-    RuntimeUsageV2ValueProvenance, DEFAULT_RUNTIME_USAGE_V2_PAGE_LIMIT,
-    MAX_RUNTIME_USAGE_V2_PAGE_LIMIT, RUNTIME_USAGE_V2_QUERY_CONTRACT_VERSION,
+    RuntimeUsageQuerySelection, RuntimeUsageQuerySelectionValue, RuntimeUsageV2ActorContext,
+    RuntimeUsageV2Affiliation, RuntimeUsageV2Aggregate, RuntimeUsageV2BucketAggregate,
+    RuntimeUsageV2ExternalEntityRef, RuntimeUsageV2Page, RuntimeUsageV2PageRequest,
+    RuntimeUsageV2ProjectionReadiness, RuntimeUsageV2Response, RuntimeUsageV2SemanticRevisionRef,
+    RuntimeUsageV2TextValue, RuntimeUsageV2TokenValue, RuntimeUsageV2ValueProvenance,
+    DEFAULT_RUNTIME_USAGE_V2_PAGE_LIMIT, MAX_RUNTIME_USAGE_V2_PAGE_LIMIT,
+    RUNTIME_USAGE_QUERY_SELECTION_CONTRACT_VERSION, RUNTIME_USAGE_V2_QUERY_CONTRACT_VERSION,
 };
 pub use search_query::{
     SearchHit, SearchPage, SearchPageRequest, DEFAULT_SEARCH_PAGE_LIMIT,
@@ -275,6 +279,27 @@ pub struct FactFamilyReplayResult {
     pub authorized_content_digest_ref: String,
     pub authorized_coverage_last_commit_seq: u64,
     pub outcome: ReconcileOutcome,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeUsageQuerySelectionCommand {
+    pub project_id: String,
+    pub session_id: String,
+    pub target_query_id: String,
+    pub expected_materialized: bool,
+    pub expected_selected_query_id: String,
+    pub expected_selected_contract_version: u32,
+    pub expected_selection_epoch: u64,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeUsageQuerySelectionResult {
+    pub contract_version: u32,
+    pub at_commit_seq: u64,
+    pub project_id: String,
+    pub session_id: String,
+    pub selection: RuntimeUsageQuerySelection,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -929,6 +954,162 @@ impl SpaghettiEngineCore {
     ) -> Result<RuntimeUsageV2Page, EngineError> {
         let (_, queries) = self.clients()?;
         queries.runtime_usage_v2_cancellable(request, cancellation)
+    }
+
+    /// Compare-and-set one source instance's runtime usage query selection.
+    /// Promotion is guarded by the current Ready projection/complete coverage
+    /// barrier; rollback remains available when that projection is unhealthy.
+    pub fn select_runtime_usage_query_cancellable(
+        &self,
+        command: RuntimeUsageQuerySelectionCommand,
+        cancellation: QueryCancellationToken,
+    ) -> Result<RuntimeUsageQuerySelectionResult, EngineError> {
+        if command.reason.trim().is_empty() || command.reason.len() > 4 * 1024 {
+            return Err(EngineError::InvalidConfig(
+                "runtime usage query selection requires a bounded reason".to_string(),
+            ));
+        }
+        if command.expected_selected_contract_version == 0
+            || command.expected_selected_query_id.trim().is_empty()
+            || !matches!(
+                command.target_query_id.as_str(),
+                runtime_usage_query::LEGACY_USAGE_QUERY_ID
+                    | runtime_usage_query::RUNTIME_USAGE_V2_QUERY_ID
+            )
+        {
+            return Err(EngineError::InvalidConfig(
+                "runtime usage query selection contains an unsupported query target".to_string(),
+            ));
+        }
+        let target_request = runtime_usage_query::RuntimeUsageQuerySelectionTargetRequest {
+            project_id: command.project_id.clone(),
+            session_id: command.session_id.clone(),
+        };
+        let target = self
+            .query_client()?
+            .runtime_usage_query_selection_target_cancellable(
+                target_request.clone(),
+                cancellation.clone(),
+            )?;
+        let requested = QueryPackSelectionValue {
+            query_id: command.target_query_id.clone(),
+            contract_version: 1,
+        };
+        if target.selection.selected.query_id == requested.query_id
+            && target.selection.selected.contract_version == requested.contract_version
+        {
+            return Ok(RuntimeUsageQuerySelectionResult {
+                contract_version:
+                    runtime_usage_query::RUNTIME_USAGE_QUERY_SELECTION_CONTRACT_VERSION,
+                at_commit_seq: target.at_commit_seq,
+                project_id: command.project_id,
+                session_id: command.session_id,
+                selection: target.selection,
+            });
+        }
+        if target.selection.materialized != command.expected_materialized
+            || target.selection.selected.query_id != command.expected_selected_query_id
+            || target.selection.selected.contract_version
+                != command.expected_selected_contract_version
+            || target.selection.selection_epoch != command.expected_selection_epoch
+        {
+            return Err(EngineError::InvalidQuery(
+                "runtime usage query selection expectation is stale".to_string(),
+            ));
+        }
+        if cancellation.is_cancelled() {
+            return Err(EngineError::QueryCancelled);
+        }
+        let current = QueryPackSelectionValue {
+            query_id: target.selection.selected.query_id.clone(),
+            contract_version: target.selection.selected.contract_version,
+        };
+        let expected = if target.selection.materialized {
+            QueryPackSelectionExpectation::At {
+                selected: current.clone(),
+                selection_epoch: target.selection.selection_epoch,
+            }
+        } else {
+            QueryPackSelectionExpectation::Absent
+        };
+        let (rollback, projection_guard) = match command.target_query_id.as_str() {
+            runtime_usage_query::RUNTIME_USAGE_V2_QUERY_ID => {
+                if current.query_id != runtime_usage_query::LEGACY_USAGE_QUERY_ID
+                    || current.contract_version != 1
+                {
+                    return Err(EngineError::InvalidQuery(
+                        "runtime usage-v2 promotion requires the legacy usage selection"
+                            .to_string(),
+                    ));
+                }
+                (
+                    current,
+                    Some(QueryPackProjectionGuard {
+                        projection_id: runtime_semantic_projection::USAGE_V2_PROJECTION_ID
+                            .to_string(),
+                        projection_scope_key: target.stable_key.clone(),
+                        projection_version:
+                            runtime_semantic_projection::USAGE_V2_PROJECTION_VERSION,
+                        coverage_owner_id: runtime_semantic_projection::USAGE_V2_PROJECTION_ID
+                            .to_string(),
+                        coverage_domain_name: runtime_semantic_projection::USAGE_V2_PROJECTION_ID
+                            .to_string(),
+                        coverage_domain_version:
+                            runtime_semantic_projection::USAGE_V2_PROJECTION_VERSION,
+                    }),
+                )
+            }
+            runtime_usage_query::LEGACY_USAGE_QUERY_ID => {
+                if !target.selection.materialized
+                    || target.selection.rollback.query_id
+                        != runtime_usage_query::LEGACY_USAGE_QUERY_ID
+                    || target.selection.rollback.contract_version != 1
+                {
+                    return Err(EngineError::InvalidQuery(
+                        "runtime usage query has no retained legacy rollback target".to_string(),
+                    ));
+                }
+                (
+                    QueryPackSelectionValue {
+                        query_id: runtime_usage_query::LEGACY_USAGE_QUERY_ID.to_string(),
+                        contract_version: 1,
+                    },
+                    None,
+                )
+            }
+            _ => unreachable!("target query id was validated above"),
+        };
+        let now = engine_now_unix_ms()?;
+        self.commit_projection_versions(ProjectionVersionCommit {
+            source_instance_id: target.source_instance_id,
+            reason: command.reason,
+            started_at: now,
+            committed_at: now,
+            projection_versions: Vec::new(),
+            coverage_sets: Vec::new(),
+            coverage_preconditions: Vec::new(),
+            query_pack_selections: vec![QueryPackSelectionUpdate {
+                query_pack_id: runtime_usage_query::RUNTIME_USAGE_QUERY_PACK_ID.to_string(),
+                scope_key: target.stable_key,
+                expected,
+                selected: requested,
+                rollback,
+                projection_guard,
+            }],
+        })?;
+        let selected = self
+            .query_client()?
+            .runtime_usage_query_selection_target_cancellable(
+                target_request,
+                QueryCancellationToken::default(),
+            )?;
+        Ok(RuntimeUsageQuerySelectionResult {
+            contract_version: runtime_usage_query::RUNTIME_USAGE_QUERY_SELECTION_CONTRACT_VERSION,
+            at_commit_seq: selected.at_commit_seq,
+            project_id: command.project_id,
+            session_id: command.session_id,
+            selection: selected.selection,
+        })
     }
 
     pub fn fact_family_coverage_cancellable(
@@ -1751,6 +1932,15 @@ impl SpaghettiEngineCore {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
+}
+
+fn engine_now_unix_ms() -> Result<i64, EngineError> {
+    let elapsed = SystemTime::now().duration_since(UNIX_EPOCH).map_err(|_| {
+        EngineError::InvalidConfig("system clock precedes the Unix epoch".to_string())
+    })?;
+    i64::try_from(elapsed.as_millis()).map_err(|_| {
+        EngineError::InvalidConfig("system clock exceeds the supported range".to_string())
+    })
 }
 
 impl Drop for SpaghettiEngineCore {

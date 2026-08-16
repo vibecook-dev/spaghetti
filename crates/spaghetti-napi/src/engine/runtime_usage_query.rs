@@ -17,10 +17,14 @@ use super::runtime_semantic_projection::{USAGE_V2_PROJECTION_ID, USAGE_V2_PROJEC
 use super::EngineError;
 
 pub const RUNTIME_USAGE_V2_QUERY_CONTRACT_VERSION: u32 = 1;
+pub const RUNTIME_USAGE_QUERY_SELECTION_CONTRACT_VERSION: u32 = 1;
 pub const DEFAULT_RUNTIME_USAGE_V2_PAGE_LIMIT: u32 = 50;
 pub const MAX_RUNTIME_USAGE_V2_PAGE_LIMIT: u32 = 200;
 const MAX_RUNTIME_USAGE_V2_CURSOR_BYTES: usize = 32 * 1024;
 const MAX_RUNTIME_USAGE_V2_AFFILIATIONS_PER_PAGE: usize = 6_400;
+pub(crate) const RUNTIME_USAGE_QUERY_PACK_ID: &str = "runtime.usage";
+pub(crate) const LEGACY_USAGE_QUERY_ID: &str = "legacy.usage";
+pub(crate) const RUNTIME_USAGE_V2_QUERY_ID: &str = "runtime.usage-v2";
 const OPAQUE_REFERENCE_VERSION: &str = "v1";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -32,6 +36,20 @@ pub struct RuntimeUsageV2PageRequest {
     pub affiliation_target_ref: Option<String>,
     pub cursor: Option<String>,
     pub limit: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RuntimeUsageQuerySelectionTargetRequest {
+    pub project_id: String,
+    pub session_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RuntimeUsageQuerySelectionTarget {
+    pub at_commit_seq: u64,
+    pub source_instance_id: u64,
+    pub stable_key: Vec<u8>,
+    pub selection: RuntimeUsageQuerySelection,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -176,11 +194,32 @@ pub struct RuntimeUsageV2ProjectionReadiness {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeUsageQuerySelectionValue {
+    pub query_id: String,
+    pub contract_version: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeUsageQuerySelection {
+    pub contract_version: u32,
+    pub query_pack_id: String,
+    /// Opaque common source identity once matching usage-v2 coverage exists.
+    pub source_instance_ref: Option<String>,
+    pub materialized: bool,
+    pub selected: RuntimeUsageQuerySelectionValue,
+    pub rollback: RuntimeUsageQuerySelectionValue,
+    pub selection_epoch: u64,
+    pub last_commit_seq: Option<u64>,
+    pub updated_at_unix_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeUsageV2Page {
     pub contract_version: u32,
     pub at_commit_seq: u64,
     pub projection_status: String,
     pub projection_readiness: RuntimeUsageV2ProjectionReadiness,
+    pub query_selection: RuntimeUsageQuerySelection,
     pub project_id: String,
     pub session_id: String,
     pub session_ref: Option<RuntimeUsageV2ExternalEntityRef>,
@@ -226,6 +265,38 @@ pub(super) fn validate_runtime_usage_v2_page(
     validate_request(request).map(|_| ())
 }
 
+pub(super) fn validate_runtime_usage_query_selection_target(
+    request: &RuntimeUsageQuerySelectionTargetRequest,
+) -> Result<(), EngineError> {
+    decode_entity_id(&request.project_id, PROJECT_ID_PREFIX, "project id")?;
+    decode_entity_id(&request.session_id, SESSION_ID_PREFIX, "session id")?;
+    Ok(())
+}
+
+pub(super) fn read_runtime_usage_query_selection_target(
+    connection: &Connection,
+    request: &RuntimeUsageQuerySelectionTargetRequest,
+) -> Result<RuntimeUsageQuerySelectionTarget, EngineError> {
+    validate_runtime_usage_query_selection_target(request)?;
+    let project_key = decode_entity_id(&request.project_id, PROJECT_ID_PREFIX, "project id")?;
+    let session_key = decode_entity_id(&request.session_id, SESSION_ID_PREFIX, "session id")?;
+    let transaction = connection
+        .unchecked_transaction()
+        .map_err(|error| query_sqlite_error("begin runtime usage selection snapshot", error))?;
+    let at_commit_seq = read_committed_watermark(&transaction)?;
+    require_session_membership(&transaction, &project_key, &session_key)?;
+    let source_scope = resolve_source_scope(&transaction, &project_key, &session_key)?;
+    let selection = read_query_selection(&transaction, &source_scope)?;
+    let target = RuntimeUsageQuerySelectionTarget {
+        at_commit_seq,
+        source_instance_id: source_scope.source_instance_id,
+        stable_key: source_scope.stable_key,
+        selection,
+    };
+    finish_snapshot(transaction)?;
+    Ok(target)
+}
+
 pub(super) fn read_runtime_usage_v2_page(
     connection: &Connection,
     request: &RuntimeUsageV2PageRequest,
@@ -244,9 +315,10 @@ pub(super) fn read_runtime_usage_v2_page(
         }
     }
     require_session_membership(&transaction, &validated.project_key, &validated.session_key)?;
-    let projection_scope_key =
-        resolve_projection_scope_key(&transaction, &validated.project_key, &validated.session_key)?;
-    let projection_readiness = read_projection_readiness(&transaction, &projection_scope_key)?;
+    let source_scope =
+        resolve_source_scope(&transaction, &validated.project_key, &validated.session_key)?;
+    let projection_readiness = read_projection_readiness(&transaction, &source_scope.stable_key)?;
+    let query_selection = read_query_selection(&transaction, &source_scope)?;
     let canonical_session_key = resolve_canonical_session_key(
         &transaction,
         &validated.project_key,
@@ -260,6 +332,7 @@ pub(super) fn read_runtime_usage_v2_page(
             at_commit_seq: watermark,
             projection_status: "not_materialized".to_string(),
             projection_readiness,
+            query_selection,
             project_id: request.project_id.clone(),
             session_id: request.session_id.clone(),
             session_ref: None,
@@ -319,11 +392,19 @@ pub(super) fn read_runtime_usage_v2_page(
         .map_err(|error| query_sqlite_error("encode runtime usage-v2 session reference", error))?;
     finish_snapshot(transaction)?;
 
+    let projection_status = if query_selection.selected.query_id == RUNTIME_USAGE_V2_QUERY_ID
+        && query_selection.selected.contract_version == RUNTIME_USAGE_V2_QUERY_CONTRACT_VERSION
+    {
+        "selected"
+    } else {
+        "shadow"
+    };
     Ok(RuntimeUsageV2Page {
         contract_version: RUNTIME_USAGE_V2_QUERY_CONTRACT_VERSION,
         at_commit_seq: watermark,
-        projection_status: "shadow".to_string(),
+        projection_status: projection_status.to_string(),
         projection_readiness,
+        query_selection,
         project_id: request.project_id.clone(),
         session_id: request.session_id.clone(),
         session_ref: Some(session_ref),
@@ -423,15 +504,20 @@ fn require_session_membership(
     Ok(())
 }
 
-fn resolve_projection_scope_key(
+struct RuntimeUsageSourceScope {
+    source_instance_id: u64,
+    stable_key: Vec<u8>,
+}
+
+fn resolve_source_scope(
     transaction: &Transaction<'_>,
     project_key: &[u8],
     session_key: &[u8],
-) -> Result<Vec<u8>, EngineError> {
+) -> Result<RuntimeUsageSourceScope, EngineError> {
     transaction
         .query_row(
             r#"
-            SELECT source.stable_key
+            SELECT source.source_instance_id, source.stable_key
             FROM canonical_sessions AS session
             JOIN source_objects AS object
               ON object.source_object_id = session.source_object_id
@@ -442,9 +528,120 @@ fn resolve_projection_scope_key(
             WHERE session.project_key = ?1 AND session.session_key = ?2
             "#,
             params![project_key, session_key],
-            |row| row.get(0),
+            |row| {
+                Ok(RuntimeUsageSourceScope {
+                    source_instance_id: nonnegative_u64(row.get(0)?, "source instance id")?,
+                    stable_key: row.get(1)?,
+                })
+            },
         )
         .map_err(|error| query_sqlite_error("resolve runtime usage-v2 projection scope", error))
+}
+
+fn read_query_selection(
+    transaction: &Transaction<'_>,
+    source_scope: &RuntimeUsageSourceScope,
+) -> Result<RuntimeUsageQuerySelection, EngineError> {
+    let source_instance_id =
+        i64::try_from(source_scope.source_instance_id).map_err(|_| EngineError::Sqlite {
+            operation: "read runtime usage query selection",
+            detail: "source instance id exceeds SQLite integer range".to_string(),
+        })?;
+    let source_instance_ref = transaction
+        .query_row(
+            r#"
+            SELECT canonical_source_instance_key
+            FROM source_coverage_sets
+            WHERE source_instance_id = ?1
+              AND owner_id = ?2
+              AND owner_scope_key = ?3
+              AND domain_kind = 'fact_family'
+              AND domain_name = ?2
+              AND domain_version = ?4
+              AND root_entity_key = X''
+            "#,
+            params![
+                source_instance_id,
+                USAGE_V2_PROJECTION_ID,
+                source_scope.stable_key,
+                i64::from(USAGE_V2_PROJECTION_VERSION),
+            ],
+            |row| digest(row, 0, "canonical source instance key"),
+        )
+        .optional()
+        .map_err(|error| query_sqlite_error("read runtime usage source reference", error))?
+        .map(|key| opaque_ref(&key));
+    let row = transaction
+        .query_row(
+            r#"
+            SELECT selected_query_id, selected_contract_version,
+                   rollback_query_id, rollback_contract_version,
+                   selection_epoch, last_commit_seq, updated_at
+            FROM query_pack_selections
+            WHERE source_instance_id = ?1
+              AND query_pack_id = ?2
+              AND scope_key = ?3
+            "#,
+            params![
+                source_instance_id,
+                RUNTIME_USAGE_QUERY_PACK_ID,
+                source_scope.stable_key,
+            ],
+            |row| {
+                Ok(RuntimeUsageQuerySelection {
+                    contract_version: RUNTIME_USAGE_QUERY_SELECTION_CONTRACT_VERSION,
+                    query_pack_id: RUNTIME_USAGE_QUERY_PACK_ID.to_string(),
+                    source_instance_ref: source_instance_ref.clone(),
+                    materialized: true,
+                    selected: RuntimeUsageQuerySelectionValue {
+                        query_id: row.get(0)?,
+                        contract_version: nonnegative_u32(
+                            row.get(1)?,
+                            "selected query contract version",
+                        )?,
+                    },
+                    rollback: RuntimeUsageQuerySelectionValue {
+                        query_id: row.get(2)?,
+                        contract_version: nonnegative_u32(
+                            row.get(3)?,
+                            "rollback query contract version",
+                        )?,
+                    },
+                    selection_epoch: nonnegative_u64(row.get(4)?, "selection epoch")?,
+                    last_commit_seq: Some(nonnegative_u64(
+                        row.get(5)?,
+                        "selection commit sequence",
+                    )?),
+                    updated_at_unix_ms: Some(row.get(6)?),
+                })
+            },
+        )
+        .optional()
+        .map_err(|error| query_sqlite_error("read runtime usage query selection", error))?;
+    Ok(row.unwrap_or_else(|| RuntimeUsageQuerySelection {
+        contract_version: RUNTIME_USAGE_QUERY_SELECTION_CONTRACT_VERSION,
+        query_pack_id: RUNTIME_USAGE_QUERY_PACK_ID.to_string(),
+        source_instance_ref,
+        materialized: false,
+        selected: RuntimeUsageQuerySelectionValue {
+            query_id: LEGACY_USAGE_QUERY_ID.to_string(),
+            contract_version: 1,
+        },
+        rollback: RuntimeUsageQuerySelectionValue {
+            query_id: LEGACY_USAGE_QUERY_ID.to_string(),
+            contract_version: 1,
+        },
+        selection_epoch: 0,
+        last_commit_seq: None,
+        updated_at_unix_ms: None,
+    }))
+}
+
+fn opaque_ref(value: &[u8]) -> String {
+    format!(
+        "{OPAQUE_REFERENCE_VERSION}:{}",
+        URL_SAFE_NO_PAD.encode(value)
+    )
 }
 
 fn read_projection_readiness(

@@ -18,7 +18,9 @@ use super::EngineError;
 
 const MAX_DRIVER_CHECKPOINT_BYTES: usize = 64 * 1024 * 1024;
 const MAX_PROJECTION_VERSION_UPDATES: usize = 64;
+const MAX_QUERY_PACK_SELECTION_UPDATES: usize = 16;
 const MAX_PROJECTION_SCOPE_KEY_BYTES: usize = 4 * 1024;
+const MAX_QUERY_PACK_ID_BYTES: usize = 256;
 const CHANGE_LOG_ROW_OVERHEAD_BYTES: u64 = 24;
 
 /// Default durable replay window. Size is measured as the encoded change
@@ -163,6 +165,44 @@ pub struct ProjectionVersionUpdate {
     pub detail: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueryPackSelectionValue {
+    pub query_id: String,
+    pub contract_version: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum QueryPackSelectionExpectation {
+    Absent,
+    At {
+        selected: QueryPackSelectionValue,
+        selection_epoch: u64,
+    },
+}
+
+/// Same-transaction proof required before a query pack may select a projection
+/// implementation. The projection readiness and complete source/fact-family
+/// coverage must be the two halves of one durable barrier commit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueryPackProjectionGuard {
+    pub projection_id: String,
+    pub projection_scope_key: Vec<u8>,
+    pub projection_version: u32,
+    pub coverage_owner_id: String,
+    pub coverage_domain_name: String,
+    pub coverage_domain_version: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueryPackSelectionUpdate {
+    pub query_pack_id: String,
+    pub scope_key: Vec<u8>,
+    pub expected: QueryPackSelectionExpectation,
+    pub selected: QueryPackSelectionValue,
+    pub rollback: QueryPackSelectionValue,
+    pub projection_guard: Option<QueryPackProjectionGuard>,
+}
+
 /// Writer-owned administrative transition for one or more common projection
 /// packs. It advances the same durable commit clock as source ingestion while
 /// touching no source cursor or adapter-owned object.
@@ -175,6 +215,7 @@ pub struct ProjectionVersionCommit {
     pub projection_versions: Vec<ProjectionVersionUpdate>,
     pub coverage_sets: Vec<DurableCoverageSetUpdate>,
     pub coverage_preconditions: Vec<source_coverage::DurableCoverageSetPrecondition>,
+    pub query_pack_selections: Vec<QueryPackSelectionUpdate>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -287,6 +328,7 @@ pub(super) enum ProjectionCommitStage {
     AfterCommitInsert,
     AfterProjectionVersions,
     AfterCoverageReplacement,
+    AfterQueryPackSelections,
     BeforeCommit,
     AfterCommit,
 }
@@ -477,7 +519,12 @@ pub(super) fn apply_projection_version_commit_with_hook(
     let projection_versions_changed =
         projection_versions_changed(&transaction, &request.projection_versions)?;
     let coverage_changed = source_coverage::updates_changed(&transaction, &request.coverage_sets)?;
-    if !projection_versions_changed && !coverage_changed {
+    let query_pack_selections_changed = query_pack_selections_changed(
+        &transaction,
+        request.source_instance_id,
+        &request.query_pack_selections,
+    )?;
+    if !projection_versions_changed && !coverage_changed && !query_pack_selections_changed {
         transaction
             .commit()
             .map_err(|error| sqlite_error("finish unchanged projection version commit", error))?;
@@ -519,6 +566,14 @@ pub(super) fn apply_projection_version_commit_with_hook(
         &request.coverage_sets,
     )?;
     hook.reach(ProjectionCommitStage::AfterCoverageReplacement)?;
+    write_query_pack_selections(
+        &transaction,
+        request.source_instance_id,
+        commit_seq,
+        request.committed_at,
+        &request.query_pack_selections,
+    )?;
+    hook.reach(ProjectionCommitStage::AfterQueryPackSelections)?;
     hook.reach(ProjectionCommitStage::BeforeCommit)?;
     transaction
         .commit()
@@ -848,12 +903,22 @@ fn validate_projection_version_commit(
             "projection commit time must not precede its start".to_string(),
         ));
     }
-    if request.projection_versions.is_empty() {
+    if request.projection_versions.is_empty() && request.query_pack_selections.is_empty() {
         return Err(EngineError::InvalidCommit(
-            "projection version commit requires at least one update".to_string(),
+            "projection version commit requires a projection or query-pack update".to_string(),
+        ));
+    }
+    if !request.query_pack_selections.is_empty()
+        && (!request.projection_versions.is_empty()
+            || !request.coverage_sets.is_empty()
+            || !request.coverage_preconditions.is_empty())
+    {
+        return Err(EngineError::InvalidCommit(
+            "query-pack selection must be an isolated administrative transaction".to_string(),
         ));
     }
     validate_projection_versions(&request.projection_versions)?;
+    validate_query_pack_selections(&request.query_pack_selections)?;
     source_coverage::validate_updates(&request.coverage_sets)?;
     source_coverage::validate_preconditions(&request.coverage_preconditions)?;
     for coverage in &request.coverage_sets {
@@ -917,6 +982,102 @@ fn validate_projection_versions(
             }
             _ => {}
         }
+    }
+    Ok(())
+}
+
+fn validate_query_pack_selections(
+    selections: &[QueryPackSelectionUpdate],
+) -> Result<(), EngineError> {
+    if selections.len() > MAX_QUERY_PACK_SELECTION_UPDATES {
+        return Err(EngineError::InvalidCommit(format!(
+            "query-pack selection count exceeds {MAX_QUERY_PACK_SELECTION_UPDATES}"
+        )));
+    }
+    let mut identities = BTreeSet::new();
+    for selection in selections {
+        validate_query_pack_id("query_pack.query_pack_id", &selection.query_pack_id)?;
+        require_bytes("query_pack.scope_key", &selection.scope_key)?;
+        if selection.scope_key.len() > MAX_PROJECTION_SCOPE_KEY_BYTES {
+            return Err(EngineError::InvalidCommit(format!(
+                "query-pack scope key exceeds {MAX_PROJECTION_SCOPE_KEY_BYTES} bytes"
+            )));
+        }
+        if !identities.insert((&selection.query_pack_id, &selection.scope_key)) {
+            return Err(EngineError::InvalidCommit(format!(
+                "query pack {} updates the same scope more than once",
+                selection.query_pack_id
+            )));
+        }
+        validate_query_pack_value("query_pack.selected", &selection.selected)?;
+        validate_query_pack_value("query_pack.rollback", &selection.rollback)?;
+        if let QueryPackSelectionExpectation::At {
+            selected,
+            selection_epoch,
+        } = &selection.expected
+        {
+            validate_query_pack_value("query_pack.expected", selected)?;
+            if *selection_epoch == 0 {
+                return Err(EngineError::InvalidCommit(
+                    "query-pack expected selection epoch must be greater than zero".to_string(),
+                ));
+            }
+            to_i64(*selection_epoch, "query-pack expected selection epoch")?;
+        }
+        if let Some(guard) = &selection.projection_guard {
+            validate_query_pack_id("query_pack.guard.projection_id", &guard.projection_id)?;
+            require_bytes(
+                "query_pack.guard.projection_scope_key",
+                &guard.projection_scope_key,
+            )?;
+            if guard.projection_scope_key.len() > MAX_PROJECTION_SCOPE_KEY_BYTES {
+                return Err(EngineError::InvalidCommit(format!(
+                    "query-pack projection scope key exceeds {MAX_PROJECTION_SCOPE_KEY_BYTES} bytes"
+                )));
+            }
+            if guard.projection_version == 0 || guard.coverage_domain_version == 0 {
+                return Err(EngineError::InvalidCommit(
+                    "query-pack projection and coverage versions must be greater than zero"
+                        .to_string(),
+                ));
+            }
+            if guard.projection_scope_key != selection.scope_key {
+                return Err(EngineError::InvalidCommit(
+                    "query-pack guard and selection must use the same source scope".to_string(),
+                ));
+            }
+            validate_query_pack_id(
+                "query_pack.guard.coverage_owner_id",
+                &guard.coverage_owner_id,
+            )?;
+            validate_query_pack_id(
+                "query_pack.guard.coverage_domain_name",
+                &guard.coverage_domain_name,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_query_pack_value(
+    field: &'static str,
+    value: &QueryPackSelectionValue,
+) -> Result<(), EngineError> {
+    validate_query_pack_id(field, &value.query_id)?;
+    if value.contract_version == 0 {
+        return Err(EngineError::InvalidCommit(format!(
+            "{field} contract version must be greater than zero"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_query_pack_id(field: &'static str, value: &str) -> Result<(), EngineError> {
+    require_text(field, value)?;
+    if value.len() > MAX_QUERY_PACK_ID_BYTES {
+        return Err(EngineError::InvalidCommit(format!(
+            "{field} exceeds {MAX_QUERY_PACK_ID_BYTES} bytes"
+        )));
     }
     Ok(())
 }
@@ -1471,6 +1632,277 @@ fn projection_versions_changed(
     Ok(false)
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct StoredQueryPackSelection {
+    source_instance_id: u64,
+    selected: QueryPackSelectionValue,
+    rollback: QueryPackSelectionValue,
+    selection_epoch: u64,
+}
+
+fn query_pack_selections_changed(
+    transaction: &Transaction<'_>,
+    source_instance_id: u64,
+    selections: &[QueryPackSelectionUpdate],
+) -> Result<bool, EngineError> {
+    let mut changed = false;
+    for selection in selections {
+        let current = read_query_pack_selection(
+            transaction,
+            source_instance_id,
+            &selection.query_pack_id,
+            &selection.scope_key,
+        )?;
+        let target_is_current = current.as_ref().is_some_and(|current| {
+            current.source_instance_id == source_instance_id
+                && current.selected == selection.selected
+                && current.rollback == selection.rollback
+        });
+        // This ordering makes a retry after post-commit acknowledgement loss
+        // idempotent even though its expected old epoch is now stale.
+        if target_is_current {
+            continue;
+        }
+        match (&selection.expected, &current) {
+            (QueryPackSelectionExpectation::Absent, None) => {}
+            (
+                QueryPackSelectionExpectation::At {
+                    selected,
+                    selection_epoch,
+                },
+                Some(current),
+            ) if current.source_instance_id == source_instance_id
+                && current.selected == *selected
+                && current.selection_epoch == *selection_epoch => {}
+            _ => {
+                return Err(EngineError::InvalidCommit(format!(
+                    "query pack {} selection compare-and-set failed",
+                    selection.query_pack_id
+                )));
+            }
+        }
+        let is_explicit_rollback = current.as_ref().is_some_and(|current| {
+            selection.selected == current.rollback && selection.rollback == current.rollback
+        });
+        if !is_explicit_rollback && selection.projection_guard.is_none() {
+            return Err(EngineError::InvalidCommit(format!(
+                "query pack {} promotion requires a projection guard",
+                selection.query_pack_id
+            )));
+        }
+        if let Some(guard) = &selection.projection_guard {
+            assert_query_pack_projection_guard(transaction, source_instance_id, guard)?;
+        }
+        changed = true;
+    }
+    Ok(changed)
+}
+
+fn read_query_pack_selection(
+    transaction: &Transaction<'_>,
+    source_instance_id: u64,
+    query_pack_id: &str,
+    scope_key: &[u8],
+) -> Result<Option<StoredQueryPackSelection>, EngineError> {
+    transaction
+        .query_row(
+            r#"
+            SELECT source_instance_id, selected_query_id,
+                   selected_contract_version, rollback_query_id,
+                   rollback_contract_version, selection_epoch
+            FROM query_pack_selections
+            WHERE source_instance_id = ?1
+              AND query_pack_id = ?2
+              AND scope_key = ?3
+            "#,
+            params![
+                to_i64(source_instance_id, "source instance id")?,
+                query_pack_id,
+                scope_key,
+            ],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, i64>(5)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|error| sqlite_error("read query-pack selection", error))?
+        .map(
+            |(
+                stored_source_instance_id,
+                selected_query_id,
+                selected_contract_version,
+                rollback_query_id,
+                rollback_contract_version,
+                selection_epoch,
+            )| {
+                Ok(StoredQueryPackSelection {
+                    source_instance_id: from_i64(
+                        stored_source_instance_id,
+                        "query-pack source instance id",
+                    )?,
+                    selected: QueryPackSelectionValue {
+                        query_id: selected_query_id,
+                        contract_version: query_pack_version(
+                            selected_contract_version,
+                            "selected query contract version",
+                        )?,
+                    },
+                    rollback: QueryPackSelectionValue {
+                        query_id: rollback_query_id,
+                        contract_version: query_pack_version(
+                            rollback_contract_version,
+                            "rollback query contract version",
+                        )?,
+                    },
+                    selection_epoch: from_i64(selection_epoch, "query-pack selection epoch")?,
+                })
+            },
+        )
+        .transpose()
+}
+
+fn query_pack_version(value: i64, field: &'static str) -> Result<u32, EngineError> {
+    u32::try_from(value).map_err(|_| EngineError::Sqlite {
+        operation: "decode query-pack selection",
+        detail: format!("{field} is outside the supported unsigned range"),
+    })
+}
+
+fn assert_query_pack_projection_guard(
+    transaction: &Transaction<'_>,
+    source_instance_id: u64,
+    guard: &QueryPackProjectionGuard,
+) -> Result<(), EngineError> {
+    let satisfied = transaction
+        .query_row(
+            r#"
+            SELECT 1
+            FROM projection_versions AS projection
+            JOIN source_coverage_sets AS coverage
+              ON coverage.source_instance_id = ?1
+             AND coverage.owner_id = ?2
+             AND coverage.owner_scope_key = projection.scope_key
+             AND coverage.domain_kind = 'fact_family'
+             AND coverage.domain_name = ?3
+             AND coverage.domain_version = ?4
+             AND length(coverage.root_entity_key) = 0
+            WHERE projection.projection_id = ?5
+              AND projection.scope_key = ?6
+              AND projection.desired_version = ?7
+              AND projection.completed_version = ?7
+              AND projection.readiness = 'ready'
+              AND projection.last_commit_seq IS NOT NULL
+              AND coverage.completeness = 'complete'
+              AND coverage.last_commit_seq = projection.last_commit_seq
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM source_coverage_errors AS errors
+                  WHERE errors.coverage_set_id = coverage.coverage_set_id
+              )
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM source_coverage_points AS points
+                  WHERE points.coverage_set_id = coverage.coverage_set_id
+                    AND points.status NOT IN ('complete_through', 'exact_snapshot')
+              )
+            "#,
+            params![
+                to_i64(source_instance_id, "source instance id")?,
+                guard.coverage_owner_id,
+                guard.coverage_domain_name,
+                i64::from(guard.coverage_domain_version),
+                guard.projection_id,
+                guard.projection_scope_key,
+                i64::from(guard.projection_version),
+            ],
+            |_| Ok(()),
+        )
+        .optional()
+        .map_err(|error| sqlite_error("verify query-pack projection guard", error))?
+        .is_some();
+    if !satisfied {
+        return Err(EngineError::InvalidCommit(format!(
+            "query-pack projection guard for {} version {} is not satisfied",
+            guard.projection_id, guard.projection_version
+        )));
+    }
+    Ok(())
+}
+
+fn write_query_pack_selections(
+    transaction: &Transaction<'_>,
+    source_instance_id: u64,
+    commit_seq: u64,
+    updated_at: i64,
+    selections: &[QueryPackSelectionUpdate],
+) -> Result<(), EngineError> {
+    let mut statement = transaction
+        .prepare_cached(
+            r#"
+            INSERT INTO query_pack_selections (
+                source_instance_id, query_pack_id, scope_key,
+                selected_query_id, selected_contract_version,
+                rollback_query_id, rollback_contract_version,
+                selection_epoch, last_commit_seq, updated_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+            ON CONFLICT(source_instance_id, query_pack_id, scope_key) DO UPDATE SET
+                source_instance_id = excluded.source_instance_id,
+                selected_query_id = excluded.selected_query_id,
+                selected_contract_version = excluded.selected_contract_version,
+                rollback_query_id = excluded.rollback_query_id,
+                rollback_contract_version = excluded.rollback_contract_version,
+                selection_epoch = excluded.selection_epoch,
+                last_commit_seq = excluded.last_commit_seq,
+                updated_at = excluded.updated_at
+            "#,
+        )
+        .map_err(|error| sqlite_error("prepare query-pack selection update", error))?;
+    for selection in selections {
+        let current = read_query_pack_selection(
+            transaction,
+            source_instance_id,
+            &selection.query_pack_id,
+            &selection.scope_key,
+        )?;
+        if current.as_ref().is_some_and(|current| {
+            current.source_instance_id == source_instance_id
+                && current.selected == selection.selected
+                && current.rollback == selection.rollback
+        }) {
+            continue;
+        }
+        let selection_epoch = current
+            .map(|current| current.selection_epoch)
+            .unwrap_or_default()
+            .checked_add(1)
+            .ok_or_else(|| {
+                EngineError::InvalidCommit("query-pack selection epoch overflow".to_string())
+            })?;
+        statement
+            .execute(params![
+                to_i64(source_instance_id, "source instance id")?,
+                selection.query_pack_id,
+                selection.scope_key,
+                selection.selected.query_id,
+                i64::from(selection.selected.contract_version),
+                selection.rollback.query_id,
+                i64::from(selection.rollback.contract_version),
+                to_i64(selection_epoch, "query-pack selection epoch")?,
+                to_i64(commit_seq, "commit sequence")?,
+                updated_at,
+            ])
+            .map_err(|error| sqlite_error("write query-pack selection", error))?;
+    }
+    Ok(())
+}
+
 fn write_record_errors(
     transaction: &Transaction<'_>,
     source_object_id: u64,
@@ -1989,6 +2421,7 @@ mod tests {
             ProjectionCommitStage::AfterCoverageReplacement => {
                 "after projection coverage replacement"
             }
+            ProjectionCommitStage::AfterQueryPackSelections => "after query-pack selection writes",
             ProjectionCommitStage::BeforeCommit => "before projection commit",
             ProjectionCommitStage::AfterCommit => "after projection commit",
         }
@@ -2151,6 +2584,47 @@ mod tests {
                 set: coverage,
             }],
             coverage_preconditions: Vec::new(),
+            query_pack_selections: Vec::new(),
+        }
+    }
+
+    fn query_value(query_id: &str) -> QueryPackSelectionValue {
+        QueryPackSelectionValue {
+            query_id: query_id.to_string(),
+            contract_version: 1,
+        }
+    }
+
+    fn usage_v2_selection_commit(
+        source_instance_id: u64,
+        expected: QueryPackSelectionExpectation,
+        selected_query_id: &str,
+        rollback_query_id: &str,
+        guarded: bool,
+    ) -> ProjectionVersionCommit {
+        ProjectionVersionCommit {
+            source_instance_id,
+            reason: format!("query.runtime.usage.select.{selected_query_id}"),
+            started_at: 1_400,
+            committed_at: 1_401,
+            projection_versions: Vec::new(),
+            coverage_sets: Vec::new(),
+            coverage_preconditions: Vec::new(),
+            query_pack_selections: vec![QueryPackSelectionUpdate {
+                query_pack_id: "runtime.usage".to_string(),
+                scope_key: b"fixture-root".to_vec(),
+                expected,
+                selected: query_value(selected_query_id),
+                rollback: query_value(rollback_query_id),
+                projection_guard: guarded.then(|| QueryPackProjectionGuard {
+                    projection_id: "runtime.usage-v2".to_string(),
+                    projection_scope_key: b"fixture-root".to_vec(),
+                    projection_version: 1,
+                    coverage_owner_id: "runtime.usage-v2".to_string(),
+                    coverage_domain_name: "runtime.usage-v2".to_string(),
+                    coverage_domain_version: 1,
+                }),
+            }],
         }
     }
 
@@ -2160,6 +2634,7 @@ mod tests {
             "source_objects" => "SELECT COUNT(*) FROM source_objects",
             "ingest_commits" => "SELECT COUNT(*) FROM ingest_commits",
             "projection_versions" => "SELECT COUNT(*) FROM projection_versions",
+            "query_pack_selections" => "SELECT COUNT(*) FROM query_pack_selections",
             "source_coverage_sets" => "SELECT COUNT(*) FROM source_coverage_sets",
             "source_record_errors" => "SELECT COUNT(*) FROM source_record_errors",
             "change_log" => "SELECT COUNT(*) FROM change_log",
@@ -2290,6 +2765,7 @@ mod tests {
             projection_versions: vec![pending.clone()],
             coverage_sets: Vec::new(),
             coverage_preconditions: Vec::new(),
+            query_pack_selections: Vec::new(),
         };
         let receipt = apply_projection_version_commit(&mut connection, &pending_request)
             .unwrap()
@@ -2319,6 +2795,7 @@ mod tests {
             }],
             coverage_sets: Vec::new(),
             coverage_preconditions: Vec::new(),
+            query_pack_selections: Vec::new(),
         };
         let ready = apply_projection_version_commit(&mut connection, &ready_request)
             .unwrap()
@@ -2343,12 +2820,244 @@ mod tests {
     }
 
     #[test]
+    fn query_pack_selection_requires_ready_complete_coverage_and_rolls_back_explicitly() {
+        let mut connection = database();
+        let source = apply_observation_commit(&mut connection, &request()).unwrap();
+        let promotion = usage_v2_selection_commit(
+            source.source_instance_id,
+            QueryPackSelectionExpectation::Absent,
+            "runtime.usage-v2",
+            "legacy.usage",
+            true,
+        );
+
+        assert!(matches!(
+            apply_projection_version_commit(&mut connection, &promotion),
+            Err(EngineError::InvalidCommit(detail)) if detail.contains("guard")
+        ));
+        assert_eq!(count(&connection, "ingest_commits"), 1);
+        assert_eq!(count(&connection, "query_pack_selections"), 0);
+
+        apply_projection_version_commit(
+            &mut connection,
+            &usage_v2_projection_commit(source.source_instance_id),
+        )
+        .unwrap()
+        .expect("ready coverage barrier advances the commit clock");
+        let selected = apply_projection_version_commit(&mut connection, &promotion)
+            .unwrap()
+            .expect("ready complete usage-v2 may be selected");
+        assert_eq!(selected.commit_seq, 3);
+        assert_eq!(
+            connection
+                .query_row(
+                    r#"
+                    SELECT selected_query_id, selected_contract_version,
+                           rollback_query_id, rollback_contract_version,
+                           selection_epoch, last_commit_seq, source_instance_id
+                    FROM query_pack_selections
+                    WHERE query_pack_id = 'runtime.usage'
+                    "#,
+                    [],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, i64>(1)?,
+                            row.get::<_, String>(2)?,
+                            row.get::<_, i64>(3)?,
+                            row.get::<_, i64>(4)?,
+                            row.get::<_, i64>(5)?,
+                            row.get::<_, i64>(6)?,
+                        ))
+                    },
+                )
+                .unwrap(),
+            (
+                "runtime.usage-v2".to_string(),
+                1,
+                "legacy.usage".to_string(),
+                1,
+                1,
+                3,
+                to_i64(source.source_instance_id, "test source instance").unwrap(),
+            )
+        );
+        assert!(
+            apply_projection_version_commit(&mut connection, &promotion)
+                .unwrap()
+                .is_none(),
+            "acknowledgement retry must accept its already-selected target"
+        );
+        assert_eq!(count(&connection, "ingest_commits"), 3);
+
+        let stale_rollback = usage_v2_selection_commit(
+            source.source_instance_id,
+            QueryPackSelectionExpectation::At {
+                selected: query_value("runtime.usage-v2"),
+                selection_epoch: 99,
+            },
+            "legacy.usage",
+            "runtime.usage-v2",
+            false,
+        );
+        assert!(matches!(
+            apply_projection_version_commit(&mut connection, &stale_rollback),
+            Err(EngineError::InvalidCommit(detail)) if detail.contains("compare-and-set")
+        ));
+        assert_eq!(count(&connection, "ingest_commits"), 3);
+
+        let pending = ProjectionVersionCommit {
+            source_instance_id: source.source_instance_id,
+            reason: "projection.runtime.usage-v2.pending".to_string(),
+            started_at: 1_500,
+            committed_at: 1_501,
+            projection_versions: vec![ProjectionVersionUpdate {
+                projection_id: "runtime.usage-v2".to_string(),
+                scope_key: b"fixture-root".to_vec(),
+                desired_version: 1,
+                completed_version: Some(1),
+                readiness: ProjectionReadiness::Pending,
+                detail: Some("new source evidence requires reduction".to_string()),
+            }],
+            coverage_sets: Vec::new(),
+            coverage_preconditions: Vec::new(),
+            query_pack_selections: Vec::new(),
+        };
+        apply_projection_version_commit(&mut connection, &pending)
+            .unwrap()
+            .expect("provider work makes the selected projection pending");
+
+        let rollback = usage_v2_selection_commit(
+            source.source_instance_id,
+            QueryPackSelectionExpectation::At {
+                selected: query_value("runtime.usage-v2"),
+                selection_epoch: 1,
+            },
+            "legacy.usage",
+            "legacy.usage",
+            false,
+        );
+        let rolled_back = apply_projection_version_commit(&mut connection, &rollback)
+            .unwrap()
+            .expect("rollback must not require a healthy v2 projection");
+        assert_eq!(rolled_back.commit_seq, 5);
+        assert_eq!(
+            connection
+                .query_row(
+                    r#"
+                    SELECT selected_query_id, rollback_query_id, selection_epoch,
+                           last_commit_seq
+                    FROM query_pack_selections
+                    WHERE query_pack_id = 'runtime.usage'
+                    "#,
+                    [],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, i64>(2)?,
+                            row.get::<_, i64>(3)?,
+                        ))
+                    },
+                )
+                .unwrap(),
+            ("legacy.usage".to_string(), "legacy.usage".to_string(), 2, 5,)
+        );
+        assert_eq!(count(&connection, "source_coverage_sets"), 1);
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT readiness FROM projection_versions WHERE projection_id = 'runtime.usage-v2'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "pending"
+        );
+    }
+
+    #[test]
+    fn query_pack_selection_crash_boundaries_are_atomic_and_ack_retry_is_idempotent() {
+        let precommit_stages = [
+            ProjectionCommitStage::BeforeTransaction,
+            ProjectionCommitStage::AfterCommitInsert,
+            ProjectionCommitStage::AfterProjectionVersions,
+            ProjectionCommitStage::AfterCoverageReplacement,
+            ProjectionCommitStage::AfterQueryPackSelections,
+            ProjectionCommitStage::BeforeCommit,
+        ];
+        for stage in precommit_stages {
+            let mut connection = database();
+            let source = apply_observation_commit(&mut connection, &request()).unwrap();
+            apply_projection_version_commit(
+                &mut connection,
+                &usage_v2_projection_commit(source.source_instance_id),
+            )
+            .unwrap();
+            let promotion = usage_v2_selection_commit(
+                source.source_instance_id,
+                QueryPackSelectionExpectation::Absent,
+                "runtime.usage-v2",
+                "legacy.usage",
+                true,
+            );
+            assert!(matches!(
+                apply_projection_version_commit_with_hook(
+                    &mut connection,
+                    &promotion,
+                    &FailProjectionAt(stage),
+                ),
+                Err(EngineError::InjectedFailure { .. })
+            ));
+            assert_eq!(count(&connection, "ingest_commits"), 2, "{stage:?}");
+            assert_eq!(count(&connection, "query_pack_selections"), 0, "{stage:?}");
+            let receipt = apply_projection_version_commit(&mut connection, &promotion)
+                .unwrap()
+                .expect("retry after a precommit failure applies once");
+            assert_eq!(receipt.commit_seq, 3, "{stage:?}");
+        }
+
+        let mut connection = database();
+        let source = apply_observation_commit(&mut connection, &request()).unwrap();
+        apply_projection_version_commit(
+            &mut connection,
+            &usage_v2_projection_commit(source.source_instance_id),
+        )
+        .unwrap();
+        let promotion = usage_v2_selection_commit(
+            source.source_instance_id,
+            QueryPackSelectionExpectation::Absent,
+            "runtime.usage-v2",
+            "legacy.usage",
+            true,
+        );
+        assert!(matches!(
+            apply_projection_version_commit_with_hook(
+                &mut connection,
+                &promotion,
+                &FailProjectionAt(ProjectionCommitStage::AfterCommit),
+            ),
+            Err(EngineError::InjectedFailure { .. })
+        ));
+        assert_eq!(count(&connection, "ingest_commits"), 3);
+        assert_eq!(count(&connection, "query_pack_selections"), 1);
+        assert!(
+            apply_projection_version_commit(&mut connection, &promotion)
+                .unwrap()
+                .is_none(),
+            "retry after acknowledgement loss must observe the durable target"
+        );
+        assert_eq!(count(&connection, "ingest_commits"), 3);
+    }
+
+    #[test]
     fn projection_and_coverage_precommit_failure_seams_roll_back_together() {
         let stages = [
             ProjectionCommitStage::BeforeTransaction,
             ProjectionCommitStage::AfterCommitInsert,
             ProjectionCommitStage::AfterProjectionVersions,
             ProjectionCommitStage::AfterCoverageReplacement,
+            ProjectionCommitStage::AfterQueryPackSelections,
             ProjectionCommitStage::BeforeCommit,
         ];
 

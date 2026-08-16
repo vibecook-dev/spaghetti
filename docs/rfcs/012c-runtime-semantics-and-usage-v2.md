@@ -729,6 +729,69 @@ UsageV2ProjectionReadiness {
 }
 ```
 
+Migration selection is a separate durable contract:
+
+```text
+UsageQuerySelection {
+  query_pack_id: "runtime.usage"
+  source_instance_ref?
+  selected: {
+    query_id: "legacy.usage" | "runtime.usage-v2"
+    contract_version
+  }
+  rollback: {
+    query_id
+    contract_version
+  }
+  selection_epoch
+  last_commit_seq
+  updated_at
+}
+```
+
+Selection is source-instance scoped because one database may contain several
+adapters with different support and readiness. Absence of a materialized row
+means the explicit compatibility default `legacy.usage@1` at epoch zero; it
+does not mean “latest” and cannot change as code is upgraded.
+
+The public projection includes the opaque common `source_instance_ref` once a
+matching usage-v2 coverage set exists; it never exposes the database catalog
+identifier. Before coverage materializes the implicit legacy selection may
+omit that reference, and promotion necessarily fails its coverage guard.
+
+Promotion to `runtime.usage-v2@1` is one writer transaction that:
+
+1. compare-and-sets the expected selection tuple and epoch;
+2. proves the same source instance's `runtime.usage-v2` projection has desired
+   and completed version 1 in `Ready` state;
+3. proves the matching fact-family coverage set is `Complete`, belongs to the
+   same source/support declaration, and shares the readiness barrier's commit;
+4. appends the normal durable commit record; and
+5. advances the selection epoch while retaining `legacy.usage@1` as the
+   rollback target.
+
+A stale expectation or failed guard writes nothing. Retrying an already
+committed identical target after acknowledgement loss is a no-op success.
+Every pre-commit failure exposes neither the selection nor its commit; an
+after-commit acknowledgement failure is resolved by reading the durable
+selection, never by assuming rollback.
+
+Rollback compare-and-sets the selected tuple/epoch back to the retained target
+without requiring the v2 projection to be healthy. It never deletes legacy or
+v2 rows. If later source work makes a selected v2 projection `Pending` or
+`Unavailable`, queries report that selected-but-non-ready state and never
+silently fall back to legacy semantics; rollback remains an explicit control
+operation.
+
+A query spanning more than one source instance may select v2 only after every
+contributing source has a compatible selection and complete comparable
+coverage. Otherwise it fails selection negotiation or uses an explicitly
+requested legacy contract. It cannot combine row-additive legacy usage for one
+source with response-revision v2 usage for another under one unqualified
+aggregate. Until that aggregate contract lands, `getUsage` and
+`getUsageActivity` remain explicitly legacy even when a source-scoped v2
+detail query reports itself selected.
+
 `Untracked` is a query-boundary representation for legacy/directly constructed
 state with no durable version row; it is never persisted and never aliases
 `Ready`. A transaction that changes rows supplied by a usage-v2 provider
@@ -805,10 +868,11 @@ set, not by deleting evidence of the old failure. A directory-membership
 snapshot cannot declare itself a directly replayable fact provider; the member
 content streams it discovers own fact replay.
 
-`projection_status = shadow | not_materialized` states whether the candidate
-query has v2 rows for the requested session; it is distinct from pack
-readiness and from RFC 012A source/fact-family coverage. All three values, rows,
-and aggregates returned by one page belong to its advertised `at_commit_seq`.
+`projection_status = shadow | selected | not_materialized` states whether the
+candidate query has v2 rows for the requested session and whether its source
+has an explicit v2 selection; it is distinct from pack readiness and from RFC
+012A source/fact-family coverage. Selection, readiness, rows, and aggregates
+returned by one page belong to its advertised `at_commit_seq`.
 
 The independent oracle groups native records without importing adapter code,
 selects the last complete response revision in the current generation, and
@@ -816,9 +880,11 @@ computes bucket quality/coverage as well as values. History, capability, and
 FTS remain compared to their existing accepted oracles; usage is deliberately
 compared to the new v2 oracle.
 
-Current implementation status (2026-08-16): steps 1 and 2 have landed as an
-explicitly non-default shadow, and step 4 now has frozen sanitized
-conformance-corpus evidence at response, actor, session, and aggregate scope.
+Current implementation status (2026-08-16): steps 1 through 5 have landed, and
+the source-scoped selection mechanism for step 6 is implemented without yet
+routing the unqualified multi-source aggregates through v2. Frozen sanitized
+and private native-corpus evidence cover response, actor, session, and
+aggregate scope.
 Claude decoder contract 17 introduced a canonical `runtime.usage-v2` fact
 beside the unchanged legacy delta; contract 18 retains that identity and adds
 canonical actor and workflow-affiliation evidence. Contract 19 retains those
@@ -901,6 +967,24 @@ administrative readiness/coverage transaction is fault-tested at every
 precommit seam and after-commit acknowledgement loss, including restart and
 idempotent retry.
 
+Schema v49 persists query-selection contract v1 independently of readiness and
+coverage. Its primary key includes source instance, query pack, and scope. An
+absent row materializes as the immutable `legacy.usage@1` default at epoch
+zero. The common writer accepts selection only in an isolated administrative
+transaction, compare-and-sets the prior tuple/epoch, and rechecks Ready v1 plus
+complete error-free usage-v2 coverage from one shared barrier commit before
+promotion. Stale and failed guards create no commit. Every precommit failure
+rolls back the selection, while after-commit acknowledgement loss survives
+reopen and an identical retry returns the durable target without advancing the
+clock.
+
+The low-level N-API engine and sole-owner `ObservationHost` expose explicit
+promotion/rollback; the transport-neutral client remains read-only. The
+versioned v2 page returns selection/readiness/data under one snapshot and uses
+`projectionStatus = selected` only after explicit promotion. Rollback remains
+available while v2 is `Pending`, preserves both projections, advances the
+epoch, and supports idempotent retry.
+
 The private native corpus gate also passes on a stable ephemeral source clone.
 An adapter/SDK/database-independent census matched the durable projection
 exactly for 149,369 response groups, 5,044 actors, 854 sessions, the root/child
@@ -913,10 +997,11 @@ a usage gap. The committed aggregate-only report is
 with digest
 `sha256:2d84af3dd9bcfb91e727b8d0e067679b1637e61b0a343957a09b8f42c303176e`.
 
-Native team-to-actor conformance, the default switch in step 6, step 7's
-compatibility/rollback window, and their crash boundaries remain open.
-Until those gates pass, the candidate capability is unsupported and
-`getUsage`/`getUsageActivity` retain legacy semantics.
+Native team-to-actor conformance, step 6's non-mixing multi-source selection
+vector and aggregate default routing, and step 7's compatibility telemetry and
+release rollback drill remain open. Until those gates pass, the candidate
+capability is unsupported and `getUsage`/`getUsageActivity` retain legacy
+semantics.
 
 ## 14. Failure and correction semantics
 

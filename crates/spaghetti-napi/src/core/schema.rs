@@ -181,7 +181,9 @@ const CANONICAL_FTS_TRIGGERS: &[&str] = &[
 /// regroup usage without copying response contributions.
 /// v48: normalized, persistable RFC 012A source/fact-family coverage sets,
 /// points, absences, and errors owned by common projection transitions.
-pub const SCHEMA_VERSION: u32 = 48;
+/// v49: source-scoped query-pack selection with explicit rollback target,
+/// epoch, and durable commit ownership for RFC 012C usage-v2 migration.
+pub const SCHEMA_VERSION: u32 = 49;
 
 /// Full DDL for the current schema — lifted verbatim from the TS `SCHEMA_SQL`
 /// template literal. Whitespace differs; structure does not.
@@ -516,6 +518,20 @@ CREATE TABLE IF NOT EXISTS projection_versions (
   updated_at INTEGER NOT NULL,
   detail TEXT,
   PRIMARY KEY (projection_id, scope_key)
+);
+
+CREATE TABLE IF NOT EXISTS query_pack_selections (
+  source_instance_id INTEGER NOT NULL REFERENCES source_instances(source_instance_id) ON DELETE CASCADE,
+  query_pack_id TEXT NOT NULL,
+  scope_key BLOB NOT NULL CHECK (length(scope_key) BETWEEN 1 AND 4096),
+  selected_query_id TEXT NOT NULL,
+  selected_contract_version INTEGER NOT NULL CHECK (selected_contract_version > 0),
+  rollback_query_id TEXT NOT NULL,
+  rollback_contract_version INTEGER NOT NULL CHECK (rollback_contract_version > 0),
+  selection_epoch INTEGER NOT NULL CHECK (selection_epoch > 0),
+  last_commit_seq INTEGER NOT NULL REFERENCES ingest_commits(commit_seq) ON DELETE RESTRICT,
+  updated_at INTEGER NOT NULL,
+  PRIMARY KEY (source_instance_id, query_pack_id, scope_key)
 );
 
 CREATE TABLE IF NOT EXISTS source_coverage_sets (
@@ -2225,6 +2241,7 @@ const CURRENT_TABLES: &[&str] = &[
     "source_coverage_absences",
     "source_coverage_points",
     "source_coverage_sets",
+    "query_pack_selections",
     "projection_versions",
     "source_objects",
     "source_streams",
@@ -3202,6 +3219,7 @@ mod tests {
         }
         assert!(object_exists(&conn, "table", "ingest_commits"));
         assert!(object_exists(&conn, "table", "projection_versions"));
+        assert!(object_exists(&conn, "table", "query_pack_selections"));
         for table in [
             "source_coverage_sets",
             "source_coverage_points",

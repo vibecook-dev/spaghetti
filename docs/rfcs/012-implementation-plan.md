@@ -692,9 +692,9 @@ Current landing status (2026-08-16):
   (`sha256:2d84af3dd9bcfb91e727b8d0e067679b1637e61b0a343957a09b8f42c303176e`);
   and
 - kept the candidate capability `unsupported`: fixture-proven native
-  team-to-actor correlation, exact-repeat public-event suppression, migration
-  switch, remaining portable fact-family serialization, and rollback window
-  are not yet complete.
+  team-to-actor correlation, exact-repeat public-event suppression, aggregate
+  default routing, remaining portable fact-family serialization, and the
+  compatibility telemetry window are not yet complete.
 
 ### C3. Durable migration
 
@@ -703,16 +703,16 @@ compare against the independent oracle, then switch the versioned query in one
 transaction. Retain the legacy projection during the compatibility window and
 test crash/restart at each migration boundary.
 
-Current landing status (2026-08-16): the read-only shadow and its first durable
-readiness slice are implemented. `getRuntimeUsageV2` exposes query contract v1
-only as
-`projectionStatus = shadow`; it does not alter `getUsage` or
-`getUsageActivity`. A valid legacy project/session scope with no canonical v2
-session mapping returns `not_materialized` and qualified-unknown aggregate
-coverage rather than silently falling back to row-additive usage. Response
-pages and aggregates share one SQLite snapshot, cursors are scoped to all
-filters and expire on a newer commit, and tests cover pagination, actor
-filtering, present-affiliation regrouping/removal, and reset expiration.
+Current landing status (2026-08-16): the versioned v2 detail query, durable
+readiness, coverage/replay, and source-scoped selection control plane are
+implemented. `getRuntimeUsageV2` reports `shadow`, `selected`, or
+`not_materialized`; it still does not alter `getUsage` or `getUsageActivity`.
+A valid legacy project/session scope with no canonical v2 session mapping
+returns `not_materialized` and qualified-unknown aggregate coverage rather than
+silently falling back to row-additive usage. Selection, response pages,
+readiness, and aggregates share one SQLite snapshot; cursors are scoped to all
+filters and expire on a newer commit. Tests cover pagination, actor filtering,
+present-affiliation regrouping/removal, reset expiration, and selection state.
 
 `projectionReadiness` is now independently versioned and writer-owned. A
 provider-stream data transaction publishes `Pending` with its rows; the
@@ -768,11 +768,32 @@ after durability but before acknowledgement. Tests prove every precommit
 failure leaks neither half and retries to one shared commit sequence; an
 after-commit error survives database reopen and an equal retry is a no-op.
 
-C3 remains `In progress`: the exact private corpus-scale comparison gate is
-closed, but transactional default query selection and its crash boundaries,
-compatibility-window telemetry, and rollback are still required. The shadow
-query, pack readiness, durable coverage query, and authorized coordinator
-replay are inspection/migration surfaces, not a support-promotion claim.
+Schema v49 and query-selection contract v1 now add the source-instance-scoped
+control plane. An absent row is the immutable `legacy.usage@1` default at epoch
+zero. Promotion compare-and-sets that tuple and, in the same writer
+transaction, revalidates Ready v1 projection state plus complete matching
+coverage from one barrier commit. Selection transactions are isolated from
+readiness/coverage changes, use the normal commit clock, and preserve
+`legacy.usage@1` as the rollback target. Stale or failed guards write nothing;
+identical retry after acknowledgement loss is a no-op success.
+
+`selectRuntimeUsageQuery` is exposed by low-level N-API and the sole-owner
+`ObservationHost`, while the transport-neutral query/IPC client stays
+read-only. `getRuntimeUsageV2` returns the selection from the same snapshot as
+rows/readiness and reports `selected` only for an explicit v2 selection.
+Explicit rollback compare-and-sets back to the retained legacy target without
+requiring v2 to remain healthy and never deletes either projection. Focused
+writer tests cover every precommit seam and post-commit acknowledgement loss;
+SDK tests cover the implicit default, promotion, stale rejection, rollback,
+idempotent retry, host forwarding, and the read-only client boundary.
+
+C3 remains `In progress`: private parity, source-scoped selection, its crash
+boundaries, and rollback are closed. The remaining work is a non-mixing
+multi-source selection vector and actual aggregate default routing, followed
+by compatibility-window telemetry and the release rollback drill.
+`getUsage`/`getUsageActivity` therefore remain explicitly legacy; selecting v2
+currently changes the versioned v2 detail surface, not the unqualified product
+aggregate, and is not a support-promotion claim.
 
 ### C4. Downstream semantic suite
 

@@ -248,6 +248,10 @@ describe('persistent SpaghettiEngine', { skip: !native }, () => {
     assert.equal(usage.projectionReadiness.state, 'ready');
     assert.equal(usage.projectionReadiness.completedVersion, 1);
     assert.equal(usage.projectionReadiness.lastCommitSeq, usage.atCommitSeq);
+    assert.equal(usage.querySelection.materialized, false);
+    assert.equal(usage.querySelection.selected.queryId, 'legacy.usage');
+    assert.equal(usage.querySelection.rollback.queryId, 'legacy.usage');
+    assert.equal(usage.querySelection.selectionEpoch, 0);
     assert.equal(usage.aggregate.responseCount, 1);
     assert.equal(usage.aggregate.inputTokens.knownTokens, 12);
     assert.equal(usage.items[0]?.nativeMessageId, 'response-1');
@@ -290,6 +294,61 @@ describe('persistent SpaghettiEngine', { skip: !native }, () => {
     assert.equal(replay.authorizedContentDigestRef, replayOptions.expectedContentDigestRef);
     assert.equal(replay.outcome.recordsDecoded, 1);
     await assert.rejects(engine.replayFactFamily(replayOptions), /authorization is stale/i);
+
+    const beforePromotion = await engine.getRuntimeUsageV2({ projectId, sessionId, limit: 10 });
+    assert.equal(beforePromotion.querySelection.sourceInstanceRef, coverage.coverage!.sourceInstanceRef);
+    const promoted = await engine.selectRuntimeUsageQuery({
+      projectId,
+      sessionId,
+      targetQueryId: 'runtime.usage-v2',
+      expectedMaterialized: beforePromotion.querySelection.materialized,
+      expectedSelectedQueryId: beforePromotion.querySelection.selected.queryId,
+      expectedSelectedContractVersion: beforePromotion.querySelection.selected.contractVersion,
+      expectedSelectionEpoch: beforePromotion.querySelection.selectionEpoch,
+      reason: 'sdk usage-v2 promotion contract test',
+    });
+    assert.equal(promoted.contractVersion, 1);
+    assert.equal(promoted.selection.materialized, true);
+    assert.equal(promoted.selection.selected.queryId, 'runtime.usage-v2');
+    assert.equal(promoted.selection.rollback.queryId, 'legacy.usage');
+    assert.equal(promoted.selection.selectionEpoch, 1);
+
+    await assert.rejects(
+      engine.selectRuntimeUsageQuery({
+        projectId,
+        sessionId,
+        targetQueryId: 'legacy.usage',
+        expectedMaterialized: beforePromotion.querySelection.materialized,
+        expectedSelectedQueryId: beforePromotion.querySelection.selected.queryId,
+        expectedSelectedContractVersion: beforePromotion.querySelection.selected.contractVersion,
+        expectedSelectionEpoch: beforePromotion.querySelection.selectionEpoch,
+        reason: 'stale rollback authorization must fail',
+      }),
+      /expectation is stale/i,
+    );
+    const selectedUsage = await engine.getRuntimeUsageV2({ projectId, sessionId, limit: 10 });
+    assert.equal(selectedUsage.projectionStatus, 'selected');
+    assert.deepEqual(selectedUsage.querySelection, promoted.selection);
+
+    const rollbackRequest = {
+      projectId,
+      sessionId,
+      targetQueryId: 'legacy.usage' as const,
+      expectedMaterialized: promoted.selection.materialized,
+      expectedSelectedQueryId: promoted.selection.selected.queryId,
+      expectedSelectedContractVersion: promoted.selection.selected.contractVersion,
+      expectedSelectionEpoch: promoted.selection.selectionEpoch,
+      reason: 'sdk usage-v2 explicit rollback contract test',
+    };
+    const rolledBack = await engine.selectRuntimeUsageQuery(rollbackRequest);
+    assert.equal(rolledBack.selection.selected.queryId, 'legacy.usage');
+    assert.equal(rolledBack.selection.rollback.queryId, 'legacy.usage');
+    assert.equal(rolledBack.selection.selectionEpoch, 2);
+    assert.equal((await engine.getRuntimeUsageV2({ projectId, sessionId, limit: 10 })).projectionStatus, 'shadow');
+
+    const retriedRollback = await engine.selectRuntimeUsageQuery(rollbackRequest);
+    assert.equal(retriedRollback.atCommitSeq, rolledBack.atCommitSeq);
+    assert.deepEqual(retriedRollback.selection, rolledBack.selection);
   });
 
   test('starts, refreshes, and stops native Claude observation', async () => {

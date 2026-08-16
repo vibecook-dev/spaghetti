@@ -27,15 +27,17 @@ use crate::engine::{
     ObservationStatusSnapshot, ObservationSupervisorOptions, OwnerMetadata, PlanDetail, PlanPage,
     PlanPageRequest, QueryCancellationToken, QueryPerformanceSnapshot, ReconcileOutcome,
     ReconcileRequest, RunStateLookup, RunStateRequest, RuntimePresenceSnapshot, RuntimeRunEvidence,
-    RuntimeRunSnapshot, RuntimeSnapshot, RuntimeSnapshotRequest, RuntimeUsageV2ActorContext,
-    RuntimeUsageV2Affiliation, RuntimeUsageV2Aggregate, RuntimeUsageV2BucketAggregate,
-    RuntimeUsageV2ExternalEntityRef, RuntimeUsageV2Page, RuntimeUsageV2PageRequest,
-    RuntimeUsageV2ProjectionReadiness, RuntimeUsageV2Response, RuntimeUsageV2SemanticRevisionRef,
-    RuntimeUsageV2TextValue, RuntimeUsageV2TokenValue, RuntimeUsageV2ValueProvenance, SearchHit,
-    SearchPage, SearchPageRequest, SessionDetail, SessionDetails, SessionDetailsRequest,
-    SessionIndexDetail, SourceCapabilitySummary, SourceDimensionPerformanceSnapshot, SourcePage,
-    SourcePageRequest, SourcePerformanceSnapshot, SourcePipelineSnapshot, SourceSummary,
-    SpaghettiEngineCore, StoragePerformanceSnapshot, TaskCollectionPage, TaskCollectionPageRequest,
+    RuntimeRunSnapshot, RuntimeSnapshot, RuntimeSnapshotRequest, RuntimeUsageQuerySelection,
+    RuntimeUsageQuerySelectionCommand, RuntimeUsageQuerySelectionResult,
+    RuntimeUsageQuerySelectionValue, RuntimeUsageV2ActorContext, RuntimeUsageV2Affiliation,
+    RuntimeUsageV2Aggregate, RuntimeUsageV2BucketAggregate, RuntimeUsageV2ExternalEntityRef,
+    RuntimeUsageV2Page, RuntimeUsageV2PageRequest, RuntimeUsageV2ProjectionReadiness,
+    RuntimeUsageV2Response, RuntimeUsageV2SemanticRevisionRef, RuntimeUsageV2TextValue,
+    RuntimeUsageV2TokenValue, RuntimeUsageV2ValueProvenance, SearchHit, SearchPage,
+    SearchPageRequest, SessionDetail, SessionDetails, SessionDetailsRequest, SessionIndexDetail,
+    SourceCapabilitySummary, SourceDimensionPerformanceSnapshot, SourcePage, SourcePageRequest,
+    SourcePerformanceSnapshot, SourcePipelineSnapshot, SourceSummary, SpaghettiEngineCore,
+    StoragePerformanceSnapshot, TaskCollectionPage, TaskCollectionPageRequest,
     TaskCollectionSummary, TaskDetail, TaskPage, TaskPageRequest, TeamConfigSummary, TeamDetails,
     TeamDetailsRequest, TeamInboxMessage, TeamInboxMessagePage, TeamInboxMessagePageRequest,
     TeamInboxPage, TeamInboxPageRequest, TeamInboxSummary, TeamMember, TeamPage, TeamPageRequest,
@@ -3155,11 +3157,96 @@ impl From<RuntimeUsageV2ProjectionReadiness> for EngineRuntimeUsageV2ProjectionR
 
 #[napi(object)]
 #[derive(Debug, Clone)]
+pub struct EngineRuntimeUsageQuerySelectionValue {
+    pub query_id: String,
+    pub contract_version: u32,
+}
+
+impl From<RuntimeUsageQuerySelectionValue> for EngineRuntimeUsageQuerySelectionValue {
+    fn from(value: RuntimeUsageQuerySelectionValue) -> Self {
+        Self {
+            query_id: value.query_id,
+            contract_version: value.contract_version,
+        }
+    }
+}
+
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct EngineRuntimeUsageQuerySelection {
+    pub contract_version: u32,
+    pub query_pack_id: String,
+    pub source_instance_ref: Option<String>,
+    pub materialized: bool,
+    pub selected: EngineRuntimeUsageQuerySelectionValue,
+    pub rollback: EngineRuntimeUsageQuerySelectionValue,
+    pub selection_epoch: f64,
+    pub last_commit_seq: Option<f64>,
+    pub updated_at_unix_ms: Option<f64>,
+}
+
+impl From<RuntimeUsageQuerySelection> for EngineRuntimeUsageQuerySelection {
+    fn from(value: RuntimeUsageQuerySelection) -> Self {
+        Self {
+            contract_version: value.contract_version,
+            query_pack_id: value.query_pack_id,
+            source_instance_ref: value.source_instance_ref,
+            materialized: value.materialized,
+            selected: value.selected.into(),
+            rollback: value.rollback.into(),
+            selection_epoch: value.selection_epoch as f64,
+            last_commit_seq: value.last_commit_seq.map(|value| value as f64),
+            updated_at_unix_ms: value.updated_at_unix_ms.map(|value| value as f64),
+        }
+    }
+}
+
+/// Compare-and-set authorization for the source instance resolved through one
+/// session. Every expected field must come from one `getRuntimeUsageV2()` page.
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct EngineRuntimeUsageQuerySelectionOptions {
+    pub project_id: String,
+    pub session_id: String,
+    pub target_query_id: String,
+    pub expected_materialized: bool,
+    pub expected_selected_query_id: String,
+    pub expected_selected_contract_version: u32,
+    pub expected_selection_epoch: f64,
+    /// Bounded durable audit reason for this selection change.
+    pub reason: String,
+}
+
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct EngineRuntimeUsageQuerySelectionResult {
+    pub contract_version: u32,
+    pub at_commit_seq: f64,
+    pub project_id: String,
+    pub session_id: String,
+    pub selection: EngineRuntimeUsageQuerySelection,
+}
+
+impl From<RuntimeUsageQuerySelectionResult> for EngineRuntimeUsageQuerySelectionResult {
+    fn from(value: RuntimeUsageQuerySelectionResult) -> Self {
+        Self {
+            contract_version: value.contract_version,
+            at_commit_seq: value.at_commit_seq as f64,
+            project_id: value.project_id,
+            session_id: value.session_id,
+            selection: value.selection.into(),
+        }
+    }
+}
+
+#[napi(object)]
+#[derive(Debug, Clone)]
 pub struct EngineRuntimeUsageV2Page {
     pub contract_version: u32,
     pub at_commit_seq: f64,
     pub projection_status: String,
     pub projection_readiness: EngineRuntimeUsageV2ProjectionReadiness,
+    pub query_selection: EngineRuntimeUsageQuerySelection,
     pub project_id: String,
     pub session_id: String,
     pub session_ref: Option<EngineRuntimeUsageV2ExternalEntityRef>,
@@ -3179,6 +3266,7 @@ impl From<RuntimeUsageV2Page> for EngineRuntimeUsageV2Page {
             at_commit_seq: value.at_commit_seq as f64,
             projection_status: value.projection_status,
             projection_readiness: value.projection_readiness.into(),
+            query_selection: value.query_selection.into(),
             project_id: value.project_id,
             session_id: value.session_id,
             session_ref: value.session_ref.map(Into::into),
@@ -4369,6 +4457,26 @@ impl SpaghettiEngine {
         )
     }
 
+    /// Atomically promote or roll back one source-scoped runtime usage query.
+    /// Promotion requires a Ready/complete v2 barrier at commit time; rollback
+    /// remains available if that projection later becomes unhealthy.
+    #[napi(ts_return_type = "Promise<EngineRuntimeUsageQuerySelectionResult>")]
+    pub fn select_runtime_usage_query(
+        &self,
+        options: EngineRuntimeUsageQuerySelectionOptions,
+        signal: Option<AbortSignal>,
+    ) -> AsyncTask<RuntimeUsageQuerySelectionTask> {
+        let cancellation = cancellation_for_signal(signal.as_ref());
+        AsyncTask::with_optional_signal(
+            RuntimeUsageQuerySelectionTask {
+                engine: Arc::clone(&self.inner),
+                options,
+                cancellation,
+            },
+            signal,
+        )
+    }
+
     /// Page normalized RFC 012A coverage for one fact family using opaque
     /// common identities. The result shares one durable commit watermark and
     /// never exposes native paths or object keys.
@@ -4910,6 +5018,12 @@ pub struct UsageActivityTask {
 pub struct RuntimeUsageV2Task {
     engine: Arc<SpaghettiEngineCore>,
     options: EngineRuntimeUsageV2Options,
+    cancellation: QueryCancellationToken,
+}
+
+pub struct RuntimeUsageQuerySelectionTask {
+    engine: Arc<SpaghettiEngineCore>,
+    options: EngineRuntimeUsageQuerySelectionOptions,
     cancellation: QueryCancellationToken,
 }
 
@@ -5632,6 +5746,41 @@ impl Task for RuntimeUsageV2Task {
                         .options
                         .limit
                         .unwrap_or(DEFAULT_RUNTIME_USAGE_V2_PAGE_LIMIT),
+                },
+                self.cancellation.clone(),
+            )
+            .map(Into::into)
+            .map_err(napi_error)
+    }
+
+    fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
+        Ok(output)
+    }
+}
+
+impl Task for RuntimeUsageQuerySelectionTask {
+    type Output = EngineRuntimeUsageQuerySelectionResult;
+    type JsValue = EngineRuntimeUsageQuerySelectionResult;
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        let expected_selection_epoch = safe_u64_from_js(
+            self.options.expected_selection_epoch,
+            "expectedSelectionEpoch",
+            true,
+        )?;
+        self.engine
+            .select_runtime_usage_query_cancellable(
+                RuntimeUsageQuerySelectionCommand {
+                    project_id: self.options.project_id.clone(),
+                    session_id: self.options.session_id.clone(),
+                    target_query_id: self.options.target_query_id.clone(),
+                    expected_materialized: self.options.expected_materialized,
+                    expected_selected_query_id: self.options.expected_selected_query_id.clone(),
+                    expected_selected_contract_version: self
+                        .options
+                        .expected_selected_contract_version,
+                    expected_selection_epoch,
+                    reason: self.options.reason.clone(),
                 },
                 self.cancellation.clone(),
             )

@@ -1456,13 +1456,58 @@ export interface SpaghettiEngineRuntimeUsageV2ProjectionReadiness {
   detail?: string;
 }
 
+export interface SpaghettiEngineRuntimeUsageQuerySelectionValue {
+  queryId: 'legacy.usage' | 'runtime.usage-v2';
+  contractVersion: number;
+}
+
+export interface SpaghettiEngineRuntimeUsageQuerySelection {
+  contractVersion: number;
+  queryPackId: 'runtime.usage';
+  /** Opaque common source identity once matching usage-v2 coverage exists. */
+  sourceInstanceRef?: string;
+  /** False means the immutable compatibility default legacy.usage@1 at epoch zero. */
+  materialized: boolean;
+  selected: SpaghettiEngineRuntimeUsageQuerySelectionValue;
+  rollback: SpaghettiEngineRuntimeUsageQuerySelectionValue;
+  selectionEpoch: number;
+  lastCommitSeq?: number;
+  updatedAtUnixMs?: number;
+}
+
+/**
+ * Compare-and-set authorization for the source instance resolved through one
+ * session. Copy every expected field from one `getRuntimeUsageV2()` page.
+ */
+export interface SpaghettiEngineRuntimeUsageQuerySelectionOptions {
+  projectId: string;
+  sessionId: string;
+  targetQueryId: 'legacy.usage' | 'runtime.usage-v2';
+  expectedMaterialized: boolean;
+  expectedSelectedQueryId: 'legacy.usage' | 'runtime.usage-v2';
+  expectedSelectedContractVersion: number;
+  expectedSelectionEpoch: number;
+  /** Bounded durable audit reason for this selection change. */
+  reason: string;
+}
+
+export interface SpaghettiEngineRuntimeUsageQuerySelectionResult {
+  contractVersion: number;
+  atCommitSeq: number;
+  projectId: string;
+  sessionId: string;
+  selection: SpaghettiEngineRuntimeUsageQuerySelection;
+}
+
 export interface SpaghettiEngineRuntimeUsageV2Page {
   contractVersion: number;
   atCommitSeq: number;
-  /** `shadow` is queryable; `not_materialized` means this session has no v2 projection yet. */
-  projectionStatus: 'shadow' | 'not_materialized';
+  /** `selected` is explicit; `not_materialized` means this session has no v2 projection yet. */
+  projectionStatus: 'shadow' | 'selected' | 'not_materialized';
   /** Writer-owned readiness at the same atCommitSeq as rows and aggregates. */
   projectionReadiness: SpaghettiEngineRuntimeUsageV2ProjectionReadiness;
+  /** Source-scoped migration selection from the same durable snapshot. */
+  querySelection: SpaghettiEngineRuntimeUsageQuerySelection;
   projectId: string;
   sessionId: string;
   sessionRef?: SpaghettiEngineRuntimeUsageV2ExternalEntityRef;
@@ -1958,6 +2003,10 @@ export interface SpaghettiEngine {
     options: SpaghettiEngineRuntimeUsageV2Options,
     signal?: AbortSignal,
   ): Promise<SpaghettiEngineRuntimeUsageV2Page>;
+  selectRuntimeUsageQuery(
+    options: SpaghettiEngineRuntimeUsageQuerySelectionOptions,
+    signal?: AbortSignal,
+  ): Promise<SpaghettiEngineRuntimeUsageQuerySelectionResult>;
   getFactFamilyCoverage(
     options: SpaghettiEngineFactFamilyCoverageOptions,
     signal?: AbortSignal,

@@ -6832,6 +6832,12 @@ mod tests {
         };
         let untracked_page = read_runtime_usage_v2_page(&connection, &page_request).unwrap();
         assert_eq!(untracked_page.projection_status, "shadow");
+        assert!(!untracked_page.query_selection.materialized);
+        assert_eq!(
+            untracked_page.query_selection.selected.query_id,
+            "legacy.usage"
+        );
+        assert_eq!(untracked_page.query_selection.selection_epoch, 0);
         assert_eq!(untracked_page.projection_readiness.state, "untracked");
         assert_eq!(untracked_page.projection_readiness.desired_version, 1);
         assert!(untracked_page
@@ -6856,6 +6862,7 @@ mod tests {
                 }],
                 coverage_sets: Vec::new(),
                 coverage_preconditions: Vec::new(),
+                query_pack_selections: Vec::new(),
             },
         )
         .unwrap()

@@ -1195,6 +1195,7 @@ impl ObservationCoordinator {
                         )],
                         coverage_sets: Vec::new(),
                         coverage_preconditions: vec![replay.precondition.clone()],
+                        query_pack_selections: Vec::new(),
                     })?;
             let mut outcome = ReconcileOutcome {
                 instances_discovered: 1,
@@ -1671,6 +1672,7 @@ impl ObservationCoordinator {
                     )],
                     coverage_sets: Vec::new(),
                     coverage_preconditions: Vec::new(),
+                    query_pack_selections: Vec::new(),
                 })?;
             if let Some(commit_seq) = commit_seq {
                 outcome.commits = outcome.commits.saturating_add(1);
@@ -1704,6 +1706,7 @@ impl ObservationCoordinator {
                 )],
                 coverage_sets: vec![coverage_set],
                 coverage_preconditions: Vec::new(),
+                query_pack_selections: Vec::new(),
             })?;
         if let Some(commit_seq) = commit_seq {
             outcome.commits = outcome.commits.saturating_add(1);
@@ -6571,6 +6574,7 @@ mod tests {
                     expected_last_commit_seq: replay_authorization.last_commit_seq,
                 },
             ],
+            query_pack_selections: Vec::new(),
         });
         assert!(matches!(
             stale_writer,
