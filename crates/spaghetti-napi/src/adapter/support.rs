@@ -12,6 +12,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use super::scope::{ScopeProgramManifest, ScopeProgramStatus};
+
 pub const SUPPORT_SELECTION_CONTRACT_VERSION: u32 = 1;
 pub const CONTRACT_VERSION_SELECTION_VERSION: u32 = 1;
 pub const SUPPORT_RELEASE_SCHEMA_VERSION: u32 = 1;
@@ -171,6 +173,29 @@ impl AdapterSupportBinding {
 
     pub fn scope_program_digest(&self) -> Sha256Digest {
         self.scope_program_digest
+    }
+}
+
+/// Borrowed compiled declarations presented together for strict registration
+/// and typed authorization. This is an input bundle, not an access capability.
+#[derive(Debug, Clone, Copy)]
+pub struct AdapterSupportRegistration<'a> {
+    adapter_id: &'a str,
+    binding: &'a AdapterSupportBinding,
+    scope_programs: &'a ScopeProgramManifest,
+}
+
+impl<'a> AdapterSupportRegistration<'a> {
+    pub fn new(
+        adapter_id: &'a str,
+        binding: &'a AdapterSupportBinding,
+        scope_programs: &'a ScopeProgramManifest,
+    ) -> Self {
+        Self {
+            adapter_id,
+            binding,
+            scope_programs,
+        }
     }
 }
 
@@ -424,6 +449,8 @@ struct SupportReleaseWire {
 struct SupportDocumentIdentityWire {
     adapter_id: String,
     #[serde(default)]
+    ads_id: Option<String>,
+    #[serde(default)]
     support_release_id: Option<String>,
 }
 
@@ -433,6 +460,7 @@ pub struct VerifiedSupportRelease {
     descriptor: SupportReleaseDescriptor,
     adapter_id: String,
     adapter_binding: AdapterSupportBinding,
+    scope_programs: ScopeProgramManifest,
 }
 
 impl VerifiedSupportRelease {
@@ -452,6 +480,10 @@ impl VerifiedSupportRelease {
         &self.adapter_binding
     }
 
+    pub fn scope_programs(&self) -> &ScopeProgramManifest {
+        &self.scope_programs
+    }
+
     pub fn verify_adapter_binding(
         &self,
         adapter_id: &str,
@@ -467,6 +499,19 @@ impl VerifiedSupportRelease {
         if &self.adapter_binding != binding {
             return Err(SupportContractError::invalid(format!(
                 "adapter {adapter_id} does not match the digest-bound package, decoder, or declaration versions in support release {}",
+                self.descriptor.support_release_id
+            )));
+        }
+        Ok(())
+    }
+
+    pub fn verify_scope_programs(
+        &self,
+        scope_programs: &ScopeProgramManifest,
+    ) -> Result<(), SupportContractError> {
+        if &self.scope_programs != scope_programs {
+            return Err(SupportContractError::invalid(format!(
+                "compiled scope declarations differ from support release {}",
                 self.descriptor.support_release_id
             )));
         }
@@ -528,8 +573,11 @@ pub fn verify_support_release_bundle(
 
     let mut referenced = BTreeSet::new();
     let mut ads_digest = None;
+    let mut ads_id = None;
+    let mut ads_references = Vec::new();
     let mut source_declaration_digest = None;
     let mut scope_program_digest = None;
+    let mut scope_programs = None;
     for (kind, reference) in release.references.entries() {
         validate_support_path(&reference.path)?;
         if !referenced.insert(reference.path.as_str()) {
@@ -564,6 +612,24 @@ pub fn verify_support_release_bundle(
                 identity.adapter_id, release.adapter_id
             )));
         }
+        match kind {
+            "ads" => {
+                let document_ads_id = identity.ads_id.as_deref().ok_or_else(|| {
+                    SupportContractError::invalid("support ADS document has no ads_id")
+                })?;
+                validate_identifier("support ADS id", document_ads_id)?;
+                ads_id = Some(document_ads_id.to_string());
+            }
+            "source_declaration" | "scope_program" | "evidence" => {
+                let referenced_ads_id = identity.ads_id.as_deref().ok_or_else(|| {
+                    SupportContractError::invalid(format!("support {kind} document has no ads_id"))
+                })?;
+                validate_identifier("support document ADS reference", referenced_ads_id)?;
+                ads_references.push((kind, referenced_ads_id.to_string()));
+            }
+            "conformance" => {}
+            _ => unreachable!(),
+        }
         if kind == "conformance"
             && identity.support_release_id.as_deref()
                 != Some(descriptor.support_release_id.as_str())
@@ -575,7 +641,15 @@ pub fn verify_support_release_bundle(
         match kind {
             "ads" => ads_digest = Some(actual_digest),
             "source_declaration" => source_declaration_digest = Some(actual_digest),
-            "scope_program" => scope_program_digest = Some(actual_digest),
+            "scope_program" => {
+                let parsed = ScopeProgramManifest::from_json(bytes).map_err(|error| {
+                    SupportContractError::invalid(format!(
+                        "support bundle scope program is invalid: {error}"
+                    ))
+                })?;
+                scope_program_digest = Some(actual_digest);
+                scope_programs = Some(parsed);
+            }
             "evidence" | "conformance" => {}
             _ => unreachable!(),
         }
@@ -583,6 +657,34 @@ pub fn verify_support_release_bundle(
     if supplied.len() != referenced.len() {
         return Err(SupportContractError::invalid(
             "support bundle contains an unreferenced document",
+        ));
+    }
+
+    let ads_id = ads_id.expect("support reference set always includes ADS");
+    for (kind, referenced_ads_id) in ads_references {
+        if referenced_ads_id != ads_id {
+            return Err(SupportContractError::invalid(format!(
+                "support {kind} document references ADS {referenced_ads_id}, not {ads_id}"
+            )));
+        }
+    }
+
+    let scope_programs =
+        scope_programs.expect("support reference set always includes scope program");
+    let scope_status_matches = match descriptor.status {
+        SupportReleaseStatus::Candidate => matches!(
+            scope_programs.status,
+            ScopeProgramStatus::Incomplete | ScopeProgramStatus::Candidate
+        ),
+        SupportReleaseStatus::Promoted => scope_programs.status == ScopeProgramStatus::Promoted,
+        // Retirement removes selection authority and may apply to a withdrawn
+        // candidate or a formerly promoted package without rewriting its
+        // digest-bound declaration documents.
+        SupportReleaseStatus::Retired => true,
+    };
+    if !scope_status_matches {
+        return Err(SupportContractError::invalid(
+            "scope-program status is incompatible with the support-release status",
         ));
     }
 
@@ -600,6 +702,7 @@ pub fn verify_support_release_bundle(
         descriptor,
         adapter_id: release.adapter_id,
         adapter_binding,
+        scope_programs,
     })
 }
 
@@ -1031,15 +1134,54 @@ impl SupportCatalog {
         }
     }
 
+    pub fn verify_adapter_registration(
+        &self,
+        registration: AdapterSupportRegistration<'_>,
+        require_promoted: bool,
+    ) -> Result<(), SupportContractError> {
+        let AdapterSupportRegistration {
+            adapter_id,
+            binding,
+            scope_programs,
+        } = registration;
+        let mut matching_status = false;
+        for release in self.releases.values().filter(|release| {
+            release.adapter_id == adapter_id
+                && (!require_promoted
+                    || release.descriptor.status == SupportReleaseStatus::Promoted)
+        }) {
+            matching_status = true;
+            if release.verify_adapter_binding(adapter_id, binding).is_ok()
+                && release.verify_scope_programs(scope_programs).is_ok()
+            {
+                return Ok(());
+            }
+        }
+        let qualifier = if require_promoted { "promoted " } else { "" };
+        if matching_status {
+            Err(SupportContractError::invalid(format!(
+                "adapter {adapter_id} does not match any digest-bound {qualifier}support release and its compiled scope declarations"
+            )))
+        } else {
+            Err(SupportContractError::invalid(format!(
+                "adapter {adapter_id} has no digest-bound {qualifier}support release"
+            )))
+        }
+    }
+
     pub(crate) fn authorize_typed_access(
         &self,
-        adapter_id: &str,
-        binding: &AdapterSupportBinding,
+        registration: AdapterSupportRegistration<'_>,
         probe: &NativeArtifactProbe,
         operation: SupportOperation,
         request: &ContractVersionRequest,
         offer: &ContractVersionOffer,
     ) -> Result<(CompatibilityDecision, TypedAccessAuthorization), SupportContractError> {
+        let AdapterSupportRegistration {
+            adapter_id,
+            binding,
+            scope_programs,
+        } = registration;
         if !matches!(
             operation,
             SupportOperation::CatalogDiscovery
@@ -1069,6 +1211,7 @@ impl SupportCatalog {
             )
         })?;
         release.verify_adapter_binding(adapter_id, binding)?;
+        release.verify_scope_programs(scope_programs)?;
         let contracts = select_contract_versions(request, offer)?;
         Ok((
             decision,
@@ -1309,6 +1452,11 @@ impl TypedAccessAuthorization {
 
 #[cfg(test)]
 mod tests {
+    use crate::adapter::{
+        ScopeProgramDeclaration, ScopeRelationBounds, ScopeRelationDeclaration,
+        ScopeRelationPrimitive, ScopeUnavailableBehavior,
+    };
+
     use super::*;
     use serde_json::Value;
 
@@ -1346,6 +1494,49 @@ mod tests {
         }
     }
 
+    fn fixture_scope_manifest(
+        adapter_id: &str,
+        status: SupportReleaseStatus,
+    ) -> ScopeProgramManifest {
+        ScopeProgramManifest {
+            schema_version: 1,
+            declaration_id: format!("{adapter_id}-scope"),
+            adapter_id: adapter_id.to_string(),
+            ads_id: format!("{adapter_id}-ads"),
+            status: match status {
+                SupportReleaseStatus::Candidate => ScopeProgramStatus::Candidate,
+                SupportReleaseStatus::Promoted => ScopeProgramStatus::Promoted,
+                SupportReleaseStatus::Retired => ScopeProgramStatus::Retired,
+            },
+            roots: vec!["root".to_string()],
+            programs: vec![ScopeProgramDeclaration {
+                program_id: "observe-session".to_string(),
+                root_entity_kind: "session".to_string(),
+                relations: vec![ScopeRelationDeclaration {
+                    relation_id: "root-object".to_string(),
+                    primitive: ScopeRelationPrimitive::KnownObject,
+                    access_root: "root".to_string(),
+                    locator: "known-object".to_string(),
+                    identity_inputs: vec!["native-session-id".to_string()],
+                    bounds: ScopeRelationBounds {
+                        max_fan_out: 1,
+                        max_depth: 1,
+                        max_objects: 1,
+                        max_bytes: 1024,
+                        max_rows: 0,
+                    },
+                    statement_id: None,
+                    parameter_names: None,
+                    unavailable_behavior: ScopeUnavailableBehavior::RecordUnavailable,
+                    claim_refs: vec!["scope-evidence".to_string()],
+                }],
+                claim_refs: vec!["scope-evidence".to_string()],
+            }],
+            blockers: Vec::new(),
+            claim_refs: vec!["scope-evidence".to_string()],
+        }
+    }
+
     fn fixture_catalog(releases: &[SupportReleaseDescriptor]) -> SupportCatalog {
         let binding = fixture_binding();
         SupportCatalog::new(releases.iter().map(|descriptor| VerifiedSupportRelease {
@@ -1353,6 +1544,10 @@ mod tests {
             adapter_id: descriptor.artifact_compatibility.family.clone(),
             descriptor: descriptor.clone(),
             adapter_binding: binding.clone(),
+            scope_programs: fixture_scope_manifest(
+                &descriptor.artifact_compatibility.family,
+                descriptor.status,
+            ),
         }))
         .unwrap()
     }
@@ -1396,10 +1591,12 @@ mod tests {
 
         let mut malformed_request = fixture.contract_request;
         malformed_request.selection_contract_version = 0;
+        let binding = fixture_binding();
+        let scope_programs =
+            fixture_scope_manifest("candidate-agent", SupportReleaseStatus::Candidate);
         let error = catalog
             .authorize_typed_access(
-                "candidate-agent",
-                &fixture_binding(),
+                AdapterSupportRegistration::new("candidate-agent", &binding, &scope_programs),
                 &candidate_probe.probe,
                 SupportOperation::DurableHistoryRuntime,
                 &malformed_request,
@@ -1418,10 +1615,12 @@ mod tests {
             .iter()
             .find(|case| case.name == "exact")
             .unwrap();
+        let binding = fixture_binding();
+        let scope_programs =
+            fixture_scope_manifest("fixture-agent", SupportReleaseStatus::Promoted);
         let (exact, durable) = catalog
             .authorize_typed_access(
-                "fixture-agent",
-                &fixture_binding(),
+                AdapterSupportRegistration::new("fixture-agent", &binding, &scope_programs),
                 &exact.probe,
                 SupportOperation::DurableHistoryRuntime,
                 &fixture.contract_request,
@@ -1457,22 +1656,22 @@ mod tests {
             (
                 "ads",
                 "support/ads.json",
-                br#"{"adapter_id":"fixture-agent"}"#.as_slice(),
+                br#"{"adapter_id":"fixture-agent","ads_id":"fixture-agent-ads"}"#.as_slice(),
             ),
             (
                 "source_declaration",
                 "support/source.json",
-                br#"{"adapter_id":"fixture-agent"}"#.as_slice(),
+                br#"{"adapter_id":"fixture-agent","ads_id":"fixture-agent-ads"}"#.as_slice(),
             ),
             (
                 "scope_program",
                 "support/scope.json",
-                br#"{"adapter_id":"fixture-agent"}"#.as_slice(),
+                br#"{"schema_version":1,"declaration_id":"fixture-agent-scope","adapter_id":"fixture-agent","ads_id":"fixture-agent-ads","status":"promoted","roots":["root"],"programs":[{"program_id":"observe-session","root_entity_kind":"session","relations":[{"relation_id":"root-object","primitive":"KnownObject","access_root":"root","locator":"known-object","identity_inputs":["native-session-id"],"bounds":{"max_fan_out":1,"max_depth":1,"max_objects":1,"max_bytes":1024,"max_rows":0},"unavailable_behavior":"record_unavailable","claim_refs":["scope-evidence"]}],"claim_refs":["scope-evidence"]}],"blockers":[],"claim_refs":["scope-evidence"]}"#.as_slice(),
             ),
             (
                 "evidence",
                 "support/evidence.json",
-                br#"{"adapter_id":"fixture-agent"}"#.as_slice(),
+                br#"{"adapter_id":"fixture-agent","ads_id":"fixture-agent-ads"}"#.as_slice(),
             ),
             (
                 "conformance",

@@ -5359,6 +5359,14 @@ mod support_binding_tests {
                     .expect("built-in adapter must declare its support binding"),
             )
             .unwrap();
+        release
+            .verify_scope_programs(
+                manifest
+                    .scope_programs
+                    .as_ref()
+                    .expect("built-in adapter must compile its scope declaration"),
+            )
+            .unwrap();
         assert_eq!(release.descriptor().status, SupportReleaseStatus::Candidate);
     }
 }

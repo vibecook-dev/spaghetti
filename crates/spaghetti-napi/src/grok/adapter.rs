@@ -19,10 +19,10 @@ use crate::adapter::{
     DecodeContext, DecodeDisposition, DecoderId, DeletionPolicy, DiscoveryContext, DriverSpec,
     EntityKey, EntityScope, EvidenceKind, EvidenceStrength, Fact, FactBatch, MessageFact,
     MessageRole, ObjectSelector, QualifiedTimestamp, RawRetentionPolicy, RunEvidenceFact, RunFact,
-    SessionFact, SourceAccess, SourceInstance, SourceInstanceKey, SourceInstanceSpec,
-    SourceObjectDescriptor, SourceRoot, SourceSnapshot, StreamAuthority, StreamId, StreamSpec,
-    SupportLevel, TimestampQuality, TokenUsage, UsageAccounting, UsageFact, UsageScope,
-    ValueQuality,
+    ScopeProgramManifest, SessionFact, SourceAccess, SourceInstance, SourceInstanceKey,
+    SourceInstanceSpec, SourceObjectDescriptor, SourceRoot, SourceSnapshot, StreamAuthority,
+    StreamId, StreamSpec, SupportLevel, TimestampQuality, TokenUsage, UsageAccounting, UsageFact,
+    UsageScope, ValueQuality,
 };
 use crate::source::{
     platform_path_key, read_stable_file_confined, AppendDelimitedConfig, DirectorySnapshotConfig,
@@ -30,6 +30,10 @@ use crate::source::{
 };
 
 const ADAPTER_ID: &str = "grok";
+const SCOPE_PROGRAM_DOCUMENT: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../agent-support/grok/candidate-2026-08-15/scope-programs.json"
+));
 const MEMBERSHIP_STREAM: &str = "session-membership";
 const TRANSCRIPT_STREAM: &str = "chat-history";
 const SUMMARY_STREAM: &str = "session-summaries";
@@ -82,6 +86,10 @@ impl GrokAdapter {
                         "sha256:2da094e844d59bb1d8cabcc6797fe4a0a2ccf61eaba95c31249fa6beedead173",
                     )
                     .expect("static Grok support binding is valid"),
+                ),
+                scope_programs: Some(
+                    ScopeProgramManifest::from_json(SCOPE_PROGRAM_DOCUMENT)
+                        .expect("static Grok scope program is valid"),
                 ),
                 source_schema_versions: vec![
                     "grok-chat-history-jsonl-v1".to_string(),

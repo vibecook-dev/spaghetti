@@ -294,6 +294,11 @@ Current landing status (2026-08-16):
   digests; and added a strict registry path that admits only matching promoted
   packages while keeping the current zero-promotion N-API host on an explicit
   non-authorizing legacy path;
+- added a strict Rust scope-program parser to support-package verification,
+  made built-in manifests compile their referenced declarations, and made
+  strict registration and typed authorization reject a compiled declaration
+  that differs from the selected verified package even when its binding fields
+  otherwise match;
 - made repository validation discover candidate, promoted, and retired bundle
   directories instead of silently ignoring future promoted releases, and
   added tests that compare all three compiled adapter manifests with their
@@ -304,11 +309,16 @@ Current landing status (2026-08-16):
   phase-tagged traces; wired adapter dependency object reads, parameterized
   queries, listings, and consistency revalidation through it; exposed aggregate
   counters on reconcile results; and added a ratchet preventing adapters from
-  minting tokens or reserving native access; and
+  minting tokens or reserving native access;
+- added the common `ScopeAccessPlan` compiler: one selected program now creates
+  exact per-relation budgets; callers cannot substitute declaration roots or
+  locators; named identity and relation/operation mismatches fail before source
+  access; phases share one pass budget; and candidate Grok declarations execute
+  as a non-authorizing conformance fixture;
 - integrated contract and tooling checks into `pnpm validate`.
 
-A2 remains `In progress`: promoted `ScopeProgram` relation bounds still need to
-instantiate these budgets in the catalog and scoped-observer runtimes; the
+A2 remains `In progress`: the compiler is not yet instantiated by catalog,
+durable, or scoped-observer execution under a carried Rust authorization; the
 bounded trace needs an authorized diagnostic retrieval/digest surface; adapter
 registrations must move from the explicit legacy path to the strict promoted
 catalog after the first support release is promoted; and public N-API/IPC host

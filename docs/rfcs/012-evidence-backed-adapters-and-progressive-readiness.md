@@ -309,7 +309,7 @@ flowchart TB
 
     subgraph common["Dependency-constrained common subsystems"]
         direction TB
-        access["Source access + selectors"]
+        access["Support authorization + ScopeProgram compiler<br/>source access · relation budgets · selectors"]
         lifecycle["Watch · reconcile · cursor · generation · retry"]
         drivers["Reusable source drivers"]
         record["SourceRecordId + native record + provenance"]

@@ -180,6 +180,32 @@ Adapters may declare bounds but cannot mint tokens or reservations. This
 implementation shape remains provisional until promoted scope declarations and
 the scoped observer execute it through cross-topology fixtures.
 
+The next executable A2 slice makes the declaration-to-ledger boundary
+concrete:
+
+- support-package verification strictly parses the referenced scope document
+  and retains that parsed declaration beside its verified digest;
+- a strict adapter registration and every typed-access authorization require
+  the adapter's compiled scope declaration to equal the selected verified
+  support package, not merely to repeat its digest string;
+- one `ScopeAccessPlan` selects exactly one declared program and instantiates
+  one common access budget per relation with the exact declared fan-out, depth,
+  object, byte, and row limits;
+- an access request supplies only a relation ID, permitted operation, phase,
+  parent token, exact named identity inputs, and worst-case reservation. The
+  access root, locator template, statement ID, unavailable behavior, and other
+  executable relation data come back from the verified declaration and cannot
+  be substituted by the caller; and
+- unknown relations, incompatible operations, malformed identity inputs, and
+  invalid reservations fail before entering a source driver. Declared bound
+  violations enter the bounded relation trace as denied access.
+
+Mechanical compilation is not authority. Incomplete and candidate declarations
+may compile for conformance, but only a promoted support decision plus compatible
+public-contract selection may authorize native access. The current durable and
+scoped hosts do not yet carry that authorization into this plan, so this slice
+does not promote any built-in support release.
+
 ## 4. Logical subsystem dependency law
 
 ### 4.1 Logical subsystems
@@ -656,6 +682,13 @@ adapter function that can freely walk the filesystem or query a database.
 Every relation declares its access root, fan-out/depth/byte bounds, identity
 inputs, and unavailable behavior.
 
+One bounded common-runtime execution selects one program; it does not merge
+relations from several programs. Relation IDs are unique across the declaration
+so every access and denial has one unambiguous budget and trace owner. Named
+identity inputs must match the declared names exactly before their values are
+hashed into an opaque object token. Native identity values never enter access
+telemetry.
+
 The initial relation vocabulary is:
 
 | Relation primitive            | Meaning                                                      |
@@ -672,6 +705,17 @@ The initial relation vocabulary is:
 Globally recursive discovery, arbitrary SQL, unconstrained globs, dynamic
 absolute paths from untrusted payloads, and “search until found” are not
 primitives.
+
+The initial operation mapping is closed:
+
+| Relation primitive                         | Permitted common access operation              |
+| ------------------------------------------ | ---------------------------------------------- |
+| `ParameterizedSQLiteRows`                  | parameterized read-only query                  |
+| `ChildDirectoryByNativeId`, `KeyNamespace` | bounded object listing and bounded object read |
+| every other initial relation primitive     | bounded object read                            |
+
+Adding another operation to a primitive changes this contract and requires an
+RFC 012A amendment plus cross-language conformance evidence.
 
 ### 7.2 Agent-specific joins
 
@@ -694,6 +738,15 @@ Conformance records every object opened, directory entry enumerated, SQLite
 statement shape and row count, KV key range, bytes read, relation that
 authorized the access, and bound consumption. A scope fails conformance if it
 touches an unrelated object even when its emitted facts happen to be correct.
+
+One `ScopeAccessPlan` instance is the budget ledger for one bounded
+reconciliation pass. `Initial` and `Revalidation` reservations in that pass
+consume the same declared totals; a phase label does not refill a budget.
+Creating a fresh plan is a common-runtime lifecycle action for a later bounded
+pass, never an adapter retry escape hatch. A declaration that requires a
+worst-case second content read during revalidation must budget both reads or use
+a proven cheaper common primitive. Per-observer scheduling/rate and total
+resource ceilings remain separate RFC 012D runtime limits.
 
 ## 8. Agent Data Surface
 

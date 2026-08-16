@@ -9,6 +9,7 @@ use crate::source::{
     SqliteSnapshotConfig,
 };
 
+use super::scope::ScopeProgramManifest;
 use super::support::AdapterSupportBinding;
 use super::FactBatch;
 
@@ -135,6 +136,7 @@ pub struct AdapterManifest {
     pub adapter_version: String,
     pub contract_version: u32,
     pub support_binding: Option<AdapterSupportBinding>,
+    pub scope_programs: Option<ScopeProgramManifest>,
     pub source_schema_versions: Vec<String>,
     pub capabilities: Vec<CapabilityDeclaration>,
 }
@@ -165,6 +167,21 @@ impl AdapterManifest {
             if binding.decoder_contract_version() != self.contract_version {
                 return Err(AdapterError::invalid_contract(
                     "adapter support binding decoder contract differs from its manifest",
+                ));
+            }
+        }
+        if let Some(scope_programs) = &self.scope_programs {
+            scope_programs.validate().map_err(|error| {
+                AdapterError::invalid_contract(format!("adapter scope program is invalid: {error}"))
+            })?;
+            if scope_programs.adapter_id != self.id.as_str() {
+                return Err(AdapterError::invalid_contract(
+                    "adapter scope program belongs to a different adapter",
+                ));
+            }
+            if self.support_binding.is_none() {
+                return Err(AdapterError::invalid_contract(
+                    "adapter scope program requires a digest-bound support manifest",
                 ));
             }
         }
@@ -690,6 +707,7 @@ mod tests {
             adapter_version: "1".to_string(),
             contract_version: 1,
             support_binding: None,
+            scope_programs: None,
             source_schema_versions: Vec::new(),
             capabilities: vec![capability.clone(), capability],
         };

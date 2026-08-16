@@ -3,9 +3,9 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::Arc;
 
 use super::{
-    AdapterError, AdapterId, AgentAdapter, CompatibilityDecision, ContractVersionOffer,
-    ContractVersionRequest, NativeArtifactProbe, SupportCatalog, SupportOperation,
-    TypedAccessAuthorization,
+    AdapterError, AdapterId, AdapterSupportRegistration, AgentAdapter, CompatibilityDecision,
+    ContractVersionOffer, ContractVersionRequest, NativeArtifactProbe, SupportCatalog,
+    SupportOperation, TypedAccessAuthorization,
 };
 
 pub struct AdapterRegistryBuilder {
@@ -66,8 +66,21 @@ impl AdapterRegistryBuilder {
                         manifest.id
                     ))
                 })?;
+                let scope_programs = manifest.scope_programs.as_ref().ok_or_else(|| {
+                    AdapterError::invalid_contract(format!(
+                        "adapter {} has no compiled scope declaration",
+                        manifest.id
+                    ))
+                })?;
                 catalog
-                    .verify_adapter_binding(manifest.id.as_str(), binding, true)
+                    .verify_adapter_registration(
+                        AdapterSupportRegistration::new(
+                            manifest.id.as_str(),
+                            binding,
+                            scope_programs,
+                        ),
+                        true,
+                    )
                     .map_err(|error| AdapterError::invalid_contract(error.to_string()))?;
             }
             let id = manifest.id;
@@ -139,6 +152,11 @@ impl AdapterRegistry {
                 "adapter {adapter_id} has no digest-bound support manifest"
             ))
         })?;
+        let scope_programs = adapter.manifest().scope_programs.as_ref().ok_or_else(|| {
+            AdapterError::invalid_contract(format!(
+                "adapter {adapter_id} has no compiled scope declaration"
+            ))
+        })?;
         let catalog = self.support_catalog.as_ref().ok_or_else(|| {
             AdapterError::invalid_contract(
                 "adapter registry was built through the explicit legacy compatibility path",
@@ -146,8 +164,7 @@ impl AdapterRegistry {
         })?;
         catalog
             .authorize_typed_access(
-                adapter_id.as_str(),
-                binding,
+                AdapterSupportRegistration::new(adapter_id.as_str(), binding, scope_programs),
                 probe,
                 operation,
                 request,
@@ -184,39 +201,49 @@ mod tests {
                     adapter_version: "1.0.0".to_string(),
                     contract_version: 1,
                     support_binding: None,
+                    scope_programs: None,
                     source_schema_versions: Vec::new(),
                     capabilities: Vec::new(),
                 },
             }
         }
 
-        fn with_support_binding(mut self, binding: AdapterSupportBinding) -> Self {
+        fn with_support(
+            mut self,
+            binding: AdapterSupportBinding,
+            scope_programs: crate::adapter::ScopeProgramManifest,
+        ) -> Self {
             self.manifest.support_binding = Some(binding);
+            self.manifest.scope_programs = Some(scope_programs);
             self
         }
     }
 
-    fn promoted_fixture_catalog() -> (Arc<SupportCatalog>, AdapterSupportBinding) {
+    fn promoted_fixture_catalog() -> (
+        Arc<SupportCatalog>,
+        AdapterSupportBinding,
+        crate::adapter::ScopeProgramManifest,
+    ) {
         let documents = [
             (
                 "ads",
                 "support/ads.json",
-                br#"{"adapter_id":"fixture"}"#.as_slice(),
+                br#"{"adapter_id":"fixture","ads_id":"fixture-ads"}"#.as_slice(),
             ),
             (
                 "source_declaration",
                 "support/source.json",
-                br#"{"adapter_id":"fixture"}"#.as_slice(),
+                br#"{"adapter_id":"fixture","ads_id":"fixture-ads"}"#.as_slice(),
             ),
             (
                 "scope_program",
                 "support/scope.json",
-                br#"{"adapter_id":"fixture"}"#.as_slice(),
+                br#"{"schema_version":1,"declaration_id":"fixture-scope","adapter_id":"fixture","ads_id":"fixture-ads","status":"promoted","roots":["root"],"programs":[{"program_id":"observe-session","root_entity_kind":"session","relations":[{"relation_id":"root-object","primitive":"KnownObject","access_root":"root","locator":"known-object","identity_inputs":["native-session-id"],"bounds":{"max_fan_out":1,"max_depth":1,"max_objects":1,"max_bytes":1024,"max_rows":0},"unavailable_behavior":"record_unavailable","claim_refs":["scope-evidence"]}],"claim_refs":["scope-evidence"]}],"blockers":[],"claim_refs":["scope-evidence"]}"#.as_slice(),
             ),
             (
                 "evidence",
                 "support/evidence.json",
-                br#"{"adapter_id":"fixture"}"#.as_slice(),
+                br#"{"adapter_id":"fixture","ads_id":"fixture-ads"}"#.as_slice(),
             ),
             (
                 "conformance",
@@ -256,7 +283,12 @@ mod tests {
             .collect::<Vec<_>>();
         let release = verify_support_release_bundle(&release_json, &bundle_documents).unwrap();
         let binding = release.adapter_binding().clone();
-        (Arc::new(SupportCatalog::new([release]).unwrap()), binding)
+        let scope_programs = release.scope_programs().clone();
+        (
+            Arc::new(SupportCatalog::new([release]).unwrap()),
+            binding,
+            scope_programs,
+        )
     }
 
     impl AgentAdapter for EmptyAdapter {
@@ -315,14 +347,25 @@ mod tests {
 
     #[test]
     fn supported_registry_requires_and_retains_a_promoted_digest_binding() {
-        let (catalog, binding) = promoted_fixture_catalog();
+        let (catalog, binding, scope_programs) = promoted_fixture_catalog();
         let missing = AdapterRegistryBuilder::new()
             .register(EmptyAdapter::new("fixture"))
             .build_supported(Arc::clone(&catalog));
         assert!(missing.err().unwrap().to_string().contains("digest-bound"));
 
+        let mut mismatched_scope = scope_programs.clone();
+        mismatched_scope.programs[0].relations[0].locator = "different-object".to_string();
+        let mismatched = AdapterRegistryBuilder::new()
+            .register(EmptyAdapter::new("fixture").with_support(binding.clone(), mismatched_scope))
+            .build_supported(Arc::clone(&catalog));
+        assert!(mismatched
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("compiled scope declarations"));
+
         let registry = AdapterRegistryBuilder::new()
-            .register(EmptyAdapter::new("fixture").with_support_binding(binding))
+            .register(EmptyAdapter::new("fixture").with_support(binding, scope_programs))
             .build_supported(catalog)
             .unwrap();
         assert!(registry.enforces_promoted_support());

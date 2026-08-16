@@ -16,15 +16,19 @@ use crate::adapter::{
     DecodeContext, DecodeDisposition, DecoderId, DeletionPolicy, DiscoveryContext, DriverSpec,
     EntityKey, EntityScope, EvidenceKind, EvidenceStrength, Fact, FactBatch, MessageFact,
     MessageRole, ObjectSelector, QualifiedTimestamp, RawRetentionPolicy, RunEvidenceFact, RunFact,
-    SessionFact, SourceInstance, SourceInstanceKey, SourceInstanceSpec, SourceObjectDescriptor,
-    SourceRoot, StreamAuthority, StreamId, StreamSpec, SupportLevel, TimestampQuality, TokenUsage,
-    UsageAccounting, UsageFact, UsageScope, ValueQuality,
+    ScopeProgramManifest, SessionFact, SourceInstance, SourceInstanceKey, SourceInstanceSpec,
+    SourceObjectDescriptor, SourceRoot, StreamAuthority, StreamId, StreamSpec, SupportLevel,
+    TimestampQuality, TokenUsage, UsageAccounting, UsageFact, UsageScope, ValueQuality,
 };
 use crate::source::{
     platform_path_key, AppendDelimitedConfig, IngestPriority, SourceRecord, SourceRecordState,
 };
 
 const ADAPTER_ID: &str = "codex";
+const SCOPE_PROGRAM_DOCUMENT: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../agent-support/codex/candidate-2026-08-15/scope-programs.json"
+));
 const ROLLOUT_STREAM: &str = "rollout-sessions";
 const ROLLOUT_DECODER: &str = "codex-rollout-record";
 const OBJECT_CONTEXT_VERSION: u32 = 1;
@@ -65,6 +69,10 @@ impl CodexAdapter {
                         "sha256:7990862cac4b59164dd8d25218077cce33e12fc15b66086e2763fcf6057a9fa5",
                     )
                     .expect("static Codex support binding is valid"),
+                ),
+                scope_programs: Some(
+                    ScopeProgramManifest::from_json(SCOPE_PROGRAM_DOCUMENT)
+                        .expect("static Codex scope program is valid"),
                 ),
                 source_schema_versions: vec!["codex-rollout-jsonl-v1".to_string()],
                 capabilities: codex_capabilities(),

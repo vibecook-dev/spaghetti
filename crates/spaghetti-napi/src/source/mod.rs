@@ -21,7 +21,8 @@ mod conformance;
 pub use access::{
     AccessBudget, AccessBudgetError, AccessBudgetSnapshot, AccessLimit, AccessObjectToken,
     AccessOperation, AccessOutcome, AccessPhase, AccessReservation, AccessReservationRequest,
-    AccessTraceEntry, ScopeAccessBounds, ACCESS_TRACE_CONTRACT_VERSION,
+    AccessTraceEntry, ScopeAccessBounds, ScopeAccessDenial, ScopeAccessPlan, ScopeAccessRequest,
+    ScopeAccessReservation, ScopeIdentityInput, ACCESS_TRACE_CONTRACT_VERSION,
     DEFAULT_ACCESS_TRACE_CAPACITY,
 };
 pub use append_delimited::{

@@ -23,13 +23,13 @@ use crate::adapter::{
     InterpretationSettingsSnapshot, MessageFact, MessageRole, ObjectSelector,
     PersistedToolResultFact, PlanSnapshotFact, PresenceFact, ProjectMemoryDocumentFact,
     QualifiedTimestamp, RawRetentionPolicy, RelationStrength, RunEvidenceFact, RunFact,
-    SessionFact, SessionIndexEntrySnapshot, SessionIndexSnapshotFact, SourceInstance,
-    SourceInstanceKey, SourceInstanceSpec, SourceObjectDescriptor, SourceRoot, StreamAuthority,
-    StreamId, StreamSpec, SupportLevel, TaskCollectionKind, TaskItemSnapshot, TaskSnapshotCoverage,
-    TaskSnapshotFact, TaskStatus, TeamInboxMessageSnapshot, TeamInboxSnapshotFact,
-    TeamMemberSnapshot, TeamSnapshotFact, TimestampQuality, TokenUsage, UsageAccounting, UsageFact,
-    UsageScope, ValueQuality, WorkflowMemberEventFact, WorkflowMemberEventKind,
-    WorkflowSnapshotFact, WorkflowStatus,
+    ScopeProgramManifest, SessionFact, SessionIndexEntrySnapshot, SessionIndexSnapshotFact,
+    SourceInstance, SourceInstanceKey, SourceInstanceSpec, SourceObjectDescriptor, SourceRoot,
+    StreamAuthority, StreamId, StreamSpec, SupportLevel, TaskCollectionKind, TaskItemSnapshot,
+    TaskSnapshotCoverage, TaskSnapshotFact, TaskStatus, TeamInboxMessageSnapshot,
+    TeamInboxSnapshotFact, TeamMemberSnapshot, TeamSnapshotFact, TimestampQuality, TokenUsage,
+    UsageAccounting, UsageFact, UsageScope, ValueQuality, WorkflowMemberEventFact,
+    WorkflowMemberEventKind, WorkflowSnapshotFact, WorkflowStatus,
 };
 use crate::claude::message_extractor;
 use crate::claude::session_metadata;
@@ -43,6 +43,10 @@ use crate::source::{
 };
 
 const ADAPTER_ID: &str = "claude-code";
+const SCOPE_PROGRAM_DOCUMENT: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../agent-support/claude-code/candidate-2026-08-15/scope-programs.json"
+));
 const PARENT_STREAM: &str = "session-transcripts";
 const SUBAGENT_STREAM: &str = "subagent-transcripts";
 const SUBAGENT_META_STREAM: &str = "subagent-metadata";
@@ -149,6 +153,10 @@ impl ClaudeCodeAdapter {
                         "sha256:689c86b9770544f826da37e72d1c4a1a37153fad4091372b954bba90ca2d5f7c",
                     )
                     .expect("static Claude support binding is valid"),
+                ),
+                scope_programs: Some(
+                    ScopeProgramManifest::from_json(SCOPE_PROGRAM_DOCUMENT)
+                        .expect("static Claude scope program is valid"),
                 ),
                 source_schema_versions: vec![
                     "claude-code-jsonl-v1".to_string(),

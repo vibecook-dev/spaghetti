@@ -360,19 +360,27 @@ def discover_rfc012_semantic_boundary_violations() -> set[str]:
 
 
 def discover_rfc012_support_boundary_violations() -> set[str]:
-    """Support selection cannot inspect sources or acquire runtime authority itself."""
+    """Support selection may inspect declarations, never sources or runtime authority."""
     path = REPO_ROOT / "crates/spaghetti-napi/src/adapter/support.rs"
-    if not path.exists() or RFC012_SUPPORT_FORBIDDEN_RE.search(production_rust_text(path)):
+    if not path.exists():
+        return {repo_path(path)}
+    text = production_rust_text(path).replace("super::scope::", "")
+    if RFC012_SUPPORT_FORBIDDEN_RE.search(text):
         return {repo_path(path)}
     return set()
 
 
 def discover_rfc012_adapter_support_binding_gaps() -> set[str]:
-    """Built-in adapters must bind their package and declaration digests."""
+    """Built-in adapters must bind and compile their support declarations."""
     found: set[str] = set()
     for relative in BUILTIN_ADAPTER_PATHS:
         text = production_rust_text(REPO_ROOT / relative)
-        if "support_binding: Some(" not in text or "AdapterSupportBinding::new(" not in text:
+        if (
+            "support_binding: Some(" not in text
+            or "AdapterSupportBinding::new(" not in text
+            or "scope_programs: Some(" not in text
+            or "ScopeProgramManifest::from_json(" not in text
+        ):
             found.add(relative)
     return found
 

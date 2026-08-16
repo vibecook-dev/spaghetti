@@ -6,6 +6,7 @@
 mod contract;
 mod facts;
 mod registry;
+mod scope;
 mod semantic;
 mod support;
 
@@ -34,6 +35,11 @@ pub use facts::{
     WorkflowMemberEventKind, WorkflowSnapshotFact, WorkflowStatus,
 };
 pub use registry::{AdapterRegistry, AdapterRegistryBuilder};
+pub use scope::{
+    ScopeContractError, ScopeProgramDeclaration, ScopeProgramManifest, ScopeProgramStatus,
+    ScopeRelationBounds, ScopeRelationDeclaration, ScopeRelationPrimitive,
+    ScopeUnavailableBehavior, SCOPE_PROGRAM_SCHEMA_VERSION,
+};
 pub use semantic::{
     compare_coverage, CanonicalEntityKey, CanonicalFactId, CanonicalSourceInstanceKey,
     ContractCompleteness, CoverageAbsence, CoverageAbsenceKind, CoverageComparison,
@@ -48,11 +54,12 @@ pub use semantic::{
 };
 pub use support::{
     classify_runtime_support, select_contract_versions, verify_support_release_bundle,
-    AdapterSupportBinding, ArtifactCompatibilityDeclaration, ArtifactVersionRange,
-    CompatibilityClass, CompatibilityDecision, CompatibilityReason, ContractVersionOffer,
-    ContractVersionRequest, ContractVersionSelection, NativeArtifactProbe, OperationAuthorization,
-    OperationPermissions, Sha256Digest, SupportBundleDocument, SupportCatalog,
-    SupportContractError, SupportOperation, SupportReleaseDescriptor, SupportReleaseStatus,
-    TypedAccessAuthorization, VerifiedSupportRelease, CONTRACT_VERSION_SELECTION_VERSION,
-    SUPPORT_RELEASE_SCHEMA_VERSION, SUPPORT_SELECTION_CONTRACT_VERSION,
+    AdapterSupportBinding, AdapterSupportRegistration, ArtifactCompatibilityDeclaration,
+    ArtifactVersionRange, CompatibilityClass, CompatibilityDecision, CompatibilityReason,
+    ContractVersionOffer, ContractVersionRequest, ContractVersionSelection, NativeArtifactProbe,
+    OperationAuthorization, OperationPermissions, Sha256Digest, SupportBundleDocument,
+    SupportCatalog, SupportContractError, SupportOperation, SupportReleaseDescriptor,
+    SupportReleaseStatus, TypedAccessAuthorization, VerifiedSupportRelease,
+    CONTRACT_VERSION_SELECTION_VERSION, SUPPORT_RELEASE_SCHEMA_VERSION,
+    SUPPORT_SELECTION_CONTRACT_VERSION,
 };

@@ -10,11 +10,17 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use serde::{Deserialize, Serialize};
 
+use crate::adapter::{
+    ScopeProgramManifest, ScopeProgramStatus, ScopeRelationDeclaration, ScopeRelationPrimitive,
+    ScopeUnavailableBehavior,
+};
+
 pub const ACCESS_TRACE_CONTRACT_VERSION: u32 = 1;
 pub const DEFAULT_ACCESS_TRACE_CAPACITY: usize = 256;
 
 const MAX_RELATION_ID_BYTES: usize = 128;
 const MAX_TRACE_CAPACITY: usize = 16_384;
+const MAX_IDENTITY_VALUE_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScopeAccessBounds {
@@ -162,8 +168,23 @@ pub enum AccessBudgetError {
         relation_id: String,
         limit: AccessLimit,
     },
+    #[error("scope access denied for program {program_id}, relation {relation_id}: {reason:?}")]
+    ScopeDenied {
+        program_id: String,
+        relation_id: String,
+        reason: ScopeAccessDenial,
+    },
     #[error("actual access exceeded its reservation")]
     ActualExceedsReservation,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScopeAccessDenial {
+    UnknownRelation,
+    OperationNotAllowed,
+    IdentityInputsMismatch,
+    InvalidReservation,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -175,6 +196,281 @@ pub struct AccessReservationRequest {
     pub depth: u32,
     pub max_bytes: u64,
     pub max_rows: u64,
+}
+
+/// One named native identity value supplied to a declarative scope relation.
+/// The name is checked against the declaration before its value contributes to
+/// the opaque object token.
+#[derive(Debug, Clone, Copy)]
+pub struct ScopeIdentityInput<'a> {
+    pub name: &'a str,
+    pub value: &'a [u8],
+}
+
+/// A bounded request against one relation in a compiled scope program.
+/// Locators and access roots are intentionally not caller-controlled: a
+/// successful reservation returns those values from the verified declaration.
+#[derive(Debug, Clone, Copy)]
+pub struct ScopeAccessRequest<'a> {
+    pub relation_id: &'a str,
+    pub operation: AccessOperation,
+    pub phase: AccessPhase,
+    pub parent_token: Option<AccessObjectToken>,
+    pub identity_inputs: &'a [ScopeIdentityInput<'a>],
+    pub depth: u32,
+    pub max_bytes: u64,
+    pub max_rows: u64,
+}
+
+/// Common-engine ledger for one program in one bounded reconciliation pass.
+/// Clones share the same relation budgets and cannot refill a pass.
+#[derive(Clone)]
+pub struct ScopeAccessPlan {
+    adapter_id: String,
+    declaration_id: String,
+    status: ScopeProgramStatus,
+    program_id: String,
+    relations: BTreeMap<String, CompiledScopeRelation>,
+}
+
+#[derive(Clone)]
+struct CompiledScopeRelation {
+    declaration: ScopeRelationDeclaration,
+    budget: AccessBudget,
+}
+
+impl ScopeAccessPlan {
+    /// Compile one declaration program into common-engine relation budgets.
+    /// Compilation is mechanical and does not itself grant native-source
+    /// authority; the host must still carry a typed support authorization.
+    pub fn for_program(
+        manifest: &ScopeProgramManifest,
+        program_id: &str,
+    ) -> Result<Self, AccessBudgetError> {
+        manifest.validate().map_err(|error| {
+            AccessBudgetError::InvalidConfig(format!("invalid scope program: {error}"))
+        })?;
+        let program = manifest.program(program_id).ok_or_else(|| {
+            AccessBudgetError::InvalidConfig(format!(
+                "scope program {program_id:?} is not declared for adapter {}",
+                manifest.adapter_id
+            ))
+        })?;
+        let mut relations = BTreeMap::new();
+        for declaration in &program.relations {
+            let bounds = ScopeAccessBounds {
+                max_fan_out: declaration.bounds.max_fan_out,
+                max_depth: declaration.bounds.max_depth,
+                max_objects: declaration.bounds.max_objects,
+                max_bytes: declaration.bounds.max_bytes,
+                max_rows: declaration.bounds.max_rows,
+            };
+            let budget = AccessBudget::new(&declaration.relation_id, bounds)?;
+            relations.insert(
+                declaration.relation_id.clone(),
+                CompiledScopeRelation {
+                    declaration: declaration.clone(),
+                    budget,
+                },
+            );
+        }
+        Ok(Self {
+            adapter_id: manifest.adapter_id.clone(),
+            declaration_id: manifest.declaration_id.clone(),
+            status: manifest.status,
+            program_id: program.program_id.clone(),
+            relations,
+        })
+    }
+
+    pub fn adapter_id(&self) -> &str {
+        &self.adapter_id
+    }
+
+    pub fn declaration_id(&self) -> &str {
+        &self.declaration_id
+    }
+
+    pub fn status(&self) -> ScopeProgramStatus {
+        self.status
+    }
+
+    pub fn program_id(&self) -> &str {
+        &self.program_id
+    }
+
+    pub fn relation(&self, relation_id: &str) -> Option<&ScopeRelationDeclaration> {
+        self.relations
+            .get(relation_id)
+            .map(|relation| &relation.declaration)
+    }
+
+    pub fn reserve(
+        &self,
+        request: ScopeAccessRequest<'_>,
+    ) -> Result<ScopeAccessReservation, AccessBudgetError> {
+        let relation = self
+            .relations
+            .get(request.relation_id)
+            .ok_or_else(|| self.denied(request.relation_id, ScopeAccessDenial::UnknownRelation))?;
+        if !primitive_allows_operation(relation.declaration.primitive, request.operation) {
+            return Err(self.denied(request.relation_id, ScopeAccessDenial::OperationNotAllowed));
+        }
+        if request.identity_inputs.len() != relation.declaration.identity_inputs.len()
+            || request
+                .identity_inputs
+                .iter()
+                .zip(&relation.declaration.identity_inputs)
+                .any(|(actual, expected)| {
+                    actual.name != expected
+                        || actual.value.is_empty()
+                        || actual.value.len() > MAX_IDENTITY_VALUE_BYTES
+                })
+        {
+            return Err(self.denied(
+                request.relation_id,
+                ScopeAccessDenial::IdentityInputsMismatch,
+            ));
+        }
+        let invalid_reservation = request.max_bytes == 0
+            || match request.operation {
+                AccessOperation::ParameterizedQuery => request.max_rows == 0,
+                AccessOperation::ObjectRead | AccessOperation::ObjectListing => {
+                    request.max_rows != 0
+                }
+            };
+        if invalid_reservation {
+            return Err(self.denied(request.relation_id, ScopeAccessDenial::InvalidReservation));
+        }
+
+        let mut token_components = Vec::with_capacity(request.identity_inputs.len() * 2);
+        for input in request.identity_inputs {
+            token_components.push(input.name.as_bytes());
+            token_components.push(input.value);
+        }
+        let object_token = AccessObjectToken::derive(request.relation_id, &token_components)?;
+        let reservation = relation.budget.reserve(AccessReservationRequest {
+            operation: request.operation,
+            phase: request.phase,
+            parent_token: request.parent_token,
+            object_token,
+            depth: request.depth,
+            max_bytes: request.max_bytes,
+            max_rows: request.max_rows,
+        })?;
+        Ok(ScopeAccessReservation {
+            declaration: relation.declaration.clone(),
+            object_token,
+            reservation: Some(reservation),
+        })
+    }
+
+    pub fn snapshot(&self, relation_id: &str) -> Option<AccessBudgetSnapshot> {
+        self.relations
+            .get(relation_id)
+            .map(|relation| relation.budget.snapshot())
+    }
+
+    pub fn snapshots(&self) -> Vec<AccessBudgetSnapshot> {
+        self.relations
+            .values()
+            .map(|relation| relation.budget.snapshot())
+            .collect()
+    }
+
+    fn denied(&self, relation_id: &str, reason: ScopeAccessDenial) -> AccessBudgetError {
+        AccessBudgetError::ScopeDenied {
+            program_id: self.program_id.clone(),
+            relation_id: relation_id.to_string(),
+            reason,
+        }
+    }
+}
+
+/// A granted reservation plus the immutable relation data the common driver
+/// must use for the native access. Dropping it consumes the reservation
+/// conservatively through [`AccessReservation`].
+pub struct ScopeAccessReservation {
+    declaration: ScopeRelationDeclaration,
+    object_token: AccessObjectToken,
+    reservation: Option<AccessReservation>,
+}
+
+impl ScopeAccessReservation {
+    pub fn relation_id(&self) -> &str {
+        &self.declaration.relation_id
+    }
+
+    pub fn primitive(&self) -> ScopeRelationPrimitive {
+        self.declaration.primitive
+    }
+
+    pub fn access_root(&self) -> &str {
+        &self.declaration.access_root
+    }
+
+    pub fn locator(&self) -> &str {
+        &self.declaration.locator
+    }
+
+    pub fn statement_id(&self) -> Option<&str> {
+        self.declaration.statement_id.as_deref()
+    }
+
+    pub fn parameter_names(&self) -> Option<&[String]> {
+        self.declaration.parameter_names.as_deref()
+    }
+
+    pub fn unavailable_behavior(&self) -> ScopeUnavailableBehavior {
+        self.declaration.unavailable_behavior
+    }
+
+    pub fn object_token(&self) -> AccessObjectToken {
+        self.object_token
+    }
+
+    pub fn complete(
+        mut self,
+        bytes_read: u64,
+        rows_read: u64,
+        outcome: AccessOutcome,
+    ) -> Result<(), AccessBudgetError> {
+        self.reservation
+            .take()
+            .expect("scope reservation is consumed only once")
+            .complete(bytes_read, rows_read, outcome)
+    }
+
+    pub fn fail_conservative(mut self) {
+        self.reservation
+            .take()
+            .expect("scope reservation is consumed only once")
+            .fail_conservative();
+    }
+}
+
+fn primitive_allows_operation(
+    primitive: ScopeRelationPrimitive,
+    operation: AccessOperation,
+) -> bool {
+    match primitive {
+        ScopeRelationPrimitive::ParameterizedSQLiteRows => {
+            operation == AccessOperation::ParameterizedQuery
+        }
+        ScopeRelationPrimitive::ChildDirectoryByNativeId | ScopeRelationPrimitive::KeyNamespace => {
+            matches!(
+                operation,
+                AccessOperation::ObjectListing | AccessOperation::ObjectRead
+            )
+        }
+        ScopeRelationPrimitive::KnownObject
+        | ScopeRelationPrimitive::SiblingObject
+        | ScopeRelationPrimitive::ReferencedObjectFromField
+        | ScopeRelationPrimitive::BoundedIndexLookup
+        | ScopeRelationPrimitive::ArtifactLocatorFromEvidence => {
+            operation == AccessOperation::ObjectRead
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -648,6 +944,194 @@ mod tests {
 
     fn token(value: &[u8]) -> AccessObjectToken {
         AccessObjectToken::derive("descendants", &[value]).unwrap()
+    }
+
+    fn grok_scope_manifest() -> ScopeProgramManifest {
+        ScopeProgramManifest::from_json(include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../agent-support/grok/candidate-2026-08-15/scope-programs.json"
+        )))
+        .unwrap()
+    }
+
+    #[test]
+    fn scope_program_compiles_exact_relation_budgets_and_returns_declared_locator() {
+        let plan = ScopeAccessPlan::for_program(&grok_scope_manifest(), "observe-session-sidecars")
+            .unwrap();
+        assert_eq!(plan.adapter_id(), "grok");
+        assert_eq!(plan.status(), ScopeProgramStatus::Incomplete);
+        assert_eq!(plan.snapshots().len(), 4);
+        assert_eq!(
+            plan.snapshot("summary-sidecar").unwrap().bounds,
+            ScopeAccessBounds {
+                max_fan_out: 1,
+                max_depth: 1,
+                max_objects: 1,
+                max_bytes: 1024 * 1024,
+                max_rows: 0,
+            }
+        );
+
+        let identity = [ScopeIdentityInput {
+            name: "history-object",
+            value: b"session/history.jsonl",
+        }];
+        let reservation = plan
+            .reserve(ScopeAccessRequest {
+                relation_id: "summary-sidecar",
+                operation: AccessOperation::ObjectRead,
+                phase: AccessPhase::Initial,
+                parent_token: None,
+                identity_inputs: &identity,
+                depth: 1,
+                max_bytes: 1024,
+                max_rows: 0,
+            })
+            .unwrap();
+        assert_eq!(reservation.access_root(), "sessions");
+        assert_eq!(reservation.locator(), "summary.json");
+        assert_eq!(
+            reservation.unavailable_behavior(),
+            ScopeUnavailableBehavior::SkipOptional
+        );
+        reservation
+            .complete(512, 0, AccessOutcome::Available)
+            .unwrap();
+        let snapshot = plan.snapshot("summary-sidecar").unwrap();
+        assert_eq!(snapshot.objects_accessed, 1);
+        assert_eq!(snapshot.bytes_read, 512);
+    }
+
+    #[test]
+    fn scope_program_denies_unknown_operations_and_identity_mismatches_before_budget_access() {
+        let plan = ScopeAccessPlan::for_program(&grok_scope_manifest(), "observe-session-sidecars")
+            .unwrap();
+        let identity = [ScopeIdentityInput {
+            name: "history-object",
+            value: b"session/history.jsonl",
+        }];
+        let request = |relation_id, operation, identity_inputs| ScopeAccessRequest {
+            relation_id,
+            operation,
+            phase: AccessPhase::Initial,
+            parent_token: None,
+            identity_inputs,
+            depth: 1,
+            max_bytes: 1,
+            max_rows: u64::from(operation == AccessOperation::ParameterizedQuery),
+        };
+
+        assert!(matches!(
+            plan.reserve(request(
+                "missing-relation",
+                AccessOperation::ObjectRead,
+                &identity
+            )),
+            Err(AccessBudgetError::ScopeDenied {
+                reason: ScopeAccessDenial::UnknownRelation,
+                ..
+            })
+        ));
+        assert!(matches!(
+            plan.reserve(request(
+                "summary-sidecar",
+                AccessOperation::ParameterizedQuery,
+                &identity
+            )),
+            Err(AccessBudgetError::ScopeDenied {
+                reason: ScopeAccessDenial::OperationNotAllowed,
+                ..
+            })
+        ));
+        let wrong_identity = [ScopeIdentityInput {
+            name: "native-session-id",
+            value: b"session",
+        }];
+        assert!(matches!(
+            plan.reserve(request(
+                "summary-sidecar",
+                AccessOperation::ObjectRead,
+                &wrong_identity
+            )),
+            Err(AccessBudgetError::ScopeDenied {
+                reason: ScopeAccessDenial::IdentityInputsMismatch,
+                ..
+            })
+        ));
+        assert_eq!(plan.snapshot("summary-sidecar").unwrap().attempts, 0);
+
+        assert!(matches!(
+            plan.reserve(ScopeAccessRequest {
+                relation_id: "summary-sidecar",
+                operation: AccessOperation::ObjectRead,
+                phase: AccessPhase::Initial,
+                parent_token: None,
+                identity_inputs: &identity,
+                depth: 1,
+                max_bytes: 1024 * 1024 + 1,
+                max_rows: 0,
+            }),
+            Err(AccessBudgetError::LimitExceeded {
+                limit: AccessLimit::MaxBytes,
+                ..
+            })
+        ));
+        let snapshot = plan.snapshot("summary-sidecar").unwrap();
+        assert_eq!(snapshot.attempts, 1);
+        assert_eq!(snapshot.denied, 1);
+        assert_eq!(snapshot.objects_accessed, 0);
+    }
+
+    #[test]
+    fn scope_relation_operation_mapping_is_closed() {
+        let operations = [
+            AccessOperation::ObjectRead,
+            AccessOperation::ParameterizedQuery,
+            AccessOperation::ObjectListing,
+        ];
+        let cases: &[(ScopeRelationPrimitive, &[AccessOperation])] = &[
+            (
+                ScopeRelationPrimitive::KnownObject,
+                &[AccessOperation::ObjectRead],
+            ),
+            (
+                ScopeRelationPrimitive::SiblingObject,
+                &[AccessOperation::ObjectRead],
+            ),
+            (
+                ScopeRelationPrimitive::ChildDirectoryByNativeId,
+                &[AccessOperation::ObjectRead, AccessOperation::ObjectListing],
+            ),
+            (
+                ScopeRelationPrimitive::ReferencedObjectFromField,
+                &[AccessOperation::ObjectRead],
+            ),
+            (
+                ScopeRelationPrimitive::BoundedIndexLookup,
+                &[AccessOperation::ObjectRead],
+            ),
+            (
+                ScopeRelationPrimitive::ParameterizedSQLiteRows,
+                &[AccessOperation::ParameterizedQuery],
+            ),
+            (
+                ScopeRelationPrimitive::KeyNamespace,
+                &[AccessOperation::ObjectRead, AccessOperation::ObjectListing],
+            ),
+            (
+                ScopeRelationPrimitive::ArtifactLocatorFromEvidence,
+                &[AccessOperation::ObjectRead],
+            ),
+        ];
+        for (primitive, allowed) in cases {
+            for operation in operations {
+                assert_eq!(
+                    primitive_allows_operation(*primitive, operation),
+                    allowed.contains(&operation),
+                    "{primitive:?} / {operation:?}"
+                );
+            }
+        }
     }
 
     #[test]
