@@ -691,6 +691,24 @@ Every complete record receives exactly one top-level disposition:
 Known ignored records are not reported as drift. Unknown families and fields
 remain measurable without producing one unbounded diagnostic row per record.
 
+A drift signature is not classified merely because a permissive native type
+accepts it. The candidate support package must record its evidence confidence,
+native meaning or deliberate opacity, and one exposure class:
+
+- `semantic`: mapped into a named common fact under fixture-backed semantics;
+- `native-only`: available only through explicitly native evidence/read APIs;
+  or
+- `prohibited`: withheld even from ordinary native evidence APIs.
+
+`native-only` fields cannot enter common entity or revision identities, FTS,
+logs, telemetry, normalized runtime events, or lifecycle/order reducers.
+Sensitive native identifiers additionally require the authorization and raw
+evidence policy of the API that returns them. A timestamp-like field whose
+transition semantics are not proven remains opaque; its numeric shape alone is
+not evidence that it represents activity, ordering, or a state transition.
+Classification is backed by sanitized shape fixtures and conformance tests
+that prove both accepted native decoding and the declared non-projection.
+
 ### 5.4 Tier, view, and topology compositionality
 
 Catalog head/prefix reads, later full-history reads, durable replay, and scoped

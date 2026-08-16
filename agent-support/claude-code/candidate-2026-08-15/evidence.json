@@ -90,8 +90,8 @@
     },
     {
       "claim_id": "claude-drift-bridge-accounts",
-      "statement": "Bridge-session rows have newly observed ownerAccountUuid and ownerOrganizationUuid fields; their semantic and disclosure treatment is intentionally unresolved.",
-      "state": "open",
+      "statement": "Observed bridge-session ownerAccountUuid and ownerOrganizationUuid fields are classified as sensitive native-only bridge correlation metadata. Agent-native message APIs and retained native transcript evidence may preserve them under their existing raw-evidence authorization, but they do not enter common identities, FTS, logs, telemetry, normalized runtime events, or lifecycle reducers.",
+      "state": "observed",
       "sources": [
         {
           "kind": "sanitized_fixture",
@@ -99,13 +99,15 @@
           "sha256": "sha256:0ccd6159504affeca81f73770c6b570ecbad8aa9f3d925a03919eddb85101dcd",
           "locator": "synthetic shape preserving field names and value categories"
         },
-        { "kind": "census_report", "path": "docs/rfcs/012-implementation-plan.md", "sha256": null, "locator": "A1 landing evidence: current Claude drift" }
+        { "kind": "design_record", "path": "docs/rfcs/012a-agent-adaptation-and-engine-boundaries.md", "sha256": null, "locator": "Mapping dispositions: native-only field classification" },
+        { "kind": "code_reference", "path": "packages/sdk/src/types/claude/projects.ts", "sha256": null, "locator": "BridgeSessionMessage native-only owner metadata" },
+        { "kind": "conformance_test", "path": "crates/spaghetti-napi/src/claude/adapter.rs", "sha256": null, "locator": "classified_native_drift_bridge_owner_fields_stay_raw_only" }
       ]
     },
     {
       "claim_id": "claude-drift-active-name-since",
-      "statement": "Active-session documents have a newly observed nameSince field; its timestamp semantics and transition behavior are intentionally unresolved.",
-      "state": "open",
+      "statement": "Observed active-session nameSince is classified as opaque native-only timestamp-like metadata. Agent-native active-session readers preserve its numeric shape, while the common presence projection deliberately excludes it from identity, activity, ordering, and lifecycle semantics until native transition behavior is fixture-proven.",
+      "state": "degraded",
       "sources": [
         {
           "kind": "sanitized_fixture",
@@ -113,7 +115,9 @@
           "sha256": "sha256:f408ad3c30fcbcde463ac7100074d8d71fcca707c3bd54d4cc60337a5a082299",
           "locator": "synthetic shape preserving numeric timestamp category"
         },
-        { "kind": "census_report", "path": "docs/rfcs/012-implementation-plan.md", "sha256": null, "locator": "A1 landing evidence: current Claude drift" }
+        { "kind": "design_record", "path": "docs/rfcs/012a-agent-adaptation-and-engine-boundaries.md", "sha256": null, "locator": "Mapping dispositions: opaque timestamp classification" },
+        { "kind": "code_reference", "path": "packages/sdk/src/sources/claude-code/active-sessions.ts", "sha256": null, "locator": "agent-native nameSince preservation" },
+        { "kind": "conformance_test", "path": "crates/spaghetti-napi/src/claude/adapter.rs", "sha256": null, "locator": "classified_native_drift_name_since_does_not_change_presence_semantics" }
       ]
     }
   ]

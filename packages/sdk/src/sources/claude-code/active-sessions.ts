@@ -46,6 +46,7 @@ function parseActiveSessionFile(raw: string, fallbackPid?: number): ActiveSessio
       kind: parsed.kind,
       entrypoint: parsed.entrypoint,
       name: parsed.name,
+      nameSince: parsed.nameSince,
       status: parsed.status,
       updatedAt: parsed.updatedAt,
       statusUpdatedAt: parsed.statusUpdatedAt,

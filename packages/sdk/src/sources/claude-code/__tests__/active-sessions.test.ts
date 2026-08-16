@@ -42,6 +42,7 @@ describe('listActiveSessionsFromDir', () => {
         cwd: '/tmp/proj',
         startedAt: Date.now() - 1000,
         name: 'live-one',
+        nameSince: 1_700_000_001_000,
         messagingSocketPath: '/tmp/claude-live.sock',
       }),
       'utf-8',
@@ -65,6 +66,7 @@ describe('listActiveSessionsFromDir', () => {
 
     const all = listActiveSessionsFromDir(dir, { requireAlive: false });
     assert.equal(all.find((s) => s.sessionId === 'sess-live')?.messagingSocketPath, '/tmp/claude-live.sock');
+    assert.equal(all.find((s) => s.sessionId === 'sess-live')?.nameSince, 1_700_000_001_000);
     assert.ok(all.some((s) => s.sessionId === 'sess-dead'));
   });
 

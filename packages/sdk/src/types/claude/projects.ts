@@ -136,6 +136,14 @@ export interface BridgeSessionMessage {
   sessionId: string;
   bridgeSessionId: string;
   lastSequenceNum: number;
+  /**
+   * Sensitive native bridge ownership metadata. These identifiers are exposed
+   * only as part of the agent-native message shape; they are not canonical
+   * Spaghetti identities and must not enter FTS, logs, telemetry, or runtime
+   * semantic events.
+   */
+  ownerAccountUuid?: string;
+  ownerOrganizationUuid?: string;
 }
 
 export interface PermissionModeMessage {

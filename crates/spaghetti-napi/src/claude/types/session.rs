@@ -137,6 +137,12 @@ pub struct BridgeSessionMessage {
     pub bridge_session_id: String,
     #[serde(default)]
     pub last_sequence_num: f64,
+    /// Sensitive native correlation metadata. These values remain on the raw
+    /// agent-native message and are never promoted to common semantic identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_account_uuid: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_organization_uuid: Option<String>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────

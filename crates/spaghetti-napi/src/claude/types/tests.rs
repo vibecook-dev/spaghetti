@@ -102,6 +102,31 @@ fn deserializes_summary_line() {
 }
 
 #[test]
+fn classified_native_drift_bridge_owner_fields_parse_as_native_metadata() {
+    let raw = r#"{
+        "type": "bridge-session",
+        "sessionId": "fixture-session",
+        "bridgeSessionId": "fixture-bridge",
+        "lastSequenceNum": 7,
+        "ownerAccountUuid": "fixture-account",
+        "ownerOrganizationUuid": "fixture-organization"
+    }"#;
+
+    let msg: SessionMessage = serde_json::from_str(raw).expect("parse bridge-session message");
+    let SessionMessage::BridgeSession(bridge) = msg else {
+        panic!("expected bridge-session variant");
+    };
+    assert_eq!(
+        bridge.owner_account_uuid.as_deref(),
+        Some("fixture-account")
+    );
+    assert_eq!(
+        bridge.owner_organization_uuid.as_deref(),
+        Some("fixture-organization")
+    );
+}
+
+#[test]
 fn deserializes_session_index_entry() {
     let raw = r#"{
         "sessionId": "s-1",

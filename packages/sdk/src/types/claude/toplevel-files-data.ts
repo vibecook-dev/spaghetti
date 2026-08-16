@@ -152,6 +152,12 @@ export interface ActiveSessionFile {
   kind?: string;
   entrypoint?: string;
   name?: string;
+  /**
+   * Opaque native timestamp-like metadata for the current name. Its transition
+   * semantics are not yet fixture-proven, so consumers must not use it as an
+   * activity, ordering, or session-lifecycle timestamp.
+   */
+  nameSince?: number;
   // Fields Claude Code now writes in the active-session registry.
   status?: string;
   updatedAt?: number;

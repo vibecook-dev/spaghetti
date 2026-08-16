@@ -1750,6 +1750,10 @@ struct ClaudeActiveSessionDocument {
     entrypoint: Option<String>,
     #[serde(default)]
     name: Option<String>,
+    /// Deliberately decoded but not projected: observed values look like epoch
+    /// milliseconds, but native transition semantics are not fixture-proven.
+    #[serde(default, rename = "nameSince")]
+    _name_since: Option<i64>,
     #[serde(default)]
     status: Option<String>,
     #[serde(default)]
@@ -6206,6 +6210,96 @@ mod tests {
     }
 
     #[test]
+    fn classified_native_drift_bridge_owner_fields_stay_raw_only() {
+        let root = TempDir::new().unwrap();
+        let adapter = ClaudeCodeAdapter::new();
+        let object_context = adapter
+            .bootstrap_object(
+                &instance(root.path()),
+                &object(PARENT_STREAM, &format!("project/{SESSION}.jsonl")),
+            )
+            .unwrap();
+        let source_record = record(
+            br#"{
+              "type":"bridge-session",
+              "sessionId":"01234567-89ab-cdef-0123-456789abcdef",
+              "bridgeSessionId":"fixture-bridge",
+              "lastSequenceNum":7,
+              "ownerAccountUuid":"fixture-account",
+              "ownerOrganizationUuid":"fixture-organization"
+            }"#,
+        );
+        let mut batch = semantic_transcript_batch(8, 4);
+        assert_eq!(
+            adapter
+                .decode(
+                    DecodeContext {
+                        decoder: &DecoderId::new(PARENT_DECODER).unwrap(),
+                        object_context: &object_context,
+                        decoder_state: None,
+                    },
+                    &source_record,
+                    &mut batch,
+                )
+                .unwrap(),
+            DecodeDisposition::Applied
+        );
+        assert!(batch.diagnostics().is_empty());
+        let message = fact_values(&batch)
+            .find_map(|fact| match fact {
+                Fact::Message(message) => Some(message),
+                _ => None,
+            })
+            .expect("bridge-session should remain a native message");
+        assert_eq!(message.native_kind, "bridge-session");
+        assert_eq!(
+            message.role,
+            MessageRole::Other("bridge-session".to_string())
+        );
+        assert!(message.content.is_empty());
+        assert!(message.search_text.is_none());
+        assert!(message.native_message_id.is_none());
+        assert!(message.model.is_none());
+        let raw: Value = serde_json::from_slice(&message.raw_json).unwrap();
+        assert_eq!(raw["ownerAccountUuid"], "fixture-account");
+        assert_eq!(raw["ownerOrganizationUuid"], "fixture-organization");
+
+        let changed_owner_record = record(
+            br#"{
+              "type":"bridge-session",
+              "sessionId":"01234567-89ab-cdef-0123-456789abcdef",
+              "bridgeSessionId":"fixture-bridge",
+              "lastSequenceNum":7,
+              "ownerAccountUuid":"example-account",
+              "ownerOrganizationUuid":"example-organization"
+            }"#,
+        );
+        let mut changed_owner_batch = semantic_transcript_batch(8, 4);
+        adapter
+            .decode(
+                DecodeContext {
+                    decoder: &DecoderId::new(PARENT_DECODER).unwrap(),
+                    object_context: &object_context,
+                    decoder_state: None,
+                },
+                &changed_owner_record,
+                &mut changed_owner_batch,
+            )
+            .unwrap();
+        let semantic_values = |facts: &FactBatch| {
+            facts
+                .facts()
+                .iter()
+                .map(|fact| serde_json::to_value(&fact.value).unwrap())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            semantic_values(&batch),
+            semantic_values(&changed_owner_batch)
+        );
+    }
+
+    #[test]
     fn file_history_checkpoint_and_delta_emit_joinable_session_artifacts() {
         let root = TempDir::new().unwrap();
         let adapter = ClaudeCodeAdapter::new();
@@ -6879,6 +6973,54 @@ mod tests {
             panic!("expected updated presence fact");
         };
         assert_eq!(changed_presence.presence, presence.presence);
+    }
+
+    #[test]
+    fn classified_native_drift_name_since_does_not_change_presence_semantics() {
+        let root = TempDir::new().unwrap();
+        let adapter = ClaudeCodeAdapter::new();
+        let object_context = adapter
+            .bootstrap_object(
+                &instance(root.path()),
+                &object(ACTIVE_SESSION_STREAM, "4242.json"),
+            )
+            .unwrap();
+        let decoder = DecoderId::new(ACTIVE_SESSION_DECODER).unwrap();
+        let decode = |name_since: i64| {
+            let payload = format!(
+                r#"{{
+                  "pid":4242,
+                  "sessionId":"{SESSION}",
+                  "cwd":"/repo",
+                  "startedAt":1786468310233,
+                  "name":"engine work",
+                  "nameSince":{name_since},
+                  "status":"idle"
+                }}"#
+            );
+            let mut batch = FactBatch::new(4, 4).unwrap();
+            assert_eq!(
+                adapter
+                    .decode(
+                        DecodeContext {
+                            decoder: &decoder,
+                            object_context: &object_context,
+                            decoder_state: None,
+                        },
+                        &presence_record(payload.as_bytes()),
+                        &mut batch,
+                    )
+                    .unwrap(),
+                DecodeDisposition::Applied
+            );
+            assert!(batch.diagnostics().is_empty());
+            let Fact::Presence(presence) = &batch.facts()[0].value else {
+                panic!("expected active-session presence fact");
+            };
+            presence.clone()
+        };
+
+        assert_eq!(decode(1786470000000), decode(1786471000000));
     }
 
     #[test]
