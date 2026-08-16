@@ -56,6 +56,10 @@ RFC012_SEMANTIC_FORBIDDEN_RE = re.compile(
 RFC012_SUPPORT_FORBIDDEN_RE = re.compile(
     r"(?:\bcrate::|\bsuper::(?:::|\b)|\brusqlite(?:::|\b)|\bnapi(?:::|\b))"
 )
+RFC012_SCOPED_HOST_FORBIDDEN_RE = re.compile(
+    r"\b(?:crate::(?:claude|codex|grok|core|engine|napi_engine|orchestrate)"
+    r"|rusqlite|napi)(?:::|\b)"
+)
 BUILTIN_ADAPTER_PATHS = (
     "crates/spaghetti-napi/src/claude/adapter.rs",
     "crates/spaghetti-napi/src/codex/adapter.rs",
@@ -385,6 +389,19 @@ def discover_rfc012_adapter_support_binding_gaps() -> set[str]:
     return found
 
 
+def discover_rfc012_scoped_host_boundary_violations() -> set[str]:
+    """The store-free scoped composition cannot depend on persistence or vendors."""
+    relative = "crates/spaghetti-napi/src/scoped_observation.rs"
+    path = REPO_ROOT / relative
+    found: set[str] = set()
+    if not path.exists() or RFC012_SCOPED_HOST_FORBIDDEN_RE.search(production_rust_text(path)):
+        found.add(relative)
+    lib = REPO_ROOT / "crates/spaghetti-napi/src/lib.rs"
+    if re.search(r"^\s*pub\s+mod\s+scoped_observation\s*;", read(lib), re.MULTILINE):
+        found.add(f"{repo_path(lib)}#premature-public-scoped-host")
+    return found
+
+
 def discover_migrated_client_direct_engine_queries() -> set[str]:
     """Once a consumer moves to SpaghettiClient, direct N-API reads cannot return."""
     return {
@@ -511,6 +528,7 @@ DISCOVERERS: dict[str, Callable[[], set[str]]] = {
     "rfc012_semantic_boundary_violations": discover_rfc012_semantic_boundary_violations,
     "rfc012_support_boundary_violations": discover_rfc012_support_boundary_violations,
     "rfc012_adapter_support_binding_gaps": discover_rfc012_adapter_support_binding_gaps,
+    "rfc012_scoped_host_boundary_violations": discover_rfc012_scoped_host_boundary_violations,
     "migrated_client_direct_engine_queries": discover_migrated_client_direct_engine_queries,
     "portable_client_runtime_boundary_violations": discover_portable_client_runtime_boundary_violations,
     "playground_main_sdk_owner_bypasses": discover_playground_main_sdk_owner_bypasses,

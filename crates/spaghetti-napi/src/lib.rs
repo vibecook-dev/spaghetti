@@ -31,6 +31,7 @@ pub mod grok;
 mod napi_engine;
 #[cfg(feature = "legacy-oracle")]
 pub mod orchestrate;
+mod scoped_observation;
 pub mod source;
 
 pub use napi_engine::{

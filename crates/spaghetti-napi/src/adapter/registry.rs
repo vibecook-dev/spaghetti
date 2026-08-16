@@ -178,11 +178,17 @@ impl AdapterRegistry {
 mod tests {
     use std::collections::BTreeMap;
 
+    use tempfile::TempDir;
+
     use crate::adapter::{
         verify_support_release_bundle, AdapterManifest, AdapterObjectContext,
         AdapterSupportBinding, DecodeContext, DecodeDisposition, DiscoveryContext, FactBatch,
         Sha256Digest, SourceInstance, SourceInstanceSpec, SourceObjectDescriptor, StreamSpec,
         SupportBundleDocument,
+    };
+    use crate::scoped_observation::{
+        ScopedKnownObjectGrant, ScopedKnownObjectReadRequest, ScopedObjectRead,
+        ScopedObservationAccessError, ScopedObservationAccessHost, ScopedObservationAccessRequest,
     };
     use crate::source::{
         AccessOperation, AccessOutcome, AccessPhase, AuthorizedScopeAccessPlan, ScopeAccessReport,
@@ -500,5 +506,153 @@ mod tests {
         tampered["relations"][0]["bytes_read"] = serde_json::json!(65);
         let tampered: ScopeAccessReport = serde_json::from_value(tampered).unwrap();
         assert!(!tampered.verify_digest());
+    }
+
+    #[test]
+    fn scoped_host_owns_authorization_confined_access_and_report_lifecycle() {
+        let (catalog, binding, scope_programs) = promoted_fixture_catalog();
+        let registry = AdapterRegistryBuilder::new()
+            .register(EmptyAdapter::new("fixture").with_support(binding, scope_programs))
+            .build_supported(catalog)
+            .unwrap();
+        let contract_request = ContractVersionRequest {
+            selection_contract_version: 1,
+            model_major: 1,
+            external_entity_reference_version: 1,
+            semantic_revision_reference_version: 1,
+            coverage_contract_versions: vec![1],
+            fact_family_versions: BTreeMap::new(),
+            query_pack_versions: None,
+            observation_contract_versions: Some(vec![1]),
+        };
+        let contract_offer = ContractVersionOffer {
+            selection_contract_version: 1,
+            model_major: 1,
+            external_entity_reference_versions: vec![1],
+            semantic_revision_reference_versions: vec![1],
+            coverage_contract_versions: vec![1],
+            fact_family_versions: BTreeMap::new(),
+            query_pack_versions: Vec::new(),
+            observation_contract_versions: vec![1],
+        };
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().join("authorized-root");
+        std::fs::create_dir_all(&root).unwrap();
+        let request = ScopedObservationAccessRequest {
+            adapter_id: "fixture".to_string(),
+            artifact_probe: NativeArtifactProbe {
+                family: "fixture".to_string(),
+                platform: "test".to_string(),
+                version: Some("1.0.0".to_string()),
+                markers: vec!["fixture.marker".to_string()],
+                contradictory_markers: false,
+            },
+            contract_request,
+            contract_offer,
+            program_id: "observe-session".to_string(),
+            known_objects: vec![ScopedKnownObjectGrant {
+                relation_id: "root-object".to_string(),
+                access_root: "root".to_string(),
+                locator_id: "known-object".to_string(),
+                root: root.clone(),
+                relative_path: "session.jsonl".into(),
+            }],
+        };
+
+        let dropped_host_request = request.clone();
+        let mut escaped_request = request.clone();
+        escaped_request.known_objects[0].relative_path = "../outside.jsonl".into();
+        assert!(matches!(
+            ScopedObservationAccessHost::authorize(&registry, escaped_request),
+            Err(ScopedObservationAccessError::InvalidGrant(_))
+        ));
+
+        // Attachment authorizes one exact missing object without reading it;
+        // the native process may create the root transcript afterward.
+        let host = ScopedObservationAccessHost::authorize(&registry, request).unwrap();
+        assert_eq!(
+            host.compatibility().support_release_id(),
+            Some("fixture-release")
+        );
+        let identity = [ScopeIdentityInput {
+            name: "native-session-id",
+            value: b"secret-session-id",
+        }];
+        let missing_pass = host.begin_pass().unwrap();
+        assert_eq!(
+            missing_pass
+                .read_known_object(ScopedKnownObjectReadRequest {
+                    relation_id: "root-object",
+                    identity_inputs: &identity,
+                    phase: AccessPhase::Initial,
+                    parent_token: None,
+                    depth: 1,
+                    max_bytes: 128,
+                })
+                .unwrap(),
+            ScopedObjectRead::Unavailable
+        );
+        let missing_report = missing_pass.finish();
+        assert_eq!(
+            missing_report.relations()[0].trace[0].outcome,
+            AccessOutcome::Unavailable
+        );
+
+        std::fs::write(root.join("session.jsonl"), b"native transcript bytes\n").unwrap();
+        let pass = host.begin_pass().unwrap();
+        assert!(matches!(
+            host.begin_pass(),
+            Err(ScopedObservationAccessError::PassAlreadyActive)
+        ));
+        let read = pass
+            .read_known_object(ScopedKnownObjectReadRequest {
+                relation_id: "root-object",
+                identity_inputs: &identity,
+                phase: AccessPhase::Initial,
+                parent_token: None,
+                depth: 1,
+                max_bytes: 128,
+            })
+            .unwrap();
+        assert!(matches!(
+            read,
+            ScopedObjectRead::Available { ref bytes, .. }
+                if bytes == b"native transcript bytes\n"
+        ));
+        let report = pass.finish();
+        assert!(report.verify_digest());
+        assert_eq!(report.relations()[0].attempts, 1);
+        assert_eq!(report.relations()[0].bytes_read, 24);
+        let encoded = serde_json::to_string(&report).unwrap();
+        assert!(!encoded.contains("secret-session-id"));
+        assert!(!encoded.contains("session.jsonl"));
+        assert!(!encoded.contains("native transcript bytes"));
+
+        let next_pass = host.begin_pass().unwrap();
+        assert_eq!(next_pass.report().relations()[0].attempts, 0);
+        drop(next_pass);
+        host.close();
+        host.close();
+        assert!(host.is_closed());
+        assert!(matches!(
+            host.begin_pass(),
+            Err(ScopedObservationAccessError::Closed)
+        ));
+
+        let dropped_host =
+            ScopedObservationAccessHost::authorize(&registry, dropped_host_request).unwrap();
+        let orphaned_pass = dropped_host.begin_pass().unwrap();
+        drop(dropped_host);
+        assert!(matches!(
+            orphaned_pass.read_known_object(ScopedKnownObjectReadRequest {
+                relation_id: "root-object",
+                identity_inputs: &identity,
+                phase: AccessPhase::Initial,
+                parent_token: None,
+                depth: 1,
+                max_bytes: 128,
+            }),
+            Err(ScopedObservationAccessError::Closed)
+        ));
     }
 }

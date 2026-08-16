@@ -202,9 +202,11 @@ concrete:
 
 Mechanical compilation is not authority. Incomplete and candidate declarations
 may compile for conformance, but only a promoted support decision plus compatible
-public-contract selection may authorize native access. The current durable and
-scoped hosts do not yet carry that authorization into this plan, so this slice
-does not promote any built-in support release.
+public-contract selection may authorize native access. The provisional
+crate-private scoped composition root now carries that authorization into an
+exact host grant and common confined known-object read. The current durable and
+public scoped hosts do not, so this slice does not promote any built-in support
+release or freeze a portable attachment request.
 
 The authorization-to-plan seam is also explicit. A scoped typed authorization
 is issued only when an observation contract version was negotiated. It embeds
@@ -226,6 +228,16 @@ report shape, canonical v1 content encoding, and digest are frozen by the
 shared `rfc012a-access-report-v1.json` fixture, which is evaluated by
 independent Rust, Python, and TypeScript implementations. The exact IPC wrapper
 and retrieval API remain provisional.
+
+The provisional scoped composition root keeps the artifact probe inside the
+trusted Rust host, validates exact known-object grants only after strict
+support/contract/program selection, reserves before a confined source read,
+and owns one active bounded pass at a time. Attachment may precede root-object
+creation; each later pass receives a fresh declared ledger; close prevents new
+passes; and the pass report contains neither granted paths nor native content.
+An architecture ratchet prevents this internal seam from depending on the
+store, N-API, or a concrete adapter and prevents it from becoming a public host
+contract before RFC 012D freezes the complete request and probe semantics.
 
 ## 4. Logical subsystem dependency law
 

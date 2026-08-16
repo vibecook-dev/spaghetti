@@ -295,6 +295,10 @@ impl AuthorizedScopeAccessPlan {
         &self.support_release_id
     }
 
+    pub fn relation(&self, relation_id: &str) -> Option<&ScopeRelationDeclaration> {
+        self.inner.relation(relation_id)
+    }
+
     pub fn reserve(
         &self,
         request: ScopeAccessRequest<'_>,

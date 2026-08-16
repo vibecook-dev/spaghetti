@@ -50,6 +50,10 @@
       "description": "Every built-in adapter must declare a package/decoder/ADS/source/scope digest binding that can be checked against a verified support release.",
       "allowed": []
     },
+    "rfc012_scoped_host_boundary_violations": {
+      "description": "The provisional store-free scoped composition root cannot depend on persistence, N-API, concrete adapters, or become a public host contract before RFC 012D freezes it.",
+      "allowed": []
+    },
     "migrated_client_direct_engine_queries": {
       "description": "Consumers already migrated to SpaghettiClient may keep native engine lifecycle ownership but cannot resume direct N-API query calls.",
       "allowed": []

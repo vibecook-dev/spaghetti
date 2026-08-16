@@ -131,7 +131,7 @@ prerequisite for early vertical slices.
 | C2. Usage-v2 shadow projection           | 012C                | Not started | independent qualified-bucket oracle parity                     |
 | C3. Durable usage migration              | 012C                | Not started | transactional switch and rollback tests                        |
 | C4. Runtime semantic downstream suite    | 012C                | Not started | typed consumers plus durable/live merge without native parsing |
-| D1. Store-free observer kernel           | 012D                | Not started | attach/bootstrap/poll/close, no SQLite/global scan             |
+| D1. Store-free observer kernel           | 012D                | In progress | attach/bootstrap/poll/close, no SQLite/global scan             |
 | D2. Claude scope composition             | 012D                | Not started | root/current/future actor and sidecar conformance              |
 | D3. Control lane and epoch replacement   | 012D                | Not started | overflow/disappearance/duplicate/fairness matrix               |
 | D4. SDK and Chopsticks migration         | 012D                | Not started | feature-flagged shadow comparison and rollback                 |
@@ -324,15 +324,22 @@ Current landing status (2026-08-16):
   no native locators/values, a canonical SHA-256 digest, mutation verification,
   and a shared portable fixture verified independently by Rust, Python, and
   TypeScript;
+- added a crate-private database-free scoped composition root that owns the
+  Rust authorization and exact known-object grants, permits one bounded pass at
+  a time, reserves before an actually confined read, supports attach before
+  object creation, emits the frozen path/content-free report, and fails closed
+  after idempotent close; plus an architecture ratchet preventing store,
+  N-API, concrete-adapter, or premature public-host dependencies;
 - integrated contract and tooling checks into `pnpm validate`.
 
-A2 remains `In progress`: no catalog, durable, or scoped-observer host yet owns
-the new authorized plan lifecycle; the access-report IPC retrieval shape is not
-yet frozen; adapter registrations must move from the explicit legacy path to
-the strict promoted catalog after the first support release is promoted; and
-public N-API/IPC host boundaries must carry the Rust-issued support
-authorization into actual source access rather than merely exposing portable
-classification/selection conformance.
+A2 remains `In progress`: the internal scoped access composition now owns the
+authorized plan lifecycle and executes its first common confined primitive, but
+no catalog, durable, or public scoped-observer host does; the access-report IPC
+retrieval shape and trusted native-probe/grant request are not yet frozen;
+adapter registrations must move from the explicit legacy path to the strict
+promoted catalog after the first support release is promoted; and the remaining
+scope primitives and public N-API/IPC boundary still require executable
+conformance rather than portable classification alone.
 
 ### A3. Current-agent candidates
 
@@ -561,6 +568,26 @@ source/decoder registry used by the durable host. It must:
   and idempotent close;
 - expose RFC 012A source/family coverage from poll and barriers; and
 - instrument every access for no-global-scan conformance.
+
+Current landing status (2026-08-16):
+
+- the crate-private composition root performs strict support/contract/program
+  selection before validating exact grants and exposes no spoofable N-API
+  artifact-probe request;
+- one host-approved known object can be absent at attachment, created later,
+  and read through the common symlink-safe confined file primitive only after
+  a declaration-sized reservation;
+- one pass is active at a time, a later pass receives fresh bounds, close is
+  idempotent, and the frozen access report excludes paths, identity values, and
+  content; and
+- the architecture checker forbids store/query/N-API/concrete-adapter imports
+  and premature public export from this provisional composition root.
+
+D1 remains `In progress`: watcher-before-scan, append framing/cursors,
+store-free decode/reduction, events, poll/readiness, queue/control lanes,
+coverage, resync epochs, artifact mediation, cancellation waiting, the trusted
+native version-probe driver, and the complete public request are not yet
+implemented.
 
 ### D2. Claude scope composition
 
