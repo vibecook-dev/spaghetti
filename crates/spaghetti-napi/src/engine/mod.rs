@@ -8,6 +8,7 @@ mod artifact_projection;
 mod capability_query;
 mod commit;
 mod coordinator;
+mod coverage_query;
 mod detail_query;
 mod ingest_profile;
 mod local_permissions;
@@ -60,6 +61,11 @@ use commit::{CommitReceipt, ObservationCommit, ProjectionVersionCommit};
 pub use coordinator::{
     FactFamilyReplayRequest, ObservationCoordinator, ReconcileOutcome, ReconcileRequest,
     ReconcileRetryTarget,
+};
+pub use coverage_query::{
+    FactFamilyCoverageItem, FactFamilyCoveragePage, FactFamilyCoveragePageRequest,
+    FactFamilyCoverageSetSummary, DEFAULT_FACT_FAMILY_COVERAGE_PAGE_LIMIT,
+    FACT_FAMILY_COVERAGE_QUERY_CONTRACT_VERSION, MAX_FACT_FAMILY_COVERAGE_PAGE_LIMIT,
 };
 pub use detail_query::{
     CanonicalStats, MessageDetail, MessagePage, MessagePageRequest, NamedCount, SessionDetail,
@@ -889,6 +895,15 @@ impl SpaghettiEngineCore {
     ) -> Result<RuntimeUsageV2Page, EngineError> {
         let (_, queries) = self.clients()?;
         queries.runtime_usage_v2_cancellable(request, cancellation)
+    }
+
+    pub fn fact_family_coverage_cancellable(
+        &self,
+        request: FactFamilyCoveragePageRequest,
+        cancellation: QueryCancellationToken,
+    ) -> Result<FactFamilyCoveragePage, EngineError> {
+        let (_, queries) = self.clients()?;
+        queries.fact_family_coverage_cancellable(request, cancellation)
     }
 
     /// Return one keyset-paged snapshot of durable run state and current

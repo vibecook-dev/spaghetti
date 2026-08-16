@@ -5800,6 +5800,46 @@ mod tests {
         );
         assert_eq!(covered.unavailable_reason, None);
         assert!(covered.error_codes.is_empty());
+
+        let (project_id, session_id) = canonical_project_session_ids(&fixture.database);
+        let public = first
+            .fact_family_coverage_cancellable(
+                crate::engine::FactFamilyCoveragePageRequest {
+                    project_id: project_id.clone(),
+                    session_id: session_id.clone(),
+                    owner_id: USAGE_V2_PROJECTION_ID.to_string(),
+                    family: USAGE_V2_PROJECTION_ID.to_string(),
+                    family_version: USAGE_V2_PROJECTION_VERSION,
+                    cursor: None,
+                    limit: 1,
+                },
+                QueryCancellationToken::default(),
+            )
+            .unwrap();
+        assert_eq!(public.contract_version, 1);
+        assert_eq!(public.at_commit_seq, 2);
+        assert_eq!(public.status, "materialized");
+        assert_eq!(public.items.len(), 1);
+        assert_eq!(public.items[0].kind, "point");
+        assert_eq!(public.items[0].status.as_deref(), Some("complete_through"));
+        assert_eq!(public.items[0].monotonic_order, covered.monotonic_order);
+        assert!(public.next_cursor.is_none());
+        let public_set = public.coverage.unwrap();
+        assert_eq!(public_set.completeness, "complete");
+        assert_eq!(public_set.last_commit_seq, 2);
+        assert_eq!(public_set.adapter_id, "claude-code");
+        for opaque in [
+            public_set.source_instance_ref,
+            public_set.declaration_ref,
+            public_set.membership_revision_ref,
+            public_set.content_digest_ref,
+            public.items[0].stream_ref.clone().unwrap(),
+            public.items[0].object_ref.clone().unwrap(),
+        ] {
+            assert!(opaque.starts_with("v1:"));
+            assert!(!opaque.contains(PROJECT));
+            assert!(!opaque.contains(SESSION));
+        }
         first.shutdown().unwrap();
 
         let restarted = fixture.open_engine();
@@ -5844,7 +5884,9 @@ mod tests {
     fn quarantined_usage_v2_coverage_stays_unavailable_until_explicit_replay() {
         let fixture = ClaudeFixture::new();
         let transcript = fixture.transcript_path();
-        std::fs::write(&transcript, b"{not-json}\n").unwrap();
+        let mut initial_transcript = transcript_line("m1", "usage before coverage gap");
+        initial_transcript.extend_from_slice(b"{not-json}\n");
+        std::fs::write(&transcript, initial_transcript).unwrap();
         let engine = fixture.open_engine();
 
         let initial = fixture.reconcile(&engine);
@@ -5872,6 +5914,38 @@ mod tests {
             unavailable_coverage.error_codes,
             vec!["coverage_gap_requires_explicit_replay".to_string()]
         );
+        let (project_id, session_id) = canonical_project_session_ids(&fixture.database);
+        let coverage_request = |cursor| crate::engine::FactFamilyCoveragePageRequest {
+            project_id: project_id.clone(),
+            session_id: session_id.clone(),
+            owner_id: USAGE_V2_PROJECTION_ID.to_string(),
+            family: USAGE_V2_PROJECTION_ID.to_string(),
+            family_version: USAGE_V2_PROJECTION_VERSION,
+            cursor,
+            limit: 1,
+        };
+        let first_coverage_page = engine
+            .fact_family_coverage_cancellable(
+                coverage_request(None),
+                QueryCancellationToken::default(),
+            )
+            .unwrap();
+        assert_eq!(first_coverage_page.items.len(), 1);
+        assert_eq!(first_coverage_page.items[0].kind, "point");
+        let first_coverage_cursor = first_coverage_page.next_cursor.unwrap();
+        let second_coverage_page = engine
+            .fact_family_coverage_cancellable(
+                coverage_request(Some(first_coverage_cursor.clone())),
+                QueryCancellationToken::default(),
+            )
+            .unwrap();
+        assert_eq!(second_coverage_page.items.len(), 1);
+        assert_eq!(second_coverage_page.items[0].kind, "error");
+        assert_eq!(
+            second_coverage_page.items[0].error_code.as_deref(),
+            Some("coverage_gap_requires_explicit_replay")
+        );
+        assert!(second_coverage_page.next_cursor.is_none());
 
         let unchanged = fixture.reconcile(&engine);
         assert_eq!(unchanged.records_quarantined, 0);
@@ -5912,6 +5986,13 @@ mod tests {
             advanced_coverage.content_digest,
             unavailable_coverage.content_digest
         );
+        assert!(matches!(
+            engine.fact_family_coverage_cancellable(
+                coverage_request(Some(first_coverage_cursor)),
+                QueryCancellationToken::default(),
+            ),
+            Err(EngineError::InvalidQuery(detail)) if detail.contains("cursor expired")
+        ));
 
         // Repairing/replacing the native file through an ordinary reconcile
         // is not sufficient proof: the sticky gap remains unavailable even
@@ -6976,6 +7057,28 @@ mod tests {
             _ => panic!("unsupported coordinator test table"),
         };
         connection.query_row(sql, [], |row| row.get(0)).unwrap()
+    }
+
+    fn canonical_project_session_ids(database: &Path) -> (String, String) {
+        let connection =
+            Connection::open_with_flags(database, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+        let (project_key, session_key) = connection
+            .query_row(
+                "SELECT project_key, session_key FROM canonical_sessions LIMIT 1",
+                [],
+                |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?)),
+            )
+            .unwrap();
+        (
+            super::super::query_identity::encode_entity_id(
+                super::super::query_identity::PROJECT_ID_PREFIX,
+                &project_key,
+            ),
+            super::super::query_identity::encode_entity_id(
+                super::super::query_identity::SESSION_ID_PREFIX,
+                &session_key,
+            ),
+        )
     }
 
     #[derive(Debug, PartialEq, Eq)]

@@ -1476,6 +1476,92 @@ export interface SpaghettiEngineRuntimeUsageV2Page {
   nextCursor?: string;
 }
 
+/** Page one normalized RFC 012A fact-family coverage set. */
+export interface SpaghettiEngineFactFamilyCoverageOptions extends SpaghettiEngineHistoryPageOptions {
+  /** Opaque project identity returned by {@link SpaghettiEngine.listHistoryProjects}. */
+  projectId: string;
+  /** Opaque session identity returned by {@link SpaghettiEngine.listHistorySessions}. */
+  sessionId: string;
+  /** Durable projection or coverage owner identifier. */
+  ownerId: string;
+  /** Common fact-family identifier, for example `runtime.usage-v2`. */
+  family: string;
+  /** Positive fact-family contract version. */
+  familyVersion: number;
+}
+
+export type SpaghettiEngineFactFamilyCoverageCompleteness = 'complete' | 'partial' | 'unavailable';
+export type SpaghettiEngineFactFamilyCoverageItemKind = 'point' | 'absence' | 'error';
+export type SpaghettiEngineFactFamilyCoveragePositionKind =
+  | 'append_cursor'
+  | 'document_revision'
+  | 'snapshot_revision'
+  | 'database_watermark'
+  | 'key_range_token';
+export type SpaghettiEngineFactFamilyCoveragePointStatus =
+  | 'complete_through'
+  | 'exact_snapshot'
+  | 'partial'
+  | 'unavailable';
+export type SpaghettiEngineFactFamilyCoverageAbsenceKind = 'absent' | 'deleted';
+
+export interface SpaghettiEngineFactFamilyCoverageSetSummary {
+  coverageSetContractVersion: number;
+  coverageContractVersion: number;
+  adapterId: string;
+  /** Versioned opaque common reference; never a native source path. */
+  sourceInstanceRef: string;
+  supportReleaseId: string;
+  /** Versioned opaque common reference to the source/scope declaration. */
+  declarationRef: string;
+  /** Versioned opaque common reference to the frozen membership revision. */
+  membershipRevisionRef: string;
+  completeness: SpaghettiEngineFactFamilyCoverageCompleteness;
+  /** Versioned opaque digest of this complete normalized coverage set. */
+  contentDigestRef: string;
+  lastCommitSeq: number;
+  updatedAtUnixMs: number;
+}
+
+export interface SpaghettiEngineFactFamilyCoverageItem {
+  kind: SpaghettiEngineFactFamilyCoverageItemKind;
+  /** Versioned opaque common stream reference, when the evidence is stream-scoped. */
+  streamRef?: string;
+  /** Versioned opaque common object reference, when the evidence is object-scoped. */
+  objectRef?: string;
+  generation?: number;
+  positionKind?: SpaghettiEngineFactFamilyCoveragePositionKind;
+  /** Versioned opaque common position reference. */
+  positionRef?: string;
+  monotonicOrder?: number;
+  status?: SpaghettiEngineFactFamilyCoveragePointStatus;
+  unavailableReason?: string;
+  /** Versioned opaque common source-record reference. */
+  sourceRecordRef?: string;
+  /** Versioned opaque common semantic-revision reference. */
+  semanticRevisionRef?: string;
+  observedAtUnixMs?: number;
+  absenceKind?: SpaghettiEngineFactFamilyCoverageAbsenceKind;
+  errorCode?: string;
+}
+
+export interface SpaghettiEngineFactFamilyCoveragePage {
+  contractVersion: number;
+  /** Fixed durable watermark shared by metadata, items, and this page cursor. */
+  atCommitSeq: number;
+  status: 'materialized' | 'not_materialized';
+  projectId: string;
+  sessionId: string;
+  ownerId: string;
+  family: string;
+  familyVersion: number;
+  coverage?: SpaghettiEngineFactFamilyCoverageSetSummary;
+  /** Deterministically ordered union of point, absence, and error evidence. */
+  items: SpaghettiEngineFactFamilyCoverageItem[];
+  /** Scope-bound cursor that expires when the durable commit watermark changes. */
+  nextCursor?: string;
+}
+
 export interface SpaghettiEngineRuntimeSnapshotOptions extends SpaghettiEngineHistoryPageOptions {
   /** Optional project scope. Omit it to retain orphan run/presence evidence. */
   projectId?: string;
@@ -1838,6 +1924,10 @@ export interface SpaghettiEngine {
     options: SpaghettiEngineRuntimeUsageV2Options,
     signal?: AbortSignal,
   ): Promise<SpaghettiEngineRuntimeUsageV2Page>;
+  getFactFamilyCoverage(
+    options: SpaghettiEngineFactFamilyCoverageOptions,
+    signal?: AbortSignal,
+  ): Promise<SpaghettiEngineFactFamilyCoveragePage>;
   getRuntimeSnapshot(
     options?: SpaghettiEngineRuntimeSnapshotOptions,
     signal?: AbortSignal,

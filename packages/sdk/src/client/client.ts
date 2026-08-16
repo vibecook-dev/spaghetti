@@ -234,6 +234,13 @@ class DefaultSpaghettiClient implements SpaghettiClient {
     return this.query('getRuntimeUsageV2', request, options);
   }
 
+  getFactFamilyCoverage(
+    request: SpaghettiClientRequestMap['getFactFamilyCoverage'],
+    options?: SpaghettiQueryOptions,
+  ): Promise<SpaghettiClientResponseMap['getFactFamilyCoverage']> {
+    return this.query('getFactFamilyCoverage', request, options);
+  }
+
   getRuntimeSnapshot(
     request?: Exclude<SpaghettiClientRequestMap['getRuntimeSnapshot'], undefined>,
     options?: SpaghettiQueryOptions,

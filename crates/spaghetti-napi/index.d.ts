@@ -104,6 +104,12 @@ export declare class SpaghettiEngine {
    */
   getRuntimeUsageV2(options: EngineRuntimeUsageV2Options, signal?: AbortSignal | undefined | null): Promise<EngineRuntimeUsageV2Page>
   /**
+   * Page normalized RFC 012A coverage for one fact family using opaque
+   * common identities. The result shares one durable commit watermark and
+   * never exposes native paths or object keys.
+   */
+  getFactFamilyCoverage(options: EngineFactFamilyCoverageOptions, signal?: AbortSignal | undefined | null): Promise<EngineFactFamilyCoveragePage>
+  /**
    * Return durable run-state and current registry-presence evidence. This
    * intentionally does not probe PIDs or synthesize freshness assessments.
    */
@@ -385,6 +391,66 @@ export interface EngineDurableChange {
   entityKeyBase64Url: string
   operation: string
   payloadBase64: string
+}
+
+export interface EngineFactFamilyCoverageItem {
+  kind: string
+  streamRef?: string
+  objectRef?: string
+  generation?: number
+  positionKind?: string
+  positionRef?: string
+  monotonicOrder?: number
+  status?: string
+  unavailableReason?: string
+  sourceRecordRef?: string
+  semanticRevisionRef?: string
+  observedAtUnixMs?: number
+  absenceKind?: string
+  errorCode?: string
+}
+
+export interface EngineFactFamilyCoverageOptions {
+  /** Opaque project identity returned by `listHistoryProjects`. */
+  projectId: string
+  /** Opaque session identity returned by `listHistorySessions`. */
+  sessionId: string
+  /** Durable projection/coverage owner identifier. */
+  ownerId: string
+  /** Common fact-family identifier, for example `runtime.usage-v2`. */
+  family: string
+  familyVersion: number
+  cursor?: string
+  /** Page size. Defaults to 50 and is capped by the Rust query pack. */
+  limit?: number
+}
+
+export interface EngineFactFamilyCoveragePage {
+  contractVersion: number
+  atCommitSeq: number
+  status: string
+  projectId: string
+  sessionId: string
+  ownerId: string
+  family: string
+  familyVersion: number
+  coverage?: EngineFactFamilyCoverageSetSummary
+  items: Array<EngineFactFamilyCoverageItem>
+  nextCursor?: string
+}
+
+export interface EngineFactFamilyCoverageSetSummary {
+  coverageSetContractVersion: number
+  coverageContractVersion: number
+  adapterId: string
+  sourceInstanceRef: string
+  supportReleaseId: string
+  declarationRef: string
+  membershipRevisionRef: string
+  completeness: string
+  contentDigestRef: string
+  lastCommitSeq: number
+  updatedAtUnixMs: number
 }
 
 export interface EngineHealth {

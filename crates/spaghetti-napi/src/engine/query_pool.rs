@@ -23,6 +23,10 @@ use super::capability_query::{
     MemoryDocumentPageRequest, PlanPage, PlanPageRequest, TaskCollectionPage,
     TaskCollectionPageRequest, TaskPage, TaskPageRequest, ToolResultPage, ToolResultPageRequest,
 };
+use super::coverage_query::{
+    read_fact_family_coverage_page, validate_fact_family_coverage_page, FactFamilyCoveragePage,
+    FactFamilyCoveragePageRequest,
+};
 use super::detail_query::{
     read_canonical_stats, read_message_page, read_session_details, read_source_page,
     validate_message_page, validate_session_details, validate_source_page, CanonicalStats,
@@ -444,6 +448,12 @@ enum QueryCommand {
         cancellation: QueryCancellationToken,
         request: RuntimeUsageV2PageRequest,
         response: Sender<Result<RuntimeUsageV2Page, EngineError>>,
+    },
+    FactFamilyCoverage {
+        cancellation_epoch: u64,
+        cancellation: QueryCancellationToken,
+        request: FactFamilyCoveragePageRequest,
+        response: Sender<Result<FactFamilyCoveragePage, EngineError>>,
     },
     RuntimeSnapshot {
         cancellation_epoch: u64,
@@ -1126,6 +1136,23 @@ impl QueryClient {
         self.send_cancellable(
             cancellation,
             |cancellation_epoch, cancellation, response| QueryCommand::RuntimeUsageV2 {
+                cancellation_epoch,
+                cancellation,
+                request,
+                response,
+            },
+        )
+    }
+
+    pub fn fact_family_coverage_cancellable(
+        &self,
+        request: FactFamilyCoveragePageRequest,
+        cancellation: QueryCancellationToken,
+    ) -> Result<FactFamilyCoveragePage, EngineError> {
+        validate_fact_family_coverage_page(&request)?;
+        self.send_cancellable(
+            cancellation,
+            |cancellation_epoch, cancellation, response| QueryCommand::FactFamilyCoverage {
                 cancellation_epoch,
                 cancellation,
                 request,
@@ -1977,6 +2004,22 @@ fn query_thread(
                     cancellation_epoch,
                     &cancellation,
                     || read_runtime_usage_v2_page(&connection, &request),
+                );
+                let _ = response.send(result);
+            }
+            QueryCommand::FactFamilyCoverage {
+                cancellation_epoch,
+                cancellation,
+                request,
+                response,
+            } => {
+                let _in_flight = InFlightGuard::enter(&control.in_flight);
+                let result = run_cancellable_query(
+                    &connection,
+                    &control,
+                    cancellation_epoch,
+                    &cancellation,
+                    || read_fact_family_coverage_page(&connection, &request),
                 );
                 let _ = response.send(result);
             }

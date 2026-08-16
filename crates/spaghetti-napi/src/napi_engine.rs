@@ -17,34 +17,36 @@ use crate::engine::{
     ArtifactDetail, ArtifactPage, ArtifactPageRequest, CanonicalStats, ChangeCursor, ChangeReplay,
     ChangeReplayRequest, CheckpointPerformanceSnapshot, CommitWaitResult, DelegationPage,
     DelegationPageRequest, DelegationSummary, DurableChange, EngineError, EngineHealthSnapshot,
-    EngineOptions, EngineOverview, EngineStatusSnapshot, HistoryProjectIndexSummary,
-    HistoryProjectPage, HistoryProjectPageRequest, HistoryProjectSummary,
-    HistorySessionIndexSummary, HistorySessionPage, HistorySessionPageRequest,
-    HistorySessionSummary, MemoryDocument, MemoryDocumentPage, MemoryDocumentPageRequest,
-    MessageDetail, MessagePage, MessagePageRequest, NamedCount, NamedLatencySnapshot,
-    ObservationStatusSnapshot, ObservationSupervisorOptions, OwnerMetadata, PlanDetail, PlanPage,
-    PlanPageRequest, QueryCancellationToken, QueryPerformanceSnapshot, ReconcileOutcome,
-    ReconcileRequest, RunStateLookup, RunStateRequest, RuntimePresenceSnapshot, RuntimeRunEvidence,
-    RuntimeRunSnapshot, RuntimeSnapshot, RuntimeSnapshotRequest, RuntimeUsageV2ActorContext,
-    RuntimeUsageV2Affiliation, RuntimeUsageV2Aggregate, RuntimeUsageV2BucketAggregate,
-    RuntimeUsageV2ExternalEntityRef, RuntimeUsageV2Page, RuntimeUsageV2PageRequest,
-    RuntimeUsageV2ProjectionReadiness, RuntimeUsageV2Response, RuntimeUsageV2SemanticRevisionRef,
-    RuntimeUsageV2TextValue, RuntimeUsageV2TokenValue, RuntimeUsageV2ValueProvenance, SearchHit,
-    SearchPage, SearchPageRequest, SessionDetail, SessionDetails, SessionDetailsRequest,
-    SessionIndexDetail, SourceCapabilitySummary, SourceDimensionPerformanceSnapshot, SourcePage,
-    SourcePageRequest, SourcePerformanceSnapshot, SourcePipelineSnapshot, SourceSummary,
-    SpaghettiEngineCore, StoragePerformanceSnapshot, TaskCollectionPage, TaskCollectionPageRequest,
-    TaskCollectionSummary, TaskDetail, TaskPage, TaskPageRequest, TeamConfigSummary, TeamDetails,
-    TeamDetailsRequest, TeamInboxMessage, TeamInboxMessagePage, TeamInboxMessagePageRequest,
-    TeamInboxPage, TeamInboxPageRequest, TeamInboxSummary, TeamMember, TeamPage, TeamPageRequest,
-    TeamSummary, TimelineFacets, TimelineMessage, TimelinePage, TimelinePageRequest,
-    ToolResultDetail, ToolResultPage, ToolResultPageRequest, UntimedUsageSummary, UsageActivityDay,
-    UsageActivityReport, UsageActivityRequest, UsageAggregate, UsageCoverageSummary,
-    UsageScopeRequest, UsageTokenValues, UsageTotalsReport, WorkflowDetails,
-    WorkflowDetailsRequest, WorkflowMember, WorkflowMemberPage, WorkflowMemberPageRequest,
-    WorkflowPage, WorkflowPageRequest, WorkflowSummary, WriterPerformanceSnapshot,
-    CHANGE_REPLAY_CONTRACT_VERSION, DEFAULT_CAPABILITY_PAGE_LIMIT, DEFAULT_CHANGE_REPLAY_LIMIT,
-    DEFAULT_COMMIT_WAIT_TIMEOUT_MS, DEFAULT_DETAIL_PAGE_LIMIT, DEFAULT_HISTORY_PAGE_LIMIT,
+    EngineOptions, EngineOverview, EngineStatusSnapshot, FactFamilyCoverageItem,
+    FactFamilyCoveragePage, FactFamilyCoveragePageRequest, FactFamilyCoverageSetSummary,
+    HistoryProjectIndexSummary, HistoryProjectPage, HistoryProjectPageRequest,
+    HistoryProjectSummary, HistorySessionIndexSummary, HistorySessionPage,
+    HistorySessionPageRequest, HistorySessionSummary, MemoryDocument, MemoryDocumentPage,
+    MemoryDocumentPageRequest, MessageDetail, MessagePage, MessagePageRequest, NamedCount,
+    NamedLatencySnapshot, ObservationStatusSnapshot, ObservationSupervisorOptions, OwnerMetadata,
+    PlanDetail, PlanPage, PlanPageRequest, QueryCancellationToken, QueryPerformanceSnapshot,
+    ReconcileOutcome, ReconcileRequest, RunStateLookup, RunStateRequest, RuntimePresenceSnapshot,
+    RuntimeRunEvidence, RuntimeRunSnapshot, RuntimeSnapshot, RuntimeSnapshotRequest,
+    RuntimeUsageV2ActorContext, RuntimeUsageV2Affiliation, RuntimeUsageV2Aggregate,
+    RuntimeUsageV2BucketAggregate, RuntimeUsageV2ExternalEntityRef, RuntimeUsageV2Page,
+    RuntimeUsageV2PageRequest, RuntimeUsageV2ProjectionReadiness, RuntimeUsageV2Response,
+    RuntimeUsageV2SemanticRevisionRef, RuntimeUsageV2TextValue, RuntimeUsageV2TokenValue,
+    RuntimeUsageV2ValueProvenance, SearchHit, SearchPage, SearchPageRequest, SessionDetail,
+    SessionDetails, SessionDetailsRequest, SessionIndexDetail, SourceCapabilitySummary,
+    SourceDimensionPerformanceSnapshot, SourcePage, SourcePageRequest, SourcePerformanceSnapshot,
+    SourcePipelineSnapshot, SourceSummary, SpaghettiEngineCore, StoragePerformanceSnapshot,
+    TaskCollectionPage, TaskCollectionPageRequest, TaskCollectionSummary, TaskDetail, TaskPage,
+    TaskPageRequest, TeamConfigSummary, TeamDetails, TeamDetailsRequest, TeamInboxMessage,
+    TeamInboxMessagePage, TeamInboxMessagePageRequest, TeamInboxPage, TeamInboxPageRequest,
+    TeamInboxSummary, TeamMember, TeamPage, TeamPageRequest, TeamSummary, TimelineFacets,
+    TimelineMessage, TimelinePage, TimelinePageRequest, ToolResultDetail, ToolResultPage,
+    ToolResultPageRequest, UntimedUsageSummary, UsageActivityDay, UsageActivityReport,
+    UsageActivityRequest, UsageAggregate, UsageCoverageSummary, UsageScopeRequest,
+    UsageTokenValues, UsageTotalsReport, WorkflowDetails, WorkflowDetailsRequest, WorkflowMember,
+    WorkflowMemberPage, WorkflowMemberPageRequest, WorkflowPage, WorkflowPageRequest,
+    WorkflowSummary, WriterPerformanceSnapshot, CHANGE_REPLAY_CONTRACT_VERSION,
+    DEFAULT_CAPABILITY_PAGE_LIMIT, DEFAULT_CHANGE_REPLAY_LIMIT, DEFAULT_COMMIT_WAIT_TIMEOUT_MS,
+    DEFAULT_DETAIL_PAGE_LIMIT, DEFAULT_FACT_FAMILY_COVERAGE_PAGE_LIMIT, DEFAULT_HISTORY_PAGE_LIMIT,
     DEFAULT_ORCHESTRATION_PAGE_LIMIT, DEFAULT_RUNTIME_PAGE_LIMIT,
     DEFAULT_RUNTIME_USAGE_V2_PAGE_LIMIT, DEFAULT_SEARCH_PAGE_LIMIT, DEFAULT_TEAM_PAGE_LIMIT,
     DEFAULT_TIMELINE_PAGE_LIMIT, MAX_CHANGE_REPLAY_PAYLOAD_BYTES,
@@ -2673,6 +2675,131 @@ pub struct EngineRuntimeUsageV2Options {
 
 #[napi(object)]
 #[derive(Debug, Clone)]
+pub struct EngineFactFamilyCoverageOptions {
+    /// Opaque project identity returned by `listHistoryProjects`.
+    pub project_id: String,
+    /// Opaque session identity returned by `listHistorySessions`.
+    pub session_id: String,
+    /// Durable projection/coverage owner identifier.
+    pub owner_id: String,
+    /// Common fact-family identifier, for example `runtime.usage-v2`.
+    pub family: String,
+    pub family_version: u32,
+    pub cursor: Option<String>,
+    /// Page size. Defaults to 50 and is capped by the Rust query pack.
+    pub limit: Option<u32>,
+}
+
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct EngineFactFamilyCoverageSetSummary {
+    pub coverage_set_contract_version: u32,
+    pub coverage_contract_version: u32,
+    pub adapter_id: String,
+    pub source_instance_ref: String,
+    pub support_release_id: String,
+    pub declaration_ref: String,
+    pub membership_revision_ref: String,
+    pub completeness: String,
+    pub content_digest_ref: String,
+    pub last_commit_seq: f64,
+    pub updated_at_unix_ms: f64,
+}
+
+impl From<FactFamilyCoverageSetSummary> for EngineFactFamilyCoverageSetSummary {
+    fn from(value: FactFamilyCoverageSetSummary) -> Self {
+        Self {
+            coverage_set_contract_version: value.coverage_set_contract_version,
+            coverage_contract_version: value.coverage_contract_version,
+            adapter_id: value.adapter_id,
+            source_instance_ref: value.source_instance_ref,
+            support_release_id: value.support_release_id,
+            declaration_ref: value.declaration_ref,
+            membership_revision_ref: value.membership_revision_ref,
+            completeness: value.completeness,
+            content_digest_ref: value.content_digest_ref,
+            last_commit_seq: value.last_commit_seq as f64,
+            updated_at_unix_ms: value.updated_at_unix_ms as f64,
+        }
+    }
+}
+
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct EngineFactFamilyCoverageItem {
+    pub kind: String,
+    pub stream_ref: Option<String>,
+    pub object_ref: Option<String>,
+    pub generation: Option<f64>,
+    pub position_kind: Option<String>,
+    pub position_ref: Option<String>,
+    pub monotonic_order: Option<f64>,
+    pub status: Option<String>,
+    pub unavailable_reason: Option<String>,
+    pub source_record_ref: Option<String>,
+    pub semantic_revision_ref: Option<String>,
+    pub observed_at_unix_ms: Option<f64>,
+    pub absence_kind: Option<String>,
+    pub error_code: Option<String>,
+}
+
+impl From<FactFamilyCoverageItem> for EngineFactFamilyCoverageItem {
+    fn from(value: FactFamilyCoverageItem) -> Self {
+        Self {
+            kind: value.kind,
+            stream_ref: value.stream_ref,
+            object_ref: value.object_ref,
+            generation: value.generation.map(|value| value as f64),
+            position_kind: value.position_kind,
+            position_ref: value.position_ref,
+            monotonic_order: value.monotonic_order.map(|value| value as f64),
+            status: value.status,
+            unavailable_reason: value.unavailable_reason,
+            source_record_ref: value.source_record_ref,
+            semantic_revision_ref: value.semantic_revision_ref,
+            observed_at_unix_ms: value.observed_at_unix_ms.map(|value| value as f64),
+            absence_kind: value.absence_kind,
+            error_code: value.error_code,
+        }
+    }
+}
+
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct EngineFactFamilyCoveragePage {
+    pub contract_version: u32,
+    pub at_commit_seq: f64,
+    pub status: String,
+    pub project_id: String,
+    pub session_id: String,
+    pub owner_id: String,
+    pub family: String,
+    pub family_version: u32,
+    pub coverage: Option<EngineFactFamilyCoverageSetSummary>,
+    pub items: Vec<EngineFactFamilyCoverageItem>,
+    pub next_cursor: Option<String>,
+}
+
+impl From<FactFamilyCoveragePage> for EngineFactFamilyCoveragePage {
+    fn from(value: FactFamilyCoveragePage) -> Self {
+        Self {
+            contract_version: value.contract_version,
+            at_commit_seq: value.at_commit_seq as f64,
+            status: value.status,
+            project_id: value.project_id,
+            session_id: value.session_id,
+            owner_id: value.owner_id,
+            family: value.family,
+            family_version: value.family_version,
+            coverage: value.coverage.map(Into::into),
+            items: value.items.into_iter().map(Into::into).collect(),
+            next_cursor: value.next_cursor,
+        }
+    }
+}
+
+#[napi(object)]
+#[derive(Debug, Clone)]
 pub struct EngineRuntimeUsageV2ExternalEntityRef {
     pub external_entity_reference_version: u32,
     pub entity_key: String,
@@ -4187,6 +4314,30 @@ impl SpaghettiEngine {
         )
     }
 
+    /// Page normalized RFC 012A coverage for one fact family using opaque
+    /// common identities. The result shares one durable commit watermark and
+    /// never exposes native paths or object keys.
+    #[napi(ts_return_type = "Promise<EngineFactFamilyCoveragePage>")]
+    pub fn get_fact_family_coverage(
+        &self,
+        options: EngineFactFamilyCoverageOptions,
+        signal: Option<AbortSignal>,
+    ) -> AsyncTask<FactFamilyCoverageTask> {
+        let cancellation = QueryCancellationToken::default();
+        if let Some(signal) = signal.as_ref() {
+            let abort_cancellation = cancellation.clone();
+            signal.on_abort(move || abort_cancellation.cancel());
+        }
+        AsyncTask::with_optional_signal(
+            FactFamilyCoverageTask {
+                engine: Arc::clone(&self.inner),
+                options,
+                cancellation,
+            },
+            signal,
+        )
+    }
+
     /// Return durable run-state and current registry-presence evidence. This
     /// intentionally does not probe PIDs or synthesize freshness assessments.
     #[napi(ts_return_type = "Promise<EngineRuntimeSnapshot>")]
@@ -4685,6 +4836,12 @@ pub struct UsageActivityTask {
 pub struct RuntimeUsageV2Task {
     engine: Arc<SpaghettiEngineCore>,
     options: EngineRuntimeUsageV2Options,
+    cancellation: QueryCancellationToken,
+}
+
+pub struct FactFamilyCoverageTask {
+    engine: Arc<SpaghettiEngineCore>,
+    options: EngineFactFamilyCoverageOptions,
     cancellation: QueryCancellationToken,
 }
 
@@ -5395,6 +5552,36 @@ impl Task for RuntimeUsageV2Task {
                         .options
                         .limit
                         .unwrap_or(DEFAULT_RUNTIME_USAGE_V2_PAGE_LIMIT),
+                },
+                self.cancellation.clone(),
+            )
+            .map(Into::into)
+            .map_err(napi_error)
+    }
+
+    fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
+        Ok(output)
+    }
+}
+
+impl Task for FactFamilyCoverageTask {
+    type Output = EngineFactFamilyCoveragePage;
+    type JsValue = EngineFactFamilyCoveragePage;
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        self.engine
+            .fact_family_coverage_cancellable(
+                FactFamilyCoveragePageRequest {
+                    project_id: self.options.project_id.clone(),
+                    session_id: self.options.session_id.clone(),
+                    owner_id: self.options.owner_id.clone(),
+                    family: self.options.family.clone(),
+                    family_version: self.options.family_version,
+                    cursor: self.options.cursor.clone(),
+                    limit: self
+                        .options
+                        .limit
+                        .unwrap_or(DEFAULT_FACT_FAMILY_COVERAGE_PAGE_LIMIT),
                 },
                 self.cancellation.clone(),
             )

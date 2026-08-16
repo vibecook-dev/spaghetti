@@ -655,9 +655,16 @@ Current landing status (2026-08-16):
   the baseline and resumes after restart from replacement-generation cursors;
   only a complete post-drain barrier replaces coverage and becomes `Ready`,
   while a new quarantine returns to replay-required `Unavailable`; and
+- exposed normalized fact-family coverage through the generic bounded
+  `getFactFamilyCoverage` contract across Rust, N-API, and the
+  transport-neutral SDK. The query resolves an opaque project/session scope to
+  its source instance, pages points, explicit absences/deletions, and errors in
+  deterministic order at one commit watermark, expires stale or cross-scope
+  cursors, distinguishes `not_materialized`, and returns only versioned opaque
+  common references rather than native paths or object keys; and
 - kept the candidate capability `unsupported`: private native corpus-scale
   parity, fixture-proven native team-to-actor correlation, exact-repeat
-  public-event suppression, bounded public coverage/replay surfaces, migration
+  public-event suppression, public replay authorization/exposure, migration
   switch, remaining portable fact-family serialization, and rollback window
   are not yet complete.
 
@@ -706,11 +713,21 @@ a test four-record pass bound completes after engine restart through the same
 path whose production bound is 4,096. This is an engine/coordinator surface;
 public host/N-API/SDK request authorization remains open.
 
-C3 remains `In progress`: bounded public coverage query and replay exposure,
-private corpus-scale comparison, transactional default query selection,
-remaining crash-boundary tests, compatibility-window telemetry, and rollback
-are still required. The shadow query, pack readiness, internal durable
-coverage, and coordinator replay are inspection/migration surfaces, not a
+The bounded public coverage inspection surface is now implemented as
+`getFactFamilyCoverage` contract v1 across Rust, N-API, and the
+transport-neutral client. It returns normalized set metadata plus a
+deterministically ordered point/absence/error union under one commit watermark;
+its full-scope cursor expires after a newer commit. The public DTO contains
+only opaque common references and cannot disclose native paths or object keys.
+Focused Rust tests cover complete and unavailable sets, pagination, stale
+cursor rejection, restart stability, and reference privacy; the persistent SDK
+test exercises the native boundary.
+
+C3 remains `In progress`: public replay authorization and host/N-API/SDK
+exposure, private corpus-scale comparison, transactional default query
+selection, remaining crash-boundary tests, compatibility-window telemetry, and
+rollback are still required. The shadow query, pack readiness, durable coverage
+query, and coordinator replay are inspection/migration surfaces, not a
 support-promotion claim.
 
 ### C4. Downstream semantic suite

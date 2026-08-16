@@ -506,6 +506,13 @@ describe('NapiTransport dispatch', () => {
     await client.getUsage({ projectId: 'project' });
     await client.getUsageActivity({ projectId: 'project', from: '2026-08-01', to: '2026-08-12' });
     await client.getRuntimeUsageV2({ projectId: 'project', sessionId: 'session' });
+    await client.getFactFamilyCoverage({
+      projectId: 'project',
+      sessionId: 'session',
+      ownerId: 'runtime.usage-v2',
+      family: 'runtime.usage-v2',
+      familyVersion: 1,
+    });
     await client.getRuntimeSnapshot();
     await client.getRunState({ runId: 'run' });
     await client.listTeams();
@@ -541,6 +548,7 @@ describe('NapiTransport dispatch', () => {
         'getUsage',
         'getUsageActivity',
         'getRuntimeUsageV2',
+        'getFactFamilyCoverage',
         'getRuntimeSnapshot',
         'getRunState',
         'listTeams',
@@ -630,6 +638,16 @@ describe('embedded SpaghettiClient', { skip: !native }, () => {
     );
     await assert.rejects(
       client.getRuntimeUsageV2({ projectId: 'not-a-project-id', sessionId: 'not-a-session-id' }),
+      (error) => errorCode(error, 'invalid_request'),
+    );
+    await assert.rejects(
+      client.getFactFamilyCoverage({
+        projectId: 'not-a-project-id',
+        sessionId: 'not-a-session-id',
+        ownerId: 'runtime.usage-v2',
+        family: 'runtime.usage-v2',
+        familyVersion: 1,
+      }),
       (error) => errorCode(error, 'invalid_request'),
     );
     await assert.rejects(client.search({ text: 'x'.repeat(70_000) }), (error) => errorCode(error, 'invalid_request'));

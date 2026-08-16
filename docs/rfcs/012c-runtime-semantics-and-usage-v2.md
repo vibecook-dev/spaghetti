@@ -841,10 +841,22 @@ adapter, canonical source instance, support release, and verified source
 declaration. A deterministic content digest suppresses equal writes; restart,
 cursor advancement, and stable quarantine-gap behavior have focused tests.
 
+The generic `getFactFamilyCoverage` query contract v1 now exposes those sets
+through Rust, N-API, and the transport-neutral SDK. A caller supplies an opaque
+project/session scope plus owner, family, and family version. The engine
+resolves the durable source instance internally and returns a bounded,
+deterministically ordered union of points, explicit absences/deletions, and
+errors. Set metadata and every page share one commit watermark; continuations
+are bound to the full query scope and expire after a newer commit. Native paths,
+object keys, and adapter payloads are never returned: source, stream, object,
+position, record, revision, membership, declaration, and content identities
+are versioned opaque common references. `not_materialized` is distinct from an
+empty complete set.
+
 The engine-internal explicit replay/restart path is implemented for usage-v2,
 including bounded append continuation and old-generation retraction without
-duplicate response contributions. A bounded public coverage query and public
-host/SDK replay request, private native corpus-scale qualification/coverage
+duplicate response contributions. A public host/SDK replay request with an
+authorization contract, private native corpus-scale qualification/coverage
 parity, native team-to-actor conformance, the default switch in step 6, step
 7's compatibility/rollback window, and remaining crash boundaries are open.
 Until those gates pass, the candidate capability is unsupported and

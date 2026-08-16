@@ -246,6 +246,8 @@ async function executeEngineRequest(
       return engine.getUsageActivity(request.payload, signal);
     case 'getRuntimeUsageV2':
       return engine.getRuntimeUsageV2(request.payload, signal);
+    case 'getFactFamilyCoverage':
+      return engine.getFactFamilyCoverage(request.payload, signal);
     case 'getRuntimeSnapshot':
       return engine.getRuntimeSnapshot(request.payload, signal);
     case 'getRunState':

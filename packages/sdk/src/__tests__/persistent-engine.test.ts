@@ -251,6 +251,25 @@ describe('persistent SpaghettiEngine', { skip: !native }, () => {
     assert.equal(usage.aggregate.responseCount, 1);
     assert.equal(usage.aggregate.inputTokens.knownTokens, 12);
     assert.equal(usage.items[0]?.nativeMessageId, 'response-1');
+
+    const coverage = await engine.getFactFamilyCoverage({
+      projectId,
+      sessionId,
+      ownerId: 'runtime.usage-v2',
+      family: 'runtime.usage-v2',
+      familyVersion: 1,
+      limit: 10,
+    });
+    assert.equal(coverage.status, 'materialized');
+    assert.equal(coverage.coverage?.completeness, 'complete');
+    assert.equal(coverage.coverage?.lastCommitSeq, coverage.atCommitSeq);
+    assert.match(coverage.coverage?.sourceInstanceRef ?? '', /^v1:/);
+    assert.match(coverage.coverage?.contentDigestRef ?? '', /^v1:/);
+    assert.equal(coverage.items.length, 1);
+    assert.equal(coverage.items[0]?.kind, 'point');
+    assert.match(coverage.items[0]?.streamRef ?? '', /^v1:/);
+    assert.match(coverage.items[0]?.objectRef ?? '', /^v1:/);
+    assert.equal(JSON.stringify(coverage).includes(root), false);
   });
 
   test('starts, refreshes, and stops native Claude observation', async () => {
