@@ -74,6 +74,23 @@ class SanitizerTests(unittest.TestCase):
         self.assertEqual(data["usage"], {"input_tokens": 17, "output_tokens": 5})
         self.assertEqual(scan_prohibited(sanitized_first), [])
 
+    def test_numeric_identifiers_and_timestamps_use_reserved_placeholders(self) -> None:
+        sanitized = sanitize_document(
+            json.dumps(
+                {
+                    "pid": 424242,
+                    "accountId": 99123,
+                    "createdAt": 1723456789000,
+                }
+            ),
+            "json",
+        )
+        data = sanitized["data"]
+        self.assertGreaterEqual(data["pid"], 4_294_000_001)
+        self.assertGreaterEqual(data["accountId"], 4_294_000_001)
+        self.assertGreaterEqual(data["createdAt"], 8_000_000_000_001_000)
+        self.assertEqual(scan_prohibited(sanitized), [])
+
     def test_prohibited_scanner_rejects_native_values(self) -> None:
         findings = scan_prohibited(
             {
@@ -88,6 +105,21 @@ class SanitizerTests(unittest.TestCase):
         self.assertIn("home path", reasons)
         self.assertIn("free-text field", reasons)
         self.assertIn("secret field", reasons)
+
+    def test_prohibited_scanner_rejects_numeric_native_values(self) -> None:
+        findings = scan_prohibited(
+            {
+                "pid": 424242,
+                "accountId": 99123,
+                "createdAt": 1723456789000,
+                "authorization": 123456789,
+            }
+        )
+        reasons = "\n".join(str(finding) for finding in findings)
+        self.assertIn("$.pid: numeric identifier field", reasons)
+        self.assertIn("$.accountId: numeric identifier field", reasons)
+        self.assertIn("$.createdAt: numeric timestamp field", reasons)
+        self.assertIn("$.authorization: secret field", reasons)
 
 
 class CompatibilityTests(unittest.TestCase):

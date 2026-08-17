@@ -3,12 +3,12 @@
     "fixture_kind": "synthetic-native-shape",
     "format": "json",
     "sanitization": "synthetic",
-    "sanitizer_version": 1
+    "sanitizer_version": 2
   },
   "data": {
     "name": "[fixture-text-001]",
     "description": "[fixture-text-004]",
-    "createdAt": 1700000000000,
+    "createdAt": 8000000000001000,
     "leadAgentId": "fixture-id-001",
     "leadSessionId": "fixture-id-003",
     "members": [
@@ -16,7 +16,7 @@
         "agentId": "fixture-id-001",
         "name": "[fixture-text-002]",
         "agentType": "[fixture-text-005]",
-        "joinedAt": 1700000001000,
+        "joinedAt": 8000000000002000,
         "tmuxPaneId": "fixture-id-004",
         "cwd": "fixture://path/001",
         "subscriptions": [],
@@ -27,7 +27,7 @@
         "name": "[fixture-text-003]",
         "agentType": "[fixture-text-007]",
         "model": "claude-fixture",
-        "joinedAt": 1700000002000,
+        "joinedAt": 8000000000003000,
         "tmuxPaneId": "fixture-id-005",
         "cwd": "fixture://path/001",
         "subscriptions": ["[fixture-text-008]"],

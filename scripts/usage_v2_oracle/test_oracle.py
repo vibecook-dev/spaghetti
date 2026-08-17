@@ -30,7 +30,7 @@ class UsageV2OracleTest(unittest.TestCase):
         self.assertEqual(actual, expected)
         self.assertEqual(
             actual["fixtureSha256"],
-            "sha256:1fd95da4905faa0302f0563224e018f367996e1eef701fd587f90f2177878893",
+            "sha256:3038ee09f9e7977516e2d83da2d4a47f6523d3082957446096d2af3b6dcc490f",
         )
         self.assertEqual(
             actual["stateSha256"],

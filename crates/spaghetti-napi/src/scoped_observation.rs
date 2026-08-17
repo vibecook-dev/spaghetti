@@ -44,6 +44,9 @@ use crate::source::{
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScopedKnownObjectGrant {
     pub relation_id: String,
+    /// Exactly one known-object grant is the attachment's semantic root. Barrier
+    /// root presence is derived from that object's admitted state.
+    pub scope_root: bool,
     pub access_root: String,
     pub locator_id: String,
     pub root: PathBuf,
@@ -334,7 +337,7 @@ pub struct ScopedAppendObservation {
     pub phase: ScopedAppendDeliveryPhase,
     pub reset_before_items: Option<ScopedAppendReset>,
     pub presence_change: Option<ScopedAppendPresenceChange>,
-    pub root_present: bool,
+    pub object_present: bool,
     pub became_missing: bool,
     pub read: AppendRead,
 }
@@ -4987,6 +4990,7 @@ pub struct ScopedObservationAccessHost {
     root_identity: ScopedObservationRootIdentity,
     program_id: String,
     known_objects: Arc<BTreeMap<String, ScopedKnownObjectGrant>>,
+    root_relation_id: Arc<str>,
     attachment_authority: Arc<ScopedObservationAttachmentAuthority>,
     lifecycle: Arc<ScopedObservationAttachmentLifecycle>,
     state: Arc<ScopedObservationAccessState>,
@@ -5022,6 +5026,14 @@ impl ScopedObservationAccessHost {
             .map_err(|error| ScopedObservationAccessError::Authorization(error.to_string()))?;
         let plan = AuthorizedScopeAccessPlan::from_authorized_program(program)?;
         let known_objects = validate_known_object_grants(&plan, request.known_objects)?;
+        let root_relation_id: Arc<str> = Arc::from(
+            known_objects
+                .values()
+                .find(|grant| grant.scope_root)
+                .expect("validated known-object grants contain exactly one scope root")
+                .relation_id
+                .as_str(),
+        );
         Ok(Self {
             adapter,
             compatibility,
@@ -5029,6 +5041,7 @@ impl ScopedObservationAccessHost {
             root_identity,
             program_id: request.program_id,
             known_objects: Arc::new(known_objects),
+            root_relation_id,
             attachment_authority: Arc::new(ScopedObservationAttachmentAuthority),
             lifecycle: Arc::new(ScopedObservationAttachmentLifecycle::default()),
             state: Arc::new(ScopedObservationAccessState {
@@ -5278,10 +5291,10 @@ impl ScopedObservationAccessHost {
     /// `ready()`-style calls return the same value without redelivery.
     pub fn offer_bootstrap_complete(
         &self,
+        append_objects: &[ScopedKnownAppendObject],
         admission: &ScopedObservationAdmissionLane,
         projection: &ScopedObservationProjectionSink,
         delivery: &mut ScopedObservationDeliveryLane,
-        root_present: bool,
         observed_at: i64,
     ) -> Result<Arc<ScopedBootstrapBarrier>, ScopedBootstrapBarrierError> {
         if matches!(
@@ -5300,6 +5313,13 @@ impl ScopedObservationAccessHost {
         let watermark = self
             .capture_watermark_core(admission, projection, delivery)
             .map_err(ScopedBootstrapBarrierError::Coverage)?;
+        let root_present = validate_bootstrap_source_state(
+            self.known_objects.as_ref(),
+            &self.root_relation_id,
+            &self.root_identity,
+            admission,
+            append_objects,
+        )?;
         let replacement = projection
             .usage_v2_replacement_snapshot(ScopedAppendDeliveryPhase::Bootstrap)
             .map_err(|_| ScopedBootstrapBarrierError::InvalidSnapshot)?;
@@ -5319,10 +5339,10 @@ impl ScopedObservationAccessHost {
     /// at the bootstrap/ready boundary.
     pub fn offer_consumer_bootstrap_complete(
         &self,
+        append_objects: &[ScopedKnownAppendObject],
         admission: &ScopedObservationAdmissionLane,
         projection: &ScopedObservationProjectionSink,
         drain: &mut ScopedObservationConsumerDrain,
-        root_present: bool,
         observed_at: i64,
     ) -> Result<Arc<ScopedBootstrapBarrier>, ScopedBootstrapBarrierError> {
         if !self.owns_consumer_drain(drain) {
@@ -5332,10 +5352,10 @@ impl ScopedObservationAccessHost {
             return Err(ScopedBootstrapBarrierError::Closed);
         }
         self.offer_bootstrap_complete(
+            append_objects,
             admission,
             projection,
             drain.delivery_lane_mut(),
-            root_present,
             observed_at,
         )
     }
@@ -5415,6 +5435,12 @@ impl ScopedObservationAccessHost {
             &admission,
             append_objects,
         )?;
+        if append_objects
+            .get(self.root_relation_id.as_ref())
+            .is_none_or(|object| object.is_present() != barrier.root_present)
+        {
+            return Err(ScopedReplacementStageError::InvalidSourceState);
+        }
         Ok(ScopedObservationEpochState {
             root: self.root_identity.clone(),
             scope_epoch: SCOPED_INITIAL_SCOPE_EPOCH,
@@ -5645,7 +5671,6 @@ impl ScopedObservationAccessHost {
         active: &mut ScopedObservationEpochState,
         stage: &mut ScopedObservationScopeReplacementStage,
         delivery: &mut ScopedObservationDeliveryLane,
-        root_present: bool,
         observed_at: i64,
     ) -> Result<Arc<ScopedResyncBarrier>, ScopedReplacementStageError> {
         if stage.activated {
@@ -5670,6 +5695,11 @@ impl ScopedObservationAccessHost {
             stage,
             delivery,
         )?;
+        let root_present = stage
+            .append_objects
+            .get(self.root_relation_id.as_ref())
+            .ok_or(ScopedReplacementStageError::InvalidSourceState)?
+            .is_present();
         let empty_retired_admission = ScopedObservationAdmissionLane::new(active.admission.limits)
             .map_err(|_| ScopedReplacementStageError::InvalidSourceState)?;
         let barrier = self.offer_projection_resync_complete(
@@ -6028,9 +6058,8 @@ pub struct ScopedKnownAppendObject {
     checkpoint: Option<AppendCheckpoint>,
     decoder_state: Option<Vec<u8>>,
     bootstrap_active: bool,
-    bootstrap_observed: bool,
     bootstrap_blocked: bool,
-    root_present: bool,
+    presence_state: ScopedAppendPresenceState,
     next_admission_token: u64,
     pending: Option<PendingAppendState>,
 }
@@ -6049,11 +6078,49 @@ enum ScopedAppendObjectLifecycle {
     Retired,
 }
 
+/// Presence knowledge for one exact object. `Unknown` is intentionally
+/// distinct from `Missing`: an unstable read cannot establish absence and
+/// therefore cannot make the next stable batch look like a creation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ScopedAppendPresenceState {
+    Unknown,
+    Missing,
+    Present,
+}
+
+impl ScopedAppendPresenceState {
+    fn is_known(self) -> bool {
+        self != Self::Unknown
+    }
+
+    fn is_present(self) -> bool {
+        self == Self::Present
+    }
+
+    fn observe_missing(
+        self,
+        previous_generation: Option<u64>,
+    ) -> (Self, Option<ScopedAppendPresenceChange>, bool) {
+        let became_missing = self == Self::Present;
+        let change = became_missing.then(|| ScopedAppendPresenceChange::Deleted {
+            generation: previous_generation
+                .expect("a present scoped append object owns a checkpoint generation"),
+        });
+        (Self::Missing, change, became_missing)
+    }
+
+    fn observe_batch(self, generation: u64) -> (Self, Option<ScopedAppendPresenceChange>) {
+        let change =
+            (self == Self::Missing).then_some(ScopedAppendPresenceChange::Created { generation });
+        (Self::Present, change)
+    }
+}
+
 struct PendingAppendState {
     admission_token: u64,
     checkpoint: Option<AppendCheckpoint>,
     bootstrap_blocked: bool,
-    root_present: bool,
+    presence_state: ScopedAppendPresenceState,
     staged_decoder_state: Option<Option<Vec<u8>>>,
 }
 
@@ -6077,9 +6144,8 @@ impl ScopedKnownAppendObject {
             checkpoint: None,
             decoder_state: None,
             bootstrap_active: true,
-            bootstrap_observed: false,
             bootstrap_blocked: false,
-            root_present: false,
+            presence_state: ScopedAppendPresenceState::Unknown,
             next_admission_token: 1,
             pending: None,
         })
@@ -6130,21 +6196,18 @@ impl ScopedKnownAppendObject {
             presence_change,
             became_missing,
             next_checkpoint,
-            next_root_present,
+            next_presence_state,
             next_bootstrap_blocked,
         ) = match &read {
             AppendRead::Missing => {
-                let became_missing = self.root_present;
-                let presence_change = became_missing.then(|| ScopedAppendPresenceChange::Deleted {
-                    generation: previous_generation
-                        .expect("a present scoped append object owns a checkpoint generation"),
-                });
+                let (presence_state, presence_change, became_missing) =
+                    self.presence_state.observe_missing(previous_generation);
                 (
                     None,
                     presence_change,
                     became_missing,
                     self.checkpoint.clone(),
-                    false,
+                    presence_state,
                     false,
                 )
             }
@@ -6153,7 +6216,7 @@ impl ScopedKnownAppendObject {
                 None,
                 false,
                 self.checkpoint.clone(),
-                self.root_present,
+                self.presence_state,
                 true,
             ),
             AppendRead::Batch {
@@ -6179,17 +6242,14 @@ impl ScopedKnownAppendObject {
                 } else {
                     None
                 };
-                let presence_change = (!self.root_present && self.bootstrap_observed).then_some(
-                    ScopedAppendPresenceChange::Created {
-                        generation: checkpoint.generation,
-                    },
-                );
+                let (presence_state, presence_change) =
+                    self.presence_state.observe_batch(checkpoint.generation);
                 (
                     reset,
                     presence_change,
                     false,
                     Some(checkpoint.clone()),
-                    true,
+                    presence_state,
                     *more_available,
                 )
             }
@@ -6218,7 +6278,7 @@ impl ScopedKnownAppendObject {
             admission_token,
             checkpoint: next_checkpoint,
             bootstrap_blocked: next_bootstrap_blocked,
-            root_present: next_root_present,
+            presence_state: next_presence_state,
             staged_decoder_state: None,
         });
         Ok(ScopedAppendObservation {
@@ -6229,7 +6289,7 @@ impl ScopedKnownAppendObject {
             phase,
             reset_before_items,
             presence_change,
-            root_present: next_root_present,
+            object_present: next_presence_state.is_present(),
             became_missing,
             read,
         })
@@ -6485,8 +6545,7 @@ impl ScopedKnownAppendObject {
         self.checkpoint = pending.checkpoint;
         self.decoder_state = decoder_state;
         self.bootstrap_blocked = pending.bootstrap_blocked;
-        self.root_present = pending.root_present;
-        self.bootstrap_observed = true;
+        self.presence_state = pending.presence_state;
     }
 
     /// Discard a read that could not be admitted. Its native access remains in
@@ -6518,7 +6577,7 @@ impl ScopedKnownAppendObject {
         if !self.bootstrap_active {
             return Err(ScopedObservationAccessError::BootstrapAlreadyComplete);
         }
-        if self.pending.is_some() || !self.bootstrap_observed || self.bootstrap_blocked {
+        if self.pending.is_some() || !self.presence_state.is_known() || self.bootstrap_blocked {
             return Err(ScopedObservationAccessError::BootstrapNotDrained);
         }
         self.bootstrap_active = false;
@@ -6562,9 +6621,8 @@ impl ScopedKnownAppendObject {
             checkpoint: None,
             decoder_state: None,
             bootstrap_active: false,
-            bootstrap_observed: false,
             bootstrap_blocked: false,
-            root_present: false,
+            presence_state: ScopedAppendPresenceState::Unknown,
             next_admission_token: 1,
             pending: None,
         };
@@ -6595,7 +6653,7 @@ impl ScopedKnownAppendObject {
                     replaces_object_token: self.object_token,
                 })
             || replacement.pending.is_some()
-            || !replacement.bootstrap_observed
+            || !replacement.presence_state.is_known()
             || replacement.bootstrap_blocked
             || replacement.source != self.source
             || replacement.relation_id != self.relation_id
@@ -6654,8 +6712,8 @@ impl ScopedKnownAppendObject {
         self.decoder_state.as_deref()
     }
 
-    pub fn root_present(&self) -> bool {
-        self.root_present
+    pub fn is_present(&self) -> bool {
+        self.presence_state.is_present()
     }
 
     pub fn bootstrap_active(&self) -> bool {
@@ -6882,6 +6940,54 @@ fn validate_scoped_relation_coverage(
     Ok(())
 }
 
+fn validate_bootstrap_source_state(
+    known_objects: &BTreeMap<String, ScopedKnownObjectGrant>,
+    root_relation_id: &str,
+    root: &ScopedObservationRootIdentity,
+    admission: &ScopedObservationAdmissionLane,
+    objects: &[ScopedKnownAppendObject],
+) -> Result<bool, ScopedBootstrapBarrierError> {
+    validate_scoped_relation_coverage(known_objects, admission)
+        .map_err(ScopedBootstrapBarrierError::Coverage)?;
+    if objects.len() != known_objects.len() {
+        return Err(ScopedBootstrapBarrierError::InvalidSnapshot);
+    }
+
+    let mut bound = BTreeMap::new();
+    for object in objects {
+        let relation_id = object
+            .relation_id
+            .as_deref()
+            .ok_or(ScopedBootstrapBarrierError::InvalidSnapshot)?;
+        let membership = admission
+            .known_coverage_objects
+            .get(&object.source)
+            .ok_or(ScopedBootstrapBarrierError::InvalidSnapshot)?;
+        if object.lifecycle != ScopedAppendObjectLifecycle::Active
+            || object.bootstrap_active
+            || object.pending.is_some()
+            || !object.presence_state.is_known()
+            || !source_belongs_to_root(&object.source, root)
+            || !known_objects.contains_key(relation_id)
+            || membership.relation_id.as_ref() != relation_id
+            || bound.insert(relation_id, object).is_some()
+        {
+            return Err(ScopedBootstrapBarrierError::InvalidSnapshot);
+        }
+    }
+    if bound.keys().any(|key| !known_objects.contains_key(*key))
+        || known_objects
+            .keys()
+            .any(|key| !bound.contains_key(key.as_str()))
+    {
+        return Err(ScopedBootstrapBarrierError::InvalidSnapshot);
+    }
+    bound
+        .get(root_relation_id)
+        .map(|object| object.is_present())
+        .ok_or(ScopedBootstrapBarrierError::InvalidSnapshot)
+}
+
 fn bind_active_scoped_append_objects(
     known_objects: &BTreeMap<String, ScopedKnownObjectGrant>,
     root: &ScopedObservationRootIdentity,
@@ -7073,6 +7179,11 @@ fn validate_known_object_grants(
                 "duplicate known-object grant for relation {relation_id:?}"
             )));
         }
+    }
+    if validated.values().filter(|grant| grant.scope_root).count() != 1 {
+        return Err(ScopedObservationAccessError::InvalidGrant(
+            "exactly one known-object grant must be designated as the scope root".to_string(),
+        ));
     }
     Ok(validated)
 }
@@ -7407,6 +7518,31 @@ mod projection_tests {
 
     fn bytes_hex(bytes: &[u8; 32]) -> String {
         bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+    }
+
+    #[test]
+    fn transient_initial_read_cannot_fabricate_source_creation() {
+        let unknown = ScopedAppendPresenceState::Unknown;
+
+        // RetryTransient deliberately preserves Unknown. A subsequent stable
+        // batch is cold bootstrap evidence, not proof that the source appeared.
+        let after_transient = unknown;
+        assert!(!after_transient.is_known());
+        let (present, change) = after_transient.observe_batch(1);
+        assert_eq!(present, ScopedAppendPresenceState::Present);
+        assert_eq!(change, None);
+
+        // A creation control is justified only by a prior stable Missing read.
+        let (missing, deletion, became_missing) = unknown.observe_missing(None);
+        assert_eq!(missing, ScopedAppendPresenceState::Missing);
+        assert_eq!(deletion, None);
+        assert!(!became_missing);
+        let (present, change) = missing.observe_batch(1);
+        assert_eq!(present, ScopedAppendPresenceState::Present);
+        assert_eq!(
+            change,
+            Some(ScopedAppendPresenceChange::Created { generation: 1 })
+        );
     }
 
     fn root_identity() -> ScopedObservationRootIdentity {

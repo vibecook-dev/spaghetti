@@ -409,6 +409,7 @@ mod tests {
             program_id: "observe-session".to_string(),
             known_objects: vec![ScopedKnownObjectGrant {
                 relation_id: "root-object".to_string(),
+                scope_root: true,
                 access_root: "root".to_string(),
                 locator_id: "known-object".to_string(),
                 root,
@@ -523,7 +524,7 @@ mod tests {
                 },
             )
             .unwrap();
-        assert!(!observation.root_present);
+        assert!(!observation.object_present);
         let ScopedAppendDecodeOutcome::Ready(decoded) = decode_scoped(host, object, &observation)
         else {
             panic!("stable missing source must produce a complete poll observation");
@@ -1085,14 +1086,20 @@ mod tests {
             }
         );
 
+        object.complete_bootstrap().unwrap();
         let barrier = host
-            .offer_consumer_bootstrap_complete(&admission, &projection, &mut drain, false, 50)
+            .offer_consumer_bootstrap_complete(
+                std::slice::from_ref(&object),
+                &admission,
+                &projection,
+                &mut drain,
+                50,
+            )
             .unwrap();
         assert!(Arc::ptr_eq(
             &host.engine_ready(&drain).unwrap().unwrap(),
             &barrier
         ));
-        object.complete_bootstrap().unwrap();
         let mut active = host
             .bind_consumer_bootstrap_epoch_state(vec![object], admission, projection, &drain)
             .unwrap();
@@ -1351,6 +1358,20 @@ mod tests {
     }
 
     #[test]
+    fn scoped_host_requires_exactly_one_designated_root_object() {
+        let registry = supported_fixture_registry();
+        let temp = TempDir::new().unwrap();
+        let mut request = scoped_access_request(temp.path().join("missing-root-role"));
+        request.known_objects[0].scope_root = false;
+
+        assert!(matches!(
+            ScopedObservationAccessHost::authorize(&registry, request),
+            Err(ScopedObservationAccessError::InvalidGrant(message))
+                if message.contains("exactly one") && message.contains("scope root")
+        ));
+    }
+
+    #[test]
     fn scoped_append_rejects_a_foreign_source_before_reserving_access() {
         let registry = supported_fixture_registry();
         let temp = TempDir::new().unwrap();
@@ -1405,7 +1426,7 @@ mod tests {
         assert_eq!(report.relations()[0].attempts, 0);
         assert_eq!(report.relations()[0].bytes_read, 0);
         assert!(object.checkpoint().is_none());
-        assert!(!object.root_present());
+        assert!(!object.is_present());
         assert_eq!(object.relation_id(), None);
     }
 
@@ -1435,7 +1456,7 @@ mod tests {
             Err(ScopedCoverageAssemblyError::DeclaredObjectCoverageMismatch)
         ));
         assert!(matches!(
-            host.offer_bootstrap_complete(&admission, &projection, &mut delivery, false, 50,),
+            host.offer_bootstrap_complete(&[], &admission, &projection, &mut delivery, 50,),
             Err(ScopedBootstrapBarrierError::Coverage(
                 ScopedCoverageAssemblyError::DeclaredObjectCoverageMismatch
             ))
@@ -1536,7 +1557,7 @@ mod tests {
         assert_eq!(second.relation_id(), Some("root-object"));
         second.discard(&second_observation).unwrap();
         assert!(second.checkpoint().is_none());
-        assert!(!second.root_present());
+        assert!(!second.is_present());
         assert_eq!(second_pass.finish().relations()[0].attempts, 1);
     }
 
@@ -1643,7 +1664,7 @@ mod tests {
         let missing = object.reconcile(&missing_pass, reconcile(64)).unwrap();
         assert_eq!(object.relation_id(), Some("root-object"));
         assert_eq!(missing.phase, ScopedAppendDeliveryPhase::Bootstrap);
-        assert!(!missing.root_present);
+        assert!(!missing.object_present);
         assert!(missing.presence_change.is_none());
         assert!(matches!(&missing.read, AppendRead::Missing));
         decode_and_admit_ignored(&host, &mut object, &missing);
@@ -1780,7 +1801,7 @@ mod tests {
         assert_eq!(record.payload, b"replacement");
         decode_and_admit_ignored(&host, &mut object, &correction);
         assert_eq!(object.checkpoint().unwrap().generation, 2);
-        assert!(object.root_present());
+        assert!(object.is_present());
         assert!(!object.bootstrap_active());
         drop(correction_pass);
 
@@ -1815,7 +1836,7 @@ mod tests {
             }) if source == expected_source
         ));
         assert!(deletion_lane.is_empty());
-        assert!(!object.root_present());
+        assert!(!object.is_present());
         drop(deletion_pass);
 
         std::fs::write(root.join("session.jsonl"), b"recreated\n").unwrap();
@@ -1874,7 +1895,7 @@ mod tests {
             })
         ));
         assert!(recreation_lane.is_empty());
-        assert!(object.root_present());
+        assert!(object.is_present());
         assert_eq!(object.checkpoint().unwrap().generation, 3);
     }
 
@@ -2929,7 +2950,7 @@ mod tests {
                 },
             )
             .unwrap();
-        assert!(!observation.root_present);
+        assert!(!observation.object_present);
         let ScopedAppendDecodeOutcome::Ready(decoded) =
             decode_scoped(&host, &mut object, &observation)
         else {
@@ -2954,7 +2975,13 @@ mod tests {
         })
         .unwrap();
         let barrier = host
-            .offer_bootstrap_complete(&admission, &projection, &mut delivery, false, 50)
+            .offer_bootstrap_complete(
+                std::slice::from_ref(&object),
+                &admission,
+                &projection,
+                &mut delivery,
+                50,
+            )
             .unwrap();
         assert_eq!(barrier.scope_epoch, 1);
         assert_eq!(barrier.barrier_sequence, 1);
@@ -2969,7 +2996,13 @@ mod tests {
         assert_eq!(delivery.state(), barrier.queue_state);
 
         let repeated = host
-            .offer_bootstrap_complete(&admission, &projection, &mut delivery, true, 999)
+            .offer_bootstrap_complete(
+                std::slice::from_ref(&object),
+                &admission,
+                &projection,
+                &mut delivery,
+                999,
+            )
             .unwrap();
         assert!(Arc::ptr_eq(&barrier, &repeated));
         assert_eq!(delivery.queued_source_control_items(), 1);
@@ -2987,7 +3020,13 @@ mod tests {
         );
         let other_host = ScopedObservationAccessHost::authorize(&registry, other_request).unwrap();
         assert!(matches!(
-            other_host.offer_bootstrap_complete(&admission, &projection, &mut delivery, false, 50,),
+            other_host.offer_bootstrap_complete(
+                std::slice::from_ref(&object),
+                &admission,
+                &projection,
+                &mut delivery,
+                50,
+            ),
             Err(ScopedBootstrapBarrierError::StateChanged)
         ));
 
@@ -3043,7 +3082,13 @@ mod tests {
             Err(ScopedCoverageAssemblyError::ContinuityInvalid)
         ));
         assert!(matches!(
-            host.offer_bootstrap_complete(&admission, &projection, &mut delivery, false, 60),
+            host.offer_bootstrap_complete(
+                std::slice::from_ref(&object),
+                &admission,
+                &projection,
+                &mut delivery,
+                60,
+            ),
             Err(ScopedBootstrapBarrierError::StateChanged)
         ));
 
@@ -3192,7 +3237,13 @@ mod tests {
             })
             .unwrap();
         let replay_barrier = host
-            .offer_bootstrap_complete(&admission, &projection, &mut replay_delivery, false, 5_000)
+            .offer_bootstrap_complete(
+                std::slice::from_ref(&object),
+                &admission,
+                &projection,
+                &mut replay_delivery,
+                5_000,
+            )
             .unwrap();
         assert_eq!(replay_barrier.snapshot_digest, barrier.snapshot_digest);
         assert_eq!(replay_delivery.pop_next().unwrap().event_id, first_event_id);
@@ -3240,7 +3291,7 @@ mod tests {
 
         let bootstrap_pass = host.begin_pass().unwrap();
         let bootstrap_observation = object.reconcile(&bootstrap_pass, request()).unwrap();
-        assert!(!bootstrap_observation.root_present);
+        assert!(!bootstrap_observation.object_present);
         let ScopedAppendDecodeOutcome::Ready(bootstrap_decoded) =
             decode_scoped(&host, &mut object, &bootstrap_observation)
         else {
@@ -3265,14 +3316,20 @@ mod tests {
         })
         .unwrap();
         let bootstrap_barrier = host
-            .offer_bootstrap_complete(&admission, &projection, &mut delivery, false, 50)
+            .offer_bootstrap_complete(
+                std::slice::from_ref(&object),
+                &admission,
+                &projection,
+                &mut delivery,
+                50,
+            )
             .unwrap();
         assert_eq!(delivery.pop_next().unwrap().observer_sequence, 1);
         let mut active = host
             .bind_bootstrap_epoch_state(vec![object], admission, projection, &delivery)
             .unwrap();
         assert_eq!(active.scope_epoch(), 1);
-        assert!(!active.append_object("root-object").unwrap().root_present());
+        assert!(!active.append_object("root-object").unwrap().is_present());
 
         // Commit one live read into the bounded admission lane but do not
         // offer it. Continuity loss must supersede this old-epoch backlog,
@@ -3348,7 +3405,7 @@ mod tests {
             replacement_observation.phase,
             ScopedAppendDeliveryPhase::Correction
         );
-        assert!(replacement_observation.root_present);
+        assert!(replacement_observation.object_present);
         let replacement_decoded = {
             let (replacement_object, _) = stage
                 .append_object_and_admission_mut("root-object", &delivery)
@@ -3383,7 +3440,7 @@ mod tests {
         // observer.resync_started still owns the one control slot. Completion
         // failure cannot activate any of the three staged state components.
         assert_eq!(
-            host.offer_scope_resync_complete(&mut active, &mut stage, &mut delivery, true, 80,),
+            host.offer_scope_resync_complete(&mut active, &mut stage, &mut delivery, 80,),
             Err(ScopedReplacementStageError::Delivery(
                 ScopedDeliveryError::SourceControlQueueFull
             ))
@@ -3402,17 +3459,18 @@ mod tests {
 
         assert_eq!(delivery.pop_next().unwrap().observer_sequence, 3);
         let resync_barrier = host
-            .offer_scope_resync_complete(&mut active, &mut stage, &mut delivery, true, 80)
+            .offer_scope_resync_complete(&mut active, &mut stage, &mut delivery, 80)
             .unwrap();
+        assert!(resync_barrier.root_present);
         assert_eq!(active.scope_epoch(), 2);
         let active_object = active.append_object("root-object").unwrap();
-        assert!(active_object.root_present());
+        assert!(active_object.is_present());
         assert_eq!(active_object.checkpoint().unwrap().committed_offset, 12);
         assert_eq!(active_object.frozen_scope_epoch(), None);
         assert_eq!(active_object.replacement_scope_epoch(), None);
         assert!(!active_object.is_retired());
         let retired_object = stage.append_object("root-object").unwrap();
-        assert!(retired_object.root_present());
+        assert!(retired_object.is_present());
         assert_eq!(retired_object.checkpoint().unwrap().committed_offset, 14);
         assert!(retired_object.is_retired());
         assert!(stage.is_activated());
@@ -3430,7 +3488,7 @@ mod tests {
             bootstrap_barrier.replacement_snapshot_digest
         );
         let repeated = host
-            .offer_scope_resync_complete(&mut active, &mut stage, &mut delivery, false, 999)
+            .offer_scope_resync_complete(&mut active, &mut stage, &mut delivery, 999)
             .unwrap();
         assert!(Arc::ptr_eq(&resync_barrier, &repeated));
         assert_eq!(delivery.queued_source_control_items(), 1);
@@ -3573,7 +3631,13 @@ mod tests {
         })
         .unwrap();
         assert!(matches!(
-            host.offer_bootstrap_complete(&admission, &projection, &mut delivery, true, 50),
+            host.offer_bootstrap_complete(
+                std::slice::from_ref(&object),
+                &admission,
+                &projection,
+                &mut delivery,
+                50,
+            ),
             Err(ScopedBootstrapBarrierError::Coverage(
                 ScopedCoverageAssemblyError::AdmissionNotDrained
             ))

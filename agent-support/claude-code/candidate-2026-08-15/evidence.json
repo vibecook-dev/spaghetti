@@ -81,25 +81,25 @@
         {
           "kind": "sanitized_fixture",
           "path": "agent-support/claude-code/candidate-2026-08-15/fixtures/usage-v2/response-revisions.json",
-          "sha256": "sha256:1fd95da4905faa0302f0563224e018f367996e1eef701fd587f90f2177878893",
+          "sha256": "sha256:3038ee09f9e7977516e2d83da2d4a47f6523d3082957446096d2af3b6dcc490f",
           "locator": "root and child response revisions, missing buckets, malformed correction, and generation reset"
         },
         {
           "kind": "sanitized_fixture",
           "path": "agent-support/claude-code/candidate-2026-08-15/fixtures/team-affiliation/team-config.json",
-          "sha256": "sha256:a3ae858f993bdd5edf6983111e3490b6b0909ace7a395be3a12b41da1f24ed5c",
+          "sha256": "sha256:ff0d82d01785953b6496a0298a78b44ebbcd5984b5c5fceaaffe84b1db5af0bb",
           "locator": "native team config root-lead identity inputs and unique member namespace"
         },
         {
           "kind": "sanitized_fixture",
           "path": "agent-support/claude-code/candidate-2026-08-15/fixtures/team-affiliation/subagent-meta.json",
-          "sha256": "sha256:2c169ed33a72d0625edbb68e7b8dce28df240c35e3a1cc3e1f7495bc9d809c60",
+          "sha256": "sha256:cf8d8717c5845211c394fb74b793ae132ef4f7c468762696b1bd1b3947527d61",
           "locator": "path-owned child metadata teamName/name correlation inputs"
         },
         {
           "kind": "experiment_report",
           "path": "agent-support/claude-code/candidate-2026-08-15/reports/usage-v2-oracle-v1.json",
-          "sha256": "sha256:555ba85bca79f18c500c243d618bd40bc1ce468e4a801951f89fa72ac0324e95",
+          "sha256": "sha256:7f2eb34ca11164a5e19e8b1791cc839e9668f0f1b671034a88e81bcb629c492c",
           "locator": "oracle contract v1 qualified response, actor, session, and aggregate report"
         },
         { "kind": "code_reference", "path": "scripts/usage-v2-private-parity.ts", "sha256": null, "locator": "ephemeral source cloning, independent before/after census, durable comparison, and aggregate-only report" },
@@ -168,7 +168,7 @@
         {
           "kind": "sanitized_fixture",
           "path": "agent-support/claude-code/candidate-2026-08-15/fixtures/drift/bridge-session-account-fields.json",
-          "sha256": "sha256:0ccd6159504affeca81f73770c6b570ecbad8aa9f3d925a03919eddb85101dcd",
+          "sha256": "sha256:bf0f47f0714a21411d7173bb5671e7019a08b31cb184c58c62c0c185ff573c5d",
           "locator": "synthetic shape preserving field names and value categories"
         },
         { "kind": "design_record", "path": "docs/rfcs/012a-agent-adaptation-and-engine-boundaries.md", "sha256": null, "locator": "Mapping dispositions: native-only field classification" },
@@ -184,7 +184,7 @@
         {
           "kind": "sanitized_fixture",
           "path": "agent-support/claude-code/candidate-2026-08-15/fixtures/drift/active-session-name-since.json",
-          "sha256": "sha256:f408ad3c30fcbcde463ac7100074d8d71fcca707c3bd54d4cc60337a5a082299",
+          "sha256": "sha256:ace27b42da80aba0e50f998abafae97e1a33de899e6c086b585b30387b4ad685",
           "locator": "synthetic shape preserving numeric timestamp category"
         },
         { "kind": "design_record", "path": "docs/rfcs/012a-agent-adaptation-and-engine-boundaries.md", "sha256": null, "locator": "Mapping dispositions: opaque timestamp classification" },
@@ -200,7 +200,7 @@
         {
           "kind": "sanitized_fixture",
           "path": "agent-support/claude-code/candidate-2026-08-15/fixtures/drift/settings-auto-mode.json",
-          "sha256": "sha256:dabfdda2438273ed7b59ae1ed4afefe25882006bd64c12975d93d51af35c690f",
+          "sha256": "sha256:82db0579e356b746ce6c33a8fce35dca1460a5c9219c223281ad25d04c2fe400",
           "locator": "synthetic shape preserving policy field names and string-array categories"
         },
         { "kind": "design_record", "path": "docs/rfcs/012a-agent-adaptation-and-engine-boundaries.md", "sha256": null, "locator": "Mapping dispositions: native-only field classification" },

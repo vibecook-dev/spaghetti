@@ -293,7 +293,7 @@ The checker rejects unrestricted discovery functions, unbounded relation
 fan-out, absent evidence, duplicate semantic ownership, and unclassified native
 families.
 
-Current landing status (2026-08-16):
+Current landing status (2026-08-17):
 
 - added strict v1 JSON Schemas for ADS, source declarations, restricted scope
   programs, evidence manifests, conformance manifests, and support-release
@@ -303,9 +303,12 @@ Current landing status (2026-08-16):
   declarations, detects duplicate semantic ownership/unclassified families,
   scans every fixture, and enforces stronger promotion-only invariants;
 - added a deterministic JSON/JSONL sanitizer that preserves structural shape
-  and referential equality without committing hashes of native values, plus a
-  prohibited-field scanner for paths, identifiers, text, secrets, and common
-  credential forms;
+  and referential equality without committing hashes of native values. The v2
+  fixture contract places numeric identifiers and timestamps in reserved,
+  parser-safe sentinel ranges; the prohibited-field scanner validates those
+  numbers as well as paths, string identifiers, text, secrets, and common
+  credential forms, so non-string native identity/time values cannot bypass the
+  repository gate;
 - added executable exact/range/unverified/incompatible classification,
   pre-access public contract selection, and relation-level access budget
   accounting with overflow tests;
@@ -946,7 +949,10 @@ Current landing status (2026-08-17):
   and read through the common symlink-safe confined file primitive only after
   a declaration-sized reservation. After the initial snapshot, transitions in
   either direction between present and missing become explicit bounded common
-  controls rather than implicit object-state changes;
+  controls rather than implicit object-state changes. Object presence is an
+  explicit `Unknown`/`Missing`/`Present` state: an unstable initial read retains
+  `Unknown`, so the next stable cold-bootstrap batch cannot fabricate
+  `source.created` without a prior stable absence;
 - the same granted root can run through the common append driver under a hard
   physical-byte ceiling; its in-memory kernel retains cursor/generation and
   partial-record state, prevents an early bootstrap barrier while more bounded
@@ -1302,6 +1308,10 @@ sequence, binds every set to the pre-access resolved root session, and carries
 that root's canonical session/external-reference/root-run tuple. It also proves
 one-to-one coverage of every exact known-object grant supplied to the current
 attachment: unobserved relations and duplicate relation claims fail closed.
+Exactly one grant must be tagged as the scope root. Bootstrap validates the
+completed append-object set and derives root presence from that object; resync
+derives it from the validated staged root. Neither barrier accepts a caller-
+asserted presence bit, and bootstrap/source-state disagreement fails closed.
 This is not yet proof of relationships or descendants that the future scope
 orchestrator has not discovered and granted, nor is it the portable poll/
 bootstrap/resync contract. The public async multiplexer/facade, whole-scope
@@ -1539,25 +1549,29 @@ durable state except for the explicitly versioned usage-v2 correction.
 
 The next execution order is:
 
-1. ratify the RFC 012 umbrella ownership/precedence and RFC 011 delta matrix;
-2. implement X0 compatibility fixtures for every retained/amended/superseded
-   RFC 011 contract;
-3. review and ratify RFC 012A logical dependencies, qualified values, identity,
-   external/semantic references, source coverage, tier compositionality, scope
-   primitives, and conservative version policy;
-4. implement A1/A2 contract fixtures and architecture/access checks;
-5. build current-agent ADS/support candidates in A3;
-6. ratify RFC 012B identity/readiness/pagination and RFC 012C qualified usage
-   semantics in parallel;
-7. implement bounded catalog compositions and common runtime facts;
-8. implement the store-free RFC 012D kernel and Claude scope against those
-   contracts;
-9. build durable catalog/readiness and usage-v2 shadow projections;
-10. run the A4 fourth-agent proof across catalog/query and scoped-observer
-    seams;
-11. run UI, Chopsticks, and reference durable/live aggregation shadow
-    integrations before any default switch; and
-12. calibrate numeric gates, amend the owning child RFCs, then promote.
+1. close X0 with executable compatibility evidence for every remaining planned
+   RFC 011 delta;
+2. finish A1/A2/A3 promotion gates, including the remaining fact-family,
+   tier/view, scope-composition, and current-agent evidence, without promoting
+   any candidate early;
+3. review and ratify RFC 012B identity/readiness/pagination and RFC 012C
+   qualified runtime semantics against the implementation evidence already
+   landed;
+4. implement B1-B3 catalog identity, bounded compositions, durable readiness,
+   and snapshot pagination while completing the remaining C1-C3 compatibility
+   report and semantic-contract work;
+5. finish D1/D2 watcher-before-scan orchestration, dynamic Claude scope,
+   declared decoder dependencies, and the public async lifecycle facade;
+6. complete D3 multi-family and D-owned replacement manifests, non-append
+   participants, watcher failure scheduling, and multi-observer fairness;
+7. run A4 only after the initial catalog/query and public scoped-observer seams
+   both exist, proving a fourth agent needs no common-engine API changes;
+8. implement B4/C4/D4 UI, typed-consumer, Chopsticks, and reference
+   durable/live reconciliation shadows with explicit rollback;
+9. finish X1-X3 search/finalization, diagnostic aggregation, and physical
+   extraction after the logical boundaries pass; and
+10. calibrate B5/D5 numeric gates, amend the owning child RFCs, close X4 drift
+    and promotion controls, then consider default switches.
 
 No step may use a temporary renderer catalog, private adapter tail, arbitrary
 scope search, second database, or duplicated native decoder to shorten the

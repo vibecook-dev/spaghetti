@@ -15,7 +15,10 @@ if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from scripts.agent_support.contracts import validate_numeric_ranges
-from scripts.agent_support.sanitize_fixture import scan_fixture_file
+from scripts.agent_support.sanitize_fixture import (
+    SANITIZER_VERSION,
+    scan_fixture_file,
+)
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -272,8 +275,11 @@ def _validate_evidence(bundle: Bundle) -> tuple[list[str], set[str]]:
         except (OSError, json.JSONDecodeError):
             continue
         metadata = fixture_value.get("_fixture") if isinstance(fixture_value, dict) else None
-        if not isinstance(metadata, dict) or metadata.get("sanitizer_version") != 1:
-            errors.append(f"{fixture.relative_to(REPO_ROOT)}: missing RFC 012A fixture metadata")
+        if not isinstance(metadata, dict) or metadata.get("sanitizer_version") != SANITIZER_VERSION:
+            errors.append(
+                f"{fixture.relative_to(REPO_ROOT)}: missing or unsupported RFC 012A "
+                f"fixture metadata (expected sanitizer_version {SANITIZER_VERSION})"
+            )
         if fixture not in referenced_fixtures:
             errors.append(f"{fixture.relative_to(REPO_ROOT)}: fixture is not referenced by an evidence claim")
     for fixture in sorted(referenced_fixtures - committed_fixtures):

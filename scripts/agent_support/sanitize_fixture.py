@@ -20,7 +20,14 @@ from pathlib import Path
 from typing import Any, Iterable
 
 
-SANITIZER_VERSION = 1
+SANITIZER_VERSION = 2
+
+# Numeric placeholders retain JSON number shape for native readers while living
+# in reserved ranges that ordinary process IDs and wall-clock timestamps cannot
+# occupy. Keep both ranges within JavaScript's exact-integer and Date bounds.
+NUMERIC_IDENTIFIER_PLACEHOLDER_BASE = 4_294_000_000
+NUMERIC_TIMESTAMP_PLACEHOLDER_BASE = 8_000_000_000_000_000
+MAX_NUMERIC_PLACEHOLDER_ORDINAL = 100_000
 
 _SECRET_KEY_PARTS = (
     "apikey",
@@ -191,13 +198,19 @@ def _sanitize_scalar(category: str, value: Any, ordinals: dict[str, dict[str, in
         return value
 
     ordinal = ordinals[category][_canonical_scalar(value)]
+    if ordinal > MAX_NUMERIC_PLACEHOLDER_ORDINAL:
+        raise ValueError(f"too many distinct {category} values for the sanitizer contract")
     if category == "identifier":
-        return 1_000 + ordinal if isinstance(value, (int, float)) else f"fixture-id-{ordinal:03d}"
+        return (
+            NUMERIC_IDENTIFIER_PLACEHOLDER_BASE + ordinal
+            if isinstance(value, (int, float))
+            else f"fixture-id-{ordinal:03d}"
+        )
     if category == "path":
         return f"fixture://path/{ordinal:03d}"
     if category == "timestamp":
         if isinstance(value, (int, float)):
-            return 1_700_000_000_000 + ordinal * 1_000
+            return NUMERIC_TIMESTAMP_PLACEHOLDER_BASE + ordinal * 1_000
         return f"2000-01-01T00:00:00.{ordinal:03d}Z"
     if category == "text":
         return f"[fixture-text-{ordinal:03d}]"
@@ -277,14 +290,40 @@ def scan_prohibited(value: Any) -> list[ScanFinding]:
             for index, child in enumerate(current):
                 visit(child, f"{path}[{index}]", key)
             return
+        if current is None or isinstance(current, bool):
+            return
+
+        category = _category(key, current)
         if not isinstance(current, str):
+            if category == "secret":
+                add(path, "secret field is not redacted")
+            elif category == "identifier":
+                valid_identifier = isinstance(current, int) and (
+                    1
+                    <= current - NUMERIC_IDENTIFIER_PLACEHOLDER_BASE
+                    <= MAX_NUMERIC_PLACEHOLDER_ORDINAL
+                )
+                if not valid_identifier:
+                    add(path, "numeric identifier field is not a sanitizer placeholder")
+            elif category == "timestamp":
+                delta = (
+                    current - NUMERIC_TIMESTAMP_PLACEHOLDER_BASE
+                    if isinstance(current, int)
+                    else 0
+                )
+                valid_timestamp = (
+                    isinstance(current, int)
+                    and delta % 1_000 == 0
+                    and 1 <= delta // 1_000 <= MAX_NUMERIC_PLACEHOLDER_ORDINAL
+                )
+                if not valid_timestamp:
+                    add(path, "numeric timestamp field is not a sanitizer placeholder")
             return
 
         for label, pattern in _PROHIBITED_PATTERNS:
             if pattern.search(current):
                 add(path, f"contains prohibited {label}")
 
-        category = _category(key, current)
         if category == "secret" and current != "[REDACTED]":
             add(path, "secret field is not redacted")
         elif category == "identifier" and not re.fullmatch(r"fixture-id-[0-9]{3,}", current):

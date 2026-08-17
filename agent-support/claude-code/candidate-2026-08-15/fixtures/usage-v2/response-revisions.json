@@ -3,7 +3,7 @@
     "fixture_kind": "synthetic-source-record-sequence",
     "format": "json",
     "sanitization": "synthetic",
-    "sanitizer_version": 1
+    "sanitizer_version": 2
   },
   "scenario": {
     "oracleContractVersion": 1,

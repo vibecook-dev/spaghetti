@@ -190,8 +190,8 @@ def _canonical_json(value: Any) -> bytes:
 def analyze_document(document: Any, fixture_sha256: str) -> dict[str, Any]:
     root = _object(document, "fixture")
     metadata = _object(root.get("_fixture"), "_fixture")
-    if metadata.get("sanitizer_version") != 1:
-        raise OracleError("_fixture.sanitizer_version must be 1")
+    if metadata.get("sanitizer_version") != 2:
+        raise OracleError("_fixture.sanitizer_version must be 2")
     scenario = _object(root.get("scenario"), "scenario")
     if scenario.get("oracleContractVersion") != ORACLE_CONTRACT_VERSION:
         raise OracleError(

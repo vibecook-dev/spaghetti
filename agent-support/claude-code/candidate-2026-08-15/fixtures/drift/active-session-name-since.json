@@ -3,15 +3,15 @@
     "fixture_kind": "synthetic-native-shape",
     "format": "json",
     "sanitization": "synthetic",
-    "sanitizer_version": 1
+    "sanitizer_version": 2
   },
   "data": {
     "cwd": "fixture://path/001",
     "name": "[fixture-text-001]",
-    "nameSince": 1700000001000,
-    "pid": 1001,
+    "nameSince": 8000000000002000,
+    "pid": 4294000001,
     "sessionId": "fixture-id-001",
-    "startedAt": 1700000000000,
+    "startedAt": 8000000000001000,
     "status": "active",
     "version": "2.1.0"
   }
