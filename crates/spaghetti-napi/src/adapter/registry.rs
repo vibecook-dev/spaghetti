@@ -201,13 +201,14 @@ mod tests {
         ScopedEnvelopeEvidenceAuthority, ScopedKnownAppendObject, ScopedKnownObjectGrant,
         ScopedKnownObjectReadRequest, ScopedObjectRead, ScopedObservationAccessError,
         ScopedObservationAccessHost, ScopedObservationAccessRequest,
-        ScopedObservationAdmissionLane, ScopedObservationContinuity, ScopedObservationDeliveryLane,
-        ScopedObservationDeliveryLimits, ScopedObservationEvent, ScopedObservationOpenDrainError,
-        ScopedObservationPollError, ScopedObservationPollLease, ScopedObservationPollResolution,
-        ScopedObservationProjectionLimits, ScopedObservationProjectionSink,
-        ScopedObservationQueueLimits, ScopedProjectionDeliveryError, ScopedQueuedObservationFrame,
-        ScopedReplacementMode, ScopedReplacementRepresentation, ScopedReplacementStageError,
-        ScopedResyncReason, ScopedRootIdentityRequest, ScopedSourceFailureClass,
+        ScopedObservationAdmissionLane, ScopedObservationCloseError, ScopedObservationContinuity,
+        ScopedObservationDeliveryLane, ScopedObservationDeliveryLimits, ScopedObservationEvent,
+        ScopedObservationOpenDrainError, ScopedObservationPollError, ScopedObservationPollLease,
+        ScopedObservationPollResolution, ScopedObservationProjectionLimits,
+        ScopedObservationProjectionSink, ScopedObservationQueueLimits,
+        ScopedProjectionDeliveryError, ScopedQueuedObservationFrame, ScopedReplacementMode,
+        ScopedReplacementRepresentation, ScopedReplacementStageError, ScopedResyncReason,
+        ScopedRootIdentityRequest, ScopedSourceFailureClass,
     };
     use crate::source::{
         AccessOperation, AccessOutcome, AccessPhase, AppendDelimitedConfig, AppendDelimitedFile,
@@ -1146,11 +1147,16 @@ mod tests {
             max_source_control_items: 1,
         };
         let first_drain = first.open_consumer_drain(limits).unwrap();
-        let second_drain = second.open_consumer_drain(limits).unwrap();
+        let mut second_drain = second.open_consumer_drain(limits).unwrap();
         assert!(matches!(
             first.engine_ready(&second_drain),
             Err(ScopedObservationPollError::ForeignDrain)
         ));
+        assert!(matches!(
+            first.close_with_consumer(&mut second_drain),
+            Err(ScopedObservationCloseError::ForeignDrain)
+        ));
+        assert!(!first.is_closed());
         assert!(first.engine_ready(&first_drain).unwrap().is_none());
 
         let ticket = first.request_poll().unwrap();
@@ -1176,6 +1182,72 @@ mod tests {
         drop(lease);
         assert_eq!(first.poll_state().in_flight_through_generation, None);
         assert!(first.poll_state().closed);
+    }
+
+    #[test]
+    fn scoped_close_barrier_waits_for_active_pass_and_consumer_acknowledgement() {
+        let registry = supported_fixture_registry();
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().join("close-barrier-root");
+        std::fs::create_dir_all(&root).unwrap();
+        let host =
+            ScopedObservationAccessHost::authorize(&registry, scoped_access_request(root)).unwrap();
+        let mut drain = host
+            .open_consumer_drain(ScopedObservationDeliveryLimits {
+                max_semantic_events: 1,
+                max_retained_native_bytes: 0,
+                max_source_control_items: 1,
+            })
+            .unwrap();
+        let ticket = host.request_poll().unwrap();
+        let lease = host.begin_poll().unwrap().unwrap();
+        let barrier = host.close();
+        assert_eq!(
+            host.poll_resolution(&ticket).unwrap(),
+            ScopedObservationPollResolution::Cancelled
+        );
+        let closing = barrier.state();
+        assert!(closing.close_requested);
+        assert_eq!(closing.active_operations, 1);
+        assert!(closing.consumer_drain_pending);
+        assert!(!closing.complete);
+
+        let identity = [ScopeIdentityInput {
+            name: "native-session-id",
+            value: b"close-barrier-session",
+        }];
+        assert!(matches!(
+            lease
+                .access_pass()
+                .read_known_object(ScopedKnownObjectReadRequest {
+                    relation_id: "root-object",
+                    identity_inputs: &identity,
+                    phase: AccessPhase::Revalidation,
+                    parent_token: None,
+                    depth: 1,
+                    max_bytes: 64,
+                }),
+            Err(ScopedObservationAccessError::Closed)
+        ));
+
+        drain.close();
+        assert!(drain.is_closed());
+        let drain_closed = barrier.state();
+        assert_eq!(drain_closed.active_operations, 1);
+        assert!(!drain_closed.consumer_drain_pending);
+        assert!(!drain_closed.complete);
+        drop(lease);
+
+        let complete = barrier.wait();
+        assert_eq!(complete.active_operations, 0);
+        assert!(!complete.consumer_drain_pending);
+        assert!(complete.complete);
+        let repeated = host.close_with_consumer(&mut drain).unwrap();
+        assert!(repeated.state().complete);
+        assert!(matches!(
+            host.begin_pass(),
+            Err(ScopedObservationAccessError::Closed)
+        ));
     }
 
     #[test]

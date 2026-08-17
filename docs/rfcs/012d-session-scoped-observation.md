@@ -229,6 +229,18 @@ following behavior is normative:
   deliveries to stop; and
 - observation failure cannot fail the native agent process.
 
+Close is a two-part cancellation barrier, not a boolean flag. Requesting close
+atomically rejects new source/poll work and cancels unresolved poll waiters.
+Every owned watch callback, access pass, read/decode, and consumer delivery is
+registered with the attachment lifecycle; the barrier cannot complete while
+one remains active. The facade then closes its exact attachment-owned event
+drain, discarding envelopes that were never delivered or applied and
+invalidating any pending application receipt. Already-applied state remains a
+historical local boundary, not proof that cancelled work was applied. Dropping
+the facade initiates cancellation, but only awaited `close()` provides the
+completion guarantee. After its barrier resolves, no attachment-owned callback,
+source access, decode, delivery, or application acknowledgement may run.
+
 Before source access, `observeSession` selects one RFC 012A-compatible model,
 external-entity-reference, semantic-revision-reference, coverage, fact-family,
 envelope, event, and lifecycle version set. The selected set is reported by
@@ -896,7 +908,9 @@ Release-blocking tests cover:
 - exact zero database operations and unrelated-root enumeration;
 - typed RFC 012C runtime facts and usage baseline behavior;
 - bounded artifact allow/deny/missing/generation/size cases; and
-- close at attach/read/decode/delivery/resync boundaries.
+- close at attach/read/decode/delivery/resync boundaries, including an active
+  pass plus pending application receipt, foreign-drain rejection, queued-event
+  discard, and no completion before every owned guard acknowledges.
 
 RFC 012D is complete when the scoped observer passes the full matrix, access
 traces prove confinement, clean-bootstrap and resync replacement-state digests

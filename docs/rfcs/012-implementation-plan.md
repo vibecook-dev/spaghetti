@@ -1207,6 +1207,17 @@ Current landing status (2026-08-17):
   retained attachment-bound bootstrap barrier is also exposed through an
   internal engine-readiness probe. Request/lease generations remain local
   flow-control coordinates and do not enter semantic identity;
+- a shared attachment lifecycle now accounts active access passes, direct
+  decodes, and consumer delivery/application calls. Idempotent close first
+  rejects new work and cancels unresolved poll tickets, then waits on a
+  barrier that remains incomplete until every registered operation exits and
+  the exact consumer drain acknowledges cancellation. Drain close invalidates
+  its pending application receipt and discards queued, never-applied envelopes;
+  host drop requests cancellation without blocking. Foreign-drain close fails
+  without closing either attachment, and the internal facade path closes its
+  owned drain before waiting. The lifecycle substrate is synchronous and
+  store-free; watcher-task registration and its portable async wrapper remain
+  for the scope orchestrator;
 - one pass is active at a time, a later pass receives fresh bounds, close is
   idempotent, and the frozen access report excludes paths, identity values, and
   content; and
@@ -1226,14 +1237,16 @@ known-object grants and family coverage beyond usage-v2,
 complete multi-family replacement manifests, whole-scope discovery and source
 state beyond the current exact append-object set, and watcher-level failed/
 re-overflow orchestration,
-artifact mediation, cancellation waiting,
+artifact mediation, watcher-task cancellation registration and the portable
+async close wrapper,
 the trusted native version-probe/identity-input drivers, and the complete
 public request are not yet implemented. The internal offered and applied
 boundaries are now transactional, but they cannot become a public watermark and
 consumer-ready helper until complete scope-membership/barrier coverage, portable
-resync completion, cancellation, and the negotiated portable lifecycle surface
-are defined. The usage-v2 sink and delivery lane remain crate-private until
-those envelope/lifecycle contracts and the negotiated portable surface exist.
+resync completion, watcher cancellation, and the negotiated portable lifecycle
+surface are defined. The usage-v2 sink and delivery lane remain crate-private
+until those envelope/lifecycle contracts and the negotiated portable surface
+exist.
 
 ### D2. Claude scope composition
 
@@ -1324,7 +1337,10 @@ requires a fresh all-known-relation access ledger plus the owning drain's
 offered watermark before completion, conservatively schedules requests that
 arrive in flight for a follow-up pass, retries dropped/failed passes without
 acknowledgement, and cancels unresolved tickets on close. An unchanged pass
-does not advance observer sequence. Epoch 1 now has an
+does not advance observer sequence. Its attachment lifecycle counts active
+passes, direct decodes, and consumer calls; close completes only after those
+guards exit and the exact drain discards pending/queued delivery and
+acknowledges cancellation. Epoch 1 now has an
 ordered, snapshot-identified bootstrap-completion control and retained
 idempotent barrier at the offered boundary; it remains internal until
 multi-object scope orchestration and the portable drain/ready surface land. A

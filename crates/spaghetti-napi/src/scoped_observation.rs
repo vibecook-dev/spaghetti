@@ -8,7 +8,7 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, Weak};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, Weak};
 
 use crate::adapter::{
     ActorRunRole, AdapterError, AdapterErrorClass, AdapterId, AdapterObjectContext,
@@ -1621,6 +1621,174 @@ struct ScopedObservationApplicationAuthority;
 #[derive(Debug)]
 struct ScopedObservationAttachmentAuthority;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScopedObservationCloseState {
+    pub close_requested: bool,
+    pub active_operations: u64,
+    pub consumer_drain_pending: bool,
+    pub complete: bool,
+}
+
+#[derive(Debug, Default)]
+struct ScopedObservationAttachmentLifecycleState {
+    close_requested: bool,
+    active_operations: u64,
+    consumer_drain_opened: bool,
+    consumer_drain_closed: bool,
+}
+
+#[derive(Debug, Default)]
+struct ScopedObservationAttachmentLifecycle {
+    state: Mutex<ScopedObservationAttachmentLifecycleState>,
+    idle: Condvar,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ScopedObservationOperationStartError {
+    Closing,
+    CapacityExhausted,
+}
+
+impl ScopedObservationAttachmentLifecycle {
+    fn lock_state(&self) -> MutexGuard<'_, ScopedObservationAttachmentLifecycleState> {
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn start_operation(
+        self: &Arc<Self>,
+    ) -> Result<ScopedObservationOperationGuard, ScopedObservationOperationStartError> {
+        let mut state = self.lock_state();
+        if state.close_requested {
+            return Err(ScopedObservationOperationStartError::Closing);
+        }
+        state.active_operations = state
+            .active_operations
+            .checked_add(1)
+            .ok_or(ScopedObservationOperationStartError::CapacityExhausted)?;
+        Ok(ScopedObservationOperationGuard {
+            lifecycle: Arc::clone(self),
+            active: true,
+        })
+    }
+
+    fn finish_operation(&self) {
+        let mut state = self.lock_state();
+        state.active_operations = state
+            .active_operations
+            .checked_sub(1)
+            .expect("scoped attachment operation accounting cannot underflow");
+        if close_is_complete(&state) {
+            self.idle.notify_all();
+        }
+    }
+
+    fn open_consumer_drain(&self) -> Result<(), ScopedObservationOperationStartError> {
+        let mut state = self.lock_state();
+        if state.close_requested {
+            return Err(ScopedObservationOperationStartError::Closing);
+        }
+        if state.consumer_drain_opened {
+            return Err(ScopedObservationOperationStartError::CapacityExhausted);
+        }
+        state.consumer_drain_opened = true;
+        state.consumer_drain_closed = false;
+        Ok(())
+    }
+
+    fn close_consumer_drain(&self) {
+        let mut state = self.lock_state();
+        if state.consumer_drain_opened {
+            state.consumer_drain_closed = true;
+        }
+        if close_is_complete(&state) {
+            self.idle.notify_all();
+        }
+    }
+
+    fn begin_close(self: &Arc<Self>) -> ScopedObservationCloseBarrier {
+        let mut state = self.lock_state();
+        state.close_requested = true;
+        if close_is_complete(&state) {
+            self.idle.notify_all();
+        }
+        drop(state);
+        ScopedObservationCloseBarrier {
+            lifecycle: Arc::clone(self),
+        }
+    }
+
+    fn is_closing(&self) -> bool {
+        self.lock_state().close_requested
+    }
+
+    fn snapshot(&self) -> ScopedObservationCloseState {
+        close_state_snapshot(&self.lock_state())
+    }
+
+    fn wait(&self) -> ScopedObservationCloseState {
+        let mut state = self.lock_state();
+        while !close_is_complete(&state) {
+            state = self
+                .idle
+                .wait(state)
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+        }
+        close_state_snapshot(&state)
+    }
+}
+
+fn close_is_complete(state: &ScopedObservationAttachmentLifecycleState) -> bool {
+    state.close_requested
+        && state.active_operations == 0
+        && (!state.consumer_drain_opened || state.consumer_drain_closed)
+}
+
+fn close_state_snapshot(
+    state: &ScopedObservationAttachmentLifecycleState,
+) -> ScopedObservationCloseState {
+    ScopedObservationCloseState {
+        close_requested: state.close_requested,
+        active_operations: state.active_operations,
+        consumer_drain_pending: state.consumer_drain_opened && !state.consumer_drain_closed,
+        complete: close_is_complete(state),
+    }
+}
+
+/// Internal synchronous substrate for the future async `close()` facade. The
+/// barrier is attachment-owned and becomes complete only after all registered
+/// operations and the sole consumer drain acknowledge cancellation.
+#[derive(Debug, Clone)]
+pub struct ScopedObservationCloseBarrier {
+    lifecycle: Arc<ScopedObservationAttachmentLifecycle>,
+}
+
+impl ScopedObservationCloseBarrier {
+    pub fn state(&self) -> ScopedObservationCloseState {
+        self.lifecycle.snapshot()
+    }
+
+    pub fn wait(&self) -> ScopedObservationCloseState {
+        self.lifecycle.wait()
+    }
+}
+
+#[derive(Debug)]
+struct ScopedObservationOperationGuard {
+    lifecycle: Arc<ScopedObservationAttachmentLifecycle>,
+    active: bool,
+}
+
+impl Drop for ScopedObservationOperationGuard {
+    fn drop(&mut self) {
+        if self.active {
+            self.active = false;
+            self.lifecycle.finish_operation();
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct ScopedObservationYieldedEnvelope {
     pub envelope: ScopedObservationEnvelope,
@@ -1649,6 +1817,10 @@ pub struct ScopedObservationAppliedState {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum ScopedObservationDrainError {
+    #[error("scoped observation consumer drain is closed")]
+    Closed,
+    #[error("scoped observation consumer operation accounting is exhausted")]
+    OperationCapacityExhausted,
     #[error("scoped observation consumer must apply the yielded envelope before draining another")]
     ApplicationPending,
     #[error("scoped observation envelope mapping failed: {0}")]
@@ -1657,6 +1829,10 @@ pub enum ScopedObservationDrainError {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum ScopedObservationApplicationError {
+    #[error("scoped observation consumer drain is closed")]
+    Closed,
+    #[error("scoped observation consumer operation accounting is exhausted")]
+    OperationCapacityExhausted,
     #[error("scoped observation application receipt belongs to another drain")]
     ForeignReceipt,
     #[error("scoped observation application receipt does not match the pending envelope")]
@@ -1673,6 +1849,12 @@ pub enum ScopedObservationOpenDrainError {
     AlreadyOpened,
     #[error("scoped observation delivery lane could not be created: {0}")]
     Delivery(ScopedDeliveryError),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum ScopedObservationCloseError {
+    #[error("scoped consumer drain belongs to another observer attachment")]
+    ForeignDrain,
 }
 
 #[derive(Debug, Clone)]
@@ -1695,6 +1877,7 @@ struct ScopedObservationPendingApplication {
 pub struct ScopedObservationConsumerDrain {
     mapper: ScopedObservationEnvelopeMapper,
     attachment_authority: Arc<ScopedObservationAttachmentAuthority>,
+    lifecycle: Arc<ScopedObservationAttachmentLifecycle>,
     authority: Arc<ScopedObservationApplicationAuthority>,
     delivery: ScopedObservationDeliveryLane,
     delivered_through_sequence: u64,
@@ -1704,18 +1887,22 @@ pub struct ScopedObservationConsumerDrain {
     last_applied: Option<ScopedObservationApplicationReceipt>,
     bootstrap_barrier: Option<Arc<ScopedBootstrapBarrier>>,
     resync_barrier: Option<Arc<ScopedResyncBarrier>>,
+    lifecycle_registered: bool,
+    closed: bool,
 }
 
 impl ScopedObservationConsumerDrain {
     fn new(
         mapper: ScopedObservationEnvelopeMapper,
         attachment_authority: Arc<ScopedObservationAttachmentAuthority>,
+        lifecycle: Arc<ScopedObservationAttachmentLifecycle>,
         limits: ScopedObservationDeliveryLimits,
     ) -> Result<Self, ScopedDeliveryError> {
         let authority = Arc::new(ScopedObservationApplicationAuthority);
         Ok(Self {
             mapper,
             attachment_authority,
+            lifecycle,
             authority,
             delivery: ScopedObservationDeliveryLane::new(limits)?,
             delivered_through_sequence: 0,
@@ -1725,6 +1912,8 @@ impl ScopedObservationConsumerDrain {
             last_applied: None,
             bootstrap_barrier: None,
             resync_barrier: None,
+            lifecycle_registered: false,
+            closed: false,
         })
     }
 
@@ -1735,6 +1924,19 @@ impl ScopedObservationConsumerDrain {
     pub fn next(
         &mut self,
     ) -> Result<Option<ScopedObservationYieldedEnvelope>, ScopedObservationDrainError> {
+        if self.closed {
+            return Err(ScopedObservationDrainError::Closed);
+        }
+        let _operation = match self.lifecycle.start_operation() {
+            Ok(operation) => operation,
+            Err(ScopedObservationOperationStartError::Closing) => {
+                self.close();
+                return Err(ScopedObservationDrainError::Closed);
+            }
+            Err(ScopedObservationOperationStartError::CapacityExhausted) => {
+                return Err(ScopedObservationDrainError::OperationCapacityExhausted);
+            }
+        };
         if self.pending.is_some() {
             return Err(ScopedObservationDrainError::ApplicationPending);
         }
@@ -1795,6 +1997,19 @@ impl ScopedObservationConsumerDrain {
         &mut self,
         receipt: &ScopedObservationApplicationReceipt,
     ) -> Result<ScopedObservationAppliedState, ScopedObservationApplicationError> {
+        if self.closed {
+            return Err(ScopedObservationApplicationError::Closed);
+        }
+        let _operation = match self.lifecycle.start_operation() {
+            Ok(operation) => operation,
+            Err(ScopedObservationOperationStartError::Closing) => {
+                self.close();
+                return Err(ScopedObservationApplicationError::Closed);
+            }
+            Err(ScopedObservationOperationStartError::CapacityExhausted) => {
+                return Err(ScopedObservationApplicationError::OperationCapacityExhausted);
+            }
+        };
         if !Arc::ptr_eq(&self.authority, &receipt.authority) {
             return Err(ScopedObservationApplicationError::ForeignReceipt);
         }
@@ -1876,6 +2091,33 @@ impl ScopedObservationConsumerDrain {
 
     pub fn engine_resync_barrier(&self) -> Option<Arc<ScopedResyncBarrier>> {
         self.delivery.resync_barrier()
+    }
+
+    /// Cancel the sole delivery/application path, discard all envelopes that
+    /// were never applied, and acknowledge the drain side of attachment close.
+    /// Applied boundaries remain observable as historical local state, while
+    /// pending receipts become unusable.
+    pub fn close(&mut self) -> ScopedObservationAppliedState {
+        if !self.closed {
+            self.closed = true;
+            self.pending = None;
+            self.delivery.discard_for_close();
+            if self.lifecycle_registered {
+                self.lifecycle_registered = false;
+                self.lifecycle.close_consumer_drain();
+            }
+        }
+        self.state()
+    }
+
+    pub fn is_closed(&self) -> bool {
+        self.closed
+    }
+}
+
+impl Drop for ScopedObservationConsumerDrain {
+    fn drop(&mut self) {
+        self.close();
     }
 }
 
@@ -2369,6 +2611,8 @@ pub enum ScopedDeliveryError {
 pub enum ScopedBootstrapBarrierError {
     #[error("scoped bootstrap consumer drain belongs to another observer attachment")]
     ForeignDrain,
+    #[error("scoped bootstrap consumer drain is closed")]
+    Closed,
     #[error("scoped bootstrap coverage is not ready: {0}")]
     Coverage(ScopedCoverageAssemblyError),
     #[error("scoped bootstrap control could not enter delivery: {0}")]
@@ -2461,6 +2705,12 @@ impl ScopedObservationDeliveryLane {
             resync_started: None,
             resync_barrier: None,
         })
+    }
+
+    fn discard_for_close(&mut self) {
+        self.semantic.clear();
+        self.source_controls.clear();
+        self.queued_retained_native_bytes = 0;
     }
 
     /// Test-only low-level delivery seam. Production composition offers only
@@ -4411,6 +4661,8 @@ pub enum ScopedObservationAccessError {
     PassAlreadyActive,
     #[error("scoped access pass sequence is exhausted")]
     AccessPassSequenceExhausted,
+    #[error("scoped attachment operation accounting is exhausted")]
+    OperationCapacityExhausted,
     #[error("scoped append bootstrap has not reached a drainable observation")]
     BootstrapNotDrained,
     #[error("scoped append bootstrap is already complete")]
@@ -4736,6 +4988,7 @@ pub struct ScopedObservationAccessHost {
     program_id: String,
     known_objects: Arc<BTreeMap<String, ScopedKnownObjectGrant>>,
     attachment_authority: Arc<ScopedObservationAttachmentAuthority>,
+    lifecycle: Arc<ScopedObservationAttachmentLifecycle>,
     state: Arc<ScopedObservationAccessState>,
 }
 
@@ -4777,6 +5030,7 @@ impl ScopedObservationAccessHost {
             program_id: request.program_id,
             known_objects: Arc::new(known_objects),
             attachment_authority: Arc::new(ScopedObservationAttachmentAuthority),
+            lifecycle: Arc::new(ScopedObservationAttachmentLifecycle::default()),
             state: Arc::new(ScopedObservationAccessState {
                 closed: AtomicBool::new(false),
                 pass_active: AtomicBool::new(false),
@@ -4808,12 +5062,13 @@ impl ScopedObservationAccessHost {
         &self,
         limits: ScopedObservationDeliveryLimits,
     ) -> Result<ScopedObservationConsumerDrain, ScopedObservationOpenDrainError> {
-        if self.state.closed.load(Ordering::Acquire) {
+        if self.state.closed.load(Ordering::Acquire) || self.lifecycle.is_closing() {
             return Err(ScopedObservationOpenDrainError::Closed);
         }
-        let drain = ScopedObservationConsumerDrain::new(
+        let mut drain = ScopedObservationConsumerDrain::new(
             ScopedObservationEnvelopeMapper::new(self.root_identity.clone()),
             Arc::clone(&self.attachment_authority),
+            Arc::clone(&self.lifecycle),
             limits,
         )
         .map_err(ScopedObservationOpenDrainError::Delivery)?;
@@ -4821,7 +5076,11 @@ impl ScopedObservationAccessHost {
             .consumer_drain_opened
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .map_err(|_| ScopedObservationOpenDrainError::AlreadyOpened)?;
-        if self.state.closed.load(Ordering::Acquire) {
+        if self.lifecycle.open_consumer_drain().is_err() {
+            return Err(ScopedObservationOpenDrainError::Closed);
+        }
+        drain.lifecycle_registered = true;
+        if self.state.closed.load(Ordering::Acquire) || self.lifecycle.is_closing() {
             return Err(ScopedObservationOpenDrainError::Closed);
         }
         Ok(drain)
@@ -4831,11 +5090,25 @@ impl ScopedObservationAccessHost {
         Arc::ptr_eq(&self.attachment_authority, &drain.attachment_authority)
     }
 
+    fn start_attachment_operation(
+        &self,
+    ) -> Result<ScopedObservationOperationGuard, ScopedObservationAccessError> {
+        match self.lifecycle.start_operation() {
+            Ok(operation) => Ok(operation),
+            Err(ScopedObservationOperationStartError::Closing) => {
+                Err(ScopedObservationAccessError::Closed)
+            }
+            Err(ScopedObservationOperationStartError::CapacityExhausted) => {
+                Err(ScopedObservationAccessError::OperationCapacityExhausted)
+            }
+        }
+    }
+
     /// Admit one logical poll request. Every request receives its own ticket,
     /// while all tickets admitted before the next pass reservation share that
     /// pass and offered watermark.
     pub fn request_poll(&self) -> Result<ScopedObservationPollTicket, ScopedObservationPollError> {
-        if self.state.closed.load(Ordering::Acquire) {
+        if self.state.closed.load(Ordering::Acquire) || self.lifecycle.is_closing() {
             return Err(ScopedObservationPollError::Closed);
         }
         self.state.poll.request()
@@ -4893,6 +5166,9 @@ impl ScopedObservationAccessHost {
         if !self.owns_consumer_drain(drain) {
             return Err(ScopedObservationPollError::ForeignDrain);
         }
+        if drain.is_closed() || self.lifecycle.is_closing() {
+            return Err(ScopedObservationPollError::Closed);
+        }
         let report = lease.access_pass().report();
         let pass_id = lease.access_pass().pass_id();
         if self.known_objects.keys().any(|relation_id| {
@@ -4946,7 +5222,10 @@ impl ScopedObservationAccessHost {
         if !self.owns_consumer_drain(drain) {
             return Err(ScopedObservationPollError::ForeignDrain);
         }
-        if self.state.closed.load(Ordering::Acquire) {
+        if drain.is_closed()
+            || self.state.closed.load(Ordering::Acquire)
+            || self.lifecycle.is_closing()
+        {
             return Err(ScopedObservationPollError::Closed);
         }
         Ok(drain.engine_bootstrap_barrier())
@@ -5048,6 +5327,9 @@ impl ScopedObservationAccessHost {
     ) -> Result<Arc<ScopedBootstrapBarrier>, ScopedBootstrapBarrierError> {
         if !self.owns_consumer_drain(drain) {
             return Err(ScopedBootstrapBarrierError::ForeignDrain);
+        }
+        if drain.is_closed() || self.lifecycle.is_closing() {
+            return Err(ScopedBootstrapBarrierError::Closed);
         }
         self.offer_bootstrap_complete(
             admission,
@@ -5151,6 +5433,9 @@ impl ScopedObservationAccessHost {
         drain: &ScopedObservationConsumerDrain,
     ) -> Result<ScopedObservationEpochState, ScopedReplacementStageError> {
         if !self.owns_consumer_drain(drain) {
+            return Err(ScopedReplacementStageError::InvalidSourceState);
+        }
+        if drain.is_closed() || self.lifecycle.is_closing() {
             return Err(ScopedReplacementStageError::InvalidSourceState);
         }
         self.bind_bootstrap_epoch_state(
@@ -5423,6 +5708,7 @@ impl ScopedObservationAccessHost {
         if self.state.closed.load(Ordering::Acquire) {
             return Err(ScopedObservationAccessError::Closed);
         }
+        let _operation = self.start_attachment_operation()?;
         if !source_belongs_to_root(&object.source, &self.root_identity) {
             return Err(ScopedObservationAccessError::InvalidRootIdentity);
         }
@@ -5445,6 +5731,13 @@ impl ScopedObservationAccessHost {
             self.state.pass_active.store(false, Ordering::Release);
             return Err(ScopedObservationAccessError::Closed);
         }
+        let operation = match self.start_attachment_operation() {
+            Ok(operation) => operation,
+            Err(error) => {
+                self.state.pass_active.store(false, Ordering::Release);
+                return Err(error);
+            }
+        };
         let plan = match self
             .authorization
             .select_scope_program(&self.program_id)
@@ -5475,15 +5768,35 @@ impl ScopedObservationAccessHost {
             known_objects: Arc::clone(&self.known_objects),
             root_identity: self.root_identity.clone(),
             state: Arc::clone(&self.state),
+            _operation: operation,
             released: false,
         })
     }
 
-    /// Idempotently prevent new passes. A pass read that observes closure after
-    /// its operating-system call is accounted conservatively before returning.
-    pub fn close(&self) {
+    /// Idempotently request attachment cancellation. The returned barrier is
+    /// complete only after all registered work and the opened consumer drain
+    /// have stopped; dropping the host initiates but deliberately does not
+    /// block on that acknowledgement.
+    pub fn close(&self) -> ScopedObservationCloseBarrier {
+        let barrier = self.lifecycle.begin_close();
         self.state.closed.store(true, Ordering::Release);
         self.state.poll.close();
+        barrier
+    }
+
+    /// Close the exact attachment-owned drain and return the shared completion
+    /// barrier. The future public observer facade owns both values and uses
+    /// this path before awaiting close.
+    pub fn close_with_consumer(
+        &self,
+        drain: &mut ScopedObservationConsumerDrain,
+    ) -> Result<ScopedObservationCloseBarrier, ScopedObservationCloseError> {
+        if !self.owns_consumer_drain(drain) {
+            return Err(ScopedObservationCloseError::ForeignDrain);
+        }
+        let barrier = self.close();
+        drain.close();
+        Ok(barrier)
     }
 
     pub fn is_closed(&self) -> bool {
@@ -5493,7 +5806,7 @@ impl ScopedObservationAccessHost {
 
 impl Drop for ScopedObservationAccessHost {
     fn drop(&mut self) {
-        self.close();
+        let _ = self.close();
     }
 }
 
@@ -5505,6 +5818,7 @@ pub struct ScopedObservationAccessPass {
     known_objects: Arc<BTreeMap<String, ScopedKnownObjectGrant>>,
     root_identity: ScopedObservationRootIdentity,
     state: Arc<ScopedObservationAccessState>,
+    _operation: ScopedObservationOperationGuard,
     released: bool,
 }
 
@@ -7184,16 +7498,21 @@ mod projection_tests {
         max_semantic_events: usize,
         max_source_control_items: usize,
     ) -> ScopedObservationConsumerDrain {
-        ScopedObservationConsumerDrain::new(
+        let lifecycle = Arc::new(ScopedObservationAttachmentLifecycle::default());
+        lifecycle.open_consumer_drain().unwrap();
+        let mut drain = ScopedObservationConsumerDrain::new(
             ScopedObservationEnvelopeMapper::new(root),
             Arc::new(ScopedObservationAttachmentAuthority),
+            lifecycle,
             ScopedObservationDeliveryLimits {
                 max_semantic_events,
                 max_retained_native_bytes: 0,
                 max_source_control_items,
             },
         )
-        .unwrap()
+        .unwrap();
+        drain.lifecycle_registered = true;
+        drain
     }
 
     #[test]
@@ -7868,6 +8187,65 @@ mod projection_tests {
             ))
         ));
         assert_eq!(drain.delivery_lane().state(), queued);
+    }
+
+    #[test]
+    fn scoped_consumer_close_cancels_pending_receipt_and_queued_delivery() {
+        let root = root_identity();
+        let source = source_identity();
+        let created = ScopedAppendPresenceChange::Created { generation: 1 };
+        let deleted = ScopedAppendPresenceChange::Deleted { generation: 1 };
+        let mut drain = consumer_drain(root, 1, 2);
+        drain
+            .delivery_lane_mut()
+            .offer(vec![
+                ScopedProjectedObservation::SourcePresence {
+                    object_token: OBJECT_TOKEN,
+                    source: source.clone(),
+                    lane_ordinal: 1,
+                    observed_at: 10,
+                    phase: ScopedAppendDeliveryPhase::Live,
+                    event_id: source_presence_event_id(&source, created),
+                    change: created,
+                },
+                ScopedProjectedObservation::SourcePresence {
+                    object_token: OBJECT_TOKEN,
+                    source: source.clone(),
+                    lane_ordinal: 2,
+                    observed_at: 20,
+                    phase: ScopedAppendDeliveryPhase::Live,
+                    event_id: source_presence_event_id(&source, deleted),
+                    change: deleted,
+                },
+            ])
+            .unwrap();
+        let yielded = drain.next().unwrap().unwrap();
+        let receipt = yielded.application_receipt().clone();
+        assert_eq!(drain.state().pending_sequence, Some(1));
+        assert_eq!(drain.delivery_lane().queued_source_control_items(), 1);
+
+        let barrier = drain.lifecycle.begin_close();
+        let closing = barrier.state();
+        assert!(closing.close_requested);
+        assert!(closing.consumer_drain_pending);
+        assert!(!closing.complete);
+        assert!(matches!(
+            drain.next(),
+            Err(ScopedObservationDrainError::Closed)
+        ));
+        let closed_state = drain.state();
+        assert!(drain.is_closed());
+        assert_eq!(closed_state.pending_sequence, None);
+        assert!(drain.delivery_lane().is_empty());
+        assert_eq!(
+            drain.acknowledge_applied(&receipt),
+            Err(ScopedObservationApplicationError::Closed)
+        );
+        assert!(matches!(
+            drain.next(),
+            Err(ScopedObservationDrainError::Closed)
+        ));
+        assert!(barrier.wait().complete);
     }
 
     #[test]
