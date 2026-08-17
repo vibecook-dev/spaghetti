@@ -938,10 +938,12 @@ Current landing status (2026-08-16):
   and decoder state. Recreation admits `source.created`, then `source.reset`,
   then corrected data. The lane ordinal is internal ordering, not public
   `observer_sequence` or semantic identity. Its production drain projects the
-  front frame without transferring ownership first: semantic validation or
-  capacity failure leaves control/data order and byte/event accounting intact
-  for retry, while only an accepted projection releases the admitted frame.
-  Raw popping is compiled for conformance tests only;
+  front frame into a side-effect-free plan: semantic validation or delivery
+  capacity failure restores the exact control/data frame and leaves reducer
+  state, byte/event accounting, and offer sequencing intact for retry. Only an
+  all-or-nothing delivery offer commits the prepared reducer mutation and
+  releases the admitted frame. Raw popping and projection-only consumption are
+  compiled for conformance tests only;
 - the scoped decoder binding carries the same topology-neutral semantic context
   as durable decode; canonical fixture emissions replay to equal
   `FactRevisionId`/`SemanticRevisionRef` values even when numeric catalog IDs,
@@ -971,7 +973,11 @@ Current landing status (2026-08-16):
   deterministic total offer order. Projected batches enter it all-or-nothing,
   semantic saturation does not consume source-control capacity, and a reset
   offered with its usage retractions is drained reset-first. Its internal offer
-  ordinal is sequencing input only, never semantic identity;
+  ordinal is sequencing input only, never semantic identity. The integrated
+  admission-to-projection-to-delivery transaction proves saturation retry
+  without reducer or ordinal drift, permits an exact-repeat empty batch to
+  retire while delivery is full, and keeps reset plus all retractions
+  indivisible;
 - one pass is active at a time, a later pass receives fresh bounds, close is
   idempotent, and the frozen access report excludes paths, identity values, and
   content; and
@@ -985,11 +991,11 @@ coverage-complete durable query exposure, the complete root/actor/source
 envelope mapper, the public ordered multiplexer and poll/readiness barriers,
 coverage, overflow/resync epochs, artifact mediation, cancellation waiting,
 the trusted native version-probe driver, and the complete public request are
-not yet implemented. Projection acceptance is not yet the public `offered`
-boundary: projection mutation, admitted-frame release, and projected-delivery
-admission still need one transaction before its watermark can advance. The
-usage-v2 sink and delivery lane remain crate-private until those
-envelope/lifecycle contracts and the negotiated portable surface exist.
+not yet implemented. The internal offered boundary is now transactional, but
+it cannot become a public `offered` watermark until the envelope mapper,
+observer sequence, and epoch lifecycle are defined. The usage-v2 sink and
+delivery lane remain crate-private until those envelope/lifecycle contracts
+and the negotiated portable surface exist.
 
 ### D2. Claude scope composition
 
@@ -1031,7 +1037,13 @@ observation-time-independent identity, empty-state removal, and equal
 bootstrap/correction semantic digests and event IDs at equal state. The public
 control multiplexer, epoch state machine, sticky overflow/resync controls,
 coverage-complete family manifest, atomic staged swap, and multi-observer
-isolation remain unimplemented; therefore the D3 and X0 gates remain open.
+isolation remain unimplemented. Internally, reducer mutation, admitted-frame
+release, and bounded delivery admission now share one retry-safe offered
+transaction: exact projected capacity is checked before mutation, queue
+pressure changes no reducer or ordinal state, and reset/control plus semantic
+retractions enter delivery as one ordered batch. Therefore the D3 and X0 gates
+remain open for the still-missing public lifecycle rather than this internal
+atomicity seam.
 
 ### D4. SDK and Chopsticks migration
 

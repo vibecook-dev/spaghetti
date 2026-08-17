@@ -273,6 +273,15 @@ struct QueuedControlFrame {
     kind: QueuedControlKind,
 }
 
+/// Temporary ownership of exactly one admitted frame. Removing a frame from
+/// its deque does not release admission accounting; the frame can therefore
+/// be restored byte-for-byte when projection or delivery preflight fails.
+struct ScopedTakenObservationFrame {
+    frame: ScopedQueuedObservationFrame,
+    data_events: u64,
+    retained_native_bytes: u64,
+}
+
 /// Two bounded internal capacity domains multiplexed by one admission ordinal.
 /// The ordinal is not an RFC 012D `observer_sequence`; public sequencing begins
 /// only after canonical semantic projection is available.
@@ -447,104 +456,159 @@ impl ScopedObservationAdmissionLane {
     }
 
     /// Test-only low-level ownership transfer for admission/order conformance.
-    /// Production composition must use `project_next`, which keeps an admitted
-    /// frame queued when semantic validation fails.
+    /// Production composition must use `offer_next`, which keeps admission,
+    /// projection, and bounded delivery in one retry-safe transaction.
     #[cfg(test)]
     pub fn pop_next(&mut self) -> Option<ScopedQueuedObservationFrame> {
-        let take_control = self.next_is_control()?;
-        if take_control {
-            let control = self.controls.pop_front().expect("control front exists");
-            return Some(queued_control_observation(control));
-        }
-        let decoded = self.decoded.pop_front().expect("decoded front exists");
-        self.queued_data_events = self
-            .queued_data_events
-            .checked_sub(decoded.data_events)
-            .expect("queued decoded event accounting cannot underflow");
-        self.queued_retained_native_bytes = self
-            .queued_retained_native_bytes
-            .checked_sub(decoded.retained_native_bytes)
-            .expect("queued retained-native accounting cannot underflow");
-        Some(ScopedQueuedObservationFrame::Decoded {
-            object_token: decoded.object_token,
-            lane_ordinal: decoded.lane_ordinal,
-            phase: decoded.phase,
-            item: decoded.item,
-        })
+        let taken = self.take_next_frame()?;
+        Some(self.commit_taken_frame(taken))
     }
 
-    /// Project exactly one admitted frame while retaining ownership until the
-    /// common semantic reducer accepts it. A projection error leaves queue
-    /// order, capacity accounting, and the already-committed source cursor's
-    /// retry evidence unchanged; no frame can disappear between admission and
-    /// semantic reduction.
-    ///
-    /// Successful projection transfers the resulting semantic/control values
-    /// to the caller and releases this lane's decoded-frame accounting. The
-    /// future public multiplexer must still offer those returned values under
-    /// its own bounded delivery transaction before advancing an offered
-    /// watermark.
+    /// Test-only projection seam. Production must not release admission
+    /// accounting before the exact projected batch has entered delivery.
+    #[cfg(test)]
     pub fn project_next(
         &mut self,
         projection: &mut ScopedObservationProjectionSink,
     ) -> Result<Option<Vec<ScopedProjectedObservation>>, ScopedProjectionError> {
-        let Some(take_control) = self.next_is_control() else {
+        let Some(taken) = self.take_next_frame() else {
             return Ok(None);
         };
+        let plan = match projection.prepare(&taken.frame) {
+            Ok(plan) => plan,
+            Err(error) => {
+                self.restore_taken_frame(taken);
+                return Err(error);
+            }
+        };
+        let ScopedProjectionPlan {
+            projected,
+            mutation,
+        } = plan;
+        projection.commit(mutation);
+        self.commit_taken_frame(taken);
+        Ok(Some(projected))
+    }
+
+    /// Atomically advance one admitted frame through semantic projection and
+    /// bounded delivery. Projection first prepares an exact batch without
+    /// mutating reducer state. Delivery then performs its all-or-nothing
+    /// capacity check and offer. Only after that succeeds do the reducer
+    /// mutation and admission-accounting release commit synchronously.
+    ///
+    /// Either error leaves the frame at the head of its original queue, keeps
+    /// reducer state unchanged, and advances no delivery offer ordinal. An
+    /// exact semantic repeat prepares an empty batch, so it can retire even
+    /// while the semantic delivery queue is full.
+    pub fn offer_next(
+        &mut self,
+        projection: &mut ScopedObservationProjectionSink,
+        delivery: &mut ScopedObservationDeliveryLane,
+    ) -> Result<Option<ScopedObservationOfferReceipt>, ScopedProjectionDeliveryError> {
+        let Some(taken) = self.take_next_frame() else {
+            return Ok(None);
+        };
+        let plan = match projection.prepare(&taken.frame) {
+            Ok(plan) => plan,
+            Err(error) => {
+                self.restore_taken_frame(taken);
+                return Err(ScopedProjectionDeliveryError::Projection(error));
+            }
+        };
+        let ScopedProjectionPlan {
+            projected,
+            mutation,
+        } = plan;
+        let receipt = match delivery.offer_projected(projected) {
+            Ok(receipt) => receipt,
+            Err(failure) => {
+                self.restore_taken_frame(taken);
+                return Err(ScopedProjectionDeliveryError::Delivery(failure.error));
+            }
+        };
+        projection.commit(mutation);
+        self.commit_taken_frame(taken);
+        Ok(Some(receipt))
+    }
+
+    fn take_next_frame(&mut self) -> Option<ScopedTakenObservationFrame> {
+        let take_control = self.next_is_control()?;
         if take_control {
             let control = self.controls.pop_front().expect("control front exists");
-            let frame = queued_control_observation(control);
-            return match projection.project(&frame) {
-                Ok(projected) => Ok(Some(projected)),
-                Err(error) => {
-                    self.controls.push_front(control);
-                    Err(error)
-                }
-            };
+            return Some(ScopedTakenObservationFrame {
+                frame: queued_control_observation(control),
+                data_events: 0,
+                retained_native_bytes: 0,
+            });
         }
-
         let decoded = self.decoded.pop_front().expect("decoded front exists");
-        let QueuedDecodedFrame {
-            object_token,
-            lane_ordinal,
-            phase,
-            item,
-            data_events,
-            retained_native_bytes,
-        } = decoded;
-        let frame = ScopedQueuedObservationFrame::Decoded {
-            object_token,
-            lane_ordinal,
-            phase,
-            item,
-        };
-        match projection.project(&frame) {
-            Ok(projected) => {
-                self.queued_data_events = self
-                    .queued_data_events
-                    .checked_sub(data_events)
-                    .expect("queued decoded event accounting cannot underflow");
-                self.queued_retained_native_bytes = self
-                    .queued_retained_native_bytes
-                    .checked_sub(retained_native_bytes)
-                    .expect("queued retained-native accounting cannot underflow");
-                Ok(Some(projected))
-            }
-            Err(error) => {
-                let ScopedQueuedObservationFrame::Decoded { item, .. } = frame else {
-                    unreachable!("the projected frame was constructed as decoded")
-                };
-                self.decoded.push_front(QueuedDecodedFrame {
-                    object_token,
-                    lane_ordinal,
-                    phase,
-                    item,
-                    data_events,
-                    retained_native_bytes,
-                });
-                Err(error)
-            }
+        Some(ScopedTakenObservationFrame {
+            frame: ScopedQueuedObservationFrame::Decoded {
+                object_token: decoded.object_token,
+                lane_ordinal: decoded.lane_ordinal,
+                phase: decoded.phase,
+                item: decoded.item,
+            },
+            data_events: decoded.data_events,
+            retained_native_bytes: decoded.retained_native_bytes,
+        })
+    }
+
+    fn restore_taken_frame(&mut self, taken: ScopedTakenObservationFrame) {
+        match taken.frame {
+            ScopedQueuedObservationFrame::Presence {
+                object_token,
+                lane_ordinal,
+                phase,
+                change,
+            } => self.controls.push_front(QueuedControlFrame {
+                object_token,
+                lane_ordinal,
+                phase,
+                kind: QueuedControlKind::Presence(change),
+            }),
+            ScopedQueuedObservationFrame::Reset {
+                object_token,
+                lane_ordinal,
+                phase,
+                reset,
+            } => self.controls.push_front(QueuedControlFrame {
+                object_token,
+                lane_ordinal,
+                phase,
+                kind: QueuedControlKind::Reset(reset),
+            }),
+            ScopedQueuedObservationFrame::Decoded {
+                object_token,
+                lane_ordinal,
+                phase,
+                item,
+            } => self.decoded.push_front(QueuedDecodedFrame {
+                object_token,
+                lane_ordinal,
+                phase,
+                item,
+                data_events: taken.data_events,
+                retained_native_bytes: taken.retained_native_bytes,
+            }),
         }
+    }
+
+    fn commit_taken_frame(
+        &mut self,
+        taken: ScopedTakenObservationFrame,
+    ) -> ScopedQueuedObservationFrame {
+        if matches!(&taken.frame, ScopedQueuedObservationFrame::Decoded { .. }) {
+            self.queued_data_events = self
+                .queued_data_events
+                .checked_sub(taken.data_events)
+                .expect("queued decoded event accounting cannot underflow");
+            self.queued_retained_native_bytes = self
+                .queued_retained_native_bytes
+                .checked_sub(taken.retained_native_bytes)
+                .expect("queued retained-native accounting cannot underflow");
+        }
+        taken.frame
     }
 
     pub fn queued_data_events(&self) -> u64 {
@@ -746,6 +810,14 @@ pub enum ScopedDeliveryError {
     OfferOrdinalExhausted,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum ScopedProjectionDeliveryError {
+    #[error("scoped semantic projection failed: {0}")]
+    Projection(ScopedProjectionError),
+    #[error("scoped projected delivery failed: {0}")]
+    Delivery(ScopedDeliveryError),
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub struct ScopedDeliveryOfferFailure {
     pub error: ScopedDeliveryError,
@@ -790,7 +862,18 @@ impl ScopedObservationDeliveryLane {
         })
     }
 
+    /// Test-only low-level delivery seam. Production composition offers only
+    /// through `ScopedObservationAdmissionLane::offer_next` so reducer and
+    /// admission state cannot advance independently of this queue.
+    #[cfg(test)]
     pub fn offer(
+        &mut self,
+        projected: Vec<ScopedProjectedObservation>,
+    ) -> Result<ScopedObservationOfferReceipt, ScopedDeliveryOfferFailure> {
+        self.offer_projected(projected)
+    }
+
+    fn offer_projected(
         &mut self,
         projected: Vec<ScopedProjectedObservation>,
     ) -> Result<ScopedObservationOfferReceipt, ScopedDeliveryOfferFailure> {
@@ -1015,6 +1098,17 @@ struct ScopedUsageV2ProjectionState {
     revision: UsageRevisionV2Fact,
 }
 
+struct ScopedProjectionPlan {
+    projected: Vec<ScopedProjectedObservation>,
+    mutation: ScopedProjectionMutation,
+}
+
+enum ScopedProjectionMutation {
+    None,
+    UpsertUsageV2(BTreeMap<CanonicalFactId, ScopedUsageV2ProjectionState>),
+    RetractUsageV2(Vec<CanonicalFactId>),
+}
+
 /// Database-free common reducer for typed scoped-observation facts.
 ///
 /// Usage-v2 is the first family wired through this sink. Its state is bounded
@@ -1037,29 +1131,55 @@ impl ScopedObservationProjectionSink {
         })
     }
 
+    #[cfg(test)]
     pub fn project(
         &mut self,
         frame: &ScopedQueuedObservationFrame,
     ) -> Result<Vec<ScopedProjectedObservation>, ScopedProjectionError> {
+        let ScopedProjectionPlan {
+            projected,
+            mutation,
+        } = self.prepare(frame)?;
+        self.commit(mutation);
+        Ok(projected)
+    }
+
+    fn prepare(
+        &self,
+        frame: &ScopedQueuedObservationFrame,
+    ) -> Result<ScopedProjectionPlan, ScopedProjectionError> {
         match frame {
             ScopedQueuedObservationFrame::Presence {
                 object_token,
                 lane_ordinal,
                 phase,
                 change,
-            } => self.project_presence(*object_token, *lane_ordinal, *phase, *change),
+            } => self.prepare_presence(*object_token, *lane_ordinal, *phase, *change),
             ScopedQueuedObservationFrame::Reset {
                 object_token,
                 lane_ordinal,
                 phase,
                 reset,
-            } => self.project_reset(*object_token, *lane_ordinal, *phase, *reset),
+            } => self.prepare_reset(*object_token, *lane_ordinal, *phase, *reset),
             ScopedQueuedObservationFrame::Decoded {
                 object_token,
                 lane_ordinal,
                 phase,
                 item,
-            } => self.project_decoded(*object_token, *lane_ordinal, *phase, item),
+            } => self.prepare_decoded(*object_token, *lane_ordinal, *phase, item),
+        }
+    }
+
+    fn commit(&mut self, mutation: ScopedProjectionMutation) {
+        match mutation {
+            ScopedProjectionMutation::None => {}
+            ScopedProjectionMutation::UpsertUsageV2(staged) => self.usage_v2.extend(staged),
+            ScopedProjectionMutation::RetractUsageV2(fact_ids) => {
+                for fact_id in fact_ids {
+                    let removed = self.usage_v2.remove(&fact_id);
+                    debug_assert!(removed.is_some(), "prepared usage-v2 retraction must exist");
+                }
+            }
         }
     }
 
@@ -1107,14 +1227,14 @@ impl ScopedObservationProjectionSink {
         })
     }
 
-    fn project_reset(
-        &mut self,
+    fn prepare_reset(
+        &self,
         object_token: u64,
         lane_ordinal: u64,
         phase: ScopedAppendDeliveryPhase,
         reset: ScopedAppendReset,
-    ) -> Result<Vec<ScopedProjectedObservation>, ScopedProjectionError> {
-        let retracted = self.retract_usage_v2(
+    ) -> Result<ScopedProjectionPlan, ScopedProjectionError> {
+        let (retracted, fact_ids) = self.prepare_usage_v2_retractions(
             object_token,
             reset.old_generation,
             lane_ordinal,
@@ -1130,17 +1250,20 @@ impl ScopedObservationProjectionSink {
             reset,
         });
         projected.extend(retracted);
-        Ok(projected)
+        Ok(ScopedProjectionPlan {
+            projected,
+            mutation: ScopedProjectionMutation::RetractUsageV2(fact_ids),
+        })
     }
 
-    fn project_presence(
-        &mut self,
+    fn prepare_presence(
+        &self,
         object_token: u64,
         lane_ordinal: u64,
         phase: ScopedAppendDeliveryPhase,
         change: ScopedAppendPresenceChange,
-    ) -> Result<Vec<ScopedProjectedObservation>, ScopedProjectionError> {
-        let retracted = match change {
+    ) -> Result<ScopedProjectionPlan, ScopedProjectionError> {
+        let (retracted, fact_ids) = match change {
             ScopedAppendPresenceChange::Created { .. } => {
                 if self
                     .usage_v2
@@ -1149,16 +1272,17 @@ impl ScopedObservationProjectionSink {
                 {
                     return Err(ScopedProjectionError::InvalidPresenceState);
                 }
-                Vec::new()
+                (Vec::new(), Vec::new())
             }
-            ScopedAppendPresenceChange::Deleted { generation } => self.retract_usage_v2(
-                object_token,
-                generation,
-                lane_ordinal,
-                phase,
-                ScopedUsageV2RetractionCause::SourceDeleted { generation },
-                ScopedProjectionError::InvalidPresenceState,
-            )?,
+            ScopedAppendPresenceChange::Deleted { generation } => self
+                .prepare_usage_v2_retractions(
+                    object_token,
+                    generation,
+                    lane_ordinal,
+                    phase,
+                    ScopedUsageV2RetractionCause::SourceDeleted { generation },
+                    ScopedProjectionError::InvalidPresenceState,
+                )?,
         };
         let mut projected = Vec::with_capacity(retracted.len().saturating_add(1));
         projected.push(ScopedProjectedObservation::SourcePresence {
@@ -1168,18 +1292,26 @@ impl ScopedObservationProjectionSink {
             change,
         });
         projected.extend(retracted);
-        Ok(projected)
+        Ok(ScopedProjectionPlan {
+            projected,
+            mutation: if fact_ids.is_empty() {
+                ScopedProjectionMutation::None
+            } else {
+                ScopedProjectionMutation::RetractUsageV2(fact_ids)
+            },
+        })
     }
 
-    fn retract_usage_v2(
-        &mut self,
+    fn prepare_usage_v2_retractions(
+        &self,
         object_token: u64,
         generation: u64,
         lane_ordinal: u64,
         phase: ScopedAppendDeliveryPhase,
         cause: ScopedUsageV2RetractionCause,
         mismatch_error: ScopedProjectionError,
-    ) -> Result<Vec<ScopedProjectedObservation>, ScopedProjectionError> {
+    ) -> Result<(Vec<ScopedProjectedObservation>, Vec<CanonicalFactId>), ScopedProjectionError>
+    {
         if self
             .usage_v2
             .values()
@@ -1187,7 +1319,7 @@ impl ScopedObservationProjectionSink {
         {
             return Err(mismatch_error);
         }
-        let retracted = self
+        let fact_ids = self
             .usage_v2
             .iter()
             .filter_map(|(fact_id, state)| {
@@ -1195,11 +1327,11 @@ impl ScopedObservationProjectionSink {
                     .then_some(*fact_id)
             })
             .collect::<Vec<_>>();
-        let mut projected = Vec::with_capacity(retracted.len());
-        for fact_id in retracted {
+        let mut projected = Vec::with_capacity(fact_ids.len());
+        for fact_id in &fact_ids {
             let state = self
                 .usage_v2
-                .remove(&fact_id)
+                .get(fact_id)
                 .expect("retraction keys came from the same reducer map");
             projected.push(ScopedProjectedObservation::UsageV2 {
                 lane_ordinal,
@@ -1213,27 +1345,30 @@ impl ScopedObservationProjectionSink {
                     fact_id: state.semantic.fact_id,
                     operation: ScopedUsageV2Operation::Retract,
                     phase,
-                    source: state.source,
+                    source: state.source.clone(),
                     retraction: Some(cause),
-                    revision: state.revision,
+                    revision: state.revision.clone(),
                 }),
             });
         }
-        Ok(projected)
+        Ok((projected, fact_ids))
     }
 
-    fn project_decoded(
-        &mut self,
+    fn prepare_decoded(
+        &self,
         object_token: u64,
         lane_ordinal: u64,
         phase: ScopedAppendDeliveryPhase,
         item: &ScopedDecodedAppendItem,
-    ) -> Result<Vec<ScopedProjectedObservation>, ScopedProjectionError> {
+    ) -> Result<ScopedProjectionPlan, ScopedProjectionError> {
         let ScopedDecodedAppendItem::Record {
             evidence, batch, ..
         } = item
         else {
-            return Ok(Vec::new());
+            return Ok(ScopedProjectionPlan {
+                projected: Vec::new(),
+                mutation: ScopedProjectionMutation::None,
+            });
         };
 
         let mut staged = BTreeMap::<CanonicalFactId, ScopedUsageV2ProjectionState>::new();
@@ -1293,8 +1428,14 @@ impl ScopedObservationProjectionSink {
         {
             return Err(ScopedProjectionError::UsageV2CapacityFull);
         }
-        self.usage_v2.extend(staged);
-        Ok(projected)
+        Ok(ScopedProjectionPlan {
+            projected,
+            mutation: if staged.is_empty() {
+                ScopedProjectionMutation::None
+            } else {
+                ScopedProjectionMutation::UpsertUsageV2(staged)
+            },
+        })
     }
 }
 
@@ -2722,6 +2863,201 @@ mod projection_tests {
         let failure = delivery.offer(projected).unwrap_err();
         assert_eq!(failure.error, ScopedDeliveryError::OfferOrdinalExhausted);
         assert_eq!(failure.projected.len(), 1);
+        assert!(delivery.is_empty());
+    }
+
+    #[test]
+    fn scoped_offer_transaction_retries_without_projection_or_ordinal_drift() {
+        let mut projection = sink(8);
+        let mut delivery = delivery_lane(1, 1);
+
+        let first_record = record(1, 0, 10);
+        let first_frame = decoded_frame(
+            1,
+            ScopedAppendDeliveryPhase::Bootstrap,
+            &first_record,
+            usage_batch(&first_record, "response-1", 10, None),
+        );
+        let mut first_lane = admission_lane_with_decoded_frame(first_frame);
+        let first_receipt = first_lane
+            .offer_next(&mut projection, &mut delivery)
+            .unwrap()
+            .unwrap();
+        assert_eq!(first_receipt.first_offer_ordinal, Some(1));
+        assert!(first_lane.is_empty());
+        assert_eq!(projection.usage_v2_entity_count(), 1);
+        assert_eq!(delivery.queued_semantic_events(), 1);
+
+        let second_record = record(1, 10, 20);
+        let second_frame = decoded_frame(
+            2,
+            ScopedAppendDeliveryPhase::Live,
+            &second_record,
+            usage_batch(&second_record, "response-2", 20, None),
+        );
+        let mut second_lane = admission_lane_with_decoded_frame(second_frame);
+        let queued_events = second_lane.queued_data_events();
+        let queued_bytes = second_lane.queued_retained_native_bytes();
+
+        assert_eq!(
+            second_lane.offer_next(&mut projection, &mut delivery),
+            Err(ScopedProjectionDeliveryError::Delivery(
+                ScopedDeliveryError::SemanticQueueFull
+            ))
+        );
+        assert_eq!(second_lane.queued_data_events(), queued_events);
+        assert_eq!(second_lane.queued_retained_native_bytes(), queued_bytes);
+        assert!(!second_lane.is_empty());
+        assert_eq!(projection.usage_v2_entity_count(), 1);
+        assert_eq!(delivery.queued_semantic_events(), 1);
+
+        let first = delivery.pop_next().unwrap();
+        assert_eq!(first.offer_ordinal, 1);
+        let retry_receipt = second_lane
+            .offer_next(&mut projection, &mut delivery)
+            .unwrap()
+            .unwrap();
+        assert_eq!(retry_receipt.first_offer_ordinal, Some(2));
+        assert_eq!(retry_receipt.through_offer_ordinal, Some(2));
+        assert_eq!(projection.usage_v2_entity_count(), 2);
+        assert!(second_lane.is_empty());
+        assert_eq!(second_lane.queued_data_events(), 0);
+        assert_eq!(second_lane.queued_retained_native_bytes(), 0);
+
+        let second = delivery.pop_next().unwrap();
+        assert_eq!(second.offer_ordinal, 2);
+        assert!(matches!(
+            second.value,
+            ScopedProjectedObservation::UsageV2 { event, .. }
+                if event.revision.response_key == b"response-2"
+        ));
+        assert!(delivery.is_empty());
+    }
+
+    #[test]
+    fn scoped_offer_transaction_retires_exact_repeat_while_delivery_is_full() {
+        let mut projection = sink(8);
+        let mut delivery = delivery_lane(1, 1);
+
+        let first_record = record(1, 0, 10);
+        let first_frame = decoded_frame(
+            1,
+            ScopedAppendDeliveryPhase::Bootstrap,
+            &first_record,
+            usage_batch(&first_record, "response-1", 10, None),
+        );
+        let mut first_lane = admission_lane_with_decoded_frame(first_frame);
+        first_lane
+            .offer_next(&mut projection, &mut delivery)
+            .unwrap()
+            .unwrap();
+        assert_eq!(delivery.queued_semantic_events(), 1);
+
+        let repeat_record = record(1, 10, 20);
+        let repeat_frame = decoded_frame(
+            2,
+            ScopedAppendDeliveryPhase::Live,
+            &repeat_record,
+            usage_batch(&repeat_record, "response-1", 10, None),
+        );
+        let mut repeat_lane = admission_lane_with_decoded_frame(repeat_frame);
+        let receipt = repeat_lane
+            .offer_next(&mut projection, &mut delivery)
+            .unwrap()
+            .unwrap();
+        assert_eq!(receipt.first_offer_ordinal, None);
+        assert_eq!(receipt.through_offer_ordinal, None);
+        assert_eq!(receipt.semantic_events, 0);
+        assert_eq!(projection.usage_v2_entity_count(), 1);
+        assert!(repeat_lane.is_empty());
+        assert_eq!(delivery.queued_semantic_events(), 1);
+
+        let first = delivery.pop_next().unwrap();
+        assert_eq!(first.offer_ordinal, 1);
+        assert!(delivery.is_empty());
+    }
+
+    #[test]
+    fn scoped_offer_transaction_keeps_reset_and_reducer_state_on_capacity_failure() {
+        let mut projection = sink(8);
+        let mut delivery = delivery_lane(1, 1);
+        let record = record(1, 0, 10);
+        let frame = decoded_frame(
+            1,
+            ScopedAppendDeliveryPhase::Bootstrap,
+            &record,
+            usage_batch(&record, "response-1", 10, None),
+        );
+        let mut initial_lane = admission_lane_with_decoded_frame(frame);
+        initial_lane
+            .offer_next(&mut projection, &mut delivery)
+            .unwrap()
+            .unwrap();
+        let before = projection
+            .usage_v2_replacement_snapshot(ScopedAppendDeliveryPhase::Correction)
+            .unwrap();
+
+        let reset = ScopedAppendReset {
+            old_generation: 1,
+            new_generation: 2,
+            reason: AppendTransition::Truncated,
+        };
+        let mut reset_lane = ScopedObservationAdmissionLane::new(ScopedObservationQueueLimits {
+            max_data_events: 1,
+            max_retained_native_bytes: 0,
+            max_control_items: 1,
+        })
+        .unwrap();
+        reset_lane.controls.push_back(QueuedControlFrame {
+            object_token: OBJECT_TOKEN,
+            lane_ordinal: 2,
+            phase: ScopedAppendDeliveryPhase::Correction,
+            kind: QueuedControlKind::Reset(reset),
+        });
+
+        assert_eq!(
+            reset_lane.offer_next(&mut projection, &mut delivery),
+            Err(ScopedProjectionDeliveryError::Delivery(
+                ScopedDeliveryError::SemanticQueueFull
+            ))
+        );
+        assert_eq!(reset_lane.queued_control_items(), 1);
+        assert_eq!(projection.usage_v2_entity_count(), 1);
+        assert_eq!(
+            projection
+                .usage_v2_replacement_snapshot(ScopedAppendDeliveryPhase::Correction)
+                .unwrap(),
+            before
+        );
+        assert_eq!(delivery.queued_semantic_events(), 1);
+        assert_eq!(delivery.queued_source_control_items(), 0);
+
+        assert_eq!(delivery.pop_next().unwrap().offer_ordinal, 1);
+        let receipt = reset_lane
+            .offer_next(&mut projection, &mut delivery)
+            .unwrap()
+            .unwrap();
+        assert_eq!(receipt.first_offer_ordinal, Some(2));
+        assert_eq!(receipt.through_offer_ordinal, Some(3));
+        assert_eq!(receipt.semantic_events, 1);
+        assert_eq!(receipt.source_control_items, 1);
+        assert!(reset_lane.is_empty());
+        assert_eq!(projection.usage_v2_entity_count(), 0);
+
+        let reset_offered = delivery.pop_next().unwrap();
+        assert_eq!(reset_offered.offer_ordinal, 2);
+        assert!(matches!(
+            reset_offered.value,
+            ScopedProjectedObservation::SourceReset { reset: queued, .. } if queued == reset
+        ));
+        let retraction = delivery.pop_next().unwrap();
+        assert_eq!(retraction.offer_ordinal, 3);
+        assert!(matches!(
+            retraction.value,
+            ScopedProjectedObservation::UsageV2 { event, .. }
+                if event.operation == ScopedUsageV2Operation::Retract
+                    && event.retraction == Some(ScopedUsageV2RetractionCause::Reset(reset))
+        ));
         assert!(delivery.is_empty());
     }
 
