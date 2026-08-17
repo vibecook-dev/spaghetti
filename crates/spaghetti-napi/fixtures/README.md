@@ -2,6 +2,10 @@
 
 Committed corpora for the cross-engine ingest-diff harness and for RFC 008.
 
+Cross-language contract fixtures live in `contracts/`. `rfc012c-runtime-v1.json`
+is the RFC 012C v1 actor/affiliation/usage-v2 value oracle: Rust constructs the
+opaque identities and the portable SDK independently validates the same file.
+
 Every fixture is generated deterministically — file mtimes are pinned, ids are
 fixed, and no fixture contains captured user content. Regenerate rather than
 hand-edit.

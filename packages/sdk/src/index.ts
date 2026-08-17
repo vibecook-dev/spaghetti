@@ -18,6 +18,9 @@ export * from './data/timeline-query.js';
 // contracts. Rust derives references; portable consumers validate and compare.
 export * from './contracts/rfc012a.js';
 
+// RFC 012C portable actor, affiliation, and usage-v2 value contracts.
+export * from './contracts/rfc012c.js';
+
 // Transport-neutral async client and the sole-owner production service.
 export * from './client/index.js';
 export * from './observation.js';

@@ -1,0 +1,509 @@
+{
+  "fixture_contract_version": 1,
+  "runtime_semantic_contract_version": 1,
+  "families": [
+    {
+      "family": "runtime.actor-run",
+      "version": 1
+    },
+    {
+      "family": "runtime.actor-affiliation",
+      "version": 1
+    },
+    {
+      "family": "runtime.usage-v2",
+      "version": 1
+    }
+  ],
+  "source": {
+    "adapter_id": "fixture-adapter",
+    "source_instance_key": "v1:x2EECJPiBmbePRdRR4PlzXDX2VM5vCQq6Yl51BO87NM",
+    "session": {
+      "entity_key": "v1:ytNPEO9TRMM8eBQ0fAEHu_GJG3sOwsDvXEudc4XpXNo",
+      "external_ref": {
+        "external_entity_reference_version": 1,
+        "entity_key": "v1:ytNPEO9TRMM8eBQ0fAEHu_GJG3sOwsDvXEudc4XpXNo"
+      },
+      "native_session_id": "fixture-session-1"
+    }
+  },
+  "actors": {
+    "root": {
+      "family": "runtime.actor-run",
+      "family_version": 1,
+      "revision": {
+        "actor_run": "v1:tYT9-3EOu3MnGWRc375H1jlf1aTuqKXKgc8U1w1m4_8",
+        "session": "v1:ytNPEO9TRMM8eBQ0fAEHu_GJG3sOwsDvXEudc4XpXNo",
+        "role": "root",
+        "parent_actor_run": null,
+        "native_session_id": "fixture-session-1",
+        "native_actor_id": "fixture-root-actor",
+        "native_actor_type": null
+      },
+      "fact_id": "v1:AT2nzUoMHWIRYC1JYBXNxdpFuGAPHucD8fj-FYL0Hpw",
+      "source_record_id": "v1:8bUk2AWeTLW_sC4KScwzlBo_PokhnE4GGYAcSh69QzM",
+      "semantic_revision_ref": {
+        "semantic_reference_contract_version": 1,
+        "fact_revision_id": "v1:KKu52NtUdCrfDKyAG-19qZbHAhek4BM8UMaaW7IV_1A"
+      }
+    },
+    "child": {
+      "family": "runtime.actor-run",
+      "family_version": 1,
+      "revision": {
+        "actor_run": "v1:N5X0T1KRSwzOMJBfGwPuHQtYdEMaHFr4QjoTAgn-Dlc",
+        "session": "v1:ytNPEO9TRMM8eBQ0fAEHu_GJG3sOwsDvXEudc4XpXNo",
+        "role": "child",
+        "parent_actor_run": "v1:tYT9-3EOu3MnGWRc375H1jlf1aTuqKXKgc8U1w1m4_8",
+        "native_session_id": "fixture-session-1",
+        "native_actor_id": "fixture-child-actor",
+        "native_actor_type": null
+      },
+      "fact_id": "v1:5aIReZ1kanfcwZP1RGGFyWI4St28OAnped5l1TXRXwM",
+      "source_record_id": "v1:8bUk2AWeTLW_sC4KScwzlBo_PokhnE4GGYAcSh69QzM",
+      "semantic_revision_ref": {
+        "semantic_reference_contract_version": 1,
+        "fact_revision_id": "v1:3wvdT-voUhpVboRHrvYxexQYbXzIbfzvsA7jboNH3Jc"
+      }
+    }
+  },
+  "affiliations": {
+    "child_team_present": {
+      "family": "runtime.actor-affiliation",
+      "family_version": 1,
+      "revision": {
+        "affiliation": "v1:-Hye9ydF7JzcxeHiAiD0tAmv_d7Tc6SeahgkrqIaIqU",
+        "actor_run": "v1:N5X0T1KRSwzOMJBfGwPuHQtYdEMaHFr4QjoTAgn-Dlc",
+        "session": "v1:ytNPEO9TRMM8eBQ0fAEHu_GJG3sOwsDvXEudc4XpXNo",
+        "dimension": "team",
+        "target": "v1:aYQ6h0sSnuRFhUfO2fDs62SPyxPutVl1cbw7CqDtpjw",
+        "member": "v1:wjC5VjW27QnYpG1IhwU3NqI_xBXvD-kXwsE1yeMeF7g",
+        "native_target_id": "fixture-team-1",
+        "native_member_id": "fixture-team-member-1",
+        "state": "present",
+        "effective_at": null
+      },
+      "fact_id": "v1:udUnK3rhBpuLGn-NfejIpFb-RQY7GjamXcw0U_6iZj8",
+      "source_record_id": "v1:8bUk2AWeTLW_sC4KScwzlBo_PokhnE4GGYAcSh69QzM",
+      "semantic_revision_ref": {
+        "semantic_reference_contract_version": 1,
+        "fact_revision_id": "v1:oHsScmcj9038TIKxhvBjw35R5kpKB7mY19vljuAidZI"
+      }
+    },
+    "child_workflow_present": {
+      "family": "runtime.actor-affiliation",
+      "family_version": 1,
+      "revision": {
+        "affiliation": "v1:x6pC3Hk_BzeuFLvFqbmUtsRnZJpVIb_f5EWs4iTpnt4",
+        "actor_run": "v1:N5X0T1KRSwzOMJBfGwPuHQtYdEMaHFr4QjoTAgn-Dlc",
+        "session": "v1:ytNPEO9TRMM8eBQ0fAEHu_GJG3sOwsDvXEudc4XpXNo",
+        "dimension": "workflow",
+        "target": "v1:OBNomwdwiQ4Edibc3OppeFq5z2JXmx_Ky-JAQuQlQfE",
+        "member": null,
+        "native_target_id": "fixture-workflow-1",
+        "native_member_id": null,
+        "state": "present",
+        "effective_at": null
+      },
+      "fact_id": "v1:BMqONmq3NBO9wuc22psmrisaK7bZeqZdnLpWI-0EL_w",
+      "source_record_id": "v1:8bUk2AWeTLW_sC4KScwzlBo_PokhnE4GGYAcSh69QzM",
+      "semantic_revision_ref": {
+        "semantic_reference_contract_version": 1,
+        "fact_revision_id": "v1:O3Q8jFoYmEOwi8Dh3pt3pHNGW_sVhNuMhXzoOZEr1FI"
+      }
+    },
+    "child_workflow_removed": {
+      "family": "runtime.actor-affiliation",
+      "family_version": 1,
+      "revision": {
+        "affiliation": "v1:x6pC3Hk_BzeuFLvFqbmUtsRnZJpVIb_f5EWs4iTpnt4",
+        "actor_run": "v1:N5X0T1KRSwzOMJBfGwPuHQtYdEMaHFr4QjoTAgn-Dlc",
+        "session": "v1:ytNPEO9TRMM8eBQ0fAEHu_GJG3sOwsDvXEudc4XpXNo",
+        "dimension": "workflow",
+        "target": "v1:OBNomwdwiQ4Edibc3OppeFq5z2JXmx_Ky-JAQuQlQfE",
+        "member": null,
+        "native_target_id": "fixture-workflow-1",
+        "native_member_id": null,
+        "state": "removed",
+        "effective_at": null
+      },
+      "fact_id": "v1:BMqONmq3NBO9wuc22psmrisaK7bZeqZdnLpWI-0EL_w",
+      "source_record_id": "v1:8bUk2AWeTLW_sC4KScwzlBo_PokhnE4GGYAcSh69QzM",
+      "semantic_revision_ref": {
+        "semantic_reference_contract_version": 1,
+        "fact_revision_id": "v1:gZKBG4qZaXm6GfzV_KKjNkBXQJTQ8YB3PmYJm41xOqA"
+      }
+    }
+  },
+  "usage": {
+    "native_message": {
+      "family": "runtime.usage-v2",
+      "family_version": 1,
+      "revision": {
+        "session": "v1:ytNPEO9TRMM8eBQ0fAEHu_GJG3sOwsDvXEudc4XpXNo",
+        "actor_run": "v1:N5X0T1KRSwzOMJBfGwPuHQtYdEMaHFr4QjoTAgn-Dlc",
+        "response_key": "bXNnX2ZpeHR1cmVfbmF0aXZlXzE=",
+        "response_identity": "native_message_id",
+        "native_message_id": "msg_fixture_native_1",
+        "request_id": "req_fixture_1",
+        "buckets": {
+          "input_tokens": {
+            "value": 0,
+            "quality": "exact",
+            "authority": "native_response",
+            "completeness": "complete",
+            "provenance": {
+              "native_field": "message.usage.input_tokens",
+              "normalization_contract_version": 1
+            }
+          },
+          "output_tokens": {
+            "value": 42,
+            "quality": "exact",
+            "authority": "native_response",
+            "completeness": "complete",
+            "provenance": {
+              "native_field": "message.usage.output_tokens",
+              "normalization_contract_version": 1
+            }
+          },
+          "cache_creation_input_tokens": {
+            "value": 0,
+            "quality": "exact",
+            "authority": "native_response",
+            "completeness": "complete",
+            "provenance": {
+              "native_field": "message.usage.cache_creation_input_tokens",
+              "normalization_contract_version": 1
+            }
+          },
+          "cache_read_input_tokens": {
+            "value": null,
+            "quality": "unknown",
+            "authority": "native_response",
+            "completeness": "unknown",
+            "unknown_reason": "missing",
+            "provenance": {
+              "native_field": "message.usage.cache_read_input_tokens",
+              "normalization_contract_version": 1
+            }
+          }
+        },
+        "model": {
+          "value": "fixture-model-1",
+          "quality": "exact",
+          "authority": "native_response",
+          "completeness": "complete",
+          "provenance": {
+            "native_field": "message.model",
+            "normalization_contract_version": 1
+          }
+        },
+        "effort": {
+          "value": "high",
+          "quality": "native_claimed",
+          "authority": "adapter_derived",
+          "completeness": "partial",
+          "provenance": {
+            "native_field": "message.effort",
+            "normalization_contract_version": 1
+          }
+        },
+        "source_time": null
+      },
+      "semantic_revision_key_hex": "b2c659f7e6a91519d0c872fda8f994c93515698e8435ba37686069c3f2f53ba7",
+      "fact_id": "v1:y18KurXukCNk1leVTdRkflL3BZhdBsAZa7C7mCWfvig",
+      "source_record_id": "v1:8bUk2AWeTLW_sC4KScwzlBo_PokhnE4GGYAcSh69QzM",
+      "semantic_revision_ref": {
+        "semantic_reference_contract_version": 1,
+        "fact_revision_id": "v1:GColsKMUqOmdO-anHUhkbopXxPheI6S7BuhRMsufMkU"
+      }
+    },
+    "source_record_fallback": {
+      "family": "runtime.usage-v2",
+      "family_version": 1,
+      "revision": {
+        "session": "v1:ytNPEO9TRMM8eBQ0fAEHu_GJG3sOwsDvXEudc4XpXNo",
+        "actor_run": "v1:tYT9-3EOu3MnGWRc375H1jlf1aTuqKXKgc8U1w1m4_8",
+        "response_key": "Zml4dHVyZS1zb3VyY2UtcmVjb3JkLWZhbGxiYWNrLTE=",
+        "response_identity": "source_record_fallback",
+        "native_message_id": null,
+        "request_id": null,
+        "buckets": {
+          "input_tokens": {
+            "value": 7,
+            "quality": "exact",
+            "authority": "native_response",
+            "completeness": "complete",
+            "provenance": {
+              "native_field": "message.usage.input_tokens",
+              "normalization_contract_version": 1
+            }
+          },
+          "output_tokens": {
+            "value": 3,
+            "quality": "exact",
+            "authority": "native_response",
+            "completeness": "complete",
+            "provenance": {
+              "native_field": "message.usage.output_tokens",
+              "normalization_contract_version": 1
+            }
+          },
+          "cache_creation_input_tokens": {
+            "value": 0,
+            "quality": "exact",
+            "authority": "native_response",
+            "completeness": "complete",
+            "provenance": {
+              "native_field": "message.usage.cache_creation_input_tokens",
+              "normalization_contract_version": 1
+            }
+          },
+          "cache_read_input_tokens": {
+            "value": 0,
+            "quality": "exact",
+            "authority": "native_response",
+            "completeness": "complete",
+            "provenance": {
+              "native_field": "message.usage.cache_read_input_tokens",
+              "normalization_contract_version": 1
+            }
+          }
+        },
+        "model": null,
+        "effort": null,
+        "source_time": null
+      },
+      "semantic_revision_key_hex": "253c30a6fde9aa60901c2b73eea4d806311f8458a2f44fc16671c76522ffe731",
+      "fact_id": "v1:KbsnQbDwCMahaJCLcEqEG4Nl75TYoX6fc1UsNQXI3Vg",
+      "source_record_id": "v1:8bUk2AWeTLW_sC4KScwzlBo_PokhnE4GGYAcSh69QzM",
+      "semantic_revision_ref": {
+        "semantic_reference_contract_version": 1,
+        "fact_revision_id": "v1:1KuOoNOyQhrBhrAFzU-bPB-m8HODq3eZhh6wmNzaTDM"
+      }
+    },
+    "response_revisions": {
+      "native_message_id": "msg_fixture_aba",
+      "a": {
+        "family": "runtime.usage-v2",
+        "family_version": 1,
+        "revision": {
+          "session": "v1:ytNPEO9TRMM8eBQ0fAEHu_GJG3sOwsDvXEudc4XpXNo",
+          "actor_run": "v1:N5X0T1KRSwzOMJBfGwPuHQtYdEMaHFr4QjoTAgn-Dlc",
+          "response_key": "bXNnX2ZpeHR1cmVfYWJh",
+          "response_identity": "native_message_id",
+          "native_message_id": "msg_fixture_aba",
+          "request_id": "req_fixture_1",
+          "buckets": {
+            "input_tokens": {
+              "value": 10,
+              "quality": "exact",
+              "authority": "native_response",
+              "completeness": "complete",
+              "provenance": {
+                "native_field": "message.usage.input_tokens",
+                "normalization_contract_version": 1
+              }
+            },
+            "output_tokens": {
+              "value": 2,
+              "quality": "exact",
+              "authority": "native_response",
+              "completeness": "complete",
+              "provenance": {
+                "native_field": "message.usage.output_tokens",
+                "normalization_contract_version": 1
+              }
+            },
+            "cache_creation_input_tokens": {
+              "value": 0,
+              "quality": "exact",
+              "authority": "native_response",
+              "completeness": "complete",
+              "provenance": {
+                "native_field": "message.usage.cache_creation_input_tokens",
+                "normalization_contract_version": 1
+              }
+            },
+            "cache_read_input_tokens": {
+              "value": 0,
+              "quality": "exact",
+              "authority": "native_response",
+              "completeness": "complete",
+              "provenance": {
+                "native_field": "message.usage.cache_read_input_tokens",
+                "normalization_contract_version": 1
+              }
+            }
+          },
+          "model": {
+            "value": "fixture-model-1",
+            "quality": "exact",
+            "authority": "native_response",
+            "completeness": "complete",
+            "provenance": {
+              "native_field": "message.model",
+              "normalization_contract_version": 1
+            }
+          },
+          "effort": null,
+          "source_time": null
+        },
+        "semantic_revision_key_hex": "d3b29f84be2d8e74693da3e9f02b60ffce9136ebca3470625842542f0b930530",
+        "fact_id": "v1:46A11dsTIlXUpGyRkrHEMYgnT36mVuv8ZaP_dADsXnM",
+        "source_record_id": "v1:8bUk2AWeTLW_sC4KScwzlBo_PokhnE4GGYAcSh69QzM",
+        "semantic_revision_ref": {
+          "semantic_reference_contract_version": 1,
+          "fact_revision_id": "v1:AEgra0VUiL60w0xoQsJTKPxH9zXJGcOgfMtoKzgvLVE"
+        }
+      },
+      "b": {
+        "family": "runtime.usage-v2",
+        "family_version": 1,
+        "revision": {
+          "session": "v1:ytNPEO9TRMM8eBQ0fAEHu_GJG3sOwsDvXEudc4XpXNo",
+          "actor_run": "v1:N5X0T1KRSwzOMJBfGwPuHQtYdEMaHFr4QjoTAgn-Dlc",
+          "response_key": "bXNnX2ZpeHR1cmVfYWJh",
+          "response_identity": "native_message_id",
+          "native_message_id": "msg_fixture_aba",
+          "request_id": "req_fixture_1",
+          "buckets": {
+            "input_tokens": {
+              "value": 20,
+              "quality": "exact",
+              "authority": "native_response",
+              "completeness": "complete",
+              "provenance": {
+                "native_field": "message.usage.input_tokens",
+                "normalization_contract_version": 1
+              }
+            },
+            "output_tokens": {
+              "value": 2,
+              "quality": "exact",
+              "authority": "native_response",
+              "completeness": "complete",
+              "provenance": {
+                "native_field": "message.usage.output_tokens",
+                "normalization_contract_version": 1
+              }
+            },
+            "cache_creation_input_tokens": {
+              "value": 0,
+              "quality": "exact",
+              "authority": "native_response",
+              "completeness": "complete",
+              "provenance": {
+                "native_field": "message.usage.cache_creation_input_tokens",
+                "normalization_contract_version": 1
+              }
+            },
+            "cache_read_input_tokens": {
+              "value": 0,
+              "quality": "exact",
+              "authority": "native_response",
+              "completeness": "complete",
+              "provenance": {
+                "native_field": "message.usage.cache_read_input_tokens",
+                "normalization_contract_version": 1
+              }
+            }
+          },
+          "model": {
+            "value": "fixture-model-1",
+            "quality": "exact",
+            "authority": "native_response",
+            "completeness": "complete",
+            "provenance": {
+              "native_field": "message.model",
+              "normalization_contract_version": 1
+            }
+          },
+          "effort": null,
+          "source_time": null
+        },
+        "semantic_revision_key_hex": "0b6e9289713b0b4654ab3050546983359070c1dbde52c3f24bf5c81d436d24c9",
+        "fact_id": "v1:46A11dsTIlXUpGyRkrHEMYgnT36mVuv8ZaP_dADsXnM",
+        "source_record_id": "v1:8bUk2AWeTLW_sC4KScwzlBo_PokhnE4GGYAcSh69QzM",
+        "semantic_revision_ref": {
+          "semantic_reference_contract_version": 1,
+          "fact_revision_id": "v1:0sLdyP9lJ0B-MENvZVhgeyMvR-9dQiZmdY6fJtVGDeQ"
+        }
+      },
+      "a_repeat": {
+        "family": "runtime.usage-v2",
+        "family_version": 1,
+        "revision": {
+          "session": "v1:ytNPEO9TRMM8eBQ0fAEHu_GJG3sOwsDvXEudc4XpXNo",
+          "actor_run": "v1:N5X0T1KRSwzOMJBfGwPuHQtYdEMaHFr4QjoTAgn-Dlc",
+          "response_key": "bXNnX2ZpeHR1cmVfYWJh",
+          "response_identity": "native_message_id",
+          "native_message_id": "msg_fixture_aba",
+          "request_id": "req_fixture_1",
+          "buckets": {
+            "input_tokens": {
+              "value": 10,
+              "quality": "exact",
+              "authority": "native_response",
+              "completeness": "complete",
+              "provenance": {
+                "native_field": "message.usage.input_tokens",
+                "normalization_contract_version": 1
+              }
+            },
+            "output_tokens": {
+              "value": 2,
+              "quality": "exact",
+              "authority": "native_response",
+              "completeness": "complete",
+              "provenance": {
+                "native_field": "message.usage.output_tokens",
+                "normalization_contract_version": 1
+              }
+            },
+            "cache_creation_input_tokens": {
+              "value": 0,
+              "quality": "exact",
+              "authority": "native_response",
+              "completeness": "complete",
+              "provenance": {
+                "native_field": "message.usage.cache_creation_input_tokens",
+                "normalization_contract_version": 1
+              }
+            },
+            "cache_read_input_tokens": {
+              "value": 0,
+              "quality": "exact",
+              "authority": "native_response",
+              "completeness": "complete",
+              "provenance": {
+                "native_field": "message.usage.cache_read_input_tokens",
+                "normalization_contract_version": 1
+              }
+            }
+          },
+          "model": {
+            "value": "fixture-model-1",
+            "quality": "exact",
+            "authority": "native_response",
+            "completeness": "complete",
+            "provenance": {
+              "native_field": "message.model",
+              "normalization_contract_version": 1
+            }
+          },
+          "effort": null,
+          "source_time": null
+        },
+        "semantic_revision_key_hex": "d3b29f84be2d8e74693da3e9f02b60ffce9136ebca3470625842542f0b930530",
+        "fact_id": "v1:46A11dsTIlXUpGyRkrHEMYgnT36mVuv8ZaP_dADsXnM",
+        "source_record_id": "v1:8bUk2AWeTLW_sC4KScwzlBo_PokhnE4GGYAcSh69QzM",
+        "semantic_revision_ref": {
+          "semantic_reference_contract_version": 1,
+          "fact_revision_id": "v1:AEgra0VUiL60w0xoQsJTKPxH9zXJGcOgfMtoKzgvLVE"
+        }
+      }
+    }
+  }
+}

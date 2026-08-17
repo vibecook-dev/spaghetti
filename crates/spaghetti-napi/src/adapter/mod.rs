@@ -10,6 +10,9 @@ mod scope;
 mod semantic;
 mod support;
 
+#[cfg(test)]
+mod runtime_contract_fixture;
+
 pub use contract::{
     AdapterDiagnostic, AdapterError, AdapterErrorClass, AdapterId, AdapterManifest,
     AdapterObjectContext, AgentAdapter, Availability, CapabilityDeclaration, CapabilityGranularity,
