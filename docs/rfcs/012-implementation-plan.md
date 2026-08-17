@@ -957,6 +957,12 @@ Current landing status (2026-08-16):
   entity count while excluding delivery phase, observation time, and local
   runtime IDs. Empty replacement is explicit and source deletion removes the
   entity before the snapshot is built;
+- a second bounded, post-reducer delivery lane keeps semantic events and source
+  lifecycle controls in independent capacity domains while retaining one
+  deterministic total offer order. Projected batches enter it all-or-nothing,
+  semantic saturation does not consume source-control capacity, and a reset
+  offered with its usage retractions is drained reset-first. Its internal offer
+  ordinal is sequencing input only, never semantic identity;
 - one pass is active at a time, a later pass receives fresh bounds, close is
   idempotent, and the frozen access report excludes paths, identity values, and
   content; and
@@ -971,10 +977,10 @@ envelope mapper, the public ordered multiplexer and poll/readiness barriers,
 coverage, overflow/resync epochs, artifact mediation, cancellation waiting,
 the trusted native version-probe driver, and the complete public request are
 not yet implemented. Projection acceptance is not yet the public `offered`
-boundary: the future bounded semantic delivery transaction must accept the
-returned events before advancing its watermark. The usage-v2 sink remains
-crate-private until those envelope/lifecycle contracts and the negotiated
-portable surface exist.
+boundary: projection mutation, admitted-frame release, and projected-delivery
+admission still need one transaction before its watermark can advance. The
+usage-v2 sink and delivery lane remain crate-private until those
+envelope/lifecycle contracts and the negotiated portable surface exist.
 
 ### D2. Claude scope composition
 

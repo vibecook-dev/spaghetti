@@ -695,6 +695,286 @@ pub enum ScopedProjectedObservation {
     },
 }
 
+/// Bounded post-reducer capacity. Native bytes retained during decode remain
+/// charged to the admission lane until projection succeeds; this second byte
+/// budget is for future projected unknown/native evidence that is intentionally
+/// carried into delivery.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScopedObservationDeliveryLimits {
+    pub max_semantic_events: usize,
+    pub max_retained_native_bytes: u64,
+    pub max_source_control_items: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScopedObservationOfferReceipt {
+    pub first_offer_ordinal: Option<u64>,
+    pub through_offer_ordinal: Option<u64>,
+    pub semantic_events: u64,
+    pub retained_native_bytes: u64,
+    pub source_control_items: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScopedOfferedObservation {
+    /// Internal stable order assigned when the projected value enters the
+    /// bounded delivery lane. The public envelope mapper will convert this to
+    /// observer sequencing; it is never semantic identity.
+    pub offer_ordinal: u64,
+    pub value: ScopedProjectedObservation,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum ScopedDeliveryError {
+    #[error("scoped observation delivery limits are invalid")]
+    InvalidLimits,
+    #[error("scoped semantic delivery batch exceeds absolute capacity")]
+    SemanticBatchTooLarge,
+    #[error("scoped semantic delivery queue is full")]
+    SemanticQueueFull,
+    #[error("scoped projected retained-native batch exceeds absolute capacity")]
+    RetainedNativeBatchTooLarge,
+    #[error("scoped projected retained-native queue is full")]
+    RetainedNativeQueueFull,
+    #[error("scoped source-control delivery batch exceeds absolute capacity")]
+    SourceControlBatchTooLarge,
+    #[error("scoped source-control delivery queue is full")]
+    SourceControlQueueFull,
+    #[error("scoped delivery accounting is exhausted")]
+    CapacityExhausted,
+    #[error("scoped delivery offer ordinal is exhausted")]
+    OfferOrdinalExhausted,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct ScopedDeliveryOfferFailure {
+    pub error: ScopedDeliveryError,
+    pub projected: Vec<ScopedProjectedObservation>,
+}
+
+struct QueuedProjectedObservation {
+    offer_ordinal: u64,
+    retained_native_bytes: u64,
+    value: ScopedProjectedObservation,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct ScopedProjectedMeasurement {
+    semantic_events: usize,
+    retained_native_bytes: u64,
+    source_control_items: usize,
+}
+
+/// All-or-nothing projected delivery queue with separate semantic and
+/// source-lifecycle capacity domains. Cross-lane order remains one total offer
+/// order; capacity separation does not create two public streams.
+pub struct ScopedObservationDeliveryLane {
+    limits: ScopedObservationDeliveryLimits,
+    semantic: VecDeque<QueuedProjectedObservation>,
+    source_controls: VecDeque<QueuedProjectedObservation>,
+    queued_retained_native_bytes: u64,
+    next_offer_ordinal: u64,
+}
+
+impl ScopedObservationDeliveryLane {
+    pub fn new(limits: ScopedObservationDeliveryLimits) -> Result<Self, ScopedDeliveryError> {
+        if limits.max_semantic_events == 0 || limits.max_source_control_items == 0 {
+            return Err(ScopedDeliveryError::InvalidLimits);
+        }
+        Ok(Self {
+            limits,
+            semantic: VecDeque::new(),
+            source_controls: VecDeque::new(),
+            queued_retained_native_bytes: 0,
+            next_offer_ordinal: 1,
+        })
+    }
+
+    pub fn offer(
+        &mut self,
+        projected: Vec<ScopedProjectedObservation>,
+    ) -> Result<ScopedObservationOfferReceipt, ScopedDeliveryOfferFailure> {
+        let measurement = match measure_projected_batch(&projected) {
+            Ok(measurement) => measurement,
+            Err(error) => return Err(ScopedDeliveryOfferFailure { error, projected }),
+        };
+        if let Err(error) = self.check_capacity(measurement) {
+            return Err(ScopedDeliveryOfferFailure { error, projected });
+        }
+        let total_items = match measurement
+            .semantic_events
+            .checked_add(measurement.source_control_items)
+        {
+            Some(total) => total,
+            None => {
+                return Err(ScopedDeliveryOfferFailure {
+                    error: ScopedDeliveryError::CapacityExhausted,
+                    projected,
+                });
+            }
+        };
+        let total_items = match u64::try_from(total_items) {
+            Ok(total) => total,
+            Err(_) => {
+                return Err(ScopedDeliveryOfferFailure {
+                    error: ScopedDeliveryError::CapacityExhausted,
+                    projected,
+                });
+            }
+        };
+        let after_ordinal = match self.next_offer_ordinal.checked_add(total_items) {
+            Some(after) => after,
+            None => {
+                return Err(ScopedDeliveryOfferFailure {
+                    error: ScopedDeliveryError::OfferOrdinalExhausted,
+                    projected,
+                });
+            }
+        };
+
+        let first_offer_ordinal = (!projected.is_empty()).then_some(self.next_offer_ordinal);
+        let mut offer_ordinal = self.next_offer_ordinal;
+        for value in projected {
+            let (semantic, retained_native_bytes) = projected_observation_measurement(&value);
+            let queued = QueuedProjectedObservation {
+                offer_ordinal,
+                retained_native_bytes,
+                value,
+            };
+            if semantic {
+                self.semantic.push_back(queued);
+            } else {
+                self.source_controls.push_back(queued);
+            }
+            offer_ordinal += 1;
+        }
+        debug_assert_eq!(offer_ordinal, after_ordinal);
+        self.next_offer_ordinal = after_ordinal;
+        self.queued_retained_native_bytes += measurement.retained_native_bytes;
+
+        Ok(ScopedObservationOfferReceipt {
+            first_offer_ordinal,
+            through_offer_ordinal: after_ordinal.checked_sub(1).filter(|_| total_items != 0),
+            semantic_events: measurement.semantic_events as u64,
+            retained_native_bytes: measurement.retained_native_bytes,
+            source_control_items: measurement.source_control_items as u64,
+        })
+    }
+
+    pub fn pop_next(&mut self) -> Option<ScopedOfferedObservation> {
+        let take_source_control = match (self.source_controls.front(), self.semantic.front()) {
+            (Some(control), Some(semantic)) => control.offer_ordinal < semantic.offer_ordinal,
+            (Some(_), None) => true,
+            (None, Some(_)) => false,
+            (None, None) => return None,
+        };
+        let queued = if take_source_control {
+            self.source_controls
+                .pop_front()
+                .expect("source-control front exists")
+        } else {
+            let queued = self.semantic.pop_front().expect("semantic front exists");
+            self.queued_retained_native_bytes = self
+                .queued_retained_native_bytes
+                .checked_sub(queued.retained_native_bytes)
+                .expect("queued projected retained-native accounting cannot underflow");
+            queued
+        };
+        Some(ScopedOfferedObservation {
+            offer_ordinal: queued.offer_ordinal,
+            value: queued.value,
+        })
+    }
+
+    pub fn queued_semantic_events(&self) -> usize {
+        self.semantic.len()
+    }
+
+    pub fn queued_retained_native_bytes(&self) -> u64 {
+        self.queued_retained_native_bytes
+    }
+
+    pub fn queued_source_control_items(&self) -> usize {
+        self.source_controls.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.semantic.is_empty() && self.source_controls.is_empty()
+    }
+
+    fn check_capacity(
+        &self,
+        measurement: ScopedProjectedMeasurement,
+    ) -> Result<(), ScopedDeliveryError> {
+        if measurement.semantic_events > self.limits.max_semantic_events {
+            return Err(ScopedDeliveryError::SemanticBatchTooLarge);
+        }
+        if measurement.retained_native_bytes > self.limits.max_retained_native_bytes {
+            return Err(ScopedDeliveryError::RetainedNativeBatchTooLarge);
+        }
+        if measurement.source_control_items > self.limits.max_source_control_items {
+            return Err(ScopedDeliveryError::SourceControlBatchTooLarge);
+        }
+        if self
+            .semantic
+            .len()
+            .checked_add(measurement.semantic_events)
+            .is_none_or(|count| count > self.limits.max_semantic_events)
+        {
+            return Err(ScopedDeliveryError::SemanticQueueFull);
+        }
+        if self
+            .queued_retained_native_bytes
+            .checked_add(measurement.retained_native_bytes)
+            .is_none_or(|bytes| bytes > self.limits.max_retained_native_bytes)
+        {
+            return Err(ScopedDeliveryError::RetainedNativeQueueFull);
+        }
+        if self
+            .source_controls
+            .len()
+            .checked_add(measurement.source_control_items)
+            .is_none_or(|count| count > self.limits.max_source_control_items)
+        {
+            return Err(ScopedDeliveryError::SourceControlQueueFull);
+        }
+        Ok(())
+    }
+}
+
+fn measure_projected_batch(
+    projected: &[ScopedProjectedObservation],
+) -> Result<ScopedProjectedMeasurement, ScopedDeliveryError> {
+    let mut measurement = ScopedProjectedMeasurement::default();
+    for value in projected {
+        let (semantic, retained_native_bytes) = projected_observation_measurement(value);
+        if semantic {
+            measurement.semantic_events = measurement
+                .semantic_events
+                .checked_add(1)
+                .ok_or(ScopedDeliveryError::CapacityExhausted)?;
+            measurement.retained_native_bytes = measurement
+                .retained_native_bytes
+                .checked_add(retained_native_bytes)
+                .ok_or(ScopedDeliveryError::CapacityExhausted)?;
+        } else {
+            measurement.source_control_items = measurement
+                .source_control_items
+                .checked_add(1)
+                .ok_or(ScopedDeliveryError::CapacityExhausted)?;
+        }
+    }
+    Ok(measurement)
+}
+
+fn projected_observation_measurement(value: &ScopedProjectedObservation) -> (bool, u64) {
+    match value {
+        ScopedProjectedObservation::UsageV2 { .. } => (true, 0),
+        ScopedProjectedObservation::SourcePresence { .. }
+        | ScopedProjectedObservation::SourceReset { .. } => (false, 0),
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ScopedObservationProjectionLimits {
     pub max_usage_v2_entities: usize,
@@ -2262,6 +2542,187 @@ mod projection_tests {
         lane.queued_retained_native_bytes = retained_native_bytes;
         lane.next_lane_ordinal = lane_ordinal + 1;
         lane
+    }
+
+    fn delivery_lane(
+        max_semantic_events: usize,
+        max_source_control_items: usize,
+    ) -> ScopedObservationDeliveryLane {
+        ScopedObservationDeliveryLane::new(ScopedObservationDeliveryLimits {
+            max_semantic_events,
+            max_retained_native_bytes: 0,
+            max_source_control_items,
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn scoped_delivery_preserves_reset_before_retraction_across_capacity_domains() {
+        let mut projection = sink(8);
+        let record = record(1, 0, 10);
+        let frame = decoded_frame(
+            1,
+            ScopedAppendDeliveryPhase::Bootstrap,
+            &record,
+            usage_batch(&record, "response-1", 10, None),
+        );
+        only_usage_event(projection.project(&frame).unwrap());
+
+        let reset = ScopedAppendReset {
+            old_generation: 1,
+            new_generation: 2,
+            reason: AppendTransition::Truncated,
+        };
+        let reset_frame = ScopedQueuedObservationFrame::Reset {
+            object_token: OBJECT_TOKEN,
+            lane_ordinal: 2,
+            phase: ScopedAppendDeliveryPhase::Correction,
+            reset,
+        };
+        let projected = projection.project(&reset_frame).unwrap();
+        assert_eq!(projected.len(), 2);
+
+        let mut delivery = delivery_lane(1, 1);
+        let receipt = delivery.offer(projected).unwrap();
+        assert_eq!(receipt.first_offer_ordinal, Some(1));
+        assert_eq!(receipt.through_offer_ordinal, Some(2));
+        assert_eq!(receipt.semantic_events, 1);
+        assert_eq!(receipt.source_control_items, 1);
+        assert_eq!(delivery.queued_semantic_events(), 1);
+        assert_eq!(delivery.queued_source_control_items(), 1);
+
+        let first = delivery.pop_next().unwrap();
+        assert_eq!(first.offer_ordinal, 1);
+        assert!(matches!(
+            first.value,
+            ScopedProjectedObservation::SourceReset { reset: queued, .. } if queued == reset
+        ));
+        let second = delivery.pop_next().unwrap();
+        assert_eq!(second.offer_ordinal, 2);
+        assert!(matches!(
+            second.value,
+            ScopedProjectedObservation::UsageV2 { event, .. }
+                if event.operation == ScopedUsageV2Operation::Retract
+        ));
+        assert!(delivery.is_empty());
+    }
+
+    #[test]
+    fn scoped_delivery_semantic_saturation_does_not_consume_source_control_capacity() {
+        let first_record = record(1, 0, 10);
+        let first_frame = decoded_frame(
+            1,
+            ScopedAppendDeliveryPhase::Live,
+            &first_record,
+            usage_batch(&first_record, "response-1", 10, None),
+        );
+        let mut first_projection = sink(8);
+        let first = first_projection.project(&first_frame).unwrap();
+
+        let second_record = record(1, 10, 20);
+        let second_frame = decoded_frame(
+            2,
+            ScopedAppendDeliveryPhase::Live,
+            &second_record,
+            usage_batch(&second_record, "response-2", 20, None),
+        );
+        let mut second_projection = sink(8);
+        let second = second_projection.project(&second_frame).unwrap();
+
+        let mut delivery = delivery_lane(1, 1);
+        delivery.offer(first).unwrap();
+        let creation = ScopedAppendPresenceChange::Created { generation: 1 };
+        delivery
+            .offer(vec![ScopedProjectedObservation::SourcePresence {
+                object_token: OBJECT_TOKEN,
+                lane_ordinal: 2,
+                phase: ScopedAppendDeliveryPhase::Live,
+                change: creation,
+            }])
+            .unwrap();
+        assert_eq!(delivery.queued_semantic_events(), 1);
+        assert_eq!(delivery.queued_source_control_items(), 1);
+
+        let failure = delivery.offer(second).unwrap_err();
+        assert_eq!(failure.error, ScopedDeliveryError::SemanticQueueFull);
+        assert_eq!(failure.projected.len(), 1);
+        assert_eq!(delivery.queued_semantic_events(), 1);
+        assert_eq!(delivery.queued_source_control_items(), 1);
+
+        let first = delivery.pop_next().unwrap();
+        assert_eq!(first.offer_ordinal, 1);
+        assert!(matches!(
+            first.value,
+            ScopedProjectedObservation::UsageV2 { .. }
+        ));
+        let second = delivery.pop_next().unwrap();
+        assert_eq!(second.offer_ordinal, 2);
+        assert!(matches!(
+            second.value,
+            ScopedProjectedObservation::SourcePresence { change, .. } if change == creation
+        ));
+    }
+
+    #[test]
+    fn scoped_delivery_rejects_oversized_batch_without_partial_offer() {
+        let mut projection = sink(8);
+        let first_record = record(1, 0, 10);
+        let first_frame = decoded_frame(
+            1,
+            ScopedAppendDeliveryPhase::Bootstrap,
+            &first_record,
+            usage_batch(&first_record, "response-1", 10, None),
+        );
+        let mut projected = projection.project(&first_frame).unwrap();
+        let second_record = record(1, 10, 20);
+        let second_frame = decoded_frame(
+            2,
+            ScopedAppendDeliveryPhase::Bootstrap,
+            &second_record,
+            usage_batch(&second_record, "response-2", 20, None),
+        );
+        projected.extend(projection.project(&second_frame).unwrap());
+
+        let mut delivery = delivery_lane(1, 1);
+        let failure = delivery.offer(projected).unwrap_err();
+        assert_eq!(failure.error, ScopedDeliveryError::SemanticBatchTooLarge);
+        assert_eq!(failure.projected.len(), 2);
+        assert!(delivery.is_empty());
+
+        let empty = delivery.offer(Vec::new()).unwrap();
+        assert_eq!(empty.first_offer_ordinal, None);
+        assert_eq!(empty.through_offer_ordinal, None);
+        assert_eq!(empty.semantic_events, 0);
+        assert_eq!(empty.source_control_items, 0);
+        assert!(delivery.is_empty());
+    }
+
+    #[test]
+    fn scoped_delivery_rejects_invalid_limits_and_ordinal_exhaustion() {
+        assert!(matches!(
+            ScopedObservationDeliveryLane::new(ScopedObservationDeliveryLimits {
+                max_semantic_events: 0,
+                max_retained_native_bytes: 0,
+                max_source_control_items: 1,
+            }),
+            Err(ScopedDeliveryError::InvalidLimits)
+        ));
+
+        let record = record(1, 0, 10);
+        let frame = decoded_frame(
+            1,
+            ScopedAppendDeliveryPhase::Bootstrap,
+            &record,
+            usage_batch(&record, "response-1", 10, None),
+        );
+        let mut projection = sink(8);
+        let projected = projection.project(&frame).unwrap();
+        let mut delivery = delivery_lane(1, 1);
+        delivery.next_offer_ordinal = u64::MAX;
+        let failure = delivery.offer(projected).unwrap_err();
+        assert_eq!(failure.error, ScopedDeliveryError::OfferOrdinalExhausted);
+        assert_eq!(failure.projected.len(), 1);
+        assert!(delivery.is_empty());
     }
 
     #[test]
