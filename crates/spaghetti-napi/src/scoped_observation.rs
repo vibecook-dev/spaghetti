@@ -11,17 +11,18 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use crate::adapter::{
-    AdapterError, AdapterErrorClass, AdapterId, AdapterObjectContext, AdapterRegistry,
-    AgentAdapter, CanonicalEntityKey, CanonicalFactId, CanonicalSourceInstanceKey,
-    CompatibilityDecision, ContractVersionOffer, ContractVersionRequest, CoverageAbsence,
-    CoverageAbsenceKind, CoverageDeclarationDigest, CoverageDomain, CoverageError,
+    ActorRunRole, AdapterError, AdapterErrorClass, AdapterId, AdapterObjectContext,
+    AdapterRegistry, AgentAdapter, CanonicalEntityKey, CanonicalFactId, CanonicalSourceInstanceKey,
+    CompatibilityDecision, ContractCompleteness, ContractVersionOffer, ContractVersionRequest,
+    CoverageAbsence, CoverageAbsenceKind, CoverageDeclarationDigest, CoverageDomain, CoverageError,
     CoverageObjectKey, CoveragePosition, CoveragePositionKind, CoverageProvenance, CoverageScope,
     CoverageSetCompleteness, CoverageStatus, CoverageStreamKey, DecodeDisposition, DecoderId,
     ExternalEntityRef, Fact, FactBatch, FactEnvelope, FactProvenance, FactRevisionId,
-    FactSemanticContext, FactSemanticRevision, NativeArtifactProbe, RawRetentionPolicy,
-    ScopeRelationPrimitive, SemanticRevisionRef, SourceAccess, SourceCoveragePoint,
-    SourceCoverageSet, SourceObjectList, SourceObjectListRequest, SourceQuery, SourceRecordId,
-    SourceRows, SourceSnapshot, SupportOperation, TypedAccessAuthorization, UsageRevisionV2Fact,
+    FactSemanticContext, FactSemanticRevision, NativeArtifactProbe, NativeIdentityClaim,
+    QualifiedTimestamp, QualifiedValueQuality, RawRetentionPolicy, ScopeRelationPrimitive,
+    SemanticRevisionRef, SourceAccess, SourceCoveragePoint, SourceCoverageSet, SourceObjectList,
+    SourceObjectListRequest, SourceQuery, SourceRecordId, SourceRows, SourceSnapshot,
+    SupportOperation, TypedAccessAuthorization, UsageRevisionV2Fact,
     EXTERNAL_ENTITY_REFERENCE_VERSION,
 };
 use crate::coverage_runtime::{
@@ -73,6 +74,7 @@ pub struct ScopedRootIdentityRequest {
     root_run_identity_key: Option<Arc<[u8]>>,
     expected_session_key: Option<CanonicalEntityKey>,
     external_session_ref: Option<ExternalEntityRef>,
+    native_session_claim: Option<NativeIdentityClaim>,
 }
 
 impl std::fmt::Debug for ScopedRootIdentityRequest {
@@ -95,6 +97,10 @@ impl std::fmt::Debug for ScopedRootIdentityRequest {
                 "has_external_session_ref",
                 &self.external_session_ref.is_some(),
             )
+            .field(
+                "has_native_session_claim",
+                &self.native_session_claim.is_some(),
+            )
             .finish_non_exhaustive()
     }
 }
@@ -115,7 +121,16 @@ impl ScopedRootIdentityRequest {
             root_run_identity_key,
             expected_session_key,
             external_session_ref,
+            native_session_claim: None,
         }
+    }
+
+    /// Attach an already-qualified native session claim. The claim is
+    /// adjacent evidence only: its entity reference must equal the canonical
+    /// root session derived from the pre-access identity inputs.
+    pub fn with_native_session_claim(mut self, claim: NativeIdentityClaim) -> Self {
+        self.native_session_claim = Some(claim);
+        self
     }
 
     fn resolve(
@@ -152,6 +167,10 @@ impl ScopedRootIdentityRequest {
             || self
                 .external_session_ref
                 .is_some_and(|expected| expected != session_ref)
+            || self
+                .native_session_claim
+                .as_ref()
+                .is_some_and(|claim| claim.entity_ref != session_ref)
         {
             return Err(ScopedObservationAccessError::InvalidRootIdentity);
         }
@@ -161,6 +180,7 @@ impl ScopedRootIdentityRequest {
             session_key,
             session_ref,
             root_actor_run_key,
+            native_session_claim: self.native_session_claim.clone(),
         })
     }
 }
@@ -172,6 +192,7 @@ pub struct ScopedObservationRootIdentity {
     pub session_key: CanonicalEntityKey,
     pub session_ref: ExternalEntityRef,
     pub root_actor_run_key: CanonicalEntityKey,
+    pub native_session_claim: Option<NativeIdentityClaim>,
 }
 
 /// One read against an exact known-object grant. Native identity bytes are
@@ -306,6 +327,9 @@ fn source_belongs_to_root(
 pub struct ScopedAppendObservation {
     object_token: u64,
     admission_token: u64,
+    /// Host observation time supplied by the trusted source-driver request.
+    /// It is delivery metadata and never participates in event identity.
+    pub observed_at: i64,
     pub phase: ScopedAppendDeliveryPhase,
     pub reset_before_items: Option<ScopedAppendReset>,
     pub presence_change: Option<ScopedAppendPresenceChange>,
@@ -406,6 +430,7 @@ pub enum ScopedQueuedObservationFrame {
         object_token: u64,
         source: ScopedSourceObjectIdentity,
         lane_ordinal: u64,
+        observed_at: i64,
         phase: ScopedAppendDeliveryPhase,
         change: ScopedAppendPresenceChange,
     },
@@ -413,6 +438,7 @@ pub enum ScopedQueuedObservationFrame {
         object_token: u64,
         source: ScopedSourceObjectIdentity,
         lane_ordinal: u64,
+        observed_at: i64,
         phase: ScopedAppendDeliveryPhase,
         reset: ScopedAppendReset,
     },
@@ -456,6 +482,7 @@ struct QueuedControlFrame {
     object_token: u64,
     source: ScopedSourceObjectIdentity,
     lane_ordinal: u64,
+    observed_at: i64,
     phase: ScopedAppendDeliveryPhase,
     kind: QueuedControlKind,
 }
@@ -650,6 +677,7 @@ impl ScopedObservationAdmissionLane {
                 object_token: observation.object_token,
                 source: object.source.clone(),
                 lane_ordinal,
+                observed_at: observation.observed_at,
                 phase: observation.phase,
                 kind: QueuedControlKind::Presence(change),
             });
@@ -660,6 +688,7 @@ impl ScopedObservationAdmissionLane {
                 object_token: observation.object_token,
                 source: object.source.clone(),
                 lane_ordinal,
+                observed_at: observation.observed_at,
                 phase: observation.phase,
                 kind: QueuedControlKind::Reset(reset),
             });
@@ -812,12 +841,14 @@ impl ScopedObservationAdmissionLane {
                 object_token,
                 source,
                 lane_ordinal,
+                observed_at,
                 phase,
                 change,
             } => self.controls.push_front(QueuedControlFrame {
                 object_token,
                 source,
                 lane_ordinal,
+                observed_at,
                 phase,
                 kind: QueuedControlKind::Presence(change),
             }),
@@ -825,12 +856,14 @@ impl ScopedObservationAdmissionLane {
                 object_token,
                 source,
                 lane_ordinal,
+                observed_at,
                 phase,
                 reset,
             } => self.controls.push_front(QueuedControlFrame {
                 object_token,
                 source,
                 lane_ordinal,
+                observed_at,
                 phase,
                 kind: QueuedControlKind::Reset(reset),
             }),
@@ -968,6 +1001,7 @@ fn queued_control_observation(control: QueuedControlFrame) -> ScopedQueuedObserv
             object_token: control.object_token,
             source: control.source,
             lane_ordinal: control.lane_ordinal,
+            observed_at: control.observed_at,
             phase: control.phase,
             change,
         },
@@ -975,6 +1009,7 @@ fn queued_control_observation(control: QueuedControlFrame) -> ScopedQueuedObserv
             object_token: control.object_token,
             source: control.source,
             lane_ordinal: control.lane_ordinal,
+            observed_at: control.observed_at,
             phase: control.phase,
             reset,
         },
@@ -1043,6 +1078,10 @@ pub struct ScopedUsageV2Event {
     pub fact_id: CanonicalFactId,
     pub operation: ScopedUsageV2Operation,
     pub phase: ScopedAppendDeliveryPhase,
+    /// Host time for this accepted delivery occurrence. For lifecycle-owned
+    /// retractions this is the control observation time, not the retracted
+    /// record's earlier provenance time.
+    pub observed_at: i64,
     pub source: ScopedUsageV2Source,
     /// Present only for a reducer retraction caused by source lifecycle.
     pub retraction: Option<ScopedUsageV2RetractionCause>,
@@ -1074,6 +1113,7 @@ pub enum ScopedProjectedObservation {
         object_token: u64,
         source: ScopedSourceObjectIdentity,
         lane_ordinal: u64,
+        observed_at: i64,
         phase: ScopedAppendDeliveryPhase,
         event_id: ScopedObservationEventId,
         change: ScopedAppendPresenceChange,
@@ -1082,6 +1122,7 @@ pub enum ScopedProjectedObservation {
         object_token: u64,
         source: ScopedSourceObjectIdentity,
         lane_ordinal: u64,
+        observed_at: i64,
         phase: ScopedAppendDeliveryPhase,
         event_id: ScopedObservationEventId,
         reset: ScopedAppendReset,
@@ -1120,6 +1161,15 @@ impl ScopedProjectedObservation {
             Self::UsageV2 { event, .. } => &event.source.object,
         }
     }
+
+    pub fn observed_at(&self) -> i64 {
+        match self {
+            Self::SourcePresence { observed_at, .. } | Self::SourceReset { observed_at, .. } => {
+                *observed_at
+            }
+            Self::UsageV2 { event, .. } => event.observed_at,
+        }
+    }
 }
 
 /// Bounded post-reducer capacity. Native bytes retained during decode remain
@@ -1154,6 +1204,425 @@ pub struct ScopedDeliveredObservation {
     pub phase: ScopedAppendDeliveryPhase,
     pub source: ScopedSourceObjectIdentity,
     pub event: ScopedProjectedObservation,
+}
+
+/// Sanitized RFC 012D root routing carried by every delivered envelope.
+/// Native identity remains an optional qualified claim and never replaces the
+/// canonical session key/reference pair.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScopedObservationEnvelopeRoot {
+    pub session_ref: ExternalEntityRef,
+    pub session_key: CanonicalEntityKey,
+    pub native_session_claim: Option<NativeIdentityClaim>,
+}
+
+/// Topology-neutral RFC 012C actor reference available at delivery time.
+/// Parent/native actor attributes remain absent until their semantic revisions
+/// have reached the scoped actor reducer; absence is not guessed from paths.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScopedActorRunRef {
+    pub root_session_key: CanonicalEntityKey,
+    pub run_key: CanonicalEntityKey,
+    pub role: ActorRunRole,
+    pub parent_run_key: Option<CanonicalEntityKey>,
+    pub native_session_id: Option<String>,
+    pub native_actor_id: Option<String>,
+    pub native_actor_type: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScopedActorFallbackReason {
+    SourceLifecycleControl,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScopedActorAttribution {
+    NativeExact,
+    DerivedExact,
+    ScopeFallback { reason: ScopedActorFallbackReason },
+}
+
+/// Current affiliation context adjacent to an event. Until affiliation-family
+/// projection lands, the mapper reports Unknown rather than treating an empty
+/// vector as proof that no team/workflow relation exists.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScopedActorAffiliationContext {
+    pub actor_run_key: CanonicalEntityKey,
+    pub team_key: Option<CanonicalEntityKey>,
+    pub native_team_id: Option<String>,
+    pub team_name: Option<String>,
+    pub member_key: Option<CanonicalEntityKey>,
+    pub workflow_key: Option<CanonicalEntityKey>,
+    pub native_workflow_id: Option<String>,
+    pub completeness: ContractCompleteness,
+    pub derived_from_revision_refs: Vec<SemanticRevisionRef>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScopedObservationByteRange {
+    pub start: u64,
+    pub end: u64,
+}
+
+/// Path-free source occurrence. `locator_id` is reserved for a future
+/// policy-approved opaque artifact locator; native paths never enter this DTO.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScopedObservationEnvelopeSource {
+    pub instance_key: CanonicalSourceInstanceKey,
+    pub stream_key: CoverageStreamKey,
+    pub object_key: CoverageObjectKey,
+    pub locator_id: Option<String>,
+    pub generation: u64,
+    pub source_record_id: Option<SourceRecordId>,
+    pub record_index: Option<u32>,
+    pub cursor_start: Option<SourceCursor>,
+    pub cursor_end: Option<SourceCursor>,
+    pub byte_range: Option<ScopedObservationByteRange>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScopedEnvelopeEvidenceAuthority {
+    NativeRecord,
+    CommonReducer,
+    EngineControl,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScopedEnvelopeEvidence {
+    pub authority: ScopedEnvelopeEvidenceAuthority,
+    pub quality: QualifiedValueQuality,
+    pub effective_at: Option<QualifiedTimestamp>,
+    pub completeness: ContractCompleteness,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScopedNativeEvidenceWithheldReason {
+    ProjectionBoundary,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ScopedNativeEvidence {
+    InlineSourceRecord {
+        media_type: SourceMediaType,
+        state: SourceRecordState,
+        payload_hash: RecordHash,
+        payload: Vec<u8>,
+    },
+    Withheld {
+        media_type: SourceMediaType,
+        state: SourceRecordState,
+        payload_hash: RecordHash,
+        reason: ScopedNativeEvidenceWithheldReason,
+    },
+    EngineControl,
+}
+
+/// Public-contract-shaped event payload. Internal object tokens, admission
+/// ordinals, and duplicated envelope metadata are deliberately stripped.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ScopedObservationEvent {
+    SourcePresence {
+        change: ScopedAppendPresenceChange,
+    },
+    SourceReset {
+        reset: ScopedAppendReset,
+    },
+    UsageV2 {
+        fact_id: CanonicalFactId,
+        operation: ScopedUsageV2Operation,
+        retraction: Option<ScopedUsageV2RetractionCause>,
+        revision: Box<UsageRevisionV2Fact>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScopedObservationEnvelope {
+    pub contract_version: u32,
+    pub observer_sequence: u64,
+    pub scope_epoch: u64,
+    pub event_id: ScopedObservationEventId,
+    pub semantic_revision_ref: Option<SemanticRevisionRef>,
+    pub root: ScopedObservationEnvelopeRoot,
+    pub actor: ScopedActorRunRef,
+    pub actor_attribution: ScopedActorAttribution,
+    pub affiliations: ScopedActorAffiliationContext,
+    pub source: ScopedObservationEnvelopeSource,
+    pub native_time: Option<QualifiedTimestamp>,
+    pub observed_at: i64,
+    pub phase: ScopedAppendDeliveryPhase,
+    pub evidence: ScopedEnvelopeEvidence,
+    pub event: ScopedObservationEvent,
+    pub native_evidence: ScopedNativeEvidence,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum ScopedEnvelopeError {
+    #[error("scoped delivery metadata does not match its projected event")]
+    DeliveryMismatch,
+    #[error("scoped delivered source does not belong to the observer root")]
+    RootSourceMismatch,
+    #[error("scoped typed event does not belong to the observer root session")]
+    RootSessionMismatch,
+    #[error("scoped delivered source occurrence is malformed")]
+    InvalidSourceOccurrence,
+}
+
+/// Immutable mapper created from the pre-access resolved root. It is safe to
+/// retain with the event drain and cannot mint or revise observer identity.
+#[derive(Debug, Clone)]
+pub struct ScopedObservationEnvelopeMapper {
+    root: ScopedObservationRootIdentity,
+}
+
+impl ScopedObservationEnvelopeMapper {
+    fn new(root: ScopedObservationRootIdentity) -> Self {
+        Self { root }
+    }
+
+    pub fn map(
+        &self,
+        delivered: ScopedDeliveredObservation,
+    ) -> Result<ScopedObservationEnvelope, ScopedEnvelopeError> {
+        if delivered.event_contract_version != SCOPED_OBSERVATION_EVENT_CONTRACT_VERSION
+            || delivered.observer_sequence == 0
+            || delivered.scope_epoch == 0
+            || delivered.event_id != delivered.event.event_id()
+            || delivered.semantic_revision_ref != delivered.event.semantic_revision_ref()
+            || delivered.phase != delivered.event.phase()
+            || &delivered.source != delivered.event.source()
+        {
+            return Err(ScopedEnvelopeError::DeliveryMismatch);
+        }
+        if !source_belongs_to_root(&delivered.source, &self.root) {
+            return Err(ScopedEnvelopeError::RootSourceMismatch);
+        }
+
+        let contract_version = delivered.event_contract_version;
+        let observer_sequence = delivered.observer_sequence;
+        let scope_epoch = delivered.scope_epoch;
+        let event_id = delivered.event_id;
+        let semantic_revision_ref = delivered.semantic_revision_ref;
+        let phase = delivered.phase;
+
+        let mapped = match delivered.event {
+            ScopedProjectedObservation::SourcePresence {
+                observed_at,
+                change,
+                ..
+            } => {
+                if semantic_revision_ref.is_some() {
+                    return Err(ScopedEnvelopeError::DeliveryMismatch);
+                }
+                let generation = match change {
+                    ScopedAppendPresenceChange::Created { generation }
+                    | ScopedAppendPresenceChange::Deleted { generation } => generation,
+                };
+                ScopedMappedEnvelopeParts {
+                    actor_run_key: self.root.root_actor_run_key,
+                    actor_attribution: ScopedActorAttribution::ScopeFallback {
+                        reason: ScopedActorFallbackReason::SourceLifecycleControl,
+                    },
+                    source: scoped_control_envelope_source(&delivered.source, generation),
+                    native_time: None,
+                    observed_at,
+                    evidence: ScopedEnvelopeEvidence {
+                        authority: ScopedEnvelopeEvidenceAuthority::EngineControl,
+                        quality: QualifiedValueQuality::Derived,
+                        effective_at: None,
+                        completeness: ContractCompleteness::Complete,
+                    },
+                    event: ScopedObservationEvent::SourcePresence { change },
+                    native_evidence: ScopedNativeEvidence::EngineControl,
+                }
+            }
+            ScopedProjectedObservation::SourceReset {
+                observed_at, reset, ..
+            } => {
+                if semantic_revision_ref.is_some() {
+                    return Err(ScopedEnvelopeError::DeliveryMismatch);
+                }
+                ScopedMappedEnvelopeParts {
+                    actor_run_key: self.root.root_actor_run_key,
+                    actor_attribution: ScopedActorAttribution::ScopeFallback {
+                        reason: ScopedActorFallbackReason::SourceLifecycleControl,
+                    },
+                    source: scoped_control_envelope_source(&delivered.source, reset.new_generation),
+                    native_time: None,
+                    observed_at,
+                    evidence: ScopedEnvelopeEvidence {
+                        authority: ScopedEnvelopeEvidenceAuthority::EngineControl,
+                        quality: QualifiedValueQuality::Derived,
+                        effective_at: None,
+                        completeness: ContractCompleteness::Complete,
+                    },
+                    event: ScopedObservationEvent::SourceReset { reset },
+                    native_evidence: ScopedNativeEvidence::EngineControl,
+                }
+            }
+            ScopedProjectedObservation::UsageV2 { event, .. } => {
+                if semantic_revision_ref != Some(event.semantic_revision_ref) {
+                    return Err(ScopedEnvelopeError::DeliveryMismatch);
+                }
+                if event.revision.session != self.root.session_key {
+                    return Err(ScopedEnvelopeError::RootSessionMismatch);
+                }
+                let source = scoped_usage_envelope_source(&event.source)?;
+                let native_time = event.revision.source_time.clone();
+                let (authority, quality) = match event.operation {
+                    ScopedUsageV2Operation::Upsert => (
+                        ScopedEnvelopeEvidenceAuthority::NativeRecord,
+                        QualifiedValueQuality::Exact,
+                    ),
+                    ScopedUsageV2Operation::Retract => (
+                        ScopedEnvelopeEvidenceAuthority::CommonReducer,
+                        QualifiedValueQuality::Derived,
+                    ),
+                };
+                ScopedMappedEnvelopeParts {
+                    actor_run_key: event.revision.actor_run,
+                    actor_attribution: ScopedActorAttribution::DerivedExact,
+                    source,
+                    native_time: native_time.clone(),
+                    observed_at: event.observed_at,
+                    evidence: ScopedEnvelopeEvidence {
+                        authority,
+                        quality,
+                        effective_at: native_time,
+                        completeness: ContractCompleteness::Complete,
+                    },
+                    event: ScopedObservationEvent::UsageV2 {
+                        fact_id: event.fact_id,
+                        operation: event.operation,
+                        retraction: event.retraction,
+                        revision: Box::new(event.revision),
+                    },
+                    native_evidence: ScopedNativeEvidence::Withheld {
+                        media_type: event.source.media_type,
+                        state: event.source.state,
+                        payload_hash: event.source.payload_hash,
+                        reason: ScopedNativeEvidenceWithheldReason::ProjectionBoundary,
+                    },
+                }
+            }
+        };
+
+        let actor = self.actor_ref(mapped.actor_run_key);
+        let affiliations = ScopedActorAffiliationContext {
+            actor_run_key: mapped.actor_run_key,
+            team_key: None,
+            native_team_id: None,
+            team_name: None,
+            member_key: None,
+            workflow_key: None,
+            native_workflow_id: None,
+            completeness: ContractCompleteness::Unknown,
+            derived_from_revision_refs: Vec::new(),
+        };
+        Ok(ScopedObservationEnvelope {
+            contract_version,
+            observer_sequence,
+            scope_epoch,
+            event_id,
+            semantic_revision_ref,
+            root: ScopedObservationEnvelopeRoot {
+                session_ref: self.root.session_ref,
+                session_key: self.root.session_key,
+                native_session_claim: self.root.native_session_claim.clone(),
+            },
+            actor,
+            actor_attribution: mapped.actor_attribution,
+            affiliations,
+            source: mapped.source,
+            native_time: mapped.native_time,
+            observed_at: mapped.observed_at,
+            phase,
+            evidence: mapped.evidence,
+            event: mapped.event,
+            native_evidence: mapped.native_evidence,
+        })
+    }
+
+    fn actor_ref(&self, run_key: CanonicalEntityKey) -> ScopedActorRunRef {
+        let native_session_id = self
+            .root
+            .native_session_claim
+            .as_ref()
+            .and_then(|claim| claim.identity.value.as_ref())
+            .map(|identity| identity.native_id.clone());
+        ScopedActorRunRef {
+            root_session_key: self.root.session_key,
+            run_key,
+            role: if run_key == self.root.root_actor_run_key {
+                ActorRunRole::Root
+            } else {
+                ActorRunRole::Child
+            },
+            parent_run_key: None,
+            native_session_id,
+            native_actor_id: None,
+            native_actor_type: None,
+        }
+    }
+}
+
+struct ScopedMappedEnvelopeParts {
+    actor_run_key: CanonicalEntityKey,
+    actor_attribution: ScopedActorAttribution,
+    source: ScopedObservationEnvelopeSource,
+    native_time: Option<QualifiedTimestamp>,
+    observed_at: i64,
+    evidence: ScopedEnvelopeEvidence,
+    event: ScopedObservationEvent,
+    native_evidence: ScopedNativeEvidence,
+}
+
+fn scoped_control_envelope_source(
+    source: &ScopedSourceObjectIdentity,
+    generation: u64,
+) -> ScopedObservationEnvelopeSource {
+    ScopedObservationEnvelopeSource {
+        instance_key: source.source_instance_key,
+        stream_key: source.stream_key,
+        object_key: source.object_key,
+        locator_id: None,
+        generation,
+        source_record_id: None,
+        record_index: None,
+        cursor_start: None,
+        cursor_end: None,
+        byte_range: None,
+    }
+}
+
+fn scoped_usage_envelope_source(
+    source: &ScopedUsageV2Source,
+) -> Result<ScopedObservationEnvelopeSource, ScopedEnvelopeError> {
+    if source.provenance.generation == 0 {
+        return Err(ScopedEnvelopeError::InvalidSourceOccurrence);
+    }
+    let byte_range = match (
+        source.cursor_start.append_offset_value(),
+        source.cursor_end.append_offset_value(),
+    ) {
+        (Some(start), Some(end)) if start <= end => Some(ScopedObservationByteRange { start, end }),
+        (Some(_), Some(_)) => return Err(ScopedEnvelopeError::InvalidSourceOccurrence),
+        (None, None) => None,
+        (Some(_), None) | (None, Some(_)) => {
+            return Err(ScopedEnvelopeError::InvalidSourceOccurrence);
+        }
+    };
+    Ok(ScopedObservationEnvelopeSource {
+        instance_key: source.object.source_instance_key,
+        stream_key: source.object.stream_key,
+        object_key: source.object.object_key,
+        locator_id: None,
+        generation: source.provenance.generation,
+        source_record_id: Some(source.source_record_id),
+        record_index: Some(source.ordinal_in_batch),
+        cursor_start: Some(source.cursor_start.clone()),
+        cursor_end: Some(source.cursor_end.clone()),
+        byte_range,
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1544,6 +2013,13 @@ enum ScopedProjectionMutation {
     RetractUsageV2(Vec<CanonicalFactId>),
 }
 
+#[derive(Clone, Copy)]
+struct ScopedRetractionDelivery {
+    lane_ordinal: u64,
+    observed_at: i64,
+    phase: ScopedAppendDeliveryPhase,
+}
+
 /// Database-free common reducer for typed scoped-observation facts.
 ///
 /// Usage-v2 is the first family wired through this sink. Its state is bounded
@@ -1588,16 +2064,32 @@ impl ScopedObservationProjectionSink {
                 object_token,
                 source,
                 lane_ordinal,
+                observed_at,
                 phase,
                 change,
-            } => self.prepare_presence(*object_token, source, *lane_ordinal, *phase, *change),
+            } => self.prepare_presence(
+                *object_token,
+                source,
+                *lane_ordinal,
+                *observed_at,
+                *phase,
+                *change,
+            ),
             ScopedQueuedObservationFrame::Reset {
                 object_token,
                 source,
                 lane_ordinal,
+                observed_at,
                 phase,
                 reset,
-            } => self.prepare_reset(*object_token, source, *lane_ordinal, *phase, *reset),
+            } => self.prepare_reset(
+                *object_token,
+                source,
+                *lane_ordinal,
+                *observed_at,
+                *phase,
+                *reset,
+            ),
             ScopedQueuedObservationFrame::Decoded {
                 object_token,
                 source,
@@ -1659,6 +2151,7 @@ impl ScopedObservationProjectionSink {
                 fact_id: state.semantic.fact_id,
                 operation: ScopedUsageV2Operation::Upsert,
                 phase,
+                observed_at: state.source.provenance.observed_at,
                 source: state.source.clone(),
                 retraction: None,
                 revision: state.revision.clone(),
@@ -1679,14 +2172,18 @@ impl ScopedObservationProjectionSink {
         object_token: u64,
         source: &ScopedSourceObjectIdentity,
         lane_ordinal: u64,
+        observed_at: i64,
         phase: ScopedAppendDeliveryPhase,
         reset: ScopedAppendReset,
     ) -> Result<ScopedProjectionPlan, ScopedProjectionError> {
         let (retracted, fact_ids) = self.prepare_usage_v2_retractions(
             object_token,
             reset.old_generation,
-            lane_ordinal,
-            ScopedAppendDeliveryPhase::Correction,
+            ScopedRetractionDelivery {
+                lane_ordinal,
+                observed_at,
+                phase: ScopedAppendDeliveryPhase::Correction,
+            },
             ScopedUsageV2RetractionCause::Reset(reset),
             ScopedProjectionError::InvalidResetState,
         )?;
@@ -1695,6 +2192,7 @@ impl ScopedObservationProjectionSink {
             object_token,
             source: source.clone(),
             lane_ordinal,
+            observed_at,
             phase,
             event_id: source_reset_event_id(source, reset),
             reset,
@@ -1711,6 +2209,7 @@ impl ScopedObservationProjectionSink {
         object_token: u64,
         source: &ScopedSourceObjectIdentity,
         lane_ordinal: u64,
+        observed_at: i64,
         phase: ScopedAppendDeliveryPhase,
         change: ScopedAppendPresenceChange,
     ) -> Result<ScopedProjectionPlan, ScopedProjectionError> {
@@ -1729,8 +2228,11 @@ impl ScopedObservationProjectionSink {
                 .prepare_usage_v2_retractions(
                     object_token,
                     generation,
-                    lane_ordinal,
-                    phase,
+                    ScopedRetractionDelivery {
+                        lane_ordinal,
+                        observed_at,
+                        phase,
+                    },
                     ScopedUsageV2RetractionCause::SourceDeleted { generation },
                     ScopedProjectionError::InvalidPresenceState,
                 )?,
@@ -1740,6 +2242,7 @@ impl ScopedObservationProjectionSink {
             object_token,
             source: source.clone(),
             lane_ordinal,
+            observed_at,
             phase,
             event_id: source_presence_event_id(source, change),
             change,
@@ -1759,8 +2262,7 @@ impl ScopedObservationProjectionSink {
         &self,
         object_token: u64,
         generation: u64,
-        lane_ordinal: u64,
-        phase: ScopedAppendDeliveryPhase,
+        delivery: ScopedRetractionDelivery,
         cause: ScopedUsageV2RetractionCause,
         mismatch_error: ScopedProjectionError,
     ) -> Result<(Vec<ScopedProjectedObservation>, Vec<CanonicalFactId>), ScopedProjectionError>
@@ -1787,7 +2289,7 @@ impl ScopedObservationProjectionSink {
                 .get(fact_id)
                 .expect("retraction keys came from the same reducer map");
             projected.push(ScopedProjectedObservation::UsageV2 {
-                lane_ordinal,
+                lane_ordinal: delivery.lane_ordinal,
                 event: Box::new(ScopedUsageV2Event {
                     event_id: usage_v2_event_id(
                         ScopedUsageV2Operation::Retract,
@@ -1797,7 +2299,8 @@ impl ScopedObservationProjectionSink {
                     semantic_revision_ref: state.semantic.semantic_revision_ref,
                     fact_id: state.semantic.fact_id,
                     operation: ScopedUsageV2Operation::Retract,
-                    phase,
+                    phase: delivery.phase,
+                    observed_at: delivery.observed_at,
                     source: state.source.clone(),
                     retraction: Some(cause),
                     revision: state.revision.clone(),
@@ -1859,6 +2362,7 @@ impl ScopedObservationProjectionSink {
                 fact_id: state.semantic.fact_id,
                 operation: ScopedUsageV2Operation::Upsert,
                 phase,
+                observed_at: state.source.provenance.observed_at,
                 source: state.source.clone(),
                 retraction: None,
                 revision: state.revision.clone(),
@@ -2239,6 +2743,10 @@ impl ScopedObservationAccessHost {
 
     pub fn root_identity(&self) -> &ScopedObservationRootIdentity {
         &self.root_identity
+    }
+
+    pub fn envelope_mapper(&self) -> ScopedObservationEnvelopeMapper {
+        ScopedObservationEnvelopeMapper::new(self.root_identity.clone())
     }
 
     /// Capture a self-consistent offered sequence plus eligible RFC 012A
@@ -2698,6 +3206,7 @@ impl ScopedKnownAppendObject {
         Ok(ScopedAppendObservation {
             object_token: self.object_token,
             admission_token,
+            observed_at: request.origin.observed_at,
             phase,
             reset_before_items,
             presence_change,
@@ -3462,9 +3971,9 @@ fn scoped_dependency_access_error() -> AdapterError {
 #[cfg(test)]
 mod projection_tests {
     use crate::adapter::{
-        ContractCompleteness, QualifiedTimestamp, QualifiedValue, QualifiedValueQuality,
-        TimestampQuality, UsageBucketsV2, UsageQualifiedValue, UsageResponseIdentity,
-        UsageValueAuthority, UsageValueProvenance,
+        ContractCompleteness, NativeIdentity, QualifiedTimestamp, QualifiedValue,
+        QualifiedValueQuality, TimestampQuality, UsageBucketsV2, UsageQualifiedValue,
+        UsageResponseIdentity, UsageValueAuthority, UsageValueProvenance,
     };
     use crate::source::RecordOrigin;
 
@@ -3622,6 +4131,42 @@ mod projection_tests {
         bytes.iter().map(|byte| format!("{byte:02x}")).collect()
     }
 
+    fn root_identity() -> ScopedObservationRootIdentity {
+        let context = semantic_context();
+        let session_key = CanonicalEntityKey::derive(
+            context.adapter_id().as_str(),
+            &context.source_instance_key(),
+            "session",
+            b"native-session",
+        )
+        .unwrap();
+        let session_ref = ExternalEntityRef::new(session_key);
+        let identity: QualifiedValue<NativeIdentity> = QualifiedValue::from_parts(
+            Some(NativeIdentity {
+                native_namespace: "fixture.session".to_string(),
+                native_id: "native-session".to_string(),
+            }),
+            QualifiedValueQuality::NativeClaimed,
+            "fixture".to_string(),
+            ContractCompleteness::Complete,
+            None,
+            None,
+            Vec::new(),
+        )
+        .unwrap();
+        ScopedRootIdentityRequest::new(
+            1,
+            b"stable-source-instance".as_slice(),
+            b"native-session".as_slice(),
+            None,
+            Some(session_key),
+            Some(session_ref),
+        )
+        .with_native_session_claim(NativeIdentityClaim::new(session_ref, identity).unwrap())
+        .resolve(context.adapter_id(), EXTERNAL_ENTITY_REFERENCE_VERSION)
+        .unwrap()
+    }
+
     fn admission_lane_with_decoded_frame(
         frame: ScopedQueuedObservationFrame,
     ) -> ScopedObservationAdmissionLane {
@@ -3694,6 +4239,7 @@ mod projection_tests {
             object_token: 1,
             source: source.clone(),
             lane_ordinal: 1,
+            observed_at: 44,
             phase: ScopedAppendDeliveryPhase::Correction,
             reset,
         };
@@ -3701,6 +4247,7 @@ mod projection_tests {
             object_token: 99,
             source: source.clone(),
             lane_ordinal: 88,
+            observed_at: 99,
             phase: ScopedAppendDeliveryPhase::Bootstrap,
             reset,
         };
@@ -3723,6 +4270,7 @@ mod projection_tests {
             object_token: 1,
             source: source.clone(),
             lane_ordinal: 1,
+            observed_at: 44,
             phase: ScopedAppendDeliveryPhase::Live,
             event_id: source_presence_event_id(
                 &source,
@@ -3747,6 +4295,239 @@ mod projection_tests {
     }
 
     #[test]
+    fn scoped_envelope_mapper_routes_typed_usage_without_exposing_internal_ordinals() {
+        let root = root_identity();
+        let mapper = ScopedObservationEnvelopeMapper::new(root.clone());
+        let record = record(3, 10, 25);
+        let frame = decoded_frame(
+            7,
+            ScopedAppendDeliveryPhase::Live,
+            &record,
+            usage_batch(&record, "response-1", 10, None),
+        );
+        let mut projection = sink(8);
+        let projected = projection.project(&frame).unwrap();
+        let mut delivery = delivery_lane(1, 1);
+        delivery.offer(projected).unwrap();
+        let delivered = delivery.pop_next().unwrap();
+        let expected_event_id = delivered.event_id;
+        let expected_semantic_ref = delivered.semantic_revision_ref;
+        let envelope = mapper.map(delivered).unwrap();
+
+        assert_eq!(
+            envelope.contract_version,
+            SCOPED_OBSERVATION_EVENT_CONTRACT_VERSION
+        );
+        assert_eq!(envelope.observer_sequence, 1);
+        assert_eq!(envelope.scope_epoch, SCOPED_INITIAL_SCOPE_EPOCH);
+        assert_eq!(envelope.event_id, expected_event_id);
+        assert_eq!(envelope.semantic_revision_ref, expected_semantic_ref);
+        assert_eq!(envelope.root.session_key, root.session_key);
+        assert_eq!(envelope.root.session_ref, root.session_ref);
+        assert_eq!(
+            envelope
+                .root
+                .native_session_claim
+                .as_ref()
+                .unwrap()
+                .entity_ref,
+            root.session_ref
+        );
+        assert_eq!(envelope.actor.root_session_key, root.session_key);
+        assert_ne!(envelope.actor.run_key, root.root_actor_run_key);
+        assert_eq!(envelope.actor.role, ActorRunRole::Child);
+        assert_eq!(envelope.actor.parent_run_key, None);
+        assert_eq!(
+            envelope.actor.native_session_id.as_deref(),
+            Some("native-session")
+        );
+        assert_eq!(
+            envelope.actor_attribution,
+            ScopedActorAttribution::DerivedExact
+        );
+        assert_eq!(
+            envelope.affiliations.completeness,
+            ContractCompleteness::Unknown
+        );
+        assert!(envelope.affiliations.derived_from_revision_refs.is_empty());
+        assert_eq!(envelope.source.instance_key, root.source_instance_key);
+        assert_eq!(envelope.source.generation, 3);
+        assert_eq!(envelope.source.record_index, Some(0));
+        assert_eq!(
+            envelope.source.byte_range,
+            Some(ScopedObservationByteRange { start: 10, end: 25 })
+        );
+        assert_eq!(envelope.observed_at, 44);
+        assert_eq!(
+            envelope
+                .native_time
+                .as_ref()
+                .map(|value| value.value.as_str()),
+            Some("2026-08-16T00:00:00Z")
+        );
+        assert_eq!(
+            envelope.evidence.authority,
+            ScopedEnvelopeEvidenceAuthority::NativeRecord
+        );
+        assert_eq!(envelope.evidence.quality, QualifiedValueQuality::Exact);
+        assert!(matches!(
+            envelope.native_evidence,
+            ScopedNativeEvidence::Withheld {
+                reason: ScopedNativeEvidenceWithheldReason::ProjectionBoundary,
+                ..
+            }
+        ));
+        assert!(matches!(
+            envelope.event,
+            ScopedObservationEvent::UsageV2 {
+                operation: ScopedUsageV2Operation::Upsert,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn scoped_envelope_mapper_marks_controls_as_fallback_and_retractions_with_control_time() {
+        let root = root_identity();
+        let mapper = ScopedObservationEnvelopeMapper::new(root.clone());
+        let record = record_with_observed_at(1, 0, 10, 44);
+        let frame = decoded_frame(
+            1,
+            ScopedAppendDeliveryPhase::Bootstrap,
+            &record,
+            usage_batch(&record, "response-1", 10, None),
+        );
+        let mut projection = sink(8);
+        only_usage_event(projection.project(&frame).unwrap());
+
+        let reset = ScopedAppendReset {
+            old_generation: 1,
+            new_generation: 2,
+            reason: AppendTransition::Truncated,
+        };
+        let reset_frame = ScopedQueuedObservationFrame::Reset {
+            object_token: OBJECT_TOKEN,
+            source: source_identity(),
+            lane_ordinal: 2,
+            observed_at: 777,
+            phase: ScopedAppendDeliveryPhase::Correction,
+            reset,
+        };
+        let projected = projection.project(&reset_frame).unwrap();
+        let mut delivery = delivery_lane(1, 1);
+        delivery.offer(projected).unwrap();
+
+        let control = mapper.map(delivery.pop_next().unwrap()).unwrap();
+        assert_eq!(control.actor.run_key, root.root_actor_run_key);
+        assert_eq!(control.actor.role, ActorRunRole::Root);
+        assert_eq!(
+            control.actor_attribution,
+            ScopedActorAttribution::ScopeFallback {
+                reason: ScopedActorFallbackReason::SourceLifecycleControl,
+            }
+        );
+        assert_eq!(control.semantic_revision_ref, None);
+        assert_eq!(control.source.generation, 2);
+        assert_eq!(control.observed_at, 777);
+        assert_eq!(
+            control.evidence.authority,
+            ScopedEnvelopeEvidenceAuthority::EngineControl
+        );
+        assert!(matches!(
+            control.event,
+            ScopedObservationEvent::SourceReset { reset: value } if value == reset
+        ));
+
+        let retraction = mapper.map(delivery.pop_next().unwrap()).unwrap();
+        assert_ne!(retraction.actor.run_key, root.root_actor_run_key);
+        assert_eq!(retraction.actor.role, ActorRunRole::Child);
+        assert_eq!(
+            retraction.actor_attribution,
+            ScopedActorAttribution::DerivedExact
+        );
+        assert!(retraction.semantic_revision_ref.is_some());
+        assert_eq!(retraction.observed_at, 777);
+        assert_eq!(
+            retraction.evidence.authority,
+            ScopedEnvelopeEvidenceAuthority::CommonReducer
+        );
+        assert_eq!(retraction.evidence.quality, QualifiedValueQuality::Derived);
+        assert!(matches!(
+            retraction.event,
+            ScopedObservationEvent::UsageV2 {
+                operation: ScopedUsageV2Operation::Retract,
+                retraction: Some(ScopedUsageV2RetractionCause::Reset(value)),
+                ..
+            } if value == reset
+        ));
+        assert!(delivery.is_empty());
+    }
+
+    #[test]
+    fn scoped_envelope_mapper_rejects_cross_root_typed_session() {
+        let root = root_identity();
+        let mapper = ScopedObservationEnvelopeMapper::new(root);
+        let record = record(1, 0, 10);
+        let frame = decoded_frame(
+            1,
+            ScopedAppendDeliveryPhase::Live,
+            &record,
+            usage_batch(&record, "response-1", 10, None),
+        );
+        let mut projection = sink(8);
+        let projected = projection.project(&frame).unwrap();
+        let mut delivery = delivery_lane(1, 1);
+        delivery.offer(projected).unwrap();
+        let mut delivered = delivery.pop_next().unwrap();
+        let ScopedProjectedObservation::UsageV2 { event, .. } = &mut delivered.event else {
+            panic!("expected usage-v2 event");
+        };
+        event.revision.session = CanonicalEntityKey::derive(
+            "fixture",
+            &semantic_context().source_instance_key(),
+            "session",
+            b"another-session",
+        )
+        .unwrap();
+        assert_eq!(
+            mapper.map(delivered),
+            Err(ScopedEnvelopeError::RootSessionMismatch)
+        );
+    }
+
+    #[test]
+    fn scoped_root_native_identity_claim_must_match_derived_session() {
+        let root = root_identity();
+        let context = semantic_context();
+        let other_session = CanonicalEntityKey::derive(
+            context.adapter_id().as_str(),
+            &context.source_instance_key(),
+            "session",
+            b"other-session",
+        )
+        .unwrap();
+        let claim = root.native_session_claim.as_ref().unwrap();
+        let mismatched = NativeIdentityClaim::new(
+            ExternalEntityRef::new(other_session),
+            claim.identity.clone(),
+        )
+        .unwrap();
+        let request = ScopedRootIdentityRequest::new(
+            1,
+            b"stable-source-instance".as_slice(),
+            b"native-session".as_slice(),
+            None,
+            Some(root.session_key),
+            Some(root.session_ref),
+        )
+        .with_native_session_claim(mismatched);
+        assert!(matches!(
+            request.resolve(context.adapter_id(), EXTERNAL_ENTITY_REFERENCE_VERSION),
+            Err(ScopedObservationAccessError::InvalidRootIdentity)
+        ));
+    }
+
+    #[test]
     fn scoped_delivery_preserves_reset_before_retraction_across_capacity_domains() {
         let mut projection = sink(8);
         let record = record(1, 0, 10);
@@ -3767,6 +4548,7 @@ mod projection_tests {
             object_token: OBJECT_TOKEN,
             source: source_identity(),
             lane_ordinal: 2,
+            observed_at: 45,
             phase: ScopedAppendDeliveryPhase::Correction,
             reset,
         };
@@ -3852,6 +4634,7 @@ mod projection_tests {
                 object_token: OBJECT_TOKEN,
                 source: creation_source.clone(),
                 lane_ordinal: 2,
+                observed_at: 44,
                 phase: ScopedAppendDeliveryPhase::Live,
                 event_id: source_presence_event_id(&creation_source, creation),
                 change: creation,
@@ -4096,6 +4879,7 @@ mod projection_tests {
             object_token: OBJECT_TOKEN,
             source: source_identity(),
             lane_ordinal: 2,
+            observed_at: 45,
             phase: ScopedAppendDeliveryPhase::Correction,
             kind: QueuedControlKind::Reset(reset),
         });
@@ -4247,6 +5031,7 @@ mod projection_tests {
             object_token: OBJECT_TOKEN,
             source: source_identity(),
             lane_ordinal: 2,
+            observed_at: 45,
             phase: ScopedAppendDeliveryPhase::Correction,
             kind: QueuedControlKind::Reset(reset),
         });
@@ -4427,6 +5212,7 @@ mod projection_tests {
             object_token: OBJECT_TOKEN,
             source: source_identity(),
             lane_ordinal: 2,
+            observed_at: 45,
             phase: ScopedAppendDeliveryPhase::Correction,
             change: ScopedAppendPresenceChange::Deleted { generation: 1 },
         };
@@ -4531,6 +5317,7 @@ mod projection_tests {
             object_token: OBJECT_TOKEN,
             source: source_identity(),
             lane_ordinal: 2,
+            observed_at: 45,
             phase: ScopedAppendDeliveryPhase::Correction,
             reset,
         };
@@ -4586,6 +5373,7 @@ mod projection_tests {
             object_token: OBJECT_TOKEN,
             source: source_identity(),
             lane_ordinal: 2,
+            observed_at: 45,
             phase: ScopedAppendDeliveryPhase::Live,
             change: deletion,
         };
@@ -4615,6 +5403,7 @@ mod projection_tests {
             object_token: OBJECT_TOKEN,
             source: creation_source.clone(),
             lane_ordinal: 3,
+            observed_at: 46,
             phase: ScopedAppendDeliveryPhase::Live,
             change: creation,
         };
@@ -4624,6 +5413,7 @@ mod projection_tests {
                 object_token: OBJECT_TOKEN,
                 source: creation_source.clone(),
                 lane_ordinal: 3,
+                observed_at: 46,
                 phase: ScopedAppendDeliveryPhase::Live,
                 event_id: source_presence_event_id(&creation_source, creation),
                 change: creation,

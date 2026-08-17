@@ -918,7 +918,7 @@ source/decoder registry used by the durable host. It must:
 - expose RFC 012A source/family coverage from poll and barriers; and
 - instrument every access for no-global-scan conformance.
 
-Current landing status (2026-08-16):
+Current landing status (2026-08-17):
 
 - the crate-private composition root performs strict support/contract/program
   selection before validating exact grants and exposes no spoofable N-API
@@ -1016,6 +1016,19 @@ Current landing status (2026-08-16):
   without reducer or sequence drift, permits an exact-repeat empty batch to
   retire while delivery is full, and keeps reset plus all retractions
   indivisible;
+- an immutable post-delivery mapper now turns those internal values into the
+  first sanitized RFC 012D envelope shape. Every mapped value carries the
+  pre-access canonical root session/reference, a complete RFC 012C actor-run
+  reference, explicit actor attribution, affiliation completeness, path-free
+  source occurrence, native/observed time, evidence qualification, and native
+  evidence disposition. Usage routes to its canonical actor; source lifecycle
+  controls route through the root only as `ScopeFallback`, never as semantic
+  root attribution. Typed usage must match the observer root session and carry
+  its durable-equal semantic reference, while controls must not fabricate one.
+  Attachment-local object tokens and admission ordinals are stripped. A
+  qualified native session claim is accepted only when its external entity
+  reference equals the already-derived root. Lifecycle-owned retractions carry
+  the reset/delete observation time rather than the old response time;
 - every admitted append observation now stages one bounded RFC 012A `Decode`
   coverage update using the same source-instance/stream/object coordinates and
   append-cursor representation as durable ingestion. Stable initial absence,
@@ -1051,9 +1064,9 @@ D1 remains `In progress`: watcher-before-scan, multi-object discovery/cursor
 orchestration, declared relation-backed decoder dependency access, built-in
 canonical fact-revision adoption beyond the current runtime families, scoped
 reducers beyond usage-v2,
-coverage-complete durable query exposure, the complete root/actor/source
-envelope mapper (including native identity claim and evidence qualification),
-the public ordered multiplexer and poll/readiness barriers,
+coverage-complete durable query exposure, affiliation/actor enrichment and
+envelope variants beyond the current usage/source-lifecycle families, the
+public ordered multiplexer and poll/readiness barriers,
 complete declared-scope membership and family coverage beyond usage-v2,
 overflow/resync epochs, artifact mediation, cancellation waiting,
 the trusted native version-probe/identity-input drivers, and the complete
@@ -1095,7 +1108,7 @@ Gate compares clean-bootstrap and resync replacement digests per RFC 012C family
 at the same RFC 012A coverage vector, including disappeared entities, explicit
 unavailable coverage, and unchanged event IDs.
 
-Current landing status (2026-08-16): D3 is `In progress`. Native-derived
+Current landing status (2026-08-17): D3 is `In progress`. Native-derived
 usage-v2 upsert/retraction IDs are deterministic and include the selected event
 and semantic-reference contract versions, typed semantic revision and stable
 source occurrence. Source create/delete and reset controls now also have
@@ -1127,9 +1140,15 @@ retractions enter delivery as one ordered batch. Therefore the D3 and X0 gates
 remain open for the still-missing public lifecycle rather than this internal
 atomicity seam. Delivered internal values now carry the selected event-contract
 version, epoch, observer sequence, mandatory event ID, optional semantic
-revision, phase, stable source coordinate, and typed event. This freezes the
-offered/delivered vocabulary but is not yet the complete public root/actor/
-evidence envelope or an applied acknowledgement.
+revision, phase, stable source coordinate, and typed event. The immutable
+mapper binds those values to the resolved root, emits RFC 012C actor and
+unknown-affiliation context, strips internal ordinals, preserves source
+occurrence and observed/native time, and distinguishes native records, common
+reducer corrections, and engine controls. It rejects cross-root typed events
+and mismatched native-session claims. This freezes the current
+usage/source-lifecycle envelope vocabulary but is not yet the public
+multiplexer, bootstrap/resync control family, complete actor-affiliation
+reducer, or an applied acknowledgement.
 
 ### D4. SDK and Chopsticks migration
 
