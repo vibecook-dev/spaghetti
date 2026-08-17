@@ -503,12 +503,15 @@ struct PendingScopedCoverageUpdate {
 
 #[derive(Clone, PartialEq, Eq)]
 struct ScopedCoverageMembershipIdentity {
+    relation_id: Arc<str>,
     stream_key: Arc<[u8]>,
     object_key: Arc<[u8]>,
     coverage_domains: Vec<CoverageDomain>,
 }
 
 /// Two bounded internal capacity domains multiplexed by one admission ordinal.
+/// Coverage membership is a one-to-one accounting of exact host-authorized
+/// known-object relations: two semantic objects cannot claim one relation.
 /// The ordinal is not an RFC 012D `observer_sequence`; public sequencing begins
 /// only after canonical semantic projection is available.
 pub struct ScopedObservationAdmissionLane {
@@ -576,6 +579,17 @@ impl ScopedObservationAdmissionLane {
             .known_coverage_objects
             .get(&object.source)
             .is_some_and(|known| known != &membership_identity)
+        {
+            return Err(ScopedAdmissionFailure {
+                error: ScopedAdmissionError::InvalidCoverage,
+                decoded,
+            });
+        }
+        if source_is_new
+            && self
+                .known_coverage_objects
+                .values()
+                .any(|known| known.relation_id.as_ref() == membership_identity.relation_id.as_ref())
         {
             return Err(ScopedAdmissionFailure {
                 error: ScopedAdmissionError::InvalidCoverage,
@@ -1978,6 +1992,8 @@ pub enum ScopedCoverageAssemblyError {
     AdmissionNotDrained,
     #[error("scoped coverage has no observed source object")]
     NoObservedObject,
+    #[error("scoped coverage does not account for every authorized known-object relation")]
+    DeclaredObjectCoverageMismatch,
     #[error("scoped source coverage does not belong to the authorized adapter")]
     AdapterMismatch,
     #[error("scoped source coverage is missing a successfully offered object state")]
@@ -4004,7 +4020,10 @@ impl ScopedObservationAccessHost {
     }
 
     /// Capture a self-consistent offered sequence plus eligible RFC 012A
-    /// source/fact-family coverage after the admission lane has drained.
+    /// source/fact-family coverage after the admission lane has drained and
+    /// every exact host-authorized known-object relation has contributed one
+    /// admitted coverage member. A known missing object counts through its
+    /// explicit absence; a relation that was never reconciled does not.
     /// Delivery backlog is allowed: offered and delivered are deliberately
     /// different boundaries.
     pub fn capture_watermark_core(
@@ -4017,6 +4036,7 @@ impl ScopedObservationAccessHost {
         if queue_state.continuity == ScopedObservationContinuity::ResyncRequired {
             return Err(ScopedCoverageAssemblyError::ContinuityInvalid);
         }
+        validate_scoped_relation_coverage(self.known_objects.as_ref(), admission)?;
         let source_coverage = assemble_scoped_coverage_sets(
             self.adapter.manifest(),
             self.authorization.contracts(),
@@ -4279,6 +4299,19 @@ impl ScopedObservationAccessPass {
         }
     }
 
+    fn validate_known_relation(
+        &self,
+        relation_id: &str,
+    ) -> Result<(), ScopedObservationAccessError> {
+        if self.known_objects.contains_key(relation_id) {
+            Ok(())
+        } else {
+            Err(ScopedObservationAccessError::InvalidGrant(format!(
+                "relation {relation_id:?} has no exact known-object grant"
+            )))
+        }
+    }
+
     pub fn read_known_object(
         &self,
         request: ScopedKnownObjectReadRequest<'_>,
@@ -4442,11 +4475,14 @@ impl Drop for ScopedObservationAccessPass {
     }
 }
 
-/// In-memory cursor/generation state for one exact append-delimited root. It
-/// does not own a store, query service, watcher, or public event queue.
+/// In-memory cursor/generation state for one exact append-delimited root. Its
+/// first authorized reconciliation permanently binds it to that exact scope
+/// relation, preventing later rebinding or duplicate coverage claims. It does
+/// not own a store, query service, watcher, or public event queue.
 pub struct ScopedKnownAppendObject {
     object_token: u64,
     source: ScopedSourceObjectIdentity,
+    relation_id: Option<Arc<str>>,
     driver: AppendDelimitedFile,
     decoder: ScopedAppendDecoderConfig,
     checkpoint: Option<AppendCheckpoint>,
@@ -4480,6 +4516,7 @@ impl ScopedKnownAppendObject {
         Ok(Self {
             object_token,
             source,
+            relation_id: None,
             driver,
             decoder,
             checkpoint: None,
@@ -4502,6 +4539,16 @@ impl ScopedKnownAppendObject {
             return Err(ScopedObservationAccessError::ObservationPending);
         }
         pass.validate_source_identity(&self.source)?;
+        pass.validate_known_relation(request.relation_id)?;
+        match &self.relation_id {
+            Some(bound) if bound.as_ref() != request.relation_id => {
+                return Err(ScopedObservationAccessError::InvalidGrant(format!(
+                    "scoped append object is already bound to relation {bound:?}"
+                )));
+            }
+            Some(_) => {}
+            None => self.relation_id = Some(Arc::from(request.relation_id)),
+        }
         let previous_generation = self.checkpoint.as_ref().map(|value| value.generation);
         let read = pass.read_known_append(
             &self.driver,
@@ -4913,8 +4960,17 @@ impl ScopedKnownAppendObject {
         &self.source
     }
 
+    pub fn relation_id(&self) -> Option<&str> {
+        self.relation_id.as_deref()
+    }
+
     fn coverage_membership_identity(&self) -> ScopedCoverageMembershipIdentity {
         ScopedCoverageMembershipIdentity {
+            relation_id: Arc::clone(
+                self.relation_id
+                    .as_ref()
+                    .expect("admitted scoped append object is bound to an exact relation"),
+            ),
             stream_key: Arc::from(self.decoder.semantic_context.stream_key()),
             object_key: Arc::from(self.decoder.semantic_context.object_key()),
             coverage_domains: self.decoder.coverage_domains.clone(),
@@ -5108,6 +5164,27 @@ fn assemble_scoped_coverage_sets(
         );
     }
     Ok(sets)
+}
+
+fn validate_scoped_relation_coverage(
+    known_objects: &BTreeMap<String, ScopedKnownObjectGrant>,
+    admission: &ScopedObservationAdmissionLane,
+) -> Result<(), ScopedCoverageAssemblyError> {
+    if known_objects.len() != admission.known_coverage_objects.len()
+        || known_objects.keys().any(|relation_id| {
+            !admission
+                .known_coverage_objects
+                .values()
+                .any(|membership| membership.relation_id.as_ref() == relation_id)
+        })
+        || admission
+            .known_coverage_objects
+            .values()
+            .any(|membership| !known_objects.contains_key(membership.relation_id.as_ref()))
+    {
+        return Err(ScopedCoverageAssemblyError::DeclaredObjectCoverageMismatch);
+    }
+    Ok(())
 }
 
 fn scoped_coverage_point_for_domain(

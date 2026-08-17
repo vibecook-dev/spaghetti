@@ -1138,6 +1138,16 @@ Current landing status (2026-08-17):
   declares it, contract negotiation selects the same version, and the common
   reducer implements it. Projection-pack coverage and adapter-private claims
   are rejected. The first such family is `runtime.usage-v2@1`;
+- an append object now binds permanently, before native access, to the exact
+  host-authorized known-object relation used by its first reconciliation.
+  Rebinding fails without reserving or reading, and admission rejects a second
+  semantic source object that claims an already-accounted relation. Bootstrap
+  and resync watermark assembly require a one-to-one match between every exact
+  known-object grant supplied at attachment and the admission lane's offered
+  coverage members. A reconciled missing object contributes explicit absence;
+  an authorized relation that was never reconciled cannot silently disappear
+  from a completion barrier. Conformance tests cover omission, duplicate
+  claims, failed rebinding, and no barrier/delivery mutation on failure;
 - one pass is active at a time, a later pass receives fresh bounds, close is
   idempotent, and the frozen access report excludes paths, identity values, and
   content; and
@@ -1151,7 +1161,8 @@ reducers beyond usage-v2,
 coverage-complete durable query exposure, affiliation/actor enrichment and
 envelope variants beyond the current usage/source-lifecycle families, the
 public async event drain plus poll/ready facade and complete scope coverage,
-complete declared-scope membership and family coverage beyond usage-v2,
+dynamic/discovered scope membership beyond the attachment's current exact
+known-object grants and family coverage beyond usage-v2,
 complete multi-family replacement manifests, whole-scope cursor/state swap,
 and whole-scope failed/re-overflow orchestration,
 artifact mediation, cancellation waiting,
@@ -1214,10 +1225,13 @@ transaction, so delivery pressure cannot overstate its cursor and semantic
 no-ops can advance coverage without inventing a sequence. A drained watermark
 core now emits common Decode and eligible usage-v2 `SourceCoverageSet`s at that
 sequence, binds every set to the pre-access resolved root session, and carries
-that root's canonical session/external-reference/root-run tuple. It is not the
-public poll/bootstrap/resync contract and does not yet prove complete declared-
-scope discovery. The public control multiplexer/facade, whole-scope replacement
-composition, complete scope-membership source/family sets, complete
+that root's canonical session/external-reference/root-run tuple. It also proves
+one-to-one coverage of every exact known-object grant supplied to the current
+attachment: unobserved relations and duplicate relation claims fail closed.
+This is not yet proof of relationships or descendants that the future scope
+orchestrator has not discovered and granted, nor is it the public poll/
+bootstrap/resync contract. The public control multiplexer/facade, whole-scope
+replacement composition, dynamic discovered-scope source/family sets, complete
 multi-family manifest, whole-scope staged swap, and multi-observer isolation
 remain unimplemented. Internally,
 reducer mutation, admitted-frame release, bounded delivery admission, and

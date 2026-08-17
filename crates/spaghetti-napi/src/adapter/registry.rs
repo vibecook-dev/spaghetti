@@ -997,6 +997,138 @@ mod tests {
         assert_eq!(report.relations()[0].bytes_read, 0);
         assert!(object.checkpoint().is_none());
         assert!(!object.root_present());
+        assert_eq!(object.relation_id(), None);
+    }
+
+    #[test]
+    fn scoped_barrier_rejects_an_authorized_relation_without_observed_coverage() {
+        let registry = supported_fixture_registry();
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().join("unobserved-relation-root");
+        std::fs::create_dir_all(&root).unwrap();
+        let host =
+            ScopedObservationAccessHost::authorize(&registry, scoped_access_request(root)).unwrap();
+        let admission = admission_lane(1, 0, 1);
+        let projection = ScopedObservationProjectionSink::new(ScopedObservationProjectionLimits {
+            max_usage_v2_entities: 1,
+        })
+        .unwrap();
+        let mut delivery = ScopedObservationDeliveryLane::new(ScopedObservationDeliveryLimits {
+            max_semantic_events: 1,
+            max_retained_native_bytes: 0,
+            max_source_control_items: 1,
+        })
+        .unwrap();
+        let initial_state = delivery.state();
+
+        assert!(matches!(
+            host.capture_watermark_core(&admission, &projection, &delivery),
+            Err(ScopedCoverageAssemblyError::DeclaredObjectCoverageMismatch)
+        ));
+        assert!(matches!(
+            host.offer_bootstrap_complete(&admission, &projection, &mut delivery, false, 50,),
+            Err(ScopedBootstrapBarrierError::Coverage(
+                ScopedCoverageAssemblyError::DeclaredObjectCoverageMismatch
+            ))
+        ));
+        assert_eq!(delivery.state(), initial_state);
+        assert!(delivery.bootstrap_barrier().is_none());
+        assert!(delivery.is_empty());
+    }
+
+    #[test]
+    fn scoped_admission_rejects_two_source_objects_claiming_one_relation() {
+        let registry = supported_fixture_registry();
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().join("duplicate-relation-root");
+        std::fs::create_dir_all(&root).unwrap();
+        let host =
+            ScopedObservationAccessHost::authorize(&registry, scoped_access_request(root)).unwrap();
+        let mut first = scoped_append_object(
+            AppendDelimitedFile::new(AppendDelimitedConfig::json_lines()).unwrap(),
+            RawRetentionPolicy::None,
+        );
+        let mut second = ScopedKnownAppendObject::new(
+            AppendDelimitedFile::new(AppendDelimitedConfig::json_lines()).unwrap(),
+            ScopedAppendDecoderConfig {
+                decoder: DecoderId::new("fixture-decoder").unwrap(),
+                object_context: AdapterObjectContext::empty(),
+                semantic_context: FactSemanticContext::new(
+                    &AdapterId::new("fixture").unwrap(),
+                    1,
+                    b"fixture-source-instance",
+                    b"fixture-second-transcript",
+                    b"second-session.jsonl",
+                    1,
+                )
+                .unwrap(),
+                coverage_domains: Vec::new(),
+                retention: RawRetentionPolicy::None,
+                max_facts_per_record: 16,
+                max_diagnostics_per_record: 16,
+            },
+        )
+        .unwrap();
+        assert_ne!(first.source_identity(), second.source_identity());
+        let identity = [ScopeIdentityInput {
+            name: "native-session-id",
+            value: b"duplicate-relation-session",
+        }];
+        let origin = RecordOrigin {
+            source_instance_id: 1,
+            stream_id: 2,
+            object_id: 3,
+            observed_at: 4,
+            source_timestamp_hint: None,
+            media_type: SourceMediaType::new("application/x-ndjson").unwrap(),
+        };
+        let request = || ScopedAppendReconcileRequest {
+            relation_id: "root-object",
+            identity_inputs: &identity,
+            access_phase: AccessPhase::Initial,
+            parent_token: None,
+            depth: 1,
+            max_bytes: 64,
+            origin: &origin,
+            force_contract_replay: false,
+        };
+        let mut admission = ScopedObservationAdmissionLane::new(ScopedObservationQueueLimits {
+            max_data_events: 1,
+            max_retained_native_bytes: 0,
+            max_control_items: 1,
+            max_coverage_objects: 2,
+        })
+        .unwrap();
+
+        let first_pass = host.begin_pass().unwrap();
+        let first_observation = first.reconcile(&first_pass, request()).unwrap();
+        let ScopedAppendDecodeOutcome::Ready(first_decoded) =
+            decode_scoped(&host, &mut first, &first_observation)
+        else {
+            panic!("missing first source should decode to an empty batch");
+        };
+        if let Err(failure) = admission.admit(&mut first, &first_observation, first_decoded) {
+            panic!("first admission failed: {}", failure.error);
+        }
+        drop(first_pass);
+        assert_eq!(first.relation_id(), Some("root-object"));
+
+        let second_pass = host.begin_pass().unwrap();
+        let second_observation = second.reconcile(&second_pass, request()).unwrap();
+        let ScopedAppendDecodeOutcome::Ready(second_decoded) =
+            decode_scoped(&host, &mut second, &second_observation)
+        else {
+            panic!("missing second source should decode to an empty batch");
+        };
+        let failure = admission
+            .admit(&mut second, &second_observation, second_decoded)
+            .expect_err("one relation cannot account for two semantic source objects");
+        assert_eq!(failure.error, ScopedAdmissionError::InvalidCoverage);
+        assert_eq!(second.relation_id(), Some("root-object"));
+        second.discard(&second_observation).unwrap();
+        assert!(second.checkpoint().is_none());
+        assert!(!second.root_present());
+        assert_eq!(second_pass.finish().relations()[0].attempts, 1);
     }
 
     #[test]
@@ -1070,6 +1202,7 @@ mod tests {
             AppendDelimitedFile::new(config).unwrap(),
             RawRetentionPolicy::None,
         );
+        assert_eq!(object.relation_id(), None);
         assert!(matches!(
             object.complete_bootstrap(),
             Err(ScopedObservationAccessError::BootstrapNotDrained)
@@ -1099,6 +1232,7 @@ mod tests {
 
         let missing_pass = host.begin_pass().unwrap();
         let missing = object.reconcile(&missing_pass, reconcile(64)).unwrap();
+        assert_eq!(object.relation_id(), Some("root-object"));
         assert_eq!(missing.phase, ScopedAppendDeliveryPhase::Bootstrap);
         assert!(!missing.root_present);
         assert!(missing.presence_change.is_none());
@@ -1113,6 +1247,26 @@ mod tests {
             object.complete_bootstrap(),
             Err(ScopedObservationAccessError::BootstrapAlreadyComplete)
         ));
+
+        let wrong_relation_pass = host.begin_pass().unwrap();
+        assert!(matches!(
+            object.reconcile(
+                &wrong_relation_pass,
+                ScopedAppendReconcileRequest {
+                    relation_id: "other-object",
+                    identity_inputs: &identity,
+                    access_phase: AccessPhase::Initial,
+                    parent_token: None,
+                    depth: 1,
+                    max_bytes: 64,
+                    origin: &origin,
+                    force_contract_replay: false,
+                },
+            ),
+            Err(ScopedObservationAccessError::InvalidGrant(_))
+        ));
+        assert_eq!(object.relation_id(), Some("root-object"));
+        assert_eq!(wrong_relation_pass.finish().relations()[0].attempts, 0);
 
         std::fs::write(root.join("session.jsonl"), b"one\npartial").unwrap();
         let limited_pass = host.begin_pass().unwrap();
