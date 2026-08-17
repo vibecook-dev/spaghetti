@@ -180,6 +180,7 @@ mod tests {
     use std::fs::OpenOptions;
     use std::io::Write;
     use std::path::PathBuf;
+    use std::sync::Arc;
 
     use tempfile::TempDir;
 
@@ -187,9 +188,9 @@ mod tests {
         verify_support_release_bundle, AdapterManifest, AdapterObjectContext,
         AdapterSupportBinding, CoverageAbsenceKind, CoverageDomain, CoveragePositionKind,
         CoverageSetCompleteness, CoverageStatus, DecodeContext, DecodeDisposition, DecoderId,
-        DiscoveryContext, Fact, FactBatch, FactSemanticContext, RawRetentionPolicy, Sha256Digest,
-        SourceAccess, SourceInstance, SourceInstanceSpec, SourceObjectDescriptor, StreamSpec,
-        SupportBundleDocument,
+        DiscoveryContext, ExternalEntityRef, Fact, FactBatch, FactSemanticContext,
+        RawRetentionPolicy, Sha256Digest, SourceAccess, SourceInstance, SourceInstanceSpec,
+        SourceObjectDescriptor, StreamSpec, SupportBundleDocument,
     };
     use crate::scoped_observation::{
         ScopedAdmissionError, ScopedAppendDecodeOutcome, ScopedAppendDecoderConfig,
@@ -201,7 +202,8 @@ mod tests {
         ScopedObservationAdmissionLane, ScopedObservationDeliveryLane,
         ScopedObservationDeliveryLimits, ScopedObservationProjectionLimits,
         ScopedObservationProjectionSink, ScopedObservationQueueLimits,
-        ScopedProjectionDeliveryError, ScopedQueuedObservationFrame, ScopedSourceFailureClass,
+        ScopedProjectionDeliveryError, ScopedQueuedObservationFrame, ScopedRootIdentityRequest,
+        ScopedSourceFailureClass,
     };
     use crate::source::{
         AccessOperation, AccessOutcome, AccessPhase, AppendDelimitedConfig, AppendDelimitedFile,
@@ -391,6 +393,14 @@ mod tests {
                 query_pack_versions: Vec::new(),
                 observation_contract_versions: vec![1],
             },
+            root_identity: ScopedRootIdentityRequest::new(
+                1,
+                b"fixture-source-instance".as_slice(),
+                b"fixture-session".as_slice(),
+                None,
+                None,
+                None,
+            ),
             program_id: "observe-session".to_string(),
             known_objects: vec![ScopedKnownObjectGrant {
                 relation_id: "root-object".to_string(),
@@ -438,10 +448,16 @@ mod tests {
     }
 
     fn fixture_semantic_context() -> FactSemanticContext {
+        fixture_semantic_context_for_source(b"fixture-source-instance")
+    }
+
+    fn fixture_semantic_context_for_source(
+        stable_source_instance_discriminator: &[u8],
+    ) -> FactSemanticContext {
         FactSemanticContext::new(
             &AdapterId::new("fixture").unwrap(),
             1,
-            b"fixture-source-instance",
+            stable_source_instance_discriminator,
             b"fixture-transcript",
             b"session.jsonl",
             1,
@@ -820,6 +836,141 @@ mod tests {
             }),
             Err(ScopedObservationAccessError::Closed)
         ));
+    }
+
+    #[test]
+    fn scoped_root_identity_is_resolved_and_validated_before_attachment_access() {
+        let registry = supported_fixture_registry();
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().join("root-identity");
+        let request = scoped_access_request(root.clone());
+        let debug = format!("{:?}", request.root_identity);
+        assert!(!debug.contains("fixture-source-instance"));
+        assert!(!debug.contains("fixture-session"));
+
+        // Root identity resolution does not require the transcript or even its
+        // containing directory to exist.
+        assert!(!root.exists());
+        let baseline = ScopedObservationAccessHost::authorize(&registry, request.clone()).unwrap();
+        let baseline_root = baseline.root_identity().clone();
+        assert_eq!(baseline_root.adapter_id.as_str(), "fixture");
+        assert_eq!(
+            baseline_root.session_ref.entity_key,
+            baseline_root.session_key
+        );
+        assert_ne!(baseline_root.session_key, baseline_root.root_actor_run_key);
+        assert!(!root.exists());
+
+        let mut matched_request = request.clone();
+        matched_request.root_identity = ScopedRootIdentityRequest::new(
+            1,
+            b"fixture-source-instance".as_slice(),
+            b"fixture-session".as_slice(),
+            Some(Arc::from(b"explicit-fixture-root-run".as_slice())),
+            Some(baseline_root.session_key),
+            Some(baseline_root.session_ref),
+        );
+        let matched = ScopedObservationAccessHost::authorize(&registry, matched_request).unwrap();
+        assert_eq!(
+            matched.root_identity().session_key,
+            baseline_root.session_key
+        );
+        assert_eq!(
+            matched.root_identity().session_ref,
+            baseline_root.session_ref
+        );
+        assert_ne!(
+            matched.root_identity().root_actor_run_key,
+            baseline_root.root_actor_run_key
+        );
+        assert!(!root.exists());
+
+        let mut wrong_key_request = request.clone();
+        wrong_key_request.root_identity = ScopedRootIdentityRequest::new(
+            1,
+            b"fixture-source-instance".as_slice(),
+            b"fixture-session".as_slice(),
+            None,
+            Some(baseline_root.root_actor_run_key),
+            Some(baseline_root.session_ref),
+        );
+        assert!(matches!(
+            ScopedObservationAccessHost::authorize(&registry, wrong_key_request),
+            Err(ScopedObservationAccessError::InvalidRootIdentity)
+        ));
+
+        let mut wrong_ref_request = request;
+        wrong_ref_request.root_identity = ScopedRootIdentityRequest::new(
+            1,
+            b"fixture-source-instance".as_slice(),
+            b"fixture-session".as_slice(),
+            None,
+            Some(baseline_root.session_key),
+            Some(ExternalEntityRef::new(baseline_root.root_actor_run_key)),
+        );
+        assert!(matches!(
+            ScopedObservationAccessHost::authorize(&registry, wrong_ref_request),
+            Err(ScopedObservationAccessError::InvalidRootIdentity)
+        ));
+        assert!(!root.exists());
+    }
+
+    #[test]
+    fn scoped_append_rejects_a_foreign_source_before_reserving_access() {
+        let registry = supported_fixture_registry();
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().join("foreign-source-root");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("session.jsonl"), b"must not be read\n").unwrap();
+        let host =
+            ScopedObservationAccessHost::authorize(&registry, scoped_access_request(root)).unwrap();
+        let mut object = ScopedKnownAppendObject::new(
+            AppendDelimitedFile::new(AppendDelimitedConfig::json_lines()).unwrap(),
+            ScopedAppendDecoderConfig {
+                decoder: DecoderId::new("fixture-decoder").unwrap(),
+                object_context: AdapterObjectContext::empty(),
+                semantic_context: fixture_semantic_context_for_source(b"foreign-source-instance"),
+                coverage_domains: Vec::new(),
+                retention: RawRetentionPolicy::None,
+                max_facts_per_record: 16,
+                max_diagnostics_per_record: 16,
+            },
+        )
+        .unwrap();
+        let identity = [ScopeIdentityInput {
+            name: "native-session-id",
+            value: b"foreign-session",
+        }];
+        let origin = RecordOrigin {
+            source_instance_id: 1,
+            stream_id: 2,
+            object_id: 3,
+            observed_at: 4,
+            source_timestamp_hint: None,
+            media_type: SourceMediaType::new("application/x-ndjson").unwrap(),
+        };
+        let pass = host.begin_pass().unwrap();
+        assert!(matches!(
+            object.reconcile(
+                &pass,
+                ScopedAppendReconcileRequest {
+                    relation_id: "root-object",
+                    identity_inputs: &identity,
+                    access_phase: AccessPhase::Initial,
+                    parent_token: None,
+                    depth: 1,
+                    max_bytes: 128,
+                    origin: &origin,
+                    force_contract_replay: false,
+                },
+            ),
+            Err(ScopedObservationAccessError::InvalidRootIdentity)
+        ));
+        let report = pass.report();
+        assert_eq!(report.relations()[0].attempts, 0);
+        assert_eq!(report.relations()[0].bytes_read, 0);
+        assert!(object.checkpoint().is_none());
+        assert!(!object.root_present());
     }
 
     #[test]
@@ -1228,6 +1379,7 @@ mod tests {
         let missing_watermark = host
             .capture_watermark_core(&lane, &projection, &delivery)
             .unwrap();
+        assert_eq!(missing_watermark.root, host.root_identity().clone());
         assert_eq!(missing_watermark.scope_epoch, 1);
         assert_eq!(missing_watermark.offered_through_sequence, 0);
         assert!(missing_watermark.explicit_object_errors.is_empty());
@@ -1250,6 +1402,14 @@ mod tests {
             .unwrap();
         assert_eq!(missing_set.coverage_domain, CoverageDomain::Decode);
         assert_eq!(missing_set.scope.adapter_id, "fixture");
+        assert_eq!(
+            missing_set.scope.source_instance_key,
+            host.root_identity().source_instance_key
+        );
+        assert_eq!(
+            missing_set.scope.root_entity_key,
+            Some(host.root_identity().session_key)
+        );
         assert_eq!(missing_set.scope.support_release_id, "fixture-release");
         assert_eq!(missing_set.completeness, CoverageSetCompleteness::Complete);
         assert_eq!(missing_set.explicit_absence_or_deletion.len(), 1);

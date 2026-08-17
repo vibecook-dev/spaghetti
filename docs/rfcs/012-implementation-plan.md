@@ -912,6 +912,19 @@ Current landing status (2026-08-16):
 - the crate-private composition root performs strict support/contract/program
   selection before validating exact grants and exposes no spoofable N-API
   artifact-probe request;
+- after support/contract selection and before any scoped source access, the
+  composition root now derives one stable canonical source-instance, base
+  session, external-session-reference, and root actor/run identity from
+  redacted pre-attach inputs. A supplied expected session key and/or persisted
+  external reference must equal that derivation or attachment fails with
+  `InvalidRootIdentity`; the root transcript and its containing directory may
+  still be absent. The run derivation includes that base session and the `Root`
+  role; an explicit support-declared native run discriminator changes only the
+  run identity, not the base session identity;
+- every scoped append object must carry the selected root's adapter and source
+  instance before it can reserve read budget, decode, or contribute coverage.
+  The internal watermark core carries the resolved root identity and every
+  assembled RFC 012A coverage scope now names the same root session key;
 - one host-approved known object can be absent at attachment, created later,
   and read through the common symlink-safe confined file primitive only after
   a declaration-sized reservation. After the initial snapshot, transitions in
@@ -1019,13 +1032,16 @@ Current landing status (2026-08-16):
 
 D1 remains `In progress`: watcher-before-scan, multi-object discovery/cursor
 orchestration, declared relation-backed decoder dependency access, built-in
-canonical fact-revision adoption and scoped reducers beyond usage-v2,
+canonical fact-revision and root actor/run derivation adoption by durable
+decoders, scoped reducers beyond usage-v2,
 coverage-complete durable query exposure, the complete root/actor/source
-envelope mapper, the public ordered multiplexer and poll/readiness barriers,
+envelope mapper (including native identity claim and evidence qualification),
+the public ordered multiplexer and poll/readiness barriers,
 complete declared-scope membership and family coverage beyond usage-v2,
 overflow/resync epochs, artifact mediation, cancellation waiting,
-the trusted native version-probe driver, and the complete public request are
-not yet implemented. The internal offered boundary is now transactional, but
+the trusted native version-probe/identity-input drivers, and the complete
+public request are not yet implemented. The internal offered boundary is now
+transactional, but
 it cannot become a public `offered` watermark until the envelope mapper,
 scope-membership/barrier coverage, and epoch lifecycle are defined. The
 usage-v2 sink and delivery lane remain crate-private until those envelope/
@@ -1079,8 +1095,10 @@ object-level `Decode` coverage checkpoint is also tied to that exact offered
 transaction, so delivery pressure cannot overstate its cursor and semantic
 no-ops can advance coverage without inventing a sequence. A drained watermark
 core now emits common Decode and eligible usage-v2 `SourceCoverageSet`s at that
-sequence, but it is not the public poll/bootstrap/resync contract and does not
-yet prove complete declared-scope discovery. The public control multiplexer,
+sequence, binds every set to the pre-access resolved root session, and carries
+that root's canonical session/external-reference/root-run tuple. It is not the
+public poll/bootstrap/resync contract and does not yet prove complete declared-
+scope discovery. The public control multiplexer,
 epoch state machine, sticky overflow/resync controls, complete scope-membership
 source/family sets, coverage-complete family manifest, atomic staged swap, and
 multi-observer isolation remain unimplemented. Internally,

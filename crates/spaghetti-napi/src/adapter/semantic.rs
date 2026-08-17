@@ -20,6 +20,7 @@ pub const SOURCE_COVERAGE_SET_CONTRACT_VERSION: u32 = 1;
 
 const CANONICAL_SOURCE_INSTANCE_KEY_VERSION: u32 = 1;
 const CANONICAL_ENTITY_KEY_VERSION: u32 = 1;
+const ROOT_ACTOR_RUN_KEY_VERSION: u32 = 1;
 const SOURCE_RECORD_ID_VERSION: u32 = 1;
 const CANONICAL_FACT_ID_VERSION: u32 = 1;
 const FACT_REVISION_ID_VERSION: u32 = 1;
@@ -257,6 +258,41 @@ impl CanonicalEntityKey {
                 native_or_declared_fallback_key,
             ],
         )))
+    }
+
+    /// Derive the RFC 012C root actor/run identity from the already-final base
+    /// session identity and `Root` role. A support-declared native run
+    /// discriminator may refine the singleton root, but never replaces the
+    /// base session as key material.
+    pub fn derive_root_actor_run(
+        adapter_id: &str,
+        source_instance_key: &CanonicalSourceInstanceKey,
+        root_session_key: &CanonicalEntityKey,
+        declared_native_run_discriminator: Option<&[u8]>,
+    ) -> Result<Self, SemanticContractError> {
+        let (discriminator_kind, discriminator) = match declared_native_run_discriminator {
+            Some(value) => {
+                validate_component("declared native root-run discriminator", value)?;
+                (b"declared-native-run".as_slice(), value)
+            }
+            None => (b"singleton".as_slice(), b"singleton-root".as_slice()),
+        };
+        let stable_run_discriminator = contract_digest(
+            b"root-actor-run-key",
+            &[
+                &ROOT_ACTOR_RUN_KEY_VERSION.to_be_bytes(),
+                root_session_key.as_bytes(),
+                b"root",
+                discriminator_kind,
+                discriminator,
+            ],
+        );
+        Self::derive(
+            adapter_id,
+            source_instance_key,
+            "run",
+            &stable_run_discriminator,
+        )
     }
 }
 
@@ -1415,6 +1451,55 @@ mod tests {
             serde_json::from_str::<ExternalEntityRef>(&encoded).unwrap(),
             first
         );
+    }
+
+    #[test]
+    fn root_actor_run_identity_is_session_and_role_derived() {
+        let source = source_key();
+        let session =
+            CanonicalEntityKey::derive("claude-code", &source, "session", b"native-secret")
+                .unwrap();
+        let singleton =
+            CanonicalEntityKey::derive_root_actor_run("claude-code", &source, &session, None)
+                .unwrap();
+        assert_eq!(
+            singleton,
+            CanonicalEntityKey::derive_root_actor_run("claude-code", &source, &session, None)
+                .unwrap()
+        );
+        assert_ne!(
+            singleton,
+            CanonicalEntityKey::derive("claude-code", &source, "run", b"native-secret").unwrap()
+        );
+
+        let other_session =
+            CanonicalEntityKey::derive("claude-code", &source, "session", b"other-session")
+                .unwrap();
+        assert_ne!(
+            singleton,
+            CanonicalEntityKey::derive_root_actor_run(
+                "claude-code",
+                &source,
+                &other_session,
+                None,
+            )
+            .unwrap()
+        );
+        let declared = CanonicalEntityKey::derive_root_actor_run(
+            "claude-code",
+            &source,
+            &session,
+            Some(b"declared-run"),
+        )
+        .unwrap();
+        assert_ne!(declared, singleton);
+        assert!(CanonicalEntityKey::derive_root_actor_run(
+            "claude-code",
+            &source,
+            &session,
+            Some(b""),
+        )
+        .is_err());
     }
 
     #[test]

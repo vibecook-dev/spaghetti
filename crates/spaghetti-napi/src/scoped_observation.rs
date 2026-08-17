@@ -12,16 +12,17 @@ use std::sync::Arc;
 
 use crate::adapter::{
     AdapterError, AdapterErrorClass, AdapterId, AdapterObjectContext, AdapterRegistry,
-    AgentAdapter, CanonicalFactId, CanonicalSourceInstanceKey, CompatibilityDecision,
-    ContractVersionOffer, ContractVersionRequest, CoverageAbsence, CoverageAbsenceKind,
-    CoverageDeclarationDigest, CoverageDomain, CoverageError, CoverageObjectKey, CoveragePosition,
-    CoveragePositionKind, CoverageProvenance, CoverageScope, CoverageSetCompleteness,
-    CoverageStatus, CoverageStreamKey, DecodeDisposition, DecoderId, Fact, FactBatch, FactEnvelope,
-    FactProvenance, FactRevisionId, FactSemanticContext, FactSemanticRevision, NativeArtifactProbe,
-    RawRetentionPolicy, ScopeRelationPrimitive, SemanticRevisionRef, SourceAccess,
-    SourceCoveragePoint, SourceCoverageSet, SourceObjectList, SourceObjectListRequest, SourceQuery,
-    SourceRecordId, SourceRows, SourceSnapshot, SupportOperation, TypedAccessAuthorization,
-    UsageRevisionV2Fact,
+    AgentAdapter, CanonicalEntityKey, CanonicalFactId, CanonicalSourceInstanceKey,
+    CompatibilityDecision, ContractVersionOffer, ContractVersionRequest, CoverageAbsence,
+    CoverageAbsenceKind, CoverageDeclarationDigest, CoverageDomain, CoverageError,
+    CoverageObjectKey, CoveragePosition, CoveragePositionKind, CoverageProvenance, CoverageScope,
+    CoverageSetCompleteness, CoverageStatus, CoverageStreamKey, DecodeDisposition, DecoderId,
+    ExternalEntityRef, Fact, FactBatch, FactEnvelope, FactProvenance, FactRevisionId,
+    FactSemanticContext, FactSemanticRevision, NativeArtifactProbe, RawRetentionPolicy,
+    ScopeRelationPrimitive, SemanticRevisionRef, SourceAccess, SourceCoveragePoint,
+    SourceCoverageSet, SourceObjectList, SourceObjectListRequest, SourceQuery, SourceRecordId,
+    SourceRows, SourceSnapshot, SupportOperation, TypedAccessAuthorization, UsageRevisionV2Fact,
+    EXTERNAL_ENTITY_REFERENCE_VERSION,
 };
 use crate::coverage_runtime::{
     derive_coverage_membership_revision, source_membership_prefix, CoverageMembershipObject,
@@ -56,8 +57,121 @@ pub struct ScopedObservationAccessRequest {
     pub artifact_probe: NativeArtifactProbe,
     pub contract_request: ContractVersionRequest,
     pub contract_offer: ContractVersionOffer,
+    pub root_identity: ScopedRootIdentityRequest,
     pub program_id: String,
     pub known_objects: Vec<ScopedKnownObjectGrant>,
+}
+
+/// Pre-access root identity inputs selected by the trusted adapter/support
+/// composition. Native/fallback bytes remain private and redacted from Debug;
+/// only derived opaque common keys cross the observer boundary.
+#[derive(Clone)]
+pub struct ScopedRootIdentityRequest {
+    source_instance_identity_contract_version: u32,
+    stable_source_instance_discriminator: Arc<[u8]>,
+    session_identity_key: Arc<[u8]>,
+    root_run_identity_key: Option<Arc<[u8]>>,
+    expected_session_key: Option<CanonicalEntityKey>,
+    external_session_ref: Option<ExternalEntityRef>,
+}
+
+impl std::fmt::Debug for ScopedRootIdentityRequest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ScopedRootIdentityRequest")
+            .field(
+                "source_instance_identity_contract_version",
+                &self.source_instance_identity_contract_version,
+            )
+            .field(
+                "has_declared_root_run_identity",
+                &self.root_run_identity_key.is_some(),
+            )
+            .field(
+                "has_expected_session_key",
+                &self.expected_session_key.is_some(),
+            )
+            .field(
+                "has_external_session_ref",
+                &self.external_session_ref.is_some(),
+            )
+            .finish_non_exhaustive()
+    }
+}
+
+impl ScopedRootIdentityRequest {
+    pub fn new(
+        source_instance_identity_contract_version: u32,
+        stable_source_instance_discriminator: impl Into<Arc<[u8]>>,
+        session_identity_key: impl Into<Arc<[u8]>>,
+        root_run_identity_key: Option<Arc<[u8]>>,
+        expected_session_key: Option<CanonicalEntityKey>,
+        external_session_ref: Option<ExternalEntityRef>,
+    ) -> Self {
+        Self {
+            source_instance_identity_contract_version,
+            stable_source_instance_discriminator: stable_source_instance_discriminator.into(),
+            session_identity_key: session_identity_key.into(),
+            root_run_identity_key,
+            expected_session_key,
+            external_session_ref,
+        }
+    }
+
+    fn resolve(
+        &self,
+        adapter_id: &AdapterId,
+        selected_external_reference_version: u32,
+    ) -> Result<ScopedObservationRootIdentity, ScopedObservationAccessError> {
+        if selected_external_reference_version != EXTERNAL_ENTITY_REFERENCE_VERSION {
+            return Err(ScopedObservationAccessError::InvalidRootIdentity);
+        }
+        let source_instance_key = CanonicalSourceInstanceKey::derive(
+            self.source_instance_identity_contract_version,
+            &self.stable_source_instance_discriminator,
+        )
+        .map_err(|_| ScopedObservationAccessError::InvalidRootIdentity)?;
+        let session_key = CanonicalEntityKey::derive(
+            adapter_id.as_str(),
+            &source_instance_key,
+            "session",
+            &self.session_identity_key,
+        )
+        .map_err(|_| ScopedObservationAccessError::InvalidRootIdentity)?;
+        let root_actor_run_key = CanonicalEntityKey::derive_root_actor_run(
+            adapter_id.as_str(),
+            &source_instance_key,
+            &session_key,
+            self.root_run_identity_key.as_deref(),
+        )
+        .map_err(|_| ScopedObservationAccessError::InvalidRootIdentity)?;
+        let session_ref = ExternalEntityRef::new(session_key);
+        if self
+            .expected_session_key
+            .is_some_and(|expected| expected != session_key)
+            || self
+                .external_session_ref
+                .is_some_and(|expected| expected != session_ref)
+        {
+            return Err(ScopedObservationAccessError::InvalidRootIdentity);
+        }
+        Ok(ScopedObservationRootIdentity {
+            adapter_id: adapter_id.clone(),
+            source_instance_key,
+            session_key,
+            session_ref,
+            root_actor_run_key,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScopedObservationRootIdentity {
+    pub adapter_id: AdapterId,
+    pub source_instance_key: CanonicalSourceInstanceKey,
+    pub session_key: CanonicalEntityKey,
+    pub session_ref: ExternalEntityRef,
+    pub root_actor_run_key: CanonicalEntityKey,
 }
 
 /// One read against an exact known-object grant. Native identity bytes are
@@ -179,6 +293,13 @@ impl ScopedSourceObjectIdentity {
             object_key,
         })
     }
+}
+
+fn source_belongs_to_root(
+    source: &ScopedSourceObjectIdentity,
+    root: &ScopedObservationRootIdentity,
+) -> bool {
+    source.adapter_id == root.adapter_id && source.source_instance_key == root.source_instance_key
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -1052,6 +1173,7 @@ pub struct ScopedObservationDeliveryState {
 /// future observer facade.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScopedObservationWatermarkCore {
+    pub root: ScopedObservationRootIdentity,
     pub scope_epoch: u64,
     pub offered_through_sequence: u64,
     pub source_coverage: Vec<SourceCoverageSet>,
@@ -2013,6 +2135,8 @@ pub enum ScopedDecodeFailureClass {
 pub enum ScopedObservationAccessError {
     #[error("scoped observation authorization failed: {0}")]
     Authorization(String),
+    #[error("scoped observation root identity is invalid or inconsistent")]
+    InvalidRootIdentity,
     #[error("invalid scoped access grant: {0}")]
     InvalidGrant(String),
     #[error("scoped observation host is closed")]
@@ -2059,6 +2183,7 @@ pub struct ScopedObservationAccessHost {
     adapter: Arc<dyn AgentAdapter>,
     compatibility: CompatibilityDecision,
     authorization: TypedAccessAuthorization,
+    root_identity: ScopedObservationRootIdentity,
     program_id: String,
     known_objects: Arc<BTreeMap<String, ScopedKnownObjectGrant>>,
     state: Arc<ScopedObservationAccessState>,
@@ -2085,6 +2210,10 @@ impl ScopedObservationAccessHost {
                 &request.contract_offer,
             )
             .map_err(|error| ScopedObservationAccessError::Authorization(error.to_string()))?;
+        let root_identity = request.root_identity.resolve(
+            &adapter_id,
+            authorization.contracts().external_entity_reference_version,
+        )?;
         let program = authorization
             .select_scope_program(&request.program_id)
             .map_err(|error| ScopedObservationAccessError::Authorization(error.to_string()))?;
@@ -2094,6 +2223,7 @@ impl ScopedObservationAccessHost {
             adapter,
             compatibility,
             authorization,
+            root_identity,
             program_id: request.program_id,
             known_objects: Arc::new(known_objects),
             state: Arc::new(ScopedObservationAccessState {
@@ -2105,6 +2235,10 @@ impl ScopedObservationAccessHost {
 
     pub fn compatibility(&self) -> &CompatibilityDecision {
         &self.compatibility
+    }
+
+    pub fn root_identity(&self) -> &ScopedObservationRootIdentity {
+        &self.root_identity
     }
 
     /// Capture a self-consistent offered sequence plus eligible RFC 012A
@@ -2120,6 +2254,7 @@ impl ScopedObservationAccessHost {
         let source_coverage = assemble_scoped_coverage_sets(
             self.adapter.manifest(),
             self.authorization.contracts(),
+            &self.root_identity,
             admission,
             projection,
         )?;
@@ -2131,6 +2266,7 @@ impl ScopedObservationAccessHost {
         explicit_object_errors.sort();
         explicit_object_errors.dedup();
         Ok(ScopedObservationWatermarkCore {
+            root: self.root_identity.clone(),
             scope_epoch: queue_state.scope_epoch,
             offered_through_sequence: queue_state.offered_through_sequence,
             source_coverage,
@@ -2149,6 +2285,9 @@ impl ScopedObservationAccessHost {
     ) -> Result<ScopedAppendDecodeOutcome, ScopedObservationAccessError> {
         if self.state.closed.load(Ordering::Acquire) {
             return Err(ScopedObservationAccessError::Closed);
+        }
+        if !source_belongs_to_root(&object.source, &self.root_identity) {
+            return Err(ScopedObservationAccessError::InvalidRootIdentity);
         }
         object.decode(
             self.adapter.as_ref(),
@@ -2185,6 +2324,7 @@ impl ScopedObservationAccessHost {
         Ok(ScopedObservationAccessPass {
             plan,
             known_objects: Arc::clone(&self.known_objects),
+            root_identity: self.root_identity.clone(),
             state: Arc::clone(&self.state),
             released: false,
         })
@@ -2212,11 +2352,23 @@ impl Drop for ScopedObservationAccessHost {
 pub struct ScopedObservationAccessPass {
     plan: AuthorizedScopeAccessPlan,
     known_objects: Arc<BTreeMap<String, ScopedKnownObjectGrant>>,
+    root_identity: ScopedObservationRootIdentity,
     state: Arc<ScopedObservationAccessState>,
     released: bool,
 }
 
 impl ScopedObservationAccessPass {
+    fn validate_source_identity(
+        &self,
+        source: &ScopedSourceObjectIdentity,
+    ) -> Result<(), ScopedObservationAccessError> {
+        if source_belongs_to_root(source, &self.root_identity) {
+            Ok(())
+        } else {
+            Err(ScopedObservationAccessError::InvalidRootIdentity)
+        }
+    }
+
     pub fn read_known_object(
         &self,
         request: ScopedKnownObjectReadRequest<'_>,
@@ -2439,6 +2591,7 @@ impl ScopedKnownAppendObject {
         if self.pending.is_some() {
             return Err(ScopedObservationAccessError::ObservationPending);
         }
+        pass.validate_source_identity(&self.source)?;
         let previous_generation = self.checkpoint.as_ref().map(|value| value.generation);
         let read = pass.read_known_append(
             &self.driver,
@@ -2903,6 +3056,7 @@ fn scoped_decode_coverage_point(
 fn assemble_scoped_coverage_sets(
     manifest: &crate::adapter::AdapterManifest,
     contracts: &crate::adapter::ContractVersionSelection,
+    root: &ScopedObservationRootIdentity,
     admission: &ScopedObservationAdmissionLane,
     projection: &ScopedObservationProjectionSink,
 ) -> Result<Vec<SourceCoverageSet>, ScopedCoverageAssemblyError> {
@@ -2929,7 +3083,10 @@ fn assemble_scoped_coverage_sets(
         )>,
     >::new();
     for (source, membership) in &admission.known_coverage_objects {
-        if source.adapter_id != manifest.id {
+        if source.adapter_id != manifest.id
+            || source.adapter_id != root.adapter_id
+            || source.source_instance_key != root.source_instance_key
+        {
             return Err(ScopedCoverageAssemblyError::AdapterMismatch);
         }
         let coverage = admission
@@ -3026,7 +3183,7 @@ fn assemble_scoped_coverage_sets(
                 CoverageScope {
                     adapter_id: manifest.id.as_str().to_string(),
                     source_instance_key,
-                    root_entity_key: None,
+                    root_entity_key: Some(root.session_key),
                     support_release_id: support.support_release_id().to_string(),
                     source_or_scope_declaration_digest: declaration_digest,
                 },
