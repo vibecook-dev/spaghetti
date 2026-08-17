@@ -204,6 +204,7 @@ mod tests {
         ScopedObservationAdmissionLane, ScopedObservationAsyncRuntime, ScopedObservationCloseError,
         ScopedObservationConsumerOfferError, ScopedObservationContinuity,
         ScopedObservationDeliveryLane, ScopedObservationDeliveryLimits, ScopedObservationEvent,
+        ScopedObservationNativeWatchBackend, ScopedObservationNativeWatcherError,
         ScopedObservationOpenDrainError, ScopedObservationPollError, ScopedObservationPollLease,
         ScopedObservationPollResolution, ScopedObservationProjectionLimits,
         ScopedObservationProjectionSink, ScopedObservationQueueLimits,
@@ -221,6 +222,39 @@ mod tests {
     };
 
     use super::*;
+
+    struct ImmediateScopedWatchBackend {
+        callback: Box<dyn FnMut(notify::Result<notify::Event>) + Send + 'static>,
+        target: PathBuf,
+        unrelated: PathBuf,
+        registrations: Arc<std::sync::Mutex<Vec<(PathBuf, notify::RecursiveMode)>>>,
+        fail_registration: bool,
+    }
+
+    impl ScopedObservationNativeWatchBackend for ImmediateScopedWatchBackend {
+        fn watch(&mut self, path: &std::path::Path, mode: notify::RecursiveMode) -> Result<(), ()> {
+            self.registrations
+                .lock()
+                .unwrap()
+                .push((path.to_path_buf(), mode));
+            if self.fail_registration {
+                return Err(());
+            }
+            (self.callback)(Ok(notify::Event::new(notify::EventKind::Access(
+                notify::event::AccessKind::Any,
+            ))
+            .add_path(self.target.clone())));
+            (self.callback)(Ok(notify::Event::new(notify::EventKind::Modify(
+                notify::event::ModifyKind::Any,
+            ))
+            .add_path(self.unrelated.clone())));
+            (self.callback)(Ok(notify::Event::new(notify::EventKind::Create(
+                notify::event::CreateKind::File,
+            ))
+            .add_path(self.target.clone())));
+            Ok(())
+        }
+    }
 
     struct EmptyAdapter {
         manifest: AdapterManifest,
@@ -1666,6 +1700,187 @@ mod tests {
 
         assert!(runtime.close().await.complete);
         assert!(runtime.next_event().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn scoped_native_watcher_buffers_registration_callbacks_and_owns_shutdown() {
+        let registry = supported_fixture_registry();
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().join("native-watch-root");
+        std::fs::create_dir_all(&root).unwrap();
+        let target = root.join("session.jsonl");
+        let host =
+            ScopedObservationAccessHost::authorize(&registry, scoped_access_request(root.clone()))
+                .unwrap();
+        let mut runtime = ScopedObservationAsyncRuntime::open(
+            host,
+            ScopedObservationDeliveryLimits {
+                max_semantic_events: 1,
+                max_retained_native_bytes: 0,
+                max_source_control_items: 1,
+            },
+        )
+        .unwrap();
+        let handle = runtime.handle();
+        let registrations = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let watcher = handle
+            .install_native_watcher_with_factory(4, {
+                let registrations = Arc::clone(&registrations);
+                let target = target.clone();
+                let unrelated = root.join("unrelated.tmp");
+                move |callback| {
+                    Ok(Box::new(ImmediateScopedWatchBackend {
+                        callback,
+                        target,
+                        unrelated,
+                        registrations,
+                        fail_registration: false,
+                    }))
+                }
+            })
+            .unwrap();
+        assert_eq!(watcher.watch_anchor_count(), 1);
+        assert_eq!(
+            watcher.coordinator().phase(),
+            ScopedObservationWatcherPhase::WatcherInstalled
+        );
+        assert_eq!(watcher.state().generation, 1);
+        assert!(!watcher.state().backend_failed);
+        assert!(!watcher.state().routing_failed);
+        let signalled = watcher.waiter().wait_after(0).await;
+        assert_eq!(signalled.generation, 1);
+        {
+            let registered = registrations.lock().unwrap();
+            assert_eq!(registered.len(), 1);
+            assert_eq!(registered[0].0, root.canonicalize().unwrap());
+            assert_eq!(registered[0].1, notify::RecursiveMode::NonRecursive);
+        }
+
+        let mut object = scoped_append_object_with_coverage(
+            AppendDelimitedFile::new(AppendDelimitedConfig::json_lines()).unwrap(),
+            RawRetentionPolicy::None,
+            vec![CoverageDomain::FactFamily {
+                family: "runtime.usage-v2".to_string(),
+                version: 1,
+            }],
+        );
+        let mut admission = admission_lane(1, 0, 1);
+        let projection = ScopedObservationProjectionSink::new(ScopedObservationProjectionLimits {
+            max_usage_v2_entities: 1,
+        })
+        .unwrap();
+        let identity = [ScopeIdentityInput {
+            name: "native-session-id",
+            value: b"native-watch-session",
+        }];
+        let origin = RecordOrigin {
+            source_instance_id: 10,
+            stream_id: 20,
+            object_id: 30,
+            observed_at: 40,
+            source_timestamp_hint: None,
+            media_type: SourceMediaType::new("application/x-ndjson").unwrap(),
+        };
+        let scan = watcher
+            .coordinator()
+            .begin_initial_scan(handle.host())
+            .unwrap();
+        let missing = reconcile_scoped_append(
+            handle.host(),
+            scan.access_pass(),
+            &mut object,
+            &mut admission,
+            &identity,
+            &origin,
+            AccessPhase::Initial,
+        );
+        assert!(!missing.object_present);
+        handle
+            .with_attachment(|host, drain| {
+                watcher.coordinator().finish_initial_scan(
+                    host,
+                    scan,
+                    &admission,
+                    &projection,
+                    drain,
+                )
+            })
+            .unwrap();
+        assert_eq!(
+            watcher.coordinator().phase(),
+            ScopedObservationWatcherPhase::ReconcilePending
+        );
+
+        let shutdown = tokio::spawn(watcher.run_until_cancelled());
+        tokio::task::yield_now().await;
+        let barrier = handle.request_close();
+        tokio::time::timeout(std::time::Duration::from_secs(2), shutdown)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(barrier.wait_async().await.complete);
+        assert!(runtime.next_event().await.unwrap().is_none());
+    }
+
+    #[test]
+    fn scoped_native_watcher_registration_failure_releases_retry_slot() {
+        let registry = supported_fixture_registry();
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().join("native-watch-retry-root");
+        std::fs::create_dir_all(&root).unwrap();
+        let target = root.join("session.jsonl");
+        let host =
+            ScopedObservationAccessHost::authorize(&registry, scoped_access_request(root.clone()))
+                .unwrap();
+        let runtime = ScopedObservationAsyncRuntime::open(
+            host,
+            ScopedObservationDeliveryLimits {
+                max_semantic_events: 1,
+                max_retained_native_bytes: 0,
+                max_source_control_items: 1,
+            },
+        )
+        .unwrap();
+        let handle = runtime.handle();
+        let failed = handle.install_native_watcher_with_factory(1, {
+            let target = target.clone();
+            let unrelated = root.join("unrelated.tmp");
+            move |callback| {
+                Ok(Box::new(ImmediateScopedWatchBackend {
+                    callback,
+                    target,
+                    unrelated,
+                    registrations: Arc::new(std::sync::Mutex::new(Vec::new())),
+                    fail_registration: true,
+                }))
+            }
+        });
+        assert!(matches!(
+            failed,
+            Err(ScopedObservationNativeWatcherError::AnchorRegistrationFailed { anchor_index: 0 })
+        ));
+
+        let recovered = handle
+            .install_native_watcher_with_factory(1, {
+                let target = target.clone();
+                let unrelated = root.join("unrelated.tmp");
+                move |callback| {
+                    Ok(Box::new(ImmediateScopedWatchBackend {
+                        callback,
+                        target,
+                        unrelated,
+                        registrations: Arc::new(std::sync::Mutex::new(Vec::new())),
+                        fail_registration: false,
+                    }))
+                }
+            })
+            .unwrap();
+        assert_eq!(
+            recovered.coordinator().phase(),
+            ScopedObservationWatcherPhase::WatcherInstalled
+        );
+        drop(recovered);
+        assert!(handle.host().is_closed());
     }
 
     #[test]

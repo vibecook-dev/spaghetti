@@ -6,9 +6,11 @@
 //! trusted Rust-host concern until their portable contracts are frozen.
 
 use std::collections::{BTreeMap, VecDeque};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, Weak};
+
+use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 
 use crate::adapter::{
     ActorRunRole, AdapterError, AdapterErrorClass, AdapterId, AdapterObjectContext,
@@ -34,10 +36,10 @@ use crate::decode_runtime::{
 use crate::source::{
     confined_relative_path_key, read_stable_file_confined, AccessBudgetError, AccessObjectToken,
     AccessOperation, AccessOutcome, AccessPhase, AppendCheckpoint, AppendDelimitedFile, AppendItem,
-    AppendRead, AppendTransition, AuthorizedScopeAccessPlan, DirtyHint, DriverQuarantine,
-    HintEnqueue, RecordHash, RecordOrigin, Revision, ScopeAccessReport, ScopeAccessRequest,
-    ScopeIdentityInput, SourceCursor, SourceDriverError, SourceMediaType, SourceRecord,
-    SourceRecordState, StableRead, StartupAction, StartupPhase, WatchBeforeScan,
+    AppendRead, AppendTransition, AuthorizedScopeAccessPlan, DirtyHint, DirtyReason, DirtyScope,
+    DriverQuarantine, HintEnqueue, RecordHash, RecordOrigin, Revision, ScopeAccessReport,
+    ScopeAccessRequest, ScopeIdentityInput, SourceCursor, SourceDriverError, SourceMediaType,
+    SourceRecord, SourceRecordState, StableRead, StartupAction, StartupPhase, WatchBeforeScan,
 };
 
 /// One exact host-approved object locator. The locator is installed during
@@ -2634,6 +2636,507 @@ impl ScopedObservationAsyncRuntime {
 impl Drop for ScopedObservationAsyncRuntime {
     fn drop(&mut self) {
         let _ = self.request_close();
+    }
+}
+
+pub type ScopedObservationNativeWatchCallback =
+    Box<dyn FnMut(notify::Result<Event>) + Send + 'static>;
+
+/// Object-safe backend seam used by the concrete `notify` owner and by
+/// deterministic watcher-before-scan tests. The containing module remains
+/// crate-private, so portable consumers cannot inject a watcher backend.
+pub trait ScopedObservationNativeWatchBackend: Send {
+    fn watch(&mut self, path: &Path, mode: RecursiveMode) -> Result<(), ()>;
+}
+
+impl ScopedObservationNativeWatchBackend for RecommendedWatcher {
+    fn watch(&mut self, path: &Path, mode: RecursiveMode) -> Result<(), ()> {
+        Watcher::watch(self, path, mode).map_err(|_| ())
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ScopedObservationNativeWatcherState {
+    pub generation: u64,
+    pub backend_failed: bool,
+    pub routing_failed: bool,
+    pub closed: bool,
+}
+
+#[derive(Debug)]
+struct ScopedObservationNativeWatcherCompletion {
+    state: Mutex<ScopedObservationNativeWatcherState>,
+    async_changed: tokio::sync::watch::Sender<ScopedObservationNativeWatcherState>,
+}
+
+impl Default for ScopedObservationNativeWatcherCompletion {
+    fn default() -> Self {
+        let state = ScopedObservationNativeWatcherState::default();
+        let (async_changed, _) = tokio::sync::watch::channel(state);
+        Self {
+            state: Mutex::new(state),
+            async_changed,
+        }
+    }
+}
+
+impl ScopedObservationNativeWatcherCompletion {
+    fn snapshot(&self) -> ScopedObservationNativeWatcherState {
+        *self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn publish(&self, backend_failed: bool, routing_failed: bool) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.backend_failed |= backend_failed;
+        state.routing_failed |= routing_failed;
+        match state.generation.checked_add(1) {
+            Some(generation) => state.generation = generation,
+            None => state.routing_failed = true,
+        }
+        self.async_changed.send_replace(*state);
+    }
+
+    fn close(&self) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !state.closed {
+            state.closed = true;
+            self.async_changed.send_replace(*state);
+        }
+    }
+
+    async fn wait_after(&self, generation: u64) -> ScopedObservationNativeWatcherState {
+        let mut changed = self.async_changed.subscribe();
+        loop {
+            let state = *changed.borrow_and_update();
+            if state.closed
+                || state.backend_failed
+                || state.routing_failed
+                || state.generation > generation
+            {
+                return state;
+            }
+            changed
+                .changed()
+                .await
+                .expect("scoped native watcher retains its async notification sender");
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ScopedObservationNativeWatcherWaiter {
+    completion: Arc<ScopedObservationNativeWatcherCompletion>,
+}
+
+impl ScopedObservationNativeWatcherWaiter {
+    pub fn state(&self) -> ScopedObservationNativeWatcherState {
+        self.completion.snapshot()
+    }
+
+    pub async fn wait_after(&self, generation: u64) -> ScopedObservationNativeWatcherState {
+        self.completion.wait_after(generation).await
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ScopedObservationNativeWatcherError {
+    #[error("scoped watcher startup failed: {0}")]
+    Startup(#[from] ScopedObservationStartupError),
+    #[error("scoped known-object relation {relation_id:?} has no existing watch root")]
+    NoWatchableRoot { relation_id: String },
+    #[error("scoped native watcher backend could not be created")]
+    BackendUnavailable,
+    #[error("scoped native watcher could not register authorized anchor {anchor_index}")]
+    AnchorRegistrationFailed { anchor_index: usize },
+    #[error("scoped native watcher callback failed during installation")]
+    CallbackFailedDuringInstall,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ScopedObservationNativeWatchAnchor {
+    path: PathBuf,
+    recursive: bool,
+}
+
+#[derive(Debug, Clone)]
+struct ScopedObservationNativeWatchRoute {
+    relation_id: Vec<u8>,
+    target_aliases: Vec<PathBuf>,
+}
+
+#[derive(Debug, Clone)]
+struct ScopedObservationNativeWatchPlan {
+    instance_scope: Vec<u8>,
+    anchors: Vec<ScopedObservationNativeWatchAnchor>,
+    routes: Vec<ScopedObservationNativeWatchRoute>,
+}
+
+impl ScopedObservationNativeWatchPlan {
+    fn from_host(
+        host: &ScopedObservationAccessHost,
+    ) -> Result<Self, ScopedObservationNativeWatcherError> {
+        let mut anchors = Vec::with_capacity(host.known_objects.len());
+        let mut routes = Vec::with_capacity(host.known_objects.len());
+        for grant in host.known_objects.values() {
+            let canonical_root = grant.root.canonicalize().map_err(|_| {
+                ScopedObservationNativeWatcherError::NoWatchableRoot {
+                    relation_id: grant.relation_id.clone(),
+                }
+            })?;
+            if !canonical_root.is_dir() {
+                return Err(ScopedObservationNativeWatcherError::NoWatchableRoot {
+                    relation_id: grant.relation_id.clone(),
+                });
+            }
+            if canonical_root.parent().is_none() {
+                return Err(ScopedObservationNativeWatcherError::NoWatchableRoot {
+                    relation_id: grant.relation_id.clone(),
+                });
+            }
+            let logical_target = grant.root.join(&grant.relative_path);
+            let canonical_target = canonical_root.join(&grant.relative_path);
+            let logical_parent = logical_target.parent().ok_or_else(|| {
+                ScopedObservationNativeWatcherError::NoWatchableRoot {
+                    relation_id: grant.relation_id.clone(),
+                }
+            })?;
+            let mut candidate = logical_parent;
+            let (anchor, recursive) = loop {
+                if candidate.is_dir() {
+                    let anchor = candidate.canonicalize().map_err(|_| {
+                        ScopedObservationNativeWatcherError::NoWatchableRoot {
+                            relation_id: grant.relation_id.clone(),
+                        }
+                    })?;
+                    let canonical_parent = canonical_target.parent().ok_or_else(|| {
+                        ScopedObservationNativeWatcherError::NoWatchableRoot {
+                            relation_id: grant.relation_id.clone(),
+                        }
+                    })?;
+                    if !anchor.starts_with(&canonical_root) {
+                        return Err(ScopedObservationNativeWatcherError::NoWatchableRoot {
+                            relation_id: grant.relation_id.clone(),
+                        });
+                    }
+                    let recursive = anchor != canonical_parent;
+                    break (anchor, recursive);
+                }
+                if candidate == grant.root {
+                    return Err(ScopedObservationNativeWatcherError::NoWatchableRoot {
+                        relation_id: grant.relation_id.clone(),
+                    });
+                }
+                candidate = candidate.parent().ok_or_else(|| {
+                    ScopedObservationNativeWatcherError::NoWatchableRoot {
+                        relation_id: grant.relation_id.clone(),
+                    }
+                })?;
+                if !candidate.starts_with(&grant.root) {
+                    return Err(ScopedObservationNativeWatcherError::NoWatchableRoot {
+                        relation_id: grant.relation_id.clone(),
+                    });
+                }
+            };
+            anchors.push(ScopedObservationNativeWatchAnchor {
+                path: anchor,
+                recursive,
+            });
+            let mut target_aliases = vec![logical_target, canonical_target];
+            target_aliases.sort();
+            target_aliases.dedup();
+            routes.push(ScopedObservationNativeWatchRoute {
+                relation_id: grant.relation_id.as_bytes().to_vec(),
+                target_aliases,
+            });
+        }
+        consolidate_scoped_watch_anchors(&mut anchors);
+        Ok(Self {
+            instance_scope: host.root_identity.source_instance_key.as_bytes().to_vec(),
+            anchors,
+            routes,
+        })
+    }
+
+    fn route(&self, event: notify::Result<Event>) -> ScopedObservationNativeWatchIngress {
+        let event = match event {
+            Ok(event) => event,
+            Err(_) => {
+                return ScopedObservationNativeWatchIngress {
+                    hints: vec![DirtyHint {
+                        scope: DirtyScope::Instance(self.instance_scope.clone()),
+                        reason: DirtyReason::BackendError,
+                    }],
+                    backend_failed: true,
+                };
+            }
+        };
+        if event.need_rescan() {
+            return ScopedObservationNativeWatchIngress {
+                hints: vec![DirtyHint {
+                    scope: DirtyScope::Instance(self.instance_scope.clone()),
+                    reason: DirtyReason::WatcherOverflow,
+                }],
+                backend_failed: false,
+            };
+        }
+        if event.kind.is_access() {
+            return ScopedObservationNativeWatchIngress::default();
+        }
+        if event.paths.is_empty() {
+            return ScopedObservationNativeWatchIngress {
+                hints: vec![DirtyHint {
+                    scope: DirtyScope::Instance(self.instance_scope.clone()),
+                    reason: DirtyReason::NativeEvent,
+                }],
+                backend_failed: false,
+            };
+        }
+
+        let membership_change = matches!(
+            event.kind,
+            EventKind::Create(_)
+                | EventKind::Remove(_)
+                | EventKind::Modify(notify::event::ModifyKind::Name(_))
+        );
+        let mut relations = std::collections::BTreeSet::new();
+        let mut instance_dirty = false;
+        for path in event.paths {
+            if !path.is_absolute() {
+                instance_dirty = true;
+                break;
+            }
+            let mut aliases = vec![path.clone()];
+            if let Ok(canonical) = path.canonicalize() {
+                aliases.push(canonical);
+            }
+            aliases.sort();
+            aliases.dedup();
+            for route in &self.routes {
+                if aliases.iter().any(|path| {
+                    route
+                        .target_aliases
+                        .iter()
+                        .any(|target| path == target || path.starts_with(target))
+                }) {
+                    relations.insert(route.relation_id.clone());
+                } else if membership_change
+                    && aliases.iter().any(|path| {
+                        route
+                            .target_aliases
+                            .iter()
+                            .any(|target| target.starts_with(path))
+                    })
+                {
+                    instance_dirty = true;
+                }
+            }
+        }
+        let hints = if instance_dirty {
+            vec![DirtyHint {
+                scope: DirtyScope::Instance(self.instance_scope.clone()),
+                reason: DirtyReason::NativeEvent,
+            }]
+        } else {
+            relations
+                .into_iter()
+                .map(|relation_id| DirtyHint {
+                    scope: DirtyScope::Object(relation_id),
+                    reason: DirtyReason::NativeEvent,
+                })
+                .collect()
+        };
+        ScopedObservationNativeWatchIngress {
+            hints,
+            backend_failed: false,
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct ScopedObservationNativeWatchIngress {
+    hints: Vec<DirtyHint>,
+    backend_failed: bool,
+}
+
+fn consolidate_scoped_watch_anchors(anchors: &mut Vec<ScopedObservationNativeWatchAnchor>) {
+    anchors.sort_by(|left, right| {
+        left.path
+            .components()
+            .count()
+            .cmp(&right.path.components().count())
+            .then_with(|| left.path.cmp(&right.path))
+            .then_with(|| right.recursive.cmp(&left.recursive))
+    });
+    let mut consolidated: Vec<ScopedObservationNativeWatchAnchor> =
+        Vec::with_capacity(anchors.len());
+    for anchor in anchors.drain(..) {
+        if let Some(existing) = consolidated
+            .iter_mut()
+            .find(|existing| existing.path == anchor.path)
+        {
+            existing.recursive |= anchor.recursive;
+            continue;
+        }
+        if consolidated
+            .iter()
+            .any(|existing| existing.recursive && anchor.path.starts_with(&existing.path))
+        {
+            continue;
+        }
+        consolidated.push(anchor);
+    }
+    *anchors = consolidated;
+}
+
+/// Concrete native watcher owner. Dropping the backend stops callbacks before
+/// the coordinator registration is released, so the attachment close barrier
+/// cannot complete while a native callback may still run.
+pub struct ScopedObservationNativeWatcher {
+    backend: Option<Box<dyn ScopedObservationNativeWatchBackend>>,
+    handle: ScopedObservationAsyncHandle,
+    coordinator: Arc<ScopedObservationWatcherOrchestrator>,
+    completion: Arc<ScopedObservationNativeWatcherCompletion>,
+    watch_anchor_count: usize,
+}
+
+impl std::fmt::Debug for ScopedObservationNativeWatcher {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ScopedObservationNativeWatcher")
+            .field("phase", &self.coordinator.phase())
+            .field("watch_anchor_count", &self.watch_anchor_count)
+            .field("state", &self.completion.snapshot())
+            .finish_non_exhaustive()
+    }
+}
+
+impl ScopedObservationNativeWatcher {
+    pub fn coordinator(&self) -> &ScopedObservationWatcherOrchestrator {
+        &self.coordinator
+    }
+
+    pub fn watch_anchor_count(&self) -> usize {
+        self.watch_anchor_count
+    }
+
+    pub fn state(&self) -> ScopedObservationNativeWatcherState {
+        self.completion.snapshot()
+    }
+
+    pub fn waiter(&self) -> ScopedObservationNativeWatcherWaiter {
+        ScopedObservationNativeWatcherWaiter {
+            completion: Arc::clone(&self.completion),
+        }
+    }
+
+    /// Own the native backend until attachment cancellation, then stop the
+    /// backend and release the coordinator's watcher registration on return.
+    pub async fn run_until_cancelled(self) {
+        self.coordinator.wait_for_cancellation_async().await;
+    }
+}
+
+impl Drop for ScopedObservationNativeWatcher {
+    fn drop(&mut self) {
+        drop(self.backend.take());
+        if !self.coordinator.cancellation_requested() {
+            let _ = self.handle.request_close();
+        }
+        self.completion.close();
+    }
+}
+
+impl ScopedObservationAsyncHandle {
+    pub fn install_native_watcher(
+        &self,
+        hint_capacity: usize,
+    ) -> Result<ScopedObservationNativeWatcher, ScopedObservationNativeWatcherError> {
+        self.install_native_watcher_with_factory_inner(hint_capacity, |callback| {
+            let watcher = notify::recommended_watcher(callback).map_err(|_| ())?;
+            Ok(Box::new(watcher))
+        })
+    }
+
+    fn install_native_watcher_with_factory_inner<F>(
+        &self,
+        hint_capacity: usize,
+        factory: F,
+    ) -> Result<ScopedObservationNativeWatcher, ScopedObservationNativeWatcherError>
+    where
+        F: FnOnce(
+            ScopedObservationNativeWatchCallback,
+        ) -> Result<Box<dyn ScopedObservationNativeWatchBackend>, ()>,
+    {
+        let coordinator = Arc::new(self.prepare_watcher_install(hint_capacity)?);
+        let plan = Arc::new(ScopedObservationNativeWatchPlan::from_host(self.host())?);
+        let completion = Arc::new(ScopedObservationNativeWatcherCompletion::default());
+        let callback_handle = self.clone();
+        let callback_coordinator = Arc::clone(&coordinator);
+        let callback_plan = Arc::clone(&plan);
+        let callback_completion = Arc::clone(&completion);
+        let callback: ScopedObservationNativeWatchCallback = Box::new(move |event| {
+            let ingress = callback_plan.route(event);
+            if ingress.hints.is_empty() {
+                return;
+            }
+            let mut routing_failed = false;
+            for hint in ingress.hints {
+                match callback_coordinator.record_hint(callback_handle.host(), hint) {
+                    Ok(ScopedObservationWatcherHintAction::Buffered(_))
+                    | Ok(ScopedObservationWatcherHintAction::PollRequested { .. }) => {}
+                    Err(ScopedObservationStartupError::Closed) => return,
+                    Err(_) => routing_failed = true,
+                }
+            }
+            callback_completion.publish(ingress.backend_failed, routing_failed);
+        });
+        let mut backend = factory(callback)
+            .map_err(|_| ScopedObservationNativeWatcherError::BackendUnavailable)?;
+        for (anchor_index, anchor) in plan.anchors.iter().enumerate() {
+            let mode = if anchor.recursive {
+                RecursiveMode::Recursive
+            } else {
+                RecursiveMode::NonRecursive
+            };
+            backend.watch(&anchor.path, mode).map_err(|_| {
+                ScopedObservationNativeWatcherError::AnchorRegistrationFailed { anchor_index }
+            })?;
+        }
+        let callback_state = completion.snapshot();
+        if callback_state.backend_failed || callback_state.routing_failed {
+            return Err(ScopedObservationNativeWatcherError::CallbackFailedDuringInstall);
+        }
+        coordinator.confirm_watcher_installed(self.host())?;
+        Ok(ScopedObservationNativeWatcher {
+            backend: Some(backend),
+            handle: self.clone(),
+            coordinator,
+            completion,
+            watch_anchor_count: plan.anchors.len(),
+        })
+    }
+
+    #[cfg(test)]
+    pub fn install_native_watcher_with_factory<F>(
+        &self,
+        hint_capacity: usize,
+        factory: F,
+    ) -> Result<ScopedObservationNativeWatcher, ScopedObservationNativeWatcherError>
+    where
+        F: FnOnce(
+            ScopedObservationNativeWatchCallback,
+        ) -> Result<Box<dyn ScopedObservationNativeWatchBackend>, ()>,
+    {
+        self.install_native_watcher_with_factory_inner(hint_capacity, factory)
     }
 }
 

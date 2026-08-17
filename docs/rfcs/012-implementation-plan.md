@@ -1271,7 +1271,21 @@ Current landing status (2026-08-17):
   final empty-hint check, bootstrap-control offer, and transition to live share
   one ordering lock, so a racing callback either blocks the barrier or becomes
   a request-local live poll ticket after it. Producer offers also verify the
-  attachment-owned consumer drain. The concrete native watcher owner and its
+  attachment-owned consumer drain;
+- a concrete attachment-owned `notify` watcher now derives consolidated
+  physical anchors no broader than the host-authorized access roots, rejects
+  missing or filesystem-wide roots, and filters unrelated/access-only paths
+  before they reach scope scheduling. Exact-object changes stay object-scoped;
+  ancestor membership changes, empty/rescan events, and backend failures
+  conservatively escalate to the source instance with their distinct dirty
+  reasons. The coordinator and callback exist before backend construction and
+  all anchor registration, so synchronous install callbacks are retained
+  behind the initial scan barrier. Partial registration failure drops the
+  backend and releases the retry slot. Normal shutdown drops the native backend
+  before its non-cloneable watcher registration; unexpected owner drop closes
+  the attachment rather than leaving an unwatched live observer. A retained
+  async signal reports callback generations and backend/routing failure. Native
+  watcher audit/reinstallation, failed-observer control delivery, and the
   public portable host wrapper remain open;
 - one pass is active at a time, a later pass receives fresh bounds, close is
   idempotent, and the frozen access report excludes paths, identity values, and
@@ -1290,9 +1304,9 @@ and complete scope coverage,
 dynamic/discovered scope membership beyond the attachment's current exact
 known-object grants and family coverage beyond usage-v2,
 complete multi-family replacement manifests, whole-scope discovery and source
-state beyond the current exact append-object set, and watcher-level failed/
-re-overflow orchestration,
-artifact mediation and the portable async close wrapper,
+state beyond the current exact append-object set, and watcher-level audit,
+reinstallation, failed-observer, and re-overflow orchestration,
+artifact mediation and the public portable close transport,
 the trusted native version-probe/identity-input drivers, and the complete
 public request are not yet implemented. The internal offered and applied
 boundaries are now transactional, but they cannot become a public watermark and
@@ -1362,7 +1376,7 @@ derives it from the validated staged root. Neither barrier accepts a caller-
 asserted presence bit, and bootstrap/source-state disagreement fails closed.
 This is not yet proof of relationships or descendants that the future scope
 orchestrator has not discovered and granted, nor is it the portable poll/
-bootstrap/resync contract. The public async multiplexer/facade, whole-scope
+bootstrap/resync contract. The public N-API/SDK iterator transport, whole-scope
 dynamic discovered-scope source/family sets, complete multi-family and D-owned
 manifests, non-append source participants, and multi-observer scheduling/
 starvation isolation remain unimplemented. Internally,
@@ -1426,8 +1440,8 @@ offer. Old admitted-but-unoffered input is superseded and dropped; completion
 pressure preserves all active state; and re-overflow keeps the last valid epoch
 while a newer stage supersedes the failed continuity epoch. Complete
 multi-family and D-owned manifests, dynamic whole-scope discovery and
-non-append participants, the async/portable wrapper over the internal applied
-drain, and watcher-level failure scheduling remain open.
+non-append participants, the public transport over the internal async applied
+runtime, and watcher audit/reinstallation plus failure scheduling remain open.
 
 ### D4. SDK and Chopsticks migration
 
