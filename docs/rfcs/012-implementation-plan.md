@@ -1179,12 +1179,14 @@ Current landing status (2026-08-17):
   an authorized relation that was never reconciled cannot silently disappear
   from a completion barrier. Conformance tests cover omission, duplicate
   claims, failed rebinding, and no barrier/delivery mutation on failure;
-- a crate-private single-consumer drain now validates and maps the next envelope
-  before dequeue, permits only one application-pending envelope, and advances a
-  distinct applied boundary only after an exact attachment-bound receipt is
-  acknowledged. Foreign/mismatched receipts and a second drain fail without
-  mutation; retrying the latest acknowledgement is a no-op. Consumer bootstrap
-  and resync readiness become visible only after their completion envelopes are
+- a crate-private single-consumer drain now owns its empty bounded delivery lane
+  from construction, validates and maps the next envelope before dequeue,
+  permits only one application-pending envelope, and advances a distinct applied
+  boundary only after an exact attachment-bound receipt is acknowledged. One
+  host can open that owner exactly once; invalid limits do not consume the slot,
+  and closed hosts reject it. Foreign/mismatched receipts fail without mutation,
+  while retrying the latest acknowledgement is a no-op. Consumer bootstrap and
+  resync readiness become visible only after their completion envelopes are
   applied, while engine barriers remain offered-bound. Explicit sequence gaps
   created by invalidation are accepted only when the skipped backlog was never
   delivered. Raw dequeue and the standalone mapper are test-only seams, so
@@ -1293,11 +1295,12 @@ and mismatched native-session claims. This freezes the current
 usage/source-lifecycle and initial resync envelope vocabulary but is not yet the
 public multiplexer/facade, complete portable resync/scope manifest, complete
 actor-affiliation reducer, or a portable consumer-ready helper. The internal
-single-consumer drain now distinguishes delivery from application with an exact
-attachment-bound receipt, blocks a second dequeue while application is pending,
-rejects cross-attachment/mismatched acknowledgements, tolerates only explicit
-invalidation sequence gaps, and exposes bootstrap/resync readiness only after
-their completion envelopes are applied. Epoch 1 now has an
+single-consumer drain now owns the bounded delivery lane from host construction,
+distinguishes delivery from application with an exact attachment-bound receipt,
+blocks a second dequeue while application is pending, rejects
+cross-attachment/mismatched acknowledgements, tolerates only explicit
+invalidation sequence gaps, and exposes engine versus consumer bootstrap/resync
+readiness separately. Epoch 1 now has an
 ordered, snapshot-identified bootstrap-completion control and retained
 idempotent barrier at the offered boundary; it remains internal until
 multi-object scope orchestration and the portable drain/ready surface land. A

@@ -202,11 +202,11 @@ mod tests {
         ScopedKnownObjectReadRequest, ScopedObjectRead, ScopedObservationAccessError,
         ScopedObservationAccessHost, ScopedObservationAccessRequest,
         ScopedObservationAdmissionLane, ScopedObservationContinuity, ScopedObservationDeliveryLane,
-        ScopedObservationDeliveryLimits, ScopedObservationEvent, ScopedObservationProjectionLimits,
-        ScopedObservationProjectionSink, ScopedObservationQueueLimits,
-        ScopedProjectionDeliveryError, ScopedQueuedObservationFrame, ScopedReplacementMode,
-        ScopedReplacementRepresentation, ScopedReplacementStageError, ScopedResyncReason,
-        ScopedRootIdentityRequest, ScopedSourceFailureClass,
+        ScopedObservationDeliveryLimits, ScopedObservationEvent, ScopedObservationOpenDrainError,
+        ScopedObservationProjectionLimits, ScopedObservationProjectionSink,
+        ScopedObservationQueueLimits, ScopedProjectionDeliveryError, ScopedQueuedObservationFrame,
+        ScopedReplacementMode, ScopedReplacementRepresentation, ScopedReplacementStageError,
+        ScopedResyncReason, ScopedRootIdentityRequest, ScopedSourceFailureClass,
     };
     use crate::source::{
         AccessOperation, AccessOutcome, AccessPhase, AppendDelimitedConfig, AppendDelimitedFile,
@@ -759,6 +759,34 @@ mod tests {
             host.compatibility().support_release_id(),
             Some("fixture-release")
         );
+        assert!(matches!(
+            host.open_consumer_drain(ScopedObservationDeliveryLimits {
+                max_semantic_events: 0,
+                max_retained_native_bytes: 0,
+                max_source_control_items: 1,
+            }),
+            Err(ScopedObservationOpenDrainError::Delivery(
+                ScopedDeliveryError::InvalidLimits
+            ))
+        ));
+        let drain = host
+            .open_consumer_drain(ScopedObservationDeliveryLimits {
+                max_semantic_events: 1,
+                max_retained_native_bytes: 0,
+                max_source_control_items: 1,
+            })
+            .unwrap();
+        assert_eq!(drain.delivery_lane().state().offered_through_sequence, 0);
+        assert_eq!(drain.state().applied_through_sequence, 0);
+        assert!(matches!(
+            host.open_consumer_drain(ScopedObservationDeliveryLimits {
+                max_semantic_events: 1,
+                max_retained_native_bytes: 0,
+                max_source_control_items: 1,
+            }),
+            Err(ScopedObservationOpenDrainError::AlreadyOpened)
+        ));
+        drop(drain);
         let identity = [ScopeIdentityInput {
             name: "native-session-id",
             value: b"secret-session-id",
@@ -822,6 +850,14 @@ mod tests {
         assert!(matches!(
             host.begin_pass(),
             Err(ScopedObservationAccessError::Closed)
+        ));
+        assert!(matches!(
+            host.open_consumer_drain(ScopedObservationDeliveryLimits {
+                max_semantic_events: 1,
+                max_retained_native_bytes: 0,
+                max_source_control_items: 1,
+            }),
+            Err(ScopedObservationOpenDrainError::Closed)
         ));
 
         let dropped_host =

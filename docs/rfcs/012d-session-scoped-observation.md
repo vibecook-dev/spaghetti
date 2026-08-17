@@ -445,8 +445,12 @@ prove consumer application. A consumer-ready SDK helper owns the one logical
 event drain, applies every envelope through that sequence, and only then resolves
 with the reduced bootstrap state.
 
-The helper maintains an attachment-local application receipt for each yielded
-envelope. A receipt binds the attachment authority, `scope_epoch`,
+The helper and its empty bounded delivery lane are constructed as one
+attachment-owned unit before bootstrap scanning begins. The lane cannot be
+claimed later, shared by a second drain, or substituted with another
+attachment's numerically similar queue. The helper maintains an
+attachment-local application receipt for each yielded envelope. A receipt binds
+the attachment authority, `scope_epoch`,
 `observer_sequence`, and `event_id`; it is flow-control evidence, not a semantic
 identity, durable cursor, or portable deduplication key. The helper acknowledges
 the receipt only after its consumer-owned reducer successfully applies the

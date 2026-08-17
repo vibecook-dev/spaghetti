@@ -1623,14 +1623,8 @@ pub struct ScopedObservationAppliedState {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum ScopedObservationDrainError {
-    #[error("scoped observation event drain was already claimed")]
-    AlreadyClaimed,
-    #[error("scoped observation delivery began before the consumer drain was claimed")]
-    DeliveryAlreadyStarted,
     #[error("scoped observation consumer must apply the yielded envelope before draining another")]
     ApplicationPending,
-    #[error("scoped observation delivery was consumed outside its claimed drain")]
-    DeliveryOwnershipLost,
     #[error("scoped observation envelope mapping failed: {0}")]
     Envelope(ScopedEnvelopeError),
 }
@@ -1643,6 +1637,16 @@ pub enum ScopedObservationApplicationError {
     ReceiptMismatch,
     #[error("scoped observation drain has no pending envelope to acknowledge")]
     NoPendingEnvelope,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum ScopedObservationOpenDrainError {
+    #[error("scoped observation host is closed")]
+    Closed,
+    #[error("scoped observation consumer drain was already opened")]
+    AlreadyOpened,
+    #[error("scoped observation delivery lane could not be created: {0}")]
+    Delivery(ScopedDeliveryError),
 }
 
 #[derive(Debug, Clone)]
@@ -1662,10 +1666,10 @@ struct ScopedObservationPendingApplication {
 /// consumer-ready SDK helper. Engine `ready()` remains the offered bootstrap
 /// barrier; this state advances only after the caller reports that its reducer
 /// successfully applied the exact yielded envelope.
-#[derive(Debug)]
 pub struct ScopedObservationConsumerDrain {
     mapper: ScopedObservationEnvelopeMapper,
     authority: Arc<ScopedObservationApplicationAuthority>,
+    delivery: ScopedObservationDeliveryLane,
     delivered_through_sequence: u64,
     applied_through_sequence: u64,
     applied_scope_epoch: Option<u64>,
@@ -1676,21 +1680,15 @@ pub struct ScopedObservationConsumerDrain {
 }
 
 impl ScopedObservationConsumerDrain {
-    fn claim(
+    fn new(
         mapper: ScopedObservationEnvelopeMapper,
-        delivery: &mut ScopedObservationDeliveryLane,
-    ) -> Result<Self, ScopedObservationDrainError> {
-        if delivery.consumer_authority.is_some() {
-            return Err(ScopedObservationDrainError::AlreadyClaimed);
-        }
-        if delivery.delivered_through_sequence != 0 {
-            return Err(ScopedObservationDrainError::DeliveryAlreadyStarted);
-        }
+        limits: ScopedObservationDeliveryLimits,
+    ) -> Result<Self, ScopedDeliveryError> {
         let authority = Arc::new(ScopedObservationApplicationAuthority);
-        delivery.consumer_authority = Some(Arc::clone(&authority));
         Ok(Self {
             mapper,
             authority,
+            delivery: ScopedObservationDeliveryLane::new(limits)?,
             delivered_through_sequence: 0,
             applied_through_sequence: 0,
             applied_scope_epoch: None,
@@ -1707,20 +1705,11 @@ impl ScopedObservationConsumerDrain {
     /// cannot consume or advance the delivery boundary.
     pub fn next(
         &mut self,
-        delivery: &mut ScopedObservationDeliveryLane,
     ) -> Result<Option<ScopedObservationYieldedEnvelope>, ScopedObservationDrainError> {
         if self.pending.is_some() {
             return Err(ScopedObservationDrainError::ApplicationPending);
         }
-        if !delivery
-            .consumer_authority
-            .as_ref()
-            .is_some_and(|authority| Arc::ptr_eq(authority, &self.authority))
-            || delivery.delivered_through_sequence != self.delivered_through_sequence
-        {
-            return Err(ScopedObservationDrainError::DeliveryOwnershipLost);
-        }
-        let Some(preview) = delivery.preview_next() else {
+        let Some(preview) = self.delivery.preview_next() else {
             return Ok(None);
         };
         let preview_sequence = preview.observer_sequence;
@@ -1730,7 +1719,8 @@ impl ScopedObservationConsumerDrain {
             .mapper
             .map(preview)
             .map_err(ScopedObservationDrainError::Envelope)?;
-        let delivered = delivery
+        let delivered = self
+            .delivery
             .dequeue_next()
             .expect("validated scoped delivery preview remains queued");
         debug_assert_eq!(delivered.observer_sequence, preview_sequence);
@@ -1838,6 +1828,25 @@ impl ScopedObservationConsumerDrain {
 
     pub fn consumer_resync_barrier(&self) -> Option<Arc<ScopedResyncBarrier>> {
         self.resync_barrier.as_ref().map(Arc::clone)
+    }
+
+    /// Producer-side access remains inside the crate-private observer runtime.
+    /// Owning rather than borrowing the lane prevents a consumer drain from
+    /// being paired with a second attachment or epoch queue.
+    pub fn delivery_lane(&self) -> &ScopedObservationDeliveryLane {
+        &self.delivery
+    }
+
+    fn delivery_lane_mut(&mut self) -> &mut ScopedObservationDeliveryLane {
+        &mut self.delivery
+    }
+
+    pub fn engine_bootstrap_barrier(&self) -> Option<Arc<ScopedBootstrapBarrier>> {
+        self.delivery.bootstrap_barrier()
+    }
+
+    pub fn engine_resync_barrier(&self) -> Option<Arc<ScopedResyncBarrier>> {
+        self.delivery.resync_barrier()
     }
 }
 
@@ -2401,7 +2410,6 @@ pub struct ScopedObservationDeliveryLane {
     resync_required: Option<Arc<ScopedResyncRequired>>,
     resync_started: Option<Arc<ScopedResyncStarted>>,
     resync_barrier: Option<Arc<ScopedResyncBarrier>>,
-    consumer_authority: Option<Arc<ScopedObservationApplicationAuthority>>,
 }
 
 impl ScopedObservationDeliveryLane {
@@ -2421,7 +2429,6 @@ impl ScopedObservationDeliveryLane {
             resync_required: None,
             resync_started: None,
             resync_barrier: None,
-            consumer_authority: None,
         })
     }
 
@@ -4404,6 +4411,7 @@ pub enum ScopedObservationAccessError {
 struct ScopedObservationAccessState {
     closed: AtomicBool,
     pass_active: AtomicBool,
+    consumer_drain_opened: AtomicBool,
 }
 
 /// The database-free scoped composition root owns the unforgeable typed
@@ -4459,6 +4467,7 @@ impl ScopedObservationAccessHost {
             state: Arc::new(ScopedObservationAccessState {
                 closed: AtomicBool::new(false),
                 pass_active: AtomicBool::new(false),
+                consumer_drain_opened: AtomicBool::new(false),
             }),
         })
     }
@@ -4476,18 +4485,30 @@ impl ScopedObservationAccessHost {
         ScopedObservationEnvelopeMapper::new(self.root_identity.clone())
     }
 
-    /// Claim the attachment's sole consumer-ready event drain before any
-    /// envelope has crossed the delivery boundary. Offered bootstrap work may
-    /// already be queued; consumer readiness remains pending until its barrier
-    /// envelope is applied and acknowledged through this drain.
-    pub fn claim_consumer_drain(
+    /// Construct the attachment's sole consumer-ready event drain together with
+    /// its empty bounded delivery lane. The observer installs this owner before
+    /// bootstrap work begins, so no envelope can cross a different or late-
+    /// claimed delivery boundary.
+    pub fn open_consumer_drain(
         &self,
-        delivery: &mut ScopedObservationDeliveryLane,
-    ) -> Result<ScopedObservationConsumerDrain, ScopedObservationDrainError> {
-        ScopedObservationConsumerDrain::claim(
+        limits: ScopedObservationDeliveryLimits,
+    ) -> Result<ScopedObservationConsumerDrain, ScopedObservationOpenDrainError> {
+        if self.state.closed.load(Ordering::Acquire) {
+            return Err(ScopedObservationOpenDrainError::Closed);
+        }
+        let drain = ScopedObservationConsumerDrain::new(
             ScopedObservationEnvelopeMapper::new(self.root_identity.clone()),
-            delivery,
+            limits,
         )
+        .map_err(ScopedObservationOpenDrainError::Delivery)?;
+        self.state
+            .consumer_drain_opened
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|_| ScopedObservationOpenDrainError::AlreadyOpened)?;
+        if self.state.closed.load(Ordering::Acquire) {
+            return Err(ScopedObservationOpenDrainError::Closed);
+        }
+        Ok(drain)
     }
 
     /// Capture a self-consistent offered sequence plus eligible RFC 012A
@@ -6656,6 +6677,22 @@ mod projection_tests {
         .unwrap()
     }
 
+    fn consumer_drain(
+        root: ScopedObservationRootIdentity,
+        max_semantic_events: usize,
+        max_source_control_items: usize,
+    ) -> ScopedObservationConsumerDrain {
+        ScopedObservationConsumerDrain::new(
+            ScopedObservationEnvelopeMapper::new(root),
+            ScopedObservationDeliveryLimits {
+                max_semantic_events,
+                max_retained_native_bytes: 0,
+                max_source_control_items,
+            },
+        )
+        .unwrap()
+    }
+
     #[test]
     fn scoped_source_controls_use_coverage_identity_and_stable_event_ids() {
         let source = source_identity();
@@ -7183,35 +7220,28 @@ mod projection_tests {
             event_id: source_presence_event_id(&source, creation),
             change: creation,
         };
-        let mut delivery = delivery_lane(1, 2);
-        delivery.offer(vec![bootstrap_presence.clone()]).unwrap();
+        let mut drain = consumer_drain(root.clone(), 1, 2);
+        drain
+            .delivery_lane_mut()
+            .offer(vec![bootstrap_presence.clone()])
+            .unwrap();
         let watermark = ScopedObservationWatermarkCore {
             root: root.clone(),
             scope_epoch: SCOPED_INITIAL_SCOPE_EPOCH,
             offered_through_sequence: 1,
             source_coverage: Vec::new(),
             explicit_object_errors: Vec::new(),
-            queue_state: delivery.state(),
+            queue_state: drain.delivery_lane().state(),
         };
-        let engine_barrier = delivery
+        let engine_barrier = drain
+            .delivery_lane_mut()
             .offer_bootstrap_barrier(&root, watermark, Vec::new(), true, 50)
             .unwrap();
         assert_eq!(engine_barrier.barrier_sequence, 2);
-        assert!(delivery.bootstrap_barrier().is_some());
-
-        let mut drain = ScopedObservationConsumerDrain::claim(
-            ScopedObservationEnvelopeMapper::new(root.clone()),
-            &mut delivery,
-        )
-        .unwrap();
-        assert_eq!(
-            ScopedObservationConsumerDrain::claim(
-                ScopedObservationEnvelopeMapper::new(root.clone()),
-                &mut delivery,
-            )
-            .unwrap_err(),
-            ScopedObservationDrainError::AlreadyClaimed
-        );
+        assert!(Arc::ptr_eq(
+            &drain.engine_bootstrap_barrier().unwrap(),
+            &engine_barrier
+        ));
         assert_eq!(
             drain.state(),
             ScopedObservationAppliedState {
@@ -7224,7 +7254,7 @@ mod projection_tests {
             }
         );
 
-        let first = drain.next(&mut delivery).unwrap().unwrap();
+        let first = drain.next().unwrap().unwrap();
         assert_eq!(first.envelope.observer_sequence, 1);
         assert!(matches!(
             first.envelope.event,
@@ -7235,23 +7265,19 @@ mod projection_tests {
         assert_eq!(first_receipt.scope_epoch(), SCOPED_INITIAL_SCOPE_EPOCH);
         assert_eq!(first_receipt.event_id(), bootstrap_presence.event_id());
         assert!(matches!(
-            drain.next(&mut delivery),
+            drain.next(),
             Err(ScopedObservationDrainError::ApplicationPending)
         ));
         assert!(drain.consumer_bootstrap_barrier().is_none());
 
         // Even an identical replay coordinate from another drain cannot
         // acknowledge this attachment's pending application.
-        let mut foreign_delivery = delivery_lane(1, 1);
-        foreign_delivery
+        let mut foreign_drain = consumer_drain(root.clone(), 1, 1);
+        foreign_drain
+            .delivery_lane_mut()
             .offer(vec![bootstrap_presence.clone()])
             .unwrap();
-        let mut foreign_drain = ScopedObservationConsumerDrain::claim(
-            ScopedObservationEnvelopeMapper::new(root.clone()),
-            &mut foreign_delivery,
-        )
-        .unwrap();
-        let foreign = foreign_drain.next(&mut foreign_delivery).unwrap().unwrap();
+        let foreign = foreign_drain.next().unwrap().unwrap();
         assert_eq!(foreign.envelope.observer_sequence, 1);
         assert_eq!(foreign.envelope.event_id, first_receipt.event_id());
         assert_eq!(
@@ -7273,12 +7299,8 @@ mod projection_tests {
             drain.acknowledge_applied(&first_receipt).unwrap(),
             applied_first
         );
-        assert!(matches!(
-            drain.next(&mut foreign_delivery),
-            Err(ScopedObservationDrainError::DeliveryOwnershipLost)
-        ));
 
-        let complete = drain.next(&mut delivery).unwrap().unwrap();
+        let complete = drain.next().unwrap().unwrap();
         assert_eq!(complete.envelope.observer_sequence, 2);
         assert!(matches!(
             &complete.envelope.event,
@@ -7301,7 +7323,7 @@ mod projection_tests {
             &drain.consumer_bootstrap_barrier().unwrap(),
             &engine_barrier
         ));
-        assert!(drain.next(&mut delivery).unwrap().is_none());
+        assert!(drain.next().unwrap().is_none());
     }
 
     #[test]
@@ -7311,8 +7333,9 @@ mod projection_tests {
         foreign_source.source_instance_key =
             CanonicalSourceInstanceKey::derive(1, b"foreign-source-instance").unwrap();
         let change = ScopedAppendPresenceChange::Created { generation: 1 };
-        let mut delivery = delivery_lane(1, 1);
-        delivery
+        let mut drain = consumer_drain(root, 1, 1);
+        drain
+            .delivery_lane_mut()
             .offer(vec![ScopedProjectedObservation::SourcePresence {
                 object_token: OBJECT_TOKEN,
                 source: foreign_source.clone(),
@@ -7323,54 +7346,45 @@ mod projection_tests {
                 change,
             }])
             .unwrap();
-        let queued = delivery.state();
-        let mut drain = ScopedObservationConsumerDrain::claim(
-            ScopedObservationEnvelopeMapper::new(root),
-            &mut delivery,
-        )
-        .unwrap();
+        let queued = drain.delivery_lane().state();
 
         assert!(matches!(
-            drain.next(&mut delivery),
+            drain.next(),
             Err(ScopedObservationDrainError::Envelope(
                 ScopedEnvelopeError::RootSourceMismatch
             ))
         ));
-        assert_eq!(delivery.state(), queued);
-        assert_eq!(delivery.queued_source_control_items(), 1);
+        assert_eq!(drain.delivery_lane().state(), queued);
+        assert_eq!(drain.delivery_lane().queued_source_control_items(), 1);
         assert_eq!(drain.state().delivered_through_sequence, 0);
         assert_eq!(drain.state().pending_sequence, None);
         assert!(matches!(
-            drain.next(&mut delivery),
+            drain.next(),
             Err(ScopedObservationDrainError::Envelope(
                 ScopedEnvelopeError::RootSourceMismatch
             ))
         ));
-        assert_eq!(delivery.state(), queued);
+        assert_eq!(drain.delivery_lane().state(), queued);
     }
 
     #[test]
     fn scoped_consumer_drain_applies_explicit_sequence_gap_after_invalidation() {
         let root = root_identity();
         let source = source_identity();
-        let mut delivery = delivery_lane(1, 3);
+        let mut drain = consumer_drain(root.clone(), 1, 3);
         let watermark = ScopedObservationWatermarkCore {
             root: root.clone(),
             scope_epoch: SCOPED_INITIAL_SCOPE_EPOCH,
             offered_through_sequence: 0,
             source_coverage: Vec::new(),
             explicit_object_errors: Vec::new(),
-            queue_state: delivery.state(),
+            queue_state: drain.delivery_lane().state(),
         };
-        let bootstrap = delivery
+        let bootstrap = drain
+            .delivery_lane_mut()
             .offer_bootstrap_barrier(&root, watermark, Vec::new(), false, 10)
             .unwrap();
-        let mut drain = ScopedObservationConsumerDrain::claim(
-            ScopedObservationEnvelopeMapper::new(root.clone()),
-            &mut delivery,
-        )
-        .unwrap();
-        let bootstrap_delivery = drain.next(&mut delivery).unwrap().unwrap();
+        let bootstrap_delivery = drain.next().unwrap().unwrap();
         drain
             .acknowledge_applied(bootstrap_delivery.application_receipt())
             .unwrap();
@@ -7382,7 +7396,8 @@ mod projection_tests {
 
         let created = ScopedAppendPresenceChange::Created { generation: 1 };
         let deleted = ScopedAppendPresenceChange::Deleted { generation: 1 };
-        delivery
+        drain
+            .delivery_lane_mut()
             .offer(vec![
                 ScopedProjectedObservation::SourcePresence {
                     object_token: OBJECT_TOKEN,
@@ -7404,14 +7419,15 @@ mod projection_tests {
                 },
             ])
             .unwrap();
-        let required = delivery
+        let required = drain
+            .delivery_lane_mut()
             .require_resync(&root, ScopedResyncReason::WatcherOverflow, 30)
             .unwrap();
         assert_eq!(required.control_sequence, 4);
         assert_eq!(required.last_contiguous_sequence, 1);
         assert_eq!(required.discarded_source_controls, 2);
 
-        let invalidation = drain.next(&mut delivery).unwrap().unwrap();
+        let invalidation = drain.next().unwrap().unwrap();
         assert_eq!(invalidation.envelope.observer_sequence, 4);
         assert!(matches!(
             &invalidation.envelope.event,
@@ -7426,9 +7442,9 @@ mod projection_tests {
         assert_eq!(state.applied_scope_epoch, Some(1));
         assert_eq!(state.pending_sequence, None);
 
-        let started = delivery.begin_resync(&root, 40).unwrap();
+        let started = drain.delivery_lane_mut().begin_resync(&root, 40).unwrap();
         assert_eq!(started.control_sequence, 5);
-        let started_delivery = drain.next(&mut delivery).unwrap().unwrap();
+        let started_delivery = drain.next().unwrap().unwrap();
         assert!(matches!(
             &started_delivery.envelope.event,
             ScopedObservationEvent::ObserverResyncStarted { control }
@@ -7445,10 +7461,11 @@ mod projection_tests {
             offered_through_sequence: 5,
             source_coverage: Vec::new(),
             explicit_object_errors: Vec::new(),
-            queue_state: delivery.state(),
+            queue_state: drain.delivery_lane().state(),
         };
         let replacement_digest = replacement_snapshot_digest(&root, false, &[], &[], &[]).unwrap();
-        let resync_barrier = delivery
+        let resync_barrier = drain
+            .delivery_lane_mut()
             .offer_resync_barrier(
                 &root,
                 completion_watermark,
@@ -7459,7 +7476,11 @@ mod projection_tests {
             )
             .unwrap();
         assert_eq!(resync_barrier.barrier_sequence, 6);
-        let completed = drain.next(&mut delivery).unwrap().unwrap();
+        assert!(Arc::ptr_eq(
+            &drain.engine_resync_barrier().unwrap(),
+            &resync_barrier
+        ));
+        let completed = drain.next().unwrap().unwrap();
         assert!(matches!(
             &completed.envelope.event,
             ScopedObservationEvent::ObserverResyncComplete { barrier }
