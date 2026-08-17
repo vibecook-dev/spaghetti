@@ -1628,6 +1628,10 @@ struct ScopedObservationAttachmentAuthority;
 pub struct ScopedObservationCloseState {
     pub close_requested: bool,
     pub active_operations: u64,
+    /// Subset of `active_operations` owned by installed watcher tasks. Close
+    /// cannot complete until every watcher observes cancellation and drops its
+    /// registration.
+    pub active_watcher_tasks: u64,
     pub consumer_drain_pending: bool,
     pub complete: bool,
 }
@@ -1636,6 +1640,7 @@ pub struct ScopedObservationCloseState {
 struct ScopedObservationAttachmentLifecycleState {
     close_requested: bool,
     active_operations: u64,
+    active_watcher_tasks: u64,
     consumer_drain_opened: bool,
     consumer_drain_closed: bool,
 }
@@ -1652,6 +1657,12 @@ enum ScopedObservationOperationStartError {
     CapacityExhausted,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ScopedObservationOperationKind {
+    Runtime,
+    Watcher,
+}
+
 impl ScopedObservationAttachmentLifecycle {
     fn lock_state(&self) -> MutexGuard<'_, ScopedObservationAttachmentLifecycleState> {
         self.state
@@ -1661,27 +1672,44 @@ impl ScopedObservationAttachmentLifecycle {
 
     fn start_operation(
         self: &Arc<Self>,
+        kind: ScopedObservationOperationKind,
     ) -> Result<ScopedObservationOperationGuard, ScopedObservationOperationStartError> {
         let mut state = self.lock_state();
         if state.close_requested {
             return Err(ScopedObservationOperationStartError::Closing);
         }
-        state.active_operations = state
+        let active_operations = state
             .active_operations
             .checked_add(1)
             .ok_or(ScopedObservationOperationStartError::CapacityExhausted)?;
+        let active_watcher_tasks = match kind {
+            ScopedObservationOperationKind::Runtime => state.active_watcher_tasks,
+            ScopedObservationOperationKind::Watcher => state
+                .active_watcher_tasks
+                .checked_add(1)
+                .ok_or(ScopedObservationOperationStartError::CapacityExhausted)?,
+        };
+        state.active_operations = active_operations;
+        state.active_watcher_tasks = active_watcher_tasks;
         Ok(ScopedObservationOperationGuard {
             lifecycle: Arc::clone(self),
+            kind,
             active: true,
         })
     }
 
-    fn finish_operation(&self) {
+    fn finish_operation(&self, kind: ScopedObservationOperationKind) {
         let mut state = self.lock_state();
         state.active_operations = state
             .active_operations
             .checked_sub(1)
             .expect("scoped attachment operation accounting cannot underflow");
+        if kind == ScopedObservationOperationKind::Watcher {
+            state.active_watcher_tasks = state
+                .active_watcher_tasks
+                .checked_sub(1)
+                .expect("scoped watcher task accounting cannot underflow");
+        }
         if close_is_complete(&state) {
             self.idle.notify_all();
         }
@@ -1713,9 +1741,11 @@ impl ScopedObservationAttachmentLifecycle {
     fn begin_close(self: &Arc<Self>) -> ScopedObservationCloseBarrier {
         let mut state = self.lock_state();
         state.close_requested = true;
-        if close_is_complete(&state) {
-            self.idle.notify_all();
-        }
+        // Wake both close-barrier waiters and watcher tasks waiting for their
+        // cancellation signal. Barrier waiters re-check full completion;
+        // watchers must wake before they can release the operations that make
+        // completion possible.
+        self.idle.notify_all();
         drop(state);
         ScopedObservationCloseBarrier {
             lifecycle: Arc::clone(self),
@@ -1724,6 +1754,16 @@ impl ScopedObservationAttachmentLifecycle {
 
     fn is_closing(&self) -> bool {
         self.lock_state().close_requested
+    }
+
+    fn wait_for_close_request(&self) {
+        let mut state = self.lock_state();
+        while !state.close_requested {
+            state = self
+                .idle
+                .wait(state)
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+        }
     }
 
     fn snapshot(&self) -> ScopedObservationCloseState {
@@ -1754,6 +1794,7 @@ fn close_state_snapshot(
     ScopedObservationCloseState {
         close_requested: state.close_requested,
         active_operations: state.active_operations,
+        active_watcher_tasks: state.active_watcher_tasks,
         consumer_drain_pending: state.consumer_drain_opened && !state.consumer_drain_closed,
         complete: close_is_complete(state),
     }
@@ -1780,6 +1821,7 @@ impl ScopedObservationCloseBarrier {
 #[derive(Debug)]
 struct ScopedObservationOperationGuard {
     lifecycle: Arc<ScopedObservationAttachmentLifecycle>,
+    kind: ScopedObservationOperationKind,
     active: bool,
 }
 
@@ -1787,8 +1829,33 @@ impl Drop for ScopedObservationOperationGuard {
     fn drop(&mut self) {
         if self.active {
             self.active = false;
-            self.lifecycle.finish_operation();
+            self.lifecycle.finish_operation(self.kind);
         }
+    }
+}
+
+/// Attachment-owned registration held by one watcher task. Requesting close
+/// makes `cancellation_requested()` sticky; dropping the registration is the
+/// watcher's acknowledgement that no callback or source hint can run again.
+/// The registration is deliberately non-cloneable so one task owns exactly
+/// one close-barrier obligation.
+#[derive(Debug)]
+#[must_use = "the watcher task must retain its registration until it has stopped"]
+pub struct ScopedObservationWatcherRegistration {
+    lifecycle: Arc<ScopedObservationAttachmentLifecycle>,
+    _operation: ScopedObservationOperationGuard,
+}
+
+impl ScopedObservationWatcherRegistration {
+    pub fn cancellation_requested(&self) -> bool {
+        self.lifecycle.is_closing()
+    }
+
+    /// Block the watcher task until attachment close requests cancellation.
+    /// Returning does not acknowledge shutdown: the task must first stop its
+    /// native watcher/callbacks, then drop this registration.
+    pub fn wait_for_cancellation(&self) {
+        self.lifecycle.wait_for_close_request();
     }
 }
 
@@ -1930,7 +1997,10 @@ impl ScopedObservationConsumerDrain {
         if self.closed {
             return Err(ScopedObservationDrainError::Closed);
         }
-        let _operation = match self.lifecycle.start_operation() {
+        let _operation = match self
+            .lifecycle
+            .start_operation(ScopedObservationOperationKind::Runtime)
+        {
             Ok(operation) => operation,
             Err(ScopedObservationOperationStartError::Closing) => {
                 self.close();
@@ -2003,7 +2073,10 @@ impl ScopedObservationConsumerDrain {
         if self.closed {
             return Err(ScopedObservationApplicationError::Closed);
         }
-        let _operation = match self.lifecycle.start_operation() {
+        let _operation = match self
+            .lifecycle
+            .start_operation(ScopedObservationOperationKind::Runtime)
+        {
             Ok(operation) => operation,
             Err(ScopedObservationOperationStartError::Closing) => {
                 self.close();
@@ -5106,7 +5179,10 @@ impl ScopedObservationAccessHost {
     fn start_attachment_operation(
         &self,
     ) -> Result<ScopedObservationOperationGuard, ScopedObservationAccessError> {
-        match self.lifecycle.start_operation() {
+        match self
+            .lifecycle
+            .start_operation(ScopedObservationOperationKind::Runtime)
+        {
             Ok(operation) => Ok(operation),
             Err(ScopedObservationOperationStartError::Closing) => {
                 Err(ScopedObservationAccessError::Closed)
@@ -5115,6 +5191,33 @@ impl ScopedObservationAccessHost {
                 Err(ScopedObservationAccessError::OperationCapacityExhausted)
             }
         }
+    }
+
+    /// Register one attachment-owned watcher task before it begins producing
+    /// callbacks. The returned non-cloneable registration is both the task's
+    /// sticky cancellation token and its close-barrier acknowledgement lease.
+    pub fn register_watcher_task(
+        &self,
+    ) -> Result<ScopedObservationWatcherRegistration, ScopedObservationAccessError> {
+        if self.state.closed.load(Ordering::Acquire) {
+            return Err(ScopedObservationAccessError::Closed);
+        }
+        let operation = match self
+            .lifecycle
+            .start_operation(ScopedObservationOperationKind::Watcher)
+        {
+            Ok(operation) => operation,
+            Err(ScopedObservationOperationStartError::Closing) => {
+                return Err(ScopedObservationAccessError::Closed);
+            }
+            Err(ScopedObservationOperationStartError::CapacityExhausted) => {
+                return Err(ScopedObservationAccessError::OperationCapacityExhausted);
+            }
+        };
+        Ok(ScopedObservationWatcherRegistration {
+            lifecycle: Arc::clone(&self.lifecycle),
+            _operation: operation,
+        })
     }
 
     /// Admit one logical poll request. Every request receives its own ticket,

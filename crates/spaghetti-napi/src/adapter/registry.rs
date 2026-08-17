@@ -1216,6 +1216,7 @@ mod tests {
         let closing = barrier.state();
         assert!(closing.close_requested);
         assert_eq!(closing.active_operations, 1);
+        assert_eq!(closing.active_watcher_tasks, 0);
         assert!(closing.consumer_drain_pending);
         assert!(!closing.complete);
 
@@ -1241,12 +1242,14 @@ mod tests {
         assert!(drain.is_closed());
         let drain_closed = barrier.state();
         assert_eq!(drain_closed.active_operations, 1);
+        assert_eq!(drain_closed.active_watcher_tasks, 0);
         assert!(!drain_closed.consumer_drain_pending);
         assert!(!drain_closed.complete);
         drop(lease);
 
         let complete = barrier.wait();
         assert_eq!(complete.active_operations, 0);
+        assert_eq!(complete.active_watcher_tasks, 0);
         assert!(!complete.consumer_drain_pending);
         assert!(complete.complete);
         let repeated = host.close_with_consumer(&mut drain).unwrap();
@@ -1255,6 +1258,99 @@ mod tests {
             host.begin_pass(),
             Err(ScopedObservationAccessError::Closed)
         ));
+    }
+
+    #[test]
+    fn scoped_close_cancels_and_waits_for_registered_watcher_tasks() {
+        let registry = supported_fixture_registry();
+        let temp = TempDir::new().unwrap();
+        let host = ScopedObservationAccessHost::authorize(
+            &registry,
+            scoped_access_request(temp.path().join("watcher-close-root")),
+        )
+        .unwrap();
+        let first = host.register_watcher_task().unwrap();
+        let second = host.register_watcher_task().unwrap();
+        assert!(!first.cancellation_requested());
+        assert!(!second.cancellation_requested());
+
+        let barrier = host.close();
+        assert!(first.cancellation_requested());
+        assert!(second.cancellation_requested());
+        let closing = barrier.state();
+        assert_eq!(closing.active_operations, 2);
+        assert_eq!(closing.active_watcher_tasks, 2);
+        assert!(!closing.consumer_drain_pending);
+        assert!(!closing.complete);
+        assert!(matches!(
+            host.register_watcher_task(),
+            Err(ScopedObservationAccessError::Closed)
+        ));
+
+        drop(first);
+        let one_pending = barrier.state();
+        assert_eq!(one_pending.active_operations, 1);
+        assert_eq!(one_pending.active_watcher_tasks, 1);
+        assert!(!one_pending.complete);
+
+        drop(second);
+        let complete = barrier.wait();
+        assert_eq!(complete.active_operations, 0);
+        assert_eq!(complete.active_watcher_tasks, 0);
+        assert!(complete.complete);
+    }
+
+    #[test]
+    fn dropping_scoped_host_requests_watcher_cancellation_without_blocking() {
+        let registry = supported_fixture_registry();
+        let temp = TempDir::new().unwrap();
+        let registration = {
+            let host = ScopedObservationAccessHost::authorize(
+                &registry,
+                scoped_access_request(temp.path().join("watcher-drop-root")),
+            )
+            .unwrap();
+            let registration = host.register_watcher_task().unwrap();
+            assert!(!registration.cancellation_requested());
+            drop(host);
+            registration
+        };
+
+        assert!(registration.cancellation_requested());
+        drop(registration);
+    }
+
+    #[test]
+    fn scoped_close_wakes_a_registered_watcher_before_waiting_for_acknowledgement() {
+        let registry = supported_fixture_registry();
+        let temp = TempDir::new().unwrap();
+        let host = ScopedObservationAccessHost::authorize(
+            &registry,
+            scoped_access_request(temp.path().join("watcher-wake-root")),
+        )
+        .unwrap();
+        let registration = host.register_watcher_task().unwrap();
+        let (waiting_tx, waiting_rx) = std::sync::mpsc::sync_channel(0);
+        let (cancelled_tx, cancelled_rx) = std::sync::mpsc::sync_channel(0);
+        let watcher = std::thread::spawn(move || {
+            waiting_tx.send(()).unwrap();
+            registration.wait_for_cancellation();
+            cancelled_tx.send(()).unwrap();
+            // Dropping registration after this send is the watcher's shutdown
+            // acknowledgement to the attachment close barrier.
+        });
+        waiting_rx.recv().unwrap();
+
+        let barrier = host.close();
+        assert_eq!(barrier.state().active_watcher_tasks, 1);
+        cancelled_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("close must wake a watcher waiting for cancellation");
+        watcher.join().unwrap();
+
+        let complete = barrier.wait();
+        assert_eq!(complete.active_watcher_tasks, 0);
+        assert!(complete.complete);
     }
 
     #[test]

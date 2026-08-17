@@ -1222,8 +1222,12 @@ Current landing status (2026-08-17):
   host drop requests cancellation without blocking. Foreign-drain close fails
   without closing either attachment, and the internal facade path closes its
   owned drain before waiting. The lifecycle substrate is synchronous and
-  store-free; watcher-task registration and its portable async wrapper remain
-  for the scope orchestrator;
+  store-free. Watcher tasks now acquire one non-cloneable attachment-owned
+  registration before starting: close makes its cancellation signal sticky,
+  wakes tasks blocked on that signal, rejects later registration, and remains
+  incomplete until every awakened watcher stops its callbacks and drops the
+  registration. Host drop requests the same cancellation without blocking;
+  the portable async watcher/close wrapper remains for the scope orchestrator;
 - one pass is active at a time, a later pass receives fresh bounds, close is
   idempotent, and the frozen access report excludes paths, identity values, and
   content; and
@@ -1243,8 +1247,7 @@ known-object grants and family coverage beyond usage-v2,
 complete multi-family replacement manifests, whole-scope discovery and source
 state beyond the current exact append-object set, and watcher-level failed/
 re-overflow orchestration,
-artifact mediation, watcher-task cancellation registration and the portable
-async close wrapper,
+artifact mediation and the portable async close wrapper,
 the trusted native version-probe/identity-input drivers, and the complete
 public request are not yet implemented. The internal offered and applied
 boundaries are now transactional, but they cannot become a public watermark and
