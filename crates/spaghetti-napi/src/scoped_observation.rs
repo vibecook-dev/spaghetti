@@ -785,6 +785,13 @@ impl ScopedObservationAdmissionLane {
         projection: &mut ScopedObservationProjectionSink,
         delivery: &mut ScopedObservationDeliveryLane,
     ) -> Result<Option<ScopedObservationOfferReceipt>, ScopedProjectionDeliveryError> {
+        if projection.lifecycle != ScopedProjectionLifecycle::Active
+            || delivery.state().continuity == ScopedObservationContinuity::Resyncing
+        {
+            return Err(ScopedProjectionDeliveryError::Projection(
+                ScopedProjectionError::InvalidLifecycle,
+            ));
+        }
         let Some(taken) = self.take_next_frame() else {
             return Ok(None);
         };
@@ -2533,6 +2540,15 @@ pub enum ScopedProjectionError {
     InvalidReplacementPhase,
     #[error("scoped replacement snapshot accounting is exhausted")]
     ReplacementCapacityExhausted,
+    #[error("scoped projection reducer is not valid for this observer lifecycle")]
+    InvalidLifecycle,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ScopedProjectionLifecycle {
+    Active,
+    Replacement { scope_epoch: u64 },
+    Retired,
 }
 
 #[derive(Clone)]
@@ -2570,6 +2586,7 @@ struct ScopedRetractionDelivery {
 /// cannot partially mutate observer state.
 pub struct ScopedObservationProjectionSink {
     limits: ScopedObservationProjectionLimits,
+    lifecycle: ScopedProjectionLifecycle,
     usage_v2: BTreeMap<CanonicalFactId, ScopedUsageV2ProjectionState>,
 }
 
@@ -2580,8 +2597,18 @@ impl ScopedObservationProjectionSink {
         }
         Ok(Self {
             limits,
+            lifecycle: ScopedProjectionLifecycle::Active,
             usage_v2: BTreeMap::new(),
         })
+    }
+
+    fn new_replacement(
+        limits: ScopedObservationProjectionLimits,
+        scope_epoch: u64,
+    ) -> Result<Self, ScopedProjectionError> {
+        let mut projection = Self::new(limits)?;
+        projection.lifecycle = ScopedProjectionLifecycle::Replacement { scope_epoch };
+        Ok(projection)
     }
 
     #[cfg(test)]
@@ -2936,6 +2963,197 @@ impl ScopedObservationProjectionSink {
                 ScopedProjectionMutation::UpsertUsageV2(staged)
             },
         })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum ScopedReplacementStageError {
+    #[error("scoped replacement stage requires an active resync epoch")]
+    NotResyncing,
+    #[error("scoped replacement stage does not belong to the bound root")]
+    RootMismatch,
+    #[error("scoped replacement stage does not belong to the current epoch")]
+    EpochMismatch,
+    #[error("scoped replacement stage requires the current active reducer")]
+    ActiveProjectionRequired,
+    #[error("scoped replacement snapshot cannot freeze before admission drains")]
+    AdmissionNotDrained,
+    #[error("scoped replacement snapshot was already frozen")]
+    SnapshotAlreadyPrepared,
+    #[error("scoped replacement snapshot has not been frozen")]
+    SnapshotNotPrepared,
+    #[error("scoped replacement snapshot accounting is exhausted")]
+    CapacityExhausted,
+    #[error("scoped replacement reduction failed: {0}")]
+    Projection(ScopedProjectionError),
+    #[error("scoped replacement delivery failed: {0}")]
+    Delivery(ScopedDeliveryError),
+}
+
+struct ScopedPreparedReplacementSnapshot {
+    usage_v2: ScopedUsageV2ReplacementSnapshot,
+    next_usage_event: usize,
+}
+
+/// Empty, epoch-bound reducer used to build a replacement without mutating
+/// the reducer that still backs the consumer-visible old epoch. Native replay
+/// is reduced silently; only the canonical latest-per-entity snapshot is
+/// offered to the new epoch.
+pub struct ScopedObservationReplacementStage {
+    root: ScopedObservationRootIdentity,
+    scope_epoch: u64,
+    projection: ScopedObservationProjectionSink,
+    prepared: Option<ScopedPreparedReplacementSnapshot>,
+}
+
+impl ScopedObservationReplacementStage {
+    fn new(
+        root: ScopedObservationRootIdentity,
+        scope_epoch: u64,
+        limits: ScopedObservationProjectionLimits,
+    ) -> Result<Self, ScopedReplacementStageError> {
+        Ok(Self {
+            root,
+            scope_epoch,
+            projection: ScopedObservationProjectionSink::new_replacement(limits, scope_epoch)
+                .map_err(ScopedReplacementStageError::Projection)?,
+            prepared: None,
+        })
+    }
+
+    /// Reduce one admitted replay frame into the isolated replacement state.
+    /// Replay input is normalized to Correction before semantic reduction and
+    /// its incremental projected events are intentionally discarded.
+    pub fn reduce_next(
+        &mut self,
+        admission: &mut ScopedObservationAdmissionLane,
+    ) -> Result<bool, ScopedReplacementStageError> {
+        if self.prepared.is_some() {
+            return Err(ScopedReplacementStageError::SnapshotAlreadyPrepared);
+        }
+        if self.projection.lifecycle
+            != (ScopedProjectionLifecycle::Replacement {
+                scope_epoch: self.scope_epoch,
+            })
+        {
+            return Err(ScopedReplacementStageError::EpochMismatch);
+        }
+        let Some(mut taken) = admission.take_next_frame() else {
+            return Ok(false);
+        };
+        force_replacement_phase(&mut taken.frame);
+        let plan = match self.projection.prepare(&taken.frame) {
+            Ok(plan) => plan,
+            Err(error) => {
+                admission.restore_taken_frame(taken);
+                return Err(ScopedReplacementStageError::Projection(error));
+            }
+        };
+        debug_assert!(plan
+            .projected
+            .iter()
+            .all(|value| value.phase() == ScopedAppendDeliveryPhase::Correction));
+        self.projection.commit(plan.mutation);
+        admission.commit_taken_frame(taken);
+        Ok(true)
+    }
+
+    /// Freeze the canonical current replacement after the replay admission
+    /// lane drains. Repeated freeze is rejected so a published prefix can
+    /// never be paired with a silently changed reducer suffix.
+    pub fn prepare_snapshot(
+        &mut self,
+        admission: &ScopedObservationAdmissionLane,
+        delivery: &ScopedObservationDeliveryLane,
+    ) -> Result<&ScopedUsageV2ReplacementSnapshot, ScopedReplacementStageError> {
+        self.validate_delivery(delivery)?;
+        if self.prepared.is_some() {
+            return Err(ScopedReplacementStageError::SnapshotAlreadyPrepared);
+        }
+        if !admission.is_empty() {
+            return Err(ScopedReplacementStageError::AdmissionNotDrained);
+        }
+        let usage_v2 = self
+            .projection
+            .usage_v2_replacement_snapshot(ScopedAppendDeliveryPhase::Correction)
+            .map_err(ScopedReplacementStageError::Projection)?;
+        self.prepared = Some(ScopedPreparedReplacementSnapshot {
+            usage_v2,
+            next_usage_event: 0,
+        });
+        Ok(&self
+            .prepared
+            .as_ref()
+            .expect("replacement snapshot was just installed")
+            .usage_v2)
+    }
+
+    /// Offer one canonical snapshot entity. One-at-a-time publication remains
+    /// bounded by the existing semantic queue and is retry-safe on pressure.
+    pub fn offer_snapshot_next(
+        &mut self,
+        delivery: &mut ScopedObservationDeliveryLane,
+    ) -> Result<Option<ScopedObservationOfferReceipt>, ScopedReplacementStageError> {
+        self.validate_delivery(delivery)?;
+        let prepared = self
+            .prepared
+            .as_mut()
+            .ok_or(ScopedReplacementStageError::SnapshotNotPrepared)?;
+        let Some(event) = prepared.usage_v2.events.get(prepared.next_usage_event) else {
+            return Ok(None);
+        };
+        let lane_ordinal = u64::try_from(prepared.next_usage_event)
+            .ok()
+            .and_then(|value| value.checked_add(1))
+            .ok_or(ScopedReplacementStageError::CapacityExhausted)?;
+        let receipt = delivery
+            .offer_projected(vec![ScopedProjectedObservation::UsageV2 {
+                lane_ordinal,
+                event: Box::new(event.clone()),
+            }])
+            .map_err(|failure| ScopedReplacementStageError::Delivery(failure.error))?;
+        prepared.next_usage_event += 1;
+        Ok(Some(receipt))
+    }
+
+    pub fn snapshot_fully_offered(&self) -> bool {
+        self.prepared
+            .as_ref()
+            .is_some_and(|prepared| prepared.next_usage_event == prepared.usage_v2.events.len())
+    }
+
+    pub fn usage_v2_entity_count(&self) -> usize {
+        self.projection.usage_v2_entity_count()
+    }
+
+    fn validate_delivery(
+        &self,
+        delivery: &ScopedObservationDeliveryLane,
+    ) -> Result<(), ScopedReplacementStageError> {
+        let started = delivery
+            .resync_started
+            .as_ref()
+            .ok_or(ScopedReplacementStageError::NotResyncing)?;
+        if started.root != self.root {
+            return Err(ScopedReplacementStageError::RootMismatch);
+        }
+        if delivery.scope_epoch != self.scope_epoch
+            || started.new_scope_epoch != self.scope_epoch
+            || delivery.state().continuity != ScopedObservationContinuity::Resyncing
+        {
+            return Err(ScopedReplacementStageError::EpochMismatch);
+        }
+        Ok(())
+    }
+}
+
+fn force_replacement_phase(frame: &mut ScopedQueuedObservationFrame) {
+    match frame {
+        ScopedQueuedObservationFrame::Presence { phase, .. }
+        | ScopedQueuedObservationFrame::Reset { phase, .. }
+        | ScopedQueuedObservationFrame::Decoded { phase, .. } => {
+            *phase = ScopedAppendDeliveryPhase::Correction;
+        }
     }
 }
 
@@ -3496,6 +3714,36 @@ impl ScopedObservationAccessHost {
         observed_at: i64,
     ) -> Result<Arc<ScopedResyncStarted>, ScopedContinuityError> {
         delivery.begin_resync(&self.root_identity, observed_at)
+    }
+
+    /// Allocate the isolated empty reducer for the current replacement epoch.
+    /// The active reducer supplies only its fixed capacity policy; none of its
+    /// semantic state is cloned into replacement.
+    pub fn open_resync_stage(
+        &self,
+        active: &ScopedObservationProjectionSink,
+        delivery: &ScopedObservationDeliveryLane,
+    ) -> Result<ScopedObservationReplacementStage, ScopedReplacementStageError> {
+        if active.lifecycle != ScopedProjectionLifecycle::Active {
+            return Err(ScopedReplacementStageError::ActiveProjectionRequired);
+        }
+        let started = delivery
+            .resync_started
+            .as_ref()
+            .ok_or(ScopedReplacementStageError::NotResyncing)?;
+        if started.root != self.root_identity {
+            return Err(ScopedReplacementStageError::RootMismatch);
+        }
+        if delivery.state().continuity != ScopedObservationContinuity::Resyncing
+            || delivery.scope_epoch != started.new_scope_epoch
+        {
+            return Err(ScopedReplacementStageError::EpochMismatch);
+        }
+        ScopedObservationReplacementStage::new(
+            self.root_identity.clone(),
+            started.new_scope_epoch,
+            active.limits,
+        )
     }
 
     /// Decode one already-read append observation through the exact adapter
@@ -5715,6 +5963,125 @@ mod projection_tests {
         );
         assert_eq!(delivery.queued_source_control_items(), 1);
         assert!(delivery.resync_started().is_none());
+    }
+
+    #[test]
+    fn scoped_replacement_stage_isolates_active_state_and_publishes_latest_snapshot() {
+        let root = root_identity();
+        let mut active = sink(8);
+        let active_record = record(1, 0, 10);
+        let active_frame = decoded_frame(
+            1,
+            ScopedAppendDeliveryPhase::Bootstrap,
+            &active_record,
+            usage_batch(&active_record, "active-response", 10, None),
+        );
+        only_usage_event(active.project(&active_frame).unwrap());
+
+        let mut delivery = delivery_lane(1, 1);
+        let watermark = ScopedObservationWatermarkCore {
+            root: root.clone(),
+            scope_epoch: SCOPED_INITIAL_SCOPE_EPOCH,
+            offered_through_sequence: 0,
+            source_coverage: Vec::new(),
+            explicit_object_errors: Vec::new(),
+            queue_state: delivery.state(),
+        };
+        delivery
+            .offer_bootstrap_barrier(&root, watermark, true, 20)
+            .unwrap();
+        assert_eq!(delivery.pop_next().unwrap().observer_sequence, 1);
+        delivery
+            .require_resync(&root, ScopedResyncReason::WatcherOverflow, 30)
+            .unwrap();
+        assert_eq!(delivery.pop_next().unwrap().observer_sequence, 2);
+        delivery.begin_resync(&root, 40).unwrap();
+
+        let first_replay_record = record(1, 10, 20);
+        let first_replay_frame = decoded_frame(
+            2,
+            ScopedAppendDeliveryPhase::Bootstrap,
+            &first_replay_record,
+            usage_batch(&first_replay_record, "replacement-response", 20, None),
+        );
+        let mut first_replay = admission_lane_with_decoded_frame(first_replay_frame);
+        assert_eq!(
+            first_replay.offer_next(&mut active, &mut delivery),
+            Err(ScopedProjectionDeliveryError::Projection(
+                ScopedProjectionError::InvalidLifecycle
+            ))
+        );
+        assert!(!first_replay.is_empty());
+        assert_eq!(active.usage_v2_entity_count(), 1);
+
+        let mut stage =
+            ScopedObservationReplacementStage::new(root.clone(), 2, active.limits).unwrap();
+        assert!(stage.reduce_next(&mut first_replay).unwrap());
+        assert!(!stage.reduce_next(&mut first_replay).unwrap());
+        assert!(first_replay.is_empty());
+        assert_eq!(stage.usage_v2_entity_count(), 1);
+        assert_eq!(active.usage_v2_entity_count(), 1);
+
+        let latest_replay_record = record(1, 20, 30);
+        let latest_replay_frame = decoded_frame(
+            3,
+            ScopedAppendDeliveryPhase::Live,
+            &latest_replay_record,
+            usage_batch(&latest_replay_record, "replacement-response", 30, None),
+        );
+        let mut latest_replay = admission_lane_with_decoded_frame(latest_replay_frame);
+        assert!(stage.reduce_next(&mut latest_replay).unwrap());
+        assert!(latest_replay.is_empty());
+
+        let snapshot = stage.prepare_snapshot(&latest_replay, &delivery).unwrap();
+        assert_eq!(snapshot.phase, ScopedAppendDeliveryPhase::Correction);
+        assert_eq!(snapshot.entity_count, 1);
+        assert_eq!(snapshot.events.len(), 1);
+        assert_eq!(
+            snapshot.events[0].revision.response_key,
+            b"replacement-response"
+        );
+        assert_eq!(
+            snapshot.events[0].revision.buckets.input_tokens.value,
+            Some(30)
+        );
+        assert_eq!(
+            stage.reduce_next(&mut latest_replay),
+            Err(ScopedReplacementStageError::SnapshotAlreadyPrepared)
+        );
+
+        let active_snapshot = active
+            .usage_v2_replacement_snapshot(ScopedAppendDeliveryPhase::Correction)
+            .unwrap();
+        assert_eq!(active_snapshot.entity_count, 1);
+        assert_eq!(
+            active_snapshot.events[0].revision.response_key,
+            b"active-response"
+        );
+
+        let receipt = stage.offer_snapshot_next(&mut delivery).unwrap().unwrap();
+        assert_eq!(receipt.first_offered_sequence, Some(4));
+        assert_eq!(receipt.offered_through_sequence, 4);
+        assert_eq!(stage.offer_snapshot_next(&mut delivery), Ok(None));
+        assert!(stage.snapshot_fully_offered());
+
+        let start = delivery.pop_next().unwrap();
+        assert_eq!(start.observer_sequence, 3);
+        assert!(matches!(
+            start.event,
+            ScopedProjectedObservation::ObserverResyncStarted { .. }
+        ));
+        let replacement = delivery.pop_next().unwrap();
+        assert_eq!(replacement.scope_epoch, 2);
+        assert_eq!(replacement.observer_sequence, 4);
+        assert!(matches!(
+            replacement.event,
+            ScopedProjectedObservation::UsageV2 { event, .. }
+                if event.phase == ScopedAppendDeliveryPhase::Correction
+                    && event.revision.response_key == b"replacement-response"
+                    && event.revision.buckets.input_tokens.value == Some(30)
+        ));
+        assert!(delivery.is_empty());
     }
 
     #[test]
