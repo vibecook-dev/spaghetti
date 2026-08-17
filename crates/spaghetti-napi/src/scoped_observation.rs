@@ -3931,6 +3931,8 @@ pub enum ScopedObservationAccessError {
     ObservationNotDecoded,
     #[error("the scoped append admission sequence is exhausted")]
     ObservationSequenceExhausted,
+    #[error("scoped append object is not valid for this observer lifecycle")]
+    InvalidObjectLifecycle,
     #[error("invalid scoped decoder bounds")]
     InvalidDecodeBounds,
     #[error("invalid or duplicate scoped decoder fact-family coverage domain")]
@@ -4483,6 +4485,7 @@ pub struct ScopedKnownAppendObject {
     object_token: u64,
     source: ScopedSourceObjectIdentity,
     relation_id: Option<Arc<str>>,
+    lifecycle: ScopedAppendObjectLifecycle,
     driver: AppendDelimitedFile,
     decoder: ScopedAppendDecoderConfig,
     checkpoint: Option<AppendCheckpoint>,
@@ -4493,6 +4496,20 @@ pub struct ScopedKnownAppendObject {
     root_present: bool,
     next_admission_token: u64,
     pending: Option<PendingAppendState>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ScopedAppendObjectLifecycle {
+    Active,
+    Frozen {
+        scope_epoch: u64,
+        replacement_object_token: u64,
+    },
+    Replacement {
+        scope_epoch: u64,
+        replaces_object_token: u64,
+    },
+    Retired,
 }
 
 struct PendingAppendState {
@@ -4517,6 +4534,7 @@ impl ScopedKnownAppendObject {
             object_token,
             source,
             relation_id: None,
+            lifecycle: ScopedAppendObjectLifecycle::Active,
             driver,
             decoder,
             checkpoint: None,
@@ -4535,6 +4553,12 @@ impl ScopedKnownAppendObject {
         pass: &ScopedObservationAccessPass,
         request: ScopedAppendReconcileRequest<'_>,
     ) -> Result<ScopedAppendObservation, ScopedObservationAccessError> {
+        if matches!(
+            self.lifecycle,
+            ScopedAppendObjectLifecycle::Frozen { .. } | ScopedAppendObjectLifecycle::Retired
+        ) {
+            return Err(ScopedObservationAccessError::InvalidObjectLifecycle);
+        }
         if self.pending.is_some() {
             return Err(ScopedObservationAccessError::ObservationPending);
         }
@@ -4633,12 +4657,20 @@ impl ScopedKnownAppendObject {
                 )
             }
         };
-        let phase = if reset_before_items.is_some() {
-            ScopedAppendDeliveryPhase::Correction
-        } else if self.bootstrap_active {
-            ScopedAppendDeliveryPhase::Bootstrap
-        } else {
-            ScopedAppendDeliveryPhase::Live
+        let phase = match self.lifecycle {
+            ScopedAppendObjectLifecycle::Replacement { .. } => {
+                ScopedAppendDeliveryPhase::Correction
+            }
+            ScopedAppendObjectLifecycle::Active if reset_before_items.is_some() => {
+                ScopedAppendDeliveryPhase::Correction
+            }
+            ScopedAppendObjectLifecycle::Active if self.bootstrap_active => {
+                ScopedAppendDeliveryPhase::Bootstrap
+            }
+            ScopedAppendObjectLifecycle::Active => ScopedAppendDeliveryPhase::Live,
+            ScopedAppendObjectLifecycle::Frozen { .. } | ScopedAppendObjectLifecycle::Retired => {
+                unreachable!("frozen and retired objects fail before source access")
+            }
         };
         let admission_token = self.next_admission_token;
         self.next_admission_token = self
@@ -4942,6 +4974,9 @@ impl ScopedKnownAppendObject {
     /// or fully drained batch observation. An incomplete final record is safe:
     /// its checkpoint retains the suffix for the next live reconciliation.
     pub fn complete_bootstrap(&mut self) -> Result<(), ScopedObservationAccessError> {
+        if self.lifecycle != ScopedAppendObjectLifecycle::Active {
+            return Err(ScopedObservationAccessError::InvalidObjectLifecycle);
+        }
         if !self.bootstrap_active {
             return Err(ScopedObservationAccessError::BootstrapAlreadyComplete);
         }
@@ -4949,6 +4984,101 @@ impl ScopedKnownAppendObject {
             return Err(ScopedObservationAccessError::BootstrapNotDrained);
         }
         self.bootstrap_active = false;
+        Ok(())
+    }
+
+    /// Create an empty source/cursor/decoder stage for a full-snapshot epoch.
+    /// The active object is only a configuration and lineage template: none of
+    /// its mutable source state is copied into replacement.
+    pub fn fork_replacement(
+        &mut self,
+        scope_epoch: u64,
+    ) -> Result<Self, ScopedObservationAccessError> {
+        let lifecycle_allows_fork = match self.lifecycle {
+            ScopedAppendObjectLifecycle::Active => scope_epoch > SCOPED_INITIAL_SCOPE_EPOCH,
+            ScopedAppendObjectLifecycle::Frozen {
+                scope_epoch: prior_epoch,
+                ..
+            } => scope_epoch > prior_epoch,
+            ScopedAppendObjectLifecycle::Replacement { .. }
+            | ScopedAppendObjectLifecycle::Retired => false,
+        };
+        if !lifecycle_allows_fork
+            || self.bootstrap_active
+            || self.pending.is_some()
+            || self.relation_id.is_none()
+        {
+            return Err(ScopedObservationAccessError::InvalidObjectLifecycle);
+        }
+        let replacement_object_token = next_scoped_object_token()?;
+        let replacement = Self {
+            object_token: replacement_object_token,
+            source: self.source.clone(),
+            relation_id: self.relation_id.clone(),
+            lifecycle: ScopedAppendObjectLifecycle::Replacement {
+                scope_epoch,
+                replaces_object_token: self.object_token,
+            },
+            driver: self.driver.clone(),
+            decoder: self.decoder.clone(),
+            checkpoint: None,
+            decoder_state: None,
+            bootstrap_active: false,
+            bootstrap_observed: false,
+            bootstrap_blocked: false,
+            root_present: false,
+            next_admission_token: 1,
+            pending: None,
+        };
+        self.lifecycle = ScopedAppendObjectLifecycle::Frozen {
+            scope_epoch,
+            replacement_object_token,
+        };
+        Ok(replacement)
+    }
+
+    /// Validate the infallible object-state swap that a whole-scope completion
+    /// barrier will eventually compose with coverage and reducer activation.
+    pub fn validate_replacement_activation(
+        &self,
+        replacement: &Self,
+        scope_epoch: u64,
+    ) -> Result<(), ScopedObservationAccessError> {
+        if self.lifecycle
+            != (ScopedAppendObjectLifecycle::Frozen {
+                scope_epoch,
+                replacement_object_token: replacement.object_token,
+            })
+            || self.bootstrap_active
+            || self.pending.is_some()
+            || replacement.lifecycle
+                != (ScopedAppendObjectLifecycle::Replacement {
+                    scope_epoch,
+                    replaces_object_token: self.object_token,
+                })
+            || replacement.pending.is_some()
+            || !replacement.bootstrap_observed
+            || replacement.bootstrap_blocked
+            || replacement.source != self.source
+            || replacement.relation_id != self.relation_id
+        {
+            return Err(ScopedObservationAccessError::InvalidObjectLifecycle);
+        }
+        Ok(())
+    }
+
+    /// Swap a fully drained replacement into the active object slot. Callers
+    /// that offer a public completion barrier must run the validation before
+    /// that offer so this mutation is infallible afterward.
+    pub fn activate_replacement(
+        &mut self,
+        replacement: &mut Self,
+        scope_epoch: u64,
+    ) -> Result<(), ScopedObservationAccessError> {
+        self.validate_replacement_activation(replacement, scope_epoch)?;
+        self.lifecycle = ScopedAppendObjectLifecycle::Retired;
+        replacement.lifecycle = ScopedAppendObjectLifecycle::Active;
+        std::mem::swap(self, replacement);
         Ok(())
     }
 
@@ -4987,6 +5117,28 @@ impl ScopedKnownAppendObject {
 
     pub fn bootstrap_active(&self) -> bool {
         self.bootstrap_active
+    }
+
+    pub fn replacement_scope_epoch(&self) -> Option<u64> {
+        match self.lifecycle {
+            ScopedAppendObjectLifecycle::Replacement { scope_epoch, .. } => Some(scope_epoch),
+            ScopedAppendObjectLifecycle::Active
+            | ScopedAppendObjectLifecycle::Frozen { .. }
+            | ScopedAppendObjectLifecycle::Retired => None,
+        }
+    }
+
+    pub fn frozen_scope_epoch(&self) -> Option<u64> {
+        match self.lifecycle {
+            ScopedAppendObjectLifecycle::Frozen { scope_epoch, .. } => Some(scope_epoch),
+            ScopedAppendObjectLifecycle::Active
+            | ScopedAppendObjectLifecycle::Replacement { .. }
+            | ScopedAppendObjectLifecycle::Retired => None,
+        }
+    }
+
+    pub fn is_retired(&self) -> bool {
+        self.lifecycle == ScopedAppendObjectLifecycle::Retired
     }
 }
 

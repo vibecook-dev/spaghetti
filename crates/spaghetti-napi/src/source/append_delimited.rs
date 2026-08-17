@@ -145,6 +145,7 @@ pub enum AppendRead {
     },
 }
 
+#[derive(Clone)]
 pub struct AppendDelimitedFile {
     config: AppendDelimitedConfig,
 }

@@ -1470,6 +1470,177 @@ mod tests {
     }
 
     #[test]
+    fn scoped_append_replacement_isolates_cursor_and_decoder_state_until_swap() {
+        let registry = stateful_supported_fixture_registry();
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().join("append-replacement-root");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("session.jsonl"), b"old\n").unwrap();
+        let host =
+            ScopedObservationAccessHost::authorize(&registry, scoped_access_request(root.clone()))
+                .unwrap();
+        let mut config = AppendDelimitedConfig::json_lines();
+        config.max_record_bytes = 64;
+        config.max_batch_bytes = 64;
+        config.max_records_per_batch = 1;
+        config.prefix_anchor_bytes = 16;
+        let mut object = scoped_append_object(
+            AppendDelimitedFile::new(config).unwrap(),
+            RawRetentionPolicy::None,
+        );
+        let identity = [ScopeIdentityInput {
+            name: "native-session-id",
+            value: b"replacement-session",
+        }];
+        let origin = RecordOrigin {
+            source_instance_id: 10,
+            stream_id: 20,
+            object_id: 30,
+            observed_at: 40,
+            source_timestamp_hint: None,
+            media_type: SourceMediaType::new("application/x-ndjson").unwrap(),
+        };
+        let request = || ScopedAppendReconcileRequest {
+            relation_id: "root-object",
+            identity_inputs: &identity,
+            access_phase: AccessPhase::Initial,
+            parent_token: None,
+            depth: 1,
+            max_bytes: 128,
+            origin: &origin,
+            force_contract_replay: false,
+        };
+
+        let bootstrap_pass = host.begin_pass().unwrap();
+        let bootstrap = object.reconcile(&bootstrap_pass, request()).unwrap();
+        assert_eq!(bootstrap.phase, ScopedAppendDeliveryPhase::Bootstrap);
+        decode_and_admit_ignored(&host, &mut object, &bootstrap);
+        drop(bootstrap_pass);
+        object.complete_bootstrap().unwrap();
+        assert_eq!(object.checkpoint().unwrap().committed_offset, 4);
+        assert_eq!(object.decoder_state(), Some(b"old".as_slice()));
+        assert_eq!(object.replacement_scope_epoch(), None);
+        assert!(!object.is_retired());
+
+        std::fs::write(root.join("session.jsonl"), b"new\nmore\n").unwrap();
+        let mut abandoned = object.fork_replacement(2).unwrap();
+        assert_eq!(abandoned.relation_id(), Some("root-object"));
+        assert_eq!(abandoned.replacement_scope_epoch(), Some(2));
+        assert_eq!(object.frozen_scope_epoch(), Some(2));
+        assert!(abandoned.checkpoint().is_none());
+        assert!(abandoned.decoder_state().is_none());
+        assert!(matches!(
+            object.fork_replacement(1),
+            Err(ScopedObservationAccessError::InvalidObjectLifecycle)
+        ));
+        assert!(matches!(
+            abandoned.fork_replacement(3),
+            Err(ScopedObservationAccessError::InvalidObjectLifecycle)
+        ));
+        assert!(matches!(
+            abandoned.complete_bootstrap(),
+            Err(ScopedObservationAccessError::InvalidObjectLifecycle)
+        ));
+        let frozen_pass = host.begin_pass().unwrap();
+        assert!(matches!(
+            object.reconcile(&frozen_pass, request()),
+            Err(ScopedObservationAccessError::InvalidObjectLifecycle)
+        ));
+        assert_eq!(frozen_pass.finish().relations()[0].attempts, 0);
+
+        let abandoned_pass = host.begin_pass().unwrap();
+        let abandoned_observation = abandoned.reconcile(&abandoned_pass, request()).unwrap();
+        assert_eq!(
+            abandoned_observation.phase,
+            ScopedAppendDeliveryPhase::Correction
+        );
+        assert!(abandoned_observation.reset_before_items.is_none());
+        decode_and_admit_ignored(&host, &mut abandoned, &abandoned_observation);
+        drop(abandoned_pass);
+        assert_eq!(abandoned.checkpoint().unwrap().committed_offset, 4);
+        assert_eq!(abandoned.decoder_state(), Some(b"new".as_slice()));
+        assert!(matches!(
+            object.validate_replacement_activation(&abandoned, 2),
+            Err(ScopedObservationAccessError::InvalidObjectLifecycle)
+        ));
+
+        let abandoned_drain_pass = host.begin_pass().unwrap();
+        let abandoned_drain = abandoned
+            .reconcile(&abandoned_drain_pass, request())
+            .unwrap();
+        assert_eq!(abandoned_drain.phase, ScopedAppendDeliveryPhase::Correction);
+        decode_and_admit_ignored(&host, &mut abandoned, &abandoned_drain);
+        drop(abandoned_drain_pass);
+        assert_eq!(abandoned.checkpoint().unwrap().committed_offset, 9);
+        assert_eq!(abandoned.decoder_state(), Some(b"newmore".as_slice()));
+        object
+            .validate_replacement_activation(&abandoned, 2)
+            .unwrap();
+
+        // Replay mutation is isolated: abandoning epoch 2 cannot advance the
+        // cursor or decoder state still serving the valid old epoch.
+        assert_eq!(object.checkpoint().unwrap().committed_offset, 4);
+        assert_eq!(object.decoder_state(), Some(b"old".as_slice()));
+        assert!(matches!(
+            object.validate_replacement_activation(&abandoned, 3),
+            Err(ScopedObservationAccessError::InvalidObjectLifecycle)
+        ));
+
+        let mut replacement = object.fork_replacement(3).unwrap();
+        assert_eq!(object.frozen_scope_epoch(), Some(3));
+        assert!(matches!(
+            object.validate_replacement_activation(&abandoned, 2),
+            Err(ScopedObservationAccessError::InvalidObjectLifecycle)
+        ));
+        let replacement_pass = host.begin_pass().unwrap();
+        let replacement_observation = replacement.reconcile(&replacement_pass, request()).unwrap();
+        assert_eq!(
+            replacement_observation.phase,
+            ScopedAppendDeliveryPhase::Correction
+        );
+        decode_and_admit_ignored(&host, &mut replacement, &replacement_observation);
+        drop(replacement_pass);
+        assert!(matches!(
+            object.validate_replacement_activation(&replacement, 3),
+            Err(ScopedObservationAccessError::InvalidObjectLifecycle)
+        ));
+
+        let replacement_drain_pass = host.begin_pass().unwrap();
+        let replacement_drain = replacement
+            .reconcile(&replacement_drain_pass, request())
+            .unwrap();
+        assert_eq!(
+            replacement_drain.phase,
+            ScopedAppendDeliveryPhase::Correction
+        );
+        decode_and_admit_ignored(&host, &mut replacement, &replacement_drain);
+        drop(replacement_drain_pass);
+        assert_eq!(replacement.checkpoint().unwrap().committed_offset, 9);
+        assert_eq!(replacement.decoder_state(), Some(b"newmore".as_slice()));
+        object
+            .validate_replacement_activation(&replacement, 3)
+            .unwrap();
+        object.activate_replacement(&mut replacement, 3).unwrap();
+
+        assert_eq!(object.checkpoint().unwrap().committed_offset, 9);
+        assert_eq!(object.decoder_state(), Some(b"newmore".as_slice()));
+        assert_eq!(object.replacement_scope_epoch(), None);
+        assert_eq!(object.frozen_scope_epoch(), None);
+        assert!(!object.bootstrap_active());
+        assert!(!object.is_retired());
+        assert_eq!(replacement.checkpoint().unwrap().committed_offset, 4);
+        assert_eq!(replacement.decoder_state(), Some(b"old".as_slice()));
+        assert!(replacement.is_retired());
+
+        let retired_pass = host.begin_pass().unwrap();
+        assert!(matches!(
+            replacement.reconcile(&retired_pass, request()),
+            Err(ScopedObservationAccessError::InvalidObjectLifecycle)
+        ));
+        assert_eq!(retired_pass.finish().relations()[0].attempts, 0);
+    }
+
+    #[test]
     fn scoped_decode_coverage_advances_only_after_the_matching_offer_boundary() {
         let registry = supported_fixture_registry();
         let temp = TempDir::new().unwrap();

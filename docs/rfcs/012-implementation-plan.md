@@ -1113,6 +1113,22 @@ Current landing status (2026-08-17):
   rejected without mutation so the owning facade can retain it until the
   ordering dependency drains; whole-scope watcher/failure orchestration remains
   open;
+- the append source component now has an isolated full-snapshot replacement
+  primitive for cursor, partial-record, presence, decoder, and admission-token
+  state. A replacement is lineage-bound to one active object and scope epoch,
+  starts with no copied cursor or decoder state, preserves the exact authorized
+  relation and source identity, and classifies every replay batch as
+  `Correction`. Forking freezes the active object before another source access;
+  a re-overflow may link it to only a strictly newer replacement epoch. It
+  cannot be forked from a bootstrap-incomplete, pending, replacement, or
+  retired object. Activation prevalidation requires the full bounded replay to
+  drain and the active object's current epoch/token link to name that exact
+  stage; an abandoned, superseded, or wrong-epoch stage leaves the active
+  cursor/decoder state unchanged, while successful swap retires the old object
+  and makes later access fail before reservation. This is intentionally still
+  a component seam: the observation host does not yet compose object-state,
+  admission/coverage, and reducer activation into the one post-barrier
+  infallible whole-scope swap;
 - every admitted append observation now stages one bounded RFC 012A `Decode`
   coverage update using the same source-instance/stream/object coordinates and
   append-cursor representation as durable ingestion. Stable initial absence,
@@ -1276,7 +1292,13 @@ acknowledgement, and watcher-level failure/re-overflow orchestration remain
 open. At the projection boundary, re-overflow after delivered resync-start now
 invalidates the incomplete epoch, discards its backlog, preserves the old
 active reducer, and requires a delivered fresh invalidation before the next
-epoch can begin.
+epoch can begin. At the source-component boundary, append cursor, partial-line,
+presence, and decoder state can now be replayed into a distinct empty
+epoch/lineage-bound object and swapped only after a complete bounded drain;
+the active object is frozen meanwhile, and abandonment leaves its mutable
+source state intact. The remaining whole-scope host transaction must bind that
+source-state swap to the same coverage watermark and successful completion-
+control offer as reducer activation.
 
 ### D4. SDK and Chopsticks migration
 
