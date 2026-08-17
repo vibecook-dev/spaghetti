@@ -4992,6 +4992,13 @@ impl ScopedObservationPollTicket {
     pub fn request_generation(&self) -> u64 {
         self.request_generation
     }
+
+    /// Blocking substrate for the future portable `poll()` future. A failed
+    /// or dropped access pass leaves this pending; successful offered coverage
+    /// or attachment close wakes every waiter exactly once.
+    pub fn wait(&self) -> ScopedObservationPollResolution {
+        self.completion.wait()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -5001,9 +5008,134 @@ pub enum ScopedObservationPollResolution {
     Cancelled,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ScopedObservationReadyResolution {
+    Pending,
+    Ready(Arc<ScopedBootstrapBarrier>),
+    Cancelled,
+}
+
+#[derive(Debug, Clone)]
+pub struct ScopedObservationReadyWaiter {
+    completion: Arc<ScopedObservationReadyCompletion>,
+}
+
+impl ScopedObservationReadyWaiter {
+    pub fn resolution(&self) -> ScopedObservationReadyResolution {
+        self.completion.snapshot()
+    }
+
+    /// Blocking substrate for the future portable engine-level `ready()`
+    /// future. Consumer-applied readiness remains a separate drain boundary.
+    pub fn wait(&self) -> ScopedObservationReadyResolution {
+        self.completion.wait()
+    }
+}
+
+#[derive(Debug)]
+struct ScopedObservationReadyCompletion {
+    resolution: Mutex<ScopedObservationReadyResolution>,
+    changed: Condvar,
+}
+
+impl Default for ScopedObservationReadyCompletion {
+    fn default() -> Self {
+        Self {
+            resolution: Mutex::new(ScopedObservationReadyResolution::Pending),
+            changed: Condvar::new(),
+        }
+    }
+}
+
+impl ScopedObservationReadyCompletion {
+    fn snapshot(&self) -> ScopedObservationReadyResolution {
+        self.resolution
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    fn complete(&self, barrier: Arc<ScopedBootstrapBarrier>) {
+        let mut resolution = self
+            .resolution
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        match &*resolution {
+            ScopedObservationReadyResolution::Pending => {
+                *resolution = ScopedObservationReadyResolution::Ready(barrier);
+                self.changed.notify_all();
+            }
+            ScopedObservationReadyResolution::Ready(existing) => {
+                debug_assert!(Arc::ptr_eq(existing, &barrier));
+            }
+            ScopedObservationReadyResolution::Cancelled => {}
+        }
+    }
+
+    fn cancel(&self) {
+        let mut resolution = self
+            .resolution
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if matches!(*resolution, ScopedObservationReadyResolution::Pending) {
+            *resolution = ScopedObservationReadyResolution::Cancelled;
+            self.changed.notify_all();
+        }
+    }
+
+    fn wait(&self) -> ScopedObservationReadyResolution {
+        let mut resolution = self
+            .resolution
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        while matches!(*resolution, ScopedObservationReadyResolution::Pending) {
+            resolution = self
+                .changed
+                .wait(resolution)
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+        }
+        resolution.clone()
+    }
+}
+
 #[derive(Debug)]
 struct ScopedObservationPollTicketCompletion {
     resolution: Mutex<ScopedObservationPollResolution>,
+    changed: Condvar,
+}
+
+impl ScopedObservationPollTicketCompletion {
+    fn snapshot(&self) -> ScopedObservationPollResolution {
+        self.resolution
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    fn resolve(&self, resolution: ScopedObservationPollResolution) {
+        let mut current = self
+            .resolution
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if matches!(*current, ScopedObservationPollResolution::Pending) {
+            *current = resolution;
+            self.changed.notify_all();
+        }
+    }
+
+    fn wait(&self) -> ScopedObservationPollResolution {
+        let mut current = self
+            .resolution
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        while matches!(*current, ScopedObservationPollResolution::Pending) {
+            current = self
+                .changed
+                .wait(current)
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+        }
+        current.clone()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -5032,6 +5164,8 @@ pub enum ScopedObservationPollError {
     IncompleteScopePass,
     #[error("scoped poll lease no longer matches the active pass")]
     LeaseMismatch,
+    #[error("scoped readiness completion does not match the attachment-owned delivery barrier")]
+    ReadinessStateMismatch,
     #[error("scoped poll could not begin its bounded access pass: {0}")]
     Access(#[source] ScopedObservationAccessError),
     #[error("scoped poll could not publish an offered watermark: {0}")]
@@ -5080,6 +5214,7 @@ impl ScopedObservationPollRuntime {
         let request_generation = state.requested_through_generation;
         let completion = Arc::new(ScopedObservationPollTicketCompletion {
             resolution: Mutex::new(ScopedObservationPollResolution::Pending),
+            changed: Condvar::new(),
         });
         state
             .pending_completions
@@ -5156,11 +5291,9 @@ impl ScopedObservationPollRuntime {
             })
             .collect::<Vec<_>>();
         for (generation, completion) in completed {
-            *completion
-                .resolution
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner()) =
-                ScopedObservationPollResolution::Ready(Arc::clone(&watermark));
+            completion.resolve(ScopedObservationPollResolution::Ready(Arc::clone(
+                &watermark,
+            )));
             state.pending_completions.remove(&generation);
         }
         state
@@ -5178,12 +5311,7 @@ impl ScopedObservationPollRuntime {
         if !Arc::ptr_eq(&ticket.runtime, self) {
             return Err(ScopedObservationPollError::ForeignTicket);
         }
-        Ok(ticket
-            .completion
-            .resolution
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone())
+        Ok(ticket.completion.snapshot())
     }
 
     fn snapshot(&self) -> ScopedObservationPollState {
@@ -5200,11 +5328,7 @@ impl ScopedObservationPollRuntime {
         let mut state = self.lock_state();
         state.closed = true;
         for completion in state.pending_completions.values().filter_map(Weak::upgrade) {
-            *completion
-                .resolution
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner()) =
-                ScopedObservationPollResolution::Cancelled;
+            completion.resolve(ScopedObservationPollResolution::Cancelled);
         }
         state.pending_completions.clear();
     }
@@ -5217,6 +5341,7 @@ struct ScopedObservationAccessState {
     consumer_drain_opened: AtomicBool,
     watcher_orchestrator_opened: AtomicBool,
     poll: Arc<ScopedObservationPollRuntime>,
+    ready: Arc<ScopedObservationReadyCompletion>,
 }
 
 /// One serialized bounded access pass satisfying every poll request through
@@ -5334,6 +5459,7 @@ impl ScopedObservationAccessHost {
                 consumer_drain_opened: AtomicBool::new(false),
                 watcher_orchestrator_opened: AtomicBool::new(false),
                 poll: Arc::new(ScopedObservationPollRuntime::default()),
+                ready: Arc::new(ScopedObservationReadyCompletion::default()),
             }),
         })
     }
@@ -5567,6 +5693,18 @@ impl ScopedObservationAccessHost {
         self.state.poll.snapshot()
     }
 
+    /// Create a cloneable attachment-level readiness waiter without starting
+    /// delivery. The future async facade starts the sole consumer drain first,
+    /// then bridges this wakeable handle onto its portable runtime.
+    pub fn ready_waiter(&self) -> Result<ScopedObservationReadyWaiter, ScopedObservationPollError> {
+        if self.state.closed.load(Ordering::Acquire) || self.lifecycle.is_closing() {
+            return Err(ScopedObservationPollError::Closed);
+        }
+        Ok(ScopedObservationReadyWaiter {
+            completion: Arc::clone(&self.state.ready),
+        })
+    }
+
     fn validate_poll_completion(
         &self,
         lease: &ScopedObservationPollLease,
@@ -5653,7 +5791,22 @@ impl ScopedObservationAccessHost {
         {
             return Err(ScopedObservationPollError::Closed);
         }
-        Ok(drain.engine_bootstrap_barrier())
+        match self.state.ready.snapshot() {
+            ScopedObservationReadyResolution::Pending => {
+                debug_assert!(drain.engine_bootstrap_barrier().is_none());
+                Ok(None)
+            }
+            ScopedObservationReadyResolution::Ready(barrier) => {
+                let drain_barrier = drain
+                    .engine_bootstrap_barrier()
+                    .ok_or(ScopedObservationPollError::ReadinessStateMismatch)?;
+                if !Arc::ptr_eq(&barrier, &drain_barrier) {
+                    return Err(ScopedObservationPollError::ReadinessStateMismatch);
+                }
+                Ok(Some(barrier))
+            }
+            ScopedObservationReadyResolution::Cancelled => Err(ScopedObservationPollError::Closed),
+        }
     }
 
     /// Capture a self-consistent offered sequence plus eligible RFC 012A
@@ -5763,13 +5916,15 @@ impl ScopedObservationAccessHost {
         if drain.is_closed() || self.lifecycle.is_closing() {
             return Err(ScopedBootstrapBarrierError::Closed);
         }
-        self.offer_bootstrap_complete(
+        let barrier = self.offer_bootstrap_complete(
             append_objects,
             admission,
             projection,
             drain.delivery_lane_mut(),
             observed_at,
-        )
+        )?;
+        self.state.ready.complete(Arc::clone(&barrier));
+        Ok(barrier)
     }
 
     /// Explicitly invalidate the current valid epoch. Ordinary queue pressure
@@ -6223,6 +6378,7 @@ impl ScopedObservationAccessHost {
         let barrier = self.lifecycle.begin_close();
         self.state.closed.store(true, Ordering::Release);
         self.state.poll.close();
+        self.state.ready.cancel();
         barrier
     }
 

@@ -207,11 +207,11 @@ mod tests {
         ScopedObservationOpenDrainError, ScopedObservationPollError, ScopedObservationPollLease,
         ScopedObservationPollResolution, ScopedObservationProjectionLimits,
         ScopedObservationProjectionSink, ScopedObservationQueueLimits,
-        ScopedObservationStartupError, ScopedObservationStartupReconcileAction,
-        ScopedObservationWatcherHintAction, ScopedObservationWatcherPhase,
-        ScopedProjectionDeliveryError, ScopedQueuedObservationFrame, ScopedReplacementMode,
-        ScopedReplacementRepresentation, ScopedReplacementStageError, ScopedResyncReason,
-        ScopedRootIdentityRequest, ScopedSourceFailureClass,
+        ScopedObservationReadyResolution, ScopedObservationStartupError,
+        ScopedObservationStartupReconcileAction, ScopedObservationWatcherHintAction,
+        ScopedObservationWatcherPhase, ScopedProjectionDeliveryError, ScopedQueuedObservationFrame,
+        ScopedReplacementMode, ScopedReplacementRepresentation, ScopedReplacementStageError,
+        ScopedResyncReason, ScopedRootIdentityRequest, ScopedSourceFailureClass,
     };
     use crate::source::{
         AccessOperation, AccessOutcome, AccessPhase, AppendDelimitedConfig, AppendDelimitedFile,
@@ -998,6 +998,11 @@ mod tests {
         let second = host.request_poll().unwrap();
         assert_eq!(first.request_generation(), 1);
         assert_eq!(second.request_generation(), 2);
+        let waiting_first = first.clone();
+        let (poll_tx, poll_rx) = std::sync::mpsc::sync_channel(0);
+        let poll_thread = std::thread::spawn(move || {
+            poll_tx.send(waiting_first.wait()).unwrap();
+        });
         let incomplete = host.begin_poll().unwrap().unwrap();
         assert_eq!(incomplete.target_generation(), 2);
         assert!(matches!(
@@ -1039,6 +1044,15 @@ mod tests {
             panic!("both pre-pass poll requests must share one completion");
         };
         assert!(Arc::ptr_eq(&first_result, &second_result));
+        let waited = poll_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("offered poll completion must wake its request-local waiter");
+        assert!(matches!(
+            waited,
+            ScopedObservationPollResolution::Ready(waited)
+                if Arc::ptr_eq(&waited, &first_watermark)
+        ));
+        poll_thread.join().unwrap();
         assert_eq!(
             host.poll_resolution(&third).unwrap(),
             ScopedObservationPollResolution::Pending
@@ -1203,8 +1217,10 @@ mod tests {
         ));
         assert!(!first.is_closed());
         assert!(first.engine_ready(&first_drain).unwrap().is_none());
+        let cancelled_ready = first.ready_waiter().unwrap();
 
         let ticket = first.request_poll().unwrap();
+        let cancelled_poll = ticket.clone();
         assert!(matches!(
             second.poll_resolution(&ticket),
             Err(ScopedObservationPollError::ForeignTicket)
@@ -1212,6 +1228,14 @@ mod tests {
         let lease = first.begin_poll().unwrap().unwrap();
         assert_eq!(first.poll_state().in_flight_through_generation, Some(1));
         first.close();
+        assert_eq!(
+            cancelled_poll.wait(),
+            ScopedObservationPollResolution::Cancelled
+        );
+        assert_eq!(
+            cancelled_ready.wait(),
+            ScopedObservationReadyResolution::Cancelled
+        );
         assert_eq!(
             first.poll_resolution(&ticket).unwrap(),
             ScopedObservationPollResolution::Cancelled
@@ -1407,6 +1431,15 @@ mod tests {
                 max_source_control_items: 4,
             })
             .unwrap();
+        let ready_waiter = host.ready_waiter().unwrap();
+        assert_eq!(
+            ready_waiter.resolution(),
+            ScopedObservationReadyResolution::Pending
+        );
+        let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(0);
+        let ready_thread = std::thread::spawn(move || {
+            ready_tx.send(ready_waiter.wait()).unwrap();
+        });
         let mut object = scoped_append_object_with_coverage(
             AppendDelimitedFile::new(AppendDelimitedConfig::json_lines()).unwrap(),
             RawRetentionPolicy::None,
@@ -1622,6 +1655,15 @@ mod tests {
             )
             .unwrap();
         assert_eq!(barrier.barrier_sequence, 2);
+        let ready_resolution = ready_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("bootstrap offer must wake the engine-ready waiter");
+        assert!(matches!(
+            ready_resolution,
+            ScopedObservationReadyResolution::Ready(ready)
+                if Arc::ptr_eq(&ready, &barrier)
+        ));
+        ready_thread.join().unwrap();
         assert_eq!(
             startup.phase(),
             ScopedObservationWatcherPhase::Live {
@@ -1684,7 +1726,18 @@ mod tests {
                 if Arc::ptr_eq(&watermark, &live_watermark)
         ));
 
+        let retained_ready = host.ready_waiter().unwrap();
         let close = host.close_with_consumer(&mut drain).unwrap();
+        assert!(matches!(
+            live_ticket.wait(),
+            ScopedObservationPollResolution::Ready(watermark)
+                if Arc::ptr_eq(&watermark, &live_watermark)
+        ));
+        assert!(matches!(
+            retained_ready.wait(),
+            ScopedObservationReadyResolution::Ready(ready)
+                if Arc::ptr_eq(&ready, &barrier)
+        ));
         assert!(startup.cancellation_requested());
         assert_eq!(close.state().active_watcher_tasks, 1);
         drop(startup);

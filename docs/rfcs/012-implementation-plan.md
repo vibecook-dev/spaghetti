@@ -1211,7 +1211,13 @@ Current landing status (2026-08-17):
   retryable; close cancels unresolved tickets, foreign tickets/leases/drains
   fail closed, and an unchanged follow-up advances no observer sequence. The
   retained attachment-bound bootstrap barrier is also exposed through an
-  internal engine-readiness probe. Request/lease generations remain local
+  internal engine-readiness probe. Poll tickets and the engine-ready boundary
+  now have wakeable completion handles: a failed/dropped pass remains pending,
+  successful poll completion wakes with the exact shared offered watermark,
+  successful bootstrap offer wakes with the retained attachment-owned barrier,
+  and close wakes unresolved handles as cancelled without overwriting an
+  already-ready result. Consumer-applied bootstrap readiness remains owned by
+  the drain acknowledgement boundary. Request/lease generations remain local
   flow-control coordinates and do not enter semantic identity;
 - a shared attachment lifecycle now accounts active access passes, direct
   decodes, and consumer delivery/application calls. Idempotent close first
@@ -1253,8 +1259,8 @@ canonical fact-revision adoption beyond the current runtime families, scoped
 reducers beyond usage-v2,
 coverage-complete durable query exposure, affiliation/actor enrichment and
 envelope variants beyond the current usage/source-lifecycle families, the
-public async event drain plus wakeable poll/ready facade over the internal
-ticket/readiness substrate and complete scope coverage,
+public async event drain and runtime bridge over the internal wakeable
+poll/ready substrate and complete scope coverage,
 dynamic/discovered scope membership beyond the attachment's current exact
 known-object grants and family coverage beyond usage-v2,
 complete multi-family replacement manifests, whole-scope discovery and source
