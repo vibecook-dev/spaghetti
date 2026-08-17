@@ -2287,6 +2287,14 @@ mod tests {
             .require_resync(&mut delivery, ScopedResyncReason::WatcherOverflow, 60)
             .unwrap();
         assert_eq!(resync.last_contiguous_sequence, 1);
+        assert_eq!(
+            other_host.begin_resync(&mut delivery, 70),
+            Err(ScopedContinuityError::RootMismatch)
+        );
+        assert_eq!(
+            host.begin_resync(&mut delivery, 70),
+            Err(ScopedContinuityError::ResyncRequiredNotDelivered)
+        );
         assert!(matches!(
             host.capture_watermark_core(&admission, &projection, &delivery),
             Err(ScopedCoverageAssemblyError::ContinuityInvalid)

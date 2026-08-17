@@ -1042,9 +1042,10 @@ Current landing status (2026-08-17):
   replay gets the same snapshot digest/event ID, failed preflight mutates
   nothing, and later Bootstrap-phase data is rejected after completion;
 - the delivery lane now tracks its distinct delivered-through boundary and an
-  explicit `Bootstrap | Valid | ResyncRequired` continuity state. An explicit
-  watcher/transport/consumer continuity-loss signal on a valid epoch clears
-  only not-yet-delivered ordinary backlog across both capacity lanes, accounts
+  explicit `Bootstrap | Valid | ResyncRequired | Resyncing` continuity state.
+  An explicit watcher/transport/consumer continuity-loss signal on a valid
+  epoch clears only not-yet-delivered ordinary backlog across both capacity
+  lanes, accounts
   what was superseded, and installs one root-bound sticky
   `observer.resync_required` as the next deliverable control. Its payload names
   the invalid epoch, last contiguous delivered sequence, bootstrap baseline
@@ -1054,6 +1055,18 @@ Current landing status (2026-08-17):
   return `ResyncRequired`, and invalidated epochs cannot publish a watermark or
   re-offer bootstrap completion. Semantic/control capacity pressure by itself
   remains retryable backpressure and never invokes this path;
+- only after that sticky invalidation control is delivered may the same bound
+  root begin a full-snapshot replacement. Starting replacement increments the
+  scope epoch exactly once, retains the attachment-wide monotonic observer
+  sequence, and installs `observer.resync_started` as the first new-epoch
+  control before any snapshot value. The control ties old and new epochs to the
+  delivered invalidation sequence, baseline digest, reason, and explicit
+  `FullSnapshot` mode; its deterministic ID excludes observation time and
+  attachment-local sequence. Repeated start calls return the same control,
+  cross-root calls fail, and the new epoch accepts only `Correction`-phase
+  traffic. Live and bootstrap traffic cannot leak into replacement. Atomic
+  family-manifest staging, completion validation/swap, and re-overflow recovery
+  remain subsequent D3 work;
 - every admitted append observation now stages one bounded RFC 012A `Decode`
   coverage update using the same source-instance/stream/object coordinates and
   append-cursor representation as durable ingestion. Stable initial absence,
@@ -1093,13 +1106,13 @@ coverage-complete durable query exposure, affiliation/actor enrichment and
 envelope variants beyond the current usage/source-lifecycle families, the
 public async event drain plus poll/ready facade and complete scope coverage,
 complete declared-scope membership and family coverage beyond usage-v2,
-new-epoch resync start/staging/completion and atomic replacement manifests,
+new-epoch resync staging/completion and atomic replacement manifests,
 artifact mediation, cancellation waiting,
 the trusted native version-probe/identity-input drivers, and the complete
 public request are not yet implemented. The internal offered boundary is now
-transactional, but
-it cannot become a public `offered` watermark until the envelope mapper,
-scope-membership/barrier coverage, and epoch lifecycle are defined. The
+transactional, but it cannot become a public `offered` watermark until complete
+scope-membership/barrier coverage, resync completion, and the consumer-applied
+acknowledgement are defined. The
 usage-v2 sink and delivery lane remain crate-private until those envelope/
 lifecycle contracts and the negotiated portable surface exist.
 
@@ -1154,8 +1167,8 @@ core now emits common Decode and eligible usage-v2 `SourceCoverageSet`s at that
 sequence, binds every set to the pre-access resolved root session, and carries
 that root's canonical session/external-reference/root-run tuple. It is not the
 public poll/bootstrap/resync contract and does not yet prove complete declared-
-scope discovery. The public control multiplexer/facade, resync-start and
-new-epoch staging/completion states, complete scope-membership source/family
+scope discovery. The public control multiplexer/facade, new-epoch replacement
+staging/completion states, complete scope-membership source/family
 sets, coverage-complete family manifest, atomic staged swap, and multi-observer
 isolation remain unimplemented. Internally,
 reducer mutation, admitted-frame release, bounded delivery admission, and
@@ -1172,17 +1185,24 @@ unknown-affiliation context, strips internal ordinals, preserves source
 occurrence and observed/native time, and distinguishes native records, common
 reducer corrections, and engine controls. It rejects cross-root typed events
 and mismatched native-session claims. This freezes the current
-usage/source-lifecycle envelope vocabulary but is not yet the public
-multiplexer/facade, resync control family, complete actor-affiliation reducer,
-or an applied acknowledgement. Epoch 1 now does have an ordered,
-snapshot-identified bootstrap-completion control and retained idempotent
-barrier at the offered boundary; it remains internal until multi-object scope
-orchestration and the portable drain/ready surface land. A valid epoch can now
+usage/source-lifecycle and initial resync envelope vocabulary but is not yet the
+public multiplexer/facade, resync-completion control and manifest, complete
+actor-affiliation reducer, or an applied acknowledgement. Epoch 1 now has an
+ordered, snapshot-identified bootstrap-completion control and retained
+idempotent barrier at the offered boundary; it remains internal until
+multi-object scope orchestration and the portable drain/ready surface land. A
+valid epoch can now
 transition exactly once to a sticky root-bound `observer.resync_required`
 state: the lane preserves the last delivered boundary, explicitly supersedes
 undelivered backlog, prioritizes the control, rejects further ordinary offers,
-and prevents invalid watermark publication. Starting and atomically publishing
-the replacement epoch remain open.
+and prevents invalid watermark publication. Once that invalidation control is
+delivered, a root-bound, idempotent start advances exactly one epoch and offers
+`observer.resync_started` first while preserving the attachment-wide observer
+sequence. Its deterministic identity binds the old/new epochs, invalidation,
+baseline digest, reason, and full-snapshot mode without timing or local
+sequence; only correction traffic may follow in the replacement epoch. Family
+snapshot staging, manifest validation, the completion barrier, atomic
+publication, and re-overflow handling remain open.
 
 ### D4. SDK and Chopsticks migration
 
