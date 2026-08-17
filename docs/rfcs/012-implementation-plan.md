@@ -1219,6 +1219,15 @@ Current landing status (2026-08-17):
   already-ready result. Consumer-applied bootstrap readiness remains owned by
   the drain acknowledgement boundary. Request/lease generations remain local
   flow-control coordinates and do not enter semantic identity;
+- the attachment-owned consumer drain now exposes a cloneable, lost-wakeup-
+  safe event notification handle keyed by the monotonically offered observer
+  sequence. Every non-empty semantic/control offer, direct continuity
+  invalidation, and resync start wakes waiters with the newest offered boundary;
+  a semantic no-op advances neither sequence nor wake state. Drain close or
+  drop wakes waiters with an explicit closed state while preserving the last
+  offered boundary. The async iterator bridge can therefore check the drain,
+  snapshot under the same owner lock, and sleep without a polling loop or a
+  check-then-wait race;
 - a shared attachment lifecycle now accounts active access passes, direct
   decodes, and consumer delivery/application calls. Idempotent close first
   rejects new work and cancels unresolved poll tickets, then waits on a
@@ -1259,8 +1268,8 @@ canonical fact-revision adoption beyond the current runtime families, scoped
 reducers beyond usage-v2,
 coverage-complete durable query exposure, affiliation/actor enrichment and
 envelope variants beyond the current usage/source-lifecycle families, the
-public async event drain and runtime bridge over the internal wakeable
-poll/ready substrate and complete scope coverage,
+public async iterator/runtime bridge over the internal wakeable
+event/poll/ready substrate and complete scope coverage,
 dynamic/discovered scope membership beyond the attachment's current exact
 known-object grants and family coverage beyond usage-v2,
 complete multi-family replacement manifests, whole-scope discovery and source

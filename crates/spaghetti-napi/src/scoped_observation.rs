@@ -2328,6 +2328,14 @@ impl ScopedObservationConsumerDrain {
         self.resync_barrier.as_ref().map(Arc::clone)
     }
 
+    /// Cloneable lost-wakeup-safe notification handle for the future async
+    /// iterator bridge. The bridge checks `next()`, snapshots this handle while
+    /// it still owns the drain, then waits for a later offered sequence or
+    /// close before checking `next()` again.
+    pub fn event_waiter(&self) -> ScopedObservationEventWaiter {
+        self.delivery.event_waiter()
+    }
+
     /// Producer-side access remains inside the crate-private observer runtime.
     /// Owning rather than borrowing the lane prevents a consumer drain from
     /// being paired with a second attachment or epoch queue.
@@ -2789,6 +2797,82 @@ pub struct ScopedObservationDeliveryState {
     pub queued_source_control_items: usize,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ScopedObservationEventWakeState {
+    pub offered_through_sequence: u64,
+    pub closed: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct ScopedObservationEventWaiter {
+    completion: Arc<ScopedObservationEventCompletion>,
+}
+
+impl ScopedObservationEventWaiter {
+    pub fn snapshot(&self) -> ScopedObservationEventWakeState {
+        self.completion.snapshot()
+    }
+
+    /// Wait until an event with a strictly newer offered sequence exists or
+    /// the owning drain closes. Passing a previously captured sequence avoids
+    /// the check-then-sleep race that would otherwise lose a producer wakeup.
+    pub fn wait_after(&self, offered_through_sequence: u64) -> ScopedObservationEventWakeState {
+        self.completion.wait_after(offered_through_sequence)
+    }
+}
+
+#[derive(Debug, Default)]
+struct ScopedObservationEventCompletion {
+    state: Mutex<ScopedObservationEventWakeState>,
+    changed: Condvar,
+}
+
+impl ScopedObservationEventCompletion {
+    fn snapshot(&self) -> ScopedObservationEventWakeState {
+        *self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn publish(&self, offered_through_sequence: u64) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        debug_assert!(offered_through_sequence >= state.offered_through_sequence);
+        if offered_through_sequence > state.offered_through_sequence {
+            state.offered_through_sequence = offered_through_sequence;
+            self.changed.notify_all();
+        }
+    }
+
+    fn close(&self) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !state.closed {
+            state.closed = true;
+            self.changed.notify_all();
+        }
+    }
+
+    fn wait_after(&self, offered_through_sequence: u64) -> ScopedObservationEventWakeState {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        while !state.closed && state.offered_through_sequence <= offered_through_sequence {
+            state = self
+                .changed
+                .wait(state)
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+        }
+        *state
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScopedObservationContinuity {
     Bootstrap,
@@ -2939,6 +3023,7 @@ pub struct ScopedObservationDeliveryLane {
     resync_required: Option<Arc<ScopedResyncRequired>>,
     resync_started: Option<Arc<ScopedResyncStarted>>,
     resync_barrier: Option<Arc<ScopedResyncBarrier>>,
+    event_completion: Arc<ScopedObservationEventCompletion>,
 }
 
 impl ScopedObservationDeliveryLane {
@@ -2958,6 +3043,7 @@ impl ScopedObservationDeliveryLane {
             resync_required: None,
             resync_started: None,
             resync_barrier: None,
+            event_completion: Arc::new(ScopedObservationEventCompletion::default()),
         })
     }
 
@@ -2965,6 +3051,13 @@ impl ScopedObservationDeliveryLane {
         self.semantic.clear();
         self.source_controls.clear();
         self.queued_retained_native_bytes = 0;
+        self.event_completion.close();
+    }
+
+    fn event_waiter(&self) -> ScopedObservationEventWaiter {
+        ScopedObservationEventWaiter {
+            completion: Arc::clone(&self.event_completion),
+        }
     }
 
     /// Test-only low-level delivery seam. Production composition offers only
@@ -3065,12 +3158,16 @@ impl ScopedObservationDeliveryLane {
         debug_assert_eq!(observer_sequence, after_sequence);
         self.next_observer_sequence = after_sequence;
         self.queued_retained_native_bytes += measurement.retained_native_bytes;
+        let offered_through_sequence = after_sequence
+            .checked_sub(1)
+            .expect("observer sequences begin at one");
+        if first_offered_sequence.is_some() {
+            self.event_completion.publish(offered_through_sequence);
+        }
 
         Ok(ScopedObservationOfferReceipt {
             first_offered_sequence,
-            offered_through_sequence: after_sequence
-                .checked_sub(1)
-                .expect("observer sequences begin at one"),
+            offered_through_sequence,
             semantic_events: measurement.semantic_events as u64,
             retained_native_bytes: measurement.retained_native_bytes,
             source_control_items: measurement.source_control_items as u64,
@@ -3250,6 +3347,7 @@ impl ScopedObservationDeliveryLane {
         self.next_observer_sequence = after_sequence;
         self.resync_required = Some(Arc::clone(&control));
         self.resync_started = None;
+        self.event_completion.publish(control_sequence);
         debug_assert_eq!(
             self.state().continuity,
             ScopedObservationContinuity::ResyncRequired
@@ -3317,6 +3415,7 @@ impl ScopedObservationDeliveryLane {
         });
         self.next_observer_sequence = after_sequence;
         self.resync_started = Some(Arc::clone(&control));
+        self.event_completion.publish(control_sequence);
         debug_assert_eq!(
             self.state().continuity,
             ScopedObservationContinuity::Resyncing
@@ -3586,6 +3685,12 @@ impl ScopedObservationDeliveryLane {
             return Err(ScopedDeliveryError::SourceControlQueueFull);
         }
         Ok(())
+    }
+}
+
+impl Drop for ScopedObservationDeliveryLane {
+    fn drop(&mut self) {
+        self.event_completion.close();
     }
 }
 
@@ -9249,6 +9354,8 @@ mod projection_tests {
         let root = root_identity();
         let source = source_identity();
         let mut drain = consumer_drain(root.clone(), 1, 3);
+        let event_waiter = drain.event_waiter();
+        assert_eq!(event_waiter.snapshot().offered_through_sequence, 0);
         let watermark = ScopedObservationWatermarkCore {
             root: root.clone(),
             scope_epoch: SCOPED_INITIAL_SCOPE_EPOCH,
@@ -9261,6 +9368,7 @@ mod projection_tests {
             .delivery_lane_mut()
             .offer_bootstrap_barrier(&root, watermark, Vec::new(), false, 10)
             .unwrap();
+        assert_eq!(event_waiter.snapshot().offered_through_sequence, 1);
         let bootstrap_delivery = drain.next().unwrap().unwrap();
         drain
             .acknowledge_applied(bootstrap_delivery.application_receipt())
@@ -9296,10 +9404,12 @@ mod projection_tests {
                 },
             ])
             .unwrap();
+        assert_eq!(event_waiter.snapshot().offered_through_sequence, 3);
         let required = drain
             .delivery_lane_mut()
             .require_resync(&root, ScopedResyncReason::WatcherOverflow, 30)
             .unwrap();
+        assert_eq!(event_waiter.snapshot().offered_through_sequence, 4);
         assert_eq!(required.control_sequence, 4);
         assert_eq!(required.last_contiguous_sequence, 1);
         assert_eq!(required.discarded_source_controls, 2);
@@ -9320,6 +9430,7 @@ mod projection_tests {
         assert_eq!(state.pending_sequence, None);
 
         let started = drain.delivery_lane_mut().begin_resync(&root, 40).unwrap();
+        assert_eq!(event_waiter.snapshot().offered_through_sequence, 5);
         assert_eq!(started.control_sequence, 5);
         let started_delivery = drain.next().unwrap().unwrap();
         assert!(matches!(
@@ -9352,6 +9463,7 @@ mod projection_tests {
                 50,
             )
             .unwrap();
+        assert_eq!(event_waiter.snapshot().offered_through_sequence, 6);
         assert_eq!(resync_barrier.barrier_sequence, 6);
         assert!(Arc::ptr_eq(
             &drain.engine_resync_barrier().unwrap(),
@@ -10138,6 +10250,9 @@ mod projection_tests {
             .unwrap()
             .unwrap();
         assert_eq!(delivery.queued_semantic_events(), 1);
+        let event_waiter = delivery.event_waiter();
+        let before_repeat = event_waiter.snapshot();
+        assert_eq!(before_repeat.offered_through_sequence, 1);
 
         let repeat_record = record(1, 10, 20);
         let repeat_frame = decoded_frame(
@@ -10158,6 +10273,7 @@ mod projection_tests {
         assert!(repeat_lane.is_empty());
         assert_eq!(delivery.queued_semantic_events(), 1);
         assert_eq!(delivery.state().offered_through_sequence, 1);
+        assert_eq!(event_waiter.snapshot(), before_repeat);
 
         let first = delivery.pop_next().unwrap();
         assert_eq!(first.observer_sequence, 1);

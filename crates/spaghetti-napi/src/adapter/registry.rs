@@ -1440,6 +1440,16 @@ mod tests {
         let ready_thread = std::thread::spawn(move || {
             ready_tx.send(ready_waiter.wait()).unwrap();
         });
+        let event_waiter = drain.event_waiter();
+        let initial_event_state = event_waiter.snapshot();
+        assert_eq!(initial_event_state.offered_through_sequence, 0);
+        assert!(!initial_event_state.closed);
+        let (event_tx, event_rx) = std::sync::mpsc::sync_channel(0);
+        let event_thread = std::thread::spawn(move || {
+            event_tx
+                .send(event_waiter.wait_after(initial_event_state.offered_through_sequence))
+                .unwrap();
+        });
         let mut object = scoped_append_object_with_coverage(
             AppendDelimitedFile::new(AppendDelimitedConfig::json_lines()).unwrap(),
             RawRetentionPolicy::None,
@@ -1588,6 +1598,12 @@ mod tests {
             .finish_reconcile(&host, reconcile, &admission, &projection, &drain)
             .unwrap();
         assert_eq!(reconciled.offered_through_sequence, 1);
+        let first_event = event_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("the first offered envelope must wake the event waiter");
+        assert_eq!(first_event.offered_through_sequence, 1);
+        assert!(!first_event.closed);
+        event_thread.join().unwrap();
         assert!(matches!(
             startup.next_reconcile(&host, 4).unwrap(),
             ScopedObservationStartupReconcileAction::CaughtUp
@@ -1727,6 +1743,15 @@ mod tests {
         ));
 
         let retained_ready = host.ready_waiter().unwrap();
+        let closing_events = drain.event_waiter();
+        let before_close = closing_events.snapshot();
+        assert_eq!(before_close.offered_through_sequence, 2);
+        let (event_close_tx, event_close_rx) = std::sync::mpsc::sync_channel(0);
+        let event_close_thread = std::thread::spawn(move || {
+            event_close_tx
+                .send(closing_events.wait_after(before_close.offered_through_sequence))
+                .unwrap();
+        });
         let close = host.close_with_consumer(&mut drain).unwrap();
         assert!(matches!(
             live_ticket.wait(),
@@ -1740,6 +1765,15 @@ mod tests {
         ));
         assert!(startup.cancellation_requested());
         assert_eq!(close.state().active_watcher_tasks, 1);
+        let closed_events = event_close_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("drain close must wake the event waiter");
+        assert_eq!(
+            closed_events.offered_through_sequence,
+            before_close.offered_through_sequence
+        );
+        assert!(closed_events.closed);
+        event_close_thread.join().unwrap();
         drop(startup);
         assert!(close.wait().complete);
     }
