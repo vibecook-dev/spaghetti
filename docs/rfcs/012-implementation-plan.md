@@ -1065,7 +1065,7 @@ Current landing status (2026-08-17):
   attachment-local sequence. Repeated start calls return the same control,
   cross-root calls fail, and the new epoch accepts only `Correction`-phase
   traffic. Live and bootstrap traffic cannot leak into replacement. Atomic
-  whole-scope staging/swap and re-overflow recovery remain subsequent D3 work;
+  whole-scope staging/swap remains subsequent D3 work;
 - replacement replay now reduces into a distinct empty, epoch-bound projection
   stage instead of the still-visible active reducer. The ordinary offered path
   rejects active-reducer mutation while continuity is `Resyncing`; the stage
@@ -1093,7 +1093,19 @@ Current landing status (2026-08-17):
   later invalidation uses its coverage snapshot as the new baseline. This is
   still an internal projection-level seam: complete multi-family manifests and
   atomic composition of replacement discovery, object/cursor/decoder state,
-  coverage membership, and re-overflow remain subsequent D3 work;
+  and coverage membership remain subsequent D3 work;
+- continuity loss during an incomplete replacement now invalidates that
+  replacement instead of returning the former provisional `ResyncAlreadyActive`
+  error. Once `observer.resync_started` itself has crossed the delivered
+  boundary, re-overflow clears all not-yet-delivered correction snapshot state,
+  emits a new sticky `observer.resync_required` for the current epoch, retains
+  the last valid snapshot baseline, and leaves the old active reducer
+  unchanged. The abandoned stage becomes unusable immediately and remains
+  epoch-mismatched after the new invalidation is delivered and a monotonically
+  fresh epoch starts. A signal received before `resync_started` delivery is
+  rejected without mutation so the owning facade can retain it until the
+  ordering dependency drains; whole-scope watcher/failure orchestration remains
+  open;
 - every admitted append observation now stages one bounded RFC 012A `Decode`
   coverage update using the same source-instance/stream/object coordinates and
   append-cursor representation as durable ingestion. Stable initial absence,
@@ -1134,7 +1146,7 @@ envelope variants beyond the current usage/source-lifecycle families, the
 public async event drain plus poll/ready facade and complete scope coverage,
 complete declared-scope membership and family coverage beyond usage-v2,
 complete multi-family replacement manifests, whole-scope cursor/state swap,
-and failed/re-overflowed resync,
+and whole-scope failed/re-overflow orchestration,
 artifact mediation, cancellation waiting,
 the trusted native version-probe/identity-input drivers, and the complete
 public request are not yet implemented. The internal offered boundary is now
@@ -1237,7 +1249,11 @@ against the exact common coverage watermark before ordered
 `observer.resync_complete`; control pressure is retry-safe, and successful offer
 atomically activates the staged projection. Complete multi-family and D-owned
 manifests, whole-scope discovery/cursor/decoder-state swap, consumer applied
-acknowledgement, and re-overflow handling remain open.
+acknowledgement, and watcher-level failure/re-overflow orchestration remain
+open. At the projection boundary, re-overflow after delivered resync-start now
+invalidates the incomplete epoch, discards its backlog, preserves the old
+active reducer, and requires a delivered fresh invalidation before the next
+epoch can begin.
 
 ### D4. SDK and Chopsticks migration
 

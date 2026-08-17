@@ -2040,8 +2040,8 @@ pub enum ScopedContinuityError {
     ResyncNotRequired,
     #[error("scoped resync cannot start before resync-required is delivered")]
     ResyncRequiredNotDelivered,
-    #[error("scoped resync is already active and cannot be invalidated by this provisional path")]
-    ResyncAlreadyActive,
+    #[error("scoped replacement epoch cannot be invalidated before resync-start is delivered")]
+    ResyncStartNotDelivered,
     #[error("scoped epoch counter is exhausted")]
     EpochExhausted,
     #[error("scoped continuity control could not enter delivery: {0}")]
@@ -2309,10 +2309,14 @@ impl ScopedObservationDeliveryLane {
         reason: ScopedResyncReason,
         observed_at: i64,
     ) -> Result<Arc<ScopedResyncRequired>, ScopedContinuityError> {
-        if self.resync_started.is_some() {
-            return Err(ScopedContinuityError::ResyncAlreadyActive);
-        }
-        if let Some(control) = &self.resync_required {
+        if let Some(started) = &self.resync_started {
+            if started.root != *root {
+                return Err(ScopedContinuityError::RootMismatch);
+            }
+            if self.delivered_through_sequence < started.control_sequence {
+                return Err(ScopedContinuityError::ResyncStartNotDelivered);
+            }
+        } else if let Some(control) = &self.resync_required {
             return if control.root == *root {
                 Ok(Arc::clone(control))
             } else {
@@ -2378,6 +2382,7 @@ impl ScopedObservationDeliveryLane {
         });
         self.next_observer_sequence = after_sequence;
         self.resync_required = Some(Arc::clone(&control));
+        self.resync_started = None;
         debug_assert_eq!(
             self.state().continuity,
             ScopedObservationContinuity::ResyncRequired
@@ -6269,6 +6274,12 @@ mod projection_tests {
         let receipt = delivery.offer(vec![correction]).unwrap();
         assert_eq!(receipt.first_offered_sequence, Some(7));
         assert_eq!(receipt.offered_through_sequence, 7);
+        assert_eq!(
+            delivery.require_resync(&root, ScopedResyncReason::TransportContinuityLoss, 115),
+            Err(ScopedContinuityError::ResyncStartNotDelivered)
+        );
+        assert_eq!(delivery.state().offered_through_sequence, 7);
+        assert_eq!(delivery.queued_source_control_items(), 2);
 
         let delivered_start = delivery.pop_next().unwrap();
         assert_eq!(delivered_start.scope_epoch, 2);
@@ -6571,6 +6582,121 @@ mod projection_tests {
                 barrier: delivered,
             } if Arc::ptr_eq(&barrier, &delivered)
         ));
+        assert!(delivery.is_empty());
+    }
+
+    #[test]
+    fn scoped_reoverflow_discards_incomplete_stage_and_requires_a_fresh_epoch() {
+        let root = root_identity();
+        let mapper = ScopedObservationEnvelopeMapper::new(root.clone());
+        let mut active = sink(8);
+        let active_record = record(1, 0, 10);
+        let active_frame = decoded_frame(
+            1,
+            ScopedAppendDeliveryPhase::Bootstrap,
+            &active_record,
+            usage_batch(&active_record, "active-response", 10, None),
+        );
+        only_usage_event(active.project(&active_frame).unwrap());
+
+        let mut delivery = delivery_lane(1, 1);
+        let watermark = ScopedObservationWatermarkCore {
+            root: root.clone(),
+            scope_epoch: SCOPED_INITIAL_SCOPE_EPOCH,
+            offered_through_sequence: 0,
+            source_coverage: Vec::new(),
+            explicit_object_errors: Vec::new(),
+            queue_state: delivery.state(),
+        };
+        let bootstrap = delivery
+            .offer_bootstrap_barrier(&root, watermark, true, 20)
+            .unwrap();
+        assert_eq!(delivery.pop_next().unwrap().observer_sequence, 1);
+        delivery
+            .require_resync(&root, ScopedResyncReason::WatcherOverflow, 30)
+            .unwrap();
+        assert_eq!(delivery.pop_next().unwrap().observer_sequence, 2);
+        delivery.begin_resync(&root, 40).unwrap();
+        assert_eq!(delivery.pop_next().unwrap().observer_sequence, 3);
+
+        let replay_record = record(1, 10, 20);
+        let replay_frame = decoded_frame(
+            2,
+            ScopedAppendDeliveryPhase::Bootstrap,
+            &replay_record,
+            usage_batch(&replay_record, "replacement-response", 20, None),
+        );
+        let mut replay = admission_lane_with_decoded_frame(replay_frame);
+        let mut stale_stage =
+            ScopedObservationReplacementStage::new(root.clone(), 2, active.limits).unwrap();
+        assert!(stale_stage.reduce_next(&mut replay).unwrap());
+        stale_stage.prepare_snapshot(&replay, &delivery).unwrap();
+        let receipt = stale_stage
+            .offer_snapshot_next(&mut delivery)
+            .unwrap()
+            .unwrap();
+        assert_eq!(receipt.first_offered_sequence, Some(4));
+        assert_eq!(delivery.queued_semantic_events(), 1);
+
+        let reoverflow = delivery
+            .require_resync(&root, ScopedResyncReason::TransportContinuityLoss, 50)
+            .unwrap();
+        assert_eq!(reoverflow.invalid_scope_epoch, 2);
+        assert_eq!(reoverflow.control_sequence, 5);
+        assert_eq!(reoverflow.last_contiguous_sequence, 3);
+        assert_eq!(
+            reoverflow.baseline_snapshot_digest,
+            bootstrap.snapshot_digest
+        );
+        assert_eq!(reoverflow.discarded_semantic_events, 1);
+        assert_eq!(reoverflow.discarded_source_controls, 0);
+        assert_eq!(delivery.queued_semantic_events(), 0);
+        assert_eq!(delivery.queued_source_control_items(), 1);
+        assert_eq!(
+            delivery.state().continuity,
+            ScopedObservationContinuity::ResyncRequired
+        );
+        assert_eq!(
+            stale_stage.offer_snapshot_next(&mut delivery),
+            Err(ScopedReplacementStageError::NotResyncing)
+        );
+
+        let active_snapshot = active
+            .usage_v2_replacement_snapshot(ScopedAppendDeliveryPhase::Correction)
+            .unwrap();
+        assert_eq!(active_snapshot.entity_count, 1);
+        assert_eq!(
+            active_snapshot.events[0].revision.response_key,
+            b"active-response"
+        );
+        let repeated = delivery
+            .require_resync(&root, ScopedResyncReason::ExplicitConsumerRequest, 999)
+            .unwrap();
+        assert!(Arc::ptr_eq(&reoverflow, &repeated));
+
+        let delivered = delivery.pop_next().unwrap();
+        assert_eq!(delivered.scope_epoch, 2);
+        assert_eq!(delivered.observer_sequence, 5);
+        assert!(matches!(
+            mapper.map(delivered).unwrap().event,
+            ScopedObservationEvent::ObserverResyncRequired {
+                control: delivered_control,
+            } if Arc::ptr_eq(&reoverflow, &delivered_control)
+        ));
+        let restarted = delivery.begin_resync(&root, 60).unwrap();
+        assert_eq!(restarted.old_scope_epoch, 2);
+        assert_eq!(restarted.new_scope_epoch, 3);
+        assert_eq!(restarted.control_sequence, 6);
+        assert_eq!(restarted.required_control_sequence, 5);
+        assert_eq!(delivery.state().scope_epoch, 3);
+        assert_eq!(
+            stale_stage.offer_snapshot_next(&mut delivery),
+            Err(ScopedReplacementStageError::EpochMismatch)
+        );
+        let fresh_stage =
+            ScopedObservationReplacementStage::new(root.clone(), 3, active.limits).unwrap();
+        assert_eq!(fresh_stage.usage_v2_entity_count(), 0);
+        assert_eq!(delivery.pop_next().unwrap().observer_sequence, 6);
         assert!(delivery.is_empty());
     }
 
