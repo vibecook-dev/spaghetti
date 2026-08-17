@@ -1261,8 +1261,14 @@ Current landing status (2026-08-17):
   event delivery. The attachment lifecycle retains the drain's weak event
   notifier, so even a direct host close wakes a pending iterator; that iterator
   closes the drain before ending and therefore satisfies the consumer side of
-  the existing watcher/operation barrier. This facade remains crate-private;
-  it introduces no N-API or incomplete portable request/envelope export;
+  the existing watcher/operation barrier. The handle now also exposes a lost-
+  wakeup-safe async source-owner reservation: watcher, audit, and logical poll
+  requests wake one coalesced bounded access lease; a request arriving during
+  that lease remains for a follow-up, and dropping an unfinished lease releases
+  access serialization before making the same target runnable again. Close and
+  terminal observer failure wake a parked driver explicitly. This facade
+  remains crate-private; it introduces no N-API or incomplete portable request/
+  envelope export;
 - a shared attachment lifecycle now accounts active access passes, direct
   decodes, and consumer delivery/application calls. Idempotent close first
   rejects new work and cancels unresolved poll tickets, then waits on a
@@ -1319,8 +1325,8 @@ Current landing status (2026-08-17):
   stops its backend/registration without implicitly closing the event drain,
   so the consumer can apply that failure before owning the independent close
   barrier. Default timing values remain provisional internal policy, not
-  promoted performance gates. Public pass-driver/portable-host wiring and
-  calibration remain open;
+  promoted performance gates. The concrete source-pass executor, portable-host
+  wiring, and policy calibration remain open;
 - one pass is active at a time, a later pass receives fresh bounds, close is
   idempotent, and the frozen access report excludes paths, identity values, and
   content; and
@@ -1338,8 +1344,9 @@ and complete scope coverage,
 dynamic/discovered scope membership beyond the attachment's current exact
 known-object grants and family coverage beyond usage-v2,
 complete multi-family replacement manifests, whole-scope discovery and source
-state beyond the current exact append-object set, public watcher pass-driver
-wiring and policy calibration, plus re-overflow orchestration,
+state beyond the current exact append-object set, the concrete watcher source-
+pass executor, portable-host wiring, and policy calibration, plus re-overflow
+orchestration,
 artifact mediation and the public portable close transport,
 the trusted native version-probe/identity-input drivers, and the complete
 public request are not yet implemented. The internal offered and applied
@@ -1475,8 +1482,8 @@ pressure preserves all active state; and re-overflow keeps the last valid epoch
 while a newer stage supersedes the failed continuity epoch. Complete
 multi-family and D-owned manifests, dynamic whole-scope discovery and
 non-append participants, the public transport over the internal async applied
-runtime, and watcher policy calibration/public pass-driver integration remain
-open. The dedicated control lane now also carries one
+runtime, and watcher policy calibration/concrete source-pass and portable-host
+integration remain open. The dedicated control lane now also carries one
 deterministic, attachment-terminal `observer.failed` control before or after
 bootstrap. The first cause wins idempotently, explicitly accounts for and
 supersedes all undelivered semantic/source-control backlog and incomplete
@@ -1681,8 +1688,8 @@ The next execution order is:
    scan coordinator while finishing D2 dynamic Claude scope and declared
    decoder dependencies;
 6. complete D3 multi-family and D-owned replacement manifests, non-append
-   participants, public watcher pass-driver wiring/policy calibration, and
-   multi-observer fairness;
+   participants, concrete watcher source-pass/portable-host wiring, policy
+   calibration, and multi-observer fairness;
 7. run A4 only after the initial catalog/query and public scoped-observer seams
    both exist, proving a fourth agent needs no common-engine API changes;
 8. implement B4/C4/D4 UI, typed-consumer, Chopsticks, and reference

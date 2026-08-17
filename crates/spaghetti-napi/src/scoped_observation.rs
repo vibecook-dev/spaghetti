@@ -2620,6 +2620,36 @@ impl ScopedObservationAsyncHandle {
         Ok(ticket.wait_async().await)
     }
 
+    /// Await and reserve the next coalesced exact-scope pass requested by a
+    /// watcher, audit, or logical `poll()` caller. This is the source-owner
+    /// half of the internal pass driver: returning `None` means attachment
+    /// cancellation, while a dropped lease remains pending and wakes a later
+    /// driver attempt. Native access and offer work still happen outside the
+    /// consumer lock through the lease's bounded access pass.
+    pub async fn next_poll_pass(
+        &self,
+    ) -> Result<Option<ScopedObservationPollLease>, ScopedObservationPollError> {
+        let mut waiter = self.shared.host.state.poll.driver_waiter();
+        loop {
+            match self.shared.host.begin_poll() {
+                Ok(Some(lease)) => return Ok(Some(lease)),
+                Ok(None) => {}
+                Err(ScopedObservationPollError::Closed) => return Ok(None),
+                Err(error) => return Err(error),
+            }
+            match waiter.wait().await {
+                ScopedObservationPollDriverResolution::WorkAvailable => {}
+                ScopedObservationPollDriverResolution::Closed => return Ok(None),
+                ScopedObservationPollDriverResolution::Failed => {
+                    return Err(ScopedObservationPollError::ObserverFailed);
+                }
+                ScopedObservationPollDriverResolution::Pending => {
+                    unreachable!("the poll driver waiter filters pending state")
+                }
+            }
+        }
+    }
+
     pub fn prepare_watcher_install(
         &self,
         hint_capacity: usize,
@@ -2917,11 +2947,11 @@ pub enum ScopedObservationNativeWatcherError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum ScopedObservationNativeWatcherRecoveryPolicyError {
     #[error("scoped watcher audit interval is outside the supported bound")]
-    InvalidAuditInterval,
+    AuditInterval,
     #[error("scoped watcher retry interval is outside the supported bound")]
-    InvalidRetryInterval,
+    RetryInterval,
     #[error("scoped watcher replacement attempt limit is outside the supported bound")]
-    InvalidAttemptLimit,
+    AttemptLimit,
 }
 
 /// Bounded runtime policy for watcher audits and backend replacement. These
@@ -2946,16 +2976,16 @@ impl ScopedObservationNativeWatcherRecoveryPolicy {
         max_reinstall_attempts: u32,
     ) -> Result<Self, ScopedObservationNativeWatcherRecoveryPolicyError> {
         if audit_interval.is_zero() || audit_interval > Self::MAX_AUDIT_INTERVAL {
-            return Err(ScopedObservationNativeWatcherRecoveryPolicyError::InvalidAuditInterval);
+            return Err(ScopedObservationNativeWatcherRecoveryPolicyError::AuditInterval);
         }
         if initial_retry_delay.is_zero()
             || initial_retry_delay > max_retry_delay
             || max_retry_delay > Self::MAX_RETRY_DELAY
         {
-            return Err(ScopedObservationNativeWatcherRecoveryPolicyError::InvalidRetryInterval);
+            return Err(ScopedObservationNativeWatcherRecoveryPolicyError::RetryInterval);
         }
         if max_reinstall_attempts == 0 || max_reinstall_attempts > Self::MAX_REINSTALL_ATTEMPTS {
-            return Err(ScopedObservationNativeWatcherRecoveryPolicyError::InvalidAttemptLimit);
+            return Err(ScopedObservationNativeWatcherRecoveryPolicyError::AttemptLimit);
         }
         Ok(Self {
             audit_interval,
@@ -3510,9 +3540,7 @@ impl ScopedObservationNativeWatcher {
                         _ = tokio::time::sleep(delay) => {}
                     }
                     completed_attempts += 1;
-                    match self
-                        .reinstall_native_backend_with_factory_inner(|callback| factory(callback))
-                    {
+                    match self.reinstall_native_backend_with_factory_inner(&mut factory) {
                         Ok(_) => {
                             observed_generation = self.state().generation;
                             break;
@@ -6858,9 +6886,29 @@ struct ScopedObservationPollRuntimeState {
     closed: bool,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ScopedObservationPollDriverResolution {
+    Pending,
+    WorkAvailable,
+    Failed,
+    Closed,
+}
+
+#[derive(Debug)]
 struct ScopedObservationPollRuntime {
     state: Mutex<ScopedObservationPollRuntimeState>,
+    driver_changed: tokio::sync::watch::Sender<ScopedObservationPollDriverResolution>,
+}
+
+impl Default for ScopedObservationPollRuntime {
+    fn default() -> Self {
+        let (driver_changed, _) =
+            tokio::sync::watch::channel(ScopedObservationPollDriverResolution::Pending);
+        Self {
+            state: Mutex::new(ScopedObservationPollRuntimeState::default()),
+            driver_changed,
+        }
+    }
 }
 
 impl ScopedObservationPollRuntime {
@@ -6868,6 +6916,33 @@ impl ScopedObservationPollRuntime {
         self.state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn driver_resolution(
+        state: &ScopedObservationPollRuntimeState,
+    ) -> ScopedObservationPollDriverResolution {
+        if state.closed {
+            ScopedObservationPollDriverResolution::Closed
+        } else if state.failure.is_some() {
+            ScopedObservationPollDriverResolution::Failed
+        } else if state.active.is_none()
+            && state.requested_through_generation > state.completed_through_generation
+        {
+            ScopedObservationPollDriverResolution::WorkAvailable
+        } else {
+            ScopedObservationPollDriverResolution::Pending
+        }
+    }
+
+    fn publish_driver_resolution(&self, state: &ScopedObservationPollRuntimeState) {
+        self.driver_changed
+            .send_replace(Self::driver_resolution(state));
+    }
+
+    fn driver_waiter(&self) -> ScopedObservationPollDriverWaiter {
+        ScopedObservationPollDriverWaiter {
+            changed: self.driver_changed.subscribe(),
+        }
     }
 
     fn request(
@@ -6898,6 +6973,7 @@ impl ScopedObservationPollRuntime {
         state
             .pending_completions
             .insert(request_generation, Arc::downgrade(&completion));
+        self.publish_driver_resolution(&state);
         Ok(ScopedObservationPollTicket {
             runtime: Arc::clone(self),
             completion,
@@ -6932,6 +7008,7 @@ impl ScopedObservationPollRuntime {
             target_generation: state.requested_through_generation,
         };
         state.active = Some(active);
+        self.publish_driver_resolution(&state);
         Ok(Some(active))
     }
 
@@ -6941,6 +7018,7 @@ impl ScopedObservationPollRuntime {
             active.lease_id == lease_id && active.target_generation == target_generation
         }) {
             state.active = None;
+            self.publish_driver_resolution(&state);
         }
     }
 
@@ -6983,6 +7061,7 @@ impl ScopedObservationPollRuntime {
             .retain(|generation, _| *generation > target_generation);
         state.completed_through_generation = target_generation;
         state.active = None;
+        self.publish_driver_resolution(&state);
         Ok(watermark)
     }
 
@@ -7014,6 +7093,7 @@ impl ScopedObservationPollRuntime {
             completion.resolve(ScopedObservationPollResolution::Cancelled);
         }
         state.pending_completions.clear();
+        self.publish_driver_resolution(&state);
     }
 
     fn fail(&self, failure: Arc<ScopedObserverFailure>) {
@@ -7029,6 +7109,27 @@ impl ScopedObservationPollRuntime {
             )));
         }
         state.pending_completions.clear();
+        self.publish_driver_resolution(&state);
+    }
+}
+
+#[derive(Debug)]
+struct ScopedObservationPollDriverWaiter {
+    changed: tokio::sync::watch::Receiver<ScopedObservationPollDriverResolution>,
+}
+
+impl ScopedObservationPollDriverWaiter {
+    async fn wait(&mut self) -> ScopedObservationPollDriverResolution {
+        loop {
+            let resolution = self.changed.borrow_and_update().clone();
+            if !matches!(resolution, ScopedObservationPollDriverResolution::Pending) {
+                return resolution;
+            }
+            self.changed
+                .changed()
+                .await
+                .expect("scoped poll runtime retains its driver notification sender");
+        }
     }
 }
 
@@ -7069,11 +7170,14 @@ impl ScopedObservationPollLease {
         mut self,
         watermark: ScopedObservationWatermarkCore,
     ) -> Result<Arc<ScopedObservationWatermarkCore>, ScopedObservationPollError> {
+        // Release the serialized native-access slot before advertising that a
+        // follow-up poll is runnable. An async driver may react to the runtime
+        // notification immediately on another task.
+        drop(self.access_pass.take());
         let watermark =
             self.runtime
                 .complete(self.lease_id, self.target_generation, Arc::new(watermark))?;
         self.completed = true;
-        drop(self.access_pass.take());
         Ok(watermark)
     }
 }
@@ -7081,6 +7185,9 @@ impl ScopedObservationPollLease {
 impl Drop for ScopedObservationPollLease {
     fn drop(&mut self) {
         if !self.completed {
+            // Release native-access serialization before making the abandoned
+            // target runnable for another driver.
+            drop(self.access_pass.take());
             self.runtime.abandon(self.lease_id, self.target_generation);
         }
     }
@@ -11534,7 +11641,7 @@ mod projection_tests {
                 Duration::from_millis(1),
                 1,
             ),
-            Err(ScopedObservationNativeWatcherRecoveryPolicyError::InvalidAuditInterval)
+            Err(ScopedObservationNativeWatcherRecoveryPolicyError::AuditInterval)
         );
         assert_eq!(
             ScopedObservationNativeWatcherRecoveryPolicy::new(
@@ -11543,7 +11650,7 @@ mod projection_tests {
                 Duration::from_millis(1),
                 1,
             ),
-            Err(ScopedObservationNativeWatcherRecoveryPolicyError::InvalidRetryInterval)
+            Err(ScopedObservationNativeWatcherRecoveryPolicyError::RetryInterval)
         );
         assert_eq!(
             ScopedObservationNativeWatcherRecoveryPolicy::new(
@@ -11552,7 +11659,7 @@ mod projection_tests {
                 Duration::from_millis(1),
                 0,
             ),
-            Err(ScopedObservationNativeWatcherRecoveryPolicyError::InvalidAttemptLimit)
+            Err(ScopedObservationNativeWatcherRecoveryPolicyError::AttemptLimit)
         );
 
         let policy = ScopedObservationNativeWatcherRecoveryPolicy::new(

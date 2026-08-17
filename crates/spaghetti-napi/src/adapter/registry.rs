@@ -1576,6 +1576,136 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn scoped_async_poll_driver_wakes_and_requeues_dropped_passes() {
+        let registry = supported_fixture_registry();
+        let temp = TempDir::new().unwrap();
+        let host = ScopedObservationAccessHost::authorize(
+            &registry,
+            scoped_access_request(temp.path().join("async-poll-driver-root")),
+        )
+        .unwrap();
+        let runtime = ScopedObservationAsyncRuntime::open(
+            host,
+            ScopedObservationDeliveryLimits {
+                max_semantic_events: 1,
+                max_retained_native_bytes: 0,
+                max_source_control_items: 1,
+            },
+        )
+        .unwrap();
+        let handle = runtime.handle();
+
+        let waiting_handle = handle.clone();
+        let waiting_driver = tokio::spawn(async move { waiting_handle.next_poll_pass().await });
+        tokio::task::yield_now().await;
+        assert!(!waiting_driver.is_finished());
+
+        let first_ticket = handle.host().request_poll().unwrap();
+        let first_lease = tokio::time::timeout(std::time::Duration::from_secs(2), waiting_driver)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(first_lease.target_generation(), 1);
+
+        let second_ticket = handle.host().request_poll().unwrap();
+        let followup_handle = handle.clone();
+        let followup_driver = tokio::spawn(async move { followup_handle.next_poll_pass().await });
+        tokio::task::yield_now().await;
+        assert!(!followup_driver.is_finished());
+
+        // Dropping the unfinished pass releases native-access serialization
+        // before waking the next driver, so the combined target is immediately
+        // reservable rather than transiently failing as "pass active".
+        drop(first_lease);
+        let followup_lease =
+            tokio::time::timeout(std::time::Duration::from_secs(2), followup_driver)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap()
+                .unwrap();
+        assert_eq!(followup_lease.target_generation(), 2);
+        drop(followup_lease);
+
+        let barrier = handle.request_close();
+        assert_eq!(
+            first_ticket.wait_async().await,
+            ScopedObservationPollResolution::Cancelled
+        );
+        assert_eq!(
+            second_ticket.wait_async().await,
+            ScopedObservationPollResolution::Cancelled
+        );
+        assert!(barrier.wait_async().await.complete);
+    }
+
+    #[tokio::test]
+    async fn scoped_async_poll_driver_wakes_on_close_and_terminal_failure() {
+        let registry = supported_fixture_registry();
+        let temp = TempDir::new().unwrap();
+        let closed_host = ScopedObservationAccessHost::authorize(
+            &registry,
+            scoped_access_request(temp.path().join("async-poll-driver-close-root")),
+        )
+        .unwrap();
+        let closed_runtime = ScopedObservationAsyncRuntime::open(
+            closed_host,
+            ScopedObservationDeliveryLimits {
+                max_semantic_events: 1,
+                max_retained_native_bytes: 0,
+                max_source_control_items: 1,
+            },
+        )
+        .unwrap();
+        let closed_handle = closed_runtime.handle();
+        let waiting_handle = closed_handle.clone();
+        let closed_driver = tokio::spawn(async move { waiting_handle.next_poll_pass().await });
+        tokio::task::yield_now().await;
+        let closed_barrier = closed_handle.request_close();
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_secs(2), closed_driver)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap()
+                .is_none()
+        );
+        assert!(closed_barrier.wait_async().await.complete);
+
+        let failed_host = ScopedObservationAccessHost::authorize(
+            &registry,
+            scoped_access_request(temp.path().join("async-poll-driver-failure-root")),
+        )
+        .unwrap();
+        let failed_runtime = ScopedObservationAsyncRuntime::open(
+            failed_host,
+            ScopedObservationDeliveryLimits {
+                max_semantic_events: 1,
+                max_retained_native_bytes: 0,
+                max_source_control_items: 1,
+            },
+        )
+        .unwrap();
+        let failed_handle = failed_runtime.handle();
+        let waiting_handle = failed_handle.clone();
+        let failed_driver = tokio::spawn(async move { waiting_handle.next_poll_pass().await });
+        tokio::task::yield_now().await;
+        failed_handle
+            .fail_observer(ScopedObserverFailureReason::InternalControlFailure, 777)
+            .unwrap();
+        assert!(matches!(
+            tokio::time::timeout(std::time::Duration::from_secs(2), failed_driver)
+                .await
+                .unwrap()
+                .unwrap(),
+            Err(ScopedObservationPollError::ObserverFailed)
+        ));
+        assert!(failed_runtime.close().await.complete);
+    }
+
+    #[tokio::test]
     async fn scoped_async_runtime_ends_a_pending_event_wait_on_direct_host_close() {
         let registry = supported_fixture_registry();
         let temp = TempDir::new().unwrap();
