@@ -169,6 +169,18 @@ impl FactSemanticContext {
         self.source_instance_key
     }
 
+    pub fn adapter_id(&self) -> &AdapterId {
+        &self.adapter_id
+    }
+
+    pub fn stream_key(&self) -> &[u8] {
+        self.stream_key.as_ref()
+    }
+
+    pub fn object_key(&self) -> &[u8] {
+        self.object_key.as_ref()
+    }
+
     pub fn source_record_id(&self, record: &SourceRecord) -> Result<SourceRecordId, AdapterError> {
         let logical_position = logical_record_position(record);
         SourceRecordId::derive(

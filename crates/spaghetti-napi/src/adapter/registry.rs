@@ -1017,12 +1017,14 @@ mod tests {
         };
         assert_eq!(deletion_receipt.control_items, 1);
         assert_eq!(deletion_receipt.data_events, 0);
+        let expected_source = object.source_identity().clone();
         assert!(matches!(
             deletion_lane.pop_next(),
             Some(ScopedQueuedObservationFrame::Presence {
+                source,
                 change: ScopedAppendPresenceChange::Deleted { generation: 2 },
                 ..
-            })
+            }) if source == expected_source
         ));
         assert!(deletion_lane.is_empty());
         assert!(!object.root_present());

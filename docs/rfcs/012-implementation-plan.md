@@ -947,7 +947,11 @@ Current landing status (2026-08-16):
 - the scoped decoder binding carries the same topology-neutral semantic context
   as durable decode; canonical fixture emissions replay to equal
   `FactRevisionId`/`SemanticRevisionRef` values even when numeric catalog IDs,
-  observation times, and append batch ordinals differ;
+  observation times, and append batch ordinals differ. It now also derives the
+  same opaque source-instance, coverage-stream, and coverage-object coordinates
+  as the durable coverage path and carries them through admitted controls,
+  projected controls, and typed usage provenance without exposing a native
+  path;
 - the first bounded `ObservationProjectionSink` family is wired for
   `runtime.usage-v2`. It independently validates each complete value-derived
   revision, rejects a whole decoded record before reducer mutation on invalid
@@ -1031,7 +1035,13 @@ unavailable coverage, and unchanged event IDs.
 Current landing status (2026-08-16): D3 is `In progress`. Native-derived
 usage-v2 upsert/retraction IDs are deterministic and include the selected event
 and semantic-reference contract versions, typed semantic revision and stable
-source occurrence. The bounded usage reducer now produces the first
+source occurrence. Source create/delete and reset controls now also have
+mandatory versioned event IDs derived from the stable adapter/source/stream/
+object coordinate and lifecycle revision; attachment-local object tokens,
+admission/delivery ordinals, phase, and timing cannot perturb replay identity.
+All projected variants expose one uniform event-ID, optional semantic-reference,
+phase, and source-coordinate seam for the future envelope mapper. The bounded
+usage reducer now produces the first
 family-versioned replacement snapshot/digest with stable ordering, phase- and
 observation-time-independent identity, empty-state removal, and equal
 bootstrap/correction semantic digests and event IDs at equal state. The public
