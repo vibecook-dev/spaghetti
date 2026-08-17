@@ -1125,10 +1125,25 @@ Current landing status (2026-08-17):
   drain and the active object's current epoch/token link to name that exact
   stage; an abandoned, superseded, or wrong-epoch stage leaves the active
   cursor/decoder state unchanged, while successful swap retires the old object
-  and makes later access fail before reservation. This is intentionally still
-  a component seam: the observation host does not yet compose object-state,
-  admission/coverage, and reducer activation into the one post-barrier
-  infallible whole-scope swap;
+  and makes later access fail before reservation;
+- the scoped host now composes those source components with their admission/
+  offered-coverage lane and semantic reducer as one epoch-owned state. Binding
+  epoch 1 re-verifies exact relation/source membership and both the source and
+  family/digest content of the already-offered bootstrap barrier. Opening a
+  replacement freezes every active append object, creates empty cursor/decoder,
+  coverage, and reducer state, and tolerates a bounded old-epoch admission
+  backlog that was invalidated before it could be offered. Completion checks
+  every current epoch/token lineage, exact relation-to-source membership,
+  drained replacement coverage, family manifest, and snapshot digest before
+  offering `observer.resync_complete`; control pressure changes none of the
+  three active components. After a successful offer, object state, the offered
+  coverage lane, and reducers transfer without another fallible operation, and
+  the invalid old admission backlog is dropped. Re-overflow retains the last
+  valid active epoch even though the continuity chain advances through an
+  incomplete epoch; a strictly newer stage supersedes the frozen link and the
+  stale stage remains unusable. The conformance path covers attach-before-root,
+  root creation during correction, unoffered old-epoch input, failed completion
+  preflight, idempotent success, active watermark parity, and re-overflow;
 - every admitted append observation now stages one bounded RFC 012A `Decode`
   coverage update using the same source-instance/stream/object coordinates and
   append-cursor representation as durable ingestion. Stable initial absence,
@@ -1179,8 +1194,9 @@ envelope variants beyond the current usage/source-lifecycle families, the
 public async event drain plus poll/ready facade and complete scope coverage,
 dynamic/discovered scope membership beyond the attachment's current exact
 known-object grants and family coverage beyond usage-v2,
-complete multi-family replacement manifests, whole-scope cursor/state swap,
-and whole-scope failed/re-overflow orchestration,
+complete multi-family replacement manifests, whole-scope discovery and source
+state beyond the current exact append-object set, and watcher-level failed/
+re-overflow orchestration,
 artifact mediation, cancellation waiting,
 the trusted native version-probe/identity-input drivers, and the complete
 public request are not yet implemented. The internal offered boundary is now
@@ -1247,9 +1263,9 @@ attachment: unobserved relations and duplicate relation claims fail closed.
 This is not yet proof of relationships or descendants that the future scope
 orchestrator has not discovered and granted, nor is it the public poll/
 bootstrap/resync contract. The public control multiplexer/facade, whole-scope
-replacement composition, dynamic discovered-scope source/family sets, complete
-multi-family manifest, whole-scope staged swap, and multi-observer isolation
-remain unimplemented. Internally,
+dynamic discovered-scope source/family sets, complete multi-family and D-owned
+manifests, non-append source participants, and multi-observer isolation remain
+unimplemented. Internally,
 reducer mutation, admitted-frame release, bounded delivery admission, and
 eligible coverage promotion now share one retry-safe offered transaction:
 exact projected capacity is checked before mutation, queue pressure changes no
@@ -1286,19 +1302,16 @@ only one latest correction per response through bounded retry-safe offers.
 The first usage-v2 manifest and deterministic replacement digest are validated
 against the exact common coverage watermark before ordered
 `observer.resync_complete`; control pressure is retry-safe, and successful offer
-atomically activates the staged projection. Complete multi-family and D-owned
-manifests, whole-scope discovery/cursor/decoder-state swap, consumer applied
-acknowledgement, and watcher-level failure/re-overflow orchestration remain
-open. At the projection boundary, re-overflow after delivered resync-start now
-invalidates the incomplete epoch, discards its backlog, preserves the old
-active reducer, and requires a delivered fresh invalidation before the next
-epoch can begin. At the source-component boundary, append cursor, partial-line,
-presence, and decoder state can now be replayed into a distinct empty
-epoch/lineage-bound object and swapped only after a complete bounded drain;
-the active object is frozen meanwhile, and abandonment leaves its mutable
-source state intact. The remaining whole-scope host transaction must bind that
-source-state swap to the same coverage watermark and successful completion-
-control offer as reducer activation.
+atomically activates the staged projection. That activation now belongs to one
+whole-epoch host transaction: exact append cursor/partial-line/presence/decoder
+state and its offered-coverage lane are staged from empty beside the reducer,
+then all three transfer only after the same successful completion-control
+offer. Old admitted-but-unoffered input is superseded and dropped; completion
+pressure preserves all active state; and re-overflow keeps the last valid epoch
+while a newer stage supersedes the failed continuity epoch. Complete
+multi-family and D-owned manifests, dynamic whole-scope discovery and
+non-append participants, consumer applied acknowledgement, and watcher-level
+failure scheduling remain open.
 
 ### D4. SDK and Chopsticks migration
 

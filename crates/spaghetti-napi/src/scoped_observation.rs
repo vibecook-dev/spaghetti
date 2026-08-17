@@ -3218,6 +3218,10 @@ pub enum ScopedReplacementStageError {
     EpochMismatch,
     #[error("scoped replacement stage requires the current active reducer")]
     ActiveProjectionRequired,
+    #[error("scoped replacement source state is missing or inconsistent")]
+    InvalidSourceState,
+    #[error("scoped replacement relation is not part of the bound source state")]
+    UnknownSourceRelation,
     #[error("scoped replacement snapshot cannot freeze before admission drains")]
     AdmissionNotDrained,
     #[error("scoped replacement snapshot was already frozen")]
@@ -3438,6 +3442,125 @@ impl ScopedObservationReplacementStage {
             return Err(ScopedReplacementStageError::EpochMismatch);
         }
         Ok(())
+    }
+}
+
+/// One complete active observer epoch at the store-free composition boundary.
+/// Source objects, their offered coverage lane, and semantic reducers move as
+/// one ownership unit during whole-scope replacement.
+pub struct ScopedObservationEpochState {
+    root: ScopedObservationRootIdentity,
+    scope_epoch: u64,
+    append_objects: BTreeMap<String, ScopedKnownAppendObject>,
+    admission: ScopedObservationAdmissionLane,
+    projection: ScopedObservationProjectionSink,
+}
+
+impl ScopedObservationEpochState {
+    pub fn scope_epoch(&self) -> u64 {
+        self.scope_epoch
+    }
+
+    pub fn append_object(&self, relation_id: &str) -> Option<&ScopedKnownAppendObject> {
+        self.append_objects.get(relation_id)
+    }
+
+    pub fn admission_is_empty(&self) -> bool {
+        self.admission.is_empty()
+    }
+
+    pub fn append_object_and_admission_mut(
+        &mut self,
+        relation_id: &str,
+    ) -> Option<(
+        &mut ScopedKnownAppendObject,
+        &mut ScopedObservationAdmissionLane,
+    )> {
+        let object = self.append_objects.get_mut(relation_id)?;
+        Some((object, &mut self.admission))
+    }
+
+    pub fn offer_next(
+        &mut self,
+        delivery: &mut ScopedObservationDeliveryLane,
+    ) -> Result<Option<ScopedObservationOfferReceipt>, ScopedProjectionDeliveryError> {
+        self.admission.offer_next(&mut self.projection, delivery)
+    }
+}
+
+/// Whole-scope replacement owner. Replay mutates only these empty source,
+/// coverage, and reducer components until one successful completion-control
+/// offer transfers all three into `ScopedObservationEpochState`.
+pub struct ScopedObservationScopeReplacementStage {
+    semantic: ScopedObservationReplacementStage,
+    append_objects: BTreeMap<String, ScopedKnownAppendObject>,
+    admission: ScopedObservationAdmissionLane,
+    activated: bool,
+}
+
+impl ScopedObservationScopeReplacementStage {
+    pub fn scope_epoch(&self) -> u64 {
+        self.semantic.scope_epoch
+    }
+
+    pub fn append_object_and_admission_mut(
+        &mut self,
+        relation_id: &str,
+        delivery: &ScopedObservationDeliveryLane,
+    ) -> Result<
+        (
+            &mut ScopedKnownAppendObject,
+            &mut ScopedObservationAdmissionLane,
+        ),
+        ScopedReplacementStageError,
+    > {
+        self.semantic.validate_delivery(delivery)?;
+        if self.semantic.prepared.is_some() || self.activated {
+            return Err(ScopedReplacementStageError::SnapshotAlreadyPrepared);
+        }
+        let object = self
+            .append_objects
+            .get_mut(relation_id)
+            .ok_or(ScopedReplacementStageError::UnknownSourceRelation)?;
+        Ok((object, &mut self.admission))
+    }
+
+    pub fn reduce_next(
+        &mut self,
+        delivery: &ScopedObservationDeliveryLane,
+    ) -> Result<bool, ScopedReplacementStageError> {
+        self.semantic.validate_delivery(delivery)?;
+        self.semantic.reduce_next(&mut self.admission)
+    }
+
+    pub fn prepare_snapshot(
+        &mut self,
+        delivery: &ScopedObservationDeliveryLane,
+    ) -> Result<&ScopedUsageV2ReplacementSnapshot, ScopedReplacementStageError> {
+        self.semantic.prepare_snapshot(&self.admission, delivery)
+    }
+
+    pub fn offer_snapshot_next(
+        &mut self,
+        delivery: &mut ScopedObservationDeliveryLane,
+    ) -> Result<Option<ScopedObservationOfferReceipt>, ScopedReplacementStageError> {
+        self.semantic.offer_snapshot_next(delivery)
+    }
+
+    pub fn snapshot_fully_offered(&self) -> bool {
+        self.semantic.snapshot_fully_offered()
+    }
+
+    pub fn append_object(&self, relation_id: &str) -> Option<&ScopedKnownAppendObject> {
+        self.append_objects.get(relation_id)
+    }
+
+    pub fn is_activated(&self) -> bool {
+        self.activated
+    }
+
+    pub fn admission_is_empty(&self) -> bool {
+        self.admission.is_empty()
     }
 }
 
@@ -4127,10 +4250,148 @@ impl ScopedObservationAccessHost {
         delivery.begin_resync(&self.root_identity, observed_at)
     }
 
+    /// Bind the fully offered bootstrap components into one active epoch owner
+    /// before resync is possible. This is the first composition that prevents
+    /// source, coverage, and reducer state from being swapped independently.
+    pub fn bind_bootstrap_epoch_state(
+        &self,
+        append_objects: Vec<ScopedKnownAppendObject>,
+        admission: ScopedObservationAdmissionLane,
+        projection: ScopedObservationProjectionSink,
+        delivery: &ScopedObservationDeliveryLane,
+    ) -> Result<ScopedObservationEpochState, ScopedReplacementStageError> {
+        let barrier = delivery
+            .bootstrap_barrier()
+            .ok_or(ScopedReplacementStageError::InvalidSourceState)?;
+        if barrier.root != self.root_identity
+            || barrier.scope_epoch != SCOPED_INITIAL_SCOPE_EPOCH
+            || delivery.state().scope_epoch != SCOPED_INITIAL_SCOPE_EPOCH
+            || delivery.state().continuity != ScopedObservationContinuity::Valid
+            || projection.lifecycle != ScopedProjectionLifecycle::Active
+        {
+            return Err(ScopedReplacementStageError::InvalidSourceState);
+        }
+        let watermark = self
+            .capture_watermark_core(&admission, &projection, delivery)
+            .map_err(ScopedReplacementStageError::Coverage)?;
+        if watermark.source_coverage != barrier.source_coverage
+            || watermark.explicit_object_errors != barrier.explicit_object_errors
+        {
+            return Err(ScopedReplacementStageError::InvalidSourceState);
+        }
+        let replacement = projection
+            .usage_v2_replacement_snapshot(ScopedAppendDeliveryPhase::Bootstrap)
+            .map_err(ScopedReplacementStageError::Projection)?;
+        let family_manifest =
+            replacement_family_manifest(&replacement, &watermark.source_coverage)?;
+        let replacement_digest = replacement_snapshot_digest(
+            &self.root_identity,
+            barrier.root_present,
+            &family_manifest,
+            &watermark.source_coverage,
+            &watermark.explicit_object_errors,
+        )?;
+        if family_manifest != barrier.family_manifest
+            || replacement_digest != barrier.replacement_snapshot_digest
+        {
+            return Err(ScopedReplacementStageError::InvalidSourceState);
+        }
+        let append_objects = bind_active_scoped_append_objects(
+            self.known_objects.as_ref(),
+            &self.root_identity,
+            &admission,
+            append_objects,
+        )?;
+        Ok(ScopedObservationEpochState {
+            root: self.root_identity.clone(),
+            scope_epoch: SCOPED_INITIAL_SCOPE_EPOCH,
+            append_objects,
+            admission,
+            projection,
+        })
+    }
+
+    /// Capture the active epoch after a whole-scope activation without
+    /// allowing callers to pair one epoch's source/coverage with another
+    /// projection sink.
+    pub fn capture_epoch_watermark(
+        &self,
+        active: &ScopedObservationEpochState,
+        delivery: &ScopedObservationDeliveryLane,
+    ) -> Result<ScopedObservationWatermarkCore, ScopedCoverageAssemblyError> {
+        if active.root != self.root_identity
+            || active.scope_epoch != delivery.state().scope_epoch
+            || active.projection.lifecycle != ScopedProjectionLifecycle::Active
+        {
+            return Err(ScopedCoverageAssemblyError::ContinuityInvalid);
+        }
+        self.capture_watermark_core(&active.admission, &active.projection, delivery)
+    }
+
+    /// Freeze every active append object and create empty source, coverage,
+    /// and reducer state for the current replacement epoch. A newer re-overflow
+    /// may supersede the lineage links; a partial construction restores them.
+    pub fn open_scope_resync_stage(
+        &self,
+        active: &mut ScopedObservationEpochState,
+        delivery: &ScopedObservationDeliveryLane,
+    ) -> Result<ScopedObservationScopeReplacementStage, ScopedReplacementStageError> {
+        let started = delivery
+            .resync_started
+            .as_ref()
+            .ok_or(ScopedReplacementStageError::NotResyncing)?;
+        let baseline_scope_epoch = valid_replacement_baseline_scope_epoch(delivery)
+            .ok_or(ScopedReplacementStageError::InvalidSourceState)?;
+        if active.root != self.root_identity
+            || started.root != self.root_identity
+            || active.scope_epoch != baseline_scope_epoch
+            || delivery.state().scope_epoch != started.new_scope_epoch
+            || active.projection.lifecycle != ScopedProjectionLifecycle::Active
+            || active.append_objects.len() != self.known_objects.len()
+            || active
+                .append_objects
+                .keys()
+                .any(|relation_id| !self.known_objects.contains_key(relation_id))
+        {
+            return Err(ScopedReplacementStageError::InvalidSourceState);
+        }
+        let semantic = self.open_projection_resync_stage(&active.projection, delivery)?;
+        let admission = ScopedObservationAdmissionLane::new(active.admission.limits)
+            .map_err(|_| ScopedReplacementStageError::InvalidSourceState)?;
+        let prior_lifecycles = active
+            .append_objects
+            .iter()
+            .map(|(relation_id, object)| (relation_id.clone(), object.lifecycle))
+            .collect::<Vec<_>>();
+        let mut append_objects = BTreeMap::new();
+        for (relation_id, object) in &mut active.append_objects {
+            let replacement = match object.fork_replacement(started.new_scope_epoch) {
+                Ok(replacement) => replacement,
+                Err(_) => {
+                    for (prior_relation_id, prior_lifecycle) in prior_lifecycles {
+                        active
+                            .append_objects
+                            .get_mut(&prior_relation_id)
+                            .expect("saved scoped append relation remains present")
+                            .lifecycle = prior_lifecycle;
+                    }
+                    return Err(ScopedReplacementStageError::InvalidSourceState);
+                }
+            };
+            append_objects.insert(relation_id.clone(), replacement);
+        }
+        Ok(ScopedObservationScopeReplacementStage {
+            semantic,
+            append_objects,
+            admission,
+            activated: false,
+        })
+    }
+
     /// Allocate the isolated empty reducer for the current replacement epoch.
     /// The active reducer supplies only its fixed capacity policy; none of its
     /// semantic state is cloned into replacement.
-    pub fn open_resync_stage(
+    fn open_projection_resync_stage(
         &self,
         active: &ScopedObservationProjectionSink,
         delivery: &ScopedObservationDeliveryLane,
@@ -4157,10 +4418,22 @@ impl ScopedObservationAccessHost {
         )
     }
 
+    /// Projection-only conformance seam. Production composition must use
+    /// `open_scope_resync_stage` so source and coverage state cannot be left
+    /// outside the replacement owner.
+    #[cfg(test)]
+    pub fn open_resync_stage(
+        &self,
+        active: &ScopedObservationProjectionSink,
+        delivery: &ScopedObservationDeliveryLane,
+    ) -> Result<ScopedObservationReplacementStage, ScopedReplacementStageError> {
+        self.open_projection_resync_stage(active, delivery)
+    }
+
     /// Validate the frozen per-family replacement against the exact offered
     /// coverage watermark, enqueue completion after every snapshot entity,
     /// then infallibly swap the isolated reducer into the active slot.
-    pub fn offer_resync_complete(
+    fn offer_projection_resync_complete(
         &self,
         active: &mut ScopedObservationProjectionSink,
         stage: &mut ScopedObservationReplacementStage,
@@ -4204,6 +4477,88 @@ impl ScopedObservationAccessHost {
             observed_at,
         )?;
         stage.activate(active, Arc::clone(&barrier));
+        Ok(barrier)
+    }
+
+    /// Projection-only conformance seam. Production completion must use
+    /// `offer_scope_resync_complete` for one source/coverage/reducer transfer.
+    #[cfg(test)]
+    pub fn offer_resync_complete(
+        &self,
+        active: &mut ScopedObservationProjectionSink,
+        stage: &mut ScopedObservationReplacementStage,
+        admission: &ScopedObservationAdmissionLane,
+        delivery: &mut ScopedObservationDeliveryLane,
+        root_present: bool,
+        observed_at: i64,
+    ) -> Result<Arc<ScopedResyncBarrier>, ScopedReplacementStageError> {
+        self.offer_projection_resync_complete(
+            active,
+            stage,
+            admission,
+            delivery,
+            root_present,
+            observed_at,
+        )
+    }
+
+    /// Offer one replacement barrier and then infallibly transfer its append
+    /// state, offered coverage lane, and semantic reducers into the active
+    /// epoch. Every fallible validation occurs before the control offer.
+    pub fn offer_scope_resync_complete(
+        &self,
+        active: &mut ScopedObservationEpochState,
+        stage: &mut ScopedObservationScopeReplacementStage,
+        delivery: &mut ScopedObservationDeliveryLane,
+        root_present: bool,
+        observed_at: i64,
+    ) -> Result<Arc<ScopedResyncBarrier>, ScopedReplacementStageError> {
+        if stage.activated {
+            let barrier = stage
+                .semantic
+                .completed
+                .as_ref()
+                .ok_or(ScopedReplacementStageError::InvalidSourceState)?;
+            return if active.root == self.root_identity
+                && active.scope_epoch == barrier.scope_epoch
+                && barrier.root == self.root_identity
+            {
+                Ok(Arc::clone(barrier))
+            } else {
+                Err(ScopedReplacementStageError::InvalidSourceState)
+            };
+        }
+        validate_scope_replacement_source_state(
+            self.known_objects.as_ref(),
+            &self.root_identity,
+            active,
+            stage,
+            delivery,
+        )?;
+        let empty_retired_admission = ScopedObservationAdmissionLane::new(active.admission.limits)
+            .map_err(|_| ScopedReplacementStageError::InvalidSourceState)?;
+        let barrier = self.offer_projection_resync_complete(
+            &mut active.projection,
+            &mut stage.semantic,
+            &stage.admission,
+            delivery,
+            root_present,
+            observed_at,
+        )?;
+
+        for (relation_id, active_object) in &mut active.append_objects {
+            let replacement = stage
+                .append_objects
+                .get_mut(relation_id)
+                .expect("prevalidated replacement relation remains present");
+            active_object.activate_replacement_prevalidated(replacement);
+        }
+        let replacement_admission =
+            std::mem::replace(&mut stage.admission, empty_retired_admission);
+        let retired_admission = std::mem::replace(&mut active.admission, replacement_admission);
+        drop(retired_admission);
+        active.scope_epoch = barrier.scope_epoch;
+        stage.activated = true;
         Ok(barrier)
     }
 
@@ -5068,18 +5423,23 @@ impl ScopedKnownAppendObject {
     }
 
     /// Swap a fully drained replacement into the active object slot. Callers
-    /// that offer a public completion barrier must run the validation before
-    /// that offer so this mutation is infallible afterward.
+    /// exercise this only as component conformance; production activation is
+    /// owned by the whole-scope post-barrier transfer.
+    #[cfg(test)]
     pub fn activate_replacement(
         &mut self,
         replacement: &mut Self,
         scope_epoch: u64,
     ) -> Result<(), ScopedObservationAccessError> {
         self.validate_replacement_activation(replacement, scope_epoch)?;
+        self.activate_replacement_prevalidated(replacement);
+        Ok(())
+    }
+
+    fn activate_replacement_prevalidated(&mut self, replacement: &mut Self) {
         self.lifecycle = ScopedAppendObjectLifecycle::Retired;
         replacement.lifecycle = ScopedAppendObjectLifecycle::Active;
         std::mem::swap(self, replacement);
-        Ok(())
     }
 
     pub fn checkpoint(&self) -> Option<&AppendCheckpoint> {
@@ -5337,6 +5697,110 @@ fn validate_scoped_relation_coverage(
         return Err(ScopedCoverageAssemblyError::DeclaredObjectCoverageMismatch);
     }
     Ok(())
+}
+
+fn bind_active_scoped_append_objects(
+    known_objects: &BTreeMap<String, ScopedKnownObjectGrant>,
+    root: &ScopedObservationRootIdentity,
+    admission: &ScopedObservationAdmissionLane,
+    objects: Vec<ScopedKnownAppendObject>,
+) -> Result<BTreeMap<String, ScopedKnownAppendObject>, ScopedReplacementStageError> {
+    validate_scoped_relation_coverage(known_objects, admission)
+        .map_err(ScopedReplacementStageError::Coverage)?;
+    if objects.len() != known_objects.len() {
+        return Err(ScopedReplacementStageError::InvalidSourceState);
+    }
+    let mut bound = BTreeMap::new();
+    for object in objects {
+        let relation_id = object
+            .relation_id
+            .as_deref()
+            .ok_or(ScopedReplacementStageError::InvalidSourceState)?;
+        let membership = admission
+            .known_coverage_objects
+            .get(&object.source)
+            .ok_or(ScopedReplacementStageError::InvalidSourceState)?;
+        if object.lifecycle != ScopedAppendObjectLifecycle::Active
+            || object.bootstrap_active
+            || object.pending.is_some()
+            || !source_belongs_to_root(&object.source, root)
+            || !known_objects.contains_key(relation_id)
+            || membership.relation_id.as_ref() != relation_id
+        {
+            return Err(ScopedReplacementStageError::InvalidSourceState);
+        }
+        if bound.insert(relation_id.to_string(), object).is_some() {
+            return Err(ScopedReplacementStageError::InvalidSourceState);
+        }
+    }
+    if bound.keys().any(|key| !known_objects.contains_key(key))
+        || known_objects.keys().any(|key| !bound.contains_key(key))
+    {
+        return Err(ScopedReplacementStageError::InvalidSourceState);
+    }
+    Ok(bound)
+}
+
+fn validate_scope_replacement_source_state(
+    known_objects: &BTreeMap<String, ScopedKnownObjectGrant>,
+    root: &ScopedObservationRootIdentity,
+    active: &ScopedObservationEpochState,
+    stage: &ScopedObservationScopeReplacementStage,
+    delivery: &ScopedObservationDeliveryLane,
+) -> Result<(), ScopedReplacementStageError> {
+    stage.semantic.validate_delivery(delivery)?;
+    let started = delivery
+        .resync_started
+        .as_ref()
+        .ok_or(ScopedReplacementStageError::NotResyncing)?;
+    let baseline_scope_epoch = valid_replacement_baseline_scope_epoch(delivery)
+        .ok_or(ScopedReplacementStageError::InvalidSourceState)?;
+    validate_scoped_relation_coverage(known_objects, &stage.admission)
+        .map_err(ScopedReplacementStageError::Coverage)?;
+    if active.root != *root
+        || stage.semantic.root != *root
+        || active.scope_epoch != baseline_scope_epoch
+        || stage.semantic.scope_epoch != started.new_scope_epoch
+        || !stage.admission.is_empty()
+        || active.append_objects.len() != known_objects.len()
+        || stage.append_objects.len() != known_objects.len()
+        || active.append_objects.keys().ne(stage.append_objects.keys())
+    {
+        return Err(ScopedReplacementStageError::InvalidSourceState);
+    }
+    for (relation_id, active_object) in &active.append_objects {
+        let replacement = stage
+            .append_objects
+            .get(relation_id)
+            .ok_or(ScopedReplacementStageError::InvalidSourceState)?;
+        active_object
+            .validate_replacement_activation(replacement, started.new_scope_epoch)
+            .map_err(|_| ScopedReplacementStageError::InvalidSourceState)?;
+        let membership = stage
+            .admission
+            .known_coverage_objects
+            .get(&replacement.source)
+            .ok_or(ScopedReplacementStageError::InvalidSourceState)?;
+        if membership.relation_id.as_ref() != relation_id
+            || !source_belongs_to_root(&replacement.source, root)
+        {
+            return Err(ScopedReplacementStageError::InvalidSourceState);
+        }
+    }
+    Ok(())
+}
+
+fn valid_replacement_baseline_scope_epoch(delivery: &ScopedObservationDeliveryLane) -> Option<u64> {
+    delivery
+        .resync_barrier
+        .as_ref()
+        .map(|barrier| barrier.scope_epoch)
+        .or_else(|| {
+            delivery
+                .bootstrap_barrier
+                .as_ref()
+                .map(|barrier| barrier.scope_epoch)
+        })
 }
 
 fn scoped_coverage_point_for_domain(

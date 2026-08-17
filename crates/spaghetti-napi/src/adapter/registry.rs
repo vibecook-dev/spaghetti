@@ -2790,6 +2790,320 @@ mod tests {
     }
 
     #[test]
+    fn scoped_whole_epoch_completion_swaps_source_coverage_and_reducer_state() {
+        let registry = supported_fixture_registry();
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().join("whole-epoch-replacement-root");
+        std::fs::create_dir_all(&root).unwrap();
+        let host =
+            ScopedObservationAccessHost::authorize(&registry, scoped_access_request(root.clone()))
+                .unwrap();
+        let mut object = scoped_append_object_with_coverage(
+            AppendDelimitedFile::new(AppendDelimitedConfig::json_lines()).unwrap(),
+            RawRetentionPolicy::None,
+            vec![CoverageDomain::FactFamily {
+                family: "runtime.usage-v2".to_string(),
+                version: 1,
+            }],
+        );
+        let identity = [ScopeIdentityInput {
+            name: "native-session-id",
+            value: b"whole-epoch-session",
+        }];
+        let origin = RecordOrigin {
+            source_instance_id: 10,
+            stream_id: 20,
+            object_id: 30,
+            observed_at: 40,
+            source_timestamp_hint: None,
+            media_type: SourceMediaType::new("application/x-ndjson").unwrap(),
+        };
+        let request = || ScopedAppendReconcileRequest {
+            relation_id: "root-object",
+            identity_inputs: &identity,
+            access_phase: AccessPhase::Initial,
+            parent_token: None,
+            depth: 1,
+            max_bytes: 128,
+            origin: &origin,
+            force_contract_replay: false,
+        };
+
+        let bootstrap_pass = host.begin_pass().unwrap();
+        let bootstrap_observation = object.reconcile(&bootstrap_pass, request()).unwrap();
+        assert!(!bootstrap_observation.root_present);
+        let ScopedAppendDecodeOutcome::Ready(bootstrap_decoded) =
+            decode_scoped(&host, &mut object, &bootstrap_observation)
+        else {
+            panic!("missing bootstrap root should decode to an empty batch");
+        };
+        let mut admission = admission_lane(2, 0, 2);
+        if let Err(failure) =
+            admission.admit(&mut object, &bootstrap_observation, bootstrap_decoded)
+        {
+            panic!("bootstrap admission failed: {}", failure.error);
+        }
+        drop(bootstrap_pass);
+        object.complete_bootstrap().unwrap();
+        let projection = ScopedObservationProjectionSink::new(ScopedObservationProjectionLimits {
+            max_usage_v2_entities: 1,
+        })
+        .unwrap();
+        let mut delivery = ScopedObservationDeliveryLane::new(ScopedObservationDeliveryLimits {
+            max_semantic_events: 1,
+            max_retained_native_bytes: 0,
+            max_source_control_items: 1,
+        })
+        .unwrap();
+        let bootstrap_barrier = host
+            .offer_bootstrap_complete(&admission, &projection, &mut delivery, false, 50)
+            .unwrap();
+        assert_eq!(delivery.pop_next().unwrap().observer_sequence, 1);
+        let mut active = host
+            .bind_bootstrap_epoch_state(vec![object], admission, projection, &delivery)
+            .unwrap();
+        assert_eq!(active.scope_epoch(), 1);
+        assert!(!active.append_object("root-object").unwrap().root_present());
+
+        // Commit one live read into the bounded admission lane but do not
+        // offer it. Continuity loss must supersede this old-epoch backlog,
+        // even though admission has already advanced the source cursor.
+        std::fs::write(root.join("session.jsonl"), b"old-unoffered\n").unwrap();
+        let live_pass = host.begin_pass().unwrap();
+        let live_observation = {
+            let (active_object, _) = active
+                .append_object_and_admission_mut("root-object")
+                .unwrap();
+            active_object.reconcile(&live_pass, request()).unwrap()
+        };
+        let live_decoded = {
+            let (active_object, _) = active
+                .append_object_and_admission_mut("root-object")
+                .unwrap();
+            let ScopedAppendDecodeOutcome::Ready(decoded) =
+                decode_scoped(&host, active_object, &live_observation)
+            else {
+                panic!("live root should decode one bounded batch");
+            };
+            decoded
+        };
+        {
+            let (active_object, active_admission) = active
+                .append_object_and_admission_mut("root-object")
+                .unwrap();
+            if let Err(failure) =
+                active_admission.admit(active_object, &live_observation, live_decoded)
+            {
+                panic!("live admission failed: {}", failure.error);
+            }
+        }
+        drop(live_pass);
+        assert!(!active.admission_is_empty());
+        assert_eq!(
+            active
+                .append_object("root-object")
+                .unwrap()
+                .checkpoint()
+                .unwrap()
+                .committed_offset,
+            14
+        );
+
+        host.require_resync(&mut delivery, ScopedResyncReason::WatcherOverflow, 60)
+            .unwrap();
+        assert_eq!(delivery.pop_next().unwrap().observer_sequence, 2);
+        host.begin_resync(&mut delivery, 70).unwrap();
+        let mut stage = host
+            .open_scope_resync_stage(&mut active, &delivery)
+            .unwrap();
+        assert_eq!(stage.scope_epoch(), 2);
+        assert_eq!(
+            active
+                .append_object("root-object")
+                .unwrap()
+                .frozen_scope_epoch(),
+            Some(2)
+        );
+
+        std::fs::write(root.join("session.jsonl"), b"replacement\n").unwrap();
+        let replacement_pass = host.begin_pass().unwrap();
+        let replacement_observation = {
+            let (replacement_object, _) = stage
+                .append_object_and_admission_mut("root-object", &delivery)
+                .unwrap();
+            replacement_object
+                .reconcile(&replacement_pass, request())
+                .unwrap()
+        };
+        assert_eq!(
+            replacement_observation.phase,
+            ScopedAppendDeliveryPhase::Correction
+        );
+        assert!(replacement_observation.root_present);
+        let replacement_decoded = {
+            let (replacement_object, _) = stage
+                .append_object_and_admission_mut("root-object", &delivery)
+                .unwrap();
+            let ScopedAppendDecodeOutcome::Ready(decoded) =
+                decode_scoped(&host, replacement_object, &replacement_observation)
+            else {
+                panic!("replacement root should decode one bounded batch");
+            };
+            decoded
+        };
+        {
+            let (replacement_object, replacement_admission) = stage
+                .append_object_and_admission_mut("root-object", &delivery)
+                .unwrap();
+            if let Err(failure) = replacement_admission.admit(
+                replacement_object,
+                &replacement_observation,
+                replacement_decoded,
+            ) {
+                panic!("replacement admission failed: {}", failure.error);
+            }
+        }
+        drop(replacement_pass);
+        assert!(stage.reduce_next(&delivery).unwrap());
+        assert!(!stage.reduce_next(&delivery).unwrap());
+        let replacement = stage.prepare_snapshot(&delivery).unwrap();
+        assert_eq!(replacement.entity_count, 0);
+        assert!(replacement.events.is_empty());
+        assert!(stage.snapshot_fully_offered());
+
+        // observer.resync_started still owns the one control slot. Completion
+        // failure cannot activate any of the three staged state components.
+        assert_eq!(
+            host.offer_scope_resync_complete(&mut active, &mut stage, &mut delivery, true, 80,),
+            Err(ScopedReplacementStageError::Delivery(
+                ScopedDeliveryError::SourceControlQueueFull
+            ))
+        );
+        assert_eq!(active.scope_epoch(), 1);
+        assert_eq!(
+            active
+                .append_object("root-object")
+                .unwrap()
+                .frozen_scope_epoch(),
+            Some(2)
+        );
+        assert!(!active.admission_is_empty());
+        assert!(stage.admission_is_empty());
+        assert!(!stage.is_activated());
+
+        assert_eq!(delivery.pop_next().unwrap().observer_sequence, 3);
+        let resync_barrier = host
+            .offer_scope_resync_complete(&mut active, &mut stage, &mut delivery, true, 80)
+            .unwrap();
+        assert_eq!(active.scope_epoch(), 2);
+        let active_object = active.append_object("root-object").unwrap();
+        assert!(active_object.root_present());
+        assert_eq!(active_object.checkpoint().unwrap().committed_offset, 12);
+        assert_eq!(active_object.frozen_scope_epoch(), None);
+        assert_eq!(active_object.replacement_scope_epoch(), None);
+        assert!(!active_object.is_retired());
+        let retired_object = stage.append_object("root-object").unwrap();
+        assert!(retired_object.root_present());
+        assert_eq!(retired_object.checkpoint().unwrap().committed_offset, 14);
+        assert!(retired_object.is_retired());
+        assert!(stage.is_activated());
+        assert!(active.admission_is_empty());
+        assert!(stage.admission_is_empty());
+
+        let active_watermark = host.capture_epoch_watermark(&active, &delivery).unwrap();
+        assert_eq!(active_watermark.scope_epoch, 2);
+        assert_eq!(
+            active_watermark.source_coverage,
+            resync_barrier.source_coverage
+        );
+        assert_ne!(
+            resync_barrier.replacement_snapshot_digest,
+            bootstrap_barrier.replacement_snapshot_digest
+        );
+        let repeated = host
+            .offer_scope_resync_complete(&mut active, &mut stage, &mut delivery, false, 999)
+            .unwrap();
+        assert!(Arc::ptr_eq(&resync_barrier, &repeated));
+        assert_eq!(delivery.queued_source_control_items(), 1);
+
+        // A later re-overflow abandons the whole stage while retaining the
+        // last activated source state. The next epoch supersedes the frozen
+        // lineage, so the stale stage can never activate.
+        assert_eq!(delivery.pop_next().unwrap().observer_sequence, 4);
+        host.require_resync(
+            &mut delivery,
+            ScopedResyncReason::ExplicitConsumerRequest,
+            90,
+        )
+        .unwrap();
+        assert_eq!(delivery.pop_next().unwrap().observer_sequence, 5);
+        host.begin_resync(&mut delivery, 100).unwrap();
+        let mut stale_stage = host
+            .open_scope_resync_stage(&mut active, &delivery)
+            .unwrap();
+        assert_eq!(active.scope_epoch(), 2);
+        assert_eq!(
+            active
+                .append_object("root-object")
+                .unwrap()
+                .frozen_scope_epoch(),
+            Some(3)
+        );
+        assert_eq!(delivery.pop_next().unwrap().observer_sequence, 6);
+        host.require_resync(
+            &mut delivery,
+            ScopedResyncReason::TransportContinuityLoss,
+            110,
+        )
+        .unwrap();
+        assert!(matches!(
+            stale_stage.append_object_and_admission_mut("root-object", &delivery),
+            Err(ScopedReplacementStageError::NotResyncing)
+        ));
+        assert_eq!(active.scope_epoch(), 2);
+        assert_eq!(
+            active
+                .append_object("root-object")
+                .unwrap()
+                .checkpoint()
+                .unwrap()
+                .committed_offset,
+            12
+        );
+        assert_eq!(delivery.pop_next().unwrap().observer_sequence, 7);
+        host.begin_resync(&mut delivery, 120).unwrap();
+        let fresh_stage = host
+            .open_scope_resync_stage(&mut active, &delivery)
+            .unwrap();
+        assert_eq!(fresh_stage.scope_epoch(), 4);
+        assert_eq!(
+            active
+                .append_object("root-object")
+                .unwrap()
+                .frozen_scope_epoch(),
+            Some(4)
+        );
+        assert!(matches!(
+            stale_stage.append_object_and_admission_mut("root-object", &delivery),
+            Err(ScopedReplacementStageError::EpochMismatch)
+        ));
+        assert_eq!(
+            stale_stage
+                .append_object("root-object")
+                .unwrap()
+                .replacement_scope_epoch(),
+            Some(3)
+        );
+        assert_eq!(
+            fresh_stage
+                .append_object("root-object")
+                .unwrap()
+                .replacement_scope_epoch(),
+            Some(4)
+        );
+    }
+
+    #[test]
     fn scoped_bootstrap_barrier_waits_for_admission_drain() {
         let registry = supported_fixture_registry();
         let temp = TempDir::new().unwrap();
