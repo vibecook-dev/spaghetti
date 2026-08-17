@@ -928,7 +928,11 @@ Current landing status (2026-08-16):
   while returning it for retry, and only then commits the paired source cursor
   and decoder state. Recreation admits `source.created`, then `source.reset`,
   then corrected data. The lane ordinal is internal ordering, not public
-  `observer_sequence` or semantic identity;
+  `observer_sequence` or semantic identity. Its production drain projects the
+  front frame without transferring ownership first: semantic validation or
+  capacity failure leaves control/data order and byte/event accounting intact
+  for retry, while only an accepted projection releases the admitted frame.
+  Raw popping is compiled for conformance tests only;
 - the scoped decoder binding carries the same topology-neutral semantic context
   as durable decode; canonical fixture emissions replay to equal
   `FactRevisionId`/`SemanticRevisionRef` values even when numeric catalog IDs,
@@ -966,8 +970,11 @@ coverage-complete durable query exposure, the complete root/actor/source
 envelope mapper, the public ordered multiplexer and poll/readiness barriers,
 coverage, overflow/resync epochs, artifact mediation, cancellation waiting,
 the trusted native version-probe driver, and the complete public request are
-not yet implemented. The usage-v2 sink remains crate-private until those
-envelope/lifecycle contracts and the negotiated portable surface exist.
+not yet implemented. Projection acceptance is not yet the public `offered`
+boundary: the future bounded semantic delivery transaction must accept the
+returned events before advancing its watermark. The usage-v2 sink remains
+crate-private until those envelope/lifecycle contracts and the negotiated
+portable surface exist.
 
 ### D2. Claude scope composition
 

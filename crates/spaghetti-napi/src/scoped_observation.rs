@@ -259,11 +259,13 @@ struct QueuedDecodedFrame {
     retained_native_bytes: u64,
 }
 
+#[derive(Clone, Copy)]
 enum QueuedControlKind {
     Presence(ScopedAppendPresenceChange),
     Reset(ScopedAppendReset),
 }
 
+#[derive(Clone, Copy)]
 struct QueuedControlFrame {
     object_token: u64,
     lane_ordinal: u64,
@@ -444,29 +446,15 @@ impl ScopedObservationAdmissionLane {
         })
     }
 
+    /// Test-only low-level ownership transfer for admission/order conformance.
+    /// Production composition must use `project_next`, which keeps an admitted
+    /// frame queued when semantic validation fails.
+    #[cfg(test)]
     pub fn pop_next(&mut self) -> Option<ScopedQueuedObservationFrame> {
-        let take_control = match (self.controls.front(), self.decoded.front()) {
-            (Some(control), Some(decoded)) => control.lane_ordinal < decoded.lane_ordinal,
-            (Some(_), None) => true,
-            (None, Some(_)) => false,
-            (None, None) => return None,
-        };
+        let take_control = self.next_is_control()?;
         if take_control {
             let control = self.controls.pop_front().expect("control front exists");
-            return Some(match control.kind {
-                QueuedControlKind::Presence(change) => ScopedQueuedObservationFrame::Presence {
-                    object_token: control.object_token,
-                    lane_ordinal: control.lane_ordinal,
-                    phase: control.phase,
-                    change,
-                },
-                QueuedControlKind::Reset(reset) => ScopedQueuedObservationFrame::Reset {
-                    object_token: control.object_token,
-                    lane_ordinal: control.lane_ordinal,
-                    phase: control.phase,
-                    reset,
-                },
-            });
+            return Some(queued_control_observation(control));
         }
         let decoded = self.decoded.pop_front().expect("decoded front exists");
         self.queued_data_events = self
@@ -485,6 +473,80 @@ impl ScopedObservationAdmissionLane {
         })
     }
 
+    /// Project exactly one admitted frame while retaining ownership until the
+    /// common semantic reducer accepts it. A projection error leaves queue
+    /// order, capacity accounting, and the already-committed source cursor's
+    /// retry evidence unchanged; no frame can disappear between admission and
+    /// semantic reduction.
+    ///
+    /// Successful projection transfers the resulting semantic/control values
+    /// to the caller and releases this lane's decoded-frame accounting. The
+    /// future public multiplexer must still offer those returned values under
+    /// its own bounded delivery transaction before advancing an offered
+    /// watermark.
+    pub fn project_next(
+        &mut self,
+        projection: &mut ScopedObservationProjectionSink,
+    ) -> Result<Option<Vec<ScopedProjectedObservation>>, ScopedProjectionError> {
+        let Some(take_control) = self.next_is_control() else {
+            return Ok(None);
+        };
+        if take_control {
+            let control = self.controls.pop_front().expect("control front exists");
+            let frame = queued_control_observation(control);
+            return match projection.project(&frame) {
+                Ok(projected) => Ok(Some(projected)),
+                Err(error) => {
+                    self.controls.push_front(control);
+                    Err(error)
+                }
+            };
+        }
+
+        let decoded = self.decoded.pop_front().expect("decoded front exists");
+        let QueuedDecodedFrame {
+            object_token,
+            lane_ordinal,
+            phase,
+            item,
+            data_events,
+            retained_native_bytes,
+        } = decoded;
+        let frame = ScopedQueuedObservationFrame::Decoded {
+            object_token,
+            lane_ordinal,
+            phase,
+            item,
+        };
+        match projection.project(&frame) {
+            Ok(projected) => {
+                self.queued_data_events = self
+                    .queued_data_events
+                    .checked_sub(data_events)
+                    .expect("queued decoded event accounting cannot underflow");
+                self.queued_retained_native_bytes = self
+                    .queued_retained_native_bytes
+                    .checked_sub(retained_native_bytes)
+                    .expect("queued retained-native accounting cannot underflow");
+                Ok(Some(projected))
+            }
+            Err(error) => {
+                let ScopedQueuedObservationFrame::Decoded { item, .. } = frame else {
+                    unreachable!("the projected frame was constructed as decoded")
+                };
+                self.decoded.push_front(QueuedDecodedFrame {
+                    object_token,
+                    lane_ordinal,
+                    phase,
+                    item,
+                    data_events,
+                    retained_native_bytes,
+                });
+                Err(error)
+            }
+        }
+    }
+
     pub fn queued_data_events(&self) -> u64 {
         self.queued_data_events
     }
@@ -499,6 +561,32 @@ impl ScopedObservationAdmissionLane {
 
     pub fn is_empty(&self) -> bool {
         self.controls.is_empty() && self.decoded.is_empty()
+    }
+
+    fn next_is_control(&self) -> Option<bool> {
+        match (self.controls.front(), self.decoded.front()) {
+            (Some(control), Some(decoded)) => Some(control.lane_ordinal < decoded.lane_ordinal),
+            (Some(_), None) => Some(true),
+            (None, Some(_)) => Some(false),
+            (None, None) => None,
+        }
+    }
+}
+
+fn queued_control_observation(control: QueuedControlFrame) -> ScopedQueuedObservationFrame {
+    match control.kind {
+        QueuedControlKind::Presence(change) => ScopedQueuedObservationFrame::Presence {
+            object_token: control.object_token,
+            lane_ordinal: control.lane_ordinal,
+            phase: control.phase,
+            change,
+        },
+        QueuedControlKind::Reset(reset) => ScopedQueuedObservationFrame::Reset {
+            object_token: control.object_token,
+            lane_ordinal: control.lane_ordinal,
+            phase: control.phase,
+            reset,
+        },
     }
 }
 
@@ -2141,6 +2229,158 @@ mod projection_tests {
 
     fn bytes_hex(bytes: &[u8; 32]) -> String {
         bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+    }
+
+    fn admission_lane_with_decoded_frame(
+        frame: ScopedQueuedObservationFrame,
+    ) -> ScopedObservationAdmissionLane {
+        let ScopedQueuedObservationFrame::Decoded {
+            object_token,
+            lane_ordinal,
+            phase,
+            item,
+        } = frame
+        else {
+            panic!("expected decoded frame")
+        };
+        let (data_events, retained_native_bytes) = decoded_item_measurement(&item).unwrap();
+        let mut lane = ScopedObservationAdmissionLane::new(ScopedObservationQueueLimits {
+            max_data_events: data_events.max(1),
+            max_retained_native_bytes: retained_native_bytes,
+            max_control_items: 1,
+        })
+        .unwrap();
+        lane.decoded.push_back(QueuedDecodedFrame {
+            object_token,
+            lane_ordinal,
+            phase,
+            item,
+            data_events,
+            retained_native_bytes,
+        });
+        lane.queued_data_events = data_events;
+        lane.queued_retained_native_bytes = retained_native_bytes;
+        lane.next_lane_ordinal = lane_ordinal + 1;
+        lane
+    }
+
+    #[test]
+    fn scoped_projection_consumption_releases_only_accepted_frame_accounting() {
+        let record = record(1, 0, 10);
+        let frame = decoded_frame(
+            7,
+            ScopedAppendDeliveryPhase::Bootstrap,
+            &record,
+            usage_batch(&record, "response-1", 10, None),
+        );
+        let mut lane = admission_lane_with_decoded_frame(frame);
+        let queued_events = lane.queued_data_events();
+        let queued_bytes = lane.queued_retained_native_bytes();
+        let mut projection = sink(8);
+
+        let projected = lane.project_next(&mut projection).unwrap().unwrap();
+        let event = only_usage_event(projected);
+        assert_eq!(event.phase, ScopedAppendDeliveryPhase::Bootstrap);
+        assert_eq!(projection.usage_v2_entity_count(), 1);
+        assert_eq!(queued_events, 1);
+        assert_eq!(queued_bytes, 0);
+        assert_eq!(lane.queued_data_events(), 0);
+        assert_eq!(lane.queued_retained_native_bytes(), 0);
+        assert!(lane.is_empty());
+        assert_eq!(lane.project_next(&mut projection), Ok(None));
+    }
+
+    #[test]
+    fn scoped_projection_failure_keeps_decoded_frame_and_accounting_for_retry() {
+        let mut projection = sink(8);
+        let first_record = record(1, 0, 10);
+        let first_frame = decoded_frame(
+            1,
+            ScopedAppendDeliveryPhase::Bootstrap,
+            &first_record,
+            usage_batch(&first_record, "response-1", 10, None),
+        );
+        let first = only_usage_event(projection.project(&first_frame).unwrap());
+
+        let forged_record = record(1, 10, 20);
+        let forged_frame = decoded_frame(
+            2,
+            ScopedAppendDeliveryPhase::Live,
+            &forged_record,
+            usage_batch(&forged_record, "response-1", 20, Some(b"forged-revision")),
+        );
+        let mut lane = admission_lane_with_decoded_frame(forged_frame);
+        let queued_events = lane.queued_data_events();
+        let queued_bytes = lane.queued_retained_native_bytes();
+
+        for _ in 0..2 {
+            assert_eq!(
+                lane.project_next(&mut projection),
+                Err(ScopedProjectionError::InvalidSemanticRevision)
+            );
+            assert_eq!(lane.queued_data_events(), queued_events);
+            assert_eq!(lane.queued_retained_native_bytes(), queued_bytes);
+            assert!(!lane.is_empty());
+            assert_eq!(projection.usage_v2_entity_count(), 1);
+            assert_eq!(
+                projection.usage_v2_revision(&first.fact_id),
+                Some(first.semantic_revision_ref)
+            );
+        }
+
+        assert!(matches!(
+            lane.pop_next(),
+            Some(ScopedQueuedObservationFrame::Decoded {
+                lane_ordinal: 2,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn scoped_projection_failure_keeps_control_queued_for_retry() {
+        let mut projection = sink(8);
+        let record = record(1, 0, 10);
+        let frame = decoded_frame(
+            1,
+            ScopedAppendDeliveryPhase::Bootstrap,
+            &record,
+            usage_batch(&record, "response-1", 10, None),
+        );
+        only_usage_event(projection.project(&frame).unwrap());
+
+        let reset = ScopedAppendReset {
+            old_generation: 2,
+            new_generation: 3,
+            reason: AppendTransition::Truncated,
+        };
+        let mut lane = ScopedObservationAdmissionLane::new(ScopedObservationQueueLimits {
+            max_data_events: 1,
+            max_retained_native_bytes: 0,
+            max_control_items: 1,
+        })
+        .unwrap();
+        lane.controls.push_back(QueuedControlFrame {
+            object_token: OBJECT_TOKEN,
+            lane_ordinal: 2,
+            phase: ScopedAppendDeliveryPhase::Correction,
+            kind: QueuedControlKind::Reset(reset),
+        });
+
+        assert_eq!(
+            lane.project_next(&mut projection),
+            Err(ScopedProjectionError::InvalidResetState)
+        );
+        assert_eq!(lane.queued_control_items(), 1);
+        assert_eq!(projection.usage_v2_entity_count(), 1);
+        assert!(matches!(
+            lane.pop_next(),
+            Some(ScopedQueuedObservationFrame::Reset {
+                lane_ordinal: 2,
+                reset: queued,
+                ..
+            }) if queued == reset
+        ));
     }
 
     #[test]
