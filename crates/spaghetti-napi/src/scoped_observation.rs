@@ -121,12 +121,19 @@ pub struct ScopedAppendReset {
     pub reason: AppendTransition,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScopedAppendPresenceChange {
+    Created { generation: u64 },
+    Deleted { generation: u64 },
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub struct ScopedAppendObservation {
     object_token: u64,
     admission_token: u64,
     pub phase: ScopedAppendDeliveryPhase,
     pub reset_before_items: Option<ScopedAppendReset>,
+    pub presence_change: Option<ScopedAppendPresenceChange>,
     pub root_present: bool,
     pub became_missing: bool,
     pub read: AppendRead,
@@ -213,6 +220,12 @@ pub struct ScopedAdmissionReceipt {
 }
 
 pub enum ScopedQueuedObservationFrame {
+    Presence {
+        object_token: u64,
+        lane_ordinal: u64,
+        phase: ScopedAppendDeliveryPhase,
+        change: ScopedAppendPresenceChange,
+    },
     Reset {
         object_token: u64,
         lane_ordinal: u64,
@@ -230,7 +243,9 @@ pub enum ScopedQueuedObservationFrame {
 impl ScopedQueuedObservationFrame {
     pub fn lane_ordinal(&self) -> u64 {
         match self {
-            Self::Reset { lane_ordinal, .. } | Self::Decoded { lane_ordinal, .. } => *lane_ordinal,
+            Self::Presence { lane_ordinal, .. }
+            | Self::Reset { lane_ordinal, .. }
+            | Self::Decoded { lane_ordinal, .. } => *lane_ordinal,
         }
     }
 }
@@ -244,11 +259,16 @@ struct QueuedDecodedFrame {
     retained_native_bytes: u64,
 }
 
-struct QueuedResetFrame {
+enum QueuedControlKind {
+    Presence(ScopedAppendPresenceChange),
+    Reset(ScopedAppendReset),
+}
+
+struct QueuedControlFrame {
     object_token: u64,
     lane_ordinal: u64,
     phase: ScopedAppendDeliveryPhase,
-    reset: ScopedAppendReset,
+    kind: QueuedControlKind,
 }
 
 /// Two bounded internal capacity domains multiplexed by one admission ordinal.
@@ -257,7 +277,7 @@ struct QueuedResetFrame {
 pub struct ScopedObservationAdmissionLane {
     limits: ScopedObservationQueueLimits,
     decoded: VecDeque<QueuedDecodedFrame>,
-    controls: VecDeque<QueuedResetFrame>,
+    controls: VecDeque<QueuedControlFrame>,
     queued_data_events: u64,
     queued_retained_native_bytes: u64,
     next_lane_ordinal: u64,
@@ -323,7 +343,8 @@ impl ScopedObservationAdmissionLane {
             retained_native_bytes = next_bytes;
             measurements.push(measurement);
         }
-        let control_items = usize::from(observation.reset_before_items.is_some());
+        let control_items = usize::from(observation.presence_change.is_some())
+            + usize::from(observation.reset_before_items.is_some());
         if self
             .queued_data_events
             .checked_add(data_events)
@@ -376,12 +397,21 @@ impl ScopedObservationAdmissionLane {
         };
 
         let mut lane_ordinal = self.next_lane_ordinal;
-        if let Some(reset) = observation.reset_before_items {
-            self.controls.push_back(QueuedResetFrame {
+        if let Some(change) = observation.presence_change {
+            self.controls.push_back(QueuedControlFrame {
                 object_token: observation.object_token,
                 lane_ordinal,
                 phase: observation.phase,
-                reset,
+                kind: QueuedControlKind::Presence(change),
+            });
+            lane_ordinal += 1;
+        }
+        if let Some(reset) = observation.reset_before_items {
+            self.controls.push_back(QueuedControlFrame {
+                object_token: observation.object_token,
+                lane_ordinal,
+                phase: observation.phase,
+                kind: QueuedControlKind::Reset(reset),
             });
             lane_ordinal += 1;
         }
@@ -423,11 +453,19 @@ impl ScopedObservationAdmissionLane {
         };
         if take_control {
             let control = self.controls.pop_front().expect("control front exists");
-            return Some(ScopedQueuedObservationFrame::Reset {
-                object_token: control.object_token,
-                lane_ordinal: control.lane_ordinal,
-                phase: control.phase,
-                reset: control.reset,
+            return Some(match control.kind {
+                QueuedControlKind::Presence(change) => ScopedQueuedObservationFrame::Presence {
+                    object_token: control.object_token,
+                    lane_ordinal: control.lane_ordinal,
+                    phase: control.phase,
+                    change,
+                },
+                QueuedControlKind::Reset(reset) => ScopedQueuedObservationFrame::Reset {
+                    object_token: control.object_token,
+                    lane_ordinal: control.lane_ordinal,
+                    phase: control.phase,
+                    reset,
+                },
             });
         }
         let decoded = self.decoded.pop_front().expect("decoded front exists");
@@ -484,6 +522,12 @@ pub enum ScopedUsageV2Operation {
     Retract,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScopedUsageV2RetractionCause {
+    Reset(ScopedAppendReset),
+    SourceDeleted { generation: u64 },
+}
+
 /// Canonical occurrence/provenance retained by the store-free semantic
 /// reducer. Native payload bytes remain owned by the bounded admission frame;
 /// reducer state never duplicates them.
@@ -508,8 +552,8 @@ pub struct ScopedUsageV2Event {
     pub operation: ScopedUsageV2Operation,
     pub phase: ScopedAppendDeliveryPhase,
     pub source: ScopedUsageV2Source,
-    /// Present only for a reducer retraction caused by a source reset.
-    pub reset: Option<ScopedAppendReset>,
+    /// Present only for a reducer retraction caused by source lifecycle.
+    pub retraction: Option<ScopedUsageV2RetractionCause>,
     /// The accepted response revision. Retractions carry the revision being
     /// removed so actor/session routing never has to guess from a control.
     pub revision: UsageRevisionV2Fact,
@@ -521,6 +565,12 @@ pub struct ScopedUsageV2Event {
 /// semantic references.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ScopedProjectedObservation {
+    SourcePresence {
+        object_token: u64,
+        lane_ordinal: u64,
+        phase: ScopedAppendDeliveryPhase,
+        change: ScopedAppendPresenceChange,
+    },
     SourceReset {
         object_token: u64,
         lane_ordinal: u64,
@@ -556,6 +606,8 @@ pub enum ScopedProjectionError {
     StaleRevision,
     #[error("scoped source reset does not match retained reducer generation")]
     InvalidResetState,
+    #[error("scoped source presence change contradicts retained reducer state")]
+    InvalidPresenceState,
 }
 
 #[derive(Clone)]
@@ -594,6 +646,12 @@ impl ScopedObservationProjectionSink {
         frame: &ScopedQueuedObservationFrame,
     ) -> Result<Vec<ScopedProjectedObservation>, ScopedProjectionError> {
         match frame {
+            ScopedQueuedObservationFrame::Presence {
+                object_token,
+                lane_ordinal,
+                phase,
+                change,
+            } => self.project_presence(*object_token, *lane_ordinal, *phase, *change),
             ScopedQueuedObservationFrame::Reset {
                 object_token,
                 lane_ordinal,
@@ -626,20 +684,14 @@ impl ScopedObservationProjectionSink {
         phase: ScopedAppendDeliveryPhase,
         reset: ScopedAppendReset,
     ) -> Result<Vec<ScopedProjectedObservation>, ScopedProjectionError> {
-        if self.usage_v2.values().any(|state| {
-            state.object_token == object_token && state.generation != reset.old_generation
-        }) {
-            return Err(ScopedProjectionError::InvalidResetState);
-        }
-
-        let retracted = self
-            .usage_v2
-            .iter()
-            .filter_map(|(fact_id, state)| {
-                (state.object_token == object_token && state.generation == reset.old_generation)
-                    .then_some(*fact_id)
-            })
-            .collect::<Vec<_>>();
+        let retracted = self.retract_usage_v2(
+            object_token,
+            reset.old_generation,
+            lane_ordinal,
+            ScopedAppendDeliveryPhase::Correction,
+            ScopedUsageV2RetractionCause::Reset(reset),
+            ScopedProjectionError::InvalidResetState,
+        )?;
         let mut projected = Vec::with_capacity(retracted.len().saturating_add(1));
         projected.push(ScopedProjectedObservation::SourceReset {
             object_token,
@@ -647,25 +699,92 @@ impl ScopedObservationProjectionSink {
             phase,
             reset,
         });
+        projected.extend(retracted);
+        Ok(projected)
+    }
+
+    fn project_presence(
+        &mut self,
+        object_token: u64,
+        lane_ordinal: u64,
+        phase: ScopedAppendDeliveryPhase,
+        change: ScopedAppendPresenceChange,
+    ) -> Result<Vec<ScopedProjectedObservation>, ScopedProjectionError> {
+        let retracted = match change {
+            ScopedAppendPresenceChange::Created { .. } => {
+                if self
+                    .usage_v2
+                    .values()
+                    .any(|state| state.object_token == object_token)
+                {
+                    return Err(ScopedProjectionError::InvalidPresenceState);
+                }
+                Vec::new()
+            }
+            ScopedAppendPresenceChange::Deleted { generation } => self.retract_usage_v2(
+                object_token,
+                generation,
+                lane_ordinal,
+                phase,
+                ScopedUsageV2RetractionCause::SourceDeleted { generation },
+                ScopedProjectionError::InvalidPresenceState,
+            )?,
+        };
+        let mut projected = Vec::with_capacity(retracted.len().saturating_add(1));
+        projected.push(ScopedProjectedObservation::SourcePresence {
+            object_token,
+            lane_ordinal,
+            phase,
+            change,
+        });
+        projected.extend(retracted);
+        Ok(projected)
+    }
+
+    fn retract_usage_v2(
+        &mut self,
+        object_token: u64,
+        generation: u64,
+        lane_ordinal: u64,
+        phase: ScopedAppendDeliveryPhase,
+        cause: ScopedUsageV2RetractionCause,
+        mismatch_error: ScopedProjectionError,
+    ) -> Result<Vec<ScopedProjectedObservation>, ScopedProjectionError> {
+        if self
+            .usage_v2
+            .values()
+            .any(|state| state.object_token == object_token && state.generation != generation)
+        {
+            return Err(mismatch_error);
+        }
+        let retracted = self
+            .usage_v2
+            .iter()
+            .filter_map(|(fact_id, state)| {
+                (state.object_token == object_token && state.generation == generation)
+                    .then_some(*fact_id)
+            })
+            .collect::<Vec<_>>();
+        let mut projected = Vec::with_capacity(retracted.len());
         for fact_id in retracted {
             let state = self
                 .usage_v2
                 .remove(&fact_id)
-                .expect("reset retraction keys came from the same reducer map");
+                .expect("retraction keys came from the same reducer map");
             projected.push(ScopedProjectedObservation::UsageV2 {
                 lane_ordinal,
                 event: Box::new(ScopedUsageV2Event {
                     event_id: usage_v2_event_id(
                         ScopedUsageV2Operation::Retract,
                         &state.semantic,
-                        Some(reset),
+                        Some(cause),
                     ),
                     semantic_revision_ref: state.semantic.semantic_revision_ref,
                     fact_id: state.semantic.fact_id,
                     operation: ScopedUsageV2Operation::Retract,
-                    phase: ScopedAppendDeliveryPhase::Correction,
+                    phase,
                     source: state.source,
-                    reset: Some(reset),
+                    retraction: Some(cause),
                     revision: state.revision,
                 }),
             });
@@ -722,7 +841,7 @@ impl ScopedObservationProjectionSink {
                 operation: ScopedUsageV2Operation::Upsert,
                 phase,
                 source: state.source.clone(),
-                reset: None,
+                retraction: None,
                 revision: state.revision.clone(),
             };
             projected.push(ScopedProjectedObservation::UsageV2 {
@@ -811,7 +930,7 @@ fn fact_provenance_matches_evidence(
 fn usage_v2_event_id(
     operation: ScopedUsageV2Operation,
     semantic: &FactSemanticRevision,
-    reset: Option<ScopedAppendReset>,
+    retraction: Option<ScopedUsageV2RetractionCause>,
 ) -> ScopedObservationEventId {
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"spaghetti/rfc012d/observation-event-id\0");
@@ -827,10 +946,20 @@ fn usage_v2_event_id(
     hash_event_component(&mut hasher, semantic.fact_id.as_bytes());
     hash_event_component(&mut hasher, semantic.fact_revision_id.as_bytes());
     hash_event_component(&mut hasher, semantic.source_record_id.as_bytes());
-    if let Some(reset) = reset {
-        hasher.update(&reset.old_generation.to_be_bytes());
-        hasher.update(&reset.new_generation.to_be_bytes());
-        hasher.update(&[append_transition_tag(reset.reason)]);
+    match retraction {
+        Some(ScopedUsageV2RetractionCause::Reset(reset)) => {
+            hasher.update(&[1]);
+            hasher.update(&reset.old_generation.to_be_bytes());
+            hasher.update(&reset.new_generation.to_be_bytes());
+            hasher.update(&[append_transition_tag(reset.reason)]);
+        }
+        Some(ScopedUsageV2RetractionCause::SourceDeleted { generation }) => {
+            hasher.update(&[2]);
+            hasher.update(&generation.to_be_bytes());
+        }
+        None => {
+            hasher.update(&[0]);
+        }
     }
     ScopedObservationEventId(*hasher.finalize().as_bytes())
 }
@@ -1285,6 +1414,7 @@ impl ScopedKnownAppendObject {
         )?;
         let (
             reset_before_items,
+            presence_change,
             became_missing,
             next_checkpoint,
             next_root_present,
@@ -1292,9 +1422,21 @@ impl ScopedKnownAppendObject {
         ) = match &read {
             AppendRead::Missing => {
                 let became_missing = self.root_present;
-                (None, became_missing, self.checkpoint.clone(), false, false)
+                let presence_change = became_missing.then(|| ScopedAppendPresenceChange::Deleted {
+                    generation: previous_generation
+                        .expect("a present scoped append object owns a checkpoint generation"),
+                });
+                (
+                    None,
+                    presence_change,
+                    became_missing,
+                    self.checkpoint.clone(),
+                    false,
+                    false,
+                )
             }
             AppendRead::RetryTransient => (
+                None,
                 None,
                 false,
                 self.checkpoint.clone(),
@@ -1324,8 +1466,14 @@ impl ScopedKnownAppendObject {
                 } else {
                     None
                 };
+                let presence_change = (!self.root_present && self.bootstrap_observed).then_some(
+                    ScopedAppendPresenceChange::Created {
+                        generation: checkpoint.generation,
+                    },
+                );
                 (
                     reset,
+                    presence_change,
                     false,
                     Some(checkpoint.clone()),
                     true,
@@ -1357,6 +1505,7 @@ impl ScopedKnownAppendObject {
             admission_token,
             phase,
             reset_before_items,
+            presence_change,
             root_present: next_root_present,
             became_missing,
             read,
@@ -1966,7 +2115,10 @@ mod projection_tests {
         assert_eq!(retracted.operation, ScopedUsageV2Operation::Retract);
         assert_eq!(retracted.semantic_revision_ref, old.semantic_revision_ref);
         assert_eq!(retracted.fact_id, old.fact_id);
-        assert_eq!(retracted.reset, Some(reset));
+        assert_eq!(
+            retracted.retraction,
+            Some(ScopedUsageV2RetractionCause::Reset(reset))
+        );
         assert_eq!(projection.usage_v2_entity_count(), 0);
 
         let new_record = record(2, 0, 12);
@@ -1981,6 +2133,63 @@ mod projection_tests {
         assert_eq!(new.phase, ScopedAppendDeliveryPhase::Correction);
         assert_ne!(new.fact_id, old.fact_id);
         assert_eq!(projection.usage_v2_entity_count(), 1);
+    }
+
+    #[test]
+    fn scoped_usage_projection_deletion_retracts_state_before_later_creation() {
+        let mut projection = sink(8);
+        let old_record = record(1, 0, 10);
+        let old_frame = decoded_frame(
+            1,
+            ScopedAppendDeliveryPhase::Bootstrap,
+            &old_record,
+            usage_batch(&old_record, "response-1", 10, None),
+        );
+        let old = only_usage_event(projection.project(&old_frame).unwrap());
+
+        let deletion = ScopedAppendPresenceChange::Deleted { generation: 1 };
+        let deletion_frame = ScopedQueuedObservationFrame::Presence {
+            object_token: OBJECT_TOKEN,
+            lane_ordinal: 2,
+            phase: ScopedAppendDeliveryPhase::Live,
+            change: deletion,
+        };
+        let removed = projection.project(&deletion_frame).unwrap();
+        assert_eq!(removed.len(), 2);
+        assert!(matches!(
+            removed[0],
+            ScopedProjectedObservation::SourcePresence { change, .. } if change == deletion
+        ));
+        let ScopedProjectedObservation::UsageV2 {
+            event: retracted, ..
+        } = &removed[1]
+        else {
+            panic!("expected deletion-owned usage retraction");
+        };
+        assert_eq!(retracted.operation, ScopedUsageV2Operation::Retract);
+        assert_eq!(retracted.semantic_revision_ref, old.semantic_revision_ref);
+        assert_eq!(
+            retracted.retraction,
+            Some(ScopedUsageV2RetractionCause::SourceDeleted { generation: 1 })
+        );
+        assert_eq!(projection.usage_v2_entity_count(), 0);
+
+        let creation = ScopedAppendPresenceChange::Created { generation: 2 };
+        let creation_frame = ScopedQueuedObservationFrame::Presence {
+            object_token: OBJECT_TOKEN,
+            lane_ordinal: 3,
+            phase: ScopedAppendDeliveryPhase::Live,
+            change: creation,
+        };
+        assert_eq!(
+            projection.project(&creation_frame).unwrap(),
+            vec![ScopedProjectedObservation::SourcePresence {
+                object_token: OBJECT_TOKEN,
+                lane_ordinal: 3,
+                phase: ScopedAppendDeliveryPhase::Live,
+                change: creation,
+            }]
+        );
     }
 
     #[test]

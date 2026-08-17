@@ -905,7 +905,9 @@ Current landing status (2026-08-16):
   artifact-probe request;
 - one host-approved known object can be absent at attachment, created later,
   and read through the common symlink-safe confined file primitive only after
-  a declaration-sized reservation;
+  a declaration-sized reservation. After the initial snapshot, transitions in
+  either direction between present and missing become explicit bounded common
+  controls rather than implicit object-state changes;
 - the same granted root can run through the common append driver under a hard
   physical-byte ceiling; its in-memory kernel retains cursor/generation and
   partial-record state, prevents an early bootstrap barrier while more bounded
@@ -921,11 +923,12 @@ Current landing status (2026-08-16):
   advances neither, generation reset clears prior decoder state, and undeclared
   decoder dependency access fails closed;
 - a bounded internal admission lane independently limits decoded-event weight,
-  actual retained-native bytes, and reset controls; it admits reset before
-  replay data, rejects the whole unit on pressure while returning it for retry,
-  and only then commits the paired source cursor and decoder state. The lane
-  ordinal is internal ordering, not public `observer_sequence` or semantic
-  identity;
+  actual retained-native bytes, and source-presence/reset controls; it admits
+  lifecycle controls before replay data, rejects the whole unit on pressure
+  while returning it for retry, and only then commits the paired source cursor
+  and decoder state. Recreation admits `source.created`, then `source.reset`,
+  then corrected data. The lane ordinal is internal ordering, not public
+  `observer_sequence` or semantic identity;
 - the scoped decoder binding carries the same topology-neutral semantic context
   as durable decode; canonical fixture emissions replay to equal
   `FactRevisionId`/`SemanticRevisionRef` values even when numeric catalog IDs,
@@ -939,7 +942,9 @@ Current landing status (2026-08-16):
   reference plus canonical source occurrence, so `A -> B -> A` reuses `A`'s
   semantic reference but delivers the second `A` under a distinct event ID.
   A generation reset reaches the projection sink first, then deterministically
-  retracts every old-generation response before corrected replay;
+  retracts every old-generation response before corrected replay. Source
+  deletion likewise emits its lifecycle control before deterministic
+  deletion-owned retractions, so disappearance cannot leave usage state stale;
 - one pass is active at a time, a later pass receives fresh bounds, close is
   idempotent, and the frozen access report excludes paths, identity values, and
   content; and

@@ -192,12 +192,12 @@ mod tests {
     };
     use crate::scoped_observation::{
         ScopedAdmissionError, ScopedAppendDecodeOutcome, ScopedAppendDecoderConfig,
-        ScopedAppendDeliveryPhase, ScopedAppendObservation, ScopedAppendReconcileRequest,
-        ScopedDecodeFailureClass, ScopedDecodedAppendItem, ScopedKnownAppendObject,
-        ScopedKnownObjectGrant, ScopedKnownObjectReadRequest, ScopedObjectRead,
-        ScopedObservationAccessError, ScopedObservationAccessHost, ScopedObservationAccessRequest,
-        ScopedObservationAdmissionLane, ScopedObservationQueueLimits, ScopedQueuedObservationFrame,
-        ScopedSourceFailureClass,
+        ScopedAppendDeliveryPhase, ScopedAppendObservation, ScopedAppendPresenceChange,
+        ScopedAppendReconcileRequest, ScopedDecodeFailureClass, ScopedDecodedAppendItem,
+        ScopedKnownAppendObject, ScopedKnownObjectGrant, ScopedKnownObjectReadRequest,
+        ScopedObjectRead, ScopedObservationAccessError, ScopedObservationAccessHost,
+        ScopedObservationAccessRequest, ScopedObservationAdmissionLane,
+        ScopedObservationQueueLimits, ScopedQueuedObservationFrame, ScopedSourceFailureClass,
     };
     use crate::source::{
         AccessOperation, AccessOutcome, AccessPhase, AppendDelimitedConfig, AppendDelimitedFile,
@@ -876,6 +876,7 @@ mod tests {
         let missing = object.reconcile(&missing_pass, reconcile(64)).unwrap();
         assert_eq!(missing.phase, ScopedAppendDeliveryPhase::Bootstrap);
         assert!(!missing.root_present);
+        assert!(missing.presence_change.is_none());
         assert!(matches!(&missing.read, AppendRead::Missing));
         decode_and_admit_ignored(&host, &mut object, &missing);
         assert_eq!(
@@ -907,6 +908,10 @@ mod tests {
         let initial = object.reconcile(&initial_pass, reconcile(64)).unwrap();
         assert_eq!(initial.phase, ScopedAppendDeliveryPhase::Live);
         assert!(initial.reset_before_items.is_none());
+        assert_eq!(
+            initial.presence_change,
+            Some(ScopedAppendPresenceChange::Created { generation: 1 })
+        );
         let AppendRead::Batch {
             items,
             checkpoint,
@@ -949,6 +954,7 @@ mod tests {
         let continued_pass = host.begin_pass().unwrap();
         let continued = object.reconcile(&continued_pass, reconcile(64)).unwrap();
         assert_eq!(continued.phase, ScopedAppendDeliveryPhase::Live);
+        assert!(continued.presence_change.is_none());
         let AppendRead::Batch {
             items,
             transition,
@@ -971,6 +977,7 @@ mod tests {
         let correction_pass = host.begin_pass().unwrap();
         let correction = object.reconcile(&correction_pass, reconcile(64)).unwrap();
         assert_eq!(correction.phase, ScopedAppendDeliveryPhase::Correction);
+        assert!(correction.presence_change.is_none());
         let reset = correction.reset_before_items.unwrap();
         assert_eq!(reset.old_generation, 1);
         assert_eq!(reset.new_generation, 2);
@@ -987,6 +994,98 @@ mod tests {
         assert_eq!(object.checkpoint().unwrap().generation, 2);
         assert!(object.root_present());
         assert!(!object.bootstrap_active());
+        drop(correction_pass);
+
+        std::fs::remove_file(root.join("session.jsonl")).unwrap();
+        let deletion_pass = host.begin_pass().unwrap();
+        let deletion = object.reconcile(&deletion_pass, reconcile(64)).unwrap();
+        assert_eq!(deletion.phase, ScopedAppendDeliveryPhase::Live);
+        assert!(deletion.became_missing);
+        assert_eq!(
+            deletion.presence_change,
+            Some(ScopedAppendPresenceChange::Deleted { generation: 2 })
+        );
+        let ScopedAppendDecodeOutcome::Ready(deletion_decoded) =
+            decode_scoped(&host, &mut object, &deletion)
+        else {
+            panic!("missing source should decode to an empty admitted batch");
+        };
+        let mut deletion_lane = admission_lane(4, 0, 4);
+        let deletion_receipt = match deletion_lane.admit(&mut object, &deletion, deletion_decoded) {
+            Ok(receipt) => receipt,
+            Err(failure) => panic!("deletion admission failed: {}", failure.error),
+        };
+        assert_eq!(deletion_receipt.control_items, 1);
+        assert_eq!(deletion_receipt.data_events, 0);
+        assert!(matches!(
+            deletion_lane.pop_next(),
+            Some(ScopedQueuedObservationFrame::Presence {
+                change: ScopedAppendPresenceChange::Deleted { generation: 2 },
+                ..
+            })
+        ));
+        assert!(deletion_lane.is_empty());
+        assert!(!object.root_present());
+        drop(deletion_pass);
+
+        std::fs::write(root.join("session.jsonl"), b"recreated\n").unwrap();
+        let recreation_pass = host.begin_pass().unwrap();
+        let recreation = object.reconcile(&recreation_pass, reconcile(64)).unwrap();
+        assert_eq!(recreation.phase, ScopedAppendDeliveryPhase::Correction);
+        assert_eq!(
+            recreation.presence_change,
+            Some(ScopedAppendPresenceChange::Created { generation: 3 })
+        );
+        assert_eq!(
+            recreation.reset_before_items,
+            Some(crate::scoped_observation::ScopedAppendReset {
+                old_generation: 2,
+                new_generation: 3,
+                reason: AppendTransition::IdentityChanged,
+            })
+        );
+        let ScopedAppendDecodeOutcome::Ready(recreation_decoded) =
+            decode_scoped(&host, &mut object, &recreation)
+        else {
+            panic!("recreated source should decode one correction batch");
+        };
+        let mut recreation_lane = admission_lane(4, 0, 4);
+        let recreation_receipt =
+            match recreation_lane.admit(&mut object, &recreation, recreation_decoded) {
+                Ok(receipt) => receipt,
+                Err(failure) => panic!("recreation admission failed: {}", failure.error),
+            };
+        assert_eq!(recreation_receipt.control_items, 2);
+        assert!(matches!(
+            recreation_lane.pop_next(),
+            Some(ScopedQueuedObservationFrame::Presence {
+                lane_ordinal: 1,
+                change: ScopedAppendPresenceChange::Created { generation: 3 },
+                ..
+            })
+        ));
+        assert!(matches!(
+            recreation_lane.pop_next(),
+            Some(ScopedQueuedObservationFrame::Reset {
+                lane_ordinal: 2,
+                reset: crate::scoped_observation::ScopedAppendReset {
+                    old_generation: 2,
+                    new_generation: 3,
+                    reason: AppendTransition::IdentityChanged,
+                },
+                ..
+            })
+        ));
+        assert!(matches!(
+            recreation_lane.pop_next(),
+            Some(ScopedQueuedObservationFrame::Decoded {
+                lane_ordinal: 3,
+                ..
+            })
+        ));
+        assert!(recreation_lane.is_empty());
+        assert!(object.root_present());
+        assert_eq!(object.checkpoint().unwrap().generation, 3);
     }
 
     #[test]
