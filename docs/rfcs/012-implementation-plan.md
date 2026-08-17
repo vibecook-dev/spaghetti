@@ -1065,8 +1065,7 @@ Current landing status (2026-08-17):
   attachment-local sequence. Repeated start calls return the same control,
   cross-root calls fail, and the new epoch accepts only `Correction`-phase
   traffic. Live and bootstrap traffic cannot leak into replacement. Atomic
-  family-manifest staging, completion validation/swap, and re-overflow recovery
-  remain subsequent D3 work;
+  whole-scope staging/swap and re-overflow recovery remain subsequent D3 work;
 - replacement replay now reduces into a distinct empty, epoch-bound projection
   stage instead of the still-visible active reducer. The ordinary offered path
   rejects active-reducer mutation while continuity is `Resyncing`; the stage
@@ -1077,8 +1076,24 @@ Current landing status (2026-08-17):
   repeated/evolving native response cannot become duplicate replacement state.
   The old reducer remains byte-for-byte unchanged through publication, and
   total observer sequencing keeps `observer.resync_started` ahead of every
-  snapshot entity. Family manifests, completion validation, and the atomic
-  active/staged swap remain subsequent D3 work;
+  snapshot entity;
+- the isolated stage now completes its first family-qualified replacement
+  protocol for `runtime.usage-v2`. The barrier manifest binds the declared
+  family/version, latest-contribution representation, source-derived
+  completeness, entity count, and semantic digest. A separate deterministic
+  replacement-snapshot digest binds that manifest to root presence, common
+  source coverage, membership, and explicit object errors while excluding
+  epoch, observer sequence, delivery phase, and observation time. Completion
+  is refused until the frozen snapshot is fully offered and the exact current
+  coverage watermark is drained; a forged digest, changed state, or saturated
+  control lane advances neither sequence nor reducer ownership. On successful
+  `observer.resync_complete` offer, continuity becomes `Valid` and the staged
+  projection replaces the active projection through an infallible swap.
+  Repeated completion returns the retained barrier without redelivery, and a
+  later invalidation uses its coverage snapshot as the new baseline. This is
+  still an internal projection-level seam: complete multi-family manifests and
+  atomic composition of replacement discovery, object/cursor/decoder state,
+  coverage membership, and re-overflow remain subsequent D3 work;
 - every admitted append observation now stages one bounded RFC 012A `Decode`
   coverage update using the same source-instance/stream/object coordinates and
   append-cursor representation as durable ingestion. Stable initial absence,
@@ -1118,13 +1133,14 @@ coverage-complete durable query exposure, affiliation/actor enrichment and
 envelope variants beyond the current usage/source-lifecycle families, the
 public async event drain plus poll/ready facade and complete scope coverage,
 complete declared-scope membership and family coverage beyond usage-v2,
-new-epoch family manifests, resync completion, and atomic replacement swap,
+complete multi-family replacement manifests, whole-scope cursor/state swap,
+and failed/re-overflowed resync,
 artifact mediation, cancellation waiting,
 the trusted native version-probe/identity-input drivers, and the complete
 public request are not yet implemented. The internal offered boundary is now
-transactional, but it cannot become a public `offered` watermark until complete
-scope-membership/barrier coverage, resync completion, and the consumer-applied
-acknowledgement are defined. The
+transactional, but it cannot become a public `offered` watermark until
+complete scope-membership/barrier coverage, portable resync completion, and
+the consumer-applied acknowledgement are defined. The
 usage-v2 sink and delivery lane remain crate-private until those envelope/
 lifecycle contracts and the negotiated portable surface exist.
 
@@ -1179,10 +1195,10 @@ core now emits common Decode and eligible usage-v2 `SourceCoverageSet`s at that
 sequence, binds every set to the pre-access resolved root session, and carries
 that root's canonical session/external-reference/root-run tuple. It is not the
 public poll/bootstrap/resync contract and does not yet prove complete declared-
-scope discovery. The public control multiplexer/facade, new-epoch replacement
-manifest/completion state, complete scope-membership source/family
-sets, coverage-complete family manifest, atomic staged swap, and multi-observer
-isolation remain unimplemented. Internally,
+scope discovery. The public control multiplexer/facade, whole-scope replacement
+composition, complete scope-membership source/family sets, complete
+multi-family manifest, whole-scope staged swap, and multi-observer isolation
+remain unimplemented. Internally,
 reducer mutation, admitted-frame release, bounded delivery admission, and
 eligible coverage promotion now share one retry-safe offered transaction:
 exact projected capacity is checked before mutation, queue pressure changes no
@@ -1198,7 +1214,7 @@ occurrence and observed/native time, and distinguishes native records, common
 reducer corrections, and engine controls. It rejects cross-root typed events
 and mismatched native-session claims. This freezes the current
 usage/source-lifecycle and initial resync envelope vocabulary but is not yet the
-public multiplexer/facade, resync-completion control and manifest, complete
+public multiplexer/facade, complete portable resync/scope manifest, complete
 actor-affiliation reducer, or an applied acknowledgement. Epoch 1 now has an
 ordered, snapshot-identified bootstrap-completion control and retained
 idempotent barrier at the offered boundary; it remains internal until
@@ -1216,8 +1232,12 @@ sequence; only correction traffic may follow in the replacement epoch. Family
 snapshot staging is now isolated from the active reducer: replay is reduced
 silently into an empty epoch-bound sink and its frozen usage snapshot publishes
 only one latest correction per response through bounded retry-safe offers.
-Manifest validation, the completion barrier, atomic active/staged publication,
-and re-overflow handling remain open.
+The first usage-v2 manifest and deterministic replacement digest are validated
+against the exact common coverage watermark before ordered
+`observer.resync_complete`; control pressure is retry-safe, and successful offer
+atomically activates the staged projection. Complete multi-family and D-owned
+manifests, whole-scope discovery/cursor/decoder-state swap, consumer applied
+acknowledgement, and re-overflow handling remain open.
 
 ### D4. SDK and Chopsticks migration
 

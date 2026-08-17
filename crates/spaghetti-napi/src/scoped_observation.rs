@@ -1029,6 +1029,7 @@ fn queued_control_observation(control: QueuedControlFrame) -> ScopedQueuedObserv
 pub const SCOPED_OBSERVATION_EVENT_CONTRACT_VERSION: u32 = 1;
 pub const SCOPED_REPLACEMENT_DIGEST_CONTRACT_VERSION: u32 = 1;
 pub const SCOPED_BOOTSTRAP_BARRIER_CONTRACT_VERSION: u32 = 1;
+pub const SCOPED_RESYNC_BARRIER_CONTRACT_VERSION: u32 = 1;
 pub const RUNTIME_USAGE_V2_FACT_FAMILY_CONTRACT_VERSION: u32 = 1;
 pub const SCOPED_INITIAL_SCOPE_EPOCH: u64 = 1;
 
@@ -1054,6 +1055,15 @@ impl ScopedReplacementSemanticDigest {
 pub struct ScopedBootstrapSnapshotDigest([u8; 32]);
 
 impl ScopedBootstrapSnapshotDigest {
+    pub fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct ScopedReplacementSnapshotDigest([u8; 32]);
+
+impl ScopedReplacementSnapshotDigest {
     pub fn as_bytes(&self) -> &[u8; 32] {
         &self.0
     }
@@ -1120,6 +1130,21 @@ pub struct ScopedUsageV2ReplacementSnapshot {
     pub events: Vec<ScopedUsageV2Event>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ScopedReplacementRepresentation {
+    UsageLatestContributionPerResponse,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScopedReplacementFamilyManifest {
+    pub fact_family: String,
+    pub contract_version: u32,
+    pub replacement_representation: ScopedReplacementRepresentation,
+    pub completeness: CoverageSetCompleteness,
+    pub entity_or_event_count: u64,
+    pub semantic_digest: ScopedReplacementSemanticDigest,
+}
+
 /// Immutable engine-level bootstrap admission barrier. Queue state is captured
 /// immediately after the completion control itself enters the ordered lane;
 /// it proves offer through `barrier_sequence`, never consumer application.
@@ -1176,6 +1201,27 @@ pub struct ScopedResyncStarted {
     pub replacement: ScopedReplacementMode,
 }
 
+/// Offered-boundary completion of one isolated replacement. The family
+/// manifest makes absence actionable for the families this provisional sink
+/// supports; source coverage preserves partial/unavailable evidence instead
+/// of silently carrying old-epoch entities forward.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScopedResyncBarrier {
+    pub barrier_contract_version: u32,
+    pub root: ScopedObservationRootIdentity,
+    pub scope_epoch: u64,
+    pub replacement: ScopedReplacementMode,
+    pub started_control_sequence: u64,
+    pub barrier_sequence: u64,
+    pub replacement_snapshot_digest: ScopedReplacementSnapshotDigest,
+    pub coverage_snapshot_digest: ScopedBootstrapSnapshotDigest,
+    pub family_manifest: Vec<ScopedReplacementFamilyManifest>,
+    pub source_coverage: Vec<SourceCoverageSet>,
+    pub explicit_object_errors: Vec<CoverageError>,
+    pub queue_state: ScopedObservationDeliveryState,
+    pub root_present: bool,
+}
+
 /// First common semantic output of the scoped observation path. The reset
 /// frame remains a control input for the future ordered public multiplexer;
 /// usage events already have final deterministic event IDs and canonical
@@ -1222,6 +1268,12 @@ pub enum ScopedProjectedObservation {
         event_id: ScopedObservationEventId,
         control: Arc<ScopedResyncStarted>,
     },
+    ObserverResyncComplete {
+        source: ScopedSourceObjectIdentity,
+        observed_at: i64,
+        event_id: ScopedObservationEventId,
+        barrier: Arc<ScopedResyncBarrier>,
+    },
 }
 
 impl ScopedProjectedObservation {
@@ -1232,6 +1284,7 @@ impl ScopedProjectedObservation {
             Self::ObserverBootstrapComplete { event_id, .. } => *event_id,
             Self::ObserverResyncRequired { event_id, .. } => *event_id,
             Self::ObserverResyncStarted { event_id, .. } => *event_id,
+            Self::ObserverResyncComplete { event_id, .. } => *event_id,
         }
     }
 
@@ -1242,7 +1295,8 @@ impl ScopedProjectedObservation {
             | Self::SourceReset { .. }
             | Self::ObserverBootstrapComplete { .. }
             | Self::ObserverResyncRequired { .. }
-            | Self::ObserverResyncStarted { .. } => None,
+            | Self::ObserverResyncStarted { .. }
+            | Self::ObserverResyncComplete { .. } => None,
         }
     }
 
@@ -1253,6 +1307,7 @@ impl ScopedProjectedObservation {
             Self::ObserverBootstrapComplete { .. } => ScopedAppendDeliveryPhase::Bootstrap,
             Self::ObserverResyncRequired { .. } => ScopedAppendDeliveryPhase::Live,
             Self::ObserverResyncStarted { .. } => ScopedAppendDeliveryPhase::Correction,
+            Self::ObserverResyncComplete { .. } => ScopedAppendDeliveryPhase::Correction,
         }
     }
 
@@ -1263,6 +1318,7 @@ impl ScopedProjectedObservation {
             Self::ObserverBootstrapComplete { source, .. } => source,
             Self::ObserverResyncRequired { source, .. } => source,
             Self::ObserverResyncStarted { source, .. } => source,
+            Self::ObserverResyncComplete { source, .. } => source,
         }
     }
 
@@ -1275,6 +1331,7 @@ impl ScopedProjectedObservation {
             Self::ObserverBootstrapComplete { observed_at, .. } => *observed_at,
             Self::ObserverResyncRequired { observed_at, .. } => *observed_at,
             Self::ObserverResyncStarted { observed_at, .. } => *observed_at,
+            Self::ObserverResyncComplete { observed_at, .. } => *observed_at,
         }
     }
 }
@@ -1449,6 +1506,9 @@ pub enum ScopedObservationEvent {
     },
     ObserverResyncStarted {
         control: Arc<ScopedResyncStarted>,
+    },
+    ObserverResyncComplete {
+        barrier: Arc<ScopedResyncBarrier>,
     },
 }
 
@@ -1715,6 +1775,42 @@ impl ScopedObservationEnvelopeMapper {
                         completeness: ContractCompleteness::Complete,
                     },
                     event: ScopedObservationEvent::ObserverResyncStarted { control },
+                    native_evidence: ScopedNativeEvidence::EngineControl,
+                }
+            }
+            ScopedProjectedObservation::ObserverResyncComplete {
+                observed_at,
+                barrier,
+                ..
+            } => {
+                if semantic_revision_ref.is_some()
+                    || barrier.barrier_contract_version != SCOPED_RESYNC_BARRIER_CONTRACT_VERSION
+                    || barrier.root != self.root
+                    || barrier.scope_epoch != scope_epoch
+                    || barrier.replacement != ScopedReplacementMode::FullSnapshot
+                    || barrier.barrier_sequence != observer_sequence
+                    || barrier.started_control_sequence >= observer_sequence
+                    || barrier.queue_state.scope_epoch != scope_epoch
+                    || barrier.queue_state.offered_through_sequence < observer_sequence
+                    || barrier.queue_state.continuity != ScopedObservationContinuity::Valid
+                {
+                    return Err(ScopedEnvelopeError::DeliveryMismatch);
+                }
+                ScopedMappedEnvelopeParts {
+                    actor_run_key: self.root.root_actor_run_key,
+                    actor_attribution: ScopedActorAttribution::ScopeFallback {
+                        reason: ScopedActorFallbackReason::ObserverLifecycleControl,
+                    },
+                    source: scoped_control_envelope_source(&delivered.source, scope_epoch),
+                    native_time: None,
+                    observed_at,
+                    evidence: ScopedEnvelopeEvidence {
+                        authority: ScopedEnvelopeEvidenceAuthority::EngineControl,
+                        quality: QualifiedValueQuality::Derived,
+                        effective_at: None,
+                        completeness: ContractCompleteness::Complete,
+                    },
+                    event: ScopedObservationEvent::ObserverResyncComplete { barrier },
                     native_evidence: ScopedNativeEvidence::EngineControl,
                 }
             }
@@ -1993,6 +2089,7 @@ pub struct ScopedObservationDeliveryLane {
     bootstrap_barrier: Option<Arc<ScopedBootstrapBarrier>>,
     resync_required: Option<Arc<ScopedResyncRequired>>,
     resync_started: Option<Arc<ScopedResyncStarted>>,
+    resync_barrier: Option<Arc<ScopedResyncBarrier>>,
 }
 
 impl ScopedObservationDeliveryLane {
@@ -2011,6 +2108,7 @@ impl ScopedObservationDeliveryLane {
             bootstrap_barrier: None,
             resync_required: None,
             resync_started: None,
+            resync_barrier: None,
         })
     }
 
@@ -2228,6 +2326,12 @@ impl ScopedObservationDeliveryLane {
         if barrier.root != *root {
             return Err(ScopedContinuityError::RootMismatch);
         }
+        let baseline_snapshot_digest = self
+            .resync_barrier
+            .as_ref()
+            .map_or(barrier.snapshot_digest, |value| {
+                value.coverage_snapshot_digest
+            });
 
         let discarded_semantic_events = u64::try_from(self.semantic.len())
             .map_err(|_| ScopedContinuityError::Delivery(ScopedDeliveryError::CapacityExhausted))?;
@@ -2247,14 +2351,14 @@ impl ScopedObservationDeliveryLane {
             invalid_scope_epoch: self.scope_epoch,
             control_sequence,
             last_contiguous_sequence: self.delivered_through_sequence,
-            baseline_snapshot_digest: barrier.snapshot_digest,
+            baseline_snapshot_digest,
             reason,
             discarded_semantic_events,
             discarded_source_controls,
             discarded_retained_native_bytes: self.queued_retained_native_bytes,
         });
         let event_id =
-            resync_required_event_id(root, self.scope_epoch, reason, barrier.snapshot_digest);
+            resync_required_event_id(root, self.scope_epoch, reason, baseline_snapshot_digest);
 
         // Invalidation is the one operation allowed to bypass ordinary FIFO:
         // all not-yet-delivered old-epoch values are explicitly superseded by
@@ -2348,6 +2452,104 @@ impl ScopedObservationDeliveryLane {
         Ok(control)
     }
 
+    fn offer_resync_barrier(
+        &mut self,
+        root: &ScopedObservationRootIdentity,
+        watermark: ScopedObservationWatermarkCore,
+        family_manifest: Vec<ScopedReplacementFamilyManifest>,
+        expected_replacement_snapshot_digest: ScopedReplacementSnapshotDigest,
+        root_present: bool,
+        observed_at: i64,
+    ) -> Result<Arc<ScopedResyncBarrier>, ScopedReplacementStageError> {
+        let started = self
+            .resync_started
+            .as_ref()
+            .ok_or(ScopedReplacementStageError::NotResyncing)?;
+        if started.root != *root {
+            return Err(ScopedReplacementStageError::RootMismatch);
+        }
+        let before = self.state();
+        if before.continuity != ScopedObservationContinuity::Resyncing
+            || watermark.root != *root
+            || watermark.scope_epoch != before.scope_epoch
+            || watermark.offered_through_sequence != before.offered_through_sequence
+            || watermark.queue_state != before
+            || started.new_scope_epoch != before.scope_epoch
+            || self
+                .semantic
+                .iter()
+                .chain(self.source_controls.iter())
+                .any(|queued| queued.value.phase() != ScopedAppendDeliveryPhase::Correction)
+        {
+            return Err(ScopedReplacementStageError::StateChanged);
+        }
+        if replacement_snapshot_digest(
+            root,
+            root_present,
+            &family_manifest,
+            &watermark.source_coverage,
+            &watermark.explicit_object_errors,
+        )? != expected_replacement_snapshot_digest
+        {
+            return Err(ScopedReplacementStageError::InvalidManifest);
+        }
+        let barrier_sequence = self.next_observer_sequence;
+        let queued_source_control_items = before
+            .queued_source_control_items
+            .checked_add(1)
+            .ok_or(ScopedReplacementStageError::CapacityExhausted)?;
+        let queue_state = ScopedObservationDeliveryState {
+            scope_epoch: before.scope_epoch,
+            offered_through_sequence: barrier_sequence,
+            delivered_through_sequence: before.delivered_through_sequence,
+            continuity: ScopedObservationContinuity::Valid,
+            queued_semantic_events: before.queued_semantic_events,
+            queued_retained_native_bytes: before.queued_retained_native_bytes,
+            queued_source_control_items,
+        };
+        let coverage_snapshot_digest = bootstrap_snapshot_digest(
+            root,
+            root_present,
+            &watermark.source_coverage,
+            &watermark.explicit_object_errors,
+        )
+        .map_err(|_| ScopedReplacementStageError::InvalidManifest)?;
+        let barrier = Arc::new(ScopedResyncBarrier {
+            barrier_contract_version: SCOPED_RESYNC_BARRIER_CONTRACT_VERSION,
+            root: root.clone(),
+            scope_epoch: before.scope_epoch,
+            replacement: ScopedReplacementMode::FullSnapshot,
+            started_control_sequence: started.control_sequence,
+            barrier_sequence,
+            replacement_snapshot_digest: expected_replacement_snapshot_digest,
+            coverage_snapshot_digest,
+            family_manifest,
+            source_coverage: watermark.source_coverage,
+            explicit_object_errors: watermark.explicit_object_errors,
+            queue_state,
+            root_present,
+        });
+        let source = observer_control_source(root)
+            .map_err(|()| ScopedReplacementStageError::InvalidManifest)?;
+        let event_id = resync_complete_event_id(root, &barrier);
+        let receipt = self
+            .offer_projected(vec![ScopedProjectedObservation::ObserverResyncComplete {
+                source,
+                observed_at,
+                event_id,
+                barrier: Arc::clone(&barrier),
+            }])
+            .map_err(|failure| ScopedReplacementStageError::Delivery(failure.error))?;
+        debug_assert_eq!(receipt.first_offered_sequence, Some(barrier_sequence));
+        debug_assert_eq!(receipt.offered_through_sequence, barrier_sequence);
+
+        self.resync_required = None;
+        self.resync_started = None;
+        self.resync_barrier = Some(Arc::clone(&barrier));
+        debug_assert_eq!(self.state(), barrier.queue_state);
+        Ok(barrier)
+    }
+
     pub fn pop_next(&mut self) -> Option<ScopedDeliveredObservation> {
         let take_source_control = match (self.source_controls.front(), self.semantic.front()) {
             (Some(control), Some(semantic)) => {
@@ -2431,6 +2633,10 @@ impl ScopedObservationDeliveryLane {
         self.resync_started.as_ref().map(Arc::clone)
     }
 
+    pub fn resync_barrier(&self) -> Option<Arc<ScopedResyncBarrier>> {
+        self.resync_barrier.as_ref().map(Arc::clone)
+    }
+
     pub fn is_empty(&self) -> bool {
         self.semantic.is_empty() && self.source_controls.is_empty()
     }
@@ -2507,7 +2713,8 @@ fn projected_observation_measurement(value: &ScopedProjectedObservation) -> (boo
         | ScopedProjectedObservation::SourceReset { .. }
         | ScopedProjectedObservation::ObserverBootstrapComplete { .. }
         | ScopedProjectedObservation::ObserverResyncRequired { .. }
-        | ScopedProjectedObservation::ObserverResyncStarted { .. } => (false, 0),
+        | ScopedProjectedObservation::ObserverResyncStarted { .. }
+        | ScopedProjectedObservation::ObserverResyncComplete { .. } => (false, 0),
     }
 }
 
@@ -2982,8 +3189,16 @@ pub enum ScopedReplacementStageError {
     SnapshotAlreadyPrepared,
     #[error("scoped replacement snapshot has not been frozen")]
     SnapshotNotPrepared,
+    #[error("scoped replacement snapshot has not crossed the offered boundary")]
+    SnapshotNotFullyOffered,
     #[error("scoped replacement snapshot accounting is exhausted")]
     CapacityExhausted,
+    #[error("scoped replacement coverage is not ready: {0}")]
+    Coverage(ScopedCoverageAssemblyError),
+    #[error("scoped replacement family manifest is invalid")]
+    InvalidManifest,
+    #[error("scoped replacement state changed before completion could be offered")]
+    StateChanged,
     #[error("scoped replacement reduction failed: {0}")]
     Projection(ScopedProjectionError),
     #[error("scoped replacement delivery failed: {0}")]
@@ -3004,6 +3219,7 @@ pub struct ScopedObservationReplacementStage {
     scope_epoch: u64,
     projection: ScopedObservationProjectionSink,
     prepared: Option<ScopedPreparedReplacementSnapshot>,
+    completed: Option<Arc<ScopedResyncBarrier>>,
 }
 
 impl ScopedObservationReplacementStage {
@@ -3018,6 +3234,7 @@ impl ScopedObservationReplacementStage {
             projection: ScopedObservationProjectionSink::new_replacement(limits, scope_epoch)
                 .map_err(ScopedReplacementStageError::Projection)?,
             prepared: None,
+            completed: None,
         })
     }
 
@@ -3124,6 +3341,81 @@ impl ScopedObservationReplacementStage {
 
     pub fn usage_v2_entity_count(&self) -> usize {
         self.projection.usage_v2_entity_count()
+    }
+
+    fn family_manifest(
+        &self,
+        source_coverage: &[SourceCoverageSet],
+    ) -> Result<Vec<ScopedReplacementFamilyManifest>, ScopedReplacementStageError> {
+        let prepared = self
+            .prepared
+            .as_ref()
+            .ok_or(ScopedReplacementStageError::SnapshotNotPrepared)?;
+        let mut usage_completeness = None;
+        for coverage in source_coverage {
+            match &coverage.coverage_domain {
+                CoverageDomain::Decode => {}
+                CoverageDomain::FactFamily { family, version }
+                    if family == "runtime.usage-v2"
+                        && *version == RUNTIME_USAGE_V2_FACT_FAMILY_CONTRACT_VERSION =>
+                {
+                    usage_completeness =
+                        Some(usage_completeness.map_or(coverage.completeness, |current| {
+                            merge_coverage_completeness(current, coverage.completeness)
+                        }));
+                }
+                CoverageDomain::FactFamily { .. } | CoverageDomain::ProjectionPack { .. } => {
+                    return Err(ScopedReplacementStageError::InvalidManifest);
+                }
+            }
+        }
+        let Some(completeness) = usage_completeness else {
+            return if prepared.usage_v2.entity_count == 0 {
+                Ok(Vec::new())
+            } else {
+                Err(ScopedReplacementStageError::InvalidManifest)
+            };
+        };
+        Ok(vec![ScopedReplacementFamilyManifest {
+            fact_family: "runtime.usage-v2".to_string(),
+            contract_version: prepared.usage_v2.fact_family_contract_version,
+            replacement_representation:
+                ScopedReplacementRepresentation::UsageLatestContributionPerResponse,
+            completeness,
+            entity_or_event_count: prepared.usage_v2.entity_count,
+            semantic_digest: prepared.usage_v2.semantic_digest,
+        }])
+    }
+
+    fn validate_activation(
+        &self,
+        active: &ScopedObservationProjectionSink,
+    ) -> Result<(), ScopedReplacementStageError> {
+        if self.completed.is_some()
+            || active.lifecycle != ScopedProjectionLifecycle::Active
+            || active.limits != self.projection.limits
+        {
+            return Err(ScopedReplacementStageError::ActiveProjectionRequired);
+        }
+        if self.projection.lifecycle
+            != (ScopedProjectionLifecycle::Replacement {
+                scope_epoch: self.scope_epoch,
+            })
+        {
+            return Err(ScopedReplacementStageError::EpochMismatch);
+        }
+        Ok(())
+    }
+
+    fn activate(
+        &mut self,
+        active: &mut ScopedObservationProjectionSink,
+        barrier: Arc<ScopedResyncBarrier>,
+    ) {
+        active.lifecycle = ScopedProjectionLifecycle::Retired;
+        self.projection.lifecycle = ScopedProjectionLifecycle::Active;
+        std::mem::swap(active, &mut self.projection);
+        self.completed = Some(barrier);
     }
 
     fn validate_delivery(
@@ -3300,6 +3592,49 @@ fn bootstrap_snapshot_digest(
     Ok(ScopedBootstrapSnapshotDigest(*hasher.finalize().as_bytes()))
 }
 
+fn replacement_snapshot_digest(
+    root: &ScopedObservationRootIdentity,
+    root_present: bool,
+    family_manifest: &[ScopedReplacementFamilyManifest],
+    source_coverage: &[SourceCoverageSet],
+    explicit_object_errors: &[CoverageError],
+) -> Result<ScopedReplacementSnapshotDigest, ScopedReplacementStageError> {
+    if family_manifest.windows(2).any(|window| {
+        (&window[0].fact_family, window[0].contract_version)
+            >= (&window[1].fact_family, window[1].contract_version)
+    }) {
+        return Err(ScopedReplacementStageError::InvalidManifest);
+    }
+    let coverage_digest =
+        bootstrap_snapshot_digest(root, root_present, source_coverage, explicit_object_errors)
+            .map_err(|_| ScopedReplacementStageError::InvalidManifest)?;
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"spaghetti/rfc012d/replacement-snapshot-digest\0");
+    hasher.update(&SCOPED_REPLACEMENT_DIGEST_CONTRACT_VERSION.to_be_bytes());
+    hash_event_component(&mut hasher, coverage_digest.as_bytes());
+    hasher.update(&(family_manifest.len() as u64).to_be_bytes());
+    for manifest in family_manifest {
+        if manifest.fact_family.is_empty() || manifest.contract_version == 0 {
+            return Err(ScopedReplacementStageError::InvalidManifest);
+        }
+        hash_event_component(&mut hasher, manifest.fact_family.as_bytes());
+        hasher.update(&manifest.contract_version.to_be_bytes());
+        hasher.update(&[match manifest.replacement_representation {
+            ScopedReplacementRepresentation::UsageLatestContributionPerResponse => 1,
+        }]);
+        hasher.update(&[match manifest.completeness {
+            CoverageSetCompleteness::Complete => 1,
+            CoverageSetCompleteness::Partial => 2,
+            CoverageSetCompleteness::Unavailable => 3,
+        }]);
+        hasher.update(&manifest.entity_or_event_count.to_be_bytes());
+        hash_event_component(&mut hasher, manifest.semantic_digest.as_bytes());
+    }
+    Ok(ScopedReplacementSnapshotDigest(
+        *hasher.finalize().as_bytes(),
+    ))
+}
+
 fn bootstrap_complete_event_id(
     root: &ScopedObservationRootIdentity,
     scope_epoch: u64,
@@ -3359,6 +3694,23 @@ fn resync_started_event_id(
         ScopedResyncReason::ExplicitConsumerRequest => 3,
     }]);
     hash_event_component(&mut hasher, control.baseline_snapshot_digest.as_bytes());
+    hash_event_component(&mut hasher, b"full_snapshot");
+    ScopedObservationEventId(*hasher.finalize().as_bytes())
+}
+
+fn resync_complete_event_id(
+    root: &ScopedObservationRootIdentity,
+    barrier: &ScopedResyncBarrier,
+) -> ScopedObservationEventId {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"spaghetti/rfc012d/observation-event-id\0");
+    hasher.update(&SCOPED_OBSERVATION_EVENT_CONTRACT_VERSION.to_be_bytes());
+    hash_event_component(&mut hasher, b"observer.resync_complete");
+    hash_event_component(&mut hasher, root.adapter_id.as_str().as_bytes());
+    hash_event_component(&mut hasher, root.source_instance_key.as_bytes());
+    hash_event_component(&mut hasher, root.session_key.as_bytes());
+    hasher.update(&barrier.scope_epoch.to_be_bytes());
+    hash_event_component(&mut hasher, barrier.replacement_snapshot_digest.as_bytes());
     hash_event_component(&mut hasher, b"full_snapshot");
     ScopedObservationEventId(*hasher.finalize().as_bytes())
 }
@@ -3744,6 +4096,56 @@ impl ScopedObservationAccessHost {
             started.new_scope_epoch,
             active.limits,
         )
+    }
+
+    /// Validate the frozen per-family replacement against the exact offered
+    /// coverage watermark, enqueue completion after every snapshot entity,
+    /// then infallibly swap the isolated reducer into the active slot.
+    pub fn offer_resync_complete(
+        &self,
+        active: &mut ScopedObservationProjectionSink,
+        stage: &mut ScopedObservationReplacementStage,
+        admission: &ScopedObservationAdmissionLane,
+        delivery: &mut ScopedObservationDeliveryLane,
+        root_present: bool,
+        observed_at: i64,
+    ) -> Result<Arc<ScopedResyncBarrier>, ScopedReplacementStageError> {
+        if let Some(barrier) = &stage.completed {
+            return if barrier.root == self.root_identity {
+                Ok(Arc::clone(barrier))
+            } else {
+                Err(ScopedReplacementStageError::RootMismatch)
+            };
+        }
+        stage.validate_delivery(delivery)?;
+        stage.validate_activation(active)?;
+        if stage.prepared.is_none() {
+            return Err(ScopedReplacementStageError::SnapshotNotPrepared);
+        }
+        if !stage.snapshot_fully_offered() {
+            return Err(ScopedReplacementStageError::SnapshotNotFullyOffered);
+        }
+        let watermark = self
+            .capture_watermark_core(admission, &stage.projection, delivery)
+            .map_err(ScopedReplacementStageError::Coverage)?;
+        let family_manifest = stage.family_manifest(&watermark.source_coverage)?;
+        let digest = replacement_snapshot_digest(
+            &self.root_identity,
+            root_present,
+            &family_manifest,
+            &watermark.source_coverage,
+            &watermark.explicit_object_errors,
+        )?;
+        let barrier = delivery.offer_resync_barrier(
+            &self.root_identity,
+            watermark,
+            family_manifest,
+            digest,
+            root_present,
+            observed_at,
+        )?;
+        stage.activate(active, Arc::clone(&barrier));
+        Ok(barrier)
     }
 
     /// Decode one already-read append observation through the exact adapter
@@ -6045,6 +6447,7 @@ mod projection_tests {
             snapshot.events[0].revision.buckets.input_tokens.value,
             Some(30)
         );
+        let replacement_semantic_digest = snapshot.semantic_digest;
         assert_eq!(
             stage.reduce_next(&mut latest_replay),
             Err(ScopedReplacementStageError::SnapshotAlreadyPrepared)
@@ -6059,6 +6462,7 @@ mod projection_tests {
             b"active-response"
         );
 
+        assert!(!stage.snapshot_fully_offered());
         let receipt = stage.offer_snapshot_next(&mut delivery).unwrap().unwrap();
         assert_eq!(receipt.first_offered_sequence, Some(4));
         assert_eq!(receipt.offered_through_sequence, 4);
@@ -6080,6 +6484,92 @@ mod projection_tests {
                 if event.phase == ScopedAppendDeliveryPhase::Correction
                     && event.revision.response_key == b"replacement-response"
                     && event.revision.buckets.input_tokens.value == Some(30)
+        ));
+        assert!(delivery.is_empty());
+
+        let family_manifest = vec![ScopedReplacementFamilyManifest {
+            fact_family: "runtime.usage-v2".to_string(),
+            contract_version: RUNTIME_USAGE_V2_FACT_FAMILY_CONTRACT_VERSION,
+            replacement_representation:
+                ScopedReplacementRepresentation::UsageLatestContributionPerResponse,
+            completeness: CoverageSetCompleteness::Complete,
+            entity_or_event_count: 1,
+            semantic_digest: replacement_semantic_digest,
+        }];
+        let replacement_snapshot_digest =
+            replacement_snapshot_digest(&root, true, &family_manifest, &[], &[]).unwrap();
+        let completion_watermark = ScopedObservationWatermarkCore {
+            root: root.clone(),
+            scope_epoch: 2,
+            offered_through_sequence: 4,
+            source_coverage: Vec::new(),
+            explicit_object_errors: Vec::new(),
+            queue_state: delivery.state(),
+        };
+        assert_eq!(
+            delivery.offer_resync_barrier(
+                &root,
+                completion_watermark.clone(),
+                family_manifest.clone(),
+                ScopedReplacementSnapshotDigest([0; 32]),
+                true,
+                120,
+            ),
+            Err(ScopedReplacementStageError::InvalidManifest)
+        );
+        assert_eq!(delivery.state().offered_through_sequence, 4);
+        assert_eq!(
+            delivery.state().continuity,
+            ScopedObservationContinuity::Resyncing
+        );
+        let barrier = delivery
+            .offer_resync_barrier(
+                &root,
+                completion_watermark,
+                family_manifest,
+                replacement_snapshot_digest,
+                true,
+                120,
+            )
+            .unwrap();
+        assert_eq!(barrier.barrier_sequence, 5);
+        assert_eq!(
+            delivery.state().continuity,
+            ScopedObservationContinuity::Valid
+        );
+        stage.validate_activation(&active).unwrap();
+        stage.activate(&mut active, Arc::clone(&barrier));
+
+        let activated = active
+            .usage_v2_replacement_snapshot(ScopedAppendDeliveryPhase::Correction)
+            .unwrap();
+        assert_eq!(activated.entity_count, 1);
+        assert_eq!(
+            activated.events[0].revision.response_key,
+            b"replacement-response"
+        );
+        let retired = stage
+            .projection
+            .usage_v2_replacement_snapshot(ScopedAppendDeliveryPhase::Correction)
+            .unwrap();
+        assert_eq!(retired.entity_count, 1);
+        assert_eq!(retired.events[0].revision.response_key, b"active-response");
+        assert_eq!(
+            stage.projection.lifecycle,
+            ScopedProjectionLifecycle::Retired
+        );
+
+        let completed = delivery.pop_next().unwrap();
+        assert_eq!(completed.scope_epoch, 2);
+        assert_eq!(completed.observer_sequence, 5);
+        let completed_envelope = ScopedObservationEnvelopeMapper::new(root.clone())
+            .map(completed)
+            .unwrap();
+        assert!(matches!(
+            completed_envelope.event,
+            ScopedObservationEvent::ObserverResyncComplete {
+                barrier: delivered,
+            } if Arc::ptr_eq(&barrier, &delivered)
         ));
         assert!(delivery.is_empty());
     }

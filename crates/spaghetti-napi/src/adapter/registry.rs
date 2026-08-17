@@ -201,10 +201,11 @@ mod tests {
         ScopedEnvelopeEvidenceAuthority, ScopedKnownAppendObject, ScopedKnownObjectGrant,
         ScopedKnownObjectReadRequest, ScopedObjectRead, ScopedObservationAccessError,
         ScopedObservationAccessHost, ScopedObservationAccessRequest,
-        ScopedObservationAdmissionLane, ScopedObservationDeliveryLane,
+        ScopedObservationAdmissionLane, ScopedObservationContinuity, ScopedObservationDeliveryLane,
         ScopedObservationDeliveryLimits, ScopedObservationEvent, ScopedObservationProjectionLimits,
         ScopedObservationProjectionSink, ScopedObservationQueueLimits,
-        ScopedProjectionDeliveryError, ScopedQueuedObservationFrame, ScopedResyncReason,
+        ScopedProjectionDeliveryError, ScopedQueuedObservationFrame, ScopedReplacementMode,
+        ScopedReplacementRepresentation, ScopedReplacementStageError, ScopedResyncReason,
         ScopedRootIdentityRequest, ScopedSourceFailureClass,
     };
     use crate::source::{
@@ -2158,9 +2159,13 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         let host =
             ScopedObservationAccessHost::authorize(&registry, scoped_access_request(root)).unwrap();
-        let mut object = scoped_append_object(
+        let mut object = scoped_append_object_with_coverage(
             AppendDelimitedFile::new(AppendDelimitedConfig::json_lines()).unwrap(),
             RawRetentionPolicy::None,
+            vec![CoverageDomain::FactFamily {
+                family: "runtime.usage-v2".to_string(),
+                version: 1,
+            }],
         );
         let identity = [ScopeIdentityInput {
             name: "native-session-id",
@@ -2203,10 +2208,11 @@ mod tests {
         drop(pass);
         object.complete_bootstrap().unwrap();
 
-        let projection = ScopedObservationProjectionSink::new(ScopedObservationProjectionLimits {
-            max_usage_v2_entities: 1,
-        })
-        .unwrap();
+        let mut projection =
+            ScopedObservationProjectionSink::new(ScopedObservationProjectionLimits {
+                max_usage_v2_entities: 1,
+            })
+            .unwrap();
         let mut delivery = ScopedObservationDeliveryLane::new(ScopedObservationDeliveryLimits {
             max_semantic_events: 1,
             max_retained_native_bytes: 0,
@@ -2219,7 +2225,7 @@ mod tests {
         assert_eq!(barrier.scope_epoch, 1);
         assert_eq!(barrier.barrier_sequence, 1);
         assert!(!barrier.root_present);
-        assert_eq!(barrier.source_coverage.len(), 1);
+        assert_eq!(barrier.source_coverage.len(), 2);
         assert!(barrier.explicit_object_errors.is_empty());
         assert_eq!(barrier.queue_state.offered_through_sequence, 1);
         assert_eq!(barrier.queue_state.queued_source_control_items, 1);
@@ -2303,6 +2309,136 @@ mod tests {
             host.offer_bootstrap_complete(&admission, &projection, &mut delivery, false, 60),
             Err(ScopedBootstrapBarrierError::StateChanged)
         ));
+
+        let required_delivery = delivery.pop_next().unwrap();
+        assert_eq!(required_delivery.observer_sequence, 2);
+        assert!(matches!(
+            host.envelope_mapper().map(required_delivery).unwrap().event,
+            ScopedObservationEvent::ObserverResyncRequired { .. }
+        ));
+        let started = host.begin_resync(&mut delivery, 70).unwrap();
+        assert_eq!(started.old_scope_epoch, 1);
+        assert_eq!(started.new_scope_epoch, 2);
+        let mut stage = host.open_resync_stage(&projection, &delivery).unwrap();
+        let replacement = stage.prepare_snapshot(&admission, &delivery).unwrap();
+        assert_eq!(replacement.entity_count, 0);
+        assert!(replacement.events.is_empty());
+        let replacement_semantic_digest = replacement.semantic_digest;
+        assert!(stage.snapshot_fully_offered());
+
+        assert_eq!(
+            host.offer_resync_complete(
+                &mut projection,
+                &mut stage,
+                &admission,
+                &mut delivery,
+                false,
+                80,
+            ),
+            Err(ScopedReplacementStageError::Delivery(
+                ScopedDeliveryError::SourceControlQueueFull
+            ))
+        );
+        assert_eq!(
+            delivery.state().continuity,
+            ScopedObservationContinuity::Resyncing
+        );
+        assert!(delivery.resync_barrier().is_none());
+
+        let started_delivery = delivery.pop_next().unwrap();
+        assert_eq!(started_delivery.observer_sequence, 3);
+        assert!(matches!(
+            host.envelope_mapper().map(started_delivery).unwrap().event,
+            ScopedObservationEvent::ObserverResyncStarted { .. }
+        ));
+        let resync_barrier = host
+            .offer_resync_complete(
+                &mut projection,
+                &mut stage,
+                &admission,
+                &mut delivery,
+                false,
+                80,
+            )
+            .unwrap();
+        assert_eq!(resync_barrier.scope_epoch, 2);
+        assert_eq!(resync_barrier.started_control_sequence, 3);
+        assert_eq!(resync_barrier.barrier_sequence, 4);
+        assert_eq!(
+            resync_barrier.replacement,
+            ScopedReplacementMode::FullSnapshot
+        );
+        assert_eq!(resync_barrier.family_manifest.len(), 1);
+        assert_eq!(
+            resync_barrier.family_manifest[0].fact_family,
+            "runtime.usage-v2"
+        );
+        assert_eq!(resync_barrier.family_manifest[0].contract_version, 1);
+        assert_eq!(
+            resync_barrier.family_manifest[0].replacement_representation,
+            ScopedReplacementRepresentation::UsageLatestContributionPerResponse
+        );
+        assert_eq!(
+            resync_barrier.family_manifest[0].completeness,
+            CoverageSetCompleteness::Complete
+        );
+        assert_eq!(resync_barrier.family_manifest[0].entity_or_event_count, 0);
+        assert_eq!(
+            resync_barrier.family_manifest[0].semantic_digest,
+            replacement_semantic_digest
+        );
+        assert_eq!(resync_barrier.source_coverage.len(), 2);
+        assert!(!resync_barrier.root_present);
+        assert_eq!(
+            delivery.state().continuity,
+            ScopedObservationContinuity::Valid
+        );
+        assert!(delivery.resync_required().is_none());
+        assert!(delivery.resync_started().is_none());
+        assert!(Arc::ptr_eq(
+            &resync_barrier,
+            &delivery.resync_barrier().unwrap()
+        ));
+        let repeated_complete = host
+            .offer_resync_complete(
+                &mut projection,
+                &mut stage,
+                &admission,
+                &mut delivery,
+                true,
+                999,
+            )
+            .unwrap();
+        assert!(Arc::ptr_eq(&resync_barrier, &repeated_complete));
+        assert_eq!(delivery.queued_source_control_items(), 1);
+
+        let completed_delivery = delivery.pop_next().unwrap();
+        let completed_event_id = completed_delivery.event_id;
+        assert_eq!(completed_delivery.observer_sequence, 4);
+        let completed_envelope = host.envelope_mapper().map(completed_delivery).unwrap();
+        assert_eq!(completed_envelope.scope_epoch, 2);
+        assert_eq!(completed_envelope.observed_at, 80);
+        assert!(matches!(
+            completed_envelope.event,
+            ScopedObservationEvent::ObserverResyncComplete {
+                barrier: delivered_barrier,
+            } if Arc::ptr_eq(&resync_barrier, &delivered_barrier)
+        ));
+        assert!(delivery.is_empty());
+
+        let next_resync = host
+            .require_resync(
+                &mut delivery,
+                ScopedResyncReason::ExplicitConsumerRequest,
+                90,
+            )
+            .unwrap();
+        assert_eq!(next_resync.invalid_scope_epoch, 2);
+        assert_eq!(
+            next_resync.baseline_snapshot_digest,
+            resync_barrier.coverage_snapshot_digest
+        );
+        assert_ne!(completed_event_id, first_event_id);
 
         // A second attachment-local lane replays the same bootstrap snapshot
         // under a different observation time without changing control ID.
