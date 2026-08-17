@@ -1284,9 +1284,17 @@ Current landing status (2026-08-17):
   backend and releases the retry slot. Normal shutdown drops the native backend
   before its non-cloneable watcher registration; unexpected owner drop closes
   the attachment rather than leaving an unwatched live observer. A retained
-  async signal reports callback generations and backend/routing failure. Native
-  watcher audit/reinstallation, failed-observer control delivery, and the
-  public portable host wrapper remain open;
+  async signal reports callback/audit/replacement generations, the successful
+  backend installation generation, replacement-in-progress state, and
+  backend/routing failure. The same owner can explicitly schedule one bounded
+  full-instance audit and can replace a failed backend without releasing its
+  attachment registration. Replacement drops the old callback owner first;
+  failed construction or anchor registration leaves a retryable degraded
+  state without advancing the backend generation, while success advances that
+  generation and schedules mandatory full-instance recovery reconciliation.
+  Automatic audit cadence, bounded retry/backoff/exhaustion policy,
+  failed-observer control delivery, and the public portable host wrapper remain
+  open;
 - one pass is active at a time, a later pass receives fresh bounds, close is
   idempotent, and the frozen access report excludes paths, identity values, and
   content; and
@@ -1304,8 +1312,8 @@ and complete scope coverage,
 dynamic/discovered scope membership beyond the attachment's current exact
 known-object grants and family coverage beyond usage-v2,
 complete multi-family replacement manifests, whole-scope discovery and source
-state beyond the current exact append-object set, and watcher-level audit,
-reinstallation, failed-observer, and re-overflow orchestration,
+state beyond the current exact append-object set, and automatic watcher audit
+cadence/reinstallation policy, failed-observer, and re-overflow orchestration,
 artifact mediation and the public portable close transport,
 the trusted native version-probe/identity-input drivers, and the complete
 public request are not yet implemented. The internal offered and applied
@@ -1441,7 +1449,8 @@ pressure preserves all active state; and re-overflow keeps the last valid epoch
 while a newer stage supersedes the failed continuity epoch. Complete
 multi-family and D-owned manifests, dynamic whole-scope discovery and
 non-append participants, the public transport over the internal async applied
-runtime, and watcher audit/reinstallation plus failure scheduling remain open.
+runtime, and automatic watcher audit/reinstallation plus terminal failure
+scheduling remain open.
 
 ### D4. SDK and Chopsticks migration
 

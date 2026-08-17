@@ -2657,9 +2657,14 @@ impl ScopedObservationNativeWatchBackend for RecommendedWatcher {
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ScopedObservationNativeWatcherState {
+    /// Successful native backend installation generation. The initial
+    /// installation is generation one; a failed replacement never advances
+    /// it.
+    pub backend_generation: u64,
     pub generation: u64,
     pub backend_failed: bool,
     pub routing_failed: bool,
+    pub reinstalling: bool,
     pub closed: bool,
 }
 
@@ -2695,11 +2700,60 @@ impl ScopedObservationNativeWatcherCompletion {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         state.backend_failed |= backend_failed;
         state.routing_failed |= routing_failed;
-        match state.generation.checked_add(1) {
-            Some(generation) => state.generation = generation,
-            None => state.routing_failed = true,
-        }
+        advance_scoped_native_watcher_generation(&mut state);
         self.async_changed.send_replace(*state);
+    }
+
+    fn mark_initial_backend_installed(&self) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        debug_assert_eq!(state.backend_generation, 0);
+        state.backend_generation = 1;
+        self.async_changed.send_replace(*state);
+    }
+
+    fn begin_reinstall(&self) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.backend_failed = false;
+        state.reinstalling = true;
+        advance_scoped_native_watcher_generation(&mut state);
+        self.async_changed.send_replace(*state);
+    }
+
+    fn finish_reinstall_failure(&self) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.backend_failed = true;
+        state.reinstalling = false;
+        advance_scoped_native_watcher_generation(&mut state);
+        self.async_changed.send_replace(*state);
+    }
+
+    fn finish_reinstall_success(&self) -> Result<(), ()> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let Some(backend_generation) = state.backend_generation.checked_add(1) else {
+            state.routing_failed = true;
+            state.reinstalling = false;
+            advance_scoped_native_watcher_generation(&mut state);
+            self.async_changed.send_replace(*state);
+            return Err(());
+        };
+        state.backend_generation = backend_generation;
+        state.backend_failed = false;
+        state.reinstalling = false;
+        advance_scoped_native_watcher_generation(&mut state);
+        self.async_changed.send_replace(*state);
+        Ok(())
     }
 
     fn close(&self) {
@@ -2732,6 +2786,13 @@ impl ScopedObservationNativeWatcherCompletion {
     }
 }
 
+fn advance_scoped_native_watcher_generation(state: &mut ScopedObservationNativeWatcherState) {
+    match state.generation.checked_add(1) {
+        Some(generation) => state.generation = generation,
+        None => state.routing_failed = true,
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ScopedObservationNativeWatcherWaiter {
     completion: Arc<ScopedObservationNativeWatcherCompletion>,
@@ -2759,6 +2820,10 @@ pub enum ScopedObservationNativeWatcherError {
     AnchorRegistrationFailed { anchor_index: usize },
     #[error("scoped native watcher callback failed during installation")]
     CallbackFailedDuringInstall,
+    #[error("scoped native watcher callback failed during backend replacement")]
+    CallbackFailedDuringReinstall,
+    #[error("scoped native watcher routing is terminally failed")]
+    RoutingFailed,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2997,6 +3062,55 @@ fn consolidate_scoped_watch_anchors(anchors: &mut Vec<ScopedObservationNativeWat
     *anchors = consolidated;
 }
 
+fn scoped_native_watch_callback(
+    handle: ScopedObservationAsyncHandle,
+    coordinator: Arc<ScopedObservationWatcherOrchestrator>,
+    plan: Arc<ScopedObservationNativeWatchPlan>,
+    completion: Arc<ScopedObservationNativeWatcherCompletion>,
+) -> ScopedObservationNativeWatchCallback {
+    Box::new(move |event| {
+        let ingress = plan.route(event);
+        if ingress.hints.is_empty() {
+            return;
+        }
+        let mut routing_failed = false;
+        for hint in ingress.hints {
+            match coordinator.record_hint(handle.host(), hint) {
+                Ok(ScopedObservationWatcherHintAction::Buffered(_))
+                | Ok(ScopedObservationWatcherHintAction::PollRequested { .. }) => {}
+                Err(ScopedObservationStartupError::Closed) => return,
+                Err(_) => routing_failed = true,
+            }
+        }
+        completion.publish(ingress.backend_failed, routing_failed);
+    })
+}
+
+fn install_scoped_native_watch_backend<F>(
+    plan: &ScopedObservationNativeWatchPlan,
+    callback: ScopedObservationNativeWatchCallback,
+    factory: F,
+) -> Result<Box<dyn ScopedObservationNativeWatchBackend>, ScopedObservationNativeWatcherError>
+where
+    F: FnOnce(
+        ScopedObservationNativeWatchCallback,
+    ) -> Result<Box<dyn ScopedObservationNativeWatchBackend>, ()>,
+{
+    let mut backend =
+        factory(callback).map_err(|_| ScopedObservationNativeWatcherError::BackendUnavailable)?;
+    for (anchor_index, anchor) in plan.anchors.iter().enumerate() {
+        let mode = if anchor.recursive {
+            RecursiveMode::Recursive
+        } else {
+            RecursiveMode::NonRecursive
+        };
+        backend.watch(&anchor.path, mode).map_err(|_| {
+            ScopedObservationNativeWatcherError::AnchorRegistrationFailed { anchor_index }
+        })?;
+    }
+    Ok(backend)
+}
+
 /// Concrete native watcher owner. Dropping the backend stops callbacks before
 /// the coordinator registration is released, so the attachment close barrier
 /// cannot complete while a native callback may still run.
@@ -3004,6 +3118,7 @@ pub struct ScopedObservationNativeWatcher {
     backend: Option<Box<dyn ScopedObservationNativeWatchBackend>>,
     handle: ScopedObservationAsyncHandle,
     coordinator: Arc<ScopedObservationWatcherOrchestrator>,
+    plan: Arc<ScopedObservationNativeWatchPlan>,
     completion: Arc<ScopedObservationNativeWatcherCompletion>,
     watch_anchor_count: usize,
 }
@@ -3036,6 +3151,108 @@ impl ScopedObservationNativeWatcher {
         ScopedObservationNativeWatcherWaiter {
             completion: Arc::clone(&self.completion),
         }
+    }
+
+    /// Schedule a bounded full-instance reconciliation without fabricating a
+    /// native event. Before bootstrap this joins the startup hint set; once
+    /// live it creates an ordinary request-local poll ticket for the pass
+    /// driver.
+    pub fn request_audit(
+        &self,
+    ) -> Result<ScopedObservationWatcherHintAction, ScopedObservationNativeWatcherError> {
+        self.request_instance_reconcile(DirtyReason::Recovery)
+    }
+
+    /// Replace a failed native backend while retaining this attachment's one
+    /// watcher registration and callback routing authority. A successful
+    /// replacement always schedules a full-instance reconciliation because
+    /// notifications may have been lost while the backend was unavailable.
+    pub fn reinstall_native_backend(
+        &mut self,
+    ) -> Result<ScopedObservationWatcherHintAction, ScopedObservationNativeWatcherError> {
+        self.reinstall_native_backend_with_factory_inner(|callback| {
+            let watcher = notify::recommended_watcher(callback).map_err(|_| ())?;
+            Ok(Box::new(watcher))
+        })
+    }
+
+    fn request_instance_reconcile(
+        &self,
+        reason: DirtyReason,
+    ) -> Result<ScopedObservationWatcherHintAction, ScopedObservationNativeWatcherError> {
+        let hint = DirtyHint {
+            scope: DirtyScope::Instance(self.plan.instance_scope.clone()),
+            reason,
+        };
+        match self.coordinator.record_hint(self.handle.host(), hint) {
+            Ok(action) => {
+                self.completion.publish(false, false);
+                Ok(action)
+            }
+            Err(error) => {
+                if !matches!(error, ScopedObservationStartupError::Closed) {
+                    self.completion.publish(false, true);
+                }
+                Err(error.into())
+            }
+        }
+    }
+
+    fn reinstall_native_backend_with_factory_inner<F>(
+        &mut self,
+        factory: F,
+    ) -> Result<ScopedObservationWatcherHintAction, ScopedObservationNativeWatcherError>
+    where
+        F: FnOnce(
+            ScopedObservationNativeWatchCallback,
+        ) -> Result<Box<dyn ScopedObservationNativeWatchBackend>, ()>,
+    {
+        if self.coordinator.cancellation_requested() {
+            return Err(ScopedObservationStartupError::Closed.into());
+        }
+        if self.completion.snapshot().routing_failed {
+            return Err(ScopedObservationNativeWatcherError::RoutingFailed);
+        }
+
+        self.completion.begin_reinstall();
+        drop(self.backend.take());
+        let callback = scoped_native_watch_callback(
+            self.handle.clone(),
+            Arc::clone(&self.coordinator),
+            Arc::clone(&self.plan),
+            Arc::clone(&self.completion),
+        );
+        let backend = match install_scoped_native_watch_backend(&self.plan, callback, factory) {
+            Ok(backend) => backend,
+            Err(error) => {
+                self.completion.finish_reinstall_failure();
+                return Err(error);
+            }
+        };
+        let callback_state = self.completion.snapshot();
+        if callback_state.backend_failed || callback_state.routing_failed {
+            self.completion.finish_reinstall_failure();
+            return Err(ScopedObservationNativeWatcherError::CallbackFailedDuringReinstall);
+        }
+
+        self.backend = Some(backend);
+        self.completion
+            .finish_reinstall_success()
+            .map_err(|()| ScopedObservationNativeWatcherError::RoutingFailed)?;
+        self.request_instance_reconcile(DirtyReason::Recovery)
+    }
+
+    #[cfg(test)]
+    pub fn reinstall_native_backend_with_factory<F>(
+        &mut self,
+        factory: F,
+    ) -> Result<ScopedObservationWatcherHintAction, ScopedObservationNativeWatcherError>
+    where
+        F: FnOnce(
+            ScopedObservationNativeWatchCallback,
+        ) -> Result<Box<dyn ScopedObservationNativeWatchBackend>, ()>,
+    {
+        self.reinstall_native_backend_with_factory_inner(factory)
     }
 
     /// Own the native backend until attachment cancellation, then stop the
@@ -3079,49 +3296,27 @@ impl ScopedObservationAsyncHandle {
         let coordinator = Arc::new(self.prepare_watcher_install(hint_capacity)?);
         let plan = Arc::new(ScopedObservationNativeWatchPlan::from_host(self.host())?);
         let completion = Arc::new(ScopedObservationNativeWatcherCompletion::default());
-        let callback_handle = self.clone();
-        let callback_coordinator = Arc::clone(&coordinator);
-        let callback_plan = Arc::clone(&plan);
-        let callback_completion = Arc::clone(&completion);
-        let callback: ScopedObservationNativeWatchCallback = Box::new(move |event| {
-            let ingress = callback_plan.route(event);
-            if ingress.hints.is_empty() {
-                return;
-            }
-            let mut routing_failed = false;
-            for hint in ingress.hints {
-                match callback_coordinator.record_hint(callback_handle.host(), hint) {
-                    Ok(ScopedObservationWatcherHintAction::Buffered(_))
-                    | Ok(ScopedObservationWatcherHintAction::PollRequested { .. }) => {}
-                    Err(ScopedObservationStartupError::Closed) => return,
-                    Err(_) => routing_failed = true,
-                }
-            }
-            callback_completion.publish(ingress.backend_failed, routing_failed);
-        });
-        let mut backend = factory(callback)
-            .map_err(|_| ScopedObservationNativeWatcherError::BackendUnavailable)?;
-        for (anchor_index, anchor) in plan.anchors.iter().enumerate() {
-            let mode = if anchor.recursive {
-                RecursiveMode::Recursive
-            } else {
-                RecursiveMode::NonRecursive
-            };
-            backend.watch(&anchor.path, mode).map_err(|_| {
-                ScopedObservationNativeWatcherError::AnchorRegistrationFailed { anchor_index }
-            })?;
-        }
+        let callback = scoped_native_watch_callback(
+            self.clone(),
+            Arc::clone(&coordinator),
+            Arc::clone(&plan),
+            Arc::clone(&completion),
+        );
+        let backend = install_scoped_native_watch_backend(&plan, callback, factory)?;
         let callback_state = completion.snapshot();
         if callback_state.backend_failed || callback_state.routing_failed {
             return Err(ScopedObservationNativeWatcherError::CallbackFailedDuringInstall);
         }
         coordinator.confirm_watcher_installed(self.host())?;
+        completion.mark_initial_backend_installed();
+        let watch_anchor_count = plan.anchors.len();
         Ok(ScopedObservationNativeWatcher {
             backend: Some(backend),
             handle: self.clone(),
             coordinator,
+            plan,
             completion,
-            watch_anchor_count: plan.anchors.len(),
+            watch_anchor_count,
         })
     }
 

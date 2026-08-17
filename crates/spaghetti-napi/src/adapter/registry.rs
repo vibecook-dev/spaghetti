@@ -180,6 +180,7 @@ mod tests {
     use std::fs::OpenOptions;
     use std::io::Write;
     use std::path::PathBuf;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
 
     use tempfile::TempDir;
@@ -204,15 +205,16 @@ mod tests {
         ScopedObservationAdmissionLane, ScopedObservationAsyncRuntime, ScopedObservationCloseError,
         ScopedObservationConsumerOfferError, ScopedObservationContinuity,
         ScopedObservationDeliveryLane, ScopedObservationDeliveryLimits, ScopedObservationEvent,
-        ScopedObservationNativeWatchBackend, ScopedObservationNativeWatcherError,
-        ScopedObservationOpenDrainError, ScopedObservationPollError, ScopedObservationPollLease,
-        ScopedObservationPollResolution, ScopedObservationProjectionLimits,
-        ScopedObservationProjectionSink, ScopedObservationQueueLimits,
-        ScopedObservationReadyResolution, ScopedObservationStartupError,
-        ScopedObservationStartupReconcileAction, ScopedObservationWatcherHintAction,
-        ScopedObservationWatcherPhase, ScopedProjectionDeliveryError, ScopedQueuedObservationFrame,
-        ScopedReplacementMode, ScopedReplacementRepresentation, ScopedReplacementStageError,
-        ScopedResyncReason, ScopedRootIdentityRequest, ScopedSourceFailureClass,
+        ScopedObservationNativeWatchBackend, ScopedObservationNativeWatchCallback,
+        ScopedObservationNativeWatcherError, ScopedObservationOpenDrainError,
+        ScopedObservationPollError, ScopedObservationPollLease, ScopedObservationPollResolution,
+        ScopedObservationProjectionLimits, ScopedObservationProjectionSink,
+        ScopedObservationQueueLimits, ScopedObservationReadyResolution,
+        ScopedObservationStartupError, ScopedObservationStartupReconcileAction,
+        ScopedObservationWatcherHintAction, ScopedObservationWatcherPhase,
+        ScopedProjectionDeliveryError, ScopedQueuedObservationFrame, ScopedReplacementMode,
+        ScopedReplacementRepresentation, ScopedReplacementStageError, ScopedResyncReason,
+        ScopedRootIdentityRequest, ScopedSourceFailureClass,
     };
     use crate::source::{
         AccessOperation, AccessOutcome, AccessPhase, AppendDelimitedConfig, AppendDelimitedFile,
@@ -253,6 +255,33 @@ mod tests {
             ))
             .add_path(self.target.clone())));
             Ok(())
+        }
+    }
+
+    struct ControlledScopedWatchBackend {
+        callback: Option<ScopedObservationNativeWatchCallback>,
+        callback_slot: Arc<std::sync::Mutex<Option<ScopedObservationNativeWatchCallback>>>,
+        registrations: Arc<std::sync::Mutex<Vec<(PathBuf, notify::RecursiveMode)>>>,
+        drops: Arc<AtomicUsize>,
+    }
+
+    impl ScopedObservationNativeWatchBackend for ControlledScopedWatchBackend {
+        fn watch(&mut self, path: &std::path::Path, mode: notify::RecursiveMode) -> Result<(), ()> {
+            self.registrations
+                .lock()
+                .unwrap()
+                .push((path.to_path_buf(), mode));
+            if let Some(callback) = self.callback.take() {
+                *self.callback_slot.lock().unwrap() = Some(callback);
+            }
+            Ok(())
+        }
+    }
+
+    impl Drop for ControlledScopedWatchBackend {
+        fn drop(&mut self) {
+            self.callback_slot.lock().unwrap().take();
+            self.drops.fetch_add(1, Ordering::SeqCst);
         }
     }
 
@@ -1881,6 +1910,103 @@ mod tests {
         );
         drop(recovered);
         assert!(handle.host().is_closed());
+    }
+
+    #[tokio::test]
+    async fn scoped_native_watcher_audit_and_backend_reinstallation_are_retry_safe() {
+        let registry = supported_fixture_registry();
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().join("native-watch-reinstall-root");
+        std::fs::create_dir_all(&root).unwrap();
+        let host =
+            ScopedObservationAccessHost::authorize(&registry, scoped_access_request(root.clone()))
+                .unwrap();
+        let runtime = ScopedObservationAsyncRuntime::open(
+            host,
+            ScopedObservationDeliveryLimits {
+                max_semantic_events: 1,
+                max_retained_native_bytes: 0,
+                max_source_control_items: 1,
+            },
+        )
+        .unwrap();
+        let handle = runtime.handle();
+        let callback_slot = Arc::new(std::sync::Mutex::new(None));
+        let registrations = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let drops = Arc::new(AtomicUsize::new(0));
+        let mut watcher = handle
+            .install_native_watcher_with_factory(2, {
+                let callback_slot = Arc::clone(&callback_slot);
+                let registrations = Arc::clone(&registrations);
+                let drops = Arc::clone(&drops);
+                move |callback| {
+                    Ok(Box::new(ControlledScopedWatchBackend {
+                        callback: Some(callback),
+                        callback_slot,
+                        registrations,
+                        drops,
+                    }))
+                }
+            })
+            .unwrap();
+        assert_eq!(watcher.state().backend_generation, 1);
+        assert_eq!(watcher.state().generation, 0);
+
+        assert!(matches!(
+            watcher.request_audit().unwrap(),
+            ScopedObservationWatcherHintAction::Buffered(HintEnqueue::EscalatedToInstance)
+        ));
+        let before_failure = watcher.state();
+        assert_eq!(before_failure.generation, 1);
+        callback_slot.lock().unwrap().as_mut().unwrap()(Err(notify::Error::generic(
+            "fixture backend disconnected",
+        )));
+        let failed = watcher.waiter().wait_after(before_failure.generation).await;
+        assert!(failed.backend_failed);
+        assert!(!failed.reinstalling);
+        assert_eq!(failed.backend_generation, 1);
+
+        assert!(matches!(
+            watcher.reinstall_native_backend_with_factory(|_| Err(())),
+            Err(ScopedObservationNativeWatcherError::BackendUnavailable)
+        ));
+        let failed_reinstall = watcher.state();
+        assert!(failed_reinstall.backend_failed);
+        assert!(!failed_reinstall.reinstalling);
+        assert_eq!(failed_reinstall.backend_generation, 1);
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        assert!(callback_slot.lock().unwrap().is_none());
+
+        assert!(matches!(
+            watcher
+                .reinstall_native_backend_with_factory({
+                    let callback_slot = Arc::clone(&callback_slot);
+                    let registrations = Arc::clone(&registrations);
+                    let drops = Arc::clone(&drops);
+                    move |callback| {
+                        Ok(Box::new(ControlledScopedWatchBackend {
+                            callback: Some(callback),
+                            callback_slot,
+                            registrations,
+                            drops,
+                        }))
+                    }
+                })
+                .unwrap(),
+            ScopedObservationWatcherHintAction::Buffered(HintEnqueue::Coalesced)
+        ));
+        let recovered = watcher.state();
+        assert_eq!(recovered.backend_generation, 2);
+        assert!(!recovered.backend_failed);
+        assert!(!recovered.routing_failed);
+        assert!(!recovered.reinstalling);
+        assert_eq!(registrations.lock().unwrap().len(), 2);
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+
+        let barrier = runtime.request_close();
+        drop(watcher);
+        assert_eq!(drops.load(Ordering::SeqCst), 2);
+        assert!(barrier.wait_async().await.complete);
     }
 
     #[test]
