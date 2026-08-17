@@ -506,11 +506,22 @@ impl ScopedObservationAdmissionLane {
 /// over N-API until the complete RFC 012D envelope and negotiation surface are
 /// frozen, but event identity is already derived with the normative inputs.
 pub const SCOPED_OBSERVATION_EVENT_CONTRACT_VERSION: u32 = 1;
+pub const SCOPED_REPLACEMENT_DIGEST_CONTRACT_VERSION: u32 = 1;
+pub const RUNTIME_USAGE_V2_FACT_FAMILY_CONTRACT_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ScopedObservationEventId([u8; 32]);
 
 impl ScopedObservationEventId {
+    pub fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct ScopedReplacementSemanticDigest([u8; 32]);
+
+impl ScopedReplacementSemanticDigest {
     pub fn as_bytes(&self) -> &[u8; 32] {
         &self.0
     }
@@ -557,6 +568,19 @@ pub struct ScopedUsageV2Event {
     /// The accepted response revision. Retractions carry the revision being
     /// removed so actor/session routing never has to guess from a control.
     pub revision: UsageRevisionV2Fact,
+}
+
+/// Family-level replacement primitive used by clean bootstrap and future
+/// resync staging. Coverage/completeness remain barrier-owned; this value
+/// proves only the complete current reducer state known to this sink.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScopedUsageV2ReplacementSnapshot {
+    pub fact_family_contract_version: u32,
+    pub replacement_digest_contract_version: u32,
+    pub phase: ScopedAppendDeliveryPhase,
+    pub entity_count: u64,
+    pub semantic_digest: ScopedReplacementSemanticDigest,
+    pub events: Vec<ScopedUsageV2Event>,
 }
 
 /// First common semantic output of the scoped observation path. The reset
@@ -608,6 +632,10 @@ pub enum ScopedProjectionError {
     InvalidResetState,
     #[error("scoped source presence change contradicts retained reducer state")]
     InvalidPresenceState,
+    #[error("scoped replacement snapshot phase must be bootstrap or correction")]
+    InvalidReplacementPhase,
+    #[error("scoped replacement snapshot accounting is exhausted")]
+    ReplacementCapacityExhausted,
 }
 
 #[derive(Clone)]
@@ -675,6 +703,40 @@ impl ScopedObservationProjectionSink {
         self.usage_v2
             .get(fact_id)
             .map(|state| state.semantic.semantic_revision_ref)
+    }
+
+    pub fn usage_v2_replacement_snapshot(
+        &self,
+        phase: ScopedAppendDeliveryPhase,
+    ) -> Result<ScopedUsageV2ReplacementSnapshot, ScopedProjectionError> {
+        if phase == ScopedAppendDeliveryPhase::Live {
+            return Err(ScopedProjectionError::InvalidReplacementPhase);
+        }
+        let entity_count = u64::try_from(self.usage_v2.len())
+            .map_err(|_| ScopedProjectionError::ReplacementCapacityExhausted)?;
+        let semantic_digest = usage_v2_replacement_digest(&self.usage_v2)?;
+        let events = self
+            .usage_v2
+            .values()
+            .map(|state| ScopedUsageV2Event {
+                event_id: usage_v2_event_id(ScopedUsageV2Operation::Upsert, &state.semantic, None),
+                semantic_revision_ref: state.semantic.semantic_revision_ref,
+                fact_id: state.semantic.fact_id,
+                operation: ScopedUsageV2Operation::Upsert,
+                phase,
+                source: state.source.clone(),
+                retraction: None,
+                revision: state.revision.clone(),
+            })
+            .collect();
+        Ok(ScopedUsageV2ReplacementSnapshot {
+            fact_family_contract_version: RUNTIME_USAGE_V2_FACT_FAMILY_CONTRACT_VERSION,
+            replacement_digest_contract_version: SCOPED_REPLACEMENT_DIGEST_CONTRACT_VERSION,
+            phase,
+            entity_count,
+            semantic_digest,
+            events,
+        })
     }
 
     fn project_reset(
@@ -944,6 +1006,12 @@ fn usage_v2_event_id(
         },
     );
     hash_event_component(&mut hasher, semantic.fact_id.as_bytes());
+    hasher.update(
+        &semantic
+            .semantic_revision_ref
+            .semantic_reference_contract_version
+            .to_be_bytes(),
+    );
     hash_event_component(&mut hasher, semantic.fact_revision_id.as_bytes());
     hash_event_component(&mut hasher, semantic.source_record_id.as_bytes());
     match retraction {
@@ -962,6 +1030,52 @@ fn usage_v2_event_id(
         }
     }
     ScopedObservationEventId(*hasher.finalize().as_bytes())
+}
+
+fn usage_v2_replacement_digest(
+    states: &BTreeMap<CanonicalFactId, ScopedUsageV2ProjectionState>,
+) -> Result<ScopedReplacementSemanticDigest, ScopedProjectionError> {
+    let entity_count = u64::try_from(states.len())
+        .map_err(|_| ScopedProjectionError::ReplacementCapacityExhausted)?;
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"spaghetti/rfc012d/replacement-semantic-digest\0");
+    hasher.update(&SCOPED_REPLACEMENT_DIGEST_CONTRACT_VERSION.to_be_bytes());
+    hash_event_component(&mut hasher, b"runtime.usage-v2");
+    hasher.update(&RUNTIME_USAGE_V2_FACT_FAMILY_CONTRACT_VERSION.to_be_bytes());
+    hasher.update(&entity_count.to_be_bytes());
+    // BTreeMap iteration supplies canonical fact-ID order. The digest retains
+    // topology-independent occurrence provenance while deliberately excluding
+    // attachment phase, observer sequence, local numeric IDs, admission batch
+    // ordinal, and observation time.
+    for state in states.values() {
+        let revision_key = state
+            .revision
+            .semantic_revision_key()
+            .map_err(|_| ScopedProjectionError::InvalidSemanticRevision)?;
+        hash_event_component(&mut hasher, state.semantic.fact_id.as_bytes());
+        hasher.update(
+            &state
+                .semantic
+                .semantic_revision_ref
+                .semantic_reference_contract_version
+                .to_be_bytes(),
+        );
+        hash_event_component(&mut hasher, state.semantic.fact_revision_id.as_bytes());
+        hash_event_component(&mut hasher, state.semantic.source_record_id.as_bytes());
+        hash_event_component(&mut hasher, &revision_key);
+        hasher.update(&state.generation.to_be_bytes());
+        hash_event_component(&mut hasher, state.source.cursor_start.as_bytes());
+        hash_event_component(&mut hasher, state.source.cursor_end.as_bytes());
+        hasher.update(state.source.payload_hash.as_bytes());
+        hash_event_component(&mut hasher, state.source.media_type.as_str().as_bytes());
+        hasher.update(&[match state.source.state {
+            SourceRecordState::Present => 1,
+            SourceRecordState::Absent => 2,
+        }]);
+    }
+    Ok(ScopedReplacementSemanticDigest(
+        *hasher.finalize().as_bytes(),
+    ))
 }
 
 fn hash_event_component(hasher: &mut blake3::Hasher, value: &[u8]) {
@@ -1896,13 +2010,18 @@ mod projection_tests {
         .unwrap()
     }
 
-    fn record(generation: u64, start: u64, end: u64) -> SourceRecord {
+    fn record_with_observed_at(
+        generation: u64,
+        start: u64,
+        end: u64,
+        observed_at: i64,
+    ) -> SourceRecord {
         SourceRecord::new(
             &RecordOrigin {
                 source_instance_id: 11,
                 stream_id: 22,
                 object_id: 33,
-                observed_at: 44,
+                observed_at,
                 source_timestamp_hint: Some(43),
                 media_type: SourceMediaType::new("application/x-ndjson").unwrap(),
             },
@@ -1912,6 +2031,10 @@ mod projection_tests {
             0,
             format!("record-{generation}-{start}-{end}").into_bytes(),
         )
+    }
+
+    fn record(generation: u64, start: u64, end: u64) -> SourceRecord {
+        record_with_observed_at(generation, start, end, 44)
     }
 
     fn exact_value<T>(value: T, native_field: &str) -> UsageQualifiedValue<T> {
@@ -2014,6 +2137,191 @@ mod projection_tests {
             max_usage_v2_entities,
         })
         .unwrap()
+    }
+
+    fn bytes_hex(bytes: &[u8; 32]) -> String {
+        bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+    }
+
+    #[test]
+    fn scoped_usage_replacement_snapshot_is_phase_independent_and_rejects_live() {
+        let mut projection = sink(8);
+        let first_record = record(1, 0, 10);
+        let first_frame = decoded_frame(
+            1,
+            ScopedAppendDeliveryPhase::Bootstrap,
+            &first_record,
+            usage_batch(&first_record, "response-1", 10, None),
+        );
+        let first = only_usage_event(projection.project(&first_frame).unwrap());
+
+        let bootstrap = projection
+            .usage_v2_replacement_snapshot(ScopedAppendDeliveryPhase::Bootstrap)
+            .unwrap();
+        let correction = projection
+            .usage_v2_replacement_snapshot(ScopedAppendDeliveryPhase::Correction)
+            .unwrap();
+
+        assert_eq!(
+            bootstrap.fact_family_contract_version,
+            RUNTIME_USAGE_V2_FACT_FAMILY_CONTRACT_VERSION
+        );
+        assert_eq!(
+            bootstrap.replacement_digest_contract_version,
+            SCOPED_REPLACEMENT_DIGEST_CONTRACT_VERSION
+        );
+        assert_eq!(bootstrap.phase, ScopedAppendDeliveryPhase::Bootstrap);
+        assert_eq!(correction.phase, ScopedAppendDeliveryPhase::Correction);
+        assert_eq!(bootstrap.entity_count, 1);
+        assert_eq!(bootstrap.semantic_digest, correction.semantic_digest);
+        assert_eq!(bootstrap.events.len(), 1);
+        assert_eq!(correction.events.len(), 1);
+        assert_eq!(bootstrap.events[0].event_id, first.event_id);
+        assert_eq!(correction.events[0].event_id, first.event_id);
+        assert_eq!(
+            bytes_hex(bootstrap.semantic_digest.as_bytes()),
+            "4aa769b30dbd71d8f26fcea5a49c76df6d6092da8acb6b1006303ea22e4bf091"
+        );
+        assert_eq!(
+            bytes_hex(first.event_id.as_bytes()),
+            "e9160c833cc2d6509935c5c999c6528f22d3aebbdd7418ceebdfeb1284ca4e0e"
+        );
+        assert_eq!(
+            bootstrap.events[0].semantic_revision_ref,
+            correction.events[0].semantic_revision_ref
+        );
+        assert_eq!(
+            bootstrap.events[0].phase,
+            ScopedAppendDeliveryPhase::Bootstrap
+        );
+        assert_eq!(
+            correction.events[0].phase,
+            ScopedAppendDeliveryPhase::Correction
+        );
+        assert_eq!(
+            projection.usage_v2_replacement_snapshot(ScopedAppendDeliveryPhase::Live),
+            Err(ScopedProjectionError::InvalidReplacementPhase)
+        );
+    }
+
+    #[test]
+    fn scoped_usage_replacement_snapshot_has_stable_order_and_digest() {
+        let first_record = record(1, 0, 10);
+        let second_record = record(1, 10, 20);
+
+        let mut forward = sink(8);
+        for (ordinal, source, response, tokens) in [
+            (1, &first_record, "response-1", 10),
+            (2, &second_record, "response-2", 20),
+        ] {
+            let frame = decoded_frame(
+                ordinal,
+                ScopedAppendDeliveryPhase::Bootstrap,
+                source,
+                usage_batch(source, response, tokens, None),
+            );
+            only_usage_event(forward.project(&frame).unwrap());
+        }
+
+        let mut reverse = sink(8);
+        for (ordinal, source, response, tokens) in [
+            (1, &second_record, "response-2", 20),
+            (2, &first_record, "response-1", 10),
+        ] {
+            let frame = decoded_frame(
+                ordinal,
+                ScopedAppendDeliveryPhase::Bootstrap,
+                source,
+                usage_batch(source, response, tokens, None),
+            );
+            only_usage_event(reverse.project(&frame).unwrap());
+        }
+
+        let forward = forward
+            .usage_v2_replacement_snapshot(ScopedAppendDeliveryPhase::Bootstrap)
+            .unwrap();
+        let reverse = reverse
+            .usage_v2_replacement_snapshot(ScopedAppendDeliveryPhase::Bootstrap)
+            .unwrap();
+        assert_eq!(forward.entity_count, 2);
+        assert_eq!(forward, reverse);
+    }
+
+    #[test]
+    fn scoped_usage_replacement_digest_excludes_observation_time() {
+        let early_record = record_with_observed_at(1, 0, 10, 44);
+        let late_record = record_with_observed_at(1, 0, 10, 99);
+
+        let mut early = sink(8);
+        let early_frame = decoded_frame(
+            1,
+            ScopedAppendDeliveryPhase::Bootstrap,
+            &early_record,
+            usage_batch(&early_record, "response-1", 10, None),
+        );
+        only_usage_event(early.project(&early_frame).unwrap());
+
+        let mut late = sink(8);
+        let late_frame = decoded_frame(
+            1,
+            ScopedAppendDeliveryPhase::Bootstrap,
+            &late_record,
+            usage_batch(&late_record, "response-1", 10, None),
+        );
+        only_usage_event(late.project(&late_frame).unwrap());
+
+        let early = early
+            .usage_v2_replacement_snapshot(ScopedAppendDeliveryPhase::Bootstrap)
+            .unwrap();
+        let late = late
+            .usage_v2_replacement_snapshot(ScopedAppendDeliveryPhase::Bootstrap)
+            .unwrap();
+        assert_eq!(early.semantic_digest, late.semantic_digest);
+        assert_eq!(early.events[0].event_id, late.events[0].event_id);
+        assert_ne!(
+            early.events[0].source.provenance.observed_at,
+            late.events[0].source.provenance.observed_at
+        );
+    }
+
+    #[test]
+    fn scoped_usage_replacement_snapshot_removes_deleted_entities() {
+        let mut projection = sink(8);
+        let record = record(1, 0, 10);
+        let frame = decoded_frame(
+            1,
+            ScopedAppendDeliveryPhase::Bootstrap,
+            &record,
+            usage_batch(&record, "response-1", 10, None),
+        );
+        only_usage_event(projection.project(&frame).unwrap());
+        let populated = projection
+            .usage_v2_replacement_snapshot(ScopedAppendDeliveryPhase::Correction)
+            .unwrap();
+
+        let deletion = ScopedQueuedObservationFrame::Presence {
+            object_token: OBJECT_TOKEN,
+            lane_ordinal: 2,
+            phase: ScopedAppendDeliveryPhase::Correction,
+            change: ScopedAppendPresenceChange::Deleted { generation: 1 },
+        };
+        let removed = projection.project(&deletion).unwrap();
+        assert_eq!(removed.len(), 2);
+
+        let replacement = projection
+            .usage_v2_replacement_snapshot(ScopedAppendDeliveryPhase::Correction)
+            .unwrap();
+        let empty = sink(8)
+            .usage_v2_replacement_snapshot(ScopedAppendDeliveryPhase::Correction)
+            .unwrap();
+        assert_eq!(replacement, empty);
+        assert_eq!(replacement.entity_count, 0);
+        assert!(replacement.events.is_empty());
+        assert_ne!(populated.semantic_digest, replacement.semantic_digest);
+        assert_eq!(
+            bytes_hex(replacement.semantic_digest.as_bytes()),
+            "ea7d7a39f13d8d04ca52cef36c83e88a9e52f69eb0d7680477a08800a13408c2"
+        );
     }
 
     #[test]

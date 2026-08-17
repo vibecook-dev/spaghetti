@@ -133,7 +133,7 @@ prerequisite for early vertical slices.
 | C4. Runtime semantic downstream suite    | 012C                | Not started | typed consumers plus durable/live merge without native parsing |
 | D1. Store-free observer kernel           | 012D                | In progress | attach/bootstrap/poll/close, no SQLite/global scan             |
 | D2. Claude scope composition             | 012D                | Not started | root/current/future actor and sidecar conformance              |
-| D3. Control lane and epoch replacement   | 012D                | Not started | overflow/disappearance/duplicate/fairness matrix               |
+| D3. Control lane and epoch replacement   | 012D                | In progress | overflow/disappearance/duplicate/fairness matrix               |
 | D4. SDK and Chopsticks migration         | 012D                | Not started | feature-flagged shadow comparison and rollback                 |
 | D5. Observer performance calibration     | 012D                | Not started | reproducible latency/memory/access report                      |
 | X1. Search/finalization separation       | 012B integration    | Not started | complete-only FTS and maintenance experiment                   |
@@ -945,6 +945,14 @@ Current landing status (2026-08-16):
   retracts every old-generation response before corrected replay. Source
   deletion likewise emits its lifecycle control before deterministic
   deletion-owned retractions, so disappearance cannot leave usage state stale;
+- the usage-v2 reducer can materialize a family-versioned bootstrap or
+  correction replacement snapshot containing exactly one latest revision per
+  retained response. Canonical fact ordering makes output independent of
+  admission order, and its versioned semantic digest covers semantic IDs,
+  value-derived revisions, stable source occurrence provenance, and current
+  entity count while excluding delivery phase, observation time, and local
+  runtime IDs. Empty replacement is explicit and source deletion removes the
+  entity before the snapshot is built;
 - one pass is active at a time, a later pass receives fresh bounds, close is
   idempotent, and the frozen access report excludes paths, identity values, and
   content; and
@@ -991,6 +999,17 @@ Implement:
 Gate compares clean-bootstrap and resync replacement digests per RFC 012C family
 at the same RFC 012A coverage vector, including disappeared entities, explicit
 unavailable coverage, and unchanged event IDs.
+
+Current landing status (2026-08-16): D3 is `In progress`. Native-derived
+usage-v2 upsert/retraction IDs are deterministic and include the selected event
+and semantic-reference contract versions, typed semantic revision and stable
+source occurrence. The bounded usage reducer now produces the first
+family-versioned replacement snapshot/digest with stable ordering, phase- and
+observation-time-independent identity, empty-state removal, and equal
+bootstrap/correction semantic digests and event IDs at equal state. The public
+control multiplexer, epoch state machine, sticky overflow/resync controls,
+coverage-complete family manifest, atomic staged swap, and multi-observer
+isolation remain unimplemented; therefore the D3 and X0 gates remain open.
 
 ### D4. SDK and Chopsticks migration
 
