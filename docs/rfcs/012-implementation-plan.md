@@ -1000,6 +1000,17 @@ Current landing status (2026-08-16):
   offered. Retained coverage membership has its own explicit object bound and
   repeated no-event updates at one pending boundary coalesce by stable source
   identity;
+- coverage membership now has one store-free canonical streaming encoder used
+  by both durable usage-v2 coverage and scoped observation, preserving the
+  existing usage-v2 byte contract while separating other domains. Once the
+  admission lane is drained, a crate-private watermark core groups offered
+  objects by common domain/source instance, derives declaration-bound
+  `SourceCoverageSet`s, flattens explicit object errors, and pairs them with the
+  exact scope epoch, offered-through sequence, and delivery queue state.
+  `Decode` is implicit; a fact-family set exists only when the exact object
+  declares it, contract negotiation selects the same version, and the common
+  reducer implements it. Projection-pack coverage and adapter-private claims
+  are rejected. The first such family is `runtime.usage-v2@1`;
 - one pass is active at a time, a later pass receives fresh bounds, close is
   idempotent, and the frozen access report excludes paths, identity values, and
   content; and
@@ -1011,8 +1022,8 @@ orchestration, declared relation-backed decoder dependency access, built-in
 canonical fact-revision adoption and scoped reducers beyond usage-v2,
 coverage-complete durable query exposure, the complete root/actor/source
 envelope mapper, the public ordered multiplexer and poll/readiness barriers,
-coverage-set membership/fact-family assembly, overflow/resync epochs, artifact
-mediation, cancellation waiting,
+complete declared-scope membership and family coverage beyond usage-v2,
+overflow/resync epochs, artifact mediation, cancellation waiting,
 the trusted native version-probe driver, and the complete public request are
 not yet implemented. The internal offered boundary is now transactional, but
 it cannot become a public `offered` watermark until the envelope mapper,
@@ -1063,13 +1074,16 @@ phase, and source-coordinate seam for the future envelope mapper. The bounded
 usage reducer now produces the first
 family-versioned replacement snapshot/digest with stable ordering, phase- and
 observation-time-independent identity, empty-state removal, and equal
-bootstrap/correction semantic digests and event IDs at equal state. The public
+bootstrap/correction semantic digests and event IDs at equal state. The internal
 object-level `Decode` coverage checkpoint is also tied to that exact offered
 transaction, so delivery pressure cannot overstate its cursor and semantic
-no-ops can advance coverage without inventing a sequence. The public control
-multiplexer, epoch state machine, sticky overflow/resync controls, complete
-scope-membership source/family sets, coverage-complete family manifest, atomic
-staged swap, and multi-observer isolation remain unimplemented. Internally,
+no-ops can advance coverage without inventing a sequence. A drained watermark
+core now emits common Decode and eligible usage-v2 `SourceCoverageSet`s at that
+sequence, but it is not the public poll/bootstrap/resync contract and does not
+yet prove complete declared-scope discovery. The public control multiplexer,
+epoch state machine, sticky overflow/resync controls, complete scope-membership
+source/family sets, coverage-complete family manifest, atomic staged swap, and
+multi-observer isolation remain unimplemented. Internally,
 reducer mutation, admitted-frame release, bounded delivery admission, and
 eligible coverage promotion now share one retry-safe offered transaction:
 exact projected capacity is checked before mutation, queue pressure changes no

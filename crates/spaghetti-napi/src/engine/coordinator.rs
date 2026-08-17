@@ -18,14 +18,16 @@ use crate::adapter::{
     AdapterError, AdapterErrorClass, AdapterManifest, AdapterObjectContext, AgentAdapter,
     Availability, CanonicalSourceInstanceKey, CapabilityGranularity, CapabilityId, CoverageAbsence,
     CoverageAbsenceKind, CoverageDeclarationDigest, CoverageDomain, CoverageError,
-    CoverageMembershipRevision, CoverageMembershipRevisionBuilder, CoverageObjectKey,
-    CoveragePosition, CoveragePositionKind, CoverageProvenance, CoverageScope,
+    CoverageObjectKey, CoveragePosition, CoveragePositionKind, CoverageProvenance, CoverageScope,
     CoverageSetCompleteness, CoverageStatus, CoverageStreamKey, DecodeDisposition, DeletionPolicy,
     DependencyRevision, DiscoveryContext, DriverSpec, FactBatch, FactSemanticContext,
     RawRetentionPolicy, SourceAccess, SourceCoveragePoint, SourceCoverageSet, SourceInstance,
     SourceInstanceSpec as AdapterSourceInstanceSpec, SourceListedObject, SourceObjectDescriptor,
     SourceObjectList, SourceObjectListRequest, SourceQuery, SourceRows, SourceSnapshot,
     StreamAuthority, StreamSpec, SupportLevel,
+};
+use crate::coverage_runtime::{
+    derive_coverage_membership_revision, source_membership_prefix, CoverageMembershipObject,
 };
 use crate::decode_runtime::{
     decode_record as decode_adapter_record, diagnostic_excerpt, DecodeRuntimeLimits,
@@ -4790,48 +4792,44 @@ fn usage_v2_coverage_set_update(
     // particular, the first quarantine and the following unchanged poll must
     // not alternate between a per-record error and a generic sticky error.
     let replay_gap = incomplete_detail.is_some_and(|detail| detail.contains("records_quarantined"));
-    const MEMBERSHIP_PREFIX: &[u8] = b"runtime.usage-v2/source-membership/v1";
-    let mut membership_bytes = MEMBERSHIP_PREFIX.len();
-    for stream in attempt.required_streams.keys() {
-        membership_bytes = checked_membership_component_len(membership_bytes, stream.as_bytes())?;
-    }
-    for object in catalog
+    let membership_streams = attempt
+        .required_streams
+        .keys()
+        .map(|stream| stream.as_bytes())
+        .collect::<Vec<_>>();
+    let mut membership_objects = catalog
         .objects
         .iter()
         .filter(|object| attempt.required_streams.contains_key(&object.stream_key))
-    {
-        membership_bytes =
-            checked_membership_component_len(membership_bytes, object.stream_key.as_bytes())?;
-        membership_bytes = checked_membership_component_len(membership_bytes, &object.object_key)?;
-        membership_bytes = checked_membership_len(
-            membership_bytes,
-            std::mem::size_of::<u64>() + std::mem::size_of::<u8>(),
-        )?;
-    }
-    let mut membership = CoverageMembershipRevision::begin_streaming(membership_bytes)
+        .map(|object| CoverageMembershipObject {
+            stream_key: object.stream_key.as_bytes(),
+            object_key: &object.object_key,
+            generation: object.generation,
+            absent: object.state == "absent",
+        })
+        .collect::<Vec<_>>();
+    membership_objects.sort_by(|left, right| {
+        (left.stream_key, left.object_key, left.generation).cmp(&(
+            right.stream_key,
+            right.object_key,
+            right.generation,
+        ))
+    });
+    let membership_prefix = source_membership_prefix(&domain)
         .map_err(|error| observation_error("build usage-v2 coverage", error.to_string()))?;
-    membership
-        .update(MEMBERSHIP_PREFIX)
-        .map_err(|error| observation_error("build usage-v2 coverage", error.to_string()))?;
+    let membership_revision = derive_coverage_membership_revision(
+        &membership_prefix,
+        &membership_streams,
+        &membership_objects,
+    )
+    .map_err(|error| observation_error("build usage-v2 coverage", error.to_string()))?;
     let mut points = Vec::new();
     let mut absences = Vec::new();
-    for stream in attempt.required_streams.keys() {
-        append_membership_component(&mut membership, stream.as_bytes())?;
-    }
     for object in catalog
         .objects
         .iter()
         .filter(|object| attempt.required_streams.contains_key(&object.stream_key))
     {
-        append_membership_component(&mut membership, object.stream_key.as_bytes())?;
-        append_membership_component(&mut membership, &object.object_key)?;
-        membership
-            .update(&object.generation.to_be_bytes())
-            .map_err(|error| observation_error("build usage-v2 coverage", error.to_string()))?;
-        membership
-            .update(&[u8::from(object.state == "absent")])
-            .map_err(|error| observation_error("build usage-v2 coverage", error.to_string()))?;
-
         let stream_key =
             CoverageStreamKey::derive(manifest.id.as_str(), object.stream_key.as_bytes())
                 .map_err(|error| observation_error("build usage-v2 coverage", error.to_string()))?;
@@ -4927,9 +4925,6 @@ fn usage_v2_coverage_set_update(
     errors.sort();
     errors.dedup();
 
-    let membership_revision = membership
-        .finish()
-        .map_err(|error| observation_error("build usage-v2 coverage", error.to_string()))?;
     let completeness = if incomplete_detail.is_none() {
         CoverageSetCompleteness::Complete
     } else {
@@ -4956,41 +4951,6 @@ fn usage_v2_coverage_set_update(
         owner_scope_key: instance.spec.stable_key.as_bytes().to_vec(),
         set,
     })
-}
-
-fn checked_membership_len(current: usize, additional: usize) -> Result<usize, EngineError> {
-    current.checked_add(additional).ok_or_else(|| {
-        observation_error(
-            "build usage-v2 coverage",
-            "coverage membership encoded length overflow",
-        )
-    })
-}
-
-fn checked_membership_component_len(
-    current: usize,
-    component: &[u8],
-) -> Result<usize, EngineError> {
-    let current = checked_membership_len(current, std::mem::size_of::<u64>())?;
-    checked_membership_len(current, component.len())
-}
-
-fn append_membership_component(
-    output: &mut CoverageMembershipRevisionBuilder,
-    component: &[u8],
-) -> Result<(), EngineError> {
-    let length = u64::try_from(component.len()).map_err(|_| {
-        observation_error(
-            "build usage-v2 coverage",
-            "coverage membership component length exceeds u64",
-        )
-    })?;
-    output
-        .update(&length.to_be_bytes())
-        .map_err(|error| observation_error("build usage-v2 coverage", error.to_string()))?;
-    output
-        .update(component)
-        .map_err(|error| observation_error("build usage-v2 coverage", error.to_string()))
 }
 
 fn normalized_coverage_blocker(blocker: &str) -> &str {

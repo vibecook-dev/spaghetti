@@ -26,6 +26,7 @@ pub mod adapter;
 pub mod claude;
 pub mod codex;
 pub mod core;
+mod coverage_runtime;
 mod decode_runtime;
 pub mod engine;
 pub mod grok;

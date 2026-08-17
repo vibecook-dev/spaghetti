@@ -185,19 +185,19 @@ mod tests {
 
     use crate::adapter::{
         verify_support_release_bundle, AdapterManifest, AdapterObjectContext,
-        AdapterSupportBinding, CoverageAbsenceKind, CoveragePositionKind, CoverageSetCompleteness,
-        CoverageStatus, DecodeContext, DecodeDisposition, DecoderId, DiscoveryContext, Fact,
-        FactBatch, FactSemanticContext, RawRetentionPolicy, Sha256Digest, SourceAccess,
-        SourceInstance, SourceInstanceSpec, SourceObjectDescriptor, StreamSpec,
+        AdapterSupportBinding, CoverageAbsenceKind, CoverageDomain, CoveragePositionKind,
+        CoverageSetCompleteness, CoverageStatus, DecodeContext, DecodeDisposition, DecoderId,
+        DiscoveryContext, Fact, FactBatch, FactSemanticContext, RawRetentionPolicy, Sha256Digest,
+        SourceAccess, SourceInstance, SourceInstanceSpec, SourceObjectDescriptor, StreamSpec,
         SupportBundleDocument,
     };
     use crate::scoped_observation::{
         ScopedAdmissionError, ScopedAppendDecodeOutcome, ScopedAppendDecoderConfig,
         ScopedAppendDeliveryPhase, ScopedAppendObservation, ScopedAppendPresenceChange,
-        ScopedAppendReconcileRequest, ScopedDecodeFailureClass, ScopedDecodedAppendItem,
-        ScopedDeliveryError, ScopedKnownAppendObject, ScopedKnownObjectGrant,
-        ScopedKnownObjectReadRequest, ScopedObjectRead, ScopedObservationAccessError,
-        ScopedObservationAccessHost, ScopedObservationAccessRequest,
+        ScopedAppendReconcileRequest, ScopedCoverageAssemblyError, ScopedDecodeFailureClass,
+        ScopedDecodedAppendItem, ScopedDeliveryError, ScopedKnownAppendObject,
+        ScopedKnownObjectGrant, ScopedKnownObjectReadRequest, ScopedObjectRead,
+        ScopedObservationAccessError, ScopedObservationAccessHost, ScopedObservationAccessRequest,
         ScopedObservationAdmissionLane, ScopedObservationDeliveryLane,
         ScopedObservationDeliveryLimits, ScopedObservationProjectionLimits,
         ScopedObservationProjectionSink, ScopedObservationQueueLimits,
@@ -377,7 +377,7 @@ mod tests {
                 external_entity_reference_version: 1,
                 semantic_revision_reference_version: 1,
                 coverage_contract_versions: vec![1],
-                fact_family_versions: BTreeMap::new(),
+                fact_family_versions: BTreeMap::from([("runtime.usage-v2".to_string(), vec![1])]),
                 query_pack_versions: None,
                 observation_contract_versions: Some(vec![1]),
             },
@@ -387,7 +387,7 @@ mod tests {
                 external_entity_reference_versions: vec![1],
                 semantic_revision_reference_versions: vec![1],
                 coverage_contract_versions: vec![1],
-                fact_family_versions: BTreeMap::new(),
+                fact_family_versions: BTreeMap::from([("runtime.usage-v2".to_string(), vec![1])]),
                 query_pack_versions: Vec::new(),
                 observation_contract_versions: vec![1],
             },
@@ -414,12 +414,21 @@ mod tests {
         driver: AppendDelimitedFile,
         retention: RawRetentionPolicy,
     ) -> ScopedKnownAppendObject {
+        scoped_append_object_with_coverage(driver, retention, Vec::new())
+    }
+
+    fn scoped_append_object_with_coverage(
+        driver: AppendDelimitedFile,
+        retention: RawRetentionPolicy,
+        coverage_domains: Vec<CoverageDomain>,
+    ) -> ScopedKnownAppendObject {
         ScopedKnownAppendObject::new(
             driver,
             ScopedAppendDecoderConfig {
                 decoder: DecoderId::new("fixture-decoder").unwrap(),
                 object_context: AdapterObjectContext::empty(),
                 semantic_context: fixture_semantic_context(),
+                coverage_domains,
                 retention,
                 max_facts_per_record: 16,
                 max_diagnostics_per_record: 16,
@@ -821,6 +830,7 @@ mod tests {
                 decoder: DecoderId::new("fixture-decoder").unwrap(),
                 object_context: AdapterObjectContext::empty(),
                 semantic_context: fixture_semantic_context(),
+                coverage_domains: Vec::new(),
                 retention: RawRetentionPolicy::None,
                 max_facts_per_record: 0,
                 max_diagnostics_per_record: 16,
@@ -830,6 +840,39 @@ mod tests {
             result,
             Err(ScopedObservationAccessError::InvalidDecodeBounds)
         ));
+    }
+
+    #[test]
+    fn scoped_append_decoder_rejects_non_fact_and_duplicate_coverage_domains() {
+        let usage = CoverageDomain::FactFamily {
+            family: "runtime.usage-v2".to_string(),
+            version: 1,
+        };
+        for coverage_domains in [
+            vec![CoverageDomain::Decode],
+            vec![CoverageDomain::ProjectionPack {
+                pack: "history".to_string(),
+                version: 1,
+            }],
+            vec![usage.clone(), usage.clone()],
+        ] {
+            let result = ScopedKnownAppendObject::new(
+                AppendDelimitedFile::new(AppendDelimitedConfig::json_lines()).unwrap(),
+                ScopedAppendDecoderConfig {
+                    decoder: DecoderId::new("fixture-decoder").unwrap(),
+                    object_context: AdapterObjectContext::empty(),
+                    semantic_context: fixture_semantic_context(),
+                    coverage_domains,
+                    retention: RawRetentionPolicy::None,
+                    max_facts_per_record: 16,
+                    max_diagnostics_per_record: 16,
+                },
+            );
+            assert!(matches!(
+                result,
+                Err(ScopedObservationAccessError::InvalidCoverageDomains)
+            ));
+        }
     }
 
     #[test]
@@ -1109,9 +1152,13 @@ mod tests {
         config.max_batch_bytes = 64;
         config.max_records_per_batch = 4;
         config.prefix_anchor_bytes = 16;
-        let mut object = scoped_append_object(
+        let mut object = scoped_append_object_with_coverage(
             AppendDelimitedFile::new(config).unwrap(),
             RawRetentionPolicy::None,
+            vec![CoverageDomain::FactFamily {
+                family: "runtime.usage-v2".to_string(),
+                version: 1,
+            }],
         );
         let source = object.source_identity().clone();
         let identity = [ScopeIdentityInput {
@@ -1178,6 +1225,42 @@ mod tests {
                 ..
             })
         ));
+        let missing_watermark = host
+            .capture_watermark_core(&lane, &projection, &delivery)
+            .unwrap();
+        assert_eq!(missing_watermark.scope_epoch, 1);
+        assert_eq!(missing_watermark.offered_through_sequence, 0);
+        assert!(missing_watermark.explicit_object_errors.is_empty());
+        assert_eq!(missing_watermark.source_coverage.len(), 2);
+        let missing_set = missing_watermark
+            .source_coverage
+            .iter()
+            .find(|set| set.coverage_domain == CoverageDomain::Decode)
+            .unwrap();
+        let missing_usage_set = missing_watermark
+            .source_coverage
+            .iter()
+            .find(|set| {
+                set.coverage_domain
+                    == (CoverageDomain::FactFamily {
+                        family: "runtime.usage-v2".to_string(),
+                        version: 1,
+                    })
+            })
+            .unwrap();
+        assert_eq!(missing_set.coverage_domain, CoverageDomain::Decode);
+        assert_eq!(missing_set.scope.adapter_id, "fixture");
+        assert_eq!(missing_set.scope.support_release_id, "fixture-release");
+        assert_eq!(missing_set.completeness, CoverageSetCompleteness::Complete);
+        assert_eq!(missing_set.explicit_absence_or_deletion.len(), 1);
+        assert_eq!(
+            missing_usage_set.explicit_absence_or_deletion,
+            missing_set.explicit_absence_or_deletion
+        );
+        assert_ne!(
+            missing_usage_set.membership_revision,
+            missing_set.membership_revision
+        );
         drop(missing_pass);
         object.complete_bootstrap().unwrap();
 
@@ -1200,6 +1283,10 @@ mod tests {
         assert_eq!(creation_receipt.through_lane_ordinal, 2);
         assert_eq!(object.checkpoint().unwrap().committed_offset, 4);
         assert_eq!(lane.queued_coverage_updates(), 1);
+        assert!(matches!(
+            host.capture_watermark_core(&lane, &projection, &delivery),
+            Err(ScopedCoverageAssemblyError::AdmissionNotDrained)
+        ));
         assert!(lane
             .offered_decode_coverage(&source)
             .unwrap()
@@ -1244,6 +1331,39 @@ mod tests {
             CoveragePositionKind::AppendCursor
         );
         assert_eq!(point.position.as_ref().unwrap().monotonic_order, Some(4));
+        let present_watermark = host
+            .capture_watermark_core(&lane, &projection, &delivery)
+            .unwrap();
+        assert_eq!(present_watermark.offered_through_sequence, 1);
+        assert_eq!(present_watermark.queue_state.queued_source_control_items, 1);
+        assert_eq!(present_watermark.source_coverage.len(), 2);
+        let present_set = present_watermark
+            .source_coverage
+            .iter()
+            .find(|set| set.coverage_domain == CoverageDomain::Decode)
+            .unwrap();
+        let present_usage_set = present_watermark
+            .source_coverage
+            .iter()
+            .find(|set| {
+                set.coverage_domain
+                    == (CoverageDomain::FactFamily {
+                        family: "runtime.usage-v2".to_string(),
+                        version: 1,
+                    })
+            })
+            .unwrap();
+        assert_eq!(present_set.points.len(), 1);
+        assert!(present_set.explicit_absence_or_deletion.is_empty());
+        assert_eq!(present_usage_set.points.len(), 1);
+        assert_eq!(
+            present_usage_set.points[0].position,
+            present_set.points[0].position
+        );
+        assert_ne!(
+            present_set.membership_revision,
+            missing_set.membership_revision
+        );
         drop(creation_pass);
 
         // Keep source.created in the one-slot control queue, then prove a
@@ -1272,6 +1392,10 @@ mod tests {
             .point
             .is_some());
         assert_eq!(lane.queued_coverage_updates(), 1);
+        assert!(matches!(
+            host.capture_watermark_core(&lane, &projection, &delivery),
+            Err(ScopedCoverageAssemblyError::AdmissionNotDrained)
+        ));
 
         assert_eq!(delivery.pop_next().unwrap().observer_sequence, 1);
         let deleted_offer = lane
@@ -1295,6 +1419,15 @@ mod tests {
         ));
         assert_eq!(lane.queued_coverage_updates(), 0);
         assert!(lane.is_empty());
+        let deleted_watermark = host
+            .capture_watermark_core(&lane, &projection, &delivery)
+            .unwrap();
+        assert_eq!(deleted_watermark.offered_through_sequence, 2);
+        assert_eq!(deleted_watermark.source_coverage.len(), 2);
+        for set in &deleted_watermark.source_coverage {
+            assert_eq!(set.points.len(), 0);
+            assert_eq!(set.explicit_absence_or_deletion.len(), 1);
+        }
         drop(deletion_pass);
     }
 
@@ -1758,6 +1891,20 @@ mod tests {
         );
         assert_eq!(partial.explicit_errors.len(), 1);
         assert_eq!(partial.explicit_errors[0].code, "bounded_backlog");
+        let partial_watermark = host
+            .capture_watermark_core(&lane, &projection, &delivery)
+            .unwrap();
+        assert_eq!(partial_watermark.offered_through_sequence, 0);
+        assert_eq!(partial_watermark.source_coverage.len(), 1);
+        assert_eq!(
+            partial_watermark.source_coverage[0].completeness,
+            CoverageSetCompleteness::Partial
+        );
+        assert_eq!(partial_watermark.explicit_object_errors.len(), 1);
+        assert_eq!(
+            partial_watermark.explicit_object_errors[0].code,
+            "bounded_backlog"
+        );
         drop(first_pass);
         assert!(matches!(
             object.complete_bootstrap(),
@@ -1806,6 +1953,12 @@ mod tests {
             Some(8)
         );
         assert!(complete.explicit_errors.is_empty());
+        let complete_watermark = host
+            .capture_watermark_core(&lane, &projection, &delivery)
+            .unwrap();
+        assert_eq!(complete_watermark.offered_through_sequence, 0);
+        assert_eq!(complete_watermark.source_coverage.len(), 1);
+        assert!(complete_watermark.explicit_object_errors.is_empty());
         drop(second_pass);
         object.complete_bootstrap().unwrap();
         assert!(!object.bootstrap_active());

@@ -14,13 +14,17 @@ use crate::adapter::{
     AdapterError, AdapterErrorClass, AdapterId, AdapterObjectContext, AdapterRegistry,
     AgentAdapter, CanonicalFactId, CanonicalSourceInstanceKey, CompatibilityDecision,
     ContractVersionOffer, ContractVersionRequest, CoverageAbsence, CoverageAbsenceKind,
-    CoverageDomain, CoverageError, CoverageObjectKey, CoveragePosition, CoveragePositionKind,
-    CoverageProvenance, CoverageSetCompleteness, CoverageStatus, CoverageStreamKey,
-    DecodeDisposition, DecoderId, Fact, FactBatch, FactEnvelope, FactProvenance, FactRevisionId,
-    FactSemanticContext, FactSemanticRevision, NativeArtifactProbe, RawRetentionPolicy,
-    ScopeRelationPrimitive, SemanticRevisionRef, SourceAccess, SourceCoveragePoint,
-    SourceObjectList, SourceObjectListRequest, SourceQuery, SourceRecordId, SourceRows,
-    SourceSnapshot, SupportOperation, TypedAccessAuthorization, UsageRevisionV2Fact,
+    CoverageDeclarationDigest, CoverageDomain, CoverageError, CoverageObjectKey, CoveragePosition,
+    CoveragePositionKind, CoverageProvenance, CoverageScope, CoverageSetCompleteness,
+    CoverageStatus, CoverageStreamKey, DecodeDisposition, DecoderId, Fact, FactBatch, FactEnvelope,
+    FactProvenance, FactRevisionId, FactSemanticContext, FactSemanticRevision, NativeArtifactProbe,
+    RawRetentionPolicy, ScopeRelationPrimitive, SemanticRevisionRef, SourceAccess,
+    SourceCoveragePoint, SourceCoverageSet, SourceObjectList, SourceObjectListRequest, SourceQuery,
+    SourceRecordId, SourceRows, SourceSnapshot, SupportOperation, TypedAccessAuthorization,
+    UsageRevisionV2Fact,
+};
+use crate::coverage_runtime::{
+    derive_coverage_membership_revision, source_membership_prefix, CoverageMembershipObject,
 };
 use crate::decode_runtime::{
     decode_record, diagnostic_excerpt, DecodeRuntimeLimits, DecodeRuntimeRequest,
@@ -105,6 +109,9 @@ pub struct ScopedAppendDecoderConfig {
     pub decoder: DecoderId,
     pub object_context: AdapterObjectContext,
     pub semantic_context: FactSemanticContext,
+    /// Fact-family domains this exact object/decoder can cover. Decode
+    /// coverage is implicit; projection-pack coverage is never legal here.
+    pub coverage_domains: Vec<CoverageDomain>,
     pub retention: RawRetentionPolicy,
     pub max_facts_per_record: usize,
     pub max_diagnostics_per_record: usize,
@@ -346,6 +353,13 @@ struct PendingScopedCoverageUpdate {
     coverage: ScopedOfferedDecodeCoverage,
 }
 
+#[derive(Clone, PartialEq, Eq)]
+struct ScopedCoverageMembershipIdentity {
+    stream_key: Arc<[u8]>,
+    object_key: Arc<[u8]>,
+    coverage_domains: Vec<CoverageDomain>,
+}
+
 /// Two bounded internal capacity domains multiplexed by one admission ordinal.
 /// The ordinal is not an RFC 012D `observer_sequence`; public sequencing begins
 /// only after canonical semantic projection is available.
@@ -357,7 +371,7 @@ pub struct ScopedObservationAdmissionLane {
     queued_retained_native_bytes: u64,
     next_lane_ordinal: u64,
     offered_lane_ordinal: u64,
-    known_coverage_objects: BTreeMap<ScopedSourceObjectIdentity, ()>,
+    known_coverage_objects: BTreeMap<ScopedSourceObjectIdentity, ScopedCoverageMembershipIdentity>,
     pending_coverage_updates: VecDeque<PendingScopedCoverageUpdate>,
     offered_decode_coverage: BTreeMap<ScopedSourceObjectIdentity, ScopedOfferedDecodeCoverage>,
 }
@@ -408,7 +422,18 @@ impl ScopedObservationAdmissionLane {
                 });
             }
         };
+        let membership_identity = object.coverage_membership_identity();
         let source_is_new = !self.known_coverage_objects.contains_key(&object.source);
+        if self
+            .known_coverage_objects
+            .get(&object.source)
+            .is_some_and(|known| known != &membership_identity)
+        {
+            return Err(ScopedAdmissionFailure {
+                error: ScopedAdmissionError::InvalidCoverage,
+                decoded,
+            });
+        }
         if source_is_new && self.known_coverage_objects.len() >= self.limits.max_coverage_objects {
             return Err(ScopedAdmissionFailure {
                 error: ScopedAdmissionError::CoverageObjectCapacityFull,
@@ -539,7 +564,7 @@ impl ScopedObservationAdmissionLane {
 
         if source_is_new {
             self.known_coverage_objects
-                .insert(object.source.clone(), ());
+                .insert(object.source.clone(), membership_identity);
         }
         self.stage_coverage_update(
             after_ordinal
@@ -1019,6 +1044,37 @@ pub struct ScopedObservationDeliveryState {
     pub queued_source_control_items: usize,
 }
 
+/// Store-free watermark substrate for common Decode coverage plus fact-family
+/// domains that are simultaneously object-declared, contract-selected, and
+/// reducer-supported. This remains crate-private and deliberately does not
+/// masquerade as the complete RFC 012D watermark: scope coverage, actor/root
+/// envelope state, and object-error lifecycle events still belong to the
+/// future observer facade.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScopedObservationWatermarkCore {
+    pub scope_epoch: u64,
+    pub offered_through_sequence: u64,
+    pub source_coverage: Vec<SourceCoverageSet>,
+    pub explicit_object_errors: Vec<CoverageError>,
+    pub queue_state: ScopedObservationDeliveryState,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum ScopedCoverageAssemblyError {
+    #[error("scoped admission and coverage markers are not drained")]
+    AdmissionNotDrained,
+    #[error("scoped coverage has no observed source object")]
+    NoObservedObject,
+    #[error("scoped source coverage does not belong to the authorized adapter")]
+    AdapterMismatch,
+    #[error("scoped source coverage is missing a successfully offered object state")]
+    ObjectNotOffered,
+    #[error("scoped adapter is missing its promoted source declaration binding")]
+    MissingSupportBinding,
+    #[error("scoped coverage could not be represented by the common contract")]
+    InvalidContract,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum ScopedDeliveryError {
     #[error("scoped observation delivery limits are invalid")]
@@ -1445,6 +1501,15 @@ impl ScopedObservationProjectionSink {
 
     pub fn usage_v2_entity_count(&self) -> usize {
         self.usage_v2.len()
+    }
+
+    fn supports_coverage_domain(&self, domain: &CoverageDomain) -> bool {
+        matches!(
+            domain,
+            CoverageDomain::FactFamily { family, version }
+                if family == "runtime.usage-v2"
+                    && *version == RUNTIME_USAGE_V2_FACT_FAMILY_CONTRACT_VERSION
+        )
     }
 
     pub fn usage_v2_revision(&self, fact_id: &CanonicalFactId) -> Option<SemanticRevisionRef> {
@@ -1970,6 +2035,8 @@ pub enum ScopedObservationAccessError {
     ObservationSequenceExhausted,
     #[error("invalid scoped decoder bounds")]
     InvalidDecodeBounds,
+    #[error("invalid or duplicate scoped decoder fact-family coverage domain")]
+    InvalidCoverageDomains,
     #[error("scoped decoder semantic source identity is invalid")]
     InvalidSemanticContext,
     #[error("scoped adapter decode failed: {0:?}")]
@@ -2038,6 +2105,38 @@ impl ScopedObservationAccessHost {
 
     pub fn compatibility(&self) -> &CompatibilityDecision {
         &self.compatibility
+    }
+
+    /// Capture a self-consistent offered sequence plus eligible RFC 012A
+    /// source/fact-family coverage after the admission lane has drained.
+    /// Delivery backlog is allowed: offered and delivered are deliberately
+    /// different boundaries.
+    pub fn capture_watermark_core(
+        &self,
+        admission: &ScopedObservationAdmissionLane,
+        projection: &ScopedObservationProjectionSink,
+        delivery: &ScopedObservationDeliveryLane,
+    ) -> Result<ScopedObservationWatermarkCore, ScopedCoverageAssemblyError> {
+        let source_coverage = assemble_scoped_coverage_sets(
+            self.adapter.manifest(),
+            self.authorization.contracts(),
+            admission,
+            projection,
+        )?;
+        let queue_state = delivery.state();
+        let mut explicit_object_errors = source_coverage
+            .iter()
+            .flat_map(|set| set.explicit_errors.iter().cloned())
+            .collect::<Vec<_>>();
+        explicit_object_errors.sort();
+        explicit_object_errors.dedup();
+        Ok(ScopedObservationWatermarkCore {
+            scope_epoch: queue_state.scope_epoch,
+            offered_through_sequence: queue_state.offered_through_sequence,
+            source_coverage,
+            explicit_object_errors,
+            queue_state,
+        })
     }
 
     /// Decode one already-read append observation through the exact adapter
@@ -2309,10 +2408,12 @@ struct PendingAppendState {
 impl ScopedKnownAppendObject {
     pub fn new(
         driver: AppendDelimitedFile,
-        decoder: ScopedAppendDecoderConfig,
+        mut decoder: ScopedAppendDecoderConfig,
     ) -> Result<Self, ScopedObservationAccessError> {
         validate_decode_bounds(&decoder)?;
         let source = ScopedSourceObjectIdentity::from_semantic_context(&decoder.semantic_context)?;
+        decoder.coverage_domains.sort();
+        validate_scoped_coverage_domains(&source, &decoder.coverage_domains)?;
         let object_token = next_scoped_object_token()?;
         Ok(Self {
             object_token,
@@ -2748,6 +2849,14 @@ impl ScopedKnownAppendObject {
         &self.source
     }
 
+    fn coverage_membership_identity(&self) -> ScopedCoverageMembershipIdentity {
+        ScopedCoverageMembershipIdentity {
+            stream_key: Arc::from(self.decoder.semantic_context.stream_key()),
+            object_key: Arc::from(self.decoder.semantic_context.object_key()),
+            coverage_domains: self.decoder.coverage_domains.clone(),
+        }
+    }
+
     pub fn decoder_state(&self) -> Option<&[u8]> {
         self.decoder_state.as_deref()
     }
@@ -2789,6 +2898,191 @@ fn scoped_decode_coverage_point(
         CoverageProvenance::default(),
     )
     .map_err(|_| ())
+}
+
+fn assemble_scoped_coverage_sets(
+    manifest: &crate::adapter::AdapterManifest,
+    contracts: &crate::adapter::ContractVersionSelection,
+    admission: &ScopedObservationAdmissionLane,
+    projection: &ScopedObservationProjectionSink,
+) -> Result<Vec<SourceCoverageSet>, ScopedCoverageAssemblyError> {
+    if !admission.is_empty() {
+        return Err(ScopedCoverageAssemblyError::AdmissionNotDrained);
+    }
+    if admission.known_coverage_objects.is_empty() {
+        return Err(ScopedCoverageAssemblyError::NoObservedObject);
+    }
+    let support = manifest
+        .support_binding
+        .as_ref()
+        .ok_or(ScopedCoverageAssemblyError::MissingSupportBinding)?;
+    let declaration_digest =
+        CoverageDeclarationDigest::derive(support.source_declaration_digest().as_bytes())
+            .map_err(|_| ScopedCoverageAssemblyError::InvalidContract)?;
+
+    let mut by_domain_and_source = BTreeMap::<
+        (CoverageDomain, CanonicalSourceInstanceKey),
+        Vec<(
+            &ScopedSourceObjectIdentity,
+            &ScopedCoverageMembershipIdentity,
+            &ScopedOfferedDecodeCoverage,
+        )>,
+    >::new();
+    for (source, membership) in &admission.known_coverage_objects {
+        if source.adapter_id != manifest.id {
+            return Err(ScopedCoverageAssemblyError::AdapterMismatch);
+        }
+        let coverage = admission
+            .offered_decode_coverage
+            .get(source)
+            .ok_or(ScopedCoverageAssemblyError::ObjectNotOffered)?;
+        if &coverage.source != source {
+            return Err(ScopedCoverageAssemblyError::InvalidContract);
+        }
+        by_domain_and_source
+            .entry((CoverageDomain::Decode, source.source_instance_key))
+            .or_default()
+            .push((source, membership, coverage));
+        for domain in &membership.coverage_domains {
+            let CoverageDomain::FactFamily { family, version } = domain else {
+                return Err(ScopedCoverageAssemblyError::InvalidContract);
+            };
+            if contracts.fact_family_versions.get(family) == Some(version)
+                && projection.supports_coverage_domain(domain)
+            {
+                by_domain_and_source
+                    .entry((domain.clone(), source.source_instance_key))
+                    .or_default()
+                    .push((source, membership, coverage));
+            }
+        }
+    }
+
+    let mut sets = Vec::with_capacity(by_domain_and_source.len());
+    for ((domain, source_instance_key), mut objects) in by_domain_and_source {
+        objects.sort_by(|left, right| {
+            (
+                left.1.stream_key.as_ref(),
+                left.1.object_key.as_ref(),
+                scoped_coverage_generation(left.2)
+                    .map(|(generation, _)| generation)
+                    .unwrap_or(0),
+            )
+                .cmp(&(
+                    right.1.stream_key.as_ref(),
+                    right.1.object_key.as_ref(),
+                    scoped_coverage_generation(right.2)
+                        .map(|(generation, _)| generation)
+                        .unwrap_or(0),
+                ))
+        });
+        let mut streams = objects
+            .iter()
+            .map(|(_, membership, _)| membership.stream_key.as_ref())
+            .collect::<Vec<_>>();
+        streams.sort_unstable();
+        streams.dedup();
+        let membership_objects = objects
+            .iter()
+            .map(|(_, membership, coverage)| {
+                let (generation, absent) = scoped_coverage_generation(coverage)
+                    .ok_or(ScopedCoverageAssemblyError::InvalidContract)?;
+                Ok(CoverageMembershipObject {
+                    stream_key: membership.stream_key.as_ref(),
+                    object_key: membership.object_key.as_ref(),
+                    generation,
+                    absent,
+                })
+            })
+            .collect::<Result<Vec<_>, ScopedCoverageAssemblyError>>()?;
+        let membership_prefix = source_membership_prefix(&domain)
+            .map_err(|_| ScopedCoverageAssemblyError::InvalidContract)?;
+        let membership_revision =
+            derive_coverage_membership_revision(&membership_prefix, &streams, &membership_objects)
+                .map_err(|_| ScopedCoverageAssemblyError::InvalidContract)?;
+
+        let mut points = Vec::new();
+        let mut absences = Vec::new();
+        let mut errors = Vec::new();
+        let mut completeness = CoverageSetCompleteness::Complete;
+        for (_, _, coverage) in objects {
+            match (&coverage.point, &coverage.explicit_absence_or_deletion) {
+                (Some(point), None) => {
+                    points.push(scoped_coverage_point_for_domain(point, &domain)?)
+                }
+                (None, Some(absence)) => absences.push(absence.clone()),
+                _ => return Err(ScopedCoverageAssemblyError::InvalidContract),
+            }
+            errors.extend(coverage.explicit_errors.iter().cloned());
+            completeness = merge_coverage_completeness(completeness, coverage.completeness);
+        }
+        points.sort_by_key(|point| (point.stream_key, point.object_key, point.generation));
+        absences.sort();
+        errors.sort();
+        errors.dedup();
+        sets.push(
+            SourceCoverageSet::new(
+                domain,
+                CoverageScope {
+                    adapter_id: manifest.id.as_str().to_string(),
+                    source_instance_key,
+                    root_entity_key: None,
+                    support_release_id: support.support_release_id().to_string(),
+                    source_or_scope_declaration_digest: declaration_digest,
+                },
+                membership_revision,
+                points,
+                absences,
+                errors,
+                completeness,
+            )
+            .map_err(|_| ScopedCoverageAssemblyError::InvalidContract)?,
+        );
+    }
+    Ok(sets)
+}
+
+fn scoped_coverage_point_for_domain(
+    point: &SourceCoveragePoint,
+    domain: &CoverageDomain,
+) -> Result<SourceCoveragePoint, ScopedCoverageAssemblyError> {
+    SourceCoveragePoint::new(
+        domain.clone(),
+        point.adapter_id.clone(),
+        point.source_instance_key,
+        point.stream_key,
+        point.object_key,
+        point.generation,
+        point.position.clone(),
+        point.status.clone(),
+        point.provenance.clone(),
+    )
+    .map_err(|_| ScopedCoverageAssemblyError::InvalidContract)
+}
+
+fn scoped_coverage_generation(coverage: &ScopedOfferedDecodeCoverage) -> Option<(u64, bool)> {
+    match (&coverage.point, &coverage.explicit_absence_or_deletion) {
+        (Some(point), None) => Some((point.generation, false)),
+        (None, Some(absence)) => Some((absence.generation, true)),
+        _ => None,
+    }
+}
+
+fn merge_coverage_completeness(
+    left: CoverageSetCompleteness,
+    right: CoverageSetCompleteness,
+) -> CoverageSetCompleteness {
+    match (left, right) {
+        (CoverageSetCompleteness::Unavailable, _) | (_, CoverageSetCompleteness::Unavailable) => {
+            CoverageSetCompleteness::Unavailable
+        }
+        (CoverageSetCompleteness::Partial, _) | (_, CoverageSetCompleteness::Partial) => {
+            CoverageSetCompleteness::Partial
+        }
+        (CoverageSetCompleteness::Complete, CoverageSetCompleteness::Complete) => {
+            CoverageSetCompleteness::Complete
+        }
+    }
 }
 
 fn validate_known_object_grants(
@@ -2918,6 +3212,34 @@ fn validate_decode_bounds(
         || decoder.max_diagnostics_per_record > MAX_DIAGNOSTICS_PER_RECORD
     {
         return Err(ScopedObservationAccessError::InvalidDecodeBounds);
+    }
+    Ok(())
+}
+
+fn validate_scoped_coverage_domains(
+    source: &ScopedSourceObjectIdentity,
+    domains: &[CoverageDomain],
+) -> Result<(), ScopedObservationAccessError> {
+    if domains.windows(2).any(|pair| pair[0] == pair[1]) {
+        return Err(ScopedObservationAccessError::InvalidCoverageDomains);
+    }
+    for domain in domains {
+        if !matches!(domain, CoverageDomain::FactFamily { .. })
+            || SourceCoveragePoint::new(
+                domain.clone(),
+                source.adapter_id.as_str(),
+                source.source_instance_key,
+                source.stream_key,
+                source.object_key,
+                1,
+                None,
+                CoverageStatus::Partial,
+                CoverageProvenance::default(),
+            )
+            .is_err()
+        {
+            return Err(ScopedObservationAccessError::InvalidCoverageDomains);
+        }
     }
     Ok(())
 }
