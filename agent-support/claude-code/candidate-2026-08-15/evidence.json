@@ -104,6 +104,31 @@
       ]
     },
     {
+      "claim_id": "claude-usage-v2-semantic-revision",
+      "statement": "Decoder contract 21 derives every usage-v2 fact revision from its complete normalized response snapshot instead of its transcript row. The common reducer recomputes that identity, suppresses an exact current-value repeat across decode batches and durable commits, builds query-bootstrap state as a non-consumption baseline, delivers post-barrier metadata corrections, and explicitly retracts old response entities on live generation replacement. A non-consecutive A-to-B-to-A reversion reuses A's semantic ledger row but remains a new ordered transition. A stable-clone adapter-independent census found 262 such reversions, and an artifact-bound full ingest passed exact response/actor/session/bucket parity, complete Ready coverage, and final foreign-key integrity without retaining native values.",
+      "state": "observed",
+      "sources": [
+        { "kind": "design_record", "path": "docs/rfcs/012c-runtime-semantics-and-usage-v2.md", "sha256": null, "locator": "Usage-v2 revision shape, reduction law, and current implementation status" },
+        { "kind": "code_reference", "path": "crates/spaghetti-napi/src/adapter/facts.rs", "sha256": null, "locator": "UsageRevisionV2Fact::semantic_revision_key and object-scoped explicit revision emission" },
+        { "kind": "code_reference", "path": "crates/spaghetti-napi/src/claude/adapter.rs", "sha256": null, "locator": "contract-21 usage-v2 semantic revision emission and decoder conformance" },
+        { "kind": "code_reference", "path": "crates/spaghetti-napi/src/engine/projection.rs", "sha256": null, "locator": "revision validation, exact-repeat ledger/change suppression, semantic-reversion ledger reuse, bootstrap baseline coalescing, and live generation retraction" },
+        { "kind": "code_reference", "path": "scripts/runtime_observation_census/census.py", "sha256": null, "locator": "adapter-independent complete semantic snapshot repeat and non-consecutive reversion census" },
+        { "kind": "code_reference", "path": "scripts/usage-v2-private-parity.ts", "sha256": null, "locator": "stable-source before/after parity, loaded native artifact binding, durable coverage, and integrity-gated host finalization" },
+        {
+          "kind": "experiment_report",
+          "path": "agent-support/claude-code/candidate-2026-08-15/reports/usage-v2-semantic-revision-census-v1.json",
+          "sha256": "sha256:4dee1d89f0f5a474458cbe257f3607b28e0911bf38d7f8c26dadfe83550edf9d",
+          "locator": "aggregate-only exact complete snapshot, counter-equal metadata correction, semantic reversion, and downward-revision census"
+        },
+        {
+          "kind": "experiment_report",
+          "path": "agent-support/claude-code/candidate-2026-08-15/reports/usage-v2-semantic-revision-parity-v1.json",
+          "sha256": "sha256:699c568377cc7d20f85392ccaa13a2fdc5b40441e5f68e4ad5234ed979aa37b8",
+          "locator": "artifact-bound contract-21 exact durable parity, Ready coverage, final foreign-key integrity, and descriptive ingest timing"
+        }
+      ]
+    },
+    {
       "claim_id": "claude-scope-relations-open",
       "statement": "The bounded root/descendant/team/task/artifact relations are a reviewable candidate but are not yet executable through the common scoped observer.",
       "state": "open",

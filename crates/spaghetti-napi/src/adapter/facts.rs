@@ -11,7 +11,8 @@ use crate::source::SourceRecord;
 use super::{
     AdapterDiagnostic, AdapterError, AdapterId, CanonicalEntityKey, CanonicalFactId,
     CanonicalSourceInstanceKey, CapabilityId, ContractCompleteness, DependencyRevision,
-    FactRevisionId, QualifiedValue, QualifiedValueQuality, SemanticRevisionRef, SourceRecordId,
+    FactRevisionId, QualifiedUnknownReason, QualifiedValue, QualifiedValueQuality,
+    SemanticRevisionRef, SourceRecordId,
 };
 
 const FACT_HASH_BYTES: usize = 32;
@@ -1158,6 +1159,159 @@ impl UsageRevisionV2Fact {
         }
         Ok(())
     }
+
+    /// Deterministic semantic value identity for one response revision.
+    ///
+    /// The enclosing canonical fact ID already owns the source-object,
+    /// generation, and response identity. This key deliberately encodes the
+    /// complete normalized value as well, so an exact native repeat has the
+    /// same revision while any counter, qualification, attribution, model,
+    /// effort, request correlation, or native-time correction has a distinct
+    /// revision. Raw source-record identity remains available separately in
+    /// `FactSemanticRevision::source_record_id`.
+    pub fn semantic_revision_key(&self) -> Result<[u8; FACT_HASH_BYTES], AdapterError> {
+        self.validate()?;
+        let mut encoded = Vec::new();
+        encoded.extend_from_slice(b"spaghetti/runtime.usage-v2/semantic-revision\0");
+        encoded.extend_from_slice(&1_u32.to_be_bytes());
+        push_component(&mut encoded, self.session.as_bytes());
+        push_component(&mut encoded, self.actor_run.as_bytes());
+        encoded.push(match self.response_identity {
+            UsageResponseIdentity::NativeMessageId => 1,
+            UsageResponseIdentity::SourceRecordFallback => 2,
+        });
+        push_component(&mut encoded, &self.response_key);
+        push_optional_component(
+            &mut encoded,
+            self.native_message_id.as_deref().map(str::as_bytes),
+        );
+        push_optional_component(&mut encoded, self.request_id.as_deref().map(str::as_bytes));
+        push_usage_qualified_value(&mut encoded, &self.buckets.input_tokens, |output, value| {
+            output.extend_from_slice(&value.to_be_bytes());
+        });
+        push_usage_qualified_value(
+            &mut encoded,
+            &self.buckets.output_tokens,
+            |output, value| {
+                output.extend_from_slice(&value.to_be_bytes());
+            },
+        );
+        push_usage_qualified_value(
+            &mut encoded,
+            &self.buckets.cache_creation_input_tokens,
+            |output, value| output.extend_from_slice(&value.to_be_bytes()),
+        );
+        push_usage_qualified_value(
+            &mut encoded,
+            &self.buckets.cache_read_input_tokens,
+            |output, value| output.extend_from_slice(&value.to_be_bytes()),
+        );
+        push_optional_usage_qualified_value(&mut encoded, self.model.as_ref(), |output, value| {
+            push_component(output, value.as_bytes());
+        });
+        push_optional_usage_qualified_value(&mut encoded, self.effort.as_ref(), |output, value| {
+            push_component(output, value.as_bytes());
+        });
+        match self.source_time.as_ref() {
+            Some(source_time) => {
+                encoded.push(1);
+                push_component(&mut encoded, source_time.value.as_bytes());
+                encoded.push(timestamp_quality_revision_tag(source_time.quality));
+            }
+            None => encoded.push(0),
+        }
+        Ok(*blake3::hash(&encoded).as_bytes())
+    }
+}
+
+fn push_optional_component(output: &mut Vec<u8>, value: Option<&[u8]>) {
+    match value {
+        Some(value) => {
+            output.push(1);
+            push_component(output, value);
+        }
+        None => output.push(0),
+    }
+}
+
+fn push_optional_usage_qualified_value<T>(
+    output: &mut Vec<u8>,
+    value: Option<&UsageQualifiedValue<T>>,
+    push_value: impl FnOnce(&mut Vec<u8>, &T),
+) {
+    match value {
+        Some(value) => {
+            output.push(1);
+            push_usage_qualified_value(output, value, push_value);
+        }
+        None => output.push(0),
+    }
+}
+
+fn push_usage_qualified_value<T>(
+    output: &mut Vec<u8>,
+    value: &UsageQualifiedValue<T>,
+    push_value: impl FnOnce(&mut Vec<u8>, &T),
+) {
+    match value.value.as_ref() {
+        Some(value) => {
+            output.push(1);
+            push_value(output, value);
+        }
+        None => output.push(0),
+    }
+    output.push(usage_quality_revision_tag(value.quality));
+    output.push(match value.authority {
+        UsageValueAuthority::NativeResponse => 1,
+        UsageValueAuthority::AdapterDerived => 2,
+    });
+    output.push(match value.completeness {
+        ContractCompleteness::Complete => 1,
+        ContractCompleteness::Partial => 2,
+        ContractCompleteness::Unknown => 3,
+    });
+    output.push(match value.unknown_reason {
+        None => 0,
+        Some(QualifiedUnknownReason::Missing) => 1,
+        Some(QualifiedUnknownReason::Unsupported) => 2,
+        Some(QualifiedUnknownReason::Withheld) => 3,
+        Some(QualifiedUnknownReason::NotYetObserved) => 4,
+        Some(QualifiedUnknownReason::Ambiguous) => 5,
+        Some(QualifiedUnknownReason::Malformed) => 6,
+    });
+    match value.effective_at {
+        Some(effective_at) => {
+            output.push(1);
+            output.extend_from_slice(&effective_at.to_be_bytes());
+        }
+        None => output.push(0),
+    }
+    push_component(output, value.provenance.native_field.as_bytes());
+    output.extend_from_slice(
+        &value
+            .provenance
+            .normalization_contract_version
+            .to_be_bytes(),
+    );
+}
+
+fn usage_quality_revision_tag(quality: QualifiedValueQuality) -> u8 {
+    match quality {
+        QualifiedValueQuality::Exact => 1,
+        QualifiedValueQuality::NativeClaimed => 2,
+        QualifiedValueQuality::Derived => 3,
+        QualifiedValueQuality::Estimated => 4,
+        QualifiedValueQuality::Unknown => 5,
+    }
+}
+
+fn timestamp_quality_revision_tag(quality: TimestampQuality) -> u8 {
+    match quality {
+        TimestampQuality::NativeExact => 1,
+        TimestampQuality::NativeApproximate => 2,
+        TimestampQuality::FileMetadataFallback => 3,
+        TimestampQuality::Derived => 4,
+    }
 }
 
 fn validate_usage_qualified_value<T>(value: &UsageQualifiedValue<T>) -> Result<(), AdapterError> {
@@ -1440,6 +1594,48 @@ impl FactBatch {
         self.push_internal(record, value, Some(semantic))
     }
 
+    /// Emit an object-scoped native fact with a value-derived semantic
+    /// revision. Equal revisions in one batch are idempotently suppressed;
+    /// reusing an explicit revision key for a different normalized value is a
+    /// contract error.
+    pub fn push_native_object_scoped_with_revision(
+        &mut self,
+        record: &SourceRecord,
+        stable_native_fact_key: &[u8],
+        source_or_semantic_revision: &[u8],
+        value: Fact,
+    ) -> Result<FactId, AdapterError> {
+        let semantic_key = self
+            .semantic_context
+            .as_ref()
+            .ok_or_else(|| {
+                AdapterError::invalid_contract(
+                    "canonical fact emission requires a bound semantic decode context",
+                )
+            })?
+            .object_scoped_native_fact_key(record.generation, stable_native_fact_key)?;
+        let semantic = self.semantic_revision(
+            record,
+            value.kind(),
+            true,
+            &semantic_key,
+            Some(source_or_semantic_revision),
+        )?;
+        if let Some(existing) = self.facts.iter().find(|envelope| {
+            envelope
+                .semantic_revision
+                .is_some_and(|candidate| candidate.fact_revision_id == semantic.fact_revision_id)
+        }) {
+            if existing.value != value {
+                return Err(AdapterError::invalid_contract(
+                    "one canonical fact revision cannot encode different normalized values",
+                ));
+            }
+            return Ok(existing.id);
+        }
+        self.push_internal(record, value, Some(semantic))
+    }
+
     /// Derive an RFC 012A entity identity from the same topology-neutral source
     /// context used for canonical fact revisions.
     pub fn canonical_entity_key(
@@ -1685,15 +1881,6 @@ impl FactBatch {
                 self.max_facts, self.max_diagnostics
             )));
         }
-        if other
-            .semantic_revisions
-            .iter()
-            .any(|revision| self.semantic_revisions.contains(revision))
-        {
-            return Err(AdapterError::invalid_contract(
-                "fact batch merge repeats a canonical fact revision",
-            ));
-        }
         match (&self.semantic_context, &other.semantic_context) {
             (Some(current), Some(incoming)) if current != incoming => {
                 return Err(AdapterError::invalid_contract(
@@ -1702,6 +1889,54 @@ impl FactBatch {
             }
             (None, Some(incoming)) => self.semantic_context = Some(incoming.clone()),
             _ => {}
+        }
+        let repeated_revisions = other
+            .semantic_revisions
+            .iter()
+            .filter(|revision| self.semantic_revisions.contains(revision))
+            .copied()
+            .collect::<Vec<_>>();
+        for revision in &repeated_revisions {
+            let existing = self.facts.iter().find(|envelope| {
+                envelope
+                    .semantic_revision
+                    .is_some_and(|semantic| semantic.fact_revision_id == *revision)
+            });
+            let incoming = other.facts.iter().find(|envelope| {
+                envelope
+                    .semantic_revision
+                    .is_some_and(|semantic| semantic.fact_revision_id == *revision)
+            });
+            let idempotent_usage_revision =
+                existing.zip(incoming).is_some_and(|(existing, incoming)| {
+                    matches!(existing.value, Fact::UsageRevisionV2(_))
+                        && matches!(incoming.value, Fact::UsageRevisionV2(_))
+                        && existing.value == incoming.value
+                        && existing
+                            .semantic_revision
+                            .zip(incoming.semantic_revision)
+                            .is_some_and(|(existing, incoming)| {
+                                existing.fact_id == incoming.fact_id
+                                    && existing.semantic_revision_ref
+                                        == incoming.semantic_revision_ref
+                            })
+                });
+            if !idempotent_usage_revision {
+                return Err(AdapterError::invalid_contract(
+                    "fact batch merge repeats a canonical fact revision",
+                ));
+            }
+        }
+        if !repeated_revisions.is_empty() {
+            let repeated_revisions = repeated_revisions.into_iter().collect::<BTreeSet<_>>();
+            other.facts.retain(|envelope| {
+                envelope
+                    .semantic_revision
+                    .is_none_or(|semantic| !repeated_revisions.contains(&semantic.fact_revision_id))
+            });
+            other
+                .semantic_revisions
+                .retain(|revision| !repeated_revisions.contains(revision));
         }
         self.facts.append(&mut other.facts);
         self.diagnostics.append(&mut other.diagnostics);
@@ -1851,6 +2086,53 @@ mod tests {
             native_kind: Some("fixture".to_string()),
             raw_payload: Vec::new(),
             reason: "test".to_string(),
+        }
+    }
+
+    fn exact_usage_value<T>(value: T, native_field: &str) -> UsageQualifiedValue<T> {
+        QualifiedValue::from_parts(
+            Some(value),
+            QualifiedValueQuality::Exact,
+            UsageValueAuthority::NativeResponse,
+            ContractCompleteness::Complete,
+            None,
+            None,
+            UsageValueProvenance {
+                native_field: native_field.to_string(),
+                normalization_contract_version: 1,
+            },
+        )
+        .unwrap()
+    }
+
+    fn usage_v2_fact(batch: &FactBatch, input_tokens: u64) -> UsageRevisionV2Fact {
+        UsageRevisionV2Fact {
+            session: batch
+                .canonical_entity_key("session", b"native-session")
+                .unwrap(),
+            actor_run: batch.canonical_entity_key("run", b"native-run").unwrap(),
+            response_key: b"response-1".to_vec(),
+            response_identity: UsageResponseIdentity::NativeMessageId,
+            native_message_id: Some("response-1".to_string()),
+            request_id: Some("request-1".to_string()),
+            buckets: UsageBucketsV2 {
+                input_tokens: exact_usage_value(input_tokens, "message.usage.input_tokens"),
+                output_tokens: exact_usage_value(2, "message.usage.output_tokens"),
+                cache_creation_input_tokens: exact_usage_value(
+                    3,
+                    "message.usage.cache_creation_input_tokens",
+                ),
+                cache_read_input_tokens: exact_usage_value(
+                    4,
+                    "message.usage.cache_read_input_tokens",
+                ),
+            },
+            model: Some(exact_usage_value("model-1".to_string(), "message.model")),
+            effort: None,
+            source_time: Some(QualifiedTimestamp {
+                value: "2026-08-16T00:00:00Z".to_string(),
+                quality: TimestampQuality::NativeExact,
+            }),
         }
     }
 
@@ -2153,6 +2435,176 @@ mod tests {
                 .unwrap()
                 .fact_id
         );
+    }
+
+    #[test]
+    fn usage_v2_semantic_revision_is_value_derived_and_batch_idempotent() {
+        let first = record();
+        let second = SourceRecord::new(
+            &RecordOrigin {
+                source_instance_id: 1,
+                stream_id: 2,
+                object_id: 3,
+                observed_at: 5,
+                source_timestamp_hint: None,
+                media_type: SourceMediaType::new("application/json").unwrap(),
+            },
+            1,
+            SourceCursor::append_offset(3),
+            SourceCursor::append_offset(6),
+            0,
+            b"[]".to_vec(),
+        );
+        let mut batch = FactBatch::new_with_semantic_context(4, 2, semantic_context()).unwrap();
+        let original = usage_v2_fact(&batch, 1);
+        let original_revision = original.semantic_revision_key().unwrap();
+        let first_id = batch
+            .push_native_object_scoped_with_revision(
+                &first,
+                b"response-1",
+                &original_revision,
+                Fact::UsageRevisionV2(original.clone()),
+            )
+            .unwrap();
+        let repeated_id = batch
+            .push_native_object_scoped_with_revision(
+                &second,
+                b"response-1",
+                &original_revision,
+                Fact::UsageRevisionV2(original),
+            )
+            .unwrap();
+        assert_eq!(first_id, repeated_id);
+        assert_eq!(batch.facts().len(), 1);
+
+        let correction = usage_v2_fact(&batch, 2);
+        let correction_revision = correction.semantic_revision_key().unwrap();
+        assert_ne!(correction_revision, original_revision);
+        batch
+            .push_native_object_scoped_with_revision(
+                &second,
+                b"response-1",
+                &correction_revision,
+                Fact::UsageRevisionV2(correction),
+            )
+            .unwrap();
+        assert_eq!(batch.facts().len(), 2);
+        let before = batch.facts()[0].semantic_revision.unwrap();
+        let after = batch.facts()[1].semantic_revision.unwrap();
+        assert_eq!(before.fact_id, after.fact_id);
+        assert_ne!(before.fact_revision_id, after.fact_revision_id);
+    }
+
+    #[test]
+    fn usage_v2_semantic_revision_is_idempotent_across_batch_merge() {
+        let first = record();
+        let second = SourceRecord::new(
+            &RecordOrigin {
+                source_instance_id: 1,
+                stream_id: 2,
+                object_id: 3,
+                observed_at: 5,
+                source_timestamp_hint: None,
+                media_type: SourceMediaType::new("application/json").unwrap(),
+            },
+            1,
+            SourceCursor::append_offset(3),
+            SourceCursor::append_offset(6),
+            0,
+            b"[]".to_vec(),
+        );
+        let mut merged = FactBatch::new_with_semantic_context(4, 2, semantic_context()).unwrap();
+        let value = usage_v2_fact(&merged, 1);
+        let revision = value.semantic_revision_key().unwrap();
+        merged
+            .push_native_object_scoped_with_revision(
+                &first,
+                b"response-1",
+                &revision,
+                Fact::UsageRevisionV2(value.clone()),
+            )
+            .unwrap();
+        let mut repeated = FactBatch::new_with_semantic_context(4, 2, semantic_context()).unwrap();
+        repeated
+            .push_native_object_scoped_with_revision(
+                &second,
+                b"response-1",
+                &revision,
+                Fact::UsageRevisionV2(value.clone()),
+            )
+            .unwrap();
+        assert_ne!(
+            merged.facts()[0]
+                .semantic_revision
+                .unwrap()
+                .source_record_id,
+            repeated.facts()[0]
+                .semantic_revision
+                .unwrap()
+                .source_record_id
+        );
+        merged.append(repeated).unwrap();
+        assert_eq!(merged.facts().len(), 1);
+        assert_eq!(merged.semantic_revisions.len(), 1);
+
+        let mut conflicting =
+            FactBatch::new_with_semantic_context(4, 2, semantic_context()).unwrap();
+        conflicting
+            .push_native_object_scoped_with_revision(
+                &second,
+                b"response-1",
+                &revision,
+                Fact::UsageRevisionV2(value),
+            )
+            .unwrap();
+        let Fact::UsageRevisionV2(conflicting_value) =
+            &mut conflicting.facts.get_mut(0).unwrap().value
+        else {
+            unreachable!()
+        };
+        conflicting_value.buckets.input_tokens.value = Some(99);
+        assert!(merged.append(conflicting).is_err());
+    }
+
+    #[test]
+    fn usage_v2_semantic_revision_covers_normalized_metadata() {
+        let batch = FactBatch::new_with_semantic_context(1, 1, semantic_context()).unwrap();
+        let original = usage_v2_fact(&batch, 1);
+        let original_revision = original.semantic_revision_key().unwrap();
+
+        let mut variants = Vec::new();
+        let mut request = original.clone();
+        request.request_id = Some("request-2".to_string());
+        variants.push(request);
+        let mut qualification = original.clone();
+        qualification.buckets.input_tokens.quality = QualifiedValueQuality::Derived;
+        variants.push(qualification);
+        let mut effective_at = original.clone();
+        effective_at.buckets.input_tokens.effective_at = Some(42);
+        variants.push(effective_at);
+        let mut provenance = original.clone();
+        provenance
+            .buckets
+            .input_tokens
+            .provenance
+            .normalization_contract_version = 2;
+        variants.push(provenance);
+        let mut model = original.clone();
+        model.model.as_mut().unwrap().value = Some("model-2".to_string());
+        variants.push(model);
+        let mut effort = original.clone();
+        effort.effort = Some(exact_usage_value("high".to_string(), "message.effort"));
+        variants.push(effort);
+        let mut source_time = original.clone();
+        source_time.source_time.as_mut().unwrap().value = "2026-08-16T00:00:01Z".to_string();
+        variants.push(source_time);
+        let mut actor = original.clone();
+        actor.actor_run = batch.canonical_entity_key("run", b"other-run").unwrap();
+        variants.push(actor);
+
+        for variant in variants {
+            assert_ne!(variant.semantic_revision_key().unwrap(), original_revision);
+        }
     }
 
     #[test]

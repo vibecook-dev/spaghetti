@@ -349,7 +349,19 @@ For a typed semantic revision it is derived from:
 event contract version
 event kind
 SemanticRevisionRef
+source record/declared correction occurrence reference
+deterministic within-record semantic subkey when needed
 ```
+
+The occurrence component is mandatory because a replaceable entity may
+legitimately transition `A -> B -> A`: both `A` values share one durable/live
+join identity, but the second `A` is a new ordered delivery that must not be
+discarded as a duplicate. An immediately repeated `A` with no intervening
+accepted revision is suppressed by the semantic reducer before event
+construction. The occurrence reference is the RFC 012A source-record identity
+for native evidence, or an equally deterministic declared correction/barrier
+identity for engine-derived corrections; it is never observer sequence or wall
+clock.
 
 When no semantic revision key exists, it is derived from:
 
@@ -364,7 +376,7 @@ deterministic within-record semantic subkey or emission ordinal
 The ordinal is part of the decoder contract and cannot depend on hash-map
 iteration, thread timing, or scheduling. An ID cannot include
 `observer_sequence`, `observed_at`, delivery phase, or `scope_epoch`; unchanged
-native evidence retains the same ID across replay.
+accepted native occurrences retain the same ID across replay.
 
 `event_id` is the idempotency key for the selected observer event contract.
 Cross-topology durable/live reconciliation uses `SemanticRevisionRef`, not
@@ -813,7 +825,9 @@ Release-blocking tests cover:
   fabricated reference on observer-only controls;
 - equality with durable-query semantic references for every shared family;
 - evolving usage for one `usage_key` producing distinct deterministic
-  revision/event IDs while an exact repeated revision is suppressed;
+  revision/event IDs while an exact repeated current revision is suppressed;
+- an `A -> B -> A` usage reversion carrying equal semantic references for both
+  `A` values but distinct deterministic occurrence event IDs within one epoch;
 - idempotent/coalesced polling and unknown-event retention;
 - bootstrap larger than the semantic queue with the SDK helper's internal drain
   active while the caller awaits consumer-ready state, then safe completion

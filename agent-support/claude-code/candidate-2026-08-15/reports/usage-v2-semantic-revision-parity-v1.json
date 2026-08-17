@@ -1,0 +1,91 @@
+{
+  "schemaVersion": 1,
+  "experiment": "rfc012c-usage-v2-semantic-revision-private-corpus-parity",
+  "adapterId": "claude-code",
+  "decoderContractVersion": 21,
+  "sourceCapture": "stable-ephemeral-clone-checked-before-after",
+  "sourceSetDigestBefore": "f74aa6289682ec3bf0158f21ad01887c61f4cd102a4502f3a397fdbd633090b7",
+  "sourceSetDigestAfter": "f74aa6289682ec3bf0158f21ad01887c61f4cd102a4502f3a397fdbd633090b7",
+  "sourceStable": true,
+  "nativeArtifact": {
+    "fileName": "spaghetti.darwin-arm64.node",
+    "sha256": "863214f8bf8250d907ec50767264bc11144f77a24db1418fbb040a2237d919e5",
+    "bytes": 8884208
+  },
+  "exact": true,
+  "atCommitSeq": 10254,
+  "independent": {
+    "responseGroups": 149671,
+    "actorFiles": 5049,
+    "sessions": 855,
+    "rootResponseGroups": 64199,
+    "childResponseGroups": 85472,
+    "fallbackResponses": 0,
+    "responsesWithModel": 149671,
+    "totals": {
+      "input_tokens": 14392816,
+      "output_tokens": 127434333,
+      "cache_creation_input_tokens": 1748158754,
+      "cache_read_input_tokens": 32360151470
+    },
+    "unknownResponses": {
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cache_creation_input_tokens": 0,
+      "cache_read_input_tokens": 0
+    },
+    "declaredTranscriptObjects": 5187,
+    "exactSemanticRepeatRowsBeyondFirst": 965,
+    "semanticReversionsAfterInterveningRevision": 262
+  },
+  "durable": {
+    "responses": 149671,
+    "actors": 5049,
+    "sessions": 855,
+    "rootResponses": 64199,
+    "childResponses": 85472,
+    "fallbackResponses": 0,
+    "responsesWithModel": 149671,
+    "totals": {
+      "input_tokens": 14392816,
+      "output_tokens": 127434333,
+      "cache_creation_input_tokens": 1748158754,
+      "cache_read_input_tokens": 32360151470
+    },
+    "unknownResponses": {
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cache_creation_input_tokens": 0,
+      "cache_read_input_tokens": 0
+    },
+    "coverage": {
+      "sets": 1,
+      "completeness": "complete",
+      "readiness": "ready",
+      "completedVersion": 1,
+      "detail": null,
+      "points": 5187,
+      "absences": 0,
+      "errors": 0
+    },
+    "providerDiagnostics": {
+      "records": 6,
+      "codes": {
+        "claude_typed_projection_loss": 6
+      }
+    },
+    "foreignKeyViolationsAfterBootstrap": 0
+  },
+  "timing": {
+    "sourceCaptureElapsedMs": 0,
+    "ingestElapsedMs": 293607.717,
+    "totalElapsedMs": 338169.417
+  },
+  "historicalReference": {
+    "report": "usage-v2-private-parity-v1.json",
+    "ingestElapsedMs": 306202.101,
+    "descriptiveDifferencePercent": -4.113,
+    "comparability": "Different stable source snapshots; descriptive only, not a controlled causal performance comparison."
+  },
+  "privacy": "Aggregate counts, token totals, readiness, coverage counts, semantic-revision cardinalities, artifact digest, and source metadata digest only. No native paths, identifiers, model values, prompts, answers, or raw payloads."
+}

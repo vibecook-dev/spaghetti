@@ -147,12 +147,12 @@ impl ClaudeCodeAdapter {
                 id: AdapterId::new(ADAPTER_ID).expect("static Claude adapter id is valid"),
                 display_name: "Claude Code".to_string(),
                 adapter_version: env!("CARGO_PKG_VERSION").to_string(),
-                contract_version: 20,
+                contract_version: 21,
                 support_binding: Some(
                     AdapterSupportBinding::new(
                         "claude-code-support-2026-08-15-candidate",
                         env!("CARGO_PKG_VERSION"),
-                        20,
+                        21,
                         "sha256:1d8b81547812a87b71e983fede40ac7cb130bbbe7252017fd3bd4a95b9bc98fa",
                         "sha256:17a0f1aa7490b5c03a525f7606a7a02ee6d1919cc8b9b776597843f1edbf1ebe",
                         "sha256:689c86b9770544f826da37e72d1c4a1a37153fad4091372b954bba90ca2d5f7c",
@@ -3929,7 +3929,13 @@ fn decode_transcript_record(
     if let Some((semantic_key, fact)) =
         claude_usage_v2_fact(context, record, &value, source_time.clone(), output)?
     {
-        output.push_native_object_scoped(record, &semantic_key, Fact::UsageRevisionV2(fact))?;
+        let semantic_revision_key = fact.semantic_revision_key()?;
+        output.push_native_object_scoped_with_revision(
+            record,
+            &semantic_key,
+            &semantic_revision_key,
+            Fact::UsageRevisionV2(fact),
+        )?;
     }
     for descriptor in spawn_descriptors {
         let mut native_spawn_key = Vec::new();
@@ -4686,7 +4692,7 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
-    use crate::adapter::{FactEnvelope, FactSemanticContext, SourceInstance};
+    use crate::adapter::{FactEnvelope, FactRevisionId, FactSemanticContext, SourceInstance};
     use crate::source::{
         AppendDelimitedFile, AppendItem, AppendRead, RecordOrigin, SourceMediaType,
     };
@@ -4718,6 +4724,10 @@ mod tests {
     }
 
     fn record(payload: &[u8]) -> SourceRecord {
+        record_at(payload, 0)
+    }
+
+    fn record_at(payload: &[u8], start: u64) -> SourceRecord {
         SourceRecord::new(
             &RecordOrigin {
                 source_instance_id: 7,
@@ -4728,8 +4738,8 @@ mod tests {
                 media_type: SourceMediaType::new("application/x-ndjson").unwrap(),
             },
             1,
-            crate::source::SourceCursor::append_offset(0),
-            crate::source::SourceCursor::append_offset(payload.len() as u64 + 1),
+            crate::source::SourceCursor::append_offset(start),
+            crate::source::SourceCursor::append_offset(start + payload.len() as u64 + 1),
             0,
             payload.to_vec(),
         )
@@ -4870,7 +4880,7 @@ mod tests {
             std::fs::canonicalize(root.path()).unwrap().join("sessions")
         );
         assert_eq!(streams.len(), 16);
-        assert_eq!(adapter.manifest().contract_version, 20);
+        assert_eq!(adapter.manifest().contract_version, 21);
         assert!(adapter
             .manifest()
             .source_schema_versions
@@ -7678,6 +7688,83 @@ mod tests {
         assert_eq!(actor.role, ActorRunRole::Root);
         assert_eq!(actor.actor_run, usage_v2.actor_run);
         assert_eq!(actor.session, usage_v2.session);
+    }
+
+    #[test]
+    fn usage_v2_decoder_reuses_only_complete_semantic_snapshot_revisions() {
+        let root = TempDir::new().unwrap();
+        let adapter = ClaudeCodeAdapter::new();
+        let object_context = adapter
+            .bootstrap_object(
+                &instance(root.path()),
+                &object(PARENT_STREAM, &format!("project/{SESSION}.jsonl")),
+            )
+            .unwrap();
+        let payload = |uuid: &str, timestamp: &str, input_tokens: u64| {
+            format!(
+                r#"{{"type":"assistant","uuid":"{uuid}","timestamp":"{timestamp}","sessionId":"{SESSION}","cwd":"/repo","requestId":"request-1","message":{{"model":"claude-sonnet","id":"response-1","type":"message","role":"assistant","content":[],"usage":{{"input_tokens":{input_tokens},"output_tokens":2,"cache_creation_input_tokens":3,"cache_read_input_tokens":4}}}}}}"#
+            )
+            .into_bytes()
+        };
+        let decode = |payload: Vec<u8>, start: u64| {
+            let record = record_at(&payload, start);
+            let mut batch = semantic_transcript_batch(8, 4);
+            adapter
+                .decode(
+                    DecodeContext {
+                        decoder: &DecoderId::new(PARENT_DECODER).unwrap(),
+                        object_context: &object_context,
+                        decoder_state: None,
+                    },
+                    &record,
+                    &mut batch,
+                )
+                .unwrap();
+            let envelope = batch
+                .facts()
+                .iter()
+                .find(|envelope| matches!(envelope.value, Fact::UsageRevisionV2(_)))
+                .unwrap();
+            let Fact::UsageRevisionV2(fact) = &envelope.value else {
+                unreachable!()
+            };
+            let semantic = envelope.semantic_revision.unwrap();
+            let expected = FactRevisionId::derive(
+                &semantic.fact_id,
+                1,
+                &fact.semantic_revision_key().unwrap(),
+            )
+            .unwrap();
+            assert_eq!(semantic.fact_revision_id, expected);
+            semantic
+        };
+
+        let first_payload = payload("row-1", "2026-08-11T00:00:00Z", 1);
+        let second_start = first_payload.len() as u64 + 1;
+        let first = decode(first_payload, 0);
+        let exact = decode(payload("row-2", "2026-08-11T00:00:00Z", 1), second_start);
+        let timestamp_correction = decode(
+            payload("row-3", "2026-08-11T00:00:01Z", 1),
+            second_start + 1_000,
+        );
+        let counter_correction = decode(
+            payload("row-4", "2026-08-11T00:00:01Z", 2),
+            second_start + 2_000,
+        );
+
+        assert_eq!(first.fact_id, exact.fact_id);
+        assert_eq!(first.fact_revision_id, exact.fact_revision_id);
+        assert_ne!(first.source_record_id, exact.source_record_id);
+        assert_eq!(first.fact_id, timestamp_correction.fact_id);
+        assert_ne!(
+            first.fact_revision_id,
+            timestamp_correction.fact_revision_id
+        );
+        assert_eq!(first.fact_id, counter_correction.fact_id);
+        assert_ne!(
+            timestamp_correction.fact_revision_id,
+            counter_correction.fact_revision_id
+        );
     }
 
     #[test]

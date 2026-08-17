@@ -24,14 +24,17 @@ def assistant(
     request_id: str,
     usage: tuple[int, int, int, int],
     content: list[dict[str, object]] | None = None,
+    *,
+    model: str = "claude-test",
+    timestamp: str | None = None,
 ) -> dict[str, object]:
-    return {
+    record: dict[str, object] = {
         "type": "assistant",
         "uuid": row_id,
         "requestId": request_id,
         "message": {
             "id": response_id,
-            "model": "claude-test",
+            "model": model,
             "content": content or [],
             "usage": {
                 "input_tokens": usage[0],
@@ -41,6 +44,9 @@ def assistant(
             },
         },
     }
+    if timestamp is not None:
+        record["timestamp"] = timestamp
+    return record
 
 
 class RuntimeObservationCensusTest(unittest.TestCase):
@@ -93,6 +99,112 @@ class RuntimeObservationCensusTest(unittest.TestCase):
                 1,
             )
             self.assertEqual(usage["latestResponseSnapshotTotal"]["cache_creation_input_tokens"], 0)
+
+    def test_distinguishes_full_semantic_repeats_from_counter_only_repeats(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            project = root / "project"
+            project.mkdir()
+            transcript = project / "session.jsonl"
+            append(
+                transcript,
+                assistant(
+                    "row-1",
+                    "response-1",
+                    "request-1",
+                    (10, 1, 2, 3),
+                    timestamp="2026-08-16T00:00:00Z",
+                ),
+            )
+            append(
+                transcript,
+                assistant(
+                    "row-2",
+                    "response-1",
+                    "request-1",
+                    (10, 1, 2, 3),
+                    timestamp="2026-08-16T00:00:00Z",
+                ),
+            )
+            append(
+                transcript,
+                assistant(
+                    "row-3",
+                    "response-1",
+                    "request-1",
+                    (10, 1, 2, 3),
+                    timestamp="2026-08-16T00:00:01Z",
+                ),
+            )
+            append(
+                transcript,
+                assistant(
+                    "row-4",
+                    "response-1",
+                    "request-2",
+                    (10, 1, 2, 3),
+                    timestamp="2026-08-16T00:00:01Z",
+                ),
+            )
+            append(
+                transcript,
+                assistant(
+                    "row-5",
+                    "response-1",
+                    "request-2",
+                    (10, 1, 2, 3),
+                    model="claude-test-next",
+                    timestamp="2026-08-16T00:00:01Z",
+                ),
+            )
+
+            usage = analyze(root)["usage"]
+
+            self.assertEqual(usage["exactRepeatRowsBeyondFirst"], 4)
+            self.assertEqual(usage["exactSemanticRepeatRowsBeyondFirst"], 1)
+            self.assertEqual(usage["counterEqualButSemanticChangedRows"], 3)
+            self.assertEqual(usage["groupsWithChangedSemanticSnapshot"], 1)
+            self.assertEqual(
+                usage["semanticChangeFields"],
+                {"model": 1, "requestId": 1, "sourceTime": 1},
+            )
+
+    def test_counts_return_to_an_earlier_semantic_snapshot_as_a_reversion(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            project = root / "project"
+            project.mkdir()
+            transcript = project / "session.jsonl"
+            first = assistant(
+                "row-1",
+                "response-1",
+                "request-1",
+                (10, 1, 2, 3),
+                timestamp="2026-08-16T00:00:00Z",
+            )
+            correction = assistant(
+                "row-2",
+                "response-1",
+                "request-1",
+                (12, 2, 2, 4),
+                timestamp="2026-08-16T00:00:01Z",
+            )
+            reversion = assistant(
+                "row-3",
+                "response-1",
+                "request-1",
+                (10, 1, 2, 3),
+                timestamp="2026-08-16T00:00:00Z",
+            )
+            append(transcript, first)
+            append(transcript, correction)
+            append(transcript, reversion)
+
+            usage = analyze(root)["usage"]
+
+            self.assertEqual(usage["semanticReversionsAfterInterveningRevision"], 1)
+            self.assertEqual(usage["exactSemanticRepeatRowsBeyondFirst"], 0)
+            self.assertEqual(usage["groupsWithChangedSemanticSnapshot"], 1)
 
     def test_scopes_response_identity_to_file_and_treats_request_id_as_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

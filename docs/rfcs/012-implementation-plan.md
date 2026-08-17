@@ -700,10 +700,36 @@ Current landing status (2026-08-16):
   aggregate-only native census found 26/26 valid configs with exactly one lead
   member, 20 unique current child joins, and zero ambiguous joins; sanitized
   root/child fixtures plus an end-to-end query test cover late arrival,
-  filtering, update, and deletion; and
-- kept the candidate capability `unsupported`: exact-repeat public-event
-  suppression, remaining portable fact-family serialization, and the external
-  compatibility telemetry window are not yet complete.
+  filtering, update, and deletion;
+- added decoder contract 21's complete value-derived usage revision key. The
+  common fact layer suppresses equal revisions inside one batch, the durable
+  ledger suppresses an already-retained usage revision across commits, and the
+  reducer independently recomputes the key before accepting it. Exact repeats
+  emit no `runtime.usage-v2.changed` entry, changed normalized snapshots emit
+  one upsert with the new RFC 012A semantic reference, and live/correction
+  generation reset emits explicit response deletes before replay. Query
+  bootstrap coalesces the historical response stream into the final
+  readiness/coverage baseline instead of writing one public usage-v2 change
+  per native revision; a focused test proves that exact post-barrier repeats
+  remain silent and the first changed live revision is delivered once. Exact
+  equal revisions decoded into separate batches merge idempotently, while an
+  unequal value under that revision fails closed. A non-consecutive
+  `A -> B -> A` value reversion is delivered as a second ordered transition
+  while reusing `A`'s valid semantic ledger row. A stable-clone independent
+  census found 965 exact complete semantic repeats, 135,981 counter-equal
+  metadata corrections, and 262 non-consecutive semantic reversions among
+  344,160 usage rows; its aggregate-only report is
+  [`usage-v2-semantic-revision-census-v1.json`](../../agent-support/claude-code/candidate-2026-08-15/reports/usage-v2-semantic-revision-census-v1.json)
+  (`sha256:4dee1d89f0f5a474458cbe257f3607b28e0911bf38d7f8c26dadfe83550edf9d`).
+  A release-artifact-bound contract-21 run then passed exact durable parity,
+  final foreign-key integrity, and complete Ready coverage for 149,671
+  responses across 5,187 transcript objects in 293.61 seconds. The report is
+  [`usage-v2-semantic-revision-parity-v1.json`](../../agent-support/claude-code/candidate-2026-08-15/reports/usage-v2-semantic-revision-parity-v1.json)
+  (`sha256:699c568377cc7d20f85392ccaa13a2fdc5b40441e5f68e4ad5234ed979aa37b8`);
+  and
+- kept the candidate capability `unsupported`: portable remaining runtime
+  family serialization, scoped observer event mapping, and the representative
+  external compatibility telemetry window are not yet complete.
 
 ### C3. Durable migration
 
@@ -832,7 +858,9 @@ Before RFC 012D cutover, exercise common semantic reducers for:
 
 Exercise a reference downstream aggregator for:
 
-- durable query plus scoped-observer deduplication by `SemanticRevisionRef`;
+- durable query plus scoped-observer state reconciliation by
+  `SemanticRevisionRef`, while ordered observer delivery deduplicates by the
+  occurrence-scoped `event_id` so `A -> B -> A` is not lost;
 - catalog/durable/observer equality for the concrete base-session reference;
 - direct durable absorption and complete-coverage overlay retirement;
 - partial/unavailable/incomparable coverage retaining or marking overlay state

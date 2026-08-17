@@ -10,18 +10,11 @@
  */
 
 import { execFileSync } from 'node:child_process';
-import {
-  constants,
-  cpSync,
-  existsSync,
-  mkdirSync,
-  mkdtempSync,
-  readFileSync,
-  rmSync,
-  writeFileSync,
-} from 'node:fs';
+import { createHash } from 'node:crypto';
+import { constants, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import path from 'node:path';
+import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
 import { parseArgs } from 'node:util';
@@ -109,6 +102,7 @@ const { values } = parseArgs({
   options: {
     'claude-root': { type: 'string' },
     'live-source': { type: 'boolean' },
+    'keep-workspace': { type: 'boolean' },
     report: { type: 'string' },
     json: { type: 'boolean' },
   },
@@ -171,6 +165,7 @@ try {
     sourceStable,
     exact,
     atCommitSeq: commitSeq,
+    nativeArtifact: loadedNativeArtifactEvidence(),
     independent: {
       responseGroups: before.usage.fileScopedResponseGroups,
       actorFiles: before.usage.usageActorFiles,
@@ -216,7 +211,11 @@ try {
   if (!exact) process.exitCode = 1;
 } finally {
   await host?.dispose().catch(() => undefined);
-  rmSync(workspace, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  if (values['keep-workspace']) {
+    process.stderr.write(`retained diagnostic workspace ${workspace}\n`);
+  } else {
+    rmSync(workspace, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  }
 }
 
 function cloneObservedSource(source: string, destination: string): string {
@@ -233,6 +232,22 @@ function cloneObservedSource(source: string, destination: string): string {
     });
   }
   return destination;
+}
+
+function loadedNativeArtifactEvidence(): { fileName: string; sha256: string; bytes: number } {
+  const require = createRequire(import.meta.url);
+  const candidates = Object.keys(require.cache).filter(
+    (candidate) => candidate.endsWith('.node') && path.basename(candidate).startsWith('spaghetti.'),
+  );
+  if (candidates.length !== 1) {
+    throw new Error(`Expected one loaded Spaghetti native artifact, found ${candidates.length}.`);
+  }
+  const artifact = readFileSync(candidates[0]);
+  return {
+    fileName: path.basename(candidates[0]),
+    sha256: createHash('sha256').update(artifact).digest('hex'),
+    bytes: artifact.byteLength,
+  };
 }
 
 function runCensus(projects: string, output: string): void {
@@ -361,10 +376,7 @@ function readDurableSummary(databasePath: string): {
       )
       .all() as Array<Record<string, unknown>>;
     const diagnosticCodes = Object.fromEntries(
-      diagnosticRows.map((diagnostic) => [
-        String(diagnostic.diagnostic_code),
-        Number(diagnostic.diagnostic_count),
-      ]),
+      diagnosticRows.map((diagnostic) => [String(diagnostic.diagnostic_code), Number(diagnostic.diagnostic_count)]),
     );
     return {
       usage: {
@@ -400,10 +412,7 @@ function readDurableSummary(databasePath: string): {
         errorCodes,
       },
       providerDiagnostics: {
-        records: diagnosticRows.reduce(
-          (total, diagnostic) => total + Number(diagnostic.diagnostic_count),
-          0,
-        ),
+        records: diagnosticRows.reduce((total, diagnostic) => total + Number(diagnostic.diagnostic_count), 0),
         codes: diagnosticCodes,
       },
     };

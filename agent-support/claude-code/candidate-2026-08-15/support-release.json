@@ -15,12 +15,12 @@
     "ads": { "path": "agent-support/claude-code/candidate-2026-08-15/ads.json", "sha256": "sha256:1d8b81547812a87b71e983fede40ac7cb130bbbe7252017fd3bd4a95b9bc98fa" },
     "source_declaration": { "path": "agent-support/claude-code/candidate-2026-08-15/source-declarations.json", "sha256": "sha256:17a0f1aa7490b5c03a525f7606a7a02ee6d1919cc8b9b776597843f1edbf1ebe" },
     "scope_program": { "path": "agent-support/claude-code/candidate-2026-08-15/scope-programs.json", "sha256": "sha256:689c86b9770544f826da37e72d1c4a1a37153fad4091372b954bba90ca2d5f7c" },
-    "evidence": { "path": "agent-support/claude-code/candidate-2026-08-15/evidence.json", "sha256": "sha256:aee60b8bd29f4523b8fe334921228f4484ddbfdac45878b48f8ef49133f9b879" },
-    "conformance": { "path": "agent-support/claude-code/candidate-2026-08-15/conformance.json", "sha256": "sha256:72eabf16f6c86e120433db00f4c0835ce9689c153712ed72bfca6af6cfb0b5b9" }
+    "evidence": { "path": "agent-support/claude-code/candidate-2026-08-15/evidence.json", "sha256": "sha256:cbb20608c0c3ef861520027b6fc69ec575501fed980464805ecc7a54137bbb94" },
+    "conformance": { "path": "agent-support/claude-code/candidate-2026-08-15/conformance.json", "sha256": "sha256:19d3ac75a0e62ad09532e1e8f14a6794d24c98e4a8c258d2c8ddd3776201778f" }
   },
   "versions": {
     "adapter_package": "0.7.0",
-    "decoder_contract": 20,
+    "decoder_contract": 21,
     "decoder_state": [1],
     "source_record_identity": 1,
     "fact_identity": 1,
@@ -33,7 +33,7 @@
   "capabilities": [
     { "capability_id": "project-session-catalog", "topology": "catalog", "level": "unsupported", "notes": "RFC 012B catalog assertions and tier composition are not implemented." },
     { "capability_id": "history-and-secondary-facts", "topology": "durable", "level": "supported", "notes": "Current Rust adapter streams project to the existing database, but this candidate is not runtime-selectable." },
-    { "capability_id": "usage-v2-runtime-semantics", "topology": "durable", "level": "unsupported", "notes": "Canonical response and actor revisions, durable response/affiliation shadow reducers, workflow and native team correlation, independent frozen sanitized-oracle parity, exact private native corpus parity, bounded streaming coverage membership, capability-scoped diagnostic coverage, the versioned public v2 query, writer-owned pack readiness, normalized durable source/family coverage with a generic bounded public query, fault-tested atomic readiness/coverage administration, crash-resumable replay recovery, stale-safe public replay authorization, crash-safe source-scoped query selection, a non-mixing composite aggregate query, a read-only compatibility sampler with bounded owner-lifetime telemetry, and an unhealthy-v2 rollback drill are implemented; a representative external compatibility-window report and remaining runtime lifecycle facts are pending." },
+    { "capability_id": "usage-v2-runtime-semantics", "topology": "durable", "level": "unsupported", "notes": "Canonical response and actor revisions, complete value-derived semantic revision identity, cross-batch and durable exact-current-repeat suppression, ordered non-consecutive semantic reversion with ledger reuse, bootstrap baseline coalescing, explicit reset retraction, durable response/affiliation shadow reducers, workflow and native team correlation, independent frozen sanitized-oracle parity, artifact-bound exact private native corpus parity with final integrity, bounded streaming coverage membership, capability-scoped diagnostic coverage, the versioned public v2 query, writer-owned pack readiness, normalized durable source/family coverage with a generic bounded public query, fault-tested atomic readiness/coverage administration, crash-resumable replay recovery, stale-safe public replay authorization, crash-safe source-scoped query selection, a non-mixing composite aggregate query, a read-only compatibility sampler with bounded owner-lifetime telemetry, and an unhealthy-v2 rollback drill are implemented; scoped observer mapping, a representative external compatibility-window report, and remaining runtime lifecycle facts are pending." },
     { "capability_id": "root-descendant-observation", "topology": "scoped", "level": "unsupported", "notes": "ScopeProgram is incomplete and common observer delivery is pending." },
     { "capability_id": "interaction-lifecycle", "topology": "scoped", "level": "unsupported", "notes": "AskUserQuestion lifecycle facts and correction delivery are pending." }
   ],

@@ -352,7 +352,7 @@ UsageRevision {
   }
   revision_key: {
     usage_key
-    source_revision
+    normalized_snapshot_revision_v1
   }
   session_key
   actor_run_key
@@ -379,12 +379,28 @@ namespaced extension fact. It cannot relabel the aggregate as an exact common
 bucket.
 
 `usage_key` is the stable replaceable contribution identity. `revision_key` is
-the ordered semantic revision identity used for correction events and event-ID
-derivation. An evolving counter therefore updates one contribution with a new
-revision/event ID; an exact repeated snapshot may be suppressed and does not
-create a second contribution. For the common metadata law, `usage_key` is the
-semantic entity key and the enclosing `revision_key` is the semantic revision
-identity.
+the semantic value identity carried by correction events. An evolving counter
+therefore updates one contribution with a new revision; an exact repeat of the
+currently accepted snapshot may be suppressed and does not create a second
+contribution. A previously seen value returning after an intervening revision
+is a new ordered transition even though it reuses the earlier semantic
+revision reference. RFC 012D therefore includes deterministic source-occurrence
+identity in `event_id`; semantic revision alone is not a delivery-occurrence
+ID. For the common metadata law, `usage_key` is the semantic entity key and the
+enclosing `revision_key` is the semantic revision identity.
+
+`normalized_snapshot_revision_v1` is a domain-separated deterministic digest
+of the complete normalized revision: canonical session and actor-run keys;
+response identity/key and optional native message ID; optional `request_id`;
+all four qualified buckets including value, quality, authority, completeness,
+unknown reason, effective time, and normalization provenance; optional
+qualified model and effort; and qualified native time. The RFC 012A source
+record ID remains separate provenance and is not an input to this digest.
+Consequently two distinct native rows that normalize to the same complete
+snapshot share one semantic revision reference, while a counter-equal row with
+different qualified metadata is a correction with a new reference. Adapters
+cannot choose a weaker per-family key: the common reducer recomputes this
+digest and rejects a mismatch.
 
 Optional `model` or `effort` means this usage record makes no assertion for that
 dimension; it does not mean exact absence or reset an accepted effective-state
@@ -428,8 +444,13 @@ Rules:
 2. A later snapshot for the same response replaces all four prior bucket
    values, qualities, and coverage in source-revision order.
 3. Upward and downward revisions are both valid.
-4. Exact repeated snapshots do not change totals and need not emit another
-   semantic revision, although raw native records remain dispositioned.
+4. A complete normalized snapshot equal to the currently accepted revision
+   shares its semantic revision, does not change totals, and is suppressed from
+   semantic delivery, although the raw native record remains dispositioned.
+   Counter equality alone is not enough to prove an exact repeat. If revision
+   `A` returns after accepted revision `B`, the `A -> B -> A` reversion is
+   delivered and ordered even though both `A` occurrences share one semantic
+   ledger revision.
 5. A source-generation reset retracts every contribution owned solely by the
    old generation before corrected replay.
 6. Conflicting out-of-order revisions produce a diagnostic and cannot replace a
@@ -978,7 +999,11 @@ beside the unchanged legacy delta; contract 18 retains that identity and adds
 canonical actor and workflow-affiliation evidence. Contract 19 retains those
 semantic identities and adds capability-scoped permanent-diagnostic coverage;
 existing contract-18 state must replay before it can claim the narrower
-coverage result. The usage fact uses
+coverage result. Contract 20 adds native team affiliation while retaining the
+same usage identity. Contract 21 replaces source-row revision identity with
+the complete value-derived `normalized_snapshot_revision_v1`; existing
+contract-20 state therefore replays before it can expose the corrected
+semantic references. The usage fact uses
 non-empty `message.id` first, an object/generation/source-record fallback when
 it is absent, canonical session and actor-run keys, independently qualified
 buckets, optional model/effort assertions, and an RFC 012A semantic revision.
@@ -998,6 +1023,25 @@ The independent Python oracle imports no adapter, SDK, or database code; its
 digest-bound root/child fixture and report are consumed by a Rust integration
 test that exercises the real parent and subagent streams plus the durable
 reducer.
+
+The common fact layer and durable reducer now enforce contract-21 revision
+identity. An exact repeat is idempotent both within one decode batch and across
+commits: it creates neither a duplicate semantic fact-ledger row nor a
+`runtime.usage-v2.changed` entry. Query bootstrap reduces the complete usage
+baseline without enqueueing per-response usage-v2 changes; the final
+readiness/coverage barrier publishes that baseline, so a consumer cannot
+misread historical replay as instantaneous burn. After that barrier, a changed
+normalized snapshot upserts the same usage entity with a new semantic
+reference. Exact equal revisions are also suppressed when independently
+decoded record batches merge. A non-consecutive `A -> B -> A` reversion emits
+the second `A` transition while reusing `A`'s existing fact-ledger row and
+binding the current response to that valid row. A live/correction generation
+replacement emits explicit delete changes for old response entities before
+replay. The durable change payload carries the same RFC 012A semantic and
+source-record references as the v2 query. Focused tests include an
+equal-counter native-time correction, a bootstrap-to-live boundary plus
+semantic reversion, cross-batch idempotency with unequal-value rejection, and
+rejection of an adapter-supplied revision key that omits normalized state.
 
 The versioned `getRuntimeUsageV2` query contract v1 is now available through
 Rust, N-API, and the transport-neutral SDK as a shadow inspection surface. It
@@ -1109,7 +1153,34 @@ a usage gap. The committed aggregate-only report is
 with digest
 `sha256:2d84af3dd9bcfb91e727b8d0e067679b1637e61b0a343957a09b8f42c303176e`.
 
-Native team-to-actor conformance also passes under decoder contract 20. Team
+A second adapter/SDK-independent census on a stable ephemeral clone measured
+the exact suppression boundary before contract 21 landed. Across 344,160
+usage-bearing rows and 149,671 file-scoped response groups, 194,489 rows
+repeated a response key. Of 136,946 counter-and-bucket-equal repeats, only 965
+were equal complete semantic snapshots; 135,981 changed other normalized
+metadata, overwhelmingly native source time, and therefore remain replaceable
+corrections rather than additive burn. The census also found 262
+non-consecutive returns to an earlier complete semantic value. Those are
+ordered reversions, not suppressible retries. The aggregate-only report is
+[`usage-v2-semantic-revision-census-v1.json`](../../agent-support/claude-code/candidate-2026-08-15/reports/usage-v2-semantic-revision-census-v1.json)
+with digest
+`sha256:4dee1d89f0f5a474458cbe257f3607b28e0911bf38d7f8c26dadfe83550edf9d`.
+
+The contract-21 release artifact then passed the same stable-clone parity gate
+after final bootstrap integrity checking: 149,671 responses, 5,049 actors, 855
+sessions, the root/child partition, all four totals, zero unknown buckets, and
+complete `Ready` coverage for 5,187 transcript objects matched exactly. The
+gate binds the loaded native artifact digest so a stale addon cannot be
+mistaken for current-source evidence. Ingest completed in 293.61 seconds; the
+older 306.20-second report used a different source snapshot, so the 4.11%
+descriptive difference is not a controlled causal performance claim. The
+aggregate-only report is
+[`usage-v2-semantic-revision-parity-v1.json`](../../agent-support/claude-code/candidate-2026-08-15/reports/usage-v2-semantic-revision-parity-v1.json)
+with digest
+`sha256:699c568377cc7d20f85392ccaa13a2fdc5b40441e5f68e4ad5234ed979aa37b8`.
+
+Native team-to-actor conformance first passed under decoder contract 20 and is
+retained by contract 21. Team
 config `leadSessionId` plus an exactly-one lead member establishes the root
 edge; zero or multiple matches fail closed as retained unknown evidence;
 subagent metadata `teamName` plus `name` establishes a child edge for the actor

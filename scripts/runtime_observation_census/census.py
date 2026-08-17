@@ -14,7 +14,7 @@ import hashlib
 import json
 import time
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -165,6 +165,13 @@ class UsageGroup:
     effort_present: bool = False
     latest_model_present: bool = False
     latest_effort_present: bool = False
+    latest_semantic_snapshot: "UsageSemanticSnapshot | None" = None
+    seen_semantic_snapshots: set["UsageSemanticSnapshot"] = field(default_factory=set)
+    exact_semantic_repeats: int = 0
+    changed_semantic_revisions: int = 0
+    semantic_reversions: int = 0
+    counter_equal_semantic_changes: int = 0
+    semantic_change_fields: Counter[str] = field(default_factory=Counter)
 
     def revise(
         self,
@@ -173,12 +180,33 @@ class UsageGroup:
         request_id: str | None,
         model_present: bool,
         effort_present: bool,
+        semantic_snapshot: "UsageSemanticSnapshot",
     ) -> None:
         self.rows += 1
-        if usage == self.latest:
+        if usage == self.latest and known == self.latest_known:
             self.exact_repeats += 1
         else:
             self.changed_revisions += 1
+        if self.latest_semantic_snapshot is None:
+            raise AssertionError("usage group is missing its initial semantic snapshot")
+        if semantic_snapshot == self.latest_semantic_snapshot:
+            self.exact_semantic_repeats += 1
+        else:
+            self.changed_semantic_revisions += 1
+            if semantic_snapshot in self.seen_semantic_snapshots:
+                self.semantic_reversions += 1
+            if usage == self.latest and known == self.latest_known:
+                self.counter_equal_semantic_changes += 1
+            for attribute, report_name in (
+                ("bucket_snapshot", "bucketSnapshot"),
+                ("request_id", "requestId"),
+                ("model", "model"),
+                ("source_time", "sourceTime"),
+            ):
+                if getattr(semantic_snapshot, attribute) != getattr(
+                    self.latest_semantic_snapshot, attribute
+                ):
+                    self.semantic_change_fields[report_name] += 1
         if any(current < previous for current, previous in zip(usage, self.latest, strict=True)):
             self.downward_correction = True
         if request_id != self.request_id:
@@ -189,6 +217,16 @@ class UsageGroup:
         self.effort_present |= effort_present
         self.latest_model_present = model_present
         self.latest_effort_present = effort_present
+        self.latest_semantic_snapshot = semantic_snapshot
+        self.seen_semantic_snapshots.add(semantic_snapshot)
+
+
+@dataclass(frozen=True)
+class UsageSemanticSnapshot:
+    bucket_snapshot: tuple[UsageTuple, UsageKnownTuple]
+    request_id: str | None
+    model: str | None
+    source_time: str | None
 
 
 def content_blocks(record: dict[str, Any]) -> Iterable[dict[str, Any]]:
@@ -354,8 +392,16 @@ def analyze(root: Path) -> dict[str, Any]:
                 response_id = nonempty_string(message.get("id"))
                 request_id = nonempty_string(record.get("requestId"))
                 row_uuid = nonempty_string(record.get("uuid"))
-                model_present = nonempty_string(message.get("model")) is not None
+                model = nonempty_string(message.get("model"))
+                source_time = nonempty_string(record.get("timestamp"))
+                model_present = model is not None
                 effort_present = has_effort(record)
+                semantic_snapshot = UsageSemanticSnapshot(
+                    bucket_snapshot=(usage, known),  # type: ignore[arg-type]
+                    request_id=request_id,
+                    model=model,
+                    source_time=source_time,
+                )
                 usage_rows_with_model += int(model_present)
                 usage_rows_with_effort += int(effort_present)
                 if response_id is None:
@@ -389,6 +435,8 @@ def analyze(root: Path) -> dict[str, Any]:
                         effort_present=effort_present,
                         latest_model_present=model_present,
                         latest_effort_present=effort_present,
+                        latest_semantic_snapshot=semantic_snapshot,
+                        seen_semantic_snapshots={semantic_snapshot},
                     )
                 else:
                     group.revise(
@@ -397,6 +445,7 @@ def analyze(root: Path) -> dict[str, Any]:
                         request_id,
                         model_present,
                         effort_present,
+                        semantic_snapshot,
                     )
 
         if file_records:
@@ -416,6 +465,11 @@ def analyze(root: Path) -> dict[str, Any]:
     repeated_groups = 0
     changed_revision_groups = 0
     exact_repeat_rows = 0
+    exact_semantic_repeat_rows = 0
+    counter_equal_semantic_change_rows = 0
+    semantic_revision_groups = 0
+    semantic_reversion_rows = 0
+    semantic_change_fields: Counter[str] = Counter()
     downward_groups = 0
     mixed_request_groups = 0
     groups_with_model = 0
@@ -431,6 +485,11 @@ def analyze(root: Path) -> dict[str, Any]:
         repeated_groups += int(group.rows > 1)
         changed_revision_groups += int(group.changed_revisions > 0)
         exact_repeat_rows += group.exact_repeats
+        exact_semantic_repeat_rows += group.exact_semantic_repeats
+        counter_equal_semantic_change_rows += group.counter_equal_semantic_changes
+        semantic_revision_groups += int(group.changed_semantic_revisions > 0)
+        semantic_reversion_rows += group.semantic_reversions
+        semantic_change_fields.update(group.semantic_change_fields)
         downward_groups += int(group.downward_correction)
         mixed_request_groups += int(group.mixed_request_ids)
         groups_with_model += int(group.model_present)
@@ -489,6 +548,11 @@ def analyze(root: Path) -> dict[str, Any]:
             "groupsWithMultipleRows": repeated_groups,
             "groupsWithChangedCounters": changed_revision_groups,
             "exactRepeatRowsBeyondFirst": exact_repeat_rows,
+            "exactSemanticRepeatRowsBeyondFirst": exact_semantic_repeat_rows,
+            "counterEqualButSemanticChangedRows": counter_equal_semantic_change_rows,
+            "groupsWithChangedSemanticSnapshot": semantic_revision_groups,
+            "semanticReversionsAfterInterveningRevision": semantic_reversion_rows,
+            "semanticChangeFields": dict(sorted(semantic_change_fields.items())),
             "groupsWithDownwardCorrection": downward_groups,
             "rowsWithoutMessageId": usage_rows_without_response_id,
             "rowsWithoutRequestId": usage_rows_without_request_id,

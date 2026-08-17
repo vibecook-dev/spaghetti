@@ -15,7 +15,7 @@ use rusqlite::{
 use crate::adapter::{
     ContractCompleteness, DelegationFact, DelegationKind, DelegationMetadataFact,
     DelegationSpawnFact, EntityKey, EvidenceKind, EvidenceStrength, Fact, FactBatch, FactEnvelope,
-    MessageRole, QualifiedTimestamp, QualifiedUnknownReason, QualifiedValueQuality,
+    FactRevisionId, MessageRole, QualifiedTimestamp, QualifiedUnknownReason, QualifiedValueQuality,
     RawRetentionPolicy, RelationStrength, SessionFact, TimestampQuality, TokenUsage,
     UsageAccounting, UsageFact, UsageQualifiedValue, UsageResponseIdentity, UsageScope,
     UsageValueAuthority, ValueQuality,
@@ -801,7 +801,7 @@ impl TransactionalProjectionWork for FactProjectionWork<'_> {
             return Ok(Vec::new());
         }
         let usage_started = Instant::now();
-        apply_usage_v2_facts(transaction, context, self.batch)?;
+        let mut changes = apply_usage_v2_facts(transaction, context, self.batch)?;
         let mut touched_sessions = BTreeSet::new();
         let mut pending_totals = BTreeMap::new();
         let existing_contribution_ids = existing_usage_contribution_ids(transaction, self.batch)?;
@@ -933,27 +933,29 @@ impl TransactionalProjectionWork for FactProjectionWork<'_> {
 
         flush_usage_totals(transaction, pending_totals, context.commit_seq)?;
 
-        let changes = touched_sessions
-            .into_iter()
-            .map(|session_key| {
-                let exists = transaction
-                    .query_row(
-                        "SELECT 1 FROM usage_totals WHERE session_key = ?1",
-                        [&session_key],
-                        |_| Ok(()),
-                    )
-                    .optional()
-                    .map_err(|error| sqlite_error("read usage total change", error))?
-                    .is_some();
-                if exists {
-                    simple_change("usage.session.changed", &session_key, "upsert", None)
-                } else {
-                    simple_change("usage.session.changed", &session_key, "delete", None)
-                }
-            })
-            .collect();
+        changes.extend(
+            touched_sessions
+                .into_iter()
+                .map(|session_key| {
+                    let exists = transaction
+                        .query_row(
+                            "SELECT 1 FROM usage_totals WHERE session_key = ?1",
+                            [&session_key],
+                            |_| Ok(()),
+                        )
+                        .optional()
+                        .map_err(|error| sqlite_error("read usage total change", error))?
+                        .is_some();
+                    if exists {
+                        simple_change("usage.session.changed", &session_key, "upsert", None)
+                    } else {
+                        simple_change("usage.session.changed", &session_key, "delete", None)
+                    }
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+        );
         self.record_detail(CommitDetail::UsageAggregation, usage_started);
-        changes
+        Ok(changes)
     }
 }
 
@@ -1508,8 +1510,92 @@ fn persist_facts(
             !redundant_activity_owners.contains_key(envelope.id.as_bytes().as_slice())
         })
         .collect::<Vec<_>>();
-    for fact_chunk in durable_facts.chunks(FACT_INSERT_BATCH_ROWS) {
+    let (usage_v2_facts, ordinary_facts): (Vec<_>, Vec<_>) = durable_facts
+        .into_iter()
+        .partition(|(envelope, _)| matches!(envelope.value, Fact::UsageRevisionV2(_)));
+    persist_fact_rows(
+        transaction,
+        &ordinary_facts,
+        source_instance_id,
+        source_stream_id,
+        source_object_id,
+        source_generation,
+        commit_seq,
+        false,
+    )?;
+    persist_fact_rows(
+        transaction,
+        &usage_v2_facts,
+        source_instance_id,
+        source_stream_id,
+        source_object_id,
+        source_generation,
+        commit_seq,
+        true,
+    )?;
+
+    // A cursor-valid same-generation append cannot revisit an already
+    // committed fact ID. A contract/source replay advances the generation and
+    // cascades old dependencies with the old fact rows. Therefore an empty
+    // dependency set has nothing to replace and should not perform a B-tree
+    // lookup for every ordinary history fact.
+    if !batch.dependency_reads().is_empty() {
+        for envelope in batch.facts() {
+            if redundant_activity_owners.contains_key(envelope.id.as_bytes().as_slice()) {
+                continue;
+            }
+            execute_cached(
+                transaction,
+                "DELETE FROM fact_dependency_reads WHERE fact_id = ?1",
+                [envelope.id.as_bytes().as_slice()],
+            )
+            .map_err(|error| sqlite_error("replace fact dependency reads", error))?;
+            for dependency in batch.dependency_reads() {
+                transaction
+                    .execute(
+                        r#"
+                INSERT INTO fact_dependency_reads (
+                    fact_id, source_instance_id, root_name, object_key, revision
+                )
+                SELECT ?1, ?2, ?3, ?4, ?5
+                WHERE EXISTS (SELECT 1 FROM fact_records WHERE fact_id = ?1)
+                "#,
+                        params![
+                            envelope.id.as_bytes().as_slice(),
+                            sqlite_u64(
+                                dependency.source_instance_id,
+                                "dependency source instance"
+                            )?,
+                            dependency.root_name,
+                            dependency.object_key,
+                            dependency.revision.as_slice(),
+                        ],
+                    )
+                    .map_err(|error| sqlite_error("persist fact dependency read", error))?;
+            }
+        }
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn persist_fact_rows(
+    transaction: &Transaction<'_>,
+    fact_rows: &[(&FactEnvelope, &EncodedFactPayload)],
+    source_instance_id: i64,
+    source_stream_id: i64,
+    source_object_id: i64,
+    source_generation: i64,
+    commit_seq: i64,
+    semantic_revision_idempotent: bool,
+) -> Result<(), EngineError> {
+    for fact_chunk in fact_rows.chunks(FACT_INSERT_BATCH_ROWS) {
         let row = "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+        let semantic_conflict = if semantic_revision_idempotent {
+            "ON CONFLICT(semantic_fact_revision_id) WHERE semantic_fact_revision_id IS NOT NULL DO NOTHING"
+        } else {
+            ""
+        };
         let sql = format!(
             r#"
             INSERT INTO fact_records (
@@ -1538,6 +1624,7 @@ fn persist_facts(
                 payload_json = excluded.payload_json,
                 payload_codec = excluded.payload_codec,
                 last_commit_seq = excluded.last_commit_seq
+            {semantic_conflict}
             "#,
             std::iter::repeat_n(row, fact_chunk.len())
                 .collect::<Vec<_>>()
@@ -1592,46 +1679,6 @@ fn persist_facts(
                 .and_then(|mut statement| statement.execute(params_from_iter(values.iter())))
         };
         result.map_err(|error| sqlite_error("persist typed fact batch", error))?;
-    }
-
-    // A cursor-valid same-generation append cannot revisit an already
-    // committed fact ID. A contract/source replay advances the generation and
-    // cascades old dependencies with the old fact rows. Therefore an empty
-    // dependency set has nothing to replace and should not perform a B-tree
-    // lookup for every ordinary history fact.
-    if !batch.dependency_reads().is_empty() {
-        for envelope in batch.facts() {
-            if redundant_activity_owners.contains_key(envelope.id.as_bytes().as_slice()) {
-                continue;
-            }
-            execute_cached(
-                transaction,
-                "DELETE FROM fact_dependency_reads WHERE fact_id = ?1",
-                [envelope.id.as_bytes().as_slice()],
-            )
-            .map_err(|error| sqlite_error("replace fact dependency reads", error))?;
-            for dependency in batch.dependency_reads() {
-                transaction
-                    .execute(
-                        r#"
-                INSERT INTO fact_dependency_reads (
-                    fact_id, source_instance_id, root_name, object_key, revision
-                ) VALUES (?1, ?2, ?3, ?4, ?5)
-                "#,
-                        params![
-                            envelope.id.as_bytes().as_slice(),
-                            sqlite_u64(
-                                dependency.source_instance_id,
-                                "dependency source instance"
-                            )?,
-                            dependency.root_name,
-                            dependency.object_key,
-                            dependency.revision.as_slice(),
-                        ],
-                    )
-                    .map_err(|error| sqlite_error("persist fact dependency read", error))?;
-            }
-        }
     }
     Ok(())
 }
@@ -2993,8 +3040,38 @@ fn apply_usage_v2_facts(
     transaction: &Transaction<'_>,
     context: &ProjectionCommitContext,
     batch: &FactBatch,
-) -> Result<(), EngineError> {
+) -> Result<Vec<ChangeEntry>, EngineError> {
+    let mut changes = Vec::new();
     if context.replaces_prior_generation {
+        let retracted = {
+            let mut statement = transaction
+                .prepare(
+                    r#"
+                    SELECT usage_key, fact_revision_id, source_record_id
+                    FROM usage_v2_response_contributions
+                    WHERE source_object_id = ?1 AND source_generation <> ?2
+                    ORDER BY usage_key
+                    "#,
+                )
+                .map_err(|error| sqlite_error("prepare replaced usage-v2 revisions", error))?;
+            let rows = statement
+                .query_map(
+                    params![
+                        sqlite_u64(context.source_object_id, "source object id")?,
+                        sqlite_u64(context.generation, "source generation")?,
+                    ],
+                    |row| {
+                        Ok((
+                            row.get::<_, Vec<u8>>(0)?,
+                            row.get::<_, Vec<u8>>(1)?,
+                            row.get::<_, Vec<u8>>(2)?,
+                        ))
+                    },
+                )
+                .map_err(|error| sqlite_error("read replaced usage-v2 revisions", error))?;
+            rows.collect::<Result<Vec<_>, _>>()
+                .map_err(|error| sqlite_error("collect replaced usage-v2 revisions", error))?
+        };
         transaction
             .execute(
                 "DELETE FROM usage_v2_response_contributions WHERE source_object_id = ?1 AND source_generation <> ?2",
@@ -3004,6 +3081,16 @@ fn apply_usage_v2_facts(
                 ],
             )
             .map_err(|error| sqlite_error("retract replaced usage-v2 contributions", error))?;
+        for (usage_key, fact_revision_id, source_record_id) in retracted {
+            if !context.query_bootstrap {
+                changes.push(usage_v2_change(
+                    &usage_key,
+                    "delete",
+                    &fact_revision_id,
+                    &source_record_id,
+                )?);
+            }
+        }
     }
 
     for envelope in batch.facts() {
@@ -3023,7 +3110,25 @@ fn apply_usage_v2_facts(
                 "usage-v2 semantic reference does not match its fact revision".to_string(),
             ));
         }
-
+        let semantic_revision_key = fact.semantic_revision_key().map_err(|error| {
+            EngineError::InvalidCommit(format!(
+                "cannot derive normalized usage-v2 semantic revision: {error}"
+            ))
+        })?;
+        let expected_revision =
+            FactRevisionId::derive(&semantic.fact_id, 1, &semantic_revision_key).map_err(
+                |error| {
+                    EngineError::InvalidCommit(format!(
+                        "cannot validate usage-v2 semantic revision identity: {error}"
+                    ))
+                },
+            )?;
+        if semantic.fact_revision_id != expected_revision {
+            return Err(EngineError::InvalidCommit(
+                "usage-v2 fact revision does not identify its complete normalized snapshot"
+                    .to_string(),
+            ));
+        }
         let input_qualification =
             intern_usage_v2_qualification(transaction, &fact.buckets.input_tokens)?;
         let output_qualification =
@@ -3067,7 +3172,11 @@ fn apply_usage_v2_facts(
                 ON CONFLICT(usage_key) DO UPDATE SET
                     fact_revision_id = excluded.fact_revision_id,
                     source_record_id = excluded.source_record_id,
-                    fact_id = excluded.fact_id,
+                    fact_id = (
+                        SELECT ledger.fact_id
+                        FROM fact_records AS ledger
+                        WHERE ledger.semantic_fact_revision_id = excluded.fact_revision_id
+                    ),
                     session_key = excluded.session_key,
                     actor_run_key = excluded.actor_run_key,
                     response_key = excluded.response_key,
@@ -3099,10 +3208,7 @@ fn apply_usage_v2_facts(
                     cursor_end = excluded.cursor_end,
                     last_commit_seq = excluded.last_commit_seq
                 WHERE excluded.cursor_end > usage_v2_response_contributions.cursor_end
-                   OR (
-                     excluded.cursor_end = usage_v2_response_contributions.cursor_end
-                     AND excluded.fact_revision_id = usage_v2_response_contributions.fact_revision_id
-                   )
+                  AND excluded.fact_revision_id <> usage_v2_response_contributions.fact_revision_id
             "#,
             params![
                 semantic.fact_id.as_bytes().as_slice(),
@@ -3136,7 +3242,9 @@ fn apply_usage_v2_facts(
                 fact.model.as_ref().and_then(|value| value.value.as_deref()),
                 model_qualification.as_ref().map(<[u8; 32]>::as_slice),
                 fact.model.as_ref().and_then(|value| value.effective_at),
-                fact.effort.as_ref().and_then(|value| value.value.as_deref()),
+                fact.effort
+                    .as_ref()
+                    .and_then(|value| value.value.as_deref()),
                 effort_qualification.as_ref().map(<[u8; 32]>::as_slice),
                 fact.effort.as_ref().and_then(|value| value.effective_at),
                 timestamp_value(fact.source_time.as_ref()),
@@ -3148,13 +3256,77 @@ fn apply_usage_v2_facts(
             ],
         )
         .map_err(|error| sqlite_error("write usage-v2 response contribution", error))?;
-        if affected != 1 {
+        if affected == 0 {
+            let accepted_revision = transaction
+                .query_row(
+                    "SELECT fact_revision_id FROM usage_v2_response_contributions WHERE usage_key = ?1",
+                    [semantic.fact_id.as_bytes().as_slice()],
+                    |row| row.get::<_, Vec<u8>>(0),
+                )
+                .optional()
+                .map_err(|error| sqlite_error("read rejected usage-v2 revision", error))?;
+            if accepted_revision.as_deref() == Some(semantic.fact_revision_id.as_bytes().as_slice())
+            {
+                continue;
+            }
             return Err(EngineError::InvalidCommit(
                 "usage-v2 revision arrived behind the accepted source cursor".to_string(),
             ));
         }
+        if affected != 1 {
+            return Err(EngineError::InvalidCommit(format!(
+                "one usage-v2 revision changed {affected} response contributions"
+            )));
+        }
+        if !context.query_bootstrap {
+            changes.push(usage_v2_change(
+                semantic.fact_id.as_bytes(),
+                "upsert",
+                semantic.fact_revision_id.as_bytes(),
+                semantic.source_record_id.as_bytes(),
+            )?);
+        }
     }
-    Ok(())
+    Ok(changes)
+}
+
+fn usage_v2_change(
+    usage_key: &[u8],
+    operation: &'static str,
+    fact_revision_id: &[u8],
+    source_record_id: &[u8],
+) -> Result<ChangeEntry, EngineError> {
+    let payload = serialize(
+        &serde_json::json!({
+            "semantic_revision_ref": {
+                "semantic_reference_contract_version": 1,
+                "fact_revision_id": opaque_reference(fact_revision_id)?,
+            },
+            "source_record_ref": opaque_reference(source_record_id)?,
+        }),
+        "serialize usage-v2 change",
+    )?;
+    Ok(ChangeEntry {
+        topic: "runtime.usage-v2.changed".to_string(),
+        schema_version: CHANGE_SCHEMA_VERSION,
+        entity_key: usage_key.to_vec(),
+        operation: operation.to_string(),
+        payload,
+    })
+}
+
+fn opaque_reference(bytes: &[u8]) -> Result<String, EngineError> {
+    use base64::Engine as _;
+
+    if bytes.len() != 32 {
+        return Err(EngineError::InvalidCommit(
+            "opaque RFC 012A reference must contain exactly 32 bytes".to_string(),
+        ));
+    }
+    Ok(format!(
+        "v1:{}",
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
+    ))
 }
 
 fn intern_usage_v2_qualification<T>(
@@ -4288,6 +4460,15 @@ mod tests {
                 serde_json::Value::from(value),
             );
         }
+        serde_json::to_vec(&value).unwrap()
+    }
+
+    fn claude_usage_line_with_timestamp(payload: Vec<u8>, timestamp: &str) -> Vec<u8> {
+        let mut value: serde_json::Value = serde_json::from_slice(&payload).unwrap();
+        value.as_object_mut().unwrap().insert(
+            "timestamp".to_string(),
+            serde_json::Value::String(timestamp.to_string()),
+        );
         serde_json::to_vec(&value).unwrap()
     }
 
@@ -6693,6 +6874,248 @@ mod tests {
     }
 
     #[test]
+    fn usage_v2_projection_rejects_a_revision_key_that_omits_normalized_state() {
+        let root = TempDir::new().unwrap();
+        let adapter = ClaudeCodeAdapter::new();
+        let context = adapter_context(root.path(), &adapter);
+        let payload = claude_usage_line("row-1", "api-1", None, 10, 5, Some(2), Some(3));
+        let record = direct_record(1, 0, payload.len() as u64 + 1, 100, &payload);
+        let mut decoded =
+            FactBatch::new_with_semantic_context(16, 8, semantic_context(b"fixture-transcript"))
+                .unwrap();
+        adapter
+            .decode(
+                DecodeContext {
+                    decoder: &DecoderId::new(DECODER).unwrap(),
+                    object_context: &context,
+                    decoder_state: None,
+                },
+                &record,
+                &mut decoded,
+            )
+            .unwrap();
+        let fact = decoded
+            .facts()
+            .iter()
+            .find_map(|envelope| match &envelope.value {
+                Fact::UsageRevisionV2(fact) => Some(fact.clone()),
+                _ => None,
+            })
+            .unwrap();
+        let mut forged =
+            FactBatch::new_with_semantic_context(1, 1, semantic_context(b"fixture-transcript"))
+                .unwrap();
+        forged
+            .push_native_object_scoped_with_revision(
+                &record,
+                b"forged-response-key",
+                b"revision-that-does-not-cover-the-normalized-value",
+                Fact::UsageRevisionV2(fact),
+            )
+            .unwrap();
+
+        let mut connection = database();
+        register_object(&mut connection);
+        let error = apply_fact_observation_commit(
+            &mut connection,
+            &request(
+                ExpectedSourceCursor::At {
+                    generation: 1,
+                    committed_cursor: SourceCursor::append_offset(0).into_bytes(),
+                },
+                1,
+                record.cursor_end.as_bytes().to_vec(),
+                101,
+            ),
+            &forged,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            EngineError::InvalidCommit(message)
+                if message.contains("complete normalized snapshot")
+        ));
+        assert_eq!(count(&connection, "fact_records"), 0);
+        assert_eq!(count(&connection, "usage_v2_response_contributions"), 0);
+    }
+
+    #[test]
+    fn usage_v2_bootstrap_establishes_a_baseline_before_live_revisions() {
+        let root = TempDir::new().unwrap();
+        let adapter = ClaudeCodeAdapter::new();
+        let context = adapter_context(root.path(), &adapter);
+        let mut connection = database();
+        register_object(&mut connection);
+        let mut state = DecodeCommitState {
+            expected_generation: 1,
+            cursor: SourceCursor::append_offset(0).into_bytes(),
+            decoder_state: None,
+        };
+
+        let bootstrap_payload = claude_usage_line("row-1", "api-1", None, 10, 5, Some(2), Some(3));
+        let bootstrap_end = bootstrap_payload.len() as u64 + 1;
+        let bootstrap_record = direct_record(1, 0, bootstrap_end, 100, &bootstrap_payload);
+        let decoder = DecoderId::new(DECODER).unwrap();
+        let mut bootstrap_batch =
+            FactBatch::new_with_semantic_context(16, 8, semantic_context(b"fixture-transcript"))
+                .unwrap();
+        adapter
+            .decode(
+                DecodeContext {
+                    decoder: &decoder,
+                    object_context: &context,
+                    decoder_state: None,
+                },
+                &bootstrap_record,
+                &mut bootstrap_batch,
+            )
+            .unwrap();
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .unwrap();
+        let mut bootstrap_request = request(
+            ExpectedSourceCursor::At {
+                generation: 1,
+                committed_cursor: state.cursor.clone(),
+            },
+            1,
+            bootstrap_record.cursor_end.as_bytes().to_vec(),
+            101,
+        );
+        if bootstrap_batch.next_decoder_state().is_some() {
+            bootstrap_request.object.decoder_state_version =
+                Some(adapter.manifest().contract_version);
+        }
+        let bootstrap_receipt = apply_fact_observation_commit_in_transaction(
+            &transaction,
+            &bootstrap_request,
+            &bootstrap_batch,
+            &TestCommitHook,
+            true,
+            true,
+        )
+        .unwrap();
+        transaction.commit().unwrap();
+        crate::engine::commit::complete_observation_commit(&TestCommitHook).unwrap();
+        state.cursor = bootstrap_record.cursor_end.as_bytes().to_vec();
+        state.decoder_state = bootstrap_batch.next_decoder_state().map(ToOwned::to_owned);
+
+        assert!(bootstrap_receipt.change_count >= 2);
+        assert_eq!(count(&connection, "usage_v2_response_contributions"), 1);
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM change_log WHERE topic = 'runtime.usage-v2.changed'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            0,
+            "bootstrap builds the replacement baseline without reporting instantaneous burn"
+        );
+
+        let repeat_payload = claude_usage_line("row-2", "api-1", None, 10, 5, Some(2), Some(3));
+        let repeat_end = bootstrap_end + repeat_payload.len() as u64 + 1;
+        let repeat_record = direct_record(1, bootstrap_end, repeat_end, 110, &repeat_payload);
+        decode_commit(
+            &mut connection,
+            &adapter,
+            &context,
+            &repeat_record,
+            &mut state,
+            111,
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM change_log WHERE topic = 'runtime.usage-v2.changed'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            0,
+            "an exact live repeat does not advance the baseline"
+        );
+
+        let correction_payload = claude_usage_line("row-3", "api-1", None, 12, 6, Some(2), Some(4));
+        let correction_end = repeat_end + correction_payload.len() as u64 + 1;
+        let correction_record =
+            direct_record(1, repeat_end, correction_end, 120, &correction_payload);
+        decode_commit(
+            &mut connection,
+            &adapter,
+            &context,
+            &correction_record,
+            &mut state,
+            121,
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM change_log WHERE topic = 'runtime.usage-v2.changed' AND operation = 'upsert'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            1,
+            "the first changed live revision is delivered after the baseline barrier"
+        );
+
+        let reversion_payload = claude_usage_line("row-4", "api-1", None, 10, 5, Some(2), Some(3));
+        let reversion_end = correction_end + reversion_payload.len() as u64 + 1;
+        let reversion_record =
+            direct_record(1, correction_end, reversion_end, 130, &reversion_payload);
+        decode_commit(
+            &mut connection,
+            &adapter,
+            &context,
+            &reversion_record,
+            &mut state,
+            131,
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT input_tokens FROM usage_v2_response_contributions",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            10,
+            "a response can return to an earlier complete semantic value"
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM change_log WHERE topic = 'runtime.usage-v2.changed' AND operation = 'upsert'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            2,
+            "a non-consecutive semantic reversion is a new ordered transition"
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM fact_records WHERE fact_kind = 'runtime.usage-v2'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            2,
+            "the reversion reuses its existing semantic ledger row"
+        );
+        assert_eq!(
+            connection
+                .query_row("PRAGMA foreign_key_check", [], |_| Ok(1_i64))
+                .optional()
+                .unwrap(),
+            None
+        );
+    }
+
+    #[test]
     fn usage_v2_replaces_response_snapshots_without_changing_legacy_usage() {
         let root = TempDir::new().unwrap();
         let adapter = ClaudeCodeAdapter::new();
@@ -6707,10 +7130,14 @@ mod tests {
         let rows = [
             claude_usage_line("row-1", "api-1", Some("shared"), 10, 5, Some(2), Some(3)),
             claude_usage_line("row-2", "api-1", Some("shared"), 10, 5, Some(2), Some(3)),
-            claude_usage_line("row-3", "api-1", Some("shared"), 14, 6, Some(3), Some(4)),
-            claude_usage_line("row-4", "api-1", Some("shared"), 8, 4, Some(1), Some(2)),
-            claude_usage_line("row-5", "api-2", Some("shared"), 3, 2, Some(0), Some(1)),
-            claude_usage_line("row-6", "api-3", None, 1, 1, None, None),
+            claude_usage_line_with_timestamp(
+                claude_usage_line("row-3", "api-1", Some("shared"), 10, 5, Some(2), Some(3)),
+                "2026-08-11T00:00:01Z",
+            ),
+            claude_usage_line("row-4", "api-1", Some("shared"), 14, 6, Some(3), Some(4)),
+            claude_usage_line("row-5", "api-1", Some("shared"), 8, 4, Some(1), Some(2)),
+            claude_usage_line("row-6", "api-2", Some("shared"), 3, 2, Some(0), Some(1)),
+            claude_usage_line("row-7", "api-3", None, 1, 1, None, None),
         ];
         let mut offset = 0_u64;
         for (index, payload) in rows.iter().enumerate() {
@@ -6727,7 +7154,7 @@ mod tests {
             offset = end;
         }
 
-        assert_eq!(count(&connection, "usage_contributions"), 6);
+        assert_eq!(count(&connection, "usage_contributions"), 7);
         assert_eq!(count(&connection, "usage_v2_response_contributions"), 3);
         assert_eq!(count(&connection, "runtime_actor_runs_v2"), 1);
         assert_eq!(
@@ -6738,7 +7165,7 @@ mod tests {
                     |row| row.get::<_, i64>(0),
                 )
                 .unwrap(),
-            46
+            56
         );
         let v2_totals: (i64, i64, i64, i64) = connection
             .query_row(
@@ -6818,6 +7245,53 @@ mod tests {
                 )
                 .unwrap(),
             (1, 1)
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM fact_records WHERE fact_kind = 'runtime.usage-v2'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            6,
+            "one exact repeated semantic revision must not duplicate the provenance ledger"
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM change_log WHERE topic = 'runtime.usage-v2.changed'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            6,
+            "one exact repeat is suppressed while a counter-equal timestamp correction is delivered"
+        );
+        let (usage_key, revision_id, change_entity, payload): (Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>) =
+            connection
+                .query_row(
+                    r#"
+                SELECT usage.usage_key, usage.fact_revision_id,
+                       change.entity_key, change.payload
+                FROM usage_v2_response_contributions AS usage
+                JOIN change_log AS change
+                  ON change.topic = 'runtime.usage-v2.changed'
+                 AND change.entity_key = usage.usage_key
+                 AND change.operation = 'upsert'
+                WHERE usage.response_key = ?1
+                ORDER BY change.commit_seq DESC
+                LIMIT 1
+                "#,
+                    [b"api-1".as_slice()],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                )
+                .unwrap();
+        assert_eq!(change_entity, usage_key);
+        let payload: serde_json::Value = serde_json::from_slice(&payload).unwrap();
+        assert_eq!(
+            payload["semantic_revision_ref"]["fact_revision_id"].as_str(),
+            Some(format!("v1:{}", URL_SAFE_NO_PAD.encode(revision_id)).as_str())
         );
 
         let (project_id, session_id) = persisted_project_session_ids(&connection);
@@ -6980,6 +7454,17 @@ mod tests {
                 )
                 .unwrap(),
             1
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM change_log WHERE topic = 'runtime.usage-v2.changed' AND operation = 'delete'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            3,
+            "generation replacement explicitly retracts every prior response entity"
         );
         assert_eq!(
             connection
