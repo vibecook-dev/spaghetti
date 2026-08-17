@@ -1041,6 +1041,19 @@ Current landing status (2026-08-17):
   ready-style calls return the retained barrier without redelivery, equivalent
   replay gets the same snapshot digest/event ID, failed preflight mutates
   nothing, and later Bootstrap-phase data is rejected after completion;
+- the delivery lane now tracks its distinct delivered-through boundary and an
+  explicit `Bootstrap | Valid | ResyncRequired` continuity state. An explicit
+  watcher/transport/consumer continuity-loss signal on a valid epoch clears
+  only not-yet-delivered ordinary backlog across both capacity lanes, accounts
+  what was superseded, and installs one root-bound sticky
+  `observer.resync_required` as the next deliverable control. Its payload names
+  the invalid epoch, last contiguous delivered sequence, bootstrap baseline
+  digest, and reason; its deterministic ID excludes delivery speed, discarded
+  counts, observation time, and sequence. Repeated signals cannot redeliver or
+  replace the first control, cross-root reuse fails, all later ordinary offers
+  return `ResyncRequired`, and invalidated epochs cannot publish a watermark or
+  re-offer bootstrap completion. Semantic/control capacity pressure by itself
+  remains retryable backpressure and never invokes this path;
 - every admitted append observation now stages one bounded RFC 012A `Decode`
   coverage update using the same source-instance/stream/object coordinates and
   append-cursor representation as durable ingestion. Stable initial absence,
@@ -1080,7 +1093,8 @@ coverage-complete durable query exposure, affiliation/actor enrichment and
 envelope variants beyond the current usage/source-lifecycle families, the
 public async event drain plus poll/ready facade and complete scope coverage,
 complete declared-scope membership and family coverage beyond usage-v2,
-overflow/resync epochs, artifact mediation, cancellation waiting,
+new-epoch resync start/staging/completion and atomic replacement manifests,
+artifact mediation, cancellation waiting,
 the trusted native version-probe/identity-input drivers, and the complete
 public request are not yet implemented. The internal offered boundary is now
 transactional, but
@@ -1140,10 +1154,10 @@ core now emits common Decode and eligible usage-v2 `SourceCoverageSet`s at that
 sequence, binds every set to the pre-access resolved root session, and carries
 that root's canonical session/external-reference/root-run tuple. It is not the
 public poll/bootstrap/resync contract and does not yet prove complete declared-
-scope discovery. The public control multiplexer,
-epoch state machine, sticky overflow/resync controls, complete scope-membership
-source/family sets, coverage-complete family manifest, atomic staged swap, and
-multi-observer isolation remain unimplemented. Internally,
+scope discovery. The public control multiplexer/facade, resync-start and
+new-epoch staging/completion states, complete scope-membership source/family
+sets, coverage-complete family manifest, atomic staged swap, and multi-observer
+isolation remain unimplemented. Internally,
 reducer mutation, admitted-frame release, bounded delivery admission, and
 eligible coverage promotion now share one retry-safe offered transaction:
 exact projected capacity is checked before mutation, queue pressure changes no
@@ -1163,7 +1177,12 @@ multiplexer/facade, resync control family, complete actor-affiliation reducer,
 or an applied acknowledgement. Epoch 1 now does have an ordered,
 snapshot-identified bootstrap-completion control and retained idempotent
 barrier at the offered boundary; it remains internal until multi-object scope
-orchestration and the portable drain/ready surface land.
+orchestration and the portable drain/ready surface land. A valid epoch can now
+transition exactly once to a sticky root-bound `observer.resync_required`
+state: the lane preserves the last delivered boundary, explicitly supersedes
+undelivered backlog, prioritizes the control, rejects further ordinary offers,
+and prevents invalid watermark publication. Starting and atomically publishing
+the replacement epoch remain open.
 
 ### D4. SDK and Chopsticks migration
 

@@ -196,14 +196,15 @@ mod tests {
         ScopedActorAttribution, ScopedActorFallbackReason, ScopedAdmissionError,
         ScopedAppendDecodeOutcome, ScopedAppendDecoderConfig, ScopedAppendDeliveryPhase,
         ScopedAppendObservation, ScopedAppendPresenceChange, ScopedAppendReconcileRequest,
-        ScopedBootstrapBarrierError, ScopedCoverageAssemblyError, ScopedDecodeFailureClass,
-        ScopedDecodedAppendItem, ScopedDeliveryError, ScopedEnvelopeEvidenceAuthority,
-        ScopedKnownAppendObject, ScopedKnownObjectGrant, ScopedKnownObjectReadRequest,
-        ScopedObjectRead, ScopedObservationAccessError, ScopedObservationAccessHost,
-        ScopedObservationAccessRequest, ScopedObservationAdmissionLane,
-        ScopedObservationDeliveryLane, ScopedObservationDeliveryLimits, ScopedObservationEvent,
-        ScopedObservationProjectionLimits, ScopedObservationProjectionSink,
-        ScopedObservationQueueLimits, ScopedProjectionDeliveryError, ScopedQueuedObservationFrame,
+        ScopedBootstrapBarrierError, ScopedContinuityError, ScopedCoverageAssemblyError,
+        ScopedDecodeFailureClass, ScopedDecodedAppendItem, ScopedDeliveryError,
+        ScopedEnvelopeEvidenceAuthority, ScopedKnownAppendObject, ScopedKnownObjectGrant,
+        ScopedKnownObjectReadRequest, ScopedObjectRead, ScopedObservationAccessError,
+        ScopedObservationAccessHost, ScopedObservationAccessRequest,
+        ScopedObservationAdmissionLane, ScopedObservationDeliveryLane,
+        ScopedObservationDeliveryLimits, ScopedObservationEvent, ScopedObservationProjectionLimits,
+        ScopedObservationProjectionSink, ScopedObservationQueueLimits,
+        ScopedProjectionDeliveryError, ScopedQueuedObservationFrame, ScopedResyncReason,
         ScopedRootIdentityRequest, ScopedSourceFailureClass,
     };
     use crate::source::{
@@ -2277,6 +2278,22 @@ mod tests {
         assert!(Arc::ptr_eq(
             &barrier,
             &delivery.bootstrap_barrier().unwrap()
+        ));
+        assert_eq!(
+            other_host.require_resync(&mut delivery, ScopedResyncReason::WatcherOverflow, 60,),
+            Err(ScopedContinuityError::RootMismatch)
+        );
+        let resync = host
+            .require_resync(&mut delivery, ScopedResyncReason::WatcherOverflow, 60)
+            .unwrap();
+        assert_eq!(resync.last_contiguous_sequence, 1);
+        assert!(matches!(
+            host.capture_watermark_core(&admission, &projection, &delivery),
+            Err(ScopedCoverageAssemblyError::ContinuityInvalid)
+        ));
+        assert!(matches!(
+            host.offer_bootstrap_complete(&admission, &projection, &mut delivery, false, 60),
+            Err(ScopedBootstrapBarrierError::StateChanged)
         ));
 
         // A second attachment-local lane replays the same bootstrap snapshot
