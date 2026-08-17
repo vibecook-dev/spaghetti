@@ -203,6 +203,7 @@ mod tests {
         ScopedObservationAccessHost, ScopedObservationAccessRequest,
         ScopedObservationAdmissionLane, ScopedObservationContinuity, ScopedObservationDeliveryLane,
         ScopedObservationDeliveryLimits, ScopedObservationEvent, ScopedObservationOpenDrainError,
+        ScopedObservationPollError, ScopedObservationPollLease, ScopedObservationPollResolution,
         ScopedObservationProjectionLimits, ScopedObservationProjectionSink,
         ScopedObservationQueueLimits, ScopedProjectionDeliveryError, ScopedQueuedObservationFrame,
         ScopedReplacementMode, ScopedReplacementRepresentation, ScopedReplacementStageError,
@@ -495,6 +496,41 @@ mod tests {
         if let Err(failure) = lane.admit(object, observation, batch) {
             panic!("fixture admission failed: {}", failure.error);
         }
+    }
+
+    fn reconcile_missing_poll(
+        host: &ScopedObservationAccessHost,
+        lease: &ScopedObservationPollLease,
+        object: &mut ScopedKnownAppendObject,
+        admission: &mut ScopedObservationAdmissionLane,
+        identity_inputs: &[ScopeIdentityInput<'_>],
+        origin: &RecordOrigin,
+        access_phase: AccessPhase,
+    ) {
+        let observation = object
+            .reconcile(
+                lease.access_pass(),
+                ScopedAppendReconcileRequest {
+                    relation_id: "root-object",
+                    identity_inputs,
+                    access_phase,
+                    parent_token: None,
+                    depth: 1,
+                    max_bytes: 64,
+                    origin,
+                    force_contract_replay: false,
+                },
+            )
+            .unwrap();
+        assert!(!observation.root_present);
+        let ScopedAppendDecodeOutcome::Ready(decoded) = decode_scoped(host, object, &observation)
+        else {
+            panic!("stable missing source must produce a complete poll observation");
+        };
+        if let Err(failure) = admission.admit(object, &observation, decoded) {
+            panic!("missing-source poll admission failed: {}", failure.error);
+        }
+        assert!(admission.is_empty());
     }
 
     impl AgentAdapter for EmptyAdapter {
@@ -875,6 +911,271 @@ mod tests {
             }),
             Err(ScopedObservationAccessError::Closed)
         ));
+    }
+
+    #[test]
+    fn scoped_poll_coalesces_prepass_requests_and_defers_inflight_requests() {
+        let registry = supported_fixture_registry();
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().join("poll-root");
+        std::fs::create_dir_all(&root).unwrap();
+        let host =
+            ScopedObservationAccessHost::authorize(&registry, scoped_access_request(root)).unwrap();
+        let mut drain = host
+            .open_consumer_drain(ScopedObservationDeliveryLimits {
+                max_semantic_events: 1,
+                max_retained_native_bytes: 0,
+                max_source_control_items: 2,
+            })
+            .unwrap();
+        let mut object = scoped_append_object_with_coverage(
+            AppendDelimitedFile::new(AppendDelimitedConfig::json_lines()).unwrap(),
+            RawRetentionPolicy::None,
+            vec![CoverageDomain::FactFamily {
+                family: "runtime.usage-v2".to_string(),
+                version: 1,
+            }],
+        );
+        let mut admission = admission_lane(1, 0, 1);
+        let projection = ScopedObservationProjectionSink::new(ScopedObservationProjectionLimits {
+            max_usage_v2_entities: 1,
+        })
+        .unwrap();
+        let identity = [ScopeIdentityInput {
+            name: "native-session-id",
+            value: b"poll-session",
+        }];
+        let origin = RecordOrigin {
+            source_instance_id: 10,
+            stream_id: 20,
+            object_id: 30,
+            observed_at: 40,
+            source_timestamp_hint: None,
+            media_type: SourceMediaType::new("application/x-ndjson").unwrap(),
+        };
+
+        let first = host.request_poll().unwrap();
+        let second = host.request_poll().unwrap();
+        assert_eq!(first.request_generation(), 1);
+        assert_eq!(second.request_generation(), 2);
+        let incomplete = host.begin_poll().unwrap().unwrap();
+        assert_eq!(incomplete.target_generation(), 2);
+        assert!(matches!(
+            host.complete_bootstrap_poll(incomplete, &admission, &projection, &drain),
+            Err(ScopedObservationPollError::IncompleteScopePass)
+        ));
+        assert_eq!(
+            host.poll_resolution(&first).unwrap(),
+            ScopedObservationPollResolution::Pending
+        );
+
+        // The failed completion requeues the same target. A new request after
+        // reservation is conservatively left for a follow-up pass.
+        let lease = host.begin_poll().unwrap().unwrap();
+        assert_eq!(lease.target_generation(), 2);
+        assert!(host.begin_poll().unwrap().is_none());
+        let third = host.request_poll().unwrap();
+        assert_eq!(third.request_generation(), 3);
+        reconcile_missing_poll(
+            &host,
+            &lease,
+            &mut object,
+            &mut admission,
+            &identity,
+            &origin,
+            AccessPhase::Initial,
+        );
+        let first_watermark = host
+            .complete_bootstrap_poll(lease, &admission, &projection, &drain)
+            .unwrap();
+        assert_eq!(first_watermark.offered_through_sequence, 0);
+        let first_result = host.poll_resolution(&first).unwrap();
+        let second_result = host.poll_resolution(&second).unwrap();
+        let (
+            ScopedObservationPollResolution::Ready(first_result),
+            ScopedObservationPollResolution::Ready(second_result),
+        ) = (first_result, second_result)
+        else {
+            panic!("both pre-pass poll requests must share one completion");
+        };
+        assert!(Arc::ptr_eq(&first_result, &second_result));
+        assert_eq!(
+            host.poll_resolution(&third).unwrap(),
+            ScopedObservationPollResolution::Pending
+        );
+
+        let follow_up = host.begin_poll().unwrap().unwrap();
+        assert_eq!(follow_up.target_generation(), 3);
+        reconcile_missing_poll(
+            &host,
+            &follow_up,
+            &mut object,
+            &mut admission,
+            &identity,
+            &origin,
+            AccessPhase::Revalidation,
+        );
+        let follow_up_watermark = host
+            .complete_bootstrap_poll(follow_up, &admission, &projection, &drain)
+            .unwrap();
+        assert_eq!(follow_up_watermark.offered_through_sequence, 0);
+        let ScopedObservationPollResolution::Ready(retained_first_watermark) =
+            host.poll_resolution(&first).unwrap()
+        else {
+            panic!("a completed ticket must retain its original poll result");
+        };
+        assert!(Arc::ptr_eq(&retained_first_watermark, &first_watermark));
+        assert!(!Arc::ptr_eq(&first_watermark, &follow_up_watermark));
+        assert!(matches!(
+            host.poll_resolution(&third).unwrap(),
+            ScopedObservationPollResolution::Ready(_)
+        ));
+
+        // A raw access attempt cannot satisfy poll completion using coverage
+        // left by an older pass; decode/admission/offered promotion must carry
+        // the current pass identity all the way to the watermark.
+        let read_only = host.request_poll().unwrap();
+        let read_only_lease = host.begin_poll().unwrap().unwrap();
+        assert_eq!(
+            read_only_lease
+                .access_pass()
+                .read_known_object(ScopedKnownObjectReadRequest {
+                    relation_id: "root-object",
+                    identity_inputs: &identity,
+                    phase: AccessPhase::Revalidation,
+                    parent_token: None,
+                    depth: 1,
+                    max_bytes: 64,
+                })
+                .unwrap(),
+            ScopedObjectRead::Unavailable
+        );
+        assert!(matches!(
+            host.complete_bootstrap_poll(read_only_lease, &admission, &projection, &drain,),
+            Err(ScopedObservationPollError::IncompleteScopePass)
+        ));
+        assert_eq!(
+            host.poll_resolution(&read_only).unwrap(),
+            ScopedObservationPollResolution::Pending
+        );
+        let retry = host.begin_poll().unwrap().unwrap();
+        reconcile_missing_poll(
+            &host,
+            &retry,
+            &mut object,
+            &mut admission,
+            &identity,
+            &origin,
+            AccessPhase::Revalidation,
+        );
+        host.complete_bootstrap_poll(retry, &admission, &projection, &drain)
+            .unwrap();
+        assert!(matches!(
+            host.poll_resolution(&read_only).unwrap(),
+            ScopedObservationPollResolution::Ready(_)
+        ));
+        assert_eq!(
+            host.poll_state(),
+            crate::scoped_observation::ScopedObservationPollState {
+                requested_through_generation: 4,
+                completed_through_generation: 4,
+                in_flight_through_generation: None,
+                closed: false,
+            }
+        );
+
+        let barrier = host
+            .offer_consumer_bootstrap_complete(&admission, &projection, &mut drain, false, 50)
+            .unwrap();
+        assert!(Arc::ptr_eq(
+            &host.engine_ready(&drain).unwrap().unwrap(),
+            &barrier
+        ));
+        object.complete_bootstrap().unwrap();
+        let mut active = host
+            .bind_consumer_bootstrap_epoch_state(vec![object], admission, projection, &drain)
+            .unwrap();
+
+        // An unchanged live pass may advance/confirm offered coverage but must
+        // not manufacture another semantic or lifecycle event.
+        let before = drain.delivery_lane().state();
+        let unchanged = host.request_poll().unwrap();
+        let lease = host.begin_poll().unwrap().unwrap();
+        let (object, admission) = active
+            .append_object_and_admission_mut("root-object")
+            .unwrap();
+        reconcile_missing_poll(
+            &host,
+            &lease,
+            object,
+            admission,
+            &identity,
+            &origin,
+            AccessPhase::Revalidation,
+        );
+        let unchanged_watermark = host.complete_epoch_poll(lease, &active, &drain).unwrap();
+        assert_eq!(
+            unchanged_watermark.offered_through_sequence,
+            before.offered_through_sequence
+        );
+        assert_eq!(drain.delivery_lane().state(), before);
+        assert!(matches!(
+            host.poll_resolution(&unchanged).unwrap(),
+            ScopedObservationPollResolution::Ready(watermark)
+                if watermark.offered_through_sequence == barrier.barrier_sequence
+        ));
+    }
+
+    #[test]
+    fn scoped_poll_rejects_cross_attachment_state_and_cancels_pending_on_close() {
+        let registry = supported_fixture_registry();
+        let temp = TempDir::new().unwrap();
+        let first_root = temp.path().join("first-poll-root");
+        let second_root = temp.path().join("second-poll-root");
+        std::fs::create_dir_all(&first_root).unwrap();
+        std::fs::create_dir_all(&second_root).unwrap();
+        let first =
+            ScopedObservationAccessHost::authorize(&registry, scoped_access_request(first_root))
+                .unwrap();
+        let second =
+            ScopedObservationAccessHost::authorize(&registry, scoped_access_request(second_root))
+                .unwrap();
+        let limits = ScopedObservationDeliveryLimits {
+            max_semantic_events: 1,
+            max_retained_native_bytes: 0,
+            max_source_control_items: 1,
+        };
+        let first_drain = first.open_consumer_drain(limits).unwrap();
+        let second_drain = second.open_consumer_drain(limits).unwrap();
+        assert!(matches!(
+            first.engine_ready(&second_drain),
+            Err(ScopedObservationPollError::ForeignDrain)
+        ));
+        assert!(first.engine_ready(&first_drain).unwrap().is_none());
+
+        let ticket = first.request_poll().unwrap();
+        assert!(matches!(
+            second.poll_resolution(&ticket),
+            Err(ScopedObservationPollError::ForeignTicket)
+        ));
+        let lease = first.begin_poll().unwrap().unwrap();
+        assert_eq!(first.poll_state().in_flight_through_generation, Some(1));
+        first.close();
+        assert_eq!(
+            first.poll_resolution(&ticket).unwrap(),
+            ScopedObservationPollResolution::Cancelled
+        );
+        assert!(matches!(
+            first.request_poll(),
+            Err(ScopedObservationPollError::Closed)
+        ));
+        assert!(matches!(
+            first.begin_poll(),
+            Err(ScopedObservationPollError::Closed)
+        ));
+        drop(lease);
+        assert_eq!(first.poll_state().in_flight_through_generation, None);
+        assert!(first.poll_state().closed);
     }
 
     #[test]

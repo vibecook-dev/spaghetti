@@ -1191,6 +1191,22 @@ Current landing status (2026-08-17):
   created by invalidation are accepted only when the skipped backlog was never
   delivered. Raw dequeue and the standalone mapper are test-only seams, so
   production code cannot bypass this boundary inside the provisional kernel;
+- the host and drain now share an unforgeable attachment authority in addition
+  to canonical root identity, so simultaneous observers of the same native
+  session cannot substitute one another's queue or readiness barrier. A
+  crate-private poll coordinator gives every logical request a local ticket,
+  coalesces all requests reserved by one bounded access pass, and leaves a
+  request arriving during that pass for a conservative follow-up. Completion
+  requires that the fresh pass ledger attempted every exact known-object
+  relation, that each relation's offered coverage carries that same pass
+  identity, and that the watermark is captured at the owning drain's offered
+  boundary. A raw read cannot complete against coverage retained from an older
+  pass. Incomplete, failed, or dropped passes acknowledge no ticket and are
+  retryable; close cancels unresolved tickets, foreign tickets/leases/drains
+  fail closed, and an unchanged follow-up advances no observer sequence. The
+  retained attachment-bound bootstrap barrier is also exposed through an
+  internal engine-readiness probe. Request/lease generations remain local
+  flow-control coordinates and do not enter semantic identity;
 - one pass is active at a time, a later pass receives fresh bounds, close is
   idempotent, and the frozen access report excludes paths, identity values, and
   content; and
@@ -1203,7 +1219,8 @@ canonical fact-revision adoption beyond the current runtime families, scoped
 reducers beyond usage-v2,
 coverage-complete durable query exposure, affiliation/actor enrichment and
 envelope variants beyond the current usage/source-lifecycle families, the
-public async event drain plus poll/ready facade and complete scope coverage,
+public async event drain plus wakeable poll/ready facade over the internal
+ticket/readiness substrate and complete scope coverage,
 dynamic/discovered scope membership beyond the attachment's current exact
 known-object grants and family coverage beyond usage-v2,
 complete multi-family replacement manifests, whole-scope discovery and source
@@ -1273,11 +1290,11 @@ that root's canonical session/external-reference/root-run tuple. It also proves
 one-to-one coverage of every exact known-object grant supplied to the current
 attachment: unobserved relations and duplicate relation claims fail closed.
 This is not yet proof of relationships or descendants that the future scope
-orchestrator has not discovered and granted, nor is it the public poll/
-bootstrap/resync contract. The public control multiplexer/facade, whole-scope
+orchestrator has not discovered and granted, nor is it the portable poll/
+bootstrap/resync contract. The public async multiplexer/facade, whole-scope
 dynamic discovered-scope source/family sets, complete multi-family and D-owned
-manifests, non-append source participants, and multi-observer isolation remain
-unimplemented. Internally,
+manifests, non-append source participants, and multi-observer scheduling/
+starvation isolation remain unimplemented. Internally,
 reducer mutation, admitted-frame release, bounded delivery admission, and
 eligible coverage promotion now share one retry-safe offered transaction:
 exact projected capacity is checked before mutation, queue pressure changes no
@@ -1300,7 +1317,14 @@ distinguishes delivery from application with an exact attachment-bound receipt,
 blocks a second dequeue while application is pending, rejects
 cross-attachment/mismatched acknowledgements, tolerates only explicit
 invalidation sequence gaps, and exposes engine versus consumer bootstrap/resync
-readiness separately. Epoch 1 now has an
+readiness separately. An attachment authority now prevents a second observer,
+even one with the same canonical root, from substituting its drain. The
+internal poll coordinator coalesces requests present at pass reservation,
+requires a fresh all-known-relation access ledger plus the owning drain's
+offered watermark before completion, conservatively schedules requests that
+arrive in flight for a follow-up pass, retries dropped/failed passes without
+acknowledgement, and cancels unresolved tickets on close. An unchanged pass
+does not advance observer sequence. Epoch 1 now has an
 ordered, snapshot-identified bootstrap-completion control and retained
 idempotent barrier at the offered boundary; it remains internal until
 multi-object scope orchestration and the portable drain/ready surface land. A

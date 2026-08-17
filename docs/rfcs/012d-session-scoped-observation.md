@@ -515,6 +515,20 @@ coalesced and idempotent at the semantic-revision level. Its source coverage is
 the coverage actually offered through `offered_through_sequence`; it cannot
 advance merely because a watcher observed a newer file timestamp.
 
+Every logical call has a request-local completion ticket. Calls admitted before
+one pass reserves its target may share that pass and exact offered watermark. A
+call admitted after reservation cannot be completed by the older pass unless
+the implementation can prove that its post-request source watermark was
+included; the baseline implementation schedules one follow-up pass. Starting,
+reading, dropping, or failing a pass completes no ticket. Completion requires a
+fresh bounded access ledger accounting for every object in the pass's declared
+scope, offered coverage for every such object originating in that same pass,
+and a watermark captured from that attachment's own delivery lane. A native
+read without its matching decode/admission/offer path cannot complete the
+ticket against coverage retained from an older pass. These ticket/pass
+generations are flow-control coordinates only and never contribute to native
+cursors, semantic revision keys, or `event_id`.
+
 Object deletion and reset retract old object/generation-owned semantic state
 through common reducers. Per-object errors carry provenance and retry state and
 do not kill sibling observation.
@@ -859,7 +873,8 @@ Release-blocking tests cover:
   revision/event IDs while an exact repeated current revision is suppressed;
 - an `A -> B -> A` usage reversion carrying equal semantic references for both
   `A` values but distinct deterministic occurrence event IDs within one epoch;
-- idempotent/coalesced polling and unknown-event retention;
+- idempotent/coalesced polling, including a request arriving during an active
+  pass, failed-pass retry without acknowledgement, and unknown-event retention;
 - bootstrap larger than the semantic queue with the SDK helper's internal drain
   active while the caller awaits consumer-ready state, then safe completion
   without artificial overflow;

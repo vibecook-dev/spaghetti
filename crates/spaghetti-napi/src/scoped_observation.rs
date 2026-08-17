@@ -8,7 +8,7 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard, Weak};
 
 use crate::adapter::{
     ActorRunRole, AdapterError, AdapterErrorClass, AdapterId, AdapterObjectContext,
@@ -327,6 +327,7 @@ fn source_belongs_to_root(
 pub struct ScopedAppendObservation {
     object_token: u64,
     admission_token: u64,
+    access_pass_id: u64,
     /// Host observation time supplied by the trusted source-driver request.
     /// It is delivery metadata and never participates in event identity.
     pub observed_at: i64,
@@ -498,6 +499,7 @@ struct ScopedTakenObservationFrame {
 
 struct PendingScopedCoverageUpdate {
     through_lane_ordinal: u64,
+    access_pass_id: u64,
     coverage: ScopedOfferedDecodeCoverage,
 }
 
@@ -525,6 +527,7 @@ pub struct ScopedObservationAdmissionLane {
     known_coverage_objects: BTreeMap<ScopedSourceObjectIdentity, ScopedCoverageMembershipIdentity>,
     pending_coverage_updates: VecDeque<PendingScopedCoverageUpdate>,
     offered_decode_coverage: BTreeMap<ScopedSourceObjectIdentity, ScopedOfferedDecodeCoverage>,
+    offered_access_pass_ids: BTreeMap<ScopedSourceObjectIdentity, u64>,
 }
 
 impl ScopedObservationAdmissionLane {
@@ -546,6 +549,7 @@ impl ScopedObservationAdmissionLane {
             known_coverage_objects: BTreeMap::new(),
             pending_coverage_updates: VecDeque::new(),
             offered_decode_coverage: BTreeMap::new(),
+            offered_access_pass_ids: BTreeMap::new(),
         })
     }
 
@@ -734,6 +738,7 @@ impl ScopedObservationAdmissionLane {
             after_ordinal
                 .checked_sub(1)
                 .expect("scoped lane ordinals start at one"),
+            observation.access_pass_id,
             coverage,
         );
 
@@ -929,9 +934,12 @@ impl ScopedObservationAdmissionLane {
     fn stage_coverage_update(
         &mut self,
         through_lane_ordinal: u64,
+        access_pass_id: u64,
         coverage: ScopedOfferedDecodeCoverage,
     ) {
         if through_lane_ordinal <= self.offered_lane_ordinal {
+            self.offered_access_pass_ids
+                .insert(coverage.source.clone(), access_pass_id);
             self.offered_decode_coverage
                 .insert(coverage.source.clone(), coverage);
             return;
@@ -949,12 +957,14 @@ impl ScopedObservationAdmissionLane {
                     && pending.coverage.source == coverage.source
             })
         {
+            pending.access_pass_id = access_pass_id;
             pending.coverage = coverage;
             return;
         }
         self.pending_coverage_updates
             .push_back(PendingScopedCoverageUpdate {
                 through_lane_ordinal,
+                access_pass_id,
                 coverage,
             });
     }
@@ -969,6 +979,8 @@ impl ScopedObservationAdmissionLane {
                 .pending_coverage_updates
                 .pop_front()
                 .expect("front coverage update was just observed");
+            self.offered_access_pass_ids
+                .insert(pending.coverage.source.clone(), pending.access_pass_id);
             self.offered_decode_coverage
                 .insert(pending.coverage.source.clone(), pending.coverage);
         }
@@ -998,6 +1010,14 @@ impl ScopedObservationAdmissionLane {
         source: &ScopedSourceObjectIdentity,
     ) -> Option<&ScopedOfferedDecodeCoverage> {
         self.offered_decode_coverage.get(source)
+    }
+
+    fn relation_was_offered_in_pass(&self, relation_id: &str, access_pass_id: u64) -> bool {
+        self.known_coverage_objects
+            .iter()
+            .find(|(_, membership)| membership.relation_id.as_ref() == relation_id)
+            .and_then(|(source, _)| self.offered_access_pass_ids.get(source))
+            .is_some_and(|offered_pass_id| *offered_pass_id == access_pass_id)
     }
 
     pub fn is_empty(&self) -> bool {
@@ -1595,6 +1615,12 @@ impl ScopedObservationApplicationReceipt {
 #[derive(Debug)]
 struct ScopedObservationApplicationAuthority;
 
+/// Unforgeable identity shared only by one authorized host and the consumer
+/// drain it constructs. Root identity alone is insufficient because two
+/// simultaneous attachments may intentionally observe the same native scope.
+#[derive(Debug)]
+struct ScopedObservationAttachmentAuthority;
+
 #[derive(Debug)]
 pub struct ScopedObservationYieldedEnvelope {
     pub envelope: ScopedObservationEnvelope,
@@ -1668,6 +1694,7 @@ struct ScopedObservationPendingApplication {
 /// successfully applied the exact yielded envelope.
 pub struct ScopedObservationConsumerDrain {
     mapper: ScopedObservationEnvelopeMapper,
+    attachment_authority: Arc<ScopedObservationAttachmentAuthority>,
     authority: Arc<ScopedObservationApplicationAuthority>,
     delivery: ScopedObservationDeliveryLane,
     delivered_through_sequence: u64,
@@ -1682,11 +1709,13 @@ pub struct ScopedObservationConsumerDrain {
 impl ScopedObservationConsumerDrain {
     fn new(
         mapper: ScopedObservationEnvelopeMapper,
+        attachment_authority: Arc<ScopedObservationAttachmentAuthority>,
         limits: ScopedObservationDeliveryLimits,
     ) -> Result<Self, ScopedDeliveryError> {
         let authority = Arc::new(ScopedObservationApplicationAuthority);
         Ok(Self {
             mapper,
+            attachment_authority,
             authority,
             delivery: ScopedObservationDeliveryLane::new(limits)?,
             delivered_through_sequence: 0,
@@ -2338,6 +2367,8 @@ pub enum ScopedDeliveryError {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum ScopedBootstrapBarrierError {
+    #[error("scoped bootstrap consumer drain belongs to another observer attachment")]
+    ForeignDrain,
     #[error("scoped bootstrap coverage is not ready: {0}")]
     Coverage(ScopedCoverageAssemblyError),
     #[error("scoped bootstrap control could not enter delivery: {0}")]
@@ -4378,6 +4409,8 @@ pub enum ScopedObservationAccessError {
     Closed,
     #[error("a scoped access pass is already active")]
     PassAlreadyActive,
+    #[error("scoped access pass sequence is exhausted")]
+    AccessPassSequenceExhausted,
     #[error("scoped append bootstrap has not reached a drainable observation")]
     BootstrapNotDrained,
     #[error("scoped append bootstrap is already complete")]
@@ -4408,10 +4441,288 @@ pub enum ScopedObservationAccessError {
     Access(#[from] AccessBudgetError),
 }
 
+/// A request-local handle for one logical `poll()` call. Request generations
+/// are flow-control coordinates only; they never enter event identity,
+/// coverage, or a native source cursor.
+#[derive(Debug, Clone)]
+pub struct ScopedObservationPollTicket {
+    runtime: Arc<ScopedObservationPollRuntime>,
+    completion: Arc<ScopedObservationPollTicketCompletion>,
+    request_generation: u64,
+}
+
+impl ScopedObservationPollTicket {
+    pub fn request_generation(&self) -> u64 {
+        self.request_generation
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ScopedObservationPollResolution {
+    Pending,
+    Ready(Arc<ScopedObservationWatermarkCore>),
+    Cancelled,
+}
+
+#[derive(Debug)]
+struct ScopedObservationPollTicketCompletion {
+    resolution: Mutex<ScopedObservationPollResolution>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScopedObservationPollState {
+    pub requested_through_generation: u64,
+    pub completed_through_generation: u64,
+    pub in_flight_through_generation: Option<u64>,
+    pub closed: bool,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ScopedObservationPollError {
+    #[error("scoped observation host is closed")]
+    Closed,
+    #[error("scoped poll request or lease sequence is exhausted")]
+    SequenceExhausted,
+    #[error("scoped poll ticket belongs to another observer attachment")]
+    ForeignTicket,
+    #[error("scoped poll lease belongs to another observer attachment")]
+    ForeignLease,
+    #[error("scoped consumer drain belongs to another observer attachment")]
+    ForeignDrain,
+    #[error(
+        "scoped poll pass did not offer current coverage for every exact known-object relation"
+    )]
+    IncompleteScopePass,
+    #[error("scoped poll lease no longer matches the active pass")]
+    LeaseMismatch,
+    #[error("scoped poll could not begin its bounded access pass: {0}")]
+    Access(#[source] ScopedObservationAccessError),
+    #[error("scoped poll could not publish an offered watermark: {0}")]
+    Coverage(#[from] ScopedCoverageAssemblyError),
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ScopedObservationActivePoll {
+    lease_id: u64,
+    target_generation: u64,
+}
+
+#[derive(Debug, Default)]
+struct ScopedObservationPollRuntimeState {
+    requested_through_generation: u64,
+    completed_through_generation: u64,
+    next_lease_id: u64,
+    active: Option<ScopedObservationActivePoll>,
+    pending_completions: BTreeMap<u64, Weak<ScopedObservationPollTicketCompletion>>,
+    closed: bool,
+}
+
+#[derive(Debug, Default)]
+struct ScopedObservationPollRuntime {
+    state: Mutex<ScopedObservationPollRuntimeState>,
+}
+
+impl ScopedObservationPollRuntime {
+    fn lock_state(&self) -> MutexGuard<'_, ScopedObservationPollRuntimeState> {
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn request(
+        self: &Arc<Self>,
+    ) -> Result<ScopedObservationPollTicket, ScopedObservationPollError> {
+        let mut state = self.lock_state();
+        if state.closed {
+            return Err(ScopedObservationPollError::Closed);
+        }
+        state.requested_through_generation = state
+            .requested_through_generation
+            .checked_add(1)
+            .ok_or(ScopedObservationPollError::SequenceExhausted)?;
+        let request_generation = state.requested_through_generation;
+        let completion = Arc::new(ScopedObservationPollTicketCompletion {
+            resolution: Mutex::new(ScopedObservationPollResolution::Pending),
+        });
+        state
+            .pending_completions
+            .retain(|_, completion| completion.strong_count() > 0);
+        state
+            .pending_completions
+            .insert(request_generation, Arc::downgrade(&completion));
+        Ok(ScopedObservationPollTicket {
+            runtime: Arc::clone(self),
+            completion,
+            request_generation,
+        })
+    }
+
+    /// Reserve all work requested before this instant for one bounded pass.
+    /// A request arriving after reservation advances the requested generation
+    /// and therefore remains pending for a follow-up pass.
+    fn reserve(
+        self: &Arc<Self>,
+    ) -> Result<Option<ScopedObservationActivePoll>, ScopedObservationPollError> {
+        let mut state = self.lock_state();
+        if state.closed {
+            return Err(ScopedObservationPollError::Closed);
+        }
+        if state.active.is_some()
+            || state.requested_through_generation == state.completed_through_generation
+        {
+            return Ok(None);
+        }
+        state.next_lease_id = state
+            .next_lease_id
+            .checked_add(1)
+            .ok_or(ScopedObservationPollError::SequenceExhausted)?;
+        let active = ScopedObservationActivePoll {
+            lease_id: state.next_lease_id,
+            target_generation: state.requested_through_generation,
+        };
+        state.active = Some(active);
+        Ok(Some(active))
+    }
+
+    fn abandon(&self, lease_id: u64, target_generation: u64) {
+        let mut state = self.lock_state();
+        if state.active.is_some_and(|active| {
+            active.lease_id == lease_id && active.target_generation == target_generation
+        }) {
+            state.active = None;
+        }
+    }
+
+    fn complete(
+        &self,
+        lease_id: u64,
+        target_generation: u64,
+        watermark: Arc<ScopedObservationWatermarkCore>,
+    ) -> Result<Arc<ScopedObservationWatermarkCore>, ScopedObservationPollError> {
+        let mut state = self.lock_state();
+        if state.closed {
+            return Err(ScopedObservationPollError::Closed);
+        }
+        let Some(active) = state.active else {
+            return Err(ScopedObservationPollError::LeaseMismatch);
+        };
+        if active.lease_id != lease_id || active.target_generation != target_generation {
+            return Err(ScopedObservationPollError::LeaseMismatch);
+        }
+        let completed = state
+            .pending_completions
+            .range(..=target_generation)
+            .filter_map(|(generation, completion)| {
+                completion
+                    .upgrade()
+                    .map(|completion| (*generation, completion))
+            })
+            .collect::<Vec<_>>();
+        for (generation, completion) in completed {
+            *completion
+                .resolution
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+                ScopedObservationPollResolution::Ready(Arc::clone(&watermark));
+            state.pending_completions.remove(&generation);
+        }
+        state
+            .pending_completions
+            .retain(|generation, _| *generation > target_generation);
+        state.completed_through_generation = target_generation;
+        state.active = None;
+        Ok(watermark)
+    }
+
+    fn resolution(
+        self: &Arc<Self>,
+        ticket: &ScopedObservationPollTicket,
+    ) -> Result<ScopedObservationPollResolution, ScopedObservationPollError> {
+        if !Arc::ptr_eq(&ticket.runtime, self) {
+            return Err(ScopedObservationPollError::ForeignTicket);
+        }
+        Ok(ticket
+            .completion
+            .resolution
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone())
+    }
+
+    fn snapshot(&self) -> ScopedObservationPollState {
+        let state = self.lock_state();
+        ScopedObservationPollState {
+            requested_through_generation: state.requested_through_generation,
+            completed_through_generation: state.completed_through_generation,
+            in_flight_through_generation: state.active.map(|active| active.target_generation),
+            closed: state.closed,
+        }
+    }
+
+    fn close(&self) {
+        let mut state = self.lock_state();
+        state.closed = true;
+        for completion in state.pending_completions.values().filter_map(Weak::upgrade) {
+            *completion
+                .resolution
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+                ScopedObservationPollResolution::Cancelled;
+        }
+        state.pending_completions.clear();
+    }
+}
+
 struct ScopedObservationAccessState {
     closed: AtomicBool,
     pass_active: AtomicBool,
+    next_pass_id: AtomicU64,
     consumer_drain_opened: AtomicBool,
+    poll: Arc<ScopedObservationPollRuntime>,
+}
+
+/// One serialized bounded access pass satisfying every poll request through
+/// `target_generation`. Dropping it before successful watermark publication
+/// requeues that target; no ticket is acknowledged by merely starting or
+/// reading a pass.
+pub struct ScopedObservationPollLease {
+    runtime: Arc<ScopedObservationPollRuntime>,
+    lease_id: u64,
+    target_generation: u64,
+    access_pass: Option<ScopedObservationAccessPass>,
+    completed: bool,
+}
+
+impl ScopedObservationPollLease {
+    pub fn target_generation(&self) -> u64 {
+        self.target_generation
+    }
+
+    pub fn access_pass(&self) -> &ScopedObservationAccessPass {
+        self.access_pass
+            .as_ref()
+            .expect("an unfinished scoped poll lease retains its access pass")
+    }
+
+    fn complete(
+        mut self,
+        watermark: ScopedObservationWatermarkCore,
+    ) -> Result<Arc<ScopedObservationWatermarkCore>, ScopedObservationPollError> {
+        let watermark =
+            self.runtime
+                .complete(self.lease_id, self.target_generation, Arc::new(watermark))?;
+        self.completed = true;
+        drop(self.access_pass.take());
+        Ok(watermark)
+    }
+}
+
+impl Drop for ScopedObservationPollLease {
+    fn drop(&mut self) {
+        if !self.completed {
+            self.runtime.abandon(self.lease_id, self.target_generation);
+        }
+    }
 }
 
 /// The database-free scoped composition root owns the unforgeable typed
@@ -4424,6 +4735,7 @@ pub struct ScopedObservationAccessHost {
     root_identity: ScopedObservationRootIdentity,
     program_id: String,
     known_objects: Arc<BTreeMap<String, ScopedKnownObjectGrant>>,
+    attachment_authority: Arc<ScopedObservationAttachmentAuthority>,
     state: Arc<ScopedObservationAccessState>,
 }
 
@@ -4464,10 +4776,13 @@ impl ScopedObservationAccessHost {
             root_identity,
             program_id: request.program_id,
             known_objects: Arc::new(known_objects),
+            attachment_authority: Arc::new(ScopedObservationAttachmentAuthority),
             state: Arc::new(ScopedObservationAccessState {
                 closed: AtomicBool::new(false),
                 pass_active: AtomicBool::new(false),
+                next_pass_id: AtomicU64::new(1),
                 consumer_drain_opened: AtomicBool::new(false),
+                poll: Arc::new(ScopedObservationPollRuntime::default()),
             }),
         })
     }
@@ -4498,6 +4813,7 @@ impl ScopedObservationAccessHost {
         }
         let drain = ScopedObservationConsumerDrain::new(
             ScopedObservationEnvelopeMapper::new(self.root_identity.clone()),
+            Arc::clone(&self.attachment_authority),
             limits,
         )
         .map_err(ScopedObservationOpenDrainError::Delivery)?;
@@ -4509,6 +4825,131 @@ impl ScopedObservationAccessHost {
             return Err(ScopedObservationOpenDrainError::Closed);
         }
         Ok(drain)
+    }
+
+    fn owns_consumer_drain(&self, drain: &ScopedObservationConsumerDrain) -> bool {
+        Arc::ptr_eq(&self.attachment_authority, &drain.attachment_authority)
+    }
+
+    /// Admit one logical poll request. Every request receives its own ticket,
+    /// while all tickets admitted before the next pass reservation share that
+    /// pass and offered watermark.
+    pub fn request_poll(&self) -> Result<ScopedObservationPollTicket, ScopedObservationPollError> {
+        if self.state.closed.load(Ordering::Acquire) {
+            return Err(ScopedObservationPollError::Closed);
+        }
+        self.state.poll.request()
+    }
+
+    /// Begin the next requested poll pass. `None` means either no request is
+    /// pending or another caller already owns the coalesced in-flight pass.
+    /// Requests admitted after this lease is reserved remain pending for a
+    /// follow-up pass rather than being falsely acknowledged by an older
+    /// source watermark.
+    pub fn begin_poll(
+        &self,
+    ) -> Result<Option<ScopedObservationPollLease>, ScopedObservationPollError> {
+        let Some(active) = self.state.poll.reserve()? else {
+            return Ok(None);
+        };
+        let access_pass = match self.begin_pass() {
+            Ok(pass) => pass,
+            Err(error) => {
+                self.state
+                    .poll
+                    .abandon(active.lease_id, active.target_generation);
+                return Err(ScopedObservationPollError::Access(error));
+            }
+        };
+        Ok(Some(ScopedObservationPollLease {
+            runtime: Arc::clone(&self.state.poll),
+            lease_id: active.lease_id,
+            target_generation: active.target_generation,
+            access_pass: Some(access_pass),
+            completed: false,
+        }))
+    }
+
+    pub fn poll_resolution(
+        &self,
+        ticket: &ScopedObservationPollTicket,
+    ) -> Result<ScopedObservationPollResolution, ScopedObservationPollError> {
+        self.state.poll.resolution(ticket)
+    }
+
+    pub fn poll_state(&self) -> ScopedObservationPollState {
+        self.state.poll.snapshot()
+    }
+
+    fn validate_poll_completion(
+        &self,
+        lease: &ScopedObservationPollLease,
+        admission: &ScopedObservationAdmissionLane,
+        drain: &ScopedObservationConsumerDrain,
+    ) -> Result<(), ScopedObservationPollError> {
+        if !Arc::ptr_eq(&self.state.poll, &lease.runtime) {
+            return Err(ScopedObservationPollError::ForeignLease);
+        }
+        if !self.owns_consumer_drain(drain) {
+            return Err(ScopedObservationPollError::ForeignDrain);
+        }
+        let report = lease.access_pass().report();
+        let pass_id = lease.access_pass().pass_id();
+        if self.known_objects.keys().any(|relation_id| {
+            !report
+                .relations()
+                .iter()
+                .any(|relation| relation.relation_id == *relation_id && relation.attempts > 0)
+                || !admission.relation_was_offered_in_pass(relation_id, pass_id)
+        }) {
+            return Err(ScopedObservationPollError::IncompleteScopePass);
+        }
+        Ok(())
+    }
+
+    /// Complete a bootstrap-era poll only after its entire exact known-object
+    /// pass is represented by the offered coverage boundary.
+    pub fn complete_bootstrap_poll(
+        &self,
+        lease: ScopedObservationPollLease,
+        admission: &ScopedObservationAdmissionLane,
+        projection: &ScopedObservationProjectionSink,
+        drain: &ScopedObservationConsumerDrain,
+    ) -> Result<Arc<ScopedObservationWatermarkCore>, ScopedObservationPollError> {
+        self.validate_poll_completion(&lease, admission, drain)?;
+        let watermark =
+            self.capture_watermark_core(admission, projection, drain.delivery_lane())?;
+        lease.complete(watermark)
+    }
+
+    /// Complete a live/correction poll against the one active epoch owner.
+    /// Coverage cannot outrun delivery because the captured watermark uses the
+    /// drain's attachment-owned offered boundary.
+    pub fn complete_epoch_poll(
+        &self,
+        lease: ScopedObservationPollLease,
+        active: &ScopedObservationEpochState,
+        drain: &ScopedObservationConsumerDrain,
+    ) -> Result<Arc<ScopedObservationWatermarkCore>, ScopedObservationPollError> {
+        self.validate_poll_completion(&lease, &active.admission, drain)?;
+        let watermark = self.capture_epoch_watermark(active, drain.delivery_lane())?;
+        lease.complete(watermark)
+    }
+
+    /// Internal readiness probe for the future async facade. It observes only
+    /// the retained engine-offered barrier; consumer-applied readiness remains
+    /// on `ScopedObservationConsumerDrain`.
+    pub fn engine_ready(
+        &self,
+        drain: &ScopedObservationConsumerDrain,
+    ) -> Result<Option<Arc<ScopedBootstrapBarrier>>, ScopedObservationPollError> {
+        if !self.owns_consumer_drain(drain) {
+            return Err(ScopedObservationPollError::ForeignDrain);
+        }
+        if self.state.closed.load(Ordering::Acquire) {
+            return Err(ScopedObservationPollError::Closed);
+        }
+        Ok(drain.engine_bootstrap_barrier())
     }
 
     /// Capture a self-consistent offered sequence plus eligible RFC 012A
@@ -4589,6 +5030,29 @@ impl ScopedObservationAccessHost {
             &self.root_identity,
             watermark,
             family_manifest,
+            root_present,
+            observed_at,
+        )
+    }
+
+    /// Producer entry point for the attachment-owned consumer drain. This
+    /// prevents an equally rooted second observer from substituting its queue
+    /// at the bootstrap/ready boundary.
+    pub fn offer_consumer_bootstrap_complete(
+        &self,
+        admission: &ScopedObservationAdmissionLane,
+        projection: &ScopedObservationProjectionSink,
+        drain: &mut ScopedObservationConsumerDrain,
+        root_present: bool,
+        observed_at: i64,
+    ) -> Result<Arc<ScopedBootstrapBarrier>, ScopedBootstrapBarrierError> {
+        if !self.owns_consumer_drain(drain) {
+            return Err(ScopedBootstrapBarrierError::ForeignDrain);
+        }
+        self.offer_bootstrap_complete(
+            admission,
+            projection,
+            drain.delivery_lane_mut(),
             root_present,
             observed_at,
         )
@@ -4676,6 +5140,25 @@ impl ScopedObservationAccessHost {
             admission,
             projection,
         })
+    }
+
+    /// Bind epoch 1 using the exact queue owner created by this attachment.
+    pub fn bind_consumer_bootstrap_epoch_state(
+        &self,
+        append_objects: Vec<ScopedKnownAppendObject>,
+        admission: ScopedObservationAdmissionLane,
+        projection: ScopedObservationProjectionSink,
+        drain: &ScopedObservationConsumerDrain,
+    ) -> Result<ScopedObservationEpochState, ScopedReplacementStageError> {
+        if !self.owns_consumer_drain(drain) {
+            return Err(ScopedReplacementStageError::InvalidSourceState);
+        }
+        self.bind_bootstrap_epoch_state(
+            append_objects,
+            admission,
+            projection,
+            drain.delivery_lane(),
+        )
     }
 
     /// Capture the active epoch after a whole-scope activation without
@@ -4975,7 +5458,19 @@ impl ScopedObservationAccessHost {
                 return Err(error);
             }
         };
+        let pass_id = match self.state.next_pass_id.fetch_update(
+            Ordering::AcqRel,
+            Ordering::Acquire,
+            |current| current.checked_add(1),
+        ) {
+            Ok(pass_id) => pass_id,
+            Err(_) => {
+                self.state.pass_active.store(false, Ordering::Release);
+                return Err(ScopedObservationAccessError::AccessPassSequenceExhausted);
+            }
+        };
         Ok(ScopedObservationAccessPass {
+            pass_id,
             plan,
             known_objects: Arc::clone(&self.known_objects),
             root_identity: self.root_identity.clone(),
@@ -4988,6 +5483,7 @@ impl ScopedObservationAccessHost {
     /// its operating-system call is accounted conservatively before returning.
     pub fn close(&self) {
         self.state.closed.store(true, Ordering::Release);
+        self.state.poll.close();
     }
 
     pub fn is_closed(&self) -> bool {
@@ -5004,6 +5500,7 @@ impl Drop for ScopedObservationAccessHost {
 /// One bounded reconciliation pass. Dropping the pass releases the host's
 /// single-pass slot; a later pass receives a fresh declaration-sized ledger.
 pub struct ScopedObservationAccessPass {
+    pass_id: u64,
     plan: AuthorizedScopeAccessPlan,
     known_objects: Arc<BTreeMap<String, ScopedKnownObjectGrant>>,
     root_identity: ScopedObservationRootIdentity,
@@ -5012,6 +5509,10 @@ pub struct ScopedObservationAccessPass {
 }
 
 impl ScopedObservationAccessPass {
+    pub fn pass_id(&self) -> u64 {
+        self.pass_id
+    }
+
     fn validate_source_identity(
         &self,
         source: &ScopedSourceObjectIdentity,
@@ -5409,6 +5910,7 @@ impl ScopedKnownAppendObject {
         Ok(ScopedAppendObservation {
             object_token: self.object_token,
             admission_token,
+            access_pass_id: pass.pass_id,
             observed_at: request.origin.observed_at,
             phase,
             reset_before_items,
@@ -6684,6 +7186,7 @@ mod projection_tests {
     ) -> ScopedObservationConsumerDrain {
         ScopedObservationConsumerDrain::new(
             ScopedObservationEnvelopeMapper::new(root),
+            Arc::new(ScopedObservationAttachmentAuthority),
             ScopedObservationDeliveryLimits {
                 max_semantic_events,
                 max_retained_native_bytes: 0,
