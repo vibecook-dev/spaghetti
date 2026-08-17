@@ -728,8 +728,11 @@ Current landing status (2026-08-16):
   (`sha256:699c568377cc7d20f85392ccaa13a2fdc5b40441e5f68e4ad5234ed979aa37b8`);
   and
 - kept the candidate capability `unsupported`: portable remaining runtime
-  family serialization, scoped observer event mapping, and the representative
-  external compatibility telemetry window are not yet complete.
+  family serialization, the remaining scoped-observer family/envelope mapping,
+  and the representative external compatibility telemetry window are not yet
+  complete. The crate-private usage-v2 mapping described under D1 closes only
+  the first common observer reducer slice; it is not the public observer
+  contract.
 
 ### C3. Durable migration
 
@@ -927,6 +930,16 @@ Current landing status (2026-08-16):
   as durable decode; canonical fixture emissions replay to equal
   `FactRevisionId`/`SemanticRevisionRef` values even when numeric catalog IDs,
   observation times, and append batch ordinals differ;
+- the first bounded `ObservationProjectionSink` family is wired for
+  `runtime.usage-v2`. It independently validates each complete value-derived
+  revision, rejects a whole decoded record before reducer mutation on invalid
+  evidence, retains at most the configured number of response entities, and
+  duplicates no retained native bytes. Equal current revisions are silent;
+  corrections emit one deterministic event ID derived from the semantic
+  reference plus canonical source occurrence, so `A -> B -> A` reuses `A`'s
+  semantic reference but delivers the second `A` under a distinct event ID.
+  A generation reset reaches the projection sink first, then deterministically
+  retracts every old-generation response before corrected replay;
 - one pass is active at a time, a later pass receives fresh bounds, close is
   idempotent, and the frozen access report excludes paths, identity values, and
   content; and
@@ -935,14 +948,13 @@ Current landing status (2026-08-16):
 
 D1 remains `In progress`: watcher-before-scan, multi-object discovery/cursor
 orchestration, declared relation-backed decoder dependency access, built-in
-canonical fact-revision adoption beyond the usage-v2 shadow plus scoped semantic
-reduction/events, coverage-complete durable query exposure, the public ordered
-multiplexer and poll/readiness barriers, coverage, overflow/resync epochs,
-artifact mediation, cancellation waiting, the trusted native version-probe
-driver, and the complete public request are not yet implemented. The generic
-fact ledger now preserves an explicit semantic revision atomically when a
-decoder supplies one; that storage seam alone does not make a legacy built-in
-fact canonical or observable.
+canonical fact-revision adoption and scoped reducers beyond usage-v2,
+coverage-complete durable query exposure, the complete root/actor/source
+envelope mapper, the public ordered multiplexer and poll/readiness barriers,
+coverage, overflow/resync epochs, artifact mediation, cancellation waiting,
+the trusted native version-probe driver, and the complete public request are
+not yet implemented. The usage-v2 sink remains crate-private until those
+envelope/lifecycle contracts and the negotiated portable surface exist.
 
 ### D2. Claude scope composition
 

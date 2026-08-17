@@ -12,11 +12,12 @@ use std::sync::Arc;
 
 use crate::adapter::{
     AdapterError, AdapterErrorClass, AdapterId, AdapterObjectContext, AdapterRegistry,
-    AgentAdapter, CompatibilityDecision, ContractVersionOffer, ContractVersionRequest,
-    DecodeDisposition, DecoderId, Fact, FactBatch, FactSemanticContext, NativeArtifactProbe,
-    RawRetentionPolicy, ScopeRelationPrimitive, SourceAccess, SourceObjectList,
-    SourceObjectListRequest, SourceQuery, SourceRows, SourceSnapshot, SupportOperation,
-    TypedAccessAuthorization,
+    AgentAdapter, CanonicalFactId, CompatibilityDecision, ContractVersionOffer,
+    ContractVersionRequest, DecodeDisposition, DecoderId, Fact, FactBatch, FactEnvelope,
+    FactProvenance, FactRevisionId, FactSemanticContext, FactSemanticRevision, NativeArtifactProbe,
+    RawRetentionPolicy, ScopeRelationPrimitive, SemanticRevisionRef, SourceAccess,
+    SourceObjectList, SourceObjectListRequest, SourceQuery, SourceRecordId, SourceRows,
+    SourceSnapshot, SupportOperation, TypedAccessAuthorization, UsageRevisionV2Fact,
 };
 use crate::decode_runtime::{
     decode_record, diagnostic_excerpt, DecodeRuntimeLimits, DecodeRuntimeRequest,
@@ -213,11 +214,13 @@ pub struct ScopedAdmissionReceipt {
 
 pub enum ScopedQueuedObservationFrame {
     Reset {
+        object_token: u64,
         lane_ordinal: u64,
         phase: ScopedAppendDeliveryPhase,
         reset: ScopedAppendReset,
     },
     Decoded {
+        object_token: u64,
         lane_ordinal: u64,
         phase: ScopedAppendDeliveryPhase,
         item: Box<ScopedDecodedAppendItem>,
@@ -233,6 +236,7 @@ impl ScopedQueuedObservationFrame {
 }
 
 struct QueuedDecodedFrame {
+    object_token: u64,
     lane_ordinal: u64,
     phase: ScopedAppendDeliveryPhase,
     item: Box<ScopedDecodedAppendItem>,
@@ -241,6 +245,7 @@ struct QueuedDecodedFrame {
 }
 
 struct QueuedResetFrame {
+    object_token: u64,
     lane_ordinal: u64,
     phase: ScopedAppendDeliveryPhase,
     reset: ScopedAppendReset,
@@ -373,6 +378,7 @@ impl ScopedObservationAdmissionLane {
         let mut lane_ordinal = self.next_lane_ordinal;
         if let Some(reset) = observation.reset_before_items {
             self.controls.push_back(QueuedResetFrame {
+                object_token: observation.object_token,
                 lane_ordinal,
                 phase: observation.phase,
                 reset,
@@ -381,6 +387,7 @@ impl ScopedObservationAdmissionLane {
         }
         for (item, (item_events, item_bytes)) in decoded.items.drain(..).zip(measurements) {
             self.decoded.push_back(QueuedDecodedFrame {
+                object_token: observation.object_token,
                 lane_ordinal,
                 phase: observation.phase,
                 item: Box::new(item),
@@ -417,6 +424,7 @@ impl ScopedObservationAdmissionLane {
         if take_control {
             let control = self.controls.pop_front().expect("control front exists");
             return Some(ScopedQueuedObservationFrame::Reset {
+                object_token: control.object_token,
                 lane_ordinal: control.lane_ordinal,
                 phase: control.phase,
                 reset: control.reset,
@@ -432,6 +440,7 @@ impl ScopedObservationAdmissionLane {
             .checked_sub(decoded.retained_native_bytes)
             .expect("queued retained-native accounting cannot underflow");
         Some(ScopedQueuedObservationFrame::Decoded {
+            object_token: decoded.object_token,
             lane_ordinal: decoded.lane_ordinal,
             phase: decoded.phase,
             item: decoded.item,
@@ -452,6 +461,393 @@ impl ScopedObservationAdmissionLane {
 
     pub fn is_empty(&self) -> bool {
         self.controls.is_empty() && self.decoded.is_empty()
+    }
+}
+
+/// Provisional internal event-contract version. These values are not exposed
+/// over N-API until the complete RFC 012D envelope and negotiation surface are
+/// frozen, but event identity is already derived with the normative inputs.
+pub const SCOPED_OBSERVATION_EVENT_CONTRACT_VERSION: u32 = 1;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct ScopedObservationEventId([u8; 32]);
+
+impl ScopedObservationEventId {
+    pub fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScopedUsageV2Operation {
+    Upsert,
+    Retract,
+}
+
+/// Canonical occurrence/provenance retained by the store-free semantic
+/// reducer. Native payload bytes remain owned by the bounded admission frame;
+/// reducer state never duplicates them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScopedUsageV2Source {
+    pub source_record_id: SourceRecordId,
+    pub provenance: FactProvenance,
+    pub cursor_start: SourceCursor,
+    pub cursor_end: SourceCursor,
+    pub ordinal_in_batch: u32,
+    pub source_timestamp_hint: Option<i64>,
+    pub media_type: SourceMediaType,
+    pub state: SourceRecordState,
+    pub payload_hash: RecordHash,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScopedUsageV2Event {
+    pub event_id: ScopedObservationEventId,
+    pub semantic_revision_ref: SemanticRevisionRef,
+    pub fact_id: CanonicalFactId,
+    pub operation: ScopedUsageV2Operation,
+    pub phase: ScopedAppendDeliveryPhase,
+    pub source: ScopedUsageV2Source,
+    /// Present only for a reducer retraction caused by a source reset.
+    pub reset: Option<ScopedAppendReset>,
+    /// The accepted response revision. Retractions carry the revision being
+    /// removed so actor/session routing never has to guess from a control.
+    pub revision: UsageRevisionV2Fact,
+}
+
+/// First common semantic output of the scoped observation path. The reset
+/// frame remains a control input for the future ordered public multiplexer;
+/// usage events already have final deterministic event IDs and canonical
+/// semantic references.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ScopedProjectedObservation {
+    SourceReset {
+        object_token: u64,
+        lane_ordinal: u64,
+        phase: ScopedAppendDeliveryPhase,
+        reset: ScopedAppendReset,
+    },
+    UsageV2 {
+        lane_ordinal: u64,
+        event: Box<ScopedUsageV2Event>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScopedObservationProjectionLimits {
+    pub max_usage_v2_entities: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum ScopedProjectionError {
+    #[error("scoped observation projection limits are invalid")]
+    InvalidLimits,
+    #[error("scoped usage-v2 projection entity capacity is full")]
+    UsageV2CapacityFull,
+    #[error("scoped usage-v2 fact is missing its canonical semantic revision")]
+    MissingSemanticRevision,
+    #[error("scoped usage-v2 fact has an invalid canonical semantic revision")]
+    InvalidSemanticRevision,
+    #[error("scoped decoded fact provenance does not match its source record")]
+    ProvenanceMismatch,
+    #[error("scoped usage-v2 fact changed source ownership")]
+    ConflictingOwnership,
+    #[error("scoped usage-v2 correction did not advance its source cursor")]
+    StaleRevision,
+    #[error("scoped source reset does not match retained reducer generation")]
+    InvalidResetState,
+}
+
+#[derive(Clone)]
+struct ScopedUsageV2ProjectionState {
+    object_token: u64,
+    generation: u64,
+    semantic: FactSemanticRevision,
+    source: ScopedUsageV2Source,
+    revision: UsageRevisionV2Fact,
+}
+
+/// Database-free common reducer for typed scoped-observation facts.
+///
+/// Usage-v2 is the first family wired through this sink. Its state is bounded
+/// by entity count, exact current repeats are silent, and event construction
+/// happens only after the whole decoded record validates so a malformed fact
+/// cannot partially mutate observer state.
+pub struct ScopedObservationProjectionSink {
+    limits: ScopedObservationProjectionLimits,
+    usage_v2: BTreeMap<CanonicalFactId, ScopedUsageV2ProjectionState>,
+}
+
+impl ScopedObservationProjectionSink {
+    pub fn new(limits: ScopedObservationProjectionLimits) -> Result<Self, ScopedProjectionError> {
+        if limits.max_usage_v2_entities == 0 {
+            return Err(ScopedProjectionError::InvalidLimits);
+        }
+        Ok(Self {
+            limits,
+            usage_v2: BTreeMap::new(),
+        })
+    }
+
+    pub fn project(
+        &mut self,
+        frame: &ScopedQueuedObservationFrame,
+    ) -> Result<Vec<ScopedProjectedObservation>, ScopedProjectionError> {
+        match frame {
+            ScopedQueuedObservationFrame::Reset {
+                object_token,
+                lane_ordinal,
+                phase,
+                reset,
+            } => self.project_reset(*object_token, *lane_ordinal, *phase, *reset),
+            ScopedQueuedObservationFrame::Decoded {
+                object_token,
+                lane_ordinal,
+                phase,
+                item,
+            } => self.project_decoded(*object_token, *lane_ordinal, *phase, item),
+        }
+    }
+
+    pub fn usage_v2_entity_count(&self) -> usize {
+        self.usage_v2.len()
+    }
+
+    pub fn usage_v2_revision(&self, fact_id: &CanonicalFactId) -> Option<SemanticRevisionRef> {
+        self.usage_v2
+            .get(fact_id)
+            .map(|state| state.semantic.semantic_revision_ref)
+    }
+
+    fn project_reset(
+        &mut self,
+        object_token: u64,
+        lane_ordinal: u64,
+        phase: ScopedAppendDeliveryPhase,
+        reset: ScopedAppendReset,
+    ) -> Result<Vec<ScopedProjectedObservation>, ScopedProjectionError> {
+        if self.usage_v2.values().any(|state| {
+            state.object_token == object_token && state.generation != reset.old_generation
+        }) {
+            return Err(ScopedProjectionError::InvalidResetState);
+        }
+
+        let retracted = self
+            .usage_v2
+            .iter()
+            .filter_map(|(fact_id, state)| {
+                (state.object_token == object_token && state.generation == reset.old_generation)
+                    .then_some(*fact_id)
+            })
+            .collect::<Vec<_>>();
+        let mut projected = Vec::with_capacity(retracted.len().saturating_add(1));
+        projected.push(ScopedProjectedObservation::SourceReset {
+            object_token,
+            lane_ordinal,
+            phase,
+            reset,
+        });
+        for fact_id in retracted {
+            let state = self
+                .usage_v2
+                .remove(&fact_id)
+                .expect("reset retraction keys came from the same reducer map");
+            projected.push(ScopedProjectedObservation::UsageV2 {
+                lane_ordinal,
+                event: Box::new(ScopedUsageV2Event {
+                    event_id: usage_v2_event_id(
+                        ScopedUsageV2Operation::Retract,
+                        &state.semantic,
+                        Some(reset),
+                    ),
+                    semantic_revision_ref: state.semantic.semantic_revision_ref,
+                    fact_id: state.semantic.fact_id,
+                    operation: ScopedUsageV2Operation::Retract,
+                    phase: ScopedAppendDeliveryPhase::Correction,
+                    source: state.source,
+                    reset: Some(reset),
+                    revision: state.revision,
+                }),
+            });
+        }
+        Ok(projected)
+    }
+
+    fn project_decoded(
+        &mut self,
+        object_token: u64,
+        lane_ordinal: u64,
+        phase: ScopedAppendDeliveryPhase,
+        item: &ScopedDecodedAppendItem,
+    ) -> Result<Vec<ScopedProjectedObservation>, ScopedProjectionError> {
+        let ScopedDecodedAppendItem::Record {
+            evidence, batch, ..
+        } = item
+        else {
+            return Ok(Vec::new());
+        };
+
+        let mut staged = BTreeMap::<CanonicalFactId, ScopedUsageV2ProjectionState>::new();
+        let mut projected = Vec::new();
+        for envelope in batch.facts() {
+            let Fact::UsageRevisionV2(revision) = &envelope.value else {
+                continue;
+            };
+            let state = scoped_usage_v2_state(object_token, evidence, envelope, revision)?;
+            let current = staged
+                .get(&state.semantic.fact_id)
+                .or_else(|| self.usage_v2.get(&state.semantic.fact_id));
+            if let Some(current) = current {
+                if current.semantic.fact_revision_id == state.semantic.fact_revision_id {
+                    continue;
+                }
+                if current.object_token != state.object_token
+                    || current.generation != state.generation
+                {
+                    return Err(ScopedProjectionError::ConflictingOwnership);
+                }
+                let old_cursor = current.source.cursor_end.append_offset_value();
+                let next_cursor = state.source.cursor_end.append_offset_value();
+                if old_cursor
+                    .zip(next_cursor)
+                    .is_none_or(|(old, next)| next <= old)
+                {
+                    return Err(ScopedProjectionError::StaleRevision);
+                }
+            }
+            let event = ScopedUsageV2Event {
+                event_id: usage_v2_event_id(ScopedUsageV2Operation::Upsert, &state.semantic, None),
+                semantic_revision_ref: state.semantic.semantic_revision_ref,
+                fact_id: state.semantic.fact_id,
+                operation: ScopedUsageV2Operation::Upsert,
+                phase,
+                source: state.source.clone(),
+                reset: None,
+                revision: state.revision.clone(),
+            };
+            projected.push(ScopedProjectedObservation::UsageV2 {
+                lane_ordinal,
+                event: Box::new(event),
+            });
+            staged.insert(state.semantic.fact_id, state);
+        }
+
+        let new_entities = staged
+            .keys()
+            .filter(|fact_id| !self.usage_v2.contains_key(fact_id))
+            .count();
+        if self
+            .usage_v2
+            .len()
+            .checked_add(new_entities)
+            .is_none_or(|count| count > self.limits.max_usage_v2_entities)
+        {
+            return Err(ScopedProjectionError::UsageV2CapacityFull);
+        }
+        self.usage_v2.extend(staged);
+        Ok(projected)
+    }
+}
+
+fn scoped_usage_v2_state(
+    object_token: u64,
+    evidence: &ScopedDecodedRecordEvidence,
+    envelope: &FactEnvelope,
+    revision: &UsageRevisionV2Fact,
+) -> Result<ScopedUsageV2ProjectionState, ScopedProjectionError> {
+    if !fact_provenance_matches_evidence(&envelope.provenance, evidence) {
+        return Err(ScopedProjectionError::ProvenanceMismatch);
+    }
+    revision
+        .validate()
+        .map_err(|_| ScopedProjectionError::InvalidSemanticRevision)?;
+    let semantic = envelope
+        .semantic_revision
+        .ok_or(ScopedProjectionError::MissingSemanticRevision)?;
+    if semantic.semantic_revision_ref.fact_revision_id != semantic.fact_revision_id {
+        return Err(ScopedProjectionError::InvalidSemanticRevision);
+    }
+    let revision_key = revision
+        .semantic_revision_key()
+        .map_err(|_| ScopedProjectionError::InvalidSemanticRevision)?;
+    let expected = FactRevisionId::derive(&semantic.fact_id, 1, &revision_key)
+        .map_err(|_| ScopedProjectionError::InvalidSemanticRevision)?;
+    if expected != semantic.fact_revision_id {
+        return Err(ScopedProjectionError::InvalidSemanticRevision);
+    }
+    Ok(ScopedUsageV2ProjectionState {
+        object_token,
+        generation: evidence.generation,
+        semantic,
+        source: ScopedUsageV2Source {
+            source_record_id: semantic.source_record_id,
+            provenance: envelope.provenance.clone(),
+            cursor_start: evidence.cursor_start.clone(),
+            cursor_end: evidence.cursor_end.clone(),
+            ordinal_in_batch: evidence.ordinal_in_batch,
+            source_timestamp_hint: evidence.source_timestamp_hint,
+            media_type: evidence.media_type.clone(),
+            state: evidence.state,
+            payload_hash: evidence.payload_hash,
+        },
+        revision: revision.clone(),
+    })
+}
+
+fn fact_provenance_matches_evidence(
+    provenance: &FactProvenance,
+    evidence: &ScopedDecodedRecordEvidence,
+) -> bool {
+    provenance.source_instance_id == evidence.source_instance_id
+        && provenance.stream_id == evidence.stream_id
+        && provenance.object_id == evidence.object_id
+        && provenance.generation == evidence.generation
+        && provenance.cursor_start == evidence.cursor_start.as_bytes()
+        && provenance.cursor_end == evidence.cursor_end.as_bytes()
+        && provenance.record_hash == *evidence.payload_hash.as_bytes()
+        && provenance.observed_at == evidence.observed_at
+}
+
+fn usage_v2_event_id(
+    operation: ScopedUsageV2Operation,
+    semantic: &FactSemanticRevision,
+    reset: Option<ScopedAppendReset>,
+) -> ScopedObservationEventId {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"spaghetti/rfc012d/observation-event-id\0");
+    hasher.update(&SCOPED_OBSERVATION_EVENT_CONTRACT_VERSION.to_be_bytes());
+    hash_event_component(&mut hasher, b"runtime.usage-v2");
+    hash_event_component(
+        &mut hasher,
+        match operation {
+            ScopedUsageV2Operation::Upsert => b"upsert",
+            ScopedUsageV2Operation::Retract => b"retract",
+        },
+    );
+    hash_event_component(&mut hasher, semantic.fact_id.as_bytes());
+    hash_event_component(&mut hasher, semantic.fact_revision_id.as_bytes());
+    hash_event_component(&mut hasher, semantic.source_record_id.as_bytes());
+    if let Some(reset) = reset {
+        hasher.update(&reset.old_generation.to_be_bytes());
+        hasher.update(&reset.new_generation.to_be_bytes());
+        hasher.update(&[append_transition_tag(reset.reason)]);
+    }
+    ScopedObservationEventId(*hasher.finalize().as_bytes())
+}
+
+fn hash_event_component(hasher: &mut blake3::Hasher, value: &[u8]) {
+    hasher.update(&(value.len() as u64).to_be_bytes());
+    hasher.update(value);
+}
+
+fn append_transition_tag(transition: AppendTransition) -> u8 {
+    match transition {
+        AppendTransition::Initial => 1,
+        AppendTransition::Continued => 2,
+        AppendTransition::Truncated => 3,
+        AppendTransition::IdentityChanged => 4,
+        AppendTransition::PrefixMismatch => 5,
+        AppendTransition::ContractReplay => 6,
     }
 }
 
@@ -1324,4 +1720,326 @@ fn scoped_dependency_access_error() -> AdapterError {
         "scoped_dependency_access_undeclared",
         "decoder requested dependency access without a scoped relation-backed grant",
     )
+}
+
+#[cfg(test)]
+mod projection_tests {
+    use crate::adapter::{
+        ContractCompleteness, QualifiedTimestamp, QualifiedValue, QualifiedValueQuality,
+        TimestampQuality, UsageBucketsV2, UsageQualifiedValue, UsageResponseIdentity,
+        UsageValueAuthority, UsageValueProvenance,
+    };
+    use crate::source::RecordOrigin;
+
+    use super::*;
+
+    const OBJECT_TOKEN: u64 = 41;
+
+    fn semantic_context() -> FactSemanticContext {
+        FactSemanticContext::new(
+            &AdapterId::new("fixture").unwrap(),
+            1,
+            b"stable-source-instance",
+            b"transcript",
+            b"root-session.jsonl",
+            1,
+        )
+        .unwrap()
+    }
+
+    fn record(generation: u64, start: u64, end: u64) -> SourceRecord {
+        SourceRecord::new(
+            &RecordOrigin {
+                source_instance_id: 11,
+                stream_id: 22,
+                object_id: 33,
+                observed_at: 44,
+                source_timestamp_hint: Some(43),
+                media_type: SourceMediaType::new("application/x-ndjson").unwrap(),
+            },
+            generation,
+            SourceCursor::append_offset(start),
+            SourceCursor::append_offset(end),
+            0,
+            format!("record-{generation}-{start}-{end}").into_bytes(),
+        )
+    }
+
+    fn exact_value<T>(value: T, native_field: &str) -> UsageQualifiedValue<T> {
+        QualifiedValue::from_parts(
+            Some(value),
+            QualifiedValueQuality::Exact,
+            UsageValueAuthority::NativeResponse,
+            ContractCompleteness::Complete,
+            None,
+            None,
+            UsageValueProvenance {
+                native_field: native_field.to_string(),
+                normalization_contract_version: 1,
+            },
+        )
+        .unwrap()
+    }
+
+    fn usage_fact(batch: &FactBatch, response_key: &str, input_tokens: u64) -> UsageRevisionV2Fact {
+        UsageRevisionV2Fact {
+            session: batch
+                .canonical_entity_key("session", b"native-session")
+                .unwrap(),
+            actor_run: batch
+                .canonical_entity_key("actor-run", b"native-run")
+                .unwrap(),
+            response_key: response_key.as_bytes().to_vec(),
+            response_identity: UsageResponseIdentity::NativeMessageId,
+            native_message_id: Some(response_key.to_string()),
+            request_id: Some("request-1".to_string()),
+            buckets: UsageBucketsV2 {
+                input_tokens: exact_value(input_tokens, "message.usage.input_tokens"),
+                output_tokens: exact_value(2, "message.usage.output_tokens"),
+                cache_creation_input_tokens: exact_value(
+                    3,
+                    "message.usage.cache_creation_input_tokens",
+                ),
+                cache_read_input_tokens: exact_value(4, "message.usage.cache_read_input_tokens"),
+            },
+            model: Some(exact_value("model-1".to_string(), "message.model")),
+            effort: None,
+            source_time: Some(QualifiedTimestamp {
+                value: "2026-08-16T00:00:00Z".to_string(),
+                quality: TimestampQuality::NativeExact,
+            }),
+        }
+    }
+
+    fn usage_batch(
+        record: &SourceRecord,
+        response_key: &str,
+        input_tokens: u64,
+        forged_revision_key: Option<&[u8]>,
+    ) -> FactBatch {
+        let mut batch = FactBatch::new_with_semantic_context(8, 4, semantic_context()).unwrap();
+        let usage = usage_fact(&batch, response_key, input_tokens);
+        let revision_key = usage.semantic_revision_key().unwrap();
+        batch
+            .push_native_object_scoped_with_revision(
+                record,
+                response_key.as_bytes(),
+                forged_revision_key.unwrap_or(&revision_key),
+                Fact::UsageRevisionV2(usage),
+            )
+            .unwrap();
+        batch
+    }
+
+    fn decoded_frame(
+        lane_ordinal: u64,
+        phase: ScopedAppendDeliveryPhase,
+        record: &SourceRecord,
+        batch: FactBatch,
+    ) -> ScopedQueuedObservationFrame {
+        ScopedQueuedObservationFrame::Decoded {
+            object_token: OBJECT_TOKEN,
+            lane_ordinal,
+            phase,
+            item: Box::new(ScopedDecodedAppendItem::Record {
+                evidence: Box::new(scoped_record_evidence(record, RawRetentionPolicy::None)),
+                disposition: DecodeDisposition::Applied,
+                batch,
+                quarantined: false,
+            }),
+        }
+    }
+
+    fn only_usage_event(projected: Vec<ScopedProjectedObservation>) -> ScopedUsageV2Event {
+        assert_eq!(projected.len(), 1);
+        let ScopedProjectedObservation::UsageV2 { event, .. } =
+            projected.into_iter().next().unwrap()
+        else {
+            panic!("expected one usage-v2 event");
+        };
+        *event
+    }
+
+    fn sink(max_usage_v2_entities: usize) -> ScopedObservationProjectionSink {
+        ScopedObservationProjectionSink::new(ScopedObservationProjectionLimits {
+            max_usage_v2_entities,
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn scoped_usage_projection_suppresses_exact_current_repeat_but_preserves_a_b_a() {
+        let mut projection = sink(8);
+
+        let first_record = record(1, 0, 10);
+        let first_frame = decoded_frame(
+            1,
+            ScopedAppendDeliveryPhase::Bootstrap,
+            &first_record,
+            usage_batch(&first_record, "response-1", 10, None),
+        );
+        let first = only_usage_event(projection.project(&first_frame).unwrap());
+        assert_eq!(first.operation, ScopedUsageV2Operation::Upsert);
+        assert_eq!(first.phase, ScopedAppendDeliveryPhase::Bootstrap);
+
+        let repeat_record = record(1, 10, 20);
+        let repeat_frame = decoded_frame(
+            2,
+            ScopedAppendDeliveryPhase::Live,
+            &repeat_record,
+            usage_batch(&repeat_record, "response-1", 10, None),
+        );
+        assert!(projection.project(&repeat_frame).unwrap().is_empty());
+
+        let second_record = record(1, 20, 30);
+        let second_frame = decoded_frame(
+            3,
+            ScopedAppendDeliveryPhase::Live,
+            &second_record,
+            usage_batch(&second_record, "response-1", 20, None),
+        );
+        let second = only_usage_event(projection.project(&second_frame).unwrap());
+        assert_ne!(second.semantic_revision_ref, first.semantic_revision_ref);
+
+        let reverted_record = record(1, 30, 40);
+        let reverted_frame = decoded_frame(
+            4,
+            ScopedAppendDeliveryPhase::Live,
+            &reverted_record,
+            usage_batch(&reverted_record, "response-1", 10, None),
+        );
+        let reverted = only_usage_event(projection.project(&reverted_frame).unwrap());
+        assert_eq!(reverted.semantic_revision_ref, first.semantic_revision_ref);
+        assert_ne!(reverted.event_id, first.event_id);
+        assert_eq!(projection.usage_v2_entity_count(), 1);
+        assert_eq!(
+            projection.usage_v2_revision(&first.fact_id),
+            Some(first.semantic_revision_ref)
+        );
+
+        let mut replay_projection = sink(8);
+        let replay_frame = decoded_frame(
+            9,
+            ScopedAppendDeliveryPhase::Correction,
+            &first_record,
+            usage_batch(&first_record, "response-1", 10, None),
+        );
+        let replay = only_usage_event(replay_projection.project(&replay_frame).unwrap());
+        assert_eq!(replay.event_id, first.event_id);
+    }
+
+    #[test]
+    fn scoped_usage_projection_orders_reset_before_retractions_and_new_generation() {
+        let mut projection = sink(8);
+        let old_record = record(1, 0, 10);
+        let old_frame = decoded_frame(
+            1,
+            ScopedAppendDeliveryPhase::Bootstrap,
+            &old_record,
+            usage_batch(&old_record, "response-1", 10, None),
+        );
+        let old = only_usage_event(projection.project(&old_frame).unwrap());
+
+        let reset = ScopedAppendReset {
+            old_generation: 1,
+            new_generation: 2,
+            reason: AppendTransition::Truncated,
+        };
+        let reset_frame = ScopedQueuedObservationFrame::Reset {
+            object_token: OBJECT_TOKEN,
+            lane_ordinal: 2,
+            phase: ScopedAppendDeliveryPhase::Correction,
+            reset,
+        };
+        let correction = projection.project(&reset_frame).unwrap();
+        assert_eq!(correction.len(), 2);
+        assert!(matches!(
+            correction[0],
+            ScopedProjectedObservation::SourceReset { reset: value, .. } if value == reset
+        ));
+        let ScopedProjectedObservation::UsageV2 {
+            event: retracted, ..
+        } = &correction[1]
+        else {
+            panic!("expected reset-owned usage retraction");
+        };
+        assert_eq!(retracted.operation, ScopedUsageV2Operation::Retract);
+        assert_eq!(retracted.semantic_revision_ref, old.semantic_revision_ref);
+        assert_eq!(retracted.fact_id, old.fact_id);
+        assert_eq!(retracted.reset, Some(reset));
+        assert_eq!(projection.usage_v2_entity_count(), 0);
+
+        let new_record = record(2, 0, 12);
+        let new_frame = decoded_frame(
+            3,
+            ScopedAppendDeliveryPhase::Correction,
+            &new_record,
+            usage_batch(&new_record, "response-1", 7, None),
+        );
+        let new = only_usage_event(projection.project(&new_frame).unwrap());
+        assert_eq!(new.operation, ScopedUsageV2Operation::Upsert);
+        assert_eq!(new.phase, ScopedAppendDeliveryPhase::Correction);
+        assert_ne!(new.fact_id, old.fact_id);
+        assert_eq!(projection.usage_v2_entity_count(), 1);
+    }
+
+    #[test]
+    fn scoped_usage_projection_rejects_forged_revision_atomically() {
+        let mut projection = sink(8);
+        let first_record = record(1, 0, 10);
+        let first_frame = decoded_frame(
+            1,
+            ScopedAppendDeliveryPhase::Bootstrap,
+            &first_record,
+            usage_batch(&first_record, "response-1", 10, None),
+        );
+        let first = only_usage_event(projection.project(&first_frame).unwrap());
+
+        let forged_record = record(1, 10, 20);
+        let forged_frame = decoded_frame(
+            2,
+            ScopedAppendDeliveryPhase::Live,
+            &forged_record,
+            usage_batch(&forged_record, "response-1", 20, Some(b"forged-revision")),
+        );
+        assert_eq!(
+            projection.project(&forged_frame),
+            Err(ScopedProjectionError::InvalidSemanticRevision)
+        );
+        assert_eq!(projection.usage_v2_entity_count(), 1);
+        assert_eq!(
+            projection.usage_v2_revision(&first.fact_id),
+            Some(first.semantic_revision_ref)
+        );
+    }
+
+    #[test]
+    fn scoped_usage_projection_enforces_entity_capacity_atomically() {
+        let mut projection = sink(1);
+        let first_record = record(1, 0, 10);
+        let first_frame = decoded_frame(
+            1,
+            ScopedAppendDeliveryPhase::Bootstrap,
+            &first_record,
+            usage_batch(&first_record, "response-1", 10, None),
+        );
+        let first = only_usage_event(projection.project(&first_frame).unwrap());
+
+        let second_record = record(1, 10, 20);
+        let second_frame = decoded_frame(
+            2,
+            ScopedAppendDeliveryPhase::Live,
+            &second_record,
+            usage_batch(&second_record, "response-2", 20, None),
+        );
+        assert_eq!(
+            projection.project(&second_frame),
+            Err(ScopedProjectionError::UsageV2CapacityFull)
+        );
+        assert_eq!(projection.usage_v2_entity_count(), 1);
+        assert_eq!(
+            projection.usage_v2_revision(&first.fact_id),
+            Some(first.semantic_revision_ref)
+        );
+    }
 }
