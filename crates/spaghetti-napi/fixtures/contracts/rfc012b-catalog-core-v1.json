@@ -1,0 +1,98 @@
+{
+  "changed_coverage_plan": {
+    "coverage_plan_contract_version": 1,
+    "coverage_plan_id": "v1:d6FZ9XhmuY7RXNAoqucZ3ZIpxguMU_Co3OmwVfzPdOY",
+    "optional_sources": [
+      {
+        "access_policy_digest": "v1:ykXP0VO5_iirThj7qxKsOR1xaU8QjmgvS1cDUSJ4FIU",
+        "adapter_id": "codex",
+        "catalog_declaration_digest": "v1:5DN9tWcK4gNf5ZjnuNijuLwPuzKydxAzmMJwPK06WpQ",
+        "source_instance_key": "v1:mhybLTzQQ7x9I_i4mbEfIzQX0uFg1RjIt3LeoeGakdk",
+        "support_release_id": "codex@fixture-v1"
+      }
+    ],
+    "required_sources": [
+      {
+        "access_policy_digest": "v1:ykXP0VO5_iirThj7qxKsOR1xaU8QjmgvS1cDUSJ4FIU",
+        "adapter_id": "claude-code",
+        "catalog_declaration_digest": "v1:j2dtTIEdnRIqPz0TU0kDaC9RO6Cv2svd8Z9x5zLPF9w",
+        "source_instance_key": "v1:rSaYWFWR7UOcFbLDQPlMB45VdP1w-s_FZvfKI6efmhw",
+        "support_release_id": "claude-code@fixture-v1"
+      }
+    ],
+    "scope": {
+      "kind": "library"
+    }
+  },
+  "complete_snapshot_id": {
+    "complete_commit": 10,
+    "coverage_plan_id": "v1:vlf0WRRULkLdxepLSSjI-h8DVXKl3wkmD1a2s49RvUw",
+    "pack_contract_version": 1,
+    "readiness_epoch": 1
+  },
+  "expected": {
+    "continuation_bound_to_snapshot": true,
+    "plan_change_attempt": 1,
+    "plan_change_epoch": 2,
+    "plan_change_state": "building",
+    "prior_plan_snapshot_is_not_current": true,
+    "registration_order_independent": true
+  },
+  "fixture_contract_version": 1,
+  "initial_coverage_plan": {
+    "coverage_plan_contract_version": 1,
+    "coverage_plan_id": "v1:vlf0WRRULkLdxepLSSjI-h8DVXKl3wkmD1a2s49RvUw",
+    "optional_sources": [],
+    "required_sources": [
+      {
+        "access_policy_digest": "v1:ykXP0VO5_iirThj7qxKsOR1xaU8QjmgvS1cDUSJ4FIU",
+        "adapter_id": "claude-code",
+        "catalog_declaration_digest": "v1:j2dtTIEdnRIqPz0TU0kDaC9RO6Cv2svd8Z9x5zLPF9w",
+        "source_instance_key": "v1:rSaYWFWR7UOcFbLDQPlMB45VdP1w-s_FZvfKI6efmhw",
+        "support_release_id": "claude-code@fixture-v1"
+      },
+      {
+        "access_policy_digest": "v1:ykXP0VO5_iirThj7qxKsOR1xaU8QjmgvS1cDUSJ4FIU",
+        "adapter_id": "codex",
+        "catalog_declaration_digest": "v1:5DN9tWcK4gNf5ZjnuNijuLwPuzKydxAzmMJwPK06WpQ",
+        "source_instance_key": "v1:mhybLTzQQ7x9I_i4mbEfIzQX0uFg1RjIt3LeoeGakdk",
+        "support_release_id": "codex@fixture-v1"
+      }
+    ],
+    "scope": {
+      "kind": "library"
+    }
+  },
+  "readiness_after_plan_change": {
+    "attempt": 1,
+    "completed_contract_version": 1,
+    "coverage_plan_id": "v1:d6FZ9XhmuY7RXNAoqucZ3ZIpxguMU_Co3OmwVfzPdOY",
+    "desired_contract_version": 1,
+    "epoch": 2,
+    "last_complete_snapshot": {
+      "complete_commit": 10,
+      "coverage_plan_id": "v1:vlf0WRRULkLdxepLSSjI-h8DVXKl3wkmD1a2s49RvUw",
+      "pack_contract_version": 1,
+      "readiness_epoch": 1
+    },
+    "readiness_contract_version": 1,
+    "scope": {
+      "kind": "library"
+    },
+    "source_coverage": [],
+    "state": "building"
+  },
+  "session_cursor": {
+    "cursor_contract_version": 1,
+    "last_entity_key": "v1:CAlCleI6BrDvTFz5yvFPvuJkLWy2CVDkBO8oM9udFNw",
+    "last_sort_key": "v1:MjAyNi0wOC0xN1QxMjowMDowMFo",
+    "query_fingerprint": "v1:xf2Cq8jGijQVVtzuxgo1rDV2kGnOwiCrOibbP4btPY4",
+    "snapshot_id": {
+      "complete_commit": 10,
+      "coverage_plan_id": "v1:vlf0WRRULkLdxepLSSjI-h8DVXKl3wkmD1a2s49RvUw",
+      "pack_contract_version": 1,
+      "readiness_epoch": 1
+    },
+    "sort_spec_version": 1
+  }
+}

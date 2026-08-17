@@ -64,6 +64,10 @@ RFC012_DECODE_RUNTIME_FORBIDDEN_RE = re.compile(
     r"\b(?:crate::(?:claude|codex|grok|core|engine|napi_engine|orchestrate|scoped_observation)"
     r"|rusqlite|napi)(?:::|\b)"
 )
+RFC012_CATALOG_CONTRACT_FORBIDDEN_RE = re.compile(
+    r"\b(?:crate::(?:claude|codex|grok|core|engine|napi_engine|orchestrate|scoped_observation|source)"
+    r"|rusqlite|napi)(?:::|\b)"
+)
 BUILTIN_ADAPTER_PATHS = (
     "crates/spaghetti-napi/src/claude/adapter.rs",
     "crates/spaghetti-napi/src/codex/adapter.rs",
@@ -417,6 +421,20 @@ def discover_rfc012_decode_runtime_boundary_violations() -> set[str]:
     return set()
 
 
+def discover_rfc012_catalog_contract_boundary_violations() -> set[str]:
+    """Draft RFC 012B semantics cannot acquire storage, source, vendor, or transport authority."""
+    relative = "crates/spaghetti-napi/src/catalog_contract.rs"
+    path = REPO_ROOT / relative
+    if not path.exists() or RFC012_CATALOG_CONTRACT_FORBIDDEN_RE.search(
+        production_rust_text(path)
+    ):
+        return {relative}
+    lib = REPO_ROOT / "crates/spaghetti-napi/src/lib.rs"
+    if re.search(r"^\s*pub\s+mod\s+catalog_contract\s*;", read(lib), re.MULTILINE):
+        return {f"{repo_path(lib)}#premature-public-catalog-contract"}
+    return set()
+
+
 def discover_migrated_client_direct_engine_queries() -> set[str]:
     """Once a consumer moves to SpaghettiClient, direct N-API reads cannot return."""
     return {
@@ -545,6 +563,7 @@ DISCOVERERS: dict[str, Callable[[], set[str]]] = {
     "rfc012_adapter_support_binding_gaps": discover_rfc012_adapter_support_binding_gaps,
     "rfc012_scoped_host_boundary_violations": discover_rfc012_scoped_host_boundary_violations,
     "rfc012_decode_runtime_boundary_violations": discover_rfc012_decode_runtime_boundary_violations,
+    "rfc012_catalog_contract_boundary_violations": discover_rfc012_catalog_contract_boundary_violations,
     "migrated_client_direct_engine_queries": discover_migrated_client_direct_engine_queries,
     "portable_client_runtime_boundary_violations": discover_portable_client_runtime_boundary_violations,
     "playground_main_sdk_owner_bypasses": discover_playground_main_sdk_owner_bypasses,

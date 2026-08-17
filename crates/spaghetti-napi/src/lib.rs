@@ -23,6 +23,7 @@
 use napi_derive::napi;
 
 pub mod adapter;
+mod catalog_contract;
 pub mod claude;
 pub mod codex;
 pub mod core;

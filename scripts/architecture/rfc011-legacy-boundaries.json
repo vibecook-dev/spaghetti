@@ -58,6 +58,10 @@
       "description": "The shared RFC 012 decode runtime cannot depend on persistence, delivery sinks, N-API, scoped orchestration, or concrete adapters.",
       "allowed": []
     },
+    "rfc012_catalog_contract_boundary_violations": {
+      "description": "The draft RFC 012B catalog semantic contract cannot depend on persistence, source runtime, N-API, scoped observation, or concrete adapters, and cannot be exported publicly before its transport contract is complete.",
+      "allowed": []
+    },
     "migrated_client_direct_engine_queries": {
       "description": "Consumers already migrated to SpaghettiClient may keep native engine lifecycle ownership but cannot resume direct N-API query calls.",
       "allowed": []
