@@ -387,7 +387,10 @@ fn expected_fixture() -> RuntimeContractFixtureWire {
         .canonical_entity_key("session", SESSION_NATIVE_ID.as_bytes())
         .unwrap();
     let root_actor = keys
-        .canonical_entity_key("run", ROOT_ACTOR_NATIVE_ID.as_bytes())
+        .canonical_root_actor_run_key(
+            SESSION_NATIVE_ID.as_bytes(),
+            Some(ROOT_ACTOR_NATIVE_ID.as_bytes()),
+        )
         .unwrap();
     let child_actor = keys
         .canonical_entity_key("run", CHILD_ACTOR_NATIVE_ID.as_bytes())

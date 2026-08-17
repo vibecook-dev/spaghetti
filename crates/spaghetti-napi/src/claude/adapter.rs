@@ -147,12 +147,12 @@ impl ClaudeCodeAdapter {
                 id: AdapterId::new(ADAPTER_ID).expect("static Claude adapter id is valid"),
                 display_name: "Claude Code".to_string(),
                 adapter_version: env!("CARGO_PKG_VERSION").to_string(),
-                contract_version: 21,
+                contract_version: 22,
                 support_binding: Some(
                     AdapterSupportBinding::new(
                         "claude-code-support-2026-08-15-candidate",
                         env!("CARGO_PKG_VERSION"),
-                        21,
+                        22,
                         "sha256:1d8b81547812a87b71e983fede40ac7cb130bbbe7252017fd3bd4a95b9bc98fa",
                         "sha256:17a0f1aa7490b5c03a525f7606a7a02ee6d1919cc8b9b776597843f1edbf1ebe",
                         "sha256:689c86b9770544f826da37e72d1c4a1a37153fad4091372b954bba90ca2d5f7c",
@@ -2029,8 +2029,9 @@ fn decode_team_config(
     emit_team_affiliation(
         record,
         output,
-        &native_lead_session_id,
-        &native_lead_session_id,
+        ClaudeTeamAffiliationActor::Root {
+            native_session_id: &native_lead_session_id,
+        },
         &context.native_team_id,
         lead_member_name.as_deref(),
         Some(created_at),
@@ -3539,15 +3540,39 @@ fn team_member_native_key(native_team_id: &str, native_member_name: &str) -> Vec
     native_key
 }
 
+enum ClaudeTeamAffiliationActor<'a> {
+    Root {
+        native_session_id: &'a str,
+    },
+    Child {
+        native_session_id: &'a str,
+        run_native_key: &'a str,
+    },
+}
+
 fn emit_team_affiliation(
     record: &SourceRecord,
     output: &mut FactBatch,
-    native_session_id: &str,
-    run_native_key: &str,
+    actor: ClaudeTeamAffiliationActor<'_>,
     native_team_id: &str,
     native_member_name: Option<&str>,
     effective_at: Option<QualifiedTimestamp>,
 ) -> Result<(), AdapterError> {
+    let (native_session_id, run_native_key, actor_run) = match actor {
+        ClaudeTeamAffiliationActor::Root { native_session_id } => (
+            native_session_id,
+            native_session_id,
+            output.canonical_root_actor_run_key(native_session_id.as_bytes(), None)?,
+        ),
+        ClaudeTeamAffiliationActor::Child {
+            native_session_id,
+            run_native_key,
+        } => (
+            native_session_id,
+            run_native_key,
+            output.canonical_entity_key("run", run_native_key.as_bytes())?,
+        ),
+    };
     let mut affiliation_native_key = Vec::new();
     push_key_component(&mut affiliation_native_key, b"team");
     push_key_component(&mut affiliation_native_key, run_native_key.as_bytes());
@@ -3564,7 +3589,7 @@ fn emit_team_affiliation(
         Fact::ActorAffiliationRevision(ActorAffiliationRevisionFact {
             affiliation: output
                 .canonical_entity_key("actor_affiliation", &affiliation_native_key)?,
-            actor_run: output.canonical_entity_key("run", run_native_key.as_bytes())?,
+            actor_run,
             session: output.canonical_entity_key("session", native_session_id.as_bytes())?,
             dimension: ActorAffiliationDimension::Team,
             target: output.canonical_entity_key("team", native_team_id.as_bytes())?,
@@ -3655,8 +3680,10 @@ fn decode_subagent_metadata(
         emit_team_affiliation(
             record,
             output,
-            &context.session_id,
-            &run_native_key,
+            ClaudeTeamAffiliationActor::Child {
+                native_session_id: &context.session_id,
+                run_native_key: &run_native_key,
+            },
             native_team_id,
             Some(native_member_name),
             None,
@@ -3785,13 +3812,13 @@ fn decode_transcript_record(
                 parent_run,
             }),
         )?;
-        let actor_run = output.canonical_entity_key("run", run_native_key.as_bytes())?;
+        let actor_run = canonical_transcript_actor_run(output, context)?;
         let canonical_session =
             output.canonical_entity_key("session", context.session_id.as_bytes())?;
         let parent_actor_run = context
             .agent_id
             .as_ref()
-            .map(|_| output.canonical_entity_key("run", context.session_id.as_bytes()))
+            .map(|_| output.canonical_root_actor_run_key(context.session_id.as_bytes(), None))
             .transpose()?;
         output.push_native(
             record,
@@ -4043,7 +4070,7 @@ fn claude_usage_v2_fact(
     push_key_component(&mut semantic_key, &response_key);
 
     let session = output.canonical_entity_key("session", context.session_id.as_bytes())?;
-    let actor_run = output.canonical_entity_key("run", context.run_native_key().as_bytes())?;
+    let actor_run = canonical_transcript_actor_run(output, context)?;
     let buckets = (|| {
         Ok::<_, String>(UsageBucketsV2 {
             input_tokens: claude_usage_value(native_usage, "input_tokens")?,
@@ -4096,6 +4123,17 @@ fn claude_usage_v2_fact(
     };
     fact.validate()?;
     Ok(Some((semantic_key, fact)))
+}
+
+fn canonical_transcript_actor_run(
+    output: &FactBatch,
+    context: &ClaudeTranscriptContext,
+) -> Result<crate::adapter::CanonicalEntityKey, AdapterError> {
+    if context.agent_id.is_some() {
+        output.canonical_entity_key("run", context.run_native_key().as_bytes())
+    } else {
+        output.canonical_root_actor_run_key(context.session_id.as_bytes(), None)
+    }
 }
 
 fn claude_usage_value(
@@ -4880,7 +4918,7 @@ mod tests {
             std::fs::canonicalize(root.path()).unwrap().join("sessions")
         );
         assert_eq!(streams.len(), 16);
-        assert_eq!(adapter.manifest().contract_version, 21);
+        assert_eq!(adapter.manifest().contract_version, 22);
         assert!(adapter
             .manifest()
             .source_schema_versions
@@ -7356,7 +7394,7 @@ mod tests {
         assert_eq!(
             affiliation.actor_run,
             batch
-                .canonical_entity_key("run", SESSION.as_bytes())
+                .canonical_root_actor_run_key(SESSION.as_bytes(), None)
                 .unwrap()
         );
         assert!(fact_values(&batch).all(|fact| !matches!(fact, Fact::RunEvidence(_))));
@@ -7688,6 +7726,12 @@ mod tests {
         assert_eq!(actor.role, ActorRunRole::Root);
         assert_eq!(actor.actor_run, usage_v2.actor_run);
         assert_eq!(actor.session, usage_v2.session);
+        assert_eq!(
+            actor.actor_run,
+            batch
+                .canonical_root_actor_run_key(SESSION.as_bytes(), None)
+                .unwrap()
+        );
     }
 
     #[test]
@@ -8152,7 +8196,14 @@ mod tests {
             })
             .expect("child transcript should declare a canonical actor");
         assert_eq!(actor.role, ActorRunRole::Child);
-        assert!(actor.parent_actor_run.is_some());
+        assert_eq!(
+            actor.parent_actor_run,
+            Some(
+                batch
+                    .canonical_root_actor_run_key(SESSION.as_bytes(), None)
+                    .unwrap()
+            )
+        );
         assert_eq!(actor.native_actor_id.as_deref(), Some("a1"));
     }
 

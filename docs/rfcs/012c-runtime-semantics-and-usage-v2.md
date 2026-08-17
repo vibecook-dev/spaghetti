@@ -1024,8 +1024,14 @@ digest-bound root/child fixture and report are consumed by a Rust integration
 test that exercises the real parent and subagent streams plus the durable
 reducer.
 
-The common fact layer and durable reducer now enforce contract-21 revision
-identity. An exact repeat is idempotent both within one decode batch and across
+The common fact layer and durable reducer now enforce contract-22 revision
+identity. Contract 22 retains contract 21's complete value-derived usage
+revision and corrects the candidate-only root actor derivation: the common key
+now includes the final base session key, the `Root` role, and the declared
+native-run or singleton-root discriminator. Root actor declarations, root
+usage, child parent references, durable affiliations, and scoped pre-attach
+identity therefore agree. The decoder-contract bump forces generation replay
+before old and corrected keys could mix. An exact repeat remains idempotent both within one decode batch and across
 commits: it creates neither a duplicate semantic fact-ledger row nor a
 `runtime.usage-v2.changed` entry. Query bootstrap reduces the complete usage
 baseline without enqueueing per-response usage-v2 changes; the final
@@ -1166,18 +1172,19 @@ ordered reversions, not suppressible retries. The aggregate-only report is
 with digest
 `sha256:4dee1d89f0f5a474458cbe257f3607b28e0911bf38d7f8c26dadfe83550edf9d`.
 
-The contract-21 release artifact then passed the same stable-clone parity gate
-after final bootstrap integrity checking: 149,671 responses, 5,049 actors, 855
-sessions, the root/child partition, all four totals, zero unknown buckets, and
-complete `Ready` coverage for 5,187 transcript objects matched exactly. The
+The contract-22 release artifact then passed the same stable-clone parity gate
+after final bootstrap integrity checking: 150,757 responses, 5,063 actors, 856
+sessions, the root/child partition, all four totals, zero unknown buckets, zero
+foreign-key violations, and complete `Ready` coverage for 5,201 transcript
+objects matched exactly. The
 gate binds the loaded native artifact digest so a stale addon cannot be
-mistaken for current-source evidence. Ingest completed in 293.61 seconds; the
-older 306.20-second report used a different source snapshot, so the 4.11%
-descriptive difference is not a controlled causal performance claim. The
+mistaken for current-source evidence. Ingest completed in 358.25 seconds; the
+snapshot differs from earlier runs, so this timing is descriptive and not a
+controlled causal performance claim. The
 aggregate-only report is
 [`usage-v2-semantic-revision-parity-v1.json`](../../agent-support/claude-code/candidate-2026-08-15/reports/usage-v2-semantic-revision-parity-v1.json)
 with digest
-`sha256:699c568377cc7d20f85392ccaa13a2fdc5b40441e5f68e4ad5234ed979aa37b8`.
+`sha256:3f3e0606e1dd228771f0778c9299a9cdbd62fbb11b555352a36d693bdcf7ad76`.
 
 Native team-to-actor conformance first passed under decoder contract 20 and is
 retained by contract 21. Team

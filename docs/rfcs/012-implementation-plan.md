@@ -730,11 +730,22 @@ Current landing status (2026-08-16):
   344,160 usage rows; its aggregate-only report is
   [`usage-v2-semantic-revision-census-v1.json`](../../agent-support/claude-code/candidate-2026-08-15/reports/usage-v2-semantic-revision-census-v1.json)
   (`sha256:4dee1d89f0f5a474458cbe257f3607b28e0911bf38d7f8c26dadfe83550edf9d`).
-  A release-artifact-bound contract-21 run then passed exact durable parity,
-  final foreign-key integrity, and complete Ready coverage for 149,671
-  responses across 5,187 transcript objects in 293.61 seconds. The report is
+- added decoder contract 22's RFC 012C root actor identity correction before
+  promotion. One common derivation now binds the final base session key, the
+  `Root` role, and either a support-declared native run discriminator or the
+  stable singleton-root discriminator. Scoped pre-attach and durable
+  `FactBatch` derivation are equal; Claude root actor declarations, root usage,
+  child parent references, and root team affiliations all use that key while
+  child identity remains unchanged. The decoder-contract bump forces a
+  generation replay rather than mixing the superseded candidate-only key with
+  corrected state. The Rust-produced portable fixture freezes the root/child/
+  usage identity consequences and the TypeScript parser consumes the same
+  bytes. A release-artifact-bound contract-22 run then passed exact durable
+  parity, zero final foreign-key violations, and complete Ready coverage for
+  150,757 responses across 5,201 transcript objects in 358.25 seconds. The
+  report is
   [`usage-v2-semantic-revision-parity-v1.json`](../../agent-support/claude-code/candidate-2026-08-15/reports/usage-v2-semantic-revision-parity-v1.json)
-  (`sha256:699c568377cc7d20f85392ccaa13a2fdc5b40441e5f68e4ad5234ed979aa37b8`);
+  (`sha256:3f3e0606e1dd228771f0778c9299a9cdbd62fbb11b555352a36d693bdcf7ad76`);
   and
 - kept the candidate capability `unsupported`: portable remaining runtime
   family serialization, the remaining scoped-observer family/envelope mapping,
@@ -925,6 +936,12 @@ Current landing status (2026-08-16):
   instance before it can reserve read budget, decode, or contribute coverage.
   The internal watermark core carries the resolved root identity and every
   assembled RFC 012A coverage scope now names the same root session key;
+- the agent-neutral `FactBatch` root-actor helper uses that exact derivation.
+  Claude decoder contract 22 adopts it for root actor declarations, root usage,
+  child parentage, and root team affiliations, while child keys remain stable;
+  its contract bump provides the durable replay boundary and an artifact-bound
+  full-corpus experiment proves response/actor/session/bucket parity, complete
+  usage-v2 coverage, and zero final foreign-key violations;
 - one host-approved known object can be absent at attachment, created later,
   and read through the common symlink-safe confined file primitive only after
   a declaration-sized reservation. After the initial snapshot, transitions in
@@ -1032,8 +1049,8 @@ Current landing status (2026-08-16):
 
 D1 remains `In progress`: watcher-before-scan, multi-object discovery/cursor
 orchestration, declared relation-backed decoder dependency access, built-in
-canonical fact-revision and root actor/run derivation adoption by durable
-decoders, scoped reducers beyond usage-v2,
+canonical fact-revision adoption beyond the current runtime families, scoped
+reducers beyond usage-v2,
 coverage-complete durable query exposure, the complete root/actor/source
 envelope mapper (including native identity claim and evidence qualification),
 the public ordered multiplexer and poll/readiness barriers,

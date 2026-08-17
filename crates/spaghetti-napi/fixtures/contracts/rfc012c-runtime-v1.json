@@ -32,7 +32,7 @@
       "family": "runtime.actor-run",
       "family_version": 1,
       "revision": {
-        "actor_run": "v1:tYT9-3EOu3MnGWRc375H1jlf1aTuqKXKgc8U1w1m4_8",
+        "actor_run": "v1:PmTKHABT8jxHColNuDusxwxsG02Pufg4yGk-6qLuQNE",
         "session": "v1:ytNPEO9TRMM8eBQ0fAEHu_GJG3sOwsDvXEudc4XpXNo",
         "role": "root",
         "parent_actor_run": null,
@@ -54,7 +54,7 @@
         "actor_run": "v1:N5X0T1KRSwzOMJBfGwPuHQtYdEMaHFr4QjoTAgn-Dlc",
         "session": "v1:ytNPEO9TRMM8eBQ0fAEHu_GJG3sOwsDvXEudc4XpXNo",
         "role": "child",
-        "parent_actor_run": "v1:tYT9-3EOu3MnGWRc375H1jlf1aTuqKXKgc8U1w1m4_8",
+        "parent_actor_run": "v1:PmTKHABT8jxHColNuDusxwxsG02Pufg4yGk-6qLuQNE",
         "native_session_id": "fixture-session-1",
         "native_actor_id": "fixture-child-actor",
         "native_actor_type": null
@@ -224,7 +224,7 @@
       "family_version": 1,
       "revision": {
         "session": "v1:ytNPEO9TRMM8eBQ0fAEHu_GJG3sOwsDvXEudc4XpXNo",
-        "actor_run": "v1:tYT9-3EOu3MnGWRc375H1jlf1aTuqKXKgc8U1w1m4_8",
+        "actor_run": "v1:PmTKHABT8jxHColNuDusxwxsG02Pufg4yGk-6qLuQNE",
         "response_key": "Zml4dHVyZS1zb3VyY2UtcmVjb3JkLWZhbGxiYWNrLTE=",
         "response_identity": "source_record_fallback",
         "native_message_id": null,
@@ -275,12 +275,12 @@
         "effort": null,
         "source_time": null
       },
-      "semantic_revision_key_hex": "253c30a6fde9aa60901c2b73eea4d806311f8458a2f44fc16671c76522ffe731",
+      "semantic_revision_key_hex": "f06bcfbe464b1b72d695e76ce047b4684acfcdb7a438dfc1a1aba78428f42bd8",
       "fact_id": "v1:KbsnQbDwCMahaJCLcEqEG4Nl75TYoX6fc1UsNQXI3Vg",
       "source_record_id": "v1:8bUk2AWeTLW_sC4KScwzlBo_PokhnE4GGYAcSh69QzM",
       "semantic_revision_ref": {
         "semantic_reference_contract_version": 1,
-        "fact_revision_id": "v1:1KuOoNOyQhrBhrAFzU-bPB-m8HODq3eZhh6wmNzaTDM"
+        "fact_revision_id": "v1:Gg1twqqXGq9-hQATur6q5x65efpmbw4C-6SVaZvqw-I"
       }
     },
     "response_revisions": {

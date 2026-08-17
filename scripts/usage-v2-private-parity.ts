@@ -182,6 +182,7 @@ try {
       ...durable.usage,
       coverage: durable.coverage,
       providerDiagnostics: durable.providerDiagnostics,
+      foreignKeyViolationsAfterBootstrap: durable.foreignKeyViolationsAfterBootstrap,
     },
     checks,
     timing: {
@@ -272,6 +273,7 @@ function readDurableSummary(databasePath: string): {
   usage: DurableUsageSummary;
   coverage: DurableCoverageSummary;
   providerDiagnostics: DurableDiagnosticSummary;
+  foreignKeyViolationsAfterBootstrap: number;
 } {
   const database = new DatabaseSync(databasePath, { readOnly: true });
   try {
@@ -378,6 +380,7 @@ function readDurableSummary(databasePath: string): {
     const diagnosticCodes = Object.fromEntries(
       diagnosticRows.map((diagnostic) => [String(diagnostic.diagnostic_code), Number(diagnostic.diagnostic_count)]),
     );
+    const foreignKeyViolationsAfterBootstrap = database.prepare('PRAGMA foreign_key_check').all().length;
     return {
       usage: {
         responses: row.responses,
@@ -415,6 +418,7 @@ function readDurableSummary(databasePath: string): {
         records: diagnosticRows.reduce((total, diagnostic) => total + Number(diagnostic.diagnostic_count), 0),
         codes: diagnosticCodes,
       },
+      foreignKeyViolationsAfterBootstrap,
     };
   } finally {
     database.close();
@@ -424,7 +428,11 @@ function readDurableSummary(databasePath: string): {
 function buildChecks(
   before: CensusReport,
   after: CensusReport,
-  durable: { usage: DurableUsageSummary; coverage: DurableCoverageSummary },
+  durable: {
+    usage: DurableUsageSummary;
+    coverage: DurableCoverageSummary;
+    foreignKeyViolationsAfterBootstrap: number;
+  },
   sourceStable: boolean,
 ): ParityCheck[] {
   const checks: ParityCheck[] = [];
@@ -455,5 +463,6 @@ function buildChecks(
   add('coverage points', after.input.files, durable.coverage.points);
   add('coverage absences', 0, durable.coverage.absences);
   add('coverage errors', 0, durable.coverage.errors);
+  add('foreign key violations after bootstrap', 0, durable.foreignKeyViolationsAfterBootstrap);
   return checks;
 }

@@ -7522,7 +7522,7 @@ mod tests {
             .canonical_entity_key("session", SESSION.as_bytes())
             .unwrap();
         let actor = workflow_batch
-            .canonical_entity_key("run", SESSION.as_bytes())
+            .canonical_root_actor_run_key(SESSION.as_bytes(), None)
             .unwrap();
         let workflow = workflow_batch
             .canonical_entity_key("workflow", b"wf-main")

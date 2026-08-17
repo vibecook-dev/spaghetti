@@ -209,6 +209,21 @@ impl FactSemanticContext {
         .map_err(semantic_identity_error)
     }
 
+    fn canonical_root_actor_run_key(
+        &self,
+        stable_native_session_key: &[u8],
+        declared_native_run_discriminator: Option<&[u8]>,
+    ) -> Result<CanonicalEntityKey, AdapterError> {
+        let session = self.canonical_entity_key("session", stable_native_session_key)?;
+        CanonicalEntityKey::derive_root_actor_run(
+            self.adapter_id.as_str(),
+            &self.source_instance_key,
+            &session,
+            declared_native_run_discriminator,
+        )
+        .map_err(semantic_identity_error)
+    }
+
     fn object_scoped_native_fact_key(
         &self,
         generation: u64,
@@ -1669,6 +1684,27 @@ impl FactBatch {
                 )
             })?
             .canonical_entity_key(entity_kind, stable_native_entity_key)
+    }
+
+    /// Derive the canonical RFC 012C root actor from this batch's source
+    /// instance and final base session identity. Child actor keys continue to
+    /// use their support-declared native/fallback derivations.
+    pub fn canonical_root_actor_run_key(
+        &self,
+        stable_native_session_key: &[u8],
+        declared_native_run_discriminator: Option<&[u8]>,
+    ) -> Result<CanonicalEntityKey, AdapterError> {
+        self.semantic_context
+            .as_ref()
+            .ok_or_else(|| {
+                AdapterError::invalid_contract(
+                    "canonical root actor derivation requires a bound semantic decode context",
+                )
+            })?
+            .canonical_root_actor_run_key(
+                stable_native_session_key,
+                declared_native_run_discriminator,
+            )
     }
 
     /// Emit a native fact whose revision is not fully owned by the primary

@@ -859,6 +859,20 @@ mod tests {
             baseline_root.session_key
         );
         assert_ne!(baseline_root.session_key, baseline_root.root_actor_run_key);
+        let durable_batch =
+            FactBatch::new_with_semantic_context(2, 2, fixture_semantic_context()).unwrap();
+        assert_eq!(
+            baseline_root.session_key,
+            durable_batch
+                .canonical_entity_key("session", b"fixture-session")
+                .unwrap()
+        );
+        assert_eq!(
+            baseline_root.root_actor_run_key,
+            durable_batch
+                .canonical_root_actor_run_key(b"fixture-session", None)
+                .unwrap()
+        );
         assert!(!root.exists());
 
         let mut matched_request = request.clone();
@@ -882,6 +896,15 @@ mod tests {
         assert_ne!(
             matched.root_identity().root_actor_run_key,
             baseline_root.root_actor_run_key
+        );
+        assert_eq!(
+            matched.root_identity().root_actor_run_key,
+            durable_batch
+                .canonical_root_actor_run_key(
+                    b"fixture-session",
+                    Some(b"explicit-fixture-root-run")
+                )
+                .unwrap()
         );
         assert!(!root.exists());
 

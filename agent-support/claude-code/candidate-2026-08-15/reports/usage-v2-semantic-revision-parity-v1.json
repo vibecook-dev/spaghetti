@@ -2,31 +2,31 @@
   "schemaVersion": 1,
   "experiment": "rfc012c-usage-v2-semantic-revision-private-corpus-parity",
   "adapterId": "claude-code",
-  "decoderContractVersion": 21,
-  "sourceCapture": "stable-ephemeral-clone-checked-before-after",
-  "sourceSetDigestBefore": "f74aa6289682ec3bf0158f21ad01887c61f4cd102a4502f3a397fdbd633090b7",
-  "sourceSetDigestAfter": "f74aa6289682ec3bf0158f21ad01887c61f4cd102a4502f3a397fdbd633090b7",
+  "decoderContractVersion": 22,
+  "sourceCapture": "ephemeral-isolated-clone-checked-before-after",
+  "sourceSetDigestBefore": "b5db505a5a02ab5259f2f3fb797d080f0c471398214af270bc27f4723553f712",
+  "sourceSetDigestAfter": "b5db505a5a02ab5259f2f3fb797d080f0c471398214af270bc27f4723553f712",
   "sourceStable": true,
   "nativeArtifact": {
     "fileName": "spaghetti.darwin-arm64.node",
-    "sha256": "863214f8bf8250d907ec50767264bc11144f77a24db1418fbb040a2237d919e5",
-    "bytes": 8884208
+    "sha256": "45dfbd637329bcbf472184ab25263a6f46780ef12265f59579316536fa0812ec",
+    "bytes": 8900752
   },
   "exact": true,
-  "atCommitSeq": 10254,
+  "atCommitSeq": 35320,
   "independent": {
-    "responseGroups": 149671,
-    "actorFiles": 5049,
-    "sessions": 855,
-    "rootResponseGroups": 64199,
-    "childResponseGroups": 85472,
+    "responseGroups": 150757,
+    "actorFiles": 5063,
+    "sessions": 856,
+    "rootResponseGroups": 64555,
+    "childResponseGroups": 86202,
     "fallbackResponses": 0,
-    "responsesWithModel": 149671,
+    "responsesWithModel": 150757,
     "totals": {
-      "input_tokens": 14392816,
-      "output_tokens": 127434333,
-      "cache_creation_input_tokens": 1748158754,
-      "cache_read_input_tokens": 32360151470
+      "input_tokens": 14394988,
+      "output_tokens": 128710415,
+      "cache_creation_input_tokens": 1753989923,
+      "cache_read_input_tokens": 32596441251
     },
     "unknownResponses": {
       "input_tokens": 0,
@@ -34,23 +34,21 @@
       "cache_creation_input_tokens": 0,
       "cache_read_input_tokens": 0
     },
-    "declaredTranscriptObjects": 5187,
-    "exactSemanticRepeatRowsBeyondFirst": 965,
-    "semanticReversionsAfterInterveningRevision": 262
+    "declaredTranscriptObjects": 5201
   },
   "durable": {
-    "responses": 149671,
-    "actors": 5049,
-    "sessions": 855,
-    "rootResponses": 64199,
-    "childResponses": 85472,
+    "responses": 150757,
+    "actors": 5063,
+    "sessions": 856,
+    "rootResponses": 64555,
+    "childResponses": 86202,
     "fallbackResponses": 0,
-    "responsesWithModel": 149671,
+    "responsesWithModel": 150757,
     "totals": {
-      "input_tokens": 14392816,
-      "output_tokens": 127434333,
-      "cache_creation_input_tokens": 1748158754,
-      "cache_read_input_tokens": 32360151470
+      "input_tokens": 14394988,
+      "output_tokens": 128710415,
+      "cache_creation_input_tokens": 1753989923,
+      "cache_read_input_tokens": 32596441251
     },
     "unknownResponses": {
       "input_tokens": 0,
@@ -64,9 +62,10 @@
       "readiness": "ready",
       "completedVersion": 1,
       "detail": null,
-      "points": 5187,
+      "points": 5201,
       "absences": 0,
-      "errors": 0
+      "errors": 0,
+      "errorCodes": {}
     },
     "providerDiagnostics": {
       "records": 6,
@@ -77,15 +76,9 @@
     "foreignKeyViolationsAfterBootstrap": 0
   },
   "timing": {
-    "sourceCaptureElapsedMs": 0,
-    "ingestElapsedMs": 293607.717,
-    "totalElapsedMs": 338169.417
+    "sourceCaptureElapsedMs": 19975.084,
+    "ingestElapsedMs": 358251.665,
+    "totalElapsedMs": 483553.445
   },
-  "historicalReference": {
-    "report": "usage-v2-private-parity-v1.json",
-    "ingestElapsedMs": 306202.101,
-    "descriptiveDifferencePercent": -4.113,
-    "comparability": "Different stable source snapshots; descriptive only, not a controlled causal performance comparison."
-  },
-  "privacy": "Aggregate counts, token totals, readiness, coverage counts, semantic-revision cardinalities, artifact digest, and source metadata digest only. No native paths, identifiers, model values, prompts, answers, or raw payloads."
+  "privacy": "Aggregate counts, token totals, readiness, coverage counts, artifact digest, and source metadata digest only. No native paths, identifiers, model values, prompts, answers, or raw payloads."
 }
