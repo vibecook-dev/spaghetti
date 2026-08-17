@@ -185,7 +185,8 @@ mod tests {
 
     use crate::adapter::{
         verify_support_release_bundle, AdapterManifest, AdapterObjectContext,
-        AdapterSupportBinding, DecodeContext, DecodeDisposition, DecoderId, DiscoveryContext, Fact,
+        AdapterSupportBinding, CoverageAbsenceKind, CoveragePositionKind, CoverageSetCompleteness,
+        CoverageStatus, DecodeContext, DecodeDisposition, DecoderId, DiscoveryContext, Fact,
         FactBatch, FactSemanticContext, RawRetentionPolicy, Sha256Digest, SourceAccess,
         SourceInstance, SourceInstanceSpec, SourceObjectDescriptor, StreamSpec,
         SupportBundleDocument,
@@ -194,10 +195,13 @@ mod tests {
         ScopedAdmissionError, ScopedAppendDecodeOutcome, ScopedAppendDecoderConfig,
         ScopedAppendDeliveryPhase, ScopedAppendObservation, ScopedAppendPresenceChange,
         ScopedAppendReconcileRequest, ScopedDecodeFailureClass, ScopedDecodedAppendItem,
-        ScopedKnownAppendObject, ScopedKnownObjectGrant, ScopedKnownObjectReadRequest,
-        ScopedObjectRead, ScopedObservationAccessError, ScopedObservationAccessHost,
-        ScopedObservationAccessRequest, ScopedObservationAdmissionLane,
-        ScopedObservationQueueLimits, ScopedQueuedObservationFrame, ScopedSourceFailureClass,
+        ScopedDeliveryError, ScopedKnownAppendObject, ScopedKnownObjectGrant,
+        ScopedKnownObjectReadRequest, ScopedObjectRead, ScopedObservationAccessError,
+        ScopedObservationAccessHost, ScopedObservationAccessRequest,
+        ScopedObservationAdmissionLane, ScopedObservationDeliveryLane,
+        ScopedObservationDeliveryLimits, ScopedObservationProjectionLimits,
+        ScopedObservationProjectionSink, ScopedObservationQueueLimits,
+        ScopedProjectionDeliveryError, ScopedQueuedObservationFrame, ScopedSourceFailureClass,
     };
     use crate::source::{
         AccessOperation, AccessOutcome, AccessPhase, AppendDelimitedConfig, AppendDelimitedFile,
@@ -445,6 +449,7 @@ mod tests {
             max_data_events,
             max_retained_native_bytes,
             max_control_items,
+            max_coverage_objects: 1,
         })
         .unwrap()
     }
@@ -1091,6 +1096,209 @@ mod tests {
     }
 
     #[test]
+    fn scoped_decode_coverage_advances_only_after_the_matching_offer_boundary() {
+        let registry = supported_fixture_registry();
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().join("offered-coverage-root");
+        std::fs::create_dir_all(&root).unwrap();
+        let host =
+            ScopedObservationAccessHost::authorize(&registry, scoped_access_request(root.clone()))
+                .unwrap();
+        let mut config = AppendDelimitedConfig::json_lines();
+        config.max_record_bytes = 64;
+        config.max_batch_bytes = 64;
+        config.max_records_per_batch = 4;
+        config.prefix_anchor_bytes = 16;
+        let mut object = scoped_append_object(
+            AppendDelimitedFile::new(config).unwrap(),
+            RawRetentionPolicy::None,
+        );
+        let source = object.source_identity().clone();
+        let identity = [ScopeIdentityInput {
+            name: "native-session-id",
+            value: b"offered-coverage-session",
+        }];
+        let origin = RecordOrigin {
+            source_instance_id: 1,
+            stream_id: 2,
+            object_id: 3,
+            observed_at: 4,
+            source_timestamp_hint: None,
+            media_type: SourceMediaType::new("application/x-ndjson").unwrap(),
+        };
+        let request = || ScopedAppendReconcileRequest {
+            relation_id: "root-object",
+            identity_inputs: &identity,
+            access_phase: AccessPhase::Initial,
+            parent_token: None,
+            depth: 1,
+            max_bytes: 64,
+            origin: &origin,
+            force_contract_replay: false,
+        };
+        let mut lane = admission_lane(8, 0, 2);
+        let mut projection =
+            ScopedObservationProjectionSink::new(ScopedObservationProjectionLimits {
+                max_usage_v2_entities: 1,
+            })
+            .unwrap();
+        let mut delivery = ScopedObservationDeliveryLane::new(ScopedObservationDeliveryLimits {
+            max_semantic_events: 1,
+            max_retained_native_bytes: 0,
+            max_source_control_items: 1,
+        })
+        .unwrap();
+
+        // A stable missing object produces no event, so its explicit absence
+        // is already covered by the current (zero) offered sequence.
+        let missing_pass = host.begin_pass().unwrap();
+        let missing = object.reconcile(&missing_pass, request()).unwrap();
+        let ScopedAppendDecodeOutcome::Ready(missing_decoded) =
+            decode_scoped(&host, &mut object, &missing)
+        else {
+            panic!("missing source should decode to an empty batch");
+        };
+        let missing_receipt = match lane.admit(&mut object, &missing, missing_decoded) {
+            Ok(receipt) => receipt,
+            Err(failure) => panic!("missing admission failed: {}", failure.error),
+        };
+        assert_eq!(missing_receipt.through_lane_ordinal, 0);
+        assert_eq!(lane.queued_coverage_updates(), 0);
+        let missing_coverage = lane.offered_decode_coverage(&source).unwrap();
+        assert_eq!(
+            missing_coverage.completeness,
+            CoverageSetCompleteness::Complete
+        );
+        assert!(missing_coverage.point.is_none());
+        assert!(matches!(
+            missing_coverage.explicit_absence_or_deletion,
+            Some(crate::adapter::CoverageAbsence {
+                generation: 1,
+                kind: CoverageAbsenceKind::Absent,
+                ..
+            })
+        ));
+        drop(missing_pass);
+        object.complete_bootstrap().unwrap();
+
+        std::fs::write(root.join("session.jsonl"), b"one\n").unwrap();
+        let creation_pass = host.begin_pass().unwrap();
+        let creation = object.reconcile(&creation_pass, request()).unwrap();
+        assert_eq!(
+            creation.presence_change,
+            Some(ScopedAppendPresenceChange::Created { generation: 1 })
+        );
+        let ScopedAppendDecodeOutcome::Ready(creation_decoded) =
+            decode_scoped(&host, &mut object, &creation)
+        else {
+            panic!("created source should decode one batch");
+        };
+        let creation_receipt = match lane.admit(&mut object, &creation, creation_decoded) {
+            Ok(receipt) => receipt,
+            Err(failure) => panic!("creation admission failed: {}", failure.error),
+        };
+        assert_eq!(creation_receipt.through_lane_ordinal, 2);
+        assert_eq!(object.checkpoint().unwrap().committed_offset, 4);
+        assert_eq!(lane.queued_coverage_updates(), 1);
+        assert!(lane
+            .offered_decode_coverage(&source)
+            .unwrap()
+            .point
+            .is_none());
+
+        // Offering source.created is not enough: the read's decoded frame is
+        // still pending, so coverage must remain at the prior absence.
+        let created_offer = lane
+            .offer_next(&mut projection, &mut delivery)
+            .unwrap()
+            .unwrap();
+        assert_eq!(created_offer.offered_through_sequence, 1);
+        assert_eq!(lane.queued_coverage_updates(), 1);
+        assert!(lane
+            .offered_decode_coverage(&source)
+            .unwrap()
+            .point
+            .is_none());
+
+        // Ignored-known decode emits no semantic event, but accepting its
+        // frame completes source coverage at the same observer sequence.
+        let decoded_offer = lane
+            .offer_next(&mut projection, &mut delivery)
+            .unwrap()
+            .unwrap();
+        assert_eq!(decoded_offer.first_offered_sequence, None);
+        assert_eq!(decoded_offer.offered_through_sequence, 1);
+        assert_eq!(lane.queued_coverage_updates(), 0);
+        let present_coverage = lane.offered_decode_coverage(&source).unwrap();
+        assert_eq!(
+            present_coverage.completeness,
+            CoverageSetCompleteness::Complete
+        );
+        assert!(present_coverage.explicit_absence_or_deletion.is_none());
+        assert!(present_coverage.explicit_errors.is_empty());
+        let point = present_coverage.point.as_ref().unwrap();
+        assert_eq!(point.generation, 1);
+        assert_eq!(point.status, CoverageStatus::CompleteThrough);
+        assert_eq!(
+            point.position.as_ref().unwrap().kind,
+            CoveragePositionKind::AppendCursor
+        );
+        assert_eq!(point.position.as_ref().unwrap().monotonic_order, Some(4));
+        drop(creation_pass);
+
+        // Keep source.created in the one-slot control queue, then prove a
+        // deletion offer rejected by pressure cannot advance coverage.
+        std::fs::remove_file(root.join("session.jsonl")).unwrap();
+        let deletion_pass = host.begin_pass().unwrap();
+        let deletion = object.reconcile(&deletion_pass, request()).unwrap();
+        let ScopedAppendDecodeOutcome::Ready(deletion_decoded) =
+            decode_scoped(&host, &mut object, &deletion)
+        else {
+            panic!("deleted source should decode to an empty batch");
+        };
+        if let Err(failure) = lane.admit(&mut object, &deletion, deletion_decoded) {
+            panic!("deletion admission failed: {}", failure.error);
+        }
+        assert_eq!(lane.queued_coverage_updates(), 1);
+        assert_eq!(
+            lane.offer_next(&mut projection, &mut delivery),
+            Err(ScopedProjectionDeliveryError::Delivery(
+                ScopedDeliveryError::SourceControlQueueFull
+            ))
+        );
+        assert!(lane
+            .offered_decode_coverage(&source)
+            .unwrap()
+            .point
+            .is_some());
+        assert_eq!(lane.queued_coverage_updates(), 1);
+
+        assert_eq!(delivery.pop_next().unwrap().observer_sequence, 1);
+        let deleted_offer = lane
+            .offer_next(&mut projection, &mut delivery)
+            .unwrap()
+            .unwrap();
+        assert_eq!(deleted_offer.offered_through_sequence, 2);
+        let deleted_coverage = lane.offered_decode_coverage(&source).unwrap();
+        assert_eq!(
+            deleted_coverage.completeness,
+            CoverageSetCompleteness::Complete
+        );
+        assert!(deleted_coverage.point.is_none());
+        assert!(matches!(
+            deleted_coverage.explicit_absence_or_deletion,
+            Some(crate::adapter::CoverageAbsence {
+                generation: 1,
+                kind: CoverageAbsenceKind::Deleted,
+                ..
+            })
+        ));
+        assert_eq!(lane.queued_coverage_updates(), 0);
+        assert!(lane.is_empty());
+        drop(deletion_pass);
+    }
+
+    #[test]
     fn scoped_decode_transaction_commits_cursor_and_decoder_state_together() {
         let registry = stateful_supported_fixture_registry();
         let temp = TempDir::new().unwrap();
@@ -1489,6 +1697,19 @@ mod tests {
             origin: &origin,
             force_contract_replay: false,
         };
+        let source = object.source_identity().clone();
+        let mut lane = admission_lane(4, 0, 1);
+        let mut projection =
+            ScopedObservationProjectionSink::new(ScopedObservationProjectionLimits {
+                max_usage_v2_entities: 1,
+            })
+            .unwrap();
+        let mut delivery = ScopedObservationDeliveryLane::new(ScopedObservationDeliveryLimits {
+            max_semantic_events: 1,
+            max_retained_native_bytes: 0,
+            max_source_control_items: 1,
+        })
+        .unwrap();
 
         let first_pass = host.begin_pass().unwrap();
         let first = object.reconcile(&first_pass, request()).unwrap();
@@ -1504,7 +1725,39 @@ mod tests {
             object.complete_bootstrap(),
             Err(ScopedObservationAccessError::BootstrapNotDrained)
         ));
-        decode_and_admit_ignored(&host, &mut object, &first);
+        let ScopedAppendDecodeOutcome::Ready(first_decoded) =
+            decode_scoped(&host, &mut object, &first)
+        else {
+            panic!("expected first bounded bootstrap decode");
+        };
+        if let Err(failure) = lane.admit(&mut object, &first, first_decoded) {
+            panic!("first bounded admission failed: {}", failure.error);
+        }
+        let first_offer = lane
+            .offer_next(&mut projection, &mut delivery)
+            .unwrap()
+            .unwrap();
+        assert_eq!(first_offer.first_offered_sequence, None);
+        assert_eq!(first_offer.offered_through_sequence, 0);
+        let partial = lane.offered_decode_coverage(&source).unwrap();
+        assert_eq!(partial.completeness, CoverageSetCompleteness::Partial);
+        assert_eq!(
+            partial.point.as_ref().unwrap().status,
+            CoverageStatus::Partial
+        );
+        assert_eq!(
+            partial
+                .point
+                .as_ref()
+                .unwrap()
+                .position
+                .as_ref()
+                .unwrap()
+                .monotonic_order,
+            Some(4)
+        );
+        assert_eq!(partial.explicit_errors.len(), 1);
+        assert_eq!(partial.explicit_errors[0].code, "bounded_backlog");
         drop(first_pass);
         assert!(matches!(
             object.complete_bootstrap(),
@@ -1521,7 +1774,38 @@ mod tests {
                 ..
             }
         ));
-        decode_and_admit_ignored(&host, &mut object, &second);
+        let ScopedAppendDecodeOutcome::Ready(second_decoded) =
+            decode_scoped(&host, &mut object, &second)
+        else {
+            panic!("expected second bounded bootstrap decode");
+        };
+        if let Err(failure) = lane.admit(&mut object, &second, second_decoded) {
+            panic!("second bounded admission failed: {}", failure.error);
+        }
+        let second_offer = lane
+            .offer_next(&mut projection, &mut delivery)
+            .unwrap()
+            .unwrap();
+        assert_eq!(second_offer.first_offered_sequence, None);
+        assert_eq!(second_offer.offered_through_sequence, 0);
+        let complete = lane.offered_decode_coverage(&source).unwrap();
+        assert_eq!(complete.completeness, CoverageSetCompleteness::Complete);
+        assert_eq!(
+            complete.point.as_ref().unwrap().status,
+            CoverageStatus::CompleteThrough
+        );
+        assert_eq!(
+            complete
+                .point
+                .as_ref()
+                .unwrap()
+                .position
+                .as_ref()
+                .unwrap()
+                .monotonic_order,
+            Some(8)
+        );
+        assert!(complete.explicit_errors.is_empty());
         drop(second_pass);
         object.complete_bootstrap().unwrap();
         assert!(!object.bootstrap_active());

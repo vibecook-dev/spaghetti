@@ -986,6 +986,20 @@ Current landing status (2026-08-16):
   without reducer or sequence drift, permits an exact-repeat empty batch to
   retire while delivery is full, and keeps reset plus all retractions
   indivisible;
+- every admitted append observation now stages one bounded RFC 012A `Decode`
+  coverage update using the same source-instance/stream/object coordinates and
+  append-cursor representation as durable ingestion. Stable initial absence,
+  later deletion, transient source failure, bounded backlog, driver quarantine,
+  and decoder quarantine remain distinguishable through common point/absence,
+  status, completeness, and explicit-error fields. The source cursor may commit
+  at admission, but reportable coverage remains at its prior state until the
+  observation's last lifecycle/data frame successfully crosses the atomic
+  offered boundary; a rejected delivery offer cannot advance it. An event-free
+  missing read or semantic no-op may advance coverage at the current observer
+  sequence, and bounded bootstrap remains `Partial` until its final batch is
+  offered. Retained coverage membership has its own explicit object bound and
+  repeated no-event updates at one pending boundary coalesce by stable source
+  identity;
 - one pass is active at a time, a later pass receives fresh bounds, close is
   idempotent, and the frozen access report excludes paths, identity values, and
   content; and
@@ -997,13 +1011,14 @@ orchestration, declared relation-backed decoder dependency access, built-in
 canonical fact-revision adoption and scoped reducers beyond usage-v2,
 coverage-complete durable query exposure, the complete root/actor/source
 envelope mapper, the public ordered multiplexer and poll/readiness barriers,
-coverage, overflow/resync epochs, artifact mediation, cancellation waiting,
+coverage-set membership/fact-family assembly, overflow/resync epochs, artifact
+mediation, cancellation waiting,
 the trusted native version-probe driver, and the complete public request are
 not yet implemented. The internal offered boundary is now transactional, but
 it cannot become a public `offered` watermark until the envelope mapper,
-observer sequence, and epoch lifecycle are defined. The usage-v2 sink and
-delivery lane remain crate-private until those envelope/lifecycle contracts
-and the negotiated portable surface exist.
+scope-membership/barrier coverage, and epoch lifecycle are defined. The
+usage-v2 sink and delivery lane remain crate-private until those envelope/
+lifecycle contracts and the negotiated portable surface exist.
 
 ### D2. Claude scope composition
 
@@ -1049,19 +1064,23 @@ usage reducer now produces the first
 family-versioned replacement snapshot/digest with stable ordering, phase- and
 observation-time-independent identity, empty-state removal, and equal
 bootstrap/correction semantic digests and event IDs at equal state. The public
-control multiplexer, epoch state machine, sticky overflow/resync controls,
-coverage-complete family manifest, atomic staged swap, and multi-observer
-isolation remain unimplemented. Internally, reducer mutation, admitted-frame
-release, and bounded delivery admission now share one retry-safe offered
-transaction: exact projected capacity is checked before mutation, queue
-pressure changes no reducer or sequence state, and reset/control plus semantic
+object-level `Decode` coverage checkpoint is also tied to that exact offered
+transaction, so delivery pressure cannot overstate its cursor and semantic
+no-ops can advance coverage without inventing a sequence. The public control
+multiplexer, epoch state machine, sticky overflow/resync controls, complete
+scope-membership source/family sets, coverage-complete family manifest, atomic
+staged swap, and multi-observer isolation remain unimplemented. Internally,
+reducer mutation, admitted-frame release, bounded delivery admission, and
+eligible coverage promotion now share one retry-safe offered transaction:
+exact projected capacity is checked before mutation, queue pressure changes no
+reducer, coverage, or sequence state, and reset/control plus semantic
 retractions enter delivery as one ordered batch. Therefore the D3 and X0 gates
 remain open for the still-missing public lifecycle rather than this internal
 atomicity seam. Delivered internal values now carry the selected event-contract
-version, epoch, observer sequence, mandatory event ID, optional
-semantic revision, phase, stable source coordinate, and typed event. This
-freezes the offered/delivered vocabulary but is not yet the complete public
-root/actor/evidence envelope or an applied acknowledgement.
+version, epoch, observer sequence, mandatory event ID, optional semantic
+revision, phase, stable source coordinate, and typed event. This freezes the
+offered/delivered vocabulary but is not yet the complete public root/actor/
+evidence envelope or an applied acknowledgement.
 
 ### D4. SDK and Chopsticks migration
 

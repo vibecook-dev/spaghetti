@@ -13,12 +13,14 @@ use std::sync::Arc;
 use crate::adapter::{
     AdapterError, AdapterErrorClass, AdapterId, AdapterObjectContext, AdapterRegistry,
     AgentAdapter, CanonicalFactId, CanonicalSourceInstanceKey, CompatibilityDecision,
-    ContractVersionOffer, ContractVersionRequest, CoverageObjectKey, CoverageStreamKey,
+    ContractVersionOffer, ContractVersionRequest, CoverageAbsence, CoverageAbsenceKind,
+    CoverageDomain, CoverageError, CoverageObjectKey, CoveragePosition, CoveragePositionKind,
+    CoverageProvenance, CoverageSetCompleteness, CoverageStatus, CoverageStreamKey,
     DecodeDisposition, DecoderId, Fact, FactBatch, FactEnvelope, FactProvenance, FactRevisionId,
     FactSemanticContext, FactSemanticRevision, NativeArtifactProbe, RawRetentionPolicy,
-    ScopeRelationPrimitive, SemanticRevisionRef, SourceAccess, SourceObjectList,
-    SourceObjectListRequest, SourceQuery, SourceRecordId, SourceRows, SourceSnapshot,
-    SupportOperation, TypedAccessAuthorization, UsageRevisionV2Fact,
+    ScopeRelationPrimitive, SemanticRevisionRef, SourceAccess, SourceCoveragePoint,
+    SourceObjectList, SourceObjectListRequest, SourceQuery, SourceRecordId, SourceRows,
+    SourceSnapshot, SupportOperation, TypedAccessAuthorization, UsageRevisionV2Fact,
 };
 use crate::decode_runtime::{
     decode_record, diagnostic_excerpt, DecodeRuntimeLimits, DecodeRuntimeRequest,
@@ -130,12 +132,26 @@ pub enum ScopedAppendPresenceChange {
 
 /// Stable, path-free source coordinate shared with RFC 012A coverage. Numeric
 /// catalog IDs and attachment-local object tokens never cross this boundary.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ScopedSourceObjectIdentity {
     pub adapter_id: AdapterId,
     pub source_instance_key: CanonicalSourceInstanceKey,
     pub stream_key: CoverageStreamKey,
     pub object_key: CoverageObjectKey,
+}
+
+/// RFC 012A decode coverage for one scoped append object at the observer's
+/// offered boundary. A present/unstable object contributes one point; a known
+/// missing object contributes one explicit absence or deletion. The future
+/// observer facade groups these bounded object entries into source coverage
+/// sets after scope membership and supported fact-family domains are frozen.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScopedOfferedDecodeCoverage {
+    pub source: ScopedSourceObjectIdentity,
+    pub point: Option<SourceCoveragePoint>,
+    pub explicit_absence_or_deletion: Option<CoverageAbsence>,
+    pub explicit_errors: Vec<CoverageError>,
+    pub completeness: CoverageSetCompleteness,
 }
 
 impl ScopedSourceObjectIdentity {
@@ -215,6 +231,9 @@ pub struct ScopedObservationQueueLimits {
     pub max_data_events: u64,
     pub max_retained_native_bytes: u64,
     pub max_control_items: usize,
+    /// Maximum stable source objects whose offered coverage may be retained.
+    /// This is a scope-membership bound, independent of transient queue slots.
+    pub max_coverage_objects: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -231,6 +250,10 @@ pub enum ScopedAdmissionError {
     RetainedNativeQueueFull,
     #[error("scoped lifecycle/control capacity is full")]
     ControlQueueFull,
+    #[error("scoped offered-coverage object capacity is full")]
+    CoverageObjectCapacityFull,
+    #[error("scoped append coverage could not be represented by the common contract")]
+    InvalidCoverage,
     #[error("scoped admission accounting or sequence range is exhausted")]
     CapacityExhausted,
 }
@@ -318,6 +341,11 @@ struct ScopedTakenObservationFrame {
     retained_native_bytes: u64,
 }
 
+struct PendingScopedCoverageUpdate {
+    through_lane_ordinal: u64,
+    coverage: ScopedOfferedDecodeCoverage,
+}
+
 /// Two bounded internal capacity domains multiplexed by one admission ordinal.
 /// The ordinal is not an RFC 012D `observer_sequence`; public sequencing begins
 /// only after canonical semantic projection is available.
@@ -328,11 +356,18 @@ pub struct ScopedObservationAdmissionLane {
     queued_data_events: u64,
     queued_retained_native_bytes: u64,
     next_lane_ordinal: u64,
+    offered_lane_ordinal: u64,
+    known_coverage_objects: BTreeMap<ScopedSourceObjectIdentity, ()>,
+    pending_coverage_updates: VecDeque<PendingScopedCoverageUpdate>,
+    offered_decode_coverage: BTreeMap<ScopedSourceObjectIdentity, ScopedOfferedDecodeCoverage>,
 }
 
 impl ScopedObservationAdmissionLane {
     pub fn new(limits: ScopedObservationQueueLimits) -> Result<Self, ScopedAdmissionError> {
-        if limits.max_data_events == 0 || limits.max_control_items == 0 {
+        if limits.max_data_events == 0
+            || limits.max_control_items == 0
+            || limits.max_coverage_objects == 0
+        {
             return Err(ScopedAdmissionError::InvalidLimits);
         }
         Ok(Self {
@@ -342,6 +377,10 @@ impl ScopedObservationAdmissionLane {
             queued_data_events: 0,
             queued_retained_native_bytes: 0,
             next_lane_ordinal: 1,
+            offered_lane_ordinal: 0,
+            known_coverage_objects: BTreeMap::new(),
+            pending_coverage_updates: VecDeque::new(),
+            offered_decode_coverage: BTreeMap::new(),
         })
     }
 
@@ -357,6 +396,22 @@ impl ScopedObservationAdmissionLane {
         if let Err(error) = object.validate_admission(observation, &decoded) {
             return Err(ScopedAdmissionFailure {
                 error: admission_validation_error(error),
+                decoded,
+            });
+        }
+        let coverage = match object.prepare_decode_coverage(observation, &decoded) {
+            Ok(coverage) => coverage,
+            Err(()) => {
+                return Err(ScopedAdmissionFailure {
+                    error: ScopedAdmissionError::InvalidCoverage,
+                    decoded,
+                });
+            }
+        };
+        let source_is_new = !self.known_coverage_objects.contains_key(&object.source);
+        if source_is_new && self.known_coverage_objects.len() >= self.limits.max_coverage_objects {
+            return Err(ScopedAdmissionFailure {
+                error: ScopedAdmissionError::CoverageObjectCapacityFull,
                 decoded,
             });
         }
@@ -481,6 +536,17 @@ impl ScopedObservationAdmissionLane {
         self.queued_data_events += data_events;
         self.queued_retained_native_bytes += retained_native_bytes;
         object.commit_admission();
+
+        if source_is_new {
+            self.known_coverage_objects
+                .insert(object.source.clone(), ());
+        }
+        self.stage_coverage_update(
+            after_ordinal
+                .checked_sub(1)
+                .expect("scoped lane ordinals start at one"),
+            coverage,
+        );
 
         Ok(ScopedAdmissionReceipt {
             object_token: observation.object_token,
@@ -644,6 +710,7 @@ impl ScopedObservationAdmissionLane {
         &mut self,
         taken: ScopedTakenObservationFrame,
     ) -> ScopedQueuedObservationFrame {
+        let lane_ordinal = taken.frame.lane_ordinal();
         if matches!(&taken.frame, ScopedQueuedObservationFrame::Decoded { .. }) {
             self.queued_data_events = self
                 .queued_data_events
@@ -654,7 +721,57 @@ impl ScopedObservationAdmissionLane {
                 .checked_sub(taken.retained_native_bytes)
                 .expect("queued retained-native accounting cannot underflow");
         }
+        self.offered_lane_ordinal = lane_ordinal;
+        self.apply_coverage_updates_through(lane_ordinal);
         taken.frame
+    }
+
+    fn stage_coverage_update(
+        &mut self,
+        through_lane_ordinal: u64,
+        coverage: ScopedOfferedDecodeCoverage,
+    ) {
+        if through_lane_ordinal <= self.offered_lane_ordinal {
+            self.offered_decode_coverage
+                .insert(coverage.source.clone(), coverage);
+            return;
+        }
+
+        // Several event-free reads can complete behind the same queued frame.
+        // Only the latest source state at that boundary matters, so coalescing
+        // prevents no-op polling from creating an unbounded marker queue.
+        if let Some(pending) = self
+            .pending_coverage_updates
+            .iter_mut()
+            .rev()
+            .find(|pending| {
+                pending.through_lane_ordinal == through_lane_ordinal
+                    && pending.coverage.source == coverage.source
+            })
+        {
+            pending.coverage = coverage;
+            return;
+        }
+        self.pending_coverage_updates
+            .push_back(PendingScopedCoverageUpdate {
+                through_lane_ordinal,
+                coverage,
+            });
+    }
+
+    fn apply_coverage_updates_through(&mut self, through_lane_ordinal: u64) {
+        while self
+            .pending_coverage_updates
+            .front()
+            .is_some_and(|pending| pending.through_lane_ordinal <= through_lane_ordinal)
+        {
+            let pending = self
+                .pending_coverage_updates
+                .pop_front()
+                .expect("front coverage update was just observed");
+            self.offered_decode_coverage
+                .insert(pending.coverage.source.clone(), pending.coverage);
+        }
     }
 
     pub fn queued_data_events(&self) -> u64 {
@@ -669,8 +786,24 @@ impl ScopedObservationAdmissionLane {
         self.controls.len()
     }
 
+    pub fn queued_coverage_updates(&self) -> usize {
+        self.pending_coverage_updates.len()
+    }
+
+    /// Latest decode coverage whose corresponding control/data frames have all
+    /// crossed the offered boundary. A newer admitted source checkpoint may
+    /// exist while this value intentionally remains unchanged.
+    pub fn offered_decode_coverage(
+        &self,
+        source: &ScopedSourceObjectIdentity,
+    ) -> Option<&ScopedOfferedDecodeCoverage> {
+        self.offered_decode_coverage.get(source)
+    }
+
     pub fn is_empty(&self) -> bool {
-        self.controls.is_empty() && self.decoded.is_empty()
+        self.controls.is_empty()
+            && self.decoded.is_empty()
+            && self.pending_coverage_updates.is_empty()
     }
 
     fn next_is_control(&self) -> Option<bool> {
@@ -2425,6 +2558,140 @@ impl ScopedKnownAppendObject {
         Ok(())
     }
 
+    fn prepare_decode_coverage(
+        &self,
+        observation: &ScopedAppendObservation,
+        decoded: &ScopedDecodedAppendBatch,
+    ) -> Result<ScopedOfferedDecodeCoverage, ()> {
+        let pending = self.pending.as_ref().ok_or(())?;
+        if observation.object_token != self.object_token
+            || decoded.object_token != self.object_token
+            || pending.admission_token != observation.admission_token
+            || decoded.admission_token != observation.admission_token
+        {
+            return Err(());
+        }
+
+        let error = |code: &str| CoverageError {
+            stream_key: Some(self.source.stream_key),
+            object_key: Some(self.source.object_key),
+            code: code.to_string(),
+        };
+        match &observation.read {
+            AppendRead::Missing => {
+                let generation = pending
+                    .checkpoint
+                    .as_ref()
+                    .map_or(1, |checkpoint| checkpoint.generation);
+                Ok(ScopedOfferedDecodeCoverage {
+                    source: self.source.clone(),
+                    point: None,
+                    explicit_absence_or_deletion: Some(CoverageAbsence {
+                        stream_key: self.source.stream_key,
+                        object_key: self.source.object_key,
+                        generation,
+                        kind: if self.checkpoint.is_some() {
+                            CoverageAbsenceKind::Deleted
+                        } else {
+                            CoverageAbsenceKind::Absent
+                        },
+                    }),
+                    explicit_errors: Vec::new(),
+                    completeness: CoverageSetCompleteness::Complete,
+                })
+            }
+            AppendRead::RetryTransient => {
+                let generation = pending
+                    .checkpoint
+                    .as_ref()
+                    .map_or(1, |checkpoint| checkpoint.generation);
+                let position = pending
+                    .checkpoint
+                    .as_ref()
+                    .map(scoped_append_coverage_position)
+                    .transpose()?;
+                let (status, completeness) = if position.is_some() {
+                    (CoverageStatus::Partial, CoverageSetCompleteness::Partial)
+                } else {
+                    (
+                        CoverageStatus::Unavailable {
+                            reason: "source_retry_transient".to_string(),
+                        },
+                        CoverageSetCompleteness::Unavailable,
+                    )
+                };
+                let point =
+                    scoped_decode_coverage_point(&self.source, generation, position, status)?;
+                Ok(ScopedOfferedDecodeCoverage {
+                    source: self.source.clone(),
+                    point: Some(point),
+                    explicit_absence_or_deletion: None,
+                    explicit_errors: vec![error("source_retry_transient")],
+                    completeness,
+                })
+            }
+            AppendRead::Batch {
+                checkpoint,
+                more_available,
+                ..
+            } => {
+                let mut explicit_errors = Vec::new();
+                let mut unavailable_reason = None;
+                for item in &decoded.items {
+                    match item {
+                        ScopedDecodedAppendItem::DriverQuarantine(_) => {
+                            unavailable_reason.get_or_insert("driver_quarantine");
+                            explicit_errors.push(error("driver_quarantine"));
+                        }
+                        ScopedDecodedAppendItem::Record {
+                            quarantined: true, ..
+                        } => {
+                            unavailable_reason.get_or_insert("decode_quarantine");
+                            explicit_errors.push(error("decode_quarantine"));
+                        }
+                        ScopedDecodedAppendItem::Record {
+                            quarantined: false, ..
+                        } => {}
+                    }
+                }
+                if *more_available {
+                    explicit_errors.push(error("bounded_backlog"));
+                }
+                explicit_errors.sort();
+                explicit_errors.dedup();
+
+                let (status, completeness) = if let Some(reason) = unavailable_reason {
+                    (
+                        CoverageStatus::Unavailable {
+                            reason: reason.to_string(),
+                        },
+                        CoverageSetCompleteness::Unavailable,
+                    )
+                } else if *more_available {
+                    (CoverageStatus::Partial, CoverageSetCompleteness::Partial)
+                } else {
+                    (
+                        CoverageStatus::CompleteThrough,
+                        CoverageSetCompleteness::Complete,
+                    )
+                };
+                let point = scoped_decode_coverage_point(
+                    &self.source,
+                    checkpoint.generation,
+                    Some(scoped_append_coverage_position(checkpoint)?),
+                    status,
+                )?;
+                Ok(ScopedOfferedDecodeCoverage {
+                    source: self.source.clone(),
+                    point: Some(point),
+                    explicit_absence_or_deletion: None,
+                    explicit_errors,
+                    completeness,
+                })
+            }
+        }
+    }
+
     fn commit_admission(&mut self) {
         let pending = self
             .pending
@@ -2492,6 +2759,36 @@ impl ScopedKnownAppendObject {
     pub fn bootstrap_active(&self) -> bool {
         self.bootstrap_active
     }
+}
+
+fn scoped_append_coverage_position(checkpoint: &AppendCheckpoint) -> Result<CoveragePosition, ()> {
+    let cursor = checkpoint.cursor();
+    CoveragePosition::derive(
+        CoveragePositionKind::AppendCursor,
+        cursor.as_bytes(),
+        Some(checkpoint.committed_offset),
+    )
+    .map_err(|_| ())
+}
+
+fn scoped_decode_coverage_point(
+    source: &ScopedSourceObjectIdentity,
+    generation: u64,
+    position: Option<CoveragePosition>,
+    status: CoverageStatus,
+) -> Result<SourceCoveragePoint, ()> {
+    SourceCoveragePoint::new(
+        CoverageDomain::Decode,
+        source.adapter_id.as_str(),
+        source.source_instance_key,
+        source.stream_key,
+        source.object_key,
+        generation,
+        position,
+        status,
+        CoverageProvenance::default(),
+    )
+    .map_err(|_| ())
 }
 
 fn validate_known_object_grants(
@@ -2864,6 +3161,7 @@ mod projection_tests {
             max_data_events: data_events.max(1),
             max_retained_native_bytes: retained_native_bytes,
             max_control_items: 1,
+            max_coverage_objects: 1,
         })
         .unwrap();
         lane.decoded.push_back(QueuedDecodedFrame {
@@ -3312,6 +3610,7 @@ mod projection_tests {
             max_data_events: 1,
             max_retained_native_bytes: 0,
             max_control_items: 1,
+            max_coverage_objects: 1,
         })
         .unwrap();
         reset_lane.controls.push_back(QueuedControlFrame {
@@ -3462,6 +3761,7 @@ mod projection_tests {
             max_data_events: 1,
             max_retained_native_bytes: 0,
             max_control_items: 1,
+            max_coverage_objects: 1,
         })
         .unwrap();
         lane.controls.push_back(QueuedControlFrame {
