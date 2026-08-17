@@ -2226,6 +2226,9 @@ mod tests {
         assert_eq!(barrier.barrier_sequence, 1);
         assert!(!barrier.root_present);
         assert_eq!(barrier.source_coverage.len(), 2);
+        assert_eq!(barrier.family_manifest.len(), 1);
+        assert_eq!(barrier.family_manifest[0].fact_family, "runtime.usage-v2");
+        assert_eq!(barrier.family_manifest[0].entity_or_event_count, 0);
         assert!(barrier.explicit_object_errors.is_empty());
         assert_eq!(barrier.queue_state.offered_through_sequence, 1);
         assert_eq!(barrier.queue_state.queued_source_control_items, 1);
@@ -2388,6 +2391,11 @@ mod tests {
             replacement_semantic_digest
         );
         assert_eq!(resync_barrier.source_coverage.len(), 2);
+        assert_eq!(resync_barrier.family_manifest, barrier.family_manifest);
+        assert_eq!(
+            resync_barrier.replacement_snapshot_digest,
+            barrier.replacement_snapshot_digest
+        );
         assert!(!resync_barrier.root_present);
         assert_eq!(
             delivery.state().continuity,
@@ -2436,7 +2444,7 @@ mod tests {
         assert_eq!(next_resync.invalid_scope_epoch, 2);
         assert_eq!(
             next_resync.baseline_snapshot_digest,
-            resync_barrier.coverage_snapshot_digest
+            resync_barrier.replacement_snapshot_digest
         );
         assert_ne!(completed_event_id, first_event_id);
 

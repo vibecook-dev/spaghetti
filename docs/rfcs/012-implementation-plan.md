@@ -1036,11 +1036,18 @@ Current landing status (2026-08-17):
   barrier sequence plus post-offer queue state without claiming consumer
   application. Its versioned snapshot digest covers canonical root identity,
   root presence, source/family coverage, and explicit object errors while
-  excluding observation time, queue state, and attachment-local sequencing;
-  the deterministic control ID also excludes observation time. Repeated
+  excluding observation time, queue state, and attachment-local sequencing.
+  It now also carries the same per-family replacement manifest and
+  replacement-snapshot digest used by resync: the first entry is usage-v2's
+  latest-contribution representation, completeness, entity count, and semantic
+  digest. The deterministic completion ID binds that full replacement digest,
+  not only coverage, while still excluding observation time. Repeated
   ready-style calls return the retained barrier without redelivery, equivalent
   replay gets the same snapshot digest/event ID, failed preflight mutates
-  nothing, and later Bootstrap-phase data is rejected after completion;
+  nothing, and later Bootstrap-phase data is rejected after completion. A
+  clean bootstrap and completed resync at equal common coverage now prove equal
+  family manifests and replacement digests; subsequent invalidation/start
+  controls retain that full digest as their semantic baseline;
 - the delivery lane now tracks its distinct delivered-through boundary and an
   explicit `Bootstrap | Valid | ResyncRequired | Resyncing` continuity state.
   An explicit watcher/transport/consumer continuity-loss signal on a valid
@@ -1199,7 +1206,9 @@ phase, and source-coordinate seam for the future envelope mapper. The bounded
 usage reducer now produces the first
 family-versioned replacement snapshot/digest with stable ordering, phase- and
 observation-time-independent identity, empty-state removal, and equal
-bootstrap/correction semantic digests and event IDs at equal state. The internal
+bootstrap/correction semantic digests and event IDs at equal state. Bootstrap
+and resync barriers now use that same family manifest and full replacement
+digest, with a parity test at equal common coverage. The internal
 object-level `Decode` coverage checkpoint is also tied to that exact offered
 transaction, so delivery pressure cannot overstate its cursor and semantic
 no-ops can advance coverage without inventing a sequence. A drained watermark

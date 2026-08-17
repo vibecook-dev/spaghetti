@@ -1155,6 +1155,8 @@ pub struct ScopedBootstrapBarrier {
     pub scope_epoch: u64,
     pub barrier_sequence: u64,
     pub snapshot_digest: ScopedBootstrapSnapshotDigest,
+    pub replacement_snapshot_digest: ScopedReplacementSnapshotDigest,
+    pub family_manifest: Vec<ScopedReplacementFamilyManifest>,
     pub source_coverage: Vec<SourceCoverageSet>,
     pub explicit_object_errors: Vec<CoverageError>,
     pub queue_state: ScopedObservationDeliveryState,
@@ -1177,7 +1179,7 @@ pub struct ScopedResyncRequired {
     pub invalid_scope_epoch: u64,
     pub control_sequence: u64,
     pub last_contiguous_sequence: u64,
-    pub baseline_snapshot_digest: ScopedBootstrapSnapshotDigest,
+    pub baseline_snapshot_digest: ScopedReplacementSnapshotDigest,
     pub reason: ScopedResyncReason,
     pub discarded_semantic_events: u64,
     pub discarded_source_controls: u64,
@@ -1196,7 +1198,7 @@ pub struct ScopedResyncStarted {
     pub new_scope_epoch: u64,
     pub control_sequence: u64,
     pub required_control_sequence: u64,
-    pub baseline_snapshot_digest: ScopedBootstrapSnapshotDigest,
+    pub baseline_snapshot_digest: ScopedReplacementSnapshotDigest,
     pub reason: ScopedResyncReason,
     pub replacement: ScopedReplacementMode,
 }
@@ -2226,6 +2228,7 @@ impl ScopedObservationDeliveryLane {
         &mut self,
         root: &ScopedObservationRootIdentity,
         watermark: ScopedObservationWatermarkCore,
+        family_manifest: Vec<ScopedReplacementFamilyManifest>,
         root_present: bool,
         observed_at: i64,
     ) -> Result<Arc<ScopedBootstrapBarrier>, ScopedBootstrapBarrierError> {
@@ -2272,12 +2275,22 @@ impl ScopedObservationDeliveryLane {
             &watermark.source_coverage,
             &watermark.explicit_object_errors,
         )?;
+        let replacement_snapshot_digest = replacement_snapshot_digest(
+            root,
+            root_present,
+            &family_manifest,
+            &watermark.source_coverage,
+            &watermark.explicit_object_errors,
+        )
+        .map_err(|_| ScopedBootstrapBarrierError::InvalidSnapshot)?;
         let barrier = Arc::new(ScopedBootstrapBarrier {
             barrier_contract_version: SCOPED_BOOTSTRAP_BARRIER_CONTRACT_VERSION,
             root: root.clone(),
             scope_epoch: before.scope_epoch,
             barrier_sequence,
             snapshot_digest,
+            replacement_snapshot_digest,
+            family_manifest,
             source_coverage: watermark.source_coverage,
             explicit_object_errors: watermark.explicit_object_errors,
             queue_state,
@@ -2285,7 +2298,8 @@ impl ScopedObservationDeliveryLane {
         });
         let source = observer_control_source(root)
             .map_err(|()| ScopedBootstrapBarrierError::InvalidSnapshot)?;
-        let event_id = bootstrap_complete_event_id(root, before.scope_epoch, snapshot_digest);
+        let event_id =
+            bootstrap_complete_event_id(root, before.scope_epoch, replacement_snapshot_digest);
         let receipt = self
             .offer_projected(vec![
                 ScopedProjectedObservation::ObserverBootstrapComplete {
@@ -2333,8 +2347,8 @@ impl ScopedObservationDeliveryLane {
         let baseline_snapshot_digest = self
             .resync_barrier
             .as_ref()
-            .map_or(barrier.snapshot_digest, |value| {
-                value.coverage_snapshot_digest
+            .map_or(barrier.replacement_snapshot_digest, |value| {
+                value.replacement_snapshot_digest
             });
 
         let discarded_semantic_events = u64::try_from(self.semantic.len())
@@ -3356,40 +3370,7 @@ impl ScopedObservationReplacementStage {
             .prepared
             .as_ref()
             .ok_or(ScopedReplacementStageError::SnapshotNotPrepared)?;
-        let mut usage_completeness = None;
-        for coverage in source_coverage {
-            match &coverage.coverage_domain {
-                CoverageDomain::Decode => {}
-                CoverageDomain::FactFamily { family, version }
-                    if family == "runtime.usage-v2"
-                        && *version == RUNTIME_USAGE_V2_FACT_FAMILY_CONTRACT_VERSION =>
-                {
-                    usage_completeness =
-                        Some(usage_completeness.map_or(coverage.completeness, |current| {
-                            merge_coverage_completeness(current, coverage.completeness)
-                        }));
-                }
-                CoverageDomain::FactFamily { .. } | CoverageDomain::ProjectionPack { .. } => {
-                    return Err(ScopedReplacementStageError::InvalidManifest);
-                }
-            }
-        }
-        let Some(completeness) = usage_completeness else {
-            return if prepared.usage_v2.entity_count == 0 {
-                Ok(Vec::new())
-            } else {
-                Err(ScopedReplacementStageError::InvalidManifest)
-            };
-        };
-        Ok(vec![ScopedReplacementFamilyManifest {
-            fact_family: "runtime.usage-v2".to_string(),
-            contract_version: prepared.usage_v2.fact_family_contract_version,
-            replacement_representation:
-                ScopedReplacementRepresentation::UsageLatestContributionPerResponse,
-            completeness,
-            entity_or_event_count: prepared.usage_v2.entity_count,
-            semantic_digest: prepared.usage_v2.semantic_digest,
-        }])
+        replacement_family_manifest(&prepared.usage_v2, source_coverage)
     }
 
     fn validate_activation(
@@ -3442,6 +3423,46 @@ impl ScopedObservationReplacementStage {
         }
         Ok(())
     }
+}
+
+fn replacement_family_manifest(
+    usage_v2: &ScopedUsageV2ReplacementSnapshot,
+    source_coverage: &[SourceCoverageSet],
+) -> Result<Vec<ScopedReplacementFamilyManifest>, ScopedReplacementStageError> {
+    let mut usage_completeness = None;
+    for coverage in source_coverage {
+        match &coverage.coverage_domain {
+            CoverageDomain::Decode => {}
+            CoverageDomain::FactFamily { family, version }
+                if family == "runtime.usage-v2"
+                    && *version == RUNTIME_USAGE_V2_FACT_FAMILY_CONTRACT_VERSION =>
+            {
+                usage_completeness =
+                    Some(usage_completeness.map_or(coverage.completeness, |current| {
+                        merge_coverage_completeness(current, coverage.completeness)
+                    }));
+            }
+            CoverageDomain::FactFamily { .. } | CoverageDomain::ProjectionPack { .. } => {
+                return Err(ScopedReplacementStageError::InvalidManifest);
+            }
+        }
+    }
+    let Some(completeness) = usage_completeness else {
+        return if usage_v2.entity_count == 0 {
+            Ok(Vec::new())
+        } else {
+            Err(ScopedReplacementStageError::InvalidManifest)
+        };
+    };
+    Ok(vec![ScopedReplacementFamilyManifest {
+        fact_family: "runtime.usage-v2".to_string(),
+        contract_version: usage_v2.fact_family_contract_version,
+        replacement_representation:
+            ScopedReplacementRepresentation::UsageLatestContributionPerResponse,
+        completeness,
+        entity_or_event_count: usage_v2.entity_count,
+        semantic_digest: usage_v2.semantic_digest,
+    }])
 }
 
 fn force_replacement_phase(frame: &mut ScopedQueuedObservationFrame) {
@@ -3643,7 +3664,7 @@ fn replacement_snapshot_digest(
 fn bootstrap_complete_event_id(
     root: &ScopedObservationRootIdentity,
     scope_epoch: u64,
-    snapshot_digest: ScopedBootstrapSnapshotDigest,
+    replacement_snapshot_digest: ScopedReplacementSnapshotDigest,
 ) -> ScopedObservationEventId {
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"spaghetti/rfc012d/observation-event-id\0");
@@ -3653,7 +3674,7 @@ fn bootstrap_complete_event_id(
     hash_event_component(&mut hasher, root.source_instance_key.as_bytes());
     hash_event_component(&mut hasher, root.session_key.as_bytes());
     hasher.update(&scope_epoch.to_be_bytes());
-    hash_event_component(&mut hasher, snapshot_digest.as_bytes());
+    hash_event_component(&mut hasher, replacement_snapshot_digest.as_bytes());
     ScopedObservationEventId(*hasher.finalize().as_bytes())
 }
 
@@ -3661,7 +3682,7 @@ fn resync_required_event_id(
     root: &ScopedObservationRootIdentity,
     scope_epoch: u64,
     reason: ScopedResyncReason,
-    baseline_snapshot_digest: ScopedBootstrapSnapshotDigest,
+    baseline_snapshot_digest: ScopedReplacementSnapshotDigest,
 ) -> ScopedObservationEventId {
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"spaghetti/rfc012d/observation-event-id\0");
@@ -4047,7 +4068,18 @@ impl ScopedObservationAccessHost {
         let watermark = self
             .capture_watermark_core(admission, projection, delivery)
             .map_err(ScopedBootstrapBarrierError::Coverage)?;
-        delivery.offer_bootstrap_barrier(&self.root_identity, watermark, root_present, observed_at)
+        let replacement = projection
+            .usage_v2_replacement_snapshot(ScopedAppendDeliveryPhase::Bootstrap)
+            .map_err(|_| ScopedBootstrapBarrierError::InvalidSnapshot)?;
+        let family_manifest = replacement_family_manifest(&replacement, &watermark.source_coverage)
+            .map_err(|_| ScopedBootstrapBarrierError::InvalidSnapshot)?;
+        delivery.offer_bootstrap_barrier(
+            &self.root_identity,
+            watermark,
+            family_manifest,
+            root_present,
+            observed_at,
+        )
     }
 
     /// Explicitly invalidate the current valid epoch. Ordinary queue pressure
@@ -6060,7 +6092,7 @@ mod projection_tests {
             queue_state: delivery.state(),
         };
         let barrier = delivery
-            .offer_bootstrap_barrier(&root, watermark, true, 99)
+            .offer_bootstrap_barrier(&root, watermark, Vec::new(), true, 99)
             .unwrap();
         assert_eq!(barrier.barrier_sequence, 2);
         assert_eq!(delivery.queued_semantic_events(), 1);
@@ -6122,7 +6154,7 @@ mod projection_tests {
             queue_state: delivery.state(),
         };
         let barrier = delivery
-            .offer_bootstrap_barrier(&root, watermark, true, 50)
+            .offer_bootstrap_barrier(&root, watermark, Vec::new(), true, 50)
             .unwrap();
         assert_eq!(barrier.barrier_sequence, 2);
         assert_eq!(delivery.pop_next().unwrap().observer_sequence, 1);
@@ -6166,7 +6198,10 @@ mod projection_tests {
         assert_eq!(control.invalid_scope_epoch, 1);
         assert_eq!(control.control_sequence, 5);
         assert_eq!(control.last_contiguous_sequence, 2);
-        assert_eq!(control.baseline_snapshot_digest, barrier.snapshot_digest);
+        assert_eq!(
+            control.baseline_snapshot_digest,
+            barrier.replacement_snapshot_digest
+        );
         assert_eq!(control.discarded_semantic_events, 1);
         assert_eq!(control.discarded_source_controls, 1);
         assert_eq!(control.discarded_retained_native_bytes, 0);
@@ -6229,7 +6264,10 @@ mod projection_tests {
         assert_eq!(started.new_scope_epoch, 2);
         assert_eq!(started.control_sequence, 6);
         assert_eq!(started.required_control_sequence, 5);
-        assert_eq!(started.baseline_snapshot_digest, barrier.snapshot_digest);
+        assert_eq!(
+            started.baseline_snapshot_digest,
+            barrier.replacement_snapshot_digest
+        );
         assert_eq!(started.reason, ScopedResyncReason::WatcherOverflow);
         assert_eq!(started.replacement, ScopedReplacementMode::FullSnapshot);
         let repeated_started = delivery.begin_resync(&root, 999).unwrap();
@@ -6358,7 +6396,7 @@ mod projection_tests {
             queue_state: delivery.state(),
         };
         delivery
-            .offer_bootstrap_barrier(&root, watermark, false, 20)
+            .offer_bootstrap_barrier(&root, watermark, Vec::new(), false, 20)
             .unwrap();
         assert_eq!(delivery.pop_next().unwrap().observer_sequence, 1);
         let required = delivery
@@ -6401,7 +6439,7 @@ mod projection_tests {
             queue_state: delivery.state(),
         };
         delivery
-            .offer_bootstrap_barrier(&root, watermark, true, 20)
+            .offer_bootstrap_barrier(&root, watermark, Vec::new(), true, 20)
             .unwrap();
         assert_eq!(delivery.pop_next().unwrap().observer_sequence, 1);
         delivery
@@ -6609,7 +6647,7 @@ mod projection_tests {
             queue_state: delivery.state(),
         };
         let bootstrap = delivery
-            .offer_bootstrap_barrier(&root, watermark, true, 20)
+            .offer_bootstrap_barrier(&root, watermark, Vec::new(), true, 20)
             .unwrap();
         assert_eq!(delivery.pop_next().unwrap().observer_sequence, 1);
         delivery
@@ -6646,7 +6684,7 @@ mod projection_tests {
         assert_eq!(reoverflow.last_contiguous_sequence, 3);
         assert_eq!(
             reoverflow.baseline_snapshot_digest,
-            bootstrap.snapshot_digest
+            bootstrap.replacement_snapshot_digest
         );
         assert_eq!(reoverflow.discarded_semantic_events, 1);
         assert_eq!(reoverflow.discarded_source_controls, 0);
