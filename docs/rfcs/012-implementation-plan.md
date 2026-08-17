@@ -587,6 +587,15 @@ quality/coverage.
 
 Current landing status (2026-08-16):
 
+- added a sanitized, Rust-derived `runtime.actor-run`,
+  `runtime.actor-affiliation`, and `runtime.usage-v2` v1 fixture consumed by the
+  portable SDK. Rust constructs every opaque identity and semantic revision;
+  TypeScript independently validates the same wire values without SQLite,
+  N-API, native paths, or Node-only `Buffer`. The contract preserves and
+  validates affiliation effective time and usage source time, exercises
+  browser-like parsing plus malformed timestamp cases, and remains explicitly
+  a value-contract slice rather than the complete C1 observer/reducer exit
+  gate;
 - added the agent-neutral `runtime.usage-v2` response fact with canonical
   session/actor keys, object-and-generation-scoped response identity, explicit
   native-ID versus source-record fallback, four independently qualified

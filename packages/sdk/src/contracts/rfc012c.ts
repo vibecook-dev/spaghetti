@@ -30,6 +30,12 @@ export type ActorAffiliationDimension = 'team' | 'workflow';
 export type ActorAffiliationState = 'present' | 'removed' | 'unknown';
 export type UsageResponseIdentity = 'native_message_id' | 'source_record_fallback';
 export type UsageValueAuthority = 'native_response' | 'adapter_derived';
+export type TimestampQuality = 'NativeExact' | 'NativeApproximate' | 'FileMetadataFallback' | 'Derived';
+
+export interface QualifiedTimestamp {
+  value: string;
+  quality: TimestampQuality;
+}
 
 export interface UsageValueProvenance {
   native_field: string;
@@ -58,6 +64,7 @@ export interface ActorAffiliationRevision {
   native_target_id: string | null;
   native_member_id: string | null;
   state: ActorAffiliationState;
+  effective_at: QualifiedTimestamp | null;
 }
 
 export interface UsageBucketsV2 {
@@ -77,6 +84,7 @@ export interface UsageRevisionV2 {
   buckets: UsageBucketsV2;
   model: UsageQualifiedValue<string> | null;
   effort: UsageQualifiedValue<string> | null;
+  source_time: QualifiedTimestamp | null;
 }
 
 export interface RuntimeFamilyVersion {
@@ -152,6 +160,11 @@ export interface RuntimeContractFixture {
 
 type UnknownRecord = Record<string, unknown>;
 
+const MAX_RUNTIME_SEMANTIC_TEXT_BYTES = 8 * 1024;
+const MAX_USAGE_RESPONSE_KEY_BYTES = 8 * 1024;
+const MAX_USAGE_PROVENANCE_FIELD_BYTES = 256;
+const textEncoder = new TextEncoder();
+
 function record(value: unknown, label: string): UnknownRecord {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) {
     throw new ContractValidationError(`${label} must be an object`);
@@ -169,6 +182,19 @@ function nonEmptyString(value: unknown, label: string): string {
 function optionalString(value: unknown, label: string): string | null {
   if (value === undefined || value === null) return null;
   return nonEmptyString(value, label);
+}
+
+function boundedText(value: unknown, label: string, maxBytes: number): string {
+  const parsed = nonEmptyString(value, label);
+  if (textEncoder.encode(parsed).byteLength > maxBytes) {
+    throw new ContractValidationError(`${label} exceeds ${maxBytes} UTF-8 bytes`);
+  }
+  return parsed;
+}
+
+function optionalRuntimeSemanticText(value: unknown, label: string): string | null {
+  if (value === undefined || value === null) return null;
+  return boundedText(value, label, MAX_RUNTIME_SEMANTIC_TEXT_BYTES);
 }
 
 function optionalOpaque(value: unknown, label: string): OpaqueContractReference | null {
@@ -200,15 +226,55 @@ function parseCanonicalBase64(value: unknown, label: string): string {
   if (!/^[A-Za-z0-9+/]+={0,2}$/.test(value) || value.length % 4 !== 0) {
     throw new ContractValidationError(`${label} is not canonical padded standard base64`);
   }
-  const decoded = Buffer.from(value, 'base64');
-  if (decoded.toString('base64') !== value) {
+  const decoded = decodeBase64(value, label);
+  if (decoded.byteLength === 0 || decoded.byteLength > MAX_USAGE_RESPONSE_KEY_BYTES) {
+    throw new ContractValidationError(`${label} must decode to 1..=${MAX_USAGE_RESPONSE_KEY_BYTES} bytes`);
+  }
+  if (encodeBase64(decoded) !== value) {
     throw new ContractValidationError(`${label} is not canonical padded standard base64`);
   }
   return value;
 }
 
-function decodeCanonicalBase64(value: string): Buffer {
-  return Buffer.from(value, 'base64');
+function decodeBase64(value: string, label: string): Uint8Array {
+  let binary: string;
+  try {
+    binary = atob(value);
+  } catch {
+    throw new ContractValidationError(`${label} is not canonical padded standard base64`);
+  }
+  return Uint8Array.from(binary, (character) => character.charCodeAt(0));
+}
+
+function encodeBase64(value: Uint8Array): string {
+  let binary = '';
+  for (const byte of value) binary += String.fromCharCode(byte);
+  return btoa(binary);
+}
+
+function bytesEqual(left: Uint8Array, right: Uint8Array): boolean {
+  return left.byteLength === right.byteLength && left.every((byte, index) => byte === right[index]);
+}
+
+function parseTimestampQuality(value: unknown, label: string): TimestampQuality {
+  if (
+    value !== 'NativeExact' &&
+    value !== 'NativeApproximate' &&
+    value !== 'FileMetadataFallback' &&
+    value !== 'Derived'
+  ) {
+    throw new ContractValidationError(`${label} has an unsupported timestamp quality`);
+  }
+  return value;
+}
+
+function parseOptionalQualifiedTimestamp(value: unknown, label: string): QualifiedTimestamp | null {
+  if (value === undefined || value === null) return null;
+  const input = record(value, label);
+  return {
+    value: boundedText(input.value, `${label} value`, MAX_RUNTIME_SEMANTIC_TEXT_BYTES),
+    quality: parseTimestampQuality(input.quality, label),
+  };
 }
 
 function parseHexDigest(value: unknown, label: string): string {
@@ -222,7 +288,7 @@ function parseHexDigest(value: unknown, label: string): string {
 function parseUsageProvenance(value: unknown): UsageValueProvenance {
   const input = record(value, 'usage provenance');
   return {
-    native_field: nonEmptyString(input.native_field, 'usage provenance native_field'),
+    native_field: boundedText(input.native_field, 'usage provenance native_field', MAX_USAGE_PROVENANCE_FIELD_BYTES),
     normalization_contract_version: positiveInteger(
       input.normalization_contract_version,
       'usage provenance normalization_contract_version',
@@ -326,9 +392,9 @@ export function parseActorRunRevision(value: unknown): ActorRunRevision {
     session: parseOpaqueContractReference(input.session, 'actor session'),
     role,
     parent_actor_run: parent,
-    native_session_id: optionalString(input.native_session_id, 'native_session_id'),
-    native_actor_id: optionalString(input.native_actor_id, 'native_actor_id'),
-    native_actor_type: optionalString(input.native_actor_type, 'native_actor_type'),
+    native_session_id: optionalRuntimeSemanticText(input.native_session_id, 'native_session_id'),
+    native_actor_id: optionalRuntimeSemanticText(input.native_actor_id, 'native_actor_id'),
+    native_actor_type: optionalRuntimeSemanticText(input.native_actor_type, 'native_actor_type'),
   };
 }
 
@@ -347,9 +413,10 @@ export function parseActorAffiliationRevision(value: unknown): ActorAffiliationR
     dimension: input.dimension,
     target: parseOpaqueContractReference(input.target, 'affiliation target'),
     member: optionalOpaque(input.member, 'affiliation member'),
-    native_target_id: optionalString(input.native_target_id, 'native_target_id'),
-    native_member_id: optionalString(input.native_member_id, 'native_member_id'),
+    native_target_id: optionalRuntimeSemanticText(input.native_target_id, 'native_target_id'),
+    native_member_id: optionalRuntimeSemanticText(input.native_member_id, 'native_member_id'),
     state: input.state,
+    effective_at: parseOptionalQualifiedTimestamp(input.effective_at, 'affiliation effective_at'),
   };
 }
 
@@ -364,7 +431,7 @@ export function parseUsageRevisionV2(value: unknown): UsageRevisionV2 {
     if (nativeMessageId === null) {
       throw new ContractValidationError('native usage response identity requires native_message_id');
     }
-    if (!decodeCanonicalBase64(responseKey).equals(Buffer.from(nativeMessageId, 'utf8'))) {
+    if (!bytesEqual(decodeBase64(responseKey, 'response_key'), textEncoder.encode(nativeMessageId))) {
       throw new ContractValidationError('native usage response key must equal native_message_id');
     }
   } else if (nativeMessageId !== null) {
@@ -394,6 +461,7 @@ export function parseUsageRevisionV2(value: unknown): UsageRevisionV2 {
     },
     model: parseOptionalUsageQualified(input.model, 'model', parseTextValue),
     effort: parseOptionalUsageQualified(input.effort, 'effort', parseTextValue),
+    source_time: parseOptionalQualifiedTimestamp(input.source_time, 'usage source_time'),
   };
 }
 
@@ -464,6 +532,9 @@ export function parseRuntimeContractFixture(value: unknown): RuntimeContractFixt
     throw new ContractValidationError('runtime families must be an array');
   }
   const families = input.families.map(parseFamilyVersion);
+  if (new Set(families.map((family) => family.family)).size !== families.length) {
+    throw new ContractValidationError('runtime families must not contain duplicate names');
+  }
   requireFamily(families, ACTOR_RUN_FAMILY, ACTOR_RUN_FAMILY_VERSION);
   requireFamily(families, ACTOR_AFFILIATION_FAMILY, ACTOR_AFFILIATION_FAMILY_VERSION);
   requireFamily(families, USAGE_V2_FAMILY, USAGE_V2_FAMILY_VERSION);
@@ -494,6 +565,12 @@ export function parseRuntimeContractFixture(value: unknown): RuntimeContractFixt
   if (actors.child.revision.parent_actor_run !== actors.root.revision.actor_run) {
     throw new ContractValidationError('child actor must be parented to the fixture root actor');
   }
+  if (
+    actors.root.revision.session !== source.session.entity_key ||
+    actors.child.revision.session !== source.session.entity_key
+  ) {
+    throw new ContractValidationError('fixture actors must reference the fixture session');
+  }
 
   const affiliationsInput = record(input.affiliations, 'runtime affiliations');
   const affiliations = {
@@ -510,12 +587,28 @@ export function parseRuntimeContractFixture(value: unknown): RuntimeContractFixt
   }
   if (
     affiliations.child_team_present.revision.actor_run !== actors.child.revision.actor_run ||
-    affiliations.child_workflow_present.revision.actor_run !== actors.child.revision.actor_run
+    affiliations.child_workflow_present.revision.actor_run !== actors.child.revision.actor_run ||
+    affiliations.child_workflow_removed.revision.actor_run !== actors.child.revision.actor_run
   ) {
     throw new ContractValidationError('team and workflow affiliations must attach to the same child actor');
   }
+  if (
+    affiliations.child_team_present.revision.session !== source.session.entity_key ||
+    affiliations.child_workflow_present.revision.session !== source.session.entity_key ||
+    affiliations.child_workflow_removed.revision.session !== source.session.entity_key
+  ) {
+    throw new ContractValidationError('fixture affiliations must reference the fixture session');
+  }
   if (affiliations.child_workflow_removed.revision.state !== 'removed') {
     throw new ContractValidationError('fixture must include a removed affiliation revision');
+  }
+  if (
+    affiliations.child_workflow_present.revision.affiliation !==
+      affiliations.child_workflow_removed.revision.affiliation ||
+    affiliations.child_workflow_present.revision.target !== affiliations.child_workflow_removed.revision.target ||
+    affiliations.child_workflow_present.revision.member !== affiliations.child_workflow_removed.revision.member
+  ) {
+    throw new ContractValidationError('workflow removal must revise the same affiliation identity');
   }
 
   const usageInput = record(input.usage, 'runtime usage');
@@ -554,6 +647,24 @@ export function parseRuntimeContractFixture(value: unknown): RuntimeContractFixt
     usage.response_revisions.a.fact_id !== usage.response_revisions.a_repeat.fact_id
   ) {
     throw new ContractValidationError('A -> B -> A usage revisions must share one response fact identity');
+  }
+  if (
+    usage.response_revisions.a.revision.native_message_id !== usage.response_revisions.native_message_id ||
+    usage.response_revisions.b.revision.native_message_id !== usage.response_revisions.native_message_id ||
+    usage.response_revisions.a_repeat.revision.native_message_id !== usage.response_revisions.native_message_id
+  ) {
+    throw new ContractValidationError('A -> B -> A revisions must use the declared native message ID');
+  }
+  for (const example of [
+    usage.native_message,
+    usage.source_record_fallback,
+    usage.response_revisions.a,
+    usage.response_revisions.b,
+    usage.response_revisions.a_repeat,
+  ]) {
+    if (example.revision.session !== source.session.entity_key) {
+      throw new ContractValidationError('fixture usage revisions must reference the fixture session');
+    }
   }
 
   return {

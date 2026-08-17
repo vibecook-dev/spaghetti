@@ -1157,6 +1157,12 @@ impl UsageRevisionV2Fact {
                 ));
             }
         }
+        validate_runtime_semantic_text(
+            "source_time.value",
+            self.source_time
+                .as_ref()
+                .map(|timestamp| timestamp.value.as_str()),
+        )?;
         Ok(())
     }
 

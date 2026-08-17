@@ -10,10 +10,10 @@ use crate::adapter::{
     ActorAffiliationDimension, ActorAffiliationRevisionFact, ActorAffiliationState,
     ActorRunRevisionFact, ActorRunRole, AdapterId, CanonicalEntityKey, CanonicalFactId,
     CanonicalSourceInstanceKey, ContractCompleteness, ExternalEntityRef, Fact, FactBatch,
-    FactSemanticContext, FactSemanticRevision, QualifiedUnknownReason, QualifiedValue,
-    QualifiedValueQuality, SemanticRevisionRef, SourceRecordId, UsageBucketsV2,
-    UsageQualifiedValue, UsageResponseIdentity, UsageRevisionV2Fact, UsageValueAuthority,
-    UsageValueProvenance,
+    FactSemanticContext, FactSemanticRevision, QualifiedTimestamp, QualifiedUnknownReason,
+    QualifiedValue, QualifiedValueQuality, SemanticRevisionRef, SourceRecordId, TimestampQuality,
+    UsageBucketsV2, UsageQualifiedValue, UsageResponseIdentity, UsageRevisionV2Fact,
+    UsageValueAuthority, UsageValueProvenance,
 };
 use crate::source::{RecordOrigin, SourceCursor, SourceMediaType, SourceRecord};
 
@@ -816,5 +816,12 @@ fn invalid_runtime_payloads_fail_the_existing_fact_contract() {
 
     usage = fixture.usage.source_record_fallback.revision.clone();
     usage.native_message_id = Some(NATIVE_MESSAGE_ID.to_string());
+    assert!(usage.semantic_revision_key().is_err());
+
+    usage = fixture.usage.native_message.revision.clone();
+    usage.source_time = Some(QualifiedTimestamp {
+        value: String::new(),
+        quality: TimestampQuality::NativeExact,
+    });
     assert!(usage.semantic_revision_key().is_err());
 }

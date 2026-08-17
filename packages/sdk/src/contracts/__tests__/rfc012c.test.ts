@@ -51,6 +51,7 @@ test('Rust RFC 012C v1 fixture validates in the portable SDK', () => {
   assert.equal(fixture.affiliations.child_team_present.revision.dimension, 'team');
   assert.equal(fixture.affiliations.child_workflow_present.revision.dimension, 'workflow');
   assert.equal(fixture.affiliations.child_workflow_present.revision.state, 'present');
+  assert.equal(fixture.affiliations.child_workflow_present.revision.effective_at, null);
   assert.equal(fixture.affiliations.child_workflow_removed.revision.state, 'removed');
   assert.equal(fixture.affiliations.child_team_present.revision.actor_run, fixture.actors.child.revision.actor_run);
   assert.equal(fixture.affiliations.child_workflow_present.revision.actor_run, fixture.actors.child.revision.actor_run);
@@ -75,6 +76,7 @@ test('Rust RFC 012C v1 fixture validates in the portable SDK', () => {
   assert.equal(native.effort?.value, 'high');
   assert.equal(native.effort?.authority, 'adapter_derived');
   assert.equal(native.effort?.completeness, 'partial');
+  assert.equal(native.source_time, null);
 
   const fallback = fixture.usage.source_record_fallback.revision;
   assert.equal(fallback.response_identity, 'source_record_fallback');
@@ -89,13 +91,48 @@ test('Rust RFC 012C v1 fixture validates in the portable SDK', () => {
   assert.equal(aba.b.revision.buckets.input_tokens.value, 20);
 });
 
-test('unknown extras are retained only as uninterpreted members', () => {
+test('unknown extras are accepted without entering the typed value', () => {
   const raw = clone(rawFixture) as {
     usage: { native_message: { revision: { extra_future_field?: string } } };
   };
   raw.usage.native_message.revision.extra_future_field = 'ignored';
   const parsed = parseRuntimeContractFixture(raw);
   assert.equal(Object.prototype.hasOwnProperty.call(parsed.usage.native_message.revision, 'extra_future_field'), false);
+});
+
+test('portable parsing does not depend on the Node Buffer global', () => {
+  const globals = globalThis as unknown as { Buffer?: unknown };
+  const originalBuffer = globals.Buffer;
+  globals.Buffer = undefined;
+  try {
+    const fixture = parseRuntimeContractFixture(rawFixture);
+    assert.equal(fixture.usage.native_message.revision.native_message_id, 'msg_fixture_native_1');
+  } finally {
+    globals.Buffer = originalBuffer;
+  }
+});
+
+test('known native timestamp fields are preserved and validated', () => {
+  const affiliation = clone(
+    (rawFixture as { affiliations: { child_team_present: { revision: unknown } } }).affiliations.child_team_present
+      .revision,
+  ) as { effective_at: unknown };
+  affiliation.effective_at = { value: '2026-08-16T00:00:00Z', quality: 'NativeExact' };
+  assert.deepEqual(parseActorAffiliationRevision(affiliation).effective_at, affiliation.effective_at);
+
+  affiliation.effective_at = { value: '', quality: 'NativeExact' };
+  reject(affiliation, parseActorAffiliationRevision);
+  affiliation.effective_at = { value: '2026-08-16T00:00:00Z', quality: 'instant' };
+  reject(affiliation, parseActorAffiliationRevision);
+
+  const usage = clone(
+    (rawFixture as { usage: { native_message: { revision: unknown } } }).usage.native_message.revision,
+  ) as { source_time: unknown };
+  usage.source_time = { value: '2026-08-16T00:00:00Z', quality: 'NativeApproximate' };
+  assert.deepEqual(parseUsageRevisionV2(usage).source_time, usage.source_time);
+
+  usage.source_time = { value: '2026-08-16T00:00:00Z', quality: 'wall_clock' };
+  reject(usage, parseUsageRevisionV2);
 });
 
 test('unknown contract majors and malformed opaque references are rejected', () => {
@@ -110,6 +147,10 @@ test('unknown contract majors and malformed opaque references are rejected', () 
   const family = clone(rawFixture) as { families: Array<{ version: number }> };
   family.families[2]!.version = 2;
   reject(family, parseRuntimeContractFixture);
+
+  const duplicateFamily = clone(rawFixture) as { families: Array<{ family: string; version: number }> };
+  duplicateFamily.families.push({ ...duplicateFamily.families[0]! });
+  reject(duplicateFamily, parseRuntimeContractFixture);
 
   const actor = clone((rawFixture as { actors: { root: { revision: unknown } } }).actors.root.revision) as {
     actor_run: string;
