@@ -9,6 +9,7 @@ use std::collections::{BTreeMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, Weak};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 
@@ -2518,6 +2519,19 @@ impl ScopedObservationAsyncRuntimeShared {
             .close_with_consumer(&mut drain)
             .expect("the async runtime retains its attachment-owned consumer drain")
     }
+
+    /// Preserve an already-admitted terminal failure for the event owner. The
+    /// check shares the drain lock with failure admission, so a watcher drop
+    /// racing `fail_observer` cannot observe a stale non-failed state and then
+    /// discard the control by closing the drain.
+    fn request_close_unless_observer_failed(&self) {
+        let mut drain = self.lock_drain();
+        if drain.delivery_lane().state().continuity != ScopedObservationContinuity::Failed {
+            self.host
+                .close_with_consumer(&mut drain)
+                .expect("the async runtime retains its attachment-owned consumer drain");
+        }
+    }
 }
 
 /// Cloneable control/producer handle for the internal portable observer runtime.
@@ -2900,6 +2914,98 @@ pub enum ScopedObservationNativeWatcherError {
     RoutingFailed,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum ScopedObservationNativeWatcherRecoveryPolicyError {
+    #[error("scoped watcher audit interval is outside the supported bound")]
+    InvalidAuditInterval,
+    #[error("scoped watcher retry interval is outside the supported bound")]
+    InvalidRetryInterval,
+    #[error("scoped watcher replacement attempt limit is outside the supported bound")]
+    InvalidAttemptLimit,
+}
+
+/// Bounded runtime policy for watcher audits and backend replacement. These
+/// are internal correctness ceilings, not promoted RFC 012D performance gates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScopedObservationNativeWatcherRecoveryPolicy {
+    audit_interval: Duration,
+    initial_retry_delay: Duration,
+    max_retry_delay: Duration,
+    max_reinstall_attempts: u32,
+}
+
+impl ScopedObservationNativeWatcherRecoveryPolicy {
+    const MAX_AUDIT_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
+    const MAX_RETRY_DELAY: Duration = Duration::from_secs(60 * 60);
+    const MAX_REINSTALL_ATTEMPTS: u32 = 32;
+
+    pub fn new(
+        audit_interval: Duration,
+        initial_retry_delay: Duration,
+        max_retry_delay: Duration,
+        max_reinstall_attempts: u32,
+    ) -> Result<Self, ScopedObservationNativeWatcherRecoveryPolicyError> {
+        if audit_interval.is_zero() || audit_interval > Self::MAX_AUDIT_INTERVAL {
+            return Err(ScopedObservationNativeWatcherRecoveryPolicyError::InvalidAuditInterval);
+        }
+        if initial_retry_delay.is_zero()
+            || initial_retry_delay > max_retry_delay
+            || max_retry_delay > Self::MAX_RETRY_DELAY
+        {
+            return Err(ScopedObservationNativeWatcherRecoveryPolicyError::InvalidRetryInterval);
+        }
+        if max_reinstall_attempts == 0 || max_reinstall_attempts > Self::MAX_REINSTALL_ATTEMPTS {
+            return Err(ScopedObservationNativeWatcherRecoveryPolicyError::InvalidAttemptLimit);
+        }
+        Ok(Self {
+            audit_interval,
+            initial_retry_delay,
+            max_retry_delay,
+            max_reinstall_attempts,
+        })
+    }
+
+    pub fn audit_interval(self) -> Duration {
+        self.audit_interval
+    }
+
+    pub fn initial_retry_delay(self) -> Duration {
+        self.initial_retry_delay
+    }
+
+    pub fn max_retry_delay(self) -> Duration {
+        self.max_retry_delay
+    }
+
+    pub fn max_reinstall_attempts(self) -> u32 {
+        self.max_reinstall_attempts
+    }
+
+    fn retry_delay(self, completed_attempts: u32) -> Duration {
+        let exponent = completed_attempts.min(31);
+        self.initial_retry_delay
+            .saturating_mul(1_u32 << exponent)
+            .min(self.max_retry_delay)
+    }
+}
+
+impl Default for ScopedObservationNativeWatcherRecoveryPolicy {
+    fn default() -> Self {
+        Self {
+            audit_interval: Duration::from_secs(5 * 60),
+            initial_retry_delay: Duration::from_millis(100),
+            max_retry_delay: Duration::from_secs(5),
+            max_reinstall_attempts: 5,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ScopedObservationNativeWatcherRunExit {
+    Cancelled,
+    Failed(Arc<ScopedObserverFailure>),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ScopedObservationNativeWatchAnchor {
     path: PathBuf,
@@ -3195,6 +3301,7 @@ pub struct ScopedObservationNativeWatcher {
     plan: Arc<ScopedObservationNativeWatchPlan>,
     completion: Arc<ScopedObservationNativeWatcherCompletion>,
     watch_anchor_count: usize,
+    terminal_failure_delivered: bool,
 }
 
 impl std::fmt::Debug for ScopedObservationNativeWatcher {
@@ -3238,11 +3345,13 @@ impl ScopedObservationNativeWatcher {
     }
 
     pub fn fail_observer(
-        &self,
+        &mut self,
         reason: ScopedObserverFailureReason,
         observed_at: i64,
     ) -> Result<Arc<ScopedObserverFailure>, ScopedContinuityError> {
-        self.handle.fail_observer(reason, observed_at)
+        let failure = self.handle.fail_observer(reason, observed_at)?;
+        self.terminal_failure_delivered = true;
+        Ok(failure)
     }
 
     /// Replace a failed native backend while retaining this attachment's one
@@ -3337,6 +3446,155 @@ impl ScopedObservationNativeWatcher {
         self.reinstall_native_backend_with_factory_inner(factory)
     }
 
+    /// Own the watcher until cancellation or terminal recovery exhaustion.
+    /// Audits only schedule bounded whole-scope passes; the attachment's pass
+    /// driver remains the sole source reader and watermark publisher.
+    pub async fn run_with_recovery(
+        self,
+        policy: ScopedObservationNativeWatcherRecoveryPolicy,
+    ) -> Result<ScopedObservationNativeWatcherRunExit, ScopedContinuityError> {
+        self.run_with_recovery_inner(
+            policy,
+            |callback| {
+                let watcher = notify::recommended_watcher(callback).map_err(|_| ())?;
+                Ok(Box::new(watcher))
+            },
+            scoped_observation_now_unix_ms,
+        )
+        .await
+    }
+
+    async fn run_with_recovery_inner<F, C>(
+        mut self,
+        policy: ScopedObservationNativeWatcherRecoveryPolicy,
+        mut factory: F,
+        mut observed_at: C,
+    ) -> Result<ScopedObservationNativeWatcherRunExit, ScopedContinuityError>
+    where
+        F: FnMut(
+                ScopedObservationNativeWatchCallback,
+            ) -> Result<Box<dyn ScopedObservationNativeWatchBackend>, ()>
+            + Send,
+        C: FnMut() -> i64 + Send,
+    {
+        let mut audit = tokio::time::interval(policy.audit_interval());
+        audit.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        // `interval` ticks immediately once; consume that setup tick so audits
+        // happen after the configured quiet period rather than at bootstrap.
+        audit.tick().await;
+        let mut observed_generation = self.state().generation;
+
+        loop {
+            let state = self.state();
+            if state.routing_failed {
+                return self.finish_terminal_failure(
+                    ScopedObserverFailureReason::NativeWatcherRoutingFailed,
+                    observed_at(),
+                );
+            }
+            if state.backend_failed {
+                let mut completed_attempts = 0;
+                loop {
+                    if completed_attempts == policy.max_reinstall_attempts() {
+                        return self.finish_terminal_failure(
+                            ScopedObserverFailureReason::NativeWatcherRecoveryExhausted,
+                            observed_at(),
+                        );
+                    }
+                    let delay = policy.retry_delay(completed_attempts);
+                    tokio::select! {
+                        biased;
+                        _ = self.coordinator.wait_for_cancellation_async() => {
+                            return Ok(ScopedObservationNativeWatcherRunExit::Cancelled);
+                        }
+                        _ = tokio::time::sleep(delay) => {}
+                    }
+                    completed_attempts += 1;
+                    match self
+                        .reinstall_native_backend_with_factory_inner(|callback| factory(callback))
+                    {
+                        Ok(_) => {
+                            observed_generation = self.state().generation;
+                            break;
+                        }
+                        Err(ScopedObservationNativeWatcherError::Startup(
+                            ScopedObservationStartupError::Closed,
+                        )) => {
+                            return Ok(ScopedObservationNativeWatcherRunExit::Cancelled);
+                        }
+                        Err(_) if self.state().routing_failed => {
+                            return self.finish_terminal_failure(
+                                ScopedObserverFailureReason::NativeWatcherRoutingFailed,
+                                observed_at(),
+                            );
+                        }
+                        Err(_) => {}
+                    }
+                }
+                continue;
+            }
+
+            let waiter = self.waiter();
+            tokio::select! {
+                biased;
+                _ = self.coordinator.wait_for_cancellation_async() => {
+                    return Ok(ScopedObservationNativeWatcherRunExit::Cancelled);
+                }
+                changed = waiter.wait_after(observed_generation) => {
+                    observed_generation = changed.generation;
+                }
+                _ = audit.tick() => {
+                    match self.request_audit() {
+                        Ok(_) => observed_generation = self.state().generation,
+                        Err(ScopedObservationNativeWatcherError::Startup(
+                            ScopedObservationStartupError::Closed,
+                        )) => {
+                            return Ok(ScopedObservationNativeWatcherRunExit::Cancelled);
+                        }
+                        Err(_) => {
+                            return self.finish_terminal_failure(
+                                ScopedObserverFailureReason::NativeWatcherRoutingFailed,
+                                observed_at(),
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn finish_terminal_failure(
+        &mut self,
+        reason: ScopedObserverFailureReason,
+        observed_at: i64,
+    ) -> Result<ScopedObservationNativeWatcherRunExit, ScopedContinuityError> {
+        match self.fail_observer(reason, observed_at) {
+            Ok(failure) => Ok(ScopedObservationNativeWatcherRunExit::Failed(failure)),
+            Err(ScopedContinuityError::Closed) => {
+                Ok(ScopedObservationNativeWatcherRunExit::Cancelled)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    #[cfg(test)]
+    pub async fn run_with_recovery_with_factory_and_clock<F, C>(
+        self,
+        policy: ScopedObservationNativeWatcherRecoveryPolicy,
+        factory: F,
+        observed_at: C,
+    ) -> Result<ScopedObservationNativeWatcherRunExit, ScopedContinuityError>
+    where
+        F: FnMut(
+                ScopedObservationNativeWatchCallback,
+            ) -> Result<Box<dyn ScopedObservationNativeWatchBackend>, ()>
+            + Send,
+        C: FnMut() -> i64 + Send,
+    {
+        self.run_with_recovery_inner(policy, factory, observed_at)
+            .await
+    }
+
     /// Own the native backend until attachment cancellation, then stop the
     /// backend and release the coordinator's watcher registration on return.
     pub async fn run_until_cancelled(self) {
@@ -3344,11 +3602,18 @@ impl ScopedObservationNativeWatcher {
     }
 }
 
+fn scoped_observation_now_unix_ms() -> i64 {
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_millis());
+    i64::try_from(millis).unwrap_or(i64::MAX)
+}
+
 impl Drop for ScopedObservationNativeWatcher {
     fn drop(&mut self) {
         drop(self.backend.take());
-        if !self.coordinator.cancellation_requested() {
-            let _ = self.handle.request_close();
+        if !self.coordinator.cancellation_requested() && !self.terminal_failure_delivered {
+            self.handle.shared.request_close_unless_observer_failed();
         }
         self.completion.close();
     }
@@ -3399,6 +3664,7 @@ impl ScopedObservationAsyncHandle {
             plan,
             completion,
             watch_anchor_count,
+            terminal_failure_delivered: false,
         })
     }
 
@@ -11257,6 +11523,50 @@ mod projection_tests {
                 replay_failure.reason,
             )
         );
+    }
+
+    #[test]
+    fn scoped_native_watcher_recovery_policy_is_bounded_and_caps_backoff() {
+        assert_eq!(
+            ScopedObservationNativeWatcherRecoveryPolicy::new(
+                Duration::ZERO,
+                Duration::from_millis(1),
+                Duration::from_millis(1),
+                1,
+            ),
+            Err(ScopedObservationNativeWatcherRecoveryPolicyError::InvalidAuditInterval)
+        );
+        assert_eq!(
+            ScopedObservationNativeWatcherRecoveryPolicy::new(
+                Duration::from_secs(1),
+                Duration::from_millis(2),
+                Duration::from_millis(1),
+                1,
+            ),
+            Err(ScopedObservationNativeWatcherRecoveryPolicyError::InvalidRetryInterval)
+        );
+        assert_eq!(
+            ScopedObservationNativeWatcherRecoveryPolicy::new(
+                Duration::from_secs(1),
+                Duration::from_millis(1),
+                Duration::from_millis(1),
+                0,
+            ),
+            Err(ScopedObservationNativeWatcherRecoveryPolicyError::InvalidAttemptLimit)
+        );
+
+        let policy = ScopedObservationNativeWatcherRecoveryPolicy::new(
+            Duration::from_secs(1),
+            Duration::from_millis(10),
+            Duration::from_millis(25),
+            4,
+        )
+        .unwrap();
+        assert_eq!(policy.retry_delay(0), Duration::from_millis(10));
+        assert_eq!(policy.retry_delay(1), Duration::from_millis(20));
+        assert_eq!(policy.retry_delay(2), Duration::from_millis(25));
+        assert_eq!(policy.retry_delay(31), Duration::from_millis(25));
+        assert_eq!(policy.max_reinstall_attempts(), 4);
     }
 
     #[test]

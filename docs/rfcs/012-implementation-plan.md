@@ -1310,9 +1310,17 @@ Current landing status (2026-08-17):
   failed construction or anchor registration leaves a retryable degraded
   state without advancing the backend generation, while success advances that
   generation and schedules mandatory full-instance recovery reconciliation.
-  Automatic audit cadence, bounded retry/backoff/exhaustion policy,
-  automatic exhaustion-to-failure triggering, and the public portable host
-  wrapper remain open;
+  A validated async owner loop now schedules audits only after the configured
+  quiet period, skips missed timer bursts, applies capped exponential backend-
+  replacement delay for a finite attempt count, and gives cancellation
+  priority at every wait. Successful replacement resumes auditing only after
+  scheduling full-instance recovery; routing failure or exhausted replacement
+  attempts deliver the retained terminal observer failure. The watcher then
+  stops its backend/registration without implicitly closing the event drain,
+  so the consumer can apply that failure before owning the independent close
+  barrier. Default timing values remain provisional internal policy, not
+  promoted performance gates. Public pass-driver/portable-host wiring and
+  calibration remain open;
 - one pass is active at a time, a later pass receives fresh bounds, close is
   idempotent, and the frozen access report excludes paths, identity values, and
   content; and
@@ -1330,8 +1338,8 @@ and complete scope coverage,
 dynamic/discovered scope membership beyond the attachment's current exact
 known-object grants and family coverage beyond usage-v2,
 complete multi-family replacement manifests, whole-scope discovery and source
-state beyond the current exact append-object set, and automatic watcher audit
-cadence/reinstallation and exhaustion policy, plus re-overflow orchestration,
+state beyond the current exact append-object set, public watcher pass-driver
+wiring and policy calibration, plus re-overflow orchestration,
 artifact mediation and the public portable close transport,
 the trusted native version-probe/identity-input drivers, and the complete
 public request are not yet implemented. The internal offered and applied
@@ -1467,8 +1475,8 @@ pressure preserves all active state; and re-overflow keeps the last valid epoch
 while a newer stage supersedes the failed continuity epoch. Complete
 multi-family and D-owned manifests, dynamic whole-scope discovery and
 non-append participants, the public transport over the internal async applied
-runtime, and automatic watcher audit/reinstallation plus terminal failure
-scheduling remain open. The dedicated control lane now also carries one
+runtime, and watcher policy calibration/public pass-driver integration remain
+open. The dedicated control lane now also carries one
 deterministic, attachment-terminal `observer.failed` control before or after
 bootstrap. The first cause wins idempotently, explicitly accounts for and
 supersedes all undelivered semantic/source-control backlog and incomplete
@@ -1476,7 +1484,10 @@ resync controls, rejects later ordinary offers and epoch transitions, and
 prevents failed-epoch watermarks. Pending poll and engine-ready waiters wake
 with the same retained failure rather than hanging or claiming cancellation;
 the ordered event drain still requires explicit application acknowledgement,
-and close remains an independent resource barrier.
+and close remains an independent resource barrier. The bounded native owner
+now automatically connects audit, backend replacement, capped retry/backoff,
+routing failure, and retry exhaustion to that control while preserving it for
+delivery before close.
 
 ### D4. SDK and Chopsticks migration
 
@@ -1670,7 +1681,8 @@ The next execution order is:
    scan coordinator while finishing D2 dynamic Claude scope and declared
    decoder dependencies;
 6. complete D3 multi-family and D-owned replacement manifests, non-append
-   participants, watcher failure scheduling, and multi-observer fairness;
+   participants, public watcher pass-driver wiring/policy calibration, and
+   multi-observer fairness;
 7. run A4 only after the initial catalog/query and public scoped-observer seams
    both exist, proving a fourth agent needs no common-engine API changes;
 8. implement B4/C4/D4 UI, typed-consumer, Chopsticks, and reference

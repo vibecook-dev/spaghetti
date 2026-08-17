@@ -206,7 +206,8 @@ mod tests {
         ScopedObservationConsumerOfferError, ScopedObservationContinuity,
         ScopedObservationDeliveryLane, ScopedObservationDeliveryLimits, ScopedObservationEvent,
         ScopedObservationNativeWatchBackend, ScopedObservationNativeWatchCallback,
-        ScopedObservationNativeWatcherError, ScopedObservationOpenDrainError,
+        ScopedObservationNativeWatcherError, ScopedObservationNativeWatcherRecoveryPolicy,
+        ScopedObservationNativeWatcherRunExit, ScopedObservationOpenDrainError,
         ScopedObservationPollError, ScopedObservationPollLease, ScopedObservationPollResolution,
         ScopedObservationProjectionLimits, ScopedObservationProjectionSink,
         ScopedObservationQueueLimits, ScopedObservationReadyResolution,
@@ -2074,6 +2075,321 @@ mod tests {
         let barrier = runtime.request_close();
         drop(watcher);
         assert_eq!(drops.load(Ordering::SeqCst), 2);
+        assert!(barrier.wait_async().await.complete);
+    }
+
+    #[tokio::test]
+    async fn scoped_native_watcher_recovery_loop_reinstalls_and_resumes() {
+        let registry = supported_fixture_registry();
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().join("native-watch-recovery-loop-root");
+        std::fs::create_dir_all(&root).unwrap();
+        let host =
+            ScopedObservationAccessHost::authorize(&registry, scoped_access_request(root.clone()))
+                .unwrap();
+        let runtime = ScopedObservationAsyncRuntime::open(
+            host,
+            ScopedObservationDeliveryLimits {
+                max_semantic_events: 1,
+                max_retained_native_bytes: 0,
+                max_source_control_items: 1,
+            },
+        )
+        .unwrap();
+        let handle = runtime.handle();
+        let callback_slot = Arc::new(std::sync::Mutex::new(None));
+        let registrations = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let drops = Arc::new(AtomicUsize::new(0));
+        let watcher = handle
+            .install_native_watcher_with_factory(1, {
+                let callback_slot = Arc::clone(&callback_slot);
+                let registrations = Arc::clone(&registrations);
+                let drops = Arc::clone(&drops);
+                move |callback| {
+                    Ok(Box::new(ControlledScopedWatchBackend {
+                        callback: Some(callback),
+                        callback_slot,
+                        registrations,
+                        drops,
+                    }))
+                }
+            })
+            .unwrap();
+        callback_slot.lock().unwrap().as_mut().unwrap()(Err(notify::Error::generic(
+            "fixture backend disconnected",
+        )));
+        let failed = watcher.state();
+        assert!(failed.backend_failed);
+        let waiter = watcher.waiter();
+
+        let policy = ScopedObservationNativeWatcherRecoveryPolicy::new(
+            std::time::Duration::from_secs(60),
+            std::time::Duration::from_millis(1),
+            std::time::Duration::from_millis(1),
+            1,
+        )
+        .unwrap();
+        let runner = tokio::spawn(watcher.run_with_recovery_with_factory_and_clock(
+            policy,
+            {
+                let callback_slot = Arc::clone(&callback_slot);
+                let registrations = Arc::clone(&registrations);
+                let drops = Arc::clone(&drops);
+                move |callback| {
+                    Ok(Box::new(ControlledScopedWatchBackend {
+                        callback: Some(callback),
+                        callback_slot: Arc::clone(&callback_slot),
+                        registrations: Arc::clone(&registrations),
+                        drops: Arc::clone(&drops),
+                    }))
+                }
+            },
+            || 321,
+        ));
+        let recovered = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                let state = waiter.state();
+                if state.backend_generation == 2 && !state.backend_failed && !state.reinstalling {
+                    break state;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(!recovered.routing_failed);
+        assert_eq!(registrations.lock().unwrap().len(), 2);
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+
+        let barrier = handle.request_close();
+        assert_eq!(
+            tokio::time::timeout(std::time::Duration::from_secs(2), runner)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap(),
+            ScopedObservationNativeWatcherRunExit::Cancelled
+        );
+        assert_eq!(drops.load(Ordering::SeqCst), 2);
+        assert!(barrier.wait_async().await.complete);
+    }
+
+    #[tokio::test]
+    async fn scoped_native_watcher_recovery_exhaustion_delivers_failure_without_closing() {
+        let registry = supported_fixture_registry();
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().join("native-watch-exhaustion-root");
+        std::fs::create_dir_all(&root).unwrap();
+        let host =
+            ScopedObservationAccessHost::authorize(&registry, scoped_access_request(root.clone()))
+                .unwrap();
+        let mut runtime = ScopedObservationAsyncRuntime::open(
+            host,
+            ScopedObservationDeliveryLimits {
+                max_semantic_events: 1,
+                max_retained_native_bytes: 0,
+                max_source_control_items: 1,
+            },
+        )
+        .unwrap();
+        let handle = runtime.handle();
+        let callback_slot = Arc::new(std::sync::Mutex::new(None));
+        let registrations = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let drops = Arc::new(AtomicUsize::new(0));
+        let watcher = handle
+            .install_native_watcher_with_factory(1, {
+                let callback_slot = Arc::clone(&callback_slot);
+                let registrations = Arc::clone(&registrations);
+                let drops = Arc::clone(&drops);
+                move |callback| {
+                    Ok(Box::new(ControlledScopedWatchBackend {
+                        callback: Some(callback),
+                        callback_slot,
+                        registrations,
+                        drops,
+                    }))
+                }
+            })
+            .unwrap();
+        callback_slot.lock().unwrap().as_mut().unwrap()(Err(notify::Error::generic(
+            "fixture backend permanently unavailable",
+        )));
+        assert!(watcher.state().backend_failed);
+
+        let policy = ScopedObservationNativeWatcherRecoveryPolicy::new(
+            std::time::Duration::from_secs(60),
+            std::time::Duration::from_millis(1),
+            std::time::Duration::from_millis(1),
+            2,
+        )
+        .unwrap();
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let exit = watcher
+            .run_with_recovery_with_factory_and_clock(
+                policy,
+                {
+                    let attempts = Arc::clone(&attempts);
+                    move |_| {
+                        attempts.fetch_add(1, Ordering::SeqCst);
+                        Err(())
+                    }
+                },
+                || 123,
+            )
+            .await
+            .unwrap();
+        let ScopedObservationNativeWatcherRunExit::Failed(failure) = exit else {
+            panic!("permanent backend failure must exhaust into observer failure");
+        };
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            failure.reason,
+            ScopedObserverFailureReason::NativeWatcherRecoveryExhausted
+        );
+        assert!(!handle.host().is_closed());
+        assert!(handle.host().poll_state().failed);
+
+        let yielded = runtime.next_event().await.unwrap().unwrap();
+        assert_eq!(yielded.envelope.observed_at, 123);
+        assert!(matches!(
+            &yielded.envelope.event,
+            ScopedObservationEvent::ObserverFailed {
+                failure: delivered,
+            } if Arc::ptr_eq(delivered, &failure)
+        ));
+        runtime
+            .acknowledge_applied(yielded.application_receipt())
+            .unwrap();
+        assert!(runtime.close().await.complete);
+    }
+
+    #[tokio::test]
+    async fn scoped_native_watcher_drop_preserves_attachment_terminal_failure() {
+        let registry = supported_fixture_registry();
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().join("native-watch-external-failure-root");
+        std::fs::create_dir_all(&root).unwrap();
+        let host =
+            ScopedObservationAccessHost::authorize(&registry, scoped_access_request(root.clone()))
+                .unwrap();
+        let mut runtime = ScopedObservationAsyncRuntime::open(
+            host,
+            ScopedObservationDeliveryLimits {
+                max_semantic_events: 1,
+                max_retained_native_bytes: 0,
+                max_source_control_items: 1,
+            },
+        )
+        .unwrap();
+        let handle = runtime.handle();
+        let callback_slot = Arc::new(std::sync::Mutex::new(None));
+        let registrations = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let drops = Arc::new(AtomicUsize::new(0));
+        let watcher = handle
+            .install_native_watcher_with_factory(1, {
+                let callback_slot = Arc::clone(&callback_slot);
+                let registrations = Arc::clone(&registrations);
+                let drops = Arc::clone(&drops);
+                move |callback| {
+                    Ok(Box::new(ControlledScopedWatchBackend {
+                        callback: Some(callback),
+                        callback_slot,
+                        registrations,
+                        drops,
+                    }))
+                }
+            })
+            .unwrap();
+
+        let failure = handle
+            .fail_observer(ScopedObserverFailureReason::InternalControlFailure, 654)
+            .unwrap();
+        drop(watcher);
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        assert!(!handle.host().is_closed());
+
+        let yielded = runtime.next_event().await.unwrap().unwrap();
+        assert!(matches!(
+            &yielded.envelope.event,
+            ScopedObservationEvent::ObserverFailed {
+                failure: delivered,
+            } if Arc::ptr_eq(delivered, &failure)
+        ));
+        runtime
+            .acknowledge_applied(yielded.application_receipt())
+            .unwrap();
+        assert!(runtime.close().await.complete);
+    }
+
+    #[tokio::test]
+    async fn scoped_native_watcher_recovery_loop_schedules_audits_and_cancels() {
+        let registry = supported_fixture_registry();
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().join("native-watch-audit-loop-root");
+        std::fs::create_dir_all(&root).unwrap();
+        let host =
+            ScopedObservationAccessHost::authorize(&registry, scoped_access_request(root.clone()))
+                .unwrap();
+        let runtime = ScopedObservationAsyncRuntime::open(
+            host,
+            ScopedObservationDeliveryLimits {
+                max_semantic_events: 1,
+                max_retained_native_bytes: 0,
+                max_source_control_items: 1,
+            },
+        )
+        .unwrap();
+        let handle = runtime.handle();
+        let callback_slot = Arc::new(std::sync::Mutex::new(None));
+        let registrations = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let drops = Arc::new(AtomicUsize::new(0));
+        let watcher = handle
+            .install_native_watcher_with_factory(1, {
+                let callback_slot = Arc::clone(&callback_slot);
+                let registrations = Arc::clone(&registrations);
+                let drops = Arc::clone(&drops);
+                move |callback| {
+                    Ok(Box::new(ControlledScopedWatchBackend {
+                        callback: Some(callback),
+                        callback_slot,
+                        registrations,
+                        drops,
+                    }))
+                }
+            })
+            .unwrap();
+        let waiter = watcher.waiter();
+        let policy = ScopedObservationNativeWatcherRecoveryPolicy::new(
+            std::time::Duration::from_millis(1),
+            std::time::Duration::from_millis(1),
+            std::time::Duration::from_millis(1),
+            1,
+        )
+        .unwrap();
+        let runner = tokio::spawn(watcher.run_with_recovery_with_factory_and_clock(
+            policy,
+            |_| Err(()),
+            || 456,
+        ));
+        let audited = tokio::time::timeout(std::time::Duration::from_secs(2), waiter.wait_after(0))
+            .await
+            .unwrap();
+        assert!(audited.generation > 0);
+        assert_eq!(audited.backend_generation, 1);
+        assert!(!audited.backend_failed);
+        assert!(!audited.routing_failed);
+
+        let barrier = handle.request_close();
+        assert_eq!(
+            tokio::time::timeout(std::time::Duration::from_secs(2), runner)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap(),
+            ScopedObservationNativeWatcherRunExit::Cancelled
+        );
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
         assert!(barrier.wait_async().await.complete);
     }
 
