@@ -976,10 +976,14 @@ Current landing status (2026-08-16):
   lifecycle controls in independent capacity domains while retaining one
   deterministic total offer order. Projected batches enter it all-or-nothing,
   semantic saturation does not consume source-control capacity, and a reset
-  offered with its usage retractions is drained reset-first. Its internal offer
-  ordinal is sequencing input only, never semantic identity. The integrated
+  offered with its usage retractions is drained reset-first. The offered
+  boundary assigns one monotonic epoch-1 `observer_sequence` across both
+  capacity domains; dequeue is the distinct delivered boundary, and neither
+  implies consumer application. Queue state reports `offered_through_sequence`
+  plus both lane counts without treating a semantic/control backlog as applied
+  state. The integrated
   admission-to-projection-to-delivery transaction proves saturation retry
-  without reducer or ordinal drift, permits an exact-repeat empty batch to
+  without reducer or sequence drift, permits an exact-repeat empty batch to
   retire while delivery is full, and keeps reset plus all retractions
   indivisible;
 - one pass is active at a time, a later pass receives fresh bounds, close is
@@ -1050,10 +1054,14 @@ coverage-complete family manifest, atomic staged swap, and multi-observer
 isolation remain unimplemented. Internally, reducer mutation, admitted-frame
 release, and bounded delivery admission now share one retry-safe offered
 transaction: exact projected capacity is checked before mutation, queue
-pressure changes no reducer or ordinal state, and reset/control plus semantic
+pressure changes no reducer or sequence state, and reset/control plus semantic
 retractions enter delivery as one ordered batch. Therefore the D3 and X0 gates
 remain open for the still-missing public lifecycle rather than this internal
-atomicity seam.
+atomicity seam. Delivered internal values now carry the selected event-contract
+version, epoch, observer sequence, mandatory event ID, optional
+semantic revision, phase, stable source coordinate, and typed event. This
+freezes the offered/delivered vocabulary but is not yet the complete public
+root/actor/evidence envelope or an applied acknowledgement.
 
 ### D4. SDK and Chopsticks migration
 

@@ -536,7 +536,7 @@ impl ScopedObservationAdmissionLane {
     /// mutation and admission-accounting release commit synchronously.
     ///
     /// Either error leaves the frame at the head of its original queue, keeps
-    /// reducer state unchanged, and advances no delivery offer ordinal. An
+    /// reducer state unchanged, and advances no offered observer sequence. An
     /// exact semantic repeat prepares an empty batch, so it can retire even
     /// while the semantic delivery queue is full.
     pub fn offer_next(
@@ -708,6 +708,7 @@ fn queued_control_observation(control: QueuedControlFrame) -> ScopedQueuedObserv
 pub const SCOPED_OBSERVATION_EVENT_CONTRACT_VERSION: u32 = 1;
 pub const SCOPED_REPLACEMENT_DIGEST_CONTRACT_VERSION: u32 = 1;
 pub const RUNTIME_USAGE_V2_FACT_FAMILY_CONTRACT_VERSION: u32 = 1;
+pub const SCOPED_INITIAL_SCOPE_EPOCH: u64 = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ScopedObservationEventId([u8; 32]);
@@ -855,20 +856,34 @@ pub struct ScopedObservationDeliveryLimits {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ScopedObservationOfferReceipt {
-    pub first_offer_ordinal: Option<u64>,
-    pub through_offer_ordinal: Option<u64>,
+    pub first_offered_sequence: Option<u64>,
+    pub offered_through_sequence: u64,
     pub semantic_events: u64,
     pub retained_native_bytes: u64,
     pub source_control_items: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ScopedOfferedObservation {
-    /// Internal stable order assigned when the projected value enters the
-    /// bounded delivery lane. The public envelope mapper will convert this to
-    /// observer sequencing; it is never semantic identity.
-    pub offer_ordinal: u64,
-    pub value: ScopedProjectedObservation,
+pub struct ScopedDeliveredObservation {
+    pub event_contract_version: u32,
+    /// Delivery order within this attachment. It is assigned at the offered
+    /// boundary and is neither a semantic identity nor stable across attaches.
+    pub observer_sequence: u64,
+    pub scope_epoch: u64,
+    pub event_id: ScopedObservationEventId,
+    pub semantic_revision_ref: Option<SemanticRevisionRef>,
+    pub phase: ScopedAppendDeliveryPhase,
+    pub source: ScopedSourceObjectIdentity,
+    pub event: ScopedProjectedObservation,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScopedObservationDeliveryState {
+    pub scope_epoch: u64,
+    pub offered_through_sequence: u64,
+    pub queued_semantic_events: usize,
+    pub queued_retained_native_bytes: u64,
+    pub queued_source_control_items: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -889,8 +904,8 @@ pub enum ScopedDeliveryError {
     SourceControlQueueFull,
     #[error("scoped delivery accounting is exhausted")]
     CapacityExhausted,
-    #[error("scoped delivery offer ordinal is exhausted")]
-    OfferOrdinalExhausted,
+    #[error("scoped observer delivery sequence is exhausted")]
+    ObserverSequenceExhausted,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -908,7 +923,7 @@ pub struct ScopedDeliveryOfferFailure {
 }
 
 struct QueuedProjectedObservation {
-    offer_ordinal: u64,
+    observer_sequence: u64,
     retained_native_bytes: u64,
     value: ScopedProjectedObservation,
 }
@@ -925,10 +940,11 @@ struct ScopedProjectedMeasurement {
 /// order; capacity separation does not create two public streams.
 pub struct ScopedObservationDeliveryLane {
     limits: ScopedObservationDeliveryLimits,
+    scope_epoch: u64,
     semantic: VecDeque<QueuedProjectedObservation>,
     source_controls: VecDeque<QueuedProjectedObservation>,
     queued_retained_native_bytes: u64,
-    next_offer_ordinal: u64,
+    next_observer_sequence: u64,
 }
 
 impl ScopedObservationDeliveryLane {
@@ -938,10 +954,11 @@ impl ScopedObservationDeliveryLane {
         }
         Ok(Self {
             limits,
+            scope_epoch: SCOPED_INITIAL_SCOPE_EPOCH,
             semantic: VecDeque::new(),
             source_controls: VecDeque::new(),
             queued_retained_native_bytes: 0,
-            next_offer_ordinal: 1,
+            next_observer_sequence: 1,
         })
     }
 
@@ -988,22 +1005,22 @@ impl ScopedObservationDeliveryLane {
                 });
             }
         };
-        let after_ordinal = match self.next_offer_ordinal.checked_add(total_items) {
+        let after_sequence = match self.next_observer_sequence.checked_add(total_items) {
             Some(after) => after,
             None => {
                 return Err(ScopedDeliveryOfferFailure {
-                    error: ScopedDeliveryError::OfferOrdinalExhausted,
+                    error: ScopedDeliveryError::ObserverSequenceExhausted,
                     projected,
                 });
             }
         };
 
-        let first_offer_ordinal = (!projected.is_empty()).then_some(self.next_offer_ordinal);
-        let mut offer_ordinal = self.next_offer_ordinal;
+        let first_offered_sequence = (!projected.is_empty()).then_some(self.next_observer_sequence);
+        let mut observer_sequence = self.next_observer_sequence;
         for value in projected {
             let (semantic, retained_native_bytes) = projected_observation_measurement(&value);
             let queued = QueuedProjectedObservation {
-                offer_ordinal,
+                observer_sequence,
                 retained_native_bytes,
                 value,
             };
@@ -1012,24 +1029,28 @@ impl ScopedObservationDeliveryLane {
             } else {
                 self.source_controls.push_back(queued);
             }
-            offer_ordinal += 1;
+            observer_sequence += 1;
         }
-        debug_assert_eq!(offer_ordinal, after_ordinal);
-        self.next_offer_ordinal = after_ordinal;
+        debug_assert_eq!(observer_sequence, after_sequence);
+        self.next_observer_sequence = after_sequence;
         self.queued_retained_native_bytes += measurement.retained_native_bytes;
 
         Ok(ScopedObservationOfferReceipt {
-            first_offer_ordinal,
-            through_offer_ordinal: after_ordinal.checked_sub(1).filter(|_| total_items != 0),
+            first_offered_sequence,
+            offered_through_sequence: after_sequence
+                .checked_sub(1)
+                .expect("observer sequences begin at one"),
             semantic_events: measurement.semantic_events as u64,
             retained_native_bytes: measurement.retained_native_bytes,
             source_control_items: measurement.source_control_items as u64,
         })
     }
 
-    pub fn pop_next(&mut self) -> Option<ScopedOfferedObservation> {
+    pub fn pop_next(&mut self) -> Option<ScopedDeliveredObservation> {
         let take_source_control = match (self.source_controls.front(), self.semantic.front()) {
-            (Some(control), Some(semantic)) => control.offer_ordinal < semantic.offer_ordinal,
+            (Some(control), Some(semantic)) => {
+                control.observer_sequence < semantic.observer_sequence
+            }
             (Some(_), None) => true,
             (None, Some(_)) => false,
             (None, None) => return None,
@@ -1046,9 +1067,19 @@ impl ScopedObservationDeliveryLane {
                 .expect("queued projected retained-native accounting cannot underflow");
             queued
         };
-        Some(ScopedOfferedObservation {
-            offer_ordinal: queued.offer_ordinal,
-            value: queued.value,
+        let event_id = queued.value.event_id();
+        let semantic_revision_ref = queued.value.semantic_revision_ref();
+        let phase = queued.value.phase();
+        let source = queued.value.source().clone();
+        Some(ScopedDeliveredObservation {
+            event_contract_version: SCOPED_OBSERVATION_EVENT_CONTRACT_VERSION,
+            observer_sequence: queued.observer_sequence,
+            scope_epoch: self.scope_epoch,
+            event_id,
+            semantic_revision_ref,
+            phase,
+            source,
+            event: queued.value,
         })
     }
 
@@ -1062,6 +1093,16 @@ impl ScopedObservationDeliveryLane {
 
     pub fn queued_source_control_items(&self) -> usize {
         self.source_controls.len()
+    }
+
+    pub fn state(&self) -> ScopedObservationDeliveryState {
+        ScopedObservationDeliveryState {
+            scope_epoch: self.scope_epoch,
+            offered_through_sequence: self.next_observer_sequence - 1,
+            queued_semantic_events: self.semantic.len(),
+            queued_retained_native_bytes: self.queued_retained_native_bytes,
+            queued_source_control_items: self.source_controls.len(),
+        }
     }
 
     pub fn is_empty(&self) -> bool {
@@ -2957,23 +2998,46 @@ mod projection_tests {
 
         let mut delivery = delivery_lane(1, 1);
         let receipt = delivery.offer(projected).unwrap();
-        assert_eq!(receipt.first_offer_ordinal, Some(1));
-        assert_eq!(receipt.through_offer_ordinal, Some(2));
+        assert_eq!(receipt.first_offered_sequence, Some(1));
+        assert_eq!(receipt.offered_through_sequence, 2);
         assert_eq!(receipt.semantic_events, 1);
         assert_eq!(receipt.source_control_items, 1);
         assert_eq!(delivery.queued_semantic_events(), 1);
         assert_eq!(delivery.queued_source_control_items(), 1);
+        assert_eq!(
+            delivery.state(),
+            ScopedObservationDeliveryState {
+                scope_epoch: SCOPED_INITIAL_SCOPE_EPOCH,
+                offered_through_sequence: 2,
+                queued_semantic_events: 1,
+                queued_retained_native_bytes: 0,
+                queued_source_control_items: 1,
+            }
+        );
 
         let first = delivery.pop_next().unwrap();
-        assert_eq!(first.offer_ordinal, 1);
+        assert_eq!(
+            first.event_contract_version,
+            SCOPED_OBSERVATION_EVENT_CONTRACT_VERSION
+        );
+        assert_eq!(first.observer_sequence, 1);
+        assert_eq!(first.scope_epoch, SCOPED_INITIAL_SCOPE_EPOCH);
+        assert_eq!(first.event_id, first.event.event_id());
+        assert_eq!(first.semantic_revision_ref, None);
+        assert_eq!(first.phase, ScopedAppendDeliveryPhase::Correction);
+        assert_eq!(&first.source, first.event.source());
         assert!(matches!(
-            first.value,
+            first.event,
             ScopedProjectedObservation::SourceReset { reset: queued, .. } if queued == reset
         ));
         let second = delivery.pop_next().unwrap();
-        assert_eq!(second.offer_ordinal, 2);
+        assert_eq!(second.observer_sequence, 2);
+        assert_eq!(second.scope_epoch, SCOPED_INITIAL_SCOPE_EPOCH);
+        assert_eq!(second.event_id, second.event.event_id());
+        assert!(second.semantic_revision_ref.is_some());
+        assert_eq!(second.phase, ScopedAppendDeliveryPhase::Correction);
         assert!(matches!(
-            second.value,
+            second.event,
             ScopedProjectedObservation::UsageV2 { event, .. }
                 if event.operation == ScopedUsageV2Operation::Retract
         ));
@@ -3026,15 +3090,15 @@ mod projection_tests {
         assert_eq!(delivery.queued_source_control_items(), 1);
 
         let first = delivery.pop_next().unwrap();
-        assert_eq!(first.offer_ordinal, 1);
+        assert_eq!(first.observer_sequence, 1);
         assert!(matches!(
-            first.value,
+            first.event,
             ScopedProjectedObservation::UsageV2 { .. }
         ));
         let second = delivery.pop_next().unwrap();
-        assert_eq!(second.offer_ordinal, 2);
+        assert_eq!(second.observer_sequence, 2);
         assert!(matches!(
-            second.value,
+            second.event,
             ScopedProjectedObservation::SourcePresence { change, .. } if change == creation
         ));
     }
@@ -3066,15 +3130,15 @@ mod projection_tests {
         assert!(delivery.is_empty());
 
         let empty = delivery.offer(Vec::new()).unwrap();
-        assert_eq!(empty.first_offer_ordinal, None);
-        assert_eq!(empty.through_offer_ordinal, None);
+        assert_eq!(empty.first_offered_sequence, None);
+        assert_eq!(empty.offered_through_sequence, 0);
         assert_eq!(empty.semantic_events, 0);
         assert_eq!(empty.source_control_items, 0);
         assert!(delivery.is_empty());
     }
 
     #[test]
-    fn scoped_delivery_rejects_invalid_limits_and_ordinal_exhaustion() {
+    fn scoped_delivery_rejects_invalid_limits_and_sequence_exhaustion() {
         assert!(matches!(
             ScopedObservationDeliveryLane::new(ScopedObservationDeliveryLimits {
                 max_semantic_events: 0,
@@ -3094,15 +3158,18 @@ mod projection_tests {
         let mut projection = sink(8);
         let projected = projection.project(&frame).unwrap();
         let mut delivery = delivery_lane(1, 1);
-        delivery.next_offer_ordinal = u64::MAX;
+        delivery.next_observer_sequence = u64::MAX;
         let failure = delivery.offer(projected).unwrap_err();
-        assert_eq!(failure.error, ScopedDeliveryError::OfferOrdinalExhausted);
+        assert_eq!(
+            failure.error,
+            ScopedDeliveryError::ObserverSequenceExhausted
+        );
         assert_eq!(failure.projected.len(), 1);
         assert!(delivery.is_empty());
     }
 
     #[test]
-    fn scoped_offer_transaction_retries_without_projection_or_ordinal_drift() {
+    fn scoped_offer_transaction_retries_without_projection_or_sequence_drift() {
         let mut projection = sink(8);
         let mut delivery = delivery_lane(1, 1);
 
@@ -3118,10 +3185,11 @@ mod projection_tests {
             .offer_next(&mut projection, &mut delivery)
             .unwrap()
             .unwrap();
-        assert_eq!(first_receipt.first_offer_ordinal, Some(1));
+        assert_eq!(first_receipt.first_offered_sequence, Some(1));
         assert!(first_lane.is_empty());
         assert_eq!(projection.usage_v2_entity_count(), 1);
         assert_eq!(delivery.queued_semantic_events(), 1);
+        assert_eq!(delivery.state().offered_through_sequence, 1);
 
         let second_record = record(1, 10, 20);
         let second_frame = decoded_frame(
@@ -3145,24 +3213,26 @@ mod projection_tests {
         assert!(!second_lane.is_empty());
         assert_eq!(projection.usage_v2_entity_count(), 1);
         assert_eq!(delivery.queued_semantic_events(), 1);
+        assert_eq!(delivery.state().offered_through_sequence, 1);
 
         let first = delivery.pop_next().unwrap();
-        assert_eq!(first.offer_ordinal, 1);
+        assert_eq!(first.observer_sequence, 1);
         let retry_receipt = second_lane
             .offer_next(&mut projection, &mut delivery)
             .unwrap()
             .unwrap();
-        assert_eq!(retry_receipt.first_offer_ordinal, Some(2));
-        assert_eq!(retry_receipt.through_offer_ordinal, Some(2));
+        assert_eq!(retry_receipt.first_offered_sequence, Some(2));
+        assert_eq!(retry_receipt.offered_through_sequence, 2);
+        assert_eq!(delivery.state().offered_through_sequence, 2);
         assert_eq!(projection.usage_v2_entity_count(), 2);
         assert!(second_lane.is_empty());
         assert_eq!(second_lane.queued_data_events(), 0);
         assert_eq!(second_lane.queued_retained_native_bytes(), 0);
 
         let second = delivery.pop_next().unwrap();
-        assert_eq!(second.offer_ordinal, 2);
+        assert_eq!(second.observer_sequence, 2);
         assert!(matches!(
-            second.value,
+            second.event,
             ScopedProjectedObservation::UsageV2 { event, .. }
                 if event.revision.response_key == b"response-2"
         ));
@@ -3200,15 +3270,16 @@ mod projection_tests {
             .offer_next(&mut projection, &mut delivery)
             .unwrap()
             .unwrap();
-        assert_eq!(receipt.first_offer_ordinal, None);
-        assert_eq!(receipt.through_offer_ordinal, None);
+        assert_eq!(receipt.first_offered_sequence, None);
+        assert_eq!(receipt.offered_through_sequence, 1);
         assert_eq!(receipt.semantic_events, 0);
         assert_eq!(projection.usage_v2_entity_count(), 1);
         assert!(repeat_lane.is_empty());
         assert_eq!(delivery.queued_semantic_events(), 1);
+        assert_eq!(delivery.state().offered_through_sequence, 1);
 
         let first = delivery.pop_next().unwrap();
-        assert_eq!(first.offer_ordinal, 1);
+        assert_eq!(first.observer_sequence, 1);
         assert!(delivery.is_empty());
     }
 
@@ -3268,28 +3339,28 @@ mod projection_tests {
         assert_eq!(delivery.queued_semantic_events(), 1);
         assert_eq!(delivery.queued_source_control_items(), 0);
 
-        assert_eq!(delivery.pop_next().unwrap().offer_ordinal, 1);
+        assert_eq!(delivery.pop_next().unwrap().observer_sequence, 1);
         let receipt = reset_lane
             .offer_next(&mut projection, &mut delivery)
             .unwrap()
             .unwrap();
-        assert_eq!(receipt.first_offer_ordinal, Some(2));
-        assert_eq!(receipt.through_offer_ordinal, Some(3));
+        assert_eq!(receipt.first_offered_sequence, Some(2));
+        assert_eq!(receipt.offered_through_sequence, 3);
         assert_eq!(receipt.semantic_events, 1);
         assert_eq!(receipt.source_control_items, 1);
         assert!(reset_lane.is_empty());
         assert_eq!(projection.usage_v2_entity_count(), 0);
 
         let reset_offered = delivery.pop_next().unwrap();
-        assert_eq!(reset_offered.offer_ordinal, 2);
+        assert_eq!(reset_offered.observer_sequence, 2);
         assert!(matches!(
-            reset_offered.value,
+            reset_offered.event,
             ScopedProjectedObservation::SourceReset { reset: queued, .. } if queued == reset
         ));
         let retraction = delivery.pop_next().unwrap();
-        assert_eq!(retraction.offer_ordinal, 3);
+        assert_eq!(retraction.observer_sequence, 3);
         assert!(matches!(
-            retraction.value,
+            retraction.event,
             ScopedProjectedObservation::UsageV2 { event, .. }
                 if event.operation == ScopedUsageV2Operation::Retract
                     && event.retraction == Some(ScopedUsageV2RetractionCause::Reset(reset))
