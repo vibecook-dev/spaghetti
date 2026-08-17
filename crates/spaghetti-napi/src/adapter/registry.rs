@@ -201,7 +201,7 @@ mod tests {
         ScopedEnvelopeEvidenceAuthority, ScopedKnownAppendObject, ScopedKnownObjectGrant,
         ScopedKnownObjectReadRequest, ScopedObjectRead, ScopedObservationAccessError,
         ScopedObservationAccessHost, ScopedObservationAccessPass, ScopedObservationAccessRequest,
-        ScopedObservationAdmissionLane, ScopedObservationCloseError,
+        ScopedObservationAdmissionLane, ScopedObservationAsyncRuntime, ScopedObservationCloseError,
         ScopedObservationConsumerOfferError, ScopedObservationContinuity,
         ScopedObservationDeliveryLane, ScopedObservationDeliveryLimits, ScopedObservationEvent,
         ScopedObservationOpenDrainError, ScopedObservationPollError, ScopedObservationPollLease,
@@ -953,8 +953,8 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn scoped_poll_coalesces_prepass_requests_and_defers_inflight_requests() {
+    #[tokio::test]
+    async fn scoped_poll_coalesces_prepass_requests_and_defers_inflight_requests() {
         let registry = supported_fixture_registry();
         let temp = TempDir::new().unwrap();
         let root = temp.path().join("poll-root");
@@ -998,6 +998,9 @@ mod tests {
         let second = host.request_poll().unwrap();
         assert_eq!(first.request_generation(), 1);
         assert_eq!(second.request_generation(), 2);
+        let waiting_second = second.clone();
+        let async_poll = tokio::spawn(async move { waiting_second.wait_async().await });
+        tokio::task::yield_now().await;
         let waiting_first = first.clone();
         let (poll_tx, poll_rx) = std::sync::mpsc::sync_channel(0);
         let poll_thread = std::thread::spawn(move || {
@@ -1044,6 +1047,14 @@ mod tests {
             panic!("both pre-pass poll requests must share one completion");
         };
         assert!(Arc::ptr_eq(&first_result, &second_result));
+        assert!(matches!(
+            tokio::time::timeout(std::time::Duration::from_secs(2), async_poll)
+                .await
+                .unwrap()
+                .unwrap(),
+            ScopedObservationPollResolution::Ready(waited)
+                if Arc::ptr_eq(&waited, &first_watermark)
+        ));
         let waited = poll_rx
             .recv_timeout(std::time::Duration::from_secs(2))
             .expect("offered poll completion must wake its request-local waiter");
@@ -1139,6 +1150,9 @@ mod tests {
         );
 
         object.complete_bootstrap().unwrap();
+        let async_ready = host.ready_waiter().unwrap();
+        let ready_task = tokio::spawn(async move { async_ready.wait_async().await });
+        tokio::task::yield_now().await;
         let barrier = host
             .offer_consumer_bootstrap_complete(
                 std::slice::from_ref(&object),
@@ -1148,6 +1162,14 @@ mod tests {
                 50,
             )
             .unwrap();
+        assert!(matches!(
+            tokio::time::timeout(std::time::Duration::from_secs(2), ready_task)
+                .await
+                .unwrap()
+                .unwrap(),
+            ScopedObservationReadyResolution::Ready(waited)
+                if Arc::ptr_eq(&waited, &barrier)
+        ));
         assert!(Arc::ptr_eq(
             &host.engine_ready(&drain).unwrap().unwrap(),
             &barrier
@@ -1413,6 +1435,237 @@ mod tests {
         let complete = barrier.wait();
         assert_eq!(complete.active_watcher_tasks, 0);
         assert!(complete.complete);
+    }
+
+    #[tokio::test]
+    async fn scoped_async_lifecycle_waits_wake_and_retain_terminal_state() {
+        let registry = supported_fixture_registry();
+        let temp = TempDir::new().unwrap();
+        let host = ScopedObservationAccessHost::authorize(
+            &registry,
+            scoped_access_request(temp.path().join("async-lifecycle-root")),
+        )
+        .unwrap();
+        let mut drain = host
+            .open_consumer_drain(ScopedObservationDeliveryLimits {
+                max_semantic_events: 1,
+                max_retained_native_bytes: 0,
+                max_source_control_items: 1,
+            })
+            .unwrap();
+        let poll = host.request_poll().unwrap();
+        let retained_poll = poll.clone();
+        let ready = host.ready_waiter().unwrap();
+        let retained_ready = ready.clone();
+        let watcher = host.register_watcher_task().unwrap();
+
+        let poll_task = tokio::spawn(async move { poll.wait_async().await });
+        let ready_task = tokio::spawn(async move { ready.wait_async().await });
+        let watcher_task = tokio::spawn(async move {
+            watcher.wait_for_cancellation_async().await;
+            watcher
+        });
+        tokio::task::yield_now().await;
+
+        let barrier = host.close_with_consumer(&mut drain).unwrap();
+        assert_eq!(
+            tokio::time::timeout(std::time::Duration::from_secs(2), poll_task)
+                .await
+                .unwrap()
+                .unwrap(),
+            ScopedObservationPollResolution::Cancelled
+        );
+        assert_eq!(
+            tokio::time::timeout(std::time::Duration::from_secs(2), ready_task)
+                .await
+                .unwrap()
+                .unwrap(),
+            ScopedObservationReadyResolution::Cancelled
+        );
+
+        // Terminal state is retained even if the future is not constructed or
+        // first polled until after cancellation has already completed.
+        assert_eq!(
+            retained_poll.wait_async().await,
+            ScopedObservationPollResolution::Cancelled
+        );
+        assert_eq!(
+            retained_ready.wait_async().await,
+            ScopedObservationReadyResolution::Cancelled
+        );
+
+        let watcher = tokio::time::timeout(std::time::Duration::from_secs(2), watcher_task)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!barrier.state().complete);
+        drop(watcher);
+        let complete =
+            tokio::time::timeout(std::time::Duration::from_secs(2), barrier.wait_async())
+                .await
+                .unwrap();
+        assert!(complete.complete);
+        assert_eq!(complete.active_operations, 0);
+        assert_eq!(complete.active_watcher_tasks, 0);
+        assert!(!complete.consumer_drain_pending);
+    }
+
+    #[tokio::test]
+    async fn scoped_async_runtime_ends_a_pending_event_wait_on_direct_host_close() {
+        let registry = supported_fixture_registry();
+        let temp = TempDir::new().unwrap();
+        let host = ScopedObservationAccessHost::authorize(
+            &registry,
+            scoped_access_request(temp.path().join("async-runtime-root")),
+        )
+        .unwrap();
+        let mut runtime = ScopedObservationAsyncRuntime::open(
+            host,
+            ScopedObservationDeliveryLimits {
+                max_semantic_events: 1,
+                max_retained_native_bytes: 0,
+                max_source_control_items: 1,
+            },
+        )
+        .unwrap();
+        let handle = runtime.handle();
+
+        let (next, barrier) = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            tokio::join!(runtime.next_event(), async {
+                tokio::task::yield_now().await;
+                handle.host().close()
+            })
+        })
+        .await
+        .unwrap();
+        assert!(next.unwrap().is_none());
+        assert!(barrier.wait_async().await.complete);
+        assert_eq!(runtime.applied_state().pending_sequence, None);
+        assert!(matches!(runtime.next_event().await, Ok(None)));
+    }
+
+    #[tokio::test]
+    async fn scoped_async_runtime_delivers_and_applies_bootstrap_concurrently_with_ready() {
+        let registry = supported_fixture_registry();
+        let temp = TempDir::new().unwrap();
+        let host = ScopedObservationAccessHost::authorize(
+            &registry,
+            scoped_access_request(temp.path().join("async-runtime-bootstrap-root")),
+        )
+        .unwrap();
+        let mut runtime = ScopedObservationAsyncRuntime::open(
+            host,
+            ScopedObservationDeliveryLimits {
+                max_semantic_events: 1,
+                max_retained_native_bytes: 0,
+                max_source_control_items: 1,
+            },
+        )
+        .unwrap();
+        let handle = runtime.handle();
+        let mut object = scoped_append_object_with_coverage(
+            AppendDelimitedFile::new(AppendDelimitedConfig::json_lines()).unwrap(),
+            RawRetentionPolicy::None,
+            vec![CoverageDomain::FactFamily {
+                family: "runtime.usage-v2".to_string(),
+                version: 1,
+            }],
+        );
+        let mut admission = admission_lane(1, 0, 1);
+        let projection = ScopedObservationProjectionSink::new(ScopedObservationProjectionLimits {
+            max_usage_v2_entities: 1,
+        })
+        .unwrap();
+        let identity = [ScopeIdentityInput {
+            name: "native-session-id",
+            value: b"async-runtime-session",
+        }];
+        let origin = RecordOrigin {
+            source_instance_id: 10,
+            stream_id: 20,
+            object_id: 30,
+            observed_at: 40,
+            source_timestamp_hint: None,
+            media_type: SourceMediaType::new("application/x-ndjson").unwrap(),
+        };
+
+        let (poll, poll_watermark) =
+            tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                tokio::join!(handle.poll(), async {
+                    let lease = loop {
+                        if let Some(lease) = handle.host().begin_poll().unwrap() {
+                            break lease;
+                        }
+                        tokio::task::yield_now().await;
+                    };
+                    reconcile_missing_poll(
+                        handle.host(),
+                        &lease,
+                        &mut object,
+                        &mut admission,
+                        &identity,
+                        &origin,
+                        AccessPhase::Initial,
+                    );
+                    handle.with_attachment(|host, drain| {
+                        host.complete_bootstrap_poll(lease, &admission, &projection, drain)
+                            .unwrap()
+                    })
+                })
+            })
+            .await
+            .unwrap();
+        assert!(matches!(
+            poll,
+            Ok(ScopedObservationPollResolution::Ready(watermark))
+                if Arc::ptr_eq(&watermark, &poll_watermark)
+        ));
+        object.complete_bootstrap().unwrap();
+
+        let (yielded, ready, barrier) =
+            tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                tokio::join!(runtime.next_event(), handle.ready(), async {
+                    tokio::task::yield_now().await;
+                    handle.with_attachment(|host, drain| {
+                        host.offer_consumer_bootstrap_complete(
+                            std::slice::from_ref(&object),
+                            &admission,
+                            &projection,
+                            drain,
+                            50,
+                        )
+                        .unwrap()
+                    })
+                })
+            })
+            .await
+            .unwrap();
+        let yielded = yielded.unwrap().unwrap();
+        assert!(matches!(
+            &yielded.envelope.event,
+            ScopedObservationEvent::ObserverBootstrapComplete { barrier: delivered }
+                if Arc::ptr_eq(delivered, &barrier)
+        ));
+        assert!(matches!(
+            ready,
+            Ok(ScopedObservationReadyResolution::Ready(ready))
+                if Arc::ptr_eq(&ready, &barrier)
+        ));
+        assert_eq!(
+            runtime.applied_state().pending_sequence,
+            Some(barrier.barrier_sequence)
+        );
+        let applied = runtime
+            .acknowledge_applied(yielded.application_receipt())
+            .unwrap();
+        assert_eq!(
+            applied.bootstrap_barrier_sequence,
+            Some(barrier.barrier_sequence)
+        );
+        assert_eq!(applied.pending_sequence, None);
+
+        assert!(runtime.close().await.complete);
+        assert!(runtime.next_event().await.unwrap().is_none());
     }
 
     #[test]

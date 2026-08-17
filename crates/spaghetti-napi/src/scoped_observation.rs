@@ -1644,12 +1644,26 @@ struct ScopedObservationAttachmentLifecycleState {
     active_watcher_tasks: u64,
     consumer_drain_opened: bool,
     consumer_drain_closed: bool,
+    consumer_event_completion: Option<Weak<ScopedObservationEventCompletion>>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct ScopedObservationAttachmentLifecycle {
     state: Mutex<ScopedObservationAttachmentLifecycleState>,
     idle: Condvar,
+    async_changed: tokio::sync::watch::Sender<ScopedObservationCloseState>,
+}
+
+impl Default for ScopedObservationAttachmentLifecycle {
+    fn default() -> Self {
+        let state = ScopedObservationAttachmentLifecycleState::default();
+        let (async_changed, _) = tokio::sync::watch::channel(close_state_snapshot(&state));
+        Self {
+            state: Mutex::new(state),
+            idle: Condvar::new(),
+            async_changed,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1692,6 +1706,8 @@ impl ScopedObservationAttachmentLifecycle {
         };
         state.active_operations = active_operations;
         state.active_watcher_tasks = active_watcher_tasks;
+        self.async_changed
+            .send_replace(close_state_snapshot(&state));
         Ok(ScopedObservationOperationGuard {
             lifecycle: Arc::clone(self),
             kind,
@@ -1711,12 +1727,17 @@ impl ScopedObservationAttachmentLifecycle {
                 .checked_sub(1)
                 .expect("scoped watcher task accounting cannot underflow");
         }
+        self.async_changed
+            .send_replace(close_state_snapshot(&state));
         if close_is_complete(&state) {
             self.idle.notify_all();
         }
     }
 
-    fn open_consumer_drain(&self) -> Result<(), ScopedObservationOperationStartError> {
+    fn open_consumer_drain(
+        &self,
+        event_completion: &Arc<ScopedObservationEventCompletion>,
+    ) -> Result<(), ScopedObservationOperationStartError> {
         let mut state = self.lock_state();
         if state.close_requested {
             return Err(ScopedObservationOperationStartError::Closing);
@@ -1726,6 +1747,9 @@ impl ScopedObservationAttachmentLifecycle {
         }
         state.consumer_drain_opened = true;
         state.consumer_drain_closed = false;
+        state.consumer_event_completion = Some(Arc::downgrade(event_completion));
+        self.async_changed
+            .send_replace(close_state_snapshot(&state));
         Ok(())
     }
 
@@ -1734,6 +1758,9 @@ impl ScopedObservationAttachmentLifecycle {
         if state.consumer_drain_opened {
             state.consumer_drain_closed = true;
         }
+        state.consumer_event_completion = None;
+        self.async_changed
+            .send_replace(close_state_snapshot(&state));
         if close_is_complete(&state) {
             self.idle.notify_all();
         }
@@ -1742,12 +1769,21 @@ impl ScopedObservationAttachmentLifecycle {
     fn begin_close(self: &Arc<Self>) -> ScopedObservationCloseBarrier {
         let mut state = self.lock_state();
         state.close_requested = true;
+        let event_completion = state
+            .consumer_event_completion
+            .as_ref()
+            .and_then(Weak::upgrade);
+        self.async_changed
+            .send_replace(close_state_snapshot(&state));
         // Wake both close-barrier waiters and watcher tasks waiting for their
         // cancellation signal. Barrier waiters re-check full completion;
         // watchers must wake before they can release the operations that make
         // completion possible.
         self.idle.notify_all();
         drop(state);
+        if let Some(event_completion) = event_completion {
+            event_completion.close();
+        }
         ScopedObservationCloseBarrier {
             lifecycle: Arc::clone(self),
         }
@@ -1767,6 +1803,20 @@ impl ScopedObservationAttachmentLifecycle {
         }
     }
 
+    async fn wait_for_close_request_async(&self) {
+        let mut changed = self.async_changed.subscribe();
+        loop {
+            let state = *changed.borrow_and_update();
+            if state.close_requested {
+                return;
+            }
+            changed
+                .changed()
+                .await
+                .expect("scoped lifecycle retains its async notification sender");
+        }
+    }
+
     fn snapshot(&self) -> ScopedObservationCloseState {
         close_state_snapshot(&self.lock_state())
     }
@@ -1780,6 +1830,20 @@ impl ScopedObservationAttachmentLifecycle {
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
         }
         close_state_snapshot(&state)
+    }
+
+    async fn wait_async(&self) -> ScopedObservationCloseState {
+        let mut changed = self.async_changed.subscribe();
+        loop {
+            let state = *changed.borrow_and_update();
+            if state.complete {
+                return state;
+            }
+            changed
+                .changed()
+                .await
+                .expect("scoped lifecycle retains its async notification sender");
+        }
     }
 }
 
@@ -1816,6 +1880,12 @@ impl ScopedObservationCloseBarrier {
 
     pub fn wait(&self) -> ScopedObservationCloseState {
         self.lifecycle.wait()
+    }
+
+    /// Executor-friendly future for portable hosts. The retained watch state
+    /// makes completion visible even when close finishes before first poll.
+    pub async fn wait_async(&self) -> ScopedObservationCloseState {
+        self.lifecycle.wait_async().await
     }
 }
 
@@ -1857,6 +1927,13 @@ impl ScopedObservationWatcherRegistration {
     /// native watcher/callbacks, then drop this registration.
     pub fn wait_for_cancellation(&self) {
         self.lifecycle.wait_for_close_request();
+    }
+
+    /// Await attachment cancellation without occupying a runtime worker.
+    /// Dropping this registration after the future resolves remains the
+    /// watcher's close-barrier acknowledgement.
+    pub async fn wait_for_cancellation_async(&self) {
+        self.lifecycle.wait_for_close_request_async().await;
     }
 }
 
@@ -2383,6 +2460,183 @@ impl Drop for ScopedObservationConsumerDrain {
     }
 }
 
+struct ScopedObservationAsyncRuntimeShared {
+    host: ScopedObservationAccessHost,
+    drain: Mutex<ScopedObservationConsumerDrain>,
+}
+
+impl ScopedObservationAsyncRuntimeShared {
+    fn lock_drain(&self) -> MutexGuard<'_, ScopedObservationConsumerDrain> {
+        self.drain
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn request_close(&self) -> ScopedObservationCloseBarrier {
+        let mut drain = self.lock_drain();
+        self.host
+            .close_with_consumer(&mut drain)
+            .expect("the async runtime retains its attachment-owned consumer drain")
+    }
+}
+
+/// Cloneable control/producer handle for the internal portable observer runtime.
+/// Every operation that can inspect or mutate the consumer-owned queue enters
+/// the same short-held lock used by the sole async event drain. Callers must
+/// not await inside `with_attachment`; native access and decode happen outside
+/// this boundary and only their bounded offer step enters it.
+#[derive(Clone)]
+pub struct ScopedObservationAsyncHandle {
+    shared: Arc<ScopedObservationAsyncRuntimeShared>,
+}
+
+impl ScopedObservationAsyncHandle {
+    pub fn host(&self) -> &ScopedObservationAccessHost {
+        &self.shared.host
+    }
+
+    pub fn with_attachment<T>(
+        &self,
+        operation: impl FnOnce(&ScopedObservationAccessHost, &mut ScopedObservationConsumerDrain) -> T,
+    ) -> T {
+        let mut drain = self.shared.lock_drain();
+        operation(&self.shared.host, &mut drain)
+    }
+
+    /// Request cancellation and close the event drain. Watcher/native owners
+    /// still acknowledge shutdown by dropping their registered operations;
+    /// callers may await the returned barrier without holding the drain lock.
+    pub fn request_close(&self) -> ScopedObservationCloseBarrier {
+        self.shared.request_close()
+    }
+
+    /// Resolve engine-level bootstrap readiness concurrently with the sole
+    /// event drain. This proves the offered barrier only; a consumer-ready
+    /// helper must also acknowledge the matching completion envelope.
+    pub async fn ready(
+        &self,
+    ) -> Result<ScopedObservationReadyResolution, ScopedObservationPollError> {
+        let waiter = self.shared.host.ready_waiter()?;
+        Ok(waiter.wait_async().await)
+    }
+
+    /// Request one logical exact-scope poll and await its request-local offered
+    /// watermark. The watcher/runtime pass driver remains responsible for
+    /// reserving and completing the corresponding bounded pass.
+    pub async fn poll(
+        &self,
+    ) -> Result<ScopedObservationPollResolution, ScopedObservationPollError> {
+        let ticket = self.shared.host.request_poll()?;
+        Ok(ticket.wait_async().await)
+    }
+
+    pub fn prepare_watcher_install(
+        &self,
+        hint_capacity: usize,
+    ) -> Result<ScopedObservationWatcherOrchestrator, ScopedObservationStartupError> {
+        self.shared.host.prepare_watcher_install(hint_capacity)
+    }
+
+    pub async fn close(&self) -> ScopedObservationCloseState {
+        self.request_close().wait_async().await
+    }
+}
+
+/// Internal executor-friendly lifecycle facade for one scoped attachment.
+/// It owns the sole consumer drain from before bootstrap, exposes one
+/// non-cloneable ordered event iterator, and keeps engine readiness distinct
+/// from consumer application acknowledgement. The containing module remains
+/// crate-private until RFC 012D scope/envelope coverage is complete.
+pub struct ScopedObservationAsyncRuntime {
+    shared: Arc<ScopedObservationAsyncRuntimeShared>,
+}
+
+impl ScopedObservationAsyncRuntime {
+    pub fn open(
+        host: ScopedObservationAccessHost,
+        limits: ScopedObservationDeliveryLimits,
+    ) -> Result<Self, ScopedObservationOpenDrainError> {
+        let drain = host.open_consumer_drain(limits)?;
+        Ok(Self {
+            shared: Arc::new(ScopedObservationAsyncRuntimeShared {
+                host,
+                drain: Mutex::new(drain),
+            }),
+        })
+    }
+
+    /// Cloneable control/producer half. Keeping readiness and poll on this
+    /// handle lets them run concurrently with `next_event(&mut self)` while
+    /// the runtime value itself remains the one non-cloneable event owner.
+    pub fn handle(&self) -> ScopedObservationAsyncHandle {
+        ScopedObservationAsyncHandle {
+            shared: Arc::clone(&self.shared),
+        }
+    }
+
+    /// Yield the next ordered envelope, or `None` after attachment close.
+    /// Queue inspection and wake-state capture share the producer lock; the
+    /// actual await never holds it, preventing both lost wakeups and producer
+    /// starvation.
+    pub async fn next_event(
+        &mut self,
+    ) -> Result<Option<ScopedObservationYieldedEnvelope>, ScopedObservationDrainError> {
+        loop {
+            let (waiter, offered_through_sequence) = {
+                let mut drain = self.shared.lock_drain();
+                match drain.next() {
+                    Ok(Some(yielded)) => return Ok(Some(yielded)),
+                    Ok(None) => {}
+                    Err(ScopedObservationDrainError::Closed) => return Ok(None),
+                    Err(error) => return Err(error),
+                }
+                let waiter = drain.event_waiter();
+                let wake = waiter.snapshot();
+                if wake.closed {
+                    drain.close();
+                    return Ok(None);
+                }
+                (waiter, wake.offered_through_sequence)
+            };
+            if waiter
+                .wait_after_async(offered_through_sequence)
+                .await
+                .closed
+            {
+                self.shared.lock_drain().close();
+                return Ok(None);
+            }
+        }
+    }
+
+    pub fn acknowledge_applied(
+        &mut self,
+        receipt: &ScopedObservationApplicationReceipt,
+    ) -> Result<ScopedObservationAppliedState, ScopedObservationApplicationError> {
+        self.shared.lock_drain().acknowledge_applied(receipt)
+    }
+
+    pub fn applied_state(&self) -> ScopedObservationAppliedState {
+        self.shared.lock_drain().state()
+    }
+
+    pub fn request_close(&self) -> ScopedObservationCloseBarrier {
+        self.shared.request_close()
+    }
+
+    /// Request cancellation, close the sole drain, and await watcher/native
+    /// acknowledgement without holding the consumer lock.
+    pub async fn close(&self) -> ScopedObservationCloseState {
+        self.request_close().wait_async().await
+    }
+}
+
+impl Drop for ScopedObservationAsyncRuntime {
+    fn drop(&mut self) {
+        let _ = self.request_close();
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum ScopedEnvelopeError {
     #[error("scoped delivery metadata does not match its projected event")]
@@ -2819,12 +3073,37 @@ impl ScopedObservationEventWaiter {
     pub fn wait_after(&self, offered_through_sequence: u64) -> ScopedObservationEventWakeState {
         self.completion.wait_after(offered_through_sequence)
     }
+
+    /// Await a newer offered sequence or close without occupying a runtime
+    /// worker. The notification retains its latest state, so an offer between
+    /// future construction and first poll cannot be lost.
+    pub async fn wait_after_async(
+        &self,
+        offered_through_sequence: u64,
+    ) -> ScopedObservationEventWakeState {
+        self.completion
+            .wait_after_async(offered_through_sequence)
+            .await
+    }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct ScopedObservationEventCompletion {
     state: Mutex<ScopedObservationEventWakeState>,
     changed: Condvar,
+    async_changed: tokio::sync::watch::Sender<ScopedObservationEventWakeState>,
+}
+
+impl Default for ScopedObservationEventCompletion {
+    fn default() -> Self {
+        let initial = ScopedObservationEventWakeState::default();
+        let (async_changed, _) = tokio::sync::watch::channel(initial);
+        Self {
+            state: Mutex::new(initial),
+            changed: Condvar::new(),
+            async_changed,
+        }
+    }
 }
 
 impl ScopedObservationEventCompletion {
@@ -2843,6 +3122,7 @@ impl ScopedObservationEventCompletion {
         debug_assert!(offered_through_sequence >= state.offered_through_sequence);
         if offered_through_sequence > state.offered_through_sequence {
             state.offered_through_sequence = offered_through_sequence;
+            self.async_changed.send_replace(*state);
             self.changed.notify_all();
         }
     }
@@ -2854,6 +3134,7 @@ impl ScopedObservationEventCompletion {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         if !state.closed {
             state.closed = true;
+            self.async_changed.send_replace(*state);
             self.changed.notify_all();
         }
     }
@@ -2870,6 +3151,23 @@ impl ScopedObservationEventCompletion {
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
         }
         *state
+    }
+
+    async fn wait_after_async(
+        &self,
+        offered_through_sequence: u64,
+    ) -> ScopedObservationEventWakeState {
+        let mut changed = self.async_changed.subscribe();
+        loop {
+            let state = *changed.borrow_and_update();
+            if state.closed || state.offered_through_sequence > offered_through_sequence {
+                return state;
+            }
+            changed
+                .changed()
+                .await
+                .expect("scoped event completion retains its async notification sender");
+        }
     }
 }
 
@@ -5104,6 +5402,12 @@ impl ScopedObservationPollTicket {
     pub fn wait(&self) -> ScopedObservationPollResolution {
         self.completion.wait()
     }
+
+    /// Await this request-local offered watermark without occupying a runtime
+    /// worker. Completion and cancellation are retained across first poll.
+    pub async fn wait_async(&self) -> ScopedObservationPollResolution {
+        self.completion.wait_async().await
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -5135,19 +5439,29 @@ impl ScopedObservationReadyWaiter {
     pub fn wait(&self) -> ScopedObservationReadyResolution {
         self.completion.wait()
     }
+
+    /// Await the engine-offered bootstrap barrier without occupying a runtime
+    /// worker. Consumer-applied readiness remains a separate drain boundary.
+    pub async fn wait_async(&self) -> ScopedObservationReadyResolution {
+        self.completion.wait_async().await
+    }
 }
 
 #[derive(Debug)]
 struct ScopedObservationReadyCompletion {
     resolution: Mutex<ScopedObservationReadyResolution>,
     changed: Condvar,
+    async_changed: tokio::sync::watch::Sender<ScopedObservationReadyResolution>,
 }
 
 impl Default for ScopedObservationReadyCompletion {
     fn default() -> Self {
+        let pending = ScopedObservationReadyResolution::Pending;
+        let (async_changed, _) = tokio::sync::watch::channel(pending.clone());
         Self {
-            resolution: Mutex::new(ScopedObservationReadyResolution::Pending),
+            resolution: Mutex::new(pending),
             changed: Condvar::new(),
+            async_changed,
         }
     }
 }
@@ -5168,6 +5482,7 @@ impl ScopedObservationReadyCompletion {
         match &*resolution {
             ScopedObservationReadyResolution::Pending => {
                 *resolution = ScopedObservationReadyResolution::Ready(barrier);
+                self.async_changed.send_replace(resolution.clone());
                 self.changed.notify_all();
             }
             ScopedObservationReadyResolution::Ready(existing) => {
@@ -5184,6 +5499,7 @@ impl ScopedObservationReadyCompletion {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         if matches!(*resolution, ScopedObservationReadyResolution::Pending) {
             *resolution = ScopedObservationReadyResolution::Cancelled;
+            self.async_changed.send_replace(resolution.clone());
             self.changed.notify_all();
         }
     }
@@ -5201,12 +5517,27 @@ impl ScopedObservationReadyCompletion {
         }
         resolution.clone()
     }
+
+    async fn wait_async(&self) -> ScopedObservationReadyResolution {
+        let mut changed = self.async_changed.subscribe();
+        loop {
+            let resolution = changed.borrow_and_update().clone();
+            if !matches!(resolution, ScopedObservationReadyResolution::Pending) {
+                return resolution;
+            }
+            changed
+                .changed()
+                .await
+                .expect("scoped ready completion retains its async notification sender");
+        }
+    }
 }
 
 #[derive(Debug)]
 struct ScopedObservationPollTicketCompletion {
     resolution: Mutex<ScopedObservationPollResolution>,
     changed: Condvar,
+    async_changed: tokio::sync::watch::Sender<ScopedObservationPollResolution>,
 }
 
 impl ScopedObservationPollTicketCompletion {
@@ -5224,6 +5555,7 @@ impl ScopedObservationPollTicketCompletion {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         if matches!(*current, ScopedObservationPollResolution::Pending) {
             *current = resolution;
+            self.async_changed.send_replace(current.clone());
             self.changed.notify_all();
         }
     }
@@ -5240,6 +5572,20 @@ impl ScopedObservationPollTicketCompletion {
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
         }
         current.clone()
+    }
+
+    async fn wait_async(&self) -> ScopedObservationPollResolution {
+        let mut changed = self.async_changed.subscribe();
+        loop {
+            let resolution = changed.borrow_and_update().clone();
+            if !matches!(resolution, ScopedObservationPollResolution::Pending) {
+                return resolution;
+            }
+            changed
+                .changed()
+                .await
+                .expect("scoped poll completion retains its async notification sender");
+        }
     }
 }
 
@@ -5317,9 +5663,12 @@ impl ScopedObservationPollRuntime {
             .checked_add(1)
             .ok_or(ScopedObservationPollError::SequenceExhausted)?;
         let request_generation = state.requested_through_generation;
+        let pending = ScopedObservationPollResolution::Pending;
+        let (async_changed, _) = tokio::sync::watch::channel(pending.clone());
         let completion = Arc::new(ScopedObservationPollTicketCompletion {
-            resolution: Mutex::new(ScopedObservationPollResolution::Pending),
+            resolution: Mutex::new(pending),
             changed: Condvar::new(),
+            async_changed,
         });
         state
             .pending_completions
@@ -5604,7 +5953,11 @@ impl ScopedObservationAccessHost {
             .consumer_drain_opened
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .map_err(|_| ScopedObservationOpenDrainError::AlreadyOpened)?;
-        if self.lifecycle.open_consumer_drain().is_err() {
+        if self
+            .lifecycle
+            .open_consumer_drain(&drain.delivery.event_completion)
+            .is_err()
+        {
             return Err(ScopedObservationOpenDrainError::Closed);
         }
         drain.lifecycle_registered = true;
@@ -6750,6 +7103,10 @@ impl ScopedObservationWatcherOrchestrator {
 
     pub fn wait_for_cancellation(&self) {
         self.registration.wait_for_cancellation();
+    }
+
+    pub async fn wait_for_cancellation_async(&self) {
+        self.registration.wait_for_cancellation_async().await;
     }
 
     /// Confirm that the native backend is active after its callback has been
@@ -8600,11 +8957,10 @@ mod projection_tests {
         max_source_control_items: usize,
     ) -> ScopedObservationConsumerDrain {
         let lifecycle = Arc::new(ScopedObservationAttachmentLifecycle::default());
-        lifecycle.open_consumer_drain().unwrap();
         let mut drain = ScopedObservationConsumerDrain::new(
             ScopedObservationEnvelopeMapper::new(root),
             Arc::new(ScopedObservationAttachmentAuthority),
-            lifecycle,
+            Arc::clone(&lifecycle),
             ScopedObservationDeliveryLimits {
                 max_semantic_events,
                 max_retained_native_bytes: 0,
@@ -8612,6 +8968,9 @@ mod projection_tests {
             },
         )
         .unwrap();
+        lifecycle
+            .open_consumer_drain(&drain.delivery.event_completion)
+            .unwrap();
         drain.lifecycle_registered = true;
         drain
     }
@@ -9347,6 +9706,43 @@ mod projection_tests {
             Err(ScopedObservationDrainError::Closed)
         ));
         assert!(barrier.wait().complete);
+    }
+
+    #[tokio::test]
+    async fn scoped_event_async_wait_wakes_and_retains_pre_poll_state() {
+        let completion = Arc::new(ScopedObservationEventCompletion::default());
+        let waiter = ScopedObservationEventWaiter {
+            completion: Arc::clone(&completion),
+        };
+        let waiting = waiter.clone();
+        let wait_task = tokio::spawn(async move { waiting.wait_after_async(0).await });
+        tokio::task::yield_now().await;
+
+        completion.publish(1);
+        assert_eq!(
+            tokio::time::timeout(std::time::Duration::from_secs(2), wait_task)
+                .await
+                .unwrap()
+                .unwrap(),
+            ScopedObservationEventWakeState {
+                offered_through_sequence: 1,
+                closed: false,
+            }
+        );
+
+        // Constructing an async wait does not subscribe until first poll. A
+        // close in that interval must still resolve from retained state.
+        let closed = waiter.wait_after_async(1);
+        completion.close();
+        assert_eq!(
+            tokio::time::timeout(std::time::Duration::from_secs(2), closed)
+                .await
+                .unwrap(),
+            ScopedObservationEventWakeState {
+                offered_through_sequence: 1,
+                closed: true,
+            }
+        );
     }
 
     #[test]

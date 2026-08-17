@@ -1228,6 +1228,23 @@ Current landing status (2026-08-17):
   offered boundary. The async iterator bridge can therefore check the drain,
   snapshot under the same owner lock, and sleep without a polling loop or a
   check-then-wait race;
+- event, poll, engine-readiness, watcher-cancellation, and close completion
+  handles now also expose executor-friendly retained-state futures. They do
+  not occupy blocking runtime workers, support multiple waiters where the
+  underlying contract is cloneable, and resolve correctly when completion or
+  cancellation races future construction and occurs before its first poll;
+- an internal async lifecycle runtime now constructs the attachment's sole
+  drain before bootstrap and splits it into one non-cloneable ordered event
+  owner plus a cloneable attachment handle. The event owner checks the queue
+  and snapshots wake state under the same short-held lock, releases that lock
+  before awaiting, treats close as end-of-stream, and preserves explicit
+  application acknowledgement. The handle permits `ready()`, request-local
+  `poll()`, producer offers, watcher setup, and close to run concurrently with
+  event delivery. The attachment lifecycle retains the drain's weak event
+  notifier, so even a direct host close wakes a pending iterator; that iterator
+  closes the drain before ending and therefore satisfies the consumer side of
+  the existing watcher/operation barrier. This facade remains crate-private;
+  it introduces no N-API or incomplete portable request/envelope export;
 - a shared attachment lifecycle now accounts active access passes, direct
   decodes, and consumer delivery/application calls. Idempotent close first
   rejects new work and cancels unresolved poll tickets, then waits on a
@@ -1254,8 +1271,8 @@ Current landing status (2026-08-17):
   final empty-hint check, bootstrap-control offer, and transition to live share
   one ordering lock, so a racing callback either blocks the barrier or becomes
   a request-local live poll ticket after it. Producer offers also verify the
-  attachment-owned consumer drain. The portable async watcher/close wrapper
-  and concrete native watcher owner remain open;
+  attachment-owned consumer drain. The concrete native watcher owner and its
+  public portable host wrapper remain open;
 - one pass is active at a time, a later pass receives fresh bounds, close is
   idempotent, and the frozen access report excludes paths, identity values, and
   content; and
@@ -1268,8 +1285,8 @@ canonical fact-revision adoption beyond the current runtime families, scoped
 reducers beyond usage-v2,
 coverage-complete durable query exposure, affiliation/actor enrichment and
 envelope variants beyond the current usage/source-lifecycle families, the
-public async iterator/runtime bridge over the internal wakeable
-event/poll/ready substrate and complete scope coverage,
+public N-API/SDK iterator transport over the internal async lifecycle runtime
+and complete scope coverage,
 dynamic/discovered scope membership beyond the attachment's current exact
 known-object grants and family coverage beyond usage-v2,
 complete multi-family replacement manifests, whole-scope discovery and source
