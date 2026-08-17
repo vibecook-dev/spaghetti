@@ -445,6 +445,33 @@ prove consumer application. A consumer-ready SDK helper owns the one logical
 event drain, applies every envelope through that sequence, and only then resolves
 with the reduced bootstrap state.
 
+The helper maintains an attachment-local application receipt for each yielded
+envelope. A receipt binds the attachment authority, `scope_epoch`,
+`observer_sequence`, and `event_id`; it is flow-control evidence, not a semantic
+identity, durable cursor, or portable deduplication key. The helper acknowledges
+the receipt only after its consumer-owned reducer successfully applies the
+envelope. Acknowledging the latest successful receipt is idempotent. A receipt
+from another attachment, a receipt that does not match the pending envelope, or
+an attempt to skip a yielded envelope advances no applied state.
+
+The initial helper permits one application-pending envelope. It does not dequeue
+a later envelope until the pending one is acknowledged or the helper is
+cancelled. This bounds post-delivery state and also ensures that a mandatory
+control can be delayed only by the one envelope already yielded to the consumer,
+as allowed by section 12. An implementation may later pipeline a bounded number
+of receipts only if it preserves the same ordered acknowledgement proof and
+cannot let delivery outrun bounded application state.
+
+Acknowledging `observer.bootstrap_complete` establishes consumer bootstrap
+readiness; acknowledging `observer.resync_complete` establishes the applied
+replacement barrier. Because acknowledgements follow the single yielded order,
+either acknowledgement proves application of every earlier yielded envelope in
+that lifecycle. Explicit sequence gaps caused by a preceding
+`observer.resync_required` are valid: superseded envelopes were never yielded and
+therefore require no fabricated acknowledgement. Application failure leaves the
+exact receipt pending and consumer readiness unresolved; it does not cause the
+engine to claim application or manufacture continuity loss.
+
 The supported consumption order is:
 
 ```text

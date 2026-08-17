@@ -1179,6 +1179,16 @@ Current landing status (2026-08-17):
   an authorized relation that was never reconciled cannot silently disappear
   from a completion barrier. Conformance tests cover omission, duplicate
   claims, failed rebinding, and no barrier/delivery mutation on failure;
+- a crate-private single-consumer drain now validates and maps the next envelope
+  before dequeue, permits only one application-pending envelope, and advances a
+  distinct applied boundary only after an exact attachment-bound receipt is
+  acknowledged. Foreign/mismatched receipts and a second drain fail without
+  mutation; retrying the latest acknowledgement is a no-op. Consumer bootstrap
+  and resync readiness become visible only after their completion envelopes are
+  applied, while engine barriers remain offered-bound. Explicit sequence gaps
+  created by invalidation are accepted only when the skipped backlog was never
+  delivered. Raw dequeue and the standalone mapper are test-only seams, so
+  production code cannot bypass this boundary inside the provisional kernel;
 - one pass is active at a time, a later pass receives fresh bounds, close is
   idempotent, and the frozen access report excludes paths, identity values, and
   content; and
@@ -1199,12 +1209,12 @@ state beyond the current exact append-object set, and watcher-level failed/
 re-overflow orchestration,
 artifact mediation, cancellation waiting,
 the trusted native version-probe/identity-input drivers, and the complete
-public request are not yet implemented. The internal offered boundary is now
-transactional, but it cannot become a public `offered` watermark until
-complete scope-membership/barrier coverage, portable resync completion, and
-the consumer-applied acknowledgement are defined. The
-usage-v2 sink and delivery lane remain crate-private until those envelope/
-lifecycle contracts and the negotiated portable surface exist.
+public request are not yet implemented. The internal offered and applied
+boundaries are now transactional, but they cannot become a public watermark and
+consumer-ready helper until complete scope-membership/barrier coverage, portable
+resync completion, cancellation, and the negotiated portable lifecycle surface
+are defined. The usage-v2 sink and delivery lane remain crate-private until
+those envelope/lifecycle contracts and the negotiated portable surface exist.
 
 ### D2. Claude scope composition
 
@@ -1282,7 +1292,12 @@ reducer corrections, and engine controls. It rejects cross-root typed events
 and mismatched native-session claims. This freezes the current
 usage/source-lifecycle and initial resync envelope vocabulary but is not yet the
 public multiplexer/facade, complete portable resync/scope manifest, complete
-actor-affiliation reducer, or an applied acknowledgement. Epoch 1 now has an
+actor-affiliation reducer, or a portable consumer-ready helper. The internal
+single-consumer drain now distinguishes delivery from application with an exact
+attachment-bound receipt, blocks a second dequeue while application is pending,
+rejects cross-attachment/mismatched acknowledgements, tolerates only explicit
+invalidation sequence gaps, and exposes bootstrap/resync readiness only after
+their completion envelopes are applied. Epoch 1 now has an
 ordered, snapshot-identified bootstrap-completion control and retained
 idempotent barrier at the offered boundary; it remains internal until
 multi-object scope orchestration and the portable drain/ready surface land. A
@@ -1310,8 +1325,8 @@ offer. Old admitted-but-unoffered input is superseded and dropped; completion
 pressure preserves all active state; and re-overflow keeps the last valid epoch
 while a newer stage supersedes the failed continuity epoch. Complete
 multi-family and D-owned manifests, dynamic whole-scope discovery and
-non-append participants, consumer applied acknowledgement, and watcher-level
-failure scheduling remain open.
+non-append participants, the async/portable wrapper over the internal applied
+drain, and watcher-level failure scheduling remain open.
 
 ### D4. SDK and Chopsticks migration
 
