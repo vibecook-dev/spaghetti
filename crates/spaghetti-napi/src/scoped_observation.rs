@@ -34,9 +34,10 @@ use crate::decode_runtime::{
 use crate::source::{
     confined_relative_path_key, read_stable_file_confined, AccessBudgetError, AccessObjectToken,
     AccessOperation, AccessOutcome, AccessPhase, AppendCheckpoint, AppendDelimitedFile, AppendItem,
-    AppendRead, AppendTransition, AuthorizedScopeAccessPlan, DriverQuarantine, RecordHash,
-    RecordOrigin, Revision, ScopeAccessReport, ScopeAccessRequest, ScopeIdentityInput,
-    SourceCursor, SourceDriverError, SourceMediaType, SourceRecord, SourceRecordState, StableRead,
+    AppendRead, AppendTransition, AuthorizedScopeAccessPlan, DirtyHint, DriverQuarantine,
+    HintEnqueue, RecordHash, RecordOrigin, Revision, ScopeAccessReport, ScopeAccessRequest,
+    ScopeIdentityInput, SourceCursor, SourceDriverError, SourceMediaType, SourceRecord,
+    SourceRecordState, StableRead, StartupAction, StartupPhase, WatchBeforeScan,
 };
 
 /// One exact host-approved object locator. The locator is installed during
@@ -1859,6 +1860,171 @@ impl ScopedObservationWatcherRegistration {
     }
 }
 
+struct ScopedObservationWatcherStartupState {
+    ordering: WatchBeforeScan,
+    backend_installed: bool,
+    reconcile_pass_active: bool,
+}
+
+/// Attachment-owned synchronous orchestration for the watcher/bootstrap race.
+/// The portable async facade will own this value beside the native watcher
+/// handle. Keeping the watcher registration inside it makes close wait until
+/// callbacks have stopped and this coordinator is dropped.
+pub struct ScopedObservationWatcherOrchestrator {
+    attachment_authority: Arc<ScopedObservationAttachmentAuthority>,
+    host_state: Arc<ScopedObservationAccessState>,
+    startup: Arc<Mutex<ScopedObservationWatcherStartupState>>,
+    registration: ScopedObservationWatcherRegistration,
+}
+
+impl std::fmt::Debug for ScopedObservationWatcherOrchestrator {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ScopedObservationWatcherOrchestrator")
+            .field("phase", &self.phase())
+            .field(
+                "cancellation_requested",
+                &self.registration.cancellation_requested(),
+            )
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScopedObservationWatcherPhase {
+    InstallingWatcher,
+    WatcherInstalled,
+    InitialScan,
+    ReconcilePending,
+    Reconciling,
+    Live { offered_through_sequence: u64 },
+}
+
+impl From<StartupPhase> for ScopedObservationWatcherPhase {
+    fn from(phase: StartupPhase) -> Self {
+        match phase {
+            StartupPhase::Discovered | StartupPhase::WatchRegistered => Self::WatcherInstalled,
+            StartupPhase::Scanning => Self::InitialScan,
+            StartupPhase::Replaying => Self::ReconcilePending,
+            StartupPhase::Reconciling => Self::Reconciling,
+            StartupPhase::Live { commit_seq } => Self::Live {
+                offered_through_sequence: commit_seq,
+            },
+        }
+    }
+}
+
+fn scoped_watcher_phase(
+    startup: &ScopedObservationWatcherStartupState,
+) -> ScopedObservationWatcherPhase {
+    if startup.backend_installed {
+        startup.ordering.phase().into()
+    } else {
+        ScopedObservationWatcherPhase::InstallingWatcher
+    }
+}
+
+impl Drop for ScopedObservationWatcherOrchestrator {
+    fn drop(&mut self) {
+        let installed = self
+            .startup
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .backend_installed;
+        if !installed {
+            self.host_state
+                .watcher_orchestrator_opened
+                .store(false, Ordering::Release);
+        }
+    }
+}
+
+#[derive(Debug)]
+pub enum ScopedObservationWatcherHintAction {
+    Buffered(HintEnqueue),
+    PollRequested {
+        hint: DirtyHint,
+        ticket: ScopedObservationPollTicket,
+    },
+}
+
+pub enum ScopedObservationStartupReconcileAction {
+    Reconcile(Box<ScopedObservationStartupReconcilePass>),
+    CaughtUp,
+}
+
+/// Typestate owner for the one exact-scope initial scan. Dropping an
+/// unfinished attempt rolls the ordering state back to `WatcherInstalled`
+/// without discarding hints captured while it ran.
+pub struct ScopedObservationInitialScan {
+    startup: Arc<Mutex<ScopedObservationWatcherStartupState>>,
+    access_pass: Option<ScopedObservationAccessPass>,
+    completed: bool,
+}
+
+impl ScopedObservationInitialScan {
+    pub fn access_pass(&self) -> &ScopedObservationAccessPass {
+        self.access_pass
+            .as_ref()
+            .expect("an unfinished initial scan retains its scoped access pass")
+    }
+}
+
+impl Drop for ScopedObservationInitialScan {
+    fn drop(&mut self) {
+        if self.completed {
+            return;
+        }
+        drop(self.access_pass.take());
+        let mut startup = self
+            .startup
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if startup.ordering.phase() == StartupPhase::Scanning {
+            let _ = startup.ordering.abort_scan();
+        }
+    }
+}
+
+/// One bounded whole-scope pass triggered by hints captured behind the
+/// bootstrap barrier. Its hints are automatically restored if the pass is
+/// dropped or cannot publish complete offered coverage.
+pub struct ScopedObservationStartupReconcilePass {
+    startup: Arc<Mutex<ScopedObservationWatcherStartupState>>,
+    hints: Vec<DirtyHint>,
+    access_pass: Option<ScopedObservationAccessPass>,
+    completed: bool,
+}
+
+impl ScopedObservationStartupReconcilePass {
+    pub fn hints(&self) -> &[DirtyHint] {
+        &self.hints
+    }
+
+    pub fn access_pass(&self) -> &ScopedObservationAccessPass {
+        self.access_pass
+            .as_ref()
+            .expect("an unfinished startup reconciliation retains its scoped access pass")
+    }
+}
+
+impl Drop for ScopedObservationStartupReconcilePass {
+    fn drop(&mut self) {
+        if self.completed {
+            return;
+        }
+        drop(self.access_pass.take());
+        let mut startup = self
+            .startup
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        for hint in self.hints.drain(..) {
+            let _ = startup.ordering.push_hint(hint);
+        }
+        startup.reconcile_pass_active = false;
+    }
+}
+
 #[derive(Debug)]
 pub struct ScopedObservationYieldedEnvelope {
     pub envelope: ScopedObservationEnvelope,
@@ -1925,6 +2091,18 @@ pub enum ScopedObservationOpenDrainError {
 pub enum ScopedObservationCloseError {
     #[error("scoped consumer drain belongs to another observer attachment")]
     ForeignDrain,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ScopedObservationConsumerOfferError {
+    #[error("scoped consumer drain belongs to another observer attachment")]
+    ForeignDrain,
+    #[error("scoped observation host or consumer drain is closed")]
+    Closed,
+    #[error("scoped observation consumer operation accounting is exhausted")]
+    OperationCapacityExhausted,
+    #[error("scoped observation projection/delivery offer failed: {0}")]
+    Offer(#[from] ScopedProjectionDeliveryError),
 }
 
 #[derive(Debug, Clone)]
@@ -4769,6 +4947,37 @@ pub enum ScopedObservationAccessError {
     Access(#[from] AccessBudgetError),
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum ScopedObservationStartupError {
+    #[error("scoped observation host is closed")]
+    Closed,
+    #[error("scoped observation watcher orchestrator was already opened")]
+    WatcherAlreadyInstalled,
+    #[error("scoped observation watcher orchestrator belongs to another attachment")]
+    ForeignHost,
+    #[error("scoped observation startup pass belongs to another watcher orchestrator")]
+    ForeignPass,
+    #[error("scoped observation startup reconciliation already has an active pass")]
+    ReconcilePassActive,
+    #[error("scoped observation reconciliation batch limit must be greater than zero")]
+    InvalidReconcileLimit,
+    #[error("scoped observation bootstrap still has {pending_hints} watcher hint(s) to reconcile")]
+    ReconcilePending { pending_hints: usize },
+    #[error("cannot {operation} while scoped watcher startup phase is {phase:?}")]
+    InvalidPhase {
+        operation: &'static str,
+        phase: ScopedObservationWatcherPhase,
+    },
+    #[error("scoped watcher startup ordering failed: {0}")]
+    Ordering(#[source] SourceDriverError),
+    #[error("scoped watcher startup access failed: {0}")]
+    Access(#[from] ScopedObservationAccessError),
+    #[error("scoped watcher startup coverage failed: {0}")]
+    Poll(#[from] ScopedObservationPollError),
+    #[error("scoped watcher bootstrap barrier failed: {0}")]
+    Bootstrap(#[from] ScopedBootstrapBarrierError),
+}
+
 /// A request-local handle for one logical `poll()` call. Request generations
 /// are flow-control coordinates only; they never enter event identity,
 /// coverage, or a native source cursor.
@@ -5006,6 +5215,7 @@ struct ScopedObservationAccessState {
     pass_active: AtomicBool,
     next_pass_id: AtomicU64,
     consumer_drain_opened: AtomicBool,
+    watcher_orchestrator_opened: AtomicBool,
     poll: Arc<ScopedObservationPollRuntime>,
 }
 
@@ -5122,6 +5332,7 @@ impl ScopedObservationAccessHost {
                 pass_active: AtomicBool::new(false),
                 next_pass_id: AtomicU64::new(1),
                 consumer_drain_opened: AtomicBool::new(false),
+                watcher_orchestrator_opened: AtomicBool::new(false),
                 poll: Arc::new(ScopedObservationPollRuntime::default()),
             }),
         })
@@ -5220,6 +5431,92 @@ impl ScopedObservationAccessHost {
         })
     }
 
+    /// Prepare the attachment-owned callback sink before installing a native
+    /// watcher. Callers wire callbacks to the returned coordinator, install
+    /// the backend, then explicitly confirm installation. The coordinator can
+    /// buffer callbacks that fire synchronously during backend setup, but it
+    /// cannot reserve the initial source scan until confirmation succeeds.
+    pub fn prepare_watcher_install(
+        &self,
+        hint_capacity: usize,
+    ) -> Result<ScopedObservationWatcherOrchestrator, ScopedObservationStartupError> {
+        if self.state.closed.load(Ordering::Acquire) || self.lifecycle.is_closing() {
+            return Err(ScopedObservationStartupError::Closed);
+        }
+        let mut ordering = WatchBeforeScan::new(
+            self.root_identity.source_instance_key.as_bytes().to_vec(),
+            hint_capacity,
+        )
+        .map_err(ScopedObservationStartupError::Ordering)?;
+        ordering
+            .watcher_registered()
+            .map_err(ScopedObservationStartupError::Ordering)?;
+        self.state
+            .watcher_orchestrator_opened
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|_| ScopedObservationStartupError::WatcherAlreadyInstalled)?;
+        let registration = match self.register_watcher_task() {
+            Ok(registration) => registration,
+            Err(error) => {
+                self.state
+                    .watcher_orchestrator_opened
+                    .store(false, Ordering::Release);
+                return Err(error.into());
+            }
+        };
+        if self.state.closed.load(Ordering::Acquire) || self.lifecycle.is_closing() {
+            self.state
+                .watcher_orchestrator_opened
+                .store(false, Ordering::Release);
+            return Err(ScopedObservationStartupError::Closed);
+        }
+        Ok(ScopedObservationWatcherOrchestrator {
+            attachment_authority: Arc::clone(&self.attachment_authority),
+            host_state: Arc::clone(&self.state),
+            startup: Arc::new(Mutex::new(ScopedObservationWatcherStartupState {
+                ordering,
+                backend_installed: false,
+                reconcile_pass_active: false,
+            })),
+            registration,
+        })
+    }
+
+    /// Advance one admitted frame through the attachment-owned projection and
+    /// delivery lane. This is the producer half of the future async facade;
+    /// an equally rooted drain from another attachment cannot be substituted.
+    pub fn offer_consumer_next(
+        &self,
+        admission: &mut ScopedObservationAdmissionLane,
+        projection: &mut ScopedObservationProjectionSink,
+        drain: &mut ScopedObservationConsumerDrain,
+    ) -> Result<Option<ScopedObservationOfferReceipt>, ScopedObservationConsumerOfferError> {
+        if !self.owns_consumer_drain(drain) {
+            return Err(ScopedObservationConsumerOfferError::ForeignDrain);
+        }
+        if drain.is_closed()
+            || self.state.closed.load(Ordering::Acquire)
+            || self.lifecycle.is_closing()
+        {
+            return Err(ScopedObservationConsumerOfferError::Closed);
+        }
+        let _operation = match self
+            .lifecycle
+            .start_operation(ScopedObservationOperationKind::Runtime)
+        {
+            Ok(operation) => operation,
+            Err(ScopedObservationOperationStartError::Closing) => {
+                return Err(ScopedObservationConsumerOfferError::Closed);
+            }
+            Err(ScopedObservationOperationStartError::CapacityExhausted) => {
+                return Err(ScopedObservationConsumerOfferError::OperationCapacityExhausted);
+            }
+        };
+        admission
+            .offer_next(projection, drain.delivery_lane_mut())
+            .map_err(Into::into)
+    }
+
     /// Admit one logical poll request. Every request receives its own ticket,
     /// while all tickets admitted before the next pass reservation share that
     /// pass and offered watermark.
@@ -5279,14 +5576,26 @@ impl ScopedObservationAccessHost {
         if !Arc::ptr_eq(&self.state.poll, &lease.runtime) {
             return Err(ScopedObservationPollError::ForeignLease);
         }
+        self.validate_scope_pass_completion(lease.access_pass(), admission, drain)
+    }
+
+    fn validate_scope_pass_completion(
+        &self,
+        pass: &ScopedObservationAccessPass,
+        admission: &ScopedObservationAdmissionLane,
+        drain: &ScopedObservationConsumerDrain,
+    ) -> Result<(), ScopedObservationPollError> {
+        if !Arc::ptr_eq(&self.state, &pass.state) {
+            return Err(ScopedObservationPollError::ForeignLease);
+        }
         if !self.owns_consumer_drain(drain) {
             return Err(ScopedObservationPollError::ForeignDrain);
         }
         if drain.is_closed() || self.lifecycle.is_closing() {
             return Err(ScopedObservationPollError::Closed);
         }
-        let report = lease.access_pass().report();
-        let pass_id = lease.access_pass().pass_id();
+        let report = pass.report();
+        let pass_id = pass.pass_id();
         if self.known_objects.keys().any(|relation_id| {
             !report
                 .relations()
@@ -6144,6 +6453,298 @@ impl ScopedObservationAccessPass {
 impl Drop for ScopedObservationAccessPass {
     fn drop(&mut self) {
         self.release();
+    }
+}
+
+impl ScopedObservationWatcherOrchestrator {
+    fn lock_startup(&self) -> MutexGuard<'_, ScopedObservationWatcherStartupState> {
+        self.startup
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn validate_host(
+        &self,
+        host: &ScopedObservationAccessHost,
+    ) -> Result<(), ScopedObservationStartupError> {
+        if !Arc::ptr_eq(&self.attachment_authority, &host.attachment_authority) {
+            return Err(ScopedObservationStartupError::ForeignHost);
+        }
+        if self.registration.cancellation_requested()
+            || host.state.closed.load(Ordering::Acquire)
+            || host.lifecycle.is_closing()
+        {
+            return Err(ScopedObservationStartupError::Closed);
+        }
+        Ok(())
+    }
+
+    pub fn phase(&self) -> ScopedObservationWatcherPhase {
+        scoped_watcher_phase(&self.lock_startup())
+    }
+
+    pub fn cancellation_requested(&self) -> bool {
+        self.registration.cancellation_requested()
+    }
+
+    pub fn wait_for_cancellation(&self) {
+        self.registration.wait_for_cancellation();
+    }
+
+    /// Confirm that the native backend is active after its callback has been
+    /// wired to this coordinator. Repeating confirmation is idempotent; source
+    /// access remains impossible until the first successful confirmation.
+    pub fn confirm_watcher_installed(
+        &self,
+        host: &ScopedObservationAccessHost,
+    ) -> Result<ScopedObservationWatcherPhase, ScopedObservationStartupError> {
+        self.validate_host(host)?;
+        let mut startup = self.lock_startup();
+        startup.backend_installed = true;
+        Ok(scoped_watcher_phase(&startup))
+    }
+
+    /// Accept one watcher callback. Before the bootstrap barrier it is kept in
+    /// the bounded/coalescing startup set. After the barrier it atomically
+    /// becomes a request-local poll ticket instead of racing bootstrap offer.
+    pub fn record_hint(
+        &self,
+        host: &ScopedObservationAccessHost,
+        hint: DirtyHint,
+    ) -> Result<ScopedObservationWatcherHintAction, ScopedObservationStartupError> {
+        self.validate_host(host)?;
+        let mut startup = self.lock_startup();
+        let action = startup
+            .ordering
+            .push_hint(hint)
+            .map_err(ScopedObservationStartupError::Ordering)?;
+        match action {
+            StartupAction::Buffered(enqueue) => {
+                Ok(ScopedObservationWatcherHintAction::Buffered(enqueue))
+            }
+            StartupAction::DeliverNow(hint) => {
+                drop(startup);
+                let ticket = host.request_poll()?;
+                Ok(ScopedObservationWatcherHintAction::PollRequested { hint, ticket })
+            }
+            StartupAction::Reconcile(_)
+            | StartupAction::AwaitMoreReconcile
+            | StartupAction::Live { .. } => {
+                let phase = scoped_watcher_phase(&startup);
+                Err(ScopedObservationStartupError::InvalidPhase {
+                    operation: "record watcher hint",
+                    phase,
+                })
+            }
+        }
+    }
+
+    /// Reserve the first exact-scope pass only after the watcher backend has
+    /// been confirmed installed. An unfinished/dropped scan is retryable and
+    /// preserves every callback buffered during the attempt.
+    pub fn begin_initial_scan(
+        &self,
+        host: &ScopedObservationAccessHost,
+    ) -> Result<ScopedObservationInitialScan, ScopedObservationStartupError> {
+        self.validate_host(host)?;
+        let mut startup = self.lock_startup();
+        if !startup.backend_installed || startup.ordering.phase() != StartupPhase::WatchRegistered {
+            return Err(ScopedObservationStartupError::InvalidPhase {
+                operation: "begin initial scan",
+                phase: scoped_watcher_phase(&startup),
+            });
+        }
+        let access_pass = host.begin_pass()?;
+        startup
+            .ordering
+            .begin_scan()
+            .map_err(ScopedObservationStartupError::Ordering)?;
+        Ok(ScopedObservationInitialScan {
+            startup: Arc::clone(&self.startup),
+            access_pass: Some(access_pass),
+            completed: false,
+        })
+    }
+
+    /// Close the initial scan only after every exact known-object relation has
+    /// attempted access and published coverage from this same pass.
+    pub fn finish_initial_scan(
+        &self,
+        host: &ScopedObservationAccessHost,
+        mut scan: ScopedObservationInitialScan,
+        admission: &ScopedObservationAdmissionLane,
+        projection: &ScopedObservationProjectionSink,
+        drain: &ScopedObservationConsumerDrain,
+    ) -> Result<ScopedObservationWatermarkCore, ScopedObservationStartupError> {
+        self.validate_host(host)?;
+        if !Arc::ptr_eq(&self.startup, &scan.startup) {
+            return Err(ScopedObservationStartupError::ForeignPass);
+        }
+        let mut startup = self.lock_startup();
+        if startup.ordering.phase() != StartupPhase::Scanning {
+            return Err(ScopedObservationStartupError::InvalidPhase {
+                operation: "finish initial scan",
+                phase: scoped_watcher_phase(&startup),
+            });
+        }
+        let pass = scan
+            .access_pass
+            .as_ref()
+            .expect("an unfinished initial scan retains its scoped access pass");
+        host.validate_scope_pass_completion(pass, admission, drain)?;
+        let watermark = host
+            .capture_watermark_core(admission, projection, drain.delivery_lane())
+            .map_err(ScopedObservationPollError::Coverage)?;
+        startup
+            .ordering
+            .finish_scan()
+            .map_err(ScopedObservationStartupError::Ordering)?;
+        scan.completed = true;
+        drop(scan.access_pass.take());
+        Ok(watermark)
+    }
+
+    /// Drain one bounded startup hint batch and reserve a fresh whole-scope
+    /// reconciliation pass. `CaughtUp` is only a provisional observation;
+    /// callbacks remain buffered until `offer_bootstrap_complete` holds this
+    /// same lock and successfully offers the barrier.
+    pub fn next_reconcile(
+        &self,
+        host: &ScopedObservationAccessHost,
+        max_hints: usize,
+    ) -> Result<ScopedObservationStartupReconcileAction, ScopedObservationStartupError> {
+        self.validate_host(host)?;
+        if max_hints == 0 {
+            return Err(ScopedObservationStartupError::InvalidReconcileLimit);
+        }
+        let mut startup = self.lock_startup();
+        if !matches!(
+            startup.ordering.phase(),
+            StartupPhase::Replaying | StartupPhase::Reconciling
+        ) {
+            return Err(ScopedObservationStartupError::InvalidPhase {
+                operation: "begin startup reconciliation",
+                phase: scoped_watcher_phase(&startup),
+            });
+        }
+        if startup.reconcile_pass_active {
+            return Err(ScopedObservationStartupError::ReconcilePassActive);
+        }
+        if startup.ordering.pending_hint_count() == 0 {
+            let action = startup
+                .ordering
+                .next_reconcile_batch(max_hints)
+                .map_err(ScopedObservationStartupError::Ordering)?;
+            debug_assert!(matches!(action, StartupAction::AwaitMoreReconcile));
+            return Ok(ScopedObservationStartupReconcileAction::CaughtUp);
+        }
+
+        let access_pass = host.begin_pass()?;
+        let action = startup
+            .ordering
+            .next_reconcile_batch(max_hints)
+            .map_err(ScopedObservationStartupError::Ordering)?;
+        let StartupAction::Reconcile(hints) = action else {
+            return Err(ScopedObservationStartupError::InvalidPhase {
+                operation: "reserve startup reconciliation",
+                phase: scoped_watcher_phase(&startup),
+            });
+        };
+        startup.reconcile_pass_active = true;
+        Ok(ScopedObservationStartupReconcileAction::Reconcile(
+            Box::new(ScopedObservationStartupReconcilePass {
+                startup: Arc::clone(&self.startup),
+                hints,
+                access_pass: Some(access_pass),
+                completed: false,
+            }),
+        ))
+    }
+
+    /// Publish the exact-scope offered watermark for one startup reconcile.
+    /// Failure or drop restores the pass's coalesced hints automatically.
+    pub fn finish_reconcile(
+        &self,
+        host: &ScopedObservationAccessHost,
+        mut reconcile: Box<ScopedObservationStartupReconcilePass>,
+        admission: &ScopedObservationAdmissionLane,
+        projection: &ScopedObservationProjectionSink,
+        drain: &ScopedObservationConsumerDrain,
+    ) -> Result<ScopedObservationWatermarkCore, ScopedObservationStartupError> {
+        self.validate_host(host)?;
+        if !Arc::ptr_eq(&self.startup, &reconcile.startup) {
+            return Err(ScopedObservationStartupError::ForeignPass);
+        }
+        let mut startup = self.lock_startup();
+        if startup.ordering.phase() != StartupPhase::Reconciling || !startup.reconcile_pass_active {
+            return Err(ScopedObservationStartupError::InvalidPhase {
+                operation: "finish startup reconciliation",
+                phase: scoped_watcher_phase(&startup),
+            });
+        }
+        let pass = reconcile
+            .access_pass
+            .as_ref()
+            .expect("an unfinished startup reconciliation retains its access pass");
+        host.validate_scope_pass_completion(pass, admission, drain)?;
+        let watermark = host
+            .capture_watermark_core(admission, projection, drain.delivery_lane())
+            .map_err(ScopedObservationPollError::Coverage)?;
+        startup.reconcile_pass_active = false;
+        reconcile.completed = true;
+        drop(reconcile.access_pass.take());
+        Ok(watermark)
+    }
+
+    /// Atomically offer the bootstrap barrier and release subsequent watcher
+    /// callbacks into live poll scheduling. Queue pressure leaves startup in
+    /// `Reconciling`; a callback cannot slip between the successful offer and
+    /// the transition to `Live`.
+    pub fn offer_bootstrap_complete(
+        &self,
+        host: &ScopedObservationAccessHost,
+        append_objects: &[ScopedKnownAppendObject],
+        admission: &ScopedObservationAdmissionLane,
+        projection: &ScopedObservationProjectionSink,
+        drain: &mut ScopedObservationConsumerDrain,
+        observed_at: i64,
+    ) -> Result<Arc<ScopedBootstrapBarrier>, ScopedObservationStartupError> {
+        self.validate_host(host)?;
+        let mut startup = self.lock_startup();
+        if let StartupPhase::Live { .. } = startup.ordering.phase() {
+            return host
+                .engine_ready(drain)?
+                .ok_or(ScopedObservationStartupError::InvalidPhase {
+                    operation: "reuse bootstrap barrier",
+                    phase: scoped_watcher_phase(&startup),
+                });
+        }
+        if startup.ordering.phase() != StartupPhase::Reconciling {
+            return Err(ScopedObservationStartupError::InvalidPhase {
+                operation: "offer bootstrap complete",
+                phase: scoped_watcher_phase(&startup),
+            });
+        }
+        if startup.reconcile_pass_active {
+            return Err(ScopedObservationStartupError::ReconcilePassActive);
+        }
+        let pending_hints = startup.ordering.pending_hint_count();
+        if pending_hints > 0 {
+            return Err(ScopedObservationStartupError::ReconcilePending { pending_hints });
+        }
+        let barrier = host.offer_consumer_bootstrap_complete(
+            append_objects,
+            admission,
+            projection,
+            drain,
+            observed_at,
+        )?;
+        let transition = startup
+            .ordering
+            .finish_reconcile(barrier.barrier_sequence)
+            .expect("startup lock keeps the verified empty hint set stable");
+        debug_assert!(matches!(transition, StartupAction::Live { .. }));
+        Ok(barrier)
     }
 }
 

@@ -217,6 +217,15 @@ impl WatchBeforeScan {
         Ok(())
     }
 
+    /// Return an interrupted initial scan to the watcher-installed boundary.
+    /// Hints captured while the scan was active remain buffered, so retrying
+    /// the scan cannot lose a native change that raced the failed attempt.
+    pub fn abort_scan(&mut self) -> Result<(), SourceDriverError> {
+        self.require_phase(StartupPhase::Scanning, "abort scan")?;
+        self.phase = StartupPhase::WatchRegistered;
+        Ok(())
+    }
+
     pub fn push_hint(&mut self, hint: DirtyHint) -> Result<StartupAction, SourceDriverError> {
         match self.phase {
             StartupPhase::WatchRegistered
@@ -249,6 +258,13 @@ impl WatchBeforeScan {
         } else {
             Ok(StartupAction::Reconcile(hints))
         }
+    }
+
+    /// Number of coalesced hints still behind the startup barrier. Hosts use
+    /// this while holding their own orchestration lock to make barrier offer
+    /// and the transition to `Live` atomic with respect to watcher callbacks.
+    pub fn pending_hint_count(&self) -> usize {
+        self.buffered.len()
     }
 
     /// Marks the current reconcile batch complete. Hints buffered during the
@@ -405,6 +421,27 @@ mod tests {
         startup.watcher_registered().unwrap();
         startup.begin_scan().unwrap();
         assert_eq!(startup.phase(), StartupPhase::Scanning);
+    }
+
+    #[test]
+    fn aborted_startup_scan_keeps_racing_hints_for_retry() {
+        let mut startup = WatchBeforeScan::new(b"instance".to_vec(), 4).unwrap();
+        startup.watcher_registered().unwrap();
+        startup.begin_scan().unwrap();
+        startup
+            .push_hint(hint(1, DirtyReason::NativeEvent))
+            .unwrap();
+        assert_eq!(startup.pending_hint_count(), 1);
+
+        startup.abort_scan().unwrap();
+        assert_eq!(startup.phase(), StartupPhase::WatchRegistered);
+        assert_eq!(startup.pending_hint_count(), 1);
+        startup.begin_scan().unwrap();
+        startup.finish_scan().unwrap();
+        assert!(matches!(
+            startup.next_reconcile_batch(4).unwrap(),
+            StartupAction::Reconcile(ref hints) if hints == &[hint(1, DirtyReason::NativeEvent)]
+        ));
     }
 
     #[test]

@@ -1227,15 +1227,28 @@ Current landing status (2026-08-17):
   wakes tasks blocked on that signal, rejects later registration, and remains
   incomplete until every awakened watcher stops its callbacks and drops the
   registration. Host drop requests the same cancellation without blocking;
-  the portable async watcher/close wrapper remains for the scope orchestrator;
+- the attachment now prepares a bounded watcher callback sink and lifecycle
+  registration before backend installation, then requires explicit successful
+  installation before the initial exact-scope access pass can start. Callbacks
+  arriving during installation, initial scan, or reconciliation coalesce
+  behind the bootstrap barrier; capacity pressure escalates to one full-source-
+  instance reconcile instead of dropping a signal. Every initial/reconcile
+  pass must attempt and offer coverage for each exact granted relation from
+  that same pass. Dropped or incomplete initial passes retain captured hints,
+  and abandoned reconciliation passes restore their bounded hint batch. The
+  final empty-hint check, bootstrap-control offer, and transition to live share
+  one ordering lock, so a racing callback either blocks the barrier or becomes
+  a request-local live poll ticket after it. Producer offers also verify the
+  attachment-owned consumer drain. The portable async watcher/close wrapper
+  and concrete native watcher owner remain open;
 - one pass is active at a time, a later pass receives fresh bounds, close is
   idempotent, and the frozen access report excludes paths, identity values, and
   content; and
 - the architecture checker forbids store/query/N-API/concrete-adapter imports
   and premature public export from this provisional composition root.
 
-D1 remains `In progress`: watcher-before-scan, multi-object discovery/cursor
-orchestration, declared relation-backed decoder dependency access, built-in
+D1 remains `In progress`: multi-object discovery/cursor orchestration,
+declared relation-backed decoder dependency access, built-in
 canonical fact-revision adoption beyond the current runtime families, scoped
 reducers beyond usage-v2,
 coverage-complete durable query exposure, affiliation/actor enrichment and
@@ -1572,8 +1585,9 @@ The next execution order is:
 4. implement B1-B3 catalog identity, bounded compositions, durable readiness,
    and snapshot pagination while completing the remaining C1-C3 compatibility
    report and semantic-contract work;
-5. finish D1/D2 watcher-before-scan orchestration, dynamic Claude scope,
-   declared decoder dependencies, and the public async lifecycle facade;
+5. build the portable async lifecycle facade over the landed watcher-before-
+   scan coordinator while finishing D2 dynamic Claude scope and declared
+   decoder dependencies;
 6. complete D3 multi-family and D-owned replacement manifests, non-append
    participants, watcher failure scheduling, and multi-observer fairness;
 7. run A4 only after the initial catalog/query and public scoped-observer seams

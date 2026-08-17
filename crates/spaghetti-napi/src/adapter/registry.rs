@@ -200,20 +200,24 @@ mod tests {
         ScopedDecodeFailureClass, ScopedDecodedAppendItem, ScopedDeliveryError,
         ScopedEnvelopeEvidenceAuthority, ScopedKnownAppendObject, ScopedKnownObjectGrant,
         ScopedKnownObjectReadRequest, ScopedObjectRead, ScopedObservationAccessError,
-        ScopedObservationAccessHost, ScopedObservationAccessRequest,
-        ScopedObservationAdmissionLane, ScopedObservationCloseError, ScopedObservationContinuity,
+        ScopedObservationAccessHost, ScopedObservationAccessPass, ScopedObservationAccessRequest,
+        ScopedObservationAdmissionLane, ScopedObservationCloseError,
+        ScopedObservationConsumerOfferError, ScopedObservationContinuity,
         ScopedObservationDeliveryLane, ScopedObservationDeliveryLimits, ScopedObservationEvent,
         ScopedObservationOpenDrainError, ScopedObservationPollError, ScopedObservationPollLease,
         ScopedObservationPollResolution, ScopedObservationProjectionLimits,
         ScopedObservationProjectionSink, ScopedObservationQueueLimits,
+        ScopedObservationStartupError, ScopedObservationStartupReconcileAction,
+        ScopedObservationWatcherHintAction, ScopedObservationWatcherPhase,
         ScopedProjectionDeliveryError, ScopedQueuedObservationFrame, ScopedReplacementMode,
         ScopedReplacementRepresentation, ScopedReplacementStageError, ScopedResyncReason,
         ScopedRootIdentityRequest, ScopedSourceFailureClass,
     };
     use crate::source::{
         AccessOperation, AccessOutcome, AccessPhase, AppendDelimitedConfig, AppendDelimitedFile,
-        AppendItem, AppendRead, AppendTransition, AuthorizedScopeAccessPlan, RecordOrigin,
-        ScopeAccessReport, ScopeAccessRequest, ScopeIdentityInput, SourceMediaType, SourceRecord,
+        AppendItem, AppendRead, AppendTransition, AuthorizedScopeAccessPlan, DirtyHint,
+        DirtyReason, DirtyScope, HintEnqueue, RecordOrigin, ScopeAccessReport, ScopeAccessRequest,
+        ScopeIdentityInput, SourceMediaType, SourceRecord,
     };
 
     use super::*;
@@ -533,6 +537,40 @@ mod tests {
             panic!("missing-source poll admission failed: {}", failure.error);
         }
         assert!(admission.is_empty());
+    }
+
+    fn reconcile_scoped_append(
+        host: &ScopedObservationAccessHost,
+        pass: &ScopedObservationAccessPass,
+        object: &mut ScopedKnownAppendObject,
+        admission: &mut ScopedObservationAdmissionLane,
+        identity_inputs: &[ScopeIdentityInput<'_>],
+        origin: &RecordOrigin,
+        access_phase: AccessPhase,
+    ) -> ScopedAppendObservation {
+        let observation = object
+            .reconcile(
+                pass,
+                ScopedAppendReconcileRequest {
+                    relation_id: "root-object",
+                    identity_inputs,
+                    access_phase,
+                    parent_token: None,
+                    depth: 1,
+                    max_bytes: 64,
+                    origin,
+                    force_contract_replay: false,
+                },
+            )
+            .unwrap();
+        let ScopedAppendDecodeOutcome::Ready(decoded) = decode_scoped(host, object, &observation)
+        else {
+            panic!("startup fixture must produce a complete decoded observation");
+        };
+        if let Err(failure) = admission.admit(object, &observation, decoded) {
+            panic!("startup fixture admission failed: {}", failure.error);
+        }
+        observation
     }
 
     impl AgentAdapter for EmptyAdapter {
@@ -1351,6 +1389,342 @@ mod tests {
         let complete = barrier.wait();
         assert_eq!(complete.active_watcher_tasks, 0);
         assert!(complete.complete);
+    }
+
+    #[test]
+    fn scoped_watcher_before_scan_reconciles_races_before_bootstrap_and_schedules_live_poll() {
+        let registry = supported_fixture_registry();
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().join("watch-before-scan-root");
+        std::fs::create_dir_all(&root).unwrap();
+        let host =
+            ScopedObservationAccessHost::authorize(&registry, scoped_access_request(root.clone()))
+                .unwrap();
+        let mut drain = host
+            .open_consumer_drain(ScopedObservationDeliveryLimits {
+                max_semantic_events: 4,
+                max_retained_native_bytes: 0,
+                max_source_control_items: 4,
+            })
+            .unwrap();
+        let mut object = scoped_append_object_with_coverage(
+            AppendDelimitedFile::new(AppendDelimitedConfig::json_lines()).unwrap(),
+            RawRetentionPolicy::None,
+            vec![CoverageDomain::FactFamily {
+                family: "runtime.usage-v2".to_string(),
+                version: 1,
+            }],
+        );
+        let mut admission = admission_lane(8, 0, 4);
+        let mut projection =
+            ScopedObservationProjectionSink::new(ScopedObservationProjectionLimits {
+                max_usage_v2_entities: 1,
+            })
+            .unwrap();
+        let identity = [ScopeIdentityInput {
+            name: "native-session-id",
+            value: b"watch-before-scan-session",
+        }];
+        let origin = RecordOrigin {
+            source_instance_id: 10,
+            stream_id: 20,
+            object_id: 30,
+            observed_at: 40,
+            source_timestamp_hint: None,
+            media_type: SourceMediaType::new("application/x-ndjson").unwrap(),
+        };
+
+        // The callback sink and lifecycle registration exist before backend
+        // installation. Dropping a failed installation is retryable, while an
+        // unconfirmed installation cannot reserve source access.
+        let failed_install = host.prepare_watcher_install(1).unwrap();
+        assert_eq!(
+            failed_install.phase(),
+            ScopedObservationWatcherPhase::InstallingWatcher
+        );
+        assert!(matches!(
+            failed_install.begin_initial_scan(&host),
+            Err(ScopedObservationStartupError::InvalidPhase {
+                phase: ScopedObservationWatcherPhase::InstallingWatcher,
+                ..
+            })
+        ));
+        drop(failed_install);
+
+        let startup = host.prepare_watcher_install(1).unwrap();
+        assert!(matches!(
+            host.prepare_watcher_install(1),
+            Err(ScopedObservationStartupError::WatcherAlreadyInstalled)
+        ));
+
+        let first_hint = DirtyHint {
+            scope: DirtyScope::Object(b"root-object".to_vec()),
+            reason: DirtyReason::NativeEvent,
+        };
+        assert!(matches!(
+            startup.record_hint(&host, first_hint).unwrap(),
+            ScopedObservationWatcherHintAction::Buffered(HintEnqueue::Added)
+        ));
+        assert_eq!(
+            startup.confirm_watcher_installed(&host).unwrap(),
+            ScopedObservationWatcherPhase::WatcherInstalled
+        );
+
+        let scan = startup.begin_initial_scan(&host).unwrap();
+        assert_eq!(startup.phase(), ScopedObservationWatcherPhase::InitialScan);
+        let missing = reconcile_scoped_append(
+            &host,
+            scan.access_pass(),
+            &mut object,
+            &mut admission,
+            &identity,
+            &origin,
+            AccessPhase::Initial,
+        );
+        assert!(!missing.object_present);
+
+        // Creation races the initial missing read. With capacity one, a second
+        // distinct callback collapses the bounded set to a full-instance pass
+        // instead of dropping either signal.
+        std::fs::write(root.join("session.jsonl"), b"one\n").unwrap();
+        assert!(matches!(
+            startup
+                .record_hint(
+                    &host,
+                    DirtyHint {
+                        scope: DirtyScope::Object(b"second-callback".to_vec()),
+                        reason: DirtyReason::NativeEvent,
+                    },
+                )
+                .unwrap(),
+            ScopedObservationWatcherHintAction::Buffered(HintEnqueue::EscalatedToInstance)
+        ));
+        let initial = startup
+            .finish_initial_scan(&host, scan, &admission, &projection, &drain)
+            .unwrap();
+        assert_eq!(initial.offered_through_sequence, 0);
+        assert_eq!(
+            startup.phase(),
+            ScopedObservationWatcherPhase::ReconcilePending
+        );
+
+        // Abandoning a reconcile attempt restores its hints and releases the
+        // exact-scope pass, so the raced creation remains retryable.
+        let ScopedObservationStartupReconcileAction::Reconcile(abandoned) =
+            startup.next_reconcile(&host, 4).unwrap()
+        else {
+            panic!("the initial scan race must schedule reconciliation");
+        };
+        assert_eq!(abandoned.hints().len(), 1);
+        assert_eq!(
+            abandoned.hints()[0].scope,
+            DirtyScope::Instance(host.root_identity().source_instance_key.as_bytes().to_vec())
+        );
+        assert_eq!(
+            abandoned.hints()[0].reason,
+            DirtyReason::InternalQueueOverflow
+        );
+        drop(abandoned);
+
+        let ScopedObservationStartupReconcileAction::Reconcile(reconcile) =
+            startup.next_reconcile(&host, 4).unwrap()
+        else {
+            panic!("dropping a startup pass must requeue its hints");
+        };
+        let created = reconcile_scoped_append(
+            &host,
+            reconcile.access_pass(),
+            &mut object,
+            &mut admission,
+            &identity,
+            &origin,
+            AccessPhase::Revalidation,
+        );
+        assert!(created.object_present);
+        assert_eq!(
+            created.presence_change,
+            Some(ScopedAppendPresenceChange::Created { generation: 1 })
+        );
+        while !admission.is_empty() {
+            assert!(host
+                .offer_consumer_next(&mut admission, &mut projection, &mut drain)
+                .unwrap()
+                .is_some());
+        }
+        let reconciled = startup
+            .finish_reconcile(&host, reconcile, &admission, &projection, &drain)
+            .unwrap();
+        assert_eq!(reconciled.offered_through_sequence, 1);
+        assert!(matches!(
+            startup.next_reconcile(&host, 4).unwrap(),
+            ScopedObservationStartupReconcileAction::CaughtUp
+        ));
+
+        // A callback after the provisional empty check still blocks the
+        // barrier and receives another exact pass.
+        assert!(matches!(
+            startup
+                .record_hint(
+                    &host,
+                    DirtyHint {
+                        scope: DirtyScope::Object(b"root-object".to_vec()),
+                        reason: DirtyReason::NativeEvent,
+                    },
+                )
+                .unwrap(),
+            ScopedObservationWatcherHintAction::Buffered(HintEnqueue::Added)
+        ));
+        assert!(matches!(
+            startup.offer_bootstrap_complete(
+                &host,
+                std::slice::from_ref(&object),
+                &admission,
+                &projection,
+                &mut drain,
+                50,
+            ),
+            Err(ScopedObservationStartupError::ReconcilePending { pending_hints: 1 })
+        ));
+        let ScopedObservationStartupReconcileAction::Reconcile(reconcile) =
+            startup.next_reconcile(&host, 4).unwrap()
+        else {
+            panic!("the finalization race must schedule reconciliation");
+        };
+        let unchanged = reconcile_scoped_append(
+            &host,
+            reconcile.access_pass(),
+            &mut object,
+            &mut admission,
+            &identity,
+            &origin,
+            AccessPhase::Revalidation,
+        );
+        assert!(unchanged.object_present);
+        assert!(unchanged.presence_change.is_none());
+        assert!(admission.is_empty());
+        startup
+            .finish_reconcile(&host, reconcile, &admission, &projection, &drain)
+            .unwrap();
+        assert!(matches!(
+            startup.next_reconcile(&host, 4).unwrap(),
+            ScopedObservationStartupReconcileAction::CaughtUp
+        ));
+
+        object.complete_bootstrap().unwrap();
+        let barrier = startup
+            .offer_bootstrap_complete(
+                &host,
+                std::slice::from_ref(&object),
+                &admission,
+                &projection,
+                &mut drain,
+                50,
+            )
+            .unwrap();
+        assert_eq!(barrier.barrier_sequence, 2);
+        assert_eq!(
+            startup.phase(),
+            ScopedObservationWatcherPhase::Live {
+                offered_through_sequence: 2,
+            }
+        );
+        let repeated = startup
+            .offer_bootstrap_complete(
+                &host,
+                std::slice::from_ref(&object),
+                &admission,
+                &projection,
+                &mut drain,
+                51,
+            )
+            .unwrap();
+        assert!(Arc::ptr_eq(&barrier, &repeated));
+
+        let mut active = host
+            .bind_consumer_bootstrap_epoch_state(vec![object], admission, projection, &drain)
+            .unwrap();
+        let live_ticket = match startup
+            .record_hint(
+                &host,
+                DirtyHint {
+                    scope: DirtyScope::Object(b"root-object".to_vec()),
+                    reason: DirtyReason::NativeEvent,
+                },
+            )
+            .unwrap()
+        {
+            ScopedObservationWatcherHintAction::PollRequested { hint, ticket } => {
+                assert_eq!(hint.reason, DirtyReason::NativeEvent);
+                ticket
+            }
+            ScopedObservationWatcherHintAction::Buffered(_) => {
+                panic!("a post-barrier callback must schedule a live poll")
+            }
+        };
+        let lease = host.begin_poll().unwrap().unwrap();
+        let (active_object, active_admission) = active
+            .append_object_and_admission_mut("root-object")
+            .unwrap();
+        let live = reconcile_scoped_append(
+            &host,
+            lease.access_pass(),
+            active_object,
+            active_admission,
+            &identity,
+            &origin,
+            AccessPhase::Revalidation,
+        );
+        assert!(live.object_present);
+        assert!(active.admission_is_empty());
+        let live_watermark = host.complete_epoch_poll(lease, &active, &drain).unwrap();
+        assert_eq!(live_watermark.offered_through_sequence, 2);
+        assert!(matches!(
+            host.poll_resolution(&live_ticket).unwrap(),
+            ScopedObservationPollResolution::Ready(watermark)
+                if Arc::ptr_eq(&watermark, &live_watermark)
+        ));
+
+        let close = host.close_with_consumer(&mut drain).unwrap();
+        assert!(startup.cancellation_requested());
+        assert_eq!(close.state().active_watcher_tasks, 1);
+        drop(startup);
+        assert!(close.wait().complete);
+    }
+
+    #[test]
+    fn scoped_consumer_offer_rejects_a_foreign_attachment_without_mutation() {
+        let registry = supported_fixture_registry();
+        let temp = TempDir::new().unwrap();
+        let first = ScopedObservationAccessHost::authorize(
+            &registry,
+            scoped_access_request(temp.path().join("first-consumer-offer")),
+        )
+        .unwrap();
+        let second = ScopedObservationAccessHost::authorize(
+            &registry,
+            scoped_access_request(temp.path().join("second-consumer-offer")),
+        )
+        .unwrap();
+        let mut drain = first
+            .open_consumer_drain(ScopedObservationDeliveryLimits {
+                max_semantic_events: 1,
+                max_retained_native_bytes: 0,
+                max_source_control_items: 1,
+            })
+            .unwrap();
+        let mut admission = admission_lane(1, 0, 1);
+        let mut projection =
+            ScopedObservationProjectionSink::new(ScopedObservationProjectionLimits {
+                max_usage_v2_entities: 1,
+            })
+            .unwrap();
+        let before = drain.delivery_lane().state();
+
+        assert!(matches!(
+            second.offer_consumer_next(&mut admission, &mut projection, &mut drain),
+            Err(ScopedObservationConsumerOfferError::ForeignDrain)
+        ));
+        assert_eq!(drain.delivery_lane().state(), before);
     }
 
     #[test]
