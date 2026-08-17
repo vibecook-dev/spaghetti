@@ -1210,6 +1210,13 @@ pub enum ScopedResyncReason {
     ExplicitConsumerRequest,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScopedObserverFailureReason {
+    NativeWatcherRecoveryExhausted,
+    NativeWatcherRoutingFailed,
+    InternalControlFailure,
+}
+
 /// Sticky invalidation of one scope epoch. Discard accounting is diagnostic
 /// only and is excluded from deterministic control identity because it depends
 /// on consumer delivery speed.
@@ -1221,6 +1228,22 @@ pub struct ScopedResyncRequired {
     pub last_contiguous_sequence: u64,
     pub baseline_snapshot_digest: ScopedReplacementSnapshotDigest,
     pub reason: ScopedResyncReason,
+    pub discarded_semantic_events: u64,
+    pub discarded_source_controls: u64,
+    pub discarded_retained_native_bytes: u64,
+}
+
+/// Terminal attachment-local failure. Like continuity invalidation, this
+/// control explicitly accounts for and supersedes every not-yet-delivered
+/// value, but no later epoch may restore this attachment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScopedObserverFailure {
+    pub root: ScopedObservationRootIdentity,
+    pub failed_scope_epoch: u64,
+    pub control_sequence: u64,
+    pub last_contiguous_sequence: u64,
+    pub phase: ScopedAppendDeliveryPhase,
+    pub reason: ScopedObserverFailureReason,
     pub discarded_semantic_events: u64,
     pub discarded_source_controls: u64,
     pub discarded_retained_native_bytes: u64,
@@ -1316,6 +1339,12 @@ pub enum ScopedProjectedObservation {
         event_id: ScopedObservationEventId,
         barrier: Arc<ScopedResyncBarrier>,
     },
+    ObserverFailed {
+        source: ScopedSourceObjectIdentity,
+        observed_at: i64,
+        event_id: ScopedObservationEventId,
+        failure: Arc<ScopedObserverFailure>,
+    },
 }
 
 impl ScopedProjectedObservation {
@@ -1327,6 +1356,7 @@ impl ScopedProjectedObservation {
             Self::ObserverResyncRequired { event_id, .. } => *event_id,
             Self::ObserverResyncStarted { event_id, .. } => *event_id,
             Self::ObserverResyncComplete { event_id, .. } => *event_id,
+            Self::ObserverFailed { event_id, .. } => *event_id,
         }
     }
 
@@ -1338,7 +1368,8 @@ impl ScopedProjectedObservation {
             | Self::ObserverBootstrapComplete { .. }
             | Self::ObserverResyncRequired { .. }
             | Self::ObserverResyncStarted { .. }
-            | Self::ObserverResyncComplete { .. } => None,
+            | Self::ObserverResyncComplete { .. }
+            | Self::ObserverFailed { .. } => None,
         }
     }
 
@@ -1350,6 +1381,7 @@ impl ScopedProjectedObservation {
             Self::ObserverResyncRequired { .. } => ScopedAppendDeliveryPhase::Live,
             Self::ObserverResyncStarted { .. } => ScopedAppendDeliveryPhase::Correction,
             Self::ObserverResyncComplete { .. } => ScopedAppendDeliveryPhase::Correction,
+            Self::ObserverFailed { failure, .. } => failure.phase,
         }
     }
 
@@ -1361,6 +1393,7 @@ impl ScopedProjectedObservation {
             Self::ObserverResyncRequired { source, .. } => source,
             Self::ObserverResyncStarted { source, .. } => source,
             Self::ObserverResyncComplete { source, .. } => source,
+            Self::ObserverFailed { source, .. } => source,
         }
     }
 
@@ -1374,6 +1407,7 @@ impl ScopedProjectedObservation {
             Self::ObserverResyncRequired { observed_at, .. } => *observed_at,
             Self::ObserverResyncStarted { observed_at, .. } => *observed_at,
             Self::ObserverResyncComplete { observed_at, .. } => *observed_at,
+            Self::ObserverFailed { observed_at, .. } => *observed_at,
         }
     }
 }
@@ -1551,6 +1585,9 @@ pub enum ScopedObservationEvent {
     },
     ObserverResyncComplete {
         barrier: Arc<ScopedResyncBarrier>,
+    },
+    ObserverFailed {
+        failure: Arc<ScopedObserverFailure>,
     },
 }
 
@@ -2299,7 +2336,8 @@ impl ScopedObservationConsumerDrain {
             | ScopedObservationEvent::SourceReset { .. }
             | ScopedObservationEvent::UsageV2 { .. }
             | ScopedObservationEvent::ObserverResyncRequired { .. }
-            | ScopedObservationEvent::ObserverResyncStarted { .. } => {
+            | ScopedObservationEvent::ObserverResyncStarted { .. }
+            | ScopedObservationEvent::ObserverFailed { .. } => {
                 ScopedObservationAppliedBoundary::None
             }
         };
@@ -2503,6 +2541,42 @@ impl ScopedObservationAsyncHandle {
     ) -> T {
         let mut drain = self.shared.lock_drain();
         operation(&self.shared.host, &mut drain)
+    }
+
+    /// Deliver the one terminal observer-failure control through this
+    /// attachment's dedicated control lane. The first failure wins and is
+    /// retained idempotently; close still owns final resource cancellation.
+    pub fn fail_observer(
+        &self,
+        reason: ScopedObserverFailureReason,
+        observed_at: i64,
+    ) -> Result<Arc<ScopedObserverFailure>, ScopedContinuityError> {
+        let mut drain = self.shared.lock_drain();
+        if drain.is_closed()
+            || self.shared.host.state.closed.load(Ordering::Acquire)
+            || self.shared.host.lifecycle.is_closing()
+        {
+            return Err(ScopedContinuityError::Closed);
+        }
+        let _operation = self
+            .shared
+            .host
+            .lifecycle
+            .start_operation(ScopedObservationOperationKind::Runtime)
+            .map_err(|error| match error {
+                ScopedObservationOperationStartError::Closing => ScopedContinuityError::Closed,
+                ScopedObservationOperationStartError::CapacityExhausted => {
+                    ScopedContinuityError::OperationCapacityExhausted
+                }
+            })?;
+        let failure = drain.delivery_lane_mut().fail_observer(
+            &self.shared.host.root_identity,
+            reason,
+            observed_at,
+        )?;
+        self.shared.host.state.poll.fail(Arc::clone(&failure));
+        self.shared.host.state.ready.fail(Arc::clone(&failure));
+        Ok(failure)
     }
 
     /// Request cancellation and close the event drain. Watcher/native owners
@@ -3163,6 +3237,14 @@ impl ScopedObservationNativeWatcher {
         self.request_instance_reconcile(DirtyReason::Recovery)
     }
 
+    pub fn fail_observer(
+        &self,
+        reason: ScopedObserverFailureReason,
+        observed_at: i64,
+    ) -> Result<Arc<ScopedObserverFailure>, ScopedContinuityError> {
+        self.handle.fail_observer(reason, observed_at)
+    }
+
     /// Replace a failed native backend while retaining this attachment's one
     /// watcher registration and callback routing authority. A successful
     /// replacement always schedules a full-instance reconciliation because
@@ -3617,6 +3699,38 @@ impl ScopedObservationEnvelopeMapper {
                     native_evidence: ScopedNativeEvidence::EngineControl,
                 }
             }
+            ScopedProjectedObservation::ObserverFailed {
+                observed_at,
+                failure,
+                ..
+            } => {
+                if semantic_revision_ref.is_some()
+                    || failure.root != self.root
+                    || failure.failed_scope_epoch != scope_epoch
+                    || failure.control_sequence != observer_sequence
+                    || failure.last_contiguous_sequence >= observer_sequence
+                    || failure.phase != phase
+                {
+                    return Err(ScopedEnvelopeError::DeliveryMismatch);
+                }
+                ScopedMappedEnvelopeParts {
+                    actor_run_key: self.root.root_actor_run_key,
+                    actor_attribution: ScopedActorAttribution::ScopeFallback {
+                        reason: ScopedActorFallbackReason::ObserverLifecycleControl,
+                    },
+                    source: scoped_control_envelope_source(&delivered.source, scope_epoch),
+                    native_time: None,
+                    observed_at,
+                    evidence: ScopedEnvelopeEvidence {
+                        authority: ScopedEnvelopeEvidenceAuthority::EngineControl,
+                        quality: QualifiedValueQuality::Derived,
+                        effective_at: None,
+                        completeness: ContractCompleteness::Complete,
+                    },
+                    event: ScopedObservationEvent::ObserverFailed { failure },
+                    native_evidence: ScopedNativeEvidence::EngineControl,
+                }
+            }
         };
 
         let actor = self.actor_ref(mapped.actor_run_key);
@@ -3875,6 +3989,7 @@ pub enum ScopedObservationContinuity {
     Valid,
     ResyncRequired,
     Resyncing,
+    Failed,
 }
 
 /// Store-free watermark substrate for common Decode coverage plus fact-family
@@ -3937,6 +4052,8 @@ pub enum ScopedDeliveryError {
     BootstrapAlreadyComplete,
     #[error("scoped observer requires a full resync before ordinary delivery")]
     ResyncRequired,
+    #[error("scoped observer is terminally failed")]
+    ObserverFailed,
     #[error("scoped resync epoch accepts only correction-phase snapshot delivery")]
     InvalidResyncPhase,
 }
@@ -3959,8 +4076,14 @@ pub enum ScopedBootstrapBarrierError {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum ScopedContinuityError {
+    #[error("scoped observation attachment is closed")]
+    Closed,
+    #[error("scoped observation operation accounting is exhausted")]
+    OperationCapacityExhausted,
     #[error("scoped continuity cannot be invalidated before bootstrap completes")]
     BootstrapIncomplete,
+    #[error("scoped observer is terminally failed")]
+    ObserverFailed,
     #[error("scoped continuity control does not belong to the bound root")]
     RootMismatch,
     #[error("scoped continuity control identity is invalid")]
@@ -4019,6 +4142,7 @@ pub struct ScopedObservationDeliveryLane {
     resync_required: Option<Arc<ScopedResyncRequired>>,
     resync_started: Option<Arc<ScopedResyncStarted>>,
     resync_barrier: Option<Arc<ScopedResyncBarrier>>,
+    observer_failure: Option<Arc<ScopedObserverFailure>>,
     event_completion: Arc<ScopedObservationEventCompletion>,
 }
 
@@ -4039,6 +4163,7 @@ impl ScopedObservationDeliveryLane {
             resync_required: None,
             resync_started: None,
             resync_barrier: None,
+            observer_failure: None,
             event_completion: Arc::new(ScopedObservationEventCompletion::default()),
         })
     }
@@ -4071,6 +4196,12 @@ impl ScopedObservationDeliveryLane {
         &mut self,
         projected: Vec<ScopedProjectedObservation>,
     ) -> Result<ScopedObservationOfferReceipt, ScopedDeliveryOfferFailure> {
+        if self.observer_failure.is_some() {
+            return Err(ScopedDeliveryOfferFailure {
+                error: ScopedDeliveryError::ObserverFailed,
+                projected,
+            });
+        }
         if self.resync_started.is_some()
             && projected
                 .iter()
@@ -4178,7 +4309,7 @@ impl ScopedObservationDeliveryLane {
         root_present: bool,
         observed_at: i64,
     ) -> Result<Arc<ScopedBootstrapBarrier>, ScopedBootstrapBarrierError> {
-        if self.resync_required.is_some() {
+        if self.resync_required.is_some() || self.observer_failure.is_some() {
             return Err(ScopedBootstrapBarrierError::StateChanged);
         }
         if let Some(barrier) = &self.bootstrap_barrier {
@@ -4269,6 +4400,9 @@ impl ScopedObservationDeliveryLane {
         reason: ScopedResyncReason,
         observed_at: i64,
     ) -> Result<Arc<ScopedResyncRequired>, ScopedContinuityError> {
+        if self.observer_failure.is_some() {
+            return Err(ScopedContinuityError::ObserverFailed);
+        }
         if let Some(started) = &self.resync_started {
             if started.root != *root {
                 return Err(ScopedContinuityError::RootMismatch);
@@ -4351,11 +4485,85 @@ impl ScopedObservationDeliveryLane {
         Ok(control)
     }
 
+    fn fail_observer(
+        &mut self,
+        root: &ScopedObservationRootIdentity,
+        reason: ScopedObserverFailureReason,
+        observed_at: i64,
+    ) -> Result<Arc<ScopedObserverFailure>, ScopedContinuityError> {
+        if let Some(failure) = &self.observer_failure {
+            return if failure.root == *root {
+                Ok(Arc::clone(failure))
+            } else {
+                Err(ScopedContinuityError::RootMismatch)
+            };
+        }
+        let control_sequence = self.next_observer_sequence;
+        let after_sequence =
+            control_sequence
+                .checked_add(1)
+                .ok_or(ScopedContinuityError::Delivery(
+                    ScopedDeliveryError::ObserverSequenceExhausted,
+                ))?;
+        let discarded_semantic_events = u64::try_from(self.semantic.len())
+            .map_err(|_| ScopedContinuityError::Delivery(ScopedDeliveryError::CapacityExhausted))?;
+        let discarded_source_controls = u64::try_from(self.source_controls.len())
+            .map_err(|_| ScopedContinuityError::Delivery(ScopedDeliveryError::CapacityExhausted))?;
+        let phase = if self.resync_started.is_some() {
+            ScopedAppendDeliveryPhase::Correction
+        } else if self.bootstrap_barrier.is_some() {
+            ScopedAppendDeliveryPhase::Live
+        } else {
+            ScopedAppendDeliveryPhase::Bootstrap
+        };
+        let source = observer_control_source(root)
+            .map_err(|()| ScopedContinuityError::InvalidControlIdentity)?;
+        let failure = Arc::new(ScopedObserverFailure {
+            root: root.clone(),
+            failed_scope_epoch: self.scope_epoch,
+            control_sequence,
+            last_contiguous_sequence: self.delivered_through_sequence,
+            phase,
+            reason,
+            discarded_semantic_events,
+            discarded_source_controls,
+            discarded_retained_native_bytes: self.queued_retained_native_bytes,
+        });
+        let event_id = observer_failed_event_id(root, self.scope_epoch, reason);
+
+        // A terminal failure is the final priority control for this
+        // attachment. It explicitly supersedes every undelivered value and
+        // incomplete resync control, then permanently rejects ordinary offers.
+        self.semantic.clear();
+        self.source_controls.clear();
+        self.queued_retained_native_bytes = 0;
+        self.resync_required = None;
+        self.resync_started = None;
+        self.source_controls.push_back(QueuedProjectedObservation {
+            observer_sequence: control_sequence,
+            retained_native_bytes: 0,
+            value: ScopedProjectedObservation::ObserverFailed {
+                source,
+                observed_at,
+                event_id,
+                failure: Arc::clone(&failure),
+            },
+        });
+        self.next_observer_sequence = after_sequence;
+        self.observer_failure = Some(Arc::clone(&failure));
+        self.event_completion.publish(control_sequence);
+        debug_assert_eq!(self.state().continuity, ScopedObservationContinuity::Failed);
+        Ok(failure)
+    }
+
     fn begin_resync(
         &mut self,
         root: &ScopedObservationRootIdentity,
         observed_at: i64,
     ) -> Result<Arc<ScopedResyncStarted>, ScopedContinuityError> {
+        if self.observer_failure.is_some() {
+            return Err(ScopedContinuityError::ObserverFailed);
+        }
         if let Some(control) = &self.resync_started {
             return if control.root == *root {
                 Ok(Arc::clone(control))
@@ -4609,7 +4817,9 @@ impl ScopedObservationDeliveryLane {
             scope_epoch: self.scope_epoch,
             offered_through_sequence: self.next_observer_sequence - 1,
             delivered_through_sequence: self.delivered_through_sequence,
-            continuity: if self.resync_started.is_some() {
+            continuity: if self.observer_failure.is_some() {
+                ScopedObservationContinuity::Failed
+            } else if self.resync_started.is_some() {
                 ScopedObservationContinuity::Resyncing
             } else if self.resync_required.is_some() {
                 ScopedObservationContinuity::ResyncRequired
@@ -4638,6 +4848,10 @@ impl ScopedObservationDeliveryLane {
 
     pub fn resync_barrier(&self) -> Option<Arc<ScopedResyncBarrier>> {
         self.resync_barrier.as_ref().map(Arc::clone)
+    }
+
+    pub fn observer_failure(&self) -> Option<Arc<ScopedObserverFailure>> {
+        self.observer_failure.as_ref().map(Arc::clone)
     }
 
     pub fn is_empty(&self) -> bool {
@@ -4723,7 +4937,8 @@ fn projected_observation_measurement(value: &ScopedProjectedObservation) -> (boo
         | ScopedProjectedObservation::ObserverBootstrapComplete { .. }
         | ScopedProjectedObservation::ObserverResyncRequired { .. }
         | ScopedProjectedObservation::ObserverResyncStarted { .. }
-        | ScopedProjectedObservation::ObserverResyncComplete { .. } => (false, 0),
+        | ScopedProjectedObservation::ObserverResyncComplete { .. }
+        | ScopedProjectedObservation::ObserverFailed { .. } => (false, 0),
     }
 }
 
@@ -5854,6 +6069,27 @@ fn resync_complete_event_id(
     ScopedObservationEventId(*hasher.finalize().as_bytes())
 }
 
+fn observer_failed_event_id(
+    root: &ScopedObservationRootIdentity,
+    scope_epoch: u64,
+    reason: ScopedObserverFailureReason,
+) -> ScopedObservationEventId {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"spaghetti/rfc012d/observation-event-id\0");
+    hasher.update(&SCOPED_OBSERVATION_EVENT_CONTRACT_VERSION.to_be_bytes());
+    hash_event_component(&mut hasher, b"observer.failed");
+    hash_event_component(&mut hasher, root.adapter_id.as_str().as_bytes());
+    hash_event_component(&mut hasher, root.source_instance_key.as_bytes());
+    hash_event_component(&mut hasher, root.session_key.as_bytes());
+    hasher.update(&scope_epoch.to_be_bytes());
+    hasher.update(&[match reason {
+        ScopedObserverFailureReason::NativeWatcherRecoveryExhausted => 1,
+        ScopedObserverFailureReason::NativeWatcherRoutingFailed => 2,
+        ScopedObserverFailureReason::InternalControlFailure => 3,
+    }]);
+    ScopedObservationEventId(*hasher.finalize().as_bytes())
+}
+
 fn source_control_event_hasher(
     source: &ScopedSourceObjectIdentity,
     event_kind: &[u8],
@@ -6112,6 +6348,7 @@ impl ScopedObservationPollTicket {
 pub enum ScopedObservationPollResolution {
     Pending,
     Ready(Arc<ScopedObservationWatermarkCore>),
+    Failed(Arc<ScopedObserverFailure>),
     Cancelled,
 }
 
@@ -6119,6 +6356,7 @@ pub enum ScopedObservationPollResolution {
 pub enum ScopedObservationReadyResolution {
     Pending,
     Ready(Arc<ScopedBootstrapBarrier>),
+    Failed(Arc<ScopedObserverFailure>),
     Cancelled,
 }
 
@@ -6186,7 +6424,8 @@ impl ScopedObservationReadyCompletion {
             ScopedObservationReadyResolution::Ready(existing) => {
                 debug_assert!(Arc::ptr_eq(existing, &barrier));
             }
-            ScopedObservationReadyResolution::Cancelled => {}
+            ScopedObservationReadyResolution::Failed(_)
+            | ScopedObservationReadyResolution::Cancelled => {}
         }
     }
 
@@ -6197,6 +6436,18 @@ impl ScopedObservationReadyCompletion {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         if matches!(*resolution, ScopedObservationReadyResolution::Pending) {
             *resolution = ScopedObservationReadyResolution::Cancelled;
+            self.async_changed.send_replace(resolution.clone());
+            self.changed.notify_all();
+        }
+    }
+
+    fn fail(&self, failure: Arc<ScopedObserverFailure>) {
+        let mut resolution = self
+            .resolution
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if matches!(*resolution, ScopedObservationReadyResolution::Pending) {
+            *resolution = ScopedObservationReadyResolution::Failed(failure);
             self.async_changed.send_replace(resolution.clone());
             self.changed.notify_all();
         }
@@ -6292,6 +6543,7 @@ pub struct ScopedObservationPollState {
     pub requested_through_generation: u64,
     pub completed_through_generation: u64,
     pub in_flight_through_generation: Option<u64>,
+    pub failed: bool,
     pub closed: bool,
 }
 
@@ -6301,6 +6553,8 @@ pub enum ScopedObservationPollError {
     Closed,
     #[error("scoped poll request or lease sequence is exhausted")]
     SequenceExhausted,
+    #[error("scoped observer is terminally failed")]
+    ObserverFailed,
     #[error("scoped poll ticket belongs to another observer attachment")]
     ForeignTicket,
     #[error("scoped poll lease belongs to another observer attachment")]
@@ -6334,6 +6588,7 @@ struct ScopedObservationPollRuntimeState {
     next_lease_id: u64,
     active: Option<ScopedObservationActivePoll>,
     pending_completions: BTreeMap<u64, Weak<ScopedObservationPollTicketCompletion>>,
+    failure: Option<Arc<ScopedObserverFailure>>,
     closed: bool,
 }
 
@@ -6355,6 +6610,9 @@ impl ScopedObservationPollRuntime {
         let mut state = self.lock_state();
         if state.closed {
             return Err(ScopedObservationPollError::Closed);
+        }
+        if state.failure.is_some() {
+            return Err(ScopedObservationPollError::ObserverFailed);
         }
         state.requested_through_generation = state
             .requested_through_generation
@@ -6391,6 +6649,9 @@ impl ScopedObservationPollRuntime {
         if state.closed {
             return Err(ScopedObservationPollError::Closed);
         }
+        if state.failure.is_some() {
+            return Err(ScopedObservationPollError::ObserverFailed);
+        }
         if state.active.is_some()
             || state.requested_through_generation == state.completed_through_generation
         {
@@ -6426,6 +6687,9 @@ impl ScopedObservationPollRuntime {
         let mut state = self.lock_state();
         if state.closed {
             return Err(ScopedObservationPollError::Closed);
+        }
+        if state.failure.is_some() {
+            return Err(ScopedObservationPollError::ObserverFailed);
         }
         let Some(active) = state.active else {
             return Err(ScopedObservationPollError::LeaseMismatch);
@@ -6472,6 +6736,7 @@ impl ScopedObservationPollRuntime {
             requested_through_generation: state.requested_through_generation,
             completed_through_generation: state.completed_through_generation,
             in_flight_through_generation: state.active.map(|active| active.target_generation),
+            failed: state.failure.is_some(),
             closed: state.closed,
         }
     }
@@ -6481,6 +6746,21 @@ impl ScopedObservationPollRuntime {
         state.closed = true;
         for completion in state.pending_completions.values().filter_map(Weak::upgrade) {
             completion.resolve(ScopedObservationPollResolution::Cancelled);
+        }
+        state.pending_completions.clear();
+    }
+
+    fn fail(&self, failure: Arc<ScopedObserverFailure>) {
+        let mut state = self.lock_state();
+        if state.closed || state.failure.is_some() {
+            return;
+        }
+        state.failure = Some(Arc::clone(&failure));
+        state.active = None;
+        for completion in state.pending_completions.values().filter_map(Weak::upgrade) {
+            completion.resolve(ScopedObservationPollResolution::Failed(Arc::clone(
+                &failure,
+            )));
         }
         state.pending_completions.clear();
     }
@@ -6961,6 +7241,9 @@ impl ScopedObservationAccessHost {
                 }
                 Ok(Some(barrier))
             }
+            ScopedObservationReadyResolution::Failed(_) => {
+                Err(ScopedObservationPollError::ObserverFailed)
+            }
             ScopedObservationReadyResolution::Cancelled => Err(ScopedObservationPollError::Closed),
         }
     }
@@ -6979,7 +7262,10 @@ impl ScopedObservationAccessHost {
         delivery: &ScopedObservationDeliveryLane,
     ) -> Result<ScopedObservationWatermarkCore, ScopedCoverageAssemblyError> {
         let queue_state = delivery.state();
-        if queue_state.continuity == ScopedObservationContinuity::ResyncRequired {
+        if matches!(
+            queue_state.continuity,
+            ScopedObservationContinuity::ResyncRequired | ScopedObservationContinuity::Failed
+        ) {
             return Err(ScopedCoverageAssemblyError::ContinuityInvalid);
         }
         validate_scoped_relation_coverage(self.known_objects.as_ref(), admission)?;
@@ -7020,7 +7306,9 @@ impl ScopedObservationAccessHost {
     ) -> Result<Arc<ScopedBootstrapBarrier>, ScopedBootstrapBarrierError> {
         if matches!(
             delivery.state().continuity,
-            ScopedObservationContinuity::ResyncRequired | ScopedObservationContinuity::Resyncing
+            ScopedObservationContinuity::ResyncRequired
+                | ScopedObservationContinuity::Resyncing
+                | ScopedObservationContinuity::Failed
         ) {
             return Err(ScopedBootstrapBarrierError::StateChanged);
         }
@@ -10812,6 +11100,163 @@ mod projection_tests {
         ));
         assert_eq!(delivery.state().delivered_through_sequence, 7);
         assert!(delivery.is_empty());
+    }
+
+    #[test]
+    fn scoped_observer_failure_supersedes_backlog_and_is_terminal() {
+        let root = root_identity();
+        let mapper = ScopedObservationEnvelopeMapper::new(root.clone());
+        let mut delivery = delivery_lane(2, 2);
+        let watermark = ScopedObservationWatermarkCore {
+            root: root.clone(),
+            scope_epoch: SCOPED_INITIAL_SCOPE_EPOCH,
+            offered_through_sequence: 0,
+            source_coverage: Vec::new(),
+            explicit_object_errors: Vec::new(),
+            queue_state: delivery.state(),
+        };
+        delivery
+            .offer_bootstrap_barrier(&root, watermark, Vec::new(), false, 10)
+            .unwrap();
+        assert_eq!(delivery.pop_next().unwrap().observer_sequence, 1);
+
+        let live_record = record(1, 0, 10);
+        let live_frame = decoded_frame(
+            1,
+            ScopedAppendDeliveryPhase::Live,
+            &live_record,
+            usage_batch(&live_record, "terminal-response", 10, None),
+        );
+        let mut projection = sink(2);
+        delivery
+            .offer(projection.project(&live_frame).unwrap())
+            .unwrap();
+        let source = source_identity();
+        let created = ScopedAppendPresenceChange::Created { generation: 1 };
+        delivery
+            .offer(vec![ScopedProjectedObservation::SourcePresence {
+                object_token: OBJECT_TOKEN,
+                source: source.clone(),
+                lane_ordinal: 2,
+                observed_at: 20,
+                phase: ScopedAppendDeliveryPhase::Live,
+                event_id: source_presence_event_id(&source, created),
+                change: created,
+            }])
+            .unwrap();
+
+        let failure = delivery
+            .fail_observer(
+                &root,
+                ScopedObserverFailureReason::NativeWatcherRecoveryExhausted,
+                30,
+            )
+            .unwrap();
+        assert_eq!(failure.failed_scope_epoch, 1);
+        assert_eq!(failure.control_sequence, 4);
+        assert_eq!(failure.last_contiguous_sequence, 1);
+        assert_eq!(failure.phase, ScopedAppendDeliveryPhase::Live);
+        assert_eq!(failure.discarded_semantic_events, 1);
+        assert_eq!(failure.discarded_source_controls, 1);
+        assert_eq!(failure.discarded_retained_native_bytes, 0);
+        assert_eq!(delivery.queued_semantic_events(), 0);
+        assert_eq!(delivery.queued_source_control_items(), 1);
+        assert_eq!(
+            delivery.state().continuity,
+            ScopedObservationContinuity::Failed
+        );
+        assert!(Arc::ptr_eq(&failure, &delivery.observer_failure().unwrap()));
+
+        let repeated = delivery
+            .fail_observer(
+                &root,
+                ScopedObserverFailureReason::InternalControlFailure,
+                999,
+            )
+            .unwrap();
+        assert!(Arc::ptr_eq(&failure, &repeated));
+        assert_eq!(delivery.queued_source_control_items(), 1);
+        assert_eq!(
+            delivery.require_resync(&root, ScopedResyncReason::WatcherOverflow, 40),
+            Err(ScopedContinuityError::ObserverFailed)
+        );
+        assert_eq!(
+            delivery.begin_resync(&root, 50),
+            Err(ScopedContinuityError::ObserverFailed)
+        );
+
+        let late = ScopedProjectedObservation::SourcePresence {
+            object_token: OBJECT_TOKEN,
+            source: source.clone(),
+            lane_ordinal: 3,
+            observed_at: 60,
+            phase: ScopedAppendDeliveryPhase::Live,
+            event_id: source_presence_event_id(
+                &source,
+                ScopedAppendPresenceChange::Deleted { generation: 1 },
+            ),
+            change: ScopedAppendPresenceChange::Deleted { generation: 1 },
+        };
+        let rejected = delivery.offer(vec![late]).unwrap_err();
+        assert_eq!(rejected.error, ScopedDeliveryError::ObserverFailed);
+        assert_eq!(rejected.projected.len(), 1);
+
+        let delivered = delivery.pop_next().unwrap();
+        assert_eq!(delivered.observer_sequence, 4);
+        assert_eq!(
+            delivered.event_id,
+            observer_failed_event_id(
+                &root,
+                1,
+                ScopedObserverFailureReason::NativeWatcherRecoveryExhausted,
+            )
+        );
+        let envelope = mapper.map(delivered).unwrap();
+        assert_eq!(envelope.observed_at, 30);
+        assert_eq!(envelope.semantic_revision_ref, None);
+        assert_eq!(
+            envelope.actor_attribution,
+            ScopedActorAttribution::ScopeFallback {
+                reason: ScopedActorFallbackReason::ObserverLifecycleControl,
+            }
+        );
+        assert!(matches!(
+            envelope.event,
+            ScopedObservationEvent::ObserverFailed {
+                failure: delivered_failure,
+            } if Arc::ptr_eq(&failure, &delivered_failure)
+        ));
+        assert!(delivery.is_empty());
+
+        let mut replay = delivery_lane(1, 1);
+        let replay_watermark = ScopedObservationWatermarkCore {
+            root: root.clone(),
+            scope_epoch: 1,
+            offered_through_sequence: 0,
+            source_coverage: Vec::new(),
+            explicit_object_errors: Vec::new(),
+            queue_state: replay.state(),
+        };
+        replay
+            .offer_bootstrap_barrier(&root, replay_watermark, Vec::new(), false, 777)
+            .unwrap();
+        replay.pop_next().unwrap();
+        let replay_failure = replay
+            .fail_observer(
+                &root,
+                ScopedObserverFailureReason::NativeWatcherRecoveryExhausted,
+                888,
+            )
+            .unwrap();
+        assert_ne!(failure.control_sequence, replay_failure.control_sequence);
+        assert_eq!(
+            observer_failed_event_id(&root, failure.failed_scope_epoch, failure.reason,),
+            observer_failed_event_id(
+                &root,
+                replay_failure.failed_scope_epoch,
+                replay_failure.reason,
+            )
+        );
     }
 
     #[test]

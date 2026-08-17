@@ -122,7 +122,7 @@ prerequisite for early vertical slices.
 | A2. ADS/scope/support tooling            | 012A                | In progress | schemas, sanitizer, ledger checker, access tracer              |
 | A3. Current-agent support candidates     | 012A                | In progress | Claude/Codex/Grok ADS and candidate entries                    |
 | A4. New-agent adaptation proof           | 012A/umbrella       | Not started | fourth adapter without common-runtime/query/observer change    |
-| B1. Catalog identity/readiness contracts | 012B                | Not started | Rust/N-API/TS fixtures and transition table tests              |
+| B1. Catalog identity/readiness contracts | 012B                | In progress | Rust/N-API/TS fixtures and transition table tests              |
 | B2. Bounded catalog source compositions  | 012B                | Not started | three adapter catalog identity digest parity                   |
 | B3. Durable catalog/query snapshots      | 012B                | Not started | atomic pack plus snapshot pagination conformance               |
 | B4. Progressive host and UX              | 012B                | Not started | cold/warm UI topology and migration tests                      |
@@ -492,6 +492,24 @@ Add semantic fixtures for:
 
 Test every RFC 012B readiness transition, including required-source-set and
 support-release changes, before implementing product startup.
+
+Current landing status (2026-08-17): a crate-private, library-first RFC 012B
+catalog contract module now normalizes coverage-plan identity across scope,
+required/optional source role, stable source identity, support release,
+catalog declaration, and access policy. It freezes `CatalogSnapshotId`, query
+fingerprint, and keyset-cursor bindings, and implements an executable
+epoch/attempt readiness machine covering pending, building, partial, ready,
+degraded, and error states; current retry evidence; terminal degradation and
+recovery; ordinary refresh; plan/contract/source-generation lineage changes;
+and independently safe prior snapshots. Checked construction and resume reject
+false-ready state, wrong plans/packs, incomplete required coverage,
+duplicate/unplanned sources, and cursor reuse across snapshot, query, or sort.
+A Rust-produced v1 fixture and architecture ratchet keep the draft module
+private and free of storage, source, vendor, and N-API dependencies.
+
+B1 remains `In progress`: catalog assertion, identity-relation, association,
+reducer, and external-resolution contracts; query-pack negotiation; hydration
+receipts; and N-API/portable TypeScript parity remain open.
 
 ### B2. Catalog source compositions
 
@@ -1293,8 +1311,8 @@ Current landing status (2026-08-17):
   state without advancing the backend generation, while success advances that
   generation and schedules mandatory full-instance recovery reconciliation.
   Automatic audit cadence, bounded retry/backoff/exhaustion policy,
-  failed-observer control delivery, and the public portable host wrapper remain
-  open;
+  automatic exhaustion-to-failure triggering, and the public portable host
+  wrapper remain open;
 - one pass is active at a time, a later pass receives fresh bounds, close is
   idempotent, and the frozen access report excludes paths, identity values, and
   content; and
@@ -1313,7 +1331,7 @@ dynamic/discovered scope membership beyond the attachment's current exact
 known-object grants and family coverage beyond usage-v2,
 complete multi-family replacement manifests, whole-scope discovery and source
 state beyond the current exact append-object set, and automatic watcher audit
-cadence/reinstallation policy, failed-observer, and re-overflow orchestration,
+cadence/reinstallation and exhaustion policy, plus re-overflow orchestration,
 artifact mediation and the public portable close transport,
 the trusted native version-probe/identity-input drivers, and the complete
 public request are not yet implemented. The internal offered and applied
@@ -1450,7 +1468,15 @@ while a newer stage supersedes the failed continuity epoch. Complete
 multi-family and D-owned manifests, dynamic whole-scope discovery and
 non-append participants, the public transport over the internal async applied
 runtime, and automatic watcher audit/reinstallation plus terminal failure
-scheduling remain open.
+scheduling remain open. The dedicated control lane now also carries one
+deterministic, attachment-terminal `observer.failed` control before or after
+bootstrap. The first cause wins idempotently, explicitly accounts for and
+supersedes all undelivered semantic/source-control backlog and incomplete
+resync controls, rejects later ordinary offers and epoch transitions, and
+prevents failed-epoch watermarks. Pending poll and engine-ready waiters wake
+with the same retained failure rather than hanging or claiming cancellation;
+the ordered event drain still requires explicit application acknowledgement,
+and close remains an independent resource barrier.
 
 ### D4. SDK and Chopsticks migration
 

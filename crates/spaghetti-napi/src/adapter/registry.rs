@@ -212,9 +212,9 @@ mod tests {
         ScopedObservationQueueLimits, ScopedObservationReadyResolution,
         ScopedObservationStartupError, ScopedObservationStartupReconcileAction,
         ScopedObservationWatcherHintAction, ScopedObservationWatcherPhase,
-        ScopedProjectionDeliveryError, ScopedQueuedObservationFrame, ScopedReplacementMode,
-        ScopedReplacementRepresentation, ScopedReplacementStageError, ScopedResyncReason,
-        ScopedRootIdentityRequest, ScopedSourceFailureClass,
+        ScopedObserverFailureReason, ScopedProjectionDeliveryError, ScopedQueuedObservationFrame,
+        ScopedReplacementMode, ScopedReplacementRepresentation, ScopedReplacementStageError,
+        ScopedResyncReason, ScopedRootIdentityRequest, ScopedSourceFailureClass,
     };
     use crate::source::{
         AccessOperation, AccessOutcome, AccessPhase, AppendDelimitedConfig, AppendDelimitedFile,
@@ -1208,6 +1208,7 @@ mod tests {
                 requested_through_generation: 4,
                 completed_through_generation: 4,
                 in_flight_through_generation: None,
+                failed: false,
                 closed: false,
             }
         );
@@ -1605,6 +1606,73 @@ mod tests {
         assert!(barrier.wait_async().await.complete);
         assert_eq!(runtime.applied_state().pending_sequence, None);
         assert!(matches!(runtime.next_event().await, Ok(None)));
+    }
+
+    #[tokio::test]
+    async fn scoped_async_runtime_delivers_terminal_failure_before_bootstrap() {
+        let registry = supported_fixture_registry();
+        let temp = TempDir::new().unwrap();
+        let host = ScopedObservationAccessHost::authorize(
+            &registry,
+            scoped_access_request(temp.path().join("async-runtime-failure-root")),
+        )
+        .unwrap();
+        let mut runtime = ScopedObservationAsyncRuntime::open(
+            host,
+            ScopedObservationDeliveryLimits {
+                max_semantic_events: 1,
+                max_retained_native_bytes: 0,
+                max_source_control_items: 1,
+            },
+        )
+        .unwrap();
+        let handle = runtime.handle();
+        let pending_poll = handle.host().request_poll().unwrap();
+        let pending_ready = handle.host().ready_waiter().unwrap();
+        let failure = handle
+            .fail_observer(ScopedObserverFailureReason::NativeWatcherRoutingFailed, 17)
+            .unwrap();
+        assert_eq!(failure.failed_scope_epoch, 1);
+        assert_eq!(failure.control_sequence, 1);
+        assert_eq!(failure.phase, ScopedAppendDeliveryPhase::Bootstrap);
+        assert_eq!(
+            handle.with_attachment(|_, drain| drain.delivery_lane().state().continuity),
+            ScopedObservationContinuity::Failed
+        );
+        assert!(matches!(
+            pending_poll.wait_async().await,
+            ScopedObservationPollResolution::Failed(failed)
+                if Arc::ptr_eq(&failed, &failure)
+        ));
+        assert!(matches!(
+            pending_ready.wait_async().await,
+            ScopedObservationReadyResolution::Failed(failed)
+                if Arc::ptr_eq(&failed, &failure)
+        ));
+        assert!(handle.host().poll_state().failed);
+        assert!(matches!(
+            handle.host().request_poll(),
+            Err(ScopedObservationPollError::ObserverFailed)
+        ));
+
+        let repeated = handle
+            .fail_observer(ScopedObserverFailureReason::InternalControlFailure, 99)
+            .unwrap();
+        assert!(Arc::ptr_eq(&failure, &repeated));
+        let yielded = runtime.next_event().await.unwrap().unwrap();
+        assert_eq!(yielded.envelope.observer_sequence, 1);
+        assert_eq!(yielded.envelope.observed_at, 17);
+        assert!(matches!(
+            &yielded.envelope.event,
+            ScopedObservationEvent::ObserverFailed {
+                failure: delivered,
+            } if Arc::ptr_eq(delivered, &failure)
+        ));
+        let applied = runtime
+            .acknowledge_applied(yielded.application_receipt())
+            .unwrap();
+        assert_eq!(applied.applied_through_sequence, 1);
+        assert!(runtime.close().await.complete);
     }
 
     #[tokio::test]
