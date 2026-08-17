@@ -193,17 +193,18 @@ mod tests {
         SourceObjectDescriptor, StreamSpec, SupportBundleDocument,
     };
     use crate::scoped_observation::{
-        ScopedAdmissionError, ScopedAppendDecodeOutcome, ScopedAppendDecoderConfig,
-        ScopedAppendDeliveryPhase, ScopedAppendObservation, ScopedAppendPresenceChange,
-        ScopedAppendReconcileRequest, ScopedCoverageAssemblyError, ScopedDecodeFailureClass,
-        ScopedDecodedAppendItem, ScopedDeliveryError, ScopedKnownAppendObject,
-        ScopedKnownObjectGrant, ScopedKnownObjectReadRequest, ScopedObjectRead,
-        ScopedObservationAccessError, ScopedObservationAccessHost, ScopedObservationAccessRequest,
-        ScopedObservationAdmissionLane, ScopedObservationDeliveryLane,
-        ScopedObservationDeliveryLimits, ScopedObservationProjectionLimits,
-        ScopedObservationProjectionSink, ScopedObservationQueueLimits,
-        ScopedProjectionDeliveryError, ScopedQueuedObservationFrame, ScopedRootIdentityRequest,
-        ScopedSourceFailureClass,
+        ScopedActorAttribution, ScopedActorFallbackReason, ScopedAdmissionError,
+        ScopedAppendDecodeOutcome, ScopedAppendDecoderConfig, ScopedAppendDeliveryPhase,
+        ScopedAppendObservation, ScopedAppendPresenceChange, ScopedAppendReconcileRequest,
+        ScopedBootstrapBarrierError, ScopedCoverageAssemblyError, ScopedDecodeFailureClass,
+        ScopedDecodedAppendItem, ScopedDeliveryError, ScopedEnvelopeEvidenceAuthority,
+        ScopedKnownAppendObject, ScopedKnownObjectGrant, ScopedKnownObjectReadRequest,
+        ScopedObjectRead, ScopedObservationAccessError, ScopedObservationAccessHost,
+        ScopedObservationAccessRequest, ScopedObservationAdmissionLane,
+        ScopedObservationDeliveryLane, ScopedObservationDeliveryLimits, ScopedObservationEvent,
+        ScopedObservationProjectionLimits, ScopedObservationProjectionSink,
+        ScopedObservationQueueLimits, ScopedProjectionDeliveryError, ScopedQueuedObservationFrame,
+        ScopedRootIdentityRequest, ScopedSourceFailureClass,
     };
     use crate::source::{
         AccessOperation, AccessOutcome, AccessPhase, AppendDelimitedConfig, AppendDelimitedFile,
@@ -2146,5 +2147,221 @@ mod tests {
         object.complete_bootstrap().unwrap();
         assert!(!object.bootstrap_active());
         assert_eq!(object.checkpoint().unwrap().committed_offset, 8);
+    }
+
+    #[test]
+    fn scoped_bootstrap_barrier_is_ordered_idempotent_and_replay_stable() {
+        let registry = supported_fixture_registry();
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().join("bootstrap-barrier-root");
+        std::fs::create_dir_all(&root).unwrap();
+        let host =
+            ScopedObservationAccessHost::authorize(&registry, scoped_access_request(root)).unwrap();
+        let mut object = scoped_append_object(
+            AppendDelimitedFile::new(AppendDelimitedConfig::json_lines()).unwrap(),
+            RawRetentionPolicy::None,
+        );
+        let identity = [ScopeIdentityInput {
+            name: "native-session-id",
+            value: b"bootstrap-barrier-session",
+        }];
+        let origin = RecordOrigin {
+            source_instance_id: 10,
+            stream_id: 20,
+            object_id: 30,
+            observed_at: 40,
+            source_timestamp_hint: None,
+            media_type: SourceMediaType::new("application/x-ndjson").unwrap(),
+        };
+        let pass = host.begin_pass().unwrap();
+        let observation = object
+            .reconcile(
+                &pass,
+                ScopedAppendReconcileRequest {
+                    relation_id: "root-object",
+                    identity_inputs: &identity,
+                    access_phase: AccessPhase::Initial,
+                    parent_token: None,
+                    depth: 1,
+                    max_bytes: 64,
+                    origin: &origin,
+                    force_contract_replay: false,
+                },
+            )
+            .unwrap();
+        assert!(!observation.root_present);
+        let ScopedAppendDecodeOutcome::Ready(decoded) =
+            decode_scoped(&host, &mut object, &observation)
+        else {
+            panic!("missing root should decode to an empty bootstrap batch");
+        };
+        let mut admission = admission_lane(1, 0, 1);
+        if let Err(failure) = admission.admit(&mut object, &observation, decoded) {
+            panic!("missing-root admission failed: {}", failure.error);
+        }
+        drop(pass);
+        object.complete_bootstrap().unwrap();
+
+        let projection = ScopedObservationProjectionSink::new(ScopedObservationProjectionLimits {
+            max_usage_v2_entities: 1,
+        })
+        .unwrap();
+        let mut delivery = ScopedObservationDeliveryLane::new(ScopedObservationDeliveryLimits {
+            max_semantic_events: 1,
+            max_retained_native_bytes: 0,
+            max_source_control_items: 1,
+        })
+        .unwrap();
+        let barrier = host
+            .offer_bootstrap_complete(&admission, &projection, &mut delivery, false, 50)
+            .unwrap();
+        assert_eq!(barrier.scope_epoch, 1);
+        assert_eq!(barrier.barrier_sequence, 1);
+        assert!(!barrier.root_present);
+        assert_eq!(barrier.source_coverage.len(), 1);
+        assert!(barrier.explicit_object_errors.is_empty());
+        assert_eq!(barrier.queue_state.offered_through_sequence, 1);
+        assert_eq!(barrier.queue_state.queued_source_control_items, 1);
+        assert_eq!(delivery.state(), barrier.queue_state);
+
+        let repeated = host
+            .offer_bootstrap_complete(&admission, &projection, &mut delivery, true, 999)
+            .unwrap();
+        assert!(Arc::ptr_eq(&barrier, &repeated));
+        assert_eq!(delivery.queued_source_control_items(), 1);
+
+        let other_root = temp.path().join("other-bootstrap-barrier-root");
+        std::fs::create_dir_all(&other_root).unwrap();
+        let mut other_request = scoped_access_request(other_root);
+        other_request.root_identity = ScopedRootIdentityRequest::new(
+            1,
+            b"fixture-other-source-instance".as_slice(),
+            b"fixture-other-session".as_slice(),
+            None,
+            None,
+            None,
+        );
+        let other_host = ScopedObservationAccessHost::authorize(&registry, other_request).unwrap();
+        assert!(matches!(
+            other_host.offer_bootstrap_complete(&admission, &projection, &mut delivery, false, 50,),
+            Err(ScopedBootstrapBarrierError::StateChanged)
+        ));
+
+        let delivered = delivery.pop_next().unwrap();
+        let first_event_id = delivered.event_id;
+        let envelope = host.envelope_mapper().map(delivered).unwrap();
+        assert_eq!(envelope.observer_sequence, barrier.barrier_sequence);
+        assert_eq!(envelope.semantic_revision_ref, None);
+        assert_eq!(envelope.observed_at, 50);
+        assert_eq!(
+            envelope.actor.run_key,
+            host.root_identity().root_actor_run_key
+        );
+        assert_eq!(
+            envelope.actor_attribution,
+            ScopedActorAttribution::ScopeFallback {
+                reason: ScopedActorFallbackReason::ObserverLifecycleControl,
+            }
+        );
+        assert_eq!(
+            envelope.evidence.authority,
+            ScopedEnvelopeEvidenceAuthority::EngineControl
+        );
+        assert!(matches!(
+            envelope.event,
+            ScopedObservationEvent::ObserverBootstrapComplete {
+                barrier: delivered_barrier,
+            } if Arc::ptr_eq(&barrier, &delivered_barrier)
+        ));
+        assert!(delivery.is_empty());
+        assert!(Arc::ptr_eq(
+            &barrier,
+            &delivery.bootstrap_barrier().unwrap()
+        ));
+
+        // A second attachment-local lane replays the same bootstrap snapshot
+        // under a different observation time without changing control ID.
+        let mut replay_delivery =
+            ScopedObservationDeliveryLane::new(ScopedObservationDeliveryLimits {
+                max_semantic_events: 1,
+                max_retained_native_bytes: 0,
+                max_source_control_items: 1,
+            })
+            .unwrap();
+        let replay_barrier = host
+            .offer_bootstrap_complete(&admission, &projection, &mut replay_delivery, false, 5_000)
+            .unwrap();
+        assert_eq!(replay_barrier.snapshot_digest, barrier.snapshot_digest);
+        assert_eq!(replay_delivery.pop_next().unwrap().event_id, first_event_id);
+    }
+
+    #[test]
+    fn scoped_bootstrap_barrier_waits_for_admission_drain() {
+        let registry = supported_fixture_registry();
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().join("bootstrap-pending-root");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("session.jsonl"), b"one\n").unwrap();
+        let host =
+            ScopedObservationAccessHost::authorize(&registry, scoped_access_request(root)).unwrap();
+        let mut object = scoped_append_object(
+            AppendDelimitedFile::new(AppendDelimitedConfig::json_lines()).unwrap(),
+            RawRetentionPolicy::None,
+        );
+        let identity = [ScopeIdentityInput {
+            name: "native-session-id",
+            value: b"bootstrap-pending-session",
+        }];
+        let origin = RecordOrigin {
+            source_instance_id: 10,
+            stream_id: 20,
+            object_id: 30,
+            observed_at: 40,
+            source_timestamp_hint: None,
+            media_type: SourceMediaType::new("application/x-ndjson").unwrap(),
+        };
+        let pass = host.begin_pass().unwrap();
+        let observation = object
+            .reconcile(
+                &pass,
+                ScopedAppendReconcileRequest {
+                    relation_id: "root-object",
+                    identity_inputs: &identity,
+                    access_phase: AccessPhase::Initial,
+                    parent_token: None,
+                    depth: 1,
+                    max_bytes: 64,
+                    origin: &origin,
+                    force_contract_replay: false,
+                },
+            )
+            .unwrap();
+        let ScopedAppendDecodeOutcome::Ready(decoded) =
+            decode_scoped(&host, &mut object, &observation)
+        else {
+            panic!("present root should decode one bootstrap batch");
+        };
+        let mut admission = admission_lane(1, 0, 1);
+        if let Err(failure) = admission.admit(&mut object, &observation, decoded) {
+            panic!("bootstrap admission failed: {}", failure.error);
+        }
+        let projection = ScopedObservationProjectionSink::new(ScopedObservationProjectionLimits {
+            max_usage_v2_entities: 1,
+        })
+        .unwrap();
+        let mut delivery = ScopedObservationDeliveryLane::new(ScopedObservationDeliveryLimits {
+            max_semantic_events: 1,
+            max_retained_native_bytes: 0,
+            max_source_control_items: 1,
+        })
+        .unwrap();
+        assert!(matches!(
+            host.offer_bootstrap_complete(&admission, &projection, &mut delivery, true, 50),
+            Err(ScopedBootstrapBarrierError::Coverage(
+                ScopedCoverageAssemblyError::AdmissionNotDrained
+            ))
+        ));
+        assert!(delivery.bootstrap_barrier().is_none());
+        assert!(delivery.is_empty());
     }
 }

@@ -1029,6 +1029,18 @@ Current landing status (2026-08-17):
   qualified native session claim is accepted only when its external entity
   reference equals the already-derived root. Lifecycle-owned retractions carry
   the reset/delete observation time rather than the old response time;
+- the first epoch-1 bootstrap barrier now enters that same ordered delivery
+  boundary as a mandatory `observer.bootstrap_complete` control. It waits for
+  the admission/coverage boundary to drain, remains deliverable through the
+  dedicated control lane while the semantic lane is full, and captures its own
+  barrier sequence plus post-offer queue state without claiming consumer
+  application. Its versioned snapshot digest covers canonical root identity,
+  root presence, source/family coverage, and explicit object errors while
+  excluding observation time, queue state, and attachment-local sequencing;
+  the deterministic control ID also excludes observation time. Repeated
+  ready-style calls return the retained barrier without redelivery, equivalent
+  replay gets the same snapshot digest/event ID, failed preflight mutates
+  nothing, and later Bootstrap-phase data is rejected after completion;
 - every admitted append observation now stages one bounded RFC 012A `Decode`
   coverage update using the same source-instance/stream/object coordinates and
   append-cursor representation as durable ingestion. Stable initial absence,
@@ -1066,7 +1078,7 @@ canonical fact-revision adoption beyond the current runtime families, scoped
 reducers beyond usage-v2,
 coverage-complete durable query exposure, affiliation/actor enrichment and
 envelope variants beyond the current usage/source-lifecycle families, the
-public ordered multiplexer and poll/readiness barriers,
+public async event drain plus poll/ready facade and complete scope coverage,
 complete declared-scope membership and family coverage beyond usage-v2,
 overflow/resync epochs, artifact mediation, cancellation waiting,
 the trusted native version-probe/identity-input drivers, and the complete
@@ -1147,8 +1159,11 @@ occurrence and observed/native time, and distinguishes native records, common
 reducer corrections, and engine controls. It rejects cross-root typed events
 and mismatched native-session claims. This freezes the current
 usage/source-lifecycle envelope vocabulary but is not yet the public
-multiplexer, bootstrap/resync control family, complete actor-affiliation
-reducer, or an applied acknowledgement.
+multiplexer/facade, resync control family, complete actor-affiliation reducer,
+or an applied acknowledgement. Epoch 1 now does have an ordered,
+snapshot-identified bootstrap-completion control and retained idempotent
+barrier at the offered boundary; it remains internal until multi-object scope
+orchestration and the portable drain/ready surface land.
 
 ### D4. SDK and Chopsticks migration
 
