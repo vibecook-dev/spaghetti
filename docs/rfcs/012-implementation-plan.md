@@ -1436,8 +1436,17 @@ and
 [`check_rfc012_delta.py`](../../scripts/architecture/check_rfc012_delta.py).
 Normal validation rejects malformed or unclassified contracts. Release mode
 uses `--require-complete` and additionally rejects every remaining `planned`
-evidence item; therefore X0 remains `In progress` until the behavioral suites
-named by the manifest land.
+evidence item.
+
+The [2026-08-17 evidence audit](./012-rfc011-delta-evidence-audit-2026-08-17.md)
+reproduced all 12 previously planned entries and promoted five without
+broadening their claims: common reconciliation ordering, adapter authority
+boundaries, D3 scoped barrier atomicity, usage-v2 oracle/switch/rollback, and
+fixed-snapshot expiration. The executable ledger now has six fully evidenced
+contracts and seven with planned evidence. X0 remains `In progress`; durable/
+scoped decoder parity, the public scoped migration, exhaustive declared-
+mechanic classification, catalog readiness, full common-fact and identity
+migration, and the durable/live consumer handoff retain concrete gaps.
 
 ### X1. Search and finalization separation
 

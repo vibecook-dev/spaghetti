@@ -33,9 +33,19 @@
           "claim": "Durable observation coalesces hints into bounded reconciliation work."
         },
         {
-          "state": "planned",
-          "target": "docs/rfcs/012-implementation-plan.md",
-          "claim": "A1 coverage comparison fixtures prove common ordering semantics."
+          "state": "implemented",
+          "target": "crates/spaghetti-napi/src/adapter/semantic.rs",
+          "claim": "Common coverage comparison tests are driver-ordered and treat generation replacement as incomparable rather than as clock progress."
+        },
+        {
+          "state": "implemented",
+          "target": "crates/spaghetti-napi/src/source/scheduler.rs",
+          "claim": "Scheduler tests coalesce notification hints while serializing the same source object and generation."
+        },
+        {
+          "state": "implemented",
+          "target": "crates/spaghetti-napi/src/adapter/registry.rs",
+          "claim": "Scoped coverage tests advance only at the matching admitted and offered source boundary."
         }
       ]
     },
@@ -54,9 +64,9 @@
           "claim": "Architecture checks reject adapter-to-storage and common-to-concrete-adapter edges."
         },
         {
-          "state": "planned",
-          "target": "docs/rfcs/012a-agent-adaptation-and-engine-boundaries.md",
-          "claim": "A2 declaration checks reject adapter-private mechanics."
+          "state": "implemented",
+          "target": "scripts/architecture/check_rfc011_boundaries.py",
+          "claim": "Architecture ratchets reject adapter-owned access authority, storage dependencies, topology-dependent shared decoding, and missing built-in support bindings."
         }
       ]
     },
@@ -91,9 +101,14 @@
           "claim": "The durable writer commits source, fact, projection, and change state together."
         },
         {
-          "state": "planned",
-          "target": "docs/rfcs/012d-session-scoped-observation.md",
-          "claim": "D3 tests observer bootstrap, reset, overflow, and replacement barriers."
+          "state": "implemented",
+          "target": "crates/spaghetti-napi/src/adapter/registry.rs",
+          "claim": "Scoped composition tests cover reset state, ordered idempotent bootstrap, and atomic whole-epoch source/coverage/reducer replacement."
+        },
+        {
+          "state": "implemented",
+          "target": "crates/spaghetti-napi/src/scoped_observation.rs",
+          "claim": "Scoped delivery tests reject overflow without partial offer and discard reoverflowed incomplete replacement stages."
         }
       ]
     },
@@ -144,9 +159,19 @@
           "claim": "The independent census demonstrates repeated usage rows per response group."
         },
         {
-          "state": "planned",
-          "target": "docs/rfcs/012c-runtime-semantics-and-usage-v2.md",
-          "claim": "C2/C3 define oracle parity, switch, and rollback fixtures."
+          "state": "implemented",
+          "target": "scripts/usage_v2_oracle/test_oracle.py",
+          "claim": "The frozen independent response-level oracle is executable and stable."
+        },
+        {
+          "state": "implemented",
+          "target": "crates/spaghetti-napi/src/engine/projection.rs",
+          "claim": "Usage-v2 projection tests match the independent qualified oracle, replace response snapshots, and leave legacy usage unchanged."
+        },
+        {
+          "state": "implemented",
+          "target": "crates/spaghetti-napi/src/engine/commit.rs",
+          "claim": "Query-pack selection tests require ready complete coverage and roll back explicitly even when usage-v2 is pending."
         }
       ]
     },
@@ -223,9 +248,19 @@
           "claim": "Existing query conformance covers stable keyset pagination."
         },
         {
-          "state": "planned",
-          "target": "docs/rfcs/012c-runtime-semantics-and-usage-v2.md",
-          "claim": "C1/C4 add fixed-snapshot and expiration fixtures."
+          "state": "implemented",
+          "target": "crates/spaghetti-napi/src/engine/projection.rs",
+          "claim": "Usage-v2 aggregate pages retain one durable watermark and reject a continuation after generation-changing replacement as expired."
+        },
+        {
+          "state": "implemented",
+          "target": "crates/spaghetti-napi/src/engine/search_query.rs",
+          "claim": "Search continuation tests reject cross-scope reuse and expire after the bound durable watermark changes."
+        },
+        {
+          "state": "implemented",
+          "target": "crates/spaghetti-napi/src/engine/timeline_query.rs",
+          "claim": "Timeline continuation tests remain stable across irrelevant commits and expire when the bound session revision changes."
         }
       ]
     },
