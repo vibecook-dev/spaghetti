@@ -4016,17 +4016,29 @@ impl ScopedObservationNativeWatcherCompletion {
         self.async_changed.send_replace(*state);
     }
 
-    fn finish_reinstall_success(&self) -> Result<(), ()> {
+    fn finish_reinstall_success(&self) -> Result<(), ScopedObservationNativeWatcherError> {
         let mut state = self
             .state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if state.routing_failed {
+            state.reinstalling = false;
+            advance_scoped_native_watcher_generation(&mut state);
+            self.async_changed.send_replace(*state);
+            return Err(ScopedObservationNativeWatcherError::RoutingFailed);
+        }
+        if state.backend_failed {
+            state.reinstalling = false;
+            advance_scoped_native_watcher_generation(&mut state);
+            self.async_changed.send_replace(*state);
+            return Err(ScopedObservationNativeWatcherError::CallbackFailedDuringReinstall);
+        }
         let Some(backend_generation) = state.backend_generation.checked_add(1) else {
             state.routing_failed = true;
             state.reinstalling = false;
             advance_scoped_native_watcher_generation(&mut state);
             self.async_changed.send_replace(*state);
-            return Err(());
+            return Err(ScopedObservationNativeWatcherError::RoutingFailed);
         };
         state.backend_generation = backend_generation;
         state.backend_failed = false;
@@ -4492,8 +4504,49 @@ pub struct ScopedObservationNativeWatcher {
     coordinator: Arc<ScopedObservationWatcherOrchestrator>,
     plan: Arc<ScopedObservationNativeWatchPlan>,
     completion: Arc<ScopedObservationNativeWatcherCompletion>,
+    recovery_progress: ScopedObservationNativeWatcherRecoveryProgress,
     watch_anchor_count: usize,
     terminal_failure_delivered: bool,
+}
+
+#[derive(Debug, Default)]
+struct ScopedObservationNativeWatcherRecoveryProgress {
+    policy: Option<ScopedObservationNativeWatcherRecoveryPolicy>,
+    completed_attempts: u32,
+    retry_not_before: Option<tokio::time::Instant>,
+}
+
+impl ScopedObservationNativeWatcherRecoveryProgress {
+    fn bind_policy(&mut self, policy: ScopedObservationNativeWatcherRecoveryPolicy) -> bool {
+        match self.policy {
+            Some(bound) => bound == policy,
+            None => {
+                self.policy = Some(policy);
+                true
+            }
+        }
+    }
+
+    fn retry_not_before(
+        &mut self,
+        policy: ScopedObservationNativeWatcherRecoveryPolicy,
+    ) -> tokio::time::Instant {
+        *self.retry_not_before.get_or_insert_with(|| {
+            tokio::time::Instant::now() + policy.retry_delay(self.completed_attempts)
+        })
+    }
+
+    fn record_attempt(&mut self) {
+        self.retry_not_before = None;
+        self.completed_attempts = self
+            .completed_attempts
+            .checked_add(1)
+            .expect("watcher recovery attempts are bounded well below u32::MAX");
+    }
+
+    fn reset(&mut self) {
+        *self = Self::default();
+    }
 }
 
 impl std::fmt::Debug for ScopedObservationNativeWatcher {
@@ -4612,17 +4665,11 @@ impl ScopedObservationNativeWatcher {
                 return Err(error);
             }
         };
-        let callback_state = self.completion.snapshot();
-        if callback_state.backend_failed || callback_state.routing_failed {
-            self.completion.finish_reinstall_failure();
-            return Err(ScopedObservationNativeWatcherError::CallbackFailedDuringReinstall);
-        }
-
+        self.completion.finish_reinstall_success()?;
         self.backend = Some(backend);
-        self.completion
-            .finish_reinstall_success()
-            .map_err(|()| ScopedObservationNativeWatcherError::RoutingFailed)?;
-        self.request_instance_reconcile(DirtyReason::Recovery)
+        let action = self.request_instance_reconcile(DirtyReason::Recovery)?;
+        self.recovery_progress.reset();
+        Ok(action)
     }
 
     #[cfg(test)]
@@ -4686,6 +4733,12 @@ impl ScopedObservationNativeWatcher {
             + Send,
         C: FnMut() -> i64 + Send,
     {
+        if self.state().backend_failed && !self.recovery_progress.bind_policy(policy) {
+            return self.finish_terminal_failure(
+                ScopedObserverFailureReason::InternalControlFailure,
+                observed_at(),
+            );
+        }
         let mut audit = tokio::time::interval(policy.audit_interval());
         audit.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         // `interval` ticks immediately once; consume that setup tick so audits
@@ -4702,23 +4755,29 @@ impl ScopedObservationNativeWatcher {
                 );
             }
             if state.backend_failed {
-                let mut completed_attempts = 0;
+                if !self.recovery_progress.bind_policy(policy) {
+                    return self.finish_terminal_failure(
+                        ScopedObserverFailureReason::InternalControlFailure,
+                        observed_at(),
+                    );
+                }
                 loop {
-                    if completed_attempts == policy.max_reinstall_attempts() {
+                    if self.recovery_progress.completed_attempts >= policy.max_reinstall_attempts()
+                    {
                         return self.finish_terminal_failure(
                             ScopedObserverFailureReason::NativeWatcherRecoveryExhausted,
                             observed_at(),
                         );
                     }
-                    let delay = policy.retry_delay(completed_attempts);
+                    let retry_not_before = self.recovery_progress.retry_not_before(policy);
                     tokio::select! {
                         biased;
                         _ = self.coordinator.wait_for_cancellation_async() => {
                             return Ok(ScopedObservationNativeWatcherRunExit::Cancelled);
                         }
-                        _ = tokio::time::sleep(delay) => {}
+                        _ = tokio::time::sleep_until(retry_not_before) => {}
                     }
-                    completed_attempts += 1;
+                    self.recovery_progress.record_attempt();
                     match self.reinstall_native_backend_with_factory_inner(&mut *factory) {
                         Ok(_) => {
                             observed_generation = self.state().generation;
@@ -4937,6 +4996,14 @@ impl ScopedObservationAsyncResyncHandoff {
         ScopedObservationNativeWatcherRecoveryPolicy,
     ) {
         (self.watcher, self.source, self.watcher_policy)
+    }
+
+    #[cfg(test)]
+    pub fn replace_watcher_policy_for_test(
+        &mut self,
+        watcher_policy: ScopedObservationNativeWatcherRecoveryPolicy,
+    ) {
+        self.watcher_policy = watcher_policy;
     }
 
     /// Build one complete replacement epoch from the stopped source owner's
@@ -6172,6 +6239,7 @@ impl ScopedObservationAsyncHandle {
             coordinator,
             plan,
             completion,
+            recovery_progress: ScopedObservationNativeWatcherRecoveryProgress::default(),
             watch_anchor_count,
             terminal_failure_delivered: false,
         })
@@ -16541,6 +16609,57 @@ mod projection_tests {
         assert_eq!(policy.retry_delay(2), Duration::from_millis(25));
         assert_eq!(policy.retry_delay(31), Duration::from_millis(25));
         assert_eq!(policy.max_reinstall_attempts(), 4);
+    }
+
+    #[test]
+    fn scoped_native_watcher_recovery_incident_binds_policy_deadline_and_callback_failure() {
+        let policy = ScopedObservationNativeWatcherRecoveryPolicy::new(
+            Duration::from_secs(1),
+            Duration::from_millis(20),
+            Duration::from_millis(40),
+            2,
+        )
+        .unwrap();
+        let drifted_policy = ScopedObservationNativeWatcherRecoveryPolicy::new(
+            Duration::from_secs(1),
+            Duration::from_millis(10),
+            Duration::from_millis(80),
+            3,
+        )
+        .unwrap();
+        let mut progress = ScopedObservationNativeWatcherRecoveryProgress::default();
+        assert!(progress.bind_policy(policy));
+        let retry_not_before = progress.retry_not_before(policy);
+        assert_eq!(progress.retry_not_before(policy), retry_not_before);
+        assert!(!progress.bind_policy(drifted_policy));
+        progress.reset();
+        assert!(progress.bind_policy(drifted_policy));
+
+        let completion = ScopedObservationNativeWatcherCompletion::default();
+        completion.mark_initial_backend_installed();
+        completion.begin_reinstall();
+        completion.publish(true, false);
+        assert!(matches!(
+            completion.finish_reinstall_success(),
+            Err(ScopedObservationNativeWatcherError::CallbackFailedDuringReinstall)
+        ));
+        let failed = completion.snapshot();
+        assert!(failed.backend_failed);
+        assert!(!failed.reinstalling);
+        assert_eq!(failed.backend_generation, 1);
+
+        let routing = ScopedObservationNativeWatcherCompletion::default();
+        routing.mark_initial_backend_installed();
+        routing.begin_reinstall();
+        routing.publish(false, true);
+        assert!(matches!(
+            routing.finish_reinstall_success(),
+            Err(ScopedObservationNativeWatcherError::RoutingFailed)
+        ));
+        let failed = routing.snapshot();
+        assert!(failed.routing_failed);
+        assert!(!failed.reinstalling);
+        assert_eq!(failed.backend_generation, 1);
     }
 
     #[test]

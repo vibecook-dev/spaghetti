@@ -210,9 +210,9 @@ mod tests {
         ScopedObservationAppendPassRequest, ScopedObservationAsyncHandle,
         ScopedObservationAsyncOwnerFirstExit, ScopedObservationAsyncOwnerPair,
         ScopedObservationAsyncOwnerRunResult, ScopedObservationAsyncRuntime,
-        ScopedObservationCloseError, ScopedObservationConsumerOfferError,
-        ScopedObservationContinuity, ScopedObservationDeliveryLane,
-        ScopedObservationDeliveryLimits, ScopedObservationEvent,
+        ScopedObservationAutomaticResyncError, ScopedObservationCloseError,
+        ScopedObservationConsumerOfferError, ScopedObservationContinuity,
+        ScopedObservationDeliveryLane, ScopedObservationDeliveryLimits, ScopedObservationEvent,
         ScopedObservationNativeWatchBackend, ScopedObservationNativeWatchCallback,
         ScopedObservationNativeWatcherError, ScopedObservationNativeWatcherRecoveryPolicy,
         ScopedObservationNativeWatcherRunExit, ScopedObservationOpenDrainError,
@@ -676,19 +676,21 @@ mod tests {
         .unwrap()
     }
 
-    async fn automatic_single_object_pair(
+    async fn automatic_single_object_pair_with_watcher_policy(
         registry: &AdapterRegistry,
         root: PathBuf,
         identity_value: Vec<u8>,
         append_config: AppendDelimitedConfig,
         max_bytes: u64,
         source_policy: ScopedObservationSourceOwnerRetryPolicy,
+        watcher_policy: ScopedObservationNativeWatcherRecoveryPolicy,
     ) -> (
         ScopedObservationAsyncRuntime,
         ScopedObservationAsyncHandle,
         ScopedObservationAsyncOwnerPair,
         PathBuf,
         Arc<AtomicUsize>,
+        Arc<std::sync::Mutex<Option<ScopedObservationNativeWatchCallback>>>,
     ) {
         std::fs::create_dir_all(&root).unwrap();
         let target = root.join("session.jsonl");
@@ -822,16 +824,43 @@ mod tests {
         let source = handle
             .bind_epoch_source_owner(active, vec![binding], source_policy)
             .unwrap();
-        let watcher_policy = ScopedObservationNativeWatcherRecoveryPolicy::new(
-            std::time::Duration::from_secs(60),
-            std::time::Duration::from_millis(1),
-            std::time::Duration::from_millis(1),
-            1,
-        )
-        .unwrap();
         let pair = handle
             .bind_live_owner_pair(watcher, source, watcher_policy)
             .unwrap();
+        (runtime, handle, pair, target, drops, callback_slot)
+    }
+
+    async fn automatic_single_object_pair(
+        registry: &AdapterRegistry,
+        root: PathBuf,
+        identity_value: Vec<u8>,
+        append_config: AppendDelimitedConfig,
+        max_bytes: u64,
+        source_policy: ScopedObservationSourceOwnerRetryPolicy,
+    ) -> (
+        ScopedObservationAsyncRuntime,
+        ScopedObservationAsyncHandle,
+        ScopedObservationAsyncOwnerPair,
+        PathBuf,
+        Arc<AtomicUsize>,
+    ) {
+        let (runtime, handle, pair, target, drops, _) =
+            automatic_single_object_pair_with_watcher_policy(
+                registry,
+                root,
+                identity_value,
+                append_config,
+                max_bytes,
+                source_policy,
+                ScopedObservationNativeWatcherRecoveryPolicy::new(
+                    std::time::Duration::from_secs(60),
+                    std::time::Duration::from_millis(1),
+                    std::time::Duration::from_millis(1),
+                    1,
+                )
+                .unwrap(),
+            )
+            .await;
         (runtime, handle, pair, target, drops)
     }
 
@@ -3837,6 +3866,204 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn scoped_automatic_resync_retains_watcher_recovery_budget_across_reoverflow() {
+        let registry = stateful_supported_fixture_registry();
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().join("automatic-resync-watcher-budget-root");
+        let reinstall_attempts = Arc::new(AtomicUsize::new(0));
+        let watcher_policy = ScopedObservationNativeWatcherRecoveryPolicy::new(
+            std::time::Duration::from_secs(60),
+            std::time::Duration::from_millis(500),
+            std::time::Duration::from_secs(1),
+            2,
+        )
+        .unwrap();
+        let (mut runtime, handle, pair, target, drops, callback_slot) =
+            automatic_single_object_pair_with_watcher_policy(
+                &registry,
+                root,
+                b"automatic-resync-watcher-budget-session".to_vec(),
+                AppendDelimitedConfig::json_lines(),
+                128,
+                ScopedObservationSourceOwnerRetryPolicy::default(),
+                watcher_policy,
+            )
+            .await;
+
+        std::fs::write(&target, b"rec-01\n").unwrap();
+        callback_slot.lock().unwrap().as_mut().unwrap()(Err(notify::Error::generic(
+            "fixture backend disconnected during replacement",
+        )));
+        handle
+            .require_resync(ScopedResyncReason::WatcherOverflow, 70)
+            .unwrap();
+        let pair_task = tokio::spawn(pair.run_with_factory_and_clocks(|_| Err(()), || 71, || 72));
+        let result = tokio::time::timeout(std::time::Duration::from_secs(2), pair_task)
+            .await
+            .unwrap()
+            .unwrap();
+        let ScopedObservationAsyncOwnerRunResult::Resync(handoff) = result else {
+            panic!("continuity invalidation must retain the failed watcher for replacement");
+        };
+
+        let recovery_task = tokio::spawn(
+            handoff.replay_and_rebind_with_factory_clocks_and_boundaries(
+                {
+                    let reinstall_attempts = Arc::clone(&reinstall_attempts);
+                    move |_| {
+                        reinstall_attempts.fetch_add(1, Ordering::SeqCst);
+                        Err(())
+                    }
+                },
+                || 80,
+                || 90,
+                {
+                    let handle = handle.clone();
+                    let reinstall_attempts = Arc::clone(&reinstall_attempts);
+                    move |_| {
+                        assert_eq!(reinstall_attempts.load(Ordering::SeqCst), 1);
+                        handle
+                            .require_resync(ScopedResyncReason::TransportContinuityLoss, 95)
+                            .unwrap();
+                    }
+                },
+                |_| {},
+            ),
+        );
+
+        let required = runtime.next_event().await.unwrap().unwrap();
+        assert!(matches!(
+            required.envelope.event,
+            ScopedObservationEvent::ObserverResyncRequired { .. }
+        ));
+        runtime
+            .acknowledge_applied(required.application_receipt())
+            .unwrap();
+
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while reinstall_attempts.load(Ordering::SeqCst) < 1 {
+                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(reinstall_attempts.load(Ordering::SeqCst), 1);
+        let started = runtime.next_event().await.unwrap().unwrap();
+        assert!(matches!(
+            started.envelope.event,
+            ScopedObservationEvent::ObserverResyncStarted { .. }
+        ));
+        assert_eq!(started.envelope.scope_epoch, 2);
+        runtime
+            .acknowledge_applied(started.application_receipt())
+            .unwrap();
+
+        let failure = tokio::time::timeout(std::time::Duration::from_secs(3), recovery_task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(
+            failure.error(),
+            ScopedObservationAutomaticResyncError::WatcherStopped
+        );
+        assert_eq!(reinstall_attempts.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            failure.terminal_failure().unwrap().reason,
+            ScopedObserverFailureReason::NativeWatcherRecoveryExhausted
+        );
+
+        let failed = runtime.next_event().await.unwrap().unwrap();
+        let ScopedObservationEvent::ObserverFailed { failure } = &failed.envelope.event else {
+            panic!("the retained cumulative watcher budget must end in one terminal control");
+        };
+        assert_eq!(
+            failure.reason,
+            ScopedObserverFailureReason::NativeWatcherRecoveryExhausted
+        );
+        runtime
+            .acknowledge_applied(failed.application_receipt())
+            .unwrap();
+        let close = runtime.request_close();
+        assert!(close.wait_async().await.complete);
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn scoped_automatic_resync_rejects_active_watcher_policy_drift() {
+        let registry = stateful_supported_fixture_registry();
+        let temp = TempDir::new().unwrap();
+        let root = temp
+            .path()
+            .join("automatic-resync-watcher-policy-drift-root");
+        let original_policy = ScopedObservationNativeWatcherRecoveryPolicy::new(
+            std::time::Duration::from_secs(60),
+            std::time::Duration::from_millis(100),
+            std::time::Duration::from_millis(100),
+            1,
+        )
+        .unwrap();
+        let drifted_policy = ScopedObservationNativeWatcherRecoveryPolicy::new(
+            std::time::Duration::from_secs(60),
+            std::time::Duration::from_millis(1),
+            std::time::Duration::from_secs(1),
+            4,
+        )
+        .unwrap();
+        let (mut runtime, handle, pair, target, drops, callback_slot) =
+            automatic_single_object_pair_with_watcher_policy(
+                &registry,
+                root,
+                b"automatic-resync-watcher-policy-drift-session".to_vec(),
+                AppendDelimitedConfig::json_lines(),
+                128,
+                ScopedObservationSourceOwnerRetryPolicy::default(),
+                original_policy,
+            )
+            .await;
+
+        std::fs::write(&target, b"rec-01\n").unwrap();
+        callback_slot.lock().unwrap().as_mut().unwrap()(Err(notify::Error::generic(
+            "fixture backend disconnected before policy drift",
+        )));
+        handle
+            .require_resync(ScopedResyncReason::WatcherOverflow, 70)
+            .unwrap();
+        let result = pair
+            .run_with_factory_and_clocks(|_| Err(()), || 71, || 72)
+            .await;
+        let ScopedObservationAsyncOwnerRunResult::Resync(mut handoff) = result else {
+            panic!("continuity invalidation must retain the active watcher incident");
+        };
+        handoff.replace_watcher_policy_for_test(drifted_policy);
+
+        let failure = handoff
+            .replay_and_rebind_with_factory_and_clocks(|_| Err(()), || 80, || 90)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            failure.error(),
+            ScopedObservationAutomaticResyncError::WatcherStopped
+        );
+        assert_eq!(
+            failure.terminal_failure().unwrap().reason,
+            ScopedObserverFailureReason::InternalControlFailure
+        );
+        let failed = runtime.next_event().await.unwrap().unwrap();
+        assert!(matches!(
+            &failed.envelope.event,
+            ScopedObservationEvent::ObserverFailed { failure }
+                if failure.reason == ScopedObserverFailureReason::InternalControlFailure
+        ));
+        runtime
+            .acknowledge_applied(failed.application_receipt())
+            .unwrap();
+        let close = runtime.request_close();
+        assert!(close.wait_async().await.complete);
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
     async fn scoped_automatic_resync_rolls_back_terminal_error_after_partial_object_progress() {
         let registry = stateful_supported_fixture_registry();
         let temp = TempDir::new().unwrap();
@@ -4689,6 +4916,24 @@ mod tests {
         assert_eq!(registrations.lock().unwrap().len(), 2);
         assert_eq!(drops.load(Ordering::SeqCst), 1);
 
+        callback_slot.lock().unwrap().as_mut().unwrap()(Err(notify::Error::generic(
+            "fixture replacement backend disconnected",
+        )));
+        let recovered_again = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                let state = waiter.state();
+                if state.backend_generation == 3 && !state.backend_failed && !state.reinstalling {
+                    break state;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(!recovered_again.routing_failed);
+        assert_eq!(registrations.lock().unwrap().len(), 3);
+        assert_eq!(drops.load(Ordering::SeqCst), 2);
+
         let barrier = handle.request_close();
         assert_eq!(
             tokio::time::timeout(std::time::Duration::from_secs(2), runner)
@@ -4698,7 +4943,7 @@ mod tests {
                 .unwrap(),
             ScopedObservationNativeWatcherRunExit::Cancelled
         );
-        assert_eq!(drops.load(Ordering::SeqCst), 2);
+        assert_eq!(drops.load(Ordering::SeqCst), 3);
         assert!(barrier.wait_async().await.complete);
     }
 
