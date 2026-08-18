@@ -2324,6 +2324,18 @@ Candidate and unauthorized. This slice adds no portable actor/affiliation DTO,
 N-API or SDK exposure, vendor promotion, artifact resolution, persistence, or
 public transport authority.
 
+The next bounded D3 slice (`c9cf72a`) makes the existing scoped usage-v2
+portable contract consume the actor and affiliation context selected by the
+common host. Usage-only selection remains key-only compatible;
+evidence-backed actor lineage and affiliation context cross the Rust and
+TypeScript boundary only under their exact v1 family selections, with
+canonical bounded text, exact root/native-session binding, and canonical
+semantic-revision evidence. A selected family may still carry the explicit
+key-only fallback when no declaration has arrived, while partial enrichment
+cannot shed its parent or family authority. This adds no actor or affiliation
+event wire, complete event union, N-API observer transport, support promotion,
+or public authorization.
+
 ### D4. SDK and Chopsticks migration
 
 Add a feature-flagged Chopsticks path beside `watchSessionTranscript`:
