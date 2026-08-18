@@ -1,8 +1,10 @@
 //! Source-neutral RFC 012B Library plan and initial build-state durability.
 //!
-//! This module owns `Pending`/`Building` administration and reconstructs the
-//! initial `Ready` snapshot published atomically by `catalog_publication`. It
-//! still owns no source reads, refresh/retention policy, or query authority.
+//! This module owns `Pending`/`Building` administration, reconstructs the
+//! initial `Ready` snapshot published atomically by `catalog_publication`, and
+//! can durably begin an ordinary refresh while retaining that exact snapshot.
+//! It still owns no source reads, refresh completion/retirement policy, or
+//! public query authority.
 
 use std::sync::Arc;
 
@@ -26,8 +28,10 @@ const READY_STATE: &str = "ready";
 const REGISTER_REASON: &str = "catalog.library.plan.registered";
 const SCHEDULE_REASON: &str = "catalog.library.build.scheduled";
 pub(super) const INITIAL_PUBLICATION_REASON: &str = "catalog.library.initial_snapshot.published";
+const REFRESH_STARTED_REASON: &str = "catalog.library.refresh.started";
 const READINESS_CHANGE_TOPIC: &str = "catalog.readiness.changed";
 const READINESS_CHANGE_SCHEMA_VERSION: u32 = 1;
+const REFRESH_CHANGE_SCHEMA_VERSION: u32 = 3;
 const MAX_CATALOG_PLAN_JSON_BYTES: usize = 4 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -68,6 +72,37 @@ pub(crate) struct CatalogBuildExpectation {
     pub state: CatalogDurableBuildPhase,
 }
 
+/// Non-transferable compare-and-swap proof for one restart-validated plain
+/// Ready publication. The authenticated publication identity is shared rather
+/// than copied, and no field is constructible outside this module.
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct CatalogReadyRefreshExpectation {
+    scope: CatalogCoverageScope,
+    coverage_plan_id: CatalogCoveragePlanId,
+    desired_contract_version: u32,
+    epoch: u64,
+    attempt: u64,
+    snapshot_id: CatalogSnapshotId,
+    state_commit_seq: u64,
+    publication_identity: Arc<CatalogReadyPublicationIdentity>,
+}
+
+impl std::fmt::Debug for CatalogReadyRefreshExpectation {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CatalogReadyRefreshExpectation")
+            .field("scope", &self.scope)
+            .field("coverage_plan_id", &self.coverage_plan_id)
+            .field("desired_contract_version", &self.desired_contract_version)
+            .field("epoch", &self.epoch)
+            .field("attempt", &self.attempt)
+            .field("snapshot_id", &self.snapshot_id)
+            .field("state_commit_seq", &self.state_commit_seq)
+            .field("publication_identity", &self.publication_identity)
+            .finish_non_exhaustive()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum CatalogBuildStateCommand {
     Register {
@@ -78,6 +113,11 @@ pub(crate) enum CatalogBuildStateCommand {
     },
     Schedule {
         expected: CatalogBuildExpectation,
+        started_at: i64,
+        committed_at: i64,
+    },
+    BeginRefresh {
+        expected: CatalogReadyRefreshExpectation,
         started_at: i64,
         committed_at: i64,
     },
@@ -104,6 +144,18 @@ impl CatalogBuildStateCommand {
         committed_at: i64,
     ) -> Self {
         Self::Schedule {
+            expected,
+            started_at,
+            committed_at,
+        }
+    }
+
+    pub(crate) fn begin_refresh(
+        expected: CatalogReadyRefreshExpectation,
+        started_at: i64,
+        committed_at: i64,
+    ) -> Self {
+        Self::BeginRefresh {
             expected,
             started_at,
             committed_at,
@@ -148,22 +200,34 @@ impl DurableCatalogBuildState {
                 "catalog retained-page reads require a completed snapshot".to_string(),
             )
         })?;
+        let state_lineage_is_exact = match self.readiness.refreshing_from_snapshot {
+            None => self.last_commit_seq == snapshot_id.complete_commit,
+            Some(refreshing) => {
+                refreshing == snapshot_id && self.last_commit_seq > snapshot_id.complete_commit
+            }
+        };
         if self.plan.scope != CatalogCoverageScope::Library
             || self.readiness.state != CatalogReadinessPhase::Ready
             || self.readiness.coverage_plan_id != self.plan.coverage_plan_id
             || self.readiness.completed_contract_version != Some(snapshot_id.pack_contract_version)
             || self.readiness.complete_through_commit != Some(snapshot_id.complete_commit)
             || self.readiness.epoch != snapshot_id.readiness_epoch
-            || self.last_commit_seq != snapshot_id.complete_commit
+            || !state_lineage_is_exact
         {
             return Err(EngineError::InvalidCommit(
                 "catalog retained-page read authority is outside its exact Ready lineage"
                     .to_string(),
             ));
         }
+        // Page payloads describe the immutable publication, not the mutable
+        // current reconciliation state. The durable state retains the refresh
+        // marker; the read authority freezes the same Ready snapshot view that
+        // was originally published.
+        let mut published_readiness = self.readiness.clone();
+        published_readiness.refreshing_from_snapshot = None;
         Ok(CatalogReadyReadAuthority {
             plan: self.plan.clone(),
-            readiness: self.readiness.clone(),
+            readiness: published_readiness,
             snapshot_id,
             publication_identity: self.ready_publication_identity.clone().ok_or_else(|| {
                 EngineError::InvalidCommit(
@@ -171,6 +235,27 @@ impl DurableCatalogBuildState {
                         .to_string(),
                 )
             })?,
+        })
+    }
+
+    pub(crate) fn refresh_expectation(
+        &self,
+    ) -> Result<CatalogReadyRefreshExpectation, EngineError> {
+        if self.readiness.refreshing_from_snapshot.is_some() {
+            return Err(EngineError::InvalidCommit(
+                "catalog ordinary refresh is already active".to_string(),
+            ));
+        }
+        let authority = self.ready_read_authority()?;
+        Ok(CatalogReadyRefreshExpectation {
+            scope: self.readiness.scope,
+            coverage_plan_id: self.readiness.coverage_plan_id,
+            desired_contract_version: self.readiness.desired_contract_version,
+            epoch: self.readiness.epoch,
+            attempt: self.readiness.attempt,
+            snapshot_id: authority.snapshot_id,
+            state_commit_seq: self.last_commit_seq,
+            publication_identity: Arc::clone(&authority.publication_identity),
         })
     }
 }
@@ -241,6 +326,54 @@ struct CatalogReadinessChangedPayload {
     commit_seq: u64,
 }
 
+#[derive(Serialize)]
+#[serde(deny_unknown_fields)]
+struct CatalogRefreshStartedPayload {
+    readiness_contract_version: u32,
+    scope: &'static str,
+    coverage_plan_id: CatalogCoveragePlanId,
+    desired_contract_version: u32,
+    completed_contract_version: u32,
+    epoch: u64,
+    attempt: u64,
+    state: CatalogReadinessPhase,
+    last_complete_snapshot: CatalogSnapshotId,
+    refreshing_from_snapshot: CatalogSnapshotId,
+    complete_through_commit: u64,
+    commit_seq: u64,
+}
+
+#[derive(Clone, Copy)]
+enum CatalogBuildStateWrite<'a> {
+    InsertPlan,
+    Schedule,
+    BeginRefresh {
+        expected: &'a CatalogReadyRefreshExpectation,
+    },
+}
+
+fn active_refresh_matches_expectation(
+    current: &DurableCatalogBuildState,
+    expected: &CatalogReadyRefreshExpectation,
+) -> bool {
+    current.plan.scope == expected.scope
+        && current.plan.coverage_plan_id == expected.coverage_plan_id
+        && current.readiness.scope == expected.scope
+        && current.readiness.coverage_plan_id == expected.coverage_plan_id
+        && current.readiness.desired_contract_version == expected.desired_contract_version
+        && current.readiness.completed_contract_version == Some(expected.desired_contract_version)
+        && current.readiness.epoch == expected.epoch
+        && current.readiness.attempt == expected.attempt
+        && current.readiness.complete_through_commit == Some(expected.snapshot_id.complete_commit)
+        && current.readiness.last_complete_snapshot == Some(expected.snapshot_id)
+        && current.readiness.refreshing_from_snapshot == Some(expected.snapshot_id)
+        && current.last_commit_seq > expected.state_commit_seq
+        && current
+            .ready_publication_identity
+            .as_ref()
+            .is_some_and(|identity| identity == &expected.publication_identity)
+}
+
 pub(super) fn apply_catalog_build_state_commit(
     connection: &mut Connection,
     command: &CatalogBuildStateCommand,
@@ -260,7 +393,7 @@ pub(super) fn apply_catalog_build_state_commit_with_hook(
         .map_err(|error| sqlite_error("begin catalog build-state commit", error))?;
     let current = load_catalog_build_state(&transaction)?;
 
-    let (mut machine, started_at, committed_at, reason, write_plan) = match command {
+    let (mut machine, started_at, committed_at, reason, write) = match command {
         CatalogBuildStateCommand::Register {
             plan,
             desired_contract_version,
@@ -293,7 +426,7 @@ pub(super) fn apply_catalog_build_state_commit_with_hook(
                 *started_at,
                 *committed_at,
                 REGISTER_REASON,
-                true,
+                CatalogBuildStateWrite::InsertPlan,
             )
         }
         CatalogBuildStateCommand::Schedule {
@@ -336,23 +469,63 @@ pub(super) fn apply_catalog_build_state_commit_with_hook(
                 CatalogReadinessMachine::resume(current.plan.clone(), current.readiness.clone())
                     .map_err(catalog_contract_error)?;
             machine.schedule_build().map_err(catalog_contract_error)?;
-            (machine, *started_at, *committed_at, SCHEDULE_REASON, false)
+            (
+                machine,
+                *started_at,
+                *committed_at,
+                SCHEDULE_REASON,
+                CatalogBuildStateWrite::Schedule,
+            )
+        }
+        CatalogBuildStateCommand::BeginRefresh {
+            expected,
+            started_at,
+            committed_at,
+        } => {
+            let Some(current) = current else {
+                return Err(EngineError::InvalidCommit(
+                    "catalog ordinary refresh cannot begin before Ready publication".to_string(),
+                ));
+            };
+            if current.readiness.refreshing_from_snapshot.is_some() {
+                if active_refresh_matches_expectation(&current, expected) {
+                    transaction.commit().map_err(|error| {
+                        sqlite_error("finish unchanged catalog refresh start", error)
+                    })?;
+                    return Ok(None);
+                }
+                return Err(EngineError::InvalidCommit(
+                    "catalog ordinary refresh conflicts with the active refresh lineage"
+                        .to_string(),
+                ));
+            }
+            if current.refresh_expectation()? != *expected {
+                return Err(EngineError::InvalidCommit(
+                    "catalog ordinary refresh compare-and-swap expectation is stale or foreign"
+                        .to_string(),
+                ));
+            }
+            let mut machine =
+                CatalogReadinessMachine::resume(current.plan.clone(), current.readiness.clone())
+                    .map_err(catalog_contract_error)?;
+            machine.begin_refresh().map_err(catalog_contract_error)?;
+            (
+                machine,
+                *started_at,
+                *committed_at,
+                REFRESH_STARTED_REASON,
+                CatalogBuildStateWrite::BeginRefresh { expected },
+            )
         }
     };
 
     let commit_seq = insert_administrative_commit(&transaction, reason, started_at, committed_at)?;
     hook.reach(CatalogCommitStage::AfterCommitInsert)?;
-    if write_plan {
+    if matches!(write, CatalogBuildStateWrite::InsertPlan) {
         insert_plan(&transaction, machine.plan(), commit_seq)?;
     }
     hook.reach(CatalogCommitStage::AfterPlanWrite)?;
-    write_build_state(
-        &transaction,
-        &mut machine,
-        commit_seq,
-        committed_at,
-        write_plan,
-    )?;
+    write_build_state(&transaction, &mut machine, commit_seq, committed_at, write)?;
     hook.reach(CatalogCommitStage::AfterBuildStateWrite)?;
     write_readiness_change(&transaction, commit_seq, machine.snapshot())?;
     hook.reach(CatalogCommitStage::AfterOutboxInsert)?;
@@ -394,6 +567,7 @@ pub(super) fn load_catalog_build_state(
                    build.completed_contract_version,
                    build.complete_through_commit,
                    build.last_complete_snapshot_commit,
+                   build.refreshing_from_snapshot_commit,
                    build.last_commit_seq,
                    build.updated_at,
                    plan_commit.source_instance_id,
@@ -407,7 +581,8 @@ pub(super) fn load_catalog_build_state(
                                   AND state_commit.reason IN (
                                       'catalog.library.plan.registered',
                                       'catalog.library.build.scheduled',
-                                      'catalog.library.initial_snapshot.published'
+                                      'catalog.library.initial_snapshot.published',
+                                      'catalog.library.refresh.started'
                                   )
                         THEN state_commit.reason END,
                    state_commit.committed_at,
@@ -436,16 +611,17 @@ pub(super) fn load_catalog_build_state(
                     completed_contract_version: row.get(9)?,
                     complete_through_commit: row.get(10)?,
                     last_complete_snapshot_commit: row.get(11)?,
-                    last_commit_seq: row.get(12)?,
-                    updated_at: row.get(13)?,
-                    plan_commit_source: row.get(14)?,
-                    plan_commit_reason: row.get(15)?,
-                    plan_committed_at: row.get(16)?,
-                    plan_fact_count: row.get(17)?,
-                    state_commit_source: row.get(18)?,
-                    state_commit_reason: row.get(19)?,
-                    state_committed_at: row.get(20)?,
-                    state_fact_count: row.get(21)?,
+                    refreshing_from_snapshot_commit: row.get(12)?,
+                    last_commit_seq: row.get(13)?,
+                    updated_at: row.get(14)?,
+                    plan_commit_source: row.get(15)?,
+                    plan_commit_reason: row.get(16)?,
+                    plan_committed_at: row.get(17)?,
+                    plan_fact_count: row.get(18)?,
+                    state_commit_source: row.get(19)?,
+                    state_commit_reason: row.get(20)?,
+                    state_committed_at: row.get(21)?,
+                    state_fact_count: row.get(22)?,
                 })
             },
         )
@@ -489,6 +665,7 @@ struct StoredCatalogBuildState {
     completed_contract_version: Option<i64>,
     complete_through_commit: Option<i64>,
     last_complete_snapshot_commit: Option<i64>,
+    refreshing_from_snapshot_commit: Option<i64>,
     last_commit_seq: i64,
     updated_at: i64,
     plan_commit_source: Option<i64>,
@@ -552,6 +729,10 @@ fn decode_stored_state(
     let phase = CatalogDurableBuildPhase::parse(state)?;
     let created_commit_seq = positive_u64(stored.created_commit_seq, "catalog plan commit")?;
     let last_commit_seq = positive_u64(stored.last_commit_seq, "catalog state commit")?;
+    let refreshing_from_snapshot_commit = stored
+        .refreshing_from_snapshot_commit
+        .map(|value| positive_u64(value, "catalog refreshing-from snapshot commit"))
+        .transpose()?;
     validate_admin_commit(
         stored.plan_commit_source,
         plan_commit_reason,
@@ -564,7 +745,7 @@ fn decode_stored_state(
         state_commit_reason,
         stored.state_committed_at,
         stored.state_fact_count,
-        phase_reason(phase),
+        phase_reason(phase, refreshing_from_snapshot_commit.is_some())?,
     )?;
     if stored.state_committed_at != Some(stored.updated_at) {
         return Err(corrupt_catalog_state(
@@ -606,21 +787,34 @@ fn decode_stored_state(
         CatalogDurableBuildPhase::Pending | CatalogDurableBuildPhase::Building
             if completed_contract_version.is_some()
                 || complete_through_commit.is_some()
-                || last_complete_snapshot_commit.is_some() =>
+                || last_complete_snapshot_commit.is_some()
+                || refreshing_from_snapshot_commit.is_some() =>
         {
             return Err(corrupt_catalog_state(
                 "pending/building catalog state cannot claim completed snapshot fields",
             ));
         }
-        CatalogDurableBuildPhase::Ready
-            if completed_contract_version != Some(desired_contract_version)
+        CatalogDurableBuildPhase::Ready => match refreshing_from_snapshot_commit {
+            None if completed_contract_version != Some(desired_contract_version)
                 || complete_through_commit != Some(last_commit_seq)
                 || last_complete_snapshot_commit != Some(last_commit_seq) =>
-        {
-            return Err(corrupt_catalog_state(
-                "ready catalog state does not identify its exact completed snapshot",
-            ));
-        }
+            {
+                return Err(corrupt_catalog_state(
+                    "plain ready catalog state does not identify its exact completed snapshot",
+                ));
+            }
+            Some(refreshing_commit)
+                if completed_contract_version != Some(desired_contract_version)
+                    || complete_through_commit != Some(refreshing_commit)
+                    || last_complete_snapshot_commit != Some(refreshing_commit)
+                    || last_commit_seq <= refreshing_commit =>
+            {
+                return Err(corrupt_catalog_state(
+                    "refreshing ready catalog state does not retain its exact completed snapshot",
+                ));
+            }
+            _ => {}
+        },
         _ => {}
     }
 
@@ -633,11 +827,14 @@ fn decode_stored_state(
         machine.schedule_build().map_err(catalog_contract_error)?;
     }
     let ready_publication_identity = if phase == CatalogDurableBuildPhase::Ready {
+        let snapshot_commit = last_complete_snapshot_commit.ok_or_else(|| {
+            corrupt_catalog_state("Ready catalog state is missing its retained snapshot commit")
+        })?;
         let snapshot_id = CatalogSnapshotId::new(
             desired_contract_version,
             plan.coverage_plan_id,
             epoch,
-            last_commit_seq,
+            snapshot_commit,
         )
         .map_err(catalog_contract_error)?;
         let publication = super::catalog_publication::load_ready_publication(
@@ -649,6 +846,9 @@ fn decode_stored_state(
         machine
             .publish_ready(snapshot_id, publication.source_coverage)
             .map_err(catalog_contract_error)?;
+        if refreshing_from_snapshot_commit.is_some() {
+            machine.begin_refresh().map_err(catalog_contract_error)?;
+        }
         Some(Arc::new(publication.identity))
     } else {
         None
@@ -703,6 +903,28 @@ fn validate_command(command: &CatalogBuildStateCommand) -> Result<(), EngineErro
             {
                 return Err(EngineError::InvalidCommit(
                     "catalog build expectation versions, epoch, and attempt must be positive"
+                        .to_string(),
+                ));
+            }
+            (*started_at, *committed_at)
+        }
+        CatalogBuildStateCommand::BeginRefresh {
+            expected,
+            started_at,
+            committed_at,
+        } => {
+            if expected.scope != CatalogCoverageScope::Library
+                || expected.desired_contract_version == 0
+                || expected.epoch == 0
+                || expected.attempt == 0
+                || expected.state_commit_seq == 0
+                || expected.snapshot_id.pack_contract_version != expected.desired_contract_version
+                || expected.snapshot_id.coverage_plan_id != expected.coverage_plan_id
+                || expected.snapshot_id.readiness_epoch != expected.epoch
+                || expected.snapshot_id.complete_commit != expected.state_commit_seq
+            {
+                return Err(EngineError::InvalidCommit(
+                    "catalog refresh expectation is outside one exact plain Ready lineage"
                         .to_string(),
                 ));
             }
@@ -778,12 +1000,12 @@ fn write_build_state(
     machine: &mut CatalogReadinessMachine,
     commit_seq: u64,
     updated_at: i64,
-    inserting: bool,
+    write: CatalogBuildStateWrite<'_>,
 ) -> Result<(), EngineError> {
     let snapshot = machine.snapshot();
     let phase = durable_phase(snapshot.state)?;
-    let changed = if inserting {
-        transaction
+    let changed = match write {
+        CatalogBuildStateWrite::InsertPlan => transaction
             .execute(
                 r#"
                 INSERT INTO catalog_build_state (
@@ -802,9 +1024,8 @@ fn write_build_state(
                     updated_at,
                 ],
             )
-            .map_err(|error| sqlite_error("insert catalog build state", error))?
-    } else {
-        transaction
+            .map_err(|error| sqlite_error("insert catalog build state", error))?,
+        CatalogBuildStateWrite::Schedule => transaction
             .execute(
                 r#"
                 UPDATE catalog_build_state
@@ -828,7 +1049,58 @@ fn write_build_state(
                     PENDING_STATE,
                 ],
             )
-            .map_err(|error| sqlite_error("advance catalog build state", error))?
+            .map_err(|error| sqlite_error("schedule catalog build state", error))?,
+        CatalogBuildStateWrite::BeginRefresh { expected } => {
+            let refreshing = snapshot.refreshing_from_snapshot.ok_or_else(|| {
+                EngineError::InvalidCommit(
+                    "catalog refresh write is missing its retained snapshot".to_string(),
+                )
+            })?;
+            if phase != CatalogDurableBuildPhase::Ready
+                || refreshing != expected.snapshot_id
+                || snapshot.last_complete_snapshot != Some(expected.snapshot_id)
+                || snapshot.complete_through_commit != Some(expected.snapshot_id.complete_commit)
+            {
+                return Err(EngineError::InvalidCommit(
+                    "catalog refresh write differs from its exact Ready expectation".to_string(),
+                ));
+            }
+            transaction
+                .execute(
+                    r#"
+                    UPDATE catalog_build_state
+                    SET refreshing_from_snapshot_commit = ?1,
+                        last_commit_seq = ?2,
+                        updated_at = ?3
+                    WHERE scope_kind = ?4
+                      AND coverage_plan_id = ?5
+                      AND desired_contract_version = ?6
+                      AND epoch = ?7
+                      AND attempt = ?8
+                      AND state = 'ready'
+                      AND completed_contract_version = ?6
+                      AND complete_through_commit = ?1
+                      AND last_complete_snapshot_commit = ?1
+                      AND refreshing_from_snapshot_commit IS NULL
+                      AND last_commit_seq = ?9
+                    "#,
+                    params![
+                        to_i64(
+                            refreshing.complete_commit,
+                            "catalog refreshing snapshot commit"
+                        )?,
+                        to_i64(commit_seq, "catalog refresh state commit")?,
+                        updated_at,
+                        LIBRARY_SCOPE,
+                        snapshot.coverage_plan_id.storage_bytes().as_slice(),
+                        i64::from(snapshot.desired_contract_version),
+                        to_i64(snapshot.epoch, "catalog readiness epoch")?,
+                        to_i64(snapshot.attempt, "catalog readiness attempt")?,
+                        to_i64(expected.state_commit_seq, "catalog expected Ready commit")?,
+                    ],
+                )
+                .map_err(|error| sqlite_error("begin catalog ordinary refresh", error))?
+        }
     };
     if changed != 1 {
         return Err(EngineError::InvalidCommit(
@@ -843,17 +1115,59 @@ fn write_readiness_change(
     commit_seq: u64,
     snapshot: &CatalogReadinessSnapshot,
 ) -> Result<(), EngineError> {
-    let payload = serde_json::to_vec(&CatalogReadinessChangedPayload {
-        readiness_contract_version: CATALOG_READINESS_CONTRACT_VERSION,
-        scope: LIBRARY_SCOPE,
-        coverage_plan_id: snapshot.coverage_plan_id,
-        desired_contract_version: snapshot.desired_contract_version,
-        epoch: snapshot.epoch,
-        attempt: snapshot.attempt,
-        state: snapshot.state,
-        commit_seq,
-    })
-    .map_err(|error| {
+    let (schema_version, payload) = if let Some(refreshing) = snapshot.refreshing_from_snapshot {
+        let completed_contract_version = snapshot.completed_contract_version.ok_or_else(|| {
+            EngineError::InvalidCommit(
+                "catalog refresh invalidation is missing its completed contract".to_string(),
+            )
+        })?;
+        let last_complete_snapshot = snapshot.last_complete_snapshot.ok_or_else(|| {
+            EngineError::InvalidCommit(
+                "catalog refresh invalidation is missing its retained snapshot".to_string(),
+            )
+        })?;
+        let complete_through_commit = snapshot.complete_through_commit.ok_or_else(|| {
+            EngineError::InvalidCommit(
+                "catalog refresh invalidation is missing its complete commit".to_string(),
+            )
+        })?;
+        if refreshing != last_complete_snapshot
+            || complete_through_commit != refreshing.complete_commit
+        {
+            return Err(EngineError::InvalidCommit(
+                "catalog refresh invalidation does not identify one exact retained snapshot"
+                    .to_string(),
+            ));
+        }
+        let payload = serde_json::to_vec(&CatalogRefreshStartedPayload {
+            readiness_contract_version: CATALOG_READINESS_CONTRACT_VERSION,
+            scope: LIBRARY_SCOPE,
+            coverage_plan_id: snapshot.coverage_plan_id,
+            desired_contract_version: snapshot.desired_contract_version,
+            completed_contract_version,
+            epoch: snapshot.epoch,
+            attempt: snapshot.attempt,
+            state: snapshot.state,
+            last_complete_snapshot,
+            refreshing_from_snapshot: refreshing,
+            complete_through_commit,
+            commit_seq,
+        });
+        (REFRESH_CHANGE_SCHEMA_VERSION, payload)
+    } else {
+        let payload = serde_json::to_vec(&CatalogReadinessChangedPayload {
+            readiness_contract_version: CATALOG_READINESS_CONTRACT_VERSION,
+            scope: LIBRARY_SCOPE,
+            coverage_plan_id: snapshot.coverage_plan_id,
+            desired_contract_version: snapshot.desired_contract_version,
+            epoch: snapshot.epoch,
+            attempt: snapshot.attempt,
+            state: snapshot.state,
+            commit_seq,
+        });
+        (READINESS_CHANGE_SCHEMA_VERSION, payload)
+    };
+    let payload = payload.map_err(|error| {
         EngineError::InvalidCommit(format!(
             "could not encode catalog readiness change: {error}"
         ))
@@ -863,7 +1177,7 @@ fn write_readiness_change(
         commit_seq,
         &[ChangeEntry {
             topic: READINESS_CHANGE_TOPIC.to_string(),
-            schema_version: READINESS_CHANGE_SCHEMA_VERSION,
+            schema_version,
             entity_key: snapshot.coverage_plan_id.storage_bytes().to_vec(),
             operation: "upsert".to_string(),
             payload,
@@ -890,11 +1204,18 @@ pub(super) fn validate_admin_commit(
     Ok(())
 }
 
-fn phase_reason(phase: CatalogDurableBuildPhase) -> &'static str {
-    match phase {
-        CatalogDurableBuildPhase::Pending => REGISTER_REASON,
-        CatalogDurableBuildPhase::Building => SCHEDULE_REASON,
-        CatalogDurableBuildPhase::Ready => INITIAL_PUBLICATION_REASON,
+fn phase_reason(
+    phase: CatalogDurableBuildPhase,
+    refreshing: bool,
+) -> Result<&'static str, EngineError> {
+    match (phase, refreshing) {
+        (CatalogDurableBuildPhase::Pending, false) => Ok(REGISTER_REASON),
+        (CatalogDurableBuildPhase::Building, false) => Ok(SCHEDULE_REASON),
+        (CatalogDurableBuildPhase::Ready, false) => Ok(INITIAL_PUBLICATION_REASON),
+        (CatalogDurableBuildPhase::Ready, true) => Ok(REFRESH_STARTED_REASON),
+        (CatalogDurableBuildPhase::Pending | CatalogDurableBuildPhase::Building, true) => Err(
+            corrupt_catalog_state("pending/building catalog state cannot own a refresh commit"),
+        ),
     }
 }
 

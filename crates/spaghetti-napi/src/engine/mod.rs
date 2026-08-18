@@ -1346,9 +1346,10 @@ impl SpaghettiEngineCore {
         }
     }
 
-    /// Register or schedule the source-neutral RFC 012B Library build on the
-    /// same durable clock as observation commits. This internal seam cannot
-    /// publish coverage-bearing readiness or catalog rows.
+    /// Register, schedule, or begin an ordinary refresh of the source-neutral
+    /// RFC 012B Library build on the same durable clock as observation
+    /// commits. Refresh start retains the exact current Ready snapshot; this
+    /// internal seam cannot publish new coverage or catalog rows.
     pub(crate) fn commit_catalog_build_state(
         &self,
         command: CatalogBuildStateCommand,

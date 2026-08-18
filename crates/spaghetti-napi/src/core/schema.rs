@@ -187,7 +187,9 @@ const CANONICAL_FTS_TRIGGERS: &[&str] = &[
 /// initial Pending/Building readiness lineage on the common commit clock.
 /// v51: immutable RFC 012B initial catalog snapshots, private typed payload
 /// frames, and the atomically linked initial Ready state.
-pub const SCHEMA_VERSION: u32 = 51;
+/// v52: ordinary RFC 012B Ready refresh administration that retains the exact
+/// current complete snapshot while advancing the durable state commit.
+pub const SCHEMA_VERSION: u32 = 52;
 
 /// Full DDL for the current schema — lifted verbatim from the TS `SCHEMA_SQL`
 /// template literal. Whitespace differs; structure does not.
@@ -492,7 +494,8 @@ CREATE TABLE IF NOT EXISTS ingest_commits (
       reason IN (
         'catalog.library.plan.registered',
         'catalog.library.build.scheduled',
-        'catalog.library.initial_snapshot.published'
+        'catalog.library.initial_snapshot.published',
+        'catalog.library.refresh.started'
       )
       AND committed_at IS NOT NULL
       AND fact_count = 0
@@ -585,6 +588,7 @@ CREATE TABLE IF NOT EXISTS catalog_build_state (
   completed_contract_version INTEGER CHECK (completed_contract_version > 0),
   complete_through_commit INTEGER REFERENCES catalog_snapshots(snapshot_commit_seq) ON DELETE RESTRICT,
   last_complete_snapshot_commit INTEGER REFERENCES catalog_snapshots(snapshot_commit_seq) ON DELETE RESTRICT,
+  refreshing_from_snapshot_commit INTEGER REFERENCES catalog_snapshots(snapshot_commit_seq) ON DELETE RESTRICT,
   last_commit_seq INTEGER NOT NULL REFERENCES ingest_commits(commit_seq) ON DELETE RESTRICT,
   updated_at INTEGER NOT NULL,
   CHECK (
@@ -593,6 +597,7 @@ CREATE TABLE IF NOT EXISTS catalog_build_state (
       AND completed_contract_version IS NULL
       AND complete_through_commit IS NULL
       AND last_complete_snapshot_commit IS NULL
+      AND refreshing_from_snapshot_commit IS NULL
     )
     OR
     (
@@ -602,7 +607,17 @@ CREATE TABLE IF NOT EXISTS catalog_build_state (
       AND last_complete_snapshot_commit IS NOT NULL
       AND completed_contract_version = desired_contract_version
       AND complete_through_commit = last_complete_snapshot_commit
-      AND last_commit_seq = complete_through_commit
+      AND (
+        (
+          refreshing_from_snapshot_commit IS NULL
+          AND last_commit_seq = complete_through_commit
+        )
+        OR
+        (
+          refreshing_from_snapshot_commit = last_complete_snapshot_commit
+          AND last_commit_seq > complete_through_commit
+        )
+      )
     )
   )
 );
@@ -3333,6 +3348,14 @@ mod tests {
         assert!(object_exists(&conn, "table", "catalog_snapshots"));
         assert!(object_exists(&conn, "table", "catalog_snapshot_entries"));
         assert!(object_exists(&conn, "table", "catalog_build_state"));
+        let refreshing_snapshot_column: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('catalog_build_state') WHERE name = 'refreshing_from_snapshot_commit'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("inspect catalog refresh lineage");
+        assert_eq!(refreshing_snapshot_column, 1);
         assert!(object_exists(&conn, "table", "projection_versions"));
         assert!(object_exists(&conn, "table", "query_pack_selections"));
         for table in [
@@ -3689,6 +3712,7 @@ mod tests {
             "INSERT INTO ingest_commits (source_instance_id, reason, started_at, committed_at, fact_count) VALUES (NULL, 'catalog.library.plan.registered', 1, 2, 1)",
             "INSERT INTO ingest_commits (source_instance_id, reason, started_at, committed_at, fact_count) VALUES (NULL, 'catalog.library.build.scheduled', 1, NULL, 0)",
             "INSERT INTO ingest_commits (source_instance_id, reason, started_at, committed_at, fact_count) VALUES (NULL, 'catalog.library.initial_snapshot.published', 1, 2, 1)",
+            "INSERT INTO ingest_commits (source_instance_id, reason, started_at, committed_at, fact_count) VALUES (NULL, 'catalog.library.refresh.started', 1, NULL, 0)",
         ] {
             assert!(conn.execute(invalid, []).is_err(), "accepted {invalid}");
         }
@@ -3703,6 +3727,7 @@ mod tests {
             "catalog.library.plan.registered",
             "catalog.library.build.scheduled",
             "catalog.library.initial_snapshot.published",
+            "catalog.library.refresh.started",
         ] {
             conn.execute(
                 "INSERT INTO ingest_commits (source_instance_id, reason, started_at, committed_at, fact_count) VALUES (NULL, ?1, 1, 2, 0)",
@@ -3714,7 +3739,7 @@ mod tests {
             conn.query_row("SELECT COUNT(*) FROM ingest_commits", [], |row| row
                 .get::<_, i64>(0))
                 .unwrap(),
-            3
+            4
         );
     }
 

@@ -1,4 +1,6 @@
+use std::cell::Cell;
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 
 use super::*;
 use crate::adapter::{
@@ -35,7 +37,9 @@ use crate::core::schema;
 use crate::engine::catalog_publication::{
     apply_initial_catalog_publication, CatalogInitialPublicationCommand,
 };
-use crate::engine::catalog_state::{self, CatalogBuildStateCommand, DurableCatalogBuildState};
+use crate::engine::catalog_state::{
+    self, CatalogBuildStateCommand, CatalogCommitHook, CatalogCommitStage, DurableCatalogBuildState,
+};
 
 const FIXTURE_ADAPTER: &str = "retained-page-fixture";
 
@@ -43,6 +47,62 @@ struct PublishedCatalog {
     connection: Connection,
     state: DurableCatalogBuildState,
     selection: CatalogQueryContractSelection,
+}
+
+struct FailRefreshAt(CatalogCommitStage);
+
+impl CatalogCommitHook for FailRefreshAt {
+    fn reach(&self, stage: CatalogCommitStage) -> Result<(), EngineError> {
+        if stage == self.0 {
+            Err(EngineError::InjectedFailure {
+                stage: "catalog refresh test seam",
+            })
+        } else {
+            Ok(())
+        }
+    }
+}
+
+struct ObserveRefreshIsolation {
+    database_path: PathBuf,
+    snapshot_commit: i64,
+    snapshot_entries: i64,
+    observed: Cell<bool>,
+}
+
+impl CatalogCommitHook for ObserveRefreshIsolation {
+    fn reach(&self, stage: CatalogCommitStage) -> Result<(), EngineError> {
+        if stage != CatalogCommitStage::AfterBuildStateWrite {
+            return Ok(());
+        }
+        let observer = Connection::open(&self.database_path).unwrap();
+        let (last_commit, refreshing): (i64, Option<i64>) = observer
+            .query_row(
+                "SELECT last_commit_seq, refreshing_from_snapshot_commit FROM catalog_build_state WHERE scope_kind = 'library'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(last_commit, self.snapshot_commit);
+        assert_eq!(refreshing, None);
+        assert_eq!(
+            observer
+                .query_row("SELECT COUNT(*) FROM catalog_snapshots", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            observer
+                .query_row("SELECT COUNT(*) FROM catalog_snapshot_entries", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap(),
+            self.snapshot_entries
+        );
+        self.observed.set(true);
+        Ok(())
+    }
 }
 
 fn durable_selection() -> ContractVersionSelection {
@@ -146,7 +206,14 @@ fn schedule_build(
 }
 
 fn publish_catalog(project_count: usize, session_count: usize) -> PublishedCatalog {
-    let mut connection = database();
+    publish_catalog_in(database(), project_count, session_count)
+}
+
+fn publish_catalog_in(
+    mut connection: Connection,
+    project_count: usize,
+    session_count: usize,
+) -> PublishedCatalog {
     let selection = query_selection();
     let (plan, assembly) = if project_count == 0 && session_count == 0 {
         let plan = CatalogCoveragePlan::new(CatalogCoverageScope::Library, Vec::new(), Vec::new())
@@ -558,6 +625,495 @@ fn publish_lifecycle_catalog(connection: &mut Connection) -> [CatalogEntityRef; 
     .unwrap()
     .unwrap();
     [deleted_ref, prior_ref, replacement_ref]
+}
+
+#[test]
+fn ordinary_refresh_start_retains_exact_ready_pages_resolution_and_outbox() {
+    let mut published = publish_catalog(2, 2);
+    let snapshot_id = published
+        .state
+        .ready_read_authority()
+        .unwrap()
+        .snapshot_id();
+    let source_coverage = published.state.readiness.source_coverage.clone();
+    let snapshot_entries: i64 = published
+        .connection
+        .query_row("SELECT COUNT(*) FROM catalog_snapshot_entries", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    let expected = published.state.refresh_expectation().unwrap();
+    let command = CatalogBuildStateCommand::begin_refresh(expected, 40, 41);
+    let receipt =
+        catalog_state::apply_catalog_build_state_commit(&mut published.connection, &command)
+            .unwrap()
+            .unwrap();
+    assert_eq!(receipt.commit_seq, snapshot_id.complete_commit + 1);
+    assert_eq!(receipt.readiness.state, CatalogReadinessPhase::Ready);
+    assert_eq!(receipt.readiness.last_complete_snapshot, Some(snapshot_id));
+    assert_eq!(
+        receipt.readiness.refreshing_from_snapshot,
+        Some(snapshot_id)
+    );
+    assert_eq!(
+        receipt.readiness.complete_through_commit,
+        Some(snapshot_id.complete_commit)
+    );
+
+    let state = catalog_state::load_catalog_build_state(&published.connection)
+        .unwrap()
+        .unwrap();
+    assert_eq!(state.last_commit_seq, receipt.commit_seq);
+    assert_eq!(state.readiness, receipt.readiness);
+    assert_eq!(state.readiness.source_coverage, source_coverage);
+    assert_eq!(
+        published
+            .connection
+            .query_row("SELECT COUNT(*) FROM catalog_snapshots", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        published
+            .connection
+            .query_row("SELECT COUNT(*) FROM catalog_snapshot_entries", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap(),
+        snapshot_entries
+    );
+
+    let (source, reason, fact_count): (Option<i64>, String, i64) = published
+        .connection
+        .query_row(
+            "SELECT source_instance_id, reason, fact_count FROM ingest_commits WHERE commit_seq = ?1",
+            [i64::try_from(receipt.commit_seq).unwrap()],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(source, None);
+    assert_eq!(reason, "catalog.library.refresh.started");
+    assert_eq!(fact_count, 0);
+    let (schema_version, payload): (i64, Vec<u8>) = published
+        .connection
+        .query_row(
+            "SELECT schema_version, payload FROM change_log WHERE commit_seq = ?1",
+            [i64::try_from(receipt.commit_seq).unwrap()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(schema_version, 3);
+    let payload: serde_json::Value = serde_json::from_slice(&payload).unwrap();
+    assert_eq!(payload["state"], "ready");
+    assert_eq!(payload["commit_seq"], receipt.commit_seq);
+    assert_eq!(
+        payload["complete_through_commit"],
+        snapshot_id.complete_commit
+    );
+    assert_eq!(
+        payload["last_complete_snapshot"],
+        payload["refreshing_from_snapshot"]
+    );
+    assert!(payload.get("source_coverage").is_none());
+    assert!(!payload.to_string().contains("private-"));
+
+    let authority = state.ready_read_authority().unwrap();
+    assert_eq!(authority.snapshot_id(), snapshot_id);
+    assert_eq!(authority.readiness().refreshing_from_snapshot, None);
+    let before_query_changes: i64 = published
+        .connection
+        .query_row("SELECT total_changes()", [], |row| row.get(0))
+        .unwrap();
+    let page = read_retained_catalog_page(
+        &published.connection,
+        &authority,
+        &CatalogRetainedPageRequest::projects_all(
+            published.selection.clone(),
+            snapshot_id,
+            10,
+            None,
+        ),
+    )
+    .unwrap();
+    let CatalogRetainedPage::Projects(page) = page else {
+        panic!("expected retained project page during refresh");
+    };
+    assert_eq!(page.rows.len(), 2);
+    assert_eq!(page.published_readiness.refreshing_from_snapshot, None);
+
+    let source_instance_key =
+        CanonicalSourceInstanceKey::derive(1, b"retained-page-source").unwrap();
+    let project_ref = CatalogEntityRef::project(
+        CanonicalEntityKey::derive(
+            FIXTURE_ADAPTER,
+            &source_instance_key,
+            "project",
+            b"project-0",
+        )
+        .unwrap(),
+    );
+    let resolution = resolve_retained_catalog_entity(
+        &published.connection,
+        &authority,
+        &CatalogResolutionRequestBinding::new(
+            published.selection.clone(),
+            snapshot_id,
+            project_ref.external_ref,
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert!(matches!(
+        resolution.resolution,
+        CatalogEntityResolution::Live { .. }
+    ));
+    assert_eq!(
+        published
+            .connection
+            .query_row("SELECT total_changes()", [], |row| row.get::<_, i64>(0))
+            .unwrap(),
+        before_query_changes
+    );
+
+    assert!(
+        catalog_state::apply_catalog_build_state_commit(&mut published.connection, &command,)
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        published
+            .connection
+            .query_row("SELECT COUNT(*) FROM ingest_commits", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        4
+    );
+}
+
+#[test]
+fn ordinary_refresh_start_rolls_back_every_precommit_seam_and_replays_lost_ack() {
+    const PRECOMMIT_STAGES: [CatalogCommitStage; 6] = [
+        CatalogCommitStage::BeforeTransaction,
+        CatalogCommitStage::AfterCommitInsert,
+        CatalogCommitStage::AfterPlanWrite,
+        CatalogCommitStage::AfterBuildStateWrite,
+        CatalogCommitStage::AfterOutboxInsert,
+        CatalogCommitStage::BeforeCommit,
+    ];
+    let mut published = publish_catalog(1, 1);
+    let snapshot_id = published
+        .state
+        .ready_read_authority()
+        .unwrap()
+        .snapshot_id();
+    let snapshot_entries: i64 = published
+        .connection
+        .query_row("SELECT COUNT(*) FROM catalog_snapshot_entries", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    let command = CatalogBuildStateCommand::begin_refresh(
+        published.state.refresh_expectation().unwrap(),
+        40,
+        41,
+    );
+    for stage in PRECOMMIT_STAGES {
+        assert!(catalog_state::apply_catalog_build_state_commit_with_hook(
+            &mut published.connection,
+            &command,
+            &FailRefreshAt(stage),
+        )
+        .is_err());
+        let retained = catalog_state::load_catalog_build_state(&published.connection)
+            .unwrap()
+            .unwrap();
+        assert_eq!(retained.last_commit_seq, snapshot_id.complete_commit);
+        assert_eq!(retained.readiness.refreshing_from_snapshot, None);
+        assert_eq!(
+            published
+                .connection
+                .query_row("SELECT COUNT(*) FROM ingest_commits", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            3
+        );
+        assert_eq!(
+            published
+                .connection
+                .query_row("SELECT COUNT(*) FROM change_log", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            3
+        );
+        assert_eq!(
+            published
+                .connection
+                .query_row("SELECT COUNT(*) FROM catalog_snapshot_entries", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap(),
+            snapshot_entries
+        );
+    }
+
+    assert!(catalog_state::apply_catalog_build_state_commit_with_hook(
+        &mut published.connection,
+        &command,
+        &FailRefreshAt(CatalogCommitStage::AfterCommit),
+    )
+    .is_err());
+    let retained = catalog_state::load_catalog_build_state(&published.connection)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        retained.readiness.refreshing_from_snapshot,
+        Some(snapshot_id)
+    );
+    assert_eq!(retained.last_commit_seq, snapshot_id.complete_commit + 1);
+    assert!(
+        catalog_state::apply_catalog_build_state_commit(&mut published.connection, &command,)
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        published
+            .connection
+            .query_row("SELECT COUNT(*) FROM ingest_commits", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        4
+    );
+}
+
+#[test]
+fn ordinary_refresh_start_is_isolated_and_restarts_with_exact_retained_authority() {
+    let directory = tempfile::tempdir().unwrap();
+    let database_path = directory.path().join("catalog-refresh.sqlite");
+    let connection = Connection::open(&database_path).unwrap();
+    schema::initialize_schema(&connection).unwrap();
+    let mut published = publish_catalog_in(connection, 2, 1);
+    let snapshot_id = published
+        .state
+        .ready_read_authority()
+        .unwrap()
+        .snapshot_id();
+    let snapshot_entries: i64 = published
+        .connection
+        .query_row("SELECT COUNT(*) FROM catalog_snapshot_entries", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    let command = CatalogBuildStateCommand::begin_refresh(
+        published.state.refresh_expectation().unwrap(),
+        40,
+        41,
+    );
+    let hook = ObserveRefreshIsolation {
+        database_path: database_path.clone(),
+        snapshot_commit: i64::try_from(snapshot_id.complete_commit).unwrap(),
+        snapshot_entries,
+        observed: Cell::new(false),
+    };
+    catalog_state::apply_catalog_build_state_commit_with_hook(
+        &mut published.connection,
+        &command,
+        &hook,
+    )
+    .unwrap()
+    .unwrap();
+    assert!(hook.observed.get());
+    drop(published.connection);
+
+    let connection = Connection::open(&database_path).unwrap();
+    let state = catalog_state::load_catalog_build_state(&connection)
+        .unwrap()
+        .unwrap();
+    assert_eq!(state.readiness.state, CatalogReadinessPhase::Ready);
+    assert_eq!(state.readiness.last_complete_snapshot, Some(snapshot_id));
+    assert_eq!(state.readiness.refreshing_from_snapshot, Some(snapshot_id));
+    assert_eq!(state.last_commit_seq, snapshot_id.complete_commit + 1);
+    let authority = state.ready_read_authority().unwrap();
+    assert_eq!(authority.snapshot_id(), snapshot_id);
+    assert_eq!(authority.readiness().refreshing_from_snapshot, None);
+    let before_changes: i64 = connection
+        .query_row("SELECT total_changes()", [], |row| row.get(0))
+        .unwrap();
+    let page = read_retained_catalog_page(
+        &connection,
+        &authority,
+        &CatalogRetainedPageRequest::sessions_all(published.selection, snapshot_id, 10, None),
+    )
+    .unwrap();
+    let CatalogRetainedPage::Sessions(page) = page else {
+        panic!("expected retained session page after refresh restart");
+    };
+    assert_eq!(page.rows.len(), 1);
+    assert_eq!(page.published_readiness.refreshing_from_snapshot, None);
+    assert_eq!(
+        connection
+            .query_row("SELECT total_changes()", [], |row| row.get::<_, i64>(0))
+            .unwrap(),
+        before_changes
+    );
+}
+
+#[test]
+fn ordinary_refresh_start_rejects_foreign_publication_and_invalid_lineage_without_mutation() {
+    let mut published = publish_catalog(1, 1);
+    let foreign = publish_catalog(2, 1);
+    let foreign_plan = publish_catalog(0, 0);
+    assert_eq!(
+        published
+            .state
+            .ready_read_authority()
+            .unwrap()
+            .snapshot_id(),
+        foreign.state.ready_read_authority().unwrap().snapshot_id()
+    );
+    let before_changes: i64 = published
+        .connection
+        .query_row("SELECT total_changes()", [], |row| row.get(0))
+        .unwrap();
+    let foreign_command = CatalogBuildStateCommand::begin_refresh(
+        foreign.state.refresh_expectation().unwrap(),
+        40,
+        41,
+    );
+    assert!(catalog_state::apply_catalog_build_state_commit(
+        &mut published.connection,
+        &foreign_command,
+    )
+    .is_err());
+    assert_eq!(
+        published
+            .connection
+            .query_row("SELECT total_changes()", [], |row| row.get::<_, i64>(0))
+            .unwrap(),
+        before_changes
+    );
+    assert_eq!(
+        catalog_state::load_catalog_build_state(&published.connection)
+            .unwrap()
+            .unwrap()
+            .readiness
+            .refreshing_from_snapshot,
+        None
+    );
+
+    let foreign_plan_command = CatalogBuildStateCommand::begin_refresh(
+        foreign_plan.state.refresh_expectation().unwrap(),
+        40,
+        41,
+    );
+    assert!(catalog_state::apply_catalog_build_state_commit(
+        &mut published.connection,
+        &foreign_plan_command,
+    )
+    .is_err());
+
+    let invalid_time = CatalogBuildStateCommand::begin_refresh(
+        published.state.refresh_expectation().unwrap(),
+        42,
+        41,
+    );
+    assert!(catalog_state::apply_catalog_build_state_commit(
+        &mut published.connection,
+        &invalid_time,
+    )
+    .is_err());
+
+    let mut pending = database();
+    let pending_plan =
+        CatalogCoveragePlan::new(CatalogCoverageScope::Library, Vec::new(), Vec::new()).unwrap();
+    catalog_state::apply_catalog_build_state_commit(
+        &mut pending,
+        &CatalogBuildStateCommand::register(pending_plan, 1, 10, 11),
+    )
+    .unwrap();
+    assert!(catalog_state::load_catalog_build_state(&pending)
+        .unwrap()
+        .unwrap()
+        .refresh_expectation()
+        .is_err());
+
+    let exact = CatalogBuildStateCommand::begin_refresh(
+        published.state.refresh_expectation().unwrap(),
+        40,
+        41,
+    );
+    catalog_state::apply_catalog_build_state_commit(&mut published.connection, &exact)
+        .unwrap()
+        .unwrap();
+    assert!(
+        catalog_state::load_catalog_build_state(&published.connection)
+            .unwrap()
+            .unwrap()
+            .refresh_expectation()
+            .is_err()
+    );
+    assert!(catalog_state::apply_catalog_build_state_commit(
+        &mut published.connection,
+        &foreign_command,
+    )
+    .is_err());
+}
+
+#[test]
+fn ordinary_refresh_start_supports_source_free_ready_and_rejects_forged_restart_lineage() {
+    let mut published = publish_catalog(0, 0);
+    let snapshot_id = published
+        .state
+        .ready_read_authority()
+        .unwrap()
+        .snapshot_id();
+    assert!(published
+        .connection
+        .execute(
+            "UPDATE catalog_build_state SET refreshing_from_snapshot_commit = ?1 WHERE scope_kind = 'library'",
+            [i64::try_from(snapshot_id.complete_commit).unwrap()],
+        )
+        .is_err());
+    let command = CatalogBuildStateCommand::begin_refresh(
+        published.state.refresh_expectation().unwrap(),
+        40,
+        41,
+    );
+    catalog_state::apply_catalog_build_state_commit(&mut published.connection, &command)
+        .unwrap()
+        .unwrap();
+    let state = catalog_state::load_catalog_build_state(&published.connection)
+        .unwrap()
+        .unwrap();
+    let authority = state.ready_read_authority().unwrap();
+    let page = read_retained_catalog_page(
+        &published.connection,
+        &authority,
+        &CatalogRetainedPageRequest::projects_all(published.selection, snapshot_id, 10, None),
+    )
+    .unwrap();
+    let CatalogRetainedPage::Projects(page) = page else {
+        panic!("expected source-free retained project page during refresh");
+    };
+    assert!(page.rows.is_empty());
+
+    published
+        .connection
+        .execute_batch("PRAGMA ignore_check_constraints = ON")
+        .unwrap();
+    published
+        .connection
+        .execute(
+            "UPDATE catalog_build_state SET last_commit_seq = ?1 WHERE scope_kind = 'library'",
+            [i64::try_from(snapshot_id.complete_commit).unwrap()],
+        )
+        .unwrap();
+    let error = catalog_state::load_catalog_build_state(&published.connection).unwrap_err();
+    let error = error.to_string();
+    assert!(
+        error.contains("catalog build lineage is not owned by the expected source-neutral commit"),
+        "unexpected restart rejection: {error}"
+    );
 }
 
 #[test]

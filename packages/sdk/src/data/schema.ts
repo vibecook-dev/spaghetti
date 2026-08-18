@@ -130,7 +130,9 @@ import type { SqliteService } from '../io/index.js';
 // initial Pending/Building readiness lineage on the common commit clock.
 // v51: immutable RFC 012B initial catalog snapshots, private typed payload
 // frames, and the atomically linked initial Ready state.
-export const SCHEMA_VERSION = 51;
+// v52: ordinary RFC 012B Ready refresh administration that retains the exact
+// current complete snapshot while advancing the durable state commit.
+export const SCHEMA_VERSION = 52;
 
 export const TOKEN_ACTIVITY_TRIGGER_NAMES = [
   'token_activity_messages_ai',
@@ -592,7 +594,8 @@ CREATE TABLE IF NOT EXISTS ingest_commits (
       reason IN (
         'catalog.library.plan.registered',
         'catalog.library.build.scheduled',
-        'catalog.library.initial_snapshot.published'
+        'catalog.library.initial_snapshot.published',
+        'catalog.library.refresh.started'
       )
       AND committed_at IS NOT NULL
       AND fact_count = 0
@@ -685,6 +688,7 @@ CREATE TABLE IF NOT EXISTS catalog_build_state (
   completed_contract_version INTEGER CHECK (completed_contract_version > 0),
   complete_through_commit INTEGER REFERENCES catalog_snapshots(snapshot_commit_seq) ON DELETE RESTRICT,
   last_complete_snapshot_commit INTEGER REFERENCES catalog_snapshots(snapshot_commit_seq) ON DELETE RESTRICT,
+  refreshing_from_snapshot_commit INTEGER REFERENCES catalog_snapshots(snapshot_commit_seq) ON DELETE RESTRICT,
   last_commit_seq INTEGER NOT NULL REFERENCES ingest_commits(commit_seq) ON DELETE RESTRICT,
   updated_at INTEGER NOT NULL,
   CHECK (
@@ -693,6 +697,7 @@ CREATE TABLE IF NOT EXISTS catalog_build_state (
       AND completed_contract_version IS NULL
       AND complete_through_commit IS NULL
       AND last_complete_snapshot_commit IS NULL
+      AND refreshing_from_snapshot_commit IS NULL
     )
     OR
     (
@@ -702,7 +707,17 @@ CREATE TABLE IF NOT EXISTS catalog_build_state (
       AND last_complete_snapshot_commit IS NOT NULL
       AND completed_contract_version = desired_contract_version
       AND complete_through_commit = last_complete_snapshot_commit
-      AND last_commit_seq = complete_through_commit
+      AND (
+        (
+          refreshing_from_snapshot_commit IS NULL
+          AND last_commit_seq = complete_through_commit
+        )
+        OR
+        (
+          refreshing_from_snapshot_commit = last_complete_snapshot_commit
+          AND last_commit_seq > complete_through_commit
+        )
+      )
     )
   )
 );
