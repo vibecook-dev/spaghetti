@@ -105,11 +105,7 @@ impl CatalogSnapshotRetirementExpectation {
                 .publication_digest()
                 .iter()
                 .all(|byte| *byte == 0)
-            || self
-                .target
-                .content_digest()
-                .iter()
-                .all(|byte| *byte == 0)
+            || self.target.content_digest().iter().all(|byte| *byte == 0)
             || self
                 .successor
                 .publication_digest()
