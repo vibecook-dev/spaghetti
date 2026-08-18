@@ -345,6 +345,62 @@ impl CodexDecoderState {
     }
 }
 
+/// Normalized identity-bearing portion of the first Codex rollout record.
+///
+/// This stays crate-private and deliberately carries no catalog field
+/// authority. RFC 012B candidate conformance reuses the exact durable decoder
+/// interpretation without turning an unpromoted support package into runtime
+/// catalog access.
+pub(super) struct CodexSessionMeta {
+    pub(super) session_id: String,
+    pub(super) cwd: String,
+    pub(super) native_project_key: String,
+    pub(super) session_time: Option<String>,
+    pub(super) model: Option<String>,
+    pub(super) internal: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum CodexSessionMetaError {
+    PayloadNotObject,
+    MissingIdentity,
+}
+
+impl CodexSessionMetaError {
+    fn diagnostic(self) -> &'static str {
+        match self {
+            Self::PayloadNotObject => "Codex session_meta payload is not an object",
+            Self::MissingIdentity => "Codex session_meta requires non-empty id and cwd",
+        }
+    }
+}
+
+pub(super) fn normalize_session_meta(
+    root: &Map<String, Value>,
+) -> Result<CodexSessionMeta, CodexSessionMetaError> {
+    let payload = root
+        .get("payload")
+        .and_then(Value::as_object)
+        .ok_or(CodexSessionMetaError::PayloadNotObject)?;
+    let session_id = nonempty_string(payload.get("id"));
+    let cwd = nonempty_string(payload.get("cwd"));
+    let (Some(session_id), Some(cwd)) = (session_id, cwd) else {
+        return Err(CodexSessionMetaError::MissingIdentity);
+    };
+    Ok(CodexSessionMeta {
+        native_project_key: encode_project_key(&cwd),
+        session_id,
+        cwd,
+        session_time: root
+            .get("timestamp")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .or_else(|| nonempty_string(payload.get("timestamp"))),
+        model: nonempty_string(payload.get("model")),
+        internal: is_internal_session(payload),
+    })
+}
+
 fn validate_rollout_path(path: &Path) -> Result<(), AdapterError> {
     if path.as_os_str().is_empty()
         || path
@@ -477,46 +533,37 @@ fn decode_session_meta(
     state: &mut CodexDecoderState,
     output: &mut FactBatch,
 ) -> Result<DecodeDisposition, AdapterError> {
-    let Some(payload) = root.get("payload").and_then(Value::as_object) else {
-        preserve_unknown(
-            record,
-            output,
-            Some("session_meta".to_string()),
-            "Codex session_meta payload is not an object".to_string(),
-        )?;
-        state.store(output)?;
-        return Ok(DecodeDisposition::PreservedUnknown);
-    };
-    let session_id = nonempty_string(payload.get("id"));
-    let cwd = nonempty_string(payload.get("cwd"));
-    let (Some(session_id), Some(cwd)) = (session_id, cwd) else {
-        preserve_unknown(
-            record,
-            output,
-            Some("session_meta".to_string()),
-            "Codex session_meta requires non-empty id and cwd".to_string(),
-        )?;
-        state.store(output)?;
-        return Ok(DecodeDisposition::PreservedUnknown);
+    let metadata = match normalize_session_meta(root) {
+        Ok(metadata) => metadata,
+        Err(error) => {
+            preserve_unknown(
+                record,
+                output,
+                Some("session_meta".to_string()),
+                error.diagnostic().to_string(),
+            )?;
+            state.store(output)?;
+            return Ok(DecodeDisposition::PreservedUnknown);
+        }
     };
     state.version = DECODER_STATE_VERSION;
     state.initialized = true;
-    state.internal = is_internal_session(payload);
-    state.session_id = session_id;
-    state.cwd = cwd;
-    state.native_project_key = encode_project_key(&state.cwd);
-    state.session_time = root
-        .get("timestamp")
-        .and_then(Value::as_str)
-        .map(str::to_owned)
-        .or_else(|| nonempty_string(payload.get("timestamp")));
-    state.model = nonempty_string(payload.get("model"));
+    state.internal = metadata.internal;
+    state.session_id = metadata.session_id;
+    state.cwd = metadata.cwd;
+    state.native_project_key = metadata.native_project_key;
+    state.session_time = metadata.session_time;
+    state.model = metadata.model;
     state.last_assistant = None;
     state.store(output)?;
     if state.internal {
         return Ok(DecodeDisposition::IgnoredKnown);
     }
 
+    // Keep these legacy RFC 011 facts unchanged until their payload entity
+    // references migrate together with their parallel RFC 012A revisions.
+    // Adding only canonical fact IDs here would leave the serialized payload
+    // dependent on numeric source-instance registration.
     let (session, project, run) = entity_keys(adapter_id, record.source_instance_id, state)?;
     output.push(
         record,

@@ -8,10 +8,37 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from census import encode_project_key, scan_claude, scan_codex, scan_grok
+from census import encode_project_key, identity_digest, scan_claude, scan_codex, scan_grok
 
 
 class CatalogCensusTest(unittest.TestCase):
+    def test_codex_candidate_oracle_matches_frozen_rfc012b_fixture(self) -> None:
+        repository = Path(__file__).resolve().parents[2]
+        fixture = json.loads(
+            (
+                repository
+                / "crates/spaghetti-napi/fixtures/contracts"
+                / "rfc012b-codex-candidate-conformance-v1.json"
+            ).read_text(encoding="utf-8")
+        )
+        self.assertEqual(fixture["fixture_contract_version"], 1)
+        self.assertEqual(fixture["adapter_id"], "codex")
+        self.assertEqual(fixture["support_release_status"], "candidate")
+        self.assertFalse(fixture["catalog_execution_authorized"])
+        self.assertEqual(fixture["head_bound_status"], "candidate_fixture_evidence")
+
+        result = scan_codex(
+            repository / "crates/spaghetti-napi/fixtures/small-codex/.codex",
+            head_bytes=fixture["bounds"]["max_head_prefix_bytes"],
+        )
+        oracle = fixture["independent_oracle"]
+        projects = result.catalog.project_identities()
+        sessions = result.catalog.session_identities()
+        self.assertEqual(len(projects), oracle["project_count"])
+        self.assertEqual(len(sessions), oracle["session_count"])
+        self.assertEqual(identity_digest(projects), oracle["project_identity_digest"])
+        self.assertEqual(identity_digest(sessions), oracle["session_identity_digest"])
+
     def test_claude_unions_index_and_transcript_without_reading_full_transcript(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary) / ".claude"

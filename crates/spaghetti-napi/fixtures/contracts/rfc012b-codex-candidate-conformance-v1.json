@@ -1,0 +1,35 @@
+{
+  "fixture_contract_version": 1,
+  "adapter_id": "codex",
+  "planning_evidence_id": "codex.catalog-candidate-2026-08-15",
+  "support_release_id": "codex-support-2026-08-15-candidate",
+  "support_release_status": "candidate",
+  "catalog_execution_authorized": false,
+  "head_bound_status": "candidate_fixture_evidence",
+  "bounds": {
+    "max_head_prefix_bytes": 65536,
+    "max_record_payload_bytes": 65535,
+    "max_checkpoint_anchor_bytes": 4096,
+    "max_physical_read_bytes_per_object": 69632,
+    "max_entries": 250000,
+    "max_depth": 64
+  },
+  "independent_oracle": {
+    "project_count": 1,
+    "session_count": 10,
+    "project_identity_digest": "033c59eb691f0ed042419dd5f430bbd1b3ac74efb2296a1e9bbfdc0d28daf541",
+    "session_identity_digest": "a99d8ec7fa45a1d2a15f61c6657133c0e6511ebee91b91166db32573a926d28f"
+  },
+  "rust_conformance": {
+    "source_record_count": 10,
+    "project_entity_count": 1,
+    "session_entity_count": 10,
+    "fact_identity_count": 11,
+    "fact_revision_count": 20,
+    "total_physical_bytes_read": 18749,
+    "source_record_identity_digest": "sha256:ddda5ddefe667d6ab72b16beb8316d175d97bec6a96f1cae61e8c59075e28ff1",
+    "entity_identity_digest": "sha256:abc62f495254349036489a342b1457847fb8b9a742a8366855f35136f44f32c3",
+    "fact_identity_digest": "sha256:25d927a442dc3be12a06e62ef14e108a3a8b08e357315f707ce638a4b2369faa",
+    "fact_revision_digest": "sha256:f36a3db94555f479c486a07977dfaaa8f2cc03f1785cdc062536dfb88e0d1e63"
+  }
+}
