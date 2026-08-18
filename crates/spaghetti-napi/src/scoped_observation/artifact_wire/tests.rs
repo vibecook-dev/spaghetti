@@ -117,8 +117,26 @@ fn command(
     expected_generation: Option<u64>,
     max_bytes: u64,
 ) -> ScopedArtifactReadCommand {
+    command_with_access_policy(
+        token,
+        ScopedArtifactAccessPolicy::bounded(max_bytes, ScopedArtifactContentPolicy::Inline),
+        policy,
+        expected_generation,
+        max_bytes,
+    )
+    .unwrap()
+}
+
+fn command_with_access_policy(
+    token: u64,
+    access_policy: ScopedArtifactAccessPolicy,
+    content_policy: ScopedArtifactContentPolicy,
+    expected_generation: Option<u64>,
+    max_bytes: u64,
+) -> Result<ScopedArtifactReadCommand, ScopedArtifactContractError> {
     ScopedArtifactReadCommand::new(
         Arc::new(ScopedObservationAttachmentAuthority { token }),
+        access_policy,
         contract_selection(),
         root_identity(),
         ScopedArtifactReadParameters {
@@ -126,10 +144,9 @@ fn command(
             artifact_kind: "workflow_definition".to_owned(),
             expected_generation,
             max_bytes,
-            content_policy: policy,
+            content_policy,
         },
     )
-    .unwrap()
 }
 
 fn inline_observed(command: &ScopedArtifactReadCommand) -> ScopedObservedArtifactWire {
@@ -242,6 +259,83 @@ fn available_content_policy_matrix_is_exact() {
 }
 
 #[test]
+fn attachment_access_policy_is_an_exact_pre_mediation_ceiling() {
+    assert!(matches!(
+        command_with_access_policy(
+            59,
+            ScopedArtifactAccessPolicy::disabled(),
+            ScopedArtifactContentPolicy::MetadataOnly,
+            None,
+            1,
+        ),
+        Err(ScopedArtifactContractError::PolicyDenied)
+    ));
+
+    let hash_ceiling =
+        ScopedArtifactAccessPolicy::bounded(1024, ScopedArtifactContentPolicy::HashOnly);
+    assert!(command_with_access_policy(
+        60,
+        hash_ceiling,
+        ScopedArtifactContentPolicy::MetadataOnly,
+        None,
+        1024,
+    )
+    .is_ok());
+    assert!(command_with_access_policy(
+        60,
+        hash_ceiling,
+        ScopedArtifactContentPolicy::HashOnly,
+        Some(1),
+        1024,
+    )
+    .is_ok());
+    assert!(matches!(
+        command_with_access_policy(
+            60,
+            hash_ceiling,
+            ScopedArtifactContentPolicy::Inline,
+            Some(1),
+            1024,
+        ),
+        Err(ScopedArtifactContractError::PolicyDenied)
+    ));
+    assert!(matches!(
+        command_with_access_policy(
+            60,
+            hash_ceiling,
+            ScopedArtifactContentPolicy::MetadataOnly,
+            None,
+            1025,
+        ),
+        Err(ScopedArtifactContractError::PolicyDenied)
+    ));
+
+    assert!(matches!(
+        command_with_access_policy(
+            61,
+            ScopedArtifactAccessPolicy::bounded(0, ScopedArtifactContentPolicy::MetadataOnly),
+            ScopedArtifactContentPolicy::MetadataOnly,
+            None,
+            1,
+        ),
+        Err(ScopedArtifactContractError::Invalid { .. })
+    ));
+    assert!(matches!(
+        command_with_access_policy(
+            61,
+            ScopedArtifactAccessPolicy::bounded(
+                MAX_ARTIFACT_REQUEST_BYTES + 1,
+                ScopedArtifactContentPolicy::MetadataOnly,
+            ),
+            ScopedArtifactContentPolicy::MetadataOnly,
+            None,
+            1,
+        ),
+        Err(ScopedArtifactContractError::Invalid { .. })
+    ));
+}
+
+#[test]
 fn unavailable_reasons_require_exact_evidence_shapes() {
     let expected = command(55, ScopedArtifactContentPolicy::HashOnly, Some(7), 100);
     assert!(expected
@@ -299,6 +393,7 @@ fn unavailable_reasons_require_exact_evidence_shapes() {
 fn command_and_result_bounds_fail_before_content_decode() {
     assert!(ScopedArtifactReadCommand::new(
         Arc::new(ScopedObservationAttachmentAuthority { token: 56 }),
+        ScopedArtifactAccessPolicy::bounded(1, ScopedArtifactContentPolicy::Inline),
         contract_selection(),
         root_identity(),
         ScopedArtifactReadParameters {
@@ -312,6 +407,7 @@ fn command_and_result_bounds_fail_before_content_decode() {
     .is_err());
     assert!(ScopedArtifactReadCommand::new(
         Arc::new(ScopedObservationAttachmentAuthority { token: 56 }),
+        ScopedArtifactAccessPolicy::bounded(1, ScopedArtifactContentPolicy::Inline),
         contract_selection(),
         root_identity(),
         ScopedArtifactReadParameters {
@@ -325,6 +421,10 @@ fn command_and_result_bounds_fail_before_content_decode() {
     .is_err());
     assert!(ScopedArtifactReadCommand::new(
         Arc::new(ScopedObservationAttachmentAuthority { token: 56 }),
+        ScopedArtifactAccessPolicy::bounded(
+            MAX_ARTIFACT_REQUEST_BYTES,
+            ScopedArtifactContentPolicy::Inline,
+        ),
         contract_selection(),
         root_identity(),
         ScopedArtifactReadParameters {

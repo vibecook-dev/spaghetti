@@ -20,8 +20,8 @@ use crate::adapter::{CanonicalEntityKey, Sha256Digest};
 use crate::observation_contract::ObservationContractSelection;
 
 use super::{
-    ScopedObservationAccessHost, ScopedObservationAttachmentAuthority,
-    ScopedObservationRootIdentity,
+    ScopedArtifactAccessPolicy, ScopedArtifactContentPolicy, ScopedObservationAccessHost,
+    ScopedObservationAttachmentAuthority, ScopedObservationRootIdentity,
 };
 
 pub(crate) const SCOPED_ARTIFACT_CONTRACT_VERSION: u32 = 1;
@@ -42,6 +42,8 @@ pub(crate) enum ScopedArtifactContractError {
     ForeignCommand,
     #[error("scoped artifact request cannot be prepared after attachment close")]
     Closed,
+    #[error("scoped artifact request exceeds the attachment access policy")]
+    PolicyDenied,
 }
 
 impl ScopedArtifactContractError {
@@ -50,14 +52,6 @@ impl ScopedArtifactContractError {
             message: message.to_string(),
         }
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum ScopedArtifactContentPolicy {
-    MetadataOnly,
-    HashOnly,
-    Inline,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -142,6 +136,7 @@ impl fmt::Debug for ScopedArtifactReadOutcome {
 #[derive(Clone)]
 pub(crate) struct ScopedArtifactReadCommand {
     attachment_authority: Arc<ScopedObservationAttachmentAuthority>,
+    artifact_access_policy: ScopedArtifactAccessPolicy,
     contract_selection: ObservationContractSelection,
     root: ScopedObservationRootIdentity,
     artifact_key: CanonicalEntityKey,
@@ -178,6 +173,7 @@ impl fmt::Debug for ScopedArtifactReadCommand {
 impl ScopedArtifactReadCommand {
     fn new(
         attachment_authority: Arc<ScopedObservationAttachmentAuthority>,
+        artifact_access_policy: ScopedArtifactAccessPolicy,
         contract_selection: ObservationContractSelection,
         root: ScopedObservationRootIdentity,
         parameters: ScopedArtifactReadParameters,
@@ -189,6 +185,7 @@ impl ScopedArtifactReadCommand {
             max_bytes,
             content_policy,
         } = parameters;
+        validate_attachment_artifact_access_policy(artifact_access_policy)?;
         validate_identifier("artifact kind", &artifact_kind, MAX_ARTIFACT_KIND_BYTES)?;
         if artifact_key.as_bytes().iter().all(|byte| *byte == 0) {
             return Err(ScopedArtifactContractError::invalid(
@@ -207,6 +204,9 @@ impl ScopedArtifactReadCommand {
             return Err(ScopedArtifactContractError::invalid(
                 "inline artifact max bytes exceeds the portable inline safety bound",
             ));
+        }
+        if !artifact_access_policy_allows(artifact_access_policy, max_bytes, content_policy) {
+            return Err(ScopedArtifactContractError::PolicyDenied);
         }
         if let Some(generation) = expected_generation {
             validate_positive_portable("artifact expected generation", generation)?;
@@ -229,6 +229,7 @@ impl ScopedArtifactReadCommand {
         );
         Ok(Self {
             attachment_authority,
+            artifact_access_policy,
             contract_selection,
             root,
             artifact_key,
@@ -243,6 +244,7 @@ impl ScopedArtifactReadCommand {
 
     fn matches_host(&self, host: &ScopedObservationAccessHost) -> bool {
         Arc::ptr_eq(&self.attachment_authority, &host.attachment_authority)
+            && self.artifact_access_policy == host.artifact_access_policy
             && self.contract_selection == host.observation_contract
             && self.root == host.root_identity
     }
@@ -283,6 +285,7 @@ impl ScopedObservationAccessHost {
         }
         ScopedArtifactReadCommand::new(
             Arc::clone(&self.attachment_authority),
+            self.artifact_access_policy,
             self.observation_contract.clone(),
             self.root_identity.clone(),
             ScopedArtifactReadParameters {
@@ -307,6 +310,49 @@ impl ScopedObservationAccessHost {
         } else {
             Err(ScopedArtifactContractError::ForeignCommand)
         }
+    }
+}
+
+pub(super) fn validate_attachment_artifact_access_policy(
+    policy: ScopedArtifactAccessPolicy,
+) -> Result<(), ScopedArtifactContractError> {
+    let ScopedArtifactAccessPolicy::Bounded {
+        max_bytes_per_read, ..
+    } = policy
+    else {
+        return Ok(());
+    };
+    validate_positive_portable("artifact policy max bytes per read", max_bytes_per_read)?;
+    if max_bytes_per_read > MAX_ARTIFACT_REQUEST_BYTES {
+        return Err(ScopedArtifactContractError::invalid(
+            "artifact policy max bytes per read exceeds the portable request safety bound",
+        ));
+    }
+    Ok(())
+}
+
+fn artifact_access_policy_allows(
+    policy: ScopedArtifactAccessPolicy,
+    max_bytes: u64,
+    requested_content_policy: ScopedArtifactContentPolicy,
+) -> bool {
+    let ScopedArtifactAccessPolicy::Bounded {
+        max_bytes_per_read,
+        maximum_content_policy,
+    } = policy
+    else {
+        return false;
+    };
+    max_bytes <= max_bytes_per_read
+        && content_policy_rank(requested_content_policy)
+            <= content_policy_rank(maximum_content_policy)
+}
+
+const fn content_policy_rank(policy: ScopedArtifactContentPolicy) -> u8 {
+    match policy {
+        ScopedArtifactContentPolicy::MetadataOnly => 1,
+        ScopedArtifactContentPolicy::HashOnly => 2,
+        ScopedArtifactContentPolicy::Inline => 3,
     }
 }
 

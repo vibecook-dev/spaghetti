@@ -187,11 +187,12 @@ mod tests {
 
     use crate::adapter::{
         verify_support_release_bundle, AdapterErrorClass, AdapterManifest, AdapterObjectContext,
-        AdapterSupportBinding, CompatibilityClass, CoverageAbsenceKind, CoverageDomain,
-        CoveragePositionKind, CoverageSetCompleteness, CoverageStatus, DecodeContext,
-        DecodeDisposition, DecoderId, DiscoveryContext, ExternalEntityRef, Fact, FactBatch,
-        FactSemanticContext, RawRetentionPolicy, Sha256Digest, SourceAccess, SourceInstance,
-        SourceInstanceSpec, SourceObjectDescriptor, StreamSpec, SupportBundleDocument,
+        AdapterSupportBinding, CanonicalEntityKey, CompatibilityClass, CoverageAbsenceKind,
+        CoverageDomain, CoveragePositionKind, CoverageSetCompleteness, CoverageStatus,
+        DecodeContext, DecodeDisposition, DecoderId, DiscoveryContext, ExternalEntityRef, Fact,
+        FactBatch, FactSemanticContext, RawRetentionPolicy, Sha256Digest, SourceAccess,
+        SourceInstance, SourceInstanceSpec, SourceObjectDescriptor, StreamSpec,
+        SupportBundleDocument,
     };
     use crate::observation_contract::{
         negotiate_observation_contract, ObservationCapabilities, ObservationCompatibilityAxis,
@@ -201,11 +202,12 @@ mod tests {
         ScopedActorAttribution, ScopedActorFallbackReason, ScopedAdmissionError,
         ScopedAppendDecodeOutcome, ScopedAppendDecoderConfig, ScopedAppendDeliveryPhase,
         ScopedAppendObservation, ScopedAppendPresenceChange, ScopedAppendReconcileRequest,
-        ScopedBootstrapBarrierError, ScopedContinuityError, ScopedCoverageAssemblyError,
-        ScopedDecodeFailureClass, ScopedDecodedAppendItem, ScopedDeliveryError,
-        ScopedEnvelopeEvidenceAuthority, ScopedKnownAppendObject, ScopedKnownObjectGrant,
-        ScopedKnownObjectReadRequest, ScopedObjectRead, ScopedObservationAccessError,
-        ScopedObservationAccessHost, ScopedObservationAccessPass, ScopedObservationAccessRequest,
+        ScopedArtifactAccessPolicy, ScopedArtifactContentPolicy, ScopedBootstrapBarrierError,
+        ScopedContinuityError, ScopedCoverageAssemblyError, ScopedDecodeFailureClass,
+        ScopedDecodedAppendItem, ScopedDeliveryError, ScopedEnvelopeEvidenceAuthority,
+        ScopedKnownAppendObject, ScopedKnownObjectGrant, ScopedKnownObjectReadRequest,
+        ScopedObjectRead, ScopedObservationAccessError, ScopedObservationAccessHost,
+        ScopedObservationAccessPass, ScopedObservationAccessRequest,
         ScopedObservationAdmissionLane, ScopedObservationAppendPassBinding,
         ScopedObservationAppendPassRequest, ScopedObservationAsyncHandle,
         ScopedObservationAsyncOwnerFirstExit, ScopedObservationAsyncOwnerPair,
@@ -501,6 +503,10 @@ mod tests {
                 markers: vec!["fixture.marker".to_string()],
                 contradictory_markers: false,
             },
+            artifact_access_policy: ScopedArtifactAccessPolicy::bounded(
+                8 * 1024 * 1024,
+                ScopedArtifactContentPolicy::Inline,
+            ),
             observation_contract_request: ObservationContractRequest::new(
                 ContractVersionRequest {
                     selection_contract_version: 1,
@@ -1448,6 +1454,97 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn scoped_artifact_access_policy_is_attachment_bound_and_fail_closed() {
+        let registry = supported_fixture_registry();
+        let temp = TempDir::new().unwrap();
+        let mut request = scoped_access_request(temp.path().join("artifact-policy"));
+        request.artifact_access_policy =
+            ScopedArtifactAccessPolicy::bounded(1024, ScopedArtifactContentPolicy::HashOnly);
+        let host = ScopedObservationAccessHost::authorize(&registry, request).unwrap();
+        assert_eq!(
+            host.artifact_access_policy(),
+            ScopedArtifactAccessPolicy::bounded(1024, ScopedArtifactContentPolicy::HashOnly)
+        );
+        let artifact_key = CanonicalEntityKey::derive(
+            "fixture",
+            &host.root_identity().source_instance_key,
+            "artifact",
+            b"policy-bound-artifact",
+        )
+        .unwrap();
+
+        assert!(host
+            .prepare_portable_artifact_read(
+                artifact_key,
+                "workflow_definition",
+                None,
+                1024,
+                ScopedArtifactContentPolicy::MetadataOnly,
+            )
+            .is_ok());
+        let command = host
+            .prepare_portable_artifact_read(
+                artifact_key,
+                "workflow_definition",
+                Some(1),
+                1024,
+                ScopedArtifactContentPolicy::HashOnly,
+            )
+            .unwrap();
+        assert!(host.validate_portable_artifact_command(&command).is_ok());
+        assert!(host
+            .prepare_portable_artifact_read(
+                artifact_key,
+                "workflow_definition",
+                Some(1),
+                1024,
+                ScopedArtifactContentPolicy::Inline,
+            )
+            .is_err());
+        assert!(host
+            .prepare_portable_artifact_read(
+                artifact_key,
+                "workflow_definition",
+                None,
+                1025,
+                ScopedArtifactContentPolicy::MetadataOnly,
+            )
+            .is_err());
+
+        let mut foreign_request =
+            scoped_access_request(temp.path().join("artifact-policy-foreign"));
+        foreign_request.artifact_access_policy =
+            ScopedArtifactAccessPolicy::bounded(1024, ScopedArtifactContentPolicy::HashOnly);
+        let foreign = ScopedObservationAccessHost::authorize(&registry, foreign_request).unwrap();
+        assert!(foreign
+            .validate_portable_artifact_command(&command)
+            .is_err());
+
+        let mut disabled_request =
+            scoped_access_request(temp.path().join("artifact-policy-disabled"));
+        disabled_request.artifact_access_policy = ScopedArtifactAccessPolicy::disabled();
+        let disabled = ScopedObservationAccessHost::authorize(&registry, disabled_request).unwrap();
+        assert!(disabled
+            .prepare_portable_artifact_read(
+                artifact_key,
+                "workflow_definition",
+                None,
+                1,
+                ScopedArtifactContentPolicy::MetadataOnly,
+            )
+            .is_err());
+
+        let mut invalid_request =
+            scoped_access_request(temp.path().join("artifact-policy-invalid"));
+        invalid_request.artifact_access_policy =
+            ScopedArtifactAccessPolicy::bounded(0, ScopedArtifactContentPolicy::MetadataOnly);
+        assert!(matches!(
+            ScopedObservationAccessHost::authorize(&registry, invalid_request),
+            Err(ScopedObservationAccessError::InvalidArtifactPolicy(_))
+        ));
+    }
+
     #[tokio::test]
     async fn scoped_portable_close_is_exact_attachment_bound_and_idempotent() {
         let registry = supported_fixture_registry();
@@ -1532,6 +1629,8 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let mut request = scoped_access_request(temp.path().to_path_buf());
         request.adapter_id = "not-registered".to_string();
+        request.artifact_access_policy =
+            ScopedArtifactAccessPolicy::bounded(0, ScopedArtifactContentPolicy::Inline);
         request.observation_contract_request.event_contract_versions = vec![2];
 
         assert!(matches!(

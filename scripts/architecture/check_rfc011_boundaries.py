@@ -491,6 +491,9 @@ def discover_rfc012_scoped_host_boundary_violations() -> set[str]:
         "from_wire_value_for_command(",
         "expected: &ScopedArtifactReadCommand",
         "Arc::ptr_eq(&self.attachment_authority",
+        "self.artifact_access_policy",
+        "artifact_access_policy_allows(",
+        "ScopedArtifactContractError::PolicyDenied",
         "ScopedArtifactLocatorDisclosureWire::Withheld",
         "MAX_INLINE_ARTIFACT_BYTES",
     )

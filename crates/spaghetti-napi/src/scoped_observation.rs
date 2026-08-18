@@ -56,6 +56,45 @@ mod scope_coverage_wire;
 mod source_wire;
 mod usage_wire;
 
+/// Maximum artifact disclosure one observer attachment may request. The
+/// ordering is intentional: metadata discloses less than a hash, and a hash
+/// discloses less than inline content.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScopedArtifactContentPolicy {
+    MetadataOnly,
+    HashOnly,
+    Inline,
+}
+
+/// Immutable artifact-request ceiling selected by the trusted Rust host at
+/// attachment time. This is not native locator or read authority; a future
+/// mediator must still prove one exact in-scope artifact relation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScopedArtifactAccessPolicy {
+    Disabled,
+    Bounded {
+        max_bytes_per_read: u64,
+        maximum_content_policy: ScopedArtifactContentPolicy,
+    },
+}
+
+impl ScopedArtifactAccessPolicy {
+    pub const fn disabled() -> Self {
+        Self::Disabled
+    }
+
+    pub const fn bounded(
+        max_bytes_per_read: u64,
+        maximum_content_policy: ScopedArtifactContentPolicy,
+    ) -> Self {
+        Self::Bounded {
+            max_bytes_per_read,
+            maximum_content_policy,
+        }
+    }
+}
+
 /// One exact host-approved object locator. The locator is installed during
 /// attachment and cannot be replaced by a decoder or by an access call.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -70,12 +109,14 @@ pub struct ScopedKnownObjectGrant {
     pub relative_path: PathBuf,
 }
 
-/// Internal attachment request. The artifact probe is supplied by the trusted
-/// Rust composition root, never by a portable runtime consumer.
+/// Internal attachment request. The artifact probe and artifact-access ceiling
+/// are supplied by the trusted Rust composition root, never by a portable
+/// runtime consumer.
 #[derive(Debug, Clone)]
 pub struct ScopedObservationAccessRequest {
     pub adapter_id: String,
     pub artifact_probe: NativeArtifactProbe,
+    pub artifact_access_policy: ScopedArtifactAccessPolicy,
     pub observation_contract_request: ObservationContractRequest,
     pub observation_contract_offer: ObservationContractOffer,
     pub root_identity: ScopedRootIdentityRequest,
@@ -9619,6 +9660,8 @@ pub enum ScopedObservationAccessError {
     ObservationCapabilities(#[from] ObservationCapabilityContractError),
     #[error("scoped observation authorization failed: {0}")]
     Authorization(String),
+    #[error("invalid scoped artifact access policy: {0}")]
+    InvalidArtifactPolicy(String),
     #[error("scoped observation root identity is invalid or inconsistent")]
     InvalidRootIdentity,
     #[error("invalid scoped access grant: {0}")]
@@ -10828,6 +10871,7 @@ pub struct ScopedObservationAccessHost {
     compatibility: CompatibilityDecision,
     observation_contract: ObservationContractSelection,
     observation_capabilities: ObservationCapabilities,
+    artifact_access_policy: ScopedArtifactAccessPolicy,
     authorization: TypedAccessAuthorization,
     root_identity: ScopedObservationRootIdentity,
     program_id: String,
@@ -10852,6 +10896,10 @@ impl ScopedObservationAccessHost {
             &request.observation_contract_request,
             &request.observation_contract_offer,
         )?;
+        artifact_wire::validate_attachment_artifact_access_policy(
+            request.artifact_access_policy,
+        )
+        .map_err(|error| ScopedObservationAccessError::InvalidArtifactPolicy(error.to_string()))?;
         let adapter_id = AdapterId::new(request.adapter_id.as_str())
             .map_err(|error| ScopedObservationAccessError::Authorization(error.to_string()))?;
         let adapter = registry.get(&adapter_id).cloned().ok_or_else(|| {
@@ -10900,6 +10948,7 @@ impl ScopedObservationAccessHost {
             compatibility,
             observation_contract,
             observation_capabilities,
+            artifact_access_policy: request.artifact_access_policy,
             authorization,
             root_identity,
             program_id: request.program_id,
@@ -10937,6 +10986,12 @@ impl ScopedObservationAccessHost {
     /// being inferred from this static attachment capability declaration.
     pub fn capabilities(&self) -> &ObservationCapabilities {
         &self.observation_capabilities
+    }
+
+    /// The immutable request ceiling retained by this attachment. It does not
+    /// grant locator or source access.
+    pub fn artifact_access_policy(&self) -> ScopedArtifactAccessPolicy {
+        self.artifact_access_policy
     }
 
     pub fn root_identity(&self) -> &ScopedObservationRootIdentity {
