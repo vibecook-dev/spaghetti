@@ -193,6 +193,10 @@ mod tests {
         RawRetentionPolicy, Sha256Digest, SourceAccess, SourceInstance, SourceInstanceSpec,
         SourceObjectDescriptor, StreamSpec, SupportBundleDocument,
     };
+    use crate::observation_contract::{
+        negotiate_observation_contract, ObservationCompatibilityAxis, ObservationContractOffer,
+        ObservationContractRequest, ObservationNegotiationError,
+    };
     use crate::scoped_observation::{
         ScopedActorAttribution, ScopedActorFallbackReason, ScopedAdmissionError,
         ScopedAppendDecodeOutcome, ScopedAppendDecoderConfig, ScopedAppendDeliveryPhase,
@@ -476,26 +480,44 @@ mod tests {
                 markers: vec!["fixture.marker".to_string()],
                 contradictory_markers: false,
             },
-            contract_request: ContractVersionRequest {
-                selection_contract_version: 1,
-                model_major: 1,
-                external_entity_reference_version: 1,
-                semantic_revision_reference_version: 1,
-                coverage_contract_versions: vec![1],
-                fact_family_versions: BTreeMap::from([("runtime.usage-v2".to_string(), vec![1])]),
-                query_pack_versions: None,
-                observation_contract_versions: Some(vec![1]),
-            },
-            contract_offer: ContractVersionOffer {
-                selection_contract_version: 1,
-                model_major: 1,
-                external_entity_reference_versions: vec![1],
-                semantic_revision_reference_versions: vec![1],
-                coverage_contract_versions: vec![1],
-                fact_family_versions: BTreeMap::from([("runtime.usage-v2".to_string(), vec![1])]),
-                query_pack_versions: Vec::new(),
-                observation_contract_versions: vec![1],
-            },
+            observation_contract_request: ObservationContractRequest::new(
+                ContractVersionRequest {
+                    selection_contract_version: 1,
+                    model_major: 1,
+                    external_entity_reference_version: 1,
+                    semantic_revision_reference_version: 1,
+                    coverage_contract_versions: vec![1],
+                    fact_family_versions: BTreeMap::from([(
+                        "runtime.usage-v2".to_string(),
+                        vec![1],
+                    )]),
+                    query_pack_versions: None,
+                    observation_contract_versions: Some(vec![1]),
+                },
+                vec![1],
+                vec![1],
+                vec![1],
+            )
+            .unwrap(),
+            observation_contract_offer: ObservationContractOffer::new(
+                ContractVersionOffer {
+                    selection_contract_version: 1,
+                    model_major: 1,
+                    external_entity_reference_versions: vec![1],
+                    semantic_revision_reference_versions: vec![1],
+                    coverage_contract_versions: vec![1],
+                    fact_family_versions: BTreeMap::from([(
+                        "runtime.usage-v2".to_string(),
+                        vec![1],
+                    )]),
+                    query_pack_versions: Vec::new(),
+                    observation_contract_versions: vec![1],
+                },
+                vec![1],
+                vec![1],
+                vec![1],
+            )
+            .unwrap(),
             root_identity: ScopedRootIdentityRequest::new(
                 1,
                 b"fixture-source-instance".as_slice(),
@@ -1018,7 +1040,13 @@ mod tests {
 
         // Attachment authorizes one exact missing object without reading it;
         // the native process may create the root transcript afterward.
+        let expected_capabilities = negotiate_observation_contract(
+            &request.observation_contract_request,
+            &request.observation_contract_offer,
+        )
+        .unwrap();
         let host = ScopedObservationAccessHost::authorize(&registry, request).unwrap();
+        assert_eq!(host.capabilities(), &expected_capabilities);
         assert_eq!(
             host.compatibility().support_release_id(),
             Some("fixture-release")
@@ -1138,6 +1166,24 @@ mod tests {
                 max_bytes: 128,
             }),
             Err(ScopedObservationAccessError::Closed)
+        ));
+    }
+
+    #[test]
+    fn scoped_host_rejects_incompatible_observation_contract_before_registry_authority() {
+        let registry = supported_fixture_registry();
+        let temp = TempDir::new().unwrap();
+        let mut request = scoped_access_request(temp.path().to_path_buf());
+        request.adapter_id = "not-registered".to_string();
+        request.observation_contract_request.event_contract_versions = vec![2];
+
+        assert!(matches!(
+            ScopedObservationAccessHost::authorize(&registry, request),
+            Err(ScopedObservationAccessError::ObservationContract(
+                ObservationNegotiationError::IncompatibleObservationContract {
+                    axis: ObservationCompatibilityAxis::EventContractVersion,
+                }
+            ))
         ));
     }
 

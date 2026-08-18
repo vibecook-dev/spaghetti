@@ -1524,10 +1524,16 @@ Current landing status (2026-08-17):
   `IncompatibleObservationContract` result, while malformed shapes remain
   validation errors. Rust and portable TypeScript consume a received selection
   only when it exactly equals the caller-held request/offer result, including
-  the fact-family set and preferred versions. A Rust-produced fixture proves
-  independent portable negotiation and strict bounded parsing. This slice does
-  not freeze the event/envelope DTO union, claim unknown-event preservation, or
-  expose native observer transport; and
+  the fact-family set and preferred versions. The internal attachment request
+  now carries those RFC 012D wrappers rather than a bare RFC 012A pair; its host
+  negotiates first, requires the resulting base selection to equal the typed
+  access authorization, retains that exact value for `capabilities()`, and uses
+  it for root-reference and coverage assembly. An incompatible event contract
+  therefore fails with its typed axis before registry authority or source-access
+  construction. A Rust-produced fixture proves independent portable negotiation
+  and strict bounded parsing. This slice does not freeze the event/envelope DTO
+  union, claim unknown-event preservation, or expose native observer transport;
+  and
 - the architecture checker forbids store/query/N-API/concrete-adapter imports
   and premature native public export from the provisional composition and
   negotiation roots, while keeping the portable negotiation graph contract-only.

@@ -16,14 +16,14 @@ use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use crate::adapter::{
     ActorRunRole, AdapterError, AdapterErrorClass, AdapterId, AdapterObjectContext,
     AdapterRegistry, AgentAdapter, CanonicalEntityKey, CanonicalFactId, CanonicalSourceInstanceKey,
-    CompatibilityDecision, ContractCompleteness, ContractVersionOffer, ContractVersionRequest,
-    CoverageAbsence, CoverageAbsenceKind, CoverageDeclarationDigest, CoverageDomain, CoverageError,
-    CoverageObjectKey, CoveragePosition, CoveragePositionKind, CoverageProvenance, CoverageScope,
-    CoverageSetCompleteness, CoverageStatus, CoverageStreamKey, DecodeDisposition, DecoderId,
-    ExternalEntityRef, Fact, FactBatch, FactEnvelope, FactProvenance, FactRevisionId,
-    FactSemanticContext, FactSemanticRevision, NativeArtifactProbe, NativeIdentityClaim,
-    QualifiedTimestamp, QualifiedValueQuality, RawRetentionPolicy, ScopeRelationPrimitive,
-    SemanticRevisionRef, SourceAccess, SourceCoveragePoint, SourceCoverageSet, SourceObjectList,
+    CompatibilityDecision, ContractCompleteness, CoverageAbsence, CoverageAbsenceKind,
+    CoverageDeclarationDigest, CoverageDomain, CoverageError, CoverageObjectKey, CoveragePosition,
+    CoveragePositionKind, CoverageProvenance, CoverageScope, CoverageSetCompleteness,
+    CoverageStatus, CoverageStreamKey, DecodeDisposition, DecoderId, ExternalEntityRef, Fact,
+    FactBatch, FactEnvelope, FactProvenance, FactRevisionId, FactSemanticContext,
+    FactSemanticRevision, NativeArtifactProbe, NativeIdentityClaim, QualifiedTimestamp,
+    QualifiedValueQuality, RawRetentionPolicy, ScopeRelationPrimitive, SemanticRevisionRef,
+    SourceAccess, SourceCoveragePoint, SourceCoverageSet, SourceObjectList,
     SourceObjectListRequest, SourceQuery, SourceRecordId, SourceRows, SourceSnapshot,
     SupportOperation, TypedAccessAuthorization, UsageRevisionV2Fact,
     EXTERNAL_ENTITY_REFERENCE_VERSION,
@@ -33,6 +33,10 @@ use crate::coverage_runtime::{
 };
 use crate::decode_runtime::{
     decode_record, diagnostic_excerpt, DecodeRuntimeLimits, DecodeRuntimeRequest,
+};
+use crate::observation_contract::{
+    negotiate_observation_contract, ObservationContractOffer, ObservationContractRequest,
+    ObservationContractSelection, ObservationNegotiationError,
 };
 use crate::source::{
     confined_relative_path_key, read_stable_file_confined, validate_relation_id, AccessBudgetError,
@@ -64,8 +68,8 @@ pub struct ScopedKnownObjectGrant {
 pub struct ScopedObservationAccessRequest {
     pub adapter_id: String,
     pub artifact_probe: NativeArtifactProbe,
-    pub contract_request: ContractVersionRequest,
-    pub contract_offer: ContractVersionOffer,
+    pub observation_contract_request: ObservationContractRequest,
+    pub observation_contract_offer: ObservationContractOffer,
     pub root_identity: ScopedRootIdentityRequest,
     pub program_id: String,
     pub known_objects: Vec<ScopedKnownObjectGrant>,
@@ -8216,6 +8220,8 @@ pub enum ScopedDecodeFailureClass {
 
 #[derive(Debug, thiserror::Error)]
 pub enum ScopedObservationAccessError {
+    #[error(transparent)]
+    ObservationContract(#[from] ObservationNegotiationError),
     #[error("scoped observation authorization failed: {0}")]
     Authorization(String),
     #[error("scoped observation root identity is invalid or inconsistent")]
@@ -8980,22 +8986,6 @@ fn scoped_source_owner_error_is_delivery_backpressure(
     )
 }
 
-#[cfg(test)]
-fn scoped_source_owner_error_is_transient(error: &ScopedObservationPassExecutionError) -> bool {
-    matches!(
-        error,
-        ScopedObservationPassExecutionError::DecodeRetryTransient
-            | ScopedObservationPassExecutionError::Access(
-                ScopedObservationAccessError::Decode(ScopedDecodeFailureClass::Transient)
-                    | ScopedObservationAccessError::Source(
-                        ScopedSourceFailureClass::Unstable
-                            | ScopedSourceFailureClass::Database
-                            | ScopedSourceFailureClass::Io
-                    )
-            )
-    )
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ScopedObjectFailureClassification {
     Retryable(ScopedSourceObjectFailureCode),
@@ -9384,6 +9374,7 @@ impl Drop for ScopedObservationPollLease {
 pub struct ScopedObservationAccessHost {
     adapter: Arc<dyn AgentAdapter>,
     compatibility: CompatibilityDecision,
+    observation_contract: ObservationContractSelection,
     authorization: TypedAccessAuthorization,
     root_identity: ScopedObservationRootIdentity,
     program_id: String,
@@ -9399,6 +9390,14 @@ impl ScopedObservationAccessHost {
         registry: &AdapterRegistry,
         request: ScopedObservationAccessRequest,
     ) -> Result<Self, ScopedObservationAccessError> {
+        // Contract selection is the first operation at this composition
+        // boundary. Incompatible semantics therefore fail before support
+        // classification, grant validation, or construction of any source-
+        // access authority.
+        let observation_contract = negotiate_observation_contract(
+            &request.observation_contract_request,
+            &request.observation_contract_offer,
+        )?;
         let adapter_id = AdapterId::new(request.adapter_id.as_str())
             .map_err(|error| ScopedObservationAccessError::Authorization(error.to_string()))?;
         let adapter = registry.get(&adapter_id).cloned().ok_or_else(|| {
@@ -9411,13 +9410,21 @@ impl ScopedObservationAccessHost {
                 &adapter_id,
                 &request.artifact_probe,
                 SupportOperation::ScopedTypedObservation,
-                &request.contract_request,
-                &request.contract_offer,
+                &request.observation_contract_request.contract_versions,
+                &request.observation_contract_offer.contract_versions,
             )
             .map_err(|error| ScopedObservationAccessError::Authorization(error.to_string()))?;
+        if authorization.contracts() != &observation_contract.contract_versions {
+            return Err(ScopedObservationAccessError::Authorization(
+                "typed access authorization does not match the negotiated observation contract"
+                    .to_string(),
+            ));
+        }
         let root_identity = request.root_identity.resolve(
             &adapter_id,
-            authorization.contracts().external_entity_reference_version,
+            observation_contract
+                .contract_versions
+                .external_entity_reference_version,
         )?;
         let program = authorization
             .select_scope_program(&request.program_id)
@@ -9435,6 +9442,7 @@ impl ScopedObservationAccessHost {
         Ok(Self {
             adapter,
             compatibility,
+            observation_contract,
             authorization,
             root_identity,
             program_id: request.program_id,
@@ -9456,6 +9464,13 @@ impl ScopedObservationAccessHost {
 
     pub fn compatibility(&self) -> &CompatibilityDecision {
         &self.compatibility
+    }
+
+    /// Exact pre-access contract selection reported by the future portable
+    /// `capabilities()` surface. Keeping it on the attachment prevents later
+    /// source or delivery code from reconstructing a different selection.
+    pub fn capabilities(&self) -> &ObservationContractSelection {
+        &self.observation_contract
     }
 
     pub fn root_identity(&self) -> &ScopedObservationRootIdentity {
@@ -10182,7 +10197,7 @@ impl ScopedObservationAccessHost {
         validate_scoped_relation_coverage(self.known_objects.as_ref(), admission)?;
         let source_coverage = assemble_scoped_coverage_sets(
             self.adapter.manifest(),
-            self.authorization.contracts(),
+            &self.observation_contract.contract_versions,
             &self.root_identity,
             admission,
             projection,
@@ -12721,6 +12736,22 @@ fn scoped_dependency_access_error() -> AdapterError {
         AdapterErrorClass::InvalidContract,
         "scoped_dependency_access_undeclared",
         "decoder requested dependency access without a scoped relation-backed grant",
+    )
+}
+
+#[cfg(test)]
+fn scoped_source_owner_error_is_transient(error: &ScopedObservationPassExecutionError) -> bool {
+    matches!(
+        error,
+        ScopedObservationPassExecutionError::DecodeRetryTransient
+            | ScopedObservationPassExecutionError::Access(
+                ScopedObservationAccessError::Decode(ScopedDecodeFailureClass::Transient)
+                    | ScopedObservationAccessError::Source(
+                        ScopedSourceFailureClass::Unstable
+                            | ScopedSourceFailureClass::Database
+                            | ScopedSourceFailureClass::Io
+                    )
+            )
     )
 }
 

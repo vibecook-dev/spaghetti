@@ -412,8 +412,17 @@ def discover_rfc012_scoped_host_boundary_violations() -> set[str]:
     relative = "crates/spaghetti-napi/src/scoped_observation.rs"
     path = REPO_ROOT / relative
     found: set[str] = set()
-    if not path.exists() or RFC012_SCOPED_HOST_FORBIDDEN_RE.search(production_rust_text(path)):
+    scoped_text = production_rust_text(path) if path.exists() else ""
+    if not path.exists() or RFC012_SCOPED_HOST_FORBIDDEN_RE.search(scoped_text):
         found.add(relative)
+    required_observation_bindings = (
+        "observation_contract_request: ObservationContractRequest",
+        "negotiate_observation_contract(",
+        "observation_contract: ObservationContractSelection",
+        "pub fn capabilities(&self) -> &ObservationContractSelection",
+    )
+    if any(binding not in scoped_text for binding in required_observation_bindings):
+        found.add(f"{relative}#missing-observation-contract-binding")
     lib = REPO_ROOT / "crates/spaghetti-napi/src/lib.rs"
     if re.search(r"^\s*pub\s+mod\s+scoped_observation\s*;", read(lib), re.MULTILINE):
         found.add(f"{repo_path(lib)}#premature-public-scoped-host")
