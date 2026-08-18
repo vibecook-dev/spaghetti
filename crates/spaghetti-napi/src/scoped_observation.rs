@@ -7552,13 +7552,14 @@ impl ScopedObservationReplacementStage {
 
     fn family_manifest(
         &self,
+        contracts: &crate::adapter::ContractVersionSelection,
         source_coverage: &[SourceCoverageSet],
     ) -> Result<Vec<ScopedReplacementFamilyManifest>, ScopedReplacementStageError> {
         let prepared = self
             .prepared
             .as_ref()
             .ok_or(ScopedReplacementStageError::SnapshotNotPrepared)?;
-        replacement_family_manifest(&prepared.usage_v2, source_coverage)
+        replacement_family_manifest(contracts, &prepared.usage_v2, source_coverage)
     }
 
     fn validate_activation(
@@ -7748,11 +7749,35 @@ impl ScopedObservationScopeReplacementStage {
 }
 
 fn replacement_family_manifest(
+    contracts: &crate::adapter::ContractVersionSelection,
     usage_v2: &ScopedUsageV2ReplacementSnapshot,
     source_coverage: &[SourceCoverageSet],
 ) -> Result<Vec<ScopedReplacementFamilyManifest>, ScopedReplacementStageError> {
+    if contracts.fact_family_versions.len() != 1
+        || contracts.fact_family_versions.get("runtime.usage-v2")
+            != Some(&RUNTIME_USAGE_V2_FACT_FAMILY_CONTRACT_VERSION)
+        || usage_v2.fact_family_contract_version != RUNTIME_USAGE_V2_FACT_FAMILY_CONTRACT_VERSION
+        || usage_v2.replacement_digest_contract_version
+            != SCOPED_REPLACEMENT_DIGEST_CONTRACT_VERSION
+        || usage_v2.phase == ScopedAppendDeliveryPhase::Live
+        || usize::try_from(usage_v2.entity_count).ok() != Some(usage_v2.events.len())
+        || usage_v2
+            .events
+            .windows(2)
+            .any(|events| events[0].fact_id >= events[1].fact_id)
+        || usage_v2.events.iter().any(|event| {
+            event.operation != ScopedUsageV2Operation::Upsert
+                || event.retraction.is_some()
+                || event.phase != usage_v2.phase
+        })
+    {
+        return Err(ScopedReplacementStageError::InvalidManifest);
+    }
     let mut usage_completeness = None;
     for coverage in source_coverage {
+        coverage
+            .validate()
+            .map_err(|_| ScopedReplacementStageError::InvalidManifest)?;
         match &coverage.coverage_domain {
             CoverageDomain::Decode => {}
             CoverageDomain::FactFamily { family, version }
@@ -7769,13 +7794,7 @@ fn replacement_family_manifest(
             }
         }
     }
-    let Some(completeness) = usage_completeness else {
-        return if usage_v2.entity_count == 0 {
-            Ok(Vec::new())
-        } else {
-            Err(ScopedReplacementStageError::InvalidManifest)
-        };
-    };
+    let completeness = usage_completeness.ok_or(ScopedReplacementStageError::InvalidManifest)?;
     Ok(vec![ScopedReplacementFamilyManifest {
         fact_family: "runtime.usage-v2".to_string(),
         contract_version: usage_v2.fact_family_contract_version,
@@ -10343,8 +10362,12 @@ impl ScopedObservationAccessHost {
         let replacement = projection
             .usage_v2_replacement_snapshot(ScopedAppendDeliveryPhase::Bootstrap)
             .map_err(|_| ScopedBootstrapBarrierError::InvalidSnapshot)?;
-        let family_manifest = replacement_family_manifest(&replacement, &watermark.source_coverage)
-            .map_err(|_| ScopedBootstrapBarrierError::InvalidSnapshot)?;
+        let family_manifest = replacement_family_manifest(
+            &self.observation_contract.contract_versions,
+            &replacement,
+            &watermark.source_coverage,
+        )
+        .map_err(|_| ScopedBootstrapBarrierError::InvalidSnapshot)?;
         delivery.offer_bootstrap_barrier(
             &self.root_identity,
             watermark,
@@ -10437,8 +10460,11 @@ impl ScopedObservationAccessHost {
         let replacement = projection
             .usage_v2_replacement_snapshot(ScopedAppendDeliveryPhase::Bootstrap)
             .map_err(ScopedReplacementStageError::Projection)?;
-        let family_manifest =
-            replacement_family_manifest(&replacement, &watermark.source_coverage)?;
+        let family_manifest = replacement_family_manifest(
+            &self.observation_contract.contract_versions,
+            &replacement,
+            &watermark.source_coverage,
+        )?;
         let replacement_digest = replacement_snapshot_digest(
             &self.root_identity,
             barrier.root_present,
@@ -10647,7 +10673,10 @@ impl ScopedObservationAccessHost {
         let watermark = self
             .capture_watermark_core(admission, &stage.projection, delivery)
             .map_err(ScopedReplacementStageError::Coverage)?;
-        let family_manifest = stage.family_manifest(&watermark.source_coverage)?;
+        let family_manifest = stage.family_manifest(
+            &self.observation_contract.contract_versions,
+            &watermark.source_coverage,
+        )?;
         let digest = replacement_snapshot_digest(
             &self.root_identity,
             root_present,
@@ -12843,10 +12872,10 @@ fn scoped_source_owner_error_is_transient(error: &ScopedObservationPassExecution
 #[cfg(test)]
 mod projection_tests {
     use crate::adapter::{
-        ContractCompleteness, ContractVersionOffer, ContractVersionRequest, NativeIdentity,
-        QualifiedTimestamp, QualifiedValue, QualifiedValueQuality, TimestampQuality,
-        UsageBucketsV2, UsageQualifiedValue, UsageResponseIdentity, UsageValueAuthority,
-        UsageValueProvenance,
+        ContractCompleteness, ContractVersionOffer, ContractVersionRequest,
+        CoverageMembershipRevision, NativeIdentity, QualifiedTimestamp, QualifiedValue,
+        QualifiedValueQuality, TimestampQuality, UsageBucketsV2, UsageQualifiedValue,
+        UsageResponseIdentity, UsageValueAuthority, UsageValueProvenance,
     };
     use crate::source::RecordOrigin;
 
@@ -13109,6 +13138,130 @@ mod projection_tests {
         .with_native_session_claim(NativeIdentityClaim::new(session_ref, identity).unwrap())
         .resolve(context.adapter_id(), EXTERNAL_ENTITY_REFERENCE_VERSION)
         .unwrap()
+    }
+
+    fn empty_usage_coverage(completeness: CoverageSetCompleteness) -> SourceCoverageSet {
+        let root = root_identity();
+        SourceCoverageSet::new(
+            CoverageDomain::FactFamily {
+                family: "runtime.usage-v2".to_owned(),
+                version: RUNTIME_USAGE_V2_FACT_FAMILY_CONTRACT_VERSION,
+            },
+            CoverageScope {
+                adapter_id: root.adapter_id.as_str().to_owned(),
+                source_instance_key: root.source_instance_key,
+                root_entity_key: Some(root.session_key),
+                support_release_id: "fixture-support-v1".to_owned(),
+                source_or_scope_declaration_digest: CoverageDeclarationDigest::derive(
+                    b"fixture-scoped-declaration",
+                )
+                .unwrap(),
+            },
+            CoverageMembershipRevision::derive(b"fixture-empty-usage-membership").unwrap(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            completeness,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn replacement_manifest_requires_selected_family_coverage_even_when_empty() {
+        let selection = observation_contract_selection();
+        let empty_snapshot = sink(1)
+            .usage_v2_replacement_snapshot(ScopedAppendDeliveryPhase::Bootstrap)
+            .unwrap();
+        assert_eq!(empty_snapshot.entity_count, 0);
+
+        let complete = empty_usage_coverage(CoverageSetCompleteness::Complete);
+        let manifest = replacement_family_manifest(
+            &selection.contract_versions,
+            &empty_snapshot,
+            std::slice::from_ref(&complete),
+        )
+        .unwrap();
+        assert_eq!(manifest.len(), 1);
+        assert_eq!(manifest[0].fact_family, "runtime.usage-v2");
+        assert_eq!(manifest[0].entity_or_event_count, 0);
+        assert_eq!(manifest[0].completeness, CoverageSetCompleteness::Complete);
+        assert_eq!(manifest[0].semantic_digest, empty_snapshot.semantic_digest);
+
+        assert!(
+            replacement_family_manifest(&selection.contract_versions, &empty_snapshot, &[],)
+                .is_err()
+        );
+
+        let mut count_drift = empty_snapshot.clone();
+        count_drift.entity_count = 1;
+        assert!(replacement_family_manifest(
+            &selection.contract_versions,
+            &count_drift,
+            std::slice::from_ref(&complete),
+        )
+        .is_err());
+        let mut live_snapshot = empty_snapshot.clone();
+        live_snapshot.phase = ScopedAppendDeliveryPhase::Live;
+        assert!(replacement_family_manifest(
+            &selection.contract_versions,
+            &live_snapshot,
+            std::slice::from_ref(&complete),
+        )
+        .is_err());
+
+        let mut malformed_coverage = complete.clone();
+        malformed_coverage.coverage_set_contract_version = 2;
+        assert!(replacement_family_manifest(
+            &selection.contract_versions,
+            &empty_snapshot,
+            &[malformed_coverage],
+        )
+        .is_err());
+        let mut foreign_coverage = complete.clone();
+        foreign_coverage.coverage_domain = CoverageDomain::FactFamily {
+            family: "runtime.future".to_owned(),
+            version: 1,
+        };
+        assert!(replacement_family_manifest(
+            &selection.contract_versions,
+            &empty_snapshot,
+            &[foreign_coverage],
+        )
+        .is_err());
+
+        let partial = empty_usage_coverage(CoverageSetCompleteness::Partial);
+        assert_eq!(
+            replacement_family_manifest(
+                &selection.contract_versions,
+                &empty_snapshot,
+                &[complete, partial],
+            )
+            .unwrap()[0]
+                .completeness,
+            CoverageSetCompleteness::Partial
+        );
+
+        let mut foreign_selection = selection.contract_versions.clone();
+        foreign_selection
+            .fact_family_versions
+            .insert("runtime.future".to_owned(), 1);
+        assert!(replacement_family_manifest(
+            &foreign_selection,
+            &empty_snapshot,
+            &[empty_usage_coverage(CoverageSetCompleteness::Complete)],
+        )
+        .is_err());
+
+        let mut wrong_version = selection.contract_versions;
+        wrong_version
+            .fact_family_versions
+            .insert("runtime.usage-v2".to_owned(), 2);
+        assert!(replacement_family_manifest(
+            &wrong_version,
+            &empty_snapshot,
+            &[empty_usage_coverage(CoverageSetCompleteness::Complete)],
+        )
+        .is_err());
     }
 
     fn admission_lane_with_decoded_frame(

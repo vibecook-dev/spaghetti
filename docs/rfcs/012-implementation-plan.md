@@ -752,6 +752,22 @@ values remain useful for static composition construction and fixtures but can
 no longer authorize execution. Source access, coverage publication, policy-view
 binding, persistence, query execution, and built-in promotion remain open.
 
+The ninth B2 slice (`9ec352f`) adds a crate-private, complete-only Library
+coverage assembly seam without reading or promoting a source. Exact/range
+catalog authorization, the complete negotiated selection, adapter and source
+instance, support release, source declaration, access policy, and normalized
+composition are bound together before assembly. Every composition component
+must provide an explicit complete enumeration and unordered snapshot revision,
+including an empty metadata-only component; canonical live/absence lineage and
+primitive-specific positions then produce one RFC 012A coverage set and a
+separate aggregate restart revision. Catalog membership, native coverage
+membership, and component-completion revisions remain distinct identities.
+Forward-recognized authorization, incomplete/error evidence, replay under a
+different selection or policy, and planned/unbound compositions fail closed.
+This remains a no-I/O contract seam: real source producers, access-plan proof,
+forward degraded coverage, partitioning beyond the portable 250,000-point cap,
+persistence, query publication, and N-API exposure remain open.
+
 ### B3. Durable pack, readiness, and pagination
 
 Implement:
@@ -1748,7 +1764,16 @@ Current landing status (2026-08-18):
   trust claims. Portable TypeScript independently requires the caller-held
   selection, root, attachment reference, and request identity and rejects
   silent nested fields or a merely `closing` state. This slice defines no
-  public N-API method or transport owner; and
+  public N-API method or transport owner;
+- the internal replacement-family manifest now closes the selected-family
+  empty-state ambiguity. The compiled reducer accepts exactly the negotiated
+  `runtime.usage-v2@1` family, validates the frozen replacement snapshot and
+  every RFC 012A coverage set, and always emits one family manifest—even when
+  its entity count is zero. Missing, foreign, malformed, or version-drifted
+  coverage therefore fails bootstrap/resync completion instead of turning an
+  uncovered family into an apparently valid empty result. Complete and partial
+  evidence still merge conservatively. This is an internal usage-v2 closure,
+  not a complete multi-family or public barrier surface; and
 - the architecture checker forbids store/query/N-API/concrete-adapter imports
   and premature native public export from the provisional composition and
   negotiation roots, while keeping the portable negotiation graph contract-only.
