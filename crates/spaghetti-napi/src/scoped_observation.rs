@@ -9466,10 +9466,11 @@ impl ScopedObservationAccessHost {
         &self.compatibility
     }
 
-    /// Exact pre-access contract selection reported by the future portable
-    /// `capabilities()` surface. Keeping it on the attachment prevents later
-    /// source or delivery code from reconstructing a different selection.
-    pub fn capabilities(&self) -> &ObservationContractSelection {
+    /// Exact pre-access contract selection retained for the future portable
+    /// capabilities report. Keeping it on the attachment prevents later source
+    /// or delivery code from reconstructing a different selection; this is not
+    /// itself RFC 012D's per-family `capabilities()` DTO.
+    pub fn contract_selection(&self) -> &ObservationContractSelection {
         &self.observation_contract
     }
 

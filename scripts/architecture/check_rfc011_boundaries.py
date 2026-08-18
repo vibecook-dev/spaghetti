@@ -419,7 +419,7 @@ def discover_rfc012_scoped_host_boundary_violations() -> set[str]:
         "observation_contract_request: ObservationContractRequest",
         "negotiate_observation_contract(",
         "observation_contract: ObservationContractSelection",
-        "pub fn capabilities(&self) -> &ObservationContractSelection",
+        "pub fn contract_selection(&self) -> &ObservationContractSelection",
     )
     if any(binding not in scoped_text for binding in required_observation_bindings):
         found.add(f"{relative}#missing-observation-contract-binding")

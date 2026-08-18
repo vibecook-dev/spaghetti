@@ -1046,7 +1046,7 @@ mod tests {
         )
         .unwrap();
         let host = ScopedObservationAccessHost::authorize(&registry, request).unwrap();
-        assert_eq!(host.capabilities(), &expected_capabilities);
+        assert_eq!(host.contract_selection(), &expected_capabilities);
         assert_eq!(
             host.compatibility().support_release_id(),
             Some("fixture-release")
