@@ -20,6 +20,7 @@ const MAX_ENTITY_KEY_BYTES: usize = 8 * 1024;
 const MAX_USAGE_RESPONSE_KEY_BYTES: usize = 8 * 1024;
 const MAX_USAGE_PROVENANCE_FIELD_BYTES: usize = 256;
 const MAX_RUNTIME_SEMANTIC_TEXT_BYTES: usize = 8 * 1024;
+const MAX_CANONICAL_ARTIFACTS_PER_FACT: usize = 4 * 1024;
 
 mod base64_bytes {
     use base64::engine::general_purpose::STANDARD;
@@ -971,6 +972,10 @@ pub enum ArtifactCapture {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ArtifactMetadataEntry {
     pub artifact: EntityKey,
+    /// Topology-neutral RFC 012A identity carried beside the RFC 011 durable
+    /// key while artifact storage completes its semantic-key migration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub canonical_artifact: Option<CanonicalEntityKey>,
     pub native_artifact_id: Option<String>,
     pub tracking_path: String,
     pub real_parent_dir: Option<String>,
@@ -986,12 +991,124 @@ pub struct ArtifactMetadataEntry {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ArtifactMetadataSnapshotFact {
     pub session: EntityKey,
+    /// Topology-neutral RFC 012A base session for scoped/durable identity
+    /// parity. Legacy producers may omit it; canonical producers may not mix
+    /// canonical and legacy-only entries in one fact.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub canonical_session: Option<CanonicalEntityKey>,
     pub native_message_id: String,
     pub native_snapshot_message_id: String,
     pub observation_kind: ArtifactObservationKind,
     pub is_snapshot_update: bool,
     pub source_time: Option<QualifiedTimestamp>,
     pub artifacts: Vec<ArtifactMetadataEntry>,
+}
+
+impl ArtifactMetadataSnapshotFact {
+    pub(crate) fn semantic_revision_key(
+        &self,
+    ) -> Result<Option<[u8; FACT_HASH_BYTES]>, AdapterError> {
+        let has_canonical_artifact = self
+            .artifacts
+            .iter()
+            .any(|artifact| artifact.canonical_artifact.is_some());
+        let Some(canonical_session) = self.canonical_session else {
+            if has_canonical_artifact {
+                return Err(AdapterError::invalid_contract(
+                    "canonical artifact metadata cannot omit its canonical session",
+                ));
+            }
+            return Ok(None);
+        };
+        if self.artifacts.len() > MAX_CANONICAL_ARTIFACTS_PER_FACT {
+            return Err(AdapterError::invalid_contract(format!(
+                "canonical artifact metadata exceeds {MAX_CANONICAL_ARTIFACTS_PER_FACT} entries"
+            )));
+        }
+        validate_runtime_semantic_text(
+            "artifact_metadata.native_message_id",
+            Some(&self.native_message_id),
+        )?;
+        validate_runtime_semantic_text(
+            "artifact_metadata.native_snapshot_message_id",
+            Some(&self.native_snapshot_message_id),
+        )?;
+        validate_runtime_semantic_text(
+            "artifact_metadata.source_time",
+            self.source_time.as_ref().map(|value| value.value.as_str()),
+        )?;
+
+        let mut artifacts = self.artifacts.iter().collect::<Vec<_>>();
+        artifacts.sort_by_key(|artifact| artifact.canonical_artifact);
+        let mut canonical_keys = BTreeSet::new();
+        let mut encoded = Vec::new();
+        encoded.extend_from_slice(b"spaghetti/runtime.artifact-metadata/semantic-revision\0");
+        encoded.extend_from_slice(&1_u32.to_be_bytes());
+        push_component(&mut encoded, canonical_session.as_bytes());
+        push_component(&mut encoded, self.native_message_id.as_bytes());
+        push_component(&mut encoded, self.native_snapshot_message_id.as_bytes());
+        encoded.push(match self.observation_kind {
+            ArtifactObservationKind::Checkpoint => 1,
+            ArtifactObservationKind::Delta => 2,
+        });
+        encoded.push(u8::from(self.is_snapshot_update));
+        push_optional_qualified_timestamp(&mut encoded, self.source_time.as_ref());
+        encoded.extend_from_slice(&(artifacts.len() as u64).to_be_bytes());
+        for artifact in artifacts {
+            let canonical_artifact = artifact.canonical_artifact.ok_or_else(|| {
+                AdapterError::invalid_contract(
+                    "canonical artifact metadata cannot mix canonical and legacy-only entries",
+                )
+            })?;
+            if !canonical_keys.insert(canonical_artifact) {
+                return Err(AdapterError::invalid_contract(
+                    "canonical artifact metadata repeats an artifact identity",
+                ));
+            }
+            if artifact.version == 0 {
+                return Err(AdapterError::invalid_contract(
+                    "canonical artifact metadata version must be positive",
+                ));
+            }
+            for (field, value) in [
+                (
+                    "artifact_metadata.native_artifact_id",
+                    artifact.native_artifact_id.as_deref(),
+                ),
+                (
+                    "artifact_metadata.tracking_path",
+                    Some(artifact.tracking_path.as_str()),
+                ),
+                (
+                    "artifact_metadata.real_parent_dir",
+                    artifact.real_parent_dir.as_deref(),
+                ),
+                (
+                    "artifact_metadata.backup_time",
+                    Some(artifact.backup_time.value.as_str()),
+                ),
+            ] {
+                validate_runtime_semantic_text(field, value)?;
+            }
+            push_component(&mut encoded, canonical_artifact.as_bytes());
+            push_optional_component(
+                &mut encoded,
+                artifact.native_artifact_id.as_deref().map(str::as_bytes),
+            );
+            push_component(&mut encoded, artifact.tracking_path.as_bytes());
+            push_optional_component(
+                &mut encoded,
+                artifact.real_parent_dir.as_deref().map(str::as_bytes),
+            );
+            encoded.extend_from_slice(&artifact.version.to_be_bytes());
+            push_qualified_timestamp(&mut encoded, &artifact.backup_time);
+            encoded.push(match artifact.capture {
+                ArtifactCapture::ContentExpected => 1,
+                ArtifactCapture::NotCaptured => 2,
+            });
+        }
+        Ok(Some(*blake3::hash(&encoded).as_bytes()))
+    }
 }
 
 /// One independently replaceable native artifact-content blob. Its path
@@ -1001,12 +1118,60 @@ pub struct ArtifactMetadataSnapshotFact {
 pub struct ArtifactContentFact {
     pub artifact: EntityKey,
     pub session: EntityKey,
+    /// Topology-neutral identities retained in parallel with the legacy
+    /// projection keys until the durable artifact schema migrates.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub canonical_artifact: Option<CanonicalEntityKey>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub canonical_session: Option<CanonicalEntityKey>,
     pub native_artifact_id: String,
     pub native_file_hash: String,
     pub version: u64,
     #[serde(with = "base64_bytes")]
     pub content: Vec<u8>,
     pub size_bytes: u64,
+}
+
+impl ArtifactContentFact {
+    pub(crate) fn semantic_revision_key(
+        &self,
+    ) -> Result<Option<[u8; FACT_HASH_BYTES]>, AdapterError> {
+        let (canonical_artifact, canonical_session) =
+            match (self.canonical_artifact, self.canonical_session) {
+                (None, None) => return Ok(None),
+                (Some(artifact), Some(session)) => (artifact, session),
+                _ => {
+                    return Err(AdapterError::invalid_contract(
+                        "canonical artifact content requires both artifact and session identities",
+                    ));
+                }
+            };
+        if self.version == 0 || u64::try_from(self.content.len()).ok() != Some(self.size_bytes) {
+            return Err(AdapterError::invalid_contract(
+                "canonical artifact content has an invalid version or byte count",
+            ));
+        }
+        validate_runtime_semantic_text(
+            "artifact_content.native_artifact_id",
+            Some(&self.native_artifact_id),
+        )?;
+        validate_runtime_semantic_text(
+            "artifact_content.native_file_hash",
+            Some(&self.native_file_hash),
+        )?;
+        let content_digest = blake3::hash(&self.content);
+        let mut encoded = Vec::new();
+        encoded.extend_from_slice(b"spaghetti/runtime.artifact-content/semantic-revision\0");
+        encoded.extend_from_slice(&1_u32.to_be_bytes());
+        push_component(&mut encoded, canonical_artifact.as_bytes());
+        push_component(&mut encoded, canonical_session.as_bytes());
+        push_component(&mut encoded, self.native_artifact_id.as_bytes());
+        push_component(&mut encoded, self.native_file_hash.as_bytes());
+        encoded.extend_from_slice(&self.version.to_be_bytes());
+        encoded.extend_from_slice(&self.size_bytes.to_be_bytes());
+        push_component(&mut encoded, content_digest.as_bytes());
+        Ok(Some(*blake3::hash(&encoded).as_bytes()))
+    }
 }
 
 /// Normalized workflow-container status. This status applies only to the
@@ -1348,6 +1513,21 @@ fn push_optional_component(output: &mut Vec<u8>, value: Option<&[u8]>) {
     }
 }
 
+fn push_qualified_timestamp(output: &mut Vec<u8>, value: &QualifiedTimestamp) {
+    push_component(output, value.value.as_bytes());
+    output.push(timestamp_quality_revision_tag(value.quality));
+}
+
+fn push_optional_qualified_timestamp(output: &mut Vec<u8>, value: Option<&QualifiedTimestamp>) {
+    match value {
+        Some(value) => {
+            output.push(1);
+            push_qualified_timestamp(output, value);
+        }
+        None => output.push(0),
+    }
+}
+
 fn push_optional_usage_qualified_value<T>(
     output: &mut Vec<u8>,
     value: Option<&UsageQualifiedValue<T>>,
@@ -1550,6 +1730,8 @@ impl Fact {
         match self {
             Self::ActorRunRevision(revision) => revision.semantic_revision_key().map(Some),
             Self::ActorAffiliationRevision(revision) => revision.semantic_revision_key().map(Some),
+            Self::ArtifactMetadataSnapshot(revision) => revision.semantic_revision_key(),
+            Self::ArtifactContent(revision) => revision.semantic_revision_key(),
             _ => Ok(None),
         }
     }
@@ -2102,6 +2284,11 @@ impl FactBatch {
                                 Fact::ActorAffiliationRevision(_),
                                 Fact::ActorAffiliationRevision(_)
                             )
+                            | (
+                                Fact::ArtifactMetadataSnapshot(_),
+                                Fact::ArtifactMetadataSnapshot(_)
+                            )
+                            | (Fact::ArtifactContent(_), Fact::ArtifactContent(_))
                     ) && existing.value == incoming.value
                         && existing
                             .semantic_revision
@@ -3064,6 +3251,8 @@ mod tests {
         let fact = Fact::ArtifactContent(ArtifactContentFact {
             artifact,
             session,
+            canonical_artifact: None,
+            canonical_session: None,
             native_artifact_id: "backup@v1".to_string(),
             native_file_hash: "backup".to_string(),
             version: 1,
@@ -3074,6 +3263,105 @@ mod tests {
         let encoded = serde_json::to_value(&fact).unwrap();
         assert_eq!(encoded["ArtifactContent"]["content"], "AP8K");
         assert_eq!(serde_json::from_value::<Fact>(encoded).unwrap(), fact);
+    }
+
+    #[test]
+    fn canonical_artifact_metadata_revision_is_order_invariant_and_fail_closed() {
+        let context = semantic_context();
+        let adapter_id = AdapterId::new("fixture").unwrap();
+        let legacy_session =
+            EntityKey::native(&adapter_id, 1, "session", b"native-session").unwrap();
+        let canonical_session = context
+            .canonical_entity_key("session", b"native-session")
+            .unwrap();
+        let timestamp = |value: &str| QualifiedTimestamp {
+            value: value.to_string(),
+            quality: TimestampQuality::NativeExact,
+        };
+        let entry = |name: &str, version: u64| ArtifactMetadataEntry {
+            artifact: EntityKey::native(&adapter_id, 1, "artifact", name.as_bytes()).unwrap(),
+            canonical_artifact: Some(
+                context
+                    .canonical_entity_key("artifact", name.as_bytes())
+                    .unwrap(),
+            ),
+            native_artifact_id: Some(name.to_string()),
+            tracking_path: format!("src/{name}"),
+            real_parent_dir: Some("/fixture/src".to_string()),
+            version,
+            backup_time: timestamp("2026-08-18T00:00:00Z"),
+            capture: ArtifactCapture::ContentExpected,
+        };
+        let first = entry("a@v1", 1);
+        let second = entry("b@v2", 2);
+        let fact = |artifacts: Vec<ArtifactMetadataEntry>| ArtifactMetadataSnapshotFact {
+            session: legacy_session.clone(),
+            canonical_session: Some(canonical_session),
+            native_message_id: "message-1".to_string(),
+            native_snapshot_message_id: "snapshot-1".to_string(),
+            observation_kind: ArtifactObservationKind::Checkpoint,
+            is_snapshot_update: true,
+            source_time: Some(timestamp("2026-08-18T00:00:01Z")),
+            artifacts,
+        };
+        let forward = fact(vec![first.clone(), second.clone()]);
+        let reversed = fact(vec![second, first]);
+        assert_eq!(
+            forward.semantic_revision_key().unwrap(),
+            reversed.semantic_revision_key().unwrap()
+        );
+
+        let mut partial = forward.clone();
+        partial.artifacts[0].canonical_artifact = None;
+        assert!(partial.semantic_revision_key().is_err());
+        let mut duplicate = forward;
+        duplicate.artifacts[1].canonical_artifact = duplicate.artifacts[0].canonical_artifact;
+        assert!(duplicate.semantic_revision_key().is_err());
+    }
+
+    #[test]
+    fn canonical_artifact_content_revision_binds_value_not_legacy_topology() {
+        let context = semantic_context();
+        let adapter_id = AdapterId::new("fixture").unwrap();
+        let canonical_artifact = context
+            .canonical_entity_key("artifact", b"backup@v1")
+            .unwrap();
+        let canonical_session = context
+            .canonical_entity_key("session", b"native-session")
+            .unwrap();
+        let fact = |source_instance_id, content: &[u8]| ArtifactContentFact {
+            artifact: EntityKey::native(&adapter_id, source_instance_id, "artifact", b"backup@v1")
+                .unwrap(),
+            session: EntityKey::native(
+                &adapter_id,
+                source_instance_id,
+                "session",
+                b"native-session",
+            )
+            .unwrap(),
+            canonical_artifact: Some(canonical_artifact),
+            canonical_session: Some(canonical_session),
+            native_artifact_id: "backup@v1".to_string(),
+            native_file_hash: "backup".to_string(),
+            version: 1,
+            content: content.to_vec(),
+            size_bytes: content.len() as u64,
+        };
+        let first = fact(1, b"content");
+        let topology_replay = fact(99, b"content");
+        assert_ne!(first.artifact, topology_replay.artifact);
+        assert_eq!(
+            first.semantic_revision_key().unwrap(),
+            topology_replay.semantic_revision_key().unwrap()
+        );
+        assert_ne!(
+            first.semantic_revision_key().unwrap(),
+            fact(1, b"changed").semantic_revision_key().unwrap()
+        );
+
+        let mut invalid = first;
+        invalid.canonical_session = None;
+        assert!(invalid.semantic_revision_key().is_err());
     }
 
     #[test]

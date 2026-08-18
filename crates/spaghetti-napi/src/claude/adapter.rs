@@ -2622,8 +2622,19 @@ fn decode_artifact_content(
         "session",
         context.native_session_id.as_bytes(),
     )?;
-    output.push(
+    let canonical_session =
+        output.canonical_entity_key("session", context.native_session_id.as_bytes())?;
+    let artifact_native_key = artifact_native_key(
+        &context.native_session_id,
+        Some(&context.native_artifact_id),
+        None,
+        context.version,
+        None,
+    );
+    let canonical_artifact = output.canonical_entity_key("artifact", &artifact_native_key)?;
+    output.push_native(
         record,
+        &artifact_native_key,
         Fact::ArtifactContent(ArtifactContentFact {
             artifact: artifact_key(
                 adapter_id,
@@ -2635,6 +2646,8 @@ fn decode_artifact_content(
                 None,
             )?,
             session,
+            canonical_artifact: Some(canonical_artifact),
+            canonical_session: Some(canonical_session),
             native_artifact_id: context.native_artifact_id.clone(),
             native_file_hash: context.native_file_hash.clone(),
             version: context.version,
@@ -4035,9 +4048,24 @@ fn decode_transcript_record(
         context,
         session,
         &value,
+        output,
     ) {
         Ok(Some(fact)) => {
-            output.push(record, Fact::ArtifactMetadataSnapshot(fact))?;
+            let mut stable_key = Vec::new();
+            push_key_component(&mut stable_key, context.session_id.as_bytes());
+            push_key_component(&mut stable_key, fact.native_message_id.as_bytes());
+            push_key_component(&mut stable_key, fact.native_snapshot_message_id.as_bytes());
+            let semantic_revision_key = fact.semantic_revision_key()?.ok_or_else(|| {
+                AdapterError::invalid_contract(
+                    "Claude artifact metadata omitted canonical semantic identity",
+                )
+            })?;
+            output.push_native_with_revision(
+                record,
+                &stable_key,
+                &semantic_revision_key,
+                Fact::ArtifactMetadataSnapshot(fact),
+            )?;
         }
         Ok(None) => {}
         Err(detail) => {
@@ -4242,6 +4270,7 @@ fn artifact_metadata_snapshot(
     context: &ClaudeTranscriptContext,
     session: EntityKey,
     value: &Value,
+    output: &FactBatch,
 ) -> Result<Option<ArtifactMetadataSnapshotFact>, String> {
     let native_kind = value.get("type").and_then(Value::as_str);
     let (
@@ -4300,7 +4329,11 @@ fn artifact_metadata_snapshot(
         ));
     }
 
+    let canonical_session = output
+        .canonical_entity_key("session", context.session_id.as_bytes())
+        .map_err(|error| format!("Claude artifact session identity is invalid: {error}"))?;
     let mut artifact_keys = BTreeSet::new();
+    let mut canonical_artifact_keys = BTreeSet::new();
     let mut artifacts = Vec::with_capacity(documents.len());
     for (tracking_path, document) in documents {
         let tracking_path = nonempty(&tracking_path)
@@ -4334,6 +4367,13 @@ fn artifact_metadata_snapshot(
                 );
             }
         };
+        let native_key = artifact_native_key(
+            &context.session_id,
+            native_artifact_id.as_deref(),
+            Some(&tracking_path),
+            document.version,
+            Some(&backup_time),
+        );
         let artifact = artifact_key(
             adapter_id,
             source_instance_id,
@@ -4349,8 +4389,17 @@ fn artifact_metadata_snapshot(
                 "Claude file-history observation maps multiple paths to one artifact".to_string(),
             );
         }
+        let canonical_artifact = output
+            .canonical_entity_key("artifact", &native_key)
+            .map_err(|error| format!("Claude canonical artifact identity is invalid: {error}"))?;
+        if !canonical_artifact_keys.insert(canonical_artifact) {
+            return Err(
+                "Claude file-history observation repeats a canonical artifact identity".to_string(),
+            );
+        }
         artifacts.push(ArtifactMetadataEntry {
             artifact,
+            canonical_artifact: Some(canonical_artifact),
             native_artifact_id,
             tracking_path,
             real_parent_dir: document.real_parent_dir.as_deref().and_then(nonempty),
@@ -4361,6 +4410,7 @@ fn artifact_metadata_snapshot(
     }
     Ok(Some(ArtifactMetadataSnapshotFact {
         session,
+        canonical_session: Some(canonical_session),
         native_message_id,
         native_snapshot_message_id,
         observation_kind,
@@ -4634,6 +4684,23 @@ fn artifact_key(
     version: u64,
     backup_time: Option<&str>,
 ) -> Result<EntityKey, AdapterError> {
+    let native_key = artifact_native_key(
+        native_session_id,
+        native_artifact_id,
+        tracking_path,
+        version,
+        backup_time,
+    );
+    EntityKey::native(adapter_id, source_instance_id, "artifact", &native_key)
+}
+
+fn artifact_native_key(
+    native_session_id: &str,
+    native_artifact_id: Option<&str>,
+    tracking_path: Option<&str>,
+    version: u64,
+    backup_time: Option<&str>,
+) -> Vec<u8> {
     let mut native_key = Vec::new();
     push_key_component(&mut native_key, native_session_id.as_bytes());
     match native_artifact_id {
@@ -4658,7 +4725,7 @@ fn artifact_key(
             );
         }
     }
-    EntityKey::native(adapter_id, source_instance_id, "artifact", &native_key)
+    native_key
 }
 
 fn workflow_native_key(context: &ClaudeWorkflowContext) -> Vec<u8> {
@@ -6631,6 +6698,14 @@ mod tests {
             Some("2026-08-11T20:00:00.000Z")
         );
         assert_eq!(metadata.artifacts.len(), 2);
+        assert_eq!(
+            metadata.canonical_session,
+            Some(
+                batch
+                    .canonical_entity_key("session", SESSION.as_bytes())
+                    .unwrap()
+            )
+        );
         let named = metadata
             .artifacts
             .iter()
@@ -6643,6 +6718,17 @@ mod tests {
         assert_eq!(named.capture, ArtifactCapture::ContentExpected);
         assert_eq!(named.real_parent_dir.as_deref(), Some("/repo/src"));
         assert_eq!(named.version, 2);
+        assert_eq!(
+            named.canonical_artifact,
+            Some(
+                batch
+                    .canonical_entity_key(
+                        "artifact",
+                        &artifact_native_key(SESSION, Some("71f902cd51ee4c6e@v2"), None, 2, None,),
+                    )
+                    .unwrap()
+            )
+        );
         let named_key = named.artifact.clone();
         let unbacked = metadata
             .artifacts
@@ -6652,6 +6738,53 @@ mod tests {
         assert!(unbacked.native_artifact_id.is_none());
         assert_eq!(unbacked.capture, ArtifactCapture::NotCaptured);
         assert_ne!(unbacked.artifact, named_key);
+        assert!(batch
+            .facts()
+            .iter()
+            .find(|envelope| matches!(envelope.value, Fact::ArtifactMetadataSnapshot(_)))
+            .and_then(|envelope| envelope.semantic_revision)
+            .is_some());
+        let metadata_semantic = batch
+            .facts()
+            .iter()
+            .find(|envelope| matches!(envelope.value, Fact::ArtifactMetadataSnapshot(_)))
+            .and_then(|envelope| envelope.semantic_revision)
+            .unwrap();
+        let mut topology_replay = checkpoint.clone();
+        topology_replay.source_instance_id = 70;
+        topology_replay.stream_id = 80;
+        topology_replay.object_id = 90;
+        topology_replay.observed_at = 100;
+        let mut replay_batch = semantic_transcript_batch(16, 8);
+        adapter
+            .decode(
+                DecodeContext {
+                    decoder: &DecoderId::new(PARENT_DECODER).unwrap(),
+                    object_context: &object_context,
+                    decoder_state: None,
+                },
+                &topology_replay,
+                &mut replay_batch,
+            )
+            .unwrap();
+        let replay_envelope = replay_batch
+            .facts()
+            .iter()
+            .find(|envelope| matches!(envelope.value, Fact::ArtifactMetadataSnapshot(_)))
+            .unwrap();
+        assert_eq!(replay_envelope.semantic_revision, Some(metadata_semantic));
+        let Fact::ArtifactMetadataSnapshot(replay_metadata) = &replay_envelope.value else {
+            panic!("expected replayed artifact metadata");
+        };
+        assert_eq!(
+            replay_metadata.canonical_session,
+            metadata.canonical_session
+        );
+        assert_eq!(
+            replay_metadata.artifacts[0].canonical_artifact,
+            metadata.artifacts[0].canonical_artifact
+        );
+        assert_ne!(replay_metadata.session, metadata.session);
 
         let delta = record(
             br#"{
@@ -6693,6 +6826,10 @@ mod tests {
         assert!(!delta_metadata.is_snapshot_update);
         assert_eq!(delta_metadata.native_message_id, "delta-1");
         assert_eq!(delta_metadata.artifacts[0].artifact, named_key);
+        assert_eq!(
+            delta_metadata.artifacts[0].canonical_artifact,
+            named.canonical_artifact
+        );
         assert_eq!(
             delta_metadata
                 .source_time
@@ -6810,7 +6947,8 @@ mod tests {
             .unwrap();
         let decoder = DecoderId::new(ARTIFACT_CONTENT_DECODER).unwrap();
         let content = document_record(b"before edit\r\n");
-        let mut batch = FactBatch::new(4, 4).unwrap();
+        let object_key = format!("file-history/{SESSION}/71f902cd51ee4c6e@v2");
+        let mut batch = semantic_batch(ARTIFACT_CONTENT_STREAM, &object_key, 4, 4);
         assert_eq!(
             adapter
                 .decode(
@@ -6837,6 +6975,23 @@ mod tests {
         assert_eq!(artifact.version, 2);
         assert_eq!(artifact.content, content.payload);
         assert_eq!(artifact.size_bytes, content.payload.len() as u64);
+        let expected_canonical_session = batch
+            .canonical_entity_key("session", SESSION.as_bytes())
+            .unwrap();
+        let expected_canonical_artifact = batch
+            .canonical_entity_key(
+                "artifact",
+                &artifact_native_key(SESSION, Some("71f902cd51ee4c6e@v2"), None, 2, None),
+            )
+            .unwrap();
+        assert_eq!(artifact.canonical_session, Some(expected_canonical_session));
+        assert_eq!(
+            artifact.canonical_artifact,
+            Some(expected_canonical_artifact)
+        );
+        let semantic = batch.facts()[0]
+            .semantic_revision
+            .expect("canonical artifact content has a semantic revision");
         assert_eq!(
             artifact.artifact,
             artifact_key(
@@ -6868,7 +7023,7 @@ mod tests {
         );
         assert!(absent_batch.facts().is_empty());
 
-        let mut empty_batch = FactBatch::new(2, 2).unwrap();
+        let mut empty_batch = semantic_batch(ARTIFACT_CONTENT_STREAM, &object_key, 2, 2);
         adapter
             .decode(
                 DecodeContext {
@@ -6886,7 +7041,7 @@ mod tests {
         assert!(empty.content.is_empty());
         assert_eq!(empty.size_bytes, 0);
 
-        let mut binary_batch = FactBatch::new(2, 2).unwrap();
+        let mut binary_batch = semantic_batch(ARTIFACT_CONTENT_STREAM, &object_key, 2, 2);
         assert_eq!(
             adapter
                 .decode(
@@ -6905,6 +7060,53 @@ mod tests {
             panic!("expected byte-exact binary artifact content");
         };
         assert_eq!(binary.content, [0xff]);
+
+        let mut topology_replay = content.clone();
+        topology_replay.source_instance_id = 70;
+        topology_replay.stream_id = 80;
+        topology_replay.object_id = 90;
+        topology_replay.observed_at = 100;
+        let mut replay_batch = semantic_batch(ARTIFACT_CONTENT_STREAM, &object_key, 2, 2);
+        adapter
+            .decode(
+                DecodeContext {
+                    decoder: &decoder,
+                    object_context: &object_context,
+                    decoder_state: None,
+                },
+                &topology_replay,
+                &mut replay_batch,
+            )
+            .unwrap();
+        let replay = &replay_batch.facts()[0];
+        assert_eq!(replay.semantic_revision, Some(semantic));
+        let Fact::ArtifactContent(replay_artifact) = &replay.value else {
+            panic!("expected replayed artifact content");
+        };
+        assert_eq!(
+            replay_artifact.canonical_artifact,
+            Some(expected_canonical_artifact)
+        );
+        assert_ne!(replay_artifact.artifact, artifact.artifact);
+
+        let changed = document_record(b"after edit\n");
+        let mut changed_batch = semantic_batch(ARTIFACT_CONTENT_STREAM, &object_key, 2, 2);
+        adapter
+            .decode(
+                DecodeContext {
+                    decoder: &decoder,
+                    object_context: &object_context,
+                    decoder_state: None,
+                },
+                &changed,
+                &mut changed_batch,
+            )
+            .unwrap();
+        let changed_semantic = changed_batch.facts()[0]
+            .semantic_revision
+            .expect("changed artifact content has a semantic revision");
+        assert_eq!(changed_semantic.fact_id, semantic.fact_id);
+        assert_ne!(changed_semantic.fact_revision_id, semantic.fact_revision_id);
     }
 
     #[test]

@@ -4888,6 +4888,7 @@ mod tests {
     ) -> ArtifactMetadataSnapshotFact {
         ArtifactMetadataSnapshotFact {
             session: entity("session", SESSION),
+            canonical_session: None,
             native_message_id: message_id.to_string(),
             native_snapshot_message_id: "checkpoint".to_string(),
             observation_kind: ArtifactObservationKind::Delta,
@@ -4906,6 +4907,7 @@ mod tests {
     ) -> ArtifactMetadataEntry {
         ArtifactMetadataEntry {
             artifact,
+            canonical_artifact: None,
             native_artifact_id: native_artifact_id.map(str::to_string),
             tracking_path: tracking_path.to_string(),
             real_parent_dir: Some("/fixture/project/src".to_string()),
@@ -4919,6 +4921,8 @@ mod tests {
         ArtifactContentFact {
             artifact,
             session: entity("session", SESSION),
+            canonical_artifact: None,
+            canonical_session: None,
             native_artifact_id: "71f902cd51ee4c6e@v1".to_string(),
             native_file_hash: "71f902cd51ee4c6e".to_string(),
             version: 1,

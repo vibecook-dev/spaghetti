@@ -2436,6 +2436,7 @@ mod tests {
                 &record,
                 Fact::ArtifactMetadataSnapshot(ArtifactMetadataSnapshotFact {
                     session: session.clone(),
+                    canonical_session: None,
                     native_message_id: "message-1".to_string(),
                     native_snapshot_message_id: "snapshot-1".to_string(),
                     observation_kind: ArtifactObservationKind::Delta,
@@ -2443,6 +2444,7 @@ mod tests {
                     source_time: Some(source_time.clone()),
                     artifacts: vec![ArtifactMetadataEntry {
                         artifact: artifact.clone(),
+                        canonical_artifact: None,
                         native_artifact_id: Some(native_artifact_id.to_string()),
                         tracking_path: "src/bootstrap.rs".to_string(),
                         real_parent_dir: Some("/fixture".to_string()),
@@ -2459,6 +2461,8 @@ mod tests {
                 Fact::ArtifactContent(ArtifactContentFact {
                     artifact: artifact.clone(),
                     session,
+                    canonical_artifact: None,
+                    canonical_session: None,
                     native_artifact_id: native_artifact_id.to_string(),
                     native_file_hash: "artifact-hash".to_string(),
                     version: 1,
