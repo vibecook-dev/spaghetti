@@ -2061,12 +2061,22 @@ applied only to the first batch and is cleared after replacement, preventing a
 large object or subsequent live poll from restarting forever at offset zero.
 The integrated test uses a five-record multi-batch replay, proves the rebound
 owner retains generation one at the complete cursor, services handoff-time
-poll demand, and later co-stops with the same watcher. Oversized/incomplete
-source state fails before swap, exposes no path or native identity in Debug,
-and emits one terminal failure rather than a false completion. Dynamic
-discovery, non-append source participants, recoverable per-object replacement
-policy, the portable host/SDK transport, and calibrated watcher/replay policy
-remain open.
+poll demand, and later co-stops with the same watcher. The next D3 slice
+(`db9ade6`) carries the stopped source owner's bounded retry policy into that
+automatic replacement. Retryable source/decode failures publish ordered
+`Correction`-phase `source.object_error` controls and partial coverage while
+the retained watcher remains supervised; successful replay clears the staged
+error and supersedes its coverage before the completion barrier. Terminal or
+exhausted failure before any replacement position removes old object-owned
+facts, publishes position-free `Unavailable` Decode coverage plus the typed
+error, and lets healthy sibling relations finish the same full snapshot. A
+terminal failure after any committed replacement prefix still rejects the
+whole isolated stage before swap, because per-object reducer rollback is not
+yet available. The portable Rust and TypeScript source-envelope parsers accept
+object errors only in `Live` or `Correction`, never `Bootstrap`, and preserve
+the exact retry/provenance contract. Dynamic discovery, non-append source
+participants, per-object transactional rollback after partial progress, the
+public host/SDK transport, and calibrated watcher/replay policy remain open.
 
 ### D4. SDK and Chopsticks migration
 
