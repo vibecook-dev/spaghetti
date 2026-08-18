@@ -2364,6 +2364,21 @@ observer-lifecycle variants remain closed. This adds no N-API observer method,
 complete portable event union, native source access, support promotion, or
 public attachment authority.
 
+The next bounded D3 prerequisite (`7d3431c`) freezes a contextual portable
+replacement-family manifest for the selected actor-affiliation, actor-run, and
+usage-v2 reducers without presenting it as a bootstrap or resync barrier. The
+serialize-only Rust projection and strict TypeScript parser require the exact
+caller-held negotiated selection, RFC 012A fact-family coverage, and
+reducer-derived expected manifest. Family order, versions, replacement
+representations, merged completeness, portable counts, and nonzero semantic
+digests are fixed across bootstrap/correction phase and reject selection,
+coverage, family, count, or digest replay. The frozen fixture carries only
+opaque coverage coordinates and digests; no native payload, locator, root,
+watermark, or source-access authority enters the manifest. Full barrier
+publication remains gated on the complete D-owned artifact/capability state,
+dynamic/discovered scope authority, and the complete event/control union; no
+N-API observer transport or public attachment authority is added here.
+
 ### D4. SDK and Chopsticks migration
 
 Add a feature-flagged Chopsticks path beside `watchSessionTranscript`:
