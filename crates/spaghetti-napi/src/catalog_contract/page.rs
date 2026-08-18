@@ -30,9 +30,9 @@ use super::query::{
 };
 use super::{
     validate_identifier, CatalogAccessPolicyDigest, CatalogContractError, CatalogCoveragePlan,
-    CatalogCoveragePlanSource, CatalogCoverageScope, CatalogCursor, CatalogQueryFingerprint,
-    CatalogQueryKind, CatalogReadinessPhase, CatalogReadinessSnapshot, CatalogSnapshotId,
-    CatalogSortKey, CATALOG_COVERAGE_PLAN_CONTRACT_VERSION,
+    CatalogCoveragePlanId, CatalogCoveragePlanSource, CatalogCoverageScope, CatalogCursor,
+    CatalogQueryFingerprint, CatalogQueryKind, CatalogReadinessPhase, CatalogReadinessSnapshot,
+    CatalogSnapshotId, CatalogSortKey, CATALOG_COVERAGE_PLAN_CONTRACT_VERSION,
 };
 
 pub(crate) const CATALOG_PAGE_CONTRACT_VERSION: u32 = 1;
@@ -48,6 +48,58 @@ const MAX_RESOLUTION_TARGETS: usize = 4_096;
 const MAX_PROVENANCE_REVISIONS: usize = 64;
 const MAX_SOURCE_COVERAGE_MEMBERS: usize = 16_384;
 const MAX_PORTABLE_COVERAGE_REASON_BYTES: usize = 1_024;
+
+/// Opaque proof that a portable row projection is bound to one validated
+/// Library plan and one exact negotiated selection. The initial retained-page
+/// executor can issue only the privacy-preserving WITHHELD view; no LOCAL
+/// constructor exists in this slice.
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct CatalogPolicyViewBinding {
+    coverage_plan_id: CatalogCoveragePlanId,
+    scope: CatalogCoverageScope,
+    contract_selection: CatalogQueryContractSelection,
+    view: CatalogPolicyView,
+}
+
+impl CatalogPolicyViewBinding {
+    pub(crate) fn withheld(
+        plan: &CatalogCoveragePlan,
+        contract_selection: &CatalogQueryContractSelection,
+    ) -> Result<Self, CatalogContractError> {
+        plan.validate()?;
+        contract_selection.validate()?;
+        if plan.scope != CatalogCoverageScope::Library {
+            return Err(CatalogContractError::invalid(
+                "initial retained catalog pages require the Library scope",
+            ));
+        }
+        Ok(Self {
+            coverage_plan_id: plan.coverage_plan_id,
+            scope: plan.scope,
+            contract_selection: contract_selection.clone(),
+            view: CatalogPolicyView::WITHHELD,
+        })
+    }
+
+    fn validate_for(
+        &self,
+        plan: &CatalogCoveragePlan,
+        contract_selection: &CatalogQueryContractSelection,
+    ) -> Result<CatalogPolicyView, CatalogContractError> {
+        plan.validate()?;
+        contract_selection.validate()?;
+        if self.coverage_plan_id != plan.coverage_plan_id
+            || self.scope != plan.scope
+            || self.contract_selection != *contract_selection
+            || self.view != CatalogPolicyView::WITHHELD
+        {
+            return Err(CatalogContractError::invalid(
+                "catalog policy view does not match the exact plan and negotiated selection",
+            ));
+        }
+        Ok(self.view)
+    }
+}
 
 fn validate_portable_u64(label: &str, value: u64) -> Result<(), CatalogContractError> {
     if value > MAX_JAVASCRIPT_SAFE_INTEGER {
@@ -447,7 +499,7 @@ pub(crate) struct CatalogPortableProjectRow {
 }
 
 impl CatalogPortableProjectRow {
-    pub(crate) fn from_evidence(
+    fn from_evidence(
         row: &CatalogProjectRow,
         view: CatalogPolicyView,
     ) -> Result<Self, CatalogContractError> {
@@ -466,6 +518,15 @@ impl CatalogPortableProjectRow {
         };
         value.validate()?;
         Ok(value)
+    }
+
+    pub(crate) fn from_bound_evidence(
+        row: &CatalogProjectRow,
+        binding: &CatalogPolicyViewBinding,
+        plan: &CatalogCoveragePlan,
+        contract_selection: &CatalogQueryContractSelection,
+    ) -> Result<Self, CatalogContractError> {
+        Self::from_evidence(row, binding.validate_for(plan, contract_selection)?)
     }
 
     fn validate(&self) -> Result<(), CatalogContractError> {
@@ -528,7 +589,7 @@ pub(crate) struct CatalogPortableSessionRow {
 }
 
 impl CatalogPortableSessionRow {
-    pub(crate) fn from_evidence(
+    fn from_evidence(
         row: &CatalogSessionRow,
         view: CatalogPolicyView,
     ) -> Result<Self, CatalogContractError> {
@@ -562,6 +623,15 @@ impl CatalogPortableSessionRow {
         };
         value.validate()?;
         Ok(value)
+    }
+
+    pub(crate) fn from_bound_evidence(
+        row: &CatalogSessionRow,
+        binding: &CatalogPolicyViewBinding,
+        plan: &CatalogCoveragePlan,
+        contract_selection: &CatalogQueryContractSelection,
+    ) -> Result<Self, CatalogContractError> {
+        Self::from_evidence(row, binding.validate_for(plan, contract_selection)?)
     }
 
     fn validate(&self) -> Result<(), CatalogContractError> {

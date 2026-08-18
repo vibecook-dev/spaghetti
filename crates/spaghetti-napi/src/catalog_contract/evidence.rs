@@ -132,6 +132,16 @@ fn validate_provenance(
                 "{label} contains an incompatible semantic revision reference"
             )));
         }
+        if reference
+            .fact_revision_id
+            .as_bytes()
+            .iter()
+            .all(|byte| *byte == 0)
+        {
+            return Err(CatalogContractError::invalid(format!(
+                "{label} contains a zero semantic revision reference"
+            )));
+        }
         if !unique.insert(reference.fact_revision_id) {
             return Err(CatalogContractError::invalid(format!(
                 "{label} contains duplicate semantic revision provenance"
@@ -219,6 +229,17 @@ impl CatalogEntityRef {
         {
             return Err(CatalogContractError::invalid(
                 "catalog entity uses an incompatible external-reference version",
+            ));
+        }
+        if self
+            .external_ref
+            .entity_key
+            .as_bytes()
+            .iter()
+            .all(|byte| *byte == 0)
+        {
+            return Err(CatalogContractError::invalid(
+                "catalog entity reference requires a nonzero entity key",
             ));
         }
         Ok(())
@@ -696,7 +717,7 @@ pub(crate) enum ProjectAssociationBasis {
     DeclaredDerivedAncestor,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct SessionProjectAssociationFact {
     pub association_key: CatalogAssociationKey,
     pub owner: CatalogEvidenceOwner,
@@ -748,6 +769,19 @@ impl SessionProjectAssociationFact {
 
     fn validate(&self) -> Result<(), CatalogContractError> {
         self.owner.validate()?;
+        if self
+            .association_key
+            .as_bytes()
+            .iter()
+            .all(|byte| *byte == 0)
+            || self
+                .locator_claim_key
+                .is_some_and(|key| key.as_bytes().iter().all(|byte| *byte == 0))
+        {
+            return Err(CatalogContractError::invalid(
+                "catalog association evidence keys must be nonzero",
+            ));
+        }
         self.session_ref.validate()?;
         self.project_ref.validate()?;
         if self.session_ref.kind != CatalogEntityKind::Session
@@ -1155,7 +1189,7 @@ fn compare_field_candidates<T>(
         .then_with(|| right.assertion_key.cmp(&left.assertion_key))
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct CatalogFieldSelection<T> {
     pub selected_assertion_key: CatalogAssertionKey,
     pub field: CatalogQualifiedField<T>,
@@ -1219,7 +1253,7 @@ struct StoredIdentityRelation {
     observation_commit: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct CatalogProjectRow {
     pub project_ref: CatalogEntityRef,
     pub native_identity: Option<CatalogFieldSelection<NativeIdentity>>,
@@ -1231,7 +1265,7 @@ pub(crate) struct CatalogProjectRow {
     pub assertion_keys: Vec<CatalogAssertionKey>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct CatalogSessionRow {
     pub session_ref: CatalogEntityRef,
     pub project_association: CatalogAssociationCoverage,
@@ -1246,20 +1280,335 @@ pub(crate) struct CatalogSessionRow {
     pub assertion_keys: Vec<CatalogAssertionKey>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct CatalogAssociationSelection {
     pub association: SessionProjectAssociationFact,
     pub competing_associations: Vec<SessionProjectAssociationFact>,
     pub conflicting_association_keys: Vec<CatalogAssociationKey>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub(crate) enum CatalogAssociationCoverage {
     Available {
         selection: Box<CatalogAssociationSelection>,
     },
     Unknown,
+}
+
+fn validate_nonzero_assertion_key(
+    label: &str,
+    key: CatalogAssertionKey,
+) -> Result<(), CatalogContractError> {
+    if key.as_bytes().iter().all(|byte| *byte == 0) {
+        return Err(CatalogContractError::invalid(format!(
+            "{label} requires nonzero assertion keys"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_durable_field_selection<T>(
+    label: &str,
+    selection: &CatalogFieldSelection<T>,
+    validate_field: impl FnOnce(&CatalogQualifiedField<T>) -> Result<(), CatalogContractError>,
+) -> Result<Vec<CatalogAssertionKey>, CatalogContractError> {
+    validate_nonzero_assertion_key(label, selection.selected_assertion_key)?;
+    if selection.conflicting_assertion_keys.len() > MAX_PRESENTATION_MEMBERS
+        || !selection
+            .conflicting_assertion_keys
+            .windows(2)
+            .all(|pair| pair[0] < pair[1])
+    {
+        return Err(CatalogContractError::invalid(format!(
+            "{label} conflicting assertion keys must be bounded, canonical, and duplicate-free"
+        )));
+    }
+    for key in &selection.conflicting_assertion_keys {
+        validate_nonzero_assertion_key(label, *key)?;
+    }
+    if selection
+        .conflicting_assertion_keys
+        .binary_search(&selection.selected_assertion_key)
+        .is_ok()
+    {
+        return Err(CatalogContractError::invalid(format!(
+            "{label} selected assertion cannot also be conflicting evidence"
+        )));
+    }
+    validate_field(&selection.field)?;
+    let mut referenced = Vec::with_capacity(selection.conflicting_assertion_keys.len() + 1);
+    referenced.push(selection.selected_assertion_key);
+    referenced.extend(selection.conflicting_assertion_keys.iter().copied());
+    Ok(referenced)
+}
+
+fn validate_durable_row_assertions(
+    assertion_keys: &[CatalogAssertionKey],
+    referenced: &[CatalogAssertionKey],
+) -> Result<(), CatalogContractError> {
+    if assertion_keys.is_empty()
+        || assertion_keys.len() > MAX_PRESENTATION_MEMBERS
+        || !assertion_keys.windows(2).all(|pair| pair[0] < pair[1])
+    {
+        return Err(CatalogContractError::invalid(
+            "durable catalog row assertion keys must be nonempty, bounded, canonical, and duplicate-free",
+        ));
+    }
+    for key in assertion_keys {
+        validate_nonzero_assertion_key("durable catalog row", *key)?;
+    }
+    if referenced
+        .iter()
+        .any(|key| assertion_keys.binary_search(key).is_err())
+    {
+        return Err(CatalogContractError::invalid(
+            "durable catalog field evidence must belong to the row assertion set",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_durable_association(
+    coverage: &CatalogAssociationCoverage,
+    session_ref: CatalogEntityRef,
+) -> Result<(), CatalogContractError> {
+    let CatalogAssociationCoverage::Available { selection } = coverage else {
+        return Ok(());
+    };
+    selection.association.validate()?;
+    if selection.association.session_ref != session_ref {
+        return Err(CatalogContractError::invalid(
+            "durable catalog association belongs to a different session row",
+        ));
+    }
+    if selection.competing_associations.len() > MAX_REPLACEMENT_RELATIONS
+        || !selection
+            .competing_associations
+            .windows(2)
+            .all(|pair| pair[0].association_key < pair[1].association_key)
+    {
+        return Err(CatalogContractError::invalid(
+            "durable competing associations must be bounded, canonical, and duplicate-free",
+        ));
+    }
+    let mut expected_conflicts = Vec::new();
+    for competitor in &selection.competing_associations {
+        competitor.validate()?;
+        if competitor.session_ref != session_ref
+            || competitor.association_key == selection.association.association_key
+        {
+            return Err(CatalogContractError::invalid(
+                "durable competing association is not independent evidence for this session",
+            ));
+        }
+        if competitor.authority == selection.association.authority
+            && competitor.project_ref != selection.association.project_ref
+        {
+            expected_conflicts.push(competitor.association_key);
+        }
+    }
+    if selection.conflicting_association_keys.len() > MAX_REPLACEMENT_RELATIONS
+        || !selection
+            .conflicting_association_keys
+            .windows(2)
+            .all(|pair| pair[0] < pair[1])
+        || selection
+            .conflicting_association_keys
+            .iter()
+            .any(|key| key.as_bytes().iter().all(|byte| *byte == 0))
+        || selection.conflicting_association_keys != expected_conflicts
+    {
+        return Err(CatalogContractError::invalid(
+            "durable association conflicts must exactly name canonical equal-authority project conflicts",
+        ));
+    }
+    Ok(())
+}
+
+impl CatalogProjectRow {
+    pub(super) fn validate_for_durable(&self) -> Result<(), CatalogContractError> {
+        self.project_ref.validate()?;
+        if self.project_ref.kind != CatalogEntityKind::Project {
+            return Err(CatalogContractError::invalid(
+                "durable project row requires a project reference",
+            ));
+        }
+        let mut referenced = Vec::new();
+        if let Some(selection) = &self.native_identity {
+            referenced.extend(validate_durable_field_selection(
+                "catalog project native identity",
+                selection,
+                validate_native_identity_field,
+            )?);
+        }
+        for (label, selection) in [
+            ("catalog project root identity", &self.root_identity),
+            ("catalog project display path", &self.display_path),
+            ("catalog project display name", &self.display_name),
+        ] {
+            if let Some(selection) = selection {
+                referenced.extend(validate_durable_field_selection(
+                    label,
+                    selection,
+                    |field| validate_string_field(label, field),
+                )?);
+            }
+        }
+        if let Some(selection) = &self.native_time {
+            referenced.extend(validate_durable_field_selection(
+                "catalog project native time",
+                selection,
+                CatalogQualifiedField::validate,
+            )?);
+        }
+        referenced.extend(validate_durable_field_selection(
+            "catalog project availability",
+            &self.availability,
+            validate_availability_field,
+        )?);
+        validate_durable_row_assertions(&self.assertion_keys, &referenced)
+    }
+}
+
+impl CatalogSessionRow {
+    pub(super) fn validate_for_durable(&self) -> Result<(), CatalogContractError> {
+        self.session_ref.validate()?;
+        if self.session_ref.kind != CatalogEntityKind::Session {
+            return Err(CatalogContractError::invalid(
+                "durable session row requires a session reference",
+            ));
+        }
+        validate_durable_association(&self.project_association, self.session_ref)?;
+        let mut referenced = Vec::new();
+        if let Some(selection) = &self.native_identity {
+            referenced.extend(validate_durable_field_selection(
+                "catalog session native identity",
+                selection,
+                validate_native_identity_field,
+            )?);
+        }
+        for (label, selection) in [
+            ("catalog session title", &self.title),
+            (
+                "catalog session first-user summary",
+                &self.first_user_summary,
+            ),
+        ] {
+            if let Some(selection) = selection {
+                referenced.extend(validate_durable_field_selection(
+                    label,
+                    selection,
+                    |field| validate_string_field(label, field),
+                )?);
+            }
+        }
+        for (label, selection) in [
+            (
+                "catalog session native creation time",
+                &self.native_created_at,
+            ),
+            (
+                "catalog session native update time",
+                &self.native_updated_at,
+            ),
+        ] {
+            if let Some(selection) = selection {
+                referenced.extend(validate_durable_field_selection(
+                    label,
+                    selection,
+                    CatalogQualifiedField::validate,
+                )?);
+            }
+        }
+        if let Some(selection) = &self.native_message_count {
+            referenced.extend(validate_durable_field_selection(
+                "catalog session native message count",
+                selection,
+                CatalogQualifiedField::validate,
+            )?);
+        }
+        if self.transcript_locator_claim_keys.len() > MAX_PRESENTATION_MEMBERS
+            || !self
+                .transcript_locator_claim_keys
+                .windows(2)
+                .all(|pair| pair[0] < pair[1])
+            || self
+                .transcript_locator_claim_keys
+                .iter()
+                .any(|key| key.as_bytes().iter().all(|byte| *byte == 0))
+        {
+            return Err(CatalogContractError::invalid(
+                "durable transcript locator claims must be bounded, canonical, nonzero, and duplicate-free",
+            ));
+        }
+        referenced.extend(validate_durable_field_selection(
+            "catalog session availability",
+            &self.availability,
+            validate_availability_field,
+        )?);
+        validate_durable_row_assertions(&self.assertion_keys, &referenced)
+    }
+}
+
+fn validate_canonical_durable_row<T: Serialize>(
+    payload: &[u8],
+    value: &T,
+    label: &'static str,
+) -> Result<(), CatalogContractError> {
+    let canonical = serialize_private_json_bounded(value, payload.len(), label)?;
+    if canonical != payload {
+        return Err(CatalogContractError::invalid(format!(
+            "{label} is not the exact canonical private JSON encoding"
+        )));
+    }
+    Ok(())
+}
+
+pub(crate) fn decode_durable_project_row(
+    payload: &[u8],
+    expected_key: &[u8; DIGEST_BYTES],
+    max_payload_bytes: usize,
+) -> Result<CatalogProjectRow, CatalogContractError> {
+    if payload.is_empty() || payload.len() > max_payload_bytes {
+        return Err(CatalogContractError::invalid(
+            "durable project row payload is outside its byte bound",
+        ));
+    }
+    let row: CatalogProjectRow = serde_json::from_slice(payload).map_err(|error| {
+        CatalogContractError::invalid(format!("durable project row is invalid: {error}"))
+    })?;
+    row.validate_for_durable()?;
+    if row.project_ref.external_ref.entity_key.as_bytes() != expected_key {
+        return Err(CatalogContractError::invalid(
+            "durable project row does not match its frame key",
+        ));
+    }
+    validate_canonical_durable_row(payload, &row, "durable catalog project row")?;
+    Ok(row)
+}
+
+pub(crate) fn decode_durable_session_row(
+    payload: &[u8],
+    expected_key: &[u8; DIGEST_BYTES],
+    max_payload_bytes: usize,
+) -> Result<CatalogSessionRow, CatalogContractError> {
+    if payload.is_empty() || payload.len() > max_payload_bytes {
+        return Err(CatalogContractError::invalid(
+            "durable session row payload is outside its byte bound",
+        ));
+    }
+    let row: CatalogSessionRow = serde_json::from_slice(payload).map_err(|error| {
+        CatalogContractError::invalid(format!("durable session row is invalid: {error}"))
+    })?;
+    row.validate_for_durable()?;
+    if row.session_ref.external_ref.entity_key.as_bytes() != expected_key {
+        return Err(CatalogContractError::invalid(
+            "durable session row does not match its frame key",
+        ));
+    }
+    validate_canonical_durable_row(payload, &row, "durable catalog session row")?;
+    Ok(row)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]

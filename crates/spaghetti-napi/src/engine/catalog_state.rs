@@ -4,6 +4,8 @@
 //! initial `Ready` snapshot published atomically by `catalog_publication`. It
 //! still owns no source reads, refresh/retention policy, or query authority.
 
+use std::sync::Arc;
+
 use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 use serde::Serialize;
 
@@ -13,6 +15,7 @@ use crate::catalog_contract::{
     CATALOG_READINESS_CONTRACT_VERSION,
 };
 
+use super::catalog_publication::CatalogReadyPublicationIdentity;
 use super::commit::{self, ChangeEntry};
 use super::EngineError;
 
@@ -113,6 +116,17 @@ pub(crate) struct DurableCatalogBuildState {
     pub plan: CatalogCoveragePlan,
     pub readiness: CatalogReadinessSnapshot,
     pub last_commit_seq: u64,
+    ready_publication_identity: Option<Arc<CatalogReadyPublicationIdentity>>,
+}
+
+/// Caller-held authority for a restart-validated immutable Ready snapshot.
+/// It is intentionally non-serializable and exposes no policy-view choice.
+#[derive(Clone, PartialEq, Eq)]
+pub(super) struct CatalogReadyReadAuthority {
+    plan: CatalogCoveragePlan,
+    readiness: CatalogReadinessSnapshot,
+    snapshot_id: CatalogSnapshotId,
+    publication_identity: Arc<CatalogReadyPublicationIdentity>,
 }
 
 impl DurableCatalogBuildState {
@@ -125,6 +139,61 @@ impl DurableCatalogBuildState {
             attempt: self.readiness.attempt,
             state: durable_phase(self.readiness.state)?,
         })
+    }
+
+    pub(super) fn ready_read_authority(&self) -> Result<CatalogReadyReadAuthority, EngineError> {
+        self.plan.validate().map_err(catalog_contract_error)?;
+        let snapshot_id = self.readiness.last_complete_snapshot.ok_or_else(|| {
+            EngineError::InvalidCommit(
+                "catalog retained-page reads require a completed snapshot".to_string(),
+            )
+        })?;
+        if self.plan.scope != CatalogCoverageScope::Library
+            || self.readiness.state != CatalogReadinessPhase::Ready
+            || self.readiness.coverage_plan_id != self.plan.coverage_plan_id
+            || self.readiness.completed_contract_version != Some(snapshot_id.pack_contract_version)
+            || self.readiness.complete_through_commit != Some(snapshot_id.complete_commit)
+            || self.readiness.epoch != snapshot_id.readiness_epoch
+            || self.last_commit_seq != snapshot_id.complete_commit
+        {
+            return Err(EngineError::InvalidCommit(
+                "catalog retained-page read authority is outside its exact Ready lineage"
+                    .to_string(),
+            ));
+        }
+        Ok(CatalogReadyReadAuthority {
+            plan: self.plan.clone(),
+            readiness: self.readiness.clone(),
+            snapshot_id,
+            publication_identity: self.ready_publication_identity.clone().ok_or_else(|| {
+                EngineError::InvalidCommit(
+                    "catalog Ready state is missing its restart-validated publication identity"
+                        .to_string(),
+                )
+            })?,
+        })
+    }
+}
+
+impl CatalogReadyReadAuthority {
+    pub(super) fn plan(&self) -> &CatalogCoveragePlan {
+        &self.plan
+    }
+
+    pub(super) fn readiness(&self) -> &CatalogReadinessSnapshot {
+        &self.readiness
+    }
+
+    pub(super) fn snapshot_id(&self) -> CatalogSnapshotId {
+        self.snapshot_id
+    }
+
+    pub(super) fn publication_identity(&self) -> &CatalogReadyPublicationIdentity {
+        self.publication_identity.as_ref()
+    }
+
+    pub(super) fn contract_selection(&self) -> &crate::adapter::ContractVersionSelection {
+        self.publication_identity.contract_selection()
     }
 }
 
@@ -563,7 +632,7 @@ fn decode_stored_state(
     ) {
         machine.schedule_build().map_err(catalog_contract_error)?;
     }
-    if phase == CatalogDurableBuildPhase::Ready {
+    let ready_publication_identity = if phase == CatalogDurableBuildPhase::Ready {
         let snapshot_id = CatalogSnapshotId::new(
             desired_contract_version,
             plan.coverage_plan_id,
@@ -580,7 +649,10 @@ fn decode_stored_state(
         machine
             .publish_ready(snapshot_id, publication.source_coverage)
             .map_err(catalog_contract_error)?;
-    }
+        Some(Arc::new(publication.identity))
+    } else {
+        None
+    };
     if machine.snapshot().epoch != epoch || machine.snapshot().attempt != attempt {
         return Err(corrupt_catalog_state(
             "catalog build epoch or attempt cannot be reconstructed from the persisted lineage",
@@ -590,6 +662,7 @@ fn decode_stored_state(
         plan,
         readiness: machine.snapshot().clone(),
         last_commit_seq,
+        ready_publication_identity,
     })
 }
 

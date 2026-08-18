@@ -380,6 +380,48 @@ fn initial_publication_requires_the_exact_empty_building_lineage_and_selection()
 }
 
 #[test]
+fn source_free_publication_still_requires_exact_base_and_reference_versions() {
+    let coverage_plan =
+        CatalogCoveragePlan::new(CatalogCoverageScope::Library, Vec::new(), Vec::new()).unwrap();
+    let readiness = building(&coverage_plan);
+    let reducer = CatalogReducer::default();
+
+    CatalogInitialPublicationAssembly::assemble(
+        &coverage_plan,
+        &readiness,
+        selection(),
+        Vec::new(),
+        &reducer,
+        Vec::new(),
+        CatalogPublicationLimits::default(),
+    )
+    .unwrap();
+
+    let mut model_drift = selection();
+    model_drift.model_major = 2;
+    let mut external_reference_drift = selection();
+    external_reference_drift.external_entity_reference_version = 2;
+    let mut semantic_reference_drift = selection();
+    semantic_reference_drift.semantic_revision_reference_version = 2;
+    for drifted in [
+        model_drift,
+        external_reference_drift,
+        semantic_reference_drift,
+    ] {
+        assert!(CatalogInitialPublicationAssembly::assemble(
+            &coverage_plan,
+            &readiness,
+            drifted,
+            Vec::new(),
+            &reducer,
+            Vec::new(),
+            CatalogPublicationLimits::default(),
+        )
+        .is_err());
+    }
+}
+
+#[test]
 fn required_and_optional_source_assemblies_are_exact() {
     let required = fixture_source("required");
     let optional = fixture_source("optional");

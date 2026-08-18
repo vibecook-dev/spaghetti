@@ -7,6 +7,7 @@
 mod artifact_projection;
 mod capability_query;
 mod catalog_publication;
+mod catalog_query;
 mod catalog_state;
 mod commit;
 mod coordinator;

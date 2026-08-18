@@ -16,6 +16,7 @@ use super::evidence::{
     CatalogEvidenceOwner, CatalogReducer, CatalogReducerPublication,
     CatalogReducerPublicationLimits,
 };
+use super::query::CATALOG_BASE_MODEL_MAJOR;
 use super::{
     validate_identifier, CatalogContractError, CatalogCoveragePlan, CatalogCoveragePlanId,
     CatalogCoveragePlanSource, CatalogCoverageScope, CatalogReadinessPhase,
@@ -24,7 +25,8 @@ use super::{
 };
 use crate::adapter::{
     ContractVersionSelection, CoverageDomain, CoverageSetCompleteness, SourceCoverageSet,
-    CONTRACT_VERSION_SELECTION_VERSION, SOURCE_COVERAGE_CONTRACT_VERSION,
+    CONTRACT_VERSION_SELECTION_VERSION, EXTERNAL_ENTITY_REFERENCE_VERSION,
+    SEMANTIC_REFERENCE_CONTRACT_VERSION, SOURCE_COVERAGE_CONTRACT_VERSION,
 };
 
 pub(crate) const CATALOG_INITIAL_PUBLICATION_CONTRACT_VERSION: u32 = 1;
@@ -34,6 +36,9 @@ const MAX_PUBLICATION_MEMBERS: usize = 1_000_000;
 const MAX_SELECTED_FACT_FAMILIES: usize = 4_096;
 pub(crate) const MAX_DURABLE_PUBLICATION_ENTRIES: usize = 2_100_000;
 pub(crate) const MAX_DURABLE_PUBLICATION_BYTES: usize = 512 * 1024 * 1024;
+/// Internal corruption/retention ceiling for one canonical project or session
+/// row. This is a safety bound, not a performance target or public limit.
+pub(crate) const MAX_DURABLE_CATALOG_ROW_BYTES: usize = 64 * 1024 * 1024;
 
 macro_rules! private_digest_type {
     ($name:ident, $label:literal) => {
@@ -807,11 +812,13 @@ impl CatalogInitialPublicationAssembly {
             reducer_state,
         )?;
         for row in self.reducer.project_rows() {
-            serialize_and_push_durable_entry(
+            row.validate_for_durable()?;
+            serialize_and_push_durable_entry_with_payload_limit(
                 &mut entries,
                 &mut encoded_bytes,
                 max_entries,
                 max_encoded_bytes,
+                MAX_DURABLE_CATALOG_ROW_BYTES,
                 CatalogDurablePublicationEntryKind::ProjectRow,
                 *row.project_ref.external_ref.entity_key.as_bytes(),
                 row,
@@ -819,11 +826,13 @@ impl CatalogInitialPublicationAssembly {
             )?;
         }
         for row in self.reducer.session_rows() {
-            serialize_and_push_durable_entry(
+            row.validate_for_durable()?;
+            serialize_and_push_durable_entry_with_payload_limit(
                 &mut entries,
                 &mut encoded_bytes,
                 max_entries,
                 max_encoded_bytes,
+                MAX_DURABLE_CATALOG_ROW_BYTES,
                 CatalogDurablePublicationEntryKind::SessionRow,
                 *row.session_ref.external_ref.entity_key.as_bytes(),
                 row,
@@ -977,13 +986,39 @@ fn serialize_and_push_durable_entry<T: Serialize + ?Sized>(
     value: &T,
     label: &'static str,
 ) -> Result<(), CatalogContractError> {
+    serialize_and_push_durable_entry_with_payload_limit(
+        entries,
+        encoded_bytes,
+        max_entries,
+        max_encoded_bytes,
+        MAX_DURABLE_PUBLICATION_BYTES,
+        kind,
+        key,
+        value,
+        label,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn serialize_and_push_durable_entry_with_payload_limit<T: Serialize + ?Sized>(
+    entries: &mut Vec<CatalogDurablePublicationEntry>,
+    encoded_bytes: &mut usize,
+    max_entries: usize,
+    max_encoded_bytes: usize,
+    max_payload_bytes: usize,
+    kind: CatalogDurablePublicationEntryKind,
+    key: [u8; DIGEST_BYTES],
+    value: &T,
+    label: &'static str,
+) -> Result<(), CatalogContractError> {
     let payload_budget = durable_entry_payload_budget(
         entries.len(),
         *encoded_bytes,
         max_entries,
         max_encoded_bytes,
         kind,
-    )?;
+    )?
+    .min(max_payload_bytes);
     let payload = serialize_private_json_bounded(value, payload_budget, label)?;
     push_durable_entry(
         entries,
@@ -1151,9 +1186,9 @@ fn validate_contract_selection(
     selection: &ContractVersionSelection,
 ) -> Result<(), CatalogContractError> {
     if selection.selection_contract_version != CONTRACT_VERSION_SELECTION_VERSION
-        || selection.model_major == 0
-        || selection.external_entity_reference_version == 0
-        || selection.semantic_revision_reference_version == 0
+        || selection.model_major != CATALOG_BASE_MODEL_MAJOR
+        || selection.external_entity_reference_version != EXTERNAL_ENTITY_REFERENCE_VERSION
+        || selection.semantic_revision_reference_version != SEMANTIC_REFERENCE_CONTRACT_VERSION
         || selection.coverage_contract_version != SOURCE_COVERAGE_CONTRACT_VERSION
         || selection.query_pack_version != Some(CATALOG_QUERY_PACK_CONTRACT_VERSION)
         || selection.observation_contract_version == Some(0)

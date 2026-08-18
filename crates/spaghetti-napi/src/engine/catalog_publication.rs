@@ -9,14 +9,16 @@ use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBe
 use serde::{Deserialize, Serialize};
 
 use crate::adapter::{ContractVersionSelection, SourceCoverageSet};
-use crate::catalog_contract::evidence::CatalogReducerPublicationRevision;
+use crate::catalog_contract::evidence::{
+    decode_durable_project_row, decode_durable_session_row, CatalogReducerPublicationRevision,
+};
 use crate::catalog_contract::publication::{
     derive_durable_content_digest, derive_durable_entries_digest,
     validate_durable_contract_selection, validate_durable_source_coverage,
     CatalogDurableInitialPublication, CatalogDurablePublicationEntryKind,
     CatalogInitialPublicationAssembly, CatalogInitialPublicationDigest,
-    CATALOG_DURABLE_PUBLICATION_CONTRACT_VERSION, MAX_DURABLE_PUBLICATION_BYTES,
-    MAX_DURABLE_PUBLICATION_ENTRIES,
+    CATALOG_DURABLE_PUBLICATION_CONTRACT_VERSION, MAX_DURABLE_CATALOG_ROW_BYTES,
+    MAX_DURABLE_PUBLICATION_BYTES, MAX_DURABLE_PUBLICATION_ENTRIES,
 };
 use crate::catalog_contract::{
     CatalogCoveragePlan, CatalogCoveragePlanSource, CatalogCoverageScope, CatalogReadinessMachine,
@@ -102,12 +104,104 @@ impl CatalogPublicationCommitHook for NoopCatalogPublicationCommitHook {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CatalogReadyPublicationHeaderIdentity {
+    build_commit_seq: u64,
+    contract_selection: ContractVersionSelection,
+    publication_digest: CatalogInitialPublicationDigest,
+    reducer_revision: CatalogReducerPublicationRevision,
+    entries_digest: [u8; DIGEST_BYTES],
+    content_digest: [u8; DIGEST_BYTES],
+    entry_count: usize,
+    encoded_bytes: usize,
+    source_count: usize,
+    member_count: usize,
+    project_row_count: usize,
+    session_row_count: usize,
+    tombstone_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CatalogReadyRowCommitment {
+    key: [u8; DIGEST_BYTES],
+    payload_digest: [u8; DIGEST_BYTES],
+    payload_len: u32,
+}
+
+#[derive(PartialEq, Eq)]
+pub(super) struct CatalogReadyPublicationIdentity {
+    header: CatalogReadyPublicationHeaderIdentity,
+    project_rows: Vec<CatalogReadyRowCommitment>,
+    session_rows: Vec<CatalogReadyRowCommitment>,
+}
+
+impl std::fmt::Debug for CatalogReadyPublicationIdentity {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CatalogReadyPublicationIdentity")
+            .field("header", &self.header)
+            .field("project_row_count", &self.project_rows.len())
+            .field("session_row_count", &self.session_rows.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl CatalogReadyPublicationIdentity {
+    pub(super) fn contract_selection(&self) -> &ContractVersionSelection {
+        &self.header.contract_selection
+    }
+
+    pub(super) fn matches_row(
+        &self,
+        kind: CatalogDurablePublicationEntryKind,
+        key: &[u8; DIGEST_BYTES],
+        payload_len: usize,
+        payload_digest: &[u8; DIGEST_BYTES],
+    ) -> bool {
+        let commitments = match kind {
+            CatalogDurablePublicationEntryKind::ProjectRow => &self.project_rows,
+            CatalogDurablePublicationEntryKind::SessionRow => &self.session_rows,
+            _ => return false,
+        };
+        let Ok(index) = commitments.binary_search_by_key(key, |commitment| commitment.key) else {
+            return false;
+        };
+        let commitment = &commitments[index];
+        usize::try_from(commitment.payload_len) == Ok(payload_len)
+            && &commitment.payload_digest == payload_digest
+    }
+
+    pub(super) fn expected_row_keys(
+        &self,
+        kind: CatalogDurablePublicationEntryKind,
+        after_key: Option<&[u8; DIGEST_BYTES]>,
+        limit: usize,
+    ) -> Option<Vec<[u8; DIGEST_BYTES]>> {
+        let commitments = match kind {
+            CatalogDurablePublicationEntryKind::ProjectRow => &self.project_rows,
+            CatalogDurablePublicationEntryKind::SessionRow => &self.session_rows,
+            _ => return None,
+        };
+        let start = match after_key {
+            Some(key) => commitments
+                .binary_search_by_key(key, |commitment| commitment.key)
+                .ok()?
+                .checked_add(1)?,
+            None => 0,
+        };
+        Some(
+            commitments[start..]
+                .iter()
+                .take(limit)
+                .map(|commitment| commitment.key)
+                .collect(),
+        )
+    }
+}
+
 pub(super) struct LoadedReadyPublication {
     pub(super) source_coverage: Vec<SourceCoverageSet>,
-    pub(super) build_commit_seq: u64,
-    pub(super) publication_digest: CatalogInitialPublicationDigest,
-    pub(super) content_digest: [u8; DIGEST_BYTES],
+    pub(super) identity: CatalogReadyPublicationIdentity,
 }
 
 pub(super) fn apply_initial_catalog_publication(
@@ -165,9 +259,9 @@ pub(super) fn apply_initial_catalog_publication_with_hook(
                 .expect("validated Ready state has a snapshot"),
             current.readiness.attempt,
         )?;
-        if retained.build_commit_seq == command.expected_build_commit_seq
-            && retained.publication_digest == durable.publication_digest()
-            && retained.content_digest == *durable.content_digest()
+        if retained.identity.header.build_commit_seq == command.expected_build_commit_seq
+            && retained.identity.header.publication_digest == durable.publication_digest()
+            && retained.identity.header.content_digest == *durable.content_digest()
         {
             transaction.commit().map_err(|error| {
                 catalog_state::sqlite_error("finish unchanged catalog publication", error)
@@ -579,6 +673,276 @@ struct StoredSnapshot {
     published_at: i64,
 }
 
+struct StoredQueryHeader {
+    build_commit_seq: i64,
+    durable_contract_version: i64,
+    pack_contract_version: i64,
+    coverage_plan_id: Option<Vec<u8>>,
+    readiness_epoch: i64,
+    attempt: i64,
+    contract_selection_json: Option<Vec<u8>>,
+    publication_digest: Option<Vec<u8>>,
+    reducer_revision: Option<Vec<u8>>,
+    entries_digest: Option<Vec<u8>>,
+    content_digest: Option<Vec<u8>>,
+    entry_count: i64,
+    encoded_bytes: i64,
+    source_count: i64,
+    member_count: i64,
+    project_row_count: i64,
+    session_row_count: i64,
+    tombstone_count: i64,
+    published_at: i64,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub(super) struct CatalogRetainedQueryHeader {
+    pub(super) contract_selection: ContractVersionSelection,
+    pub(super) project_row_count: usize,
+    pub(super) session_row_count: usize,
+    pub(super) encoded_bytes: usize,
+}
+
+/// Load only the bounded immutable header needed by a retained-page range
+/// read. Absence is an internal not-retained result; it is deliberately not a
+/// caller-visible SnapshotExpired claim because this slice has no retention
+/// authority.
+pub(super) fn load_retained_query_header(
+    connection: &Connection,
+    plan: &CatalogCoveragePlan,
+    snapshot_id: CatalogSnapshotId,
+    expected_attempt: u64,
+    expected_identity: &CatalogReadyPublicationIdentity,
+) -> Result<CatalogRetainedQueryHeader, EngineError> {
+    plan.validate()
+        .map_err(catalog_state::catalog_contract_error)?;
+    let stored = connection
+        .query_row(
+            r#"
+            SELECT build_commit_seq, durable_publication_contract_version,
+                   pack_contract_version,
+                   CASE WHEN typeof(coverage_plan_id) = 'blob'
+                                  AND length(coverage_plan_id) = 32
+                        THEN coverage_plan_id END,
+                   readiness_epoch, attempt,
+                   CASE WHEN typeof(contract_selection_json) = 'blob'
+                                  AND length(contract_selection_json) BETWEEN 1 AND 4194304
+                        THEN contract_selection_json END,
+                   CASE WHEN typeof(publication_digest) = 'blob'
+                                  AND length(publication_digest) = 32
+                        THEN publication_digest END,
+                   CASE WHEN typeof(reducer_revision) = 'blob'
+                                  AND length(reducer_revision) = 32
+                        THEN reducer_revision END,
+                   CASE WHEN typeof(entries_digest) = 'blob'
+                                  AND length(entries_digest) = 32
+                        THEN entries_digest END,
+                   CASE WHEN typeof(content_digest) = 'blob'
+                                  AND length(content_digest) = 32
+                        THEN content_digest END,
+                   entry_count, encoded_bytes, source_count, member_count,
+                   project_row_count, session_row_count, tombstone_count,
+                   published_at
+            FROM catalog_snapshots WHERE snapshot_commit_seq = ?1
+            "#,
+            [catalog_state::to_i64(
+                snapshot_id.complete_commit,
+                "catalog retained snapshot commit",
+            )?],
+            |row| {
+                Ok(StoredQueryHeader {
+                    build_commit_seq: row.get(0)?,
+                    durable_contract_version: row.get(1)?,
+                    pack_contract_version: row.get(2)?,
+                    coverage_plan_id: row.get(3)?,
+                    readiness_epoch: row.get(4)?,
+                    attempt: row.get(5)?,
+                    contract_selection_json: row.get(6)?,
+                    publication_digest: row.get(7)?,
+                    reducer_revision: row.get(8)?,
+                    entries_digest: row.get(9)?,
+                    content_digest: row.get(10)?,
+                    entry_count: row.get(11)?,
+                    encoded_bytes: row.get(12)?,
+                    source_count: row.get(13)?,
+                    member_count: row.get(14)?,
+                    project_row_count: row.get(15)?,
+                    session_row_count: row.get(16)?,
+                    tombstone_count: row.get(17)?,
+                    published_at: row.get(18)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(|error| catalog_state::sqlite_error("load retained catalog header", error))?
+        .ok_or_else(|| {
+            EngineError::InvalidCommit(
+                "catalog snapshot is not retained by this database".to_string(),
+            )
+        })?;
+
+    let coverage_plan_id = stored.coverage_plan_id.as_deref().ok_or_else(|| {
+        catalog_state::corrupt_catalog_state(
+            "retained catalog coverage-plan ID exceeds its fixed bound",
+        )
+    })?;
+    let build_commit_seq =
+        catalog_state::positive_u64(stored.build_commit_seq, "catalog Building commit")?;
+    validate_commit_owner(
+        connection,
+        build_commit_seq,
+        "catalog.library.build.scheduled",
+        None,
+    )?;
+    validate_commit_owner(
+        connection,
+        snapshot_id.complete_commit,
+        catalog_state::INITIAL_PUBLICATION_REASON,
+        Some(stored.published_at),
+    )?;
+    if build_commit_seq >= snapshot_id.complete_commit
+        || stored.durable_contract_version
+            != i64::from(CATALOG_DURABLE_PUBLICATION_CONTRACT_VERSION)
+        || stored.pack_contract_version != i64::from(snapshot_id.pack_contract_version)
+        || coverage_plan_id != plan.coverage_plan_id.storage_bytes()
+        || snapshot_id.coverage_plan_id != plan.coverage_plan_id
+        || stored.readiness_epoch
+            != catalog_state::to_i64(snapshot_id.readiness_epoch, "catalog retained epoch")?
+        || stored.attempt != catalog_state::to_i64(expected_attempt, "catalog retained attempt")?
+        || plan.scope != CatalogCoverageScope::Library
+    {
+        return Err(catalog_state::corrupt_catalog_state(
+            "retained catalog header is outside its exact plan/build lineage",
+        ));
+    }
+    let publication_digest = decode_digest_column(
+        stored.publication_digest.as_deref().ok_or_else(|| {
+            catalog_state::corrupt_catalog_state(
+                "retained catalog publication digest exceeds its fixed bound",
+            )
+        })?,
+        "catalog publication digest",
+    )?;
+    let reducer_revision = decode_digest_column(
+        stored.reducer_revision.as_deref().ok_or_else(|| {
+            catalog_state::corrupt_catalog_state(
+                "retained catalog reducer revision exceeds its fixed bound",
+            )
+        })?,
+        "catalog reducer revision",
+    )?;
+    let entries_digest = decode_digest_column(
+        stored.entries_digest.as_deref().ok_or_else(|| {
+            catalog_state::corrupt_catalog_state(
+                "retained catalog entries digest exceeds its fixed bound",
+            )
+        })?,
+        "catalog entries digest",
+    )?;
+    let content_digest = decode_digest_column(
+        stored.content_digest.as_deref().ok_or_else(|| {
+            catalog_state::corrupt_catalog_state(
+                "retained catalog content digest exceeds its fixed bound",
+            )
+        })?,
+        "catalog content digest",
+    )?;
+    let contract_selection_json = stored.contract_selection_json.ok_or_else(|| {
+        catalog_state::corrupt_catalog_state(
+            "retained catalog selection exceeds its durable byte bound",
+        )
+    })?;
+    let contract_selection: ContractVersionSelection =
+        serde_json::from_slice(&contract_selection_json).map_err(|error| {
+            catalog_state::corrupt_catalog_state(format!(
+                "retained catalog selection is invalid: {error}"
+            ))
+        })?;
+    validate_durable_contract_selection(&contract_selection)
+        .map_err(catalog_state::catalog_contract_error)?;
+    if contract_selection.query_pack_version != Some(snapshot_id.pack_contract_version) {
+        return Err(catalog_state::corrupt_catalog_state(
+            "retained catalog selection does not match its snapshot pack",
+        ));
+    }
+    let entry_count = bounded_usize(
+        stored.entry_count,
+        1,
+        MAX_DURABLE_PUBLICATION_ENTRIES,
+        "retained catalog entry count",
+    )?;
+    let encoded_bytes = bounded_usize(
+        stored.encoded_bytes,
+        1,
+        MAX_DURABLE_PUBLICATION_BYTES,
+        "retained catalog encoded bytes",
+    )?;
+    let project_row_count = bounded_usize(
+        stored.project_row_count,
+        0,
+        1_000_000,
+        "retained catalog project row count",
+    )?;
+    let session_row_count = bounded_usize(
+        stored.session_row_count,
+        0,
+        1_000_000,
+        "retained catalog session row count",
+    )?;
+    let source_count = bounded_usize(
+        stored.source_count,
+        0,
+        4_096,
+        "retained catalog source count",
+    )?;
+    let member_count = bounded_usize(
+        stored.member_count,
+        0,
+        1_000_000,
+        "retained catalog member count",
+    )?;
+    let tombstone_count = bounded_usize(
+        stored.tombstone_count,
+        0,
+        1_000_000,
+        "retained catalog tombstone count",
+    )?;
+    if project_row_count
+        .checked_add(session_row_count)
+        .is_none_or(|count| count > entry_count)
+    {
+        return Err(catalog_state::corrupt_catalog_state(
+            "retained catalog row counts exceed the bounded entry count",
+        ));
+    }
+    let header_identity = CatalogReadyPublicationHeaderIdentity {
+        build_commit_seq,
+        contract_selection: contract_selection.clone(),
+        publication_digest: CatalogInitialPublicationDigest::from_digest(publication_digest),
+        reducer_revision: CatalogReducerPublicationRevision::from_storage_bytes(reducer_revision),
+        entries_digest,
+        content_digest,
+        entry_count,
+        encoded_bytes,
+        source_count,
+        member_count,
+        project_row_count,
+        session_row_count,
+        tombstone_count,
+    };
+    if header_identity != expected_identity.header {
+        return Err(catalog_state::corrupt_catalog_state(
+            "retained catalog header differs from the restart-validated publication identity",
+        ));
+    }
+    Ok(CatalogRetainedQueryHeader {
+        contract_selection,
+        project_row_count,
+        session_row_count,
+        encoded_bytes,
+    })
+}
+
 pub(super) fn load_ready_publication(
     connection: &Connection,
     plan: &CatalogCoveragePlan,
@@ -818,7 +1182,9 @@ pub(super) fn load_ready_publication(
                                   AND length(entry_key) = 32
                         THEN entry_key END,
                    CASE WHEN typeof(payload) = 'blob'
-                                  AND length(payload) BETWEEN 1 AND ?3
+                                  AND length(payload) BETWEEN 1 AND
+                                      CASE WHEN entry_kind IN ('project_row', 'session_row')
+                                           THEN MIN(?3, ?4) ELSE ?3 END
                         THEN payload END,
                    CASE WHEN typeof(payload_digest) = 'blob'
                                   AND length(payload_digest) = 32
@@ -838,10 +1204,30 @@ pub(super) fn load_ready_publication(
             catalog_state::to_i64(snapshot_id.complete_commit, "catalog snapshot commit")?,
             catalog_state::to_i64(scan_limit as u64, "catalog snapshot entry scan limit")?,
             catalog_state::to_i64(encoded_bytes as u64, "catalog snapshot encoded bytes")?,
+            catalog_state::to_i64(
+                MAX_DURABLE_CATALOG_ROW_BYTES as u64,
+                "catalog durable row byte ceiling",
+            )?,
         ])
         .map_err(|error| catalog_state::sqlite_error("query catalog snapshot entries", error))?;
     let mut summaries = Vec::with_capacity(entry_count);
     let mut source_coverage = Vec::with_capacity(source_count);
+    let mut project_row_commitments = Vec::new();
+    project_row_commitments
+        .try_reserve_exact(project_row_count)
+        .map_err(|_| {
+            catalog_state::corrupt_catalog_state(
+                "catalog project-row commitment bound cannot be reserved",
+            )
+        })?;
+    let mut session_row_commitments = Vec::new();
+    session_row_commitments
+        .try_reserve_exact(session_row_count)
+        .map_err(|_| {
+            catalog_state::corrupt_catalog_state(
+                "catalog session-row commitment bound cannot be reserved",
+            )
+        })?;
     let mut actual_encoded_bytes = contract_selection_json.len();
     if let Some(identity_contract) = member_identity_contract_id {
         actual_encoded_bytes = actual_encoded_bytes
@@ -927,6 +1313,35 @@ pub(super) fn load_ready_publication(
                 "catalog reducer-state frame key does not match the snapshot reducer revision",
             ));
         }
+        match kind {
+            CatalogDurablePublicationEntryKind::ProjectRow => {
+                decode_durable_project_row(&payload, &key, MAX_DURABLE_CATALOG_ROW_BYTES)
+                    .map_err(catalog_state::catalog_contract_error)?;
+                project_row_commitments.push(CatalogReadyRowCommitment {
+                    key,
+                    payload_digest,
+                    payload_len: u32::try_from(payload.len()).map_err(|_| {
+                        catalog_state::corrupt_catalog_state(
+                            "catalog project row exceeds its commitment length bound",
+                        )
+                    })?,
+                });
+            }
+            CatalogDurablePublicationEntryKind::SessionRow => {
+                decode_durable_session_row(&payload, &key, MAX_DURABLE_CATALOG_ROW_BYTES)
+                    .map_err(catalog_state::catalog_contract_error)?;
+                session_row_commitments.push(CatalogReadyRowCommitment {
+                    key,
+                    payload_digest,
+                    payload_len: u32::try_from(payload.len()).map_err(|_| {
+                        catalog_state::corrupt_catalog_state(
+                            "catalog session row exceeds its commitment length bound",
+                        )
+                    })?,
+                });
+            }
+            _ => {}
+        }
         actual_encoded_bytes = actual_encoded_bytes
             .checked_add(payload.len())
             .and_then(|bytes| bytes.checked_add(DIGEST_BYTES * 2))
@@ -975,6 +1390,8 @@ pub(super) fn load_ready_publication(
         || kind_counts[kind_index(CatalogDurablePublicationEntryKind::SessionRow)]
             != session_row_count
         || kind_counts[kind_index(CatalogDurablePublicationEntryKind::Tombstone)] != tombstone_count
+        || project_row_commitments.len() != project_row_count
+        || session_row_commitments.len() != session_row_count
     {
         return Err(catalog_state::corrupt_catalog_state(
             "catalog snapshot entry counts or bytes do not match its header",
@@ -1018,9 +1435,25 @@ pub(super) fn load_ready_publication(
     });
     Ok(LoadedReadyPublication {
         source_coverage,
-        build_commit_seq,
-        publication_digest,
-        content_digest,
+        identity: CatalogReadyPublicationIdentity {
+            header: CatalogReadyPublicationHeaderIdentity {
+                build_commit_seq,
+                contract_selection,
+                publication_digest,
+                reducer_revision,
+                entries_digest: actual_entries_digest,
+                content_digest,
+                entry_count,
+                encoded_bytes,
+                source_count,
+                member_count,
+                project_row_count,
+                session_row_count,
+                tombstone_count,
+            },
+            project_rows: project_row_commitments,
+            session_rows: session_row_commitments,
+        },
     })
 }
 
