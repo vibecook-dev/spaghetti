@@ -2092,14 +2092,24 @@ the retained watcher remains supervised; successful replay clears the staged
 error and supersedes its coverage before the completion barrier. Terminal or
 exhausted failure before any replacement position removes old object-owned
 facts, publishes position-free `Unavailable` Decode coverage plus the typed
-error, and lets healthy sibling relations finish the same full snapshot. A
-terminal failure after any committed replacement prefix still rejects the
-whole isolated stage before swap, because per-object reducer rollback is not
-yet available. The portable Rust and TypeScript source-envelope parsers accept
-object errors only in `Live` or `Correction`, never `Bootstrap`, and preserve
-the exact retry/provenance contract. Dynamic discovery, non-append source
-participants, per-object transactional rollback after partial progress, the
-public host/SDK transport, and calibrated watcher/replay policy remain open.
+error, and lets healthy sibling relations finish the same full snapshot. The
+next D3 slice (`f48dedd`) closes the corresponding partial-progress case with
+an object-scoped in-memory transaction. Scheduled retries retain the exact
+cursor and partial coverage; terminal or exhausted recovery prevalidates the
+object, admission, and reducer authorities, then removes only that object's
+offered coverage and object-token-owned facts while discarding its cursor and
+decoder state. The typed error retains the last admitted position strictly as
+diagnostic provenance, while current Decode coverage is position-free
+`Unavailable`; the discarded marker is bound to that exact terminal error and
+cannot become a resumable live cursor. Integrated retry-exhaustion and
+sibling-ownership tests prove the incomplete prefix is absent from the frozen
+replacement, an unaffected sibling remains projected, and the rebound epoch
+continues to produce complete polls without failing the observer. The portable
+Rust and TypeScript source-envelope parsers accept object errors only in
+`Live` or `Correction`, never `Bootstrap`, and preserve the exact
+retry/provenance contract. Dynamic discovery, non-append source participants,
+the public host/SDK transport, and calibrated watcher/replay policy remain
+open.
 
 ### D4. SDK and Chopsticks migration
 
