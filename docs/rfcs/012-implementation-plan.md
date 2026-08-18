@@ -601,10 +601,10 @@ B1 remains `In progress` only at the public exposure gate: no catalog N-API
 query surface should land until engine transport can bind an authorized
 `CatalogPolicyView` to the frozen access-policy digest and B3 provides real
 retained-snapshot/query execution. B2 is independently `In progress` as
-described below. B3 has started with source-neutral plan registration and the
-initial build lineage described below, but coverage/row/snapshot publication
-and retained query execution remain open; scheduling and hydration execution
-remain later integration work.
+described below. B3 now includes source-neutral plan registration, the initial
+build lineage, and one atomic immutable initial Library publication, but
+retained-snapshot query execution remains open; scheduling and hydration
+execution remain later integration work.
 
 ### B2. Catalog source compositions
 
@@ -798,10 +798,10 @@ replays are no-ops, stale or foreign expectations fail without mutation, and
 restart reparses the bounded plan, recomputes its ID/content digest, validates
 commit ownership, and reconstructs the B1 readiness machine. Crash injection
 proves rollback at every precommit seam and durable idempotency after commit.
-This slice cannot accept or synthesize coverage, reducer rows, complete or
-degraded readiness, snapshot IDs, last-complete state, retention, pagination,
-or public query authority. Atomic coverage/reducer/snapshot/readiness/outbox
-publication and retained-snapshot reads remain the next B3 gates.
+This slice itself cannot accept or synthesize coverage, reducer rows, complete
+or degraded readiness, snapshot IDs, last-complete state, retention,
+pagination, or public query authority. The later third slice now supplies the
+initial atomic publication; retained-snapshot reads remain open.
 
 The second bounded B3 slice (`e65a9fd`) adds a store-free, contract-only
 initial-publication assembly envelope. It consumes exact complete Library
@@ -817,10 +817,26 @@ state are canonicalized before deriving the privacy-safe publication digest;
 early aggregate preflight plus grouped row materialization and indexed member
 validation keep the freeze bounded without quadratic lookup. A complete empty
 required source composes honestly with a nonempty required source. The envelope
-is non-serializable and store-free: it does not write SQLite, publish a Ready
-snapshot/readiness/outbox transition, read native sources, expose N-API or
-query authority, or implement retention/pagination. Atomic durable initial
-publication remains the next B3 gate.
+is non-serializable and store-free: it does not itself write SQLite, publish a
+Ready snapshot/readiness/outbox transition, read native sources, expose N-API
+or query authority, or implement retention/pagination. The following slice
+consumes this checked envelope for initial durability.
+
+The third bounded B3 slice (`51b0025`) consumes the checked initial Library
+publication envelope under an exact `Building` commit compare-and-swap and
+writes one immutable schema-v51 snapshot header, canonical typed private
+frames, `Ready` build/readiness state, and one privacy-safe readiness outbox
+entry in a single SQLite transaction. Durable preparation enforces entry and
+aggregate byte ceilings before SQL with bounded streaming JSON encoding;
+restart reconstructs the exact plan, selection, and source coverage and
+validates commit ownership, closed vocabularies, header/frame coordinates,
+nonzero revisions, reducer-key linkage, canonical ordering, counts, and
+content digests before exposing `Ready`. Crash injection covers every write
+boundary and lost acknowledgements, while a second connection proves
+uncommitted rows remain invisible. This remains initial `Library` publication
+only: no refresh/degraded transition, retention/expiration, query-page
+execution, hydration execution, source reads, or public N-API authority.
+Retained-snapshot read lanes and pagination remain the next B3 gates.
 
 ### B4. Progressive host and UX
 
