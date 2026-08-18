@@ -460,6 +460,51 @@ struct GrokSessionContext {
     clock_truncated: bool,
 }
 
+/// Test-only, privacy-sensitive coordinates used by the RFC 012B candidate
+/// oracle. They never enter its frozen fixture or a public contract.
+#[cfg(test)]
+#[derive(Clone, PartialEq, Eq)]
+pub(super) struct GrokCatalogCoordinates {
+    pub(super) cwd: String,
+    pub(super) native_project_key: String,
+    pub(super) session_id: String,
+}
+
+#[cfg(test)]
+pub(super) fn candidate_catalog_path_coordinates(
+    relative_path: &Path,
+) -> Result<GrokCatalogCoordinates, AdapterError> {
+    Ok(catalog_coordinates(session_context_from_path(
+        relative_path,
+    )?))
+}
+
+#[cfg(test)]
+pub(super) fn candidate_catalog_summary_coordinates(
+    relative_path: &Path,
+    summary: &Value,
+) -> Result<GrokCatalogCoordinates, AdapterError> {
+    if !summary.is_object() {
+        return Err(AdapterError::new(
+            AdapterErrorClass::RecordPermanent,
+            "grok_catalog_summary_shape",
+            "Grok catalog summary must be an object",
+        ));
+    }
+    let mut context = session_context_from_path(relative_path)?;
+    apply_summary(&mut context, summary);
+    Ok(catalog_coordinates(context))
+}
+
+#[cfg(test)]
+fn catalog_coordinates(context: GrokSessionContext) -> GrokCatalogCoordinates {
+    GrokCatalogCoordinates {
+        cwd: context.cwd,
+        native_project_key: context.native_project_key,
+        session_id: context.session_id,
+    }
+}
+
 impl GrokSessionContext {
     fn decode(context: &AdapterObjectContext) -> Result<Self, AdapterError> {
         if context.version() != OBJECT_CONTEXT_VERSION {

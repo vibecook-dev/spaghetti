@@ -1,0 +1,43 @@
+{
+  "fixture_contract_version": 1,
+  "adapter_id": "grok",
+  "planning_evidence_id": "grok.catalog-candidate-2026-08-15",
+  "support_release_id": "grok-support-2026-08-15-candidate",
+  "source_declaration_id": "grok-sources-2026-08-15-candidate",
+  "support_release_status": "candidate",
+  "catalog_execution_authorized": false,
+  "planned_composition_status": "planned_unbound",
+  "admission_policy_status": "current_candidate_declaration",
+  "bounds": {
+    "membership_max_entries": 100000,
+    "membership_max_depth": 8,
+    "admitted_sidecar_name_count": 4,
+    "summary_max_document_bytes": 1048576
+  },
+  "independent_oracle": {
+    "project_count": 3,
+    "session_count": 4,
+    "project_identity_digest": "6d14f245f0727d59032ae4113ac4c2a58d752858ec53eb30bd8a50bd6d29ea77",
+    "session_identity_digest": "dabea5526a7e7f3b1886ca61bedb1cf9fdb8a6385b14de31f6006f462da9478c"
+  },
+  "rust_conformance": {
+    "membership_generation": 1,
+    "admitted_membership_object_count": 16,
+    "member_count": 4,
+    "summary_source_record_count": 4,
+    "summary_metadata_unavailable_count": 0,
+    "summary_bytes_read": 1373,
+    "hydrated_project_count": 3,
+    "hydrated_session_count": 4,
+    "project_entity_count": 3,
+    "session_entity_count": 4,
+    "fact_identity_count": 15,
+    "fact_revision_count": 15,
+    "membership_identity_digest": "sha256:dabea5526a7e7f3b1886ca61bedb1cf9fdb8a6385b14de31f6006f462da9478c",
+    "source_record_identity_digest": "sha256:bab787eb9e7e6bb6e6e38e1d9918db41346b3e8f4ff5973f603ff92bb89696b9",
+    "entity_identity_digest": "sha256:60ba4d29dd5b83f7f1f8ef67d094bb809beecf9808ea4c61f1ec3255ebef9c44",
+    "fact_identity_digest": "sha256:fa5f5d0014cb98c740286fd03c3c56d507f721d0cfd7bdb17c21b5d43443f957",
+    "fact_revision_digest": "sha256:8475878cef6257007731de4137797b728b953dc7b97c64cdab53747121877a1f",
+    "hydrated_identity_digest": "sha256:aae71bca980ec43f460b497901280de3084bb3d027e44bdc762d7ee6b065cdd1"
+  }
+}
