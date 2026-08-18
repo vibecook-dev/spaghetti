@@ -2336,6 +2336,19 @@ cannot shed its parent or family authority. This adds no actor or affiliation
 event wire, complete event union, N-API observer transport, support promotion,
 or public authorization.
 
+The next bounded D3 prerequisite (`a67d550`) makes `runtime.actor-run` and
+`runtime.actor-affiliation` v1 use canonical value-derived semantic revision
+keys. Equal normalized revisions under one stable fact identity now share one
+durable/scoped join identity across source-record replay while source
+occurrence remains separate provenance; every actor lineage, affiliation
+state, qualification, and timestamp axis is digest-bound. The fact boundary
+rejects weaker caller-supplied keys, scoped and durable reducers recompute the
+identity, exact batch/database replay is idempotent, and generation or snapshot
+replacement retains one current owner without fabricating a second occurrence.
+The Rust/TypeScript RFC 012C fixture pins both keys and references. This adds no
+actor event wire, N-API/SDK observer transport, source promotion, or public
+authorization.
+
 ### D4. SDK and Chopsticks migration
 
 Add a feature-flagged Chopsticks path beside `watchSessionTranscript`:
