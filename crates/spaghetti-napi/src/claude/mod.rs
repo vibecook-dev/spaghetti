@@ -6,6 +6,8 @@
 //! cold/warm path.
 
 pub mod adapter;
+#[cfg(test)]
+mod catalog_conformance;
 /// On-disk fingerprint discovery + `source_files` store helpers.
 ///
 /// The walk is Claude-layout-specific; `FingerprintStore` itself is a

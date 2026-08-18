@@ -12,6 +12,46 @@ from census import encode_project_key, identity_digest, scan_claude, scan_codex,
 
 
 class CatalogCensusTest(unittest.TestCase):
+    def test_claude_candidate_oracle_matches_frozen_rfc012b_fixture(self) -> None:
+        repository = Path(__file__).resolve().parents[2]
+        fixture = json.loads(
+            (
+                repository
+                / "crates/spaghetti-napi/fixtures/contracts"
+                / "rfc012b-claude-candidate-conformance-v1.json"
+            ).read_text(encoding="utf-8")
+        )
+        self.assertEqual(fixture["fixture_contract_version"], 1)
+        self.assertEqual(fixture["adapter_id"], "claude-code")
+        self.assertEqual(fixture["support_release_status"], "candidate")
+        self.assertFalse(fixture["catalog_execution_authorized"])
+        self.assertEqual(fixture["planned_composition_status"], "planned_unbound")
+        bounds = fixture["bounds"]
+        self.assertEqual(bounds["transcript_head_max_record_payload_bytes"], 65_536)
+        self.assertEqual(bounds["transcript_head_delimiter_bytes"], 1)
+        self.assertEqual(bounds["transcript_head_framing_read_ahead_bytes"], 65_536)
+        self.assertTrue(
+            bounds["transcript_head_delimiter_included_in_framing_read_ahead"]
+        )
+        self.assertEqual(bounds["transcript_head_checkpoint_anchor_bytes"], 4_096)
+        self.assertEqual(
+            bounds["transcript_head_physical_read_ceiling_bytes"],
+            65_536 + 65_536 + 4_096,
+        )
+
+        result = scan_claude(
+            repository / "crates/spaghetti-napi/fixtures/small/.claude",
+            head_bytes=bounds["transcript_head_max_window_payload_bytes"],
+            document_bytes=bounds["index_max_document_bytes"],
+        )
+        oracle = fixture["independent_oracle"]
+        projects = result.catalog.project_identities()
+        sessions = result.catalog.session_identities()
+        self.assertEqual(len(projects), oracle["project_count"])
+        self.assertEqual(len(sessions), oracle["session_count"])
+        self.assertEqual(identity_digest(projects), oracle["project_identity_digest"])
+        self.assertEqual(identity_digest(sessions), oracle["session_identity_digest"])
+
     def test_codex_candidate_oracle_matches_frozen_rfc012b_fixture(self) -> None:
         repository = Path(__file__).resolve().parents[2]
         fixture = json.loads(
@@ -77,6 +117,7 @@ class CatalogCensusTest(unittest.TestCase):
             project.mkdir(parents=True)
             indexed = "11111111-1111-1111-1111-111111111111"
             transcript = "22222222-2222-2222-2222-222222222222"
+            nested = "33333333-3333-3333-3333-333333333333"
             (project / "sessions-index.json").write_text(
                 json.dumps(
                     {
@@ -110,14 +151,32 @@ class CatalogCensusTest(unittest.TestCase):
                 + ("x" * 100_000)
             )
             (project / f"{transcript}.jsonl").write_text(payload, encoding="utf-8")
+            nested_subagents = project / nested / "subagents"
+            nested_subagents.mkdir(parents=True)
+            (nested_subagents / "agent-child.jsonl").write_text(
+                json.dumps(
+                    {
+                        "type": "user",
+                        "sessionId": nested,
+                        "cwd": "/tmp/project",
+                        "message": {"content": "nested prompt"},
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
 
             result = scan_claude(root, head_bytes=4096, document_bytes=1024 * 1024)
 
             self.assertEqual(len(result.catalog.projects), 1)
-            self.assertEqual(len(result.catalog.sessions), 2)
+            self.assertEqual(len(result.catalog.sessions), 3)
             self.assertEqual(
                 result.catalog.sessions[("-tmp-project", transcript)].first_prompt,
                 "transcript prompt",
+            )
+            self.assertEqual(
+                result.catalog.sessions[("-tmp-project", nested)].evidence,
+                {"subagent-membership"},
             )
             self.assertLess(result.metrics.bytes_read, len(payload))
 

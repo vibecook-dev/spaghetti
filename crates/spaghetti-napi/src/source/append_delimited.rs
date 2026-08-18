@@ -441,7 +441,9 @@ impl AppendDelimitedFile {
                 pending = PendingRecord::new(self.config.max_record_bytes);
                 segment_start = index + 1;
 
-                if output.items.len() == self.config.max_records_per_batch {
+                if output.items.len() == self.config.max_records_per_batch
+                    || batch_payload_bytes == self.config.max_batch_bytes
+                {
                     output.more_available = cursor_end < snapshot_len;
                     break 'read;
                 }
@@ -937,6 +939,70 @@ mod tests {
             panic!("expected continued append batch");
         };
         assert_eq!(bytes_read, 28); // 8 verify + 6 append + 14 new anchor.
+    }
+
+    #[test]
+    fn exact_full_batch_stops_before_scanning_a_delimiter_free_tail() {
+        const RECORD_PAYLOAD_BYTES: usize = 65_536;
+        const FRAMING_READ_AHEAD_BYTES: usize = 65_536;
+        const CHECKPOINT_ANCHOR_BYTES: usize = 4_096;
+        const PHYSICAL_READ_CEILING: u64 =
+            (RECORD_PAYLOAD_BYTES + FRAMING_READ_AHEAD_BYTES + CHECKPOINT_ANCHOR_BYTES) as u64;
+
+        let root = TempDir::new().unwrap();
+        let relative = Path::new("stream.jsonl");
+        let path = root.path().join(relative);
+        let mut bytes = vec![b'a'; RECORD_PAYLOAD_BYTES];
+        bytes.push(b'\n');
+        // The next record has no delimiter and exceeds both the logical
+        // record bound and the remaining physical reservation. Once the
+        // accepted first record exactly fills the batch, reading it would be
+        // unnecessary and would turn a bounded prefix into a false failure.
+        bytes.extend(std::iter::repeat_n(b'b', FRAMING_READ_AHEAD_BYTES * 2));
+        std::fs::write(&path, bytes).unwrap();
+
+        let driver = AppendDelimitedFile::new(AppendDelimitedConfig {
+            delimiter: b'\n',
+            normalize_crlf: true,
+            max_record_bytes: RECORD_PAYLOAD_BYTES,
+            max_batch_bytes: RECORD_PAYLOAD_BYTES,
+            max_records_per_batch: 128,
+            prefix_anchor_bytes: CHECKPOINT_ANCHOR_BYTES,
+        })
+        .unwrap();
+        let read = driver
+            .read_confined_bounded(
+                root.path(),
+                relative,
+                None,
+                &origin(),
+                false,
+                PHYSICAL_READ_CEILING,
+            )
+            .unwrap();
+        let AppendRead::Batch {
+            items,
+            checkpoint,
+            needs_retry,
+            more_available,
+            bytes_read,
+            ..
+        } = read
+        else {
+            panic!("expected bounded append batch");
+        };
+        assert_eq!(items.len(), 1);
+        let AppendItem::Record(record) = &items[0] else {
+            panic!("expected accepted first record");
+        };
+        assert_eq!(record.payload.len(), RECORD_PAYLOAD_BYTES);
+        assert_eq!(checkpoint.committed_offset, RECORD_PAYLOAD_BYTES as u64 + 1);
+        assert!(needs_retry && more_available);
+        // 65,536 payload bytes plus its LF require the second 64-KiB
+        // framing read. The driver may read that complete OS chunk, then
+        // re-reads the 4-KiB continuity anchor: a conservative 132-KiB
+        // candidate-oracle ceiling, not a global performance bound.
+        assert_eq!(bytes_read, PHYSICAL_READ_CEILING);
     }
 
     #[test]
