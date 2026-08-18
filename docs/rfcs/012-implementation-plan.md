@@ -603,7 +603,8 @@ policy view to the frozen access-policy digest and the retained-snapshot lane
 has public transport, retention, and expiration authority. B2 is independently
 `In progress` as described below. B3 now includes source-neutral plan
 registration, the initial build lineage, one atomic immutable initial Library
-publication, and a crate-private WITHHELD-only retained-page reader; scheduling
+publication, a crate-private WITHHELD-only retained-page reader, and durable
+ordinary-refresh start that keeps the published snapshot readable; scheduling
 and hydration execution remain later integration work.
 
 ### B2. Catalog source compositions
@@ -877,6 +878,20 @@ This slice adds no schema writes, public N-API/SDK surface, local-sensitive
 policy view, refresh/degraded lineage, retention/expiration authority, or
 richer filter/sort vocabulary. Those remain the next exposure and lifecycle
 gates.
+
+The sixth bounded B3 slice (`773985b`) adds schema-v52 and crate-private
+ordinary Library refresh start from an exact restart-authenticated plain-Ready
+publication. One source-neutral zero-fact administrative commit atomically
+retains the immutable current snapshot, advances durable readiness with
+`refreshing_from_snapshot`, and writes a privacy-safe v3 invalidation under an
+exact Ready/publication compare-and-swap. Restart reconstructs the refreshing
+Ready lineage and continues to issue only a snapshot-frozen WITHHELD read
+authority for the retained publication. Crash seams, separate-connection
+isolation, lost-ack replay, source-free operation, and forged or foreign
+lineage rejection are executable. This slice adds no replacement snapshot,
+refresh completion, degraded state, retention/expiration authority, source
+reads, or public N-API/SDK catalog surface. Atomic refresh publication is the
+next prerequisite for a genuine newer snapshot and later retirement evidence.
 
 ### B4. Progressive host and UX
 
@@ -1906,6 +1921,22 @@ Current landing status (2026-08-18):
   observer method, or N-API authority. Dynamic/discovered membership and the
   complete artifact/capability/family manifest remain prerequisites for a
   portable bootstrap or resync-completion barrier; and
+- the first bounded artifact wire slice freezes a path-free, attachment-bound
+  request/result contract without granting native source access. A process-
+  local command retains the exact attachment authority, negotiated selection,
+  resolved root, artifact key and kind, expected generation, byte ceiling, and
+  `metadata_only`, `hash_only`, or bounded `inline` disclosure policy. V1
+  always withholds the native locator. Available results require complete,
+  positive-generation provenance and policy-exact hash/content fields; Rust
+  verifies canonical padded base64, exact size, and SHA-256 before producing
+  or consuming inline content. Typed unavailable results distinguish scope,
+  denial, absence, limit, generation, support, malformed, and unstable states
+  without smuggling paths. Portable TypeScript independently enforces strict
+  caller-held context, shape, number, identity, base64, and byte bounds against
+  the Rust fixture, while Rust remains the SHA-256 integrity boundary. The
+  architecture ratchet requires both the Rust attachment seam and portable
+  export. No native locator mediator, file read, public observer method, or
+  N-API transport lands in this slice; and
 - the architecture checker forbids store/query/N-API/concrete-adapter imports
   and premature native public export from the provisional composition and
   negotiation roots, while keeping the portable negotiation graph contract-only.
@@ -1924,7 +1955,8 @@ usage-v2,
 complete multi-family replacement manifests, whole-scope discovery and source
 state beyond the current exact append-object set, remaining portable-host
 wiring and policy calibration, dynamic/non-append replacement composition,
-artifact mediation and the public close-method transport,
+native artifact-access mediation and the public artifact/close-method
+transports,
 the trusted native version-probe/identity-input drivers, and the complete
 public request are not yet implemented. The internal offered and applied
 boundaries are now transactional, but they cannot become a public watermark and
