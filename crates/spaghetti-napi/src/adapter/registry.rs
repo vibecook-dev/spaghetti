@@ -2209,24 +2209,181 @@ mod tests {
             .acknowledge_applied(deleted.application_receipt())
             .unwrap();
 
-        let close = runtime.request_close();
+        // A continuity control must wake a source owner parked with no poll or
+        // retry work. The returned handoff retains the exact old epoch,
+        // redacted bindings, and retry policy needed to build the replacement
+        // and bind its new automatic owner.
+        assert!(!source_task.is_finished());
+        let attempts_before_resync = attempts.load(Ordering::SeqCst);
+        let required = handle
+            .require_resync(ScopedResyncReason::WatcherOverflow, 200)
+            .unwrap();
         let stopped = tokio::time::timeout(std::time::Duration::from_secs(2), source_task)
             .await
             .unwrap()
             .unwrap();
-        assert!(matches!(
-            stopped.exit(),
-            ScopedObservationSourceOwnerRunExit::Cancelled
-        ));
-        let (active, exit) = stopped.into_parts();
+        let ScopedObservationSourceOwnerRunExit::ContinuityInvalidated(invalidation) =
+            stopped.exit()
+        else {
+            panic!("resync must stop the exact old-epoch source owner");
+        };
+        assert_eq!(invalidation.owned_scope_epoch(), 1);
+        assert_eq!(invalidation.observed_scope_epoch(), 1);
+        assert_eq!(
+            invalidation.observed_continuity(),
+            ScopedObservationContinuity::ResyncRequired
+        );
+        assert!(Arc::ptr_eq(&invalidation.control().unwrap(), &required));
+        assert_eq!(stopped.binding_count(), 1);
+        assert_eq!(
+            stopped.retry_policy(),
+            ScopedObservationSourceOwnerRetryPolicy::default()
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        assert_eq!(attempts.load(Ordering::SeqCst), attempts_before_resync);
+        let (mut active, bindings, policy, exit) = stopped.into_rebind_parts();
         assert!(matches!(
             exit,
-            ScopedObservationSourceOwnerRunExit::Cancelled
+            ScopedObservationSourceOwnerRunExit::ContinuityInvalidated(_)
         ));
+        assert_eq!(bindings.len(), 1);
         assert!(!active
             .append_object("root-object")
             .expect("the exact root remains bound after deletion")
             .is_present());
+
+        // The invalid old epoch cannot be rebound before replacement, and a
+        // failed bind still returns the same handoff material intact.
+        let failed_rebind = handle
+            .bind_epoch_source_owner(active, bindings, policy)
+            .unwrap_err();
+        assert_eq!(
+            failed_rebind.error(),
+            ScopedObservationSourceOwnerBindingError::InvalidEpochState
+        );
+        let (_, returned_active, returned_bindings) = failed_rebind.into_parts();
+        active = returned_active;
+        assert_eq!(returned_bindings.len(), 1);
+
+        let required_event = runtime.next_event().await.unwrap().unwrap();
+        assert!(matches!(
+            &required_event.envelope.event,
+            ScopedObservationEvent::ObserverResyncRequired { control }
+                if Arc::ptr_eq(control, &required)
+        ));
+        runtime
+            .acknowledge_applied(required_event.application_receipt())
+            .unwrap();
+        let started = handle.begin_resync(210).unwrap();
+        assert_eq!(started.old_scope_epoch, 1);
+        assert_eq!(started.new_scope_epoch, 2);
+        let started_event = runtime.next_event().await.unwrap().unwrap();
+        assert!(matches!(
+            &started_event.envelope.event,
+            ScopedObservationEvent::ObserverResyncStarted { control }
+                if Arc::ptr_eq(control, &started)
+        ));
+        runtime
+            .acknowledge_applied(started_event.application_receipt())
+            .unwrap();
+
+        let mut stage = handle.open_scope_resync_stage(&mut active).unwrap();
+        assert_eq!(stage.scope_epoch(), 2);
+        std::fs::write(root.join("session.jsonl"), b"replacement\n").unwrap();
+        let replacement_pass = handle.host().begin_pass().unwrap();
+        let replacement_observation = handle.with_attachment(|_, drain| {
+            let (object, _) = stage
+                .append_object_and_admission_mut("root-object", drain.delivery_lane())
+                .unwrap();
+            object
+                .reconcile(
+                    &replacement_pass,
+                    ScopedAppendReconcileRequest {
+                        relation_id: "root-object",
+                        identity_inputs: &identity,
+                        access_phase: AccessPhase::Initial,
+                        parent_token: None,
+                        depth: 1,
+                        max_bytes: 64,
+                        origin: &origin,
+                        force_contract_replay: false,
+                    },
+                )
+                .unwrap()
+        });
+        assert_eq!(
+            replacement_observation.phase,
+            ScopedAppendDeliveryPhase::Correction
+        );
+        let replacement_decoded = handle.with_attachment(|host, drain| {
+            let (object, _) = stage
+                .append_object_and_admission_mut("root-object", drain.delivery_lane())
+                .unwrap();
+            let ScopedAppendDecodeOutcome::Ready(decoded) =
+                decode_scoped(host, object, &replacement_observation)
+            else {
+                panic!("replacement source must decode one bounded batch");
+            };
+            decoded
+        });
+        handle.with_attachment(|_, drain| {
+            let (object, admission) = stage
+                .append_object_and_admission_mut("root-object", drain.delivery_lane())
+                .unwrap();
+            if let Err(failure) =
+                admission.admit(object, &replacement_observation, replacement_decoded)
+            {
+                panic!("replacement admission failed: {}", failure.error);
+            }
+        });
+        drop(replacement_pass);
+        handle.with_attachment(|_, drain| {
+            assert!(stage.reduce_next(drain.delivery_lane()).unwrap());
+            assert!(!stage.reduce_next(drain.delivery_lane()).unwrap());
+            let replacement = stage.prepare_snapshot(drain.delivery_lane()).unwrap();
+            assert_eq!(replacement.entity_count, 0);
+            assert!(replacement.events.is_empty());
+            assert!(stage.snapshot_fully_offered());
+        });
+        let completed = handle
+            .offer_scope_resync_complete(&mut active, &mut stage, 220)
+            .unwrap();
+        assert_eq!(active.scope_epoch(), 2);
+        let completed_event = runtime.next_event().await.unwrap().unwrap();
+        assert!(matches!(
+            &completed_event.envelope.event,
+            ScopedObservationEvent::ObserverResyncComplete { barrier }
+                if Arc::ptr_eq(barrier, &completed)
+        ));
+        runtime
+            .acknowledge_applied(completed_event.application_receipt())
+            .unwrap();
+
+        let replacement_owner = handle
+            .bind_epoch_source_owner(active, returned_bindings, policy)
+            .unwrap();
+        assert_eq!(replacement_owner.scope_epoch(), 2);
+        let replacement_task = tokio::spawn(replacement_owner.run_until_stopped_with_clock(|| 230));
+        let replacement_poll =
+            tokio::time::timeout(std::time::Duration::from_secs(2), handle.poll())
+                .await
+                .unwrap()
+                .unwrap();
+        let ScopedObservationPollResolution::Ready(watermark) = replacement_poll else {
+            panic!("the replacement source owner must service the new epoch");
+        };
+        assert_eq!(watermark.scope_epoch, 2);
+
+        let close = runtime.request_close();
+        let replacement_stopped =
+            tokio::time::timeout(std::time::Duration::from_secs(2), replacement_task)
+                .await
+                .unwrap()
+                .unwrap();
+        assert!(matches!(
+            replacement_stopped.exit(),
+            ScopedObservationSourceOwnerRunExit::Cancelled
+        ));
         assert!(close.wait_async().await.complete);
         assert!(runtime.next_event().await.unwrap().is_none());
     }

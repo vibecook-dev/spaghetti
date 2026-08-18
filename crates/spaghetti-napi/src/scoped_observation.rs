@@ -2892,6 +2892,135 @@ impl ScopedObservationAsyncHandle {
         Ok(failure)
     }
 
+    /// Invalidate the attachment-owned live epoch through the same consumer
+    /// lane observed by the ordered event owner and automatic source owner.
+    /// The source owner wakes on this exact control offer and returns its
+    /// intact epoch plus rebind material instead of waiting for another poll.
+    pub fn require_resync(
+        &self,
+        reason: ScopedResyncReason,
+        observed_at: i64,
+    ) -> Result<Arc<ScopedResyncRequired>, ScopedContinuityError> {
+        let mut drain = self.shared.lock_drain();
+        if drain.is_closed()
+            || self.shared.host.state.closed.load(Ordering::Acquire)
+            || self.shared.host.lifecycle.is_closing()
+        {
+            return Err(ScopedContinuityError::Closed);
+        }
+        let _operation = self
+            .shared
+            .host
+            .lifecycle
+            .start_operation(ScopedObservationOperationKind::Runtime)
+            .map_err(|error| match error {
+                ScopedObservationOperationStartError::Closing => ScopedContinuityError::Closed,
+                ScopedObservationOperationStartError::CapacityExhausted => {
+                    ScopedContinuityError::OperationCapacityExhausted
+                }
+            })?;
+        self.shared
+            .host
+            .require_resync(drain.delivery_lane_mut(), reason, observed_at)
+    }
+
+    /// Start the replacement epoch only after the attachment-owned consumer
+    /// has delivered the matching invalidation control.
+    pub fn begin_resync(
+        &self,
+        observed_at: i64,
+    ) -> Result<Arc<ScopedResyncStarted>, ScopedContinuityError> {
+        let mut drain = self.shared.lock_drain();
+        if drain.is_closed()
+            || self.shared.host.state.closed.load(Ordering::Acquire)
+            || self.shared.host.lifecycle.is_closing()
+        {
+            return Err(ScopedContinuityError::Closed);
+        }
+        let _operation = self
+            .shared
+            .host
+            .lifecycle
+            .start_operation(ScopedObservationOperationKind::Runtime)
+            .map_err(|error| match error {
+                ScopedObservationOperationStartError::Closing => ScopedContinuityError::Closed,
+                ScopedObservationOperationStartError::CapacityExhausted => {
+                    ScopedContinuityError::OperationCapacityExhausted
+                }
+            })?;
+        self.shared
+            .host
+            .begin_resync(drain.delivery_lane_mut(), observed_at)
+    }
+
+    /// Create the whole-scope replacement owner against this attachment's
+    /// exact delivery lane. The stopped source owner remains the sole source
+    /// of the active epoch passed here.
+    pub fn open_scope_resync_stage(
+        &self,
+        active: &mut ScopedObservationEpochState,
+    ) -> Result<ScopedObservationScopeReplacementStage, ScopedReplacementStageError> {
+        let drain = self.shared.lock_drain();
+        if drain.is_closed()
+            || self.shared.host.state.closed.load(Ordering::Acquire)
+            || self.shared.host.lifecycle.is_closing()
+        {
+            return Err(ScopedReplacementStageError::Closed);
+        }
+        let _operation = self
+            .shared
+            .host
+            .lifecycle
+            .start_operation(ScopedObservationOperationKind::Runtime)
+            .map_err(|error| match error {
+                ScopedObservationOperationStartError::Closing => {
+                    ScopedReplacementStageError::Closed
+                }
+                ScopedObservationOperationStartError::CapacityExhausted => {
+                    ScopedReplacementStageError::OperationCapacityExhausted
+                }
+            })?;
+        self.shared
+            .host
+            .open_scope_resync_stage(active, drain.delivery_lane())
+    }
+
+    /// Atomically offer the replacement completion control and transfer its
+    /// source, coverage, and reducer state through the attachment-owned lane.
+    pub fn offer_scope_resync_complete(
+        &self,
+        active: &mut ScopedObservationEpochState,
+        stage: &mut ScopedObservationScopeReplacementStage,
+        observed_at: i64,
+    ) -> Result<Arc<ScopedResyncBarrier>, ScopedReplacementStageError> {
+        let mut drain = self.shared.lock_drain();
+        if drain.is_closed()
+            || self.shared.host.state.closed.load(Ordering::Acquire)
+            || self.shared.host.lifecycle.is_closing()
+        {
+            return Err(ScopedReplacementStageError::Closed);
+        }
+        let _operation = self
+            .shared
+            .host
+            .lifecycle
+            .start_operation(ScopedObservationOperationKind::Runtime)
+            .map_err(|error| match error {
+                ScopedObservationOperationStartError::Closing => {
+                    ScopedReplacementStageError::Closed
+                }
+                ScopedObservationOperationStartError::CapacityExhausted => {
+                    ScopedReplacementStageError::OperationCapacityExhausted
+                }
+            })?;
+        self.shared.host.offer_scope_resync_complete(
+            active,
+            stage,
+            drain.delivery_lane_mut(),
+            observed_at,
+        )
+    }
+
     /// Request cancellation and close the event drain. Watcher/native owners
     /// still acknowledge shutdown by dropping their registered operations;
     /// callers may await the returned barrier without holding the drain lock.
@@ -3082,11 +3211,12 @@ impl ScopedObservationAsyncSourceOwner {
         self.active.scope_epoch
     }
 
-    /// Run until attachment cancellation or an attachment-level failure.
-    /// Delivery queue fullness waits on dequeue-owned capacity rather than
-    /// sleeping or invalidating continuity. Relation-local source/decode
-    /// failures become explicit coverage plus bounded object retry controls;
-    /// they never terminate or delay healthy sibling relations.
+    /// Run until attachment cancellation, continuity invalidation, or an
+    /// attachment-level failure. Delivery queue fullness waits on dequeue-
+    /// owned capacity rather than sleeping or invalidating continuity.
+    /// Relation-local source/decode failures become explicit coverage plus
+    /// bounded object retry controls; they never terminate or delay healthy
+    /// sibling relations.
     pub async fn run_until_stopped(self) -> ScopedObservationStoppedSourceOwner {
         self.run_until_stopped_inner(scoped_observation_now_unix_ms)
             .await
@@ -3114,15 +3244,20 @@ impl ScopedObservationAsyncSourceOwner {
         let Self {
             handle: _,
             active,
-            bindings: _,
-            policy: _,
+            bindings,
+            policy,
             retry_deadlines: _,
             operation,
         } = self;
         // Release the close-barrier obligation before the stopped state is
         // returned and potentially retained by a caller.
         drop(operation);
-        ScopedObservationStoppedSourceOwner { active, exit }
+        ScopedObservationStoppedSourceOwner {
+            active,
+            bindings,
+            policy,
+            exit,
+        }
     }
 
     async fn run_loop<C>(&mut self, observed_at: &mut C) -> ScopedObservationSourceOwnerRunExit
@@ -3130,26 +3265,63 @@ impl ScopedObservationAsyncSourceOwner {
         C: FnMut() -> i64 + Send,
     {
         loop {
+            let wait_context = match self.attachment_wait_context() {
+                Ok(context) => context,
+                Err(exit) => return exit,
+            };
             let mut automatic_ticket = None;
+            let mut lease_result = None;
             let next_deadline = self.retry_deadlines.values().copied().min();
-            let lease_result = if let Some(deadline) = next_deadline {
+            let attachment_event = if let Some(deadline) = next_deadline {
                 tokio::select! {
                     biased;
-                    result = self.handle.next_poll_pass() => result,
+                    event = self.wait_for_poll_or_attachment_event(
+                        &wait_context,
+                        &mut lease_result,
+                    ) => event,
                     _ = tokio::time::sleep_until(deadline) => {
                         match self.handle.host().request_poll() {
                             Ok(ticket) => {
                                 automatic_ticket = Some(ticket);
-                                self.handle.next_poll_pass().await
+                                let context = match self.attachment_wait_context() {
+                                    Ok(context) => context,
+                                    Err(exit) => return exit,
+                                };
+                                self.wait_for_poll_or_attachment_event(
+                                    &context,
+                                    &mut lease_result,
+                                ).await
                             }
-                            Err(ScopedObservationPollError::Closed) => Ok(None),
-                            Err(error) => Err(error),
+                            Err(ScopedObservationPollError::Closed) => {
+                                lease_result = Some(Ok(None));
+                                None
+                            }
+                            Err(error) => {
+                                lease_result = Some(Err(error));
+                                None
+                            }
                         }
                     }
                 }
             } else {
-                self.handle.next_poll_pass().await
+                self.wait_for_poll_or_attachment_event(&wait_context, &mut lease_result)
+                    .await
             };
+            if let Some(state) = attachment_event {
+                if state.closed {
+                    return ScopedObservationSourceOwnerRunExit::Cancelled;
+                }
+                continue;
+            }
+            let lease_result = lease_result
+                .expect("a source-owner poll wait without an attachment event has a result");
+            // A poll lease and continuity invalidation can become ready in the
+            // same scheduler turn. Recheck under the drain lock before any
+            // native access so the old owner cannot service a replacement
+            // epoch or report a generic pass failure for that race.
+            if let Err(exit) = self.attachment_wait_context() {
+                return exit;
+            }
             let lease = match lease_result {
                 Ok(Some(lease)) => lease,
                 Ok(None) | Err(ScopedObservationPollError::Closed) => {
@@ -3221,6 +3393,12 @@ impl ScopedObservationAsyncSourceOwner {
                 attempt_time,
             );
             drop(automatic_ticket);
+            // Native access and bounded offers intentionally occur outside
+            // the wait. Give an invalidation or terminal failure that raced
+            // the synchronous pass precedence over its incidental pass error.
+            if let Err(exit) = self.attachment_wait_context() {
+                return exit;
+            }
             match result {
                 Ok(_) => {}
                 Err(error) if scoped_source_owner_error_is_cancelled(&error) => {
@@ -3244,6 +3422,80 @@ impl ScopedObservationAsyncSourceOwner {
                         ScopedObservationSourceOwnerRunError::Pass(error),
                     );
                 }
+            }
+        }
+    }
+
+    fn attachment_wait_context(
+        &self,
+    ) -> Result<ScopedObservationSourceOwnerWaitContext, ScopedObservationSourceOwnerRunExit> {
+        let drain = self.handle.shared.lock_drain();
+        if drain.is_closed()
+            || self.handle.shared.host.state.closed.load(Ordering::Acquire)
+            || self.handle.shared.host.lifecycle.is_closing()
+        {
+            return Err(ScopedObservationSourceOwnerRunExit::Cancelled);
+        }
+        let state = drain.delivery_lane().state();
+        match state.continuity {
+            ScopedObservationContinuity::Valid if state.scope_epoch == self.active.scope_epoch => {
+                Ok(ScopedObservationSourceOwnerWaitContext {
+                    event_waiter: drain.event_waiter(),
+                    offered_through_sequence: state.offered_through_sequence,
+                })
+            }
+            ScopedObservationContinuity::ResyncRequired
+            | ScopedObservationContinuity::Resyncing
+            | ScopedObservationContinuity::Valid => {
+                let control = drain
+                    .delivery_lane()
+                    .resync_required()
+                    .filter(|control| control.invalid_scope_epoch == self.active.scope_epoch);
+                Err(ScopedObservationSourceOwnerRunExit::ContinuityInvalidated(
+                    ScopedObservationSourceOwnerContinuityInvalidation {
+                        owned_scope_epoch: self.active.scope_epoch,
+                        observed_scope_epoch: state.scope_epoch,
+                        observed_continuity: state.continuity,
+                        control,
+                    },
+                ))
+            }
+            ScopedObservationContinuity::Failed => {
+                Err(ScopedObservationSourceOwnerRunExit::Failed(
+                    ScopedObservationSourceOwnerRunError::Pass(
+                        ScopedObservationPassExecutionError::Poll(
+                            ScopedObservationPollError::ObserverFailed,
+                        ),
+                    ),
+                ))
+            }
+            ScopedObservationContinuity::Bootstrap => {
+                Err(ScopedObservationSourceOwnerRunExit::Failed(
+                    ScopedObservationSourceOwnerRunError::Pass(
+                        ScopedObservationPassExecutionError::InvalidEpochState,
+                    ),
+                ))
+            }
+        }
+    }
+
+    async fn wait_for_poll_or_attachment_event(
+        &self,
+        context: &ScopedObservationSourceOwnerWaitContext,
+        poll_result: &mut Option<
+            Result<Option<ScopedObservationPollLease>, ScopedObservationPollError>,
+        >,
+    ) -> Option<ScopedObservationEventWakeState> {
+        tokio::select! {
+            biased;
+            result = self.handle.next_poll_pass() => {
+                *poll_result = Some(result);
+                None
+            }
+            state = context
+                .event_waiter
+                .wait_after_async(context.offered_through_sequence) => {
+                Some(state)
             }
         }
     }
@@ -6664,6 +6916,10 @@ impl ScopedObservationProjectionSink {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum ScopedReplacementStageError {
+    #[error("scoped replacement attachment is closed")]
+    Closed,
+    #[error("scoped replacement operation accounting is exhausted")]
+    OperationCapacityExhausted,
     #[error("scoped replacement stage requires an active resync epoch")]
     NotResyncing,
     #[error("scoped replacement stage does not belong to the bound root")]
@@ -8224,10 +8480,46 @@ pub enum ScopedObservationSourceOwnerRunError {
     Pass(#[source] ScopedObservationPassExecutionError),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScopedObservationSourceOwnerContinuityInvalidation {
+    owned_scope_epoch: u64,
+    observed_scope_epoch: u64,
+    observed_continuity: ScopedObservationContinuity,
+    control: Option<Arc<ScopedResyncRequired>>,
+}
+
+impl ScopedObservationSourceOwnerContinuityInvalidation {
+    pub fn owned_scope_epoch(&self) -> u64 {
+        self.owned_scope_epoch
+    }
+
+    pub fn observed_scope_epoch(&self) -> u64 {
+        self.observed_scope_epoch
+    }
+
+    pub fn observed_continuity(&self) -> ScopedObservationContinuity {
+        self.observed_continuity
+    }
+
+    /// The exact invalidation control is retained when the owner observes its
+    /// own epoch being invalidated. A late owner that is not scheduled until a
+    /// later replacement completes still exits through the epoch mismatch,
+    /// but the delivery lane may already have retired that transient control.
+    pub fn control(&self) -> Option<Arc<ScopedResyncRequired>> {
+        self.control.as_ref().map(Arc::clone)
+    }
+}
+
 #[derive(Debug)]
 pub enum ScopedObservationSourceOwnerRunExit {
     Cancelled,
+    ContinuityInvalidated(ScopedObservationSourceOwnerContinuityInvalidation),
     Failed(ScopedObservationSourceOwnerRunError),
+}
+
+struct ScopedObservationSourceOwnerWaitContext {
+    event_waiter: ScopedObservationEventWaiter,
+    offered_through_sequence: u64,
 }
 
 /// Result of a stopped source owner. Its attachment operation has already
@@ -8235,12 +8527,22 @@ pub enum ScopedObservationSourceOwnerRunExit {
 /// value for epoch recovery or diagnostics.
 pub struct ScopedObservationStoppedSourceOwner {
     active: ScopedObservationEpochState,
+    bindings: Vec<ScopedObservationAppendPassBinding>,
+    policy: ScopedObservationSourceOwnerRetryPolicy,
     exit: ScopedObservationSourceOwnerRunExit,
 }
 
 impl ScopedObservationStoppedSourceOwner {
     pub fn exit(&self) -> &ScopedObservationSourceOwnerRunExit {
         &self.exit
+    }
+
+    pub fn binding_count(&self) -> usize {
+        self.bindings.len()
+    }
+
+    pub fn retry_policy(&self) -> ScopedObservationSourceOwnerRetryPolicy {
+        self.policy
     }
 
     pub fn into_parts(
@@ -8250,6 +8552,19 @@ impl ScopedObservationStoppedSourceOwner {
         ScopedObservationSourceOwnerRunExit,
     ) {
         (self.active, self.exit)
+    }
+
+    /// Recover the inseparable epoch, redacted owned relation bindings, and
+    /// retry policy needed to bind a fresh source owner after replacement.
+    pub fn into_rebind_parts(
+        self,
+    ) -> (
+        ScopedObservationEpochState,
+        Vec<ScopedObservationAppendPassBinding>,
+        ScopedObservationSourceOwnerRetryPolicy,
+        ScopedObservationSourceOwnerRunExit,
+    ) {
+        (self.active, self.bindings, self.policy, self.exit)
     }
 }
 

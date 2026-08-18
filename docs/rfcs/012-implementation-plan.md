@@ -1407,6 +1407,23 @@ Current landing status (2026-08-17):
   exclusive source/coverage/reducer state. The owner holds a close-barrier
   operation for its whole lifetime and returns the intact epoch after
   cancellation or classified failure;
+- that source owner now also waits on the attachment's retained offered-event
+  signal while parked for poll work or a relation-local retry. A direct
+  `observer.resync_required` therefore wakes it without another poll, and a
+  resync racing lease reservation or a synchronous source pass is classified
+  as typed continuity invalidation rather than a generic pass failure. The
+  result records the owned and observed epochs/continuity and retains the exact
+  invalidation control when it still names that owner. The stopped handoff
+  preserves the intact old epoch, exact redacted relation bindings, and retry
+  policy after releasing its close-barrier operation. Attachment-owned,
+  lifecycle-counted resync entry points then reject rebinding that stale epoch,
+  open and atomically complete the whole-scope replacement through the sole
+  consumer lane, and permit the returned bindings/policy to bind a new owner
+  only after the replacement epoch is valid. The integrated conformance path
+  proves a parked epoch-1 owner performs no later access, epoch 1 cannot
+  rebind, epoch 2 replaces source/coverage/reducer state, and its newly bound
+  owner services a fresh epoch-2 poll. Automatic watcher-to-replacement replay
+  orchestration and portable poll behavior during that handoff remain open;
 - bounded delivery now has a separate retained producer-capacity generation.
   Dequeue, explicit epoch supersession, terminal failure, and drain close wake
   a parked owner without a check-then-sleep race. Semantic, retained-native,
@@ -1630,6 +1647,12 @@ retry exhaustion or a nonretryable outcome is terminal only for that relation,
 while later successful evidence clears its retained failure. The conformance
 matrix covers mixed healthy/retryable/terminal relations, deterministic retry
 ceilings, no-spin idle behavior, current error coverage, and cancellation.
+Continuity invalidation now independently wakes a parked source owner and
+returns its exact epoch/binding/policy handoff before replacement starts; a
+stale owner cannot read or bind into the next epoch, while a completed
+whole-scope replacement can bind the preserved authority to a fresh owner and
+service an epoch-local poll. Watcher-driven replay/supervision across that
+handoff remains later D3 composition rather than an implicit background task.
 
 ### D4. SDK and Chopsticks migration
 
