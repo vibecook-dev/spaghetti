@@ -17,7 +17,6 @@ use rusqlite::{Connection, TransactionBehavior};
 use crate::adapter::FactBatch;
 use crate::core::schema;
 
-use super::catalog_state;
 use super::commit::{
     self, ChangeLogRetentionPolicy, ChangeLogRetentionSnapshot, CommitDetail, CommitHook,
     CommitReceipt, CommitStage, ObservationCommit,
@@ -29,6 +28,7 @@ use super::performance::{
 use super::projection;
 use super::query_pool::{read_source_catalog, SourceCatalogSnapshot};
 use super::EngineError;
+use super::{catalog_publication, catalog_state};
 
 const MIN_DISK_RESERVE_BYTES: u64 = 1024 * 1024 * 1024;
 const MAX_DISK_RESERVE_BYTES: u64 = 4 * 1024 * 1024 * 1024;
@@ -65,6 +65,13 @@ enum WriterCommand {
         command: Box<catalog_state::CatalogBuildStateCommand>,
         queued_at: Instant,
         response: Sender<Result<Option<catalog_state::CatalogBuildStateReceipt>, EngineError>>,
+    },
+    CommitInitialCatalogPublication {
+        command: Box<catalog_publication::CatalogInitialPublicationCommand>,
+        queued_at: Instant,
+        response: Sender<
+            Result<Option<catalog_publication::CatalogInitialPublicationReceipt>, EngineError>,
+        >,
     },
     SourceCatalog {
         adapter_id: String,
@@ -183,6 +190,26 @@ impl WriterClient {
         let (response_tx, response_rx) = bounded(1);
         self.commands
             .send(WriterCommand::CommitCatalogBuildState {
+                command: Box::new(command),
+                queued_at: Instant::now(),
+                response: response_tx,
+            })
+            .map_err(|_| EngineError::WorkerUnavailable { worker: "writer" })?;
+        response_rx
+            .recv()
+            .map_err(|_| EngineError::WorkerUnavailable { worker: "writer" })?
+    }
+
+    pub(crate) fn commit_initial_catalog_publication(
+        &self,
+        command: catalog_publication::CatalogInitialPublicationCommand,
+    ) -> Result<Option<catalog_publication::CatalogInitialPublicationReceipt>, EngineError> {
+        if !self.alive.load(Ordering::Acquire) {
+            return Err(EngineError::WorkerUnavailable { worker: "writer" });
+        }
+        let (response_tx, response_rx) = bounded(1);
+        self.commands
+            .send(WriterCommand::CommitInitialCatalogPublication {
                 command: Box::new(command),
                 queued_at: Instant::now(),
                 response: response_tx,
@@ -553,6 +580,47 @@ fn writer_thread(
                 let started = Instant::now();
                 let result = reserve.and_then(|()| {
                     catalog_state::apply_catalog_build_state_commit(&mut connection, &command)
+                });
+                let elapsed = started.elapsed();
+                telemetry.writer_total.record(elapsed);
+                let committed = matches!(result, Ok(Some(_)));
+                match &result {
+                    Ok(Some(_)) => {
+                        atomic_saturating_add(&telemetry.commit_attempts, 1);
+                        atomic_saturating_add(&telemetry.committed, 1);
+                        atomic_saturating_add(
+                            &telemetry.sqlite_rows_changed,
+                            sqlite_total_changes(&connection).saturating_sub(rows_before),
+                        );
+                        telemetry.physical_transaction.record(elapsed);
+                    }
+                    Ok(None) => {}
+                    Err(_) => {
+                        atomic_saturating_add(&telemetry.commit_attempts, 1);
+                        atomic_saturating_add(&telemetry.failed, 1);
+                    }
+                }
+                let _ = response.send(result);
+                if committed {
+                    checkpoints.maybe_checkpoint(&connection, &telemetry, bootstrap_active);
+                }
+            }
+            WriterCommand::CommitInitialCatalogPublication {
+                command,
+                queued_at,
+                response,
+            } => {
+                telemetry.queue_wait.record(queued_at.elapsed());
+                let reserve_started = Instant::now();
+                let reserve = ensure_disk_reserve(&database_path);
+                telemetry.disk_reserve.record(reserve_started.elapsed());
+                let rows_before = sqlite_total_changes(&connection);
+                let started = Instant::now();
+                let result = reserve.and_then(|()| {
+                    catalog_publication::apply_initial_catalog_publication(
+                        &mut connection,
+                        &command,
+                    )
                 });
                 let elapsed = started.elapsed();
                 telemetry.writer_total.record(elapsed);

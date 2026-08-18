@@ -1,26 +1,28 @@
-//! Source-neutral RFC 012B Library plan registration and initial build state.
+//! Source-neutral RFC 012B Library plan and initial build-state durability.
 //!
-//! This module deliberately stops at `Pending`/`Building`. It persists no
-//! source coverage, reduced rows, completed snapshot, or query authority. A
-//! later B3 transition must compose those values atomically before readiness
-//! may advance beyond this administrative lineage.
+//! This module owns `Pending`/`Building` administration and reconstructs the
+//! initial `Ready` snapshot published atomically by `catalog_publication`. It
+//! still owns no source reads, refresh/retention policy, or query authority.
 
 use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 use serde::Serialize;
 
 use crate::catalog_contract::{
     CatalogCoveragePlan, CatalogCoveragePlanId, CatalogCoverageScope, CatalogReadinessMachine,
-    CatalogReadinessPhase, CatalogReadinessSnapshot, CATALOG_READINESS_CONTRACT_VERSION,
+    CatalogReadinessPhase, CatalogReadinessSnapshot, CatalogSnapshotId,
+    CATALOG_READINESS_CONTRACT_VERSION,
 };
 
 use super::commit::{self, ChangeEntry};
 use super::EngineError;
 
-const LIBRARY_SCOPE: &str = "library";
+pub(super) const LIBRARY_SCOPE: &str = "library";
 const PENDING_STATE: &str = "pending";
 const BUILDING_STATE: &str = "building";
+const READY_STATE: &str = "ready";
 const REGISTER_REASON: &str = "catalog.library.plan.registered";
 const SCHEDULE_REASON: &str = "catalog.library.build.scheduled";
+pub(super) const INITIAL_PUBLICATION_REASON: &str = "catalog.library.initial_snapshot.published";
 const READINESS_CHANGE_TOPIC: &str = "catalog.readiness.changed";
 const READINESS_CHANGE_SCHEMA_VERSION: u32 = 1;
 const MAX_CATALOG_PLAN_JSON_BYTES: usize = 4 * 1024 * 1024;
@@ -29,6 +31,7 @@ const MAX_CATALOG_PLAN_JSON_BYTES: usize = 4 * 1024 * 1024;
 pub(crate) enum CatalogDurableBuildPhase {
     Pending,
     Building,
+    Ready,
 }
 
 impl CatalogDurableBuildPhase {
@@ -36,6 +39,7 @@ impl CatalogDurableBuildPhase {
         match self {
             Self::Pending => PENDING_STATE,
             Self::Building => BUILDING_STATE,
+            Self::Ready => READY_STATE,
         }
     }
 
@@ -43,6 +47,7 @@ impl CatalogDurableBuildPhase {
         match value {
             PENDING_STATE => Ok(Self::Pending),
             BUILDING_STATE => Ok(Self::Building),
+            READY_STATE => Ok(Self::Ready),
             _ => Err(corrupt_catalog_state(format!(
                 "unsupported durable build state {value:?}"
             ))),
@@ -198,7 +203,9 @@ pub(super) fn apply_catalog_build_state_commit_with_hook(
                     && current.readiness.desired_contract_version == *desired_contract_version
                     && matches!(
                         current.readiness.state,
-                        CatalogReadinessPhase::Pending | CatalogReadinessPhase::Building
+                        CatalogReadinessPhase::Pending
+                            | CatalogReadinessPhase::Building
+                            | CatalogReadinessPhase::Ready
                     )
                 {
                     transaction.commit().map_err(|error| {
@@ -297,26 +304,43 @@ pub(super) fn load_catalog_build_state(
     let row = connection
         .query_row(
             r#"
-            SELECT plan.coverage_plan_id,
+            SELECT CASE WHEN typeof(plan.coverage_plan_id) = 'blob'
+                                  AND length(plan.coverage_plan_id) = 32
+                        THEN plan.coverage_plan_id END,
                    plan.coverage_plan_contract_version,
                    CASE
                      WHEN length(plan.plan_json) BETWEEN 1 AND ?2
                      THEN plan.plan_json
                    END,
-                   plan.content_digest,
+                   CASE WHEN typeof(plan.content_digest) = 'blob'
+                                  AND length(plan.content_digest) = 32
+                        THEN plan.content_digest END,
                    plan.created_commit_seq,
                    build.desired_contract_version,
                    build.epoch,
                    build.attempt,
-                   build.state,
+                   CASE WHEN typeof(build.state) = 'text'
+                                  AND build.state IN ('pending', 'building', 'ready')
+                        THEN build.state END,
+                   build.completed_contract_version,
+                   build.complete_through_commit,
+                   build.last_complete_snapshot_commit,
                    build.last_commit_seq,
                    build.updated_at,
                    plan_commit.source_instance_id,
-                   plan_commit.reason,
+                   CASE WHEN typeof(plan_commit.reason) = 'text'
+                                  AND plan_commit.reason = 'catalog.library.plan.registered'
+                        THEN plan_commit.reason END,
                    plan_commit.committed_at,
                    plan_commit.fact_count,
                    state_commit.source_instance_id,
-                   state_commit.reason,
+                   CASE WHEN typeof(state_commit.reason) = 'text'
+                                  AND state_commit.reason IN (
+                                      'catalog.library.plan.registered',
+                                      'catalog.library.build.scheduled',
+                                      'catalog.library.initial_snapshot.published'
+                                  )
+                        THEN state_commit.reason END,
                    state_commit.committed_at,
                    state_commit.fact_count
             FROM catalog_build_state AS build
@@ -340,16 +364,19 @@ pub(super) fn load_catalog_build_state(
                     epoch: row.get(6)?,
                     attempt: row.get(7)?,
                     state: row.get(8)?,
-                    last_commit_seq: row.get(9)?,
-                    updated_at: row.get(10)?,
-                    plan_commit_source: row.get(11)?,
-                    plan_commit_reason: row.get(12)?,
-                    plan_committed_at: row.get(13)?,
-                    plan_fact_count: row.get(14)?,
-                    state_commit_source: row.get(15)?,
-                    state_commit_reason: row.get(16)?,
-                    state_committed_at: row.get(17)?,
-                    state_fact_count: row.get(18)?,
+                    completed_contract_version: row.get(9)?,
+                    complete_through_commit: row.get(10)?,
+                    last_complete_snapshot_commit: row.get(11)?,
+                    last_commit_seq: row.get(12)?,
+                    updated_at: row.get(13)?,
+                    plan_commit_source: row.get(14)?,
+                    plan_commit_reason: row.get(15)?,
+                    plan_committed_at: row.get(16)?,
+                    plan_fact_count: row.get(17)?,
+                    state_commit_source: row.get(18)?,
+                    state_commit_reason: row.get(19)?,
+                    state_committed_at: row.get(20)?,
+                    state_fact_count: row.get(21)?,
                 })
             },
         )
@@ -367,7 +394,9 @@ pub(super) fn load_catalog_build_state(
         })
         .map_err(|error| sqlite_error("count catalog build states", error))?;
     match row {
-        Some(row) if plan_count == 1 && state_count == 1 => decode_stored_state(row).map(Some),
+        Some(row) if plan_count == 1 && state_count == 1 => {
+            decode_stored_state(connection, row).map(Some)
+        }
         Some(_) => Err(corrupt_catalog_state(
             "durable catalog state must contain exactly one joined Library plan and build row",
         )),
@@ -379,28 +408,32 @@ pub(super) fn load_catalog_build_state(
 }
 
 struct StoredCatalogBuildState {
-    coverage_plan_id: Vec<u8>,
+    coverage_plan_id: Option<Vec<u8>>,
     coverage_plan_contract_version: i64,
     plan_json: Option<Vec<u8>>,
-    content_digest: Vec<u8>,
+    content_digest: Option<Vec<u8>>,
     created_commit_seq: i64,
     desired_contract_version: i64,
     epoch: i64,
     attempt: i64,
-    state: String,
+    state: Option<String>,
+    completed_contract_version: Option<i64>,
+    complete_through_commit: Option<i64>,
+    last_complete_snapshot_commit: Option<i64>,
     last_commit_seq: i64,
     updated_at: i64,
     plan_commit_source: Option<i64>,
-    plan_commit_reason: String,
+    plan_commit_reason: Option<String>,
     plan_committed_at: Option<i64>,
     plan_fact_count: i64,
     state_commit_source: Option<i64>,
-    state_commit_reason: String,
+    state_commit_reason: Option<String>,
     state_committed_at: Option<i64>,
     state_fact_count: i64,
 }
 
 fn decode_stored_state(
+    connection: &Connection,
     stored: StoredCatalogBuildState,
 ) -> Result<DurableCatalogBuildState, EngineError> {
     let Some(plan_json) = stored.plan_json else {
@@ -408,12 +441,22 @@ fn decode_stored_state(
             "catalog coverage-plan JSON is outside its durable byte bound",
         ));
     };
-    if stored.coverage_plan_id.len() != 32 || stored.content_digest.len() != 32 {
-        return Err(corrupt_catalog_state(
-            "catalog plan identity or content digest is not 32 bytes",
-        ));
-    }
-    if blake3::hash(&plan_json).as_bytes() != stored.content_digest.as_slice() {
+    let coverage_plan_id = stored.coverage_plan_id.as_deref().ok_or_else(|| {
+        corrupt_catalog_state("catalog plan identity exceeds its fixed durable bound")
+    })?;
+    let content_digest = stored.content_digest.as_deref().ok_or_else(|| {
+        corrupt_catalog_state("catalog plan content digest exceeds its fixed durable bound")
+    })?;
+    let state = stored.state.as_deref().ok_or_else(|| {
+        corrupt_catalog_state("catalog durable build state is outside its closed vocabulary")
+    })?;
+    let plan_commit_reason = stored.plan_commit_reason.as_deref().ok_or_else(|| {
+        corrupt_catalog_state("catalog plan commit reason is outside its closed vocabulary")
+    })?;
+    let state_commit_reason = stored.state_commit_reason.as_deref().ok_or_else(|| {
+        corrupt_catalog_state("catalog state commit reason is outside its closed vocabulary")
+    })?;
+    if blake3::hash(&plan_json).as_bytes() != content_digest {
         return Err(corrupt_catalog_state(
             "catalog coverage-plan content digest does not match stored bytes",
         ));
@@ -423,7 +466,7 @@ fn decode_stored_state(
     })?;
     plan.validate().map_err(catalog_contract_error)?;
     if plan.scope != CatalogCoverageScope::Library
-        || plan.coverage_plan_id.storage_bytes().as_slice() != stored.coverage_plan_id.as_slice()
+        || plan.coverage_plan_id.storage_bytes().as_slice() != coverage_plan_id
         || i64::from(plan.coverage_plan_contract_version) != stored.coverage_plan_contract_version
     {
         return Err(corrupt_catalog_state(
@@ -437,19 +480,19 @@ fn decode_stored_state(
     )?;
     let epoch = positive_u64(stored.epoch, "catalog readiness epoch")?;
     let attempt = positive_u64(stored.attempt, "catalog readiness attempt")?;
-    let phase = CatalogDurableBuildPhase::parse(&stored.state)?;
+    let phase = CatalogDurableBuildPhase::parse(state)?;
     let created_commit_seq = positive_u64(stored.created_commit_seq, "catalog plan commit")?;
     let last_commit_seq = positive_u64(stored.last_commit_seq, "catalog state commit")?;
     validate_admin_commit(
         stored.plan_commit_source,
-        &stored.plan_commit_reason,
+        plan_commit_reason,
         stored.plan_committed_at,
         stored.plan_fact_count,
         REGISTER_REASON,
     )?;
     validate_admin_commit(
         stored.state_commit_source,
-        &stored.state_commit_reason,
+        state_commit_reason,
         stored.state_committed_at,
         stored.state_fact_count,
         phase_reason(phase),
@@ -470,13 +513,73 @@ fn decode_stored_state(
                 "building catalog state must follow its registration commit",
             ));
         }
+        CatalogDurableBuildPhase::Ready if last_commit_seq <= created_commit_seq => {
+            return Err(corrupt_catalog_state(
+                "ready catalog publication must follow its registration commit",
+            ));
+        }
+        _ => {}
+    }
+
+    let completed_contract_version = stored
+        .completed_contract_version
+        .map(|value| positive_u32(value, "catalog completed contract version"))
+        .transpose()?;
+    let complete_through_commit = stored
+        .complete_through_commit
+        .map(|value| positive_u64(value, "catalog complete-through commit"))
+        .transpose()?;
+    let last_complete_snapshot_commit = stored
+        .last_complete_snapshot_commit
+        .map(|value| positive_u64(value, "catalog last-complete snapshot commit"))
+        .transpose()?;
+    match phase {
+        CatalogDurableBuildPhase::Pending | CatalogDurableBuildPhase::Building
+            if completed_contract_version.is_some()
+                || complete_through_commit.is_some()
+                || last_complete_snapshot_commit.is_some() =>
+        {
+            return Err(corrupt_catalog_state(
+                "pending/building catalog state cannot claim completed snapshot fields",
+            ));
+        }
+        CatalogDurableBuildPhase::Ready
+            if completed_contract_version != Some(desired_contract_version)
+                || complete_through_commit != Some(last_commit_seq)
+                || last_complete_snapshot_commit != Some(last_commit_seq) =>
+        {
+            return Err(corrupt_catalog_state(
+                "ready catalog state does not identify its exact completed snapshot",
+            ));
+        }
         _ => {}
     }
 
     let mut machine = CatalogReadinessMachine::register(plan.clone(), desired_contract_version)
         .map_err(catalog_contract_error)?;
-    if phase == CatalogDurableBuildPhase::Building {
+    if matches!(
+        phase,
+        CatalogDurableBuildPhase::Building | CatalogDurableBuildPhase::Ready
+    ) {
         machine.schedule_build().map_err(catalog_contract_error)?;
+    }
+    if phase == CatalogDurableBuildPhase::Ready {
+        let snapshot_id = CatalogSnapshotId::new(
+            desired_contract_version,
+            plan.coverage_plan_id,
+            epoch,
+            last_commit_seq,
+        )
+        .map_err(catalog_contract_error)?;
+        let publication = super::catalog_publication::load_ready_publication(
+            connection,
+            &plan,
+            snapshot_id,
+            attempt,
+        )?;
+        machine
+            .publish_ready(snapshot_id, publication.source_coverage)
+            .map_err(catalog_contract_error)?;
     }
     if machine.snapshot().epoch != epoch || machine.snapshot().attempt != attempt {
         return Err(corrupt_catalog_state(
@@ -541,7 +644,7 @@ fn validate_command(command: &CatalogBuildStateCommand) -> Result<(), EngineErro
     Ok(())
 }
 
-fn insert_administrative_commit(
+pub(super) fn insert_administrative_commit(
     transaction: &Transaction<'_>,
     reason: &str,
     started_at: i64,
@@ -695,7 +798,7 @@ fn write_readiness_change(
     )
 }
 
-fn validate_admin_commit(
+pub(super) fn validate_admin_commit(
     source_instance_id: Option<i64>,
     reason: &str,
     committed_at: Option<i64>,
@@ -718,6 +821,7 @@ fn phase_reason(phase: CatalogDurableBuildPhase) -> &'static str {
     match phase {
         CatalogDurableBuildPhase::Pending => REGISTER_REASON,
         CatalogDurableBuildPhase::Building => SCHEDULE_REASON,
+        CatalogDurableBuildPhase::Ready => INITIAL_PUBLICATION_REASON,
     }
 }
 
@@ -725,16 +829,17 @@ fn durable_phase(state: CatalogReadinessPhase) -> Result<CatalogDurableBuildPhas
     match state {
         CatalogReadinessPhase::Pending => Ok(CatalogDurableBuildPhase::Pending),
         CatalogReadinessPhase::Building => Ok(CatalogDurableBuildPhase::Building),
+        CatalogReadinessPhase::Ready => Ok(CatalogDurableBuildPhase::Ready),
         CatalogReadinessPhase::Partial
-        | CatalogReadinessPhase::Ready
         | CatalogReadinessPhase::Degraded
         | CatalogReadinessPhase::Error => Err(EngineError::InvalidCommit(
-            "this catalog persistence slice cannot publish coverage-bearing readiness".to_string(),
+            "this catalog persistence slice supports only initial pending/building/ready readiness"
+                .to_string(),
         )),
     }
 }
 
-fn positive_u32(value: i64, field: &'static str) -> Result<u32, EngineError> {
+pub(super) fn positive_u32(value: i64, field: &'static str) -> Result<u32, EngineError> {
     let value = u32::try_from(value)
         .map_err(|_| corrupt_catalog_state(format!("{field} is outside the durable u32 range")))?;
     if value == 0 {
@@ -743,7 +848,7 @@ fn positive_u32(value: i64, field: &'static str) -> Result<u32, EngineError> {
     Ok(value)
 }
 
-fn positive_u64(value: i64, field: &'static str) -> Result<u64, EngineError> {
+pub(super) fn positive_u64(value: i64, field: &'static str) -> Result<u64, EngineError> {
     let value =
         u64::try_from(value).map_err(|_| corrupt_catalog_state(format!("{field} is negative")))?;
     if value == 0 {
@@ -752,23 +857,23 @@ fn positive_u64(value: i64, field: &'static str) -> Result<u64, EngineError> {
     Ok(value)
 }
 
-fn to_i64(value: u64, field: &'static str) -> Result<i64, EngineError> {
+pub(super) fn to_i64(value: u64, field: &'static str) -> Result<i64, EngineError> {
     i64::try_from(value)
         .map_err(|_| EngineError::InvalidCommit(format!("{field} exceeds SQLite integer range")))
 }
 
-fn catalog_contract_error(error: impl std::fmt::Display) -> EngineError {
+pub(super) fn catalog_contract_error(error: impl std::fmt::Display) -> EngineError {
     EngineError::InvalidCommit(format!("invalid catalog contract: {error}"))
 }
 
-fn corrupt_catalog_state(message: impl Into<String>) -> EngineError {
+pub(super) fn corrupt_catalog_state(message: impl Into<String>) -> EngineError {
     EngineError::InvalidCommit(format!(
         "corrupt durable catalog build state: {}",
         message.into()
     ))
 }
 
-fn sqlite_error(operation: &'static str, error: rusqlite::Error) -> EngineError {
+pub(super) fn sqlite_error(operation: &'static str, error: rusqlite::Error) -> EngineError {
     EngineError::Sqlite {
         operation,
         detail: error.to_string(),
@@ -1187,6 +1292,133 @@ mod tests {
                 panic!("corrupt catalog state unexpectedly started the writer");
             }
         }
+    }
+
+    #[test]
+    fn restart_projects_identity_phase_and_commit_reasons_before_decoding() {
+        let mut connection = database();
+        apply_catalog_build_state_commit(&mut connection, &register(plan()))
+            .unwrap()
+            .unwrap();
+        let pending = load_catalog_build_state(&connection).unwrap().unwrap();
+        apply_catalog_build_state_commit(
+            &mut connection,
+            &CatalogBuildStateCommand::schedule(pending.expectation().unwrap(), 20, 21),
+        )
+        .unwrap()
+        .unwrap();
+        connection
+            .execute_batch("PRAGMA foreign_keys = OFF; PRAGMA ignore_check_constraints = ON;")
+            .unwrap();
+
+        let original_plan_id = plan().coverage_plan_id.storage_bytes().to_vec();
+        let oversized_plan_id = vec![7_u8; 33];
+        connection
+            .execute(
+                "UPDATE catalog_coverage_plans SET coverage_plan_id = ?1",
+                [&oversized_plan_id],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "UPDATE catalog_build_state SET coverage_plan_id = ?1",
+                [&oversized_plan_id],
+            )
+            .unwrap();
+        let error = load_catalog_build_state(&connection).unwrap_err();
+        assert!(error.to_string().contains("plan identity exceeds"));
+        connection
+            .execute(
+                "UPDATE catalog_coverage_plans SET coverage_plan_id = ?1",
+                [&original_plan_id],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "UPDATE catalog_build_state SET coverage_plan_id = ?1",
+                [&original_plan_id],
+            )
+            .unwrap();
+
+        let original_content_digest: Vec<u8> = connection
+            .query_row(
+                "SELECT content_digest FROM catalog_coverage_plans",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        connection
+            .execute(
+                "UPDATE catalog_coverage_plans SET content_digest = ?1",
+                [vec![8_u8; 33]],
+            )
+            .unwrap();
+        let error = load_catalog_build_state(&connection).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("content digest exceeds its fixed durable bound"));
+        connection
+            .execute(
+                "UPDATE catalog_coverage_plans SET content_digest = ?1",
+                [original_content_digest],
+            )
+            .unwrap();
+
+        connection
+            .execute(
+                "UPDATE catalog_build_state SET state = ?1",
+                ["x".repeat(257)],
+            )
+            .unwrap();
+        let error = load_catalog_build_state(&connection).unwrap_err();
+        assert!(error.to_string().contains("closed vocabulary"));
+        connection
+            .execute(
+                "UPDATE catalog_build_state SET state = ?1",
+                [BUILDING_STATE],
+            )
+            .unwrap();
+
+        connection
+            .execute(
+                "UPDATE ingest_commits SET reason = ?1 WHERE commit_seq = 1",
+                ["x".repeat(257)],
+            )
+            .unwrap();
+        let error = load_catalog_build_state(&connection).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("plan commit reason is outside its closed vocabulary"));
+        connection
+            .execute(
+                "UPDATE ingest_commits SET reason = ?1 WHERE commit_seq = 1",
+                [REGISTER_REASON],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "UPDATE ingest_commits SET reason = ?1 WHERE commit_seq = 2",
+                ["x".repeat(257)],
+            )
+            .unwrap();
+        let error = load_catalog_build_state(&connection).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("state commit reason is outside its closed vocabulary"));
+        connection
+            .execute(
+                "UPDATE ingest_commits SET reason = ?1 WHERE commit_seq = 2",
+                [SCHEDULE_REASON],
+            )
+            .unwrap();
+        assert_eq!(
+            load_catalog_build_state(&connection)
+                .unwrap()
+                .unwrap()
+                .readiness
+                .state,
+            CatalogReadinessPhase::Building
+        );
     }
 
     #[test]

@@ -1,18 +1,20 @@
-//! Store-free RFC 012B initial catalog publication assembly.
+//! Store-independent RFC 012B initial catalog publication assembly and frames.
 //!
-//! This module validates the complete semantic payload that a later B3 writer
-//! may commit atomically. It deliberately owns no SQLite, source reads,
-//! snapshot transition, serialization, or public transport surface.
+//! This module validates the complete semantic payload and projects it into
+//! bounded canonical private frames consumed by the B3 writer. It deliberately
+//! owns no SQLite, source reads, snapshot transition, or public transport.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
+use serde::{Serialize, Serializer};
 
 use super::evidence::{
-    CatalogAssertionKey, CatalogEntityKind, CatalogEntityRef, CatalogEvidenceOwner, CatalogReducer,
-    CatalogReducerPublication, CatalogReducerPublicationLimits,
+    serialize_private_json_bounded, CatalogAssertionKey, CatalogEntityKind, CatalogEntityRef,
+    CatalogEvidenceOwner, CatalogReducer, CatalogReducerPublication,
+    CatalogReducerPublicationLimits,
 };
 use super::{
     validate_identifier, CatalogContractError, CatalogCoveragePlan, CatalogCoveragePlanId,
@@ -26,9 +28,12 @@ use crate::adapter::{
 };
 
 pub(crate) const CATALOG_INITIAL_PUBLICATION_CONTRACT_VERSION: u32 = 1;
+pub(crate) const CATALOG_DURABLE_PUBLICATION_CONTRACT_VERSION: u32 = 1;
 
 const MAX_PUBLICATION_MEMBERS: usize = 1_000_000;
 const MAX_SELECTED_FACT_FAMILIES: usize = 4_096;
+pub(crate) const MAX_DURABLE_PUBLICATION_ENTRIES: usize = 2_100_000;
+pub(crate) const MAX_DURABLE_PUBLICATION_BYTES: usize = 512 * 1024 * 1024;
 
 macro_rules! private_digest_type {
     ($name:ident, $label:literal) => {
@@ -57,6 +62,15 @@ macro_rules! private_digest_type {
                     .finish()
             }
         }
+
+        impl Serialize for $name {
+            fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+            where
+                S: Serializer,
+            {
+                serializer.serialize_str(&format!("v1:{}", URL_SAFE_NO_PAD.encode(self.0)))
+            }
+        }
     };
 }
 
@@ -79,6 +93,189 @@ impl fmt::Display for CatalogInitialPublicationDigest {
             "catalog-initial-publication-v1:{}",
             URL_SAFE_NO_PAD.encode(self.0)
         )
+    }
+}
+
+impl CatalogInitialPublicationDigest {
+    pub(crate) fn storage_bytes(&self) -> &[u8; DIGEST_BYTES] {
+        self.as_bytes()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum CatalogDurablePublicationEntryKind {
+    Source,
+    MemberBinding,
+    ReducerState,
+    ProjectRow,
+    SessionRow,
+    Tombstone,
+}
+
+impl CatalogDurablePublicationEntryKind {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Source => "source",
+            Self::MemberBinding => "member_binding",
+            Self::ReducerState => "reducer_state",
+            Self::ProjectRow => "project_row",
+            Self::SessionRow => "session_row",
+            Self::Tombstone => "tombstone",
+        }
+    }
+
+    pub(crate) fn parse(value: &str) -> Result<Self, CatalogContractError> {
+        match value {
+            "source" => Ok(Self::Source),
+            "member_binding" => Ok(Self::MemberBinding),
+            "reducer_state" => Ok(Self::ReducerState),
+            "project_row" => Ok(Self::ProjectRow),
+            "session_row" => Ok(Self::SessionRow),
+            "tombstone" => Ok(Self::Tombstone),
+            _ => Err(CatalogContractError::invalid(
+                "unsupported durable catalog publication entry kind",
+            )),
+        }
+    }
+}
+
+/// One canonical, versioned private frame written by B3 persistence. Payloads
+/// can retain local-sensitive values and therefore never implement `Debug`.
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct CatalogDurablePublicationEntry {
+    kind: CatalogDurablePublicationEntryKind,
+    key: [u8; DIGEST_BYTES],
+    payload: Vec<u8>,
+    payload_digest: [u8; DIGEST_BYTES],
+}
+
+impl CatalogDurablePublicationEntry {
+    pub(crate) fn kind(&self) -> CatalogDurablePublicationEntryKind {
+        self.kind
+    }
+
+    pub(crate) fn key(&self) -> &[u8; DIGEST_BYTES] {
+        &self.key
+    }
+
+    pub(crate) fn payload(&self) -> &[u8] {
+        &self.payload
+    }
+
+    pub(crate) fn payload_digest(&self) -> &[u8; DIGEST_BYTES] {
+        &self.payload_digest
+    }
+}
+
+/// Checked private durable projection of the non-serializable publication
+/// envelope. It is prepared completely before the writer starts SQLite.
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct CatalogDurableInitialPublication {
+    contract_version: u32,
+    build: CatalogInitialBuildExpectation,
+    contract_selection: ContractVersionSelection,
+    contract_selection_json: Vec<u8>,
+    member_identity_contract_id: Option<String>,
+    source_coverage: Vec<SourceCoverageSet>,
+    entries: Vec<CatalogDurablePublicationEntry>,
+    publication_digest: CatalogInitialPublicationDigest,
+    reducer_revision: super::evidence::CatalogReducerPublicationRevision,
+    source_count: usize,
+    member_count: usize,
+    project_row_count: usize,
+    session_row_count: usize,
+    tombstone_count: usize,
+    encoded_bytes: usize,
+    entries_digest: [u8; DIGEST_BYTES],
+    content_digest: [u8; DIGEST_BYTES],
+}
+
+impl CatalogDurableInitialPublication {
+    pub(crate) fn contract_version(&self) -> u32 {
+        self.contract_version
+    }
+
+    pub(crate) fn build(&self) -> CatalogInitialBuildExpectation {
+        self.build
+    }
+
+    pub(crate) fn contract_selection(&self) -> &ContractVersionSelection {
+        &self.contract_selection
+    }
+
+    pub(crate) fn contract_selection_json(&self) -> &[u8] {
+        &self.contract_selection_json
+    }
+
+    pub(crate) fn member_identity_contract_id(&self) -> Option<&str> {
+        self.member_identity_contract_id.as_deref()
+    }
+
+    pub(crate) fn source_coverage(&self) -> &[SourceCoverageSet] {
+        &self.source_coverage
+    }
+
+    pub(crate) fn entries(&self) -> &[CatalogDurablePublicationEntry] {
+        &self.entries
+    }
+
+    pub(crate) fn publication_digest(&self) -> CatalogInitialPublicationDigest {
+        self.publication_digest
+    }
+
+    pub(crate) fn reducer_revision(&self) -> super::evidence::CatalogReducerPublicationRevision {
+        self.reducer_revision
+    }
+
+    pub(crate) fn source_count(&self) -> usize {
+        self.source_count
+    }
+
+    pub(crate) fn member_count(&self) -> usize {
+        self.member_count
+    }
+
+    pub(crate) fn project_row_count(&self) -> usize {
+        self.project_row_count
+    }
+
+    pub(crate) fn session_row_count(&self) -> usize {
+        self.session_row_count
+    }
+
+    pub(crate) fn tombstone_count(&self) -> usize {
+        self.tombstone_count
+    }
+
+    pub(crate) fn encoded_bytes(&self) -> usize {
+        self.encoded_bytes
+    }
+
+    pub(crate) fn entries_digest(&self) -> &[u8; DIGEST_BYTES] {
+        &self.entries_digest
+    }
+
+    pub(crate) fn content_digest(&self) -> &[u8; DIGEST_BYTES] {
+        &self.content_digest
+    }
+}
+
+impl fmt::Debug for CatalogDurableInitialPublication {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CatalogDurableInitialPublication")
+            .field("contract_version", &self.contract_version)
+            .field("build", &self.build)
+            .field("source_count", &self.source_count)
+            .field("member_count", &self.member_count)
+            .field("project_row_count", &self.project_row_count)
+            .field("session_row_count", &self.session_row_count)
+            .field("tombstone_count", &self.tombstone_count)
+            .field("entry_count", &self.entries.len())
+            .field("encoded_bytes", &self.encoded_bytes)
+            .field("publication_digest", &self.publication_digest)
+            .field("payloads", &"<redacted>")
+            .finish()
     }
 }
 
@@ -328,9 +525,9 @@ pub(crate) struct CatalogInitialBuildExpectation {
     pub attempt: u64,
 }
 
-/// Fully checked, store-free input for one future atomic initial catalog
+/// Fully checked, store-independent input for one atomic initial catalog
 /// publication. The raw reducer evidence and rows remain private and Debug is
-/// redacted; the later writer must consume this checked value rather than
+/// redacted; the writer consumes this checked value rather than
 /// accepting independent coverage, row, and readiness inputs.
 #[derive(Clone, PartialEq, Eq)]
 pub(crate) struct CatalogInitialPublicationAssembly {
@@ -466,6 +663,245 @@ impl CatalogInitialPublicationAssembly {
     pub(crate) fn tombstone_count(&self) -> usize {
         self.reducer.tombstone_count()
     }
+
+    /// Project the checked store-free envelope into bounded, canonical private
+    /// durable frames. Encoding completes before the writer opens a
+    /// transaction, so an oversized publication cannot create a partial
+    /// SQLite lineage.
+    pub(crate) fn prepare_durable(
+        &self,
+    ) -> Result<CatalogDurableInitialPublication, CatalogContractError> {
+        self.prepare_durable_with_limits(
+            MAX_DURABLE_PUBLICATION_ENTRIES,
+            MAX_DURABLE_PUBLICATION_BYTES,
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn prepare_durable_with_test_limits(
+        &self,
+        max_entries: usize,
+        max_encoded_bytes: usize,
+    ) -> Result<CatalogDurableInitialPublication, CatalogContractError> {
+        self.prepare_durable_with_limits(max_entries, max_encoded_bytes)
+    }
+
+    fn prepare_durable_with_limits(
+        &self,
+        max_entries: usize,
+        max_encoded_bytes: usize,
+    ) -> Result<CatalogDurableInitialPublication, CatalogContractError> {
+        if max_entries == 0
+            || max_entries > MAX_DURABLE_PUBLICATION_ENTRIES
+            || max_encoded_bytes == 0
+            || max_encoded_bytes > MAX_DURABLE_PUBLICATION_BYTES
+        {
+            return Err(CatalogContractError::invalid(
+                "catalog durable publication limits are outside the frozen safety ceilings",
+            ));
+        }
+        #[derive(Serialize)]
+        struct DurableSource<'a> {
+            durable_source_contract_version: u32,
+            plan_source: &'a CatalogCoveragePlanSource,
+            contract_selection: &'a ContractVersionSelection,
+            member_identity_contract_id: &'a str,
+            membership_revision: CatalogSourceMembershipRevision,
+            component_completion_revision: CatalogSourceCompletionRevision,
+            member_count: usize,
+            source_coverage: &'a SourceCoverageSet,
+            source_digest: CatalogCompleteSourceDigest,
+        }
+
+        #[derive(Serialize)]
+        struct DurableMemberBinding<'a> {
+            durable_member_binding_contract_version: u32,
+            source: &'a CatalogCoveragePlanSource,
+            member_ref: CatalogPublicationMemberRef,
+            assertion_key: CatalogAssertionKey,
+            session_ref: CatalogEntityRef,
+        }
+
+        let identity_contract_bytes = self
+            .member_identity_contract_id
+            .as_ref()
+            .map_or(0, String::len);
+        let selection_budget = max_encoded_bytes
+            .checked_sub(identity_contract_bytes)
+            .ok_or_else(|| {
+                CatalogContractError::invalid(
+                    "catalog member identity contract exhausts the durable byte ceiling",
+                )
+            })?;
+        let contract_selection_json = serialize_private_json_bounded(
+            &self.contract_selection,
+            selection_budget,
+            "catalog publication contract selection",
+        )?;
+        let mut encoded_bytes = contract_selection_json
+            .len()
+            .checked_add(identity_contract_bytes)
+            .ok_or_else(|| {
+                CatalogContractError::invalid(
+                    "catalog durable publication encoded byte count overflow",
+                )
+            })?;
+        let mut entries = Vec::new();
+        for source in &self.sources {
+            serialize_and_push_durable_entry(
+                &mut entries,
+                &mut encoded_bytes,
+                max_entries,
+                max_encoded_bytes,
+                CatalogDurablePublicationEntryKind::Source,
+                *source.digest.as_bytes(),
+                &DurableSource {
+                    durable_source_contract_version: CATALOG_DURABLE_PUBLICATION_CONTRACT_VERSION,
+                    plan_source: &source.plan_source,
+                    contract_selection: &source.contract_selection,
+                    member_identity_contract_id: &source.member_identity_contract_id,
+                    membership_revision: source.membership_revision,
+                    component_completion_revision: source.component_completion_revision,
+                    member_count: source.member_refs.len(),
+                    source_coverage: &source.source_coverage,
+                    source_digest: source.digest,
+                },
+                "catalog complete source",
+            )?;
+        }
+        for binding in &self.member_bindings {
+            serialize_and_push_durable_entry(
+                &mut entries,
+                &mut encoded_bytes,
+                max_entries,
+                max_encoded_bytes,
+                CatalogDurablePublicationEntryKind::MemberBinding,
+                derive_member_binding_frame_key(binding),
+                &DurableMemberBinding {
+                    durable_member_binding_contract_version:
+                        CATALOG_DURABLE_PUBLICATION_CONTRACT_VERSION,
+                    source: &binding.source,
+                    member_ref: binding.member_ref,
+                    assertion_key: binding.assertion_key,
+                    session_ref: binding.session_ref,
+                },
+                "catalog member binding",
+            )?;
+        }
+
+        let reducer_budget = durable_entry_payload_budget(
+            entries.len(),
+            encoded_bytes,
+            max_entries,
+            max_encoded_bytes,
+            CatalogDurablePublicationEntryKind::ReducerState,
+        )?;
+        let reducer_state = self.reducer.durable_state_json(reducer_budget)?;
+        push_durable_entry(
+            &mut entries,
+            &mut encoded_bytes,
+            max_entries,
+            max_encoded_bytes,
+            CatalogDurablePublicationEntryKind::ReducerState,
+            *self.reducer.revision().storage_bytes(),
+            reducer_state,
+        )?;
+        for row in self.reducer.project_rows() {
+            serialize_and_push_durable_entry(
+                &mut entries,
+                &mut encoded_bytes,
+                max_entries,
+                max_encoded_bytes,
+                CatalogDurablePublicationEntryKind::ProjectRow,
+                *row.project_ref.external_ref.entity_key.as_bytes(),
+                row,
+                "catalog project row",
+            )?;
+        }
+        for row in self.reducer.session_rows() {
+            serialize_and_push_durable_entry(
+                &mut entries,
+                &mut encoded_bytes,
+                max_entries,
+                max_encoded_bytes,
+                CatalogDurablePublicationEntryKind::SessionRow,
+                *row.session_ref.external_ref.entity_key.as_bytes(),
+                row,
+                "catalog session row",
+            )?;
+        }
+        for tombstone in self.reducer.tombstones() {
+            serialize_and_push_durable_entry(
+                &mut entries,
+                &mut encoded_bytes,
+                max_entries,
+                max_encoded_bytes,
+                CatalogDurablePublicationEntryKind::Tombstone,
+                *tombstone.entity_ref.external_ref.entity_key.as_bytes(),
+                tombstone,
+                "catalog tombstone",
+            )?;
+        }
+        entries.sort_by_key(|entry| (entry.kind, entry.key));
+        if entries
+            .windows(2)
+            .any(|pair| pair[0].kind == pair[1].kind && pair[0].key == pair[1].key)
+        {
+            return Err(CatalogContractError::invalid(
+                "catalog durable publication contains duplicate typed entry keys",
+            ));
+        }
+
+        let entry_summaries = entries
+            .iter()
+            .map(|entry| {
+                (
+                    entry.kind,
+                    entry.key,
+                    entry.payload.len(),
+                    entry.payload_digest,
+                )
+            })
+            .collect::<Vec<_>>();
+        let entries_digest = derive_durable_entries_digest(&entry_summaries);
+        let content_digest = derive_durable_content_digest(
+            self.build,
+            &contract_selection_json,
+            self.member_identity_contract_id.as_deref(),
+            self.digest,
+            self.reducer.revision(),
+            self.sources.len(),
+            self.member_bindings.len(),
+            self.reducer.project_row_count(),
+            self.reducer.session_row_count(),
+            self.reducer.tombstone_count(),
+            encoded_bytes,
+            entries_digest,
+        );
+        Ok(CatalogDurableInitialPublication {
+            contract_version: CATALOG_DURABLE_PUBLICATION_CONTRACT_VERSION,
+            build: self.build,
+            contract_selection: self.contract_selection.clone(),
+            contract_selection_json,
+            member_identity_contract_id: self.member_identity_contract_id.clone(),
+            source_coverage: self
+                .sources
+                .iter()
+                .map(|source| source.source_coverage.clone())
+                .collect(),
+            entries,
+            publication_digest: self.digest,
+            reducer_revision: self.reducer.revision(),
+            source_count: self.sources.len(),
+            member_count: self.member_bindings.len(),
+            project_row_count: self.reducer.project_row_count(),
+            session_row_count: self.reducer.session_row_count(),
+            tombstone_count: self.reducer.tombstone_count(),
+            encoded_bytes,
+            entries_digest,
+            content_digest,
+        })
+    }
 }
 
 impl fmt::Debug for CatalogInitialPublicationAssembly {
@@ -487,6 +923,228 @@ impl fmt::Debug for CatalogInitialPublicationAssembly {
             .field("digest", &self.digest)
             .finish()
     }
+}
+
+fn durable_entry_payload_budget(
+    entry_count: usize,
+    encoded_bytes: usize,
+    max_entries: usize,
+    max_encoded_bytes: usize,
+    kind: CatalogDurablePublicationEntryKind,
+) -> Result<usize, CatalogContractError> {
+    if entry_count >= max_entries {
+        return Err(CatalogContractError::invalid(format!(
+            "catalog durable publication reached its {max_entries}-entry ceiling before {}",
+            kind.as_str()
+        )));
+    }
+    let frame_overhead = DIGEST_BYTES
+        .checked_mul(2)
+        .and_then(|bytes| bytes.checked_add(kind.as_str().len()))
+        .ok_or_else(|| {
+            CatalogContractError::invalid(
+                "catalog durable publication frame-overhead count overflow",
+            )
+        })?;
+    let after_overhead = encoded_bytes.checked_add(frame_overhead).ok_or_else(|| {
+        CatalogContractError::invalid("catalog durable publication encoded byte count overflow")
+    })?;
+    let remaining = max_encoded_bytes
+        .checked_sub(after_overhead)
+        .ok_or_else(|| {
+            CatalogContractError::invalid(format!(
+            "catalog durable publication exhausted its {max_encoded_bytes}-byte ceiling before {}",
+            kind.as_str()
+        ))
+        })?;
+    if remaining == 0 {
+        return Err(CatalogContractError::invalid(format!(
+            "catalog durable publication has no payload budget for {}",
+            kind.as_str()
+        )));
+    }
+    Ok(remaining)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn serialize_and_push_durable_entry<T: Serialize + ?Sized>(
+    entries: &mut Vec<CatalogDurablePublicationEntry>,
+    encoded_bytes: &mut usize,
+    max_entries: usize,
+    max_encoded_bytes: usize,
+    kind: CatalogDurablePublicationEntryKind,
+    key: [u8; DIGEST_BYTES],
+    value: &T,
+    label: &'static str,
+) -> Result<(), CatalogContractError> {
+    let payload_budget = durable_entry_payload_budget(
+        entries.len(),
+        *encoded_bytes,
+        max_entries,
+        max_encoded_bytes,
+        kind,
+    )?;
+    let payload = serialize_private_json_bounded(value, payload_budget, label)?;
+    push_durable_entry(
+        entries,
+        encoded_bytes,
+        max_entries,
+        max_encoded_bytes,
+        kind,
+        key,
+        payload,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn push_durable_entry(
+    entries: &mut Vec<CatalogDurablePublicationEntry>,
+    encoded_bytes: &mut usize,
+    max_entries: usize,
+    max_encoded_bytes: usize,
+    kind: CatalogDurablePublicationEntryKind,
+    key: [u8; DIGEST_BYTES],
+    payload: Vec<u8>,
+) -> Result<(), CatalogContractError> {
+    let payload_budget = durable_entry_payload_budget(
+        entries.len(),
+        *encoded_bytes,
+        max_entries,
+        max_encoded_bytes,
+        kind,
+    )?;
+    if payload.len() > payload_budget {
+        return Err(CatalogContractError::invalid(format!(
+            "catalog durable {} frame exceeds its remaining payload budget",
+            kind.as_str()
+        )));
+    }
+    let entry = durable_entry(kind, key, payload)?;
+    *encoded_bytes = encoded_bytes
+        .checked_add(entry.payload.len())
+        .and_then(|bytes| bytes.checked_add(DIGEST_BYTES * 2))
+        .and_then(|bytes| bytes.checked_add(kind.as_str().len()))
+        .ok_or_else(|| {
+            CatalogContractError::invalid("catalog durable publication encoded byte count overflow")
+        })?;
+    debug_assert!(*encoded_bytes <= max_encoded_bytes);
+    entries.push(entry);
+    Ok(())
+}
+
+fn durable_entry(
+    kind: CatalogDurablePublicationEntryKind,
+    key: [u8; DIGEST_BYTES],
+    payload: Vec<u8>,
+) -> Result<CatalogDurablePublicationEntry, CatalogContractError> {
+    if key.iter().all(|byte| *byte == 0) || payload.is_empty() {
+        return Err(CatalogContractError::invalid(
+            "catalog durable publication entries require nonzero keys and nonempty payloads",
+        ));
+    }
+    if payload.len() > MAX_DURABLE_PUBLICATION_BYTES {
+        return Err(CatalogContractError::invalid(
+            "one catalog durable publication entry exceeds the aggregate byte ceiling",
+        ));
+    }
+    Ok(CatalogDurablePublicationEntry {
+        kind,
+        key,
+        payload_digest: *blake3::hash(&payload).as_bytes(),
+        payload,
+    })
+}
+
+fn derive_member_binding_frame_key(
+    binding: &CatalogPublicationMemberBinding,
+) -> [u8; DIGEST_BYTES] {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"spaghetti/rfc012b/catalog-durable-member-binding-v1\0");
+    hash_plan_source(&mut hasher, &binding.source);
+    hasher.update(binding.member_ref.as_bytes());
+    *hasher.finalize().as_bytes()
+}
+
+pub(crate) fn derive_durable_entries_digest(
+    entries: &[(
+        CatalogDurablePublicationEntryKind,
+        [u8; DIGEST_BYTES],
+        usize,
+        [u8; DIGEST_BYTES],
+    )],
+) -> [u8; DIGEST_BYTES] {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"spaghetti/rfc012b/catalog-durable-entries-v1\0");
+    hasher.update(&(entries.len() as u64).to_be_bytes());
+    for (kind, key, payload_len, payload_digest) in entries {
+        hash_component(&mut hasher, kind.as_str().as_bytes());
+        hasher.update(key);
+        hasher.update(&(*payload_len as u64).to_be_bytes());
+        hasher.update(payload_digest);
+    }
+    *hasher.finalize().as_bytes()
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn derive_durable_content_digest(
+    build: CatalogInitialBuildExpectation,
+    contract_selection_json: &[u8],
+    member_identity_contract_id: Option<&str>,
+    publication_digest: CatalogInitialPublicationDigest,
+    reducer_revision: super::evidence::CatalogReducerPublicationRevision,
+    source_count: usize,
+    member_count: usize,
+    project_row_count: usize,
+    session_row_count: usize,
+    tombstone_count: usize,
+    encoded_bytes: usize,
+    entries_digest: [u8; DIGEST_BYTES],
+) -> [u8; DIGEST_BYTES] {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"spaghetti/rfc012b/catalog-durable-content-v1\0");
+    hasher.update(&CATALOG_DURABLE_PUBLICATION_CONTRACT_VERSION.to_be_bytes());
+    hasher.update(build.coverage_plan_id.storage_bytes());
+    hasher.update(&build.desired_contract_version.to_be_bytes());
+    hasher.update(&build.epoch.to_be_bytes());
+    hasher.update(&build.attempt.to_be_bytes());
+    hash_component(&mut hasher, contract_selection_json);
+    match member_identity_contract_id {
+        Some(value) => {
+            hasher.update(&[1]);
+            hash_component(&mut hasher, value.as_bytes());
+        }
+        None => {
+            hasher.update(&[0]);
+        }
+    }
+    hasher.update(publication_digest.storage_bytes());
+    hasher.update(reducer_revision.storage_bytes());
+    for value in [
+        source_count,
+        member_count,
+        project_row_count,
+        session_row_count,
+        tombstone_count,
+        encoded_bytes,
+    ] {
+        hasher.update(&(value as u64).to_be_bytes());
+    }
+    hasher.update(&entries_digest);
+    *hasher.finalize().as_bytes()
+}
+
+pub(crate) fn validate_durable_contract_selection(
+    selection: &ContractVersionSelection,
+) -> Result<(), CatalogContractError> {
+    validate_contract_selection(selection)
+}
+
+pub(crate) fn validate_durable_source_coverage(
+    plan_source: &CatalogCoveragePlanSource,
+    selection: &ContractVersionSelection,
+    coverage: &SourceCoverageSet,
+) -> Result<(), CatalogContractError> {
+    validate_complete_source_coverage(plan_source, selection, coverage)
 }
 
 fn validate_contract_selection(

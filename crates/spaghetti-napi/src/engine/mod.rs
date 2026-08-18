@@ -6,6 +6,7 @@
 
 mod artifact_projection;
 mod capability_query;
+mod catalog_publication;
 mod catalog_state;
 mod commit;
 mod coordinator;
@@ -55,6 +56,7 @@ pub use capability_query::{
     ToolResultDetail, ToolResultPage, ToolResultPageRequest, CAPABILITY_QUERY_CONTRACT_VERSION,
     DEFAULT_CAPABILITY_PAGE_LIMIT, MAX_CAPABILITY_PAGE_PAYLOAD_BYTES,
 };
+use catalog_publication::{CatalogInitialPublicationCommand, CatalogInitialPublicationReceipt};
 use catalog_state::CatalogBuildStateCommand;
 pub use commit::{
     ChangeLogRetentionPolicy, ChangeLogRetentionSnapshot, DEFAULT_CHANGE_LOG_MAX_AGE_MS,
@@ -1358,6 +1360,21 @@ impl SpaghettiEngineCore {
         } else {
             Ok(None)
         }
+    }
+
+    /// Atomically publish the checked initial RFC 012B Library snapshot and
+    /// transition its exact durable Building lineage to Ready. The command is
+    /// crate-private and carries no public query or N-API authority.
+    pub(crate) fn commit_initial_catalog_publication(
+        &self,
+        command: CatalogInitialPublicationCommand,
+    ) -> Result<Option<CatalogInitialPublicationReceipt>, EngineError> {
+        let writer = self.writer_client()?;
+        let receipt = writer.commit_initial_catalog_publication(command)?;
+        if let Some(receipt) = &receipt {
+            self.commit_notifications.publish(receipt.commit_seq);
+        }
+        Ok(receipt)
     }
 
     /// Commit storage-agnostic adapter facts through the common projectors.

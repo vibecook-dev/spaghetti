@@ -185,7 +185,9 @@ const CANONICAL_FTS_TRIGGERS: &[&str] = &[
 /// epoch, and durable commit ownership for RFC 012C usage-v2 migration.
 /// v50: source-neutral RFC 012B Library coverage-plan registration and the
 /// initial Pending/Building readiness lineage on the common commit clock.
-pub const SCHEMA_VERSION: u32 = 50;
+/// v51: immutable RFC 012B initial catalog snapshots, private typed payload
+/// frames, and the atomically linked initial Ready state.
+pub const SCHEMA_VERSION: u32 = 51;
 
 /// Full DDL for the current schema — lifted verbatim from the TS `SCHEMA_SQL`
 /// template literal. Whitespace differs; structure does not.
@@ -487,7 +489,11 @@ CREATE TABLE IF NOT EXISTS ingest_commits (
   CHECK (
     source_instance_id IS NOT NULL
     OR (
-      reason IN ('catalog.library.plan.registered', 'catalog.library.build.scheduled')
+      reason IN (
+        'catalog.library.plan.registered',
+        'catalog.library.build.scheduled',
+        'catalog.library.initial_snapshot.published'
+      )
       AND committed_at IS NOT NULL
       AND fact_count = 0
     )
@@ -527,15 +533,78 @@ CREATE TABLE IF NOT EXISTS catalog_coverage_plans (
   created_commit_seq INTEGER NOT NULL REFERENCES ingest_commits(commit_seq) ON DELETE RESTRICT
 );
 
+CREATE TABLE IF NOT EXISTS catalog_snapshots (
+  snapshot_commit_seq INTEGER PRIMARY KEY REFERENCES ingest_commits(commit_seq) ON DELETE RESTRICT,
+  build_commit_seq INTEGER NOT NULL REFERENCES ingest_commits(commit_seq) ON DELETE RESTRICT,
+  durable_publication_contract_version INTEGER NOT NULL CHECK (durable_publication_contract_version > 0),
+  pack_contract_version INTEGER NOT NULL CHECK (pack_contract_version > 0),
+  coverage_plan_id BLOB NOT NULL REFERENCES catalog_coverage_plans(coverage_plan_id) ON DELETE RESTRICT CHECK (length(coverage_plan_id) = 32),
+  readiness_epoch INTEGER NOT NULL CHECK (readiness_epoch > 0),
+  attempt INTEGER NOT NULL CHECK (attempt > 0),
+  contract_selection_json BLOB NOT NULL CHECK (length(contract_selection_json) BETWEEN 1 AND 4194304),
+  member_identity_contract_id TEXT,
+  publication_digest BLOB NOT NULL CHECK (length(publication_digest) = 32),
+  reducer_revision BLOB NOT NULL CHECK (length(reducer_revision) = 32),
+  entries_digest BLOB NOT NULL CHECK (length(entries_digest) = 32),
+  content_digest BLOB NOT NULL CHECK (length(content_digest) = 32),
+  entry_count INTEGER NOT NULL CHECK (entry_count BETWEEN 1 AND 2100000),
+  encoded_bytes INTEGER NOT NULL CHECK (encoded_bytes BETWEEN 1 AND 536870912),
+  source_count INTEGER NOT NULL CHECK (source_count BETWEEN 0 AND 4096),
+  member_count INTEGER NOT NULL CHECK (member_count BETWEEN 0 AND 1000000),
+  project_row_count INTEGER NOT NULL CHECK (project_row_count BETWEEN 0 AND 1000000),
+  session_row_count INTEGER NOT NULL CHECK (session_row_count BETWEEN 0 AND 1000000),
+  tombstone_count INTEGER NOT NULL CHECK (tombstone_count BETWEEN 0 AND 1000000),
+  published_at INTEGER NOT NULL,
+  CHECK (member_identity_contract_id IS NULL OR length(CAST(member_identity_contract_id AS BLOB)) BETWEEN 1 AND 256),
+  CHECK (
+    (source_count = 0 AND member_identity_contract_id IS NULL)
+    OR (source_count > 0 AND member_identity_contract_id IS NOT NULL)
+  ),
+  CHECK (snapshot_commit_seq > build_commit_seq),
+  UNIQUE (pack_contract_version, coverage_plan_id, readiness_epoch, snapshot_commit_seq)
+);
+
+CREATE TABLE IF NOT EXISTS catalog_snapshot_entries (
+  snapshot_commit_seq INTEGER NOT NULL REFERENCES catalog_snapshots(snapshot_commit_seq) ON DELETE CASCADE,
+  ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
+  entry_kind TEXT NOT NULL CHECK (entry_kind IN ('source', 'member_binding', 'reducer_state', 'project_row', 'session_row', 'tombstone')),
+  entry_key BLOB NOT NULL CHECK (length(entry_key) = 32),
+  payload BLOB NOT NULL CHECK (length(payload) BETWEEN 1 AND 536870912),
+  payload_digest BLOB NOT NULL CHECK (length(payload_digest) = 32),
+  PRIMARY KEY (snapshot_commit_seq, entry_kind, entry_key),
+  UNIQUE (snapshot_commit_seq, ordinal)
+);
+
 CREATE TABLE IF NOT EXISTS catalog_build_state (
   scope_kind TEXT PRIMARY KEY CHECK (scope_kind = 'library'),
   coverage_plan_id BLOB NOT NULL REFERENCES catalog_coverage_plans(coverage_plan_id) ON DELETE RESTRICT,
   desired_contract_version INTEGER NOT NULL CHECK (desired_contract_version > 0),
   epoch INTEGER NOT NULL CHECK (epoch > 0),
   attempt INTEGER NOT NULL CHECK (attempt > 0),
-  state TEXT NOT NULL CHECK (state IN ('pending', 'building')),
+  state TEXT NOT NULL CHECK (state IN ('pending', 'building', 'ready')),
+  completed_contract_version INTEGER CHECK (completed_contract_version > 0),
+  complete_through_commit INTEGER REFERENCES catalog_snapshots(snapshot_commit_seq) ON DELETE RESTRICT,
+  last_complete_snapshot_commit INTEGER REFERENCES catalog_snapshots(snapshot_commit_seq) ON DELETE RESTRICT,
   last_commit_seq INTEGER NOT NULL REFERENCES ingest_commits(commit_seq) ON DELETE RESTRICT,
-  updated_at INTEGER NOT NULL
+  updated_at INTEGER NOT NULL,
+  CHECK (
+    (
+      state IN ('pending', 'building')
+      AND completed_contract_version IS NULL
+      AND complete_through_commit IS NULL
+      AND last_complete_snapshot_commit IS NULL
+    )
+    OR
+    (
+      state = 'ready'
+      AND completed_contract_version IS NOT NULL
+      AND complete_through_commit IS NOT NULL
+      AND last_complete_snapshot_commit IS NOT NULL
+      AND completed_contract_version = desired_contract_version
+      AND complete_through_commit = last_complete_snapshot_commit
+      AND last_commit_seq = complete_through_commit
+    )
+  )
 );
 
 CREATE TABLE IF NOT EXISTS projection_versions (
@@ -2273,7 +2342,9 @@ const CURRENT_TABLES: &[&str] = &[
     "source_coverage_sets",
     "query_pack_selections",
     "projection_versions",
+    "catalog_snapshot_entries",
     "catalog_build_state",
+    "catalog_snapshots",
     "catalog_coverage_plans",
     "source_objects",
     "source_streams",
@@ -3259,6 +3330,8 @@ mod tests {
             .expect("inspect source-neutral commit ownership");
         assert_eq!(source_commit_nullable, 0);
         assert!(object_exists(&conn, "table", "catalog_coverage_plans"));
+        assert!(object_exists(&conn, "table", "catalog_snapshots"));
+        assert!(object_exists(&conn, "table", "catalog_snapshot_entries"));
         assert!(object_exists(&conn, "table", "catalog_build_state"));
         assert!(object_exists(&conn, "table", "projection_versions"));
         assert!(object_exists(&conn, "table", "query_pack_selections"));
@@ -3615,6 +3688,7 @@ mod tests {
             "INSERT INTO ingest_commits (source_instance_id, reason, started_at, committed_at, fact_count) VALUES (NULL, 'observation', 1, 2, 0)",
             "INSERT INTO ingest_commits (source_instance_id, reason, started_at, committed_at, fact_count) VALUES (NULL, 'catalog.library.plan.registered', 1, 2, 1)",
             "INSERT INTO ingest_commits (source_instance_id, reason, started_at, committed_at, fact_count) VALUES (NULL, 'catalog.library.build.scheduled', 1, NULL, 0)",
+            "INSERT INTO ingest_commits (source_instance_id, reason, started_at, committed_at, fact_count) VALUES (NULL, 'catalog.library.initial_snapshot.published', 1, 2, 1)",
         ] {
             assert!(conn.execute(invalid, []).is_err(), "accepted {invalid}");
         }
@@ -3628,6 +3702,7 @@ mod tests {
         for reason in [
             "catalog.library.plan.registered",
             "catalog.library.build.scheduled",
+            "catalog.library.initial_snapshot.published",
         ] {
             conn.execute(
                 "INSERT INTO ingest_commits (source_instance_id, reason, started_at, committed_at, fact_count) VALUES (NULL, ?1, 1, 2, 0)",
@@ -3639,7 +3714,7 @@ mod tests {
             conn.query_row("SELECT COUNT(*) FROM ingest_commits", [], |row| row
                 .get::<_, i64>(0))
                 .unwrap(),
-            2
+            3
         );
     }
 

@@ -8,6 +8,7 @@
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
+use std::io::{self, Write};
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
@@ -30,6 +31,62 @@ const MAX_PRESENTATION_MEMBERS: usize = 4_096;
 const MAX_REPLACEMENT_RELATIONS: usize = 4_096;
 const MAX_PUBLICATION_REDUCER_ENTRIES: usize = 1_000_000;
 const MAX_PUBLICATION_ROWS: usize = 1_000_000;
+
+struct BoundedJsonWriter {
+    bytes: Vec<u8>,
+    max_bytes: usize,
+}
+
+impl BoundedJsonWriter {
+    fn new(max_bytes: usize) -> Self {
+        Self {
+            bytes: Vec::with_capacity(max_bytes.min(64 * 1024)),
+            max_bytes,
+        }
+    }
+
+    fn finish(self) -> Vec<u8> {
+        self.bytes
+    }
+}
+
+impl Write for BoundedJsonWriter {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        let next_len = self
+            .bytes
+            .len()
+            .checked_add(bytes.len())
+            .ok_or_else(|| io::Error::other("bounded JSON byte count overflow"))?;
+        if next_len > self.max_bytes {
+            return Err(io::Error::other("bounded JSON byte ceiling exceeded"));
+        }
+        self.bytes.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+pub(super) fn serialize_private_json_bounded<T: Serialize + ?Sized>(
+    value: &T,
+    max_bytes: usize,
+    label: &'static str,
+) -> Result<Vec<u8>, CatalogContractError> {
+    if max_bytes == 0 {
+        return Err(CatalogContractError::invalid(format!(
+            "{label} has no remaining durable byte budget"
+        )));
+    }
+    let mut writer = BoundedJsonWriter::new(max_bytes);
+    serde_json::to_writer(&mut writer, value).map_err(|error| {
+        CatalogContractError::invalid(format!(
+            "{label} could not be encoded within its durable byte budget: {error}"
+        ))
+    })?;
+    Ok(writer.finish())
+}
 
 opaque_digest_type!(CatalogAssertionKey);
 opaque_digest_type!(CatalogAssociationKey);
@@ -1410,7 +1467,15 @@ impl Default for CatalogReducerPublicationLimits {
 pub(crate) struct CatalogReducerPublicationRevision([u8; DIGEST_BYTES]);
 
 impl CatalogReducerPublicationRevision {
+    pub(crate) fn from_storage_bytes(bytes: [u8; DIGEST_BYTES]) -> Self {
+        Self(bytes)
+    }
+
     pub(super) fn as_bytes(&self) -> &[u8; DIGEST_BYTES] {
+        &self.0
+    }
+
+    pub(crate) fn storage_bytes(&self) -> &[u8; DIGEST_BYTES] {
         &self.0
     }
 }
@@ -1496,6 +1561,220 @@ impl CatalogReducerPublication {
 
     pub(crate) fn tombstone_count(&self) -> usize {
         self.tombstones.len()
+    }
+
+    pub(super) fn project_rows(&self) -> &[CatalogProjectRow] {
+        &self.project_rows
+    }
+
+    pub(super) fn session_rows(&self) -> &[CatalogSessionRow] {
+        &self.session_rows
+    }
+
+    pub(super) fn tombstones(&self) -> &[CatalogTombstone] {
+        &self.tombstones
+    }
+
+    /// Canonical private restart/audit payload for the reducer state that is
+    /// not already represented by the immutable materialized rows and
+    /// tombstones. This is deliberately not a public wire contract and has no
+    /// unchecked decoder. B3 persistence stores the bytes with their digest;
+    /// a later refresh slice must introduce a checked decoder before it can
+    /// resume mutation from this history.
+    pub(super) fn durable_state_json(
+        &self,
+        max_encoded_bytes: usize,
+    ) -> Result<Vec<u8>, CatalogContractError> {
+        #[derive(Serialize)]
+        struct FrozenFact<'a, T> {
+            fact: &'a T,
+            observation_commit: u64,
+        }
+
+        #[derive(Serialize)]
+        struct AssertionHistory<'a> {
+            assertion_key: &'a CatalogAssertionKey,
+            owner: &'a CatalogEvidenceOwner,
+            entity_ref: CatalogEntityRef,
+        }
+
+        #[derive(Serialize)]
+        struct AssociationHistory<'a> {
+            association_key: &'a CatalogAssociationKey,
+            owner: &'a CatalogEvidenceOwner,
+            session_ref: CatalogEntityRef,
+            project_ref: CatalogEntityRef,
+        }
+
+        #[derive(Serialize)]
+        struct LocatorHistory<'a> {
+            locator_claim_key: &'a CatalogLocatorClaimKey,
+            owner: &'a CatalogEvidenceOwner,
+            subject_ref: CatalogEntityRef,
+        }
+
+        #[derive(Serialize)]
+        struct IdentityRelationHistory<'a> {
+            relation_key: &'a CatalogIdentityRelationKey,
+            owner: &'a CatalogEvidenceOwner,
+            relation: IdentityRelationKind,
+            left_ref: CatalogEntityRef,
+            right_ref: CatalogEntityRef,
+        }
+
+        #[derive(Serialize)]
+        struct EntityKindEntry<'a> {
+            entity_key: &'a CanonicalEntityKey,
+            kind: CatalogEntityKind,
+        }
+
+        #[derive(Serialize)]
+        struct RetractedAssertionEntry<'a> {
+            entity_ref: CatalogEntityRef,
+            assertion_key: &'a CatalogAssertionKey,
+            evidence: &'a CatalogRetractionEvidence,
+            retracted_at_commit: u64,
+            provenance: &'a [SemanticRevisionRef],
+        }
+
+        #[derive(Serialize)]
+        struct DurableReducerState<'a> {
+            durable_reducer_state_contract_version: u32,
+            projects: Vec<FrozenFact<'a, CatalogProjectAssertion>>,
+            sessions: Vec<FrozenFact<'a, CatalogSessionAssertion>>,
+            associations: Vec<FrozenFact<'a, SessionProjectAssociationFact>>,
+            locators: Vec<FrozenFact<'a, NativeLocatorClaim>>,
+            identity_relations: Vec<FrozenFact<'a, IdentityRelationFact>>,
+            retracted_owners: &'a [CatalogRetractionEvidence],
+            assertion_history: Vec<AssertionHistory<'a>>,
+            association_history: Vec<AssociationHistory<'a>>,
+            locator_history: Vec<LocatorHistory<'a>>,
+            identity_relation_history: Vec<IdentityRelationHistory<'a>>,
+            entity_kinds: Vec<EntityKindEntry<'a>>,
+            retracted_assertions: Vec<RetractedAssertionEntry<'a>>,
+        }
+
+        let projects = self
+            .projects
+            .iter()
+            .map(|stored| FrozenFact {
+                fact: &stored.fact,
+                observation_commit: stored.observation_commit,
+            })
+            .collect();
+        let sessions = self
+            .sessions
+            .iter()
+            .map(|stored| FrozenFact {
+                fact: &stored.fact,
+                observation_commit: stored.observation_commit,
+            })
+            .collect();
+        let associations = self
+            .associations
+            .iter()
+            .map(|stored| FrozenFact {
+                fact: &stored.fact,
+                observation_commit: stored.observation_commit,
+            })
+            .collect();
+        let locators = self
+            .locators
+            .iter()
+            .map(|stored| FrozenFact {
+                fact: &stored.fact,
+                observation_commit: stored.observation_commit,
+            })
+            .collect();
+        let identity_relations = self
+            .identity_relations
+            .iter()
+            .map(|stored| FrozenFact {
+                fact: &stored.fact,
+                observation_commit: stored.observation_commit,
+            })
+            .collect();
+        let assertion_history = self
+            .assertion_history
+            .iter()
+            .map(|(assertion_key, coordinates)| AssertionHistory {
+                assertion_key,
+                owner: &coordinates.owner,
+                entity_ref: coordinates.entity_ref,
+            })
+            .collect();
+        let association_history = self
+            .association_history
+            .iter()
+            .map(|(association_key, coordinates)| AssociationHistory {
+                association_key,
+                owner: &coordinates.owner,
+                session_ref: coordinates.session_ref,
+                project_ref: coordinates.project_ref,
+            })
+            .collect();
+        let locator_history = self
+            .locator_history
+            .iter()
+            .map(|(locator_claim_key, coordinates)| LocatorHistory {
+                locator_claim_key,
+                owner: &coordinates.owner,
+                subject_ref: coordinates.subject_ref,
+            })
+            .collect();
+        let identity_relation_history = self
+            .identity_relation_history
+            .iter()
+            .map(|(relation_key, coordinates)| IdentityRelationHistory {
+                relation_key,
+                owner: &coordinates.owner,
+                relation: coordinates.relation,
+                left_ref: coordinates.left_ref,
+                right_ref: coordinates.right_ref,
+            })
+            .collect();
+        let entity_kinds = self
+            .entity_kinds
+            .iter()
+            .map(|(entity_key, kind)| EntityKindEntry {
+                entity_key,
+                kind: *kind,
+            })
+            .collect();
+        let retracted_assertions = self
+            .retracted_assertions
+            .iter()
+            .flat_map(|(entity_ref, assertions)| {
+                assertions
+                    .iter()
+                    .map(move |(assertion_key, retracted)| RetractedAssertionEntry {
+                        entity_ref: *entity_ref,
+                        assertion_key,
+                        evidence: &retracted.evidence,
+                        retracted_at_commit: retracted.retracted_at_commit,
+                        provenance: &retracted.provenance,
+                    })
+            })
+            .collect();
+        serialize_private_json_bounded(
+            &DurableReducerState {
+                durable_reducer_state_contract_version: 1,
+                projects,
+                sessions,
+                associations,
+                locators,
+                identity_relations,
+                retracted_owners: &self.retracted_owners,
+                assertion_history,
+                association_history,
+                locator_history,
+                identity_relation_history,
+                entity_kinds,
+                retracted_assertions,
+            },
+            max_encoded_bytes,
+            "catalog reducer durable state",
+        )
     }
 }
 
@@ -2125,7 +2404,7 @@ impl CatalogReducer {
 
     /// Freeze every live reducer input and materialized row under explicit
     /// bounded ceilings. The returned value is not a wire DTO; it is the exact
-    /// immutable semantic input to the later atomic B3 writer.
+    /// immutable semantic input to the atomic B3 publication framing step.
     pub(crate) fn freeze_for_initial_publication(
         &self,
         limits: CatalogReducerPublicationLimits,
