@@ -28,6 +28,8 @@ use crate::adapter::{
 const MAX_PROVENANCE_REVISIONS: usize = 64;
 const MAX_PRESENTATION_MEMBERS: usize = 4_096;
 const MAX_REPLACEMENT_RELATIONS: usize = 4_096;
+const MAX_PUBLICATION_REDUCER_ENTRIES: usize = 1_000_000;
+const MAX_PUBLICATION_ROWS: usize = 1_000_000;
 
 opaque_digest_type!(CatalogAssertionKey);
 opaque_digest_type!(CatalogAssociationKey);
@@ -238,6 +240,10 @@ fn derive_evidence_key(
 }
 
 impl CatalogAssertionKey {
+    pub(super) fn publication_bytes(&self) -> &[u8; DIGEST_BYTES] {
+        self.as_bytes()
+    }
+
     fn derive(
         owner: &CatalogEvidenceOwner,
         entity_kind: CatalogEntityKind,
@@ -1362,6 +1368,164 @@ pub(crate) struct CatalogAttachTarget {
     pub provenance: Vec<SemanticRevisionRef>,
 }
 
+/// Caller-selected ceilings for one immutable reducer publication freeze.
+/// These are safety caps for the contract assembly, not performance targets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct CatalogReducerPublicationLimits {
+    pub max_reducer_entries: usize,
+    pub max_rows: usize,
+}
+
+impl CatalogReducerPublicationLimits {
+    pub(crate) fn new(
+        max_reducer_entries: usize,
+        max_rows: usize,
+    ) -> Result<Self, CatalogContractError> {
+        if max_reducer_entries == 0
+            || max_reducer_entries > MAX_PUBLICATION_REDUCER_ENTRIES
+            || max_rows == 0
+            || max_rows > MAX_PUBLICATION_ROWS
+        {
+            return Err(CatalogContractError::invalid(format!(
+                "catalog publication limits must be within entries=1..={MAX_PUBLICATION_REDUCER_ENTRIES}, rows=1..={MAX_PUBLICATION_ROWS}"
+            )));
+        }
+        Ok(Self {
+            max_reducer_entries,
+            max_rows,
+        })
+    }
+}
+
+impl Default for CatalogReducerPublicationLimits {
+    fn default() -> Self {
+        Self {
+            max_reducer_entries: MAX_PUBLICATION_REDUCER_ENTRIES,
+            max_rows: MAX_PUBLICATION_ROWS,
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub(crate) struct CatalogReducerPublicationRevision([u8; DIGEST_BYTES]);
+
+impl CatalogReducerPublicationRevision {
+    pub(super) fn as_bytes(&self) -> &[u8; DIGEST_BYTES] {
+        &self.0
+    }
+}
+
+impl fmt::Debug for CatalogReducerPublicationRevision {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_tuple("CatalogReducerPublicationRevision")
+            .field(&format_args!(
+                "{REFERENCE_ENCODING_VERSION}:{}",
+                URL_SAFE_NO_PAD.encode(self.0)
+            ))
+            .finish()
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub(super) struct FrozenProjectAssertion {
+    pub(super) fact: CatalogProjectAssertion,
+    pub(super) observation_commit: u64,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub(super) struct FrozenSessionAssertion {
+    pub(super) fact: CatalogSessionAssertion,
+    pub(super) observation_commit: u64,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub(super) struct FrozenAssociation {
+    pub(super) fact: SessionProjectAssociationFact,
+    pub(super) observation_commit: u64,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub(super) struct FrozenLocatorClaim {
+    pub(super) fact: NativeLocatorClaim,
+    pub(super) observation_commit: u64,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub(super) struct FrozenIdentityRelation {
+    pub(super) fact: IdentityRelationFact,
+    pub(super) observation_commit: u64,
+}
+
+/// Immutable, canonical reducer state consumed by the store-free B3
+/// publication envelope. Debug deliberately exposes only counts and the
+/// revision because facts and rows may retain local paths or native IDs.
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct CatalogReducerPublication {
+    pub(super) projects: Vec<FrozenProjectAssertion>,
+    pub(super) sessions: Vec<FrozenSessionAssertion>,
+    pub(super) associations: Vec<FrozenAssociation>,
+    pub(super) locators: Vec<FrozenLocatorClaim>,
+    pub(super) identity_relations: Vec<FrozenIdentityRelation>,
+    pub(super) project_rows: Vec<CatalogProjectRow>,
+    pub(super) session_rows: Vec<CatalogSessionRow>,
+    pub(super) tombstones: Vec<CatalogTombstone>,
+    pub(super) retracted_owners: Vec<CatalogRetractionEvidence>,
+    assertion_history: BTreeMap<CatalogAssertionKey, AssertionCoordinates>,
+    association_history: BTreeMap<CatalogAssociationKey, AssociationCoordinates>,
+    locator_history: BTreeMap<CatalogLocatorClaimKey, LocatorCoordinates>,
+    identity_relation_history: BTreeMap<CatalogIdentityRelationKey, IdentityRelationCoordinates>,
+    entity_kinds: BTreeMap<CanonicalEntityKey, CatalogEntityKind>,
+    retracted_assertions:
+        BTreeMap<CatalogEntityRef, BTreeMap<CatalogAssertionKey, RetractedAssertion>>,
+    revision: CatalogReducerPublicationRevision,
+}
+
+impl CatalogReducerPublication {
+    pub(crate) fn revision(&self) -> CatalogReducerPublicationRevision {
+        self.revision
+    }
+
+    pub(crate) fn project_row_count(&self) -> usize {
+        self.project_rows.len()
+    }
+
+    pub(crate) fn session_row_count(&self) -> usize {
+        self.session_rows.len()
+    }
+
+    pub(crate) fn tombstone_count(&self) -> usize {
+        self.tombstones.len()
+    }
+}
+
+impl fmt::Debug for CatalogReducerPublication {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CatalogReducerPublication")
+            .field("revision", &self.revision)
+            .field("project_assertions", &self.projects.len())
+            .field("session_assertions", &self.sessions.len())
+            .field("associations", &self.associations.len())
+            .field("locators", &self.locators.len())
+            .field("identity_relations", &self.identity_relations.len())
+            .field("project_rows", &self.project_rows.len())
+            .field("session_rows", &self.session_rows.len())
+            .field("tombstones", &self.tombstones.len())
+            .field("retracted_owners", &self.retracted_owners.len())
+            .field("assertion_history", &self.assertion_history.len())
+            .field("association_history", &self.association_history.len())
+            .field("locator_history", &self.locator_history.len())
+            .field(
+                "identity_relation_history",
+                &self.identity_relation_history.len(),
+            )
+            .field("entity_kinds", &self.entity_kinds.len())
+            .field("retracted_entities", &self.retracted_assertions.len())
+            .finish()
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub(crate) struct CatalogReducer {
     projects: BTreeMap<CatalogAssertionKey, StoredProjectAssertion>,
@@ -1920,62 +2084,7 @@ impl CatalogReducer {
         if assertions.is_empty() {
             return None;
         }
-        let native_identity = select_field(assertions.iter().filter_map(|stored| {
-            stored
-                .fact
-                .native_identity
-                .as_ref()
-                .map(|value| project_field_candidate(stored, value))
-        }));
-        let root_identity = select_field(assertions.iter().filter_map(|stored| {
-            stored
-                .fact
-                .root_identity
-                .as_ref()
-                .map(|value| project_field_candidate(stored, value))
-        }));
-        let display_path = select_field(assertions.iter().filter_map(|stored| {
-            stored
-                .fact
-                .display_path
-                .as_ref()
-                .map(|value| project_field_candidate(stored, value))
-        }));
-        let display_name = select_field(assertions.iter().filter_map(|stored| {
-            stored
-                .fact
-                .display_name
-                .as_ref()
-                .map(|value| project_field_candidate(stored, value))
-        }));
-        let native_time = select_field(assertions.iter().filter_map(|stored| {
-            stored
-                .fact
-                .native_time
-                .as_ref()
-                .map(|value| project_field_candidate(stored, value))
-        }));
-        let availability = select_field(assertions.iter().map(|stored| FieldCandidate {
-            assertion_key: stored.fact.assertion_key,
-            observation_commit: stored.observation_commit,
-            field: &stored.fact.availability,
-        }))
-        .expect("a project membership assertion always carries availability");
-        let mut assertion_keys: Vec<_> = assertions
-            .iter()
-            .map(|stored| stored.fact.assertion_key)
-            .collect();
-        assertion_keys.sort();
-        Some(CatalogProjectRow {
-            project_ref,
-            native_identity,
-            root_identity,
-            display_path,
-            display_name,
-            native_time,
-            availability,
-            assertion_keys,
-        })
+        Some(materialize_project_row(project_ref, &assertions))
     }
 
     pub(crate) fn session_row(&self, session_ref: CatalogEntityRef) -> Option<CatalogSessionRow> {
@@ -1990,78 +2099,16 @@ impl CatalogReducer {
         if assertions.is_empty() {
             return None;
         }
-        let native_identity = select_field(assertions.iter().filter_map(|stored| {
-            stored
-                .fact
-                .native_identity
-                .as_ref()
-                .map(|value| session_field_candidate(stored, value))
-        }));
-        let title = select_field(assertions.iter().filter_map(|stored| {
-            stored
-                .fact
-                .title
-                .as_ref()
-                .map(|value| session_field_candidate(stored, value))
-        }));
-        let first_user_summary = select_field(assertions.iter().filter_map(|stored| {
-            stored
-                .fact
-                .first_user_summary
-                .as_ref()
-                .map(|value| session_field_candidate(stored, value))
-        }));
-        let native_created_at = select_field(assertions.iter().filter_map(|stored| {
-            stored
-                .fact
-                .native_created_at
-                .as_ref()
-                .map(|value| session_field_candidate(stored, value))
-        }));
-        let native_updated_at = select_field(assertions.iter().filter_map(|stored| {
-            stored
-                .fact
-                .native_updated_at
-                .as_ref()
-                .map(|value| session_field_candidate(stored, value))
-        }));
-        let native_message_count = select_field(assertions.iter().filter_map(|stored| {
-            stored
-                .fact
-                .native_message_count
-                .as_ref()
-                .map(|value| session_field_candidate(stored, value))
-        }));
-        let transcript_locator_claim_keys = assertions
-            .iter()
-            .filter_map(|stored| stored.fact.transcript_locator_claim)
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .collect();
-        let availability = select_field(assertions.iter().map(|stored| FieldCandidate {
-            assertion_key: stored.fact.assertion_key,
-            observation_commit: stored.observation_commit,
-            field: &stored.fact.availability,
-        }))
-        .expect("a session membership assertion always carries availability");
-        let mut assertion_keys: Vec<_> = assertions
-            .iter()
-            .map(|stored| stored.fact.assertion_key)
-            .collect();
-        assertion_keys.sort();
-        Some(CatalogSessionRow {
+        let associations = self
+            .associations
+            .values()
+            .filter(|stored| stored.fact.session_ref == session_ref)
+            .collect::<Vec<_>>();
+        Some(materialize_session_row(
             session_ref,
-            project_association: self.association_for_session(session_ref),
-            native_identity,
-            title,
-            first_user_summary,
-            native_created_at,
-            native_updated_at,
-            native_message_count,
-            transcript_locator_claim_keys,
-            availability,
-            assertion_keys,
-        })
+            &assertions,
+            &associations,
+        ))
     }
 
     pub(crate) fn association_for_session(
@@ -2073,36 +2120,183 @@ impl CatalogReducer {
             .values()
             .filter(|stored| stored.fact.session_ref == session_ref)
             .collect();
-        let Some(winner) = candidates
-            .iter()
-            .copied()
-            .max_by(|left, right| compare_associations(left, right))
-        else {
-            return CatalogAssociationCoverage::Unknown;
-        };
-        let mut conflicting_association_keys: Vec<_> = candidates
-            .iter()
-            .filter(|candidate| {
-                candidate.fact.association_key != winner.fact.association_key
-                    && candidate.fact.authority == winner.fact.authority
-                    && candidate.fact.project_ref != winner.fact.project_ref
-            })
-            .map(|candidate| candidate.fact.association_key)
-            .collect();
-        conflicting_association_keys.sort();
-        let mut competing_associations: Vec<_> = candidates
-            .iter()
-            .filter(|candidate| candidate.fact.association_key != winner.fact.association_key)
-            .map(|candidate| candidate.fact.clone())
-            .collect();
-        competing_associations.sort_by_key(|fact| fact.association_key);
-        CatalogAssociationCoverage::Available {
-            selection: Box::new(CatalogAssociationSelection {
-                association: winner.fact.clone(),
-                competing_associations,
-                conflicting_association_keys,
-            }),
+        materialize_association_coverage(&candidates)
+    }
+
+    /// Freeze every live reducer input and materialized row under explicit
+    /// bounded ceilings. The returned value is not a wire DTO; it is the exact
+    /// immutable semantic input to the later atomic B3 writer.
+    pub(crate) fn freeze_for_initial_publication(
+        &self,
+        limits: CatalogReducerPublicationLimits,
+    ) -> Result<CatalogReducerPublication, CatalogContractError> {
+        CatalogReducerPublicationLimits::new(limits.max_reducer_entries, limits.max_rows)?;
+        let retracted_assertion_count =
+            self.retracted_assertions
+                .values()
+                .try_fold(0_usize, |count, assertions| {
+                    count.checked_add(assertions.len()).ok_or_else(|| {
+                        CatalogContractError::invalid(
+                            "catalog retracted-assertion count overflow during publication freeze",
+                        )
+                    })
+                })?;
+        let base_reducer_entry_counts = [
+            self.projects.len(),
+            self.sessions.len(),
+            self.associations.len(),
+            self.locators.len(),
+            self.identity_relations.len(),
+            self.assertion_history.len(),
+            self.association_history.len(),
+            self.locator_history.len(),
+            self.identity_relation_history.len(),
+            self.retracted_owners.len(),
+            self.entity_kinds.len(),
+            retracted_assertion_count,
+            self.tombstones.len(),
+        ];
+        let base_reducer_entry_count =
+            base_reducer_entry_counts
+                .into_iter()
+                .try_fold(0_usize, |count, next| {
+                    count.checked_add(next).ok_or_else(|| {
+                        CatalogContractError::invalid(
+                            "catalog reducer entry count overflow during publication freeze",
+                        )
+                    })
+                })?;
+        if base_reducer_entry_count > limits.max_reducer_entries {
+            return Err(CatalogContractError::invalid(
+                "catalog reducer publication exceeds its bounded evidence ceiling",
+            ));
         }
+
+        let mut project_assertions = BTreeMap::new();
+        for stored in self.projects.values() {
+            project_assertions
+                .entry(stored.fact.project_ref)
+                .or_insert_with(Vec::new)
+                .push(stored);
+        }
+        let mut session_assertions = BTreeMap::new();
+        for stored in self.sessions.values() {
+            session_assertions
+                .entry(stored.fact.session_ref)
+                .or_insert_with(Vec::new)
+                .push(stored);
+        }
+        let row_count = project_assertions
+            .len()
+            .checked_add(session_assertions.len())
+            .ok_or_else(|| {
+                CatalogContractError::invalid("catalog publication row count overflow")
+            })?;
+        if row_count > limits.max_rows {
+            return Err(CatalogContractError::invalid(
+                "catalog reducer publication exceeds its bounded row ceiling",
+            ));
+        }
+        let reducer_entry_count =
+            base_reducer_entry_count
+                .checked_add(row_count)
+                .ok_or_else(|| {
+                    CatalogContractError::invalid(
+                        "catalog reducer entry count overflow during publication freeze",
+                    )
+                })?;
+        if reducer_entry_count > limits.max_reducer_entries {
+            return Err(CatalogContractError::invalid(
+                "catalog reducer publication exceeds its bounded evidence ceiling",
+            ));
+        }
+
+        validate_publication_endpoints(self)?;
+        validate_identity_relation_graph(&self.identity_relations)?;
+
+        let mut associations_by_session = BTreeMap::new();
+        for stored in self.associations.values() {
+            associations_by_session
+                .entry(stored.fact.session_ref)
+                .or_insert_with(Vec::new)
+                .push(stored);
+        }
+        let project_rows = project_assertions
+            .into_iter()
+            .map(|(project_ref, assertions)| materialize_project_row(project_ref, &assertions))
+            .collect::<Vec<_>>();
+        let session_rows = session_assertions
+            .into_iter()
+            .map(|(session_ref, assertions)| {
+                let associations = associations_by_session
+                    .remove(&session_ref)
+                    .unwrap_or_default();
+                materialize_session_row(session_ref, &assertions, &associations)
+            })
+            .collect::<Vec<_>>();
+
+        let projects = self
+            .projects
+            .values()
+            .map(|stored| FrozenProjectAssertion {
+                fact: stored.fact.clone(),
+                observation_commit: stored.observation_commit,
+            })
+            .collect();
+        let sessions = self
+            .sessions
+            .values()
+            .map(|stored| FrozenSessionAssertion {
+                fact: stored.fact.clone(),
+                observation_commit: stored.observation_commit,
+            })
+            .collect();
+        let associations = self
+            .associations
+            .values()
+            .map(|stored| FrozenAssociation {
+                fact: stored.fact.clone(),
+                observation_commit: stored.observation_commit,
+            })
+            .collect();
+        let locators = self
+            .locators
+            .values()
+            .map(|stored| FrozenLocatorClaim {
+                fact: stored.fact.clone(),
+                observation_commit: stored.observation_commit,
+            })
+            .collect();
+        let identity_relations = self
+            .identity_relations
+            .values()
+            .map(|stored| FrozenIdentityRelation {
+                fact: stored.fact.clone(),
+                observation_commit: stored.observation_commit,
+            })
+            .collect();
+        let tombstones = self.tombstones.values().cloned().collect();
+        let retracted_owners = self.retracted_owners.values().cloned().collect();
+        let revision = derive_reducer_publication_revision(self, &project_rows, &session_rows)?;
+
+        Ok(CatalogReducerPublication {
+            projects,
+            sessions,
+            associations,
+            locators,
+            identity_relations,
+            project_rows,
+            session_rows,
+            tombstones,
+            retracted_owners,
+            assertion_history: self.assertion_history.clone(),
+            association_history: self.association_history.clone(),
+            locator_history: self.locator_history.clone(),
+            identity_relation_history: self.identity_relation_history.clone(),
+            entity_kinds: self.entity_kinds.clone(),
+            retracted_assertions: self.retracted_assertions.clone(),
+            revision,
+        })
     }
 
     pub(crate) fn retract_owner(
@@ -2547,6 +2741,435 @@ impl CatalogReducer {
             provenance: locator.fact.provenance.clone(),
         })
     }
+}
+
+fn materialize_project_row(
+    project_ref: CatalogEntityRef,
+    assertions: &[&StoredProjectAssertion],
+) -> CatalogProjectRow {
+    let native_identity = select_field(assertions.iter().filter_map(|stored| {
+        stored
+            .fact
+            .native_identity
+            .as_ref()
+            .map(|value| project_field_candidate(stored, value))
+    }));
+    let root_identity = select_field(assertions.iter().filter_map(|stored| {
+        stored
+            .fact
+            .root_identity
+            .as_ref()
+            .map(|value| project_field_candidate(stored, value))
+    }));
+    let display_path = select_field(assertions.iter().filter_map(|stored| {
+        stored
+            .fact
+            .display_path
+            .as_ref()
+            .map(|value| project_field_candidate(stored, value))
+    }));
+    let display_name = select_field(assertions.iter().filter_map(|stored| {
+        stored
+            .fact
+            .display_name
+            .as_ref()
+            .map(|value| project_field_candidate(stored, value))
+    }));
+    let native_time = select_field(assertions.iter().filter_map(|stored| {
+        stored
+            .fact
+            .native_time
+            .as_ref()
+            .map(|value| project_field_candidate(stored, value))
+    }));
+    let availability = select_field(assertions.iter().map(|stored| FieldCandidate {
+        assertion_key: stored.fact.assertion_key,
+        observation_commit: stored.observation_commit,
+        field: &stored.fact.availability,
+    }))
+    .expect("a project membership assertion always carries availability");
+    let mut assertion_keys = assertions
+        .iter()
+        .map(|stored| stored.fact.assertion_key)
+        .collect::<Vec<_>>();
+    assertion_keys.sort();
+    CatalogProjectRow {
+        project_ref,
+        native_identity,
+        root_identity,
+        display_path,
+        display_name,
+        native_time,
+        availability,
+        assertion_keys,
+    }
+}
+
+fn materialize_session_row(
+    session_ref: CatalogEntityRef,
+    assertions: &[&StoredSessionAssertion],
+    associations: &[&StoredAssociation],
+) -> CatalogSessionRow {
+    let native_identity = select_field(assertions.iter().filter_map(|stored| {
+        stored
+            .fact
+            .native_identity
+            .as_ref()
+            .map(|value| session_field_candidate(stored, value))
+    }));
+    let title = select_field(assertions.iter().filter_map(|stored| {
+        stored
+            .fact
+            .title
+            .as_ref()
+            .map(|value| session_field_candidate(stored, value))
+    }));
+    let first_user_summary = select_field(assertions.iter().filter_map(|stored| {
+        stored
+            .fact
+            .first_user_summary
+            .as_ref()
+            .map(|value| session_field_candidate(stored, value))
+    }));
+    let native_created_at = select_field(assertions.iter().filter_map(|stored| {
+        stored
+            .fact
+            .native_created_at
+            .as_ref()
+            .map(|value| session_field_candidate(stored, value))
+    }));
+    let native_updated_at = select_field(assertions.iter().filter_map(|stored| {
+        stored
+            .fact
+            .native_updated_at
+            .as_ref()
+            .map(|value| session_field_candidate(stored, value))
+    }));
+    let native_message_count = select_field(assertions.iter().filter_map(|stored| {
+        stored
+            .fact
+            .native_message_count
+            .as_ref()
+            .map(|value| session_field_candidate(stored, value))
+    }));
+    let transcript_locator_claim_keys = assertions
+        .iter()
+        .filter_map(|stored| stored.fact.transcript_locator_claim)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let availability = select_field(assertions.iter().map(|stored| FieldCandidate {
+        assertion_key: stored.fact.assertion_key,
+        observation_commit: stored.observation_commit,
+        field: &stored.fact.availability,
+    }))
+    .expect("a session membership assertion always carries availability");
+    let mut assertion_keys = assertions
+        .iter()
+        .map(|stored| stored.fact.assertion_key)
+        .collect::<Vec<_>>();
+    assertion_keys.sort();
+    CatalogSessionRow {
+        session_ref,
+        project_association: materialize_association_coverage(associations),
+        native_identity,
+        title,
+        first_user_summary,
+        native_created_at,
+        native_updated_at,
+        native_message_count,
+        transcript_locator_claim_keys,
+        availability,
+        assertion_keys,
+    }
+}
+
+fn materialize_association_coverage(
+    candidates: &[&StoredAssociation],
+) -> CatalogAssociationCoverage {
+    let Some(winner) = candidates
+        .iter()
+        .copied()
+        .max_by(|left, right| compare_associations(left, right))
+    else {
+        return CatalogAssociationCoverage::Unknown;
+    };
+    let mut conflicting_association_keys = candidates
+        .iter()
+        .filter(|candidate| {
+            candidate.fact.association_key != winner.fact.association_key
+                && candidate.fact.authority == winner.fact.authority
+                && candidate.fact.project_ref != winner.fact.project_ref
+        })
+        .map(|candidate| candidate.fact.association_key)
+        .collect::<Vec<_>>();
+    conflicting_association_keys.sort();
+    let mut competing_associations = candidates
+        .iter()
+        .filter(|candidate| candidate.fact.association_key != winner.fact.association_key)
+        .map(|candidate| candidate.fact.clone())
+        .collect::<Vec<_>>();
+    competing_associations.sort_by_key(|fact| fact.association_key);
+    CatalogAssociationCoverage::Available {
+        selection: Box::new(CatalogAssociationSelection {
+            association: winner.fact.clone(),
+            competing_associations,
+            conflicting_association_keys,
+        }),
+    }
+}
+
+fn validate_publication_endpoints(reducer: &CatalogReducer) -> Result<(), CatalogContractError> {
+    let live_projects = reducer
+        .projects
+        .values()
+        .map(|stored| stored.fact.project_ref)
+        .collect::<BTreeSet<_>>();
+    let live_sessions = reducer
+        .sessions
+        .values()
+        .map(|stored| stored.fact.session_ref)
+        .collect::<BTreeSet<_>>();
+    let live_entities = live_projects
+        .iter()
+        .chain(live_sessions.iter())
+        .copied()
+        .collect::<BTreeSet<_>>();
+
+    for stored in reducer.associations.values() {
+        if !live_sessions.contains(&stored.fact.session_ref)
+            || !live_projects.contains(&stored.fact.project_ref)
+        {
+            return Err(CatalogContractError::invalid(
+                "catalog publication association endpoints require live assertion evidence",
+            ));
+        }
+        if let Some(locator_key) = stored.fact.locator_claim_key {
+            let locator = reducer.locators.get(&locator_key).ok_or_else(|| {
+                CatalogContractError::invalid(
+                    "catalog publication association references unknown locator evidence",
+                )
+            })?;
+            if locator.fact.subject_ref != stored.fact.session_ref
+                && locator.fact.subject_ref != stored.fact.project_ref
+            {
+                return Err(CatalogContractError::invalid(
+                    "catalog publication association locator belongs to neither endpoint",
+                ));
+            }
+        }
+    }
+    for stored in reducer.locators.values() {
+        if !live_entities.contains(&stored.fact.subject_ref) {
+            return Err(CatalogContractError::invalid(
+                "catalog publication locator subject requires live assertion evidence",
+            ));
+        }
+    }
+    for stored in reducer.sessions.values() {
+        if let Some(locator_key) = stored.fact.transcript_locator_claim {
+            let locator = reducer.locators.get(&locator_key).ok_or_else(|| {
+                CatalogContractError::invalid(
+                    "catalog publication session references unknown transcript locator evidence",
+                )
+            })?;
+            if locator.fact.subject_ref != stored.fact.session_ref {
+                return Err(CatalogContractError::invalid(
+                    "catalog publication transcript locator belongs to another entity",
+                ));
+            }
+        }
+    }
+
+    let historically_evidenced = live_entities
+        .iter()
+        .chain(reducer.retracted_assertions.keys())
+        .chain(reducer.tombstones.keys())
+        .copied()
+        .collect::<BTreeSet<_>>();
+    for stored in reducer.identity_relations.values() {
+        let left_known = historically_evidenced.contains(&stored.fact.left_ref);
+        let right_known = historically_evidenced.contains(&stored.fact.right_ref);
+        if !(left_known && right_known) {
+            return Err(CatalogContractError::invalid(
+                "catalog publication identity relation has an unevidenced endpoint",
+            ));
+        }
+    }
+    for tombstone in reducer.tombstones.values() {
+        if live_entities.contains(&tombstone.entity_ref)
+            || !reducer
+                .retracted_assertions
+                .contains_key(&tombstone.entity_ref)
+        {
+            return Err(CatalogContractError::invalid(
+                "catalog publication tombstone must retain non-live retracted assertion evidence",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn hash_publication_value<T: Serialize>(
+    hasher: &mut blake3::Hasher,
+    label: &[u8],
+    value: &T,
+) -> Result<(), CatalogContractError> {
+    let encoded = serde_json::to_vec(value).map_err(|error| {
+        CatalogContractError::invalid(format!(
+            "catalog reducer publication could not canonically encode evidence: {error}"
+        ))
+    })?;
+    hasher.update(&(label.len() as u64).to_be_bytes());
+    hasher.update(label);
+    hasher.update(&(encoded.len() as u64).to_be_bytes());
+    hasher.update(&encoded);
+    Ok(())
+}
+
+fn hash_publication_map_len(hasher: &mut blake3::Hasher, label: &[u8], len: usize) {
+    hasher.update(&(label.len() as u64).to_be_bytes());
+    hasher.update(label);
+    hasher.update(&(len as u64).to_be_bytes());
+}
+
+fn derive_reducer_publication_revision(
+    reducer: &CatalogReducer,
+    project_rows: &[CatalogProjectRow],
+    session_rows: &[CatalogSessionRow],
+) -> Result<CatalogReducerPublicationRevision, CatalogContractError> {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"spaghetti/rfc012b/catalog-reducer-publication-v1\0");
+
+    hash_publication_map_len(&mut hasher, b"projects", reducer.projects.len());
+    for (key, stored) in &reducer.projects {
+        validate_observation_commit(stored.observation_commit)?;
+        hasher.update(key.as_bytes());
+        hasher.update(&stored.observation_commit.to_be_bytes());
+        hash_publication_value(&mut hasher, b"project", &stored.fact)?;
+    }
+    hash_publication_map_len(&mut hasher, b"sessions", reducer.sessions.len());
+    for (key, stored) in &reducer.sessions {
+        validate_observation_commit(stored.observation_commit)?;
+        hasher.update(key.as_bytes());
+        hasher.update(&stored.observation_commit.to_be_bytes());
+        hash_publication_value(&mut hasher, b"session", &stored.fact)?;
+    }
+    hash_publication_map_len(&mut hasher, b"associations", reducer.associations.len());
+    for (key, stored) in &reducer.associations {
+        validate_observation_commit(stored.observation_commit)?;
+        hasher.update(key.as_bytes());
+        hasher.update(&stored.observation_commit.to_be_bytes());
+        hash_publication_value(&mut hasher, b"association", &stored.fact)?;
+    }
+    hash_publication_map_len(&mut hasher, b"locators", reducer.locators.len());
+    for (key, stored) in &reducer.locators {
+        validate_observation_commit(stored.observation_commit)?;
+        hasher.update(key.as_bytes());
+        hasher.update(&stored.observation_commit.to_be_bytes());
+        hash_publication_value(&mut hasher, b"locator", &stored.fact)?;
+    }
+    hash_publication_map_len(
+        &mut hasher,
+        b"identity-relations",
+        reducer.identity_relations.len(),
+    );
+    for (key, stored) in &reducer.identity_relations {
+        validate_observation_commit(stored.observation_commit)?;
+        hasher.update(key.as_bytes());
+        hasher.update(&stored.observation_commit.to_be_bytes());
+        hash_publication_value(&mut hasher, b"identity-relation", &stored.fact)?;
+    }
+
+    hash_publication_map_len(
+        &mut hasher,
+        b"assertion-history",
+        reducer.assertion_history.len(),
+    );
+    for (key, coordinates) in &reducer.assertion_history {
+        hasher.update(key.as_bytes());
+        hash_publication_value(&mut hasher, b"owner", &coordinates.owner)?;
+        hash_publication_value(&mut hasher, b"entity", &coordinates.entity_ref)?;
+    }
+    hash_publication_map_len(
+        &mut hasher,
+        b"association-history",
+        reducer.association_history.len(),
+    );
+    for (key, coordinates) in &reducer.association_history {
+        hasher.update(key.as_bytes());
+        hash_publication_value(&mut hasher, b"owner", &coordinates.owner)?;
+        hash_publication_value(&mut hasher, b"session", &coordinates.session_ref)?;
+        hash_publication_value(&mut hasher, b"project", &coordinates.project_ref)?;
+    }
+    hash_publication_map_len(
+        &mut hasher,
+        b"locator-history",
+        reducer.locator_history.len(),
+    );
+    for (key, coordinates) in &reducer.locator_history {
+        hasher.update(key.as_bytes());
+        hash_publication_value(&mut hasher, b"owner", &coordinates.owner)?;
+        hash_publication_value(&mut hasher, b"subject", &coordinates.subject_ref)?;
+    }
+    hash_publication_map_len(
+        &mut hasher,
+        b"identity-relation-history",
+        reducer.identity_relation_history.len(),
+    );
+    for (key, coordinates) in &reducer.identity_relation_history {
+        hasher.update(key.as_bytes());
+        hash_publication_value(&mut hasher, b"owner", &coordinates.owner)?;
+        hash_publication_value(&mut hasher, b"relation-kind", &coordinates.relation)?;
+        hash_publication_value(&mut hasher, b"left", &coordinates.left_ref)?;
+        hash_publication_value(&mut hasher, b"right", &coordinates.right_ref)?;
+    }
+    hash_publication_map_len(
+        &mut hasher,
+        b"retracted-owners",
+        reducer.retracted_owners.len(),
+    );
+    for (owner, evidence) in &reducer.retracted_owners {
+        hash_publication_value(&mut hasher, b"owner", owner)?;
+        hash_publication_value(&mut hasher, b"retraction", evidence)?;
+    }
+    hash_publication_map_len(&mut hasher, b"entity-kinds", reducer.entity_kinds.len());
+    for (key, kind) in &reducer.entity_kinds {
+        hasher.update(key.as_bytes());
+        hash_publication_value(&mut hasher, b"entity-kind", kind)?;
+    }
+    hash_publication_map_len(
+        &mut hasher,
+        b"retracted-assertion-entities",
+        reducer.retracted_assertions.len(),
+    );
+    for (entity_ref, assertions) in &reducer.retracted_assertions {
+        hash_publication_value(&mut hasher, b"retracted-entity", entity_ref)?;
+        hash_publication_map_len(&mut hasher, b"retracted-assertions", assertions.len());
+        for (key, retracted) in assertions {
+            hasher.update(key.as_bytes());
+            hash_publication_value(&mut hasher, b"retraction", &retracted.evidence)?;
+            hasher.update(&retracted.retracted_at_commit.to_be_bytes());
+            hash_publication_value(&mut hasher, b"provenance", &retracted.provenance)?;
+        }
+    }
+    hash_publication_map_len(&mut hasher, b"tombstones", reducer.tombstones.len());
+    for (entity_ref, tombstone) in &reducer.tombstones {
+        hash_publication_value(&mut hasher, b"tombstone-entity", entity_ref)?;
+        hash_publication_value(&mut hasher, b"tombstone", tombstone)?;
+    }
+    hash_publication_map_len(&mut hasher, b"project-rows", project_rows.len());
+    for row in project_rows {
+        hash_publication_value(&mut hasher, b"project-row", row)?;
+    }
+    hash_publication_map_len(&mut hasher, b"session-rows", session_rows.len());
+    for row in session_rows {
+        hash_publication_value(&mut hasher, b"session-row", row)?;
+    }
+
+    Ok(CatalogReducerPublicationRevision(
+        *hasher.finalize().as_bytes(),
+    ))
 }
 
 fn validate_identity_relation_graph(

@@ -180,6 +180,7 @@ impl CatalogCoveragePlanId {
 pub(crate) mod evidence;
 pub(crate) mod hydration;
 pub(crate) mod page;
+pub(crate) mod publication;
 pub(crate) mod query;
 
 impl CatalogAccessPolicyDigest {

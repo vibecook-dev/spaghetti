@@ -880,6 +880,28 @@ fn executable_composition_assembles_canonical_complete_library_coverage() {
         .explicit_absence_or_deletion
         .is_empty());
     assert!(assembly.source_coverage().explicit_errors.is_empty());
+    let publication_source = assembly.complete_publication_source().unwrap();
+    assert_eq!(
+        publication_source.member_identity_contract_id(),
+        MEMBER_IDENTITY_CONTRACT
+    );
+    assert_eq!(publication_source.member_count(), membership.members.len());
+    assert_eq!(publication_source.plan_source(), assembly.plan_source());
+    assert_eq!(
+        publication_source.source_coverage(),
+        assembly.source_coverage()
+    );
+    assert_ne!(
+        publication_source.membership_revision(),
+        CatalogSourceMembershipRevision::from_digest([0; 32])
+    );
+    assert_ne!(
+        publication_source.component_completion_revision(),
+        CatalogSourceCompletionRevision::from_digest([0; 32])
+    );
+    let publication_debug = format!("{publication_source:?}");
+    assert!(!publication_debug.contains("claude-session-a"));
+    assert!(!publication_debug.contains("claude-session-b"));
     assert_eq!(
         assembly
             .source_coverage()

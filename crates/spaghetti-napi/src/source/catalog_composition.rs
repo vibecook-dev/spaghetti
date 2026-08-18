@@ -20,9 +20,13 @@ use crate::adapter::{
     CoverageSetCompleteness, CoverageStatus, CoverageStreamKey, SourceCoveragePoint,
     SourceCoverageSet, SOURCE_COVERAGE_CONTRACT_VERSION,
 };
+use crate::catalog_contract::publication::{
+    CatalogCompleteSourceAssembly, CatalogPublicationMemberRef, CatalogSourceCompletionRevision,
+    CatalogSourceMembershipRevision,
+};
 use crate::catalog_contract::{
-    CatalogAccessPolicyDigest, CatalogCoveragePlanSource, CatalogCoverageScope,
-    CATALOG_PROJECTION_PACK_ID, CATALOG_QUERY_PACK_CONTRACT_VERSION,
+    CatalogAccessPolicyDigest, CatalogContractError, CatalogCoveragePlanSource,
+    CatalogCoverageScope, CATALOG_PROJECTION_PACK_ID, CATALOG_QUERY_PACK_CONTRACT_VERSION,
 };
 use crate::coverage_runtime::{
     derive_coverage_membership_revision, source_membership_prefix, CoverageMembershipObject,
@@ -246,6 +250,10 @@ pub(crate) struct CatalogComponentCompletionRevision([u8; DIGEST_BYTES]);
 impl CatalogComponentCompletionRevision {
     fn from_digest(bytes: [u8; DIGEST_BYTES]) -> Self {
         Self(bytes)
+    }
+
+    fn as_bytes(&self) -> &[u8; DIGEST_BYTES] {
+        &self.0
     }
 }
 
@@ -1341,6 +1349,12 @@ impl CatalogExecutableComposition<'_, '_> {
             contract_selection: self.authorization.contracts().clone(),
             plan_source,
             source_coverage,
+            member_identity_contract_id: membership.member_identity_contract_id.clone(),
+            member_refs: membership
+                .members
+                .iter()
+                .map(|member| member.member_ref)
+                .collect(),
         })
     }
 }
@@ -1583,6 +1597,8 @@ pub(crate) struct CatalogLibraryCoverageAssembly {
     contract_selection: ContractVersionSelection,
     plan_source: CatalogCoveragePlanSource,
     source_coverage: SourceCoverageSet,
+    member_identity_contract_id: String,
+    member_refs: Vec<CatalogMemberRef>,
 }
 
 impl CatalogLibraryCoverageAssembly {
@@ -1604,6 +1620,31 @@ impl CatalogLibraryCoverageAssembly {
 
     pub(crate) fn source_coverage(&self) -> &SourceCoverageSet {
         &self.source_coverage
+    }
+
+    /// Project this checked B2 result into the adapter-neutral input consumed
+    /// by the B3 initial-publication envelope. The projection retains the
+    /// exact member set and identity contract instead of treating coverage
+    /// membership as catalog membership.
+    pub(crate) fn complete_publication_source(
+        &self,
+    ) -> Result<CatalogCompleteSourceAssembly, CatalogContractError> {
+        CatalogCompleteSourceAssembly::from_complete_library_coverage(
+            self.plan_source.clone(),
+            self.contract_selection.clone(),
+            self.member_identity_contract_id.clone(),
+            CatalogSourceMembershipRevision::from_digest(
+                *self.catalog_membership_revision.as_bytes(),
+            ),
+            CatalogSourceCompletionRevision::from_digest(
+                *self.component_completion_revision.as_bytes(),
+            ),
+            self.member_refs
+                .iter()
+                .map(|member_ref| CatalogPublicationMemberRef::from_digest(*member_ref.as_bytes()))
+                .collect(),
+            self.source_coverage.clone(),
+        )
     }
 }
 
