@@ -2379,6 +2379,24 @@ publication remains gated on the complete D-owned artifact/capability state,
 dynamic/discovered scope authority, and the complete event/control union; no
 N-API observer transport or public attachment authority is added here.
 
+The next bounded D3 prerequisite (`add1cb6`) freezes the attachment's
+phase-independent observation-capability state without presenting static
+support expectations as current source readiness. Rust validates the exact
+caller-held selection, host offer, compatibility class, support-release
+identity, selected-family implementation, and explicit unselected families,
+then derives a domain-separated BLAKE3-256 semantic digest over the canonical
+capability report. Exact-supported and range-supported reports therefore have
+distinct snapshots, while replay is independent of bootstrap/correction phase
+and JSON map insertion order. The exported TypeScript parser independently
+enforces every inspectable capability/context/shape bound and compares the
+Rust-derived digest to caller-held context without claiming portable BLAKE3
+authority. No source coverage, current readiness, root, artifact state,
+barrier sequence, native payload, source-access token, or observer transport
+enters this snapshot. Full bootstrap/resync barrier publication remains gated
+on artifact-availability revisions, dynamic/discovered scope authority, and
+the complete event/control union; no N-API observer method or public attachment
+authority is added here.
+
 ### D4. SDK and Chopsticks migration
 
 Add a feature-flagged Chopsticks path beside `watchSessionTranscript`:
