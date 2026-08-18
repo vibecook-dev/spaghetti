@@ -1,0 +1,184 @@
+{
+  "continuation_request": {
+    "catalog_continuation_request_contract_version": 1,
+    "contract_selection": {
+      "catalog_query_contract_version": 1,
+      "contract_versions": {
+        "coverage_contract_version": 1,
+        "external_entity_reference_version": 1,
+        "fact_family_versions": {},
+        "model_major": 1,
+        "observation_contract_version": null,
+        "query_pack_version": 1,
+        "selection_contract_version": 1,
+        "semantic_revision_reference_version": 1
+      },
+      "typed_unknown": {
+        "max_payload_bytes": 4096,
+        "preserves_unknown_fields": true,
+        "preserves_unknown_variants": true,
+        "typed_unknown_contract_version": 1
+      }
+    },
+    "cursor": {
+      "cursor_contract_version": 1,
+      "last_entity_key": "v1:JMqH3YizEDsJ1Xp050r0mwmN3hk-A4fo-m2HyYR-4GM",
+      "last_sort_key": "v1:MjAyNi0wOC0xN1QxMjowMDowMFo",
+      "query_fingerprint": "v1:yAbk-F3g1j-bfu1ICV3xqJyn7UXak6W6q4N0ihKSwr4",
+      "snapshot_id": {
+        "complete_commit": 42,
+        "coverage_plan_id": "v1:hXFqUT7eph1816sGyqvASj9o-9D9Q7l90iLgiuANCEE",
+        "pack_contract_version": 1,
+        "readiness_epoch": 7
+      },
+      "sort_spec_version": 1
+    },
+    "page_size": 50,
+    "query_fingerprint": "v1:yAbk-F3g1j-bfu1ICV3xqJyn7UXak6W6q4N0ihKSwr4",
+    "snapshot_id": {
+      "complete_commit": 42,
+      "coverage_plan_id": "v1:hXFqUT7eph1816sGyqvASj9o-9D9Q7l90iLgiuANCEE",
+      "pack_contract_version": 1,
+      "readiness_epoch": 7
+    },
+    "sort_spec_version": 1
+  },
+  "contract_offer": {
+    "catalog_query_contract_version": 1,
+    "contract_versions": {
+      "coverage_contract_versions": [
+        1
+      ],
+      "external_entity_reference_versions": [
+        1
+      ],
+      "fact_family_versions": {},
+      "model_major": 1,
+      "observation_contract_versions": [],
+      "query_pack_versions": [
+        1
+      ],
+      "selection_contract_version": 1,
+      "semantic_revision_reference_versions": [
+        1
+      ]
+    },
+    "typed_unknown": {
+      "max_payload_bytes": 8192,
+      "preserves_unknown_fields": true,
+      "preserves_unknown_variants": true,
+      "typed_unknown_contract_version": 1
+    }
+  },
+  "contract_request": {
+    "catalog_query_contract_version": 1,
+    "contract_versions": {
+      "coverage_contract_versions": [
+        2,
+        1
+      ],
+      "external_entity_reference_version": 1,
+      "fact_family_versions": {},
+      "model_major": 1,
+      "observation_contract_versions": null,
+      "query_pack_versions": [
+        2,
+        1
+      ],
+      "selection_contract_version": 1,
+      "semantic_revision_reference_version": 1
+    },
+    "typed_unknown": {
+      "max_payload_bytes": 4096,
+      "preserves_unknown_fields": true,
+      "preserves_unknown_variants": true,
+      "typed_unknown_contract_version": 1
+    }
+  },
+  "expected": {
+    "additive_field": "future_server_hint",
+    "cursor_binding_valid": true,
+    "incompatible_error": "IncompatibleCatalogContract",
+    "selected_query_pack_version": 1,
+    "selected_unknown_max_payload_bytes": 4096,
+    "unknown_variant": "future_catalog_capability"
+  },
+  "fixture_contract_version": 1,
+  "selected_response": {
+    "catalog_query_response_contract_version": 1,
+    "contract_selection": {
+      "catalog_query_contract_version": 1,
+      "contract_versions": {
+        "coverage_contract_version": 1,
+        "external_entity_reference_version": 1,
+        "fact_family_versions": {},
+        "model_major": 1,
+        "observation_contract_version": null,
+        "query_pack_version": 1,
+        "selection_contract_version": 1,
+        "semantic_revision_reference_version": 1
+      },
+      "typed_unknown": {
+        "max_payload_bytes": 4096,
+        "preserves_unknown_fields": true,
+        "preserves_unknown_variants": true,
+        "typed_unknown_contract_version": 1
+      }
+    },
+    "kind": "selected"
+  },
+  "selected_response_with_additive_field": {
+    "catalog_query_response_contract_version": 1,
+    "contract_selection": {
+      "catalog_query_contract_version": 1,
+      "contract_versions": {
+        "coverage_contract_version": 1,
+        "external_entity_reference_version": 1,
+        "fact_family_versions": {},
+        "model_major": 1,
+        "observation_contract_version": null,
+        "query_pack_version": 1,
+        "selection_contract_version": 1,
+        "semantic_revision_reference_version": 1
+      },
+      "typed_unknown": {
+        "max_payload_bytes": 4096,
+        "preserves_unknown_fields": true,
+        "preserves_unknown_variants": true,
+        "typed_unknown_contract_version": 1
+      }
+    },
+    "future_server_hint": {
+      "mode": "bounded",
+      "retry_after": 2
+    },
+    "kind": "selected"
+  },
+  "unknown_response_variant": {
+    "capability": {
+      "enabled": true,
+      "name": "server_rank_hint"
+    },
+    "catalog_query_response_contract_version": 1,
+    "contract_selection": {
+      "catalog_query_contract_version": 1,
+      "contract_versions": {
+        "coverage_contract_version": 1,
+        "external_entity_reference_version": 1,
+        "fact_family_versions": {},
+        "model_major": 1,
+        "observation_contract_version": null,
+        "query_pack_version": 1,
+        "selection_contract_version": 1,
+        "semantic_revision_reference_version": 1
+      },
+      "typed_unknown": {
+        "max_payload_bytes": 4096,
+        "preserves_unknown_fields": true,
+        "preserves_unknown_variants": true,
+        "typed_unknown_contract_version": 1
+      }
+    },
+    "kind": "future_catalog_capability"
+  }
+}

@@ -163,6 +163,7 @@ opaque_digest_type!(CatalogAccessPolicyDigest);
 opaque_digest_type!(CatalogQueryFingerprint);
 
 pub(crate) mod evidence;
+pub(crate) mod query;
 
 impl CatalogAccessPolicyDigest {
     pub(crate) fn derive(

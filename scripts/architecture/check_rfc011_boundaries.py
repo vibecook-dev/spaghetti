@@ -425,6 +425,7 @@ def discover_rfc012_catalog_contract_boundary_violations() -> set[str]:
     """Draft RFC 012B semantics cannot acquire storage, source, vendor, or transport authority."""
     relative = "crates/spaghetti-napi/src/catalog_contract.rs"
     path = REPO_ROOT / relative
+    found: set[str] = set()
     contract_paths = [path]
     contract_dir = path.with_suffix("")
     if contract_dir.exists():
@@ -433,11 +434,40 @@ def discover_rfc012_catalog_contract_boundary_violations() -> set[str]:
         RFC012_CATALOG_CONTRACT_FORBIDDEN_RE.search(production_rust_text(contract_path))
         for contract_path in contract_paths
     ):
-        return {relative}
+        found.add(relative)
     lib = REPO_ROOT / "crates/spaghetti-napi/src/lib.rs"
     if re.search(r"^\s*pub\s+mod\s+catalog_contract\s*;", read(lib), re.MULTILINE):
-        return {f"{repo_path(lib)}#premature-public-catalog-contract"}
-    return set()
+        found.add(f"{repo_path(lib)}#premature-public-catalog-contract")
+
+    portable_relative = "packages/sdk/src/contracts/rfc012b.ts"
+    portable = REPO_ROOT / portable_relative
+    contracts_root = portable.parent.resolve()
+    if not portable.exists():
+        found.add(portable_relative)
+    else:
+        pending = [portable]
+        visited: set[Path] = set()
+        while pending:
+            importer = pending.pop().resolve()
+            if importer in visited:
+                continue
+            visited.add(importer)
+            for specifier in RUNTIME_MODULE_RE.findall(read(importer)):
+                edge = f"{repo_path(importer)} -> {specifier}"
+                target = resolve_typescript_module(importer, specifier)
+                if (
+                    not specifier.startswith(".")
+                    or target is None
+                    or not target.is_relative_to(contracts_root)
+                ):
+                    found.add(edge)
+                    continue
+                pending.append(target)
+
+    sdk_index = REPO_ROOT / "packages/sdk/src/index.ts"
+    if "./contracts/rfc012b.js" not in RUNTIME_MODULE_RE.findall(read(sdk_index)):
+        found.add(f"{repo_path(sdk_index)}#missing-rfc012b-contract-export")
+    return found
 
 
 def discover_migrated_client_direct_engine_queries() -> set[str]:

@@ -542,7 +542,7 @@ function parseFactFamilyVersions(value: unknown, label: string): Record<string, 
   );
 }
 
-function parseContractVersionRequest(value: unknown): ContractVersionRequest {
+export function parseContractVersionRequest(value: unknown): ContractVersionRequest {
   const input = record(value, 'contract version request');
   if (input.selection_contract_version !== CONTRACT_VERSION_SELECTION_VERSION) {
     throw new ContractValidationError('unsupported contract-version selection request version');
@@ -565,10 +565,10 @@ function parseContractVersionRequest(value: unknown): ContractVersionRequest {
     ),
     fact_family_versions: parseFactFamilyVersions(input.fact_family_versions, 'requested'),
   };
-  if (input.query_pack_versions !== undefined) {
+  if (input.query_pack_versions !== undefined && input.query_pack_versions !== null) {
     result.query_pack_versions = versionList(input.query_pack_versions, 'requested query pack versions', true);
   }
-  if (input.observation_contract_versions !== undefined) {
+  if (input.observation_contract_versions !== undefined && input.observation_contract_versions !== null) {
     result.observation_contract_versions = versionList(
       input.observation_contract_versions,
       'requested observation contract versions',
@@ -578,7 +578,7 @@ function parseContractVersionRequest(value: unknown): ContractVersionRequest {
   return result;
 }
 
-function parseContractVersionOffer(value: unknown): ContractVersionOffer {
+export function parseContractVersionOffer(value: unknown): ContractVersionOffer {
   const input = record(value, 'contract version offer');
   if (input.selection_contract_version !== CONTRACT_VERSION_SELECTION_VERSION) {
     throw new ContractValidationError('unsupported contract-version offer version');
@@ -607,6 +607,43 @@ function parseContractVersionOffer(value: unknown): ContractVersionOffer {
       input.observation_contract_versions,
       'offered observation contract versions',
       false,
+    ),
+  };
+}
+
+export function parseContractVersionSelection(value: unknown): ContractVersionSelection {
+  const input = record(value, 'contract version selection');
+  if (input.selection_contract_version !== CONTRACT_VERSION_SELECTION_VERSION) {
+    throw new ContractValidationError('unsupported contract-version selection version');
+  }
+  const families = record(input.fact_family_versions, 'selected fact families');
+  const factFamilyVersions = Object.fromEntries(
+    Object.entries(families).map(([family, version]) => [
+      nonEmptyString(family, 'selected fact family'),
+      positiveInteger(version, `selected fact family ${family}`),
+    ]),
+  );
+  const optionalVersion = (version: unknown, label: string): number | null => {
+    if (version === null || version === undefined) return null;
+    return positiveInteger(version, label);
+  };
+  return {
+    selection_contract_version: CONTRACT_VERSION_SELECTION_VERSION,
+    model_major: positiveInteger(input.model_major, 'selected model major'),
+    external_entity_reference_version: positiveInteger(
+      input.external_entity_reference_version,
+      'selected external entity reference version',
+    ),
+    semantic_revision_reference_version: positiveInteger(
+      input.semantic_revision_reference_version,
+      'selected semantic revision reference version',
+    ),
+    coverage_contract_version: positiveInteger(input.coverage_contract_version, 'selected coverage contract version'),
+    fact_family_versions: factFamilyVersions,
+    query_pack_version: optionalVersion(input.query_pack_version, 'selected query pack version'),
+    observation_contract_version: optionalVersion(
+      input.observation_contract_version,
+      'selected observation contract version',
     ),
   };
 }
