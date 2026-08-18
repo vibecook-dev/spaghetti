@@ -154,7 +154,7 @@ impl ClaudeCodeAdapter {
                         env!("CARGO_PKG_VERSION"),
                         22,
                         "sha256:1d8b81547812a87b71e983fede40ac7cb130bbbe7252017fd3bd4a95b9bc98fa",
-                        "sha256:17a0f1aa7490b5c03a525f7606a7a02ee6d1919cc8b9b776597843f1edbf1ebe",
+                        "sha256:5ec0d94f65d06aa72444d951ee65f6aff7e920e57d82188114eff7b26238ea40",
                         "sha256:689c86b9770544f826da37e72d1c4a1a37153fad4091372b954bba90ca2d5f7c",
                     )
                     .expect("static Claude support binding is valid"),

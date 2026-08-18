@@ -114,7 +114,7 @@
             "member_identity_contract_id": "catalog-session-identity-v1",
             "metadata_contract_id": "transcript-head-metadata-v1"
           },
-          "decoder_contract_id": "claude-parent-transcript",
+          "decoder_contract_id": "claude-session-record",
           "decoder_contract_version": 1,
           "discovery_bounds": {
             "max_depth": 64,
@@ -143,7 +143,7 @@
         }
       ],
       "composition_contract_version": 1,
-      "composition_id": "catalog-composition-v1:q0Sk3ZssUDuW44aEqBArCZy8LOXM9JwDgRByc_EvdD4",
+      "composition_id": "catalog-composition-v1:m2BFDZcH8hcn3_h-TiM5liIVGm4SZwsp4Mk9jf9ZaLE",
       "member_identity_contract_id": "catalog-session-identity-v1",
       "source_declaration_id": "claude-code.catalog-sources-v1",
       "support_release_id": "claude-code.catalog-candidate-2026-08-15"
@@ -301,7 +301,7 @@
           "generation": 1
         }
       ],
-      "composition_id": "catalog-composition-v1:q0Sk3ZssUDuW44aEqBArCZy8LOXM9JwDgRByc_EvdD4",
+      "composition_id": "catalog-composition-v1:m2BFDZcH8hcn3_h-TiM5liIVGm4SZwsp4Mk9jf9ZaLE",
       "member_identity_contract_id": "catalog-session-identity-v1",
       "members": [
         {
@@ -333,7 +333,7 @@
         }
       ],
       "membership_contract_version": 1,
-      "membership_revision": "catalog-membership-v1:pBj8d3YmYvRvUSKtmRokynVf8bRL6rGHTBEs8gxaDao"
+      "membership_revision": "catalog-membership-v1:0YEr4lKgJAl_gHPENW_Bj33Madt2aaA_i9PBZatPJZQ"
     },
     "codex": {
       "authority_evidence": [
@@ -398,16 +398,16 @@
       "full_only": {
         "final_decoder_state": "catalog-conformance-v1:9QuX8Yu_8DFEE8iKtfJyxvm7Ytr_2XBzuSH5RDjFFGM",
         "record_count": 3,
-        "trace_digest": "catalog-conformance-v1:4xdxW0SJo00rTg4qG3RUc2nHu3iHFH7WP1B8WWX46_8"
+        "trace_digest": "catalog-conformance-v1:V7VyIWGxN-AYM4n_49-7VbEEFDpQWJqoMCQtwM1sJNs"
       },
       "head_or_prefix_plus_continuation": {
         "final_decoder_state": "catalog-conformance-v1:9QuX8Yu_8DFEE8iKtfJyxvm7Ytr_2XBzuSH5RDjFFGM",
         "record_count": 3,
-        "trace_digest": "catalog-conformance-v1:4xdxW0SJo00rTg4qG3RUc2nHu3iHFH7WP1B8WWX46_8"
+        "trace_digest": "catalog-conformance-v1:V7VyIWGxN-AYM4n_49-7VbEEFDpQWJqoMCQtwM1sJNs"
       },
       "windows": [
         {
-          "continuation": "catalog-window-continuation-v1:v-bAloAm1guXKizT0RmuGPdDFqxsmzHsk7y8ke9YJzs",
+          "continuation": "catalog-window-continuation-v1:67yf33nL2dYHx9XHwgS4goG_54s49tnVuT3PsyK8r3U",
           "window": {
             "remainder": {
               "kind": "continue_at",

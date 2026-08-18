@@ -5,8 +5,9 @@ use tempfile::TempDir;
 use super::*;
 use crate::adapter::{
     verify_support_release_bundle, AdapterSupportRegistration, CompatibilityClass,
-    ContractVersionOffer, ContractVersionRequest, NativeArtifactProbe, SupportBundleDocument,
-    SupportCatalog, SupportOperation, VerifiedSupportRelease,
+    ContractVersionOffer, ContractVersionRequest, NativeArtifactProbe, Sha256Digest,
+    SupportBundleDocument, SupportCatalog, SupportContractError, SupportOperation,
+    VerifiedSupportRelease,
 };
 
 const INDEX_ONLY: &str = "11111111-1111-1111-1111-111111111111";
@@ -298,19 +299,24 @@ fn current_candidate_and_planned_composition_remain_non_authorizing_and_distinct
         .unwrap();
     assert_eq!(catalog_capability["level"], "unsupported");
 
-    let declaration: serde_json::Value = serde_json::from_slice(include_bytes!(concat!(
+    let declaration_bytes = include_bytes!(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/../../agent-support/claude-code/candidate-2026-08-15/source-declarations.json"
-    )))
-    .unwrap();
+    ));
+    let declaration: serde_json::Value = serde_json::from_slice(declaration_bytes).unwrap();
+    let declaration_digest = Sha256Digest::of(declaration_bytes).to_string();
+    assert_eq!(
+        release_wire["references"]["source_declaration"]["sha256"],
+        declaration_digest
+    );
     assert_eq!(declaration["declaration_id"], SOURCE_DECLARATION_ID);
     assert_eq!(declaration["status"], "candidate");
     let declared_parent = exact_declared_stream(&declaration, PARENT_STREAM_ID);
     let declared_subagent = exact_declared_stream(&declaration, SUBAGENT_STREAM_ID);
     let declared_index = exact_declared_stream(&declaration, INDEX_STREAM_ID);
     for (stream, decoder) in [
-        (declared_parent, "claude-parent-transcript"),
-        (declared_subagent, "claude-subagent-transcript"),
+        (declared_parent, "claude-session-record"),
+        (declared_subagent, "claude-subagent-record"),
     ] {
         assert_eq!(stream["primitive"], "AppendDelimited");
         assert_eq!(stream["decoder_id"], decoder);
@@ -347,11 +353,11 @@ fn current_candidate_and_planned_composition_remain_non_authorizing_and_distinct
     assert_eq!(runtime_parent.decoder.as_str(), "claude-session-record");
     assert_eq!(runtime_subagent.decoder.as_str(), "claude-subagent-record");
     assert_eq!(runtime_index.decoder.as_str(), "claude-session-index");
-    assert_ne!(
+    assert_eq!(
         declared_parent["decoder_id"].as_str().unwrap(),
         runtime_parent.decoder.as_str()
     );
-    assert_ne!(
+    assert_eq!(
         declared_subagent["decoder_id"].as_str().unwrap(),
         runtime_subagent.decoder.as_str()
     );
@@ -390,6 +396,14 @@ fn current_candidate_and_planned_composition_remain_non_authorizing_and_distinct
     assert_eq!(planned_head["primitive"]["max_record_bytes"], 65_536);
     assert_eq!(planned_head["primitive"]["max_window_bytes"], 65_536);
     assert_eq!(planned_head["primitive"]["max_records"], 128);
+    assert_eq!(
+        planned_head["decoder_contract_id"].as_str().unwrap(),
+        declared_parent["decoder_id"].as_str().unwrap()
+    );
+    assert_eq!(
+        planned_head["decoder_contract_id"].as_str().unwrap(),
+        runtime_parent.decoder.as_str()
+    );
     assert_eq!(
         planned_head["overlap_strategy"]["kind"],
         "idempotent_overlap"
@@ -457,6 +471,15 @@ fn current_candidate_and_planned_composition_remain_non_authorizing_and_distinct
         crate::adapter::SupportReleaseStatus::Candidate
     );
     let manifest = adapter.manifest();
+    assert_eq!(
+        manifest
+            .support_binding
+            .as_ref()
+            .unwrap()
+            .source_declaration_digest()
+            .to_string(),
+        declaration_digest
+    );
     release
         .verify_adapter_binding(
             manifest.id.as_str(),
@@ -488,6 +511,22 @@ fn current_candidate_and_planned_composition_remain_non_authorizing_and_distinct
         )
         .unwrap_err();
     assert!(error.to_string().contains("forbidden"));
+}
+
+#[test]
+fn candidate_support_release_rejects_source_declaration_digest_drift() {
+    let mut drifted = include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../agent-support/claude-code/candidate-2026-08-15/source-declarations.json"
+    ))
+    .to_vec();
+    drifted.push(b'\n');
+
+    let error = verify_candidate_release_with_source_declaration(&drifted)
+        .expect_err("digest drift must fail before a release can be verified");
+    assert!(error
+        .to_string()
+        .contains("source_declaration document digest does not match"));
 }
 
 fn write_index(project: &Path, entries: &[(&str, &str)]) {
@@ -630,6 +669,16 @@ fn candidate_probe() -> NativeArtifactProbe {
 }
 
 fn verified_candidate_release() -> VerifiedSupportRelease {
+    verify_candidate_release_with_source_declaration(include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../agent-support/claude-code/candidate-2026-08-15/source-declarations.json"
+    )))
+    .unwrap()
+}
+
+fn verify_candidate_release_with_source_declaration(
+    source_declaration: &[u8],
+) -> Result<VerifiedSupportRelease, SupportContractError> {
     verify_support_release_bundle(
         include_bytes!(concat!(
             env!("CARGO_MANIFEST_DIR"),
@@ -645,10 +694,7 @@ fn verified_candidate_release() -> VerifiedSupportRelease {
             ),
             SupportBundleDocument::new(
                 "agent-support/claude-code/candidate-2026-08-15/source-declarations.json",
-                include_bytes!(concat!(
-                    env!("CARGO_MANIFEST_DIR"),
-                    "/../../agent-support/claude-code/candidate-2026-08-15/source-declarations.json"
-                )),
+                source_declaration,
             ),
             SupportBundleDocument::new(
                 "agent-support/claude-code/candidate-2026-08-15/scope-programs.json",
@@ -673,5 +719,4 @@ fn verified_candidate_release() -> VerifiedSupportRelease {
             ),
         ],
     )
-    .unwrap()
 }

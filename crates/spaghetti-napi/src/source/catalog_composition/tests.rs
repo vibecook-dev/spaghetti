@@ -95,7 +95,7 @@ fn claude_components() -> Vec<CatalogSourceComponent> {
             CatalogOverlapStrategy::IdempotentOverlap,
             CatalogDecoderStateBoundary::ObjectGenerationCursor,
             (
-                "claude-parent-transcript",
+                "claude-session-record",
                 &["native-family:session-transcript"],
             ),
         ),
