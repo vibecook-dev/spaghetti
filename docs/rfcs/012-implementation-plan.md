@@ -507,9 +507,31 @@ duplicate/unplanned sources, and cursor reuse across snapshot, query, or sort.
 A Rust-produced v1 fixture and architecture ratchet keep the draft module
 private and free of storage, source, vendor, and N-API dependencies.
 
-B1 remains `In progress`: catalog assertion, identity-relation, association,
-reducer, and external-resolution contracts; query-pack negotiation; hydration
-receipts; and N-API/portable TypeScript parity remain open.
+The second library-first slice defines crate-private project/session membership
+assertions, native association and policy-bound locator evidence, explicit
+alias/same/replacement relations, and a relation-proven
+representative-to-base-session attach handoff. Deterministic field and
+association reduction applies concrete-value precedence while retaining
+competitors and equal-authority conflicts. Complete confirmed-deletion or
+replacement evidence retracts only its owning source generation; immutable key
+history prevents all four evidence domains from retargeting after retraction;
+and canonical multi-owner tombstones require complete, commit-ordered evidence
+and an explicitly newer generation for revival. Live external-reference
+resolution now returns its typed reduced row, including session association
+coverage, while tombstoned, superseded, and unknown results retain canonical
+semantic provenance. Frozen Rust evidence fixtures and the nested catalog
+architecture ratchet cover these contracts.
+
+The readiness resume validator additionally rejects future last-complete
+epochs, empty or optional-only `Partial` state, false current-complete commits,
+and integrity-failure snapshot-disposition mismatches. `IndependentlySafe` and
+`Discarded` integrity outcomes are persisted explicitly rather than inferred
+from the presence of an old snapshot.
+
+B1 remains `In progress`: compatible query-pack negotiation and incompatible
+rejection, hydration commands/receipts, and N-API/portable TypeScript DTO and
+typed-unknown parity remain open. B2 source compositions and B3 durable
+transactional persistence, outbox, and restart parity have not started.
 
 ### B2. Catalog source compositions
 
