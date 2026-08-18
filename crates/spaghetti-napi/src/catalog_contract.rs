@@ -31,7 +31,7 @@ const MAX_IDENTIFIER_BYTES: usize = 256;
 const MAX_PLAN_SOURCES: usize = 4_096;
 const MAX_QUERY_BYTES: usize = 64 * 1024;
 const MAX_SORT_KEY_BYTES: usize = 64 * 1024;
-const MAX_REASON_CODE_BYTES: usize = 1_024;
+const MAX_REASON_CODE_BYTES: usize = 64;
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("{message}")]
@@ -61,10 +61,14 @@ fn validate_identifier(label: &str, value: &str) -> Result<(), CatalogContractEr
     Ok(())
 }
 
-fn validate_reason_code(value: &str) -> Result<(), CatalogContractError> {
-    if value.is_empty() || value.trim() != value || value.len() > MAX_REASON_CODE_BYTES {
+pub(crate) fn validate_reason_code(value: &str) -> Result<(), CatalogContractError> {
+    let mut bytes = value.bytes();
+    let valid = value.len() <= MAX_REASON_CODE_BYTES
+        && bytes.next().is_some_and(|byte| byte.is_ascii_lowercase())
+        && bytes.all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_');
+    if !valid {
         return Err(CatalogContractError::invalid(format!(
-            "catalog readiness reason must be canonical and at most {MAX_REASON_CODE_BYTES} bytes"
+            "catalog readiness reason code must be lowercase ASCII machine code of at most {MAX_REASON_CODE_BYTES} bytes"
         )));
     }
     Ok(())
@@ -1959,6 +1963,27 @@ mod tests {
             .unwrap();
         assert_eq!(machine.snapshot().last_complete_snapshot, None);
         assert_eq!(machine.snapshot().completed_contract_version, None);
+    }
+
+    #[test]
+    fn readiness_reason_codes_are_privacy_safe_machine_codes() {
+        for invalid in [
+            "",
+            "/private/native/catalog.log",
+            "free form native failure",
+            "UPPERCASE_FAILURE",
+            "1leading_digit",
+            "a\0hidden",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        ] {
+            assert!(
+                validate_reason_code(invalid).is_err(),
+                "accepted {invalid:?}"
+            );
+        }
+        validate_reason_code("catalog_refresh_integrity_failed").unwrap();
+        validate_reason_code("source_unavailable_2").unwrap();
+        validate_reason_code(&"a".repeat(MAX_REASON_CODE_BYTES)).unwrap();
     }
 
     #[test]

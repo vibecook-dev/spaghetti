@@ -268,6 +268,47 @@ test('current readiness may retain a prior-plan snapshot but cannot present it a
   };
   reject(() => parseCatalogReadinessResponse(discardedButRetained, fixture.contract_selection, fixture.current_plan));
 
+  const safeError = clone(fixture.readiness_response) as {
+    readiness: Record<string, unknown>;
+  };
+  safeError.readiness = clone(fixture.project_page.published_readiness as Record<string, unknown>);
+  safeError.readiness.state = 'error';
+  safeError.readiness.reason = {
+    kind: 'integrity_failure',
+    code: 'refresh_payload_digest_mismatch',
+    snapshot_disposition: 'independently_safe',
+  };
+  assert.equal(
+    parseCatalogReadinessResponse(safeError, fixture.contract_selection, fixture.published_plan).readiness.state,
+    'error',
+  );
+  (safeError.readiness.reason as { code: string }).code = 'a'.repeat(64);
+  assert.equal(
+    parseCatalogReadinessResponse(safeError, fixture.contract_selection, fixture.published_plan).readiness.state,
+    'error',
+  );
+
+  for (const invalidCode of [
+    '',
+    '/private/native/catalog.log',
+    'free form native failure',
+    'UPPERCASE_FAILURE',
+    '1leading_digit',
+    'a\0hidden',
+    'a'.repeat(65),
+  ]) {
+    const unsafeCode = clone(fixture.readiness_response) as {
+      readiness: { state: string; reason?: unknown };
+    };
+    unsafeCode.readiness.state = 'error';
+    unsafeCode.readiness.reason = {
+      kind: 'integrity_failure',
+      code: invalidCode,
+      snapshot_disposition: 'independently_safe',
+    };
+    reject(() => parseCatalogReadinessResponse(unsafeCode, fixture.contract_selection, fixture.current_plan));
+  }
+
   reject(() =>
     parseCatalogReadinessResponse(fixture.readiness_response, fixture.contract_selection, fixture.published_plan),
   );

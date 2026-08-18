@@ -136,7 +136,9 @@ import type { SqliteService } from '../io/index.js';
 // predecessor commitments and cumulative member-identity history.
 // v54: append-only RFC 012B logical query-retirement evidence for retained
 // catalog snapshots.
-export const SCHEMA_VERSION = 54;
+// v55: append-only independently-safe integrity-failure evidence for an
+// active RFC 012B Library refresh while retaining its exact prior snapshot.
+export const SCHEMA_VERSION = 55;
 
 export const TOKEN_ACTIVITY_TRIGGER_NAMES = [
   'token_activity_messages_ai',
@@ -601,6 +603,7 @@ CREATE TABLE IF NOT EXISTS ingest_commits (
         'catalog.library.initial_snapshot.published',
         'catalog.library.refresh.started',
         'catalog.library.refresh_snapshot.published',
+        'catalog.library.refresh.integrity_failed',
         'catalog.library.snapshot.retired'
       )
       AND committed_at IS NOT NULL
@@ -729,13 +732,45 @@ BEFORE DELETE ON catalog_snapshot_retirements BEGIN
   SELECT RAISE(ABORT, 'catalog snapshot retirement evidence is immutable');
 END;
 
+CREATE TABLE IF NOT EXISTS catalog_refresh_integrity_failures (
+  failure_commit_seq INTEGER PRIMARY KEY REFERENCES ingest_commits(commit_seq) ON DELETE RESTRICT,
+  failed_refresh_commit_seq INTEGER NOT NULL UNIQUE REFERENCES ingest_commits(commit_seq) ON DELETE RESTRICT,
+  coverage_plan_id BLOB NOT NULL REFERENCES catalog_coverage_plans(coverage_plan_id) ON DELETE RESTRICT CHECK (typeof(coverage_plan_id) = 'blob' AND length(coverage_plan_id) = 32),
+  readiness_epoch INTEGER NOT NULL CHECK (readiness_epoch > 0),
+  attempt INTEGER NOT NULL CHECK (attempt > 0),
+  retained_snapshot_commit_seq INTEGER NOT NULL REFERENCES catalog_snapshots(snapshot_commit_seq) ON DELETE RESTRICT,
+  retained_publication_digest BLOB NOT NULL CHECK (typeof(retained_publication_digest) = 'blob' AND length(retained_publication_digest) = 32),
+  retained_content_digest BLOB NOT NULL CHECK (typeof(retained_content_digest) = 'blob' AND length(retained_content_digest) = 32),
+  reason_code TEXT NOT NULL CHECK (
+    typeof(reason_code) = 'text'
+    AND length(CAST(reason_code AS BLOB)) BETWEEN 1 AND 64
+    AND length(reason_code) = length(CAST(reason_code AS BLOB))
+    AND substr(reason_code, 1, 1) GLOB '[a-z]'
+    AND reason_code NOT GLOB '*[^a-z0-9_]*'
+  ),
+  snapshot_disposition TEXT NOT NULL CHECK (snapshot_disposition = 'independently_safe'),
+  failed_at INTEGER NOT NULL,
+  CHECK (retained_snapshot_commit_seq < failed_refresh_commit_seq),
+  CHECK (failed_refresh_commit_seq < failure_commit_seq)
+);
+
+CREATE TRIGGER IF NOT EXISTS catalog_refresh_integrity_failures_no_update
+BEFORE UPDATE ON catalog_refresh_integrity_failures BEGIN
+  SELECT RAISE(ABORT, 'catalog refresh integrity-failure evidence is immutable');
+END;
+
+CREATE TRIGGER IF NOT EXISTS catalog_refresh_integrity_failures_no_delete
+BEFORE DELETE ON catalog_refresh_integrity_failures BEGIN
+  SELECT RAISE(ABORT, 'catalog refresh integrity-failure evidence is immutable');
+END;
+
 CREATE TABLE IF NOT EXISTS catalog_build_state (
   scope_kind TEXT PRIMARY KEY CHECK (scope_kind = 'library'),
   coverage_plan_id BLOB NOT NULL REFERENCES catalog_coverage_plans(coverage_plan_id) ON DELETE RESTRICT,
   desired_contract_version INTEGER NOT NULL CHECK (desired_contract_version > 0),
   epoch INTEGER NOT NULL CHECK (epoch > 0),
   attempt INTEGER NOT NULL CHECK (attempt > 0),
-  state TEXT NOT NULL CHECK (state IN ('pending', 'building', 'ready')),
+  state TEXT NOT NULL CHECK (state IN ('pending', 'building', 'ready', 'error')),
   completed_contract_version INTEGER CHECK (completed_contract_version > 0),
   complete_through_commit INTEGER REFERENCES catalog_snapshots(snapshot_commit_seq) ON DELETE RESTRICT,
   last_complete_snapshot_commit INTEGER REFERENCES catalog_snapshots(snapshot_commit_seq) ON DELETE RESTRICT,
@@ -769,6 +804,17 @@ CREATE TABLE IF NOT EXISTS catalog_build_state (
           AND last_commit_seq > complete_through_commit
         )
       )
+    )
+    OR
+    (
+      state = 'error'
+      AND completed_contract_version IS NOT NULL
+      AND complete_through_commit IS NOT NULL
+      AND last_complete_snapshot_commit IS NOT NULL
+      AND refreshing_from_snapshot_commit IS NULL
+      AND completed_contract_version = desired_contract_version
+      AND complete_through_commit = last_complete_snapshot_commit
+      AND last_commit_seq > complete_through_commit
     )
   )
 );
@@ -2456,6 +2502,7 @@ const CURRENT_TABLES = [
   'source_coverage_sets',
   'query_pack_selections',
   'projection_versions',
+  'catalog_refresh_integrity_failures',
   'catalog_snapshot_retirements',
   'catalog_snapshot_entries',
   'catalog_build_state',

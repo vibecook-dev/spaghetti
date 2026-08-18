@@ -51,6 +51,7 @@ const MAX_PROVENANCE_REVISIONS = 64;
 const MAX_PLAN_SOURCES = 4_096;
 const MAX_SOURCE_COVERAGE_MEMBERS = 16_384;
 const MAX_IDENTIFIER_BYTES = 256;
+const MAX_READINESS_REASON_CODE_BYTES = 64;
 const MAX_PORTABLE_COVERAGE_REASON_BYTES = 1_024;
 const MAX_TEXT_BYTES = 16 * 1_024;
 const MAX_TYPED_UNKNOWN_DEPTH = 16;
@@ -701,7 +702,17 @@ function plansEqual(left: CatalogPortableCoveragePlan, right: CatalogPortableCov
 
 function parseReadinessReason(value: unknown): CatalogReadinessReason {
   const input = record(value, 'catalog readiness reason');
-  const code = canonicalString(input.code, 'catalog readiness reason code', 1_024);
+  if (
+    typeof input.code !== 'string' ||
+    input.code.length === 0 ||
+    input.code.length > MAX_READINESS_REASON_CODE_BYTES ||
+    !/^[a-z][a-z0-9_]*$/.test(input.code)
+  ) {
+    throw new ContractValidationError(
+      `catalog readiness reason code must be lowercase ASCII machine code of at most ${MAX_READINESS_REASON_CODE_BYTES} bytes`,
+    );
+  }
+  const code = input.code;
   switch (input.kind) {
     case 'source_retrying':
       assertKnownFields(input, ['kind', 'code'], 'source-retrying readiness reason');
