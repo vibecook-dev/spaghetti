@@ -123,7 +123,7 @@ prerequisite for early vertical slices.
 | A3. Current-agent support candidates     | 012A                | In progress | Claude/Codex/Grok ADS and candidate entries                    |
 | A4. New-agent adaptation proof           | 012A/umbrella       | Not started | fourth adapter without common-runtime/query/observer change    |
 | B1. Catalog identity/readiness contracts | 012B                | In progress | Rust/N-API/TS fixtures and transition table tests              |
-| B2. Bounded catalog source compositions  | 012B                | Not started | three adapter catalog identity digest parity                   |
+| B2. Bounded catalog source compositions  | 012B                | In progress | three adapter catalog identity digest parity                   |
 | B3. Durable catalog/query snapshots      | 012B                | Not started | atomic pack plus snapshot pagination conformance               |
 | B4. Progressive host and UX              | 012B                | Not started | cold/warm UI topology and migration tests                      |
 | B5. Catalog performance calibration      | 012B                | Not started | reproducible gate-amendment report                             |
@@ -560,11 +560,33 @@ rejects values outside Rust's `u32` range. The contract carries no raw request
 token, native identity, or locator and deliberately adds no scheduler, source
 read, storage, cancellation, hydration execution, or N-API authority.
 
-B1 remains `In progress`: complete catalog page, readiness, and resolution DTO
-parity, snapshot-expiration transport, and the gated public N-API surface
-remain open. B2 source compositions and B3 durable transactional persistence,
-outbox, and restart parity have not started; scheduling and hydration execution
-remain later integration work.
+The fifth library-first slice freezes complete portable project/session page,
+readiness, external-resolution, and snapshot-expiration contracts. Rust
+constructs snapshot-frozen pages with exact caller-held selection, query, sort,
+page-size, cursor, and coverage-plan bindings; canonical nonrepeating row
+order; self-consistent known/unknown counts; selected and competing evidence
+membership; policy-withheld native values; complete association coverage; and
+bounded canonical provenance. Readiness coverage is bound to catalog
+declaration plus access policy, rejects zero generations and noncanonical or
+unbounded member evidence, and can retain an independently safe prior-plan
+snapshot without presenting it as current-plan completeness. External
+resolution preserves the requested identity across live, tombstoned,
+superseded, unknown, and negotiated typed-unknown states. Snapshot expiration
+is emitted only after the exact continuation and caller-held scope validate,
+and requires a strictly newer snapshot in the same pack/scope lineage;
+malformed or foreign cursors cannot be relabeled as expired. Portable
+TypeScript independently parses the Rust fixture, rejects semantic
+unknown-field drops and Rust/JavaScript numeric drift, and preserves only
+bounded negotiated additive response data. The contracts remain free of
+storage, engine queries, source reads, hydration execution, and N-API.
+
+B1 remains `In progress` only at the public exposure gate: no catalog N-API
+query surface should land until engine transport can bind an authorized
+`CatalogPolicyView` to the frozen access-policy digest and B3 provides real
+retained-snapshot/query execution. The first B2 adapter-neutral bounded
+catalog-composition slice is now in progress. B3 durable transactional
+persistence, outbox, and restart parity have not started; scheduling and
+hydration execution remain later integration work.
 
 ### B2. Catalog source compositions
 
@@ -1390,11 +1412,17 @@ Current landing status (2026-08-17):
   a parked owner without a check-then-sleep race. Semantic, retained-native,
   and source-control queue-full outcomes wait for that exact capacity owner and
   never manufacture continuity loss; batch/admission/configuration failures do
-  not masquerade as recoverable pressure. Source/decode transients use capped,
-  cancellation-prioritized exponential delay, while terminal errors return to
-  the still-open per-object/resync supervisor seam. The deletion-under-control-
-  pressure async matrix proves no retry spin, committed-admission flush before
-  fresh access, request-local poll completion, and close acknowledgement;
+  not masquerade as recoverable pressure. Source/decode failures are retained
+  per exact relation with stable redacted codes and provenance. Retryable
+  failures use capped, cancellation-prioritized exponential delay and become
+  typed exhaustion at the configured attempt ceiling; nonretryable and
+  exhausted relations remain terminal locally without stopping healthy
+  siblings. Every pass republishes their explicit error coverage, successful
+  newer evidence clears only the matching relation state, and close cancels a
+  parked retry without another access. The deletion-under-control-pressure and
+  two-object async matrices prove no retry spin, committed-admission flush
+  before fresh access, healthy-sibling progress, request-local poll completion,
+  terminal isolation, and close acknowledgement;
 - a concrete attachment-owned `notify` watcher now derives consolidated
   physical anchors no broader than the host-authorized access roots, rejects
   missing or filesystem-wide roots, and filters unrelated/access-only paths
@@ -1444,9 +1472,8 @@ dynamic/discovered scope membership beyond the attachment's current exact
 known-object grants and family coverage beyond usage-v2,
 complete multi-family replacement manifests, whole-scope discovery and source
 state beyond the current exact append-object set, integrated watcher/source-
-owner supervision, per-object error/retry controls, automatic owner transfer
-through resync, remaining portable-host wiring and policy calibration, plus
-re-overflow orchestration,
+owner supervision, automatic owner transfer through resync, remaining
+portable-host wiring and policy calibration, plus re-overflow orchestration,
 artifact mediation and the public portable close transport,
 the trusted native version-probe/identity-input drivers, and the complete
 public request are not yet implemented. The internal offered and applied
@@ -1594,7 +1621,15 @@ the ordered event drain still requires explicit application acknowledgement,
 and close remains an independent resource barrier. The bounded native owner
 now automatically connects audit, backend replacement, capped retry/backoff,
 routing failure, and retry exhaustion to that control while preserving it for
-delivery before close.
+delivery before close. The source owner now classifies source and decode
+failure independently for every exact relation, publishes a typed
+`source.object_error` control with redacted stable provenance, retains the
+error in same-pass coverage, and schedules only genuinely transient relations
+under bounded backoff. A failed relation cannot delay a healthy sibling;
+retry exhaustion or a nonretryable outcome is terminal only for that relation,
+while later successful evidence clears its retained failure. The conformance
+matrix covers mixed healthy/retryable/terminal relations, deterministic retry
+ceilings, no-spin idle behavior, current error coverage, and cancellation.
 
 ### D4. SDK and Chopsticks migration
 
