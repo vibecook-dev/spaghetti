@@ -528,9 +528,22 @@ and integrity-failure snapshot-disposition mismatches. `IndependentlySafe` and
 `Discarded` integrity outcomes are persisted explicitly rather than inferred
 from the presence of an old snapshot.
 
-B1 remains `In progress`: compatible query-pack negotiation and incompatible
-rejection, hydration commands/receipts, and N-API/portable TypeScript DTO and
-typed-unknown parity remain open. B2 source compositions and B3 durable
+The third library-first slice composes the existing RFC 012A contract-version
+selection into explicit catalog query request, offer, and selected-contract
+DTOs. It requires the catalog query pack, reports a typed incompatibility axis
+for every base/family/query/observation/unknown-preservation mismatch, and
+negotiates a hard bound for additive fields and future response variants. Rust
+and portable TypeScript parse and round-trip the same Rust-produced fixture;
+reject non-JSON, over-depth, over-node, oversized, reserved-key, and
+non-JavaScript-safe payloads; and require responses and continuations to equal
+the caller's exact negotiated selection. Continuations additionally bind the
+selected pack, retained snapshot, query fingerprint, sort specification, and
+cursor, with JavaScript-safe snapshot counters. The module remains free of
+engine execution, snapshot retention, storage, hydration, and N-API exposure.
+
+B1 remains `In progress`: hydration commands/receipts, complete catalog page,
+readiness, and resolution DTO parity, snapshot-expiration transport, and the
+gated public N-API surface remain open. B2 source compositions and B3 durable
 transactional persistence, outbox, and restart parity have not started.
 
 ### B2. Catalog source compositions
@@ -1318,6 +1331,30 @@ Current landing status (2026-08-17):
   one ordering lock, so a racing callback either blocks the barrier or becomes
   a request-local live poll ticket after it. Producer offers also verify the
   attachment-owned consumer drain;
+- the live exact-scope poll coordinator now has a concrete append-source pass
+  executor. Before native mutation it validates the reserved lease, owning
+  drain, attachment-bound active epoch, valid continuity, and exactly one
+  redacted request per authorized relation. It visits relations in canonical
+  order, performs bounded revalidation, decode, admission, and offer, and only
+  then completes tickets with coverage produced by that same access pass.
+  Decode, admission, access, and delivery failures acknowledge no ticket; the
+  unfinished lease requeues for caller-owned classification and recovery. A
+  retry first flushes any frame whose cursor was already committed to the
+  admission lane, then takes a fresh exact pass; the
+  bounded deletion-under-control-pressure conformance case proves that neither
+  a committed cursor nor older offered coverage can acknowledge the poll. The
+  active source/coverage/reducer epoch now carries the creating attachment's
+  unforgeable authority, so a second observer of the same canonical root
+  cannot substitute it;
+- the async attachment handle exposes that pass executor without holding its
+  consumer-drain mutex across native access or decode. Only preflight, bounded
+  delivery offers, and final watermark publication enter the short-held lock;
+  one source owner retains exclusive mutable epoch state while `poll()` and
+  ordered event delivery remain concurrent. The attach-before-root, later
+  creation path proves one shared offered watermark and matching lifecycle
+  event through this bridge. An automatic long-lived source-owner task, owned
+  multi-object request bindings, and public portable lifecycle transport remain
+  open;
 - a concrete attachment-owned `notify` watcher now derives consolidated
   physical anchors no broader than the host-authorized access roots, rejects
   missing or filesystem-wide roots, and filters unrelated/access-only paths
@@ -1347,8 +1384,8 @@ Current landing status (2026-08-17):
   stops its backend/registration without implicitly closing the event drain,
   so the consumer can apply that failure before owning the independent close
   barrier. Default timing values remain provisional internal policy, not
-  promoted performance gates. The concrete source-pass executor, portable-host
-  wiring, and policy calibration remain open;
+  promoted performance gates. The automatic source-owner loop, remaining
+  portable-host wiring, and policy calibration remain open;
 - one pass is active at a time, a later pass receives fresh bounds, close is
   idempotent, and the frozen access report excludes paths, identity values, and
   content; and
@@ -1366,9 +1403,9 @@ and complete scope coverage,
 dynamic/discovered scope membership beyond the attachment's current exact
 known-object grants and family coverage beyond usage-v2,
 complete multi-family replacement manifests, whole-scope discovery and source
-state beyond the current exact append-object set, the concrete watcher source-
-pass executor, portable-host wiring, and policy calibration, plus re-overflow
-orchestration,
+state beyond the current exact append-object set, the automatic watcher source-
+owner loop, owned multi-object pass bindings, remaining portable-host wiring,
+and policy calibration, plus re-overflow orchestration,
 artifact mediation and the public portable close transport,
 the trusted native version-probe/identity-input drivers, and the complete
 public request are not yet implemented. The internal offered and applied
