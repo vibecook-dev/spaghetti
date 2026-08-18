@@ -2349,6 +2349,21 @@ The Rust/TypeScript RFC 012C fixture pins both keys and references. This adds no
 actor event wire, N-API/SDK observer transport, source promotion, or public
 authorization.
 
+The next bounded D3 slice (`2196021`) freezes the selected actor-run and
+actor-affiliation event envelope without claiming the complete observer
+transport. A serialization-only Rust projection and mandatory contextual
+consumer bind the exact negotiated selection, root/native-session identity,
+actor and affiliation context, authorized source occurrence, append-reset or
+deletion lineage, complete evidence, and withheld native-payload projection.
+Rust recomputes both canonical semantic revision and occurrence event identity;
+the exported TypeScript parser independently enforces every inspectable strict
+shape, bound, family, context, occurrence, evidence, and privacy rule against
+the same frozen fixture. Actor-run upserts and affiliation reset retractions
+prove both selected families while unsupported usage, source-control, and
+observer-lifecycle variants remain closed. This adds no N-API observer method,
+complete portable event union, native source access, support promotion, or
+public attachment authority.
+
 ### D4. SDK and Chopsticks migration
 
 Add a feature-flagged Chopsticks path beside `watchSessionTranscript`:
