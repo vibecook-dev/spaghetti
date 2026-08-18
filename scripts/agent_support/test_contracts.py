@@ -4,6 +4,7 @@ import copy
 import json
 import unittest
 from pathlib import Path
+from typing import Any
 
 from scripts.agent_support.contracts import (
     AccessBoundExceeded,
@@ -22,6 +23,7 @@ from scripts.agent_support.sanitize_fixture import sanitize_document, scan_prohi
 from scripts.agent_support.validate import (
     REPO_ROOT,
     SCHEMA_ROOT,
+    _validate_scope_contract,
     validate_json_schema,
     validate_repository,
 )
@@ -407,6 +409,64 @@ class AccessBudgetTests(unittest.TestCase):
 
 
 class SchemaAndRepositoryTests(unittest.TestCase):
+    def test_promoted_scope_requires_a_declared_known_object_root(self) -> None:
+        class FixtureBundle:
+            label = "fixture"
+
+            def __init__(self, scope: dict[str, Any]) -> None:
+                self.scope = scope
+
+            def document(self, name: str) -> dict[str, Any]:
+                if name == "ads.json":
+                    return {
+                        "source_instance": {
+                            "canonical_roots": [{"root_id": "root"}],
+                        }
+                    }
+                self.assert_scope_name(name)
+                return self.scope
+
+            @staticmethod
+            def assert_scope_name(name: str) -> None:
+                if name != "scope-programs.json":
+                    raise AssertionError(name)
+
+        scope: dict[str, Any] = {
+            "status": "promoted",
+            "roots": ["root"],
+            "blockers": [],
+            "programs": [
+                {
+                    "program_id": "observe-session",
+                    "relations": [
+                        {
+                            "relation_id": "root-object",
+                            "primitive": "KnownObject",
+                            "access_root": "root",
+                            "locator": "session.jsonl",
+                        },
+                        {
+                            "relation_id": "sibling-object",
+                            "primitive": "SiblingObject",
+                            "access_root": "root",
+                            "locator": "summary.json",
+                        },
+                    ],
+                }
+            ],
+        }
+        bundle = FixtureBundle(scope)
+        errors = _validate_scope_contract(bundle)
+        self.assertTrue(
+            any("requires a declared root relation" in error for error in errors)
+        )
+        program = scope["programs"][0]
+        program["root_relation_id"] = "sibling-object"
+        errors = _validate_scope_contract(bundle)
+        self.assertTrue(any("must use KnownObject" in error for error in errors))
+        program["root_relation_id"] = "root-object"
+        self.assertEqual(_validate_scope_contract(bundle), [])
+
     def test_strict_schema_rejects_unknown_property(self) -> None:
         schema = json.loads((SCHEMA_ROOT / "evidence-manifest.schema.json").read_text(encoding="utf-8"))
         value = {

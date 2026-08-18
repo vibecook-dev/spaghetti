@@ -5,7 +5,7 @@
 //! artifact probing and the complete RFC 012D request contract must remain a
 //! trusted Rust-host concern until their portable contracts are frozen.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, Weak};
@@ -23,7 +23,7 @@ use crate::adapter::{
     FactBatch, FactEnvelope, FactProvenance, FactRevisionId, FactSemanticContext,
     FactSemanticRevision, NativeArtifactProbe, NativeIdentityClaim, QualifiedTimestamp,
     QualifiedValueQuality, RawRetentionPolicy, ScopeRelationPrimitive, SemanticRevisionRef,
-    SourceAccess, SourceCoveragePoint, SourceCoverageSet, SourceObjectList,
+    Sha256Digest, SourceAccess, SourceCoveragePoint, SourceCoverageSet, SourceObjectList,
     SourceObjectListRequest, SourceQuery, SourceRecordId, SourceRows, SourceSnapshot,
     SupportOperation, TypedAccessAuthorization, UsageRevisionV2Fact,
     EXTERNAL_ENTITY_REFERENCE_VERSION,
@@ -1330,6 +1330,7 @@ pub const SCOPED_OBSERVATION_EVENT_CONTRACT_VERSION: u32 = 1;
 pub const SCOPED_REPLACEMENT_DIGEST_CONTRACT_VERSION: u32 = 1;
 pub const SCOPED_BOOTSTRAP_BARRIER_CONTRACT_VERSION: u32 = 1;
 pub const SCOPED_RESYNC_BARRIER_CONTRACT_VERSION: u32 = 1;
+pub const SCOPED_SCOPE_COVERAGE_CONTRACT_VERSION: u32 = 1;
 pub const RUNTIME_USAGE_V2_FACT_FAMILY_CONTRACT_VERSION: u32 = 1;
 pub const SCOPED_INITIAL_SCOPE_EPOCH: u64 = 1;
 const SCOPED_OBSERVATION_IMPLEMENTED_FACT_FAMILIES: &[(&str, u32)] = &[(
@@ -1368,6 +1369,15 @@ impl ScopedBootstrapSnapshotDigest {
 pub struct ScopedReplacementSnapshotDigest([u8; 32]);
 
 impl ScopedReplacementSnapshotDigest {
+    pub fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct ScopedScopeCoverageRevision([u8; 32]);
+
+impl ScopedScopeCoverageRevision {
     pub fn as_bytes(&self) -> &[u8; 32] {
         &self.0
     }
@@ -1462,6 +1472,7 @@ pub struct ScopedBootstrapBarrier {
     pub replacement_snapshot_digest: ScopedReplacementSnapshotDigest,
     pub family_manifest: Vec<ScopedReplacementFamilyManifest>,
     pub source_coverage: Vec<SourceCoverageSet>,
+    pub scope_coverage: ScopedScopeCoverage,
     pub explicit_object_errors: Vec<CoverageError>,
     pub queue_state: ScopedObservationDeliveryState,
     pub root_present: bool,
@@ -1546,6 +1557,7 @@ pub struct ScopedResyncBarrier {
     pub coverage_snapshot_digest: ScopedBootstrapSnapshotDigest,
     pub family_manifest: Vec<ScopedReplacementFamilyManifest>,
     pub source_coverage: Vec<SourceCoverageSet>,
+    pub scope_coverage: ScopedScopeCoverage,
     pub explicit_object_errors: Vec<CoverageError>,
     pub queue_state: ScopedObservationDeliveryState,
     pub root_present: bool,
@@ -5953,18 +5965,199 @@ pub enum ScopedObservationContinuity {
     Failed,
 }
 
+/// Path-free declared-relation summary paired with RFC 012A source coverage.
+/// It proves which exact authorized relation is the scope root and whether
+/// every declared known object was observed as present or explicitly absent.
+/// Cursor/position authority remains exclusively on `SourceCoverageSet`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ScopedScopeRelationState {
+    Present { status: CoverageStatus },
+    Absent { kind: CoverageAbsenceKind },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScopedScopeRelationCoverage {
+    pub relation_id: Arc<str>,
+    pub scope_root: bool,
+    pub source: ScopedSourceObjectIdentity,
+    pub generation: u64,
+    pub state: ScopedScopeRelationState,
+    pub completeness: CoverageSetCompleteness,
+}
+
+/// Convenience scope-membership proof required by RFC 012D watermarks. The
+/// scope-program digest and opaque relation/source coordinates bind this
+/// summary to the authorization used before access. This value cannot replace
+/// or broaden the accompanying RFC 012A Decode coverage set.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScopedScopeCoverage {
+    contract_version: u32,
+    program_id: String,
+    scope_program_digest: Sha256Digest,
+    root_relation_id: Arc<str>,
+    scope_revision: ScopedScopeCoverageRevision,
+    relations: Vec<ScopedScopeRelationCoverage>,
+    completeness: CoverageSetCompleteness,
+}
+
+impl ScopedScopeCoverage {
+    pub fn contract_version(&self) -> u32 {
+        self.contract_version
+    }
+
+    pub fn program_id(&self) -> &str {
+        &self.program_id
+    }
+
+    pub fn scope_program_digest(&self) -> Sha256Digest {
+        self.scope_program_digest
+    }
+
+    pub fn root_relation_id(&self) -> &str {
+        &self.root_relation_id
+    }
+
+    pub fn scope_revision(&self) -> ScopedScopeCoverageRevision {
+        self.scope_revision
+    }
+
+    pub fn relations(&self) -> &[ScopedScopeRelationCoverage] {
+        &self.relations
+    }
+
+    pub fn completeness(&self) -> CoverageSetCompleteness {
+        self.completeness
+    }
+
+    pub fn root_present(&self) -> Option<bool> {
+        self.relations
+            .iter()
+            .find(|relation| relation.relation_id.as_ref() == self.root_relation_id.as_ref())
+            .map(|relation| matches!(relation.state, ScopedScopeRelationState::Present { .. }))
+    }
+
+    pub(crate) fn validate_against(
+        &self,
+        root: &ScopedObservationRootIdentity,
+        source_coverage: &[SourceCoverageSet],
+    ) -> bool {
+        if self.contract_version != SCOPED_SCOPE_COVERAGE_CONTRACT_VERSION
+            || validate_relation_id(&self.program_id).is_err()
+            || validate_relation_id(&self.root_relation_id).is_err()
+            || self
+                .scope_program_digest
+                .as_bytes()
+                .iter()
+                .all(|byte| *byte == 0)
+            || self.relations.is_empty()
+            || self.relations.windows(2).any(|relations| {
+                relations[0].relation_id.as_ref() >= relations[1].relation_id.as_ref()
+            })
+            || self
+                .relations
+                .iter()
+                .filter(|relation| relation.scope_root)
+                .count()
+                != 1
+            || !self.relations.iter().any(|relation| {
+                relation.scope_root
+                    && relation.relation_id.as_ref() == self.root_relation_id.as_ref()
+            })
+            || self.relations.iter().any(|relation| {
+                validate_relation_id(&relation.relation_id).is_err()
+                    || !source_belongs_to_root(&relation.source, root)
+                    || relation.generation == 0
+            })
+            || self
+                .relations
+                .iter()
+                .fold(CoverageSetCompleteness::Complete, |combined, relation| {
+                    merge_coverage_completeness(combined, relation.completeness)
+                })
+                != self.completeness
+            || self.root_present().is_none()
+        {
+            return false;
+        }
+
+        let mut coordinates = BTreeSet::new();
+        if self.relations.iter().any(|relation| {
+            !coordinates.insert((relation.source.stream_key, relation.source.object_key))
+                || (relation.completeness == CoverageSetCompleteness::Complete
+                    && matches!(
+                        &relation.state,
+                        ScopedScopeRelationState::Present {
+                            status: CoverageStatus::Partial | CoverageStatus::Unavailable { .. }
+                        }
+                    ))
+        }) {
+            return false;
+        }
+
+        let mut decode_sets = source_coverage
+            .iter()
+            .filter(|set| set.coverage_domain == CoverageDomain::Decode);
+        let Some(decode) = decode_sets.next() else {
+            return false;
+        };
+        if decode_sets.next().is_some()
+            || decode.validate().is_err()
+            || decode.scope.adapter_id != root.adapter_id.as_str()
+            || decode.scope.source_instance_key != root.source_instance_key
+            || decode.scope.root_entity_key != Some(root.session_key)
+            || decode.completeness != self.completeness
+            || decode.points.len() + decode.explicit_absence_or_deletion.len()
+                != self.relations.len()
+        {
+            return false;
+        }
+
+        for relation in &self.relations {
+            let represented = match &relation.state {
+                ScopedScopeRelationState::Present { status } => decode.points.iter().any(|point| {
+                    point.stream_key == relation.source.stream_key
+                        && point.object_key == relation.source.object_key
+                        && point.generation == relation.generation
+                        && &point.status == status
+                }),
+                ScopedScopeRelationState::Absent { kind } => {
+                    decode.explicit_absence_or_deletion.iter().any(|absence| {
+                        absence.stream_key == relation.source.stream_key
+                            && absence.object_key == relation.source.object_key
+                            && absence.generation == relation.generation
+                            && absence.kind == *kind
+                    })
+                }
+            };
+            if !represented {
+                return false;
+            }
+        }
+        self.scope_revision
+            == derive_scoped_scope_coverage_revision(
+                &self.program_id,
+                self.scope_program_digest,
+                &self.root_relation_id,
+                root,
+                &self.relations,
+                self.completeness,
+            )
+    }
+}
+
 /// Store-free watermark substrate for common Decode coverage plus fact-family
 /// domains that are simultaneously object-declared, contract-selected, and
-/// reducer-supported. This remains crate-private and deliberately does not
-/// masquerade as the complete RFC 012D watermark: scope coverage, actor/root
-/// envelope state, and object-error lifecycle events still belong to the
-/// future observer facade.
+/// reducer-supported, paired with exact declared-relation/root coverage. This
+/// remains crate-private and deliberately does not masquerade as the complete
+/// RFC 012D watermark: dynamic discovery, artifact state, and the portable
+/// observer facade remain open.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScopedObservationWatermarkCore {
     pub root: ScopedObservationRootIdentity,
     pub scope_epoch: u64,
     pub offered_through_sequence: u64,
     pub source_coverage: Vec<SourceCoverageSet>,
+    pub scope_coverage: ScopedScopeCoverage,
     pub explicit_object_errors: Vec<CoverageError>,
     pub queue_state: ScopedObservationDeliveryState,
 }
@@ -5985,6 +6178,8 @@ pub enum ScopedCoverageAssemblyError {
     MissingSupportBinding,
     #[error("scoped coverage could not be represented by the common contract")]
     InvalidContract,
+    #[error("scoped relation coverage does not match its authorized scope or Decode coverage")]
+    InvalidScopeCoverage,
     #[error("scoped coverage belongs to an invalidated observer epoch")]
     ContinuityInvalid,
 }
@@ -6319,6 +6514,7 @@ impl ScopedObservationDeliveryLane {
         let snapshot_digest = bootstrap_snapshot_digest(
             root,
             root_present,
+            &watermark.scope_coverage,
             &watermark.source_coverage,
             &watermark.explicit_object_errors,
         )?;
@@ -6326,6 +6522,7 @@ impl ScopedObservationDeliveryLane {
             root,
             root_present,
             &family_manifest,
+            &watermark.scope_coverage,
             &watermark.source_coverage,
             &watermark.explicit_object_errors,
         )
@@ -6339,6 +6536,7 @@ impl ScopedObservationDeliveryLane {
             replacement_snapshot_digest,
             family_manifest,
             source_coverage: watermark.source_coverage,
+            scope_coverage: watermark.scope_coverage,
             explicit_object_errors: watermark.explicit_object_errors,
             queue_state,
             root_present,
@@ -6634,6 +6832,7 @@ impl ScopedObservationDeliveryLane {
             root,
             root_present,
             &family_manifest,
+            &watermark.scope_coverage,
             &watermark.source_coverage,
             &watermark.explicit_object_errors,
         )? != expected_replacement_snapshot_digest
@@ -6657,6 +6856,7 @@ impl ScopedObservationDeliveryLane {
         let coverage_snapshot_digest = bootstrap_snapshot_digest(
             root,
             root_present,
+            &watermark.scope_coverage,
             &watermark.source_coverage,
             &watermark.explicit_object_errors,
         )
@@ -6672,6 +6872,7 @@ impl ScopedObservationDeliveryLane {
             coverage_snapshot_digest,
             family_manifest,
             source_coverage: watermark.source_coverage,
+            scope_coverage: watermark.scope_coverage,
             explicit_object_errors: watermark.explicit_object_errors,
             queue_state,
             root_present,
@@ -7969,9 +8170,15 @@ fn observer_control_source(
 fn bootstrap_snapshot_digest(
     root: &ScopedObservationRootIdentity,
     root_present: bool,
+    scope_coverage: &ScopedScopeCoverage,
     source_coverage: &[SourceCoverageSet],
     explicit_object_errors: &[CoverageError],
 ) -> Result<ScopedBootstrapSnapshotDigest, ScopedBootstrapBarrierError> {
+    if scope_coverage.root_present() != Some(root_present)
+        || !scope_coverage.validate_against(root, source_coverage)
+    {
+        return Err(ScopedBootstrapBarrierError::InvalidSnapshot);
+    }
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"spaghetti/rfc012d/bootstrap-snapshot-digest\0");
     hasher.update(&SCOPED_BOOTSTRAP_BARRIER_CONTRACT_VERSION.to_be_bytes());
@@ -7980,6 +8187,8 @@ fn bootstrap_snapshot_digest(
     hash_event_component(&mut hasher, root.session_key.as_bytes());
     hash_event_component(&mut hasher, root.root_actor_run_key.as_bytes());
     hasher.update(&[u8::from(root_present)]);
+    hasher.update(&scope_coverage.contract_version.to_be_bytes());
+    hash_event_component(&mut hasher, scope_coverage.scope_revision.as_bytes());
     hasher.update(&(source_coverage.len() as u64).to_be_bytes());
     for coverage in source_coverage {
         coverage
@@ -8006,6 +8215,7 @@ fn replacement_snapshot_digest(
     root: &ScopedObservationRootIdentity,
     root_present: bool,
     family_manifest: &[ScopedReplacementFamilyManifest],
+    scope_coverage: &ScopedScopeCoverage,
     source_coverage: &[SourceCoverageSet],
     explicit_object_errors: &[CoverageError],
 ) -> Result<ScopedReplacementSnapshotDigest, ScopedReplacementStageError> {
@@ -8015,9 +8225,14 @@ fn replacement_snapshot_digest(
     }) {
         return Err(ScopedReplacementStageError::InvalidManifest);
     }
-    let coverage_digest =
-        bootstrap_snapshot_digest(root, root_present, source_coverage, explicit_object_errors)
-            .map_err(|_| ScopedReplacementStageError::InvalidManifest)?;
+    let coverage_digest = bootstrap_snapshot_digest(
+        root,
+        root_present,
+        scope_coverage,
+        source_coverage,
+        explicit_object_errors,
+    )
+    .map_err(|_| ScopedReplacementStageError::InvalidManifest)?;
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"spaghetti/rfc012d/replacement-snapshot-digest\0");
     hasher.update(&SCOPED_REPLACEMENT_DIGEST_CONTRACT_VERSION.to_be_bytes());
@@ -9459,6 +9674,7 @@ pub struct ScopedObservationAccessHost {
     authorization: TypedAccessAuthorization,
     root_identity: ScopedObservationRootIdentity,
     program_id: String,
+    scope_program_digest: Sha256Digest,
     known_objects: Arc<BTreeMap<String, ScopedKnownObjectGrant>>,
     root_relation_id: Arc<str>,
     attachment_authority: Arc<ScopedObservationAttachmentAuthority>,
@@ -9517,16 +9733,10 @@ impl ScopedObservationAccessHost {
         let program = authorization
             .select_scope_program(&request.program_id)
             .map_err(|error| ScopedObservationAccessError::Authorization(error.to_string()))?;
+        let scope_program_digest = program.scope_program_digest();
         let plan = AuthorizedScopeAccessPlan::from_authorized_program(program)?;
+        let root_relation_id: Arc<str> = Arc::from(plan.root_relation_id());
         let known_objects = validate_known_object_grants(&plan, request.known_objects)?;
-        let root_relation_id: Arc<str> = Arc::from(
-            known_objects
-                .values()
-                .find(|grant| grant.scope_root)
-                .expect("validated known-object grants contain exactly one scope root")
-                .relation_id
-                .as_str(),
-        );
         let attachment_authority = next_scoped_attachment_authority()?;
         Ok(Self {
             adapter,
@@ -9536,6 +9746,7 @@ impl ScopedObservationAccessHost {
             authorization,
             root_identity,
             program_id: request.program_id,
+            scope_program_digest,
             known_objects: Arc::new(known_objects),
             root_relation_id,
             attachment_authority,
@@ -10306,6 +10517,15 @@ impl ScopedObservationAccessHost {
             admission,
             projection,
         )?;
+        let scope_coverage = assemble_scoped_scope_coverage(
+            &self.program_id,
+            self.scope_program_digest,
+            &self.root_relation_id,
+            &self.root_identity,
+            self.known_objects.as_ref(),
+            admission,
+            &source_coverage,
+        )?;
         let mut explicit_object_errors = source_coverage
             .iter()
             .flat_map(|set| set.explicit_errors.iter().cloned())
@@ -10317,6 +10537,7 @@ impl ScopedObservationAccessHost {
             scope_epoch: queue_state.scope_epoch,
             offered_through_sequence: queue_state.offered_through_sequence,
             source_coverage,
+            scope_coverage,
             explicit_object_errors,
             queue_state,
         })
@@ -10359,6 +10580,9 @@ impl ScopedObservationAccessHost {
             admission,
             append_objects,
         )?;
+        if watermark.scope_coverage.root_present() != Some(root_present) {
+            return Err(ScopedBootstrapBarrierError::InvalidSnapshot);
+        }
         let replacement = projection
             .usage_v2_replacement_snapshot(ScopedAppendDeliveryPhase::Bootstrap)
             .map_err(|_| ScopedBootstrapBarrierError::InvalidSnapshot)?;
@@ -10453,6 +10677,7 @@ impl ScopedObservationAccessHost {
             .capture_watermark_core(&admission, &projection, delivery)
             .map_err(ScopedReplacementStageError::Coverage)?;
         if watermark.source_coverage != barrier.source_coverage
+            || watermark.scope_coverage != barrier.scope_coverage
             || watermark.explicit_object_errors != barrier.explicit_object_errors
         {
             return Err(ScopedReplacementStageError::InvalidSourceState);
@@ -10469,6 +10694,7 @@ impl ScopedObservationAccessHost {
             &self.root_identity,
             barrier.root_present,
             &family_manifest,
+            &watermark.scope_coverage,
             &watermark.source_coverage,
             &watermark.explicit_object_errors,
         )?;
@@ -10673,6 +10899,9 @@ impl ScopedObservationAccessHost {
         let watermark = self
             .capture_watermark_core(admission, &stage.projection, delivery)
             .map_err(ScopedReplacementStageError::Coverage)?;
+        if watermark.scope_coverage.root_present() != Some(root_present) {
+            return Err(ScopedReplacementStageError::InvalidSourceState);
+        }
         let family_manifest = stage.family_manifest(
             &self.observation_contract.contract_versions,
             &watermark.source_coverage,
@@ -10681,6 +10910,7 @@ impl ScopedObservationAccessHost {
             &self.root_identity,
             root_present,
             &family_manifest,
+            &watermark.scope_coverage,
             &watermark.source_coverage,
             &watermark.explicit_object_errors,
         )?;
@@ -12401,6 +12631,204 @@ fn assemble_scoped_coverage_sets(
     Ok(sets)
 }
 
+fn assemble_scoped_scope_coverage(
+    program_id: &str,
+    scope_program_digest: Sha256Digest,
+    root_relation_id: &str,
+    root: &ScopedObservationRootIdentity,
+    known_objects: &BTreeMap<String, ScopedKnownObjectGrant>,
+    admission: &ScopedObservationAdmissionLane,
+    source_coverage: &[SourceCoverageSet],
+) -> Result<ScopedScopeCoverage, ScopedCoverageAssemblyError> {
+    validate_scoped_relation_coverage(known_objects, admission)?;
+
+    let mut decode_sets = source_coverage
+        .iter()
+        .filter(|set| set.coverage_domain == CoverageDomain::Decode);
+    let decode = decode_sets
+        .next()
+        .ok_or(ScopedCoverageAssemblyError::InvalidScopeCoverage)?;
+    if decode_sets.next().is_some()
+        || decode.validate().is_err()
+        || decode.scope.adapter_id != root.adapter_id.as_str()
+        || decode.scope.source_instance_key != root.source_instance_key
+        || decode.scope.root_entity_key != Some(root.session_key)
+        || decode.points.len() + decode.explicit_absence_or_deletion.len() != known_objects.len()
+    {
+        return Err(ScopedCoverageAssemblyError::InvalidScopeCoverage);
+    }
+
+    let mut by_relation = BTreeMap::new();
+    for (source, membership) in &admission.known_coverage_objects {
+        let coverage = admission
+            .offered_decode_coverage
+            .get(source)
+            .ok_or(ScopedCoverageAssemblyError::ObjectNotOffered)?;
+        if by_relation
+            .insert(membership.relation_id.as_ref(), (source, coverage))
+            .is_some()
+        {
+            return Err(ScopedCoverageAssemblyError::InvalidScopeCoverage);
+        }
+    }
+
+    let mut relations = Vec::with_capacity(known_objects.len());
+    let mut completeness = CoverageSetCompleteness::Complete;
+    for (relation_id, grant) in known_objects {
+        let (source, coverage) = by_relation
+            .get(relation_id.as_str())
+            .copied()
+            .ok_or(ScopedCoverageAssemblyError::InvalidScopeCoverage)?;
+        if &coverage.source != source || !source_belongs_to_root(source, root) {
+            return Err(ScopedCoverageAssemblyError::InvalidScopeCoverage);
+        }
+        let (generation, state, represented_in_decode) =
+            match (&coverage.point, &coverage.explicit_absence_or_deletion) {
+                (Some(point), None)
+                    if point.coverage_domain == CoverageDomain::Decode
+                        && point.adapter_id == root.adapter_id.as_str()
+                        && point.source_instance_key == root.source_instance_key
+                        && point.stream_key == source.stream_key
+                        && point.object_key == source.object_key =>
+                {
+                    let represented = decode.points.iter().any(|candidate| candidate == point);
+                    (
+                        point.generation,
+                        ScopedScopeRelationState::Present {
+                            status: point.status.clone(),
+                        },
+                        represented,
+                    )
+                }
+                (None, Some(absence))
+                    if absence.stream_key == source.stream_key
+                        && absence.object_key == source.object_key =>
+                {
+                    let represented = decode
+                        .explicit_absence_or_deletion
+                        .iter()
+                        .any(|candidate| candidate == absence);
+                    (
+                        absence.generation,
+                        ScopedScopeRelationState::Absent { kind: absence.kind },
+                        represented,
+                    )
+                }
+                _ => return Err(ScopedCoverageAssemblyError::InvalidScopeCoverage),
+            };
+        if !represented_in_decode {
+            return Err(ScopedCoverageAssemblyError::InvalidScopeCoverage);
+        }
+        completeness = merge_coverage_completeness(completeness, coverage.completeness);
+        relations.push(ScopedScopeRelationCoverage {
+            relation_id: Arc::from(relation_id.as_str()),
+            scope_root: grant.scope_root,
+            source: source.clone(),
+            generation,
+            state,
+            completeness: coverage.completeness,
+        });
+    }
+    if completeness != decode.completeness
+        || relations
+            .iter()
+            .filter(|relation| relation.scope_root)
+            .count()
+            != 1
+        || !relations
+            .iter()
+            .any(|relation| relation.relation_id.as_ref() == root_relation_id)
+    {
+        return Err(ScopedCoverageAssemblyError::InvalidScopeCoverage);
+    }
+
+    let scope_revision = derive_scoped_scope_coverage_revision(
+        program_id,
+        scope_program_digest,
+        root_relation_id,
+        root,
+        &relations,
+        completeness,
+    );
+    let value = ScopedScopeCoverage {
+        contract_version: SCOPED_SCOPE_COVERAGE_CONTRACT_VERSION,
+        program_id: program_id.to_owned(),
+        scope_program_digest,
+        root_relation_id: Arc::from(root_relation_id),
+        scope_revision,
+        relations,
+        completeness,
+    };
+    if !value.validate_against(root, source_coverage) {
+        return Err(ScopedCoverageAssemblyError::InvalidScopeCoverage);
+    }
+    Ok(value)
+}
+
+fn derive_scoped_scope_coverage_revision(
+    program_id: &str,
+    scope_program_digest: Sha256Digest,
+    root_relation_id: &str,
+    root: &ScopedObservationRootIdentity,
+    relations: &[ScopedScopeRelationCoverage],
+    completeness: CoverageSetCompleteness,
+) -> ScopedScopeCoverageRevision {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"spaghetti/rfc012d/scope-coverage-revision\0");
+    hasher.update(&SCOPED_SCOPE_COVERAGE_CONTRACT_VERSION.to_be_bytes());
+    hash_event_component(&mut hasher, program_id.as_bytes());
+    hash_event_component(&mut hasher, scope_program_digest.as_bytes());
+    hash_event_component(&mut hasher, root_relation_id.as_bytes());
+    hash_event_component(&mut hasher, root.adapter_id.as_str().as_bytes());
+    hash_event_component(&mut hasher, root.source_instance_key.as_bytes());
+    hash_event_component(&mut hasher, root.session_key.as_bytes());
+    hasher.update(&(relations.len() as u64).to_be_bytes());
+    for relation in relations {
+        hash_event_component(&mut hasher, relation.relation_id.as_bytes());
+        hasher.update(&[u8::from(relation.scope_root)]);
+        hash_event_component(&mut hasher, relation.source.stream_key.as_bytes());
+        hash_event_component(&mut hasher, relation.source.object_key.as_bytes());
+        hasher.update(&relation.generation.to_be_bytes());
+        match &relation.state {
+            ScopedScopeRelationState::Present { status } => {
+                hasher.update(&[1]);
+                match status {
+                    CoverageStatus::CompleteThrough => {
+                        hasher.update(&[1]);
+                    }
+                    CoverageStatus::ExactSnapshot => {
+                        hasher.update(&[2]);
+                    }
+                    CoverageStatus::Partial => {
+                        hasher.update(&[3]);
+                    }
+                    CoverageStatus::Unavailable { reason } => {
+                        hasher.update(&[4]);
+                        hash_event_component(&mut hasher, reason.as_bytes());
+                    }
+                }
+            }
+            ScopedScopeRelationState::Absent { kind } => {
+                hasher.update(&[match kind {
+                    CoverageAbsenceKind::Absent => 2,
+                    CoverageAbsenceKind::Deleted => 3,
+                }]);
+            }
+        }
+        hasher.update(&[coverage_completeness_tag(relation.completeness)]);
+    }
+    hasher.update(&[coverage_completeness_tag(completeness)]);
+    ScopedScopeCoverageRevision(*hasher.finalize().as_bytes())
+}
+
+fn coverage_completeness_tag(completeness: CoverageSetCompleteness) -> u8 {
+    match completeness {
+        CoverageSetCompleteness::Complete => 1,
+        CoverageSetCompleteness::Partial => 2,
+        CoverageSetCompleteness::Unavailable => 3,
+    }
+}
+
 fn validate_scoped_relation_coverage(
     known_objects: &BTreeMap<String, ScopedKnownObjectGrant>,
     admission: &ScopedObservationAdmissionLane,
@@ -12635,11 +13063,19 @@ fn validate_known_object_grants(
     plan: &AuthorizedScopeAccessPlan,
     grants: Vec<ScopedKnownObjectGrant>,
 ) -> Result<BTreeMap<String, ScopedKnownObjectGrant>, ScopedObservationAccessError> {
-    if grants.is_empty() {
+    let declared_known_objects = plan.known_object_relation_ids().collect::<BTreeSet<_>>();
+    if declared_known_objects.is_empty() {
         return Err(ScopedObservationAccessError::InvalidGrant(
-            "at least one exact known-object grant is required".to_string(),
+            "the authorized scope program declares no exact known-object relation".to_string(),
         ));
     }
+    if grants.len() != declared_known_objects.len() {
+        return Err(ScopedObservationAccessError::InvalidGrant(
+            "the exact known-object grant set must equal every declared KnownObject relation"
+                .to_string(),
+        ));
+    }
+    let root_relation_id = plan.root_relation_id();
     let mut validated = BTreeMap::new();
     for grant in grants {
         if grant.root.as_os_str().is_empty() || !grant.root.is_absolute() {
@@ -12669,6 +13105,12 @@ fn validate_known_object_grants(
                 grant.relation_id
             )));
         }
+        if grant.scope_root != (grant.relation_id == root_relation_id) {
+            return Err(ScopedObservationAccessError::InvalidGrant(format!(
+                "relation {:?} does not match the authorized scope root relation {:?}",
+                grant.relation_id, root_relation_id
+            )));
+        }
         let relation_id = grant.relation_id.clone();
         if validated.insert(relation_id.clone(), grant).is_some() {
             return Err(ScopedObservationAccessError::InvalidGrant(format!(
@@ -12676,9 +13118,14 @@ fn validate_known_object_grants(
             )));
         }
     }
-    if validated.values().filter(|grant| grant.scope_root).count() != 1 {
+    if validated
+        .keys()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>()
+        != declared_known_objects
+    {
         return Err(ScopedObservationAccessError::InvalidGrant(
-            "exactly one known-object grant must be designated as the scope root".to_string(),
+            "the exact known-object grant set omits or adds an authorized relation".to_string(),
         ));
     }
     Ok(validated)
@@ -13138,6 +13585,136 @@ mod projection_tests {
         .with_native_session_claim(NativeIdentityClaim::new(session_ref, identity).unwrap())
         .resolve(context.adapter_id(), EXTERNAL_ENTITY_REFERENCE_VERSION)
         .unwrap()
+    }
+
+    fn fixture_scope_coverage(
+        root: &ScopedObservationRootIdentity,
+        root_present: bool,
+    ) -> ScopedScopeCoverage {
+        let state = if root_present {
+            ScopedScopeRelationState::Present {
+                status: CoverageStatus::CompleteThrough,
+            }
+        } else {
+            ScopedScopeRelationState::Absent {
+                kind: CoverageAbsenceKind::Absent,
+            }
+        };
+        let relations = vec![ScopedScopeRelationCoverage {
+            relation_id: Arc::from("root-object"),
+            scope_root: true,
+            source: source_identity(),
+            generation: 1,
+            state,
+            completeness: CoverageSetCompleteness::Complete,
+        }];
+        let scope_program_digest = Sha256Digest::of(b"fixture-scope-program");
+        ScopedScopeCoverage {
+            contract_version: SCOPED_SCOPE_COVERAGE_CONTRACT_VERSION,
+            program_id: "session-observation".to_owned(),
+            scope_program_digest,
+            root_relation_id: Arc::from("root-object"),
+            scope_revision: derive_scoped_scope_coverage_revision(
+                "session-observation",
+                scope_program_digest,
+                "root-object",
+                root,
+                &relations,
+                CoverageSetCompleteness::Complete,
+            ),
+            relations,
+            completeness: CoverageSetCompleteness::Complete,
+        }
+    }
+
+    fn fixture_decode_coverage(
+        root: &ScopedObservationRootIdentity,
+        root_present: bool,
+    ) -> SourceCoverageSet {
+        let source = source_identity();
+        let (points, absences) = if root_present {
+            (
+                vec![SourceCoveragePoint::new(
+                    CoverageDomain::Decode,
+                    root.adapter_id.as_str(),
+                    root.source_instance_key,
+                    source.stream_key,
+                    source.object_key,
+                    1,
+                    Some(
+                        CoveragePosition::derive(
+                            CoveragePositionKind::AppendCursor,
+                            b"fixture-scope-cursor",
+                            Some(1),
+                        )
+                        .unwrap(),
+                    ),
+                    CoverageStatus::CompleteThrough,
+                    CoverageProvenance::default(),
+                )
+                .unwrap()],
+                Vec::new(),
+            )
+        } else {
+            (
+                Vec::new(),
+                vec![CoverageAbsence {
+                    stream_key: source.stream_key,
+                    object_key: source.object_key,
+                    generation: 1,
+                    kind: CoverageAbsenceKind::Absent,
+                }],
+            )
+        };
+        SourceCoverageSet::new(
+            CoverageDomain::Decode,
+            CoverageScope {
+                adapter_id: root.adapter_id.as_str().to_owned(),
+                source_instance_key: root.source_instance_key,
+                root_entity_key: Some(root.session_key),
+                support_release_id: "fixture-support-v1".to_owned(),
+                source_or_scope_declaration_digest: CoverageDeclarationDigest::derive(
+                    b"fixture-scoped-declaration",
+                )
+                .unwrap(),
+            },
+            CoverageMembershipRevision::derive(if root_present {
+                b"fixture-present-membership"
+            } else {
+                b"fixture-absent-membership"
+            })
+            .unwrap(),
+            points,
+            absences,
+            Vec::new(),
+            CoverageSetCompleteness::Complete,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn scope_coverage_tracks_membership_without_claiming_cursor_authority() {
+        let root = root_identity();
+        let scope_coverage = fixture_scope_coverage(&root, true);
+        let mut decode_coverage = fixture_decode_coverage(&root, true);
+
+        assert!(scope_coverage.validate_against(&root, &[decode_coverage.clone()]));
+        let scope_revision = scope_coverage.scope_revision();
+
+        decode_coverage.points[0].position = Some(
+            CoveragePosition::derive(
+                CoveragePositionKind::AppendCursor,
+                b"fixture-later-scope-cursor",
+                Some(2),
+            )
+            .unwrap(),
+        );
+        assert!(decode_coverage.validate().is_ok());
+        assert!(scope_coverage.validate_against(&root, &[decode_coverage]));
+        assert_eq!(scope_coverage.scope_revision(), scope_revision);
+
+        let absent_decode_coverage = fixture_decode_coverage(&root, false);
+        assert!(!scope_coverage.validate_against(&root, &[absent_decode_coverage]));
     }
 
     fn empty_usage_coverage(completeness: CoverageSetCompleteness) -> SourceCoverageSet {
@@ -13822,7 +14399,8 @@ mod projection_tests {
             root: root.clone(),
             scope_epoch: SCOPED_INITIAL_SCOPE_EPOCH,
             offered_through_sequence: 1,
-            source_coverage: Vec::new(),
+            source_coverage: vec![fixture_decode_coverage(&root, true)],
+            scope_coverage: fixture_scope_coverage(&root, true),
             explicit_object_errors: Vec::new(),
             queue_state: delivery.state(),
         };
@@ -13888,7 +14466,8 @@ mod projection_tests {
             root: root.clone(),
             scope_epoch: SCOPED_INITIAL_SCOPE_EPOCH,
             offered_through_sequence: 1,
-            source_coverage: Vec::new(),
+            source_coverage: vec![fixture_decode_coverage(&root, true)],
+            scope_coverage: fixture_scope_coverage(&root, true),
             explicit_object_errors: Vec::new(),
             queue_state: drain.delivery_lane().state(),
         };
@@ -14133,7 +14712,8 @@ mod projection_tests {
             root: root.clone(),
             scope_epoch: SCOPED_INITIAL_SCOPE_EPOCH,
             offered_through_sequence: 0,
-            source_coverage: Vec::new(),
+            source_coverage: vec![fixture_decode_coverage(&root, false)],
+            scope_coverage: fixture_scope_coverage(&root, false),
             explicit_object_errors: Vec::new(),
             queue_state: drain.delivery_lane().state(),
         };
@@ -14220,11 +14800,20 @@ mod projection_tests {
             root: root.clone(),
             scope_epoch: 2,
             offered_through_sequence: 5,
-            source_coverage: Vec::new(),
+            source_coverage: vec![fixture_decode_coverage(&root, false)],
+            scope_coverage: fixture_scope_coverage(&root, false),
             explicit_object_errors: Vec::new(),
             queue_state: drain.delivery_lane().state(),
         };
-        let replacement_digest = replacement_snapshot_digest(&root, false, &[], &[], &[]).unwrap();
+        let replacement_digest = replacement_snapshot_digest(
+            &root,
+            false,
+            &[],
+            &completion_watermark.scope_coverage,
+            &completion_watermark.source_coverage,
+            &[],
+        )
+        .unwrap();
         let resync_barrier = drain
             .delivery_lane_mut()
             .offer_resync_barrier(
@@ -14280,7 +14869,8 @@ mod projection_tests {
             root: root.clone(),
             scope_epoch: SCOPED_INITIAL_SCOPE_EPOCH,
             offered_through_sequence: 1,
-            source_coverage: Vec::new(),
+            source_coverage: vec![fixture_decode_coverage(&root, true)],
+            scope_coverage: fixture_scope_coverage(&root, true),
             explicit_object_errors: Vec::new(),
             queue_state: delivery.state(),
         };
@@ -14502,7 +15092,8 @@ mod projection_tests {
             root: root.clone(),
             scope_epoch: SCOPED_INITIAL_SCOPE_EPOCH,
             offered_through_sequence: 0,
-            source_coverage: Vec::new(),
+            source_coverage: vec![fixture_decode_coverage(&root, false)],
+            scope_coverage: fixture_scope_coverage(&root, false),
             explicit_object_errors: Vec::new(),
             queue_state: delivery.state(),
         };
@@ -14624,7 +15215,8 @@ mod projection_tests {
             root: root.clone(),
             scope_epoch: 1,
             offered_through_sequence: 0,
-            source_coverage: Vec::new(),
+            source_coverage: vec![fixture_decode_coverage(&root, false)],
+            scope_coverage: fixture_scope_coverage(&root, false),
             explicit_object_errors: Vec::new(),
             queue_state: replay.state(),
         };
@@ -14936,7 +15528,8 @@ mod projection_tests {
             root: root.clone(),
             scope_epoch: SCOPED_INITIAL_SCOPE_EPOCH,
             offered_through_sequence: 0,
-            source_coverage: Vec::new(),
+            source_coverage: vec![fixture_decode_coverage(&root, false)],
+            scope_coverage: fixture_scope_coverage(&root, false),
             explicit_object_errors: Vec::new(),
             queue_state: delivery.state(),
         };
@@ -14979,7 +15572,8 @@ mod projection_tests {
             root: root.clone(),
             scope_epoch: SCOPED_INITIAL_SCOPE_EPOCH,
             offered_through_sequence: 0,
-            source_coverage: Vec::new(),
+            source_coverage: vec![fixture_decode_coverage(&root, true)],
+            scope_coverage: fixture_scope_coverage(&root, true),
             explicit_object_errors: Vec::new(),
             queue_state: delivery.state(),
         };
@@ -15090,13 +15684,23 @@ mod projection_tests {
             entity_or_event_count: 1,
             semantic_digest: replacement_semantic_digest,
         }];
-        let replacement_snapshot_digest =
-            replacement_snapshot_digest(&root, true, &family_manifest, &[], &[]).unwrap();
+        let scope_coverage = fixture_scope_coverage(&root, true);
+        let source_coverage = vec![fixture_decode_coverage(&root, true)];
+        let replacement_snapshot_digest = replacement_snapshot_digest(
+            &root,
+            true,
+            &family_manifest,
+            &scope_coverage,
+            &source_coverage,
+            &[],
+        )
+        .unwrap();
         let completion_watermark = ScopedObservationWatermarkCore {
             root: root.clone(),
             scope_epoch: 2,
             offered_through_sequence: 4,
-            source_coverage: Vec::new(),
+            source_coverage,
+            scope_coverage,
             explicit_object_errors: Vec::new(),
             queue_state: delivery.state(),
         };
@@ -15185,7 +15789,8 @@ mod projection_tests {
             root: root.clone(),
             scope_epoch: SCOPED_INITIAL_SCOPE_EPOCH,
             offered_through_sequence: 0,
-            source_coverage: Vec::new(),
+            source_coverage: vec![fixture_decode_coverage(&root, true)],
+            scope_coverage: fixture_scope_coverage(&root, true),
             explicit_object_errors: Vec::new(),
             queue_state: delivery.state(),
         };

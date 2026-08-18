@@ -240,6 +240,7 @@ pub struct ScopeAccessPlan {
     declaration_id: String,
     status: ScopeProgramStatus,
     program_id: String,
+    root_relation_id: Option<String>,
     relations: BTreeMap<String, CompiledScopeRelation>,
 }
 
@@ -297,6 +298,23 @@ impl AuthorizedScopeAccessPlan {
 
     pub fn relation(&self, relation_id: &str) -> Option<&ScopeRelationDeclaration> {
         self.inner.relation(relation_id)
+    }
+
+    pub(crate) fn root_relation_id(&self) -> &str {
+        self.inner
+            .root_relation_id
+            .as_deref()
+            .expect("promoted authorized scope programs declare a validated root relation")
+    }
+
+    pub(crate) fn known_object_relation_ids(&self) -> impl Iterator<Item = &str> {
+        self.inner
+            .relations
+            .values()
+            .filter(|relation| {
+                relation.declaration.primitive == ScopeRelationPrimitive::KnownObject
+            })
+            .map(|relation| relation.declaration.relation_id.as_str())
     }
 
     pub fn reserve(
@@ -357,6 +375,7 @@ impl ScopeAccessPlan {
             declaration_id: manifest.declaration_id.clone(),
             status: manifest.status,
             program_id: program.program_id.clone(),
+            root_relation_id: program.root_relation_id.clone(),
             relations,
         })
     }

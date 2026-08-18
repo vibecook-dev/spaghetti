@@ -1840,6 +1840,7 @@ mod tests {
             programs: vec![ScopeProgramDeclaration {
                 program_id: "observe-session".to_string(),
                 root_entity_kind: "session".to_string(),
+                root_relation_id: Some("root-object".to_string()),
                 relations: vec![ScopeRelationDeclaration {
                     relation_id: "root-object".to_string(),
                     primitive: ScopeRelationPrimitive::KnownObject,
@@ -2112,7 +2113,7 @@ mod tests {
             (
                 "scope_program",
                 "support/scope.json",
-                br#"{"schema_version":1,"declaration_id":"fixture-agent-scope","adapter_id":"fixture-agent","ads_id":"fixture-agent-ads","status":"promoted","roots":["root"],"programs":[{"program_id":"observe-session","root_entity_kind":"session","relations":[{"relation_id":"root-object","primitive":"KnownObject","access_root":"root","locator":"known-object","identity_inputs":["native-session-id"],"bounds":{"max_fan_out":1,"max_depth":1,"max_objects":1,"max_bytes":1024,"max_rows":0},"unavailable_behavior":"record_unavailable","claim_refs":["scope-evidence"]}],"claim_refs":["scope-evidence"]}],"blockers":[],"claim_refs":["scope-evidence"]}"#.as_slice(),
+                br#"{"schema_version":1,"declaration_id":"fixture-agent-scope","adapter_id":"fixture-agent","ads_id":"fixture-agent-ads","status":"promoted","roots":["root"],"programs":[{"program_id":"observe-session","root_entity_kind":"session","root_relation_id":"root-object","relations":[{"relation_id":"root-object","primitive":"KnownObject","access_root":"root","locator":"known-object","identity_inputs":["native-session-id"],"bounds":{"max_fan_out":1,"max_depth":1,"max_objects":1,"max_bytes":1024,"max_rows":0},"unavailable_behavior":"record_unavailable","claim_refs":["scope-evidence"]}],"claim_refs":["scope-evidence"]}],"blockers":[],"claim_refs":["scope-evidence"]}"#.as_slice(),
             ),
             (
                 "evidence",

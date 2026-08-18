@@ -124,7 +124,7 @@ prerequisite for early vertical slices.
 | A4. New-agent adaptation proof           | 012A/umbrella       | Not started | fourth adapter without common-runtime/query/observer change    |
 | B1. Catalog identity/readiness contracts | 012B                | In progress | Rust/N-API/TS fixtures and transition table tests              |
 | B2. Bounded catalog source compositions  | 012B                | In progress | three adapter catalog identity digest parity                   |
-| B3. Durable catalog/query snapshots      | 012B                | Not started | atomic pack plus snapshot pagination conformance               |
+| B3. Durable catalog/query snapshots      | 012B                | In progress | atomic pack plus snapshot pagination conformance               |
 | B4. Progressive host and UX              | 012B                | Not started | cold/warm UI topology and migration tests                      |
 | B5. Catalog performance calibration      | 012B                | Not started | reproducible gate-amendment report                             |
 | C1. Runtime semantic contracts           | 012C                | In progress | actor/usage/state/interaction serialization fixtures           |
@@ -601,9 +601,10 @@ B1 remains `In progress` only at the public exposure gate: no catalog N-API
 query surface should land until engine transport can bind an authorized
 `CatalogPolicyView` to the frozen access-policy digest and B3 provides real
 retained-snapshot/query execution. B2 is independently `In progress` as
-described below. B3 durable transactional persistence, outbox, and restart
-parity have not started; scheduling and hydration execution remain later
-integration work.
+described below. B3 has started with source-neutral plan registration and the
+initial build lineage described below, but coverage/row/snapshot publication
+and retained query execution remain open; scheduling and hydration execution
+remain later integration work.
 
 ### B2. Catalog source compositions
 
@@ -784,6 +785,23 @@ Implement:
 
 Crash-inject before/after every rows/snapshot/readiness/outbox boundary. Query
 purity tests run against actual read lanes.
+
+Current landing status (2026-08-18): B3 is `In progress`. The first durable
+slice (`dc7e9aa`) registers one immutable, bounded Library coverage plan and
+advances only the initial `Absent -> Pending -> Building` readiness lineage on
+the existing RFC 011 commit clock. Schema v50 reserves source-neutral commits
+for the two completed zero-fact catalog administration transitions; the typed
+writer transaction atomically owns the commit row, plan, CAS-bound build state,
+and privacy-safe `catalog.readiness.changed` outbox entry, and publishes an
+in-memory commit notification only after SQLite durability. Equal lost-ack
+replays are no-ops, stale or foreign expectations fail without mutation, and
+restart reparses the bounded plan, recomputes its ID/content digest, validates
+commit ownership, and reconstructs the B1 readiness machine. Crash injection
+proves rollback at every precommit seam and durable idempotency after commit.
+This slice cannot accept or synthesize coverage, reducer rows, complete or
+degraded readiness, snapshot IDs, last-complete state, retention, pagination,
+or public query authority. Atomic coverage/reducer/snapshot/readiness/outbox
+publication and retained-snapshot reads remain the next B3 gates.
 
 ### B4. Progressive host and UX
 
@@ -1773,7 +1791,19 @@ Current landing status (2026-08-18):
   coverage therefore fails bootstrap/resync completion instead of turning an
   uncovered family into an apparently valid empty result. Complete and partial
   evidence still merge conservatively. This is an internal usage-v2 closure,
-  not a complete multi-family or public barrier surface; and
+  not a complete multi-family or public barrier surface;
+- exact known-object watermark assembly now carries the first RFC 012D
+  `scope_coverage` proof. It binds the selected promoted scope-program digest,
+  the program-declared `KnownObject` root, the exact complete set of declared
+  `KnownObject` relations, opaque source coordinates, positive generations,
+  present/absent/deleted state, and conservative completeness; validates
+  one-for-one against the RFC 012A Decode set; and is carried and digested
+  identically by bootstrap and resync barriers. A promoted program without a
+  typed `KnownObject` root, an omitted relation, or a caller-swapped root flag
+  fails before access. The path-free summary deliberately excludes source
+  positions and cannot replace their cursor or membership authority. Dynamic
+  relation discovery, non-append members, D-owned artifact/capability
+  manifests, the portable barrier wire, and N-API transport remain open; and
 - the architecture checker forbids store/query/N-API/concrete-adapter imports
   and premature native public export from the provisional composition and
   negotiation roots, while keeping the portable negotiation graph contract-only.
@@ -1784,8 +1814,9 @@ canonical fact-revision adoption beyond the current runtime families, scoped
 reducers beyond usage-v2,
 coverage-complete durable query exposure, affiliation/actor enrichment and
 envelope variants beyond the current usage/source-lifecycle families, the
-public N-API/SDK iterator transport over the internal async lifecycle runtime
-and complete scope coverage,
+public N-API/SDK iterator transport over the internal async lifecycle runtime,
+portable scope coverage beyond the current exact known-object relation/root
+summary,
 dynamic/discovered scope membership beyond the attachment's current exact
 known-object grants and family coverage beyond usage-v2,
 complete multi-family replacement manifests, whole-scope discovery and source
@@ -1796,11 +1827,12 @@ artifact mediation and the public close-method transport,
 the trusted native version-probe/identity-input drivers, and the complete
 public request are not yet implemented. The internal offered and applied
 boundaries are now transactional, but they cannot become a public watermark and
-consumer-ready helper until complete scope-membership/barrier coverage, portable
-resync completion, runtime-bound public close invocation, and the remaining
-negotiated lifecycle surface are defined. The usage-v2 sink and delivery lane remain crate-private
-until the complete envelope/event/lifecycle DTOs, bounded unknown-variant
-preservation, and runtime-bound negotiated portable transport exist.
+consumer-ready helper until dynamic scope-membership and portable barrier
+coverage, resync completion, runtime-bound public close invocation, and the
+remaining negotiated lifecycle surface are defined. The usage-v2 sink and
+delivery lane remain crate-private until the complete envelope/event/lifecycle
+DTOs, bounded unknown-variant preservation, and runtime-bound negotiated
+portable transport exist.
 
 ### D2. Claude scope composition
 

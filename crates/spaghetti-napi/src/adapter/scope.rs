@@ -151,6 +151,12 @@ impl ScopeRelationDeclaration {
 pub struct ScopeProgramDeclaration {
     pub program_id: String,
     pub root_entity_kind: String,
+    /// The declared relation whose exact native object represents the
+    /// requested root entity. Candidate/incomplete manifests may omit this
+    /// while the relation model is still under review; promoted manifests may
+    /// not.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub root_relation_id: Option<String>,
     pub relations: Vec<ScopeRelationDeclaration>,
     pub claim_refs: Vec<String>,
 }
@@ -246,6 +252,34 @@ impl ScopeProgramManifest {
                         relation.relation_id
                     )));
                 }
+            }
+            match program.root_relation_id.as_deref() {
+                Some(root_relation_id) => {
+                    validate_identifier("scope root relation id", root_relation_id)?;
+                    let root_relation = program
+                        .relations
+                        .iter()
+                        .find(|relation| relation.relation_id == root_relation_id)
+                        .ok_or_else(|| {
+                            invalid(format!(
+                                "scope program {} names undeclared root relation {}",
+                                program.program_id, root_relation_id
+                            ))
+                        })?;
+                    if root_relation.primitive != ScopeRelationPrimitive::KnownObject {
+                        return Err(invalid(format!(
+                            "scope program {} root relation {} must use KnownObject",
+                            program.program_id, root_relation_id
+                        )));
+                    }
+                }
+                None if self.status == ScopeProgramStatus::Promoted => {
+                    return Err(invalid(format!(
+                        "promoted scope program {} requires a declared root relation",
+                        program.program_id
+                    )));
+                }
+                None => {}
             }
         }
         Ok(())
@@ -365,6 +399,33 @@ mod tests {
             assert_eq!(manifest.status, ScopeProgramStatus::Incomplete);
             assert!(!manifest.programs.is_empty());
         }
+    }
+
+    #[test]
+    fn promoted_scope_program_requires_a_known_object_root_relation() {
+        let bytes = include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../agent-support/grok/candidate-2026-08-15/scope-programs.json"
+        ));
+        let mut manifest = ScopeProgramManifest::from_json(bytes).unwrap();
+        manifest.status = ScopeProgramStatus::Promoted;
+        manifest.blockers.clear();
+
+        assert!(manifest
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("declared root relation"));
+
+        manifest.programs[0].root_relation_id = Some("summary-sidecar".to_string());
+        assert!(manifest
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("must use KnownObject"));
+
+        manifest.programs[0].root_relation_id = Some("root-history".to_string());
+        manifest.validate().unwrap();
     }
 
     #[test]

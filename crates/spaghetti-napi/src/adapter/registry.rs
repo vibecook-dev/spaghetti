@@ -225,8 +225,8 @@ mod tests {
         ScopedObservationWatcherHintAction, ScopedObservationWatcherPhase,
         ScopedObserverFailureReason, ScopedProjectionDeliveryError, ScopedQueuedObservationFrame,
         ScopedReplacementMode, ScopedReplacementRepresentation, ScopedReplacementStageError,
-        ScopedResyncReason, ScopedRootIdentityRequest, ScopedSourceFailureClass,
-        ScopedSourceObjectRetryState,
+        ScopedResyncReason, ScopedRootIdentityRequest, ScopedScopeRelationState,
+        ScopedSourceFailureClass, ScopedSourceObjectRetryState,
     };
     use crate::source::{
         AccessOperation, AccessOutcome, AccessPhase, AppendDelimitedConfig, AppendDelimitedFile,
@@ -342,9 +342,9 @@ mod tests {
         }
     }
 
-    const SINGLE_OBJECT_SCOPE_DOCUMENT: &[u8] = br#"{"schema_version":1,"declaration_id":"fixture-scope","adapter_id":"fixture","ads_id":"fixture-ads","status":"promoted","roots":["root"],"programs":[{"program_id":"observe-session","root_entity_kind":"session","relations":[{"relation_id":"root-object","primitive":"KnownObject","access_root":"root","locator":"known-object","identity_inputs":["native-session-id"],"bounds":{"max_fan_out":1,"max_depth":1,"max_objects":1,"max_bytes":1024,"max_rows":0},"unavailable_behavior":"record_unavailable","claim_refs":["scope-evidence"]}],"claim_refs":["scope-evidence"]}],"blockers":[],"claim_refs":["scope-evidence"]}"#;
+    const SINGLE_OBJECT_SCOPE_DOCUMENT: &[u8] = br#"{"schema_version":1,"declaration_id":"fixture-scope","adapter_id":"fixture","ads_id":"fixture-ads","status":"promoted","roots":["root"],"programs":[{"program_id":"observe-session","root_entity_kind":"session","root_relation_id":"root-object","relations":[{"relation_id":"root-object","primitive":"KnownObject","access_root":"root","locator":"known-object","identity_inputs":["native-session-id"],"bounds":{"max_fan_out":1,"max_depth":1,"max_objects":1,"max_bytes":1024,"max_rows":0},"unavailable_behavior":"record_unavailable","claim_refs":["scope-evidence"]}],"claim_refs":["scope-evidence"]}],"blockers":[],"claim_refs":["scope-evidence"]}"#;
 
-    const TWO_OBJECT_SCOPE_DOCUMENT: &[u8] = br#"{"schema_version":1,"declaration_id":"fixture-scope","adapter_id":"fixture","ads_id":"fixture-ads","status":"promoted","roots":["root"],"programs":[{"program_id":"observe-session","root_entity_kind":"session","relations":[{"relation_id":"root-object","primitive":"KnownObject","access_root":"root","locator":"known-object","identity_inputs":["native-session-id"],"bounds":{"max_fan_out":1,"max_depth":1,"max_objects":1,"max_bytes":1024,"max_rows":0},"unavailable_behavior":"record_unavailable","claim_refs":["scope-evidence"]},{"relation_id":"sibling-object","primitive":"KnownObject","access_root":"root","locator":"sibling-object","identity_inputs":["native-session-id"],"bounds":{"max_fan_out":1,"max_depth":1,"max_objects":1,"max_bytes":1024,"max_rows":0},"unavailable_behavior":"record_unavailable","claim_refs":["scope-evidence"]}],"claim_refs":["scope-evidence"]}],"blockers":[],"claim_refs":["scope-evidence"]}"#;
+    const TWO_OBJECT_SCOPE_DOCUMENT: &[u8] = br#"{"schema_version":1,"declaration_id":"fixture-scope","adapter_id":"fixture","ads_id":"fixture-ads","status":"promoted","roots":["root"],"programs":[{"program_id":"observe-session","root_entity_kind":"session","root_relation_id":"root-object","relations":[{"relation_id":"root-object","primitive":"KnownObject","access_root":"root","locator":"known-object","identity_inputs":["native-session-id"],"bounds":{"max_fan_out":1,"max_depth":1,"max_objects":1,"max_bytes":1024,"max_rows":0},"unavailable_behavior":"record_unavailable","claim_refs":["scope-evidence"]},{"relation_id":"sibling-object","primitive":"KnownObject","access_root":"root","locator":"sibling-object","identity_inputs":["native-session-id"],"bounds":{"max_fan_out":1,"max_depth":1,"max_objects":1,"max_bytes":1024,"max_rows":0},"unavailable_behavior":"record_unavailable","claim_refs":["scope-evidence"]}],"claim_refs":["scope-evidence"]}],"blockers":[],"claim_refs":["scope-evidence"]}"#;
 
     fn promoted_fixture_catalog_with_scope(
         scope_document: &[u8],
@@ -1025,7 +1025,7 @@ mod tests {
         assert!(report.verify_digest());
         assert_eq!(
             report.digest().to_string(),
-            "sha256:5d494f25dab64f909e09c3547d90d8cd2459b2172dd5e7fdee0112d85298d6bb"
+            "sha256:293d3c4e10e46afab60e64b51cd161c6a9fa48c482519039ccf986f8ced95c84"
         );
         assert_ne!(report.digest(), empty_digest);
         let encoded = serde_json::to_string(&report).unwrap();
@@ -4403,7 +4403,7 @@ mod tests {
     }
 
     #[test]
-    fn scoped_host_requires_exactly_one_designated_root_object() {
+    fn scoped_host_requires_the_declared_root_object_designation() {
         let registry = supported_fixture_registry();
         let temp = TempDir::new().unwrap();
         let mut request = scoped_access_request(temp.path().join("missing-root-role"));
@@ -4412,7 +4412,29 @@ mod tests {
         assert!(matches!(
             ScopedObservationAccessHost::authorize(&registry, request),
             Err(ScopedObservationAccessError::InvalidGrant(message))
-                if message.contains("exactly one") && message.contains("scope root")
+                if message.contains("authorized scope root relation")
+        ));
+    }
+
+    #[test]
+    fn scoped_host_requires_every_declared_known_object_and_rejects_root_swaps() {
+        let registry = stateful_two_object_fixture_registry();
+        let temp = TempDir::new().unwrap();
+
+        let omitted = scoped_access_request(temp.path().join("omitted-known-object"));
+        assert!(matches!(
+            ScopedObservationAccessHost::authorize(&registry, omitted),
+            Err(ScopedObservationAccessError::InvalidGrant(message))
+                if message.contains("must equal every declared KnownObject relation")
+        ));
+
+        let mut swapped = two_object_scoped_access_request(temp.path().join("swapped-root-object"));
+        swapped.known_objects[0].scope_root = false;
+        swapped.known_objects[1].scope_root = true;
+        assert!(matches!(
+            ScopedObservationAccessHost::authorize(&registry, swapped),
+            Err(ScopedObservationAccessError::InvalidGrant(message))
+                if message.contains("authorized scope root relation")
         ));
     }
 
@@ -5247,6 +5269,37 @@ mod tests {
             missing_usage_set.membership_revision,
             missing_set.membership_revision
         );
+        let missing_scope = &missing_watermark.scope_coverage;
+        assert_eq!(missing_scope.contract_version(), 1);
+        assert_eq!(missing_scope.program_id(), "observe-session");
+        assert_eq!(missing_scope.root_relation_id(), "root-object");
+        assert_eq!(
+            missing_scope.scope_program_digest(),
+            Sha256Digest::of(SINGLE_OBJECT_SCOPE_DOCUMENT)
+        );
+        assert_eq!(
+            missing_scope.completeness(),
+            CoverageSetCompleteness::Complete
+        );
+        assert_eq!(missing_scope.root_present(), Some(false));
+        assert_eq!(missing_scope.relations().len(), 1);
+        assert_eq!(
+            missing_scope.relations()[0].relation_id.as_ref(),
+            "root-object"
+        );
+        assert!(missing_scope.relations()[0].scope_root);
+        assert_eq!(missing_scope.relations()[0].source, source);
+        assert_eq!(missing_scope.relations()[0].generation, 1);
+        assert!(matches!(
+            &missing_scope.relations()[0].state,
+            ScopedScopeRelationState::Absent {
+                kind: CoverageAbsenceKind::Absent
+            }
+        ));
+        assert!(missing_scope
+            .validate_against(host.root_identity(), &missing_watermark.source_coverage,));
+        assert!(!format!("{missing_scope:?}").contains(&root.to_string_lossy().to_string()));
+        let missing_scope_revision = missing_scope.scope_revision();
         drop(missing_pass);
         object.complete_bootstrap().unwrap();
 
@@ -5350,6 +5403,19 @@ mod tests {
             present_set.membership_revision,
             missing_set.membership_revision
         );
+        let present_scope = &present_watermark.scope_coverage;
+        assert_eq!(present_scope.root_present(), Some(true));
+        assert!(matches!(
+            &present_scope.relations()[0].state,
+            ScopedScopeRelationState::Present {
+                status: CoverageStatus::CompleteThrough
+            }
+        ));
+        assert_ne!(present_scope.scope_revision(), missing_scope_revision);
+        assert!(present_scope
+            .validate_against(host.root_identity(), &present_watermark.source_coverage,));
+        assert!(!missing_scope
+            .validate_against(host.root_identity(), &present_watermark.source_coverage,));
         drop(creation_pass);
 
         // Keep source.created in the one-slot control queue, then prove a
@@ -5414,6 +5480,17 @@ mod tests {
             assert_eq!(set.points.len(), 0);
             assert_eq!(set.explicit_absence_or_deletion.len(), 1);
         }
+        let deleted_scope = &deleted_watermark.scope_coverage;
+        assert_eq!(deleted_scope.root_present(), Some(false));
+        assert!(matches!(
+            &deleted_scope.relations()[0].state,
+            ScopedScopeRelationState::Absent {
+                kind: CoverageAbsenceKind::Deleted
+            }
+        ));
+        assert_ne!(deleted_scope.scope_revision(), missing_scope_revision);
+        assert!(deleted_scope
+            .validate_against(host.root_identity(), &deleted_watermark.source_coverage,));
         drop(deletion_pass);
     }
 
@@ -6032,6 +6109,10 @@ mod tests {
         assert_eq!(barrier.barrier_sequence, 1);
         assert!(!barrier.root_present);
         assert_eq!(barrier.source_coverage.len(), 2);
+        assert_eq!(barrier.scope_coverage.root_present(), Some(false));
+        assert!(barrier
+            .scope_coverage
+            .validate_against(host.root_identity(), &barrier.source_coverage));
         assert_eq!(barrier.family_manifest.len(), 1);
         assert_eq!(barrier.family_manifest[0].fact_family, "runtime.usage-v2");
         assert_eq!(barrier.family_manifest[0].entity_or_event_count, 0);
@@ -6215,6 +6296,7 @@ mod tests {
             replacement_semantic_digest
         );
         assert_eq!(resync_barrier.source_coverage.len(), 2);
+        assert_eq!(resync_barrier.scope_coverage, barrier.scope_coverage);
         assert_eq!(resync_barrier.family_manifest, barrier.family_manifest);
         assert_eq!(
             resync_barrier.replacement_snapshot_digest,

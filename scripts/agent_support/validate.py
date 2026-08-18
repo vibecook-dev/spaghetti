@@ -363,6 +363,12 @@ def _validate_scope_contract(bundle: Bundle) -> list[str]:
 
     relation_ids: list[str] = []
     for program in scope["programs"]:
+        root_relation_id = program.get("root_relation_id")
+        if scope["status"] == "promoted" and root_relation_id is None:
+            errors.append(
+                f"{bundle.label}/scope-programs.json program {program['program_id']}: "
+                "promoted scope requires a declared root relation"
+            )
         for relation in program["relations"]:
             relation_ids.append(relation["relation_id"])
             prefix = f"{bundle.label}/scope-programs.json relation {relation['relation_id']}"
@@ -383,6 +389,22 @@ def _validate_scope_contract(bundle: Bundle) -> list[str]:
                 errors.append(f"{prefix}: parameterized SQLite relation needs statement_id and parameters")
             if not is_sql and ("statement_id" in relation or "parameter_names" in relation):
                 errors.append(f"{prefix}: SQL declaration fields are forbidden for this primitive")
+        if root_relation_id is not None:
+            root_relations = [
+                relation
+                for relation in program["relations"]
+                if relation["relation_id"] == root_relation_id
+            ]
+            if len(root_relations) != 1:
+                errors.append(
+                    f"{bundle.label}/scope-programs.json program {program['program_id']}: "
+                    f"root relation {root_relation_id} is not declared exactly once"
+                )
+            elif root_relations[0]["primitive"] != "KnownObject":
+                errors.append(
+                    f"{bundle.label}/scope-programs.json program {program['program_id']}: "
+                    f"root relation {root_relation_id} must use KnownObject"
+                )
     for duplicate in sorted(_duplicates(relation_ids)):
         errors.append(f"{bundle.label}/scope-programs.json: duplicate relation id {duplicate}")
     return errors
