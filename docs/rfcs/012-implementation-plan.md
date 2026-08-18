@@ -2309,6 +2309,21 @@ domains, offered events, and barrier manifest remain exactly
 portable envelopes, and a truthful complete multi-family replacement manifest
 remain the next D3 gates.
 
+The next bounded D3 slice (`24dfa17`) selects the crate-private
+`runtime.actor-run` and `runtime.actor-affiliation` v1 families beside
+`runtime.usage-v2` under the exact negotiated family set. Common reduction now
+emits deterministic, provenance-bound actor and affiliation upserts, preserves
+late affiliation without redelivering unchanged usage, and retracts dependent
+families in affiliation-before-actor order on reset or confirmed deletion.
+Bootstrap and replacement require matching per-family coverage and one
+canonical complete manifest, while replacement offering remains retry-safe and
+orders actor, affiliation, then usage. A synthetic promoted fixture proves the
+exact three-family host selection and rejects a usage-only reducer before
+watermark or readiness publication; all built-in support packages remain
+Candidate and unauthorized. This slice adds no portable actor/affiliation DTO,
+N-API or SDK exposure, vendor promotion, artifact resolution, persistence, or
+public transport authority.
+
 ### D4. SDK and Chopsticks migration
 
 Add a feature-flagged Chopsticks path beside `watchSessionTranscript`:
