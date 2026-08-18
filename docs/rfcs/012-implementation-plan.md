@@ -803,6 +803,25 @@ degraded readiness, snapshot IDs, last-complete state, retention, pagination,
 or public query authority. Atomic coverage/reducer/snapshot/readiness/outbox
 publication and retained-snapshot reads remain the next B3 gates.
 
+The second bounded B3 slice (`e65a9fd`) adds a store-free, contract-only
+initial-publication assembly envelope. It consumes exact complete Library
+source assemblies projected from authorized B2 composition, the frozen initial
+durable `Building` expectation, explicit source-member-to-live-session
+bindings, and one canonical bounded reducer freeze. Construction requires every
+required source, accepts only declared complete optional sources, binds the full
+negotiated selection plus plan, declaration, access-policy, coverage,
+membership, and component-completion revisions, rejects uncovered evidence and
+unevidenced relation, locator, or association endpoints, and converges a shared
+cross-source member identity on one base session. Coverage vectors and reducer
+state are canonicalized before deriving the privacy-safe publication digest;
+early aggregate preflight plus grouped row materialization and indexed member
+validation keep the freeze bounded without quadratic lookup. A complete empty
+required source composes honestly with a nonempty required source. The envelope
+is non-serializable and store-free: it does not write SQLite, publish a Ready
+snapshot/readiness/outbox transition, read native sources, expose N-API or
+query authority, or implement retention/pagination. Atomic durable initial
+publication remains the next B3 gate.
+
 ### B4. Progressive host and UX
 
 Change host lifecycle so all source catalogs are registered before full history
