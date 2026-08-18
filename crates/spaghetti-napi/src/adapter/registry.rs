@@ -202,22 +202,25 @@ mod tests {
         ScopedEnvelopeEvidenceAuthority, ScopedKnownAppendObject, ScopedKnownObjectGrant,
         ScopedKnownObjectReadRequest, ScopedObjectRead, ScopedObservationAccessError,
         ScopedObservationAccessHost, ScopedObservationAccessPass, ScopedObservationAccessRequest,
-        ScopedObservationAdmissionLane, ScopedObservationAppendPassRequest,
-        ScopedObservationAsyncRuntime, ScopedObservationCloseError,
-        ScopedObservationConsumerOfferError, ScopedObservationContinuity,
-        ScopedObservationDeliveryLane, ScopedObservationDeliveryLimits, ScopedObservationEvent,
+        ScopedObservationAdmissionLane, ScopedObservationAppendPassBinding,
+        ScopedObservationAppendPassRequest, ScopedObservationAsyncRuntime,
+        ScopedObservationCloseError, ScopedObservationConsumerOfferError,
+        ScopedObservationContinuity, ScopedObservationDeliveryLane,
+        ScopedObservationDeliveryLimits, ScopedObservationEvent,
         ScopedObservationNativeWatchBackend, ScopedObservationNativeWatchCallback,
         ScopedObservationNativeWatcherError, ScopedObservationNativeWatcherRecoveryPolicy,
         ScopedObservationNativeWatcherRunExit, ScopedObservationOpenDrainError,
-        ScopedObservationPassExecutionError, ScopedObservationPollError,
-        ScopedObservationPollLease, ScopedObservationPollResolution,
+        ScopedObservationOwnedIdentityInput, ScopedObservationPassExecutionError,
+        ScopedObservationPollError, ScopedObservationPollLease, ScopedObservationPollResolution,
         ScopedObservationProjectionLimits, ScopedObservationProjectionSink,
         ScopedObservationQueueLimits, ScopedObservationReadyResolution,
-        ScopedObservationStartupError, ScopedObservationStartupReconcileAction,
-        ScopedObservationWatcherHintAction, ScopedObservationWatcherPhase,
-        ScopedObserverFailureReason, ScopedProjectionDeliveryError, ScopedQueuedObservationFrame,
-        ScopedReplacementMode, ScopedReplacementRepresentation, ScopedReplacementStageError,
-        ScopedResyncReason, ScopedRootIdentityRequest, ScopedSourceFailureClass,
+        ScopedObservationSourceOwnerBindingError, ScopedObservationSourceOwnerRetryPolicy,
+        ScopedObservationSourceOwnerRunExit, ScopedObservationStartupError,
+        ScopedObservationStartupReconcileAction, ScopedObservationWatcherHintAction,
+        ScopedObservationWatcherPhase, ScopedObserverFailureReason, ScopedProjectionDeliveryError,
+        ScopedQueuedObservationFrame, ScopedReplacementMode, ScopedReplacementRepresentation,
+        ScopedReplacementStageError, ScopedResyncReason, ScopedRootIdentityRequest,
+        ScopedSourceFailureClass,
     };
     use crate::source::{
         AccessOperation, AccessOutcome, AccessPhase, AppendDelimitedConfig, AppendDelimitedFile,
@@ -1809,7 +1812,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn scoped_async_runtime_delivers_and_applies_bootstrap_concurrently_with_ready() {
+    async fn scoped_async_source_owner_drives_poll_and_waits_for_delivery_capacity() {
         let registry = supported_fixture_registry();
         let temp = TempDir::new().unwrap();
         let root = temp.path().join("async-runtime-bootstrap-root");
@@ -1928,47 +1931,136 @@ mod tests {
         );
         assert_eq!(applied.pending_sequence, None);
 
-        let mut active = handle
+        let active = handle
             .with_attachment(|host, drain| {
                 host.bind_consumer_bootstrap_epoch_state(vec![object], admission, projection, drain)
             })
             .unwrap();
-        std::fs::write(root.join("session.jsonl"), b"one\n").unwrap();
-        let pass_request = [ScopedObservationAppendPassRequest {
-            relation_id: "root-object",
-            identity_inputs: &identity,
-            parent_token: None,
-            depth: 1,
-            max_bytes: 64,
-            origin: &origin,
-            force_contract_replay: false,
-        }];
-        let poll_handle = handle.clone();
-        let source_handle = handle.clone();
-        let (poll, source_watermark, created) =
-            tokio::time::timeout(std::time::Duration::from_secs(2), async {
-                tokio::join!(
-                    poll_handle.poll(),
-                    async {
-                        let lease = source_handle
-                            .next_poll_pass()
-                            .await
-                            .unwrap()
-                            .expect("the requested live pass remains runnable");
-                        source_handle.execute_epoch_poll_pass(lease, &mut active, &pass_request)
-                    },
-                    runtime.next_event(),
-                )
-            })
-            .await
-            .unwrap();
-        let source_watermark = source_watermark.unwrap();
+        let wrong_binding = ScopedObservationAppendPassBinding::new(
+            "root-object",
+            vec![ScopedObservationOwnedIdentityInput::new(
+                "native-session-id",
+                b"wrong-session".to_vec(),
+            )
+            .unwrap()],
+            None,
+            1,
+            64,
+            origin.clone(),
+            false,
+        )
+        .unwrap();
+        let failed_binding = handle
+            .bind_epoch_source_owner(
+                active,
+                vec![wrong_binding],
+                ScopedObservationSourceOwnerRetryPolicy::default(),
+            )
+            .unwrap_err();
         assert!(matches!(
-            poll,
-            Ok(ScopedObservationPollResolution::Ready(watermark))
-                if Arc::ptr_eq(&watermark, &source_watermark)
+            failed_binding.error(),
+            ScopedObservationSourceOwnerBindingError::AccessIdentityMismatch
         ));
-        let created = created.unwrap().unwrap();
+        let failed_debug = format!("{failed_binding:?}");
+        assert!(failed_debug.contains("native-session-id"));
+        assert!(!failed_debug.contains("wrong-session"));
+        assert!(!failed_debug.contains("async-runtime-session"));
+        let (_, active, _) = failed_binding.into_parts();
+
+        let mut wrong_origin = origin.clone();
+        wrong_origin.object_id = 999;
+        let wrong_origin_binding = ScopedObservationAppendPassBinding::new(
+            "root-object",
+            vec![ScopedObservationOwnedIdentityInput::new(
+                "native-session-id",
+                b"async-runtime-session".to_vec(),
+            )
+            .unwrap()],
+            None,
+            1,
+            64,
+            wrong_origin,
+            false,
+        )
+        .unwrap();
+        let failed_origin = handle
+            .bind_epoch_source_owner(
+                active,
+                vec![wrong_origin_binding],
+                ScopedObservationSourceOwnerRetryPolicy::default(),
+            )
+            .unwrap_err();
+        assert_eq!(
+            failed_origin.error(),
+            ScopedObservationSourceOwnerBindingError::AccessIdentityMismatch
+        );
+        let (_, active, _) = failed_origin.into_parts();
+
+        let binding = ScopedObservationAppendPassBinding::new(
+            "root-object",
+            vec![ScopedObservationOwnedIdentityInput::new(
+                "native-session-id",
+                b"async-runtime-session".to_vec(),
+            )
+            .unwrap()],
+            None,
+            1,
+            64,
+            origin.clone(),
+            false,
+        )
+        .unwrap();
+        let binding_debug = format!("{binding:?}");
+        assert!(binding_debug.contains("native-session-id"));
+        assert!(!binding_debug.contains("async-runtime-session"));
+        let owner = handle
+            .bind_epoch_source_owner(
+                active,
+                vec![binding],
+                ScopedObservationSourceOwnerRetryPolicy::default(),
+            )
+            .unwrap();
+        assert_eq!(owner.scope_epoch(), 1);
+        assert!(!format!("{owner:?}").contains("async-runtime-session"));
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let source_attempts = Arc::clone(&attempts);
+        let source_task = tokio::spawn(owner.run_until_stopped_with_clock(move || {
+            100 + source_attempts.fetch_add(1, Ordering::SeqCst) as i64
+        }));
+
+        // The automatic owner reserves and completes the first live pass.
+        // Leave its created-source control queued to force bounded pressure on
+        // the immediately following deletion pass.
+        std::fs::write(root.join("session.jsonl"), b"one\n").unwrap();
+        let created_poll = tokio::time::timeout(std::time::Duration::from_secs(2), handle.poll())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            created_poll,
+            ScopedObservationPollResolution::Ready(_)
+        ));
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+
+        std::fs::remove_file(root.join("session.jsonl")).unwrap();
+        let deletion_handle = handle.clone();
+        let deletion_poll = tokio::spawn(async move { deletion_handle.poll().await });
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while attempts.load(Ordering::SeqCst) < 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let blocked_attempts = attempts.load(Ordering::SeqCst);
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        assert_eq!(attempts.load(Ordering::SeqCst), blocked_attempts);
+        assert!(!deletion_poll.is_finished());
+
+        // Dequeue is the exact capacity release. It wakes the owner, which
+        // first flushes the already-admitted deletion and only then completes
+        // the fresh exact-scope retry watermark.
+        let created = runtime.next_event().await.unwrap().unwrap();
         assert!(matches!(
             created.envelope.event,
             ScopedObservationEvent::SourcePresence {
@@ -1978,8 +2070,47 @@ mod tests {
         runtime
             .acknowledge_applied(created.application_receipt())
             .unwrap();
+        let deletion_resolution =
+            tokio::time::timeout(std::time::Duration::from_secs(2), deletion_poll)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+        assert!(matches!(
+            deletion_resolution,
+            ScopedObservationPollResolution::Ready(_)
+        ));
+        assert_eq!(attempts.load(Ordering::SeqCst), blocked_attempts + 1);
+        let deleted = runtime.next_event().await.unwrap().unwrap();
+        assert!(matches!(
+            deleted.envelope.event,
+            ScopedObservationEvent::SourcePresence {
+                change: ScopedAppendPresenceChange::Deleted { generation: 1 }
+            }
+        ));
+        runtime
+            .acknowledge_applied(deleted.application_receipt())
+            .unwrap();
 
-        assert!(runtime.close().await.complete);
+        let close = runtime.request_close();
+        let stopped = tokio::time::timeout(std::time::Duration::from_secs(2), source_task)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            stopped.exit(),
+            ScopedObservationSourceOwnerRunExit::Cancelled
+        ));
+        let (active, exit) = stopped.into_parts();
+        assert!(matches!(
+            exit,
+            ScopedObservationSourceOwnerRunExit::Cancelled
+        ));
+        assert!(!active
+            .append_object("root-object")
+            .expect("the exact root remains bound after deletion")
+            .is_present());
+        assert!(close.wait_async().await.complete);
         assert!(runtime.next_event().await.unwrap().is_none());
     }
 

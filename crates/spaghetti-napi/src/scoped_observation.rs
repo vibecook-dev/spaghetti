@@ -41,6 +41,7 @@ use crate::source::{
     DriverQuarantine, HintEnqueue, RecordHash, RecordOrigin, Revision, ScopeAccessReport,
     ScopeAccessRequest, ScopeIdentityInput, SourceCursor, SourceDriverError, SourceMediaType,
     SourceRecord, SourceRecordState, StableRead, StartupAction, StartupPhase, WatchBeforeScan,
+    MAX_IDENTITY_VALUE_BYTES,
 };
 
 /// One exact host-approved object locator. The locator is installed during
@@ -2454,6 +2455,13 @@ impl ScopedObservationConsumerDrain {
         self.delivery.event_waiter()
     }
 
+    /// Cloneable producer-side capacity notification. Source owners capture
+    /// this state under the same drain lock before offering, then await only
+    /// after releasing that lock when delivery reports bounded backpressure.
+    pub fn delivery_capacity_waiter(&self) -> ScopedObservationDeliveryCapacityWaiter {
+        self.delivery.capacity_waiter()
+    }
+
     /// Producer-side access remains inside the crate-private observer runtime.
     /// Owning rather than borrowing the lane prevents a consumer drain from
     /// being paired with a second attachment or epoch queue.
@@ -2542,6 +2550,29 @@ impl ScopedObservationAsyncRuntimeShared {
 #[derive(Clone)]
 pub struct ScopedObservationAsyncHandle {
     shared: Arc<ScopedObservationAsyncRuntimeShared>,
+}
+
+/// Non-cloneable owner of one attachment's mutable source/coverage/reducer
+/// epoch. It is registered with the close barrier for its whole lifetime and
+/// builds borrowed pass requests only for the duration of one synchronous
+/// bounded source attempt.
+pub struct ScopedObservationAsyncSourceOwner {
+    handle: ScopedObservationAsyncHandle,
+    active: ScopedObservationEpochState,
+    bindings: Vec<ScopedObservationAppendPassBinding>,
+    policy: ScopedObservationSourceOwnerRetryPolicy,
+    operation: ScopedObservationOperationGuard,
+}
+
+impl std::fmt::Debug for ScopedObservationAsyncSourceOwner {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ScopedObservationAsyncSourceOwner")
+            .field("scope_epoch", &self.active.scope_epoch)
+            .field("bindings", &self.bindings)
+            .field("policy", &self.policy)
+            .finish_non_exhaustive()
+    }
 }
 
 impl ScopedObservationAsyncHandle {
@@ -2698,6 +2729,61 @@ impl ScopedObservationAsyncHandle {
             .map_err(Into::into)
     }
 
+    /// Transfer one valid active epoch into its automatic long-lived source
+    /// owner. Exact owned bindings are checked against both the authorized
+    /// scope declaration and the access identity permanently established by
+    /// bootstrap before an attachment operation is registered.
+    pub fn bind_epoch_source_owner(
+        &self,
+        active: ScopedObservationEpochState,
+        bindings: Vec<ScopedObservationAppendPassBinding>,
+        policy: ScopedObservationSourceOwnerRetryPolicy,
+    ) -> Result<ScopedObservationAsyncSourceOwner, ScopedObservationSourceOwnerBindFailure> {
+        let validation = {
+            let drain = self.shared.lock_drain();
+            self.shared
+                .host
+                .validate_epoch_source_owner_binding(&active, &drain, &bindings)
+        };
+        if let Err(error) = validation {
+            return Err(ScopedObservationSourceOwnerBindFailure {
+                error,
+                active: Box::new(active),
+                bindings,
+            });
+        }
+        let operation = match self
+            .shared
+            .host
+            .lifecycle
+            .start_operation(ScopedObservationOperationKind::Runtime)
+        {
+            Ok(operation) => operation,
+            Err(start_error) => {
+                let error = match start_error {
+                    ScopedObservationOperationStartError::Closing => {
+                        ScopedObservationSourceOwnerBindingError::Closed
+                    }
+                    ScopedObservationOperationStartError::CapacityExhausted => {
+                        ScopedObservationSourceOwnerBindingError::OperationCapacityExhausted
+                    }
+                };
+                return Err(ScopedObservationSourceOwnerBindFailure {
+                    error,
+                    active: Box::new(active),
+                    bindings,
+                });
+            }
+        };
+        Ok(ScopedObservationAsyncSourceOwner {
+            handle: self.clone(),
+            active,
+            bindings,
+            policy,
+            operation,
+        })
+    }
+
     pub fn prepare_watcher_install(
         &self,
         hint_capacity: usize,
@@ -2707,6 +2793,171 @@ impl ScopedObservationAsyncHandle {
 
     pub async fn close(&self) -> ScopedObservationCloseState {
         self.request_close().wait_async().await
+    }
+}
+
+impl ScopedObservationAsyncSourceOwner {
+    pub fn scope_epoch(&self) -> u64 {
+        self.active.scope_epoch
+    }
+
+    /// Run until attachment cancellation or an explicitly classified source
+    /// failure. Delivery queue fullness waits on dequeue-owned capacity rather
+    /// than sleeping or invalidating continuity. Source/decode transients use
+    /// bounded cancellation-aware backoff; other failures return to the
+    /// higher-level per-object/resync orchestrator without killing siblings.
+    pub async fn run_until_stopped(self) -> ScopedObservationStoppedSourceOwner {
+        self.run_until_stopped_inner(scoped_observation_now_unix_ms)
+            .await
+    }
+
+    #[cfg(test)]
+    pub async fn run_until_stopped_with_clock<C>(
+        self,
+        observed_at: C,
+    ) -> ScopedObservationStoppedSourceOwner
+    where
+        C: FnMut() -> i64 + Send,
+    {
+        self.run_until_stopped_inner(observed_at).await
+    }
+
+    async fn run_until_stopped_inner<C>(
+        mut self,
+        mut observed_at: C,
+    ) -> ScopedObservationStoppedSourceOwner
+    where
+        C: FnMut() -> i64 + Send,
+    {
+        let exit = self.run_loop(&mut observed_at).await;
+        let Self {
+            handle: _,
+            active,
+            bindings: _,
+            policy: _,
+            operation,
+        } = self;
+        // Release the close-barrier obligation before the stopped state is
+        // returned and potentially retained by a caller.
+        drop(operation);
+        ScopedObservationStoppedSourceOwner { active, exit }
+    }
+
+    async fn run_loop<C>(&mut self, observed_at: &mut C) -> ScopedObservationSourceOwnerRunExit
+    where
+        C: FnMut() -> i64 + Send,
+    {
+        let mut transient_attempts = 0_u32;
+        loop {
+            let lease = match self.handle.next_poll_pass().await {
+                Ok(Some(lease)) => lease,
+                Ok(None) | Err(ScopedObservationPollError::Closed) => {
+                    return ScopedObservationSourceOwnerRunExit::Cancelled;
+                }
+                Err(error) => {
+                    return ScopedObservationSourceOwnerRunExit::Failed(
+                        ScopedObservationSourceOwnerRunError::Pass(
+                            ScopedObservationPassExecutionError::Poll(error),
+                        ),
+                    );
+                }
+            };
+            let (capacity_waiter, capacity_generation) = {
+                let drain = self.handle.shared.lock_drain();
+                let waiter = drain.delivery_capacity_waiter();
+                let generation = waiter.snapshot().generation;
+                (waiter, generation)
+            };
+            let attempt_time = observed_at();
+            let identity_inputs = self
+                .bindings
+                .iter()
+                .map(|binding| {
+                    binding
+                        .identity_inputs
+                        .iter()
+                        .map(|input| ScopeIdentityInput {
+                            name: &input.name,
+                            value: &input.value,
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>();
+            let origins = self
+                .bindings
+                .iter()
+                .map(|binding| {
+                    let mut origin = binding.origin.clone();
+                    origin.observed_at = attempt_time;
+                    origin
+                })
+                .collect::<Vec<_>>();
+            let requests = self
+                .bindings
+                .iter()
+                .zip(&identity_inputs)
+                .zip(&origins)
+                .map(
+                    |((binding, identity_inputs), origin)| ScopedObservationAppendPassRequest {
+                        relation_id: &binding.relation_id,
+                        identity_inputs,
+                        parent_token: binding.parent_token,
+                        depth: binding.depth,
+                        max_bytes: binding.max_bytes,
+                        origin,
+                        force_contract_replay: binding.force_contract_replay,
+                    },
+                )
+                .collect::<Vec<_>>();
+
+            match self
+                .handle
+                .execute_epoch_poll_pass(lease, &mut self.active, &requests)
+            {
+                Ok(_) => transient_attempts = 0,
+                Err(error) if scoped_source_owner_error_is_cancelled(&error) => {
+                    return ScopedObservationSourceOwnerRunExit::Cancelled;
+                }
+                Err(error) if scoped_source_owner_error_is_delivery_backpressure(&error) => {
+                    transient_attempts = 0;
+                    tokio::select! {
+                        biased;
+                        _ = self.handle.shared.host.lifecycle.wait_for_close_request_async() => {
+                            return ScopedObservationSourceOwnerRunExit::Cancelled;
+                        }
+                        state = capacity_waiter.wait_after_async(capacity_generation) => {
+                            if state.closed {
+                                return ScopedObservationSourceOwnerRunExit::Cancelled;
+                            }
+                        }
+                    }
+                }
+                Err(error) if scoped_source_owner_error_is_transient(&error) => {
+                    transient_attempts = transient_attempts.saturating_add(1);
+                    if transient_attempts >= self.policy.max_transient_attempts {
+                        return ScopedObservationSourceOwnerRunExit::Failed(
+                            ScopedObservationSourceOwnerRunError::TransientRetryExhausted {
+                                attempts: transient_attempts,
+                                last_error: Box::new(error),
+                            },
+                        );
+                    }
+                    let delay = self.policy.retry_delay(transient_attempts - 1);
+                    tokio::select! {
+                        biased;
+                        _ = self.handle.shared.host.lifecycle.wait_for_close_request_async() => {
+                            return ScopedObservationSourceOwnerRunExit::Cancelled;
+                        }
+                        _ = tokio::time::sleep(delay) => {}
+                    }
+                }
+                Err(error) => {
+                    return ScopedObservationSourceOwnerRunExit::Failed(
+                        ScopedObservationSourceOwnerRunError::Pass(error),
+                    );
+                }
+            }
+        }
     }
 }
 
@@ -4325,6 +4576,102 @@ impl ScopedObservationEventCompletion {
     }
 }
 
+/// Retained producer-side notification for bounded delivery capacity. A
+/// generation advances only when dequeue/invalidation releases or supersedes
+/// queued work; ordinary offers do not advance it. Capturing the generation
+/// before a producer attempt closes the dequeue-between-error-and-wait race.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ScopedObservationDeliveryCapacityState {
+    pub generation: u128,
+    pub closed: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct ScopedObservationDeliveryCapacityWaiter {
+    completion: Arc<ScopedObservationDeliveryCapacityCompletion>,
+}
+
+impl ScopedObservationDeliveryCapacityWaiter {
+    pub fn snapshot(&self) -> ScopedObservationDeliveryCapacityState {
+        self.completion.snapshot()
+    }
+
+    /// Await a dequeue/supersession after a generation captured before a
+    /// producer attempt, or the owning drain's close. Retained watch state
+    /// makes a release before first poll immediately visible.
+    pub async fn wait_after_async(
+        &self,
+        generation: u128,
+    ) -> ScopedObservationDeliveryCapacityState {
+        self.completion.wait_after_async(generation).await
+    }
+}
+
+#[derive(Debug)]
+struct ScopedObservationDeliveryCapacityCompletion {
+    state: Mutex<ScopedObservationDeliveryCapacityState>,
+    async_changed: tokio::sync::watch::Sender<ScopedObservationDeliveryCapacityState>,
+}
+
+impl Default for ScopedObservationDeliveryCapacityCompletion {
+    fn default() -> Self {
+        let initial = ScopedObservationDeliveryCapacityState::default();
+        let (async_changed, _) = tokio::sync::watch::channel(initial);
+        Self {
+            state: Mutex::new(initial),
+            async_changed,
+        }
+    }
+}
+
+impl ScopedObservationDeliveryCapacityCompletion {
+    fn snapshot(&self) -> ScopedObservationDeliveryCapacityState {
+        *self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn publish_release(&self) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !state.closed {
+            state.generation = state
+                .generation
+                .checked_add(1)
+                .expect("scoped capacity generations cannot exhaust before observer sequences");
+            self.async_changed.send_replace(*state);
+        }
+    }
+
+    fn close(&self) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !state.closed {
+            state.closed = true;
+            self.async_changed.send_replace(*state);
+        }
+    }
+
+    async fn wait_after_async(&self, generation: u128) -> ScopedObservationDeliveryCapacityState {
+        let mut changed = self.async_changed.subscribe();
+        loop {
+            let state = *changed.borrow_and_update();
+            if state.closed || state.generation > generation {
+                return state;
+            }
+            changed
+                .changed()
+                .await
+                .expect("scoped capacity completion retains its async notification sender");
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScopedObservationContinuity {
     Bootstrap,
@@ -4486,6 +4833,7 @@ pub struct ScopedObservationDeliveryLane {
     resync_barrier: Option<Arc<ScopedResyncBarrier>>,
     observer_failure: Option<Arc<ScopedObserverFailure>>,
     event_completion: Arc<ScopedObservationEventCompletion>,
+    capacity_completion: Arc<ScopedObservationDeliveryCapacityCompletion>,
 }
 
 impl ScopedObservationDeliveryLane {
@@ -4507,6 +4855,7 @@ impl ScopedObservationDeliveryLane {
             resync_barrier: None,
             observer_failure: None,
             event_completion: Arc::new(ScopedObservationEventCompletion::default()),
+            capacity_completion: Arc::new(ScopedObservationDeliveryCapacityCompletion::default()),
         })
     }
 
@@ -4515,11 +4864,18 @@ impl ScopedObservationDeliveryLane {
         self.source_controls.clear();
         self.queued_retained_native_bytes = 0;
         self.event_completion.close();
+        self.capacity_completion.close();
     }
 
     fn event_waiter(&self) -> ScopedObservationEventWaiter {
         ScopedObservationEventWaiter {
             completion: Arc::clone(&self.event_completion),
+        }
+    }
+
+    fn capacity_waiter(&self) -> ScopedObservationDeliveryCapacityWaiter {
+        ScopedObservationDeliveryCapacityWaiter {
+            completion: Arc::clone(&self.capacity_completion),
         }
     }
 
@@ -4819,6 +5175,7 @@ impl ScopedObservationDeliveryLane {
         self.next_observer_sequence = after_sequence;
         self.resync_required = Some(Arc::clone(&control));
         self.resync_started = None;
+        self.capacity_completion.publish_release();
         self.event_completion.publish(control_sequence);
         debug_assert_eq!(
             self.state().continuity,
@@ -4893,6 +5250,7 @@ impl ScopedObservationDeliveryLane {
         });
         self.next_observer_sequence = after_sequence;
         self.observer_failure = Some(Arc::clone(&failure));
+        self.capacity_completion.publish_release();
         self.event_completion.publish(control_sequence);
         debug_assert_eq!(self.state().continuity, ScopedObservationContinuity::Failed);
         Ok(failure)
@@ -5123,6 +5481,7 @@ impl ScopedObservationDeliveryLane {
         let source = queued.value.source().clone();
         debug_assert!(queued.observer_sequence > self.delivered_through_sequence);
         self.delivered_through_sequence = queued.observer_sequence;
+        self.capacity_completion.publish_release();
         Some(ScopedDeliveredObservation {
             event_contract_version: SCOPED_OBSERVATION_EVENT_CONTRACT_VERSION,
             observer_sequence: queued.observer_sequence,
@@ -5243,6 +5602,7 @@ impl ScopedObservationDeliveryLane {
 impl Drop for ScopedObservationDeliveryLane {
     fn drop(&mut self) {
         self.event_completion.close();
+        self.capacity_completion.close();
     }
 }
 
@@ -6918,6 +7278,248 @@ pub enum ScopedObservationPollError {
     Coverage(#[from] ScopedCoverageAssemblyError),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum ScopedObservationSourceOwnerBindingError {
+    #[error("scoped source-owner relation bindings are not the active exact relation set")]
+    InvalidRelationSet,
+    #[error("scoped source-owner identity input is invalid")]
+    InvalidIdentityInput,
+    #[error("scoped source-owner access identity differs from the bootstrap binding")]
+    AccessIdentityMismatch,
+    #[error("scoped source-owner access bounds are invalid")]
+    InvalidBounds,
+    #[error("scoped source owner requires the attachment's current valid epoch")]
+    InvalidEpochState,
+    #[error("scoped source owner could not recover the attachment's authorized scope program")]
+    AuthorizedProgramUnavailable,
+    #[error("scoped source owner cannot start after attachment close")]
+    Closed,
+    #[error("scoped source-owner operation accounting is exhausted")]
+    OperationCapacityExhausted,
+}
+
+/// Failed ownership transfer retains both the epoch and redacted owned
+/// bindings so callers can correct a configuration error without rebuilding
+/// or silently losing live source state.
+pub struct ScopedObservationSourceOwnerBindFailure {
+    error: ScopedObservationSourceOwnerBindingError,
+    active: Box<ScopedObservationEpochState>,
+    bindings: Vec<ScopedObservationAppendPassBinding>,
+}
+
+impl ScopedObservationSourceOwnerBindFailure {
+    pub fn error(&self) -> ScopedObservationSourceOwnerBindingError {
+        self.error
+    }
+
+    pub fn into_parts(
+        self,
+    ) -> (
+        ScopedObservationSourceOwnerBindingError,
+        ScopedObservationEpochState,
+        Vec<ScopedObservationAppendPassBinding>,
+    ) {
+        (self.error, *self.active, self.bindings)
+    }
+}
+
+impl std::fmt::Debug for ScopedObservationSourceOwnerBindFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ScopedObservationSourceOwnerBindFailure")
+            .field("error", &self.error)
+            .field("scope_epoch", &self.active.scope_epoch)
+            .field("bindings", &self.bindings)
+            .finish()
+    }
+}
+
+impl std::fmt::Display for ScopedObservationSourceOwnerBindFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.error.fmt(formatter)
+    }
+}
+
+impl std::error::Error for ScopedObservationSourceOwnerBindFailure {}
+
+/// Owned native identity input retained only by the trusted source owner.
+/// Debug output deliberately omits the value; borrowed pass requests expose
+/// only the declaration's input names as well.
+#[derive(Clone, PartialEq, Eq)]
+pub struct ScopedObservationOwnedIdentityInput {
+    name: String,
+    value: Vec<u8>,
+}
+
+impl ScopedObservationOwnedIdentityInput {
+    pub fn new(
+        name: impl Into<String>,
+        value: impl Into<Vec<u8>>,
+    ) -> Result<Self, ScopedObservationSourceOwnerBindingError> {
+        let name = name.into();
+        let value = value.into();
+        if name.trim().is_empty() || value.is_empty() || value.len() > MAX_IDENTITY_VALUE_BYTES {
+            return Err(ScopedObservationSourceOwnerBindingError::InvalidIdentityInput);
+        }
+        Ok(Self { name, value })
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+}
+
+impl std::fmt::Debug for ScopedObservationOwnedIdentityInput {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ScopedObservationOwnedIdentityInput")
+            .field("name", &self.name)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Long-lived owned binding for one exact append relation. The binding fixes
+/// native identity, hierarchy, bounded access, record-origin lineage, and
+/// replay policy for the lifetime of one active epoch owner.
+#[derive(Clone)]
+pub struct ScopedObservationAppendPassBinding {
+    relation_id: String,
+    identity_inputs: Vec<ScopedObservationOwnedIdentityInput>,
+    parent_token: Option<AccessObjectToken>,
+    depth: u32,
+    max_bytes: u64,
+    origin: RecordOrigin,
+    force_contract_replay: bool,
+}
+
+impl ScopedObservationAppendPassBinding {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        relation_id: impl Into<String>,
+        identity_inputs: Vec<ScopedObservationOwnedIdentityInput>,
+        parent_token: Option<AccessObjectToken>,
+        depth: u32,
+        max_bytes: u64,
+        origin: RecordOrigin,
+        force_contract_replay: bool,
+    ) -> Result<Self, ScopedObservationSourceOwnerBindingError> {
+        let relation_id = relation_id.into();
+        if relation_id.trim().is_empty() || identity_inputs.is_empty() {
+            return Err(ScopedObservationSourceOwnerBindingError::InvalidRelationSet);
+        }
+        if identity_inputs.iter().enumerate().any(|(index, input)| {
+            identity_inputs[..index]
+                .iter()
+                .any(|prior| prior.name == input.name)
+        }) {
+            return Err(ScopedObservationSourceOwnerBindingError::InvalidIdentityInput);
+        }
+        if depth == 0 || max_bytes == 0 {
+            return Err(ScopedObservationSourceOwnerBindingError::InvalidBounds);
+        }
+        Ok(Self {
+            relation_id,
+            identity_inputs,
+            parent_token,
+            depth,
+            max_bytes,
+            origin,
+            force_contract_replay,
+        })
+    }
+
+    pub fn relation_id(&self) -> &str {
+        &self.relation_id
+    }
+}
+
+impl std::fmt::Debug for ScopedObservationAppendPassBinding {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ScopedObservationAppendPassBinding")
+            .field("relation_id", &self.relation_id)
+            .field(
+                "identity_input_names",
+                &self
+                    .identity_inputs
+                    .iter()
+                    .map(ScopedObservationOwnedIdentityInput::name)
+                    .collect::<Vec<_>>(),
+            )
+            .field("has_parent_token", &self.parent_token.is_some())
+            .field("depth", &self.depth)
+            .field("max_bytes", &self.max_bytes)
+            .field(
+                "has_source_timestamp_hint",
+                &self.origin.source_timestamp_hint.is_some(),
+            )
+            .field("force_contract_replay", &self.force_contract_replay)
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum ScopedObservationSourceOwnerRetryPolicyError {
+    #[error("scoped source-owner retry interval is outside the supported bound")]
+    RetryInterval,
+    #[error("scoped source-owner retry attempt limit is outside the supported bound")]
+    AttemptLimit,
+}
+
+/// Bounded retry policy for genuinely transient source/decode failures. Queue
+/// pressure is not timer-retried: it waits for the exact delivery owner to
+/// release capacity. Values remain internal policy, not an RFC performance
+/// gate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScopedObservationSourceOwnerRetryPolicy {
+    initial_retry_delay: Duration,
+    max_retry_delay: Duration,
+    max_transient_attempts: u32,
+}
+
+impl ScopedObservationSourceOwnerRetryPolicy {
+    const MAX_RETRY_DELAY: Duration = Duration::from_secs(60 * 60);
+    const MAX_TRANSIENT_ATTEMPTS: u32 = 32;
+
+    pub fn new(
+        initial_retry_delay: Duration,
+        max_retry_delay: Duration,
+        max_transient_attempts: u32,
+    ) -> Result<Self, ScopedObservationSourceOwnerRetryPolicyError> {
+        if initial_retry_delay.is_zero()
+            || initial_retry_delay > max_retry_delay
+            || max_retry_delay > Self::MAX_RETRY_DELAY
+        {
+            return Err(ScopedObservationSourceOwnerRetryPolicyError::RetryInterval);
+        }
+        if max_transient_attempts == 0 || max_transient_attempts > Self::MAX_TRANSIENT_ATTEMPTS {
+            return Err(ScopedObservationSourceOwnerRetryPolicyError::AttemptLimit);
+        }
+        Ok(Self {
+            initial_retry_delay,
+            max_retry_delay,
+            max_transient_attempts,
+        })
+    }
+
+    fn retry_delay(self, completed_attempts: u32) -> Duration {
+        let exponent = completed_attempts.min(31);
+        self.initial_retry_delay
+            .saturating_mul(1_u32 << exponent)
+            .min(self.max_retry_delay)
+    }
+}
+
+impl Default for ScopedObservationSourceOwnerRetryPolicy {
+    fn default() -> Self {
+        Self {
+            initial_retry_delay: Duration::from_millis(100),
+            max_retry_delay: Duration::from_secs(5),
+            max_transient_attempts: 5,
+        }
+    }
+}
+
 /// One trusted source-owner binding for an exact append relation in a live
 /// poll pass. Native identity values remain borrowed and never enter the
 /// access report or observer envelope.
@@ -6969,6 +7571,88 @@ pub enum ScopedObservationPassExecutionError {
     Offer(#[from] ScopedObservationConsumerOfferError),
     #[error("scoped poll completion failed: {0}")]
     Poll(#[from] ScopedObservationPollError),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ScopedObservationSourceOwnerRunError {
+    #[error("scoped source-owner pass failed: {0}")]
+    Pass(#[source] ScopedObservationPassExecutionError),
+    #[error("scoped source-owner transient retry limit was exhausted after {attempts} attempts")]
+    TransientRetryExhausted {
+        attempts: u32,
+        #[source]
+        last_error: Box<ScopedObservationPassExecutionError>,
+    },
+}
+
+#[derive(Debug)]
+pub enum ScopedObservationSourceOwnerRunExit {
+    Cancelled,
+    Failed(ScopedObservationSourceOwnerRunError),
+}
+
+/// Result of a stopped source owner. Its attachment operation has already
+/// been released, so close can complete even while the caller retains this
+/// value for epoch recovery or diagnostics.
+pub struct ScopedObservationStoppedSourceOwner {
+    active: ScopedObservationEpochState,
+    exit: ScopedObservationSourceOwnerRunExit,
+}
+
+impl ScopedObservationStoppedSourceOwner {
+    pub fn exit(&self) -> &ScopedObservationSourceOwnerRunExit {
+        &self.exit
+    }
+
+    pub fn into_parts(
+        self,
+    ) -> (
+        ScopedObservationEpochState,
+        ScopedObservationSourceOwnerRunExit,
+    ) {
+        (self.active, self.exit)
+    }
+}
+
+fn scoped_source_owner_error_is_delivery_backpressure(
+    error: &ScopedObservationPassExecutionError,
+) -> bool {
+    matches!(
+        error,
+        ScopedObservationPassExecutionError::Offer(ScopedObservationConsumerOfferError::Offer(
+            ScopedProjectionDeliveryError::Delivery(
+                ScopedDeliveryError::SemanticQueueFull
+                    | ScopedDeliveryError::RetainedNativeQueueFull
+                    | ScopedDeliveryError::SourceControlQueueFull
+            )
+        ))
+    )
+}
+
+fn scoped_source_owner_error_is_transient(error: &ScopedObservationPassExecutionError) -> bool {
+    matches!(
+        error,
+        ScopedObservationPassExecutionError::DecodeRetryTransient
+            | ScopedObservationPassExecutionError::Access(
+                ScopedObservationAccessError::Decode(ScopedDecodeFailureClass::Transient)
+                    | ScopedObservationAccessError::Source(
+                        ScopedSourceFailureClass::Unstable
+                            | ScopedSourceFailureClass::Database
+                            | ScopedSourceFailureClass::Io
+                    )
+            )
+    )
+}
+
+fn scoped_source_owner_error_is_cancelled(error: &ScopedObservationPassExecutionError) -> bool {
+    matches!(
+        error,
+        ScopedObservationPassExecutionError::Access(ScopedObservationAccessError::Closed)
+            | ScopedObservationPassExecutionError::Offer(
+                ScopedObservationConsumerOfferError::Closed
+            )
+            | ScopedObservationPassExecutionError::Poll(ScopedObservationPollError::Closed)
+    )
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -7710,6 +8394,105 @@ impl ScopedObservationAccessHost {
             .any(|relation_id| !relation_ids.contains_key(relation_id.as_str()))
         {
             return Err(ScopedObservationPassExecutionError::InvalidRelationSet);
+        }
+        Ok(())
+    }
+
+    fn validate_epoch_source_owner_binding(
+        &self,
+        active: &ScopedObservationEpochState,
+        drain: &ScopedObservationConsumerDrain,
+        bindings: &[ScopedObservationAppendPassBinding],
+    ) -> Result<(), ScopedObservationSourceOwnerBindingError> {
+        if !self.owns_consumer_drain(drain)
+            || !Arc::ptr_eq(&active.attachment_authority, &self.attachment_authority)
+        {
+            return Err(ScopedObservationSourceOwnerBindingError::InvalidEpochState);
+        }
+        if drain.is_closed()
+            || self.state.closed.load(Ordering::Acquire)
+            || self.lifecycle.is_closing()
+        {
+            return Err(ScopedObservationSourceOwnerBindingError::Closed);
+        }
+        let queue_state = drain.delivery_lane().state();
+        if active.root != self.root_identity
+            || active.scope_epoch != queue_state.scope_epoch
+            || active.projection.lifecycle != ScopedProjectionLifecycle::Active
+            || queue_state.continuity != ScopedObservationContinuity::Valid
+            || active.append_objects.len() != self.known_objects.len()
+            || active
+                .append_objects
+                .keys()
+                .any(|relation_id| !self.known_objects.contains_key(relation_id))
+        {
+            return Err(ScopedObservationSourceOwnerBindingError::InvalidEpochState);
+        }
+        if bindings.len() != active.append_objects.len() {
+            return Err(ScopedObservationSourceOwnerBindingError::InvalidRelationSet);
+        }
+        let program = self
+            .authorization
+            .select_scope_program(&self.program_id)
+            .map_err(|_| ScopedObservationSourceOwnerBindingError::AuthorizedProgramUnavailable)?;
+        let plan = AuthorizedScopeAccessPlan::from_authorized_program(program)
+            .map_err(|_| ScopedObservationSourceOwnerBindingError::AuthorizedProgramUnavailable)?;
+        let mut relation_ids = BTreeMap::new();
+        for binding in bindings {
+            let object = active
+                .append_objects
+                .get(binding.relation_id.as_str())
+                .ok_or(ScopedObservationSourceOwnerBindingError::InvalidRelationSet)?;
+            if relation_ids
+                .insert(binding.relation_id.as_str(), ())
+                .is_some()
+            {
+                return Err(ScopedObservationSourceOwnerBindingError::InvalidRelationSet);
+            }
+            let declaration = plan
+                .relation(&binding.relation_id)
+                .ok_or(ScopedObservationSourceOwnerBindingError::InvalidRelationSet)?;
+            if declaration.identity_inputs.len() != binding.identity_inputs.len()
+                || declaration
+                    .identity_inputs
+                    .iter()
+                    .zip(&binding.identity_inputs)
+                    .any(|(expected, actual)| expected != &actual.name)
+            {
+                return Err(ScopedObservationSourceOwnerBindingError::InvalidIdentityInput);
+            }
+            if binding.depth > declaration.bounds.max_depth
+                || binding.max_bytes > declaration.bounds.max_bytes
+            {
+                return Err(ScopedObservationSourceOwnerBindingError::InvalidBounds);
+            }
+            let mut token_components = Vec::with_capacity(binding.identity_inputs.len() * 2);
+            for input in &binding.identity_inputs {
+                token_components.push(input.name.as_bytes());
+                token_components.push(input.value.as_slice());
+            }
+            let object_token =
+                AccessObjectToken::derive(&binding.relation_id, &token_components)
+                    .map_err(|_| ScopedObservationSourceOwnerBindingError::InvalidIdentityInput)?;
+            let expected_access_identity = ScopedAppendAccessIdentity {
+                object_token,
+                parent_token: binding.parent_token,
+                depth: binding.depth,
+                source_instance_id: binding.origin.source_instance_id,
+                stream_id: binding.origin.stream_id,
+                object_id: binding.origin.object_id,
+                media_type: binding.origin.media_type.clone(),
+            };
+            if object.access_identity.as_ref() != Some(&expected_access_identity) {
+                return Err(ScopedObservationSourceOwnerBindingError::AccessIdentityMismatch);
+            }
+        }
+        if active
+            .append_objects
+            .keys()
+            .any(|relation_id| !relation_ids.contains_key(relation_id.as_str()))
+        {
+            return Err(ScopedObservationSourceOwnerBindingError::InvalidRelationSet);
         }
         Ok(())
     }
@@ -8631,7 +9414,8 @@ impl ScopedObservationAccessPass {
         &self,
         driver: &AppendDelimitedFile,
         request: ScopedKnownAppendReadRequest<'_>,
-    ) -> Result<AppendRead, ScopedObservationAccessError> {
+        expected_object_token: Option<AccessObjectToken>,
+    ) -> Result<(AppendRead, AccessObjectToken), ScopedObservationAccessError> {
         if self.state.closed.load(Ordering::Acquire) {
             return Err(ScopedObservationAccessError::Closed);
         }
@@ -8651,6 +9435,14 @@ impl ScopedObservationAccessPass {
             max_bytes: request.max_bytes,
             max_rows: 0,
         })?;
+        let object_token = reservation.object_token();
+        if expected_object_token.is_some_and(|expected| expected != object_token) {
+            reservation.fail_conservative();
+            return Err(ScopedObservationAccessError::InvalidGrant(
+                "known-object identity inputs changed after their first authorized access"
+                    .to_string(),
+            ));
+        }
         if reservation.primitive() != ScopeRelationPrimitive::KnownObject
             || reservation.access_root() != grant.access_root
             || reservation.locator() != grant.locator_id
@@ -8688,7 +9480,7 @@ impl ScopedObservationAccessPass {
                 reservation.complete(*bytes_read, 0, AccessOutcome::Available)?;
             }
         }
-        Ok(read)
+        Ok((read, object_token))
     }
 
     pub fn report(&self) -> ScopeAccessReport {
@@ -9017,6 +9809,7 @@ impl ScopedObservationWatcherOrchestrator {
 /// not own a store, query service, watcher, or public event queue.
 pub struct ScopedKnownAppendObject {
     object_token: u64,
+    access_identity: Option<ScopedAppendAccessIdentity>,
     source: ScopedSourceObjectIdentity,
     relation_id: Option<Arc<str>>,
     lifecycle: ScopedAppendObjectLifecycle,
@@ -9029,6 +9822,17 @@ pub struct ScopedKnownAppendObject {
     presence_state: ScopedAppendPresenceState,
     next_admission_token: u64,
     pending: Option<PendingAppendState>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ScopedAppendAccessIdentity {
+    object_token: AccessObjectToken,
+    parent_token: Option<AccessObjectToken>,
+    depth: u32,
+    source_instance_id: u64,
+    stream_id: u64,
+    object_id: u64,
+    media_type: SourceMediaType,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -9103,6 +9907,7 @@ impl ScopedKnownAppendObject {
         let object_token = next_scoped_object_token()?;
         Ok(Self {
             object_token,
+            access_identity: None,
             source,
             relation_id: None,
             lifecycle: ScopedAppendObjectLifecycle::Active,
@@ -9143,8 +9948,21 @@ impl ScopedKnownAppendObject {
             Some(_) => {}
             None => self.relation_id = Some(Arc::from(request.relation_id)),
         }
+        if self.access_identity.as_ref().is_some_and(|identity| {
+            identity.parent_token != request.parent_token
+                || identity.depth != request.depth
+                || identity.source_instance_id != request.origin.source_instance_id
+                || identity.stream_id != request.origin.stream_id
+                || identity.object_id != request.origin.object_id
+                || identity.media_type != request.origin.media_type
+        }) {
+            return Err(ScopedObservationAccessError::InvalidGrant(
+                "known-object access or source identity changed after its first authorized access"
+                    .to_string(),
+            ));
+        }
         let previous_generation = self.checkpoint.as_ref().map(|value| value.generation);
-        let read = pass.read_known_append(
+        let (read, access_object_token) = pass.read_known_append(
             &self.driver,
             ScopedKnownAppendReadRequest {
                 relation_id: request.relation_id,
@@ -9157,7 +9975,19 @@ impl ScopedKnownAppendObject {
                 origin: request.origin,
                 force_contract_replay: request.force_contract_replay,
             },
+            self.access_identity
+                .as_ref()
+                .map(|identity| identity.object_token),
         )?;
+        self.access_identity = Some(ScopedAppendAccessIdentity {
+            object_token: access_object_token,
+            parent_token: request.parent_token,
+            depth: request.depth,
+            source_instance_id: request.origin.source_instance_id,
+            stream_id: request.origin.stream_id,
+            object_id: request.origin.object_id,
+            media_type: request.origin.media_type.clone(),
+        });
         let (
             reset_before_items,
             presence_change,
@@ -9577,6 +10407,7 @@ impl ScopedKnownAppendObject {
         let replacement_object_token = next_scoped_object_token()?;
         let replacement = Self {
             object_token: replacement_object_token,
+            access_identity: self.access_identity.clone(),
             source: self.source.clone(),
             relation_id: self.relation_id.clone(),
             lifecycle: ScopedAppendObjectLifecycle::Replacement {
@@ -9624,6 +10455,7 @@ impl ScopedKnownAppendObject {
             || replacement.bootstrap_blocked
             || replacement.source != self.source
             || replacement.relation_id != self.relation_id
+            || replacement.access_identity != self.access_identity
         {
             return Err(ScopedObservationAccessError::InvalidObjectLifecycle);
         }
@@ -11960,6 +12792,136 @@ mod projection_tests {
         assert_eq!(policy.retry_delay(2), Duration::from_millis(25));
         assert_eq!(policy.retry_delay(31), Duration::from_millis(25));
         assert_eq!(policy.max_reinstall_attempts(), 4);
+    }
+
+    #[test]
+    fn scoped_source_owner_retry_policy_and_failure_classes_are_bounded() {
+        assert_eq!(
+            ScopedObservationSourceOwnerRetryPolicy::new(
+                Duration::ZERO,
+                Duration::from_millis(1),
+                1,
+            ),
+            Err(ScopedObservationSourceOwnerRetryPolicyError::RetryInterval)
+        );
+        assert_eq!(
+            ScopedObservationSourceOwnerRetryPolicy::new(
+                Duration::from_millis(2),
+                Duration::from_millis(1),
+                1,
+            ),
+            Err(ScopedObservationSourceOwnerRetryPolicyError::RetryInterval)
+        );
+        assert_eq!(
+            ScopedObservationSourceOwnerRetryPolicy::new(
+                Duration::from_millis(1),
+                Duration::from_millis(1),
+                0,
+            ),
+            Err(ScopedObservationSourceOwnerRetryPolicyError::AttemptLimit)
+        );
+        let policy = ScopedObservationSourceOwnerRetryPolicy::new(
+            Duration::from_millis(10),
+            Duration::from_millis(25),
+            4,
+        )
+        .unwrap();
+        assert_eq!(policy.retry_delay(0), Duration::from_millis(10));
+        assert_eq!(policy.retry_delay(1), Duration::from_millis(20));
+        assert_eq!(policy.retry_delay(2), Duration::from_millis(25));
+
+        for delivery_error in [
+            ScopedDeliveryError::SemanticQueueFull,
+            ScopedDeliveryError::RetainedNativeQueueFull,
+            ScopedDeliveryError::SourceControlQueueFull,
+        ] {
+            let error = ScopedObservationPassExecutionError::Offer(
+                ScopedObservationConsumerOfferError::Offer(
+                    ScopedProjectionDeliveryError::Delivery(delivery_error),
+                ),
+            );
+            assert!(scoped_source_owner_error_is_delivery_backpressure(&error));
+            assert!(!scoped_source_owner_error_is_transient(&error));
+            assert!(!scoped_source_owner_error_is_cancelled(&error));
+        }
+        let oversized = ScopedObservationPassExecutionError::Offer(
+            ScopedObservationConsumerOfferError::Offer(ScopedProjectionDeliveryError::Delivery(
+                ScopedDeliveryError::SourceControlBatchTooLarge,
+            )),
+        );
+        assert!(!scoped_source_owner_error_is_delivery_backpressure(
+            &oversized
+        ));
+        let admission_full =
+            ScopedObservationPassExecutionError::Admission(ScopedAdmissionError::DataQueueFull);
+        assert!(!scoped_source_owner_error_is_delivery_backpressure(
+            &admission_full
+        ));
+        assert!(!scoped_source_owner_error_is_transient(&admission_full));
+
+        for transient in [
+            ScopedObservationPassExecutionError::DecodeRetryTransient,
+            ScopedObservationPassExecutionError::Access(ScopedObservationAccessError::Decode(
+                ScopedDecodeFailureClass::Transient,
+            )),
+            ScopedObservationPassExecutionError::Access(ScopedObservationAccessError::Source(
+                ScopedSourceFailureClass::Unstable,
+            )),
+            ScopedObservationPassExecutionError::Access(ScopedObservationAccessError::Source(
+                ScopedSourceFailureClass::Database,
+            )),
+            ScopedObservationPassExecutionError::Access(ScopedObservationAccessError::Source(
+                ScopedSourceFailureClass::Io,
+            )),
+        ] {
+            assert!(scoped_source_owner_error_is_transient(&transient));
+            assert!(!scoped_source_owner_error_is_delivery_backpressure(
+                &transient
+            ));
+        }
+        let cancelled =
+            ScopedObservationPassExecutionError::Offer(ScopedObservationConsumerOfferError::Closed);
+        assert!(scoped_source_owner_error_is_cancelled(&cancelled));
+    }
+
+    #[tokio::test]
+    async fn scoped_delivery_capacity_wakeup_is_retained_and_closes() {
+        let mut delivery = delivery_lane(1, 1);
+        let source = source_identity();
+        let created = ScopedAppendPresenceChange::Created { generation: 1 };
+        delivery
+            .offer(vec![ScopedProjectedObservation::SourcePresence {
+                object_token: OBJECT_TOKEN,
+                source: source.clone(),
+                lane_ordinal: 1,
+                observed_at: 10,
+                phase: ScopedAppendDeliveryPhase::Bootstrap,
+                event_id: source_presence_event_id(&source, created),
+                change: created,
+            }])
+            .unwrap();
+        let waiter = delivery.capacity_waiter();
+        let before = waiter.snapshot();
+        assert_eq!(before.generation, 0);
+        assert!(!before.closed);
+
+        // Release before the future is constructed/first-polled. The retained
+        // generation still makes the waiter complete immediately.
+        assert!(delivery.pop_next().is_some());
+        let released = tokio::time::timeout(
+            Duration::from_secs(1),
+            waiter.wait_after_async(before.generation),
+        )
+        .await
+        .unwrap();
+        assert_eq!(released.generation, 1);
+        assert!(!released.closed);
+
+        let close_generation = released.generation;
+        delivery.discard_for_close();
+        let closed = waiter.wait_after_async(close_generation).await;
+        assert_eq!(closed.generation, close_generation);
+        assert!(closed.closed);
     }
 
     #[test]

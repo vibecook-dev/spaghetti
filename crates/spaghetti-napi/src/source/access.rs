@@ -22,7 +22,7 @@ pub const DEFAULT_ACCESS_TRACE_CAPACITY: usize = 256;
 
 const MAX_RELATION_ID_BYTES: usize = 128;
 const MAX_TRACE_CAPACITY: usize = 16_384;
-const MAX_IDENTITY_VALUE_BYTES: usize = 64 * 1024;
+pub(crate) const MAX_IDENTITY_VALUE_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
