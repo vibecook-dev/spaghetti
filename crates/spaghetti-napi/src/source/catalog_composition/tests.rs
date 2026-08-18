@@ -2,11 +2,48 @@ use std::collections::BTreeMap;
 
 use serde::Serialize;
 
+use crate::adapter::{
+    AuthorizedCatalogAccess, ContractVersionSelection, Sha256Digest,
+    CONTRACT_VERSION_SELECTION_VERSION,
+};
+
 use super::*;
 
 const MEMBER_IDENTITY_CONTRACT: &str = "catalog-session-identity-v1";
 const CANDIDATE_HEAD_BYTES: u64 = 64 * 1024;
 const PLANNING_EVIDENCE_ID: &str = "phase0-catalog-census-2026-08-15";
+
+fn catalog_contract_selection() -> ContractVersionSelection {
+    ContractVersionSelection {
+        selection_contract_version: CONTRACT_VERSION_SELECTION_VERSION,
+        model_major: 1,
+        external_entity_reference_version: 1,
+        semantic_revision_reference_version: 1,
+        coverage_contract_version: 1,
+        fact_family_versions: BTreeMap::from([
+            ("catalog.project".to_owned(), 1),
+            ("catalog.session".to_owned(), 1),
+        ]),
+        query_pack_version: Some(1),
+        observation_contract_version: None,
+    }
+}
+
+fn catalog_access<'a>(
+    adapter_id: &'a str,
+    support_release_id: &'a str,
+    source_declaration: &[u8],
+    support_release: &[u8],
+    selection: &'a ContractVersionSelection,
+) -> AuthorizedCatalogAccess<'a> {
+    AuthorizedCatalogAccess::fixture(
+        adapter_id,
+        support_release_id,
+        Sha256Digest::of(support_release),
+        Sha256Digest::of(source_declaration),
+        selection,
+    )
+}
 
 fn planned_composition(
     adapter_id: &str,
@@ -563,36 +600,91 @@ fn planned_compositions_bind_existing_decoder_and_disposition_axes_without_promo
 }
 
 #[test]
-fn only_an_exact_promoted_binding_can_authorize_execution() {
-    let planned = claude_composition();
-    let promoted_binding = CatalogPromotedBinding::fixture(
-        b"claude-code/catalog-source-declaration/v1",
-        b"claude-code/catalog-support-release/v1",
+fn only_an_exact_rust_authorization_can_execute_a_promoted_composition() {
+    const ADAPTER_ID: &str = "fixture-agent";
+    const SUPPORT_RELEASE_ID: &str = "fixture-catalog-support-v1";
+    const SOURCE_DECLARATION_ID: &str = "fixture-catalog-sources-v1";
+    const SOURCE_DECLARATION: &[u8] = b"fixture/catalog-source-declaration/v1";
+    const SUPPORT_RELEASE: &[u8] = b"fixture/catalog-support-release/v1";
+
+    let planned = planned_composition(
+        ADAPTER_ID,
+        SUPPORT_RELEASE_ID,
+        SOURCE_DECLARATION_ID,
+        claude_components(),
+    )
+    .unwrap();
+    let selection = catalog_contract_selection();
+    let access = catalog_access(
+        ADAPTER_ID,
+        SUPPORT_RELEASE_ID,
+        SOURCE_DECLARATION,
+        SUPPORT_RELEASE,
+        &selection,
     );
-    assert!(planned.authorize_execution(promoted_binding).is_err());
+    assert!(planned.authorize_execution(access).is_err());
+
+    let promoted_binding = CatalogPromotedBinding::fixture(SOURCE_DECLARATION, SUPPORT_RELEASE);
 
     let promoted = CatalogSourceComposition::new_promoted(
-        "claude-code",
-        "claude-code.catalog-candidate-2026-08-15",
-        "claude-code.catalog-sources-v1",
+        ADAPTER_ID,
+        SUPPORT_RELEASE_ID,
+        SOURCE_DECLARATION_ID,
         promoted_binding,
         claude_components(),
     )
     .unwrap();
     assert_ne!(promoted.composition_id, planned.composition_id);
-    assert_eq!(
-        promoted
-            .authorize_execution(promoted_binding)
-            .unwrap()
-            .composition_id(),
-        promoted.composition_id
+    let executable = promoted
+        .authorize_execution(catalog_access(
+            ADAPTER_ID,
+            SUPPORT_RELEASE_ID,
+            SOURCE_DECLARATION,
+            SUPPORT_RELEASE,
+            &selection,
+        ))
+        .unwrap();
+    assert_eq!(executable.composition_id(), promoted.composition_id);
+    assert_eq!(executable.contract_selection(), &selection);
+
+    let drifted_adapter = catalog_access(
+        "other-agent",
+        SUPPORT_RELEASE_ID,
+        SOURCE_DECLARATION,
+        SUPPORT_RELEASE,
+        &selection,
+    );
+    assert!(promoted.authorize_execution(drifted_adapter).is_err());
+
+    let drifted_release = catalog_access(
+        ADAPTER_ID,
+        "claude-code.other-support-v1",
+        SOURCE_DECLARATION,
+        SUPPORT_RELEASE,
+        &selection,
+    );
+    assert!(promoted.authorize_execution(drifted_release).is_err());
+
+    let drifted_declaration = catalog_access(
+        ADAPTER_ID,
+        SUPPORT_RELEASE_ID,
+        b"other/source-declaration",
+        SUPPORT_RELEASE,
+        &selection,
+    );
+    assert!(promoted.authorize_execution(drifted_declaration).is_err());
+
+    let drifted_release_digest = catalog_access(
+        ADAPTER_ID,
+        SUPPORT_RELEASE_ID,
+        SOURCE_DECLARATION,
+        b"other/support-release",
+        &selection,
     );
     assert!(promoted
-        .authorize_execution(CatalogPromotedBinding::fixture(
-            b"other/source-declaration",
-            b"claude-code/catalog-support-release/v1",
-        ))
+        .authorize_execution(drifted_release_digest)
         .is_err());
+
     assert!(CatalogPromotedBinding::from_digests([0; DIGEST_BYTES], [1; DIGEST_BYTES]).is_err());
 }
 

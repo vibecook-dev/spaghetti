@@ -10,6 +10,10 @@ use std::fmt;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
 use serde::{Serialize, Serializer};
+#[cfg(test)]
+use sha2::{Digest as _, Sha256};
+
+use crate::adapter::{AuthorizedCatalogAccess, ContractVersionSelection};
 
 pub(crate) const CATALOG_SOURCE_COMPOSITION_CONTRACT_VERSION: u32 = 1;
 pub(crate) const CATALOG_MEMBERSHIP_CONTRACT_VERSION: u32 = 1;
@@ -236,11 +240,11 @@ impl CatalogPromotedBinding {
 
     #[cfg(test)]
     fn fixture(source_declaration: &[u8], support_release: &[u8]) -> Self {
-        Self::from_digests(
-            *blake3::hash(source_declaration).as_bytes(),
-            *blake3::hash(support_release).as_bytes(),
-        )
-        .expect("fixture binding digests are nonzero")
+        let source_declaration_digest: [u8; DIGEST_BYTES] =
+            Sha256::digest(source_declaration).into();
+        let support_release_digest: [u8; DIGEST_BYTES] = Sha256::digest(support_release).into();
+        Self::from_digests(source_declaration_digest, support_release_digest)
+            .expect("fixture binding digests are nonzero")
     }
 
     fn validate(self) -> Result<(), CatalogCompositionError> {
@@ -940,28 +944,51 @@ impl CatalogSourceComposition {
             .map(|index| &self.components[index])
     }
 
-    pub(crate) fn authorize_execution(
-        &self,
-        expected_binding: CatalogPromotedBinding,
-    ) -> Result<CatalogExecutableComposition<'_>, CatalogCompositionError> {
+    pub(crate) fn authorize_execution<'composition, 'authorization>(
+        &'composition self,
+        authorization: AuthorizedCatalogAccess<'authorization>,
+    ) -> Result<CatalogExecutableComposition<'composition, 'authorization>, CatalogCompositionError>
+    {
         self.validate()?;
+        if self.adapter_id != authorization.adapter_id() {
+            return Err(CatalogCompositionError::invalid(
+                "catalog authorization belongs to another adapter",
+            ));
+        }
+        if self.support_release_id != authorization.support_release_id() {
+            return Err(CatalogCompositionError::invalid(
+                "catalog authorization belongs to another support release",
+            ));
+        }
+        let expected_binding = CatalogPromotedBinding::from_digests(
+            *authorization.source_declaration_digest().as_bytes(),
+            *authorization.support_release_digest().as_bytes(),
+        )?;
         expected_binding.validate()?;
         if self.binding.promoted_binding() != Some(expected_binding) {
             return Err(CatalogCompositionError::invalid(
-                "catalog composition is planned/unbound or does not match the promoted declaration binding",
+                "catalog composition is planned/unbound or does not match the authorized promoted declaration binding",
             ));
         }
-        Ok(CatalogExecutableComposition { composition: self })
+        Ok(CatalogExecutableComposition {
+            composition: self,
+            authorization,
+        })
     }
 }
 
-pub(crate) struct CatalogExecutableComposition<'a> {
-    composition: &'a CatalogSourceComposition,
+pub(crate) struct CatalogExecutableComposition<'composition, 'authorization> {
+    composition: &'composition CatalogSourceComposition,
+    authorization: AuthorizedCatalogAccess<'authorization>,
 }
 
-impl CatalogExecutableComposition<'_> {
+impl CatalogExecutableComposition<'_, '_> {
     pub(crate) fn composition_id(&self) -> CatalogCompositionId {
         self.composition.composition_id
+    }
+
+    pub(crate) fn contract_selection(&self) -> &ContractVersionSelection {
+        self.authorization.contracts()
     }
 }
 

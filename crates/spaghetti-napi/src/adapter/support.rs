@@ -1330,6 +1330,7 @@ impl SupportCatalog {
                 contracts,
                 adapter_id: adapter_id.to_string(),
                 support_release_digest: release.release_digest,
+                source_declaration_digest: release.adapter_binding.source_declaration_digest,
                 scope_program_digest: release.adapter_binding.scope_program_digest,
                 scope_programs: release.scope_programs.clone(),
             },
@@ -1557,6 +1558,7 @@ pub struct TypedAccessAuthorization {
     contracts: ContractVersionSelection,
     adapter_id: String,
     support_release_digest: Sha256Digest,
+    source_declaration_digest: Sha256Digest,
     scope_program_digest: Sha256Digest,
     scope_programs: ScopeProgramManifest,
 }
@@ -1568,6 +1570,36 @@ impl TypedAccessAuthorization {
 
     pub fn contracts(&self) -> &ContractVersionSelection {
         &self.contracts
+    }
+
+    /// Select the exact verified catalog authorization carried by this typed
+    /// access token. The returned proof is borrowed and cannot be serialized
+    /// or reconstructed from digest strings by a source runtime.
+    pub fn select_catalog_access(
+        &self,
+    ) -> Result<AuthorizedCatalogAccess<'_>, SupportContractError> {
+        if self.operation.operation != SupportOperation::CatalogDiscovery {
+            return Err(SupportContractError::invalid(
+                "typed authorization does not permit catalog discovery",
+            ));
+        }
+        if self.contracts.query_pack_version.is_none() {
+            return Err(SupportContractError::invalid(
+                "catalog discovery requires a negotiated query-pack contract",
+            ));
+        }
+        let support_release_id = self.operation.support_release_id().ok_or_else(|| {
+            SupportContractError::invalid(
+                "catalog authorization does not select a promoted support release",
+            )
+        })?;
+        Ok(AuthorizedCatalogAccess {
+            adapter_id: &self.adapter_id,
+            support_release_id,
+            support_release_digest: self.support_release_digest,
+            source_declaration_digest: self.source_declaration_digest,
+            contracts: &self.contracts,
+        })
     }
 
     pub fn select_scope_program(
@@ -1595,6 +1627,60 @@ impl TypedAccessAuthorization {
             authorization: self,
             program,
         })
+    }
+}
+
+/// Borrowed proof that Rust support selection authorized catalog discovery
+/// against one exact promoted release and negotiated contract selection.
+///
+/// This type deliberately has no serde implementation or public constructor.
+/// It is an in-process source-access capability, not a transferable digest or
+/// portable decision object.
+#[derive(Debug)]
+pub struct AuthorizedCatalogAccess<'a> {
+    adapter_id: &'a str,
+    support_release_id: &'a str,
+    support_release_digest: Sha256Digest,
+    source_declaration_digest: Sha256Digest,
+    contracts: &'a ContractVersionSelection,
+}
+
+impl<'a> AuthorizedCatalogAccess<'a> {
+    pub fn adapter_id(&self) -> &str {
+        self.adapter_id
+    }
+
+    pub fn support_release_id(&self) -> &str {
+        self.support_release_id
+    }
+
+    pub fn support_release_digest(&self) -> Sha256Digest {
+        self.support_release_digest
+    }
+
+    pub fn source_declaration_digest(&self) -> Sha256Digest {
+        self.source_declaration_digest
+    }
+
+    pub fn contracts(&self) -> &ContractVersionSelection {
+        self.contracts
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fixture(
+        adapter_id: &'a str,
+        support_release_id: &'a str,
+        support_release_digest: Sha256Digest,
+        source_declaration_digest: Sha256Digest,
+        contracts: &'a ContractVersionSelection,
+    ) -> Self {
+        Self {
+            adapter_id,
+            support_release_id,
+            support_release_digest,
+            source_declaration_digest,
+            contracts,
+        }
     }
 }
 
@@ -1799,7 +1885,7 @@ mod tests {
             .authorize_typed_access(
                 AdapterSupportRegistration::new("candidate-agent", &binding, &scope_programs),
                 &candidate_probe.probe,
-                SupportOperation::DurableHistoryRuntime,
+                SupportOperation::CatalogDiscovery,
                 &malformed_request,
                 &fixture.contract_offer,
             )
@@ -1836,7 +1922,56 @@ mod tests {
             durable.operation().support_release_id(),
             Some("fixture-support-v1")
         );
+        assert!(durable.select_catalog_access().is_err());
         assert!(durable.select_scope_program("observe-session").is_err());
+
+        let (catalog_decision, catalog_authorization) = catalog
+            .authorize_typed_access(
+                AdapterSupportRegistration::new("fixture-agent", &binding, &scope_programs),
+                &exact.probe,
+                SupportOperation::CatalogDiscovery,
+                &fixture.contract_request,
+                &fixture.contract_offer,
+            )
+            .unwrap();
+        assert_eq!(
+            catalog_decision.compatibility_class,
+            CompatibilityClass::ExactSupported
+        );
+        let catalog_access = catalog_authorization.select_catalog_access().unwrap();
+        assert_eq!(catalog_access.adapter_id(), "fixture-agent");
+        assert_eq!(catalog_access.support_release_id(), "fixture-support-v1");
+        assert_eq!(
+            catalog_access.support_release_digest(),
+            Sha256Digest::of(b"fixture-support-v1")
+        );
+        assert_eq!(
+            catalog_access.source_declaration_digest(),
+            binding.source_declaration_digest()
+        );
+        assert_eq!(
+            catalog_access.contracts(),
+            &fixture.expected_contract_selection
+        );
+        assert!(catalog_authorization
+            .select_scope_program("observe-session")
+            .is_err());
+
+        let mut no_query_pack = fixture.contract_request.clone();
+        no_query_pack.query_pack_versions = None;
+        let (_, no_query_pack_authorization) = catalog
+            .authorize_typed_access(
+                AdapterSupportRegistration::new("fixture-agent", &binding, &scope_programs),
+                &exact.probe,
+                SupportOperation::CatalogDiscovery,
+                &no_query_pack,
+                &fixture.contract_offer,
+            )
+            .unwrap();
+        let error = no_query_pack_authorization
+            .select_catalog_access()
+            .unwrap_err();
+        assert!(error.to_string().contains("query-pack"));
 
         let (_, scoped) = catalog
             .authorize_typed_access(
@@ -1851,20 +1986,42 @@ mod tests {
         assert_eq!(program.adapter_id(), "fixture-agent");
         assert_eq!(program.support_release_id(), "fixture-support-v1");
         assert_eq!(program.observation_contract_version(), 1);
+        assert!(scoped.select_catalog_access().is_err());
         assert!(scoped.select_scope_program("unknown-program").is_err());
 
-        let forward = fixture
+        let forward_case = fixture
             .runtime_cases
             .iter()
             .find(|case| case.name == "forward-catalog")
             .unwrap();
-        let forward = classify_runtime_support(&forward.probe, &fixture.releases).unwrap();
-        assert!(forward
+        let forward_decision =
+            classify_runtime_support(&forward_case.probe, &fixture.releases).unwrap();
+        assert!(forward_decision
             .authorize(SupportOperation::DurableHistoryRuntime)
             .is_err());
-        assert!(forward
+        assert!(forward_decision
             .authorize(SupportOperation::CatalogDiscovery)
             .is_ok());
+        let (forward_decision, forward_authorization) = catalog
+            .authorize_typed_access(
+                AdapterSupportRegistration::new("fixture-agent", &binding, &scope_programs),
+                &forward_case.probe,
+                SupportOperation::CatalogDiscovery,
+                &fixture.contract_request,
+                &fixture.contract_offer,
+            )
+            .unwrap();
+        assert_eq!(
+            forward_decision.compatibility_class,
+            CompatibilityClass::RecognizedUnverified
+        );
+        let forward_access = forward_authorization.select_catalog_access().unwrap();
+        assert_eq!(forward_access.adapter_id(), "fixture-agent");
+        assert_eq!(forward_access.support_release_id(), "fixture-support-v1");
+        assert_eq!(
+            forward_access.contracts(),
+            &fixture.expected_contract_selection
+        );
 
         let restricted = fixture
             .runtime_cases
