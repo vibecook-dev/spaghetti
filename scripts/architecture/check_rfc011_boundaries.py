@@ -422,6 +422,9 @@ def discover_rfc012_scoped_host_boundary_violations() -> set[str]:
         "pub fn contract_selection(&self) -> &ObservationContractSelection",
         "observation_capabilities: ObservationCapabilities",
         "pub fn capabilities(&self) -> &ObservationCapabilities",
+        "pub contract_selection: ObservationContractSelection",
+        "contract_version: self.contract_selection.envelope_contract_version",
+        "EventFamilyNotSelected",
     )
     if any(binding not in scoped_text for binding in required_observation_bindings):
         found.add(f"{relative}#missing-observation-contract-binding")

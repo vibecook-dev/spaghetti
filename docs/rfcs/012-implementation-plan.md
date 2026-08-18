@@ -1595,6 +1595,15 @@ Current landing status (2026-08-18):
   independently exercises exact, range-degraded, and unselected-family parsing
   in portable TypeScript. The report is retained on the crate-private
   attachment; no N-API observer transport lands in this slice; and
+- the internal consumer envelope mapper now retains that exact negotiated
+  selection rather than reconstructing a global version. The envelope's
+  `contract_version` comes from the selected envelope axis, the delivered event
+  must match the independently selected event axis, and a typed usage revision
+  is rejected unless `runtime.usage-v2` at its exact family version belongs to
+  the attachment selection. The full selection is retained beside every mapped
+  envelope for the forthcoming contextual wire parser. Lifecycle versioning
+  remains a separate selected axis; this correction does not yet freeze or
+  expose the portable event/envelope union; and
 - the architecture checker forbids store/query/N-API/concrete-adapter imports
   and premature native public export from the provisional composition and
   negotiation roots, while keeping the portable negotiation graph contract-only.

@@ -1868,7 +1868,10 @@ pub enum ScopedObservationEvent {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScopedObservationEnvelope {
+    /// Selected envelope representation version. Event and lifecycle versions
+    /// remain distinct axes in `contract_selection`.
     pub contract_version: u32,
+    pub contract_selection: ObservationContractSelection,
     pub observer_sequence: u64,
     pub scope_epoch: u64,
     pub event_id: ScopedObservationEventId,
@@ -5203,6 +5206,8 @@ pub enum ScopedEnvelopeError {
     RootSourceMismatch,
     #[error("scoped typed event does not belong to the observer root session")]
     RootSessionMismatch,
+    #[error("scoped typed event family was not selected for this attachment")]
+    EventFamilyNotSelected,
     #[error("scoped delivered source occurrence is malformed")]
     InvalidSourceOccurrence,
 }
@@ -5212,18 +5217,25 @@ pub enum ScopedEnvelopeError {
 #[derive(Debug, Clone)]
 pub struct ScopedObservationEnvelopeMapper {
     root: ScopedObservationRootIdentity,
+    contract_selection: ObservationContractSelection,
 }
 
 impl ScopedObservationEnvelopeMapper {
-    fn new(root: ScopedObservationRootIdentity) -> Self {
-        Self { root }
+    fn new(
+        root: ScopedObservationRootIdentity,
+        contract_selection: ObservationContractSelection,
+    ) -> Self {
+        Self {
+            root,
+            contract_selection,
+        }
     }
 
     pub fn map(
         &self,
         delivered: ScopedDeliveredObservation,
     ) -> Result<ScopedObservationEnvelope, ScopedEnvelopeError> {
-        if delivered.event_contract_version != SCOPED_OBSERVATION_EVENT_CONTRACT_VERSION
+        if delivered.event_contract_version != self.contract_selection.event_contract_version
             || delivered.observer_sequence == 0
             || delivered.scope_epoch == 0
             || delivered.event_id != delivered.event.event_id()
@@ -5237,7 +5249,6 @@ impl ScopedObservationEnvelopeMapper {
             return Err(ScopedEnvelopeError::RootSourceMismatch);
         }
 
-        let contract_version = delivered.event_contract_version;
         let observer_sequence = delivered.observer_sequence;
         let scope_epoch = delivered.scope_epoch;
         let event_id = delivered.event_id;
@@ -5335,6 +5346,15 @@ impl ScopedObservationEnvelopeMapper {
                 }
             }
             ScopedProjectedObservation::UsageV2 { event, .. } => {
+                if self
+                    .contract_selection
+                    .contract_versions
+                    .fact_family_versions
+                    .get("runtime.usage-v2")
+                    != Some(&RUNTIME_USAGE_V2_FACT_FAMILY_CONTRACT_VERSION)
+                {
+                    return Err(ScopedEnvelopeError::EventFamilyNotSelected);
+                }
                 if semantic_revision_ref != Some(event.semantic_revision_ref) {
                     return Err(ScopedEnvelopeError::DeliveryMismatch);
                 }
@@ -5559,7 +5579,8 @@ impl ScopedObservationEnvelopeMapper {
             derived_from_revision_refs: Vec::new(),
         };
         Ok(ScopedObservationEnvelope {
-            contract_version,
+            contract_version: self.contract_selection.envelope_contract_version,
+            contract_selection: self.contract_selection.clone(),
             observer_sequence,
             scope_epoch,
             event_id,
@@ -9503,7 +9524,10 @@ impl ScopedObservationAccessHost {
 
     #[cfg(test)]
     pub fn envelope_mapper(&self) -> ScopedObservationEnvelopeMapper {
-        ScopedObservationEnvelopeMapper::new(self.root_identity.clone())
+        ScopedObservationEnvelopeMapper::new(
+            self.root_identity.clone(),
+            self.observation_contract.clone(),
+        )
     }
 
     /// Construct the attachment's sole consumer-ready event drain together with
@@ -9518,7 +9542,10 @@ impl ScopedObservationAccessHost {
             return Err(ScopedObservationOpenDrainError::Closed);
         }
         let mut drain = ScopedObservationConsumerDrain::new(
-            ScopedObservationEnvelopeMapper::new(self.root_identity.clone()),
+            ScopedObservationEnvelopeMapper::new(
+                self.root_identity.clone(),
+                self.observation_contract.clone(),
+            ),
             Arc::clone(&self.attachment_authority),
             Arc::clone(&self.lifecycle),
             limits,
@@ -12782,15 +12809,62 @@ fn scoped_source_owner_error_is_transient(error: &ScopedObservationPassExecution
 #[cfg(test)]
 mod projection_tests {
     use crate::adapter::{
-        ContractCompleteness, NativeIdentity, QualifiedTimestamp, QualifiedValue,
-        QualifiedValueQuality, TimestampQuality, UsageBucketsV2, UsageQualifiedValue,
-        UsageResponseIdentity, UsageValueAuthority, UsageValueProvenance,
+        ContractCompleteness, ContractVersionOffer, ContractVersionRequest, NativeIdentity,
+        QualifiedTimestamp, QualifiedValue, QualifiedValueQuality, TimestampQuality,
+        UsageBucketsV2, UsageQualifiedValue, UsageResponseIdentity, UsageValueAuthority,
+        UsageValueProvenance,
     };
     use crate::source::RecordOrigin;
 
     use super::*;
 
     const OBJECT_TOKEN: u64 = 41;
+
+    fn observation_contract_selection_for(fact_family: &str) -> ObservationContractSelection {
+        let requested_families = BTreeMap::from([(fact_family.to_string(), vec![1])]);
+        let offered_families = requested_families.clone();
+        let request = ObservationContractRequest::new(
+            ContractVersionRequest {
+                selection_contract_version: 1,
+                model_major: 1,
+                external_entity_reference_version: 1,
+                semantic_revision_reference_version: 1,
+                coverage_contract_versions: vec![1],
+                fact_family_versions: requested_families,
+                query_pack_versions: None,
+                observation_contract_versions: Some(vec![1]),
+            },
+            vec![1],
+            vec![1],
+            vec![1],
+        )
+        .unwrap();
+        let offer = ObservationContractOffer::new(
+            ContractVersionOffer {
+                selection_contract_version: 1,
+                model_major: 1,
+                external_entity_reference_versions: vec![1],
+                semantic_revision_reference_versions: vec![1],
+                coverage_contract_versions: vec![1],
+                fact_family_versions: offered_families,
+                query_pack_versions: Vec::new(),
+                observation_contract_versions: vec![1],
+            },
+            vec![1],
+            vec![1],
+            vec![1],
+        )
+        .unwrap();
+        negotiate_observation_contract(&request, &offer).unwrap()
+    }
+
+    fn observation_contract_selection() -> ObservationContractSelection {
+        observation_contract_selection_for("runtime.usage-v2")
+    }
+
+    fn envelope_mapper(root: ScopedObservationRootIdentity) -> ScopedObservationEnvelopeMapper {
+        ScopedObservationEnvelopeMapper::new(root, observation_contract_selection())
+    }
 
     fn semantic_context() -> FactSemanticContext {
         FactSemanticContext::new(
@@ -13058,7 +13132,7 @@ mod projection_tests {
     ) -> ScopedObservationConsumerDrain {
         let lifecycle = Arc::new(ScopedObservationAttachmentLifecycle::default());
         let mut drain = ScopedObservationConsumerDrain::new(
-            ScopedObservationEnvelopeMapper::new(root),
+            envelope_mapper(root),
             Arc::new(ScopedObservationAttachmentAuthority),
             Arc::clone(&lifecycle),
             ScopedObservationDeliveryLimits {
@@ -13157,7 +13231,8 @@ mod projection_tests {
     #[test]
     fn scoped_envelope_mapper_routes_typed_usage_without_exposing_internal_ordinals() {
         let root = root_identity();
-        let mapper = ScopedObservationEnvelopeMapper::new(root.clone());
+        let selection = observation_contract_selection();
+        let mapper = ScopedObservationEnvelopeMapper::new(root.clone(), selection.clone());
         let record = record(3, 10, 25);
         let frame = decoded_frame(
             7,
@@ -13172,12 +13247,27 @@ mod projection_tests {
         let delivered = delivery.pop_next().unwrap();
         let expected_event_id = delivered.event_id;
         let expected_semantic_ref = delivered.semantic_revision_ref;
+        let mut wrong_event_contract = delivered.clone();
+        wrong_event_contract.event_contract_version += 1;
+        assert_eq!(
+            mapper.map(wrong_event_contract),
+            Err(ScopedEnvelopeError::DeliveryMismatch)
+        );
+        let unselected_mapper = ScopedObservationEnvelopeMapper::new(
+            root.clone(),
+            observation_contract_selection_for("runtime.actor-run"),
+        );
+        assert_eq!(
+            unselected_mapper.map(delivered.clone()),
+            Err(ScopedEnvelopeError::EventFamilyNotSelected)
+        );
         let envelope = mapper.map(delivered).unwrap();
 
         assert_eq!(
             envelope.contract_version,
-            SCOPED_OBSERVATION_EVENT_CONTRACT_VERSION
+            selection.envelope_contract_version
         );
+        assert_eq!(envelope.contract_selection, selection);
         assert_eq!(envelope.observer_sequence, 1);
         assert_eq!(envelope.scope_epoch, SCOPED_INITIAL_SCOPE_EPOCH);
         assert_eq!(envelope.event_id, expected_event_id);
@@ -13249,7 +13339,7 @@ mod projection_tests {
     #[test]
     fn scoped_envelope_mapper_marks_controls_as_fallback_and_retractions_with_control_time() {
         let root = root_identity();
-        let mapper = ScopedObservationEnvelopeMapper::new(root.clone());
+        let mapper = envelope_mapper(root.clone());
         let record = record_with_observed_at(1, 0, 10, 44);
         let frame = decoded_frame(
             1,
@@ -13326,7 +13416,7 @@ mod projection_tests {
     #[test]
     fn scoped_envelope_mapper_rejects_cross_root_typed_session() {
         let root = root_identity();
-        let mapper = ScopedObservationEnvelopeMapper::new(root);
+        let mapper = envelope_mapper(root);
         let record = record(1, 0, 10);
         let frame = decoded_frame(
             1,
@@ -13987,7 +14077,7 @@ mod projection_tests {
     #[test]
     fn scoped_resync_required_invalidates_backlog_and_delivers_next() {
         let root = root_identity();
-        let mapper = ScopedObservationEnvelopeMapper::new(root.clone());
+        let mapper = envelope_mapper(root.clone());
         let bootstrap_record = record(1, 0, 10);
         let bootstrap_frame = decoded_frame(
             1,
@@ -14219,7 +14309,7 @@ mod projection_tests {
     #[test]
     fn scoped_observer_failure_supersedes_backlog_and_is_terminal() {
         let root = root_identity();
-        let mapper = ScopedObservationEnvelopeMapper::new(root.clone());
+        let mapper = envelope_mapper(root.clone());
         let mut delivery = delivery_lane(2, 2);
         let watermark = ScopedObservationWatermarkCore {
             root: root.clone(),
@@ -14879,9 +14969,7 @@ mod projection_tests {
         let completed = delivery.pop_next().unwrap();
         assert_eq!(completed.scope_epoch, 2);
         assert_eq!(completed.observer_sequence, 5);
-        let completed_envelope = ScopedObservationEnvelopeMapper::new(root.clone())
-            .map(completed)
-            .unwrap();
+        let completed_envelope = envelope_mapper(root.clone()).map(completed).unwrap();
         assert!(matches!(
             completed_envelope.event,
             ScopedObservationEvent::ObserverResyncComplete {
@@ -14894,7 +14982,7 @@ mod projection_tests {
     #[test]
     fn scoped_reoverflow_discards_incomplete_stage_and_requires_a_fresh_epoch() {
         let root = root_identity();
-        let mapper = ScopedObservationEnvelopeMapper::new(root.clone());
+        let mapper = envelope_mapper(root.clone());
         let mut active = sink(8);
         let active_record = record(1, 0, 10);
         let active_frame = decoded_frame(
