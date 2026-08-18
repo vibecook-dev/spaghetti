@@ -801,8 +801,9 @@ proves rollback at every precommit seam and durable idempotency after commit.
 This slice itself cannot accept or synthesize coverage, reducer rows, complete
 or degraded readiness, snapshot IDs, last-complete state, retention,
 pagination, or public query authority. The later third slice now supplies the
-initial atomic publication, and the fourth slice supplies the first private
-retained-page reader.
+initial atomic publication, the fourth slice supplies the first private
+retained-page reader, and the fifth slice supplies checked retained identity
+resolution.
 
 The second bounded B3 slice (`e65a9fd`) adds a store-free, contract-only
 initial-publication assembly envelope. It consumes exact complete Library
@@ -857,9 +858,25 @@ query-only while unrelated commits advance. Projection accepts only a
 WITHHELD policy token bound to the exact Library plan and selection, so native
 and policy-sensitive values cannot be disclosed. An absent snapshot remains an
 internal not-retained error rather than a fabricated `SnapshotExpired` claim.
-Public N-API/SDK exposure, caller-authorized local policy views, richer
-filters/sorts, external-resolution execution, refresh, snapshot retention, and
-expiration authority remain open.
+At that landing, public N-API/SDK exposure, caller-authorized local policy
+views, richer filters/sorts, external-resolution execution, refresh, snapshot
+retention, and expiration authority remained open.
+
+The fifth bounded B3 slice (`fa1eb64`) extends Ready restart to strictly decode
+and reconstruct every source, member-binding, reducer, tombstone, project, and
+session frame; reproduce the exact reducer, source coverage, and publication
+revisions; and retain a privacy-minimal lifecycle index. Its crate-private
+WITHHELD-only resolver validates the exact caller-held snapshot, full
+negotiated selection, policy binding, and restart-authenticated publication
+identity before returning a committed live row or a tombstoned, superseded, or
+typed-unknown result. Tombstone and replacement provenance is canonical and
+bounded, semantic drift cannot be hidden behind coordinated frame-digest
+rewrites, and a file-backed close/reopen test proves Tombstoned,
+Superseded-to-exact-target, and replacement-Live resolution from durable state.
+This slice adds no schema writes, public N-API/SDK surface, local-sensitive
+policy view, refresh/degraded lineage, retention/expiration authority, or
+richer filter/sort vocabulary. Those remain the next exposure and lifecycle
+gates.
 
 ### B4. Progressive host and UX
 
@@ -1907,7 +1924,6 @@ usage-v2,
 complete multi-family replacement manifests, whole-scope discovery and source
 state beyond the current exact append-object set, remaining portable-host
 wiring and policy calibration, dynamic/non-append replacement composition,
-plus higher-level re-overflow retry orchestration,
 artifact mediation and the public close-method transport,
 the trusted native version-probe/identity-input drivers, and the complete
 public request are not yet implemented. The internal offered and applied
@@ -2107,9 +2123,20 @@ replacement, an unaffected sibling remains projected, and the rebound epoch
 continues to produce complete polls without failing the observer. The portable
 Rust and TypeScript source-envelope parsers accept object errors only in
 `Live` or `Correction`, never `Bootstrap`, and preserve the exact
-retry/provenance contract. Dynamic discovery, non-append source participants,
-the public host/SDK transport, and calibrated watcher/replay policy remain
-open.
+retry/provenance contract. The following D3 slice (`8f396eb`) closes automatic
+replacement re-overflow at every post-replay ownership boundary. An exact
+persisted-state proof now binds the attempted epoch, declared root, invalidated
+epoch, current bootstrap/resync baseline digest, and baseline scope epoch;
+re-overflow during staging, source-owner binding, or final watcher/source
+pairing discards the failed stage and retries on a strictly newer epoch instead
+of publishing `observer.failed`. The handoff recovers each non-cloneable owner
+only for its exact race error, retains queued poll demand and watcher
+supervision, and later polls and closes normally. Deterministic boundary hooks
+exercise both bind races and retry exhaustion without losing the last valid
+epoch. Dynamic discovery, non-append source participants, the public host/SDK
+transport, and calibrated watcher/replay policy remain open; repeated
+re-overflow still recreates the watcher recovery future, so retaining its
+cumulative reinstall/backoff budget is a later hardening item.
 
 ### D4. SDK and Chopsticks migration
 
