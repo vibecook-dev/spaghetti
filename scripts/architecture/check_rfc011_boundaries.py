@@ -476,6 +476,29 @@ def discover_rfc012_scoped_host_boundary_violations() -> set[str]:
     )
     if any(binding not in close_wire_text for binding in required_close_wire_bindings):
         found.add(f"{relative}#missing-attachment-bound-close-contract")
+    artifact_wire = scoped_dir / "artifact_wire.rs"
+    artifact_wire_text = (
+        production_rust_text(artifact_wire)
+        if artifact_wire in production_scoped_paths
+        else ""
+    )
+    required_artifact_wire_bindings = (
+        "pub(crate) struct ScopedArtifactReadCommand",
+        "pub(crate) enum ScopedArtifactReadOutcome",
+        "prepare_portable_artifact_read(",
+        "validate_portable_artifact_command(",
+        "pub(crate) fn context_wire(&self) -> ScopedArtifactReadContextWire",
+        "from_wire_value_for_command(",
+        "expected: &ScopedArtifactReadCommand",
+        "Arc::ptr_eq(&self.attachment_authority",
+        "ScopedArtifactLocatorDisclosureWire::Withheld",
+        "MAX_INLINE_ARTIFACT_BYTES",
+    )
+    if any(
+        binding not in artifact_wire_text
+        for binding in required_artifact_wire_bindings
+    ):
+        found.add(f"{relative}#missing-attachment-bound-artifact-contract")
     source_wire = scoped_dir / "source_wire.rs"
     source_wire_text = (
         production_rust_text(source_wire) if source_wire in production_scoped_paths else ""
@@ -577,6 +600,8 @@ def discover_rfc012_scoped_host_boundary_violations() -> set[str]:
     continuity_portable = REPO_ROOT / continuity_portable_relative
     close_portable_relative = "packages/sdk/src/contracts/rfc012d-close.ts"
     close_portable = REPO_ROOT / close_portable_relative
+    artifact_portable_relative = "packages/sdk/src/contracts/rfc012d-artifact.ts"
+    artifact_portable = REPO_ROOT / artifact_portable_relative
     scope_coverage_portable_relative = (
         "packages/sdk/src/contracts/rfc012d-scope-coverage.ts"
     )
@@ -588,6 +613,7 @@ def discover_rfc012_scoped_host_boundary_violations() -> set[str]:
         or not source_portable.exists()
         or not continuity_portable.exists()
         or not close_portable.exists()
+        or not artifact_portable.exists()
         or not scope_coverage_portable.exists()
     ):
         found.add(portable_relative)
@@ -631,6 +657,16 @@ def discover_rfc012_scoped_host_boundary_violations() -> set[str]:
             or "expectedContextInput: unknown" not in close_portable_text
         ):
             found.add(f"{close_portable_relative}#missing-attachment-bound-close-contract")
+        artifact_portable_text = read(artifact_portable)
+        if (
+            "export interface ScopedArtifactReadContext" not in artifact_portable_text
+            or "export interface ScopedObservedArtifact" not in artifact_portable_text
+            or "export function parseScopedObservedArtifact(" not in artifact_portable_text
+            or "expectedContextInput: unknown" not in artifact_portable_text
+        ):
+            found.add(
+                f"{artifact_portable_relative}#missing-attachment-bound-artifact-contract"
+            )
         scope_coverage_portable_text = read(scope_coverage_portable)
         if (
             "export interface ScopedScopeCoverageContext"
@@ -648,6 +684,7 @@ def discover_rfc012_scoped_host_boundary_violations() -> set[str]:
             source_portable,
             continuity_portable,
             close_portable,
+            artifact_portable,
             scope_coverage_portable,
         ]
         visited: set[Path] = set()
@@ -687,6 +724,10 @@ def discover_rfc012_scoped_host_boundary_violations() -> set[str]:
         )
     if "./contracts/rfc012d-close.js" not in RUNTIME_MODULE_RE.findall(read(sdk_index)):
         found.add(f"{repo_path(sdk_index)}#missing-rfc012d-close-export")
+    if "./contracts/rfc012d-artifact.js" not in RUNTIME_MODULE_RE.findall(
+        read(sdk_index)
+    ):
+        found.add(f"{repo_path(sdk_index)}#missing-rfc012d-artifact-export")
     if "./contracts/rfc012d-scope-coverage.js" not in RUNTIME_MODULE_RE.findall(
         read(sdk_index)
     ):
