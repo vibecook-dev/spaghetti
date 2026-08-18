@@ -59,7 +59,8 @@ mod pack {
 
         let append = AppendDelimitedFile::new(AppendDelimitedConfig::json_lines()).unwrap();
         let replace = ReplaceDocument::new(ReplaceDocumentConfig::default()).unwrap();
-        let directory = DirectorySnapshot::new(DirectorySnapshotConfig::default()).unwrap();
+        let directory_config = DirectorySnapshotConfig::default();
+        let directory = DirectorySnapshot::new(directory_config.clone()).unwrap();
         let presence_driver = PresenceObject::new(PresenceObjectConfig {
             include_content: true,
             max_content_bytes: 64,
@@ -203,8 +204,11 @@ mod pack {
         // encoding and resumes at the committed boundary.
         let append_checkpoint = AppendCheckpoint::decode(&append_checkpoint.encode()).unwrap();
         let replace_checkpoint = ReplaceCheckpoint::decode(&replace_checkpoint.encode()).unwrap();
-        let directory_checkpoint =
-            DirectoryCheckpoint::decode(&directory_checkpoint.encode()).unwrap();
+        let directory_checkpoint = DirectoryCheckpoint::decode_for_config(
+            &directory_checkpoint.encode(),
+            &directory_config,
+        )
+        .unwrap();
         let presence_checkpoint =
             PresenceCheckpoint::decode(&presence_checkpoint.encode()).unwrap();
         let sqlite_checkpoint = SqliteCheckpoint::decode(&sqlite_checkpoint.encode()).unwrap();

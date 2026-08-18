@@ -1975,7 +1975,7 @@ impl ObservationCoordinator {
         });
         let previous_checkpoint = previous
             .and_then(|object| object.driver_checkpoint.as_deref())
-            .map(DirectoryCheckpoint::decode)
+            .map(|bytes| DirectoryCheckpoint::decode_for_config(bytes, config))
             .transpose()
             .map_err(source_error)?;
         if previous.is_some_and(|object| object.driver_checkpoint_version != Some(1)) {
@@ -6815,8 +6815,14 @@ mod tests {
         assert_eq!(initial.objects_registered, 1);
         assert_eq!(initial.objects_changed, 1);
         let first = directory_catalog_object(&engine, &root);
-        let first_checkpoint =
-            DirectoryCheckpoint::decode(first.driver_checkpoint.as_deref().unwrap()).unwrap();
+        let first_checkpoint = DirectoryCheckpoint::decode_for_config(
+            first.driver_checkpoint.as_deref().unwrap(),
+            &DirectorySnapshotConfig {
+                max_entries: 100,
+                max_depth: 4,
+            },
+        )
+        .unwrap();
         assert_eq!(first_checkpoint.entries.len(), 1);
         assert!(first_checkpoint
             .entries
@@ -6830,8 +6836,14 @@ mod tests {
             .unwrap();
         assert_eq!(changed.objects_changed, 1);
         let second = directory_catalog_object(&engine, &root);
-        let second_checkpoint =
-            DirectoryCheckpoint::decode(second.driver_checkpoint.as_deref().unwrap()).unwrap();
+        let second_checkpoint = DirectoryCheckpoint::decode_for_config(
+            second.driver_checkpoint.as_deref().unwrap(),
+            &DirectorySnapshotConfig {
+                max_entries: 100,
+                max_depth: 4,
+            },
+        )
+        .unwrap();
         assert_eq!(second_checkpoint.entries.len(), 1);
         assert!(second_checkpoint
             .entries
@@ -6843,6 +6855,47 @@ mod tests {
             .unwrap();
         assert_eq!(unchanged.commits, 0);
         assert_eq!(unchanged.objects_unchanged, 1);
+    }
+
+    #[test]
+    fn directory_snapshot_resume_rejects_a_checkpoint_above_the_current_stream_bound() {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().join("source");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("first.json"), b"one").unwrap();
+        std::fs::write(root.join("second.json"), b"two").unwrap();
+        let engine = open_test_engine(temp.path().join("directory-bound.db"));
+
+        ObservationCoordinator::new(Arc::clone(&engine))
+            .reconcile(
+                &DirectoryOnlyAdapter::with_max_entries(2),
+                ReconcileRequest::manual(vec![root.clone()]),
+            )
+            .unwrap();
+        let before = directory_catalog_object(&engine, &root)
+            .driver_checkpoint
+            .unwrap();
+
+        // Leave a source tree that fits the new declaration. Resume must still
+        // reject the two-entry stored checkpoint before scanning under a
+        // narrower authority than the one that created it.
+        std::fs::remove_file(root.join("second.json")).unwrap();
+        let result = ObservationCoordinator::new(Arc::clone(&engine)).reconcile(
+            &DirectoryOnlyAdapter::with_max_entries(1),
+            ReconcileRequest::manual(vec![root.clone()]),
+        );
+        assert!(
+            matches!(
+                &result,
+                Err(EngineError::Observation { detail, .. })
+                    if detail.contains("configured limit 1")
+            ),
+            "unexpected narrowed-bound resume result: {result:?}"
+        );
+        assert_eq!(
+            directory_catalog_object(&engine, &root).driver_checkpoint,
+            Some(before)
+        );
     }
 
     #[test]
@@ -7187,12 +7240,18 @@ mod tests {
 
     struct DirectoryOnlyAdapter {
         manifest: AdapterManifest,
+        max_entries: usize,
     }
 
     impl DirectoryOnlyAdapter {
         fn new() -> Self {
+            Self::with_max_entries(100)
+        }
+
+        fn with_max_entries(max_entries: usize) -> Self {
             Self {
                 manifest: synthetic_manifest("synthetic-directory"),
+                max_entries,
             }
         }
     }
@@ -7213,7 +7272,7 @@ mod tests {
             Ok(vec![StreamSpec {
                 id: StreamId::new("membership")?,
                 driver: DriverSpec::DirectorySnapshot(DirectorySnapshotConfig {
-                    max_entries: 100,
+                    max_entries: self.max_entries,
                     max_depth: 4,
                 }),
                 selector: ObjectSelector {

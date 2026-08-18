@@ -6,7 +6,6 @@ use super::model::{io_error, CursorReader};
 use super::{FileIdentity, Revision, SourceCursor, SourceDriverError};
 
 const CHECKPOINT_MAGIC: &[u8] = b"SPDS";
-const MAX_DECODED_ENTRIES: usize = 100_000;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DirectorySnapshotConfig {
@@ -20,6 +19,17 @@ impl Default for DirectorySnapshotConfig {
             max_entries: 100_000,
             max_depth: 32,
         }
+    }
+}
+
+impl DirectorySnapshotConfig {
+    fn validate(&self) -> Result<(), SourceDriverError> {
+        if self.max_entries == 0 {
+            return Err(SourceDriverError::InvalidConfig(
+                "directory max_entries must be greater than zero".to_string(),
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -110,20 +120,26 @@ impl DirectoryCheckpoint {
         bytes
     }
 
-    pub fn decode(bytes: &[u8]) -> Result<Self, SourceDriverError> {
+    pub fn decode_for_config(
+        bytes: &[u8],
+        config: &DirectorySnapshotConfig,
+    ) -> Result<Self, SourceDriverError> {
+        config.validate()?;
         let mut reader = CursorReader::new(bytes, CHECKPOINT_MAGIC)?;
         let generation = reader.u64()?;
         let root_identity = FileIdentity::decode_from(&mut reader)?;
         let revision = reader.revision()?;
         let entry_count = reader.usize()?;
-        if entry_count > MAX_DECODED_ENTRIES {
+        if entry_count > config.max_entries {
             return Err(SourceDriverError::InvalidCursor(format!(
-                "directory checkpoint contains {entry_count} entries"
+                "directory checkpoint contains {entry_count} entries, exceeding configured limit {}",
+                config.max_entries
             )));
         }
         let mut entries = BTreeMap::new();
         for _ in 0..entry_count {
             let path_key = decode_bytes(&mut reader)?;
+            validate_checkpoint_path_key(&path_key, config.max_depth)?;
             let display_path = String::from_utf8(decode_bytes(&mut reader)?).map_err(|_| {
                 SourceDriverError::InvalidCursor(
                     "directory checkpoint display path is not UTF-8".to_string(),
@@ -213,11 +229,7 @@ pub struct DirectorySnapshot {
 
 impl DirectorySnapshot {
     pub fn new(config: DirectorySnapshotConfig) -> Result<Self, SourceDriverError> {
-        if config.max_entries == 0 {
-            return Err(SourceDriverError::InvalidConfig(
-                "directory max_entries must be greater than zero".to_string(),
-            ));
-        }
+        config.validate()?;
         Ok(Self { config })
     }
 
@@ -505,6 +517,72 @@ fn decode_bytes(reader: &mut CursorReader<'_>) -> Result<Vec<u8>, SourceDriverEr
     Ok(reader.take(length)?.to_vec())
 }
 
+fn validate_checkpoint_path_key(
+    path_key: &[u8],
+    max_depth: usize,
+) -> Result<(), SourceDriverError> {
+    if path_key.first() != Some(&1) {
+        return Err(SourceDriverError::InvalidCursor(
+            "directory checkpoint path key has an invalid version".to_string(),
+        ));
+    }
+
+    let mut offset = 1_usize;
+    let mut component_count = 0_usize;
+    while offset < path_key.len() {
+        let length_end = offset.checked_add(8).ok_or_else(|| {
+            SourceDriverError::InvalidCursor(
+                "directory checkpoint path key length overflowed".to_string(),
+            )
+        })?;
+        let length_bytes: [u8; 8] = path_key
+            .get(offset..length_end)
+            .ok_or_else(|| {
+                SourceDriverError::InvalidCursor(
+                    "directory checkpoint path key is truncated".to_string(),
+                )
+            })?
+            .try_into()
+            .expect("path-key component length has a fixed width");
+        let component_length = usize::try_from(u64::from_be_bytes(length_bytes)).map_err(|_| {
+            SourceDriverError::InvalidCursor(
+                "directory checkpoint path component length exceeds this platform".to_string(),
+            )
+        })?;
+        if component_length == 0 {
+            return Err(SourceDriverError::InvalidCursor(
+                "directory checkpoint path key contains an empty component".to_string(),
+            ));
+        }
+        offset = length_end.checked_add(component_length).ok_or_else(|| {
+            SourceDriverError::InvalidCursor(
+                "directory checkpoint path component length overflowed".to_string(),
+            )
+        })?;
+        if offset > path_key.len() {
+            return Err(SourceDriverError::InvalidCursor(
+                "directory checkpoint path key is truncated".to_string(),
+            ));
+        }
+        component_count = component_count.checked_add(1).ok_or_else(|| {
+            SourceDriverError::InvalidCursor(
+                "directory checkpoint path component count overflowed".to_string(),
+            )
+        })?;
+        if component_count.saturating_sub(1) > max_depth {
+            return Err(SourceDriverError::InvalidCursor(format!(
+                "directory checkpoint path exceeds configured maximum depth {max_depth}"
+            )));
+        }
+    }
+    if component_count == 0 {
+        return Err(SourceDriverError::InvalidCursor(
+            "directory checkpoint path key contains no components".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 fn next_generation(current: u64) -> Result<u64, SourceDriverError> {
     current
         .checked_add(1)
@@ -647,8 +725,101 @@ mod tests {
                 .unwrap(),
         );
         let encoded = checkpoint.encode();
-        assert_eq!(DirectoryCheckpoint::decode(&encoded).unwrap(), checkpoint);
+        assert_eq!(
+            DirectoryCheckpoint::decode_for_config(&encoded, &DirectorySnapshotConfig::default())
+                .unwrap(),
+            checkpoint
+        );
         assert_eq!(checkpoint.encode(), encoded);
+    }
+
+    #[test]
+    fn checkpoint_restore_uses_the_exact_configured_entry_bound() {
+        const ABOVE_LEGACY_BOUND: usize = 100_001;
+        let root_identity = FileIdentity::Unix {
+            device: 1,
+            inode: 1,
+        };
+        let entries = (0..ABOVE_LEGACY_BOUND)
+            .map(|index| {
+                let display_path = format!("{index:06}.json");
+                let path_key = confined_relative_path_key(Path::new(&display_path)).unwrap();
+                let revision = Revision::digest(&path_key);
+                (
+                    path_key.clone(),
+                    DirectoryEntryState {
+                        path_key,
+                        display_path,
+                        kind: DirectoryEntryKind::File,
+                        identity: FileIdentity::Unix {
+                            device: 1,
+                            inode: index as u64 + 2,
+                        },
+                        revision,
+                        size_bytes: 0,
+                        modified_ns: index as i128,
+                        generation: 1,
+                    },
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        let checkpoint = DirectoryCheckpoint {
+            revision: snapshot_revision(&root_identity, &entries),
+            root_identity,
+            generation: 1,
+            entries,
+        };
+        let encoded = checkpoint.encode();
+        drop(checkpoint);
+
+        let legacy_bound = DirectorySnapshotConfig {
+            max_entries: 100_000,
+            max_depth: 64,
+        };
+        let error = DirectoryCheckpoint::decode_for_config(&encoded, &legacy_bound).unwrap_err();
+        assert!(matches!(error, SourceDriverError::InvalidCursor(_)));
+        assert!(error.to_string().contains("configured limit 100000"));
+
+        let candidate_bound = DirectorySnapshotConfig {
+            max_entries: 250_000,
+            max_depth: 64,
+        };
+        let restored = DirectoryCheckpoint::decode_for_config(&encoded, &candidate_bound).unwrap();
+        assert_eq!(restored.entries.len(), ABOVE_LEGACY_BOUND);
+        assert_eq!(
+            restored.revision,
+            snapshot_revision(&restored.root_identity, &restored.entries)
+        );
+    }
+
+    #[test]
+    fn checkpoint_restore_rejects_paths_above_the_current_depth_bound() {
+        let root = TempDir::new().unwrap();
+        std::fs::create_dir(root.path().join("nested")).unwrap();
+        std::fs::write(root.path().join("nested/session.json"), b"{}").unwrap();
+        let scan_config = DirectorySnapshotConfig {
+            max_entries: 10,
+            max_depth: 1,
+        };
+        let (_, checkpoint, _) = snapshot(
+            DirectorySnapshot::new(scan_config.clone())
+                .unwrap()
+                .scan(root.path(), None, &files)
+                .unwrap(),
+        );
+        let encoded = checkpoint.encode();
+        assert_eq!(
+            DirectoryCheckpoint::decode_for_config(&encoded, &scan_config).unwrap(),
+            checkpoint
+        );
+
+        let lowered_config = DirectorySnapshotConfig {
+            max_entries: 10,
+            max_depth: 0,
+        };
+        let error = DirectoryCheckpoint::decode_for_config(&encoded, &lowered_config).unwrap_err();
+        assert!(matches!(error, SourceDriverError::InvalidCursor(_)));
+        assert!(error.to_string().contains("configured maximum depth 0"));
     }
 
     #[cfg(unix)]

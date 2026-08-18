@@ -334,7 +334,6 @@ impl CandidateProjection {
                 fact_revision_digest: semantic_digest(&self.fact_revisions),
             },
             non_promotion_gaps: vec![
-                "directory_checkpoint_decode_caps_100000_below_declared_250000".to_string(),
                 "nested_parent_uuid_enforcement_is_not_yet_declared".to_string(),
                 "physical_head_ceiling_is_fixture_evidence_not_ratified".to_string(),
             ],

@@ -442,9 +442,9 @@ fn current_candidate_and_planned_composition_remain_non_authorizing_and_distinct
         assert_eq!(component["primitive"], primitive);
     }
 
-    // The v1 common snapshot declaration permits 250k selected entries, but
-    // restart decode is still capped at 100k. This oracle does not hide that
-    // promotion blocker merely because the small fixture is tiny.
+    // The configured 250k candidate bound is carried consistently through
+    // scan and checkpoint restore. It remains candidate evidence, not a
+    // ratified global performance limit.
     assert_eq!(
         planned["components"]
             .as_array()
