@@ -1,0 +1,375 @@
+{
+  "exact": {
+    "context": {
+      "compatibility_class": "ExactSupported",
+      "contract_offer": {
+        "contract_versions": {
+          "coverage_contract_versions": [
+            1
+          ],
+          "external_entity_reference_versions": [
+            1
+          ],
+          "fact_family_versions": {
+            "runtime.actor-run": [
+              1
+            ],
+            "runtime.usage-v2": [
+              1
+            ]
+          },
+          "model_major": 1,
+          "observation_contract_versions": [
+            1
+          ],
+          "query_pack_versions": [],
+          "selection_contract_version": 1,
+          "semantic_revision_reference_versions": [
+            1
+          ]
+        },
+        "envelope_contract_versions": [
+          1
+        ],
+        "event_contract_versions": [
+          1
+        ],
+        "lifecycle_contract_versions": [
+          1
+        ],
+        "observation_negotiation_contract_version": 1
+      },
+      "contract_selection": {
+        "contract_versions": {
+          "coverage_contract_version": 1,
+          "external_entity_reference_version": 1,
+          "fact_family_versions": {
+            "runtime.usage-v2": 1
+          },
+          "model_major": 1,
+          "observation_contract_version": 1,
+          "query_pack_version": null,
+          "selection_contract_version": 1,
+          "semantic_revision_reference_version": 1
+        },
+        "envelope_contract_version": 1,
+        "event_contract_version": 1,
+        "lifecycle_contract_version": 1,
+        "observation_negotiation_contract_version": 1
+      },
+      "expected_capabilities": {
+        "fact_families": [
+          {
+            "evidence": {
+              "kind": "host_offer_not_selected",
+              "offered_versions": [
+                1
+              ]
+            },
+            "expected_completeness": "unknown",
+            "expected_timing": "never",
+            "fact_family": "runtime.actor-run",
+            "limitations": [
+              "not_negotiated"
+            ],
+            "quality": "unavailable",
+            "status": "unsupported"
+          },
+          {
+            "evidence": {
+              "kind": "promoted_support_release",
+              "support": "exact_promoted_release",
+              "support_release_id": "fixture-release-v1"
+            },
+            "expected_completeness": "complete",
+            "expected_timing": "bootstrap_and_live",
+            "fact_family": "runtime.usage-v2",
+            "limitations": [
+              "scope_bound",
+              "coverage_reported_separately"
+            ],
+            "quality": "exact",
+            "selected_version": 1,
+            "status": "supported"
+          }
+        ],
+        "observation_capabilities_contract_version": 1,
+        "selection": {
+          "contract_versions": {
+            "coverage_contract_version": 1,
+            "external_entity_reference_version": 1,
+            "fact_family_versions": {
+              "runtime.usage-v2": 1
+            },
+            "model_major": 1,
+            "observation_contract_version": 1,
+            "query_pack_version": null,
+            "selection_contract_version": 1,
+            "semantic_revision_reference_version": 1
+          },
+          "envelope_contract_version": 1,
+          "event_contract_version": 1,
+          "lifecycle_contract_version": 1,
+          "observation_negotiation_contract_version": 1
+        }
+      },
+      "expected_semantic_digest": "v1:qjMG0tw_GoYprvAUJYYb4-OtH4vY3DbmzZ555Q-vxeU",
+      "support_release_id": "fixture-release-v1"
+    },
+    "snapshot": {
+      "capability_digest_contract_version": 1,
+      "observation_capabilities": {
+        "fact_families": [
+          {
+            "evidence": {
+              "kind": "host_offer_not_selected",
+              "offered_versions": [
+                1
+              ]
+            },
+            "expected_completeness": "unknown",
+            "expected_timing": "never",
+            "fact_family": "runtime.actor-run",
+            "limitations": [
+              "not_negotiated"
+            ],
+            "quality": "unavailable",
+            "status": "unsupported"
+          },
+          {
+            "evidence": {
+              "kind": "promoted_support_release",
+              "support": "exact_promoted_release",
+              "support_release_id": "fixture-release-v1"
+            },
+            "expected_completeness": "complete",
+            "expected_timing": "bootstrap_and_live",
+            "fact_family": "runtime.usage-v2",
+            "limitations": [
+              "scope_bound",
+              "coverage_reported_separately"
+            ],
+            "quality": "exact",
+            "selected_version": 1,
+            "status": "supported"
+          }
+        ],
+        "observation_capabilities_contract_version": 1,
+        "selection": {
+          "contract_versions": {
+            "coverage_contract_version": 1,
+            "external_entity_reference_version": 1,
+            "fact_family_versions": {
+              "runtime.usage-v2": 1
+            },
+            "model_major": 1,
+            "observation_contract_version": 1,
+            "query_pack_version": null,
+            "selection_contract_version": 1,
+            "semantic_revision_reference_version": 1
+          },
+          "envelope_contract_version": 1,
+          "event_contract_version": 1,
+          "lifecycle_contract_version": 1,
+          "observation_negotiation_contract_version": 1
+        }
+      },
+      "scoped_capability_snapshot_contract_version": 1,
+      "semantic_digest": "v1:qjMG0tw_GoYprvAUJYYb4-OtH4vY3DbmzZ555Q-vxeU"
+    }
+  },
+  "expected": {
+    "artifact_availability_state": false,
+    "bootstrap_or_resync_barrier": false,
+    "coverage_or_readiness_claim": false,
+    "native_payload_disclosure": "none",
+    "phase_independent": true,
+    "portable_observer_transport": false,
+    "selected_family": "runtime.usage-v2",
+    "semantic_digest_algorithm": "blake3-256",
+    "source_access_authority": false,
+    "unselected_family": "runtime.actor-run"
+  },
+  "fixture_contract_version": 1,
+  "range": {
+    "context": {
+      "compatibility_class": "RangeSupported",
+      "contract_offer": {
+        "contract_versions": {
+          "coverage_contract_versions": [
+            1
+          ],
+          "external_entity_reference_versions": [
+            1
+          ],
+          "fact_family_versions": {
+            "runtime.actor-run": [
+              1
+            ],
+            "runtime.usage-v2": [
+              1
+            ]
+          },
+          "model_major": 1,
+          "observation_contract_versions": [
+            1
+          ],
+          "query_pack_versions": [],
+          "selection_contract_version": 1,
+          "semantic_revision_reference_versions": [
+            1
+          ]
+        },
+        "envelope_contract_versions": [
+          1
+        ],
+        "event_contract_versions": [
+          1
+        ],
+        "lifecycle_contract_versions": [
+          1
+        ],
+        "observation_negotiation_contract_version": 1
+      },
+      "contract_selection": {
+        "contract_versions": {
+          "coverage_contract_version": 1,
+          "external_entity_reference_version": 1,
+          "fact_family_versions": {
+            "runtime.usage-v2": 1
+          },
+          "model_major": 1,
+          "observation_contract_version": 1,
+          "query_pack_version": null,
+          "selection_contract_version": 1,
+          "semantic_revision_reference_version": 1
+        },
+        "envelope_contract_version": 1,
+        "event_contract_version": 1,
+        "lifecycle_contract_version": 1,
+        "observation_negotiation_contract_version": 1
+      },
+      "expected_capabilities": {
+        "fact_families": [
+          {
+            "evidence": {
+              "kind": "host_offer_not_selected",
+              "offered_versions": [
+                1
+              ]
+            },
+            "expected_completeness": "unknown",
+            "expected_timing": "never",
+            "fact_family": "runtime.actor-run",
+            "limitations": [
+              "not_negotiated"
+            ],
+            "quality": "unavailable",
+            "status": "unsupported"
+          },
+          {
+            "evidence": {
+              "kind": "promoted_support_release",
+              "support": "range_supported_release",
+              "support_release_id": "fixture-release-v1"
+            },
+            "expected_completeness": "partial",
+            "expected_timing": "bootstrap_and_live",
+            "fact_family": "runtime.usage-v2",
+            "limitations": [
+              "scope_bound",
+              "coverage_reported_separately",
+              "range_supported_native_version"
+            ],
+            "quality": "qualified",
+            "selected_version": 1,
+            "status": "degraded"
+          }
+        ],
+        "observation_capabilities_contract_version": 1,
+        "selection": {
+          "contract_versions": {
+            "coverage_contract_version": 1,
+            "external_entity_reference_version": 1,
+            "fact_family_versions": {
+              "runtime.usage-v2": 1
+            },
+            "model_major": 1,
+            "observation_contract_version": 1,
+            "query_pack_version": null,
+            "selection_contract_version": 1,
+            "semantic_revision_reference_version": 1
+          },
+          "envelope_contract_version": 1,
+          "event_contract_version": 1,
+          "lifecycle_contract_version": 1,
+          "observation_negotiation_contract_version": 1
+        }
+      },
+      "expected_semantic_digest": "v1:yCtSoDs495XD__eYz4BZUPA82G5lpE0z_TB13C0J6Yw",
+      "support_release_id": "fixture-release-v1"
+    },
+    "snapshot": {
+      "capability_digest_contract_version": 1,
+      "observation_capabilities": {
+        "fact_families": [
+          {
+            "evidence": {
+              "kind": "host_offer_not_selected",
+              "offered_versions": [
+                1
+              ]
+            },
+            "expected_completeness": "unknown",
+            "expected_timing": "never",
+            "fact_family": "runtime.actor-run",
+            "limitations": [
+              "not_negotiated"
+            ],
+            "quality": "unavailable",
+            "status": "unsupported"
+          },
+          {
+            "evidence": {
+              "kind": "promoted_support_release",
+              "support": "range_supported_release",
+              "support_release_id": "fixture-release-v1"
+            },
+            "expected_completeness": "partial",
+            "expected_timing": "bootstrap_and_live",
+            "fact_family": "runtime.usage-v2",
+            "limitations": [
+              "scope_bound",
+              "coverage_reported_separately",
+              "range_supported_native_version"
+            ],
+            "quality": "qualified",
+            "selected_version": 1,
+            "status": "degraded"
+          }
+        ],
+        "observation_capabilities_contract_version": 1,
+        "selection": {
+          "contract_versions": {
+            "coverage_contract_version": 1,
+            "external_entity_reference_version": 1,
+            "fact_family_versions": {
+              "runtime.usage-v2": 1
+            },
+            "model_major": 1,
+            "observation_contract_version": 1,
+            "query_pack_version": null,
+            "selection_contract_version": 1,
+            "semantic_revision_reference_version": 1
+          },
+          "envelope_contract_version": 1,
+          "event_contract_version": 1,
+          "lifecycle_contract_version": 1,
+          "observation_negotiation_contract_version": 1
+        }
+      },
+      "scoped_capability_snapshot_contract_version": 1,
+      "semantic_digest": "v1:yCtSoDs495XD__eYz4BZUPA82G5lpE0z_TB13C0J6Yw"
+    }
+  }
+}

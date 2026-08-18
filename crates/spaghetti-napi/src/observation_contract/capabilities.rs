@@ -262,7 +262,7 @@ impl ObservationCapabilities {
         Ok(value)
     }
 
-    fn validate(&self) -> Result<(), ObservationCapabilityContractError> {
+    pub(crate) fn validate(&self) -> Result<(), ObservationCapabilityContractError> {
         self.selection
             .validate()
             .map_err(ObservationCapabilityContractError::invalid)?;

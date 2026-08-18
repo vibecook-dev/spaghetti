@@ -29,13 +29,15 @@ export * from './contracts/rfc012c.js';
 
 // RFC 012D exact-version negotiation plus deliberately incomplete contextual
 // actor, usage, source-control, continuity, exact-known-object scope coverage,
-// contextual replacement-family manifest, attachment-close, and bounded-artifact
-// wire slices. The complete event union, bootstrap/resync barrier, native
+// contextual replacement-family and capability snapshots, attachment-close,
+// and bounded-artifact wire slices. The complete event union,
+// bootstrap/resync barrier, native
 // artifact-access mediator, and native observer transport remain gated on the
 // full scoped contract.
 export * from './contracts/rfc012d.js';
 export * from './contracts/rfc012d-actor-envelope.js';
 export * from './contracts/rfc012d-artifact.js';
+export * from './contracts/rfc012d-capability-snapshot.js';
 export * from './contracts/rfc012d-close.js';
 export * from './contracts/rfc012d-continuity-envelope.js';
 export * from './contracts/rfc012d-replacement-manifest.js';

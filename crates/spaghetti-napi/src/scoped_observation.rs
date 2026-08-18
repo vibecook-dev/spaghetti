@@ -52,6 +52,7 @@ use crate::source::{
 
 mod actor_wire;
 mod artifact_wire;
+mod capability_snapshot_wire;
 mod close_wire;
 mod continuity_wire;
 mod replacement_manifest_wire;
