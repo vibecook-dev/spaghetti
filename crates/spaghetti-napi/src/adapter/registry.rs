@@ -187,15 +187,15 @@ mod tests {
 
     use crate::adapter::{
         verify_support_release_bundle, AdapterErrorClass, AdapterManifest, AdapterObjectContext,
-        AdapterSupportBinding, CoverageAbsenceKind, CoverageDomain, CoveragePositionKind,
-        CoverageSetCompleteness, CoverageStatus, DecodeContext, DecodeDisposition, DecoderId,
-        DiscoveryContext, ExternalEntityRef, Fact, FactBatch, FactSemanticContext,
-        RawRetentionPolicy, Sha256Digest, SourceAccess, SourceInstance, SourceInstanceSpec,
-        SourceObjectDescriptor, StreamSpec, SupportBundleDocument,
+        AdapterSupportBinding, CompatibilityClass, CoverageAbsenceKind, CoverageDomain,
+        CoveragePositionKind, CoverageSetCompleteness, CoverageStatus, DecodeContext,
+        DecodeDisposition, DecoderId, DiscoveryContext, ExternalEntityRef, Fact, FactBatch,
+        FactSemanticContext, RawRetentionPolicy, Sha256Digest, SourceAccess, SourceInstance,
+        SourceInstanceSpec, SourceObjectDescriptor, StreamSpec, SupportBundleDocument,
     };
     use crate::observation_contract::{
-        negotiate_observation_contract, ObservationCompatibilityAxis, ObservationContractOffer,
-        ObservationContractRequest, ObservationNegotiationError,
+        negotiate_observation_contract, ObservationCapabilities, ObservationCompatibilityAxis,
+        ObservationContractOffer, ObservationContractRequest, ObservationNegotiationError,
     };
     use crate::scoped_observation::{
         ScopedActorAttribution, ScopedActorFallbackReason, ScopedAdmissionError,
@@ -1045,8 +1045,17 @@ mod tests {
             &request.observation_contract_offer,
         )
         .unwrap();
+        let expected_capability_report = ObservationCapabilities::from_negotiation(
+            expected_capabilities.clone(),
+            &request.observation_contract_offer,
+            CompatibilityClass::ExactSupported,
+            Some("fixture-release"),
+            &[("runtime.usage-v2", 1)],
+        )
+        .unwrap();
         let host = ScopedObservationAccessHost::authorize(&registry, request).unwrap();
         assert_eq!(host.contract_selection(), &expected_capabilities);
+        assert_eq!(host.capabilities(), &expected_capability_report);
         assert_eq!(
             host.compatibility().support_release_id(),
             Some("fixture-release")

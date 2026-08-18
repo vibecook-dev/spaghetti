@@ -35,8 +35,9 @@ use crate::decode_runtime::{
     decode_record, diagnostic_excerpt, DecodeRuntimeLimits, DecodeRuntimeRequest,
 };
 use crate::observation_contract::{
-    negotiate_observation_contract, ObservationContractOffer, ObservationContractRequest,
-    ObservationContractSelection, ObservationNegotiationError,
+    negotiate_observation_contract, ObservationCapabilities, ObservationCapabilityContractError,
+    ObservationContractOffer, ObservationContractRequest, ObservationContractSelection,
+    ObservationNegotiationError,
 };
 use crate::source::{
     confined_relative_path_key, read_stable_file_confined, validate_relation_id, AccessBudgetError,
@@ -1326,6 +1327,10 @@ pub const SCOPED_BOOTSTRAP_BARRIER_CONTRACT_VERSION: u32 = 1;
 pub const SCOPED_RESYNC_BARRIER_CONTRACT_VERSION: u32 = 1;
 pub const RUNTIME_USAGE_V2_FACT_FAMILY_CONTRACT_VERSION: u32 = 1;
 pub const SCOPED_INITIAL_SCOPE_EPOCH: u64 = 1;
+const SCOPED_OBSERVATION_IMPLEMENTED_FACT_FAMILIES: &[(&str, u32)] = &[(
+    "runtime.usage-v2",
+    RUNTIME_USAGE_V2_FACT_FAMILY_CONTRACT_VERSION,
+)];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ScopedObservationEventId([u8; 32]);
@@ -8222,6 +8227,8 @@ pub enum ScopedDecodeFailureClass {
 pub enum ScopedObservationAccessError {
     #[error(transparent)]
     ObservationContract(#[from] ObservationNegotiationError),
+    #[error(transparent)]
+    ObservationCapabilities(#[from] ObservationCapabilityContractError),
     #[error("scoped observation authorization failed: {0}")]
     Authorization(String),
     #[error("scoped observation root identity is invalid or inconsistent")]
@@ -9375,6 +9382,7 @@ pub struct ScopedObservationAccessHost {
     adapter: Arc<dyn AgentAdapter>,
     compatibility: CompatibilityDecision,
     observation_contract: ObservationContractSelection,
+    observation_capabilities: ObservationCapabilities,
     authorization: TypedAccessAuthorization,
     root_identity: ScopedObservationRootIdentity,
     program_id: String,
@@ -9420,6 +9428,13 @@ impl ScopedObservationAccessHost {
                     .to_string(),
             ));
         }
+        let observation_capabilities = ObservationCapabilities::from_negotiation(
+            observation_contract.clone(),
+            &request.observation_contract_offer,
+            compatibility.compatibility_class(),
+            compatibility.support_release_id(),
+            SCOPED_OBSERVATION_IMPLEMENTED_FACT_FAMILIES,
+        )?;
         let root_identity = request.root_identity.resolve(
             &adapter_id,
             observation_contract
@@ -9443,6 +9458,7 @@ impl ScopedObservationAccessHost {
             adapter,
             compatibility,
             observation_contract,
+            observation_capabilities,
             authorization,
             root_identity,
             program_id: request.program_id,
@@ -9472,6 +9488,13 @@ impl ScopedObservationAccessHost {
     /// itself RFC 012D's per-family `capabilities()` DTO.
     pub fn contract_selection(&self) -> &ObservationContractSelection {
         &self.observation_contract
+    }
+
+    /// Selection-bound RFC 012D per-family support report. Current source
+    /// coverage and readiness remain barrier/watermark concerns rather than
+    /// being inferred from this static attachment capability declaration.
+    pub fn capabilities(&self) -> &ObservationCapabilities {
+        &self.observation_capabilities
     }
 
     pub fn root_identity(&self) -> &ScopedObservationRootIdentity {

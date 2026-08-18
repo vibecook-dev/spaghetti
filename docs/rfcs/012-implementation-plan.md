@@ -604,7 +604,7 @@ declared bounds. Head/prefix plus continuation equals full-only fact and final
 projection digests under the RFC 012A overlap strategy. Project-association
 digests retain every evidence basis/conflict and never infer VibeField grouping.
 
-Current landing status (2026-08-17): B2 remains `In progress`. The first
+Current landing status (2026-08-18): B2 remains `In progress`. The first
 crate-private, adapter-neutral v1 slice freezes Claude, Codex, and Grok catalog
 composition contracts and one Rust-produced conformance fixture. Composition
 identity binds explicit sanitized decoder/disposition overlap axes and a
@@ -643,7 +643,28 @@ unsupported, and catalog access authorization is rejected. This is candidate
 evidence only: Codex's legacy payload identities still depend on numeric source
 registration and do not yet carry semantic revisions, so cross-topology payload
 parity, promoted declarations/support, and runtime catalog execution remain
-open alongside the Claude and Grok identity oracles.
+open alongside the Claude identity oracle.
+
+The third B2 slice (`08f4cec`) freezes a Grok-only candidate conformance
+oracle without promoting or executing the planned composition. A test-only
+runner uses the real common directory-snapshot and replace-document drivers
+with the exact current candidate declaration: four admitting sidecars at
+100,000 entries/depth 8 and bounded 1 MiB summaries. Complete membership is
+authoritative before optional summary enrichment; chat-only, malformed-summary,
+and oversized-summary members remain visible, while updates-only and
+unknown-only directories remain explicitly non-admitting pending a declared
+policy decision. Summary/path session and project identity drift fails closed
+and requires explicit relation evidence. The privacy-reduced Rust fixture
+matches the independent Phase 0 census and durable summary decoder at three
+projects/four sessions, accounts every physically read summary byte, and pins
+registration-invariant source-record, entity, planned membership/association/
+metadata fact, and revision identities. The exact digest-bound support release
+remains `Candidate`, catalog capability remains unsupported, and catalog
+authorization is rejected; the materially different Grok adapter-neutral
+composition remains planned/unbound. Claude three-source identity and final-
+hydration parity, promoted declarations/support, source-access/coverage
+integration, runtime catalog execution, and calibrated performance evidence
+remain open.
 
 ### B3. Durable pack, readiness, and pagination
 
@@ -1057,7 +1078,7 @@ source/decoder registry used by the durable host. It must:
 - expose RFC 012A source/family coverage from poll and barriers; and
 - instrument every access for no-global-scan conformance.
 
-Current landing status (2026-08-17):
+Current landing status (2026-08-18):
 
 - the crate-private composition root performs strict support/contract/program
   selection before validating exact grants and exposes no spoofable N-API
@@ -1553,8 +1574,27 @@ Current landing status (2026-08-17):
   result. An incompatible event contract therefore fails with its typed axis
   before registry authority or source-access construction. A Rust-produced
   fixture proves independent portable negotiation and strict bounded parsing.
-  This slice does not freeze the event/envelope or capabilities DTO unions,
-  claim unknown-event preservation, or expose native observer transport; and
+  This slice does not freeze the event/envelope DTO union, claim unknown-event
+  preservation, or expose native observer transport;
+- the first exact per-family RFC 012D capabilities DTO now repeats the
+  caller-held negotiated selection and reports `Supported`, `Degraded`, or
+  `Unsupported` with support-release evidence, evidence quality, expected
+  timing, expected completeness, and a closed canonical limitation set. Exact
+  promoted support reports complete capability; range-backed support remains
+  qualified and partial; and host-offered families outside this attachment's
+  selection remain explicitly unavailable rather than silently disappearing.
+  Construction additionally binds selected families to the scoped reducer's
+  compiled implementation set, currently only `runtime.usage-v2` v1, so an
+  offered but unimplemented family cannot be promoted into a support claim.
+  Wire consumption requires the exact caller-held selection, host offer,
+  compatibility class, and support-release identity, and rejects any selected
+  reference, coverage, family, profile, envelope, event, or lifecycle version
+  absent from that offer. The completeness field is
+  explicitly an implementation expectation, never current source readiness;
+  barriers and RFC 012A coverage retain that authority. A Rust-produced fixture
+  independently exercises exact, range-degraded, and unselected-family parsing
+  in portable TypeScript. The report is retained on the crate-private
+  attachment; no N-API observer transport lands in this slice; and
 - the architecture checker forbids store/query/N-API/concrete-adapter imports
   and premature native public export from the provisional composition and
   negotiation roots, while keeping the portable negotiation graph contract-only.

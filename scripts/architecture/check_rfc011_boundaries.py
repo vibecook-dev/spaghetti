@@ -420,6 +420,8 @@ def discover_rfc012_scoped_host_boundary_violations() -> set[str]:
         "negotiate_observation_contract(",
         "observation_contract: ObservationContractSelection",
         "pub fn contract_selection(&self) -> &ObservationContractSelection",
+        "observation_capabilities: ObservationCapabilities",
+        "pub fn capabilities(&self) -> &ObservationCapabilities",
     )
     if any(binding not in scoped_text for binding in required_observation_bindings):
         found.add(f"{relative}#missing-observation-contract-binding")
@@ -442,6 +444,15 @@ def discover_rfc012_scoped_host_boundary_violations() -> set[str]:
         found.add(contract_relative)
     if re.search(r"^\s*pub\s+mod\s+observation_contract\s*;", read(lib), re.MULTILINE):
         found.add(f"{repo_path(lib)}#premature-public-observation-contract")
+    capabilities_path = contract_dir / "capabilities.rs"
+    required_capabilities_contract = (
+        "pub(crate) struct ObservationCapabilities",
+        "implemented_fact_families: &[(&str, u32)]",
+        "from_wire_value_for_context(",
+    )
+    capabilities_text = production_rust_text(capabilities_path) if capabilities_path.exists() else ""
+    if any(marker not in capabilities_text for marker in required_capabilities_contract):
+        found.add(f"{contract_relative}#missing-capabilities-contract")
 
     portable_relative = "packages/sdk/src/contracts/rfc012d.ts"
     portable = REPO_ROOT / portable_relative
@@ -449,6 +460,12 @@ def discover_rfc012_scoped_host_boundary_violations() -> set[str]:
     if not portable.exists():
         found.add(portable_relative)
     else:
+        portable_text = read(portable)
+        if (
+            "export interface ObservationCapabilities" not in portable_text
+            or "export function parseObservationCapabilities(" not in portable_text
+        ):
+            found.add(f"{portable_relative}#missing-capabilities-contract")
         pending = [portable]
         visited: set[Path] = set()
         while pending:

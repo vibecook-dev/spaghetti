@@ -19,6 +19,9 @@ use crate::adapter::{
     SOURCE_COVERAGE_CONTRACT_VERSION,
 };
 
+mod capabilities;
+pub(crate) use capabilities::{ObservationCapabilities, ObservationCapabilityContractError};
+
 pub(crate) const OBSERVATION_NEGOTIATION_CONTRACT_VERSION: u32 = 1;
 pub(crate) const OBSERVATION_PROFILE_CONTRACT_VERSION: u32 = 1;
 pub(crate) const OBSERVATION_ENVELOPE_CONTRACT_VERSION: u32 = 1;
@@ -314,6 +317,38 @@ impl ObservationContractSelection {
         if value != negotiate_observation_contract(request, offer)? {
             return Err(ObservationNegotiationError::invalid(
                 "observation selection does not match the exact negotiated result",
+            ));
+        }
+        Ok(value)
+    }
+
+    pub(super) fn from_wire_value_for_expected(
+        value: serde_json::Value,
+        expected: &Self,
+    ) -> Result<Self, ObservationNegotiationError> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Wire {
+            observation_negotiation_contract_version: u32,
+            contract_versions: ContractVersionSelection,
+            envelope_contract_version: u32,
+            event_contract_version: u32,
+            lifecycle_contract_version: u32,
+        }
+
+        let wire: Wire =
+            serde_json::from_value(value).map_err(ObservationNegotiationError::invalid)?;
+        let value = Self {
+            observation_negotiation_contract_version: wire.observation_negotiation_contract_version,
+            contract_versions: wire.contract_versions,
+            envelope_contract_version: wire.envelope_contract_version,
+            event_contract_version: wire.event_contract_version,
+            lifecycle_contract_version: wire.lifecycle_contract_version,
+        };
+        value.validate()?;
+        if &value != expected {
+            return Err(ObservationNegotiationError::invalid(
+                "observation selection does not match the caller-held selection",
             ));
         }
         Ok(value)

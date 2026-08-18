@@ -6,6 +6,7 @@ import { ContractValidationError } from '../rfc012a.js';
 import {
   IncompatibleObservationContractError,
   negotiateObservationContract,
+  parseObservationCapabilities,
   parseObservationContractOffer,
   parseObservationContractRequest,
   parseObservationContractSelection,
@@ -25,6 +26,13 @@ interface ObservationNegotiationFixture {
   };
 }
 
+interface ObservationCapabilitiesFixture {
+  fixture_contract_version: number;
+  contract_offer: unknown;
+  exact: any;
+  range: any;
+}
+
 const fixture = JSON.parse(
   readFileSync(
     new URL(
@@ -34,6 +42,16 @@ const fixture = JSON.parse(
     'utf8',
   ),
 ) as ObservationNegotiationFixture;
+
+const capabilityFixture = JSON.parse(
+  readFileSync(
+    new URL(
+      '../../../../../crates/spaghetti-napi/fixtures/contracts/rfc012d-observation-capabilities-v1.json',
+      import.meta.url,
+    ),
+    'utf8',
+  ),
+) as ObservationCapabilitiesFixture;
 
 function clone<T>(value: T): T {
   return structuredClone(value);
@@ -195,4 +213,188 @@ test('selected contract parsing rejects forged or unnegotiated semantics', () =>
   const downgradedFamily = clone(fixture.contract_selection) as any;
   downgradedFamily.contract_versions.fact_family_versions['runtime.usage-v2'] = 2;
   reject(downgradedFamily, parseSelection);
+});
+
+test('Rust RFC 012D capability fixture preserves exact, degraded, and unsupported status', () => {
+  assert.equal(capabilityFixture.fixture_contract_version, 1);
+  const exact = parseObservationCapabilities(
+    capabilityFixture.exact,
+    capabilityFixture.exact.selection,
+    capabilityFixture.contract_offer,
+    'ExactSupported',
+    'fixture-release-v1',
+  );
+  const range = parseObservationCapabilities(
+    capabilityFixture.range,
+    capabilityFixture.range.selection,
+    capabilityFixture.contract_offer,
+    'RangeSupported',
+    'fixture-release-v1',
+  );
+  assert.deepEqual(exact, capabilityFixture.exact);
+  assert.deepEqual(range, capabilityFixture.range);
+  assert.equal(exact.fact_families[0]?.status, 'unsupported');
+  assert.equal(exact.fact_families[1]?.status, 'supported');
+  assert.equal(exact.fact_families[1]?.expected_completeness, 'complete');
+  assert.equal(range.fact_families[1]?.status, 'degraded');
+  assert.equal(range.fact_families[1]?.expected_completeness, 'partial');
+});
+
+test('capability parsing is exact-selection-bound and rejects false support claims', () => {
+  const parseCapabilities = (value: unknown) =>
+    parseObservationCapabilities(
+      value,
+      capabilityFixture.exact.selection,
+      capabilityFixture.contract_offer,
+      'ExactSupported',
+      'fixture-release-v1',
+    );
+
+  const foreignSelection = clone(capabilityFixture.exact);
+  foreignSelection.selection.event_contract_version = 2;
+  reject(foreignSelection, parseCapabilities);
+
+  const falseSupported = clone(capabilityFixture.exact);
+  falseSupported.fact_families[0].status = 'supported';
+  reject(falseSupported, parseCapabilities);
+
+  const falseDegraded = clone(capabilityFixture.exact);
+  falseDegraded.fact_families[1].status = 'degraded';
+  reject(falseDegraded, parseCapabilities);
+
+  const missingSelected = clone(capabilityFixture.exact);
+  missingSelected.fact_families.pop();
+  reject(missingSelected, parseCapabilities);
+
+  const reordered = clone(capabilityFixture.exact);
+  reordered.fact_families.reverse();
+  reject(reordered, parseCapabilities);
+
+  reject(capabilityFixture.exact, (value) =>
+    parseObservationCapabilities(
+      value,
+      capabilityFixture.exact.selection,
+      capabilityFixture.contract_offer,
+      'RangeSupported',
+      'fixture-release-v1',
+    ),
+  );
+  reject(capabilityFixture.exact, (value) =>
+    parseObservationCapabilities(
+      value,
+      capabilityFixture.exact.selection,
+      capabilityFixture.contract_offer,
+      'ExactSupported',
+      'different-release',
+    ),
+  );
+  const narrowedOffer = clone(capabilityFixture.contract_offer) as any;
+  delete narrowedOffer.contract_versions.fact_family_versions['runtime.actor-run'];
+  reject(capabilityFixture.exact, (value) =>
+    parseObservationCapabilities(
+      value,
+      capabilityFixture.exact.selection,
+      narrowedOffer,
+      'ExactSupported',
+      'fixture-release-v1',
+    ),
+  );
+
+  const wrongSelectedVersion = clone(capabilityFixture.contract_offer) as any;
+  wrongSelectedVersion.contract_versions.fact_family_versions['runtime.usage-v2'] = [2];
+  reject(capabilityFixture.exact, (value) =>
+    parseObservationCapabilities(
+      value,
+      capabilityFixture.exact.selection,
+      wrongSelectedVersion,
+      'ExactSupported',
+      'fixture-release-v1',
+    ),
+  );
+
+  const wrongEventOffer = clone(capabilityFixture.contract_offer) as any;
+  wrongEventOffer.event_contract_versions = [2];
+  reject(capabilityFixture.exact, (value) =>
+    parseObservationCapabilities(
+      value,
+      capabilityFixture.exact.selection,
+      wrongEventOffer,
+      'ExactSupported',
+      'fixture-release-v1',
+    ),
+  );
+});
+
+test('capability parsing rejects silent fields, noncanonical evidence, and portable version drift', () => {
+  const parseCapabilities = (value: unknown) =>
+    parseObservationCapabilities(
+      value,
+      capabilityFixture.exact.selection,
+      capabilityFixture.contract_offer,
+      'ExactSupported',
+      'fixture-release-v1',
+    );
+
+  const unknownTop = clone(capabilityFixture.exact);
+  unknownTop.future_meaning = true;
+  reject(unknownTop, parseCapabilities);
+
+  const unknownFamily = clone(capabilityFixture.exact);
+  unknownFamily.fact_families[0].future_meaning = true;
+  reject(unknownFamily, parseCapabilities);
+
+  const unknownEvidence = clone(capabilityFixture.exact);
+  unknownEvidence.fact_families[1].evidence.future_meaning = true;
+  reject(unknownEvidence, parseCapabilities);
+
+  const invalidRelease = clone(capabilityFixture.exact);
+  invalidRelease.fact_families[1].evidence.support_release_id = ' fixture release ';
+  reject(invalidRelease, parseCapabilities);
+
+  const duplicateLimitation = clone(capabilityFixture.exact);
+  duplicateLimitation.fact_families[1].limitations = [
+    'scope_bound',
+    'coverage_reported_separately',
+    'coverage_reported_separately',
+  ];
+  reject(duplicateLimitation, parseCapabilities);
+
+  const oversizedVersion = clone(capabilityFixture.exact);
+  oversizedVersion.fact_families[0].evidence.offered_versions = [0x1_0000_0000];
+  reject(oversizedVersion, parseCapabilities);
+});
+
+test('all selected capability families share one support-release evidence source', () => {
+  const expected = clone(capabilityFixture.exact.selection);
+  expected.contract_versions.fact_family_versions['runtime.actor-run'] = 1;
+  const mixed = clone(capabilityFixture.exact);
+  mixed.selection = clone(expected);
+  mixed.fact_families[0] = {
+    fact_family: 'runtime.actor-run',
+    selected_version: 1,
+    status: 'supported',
+    evidence: {
+      kind: 'promoted_support_release',
+      support_release_id: 'fixture-release-v1',
+      support: 'exact_promoted_release',
+    },
+    quality: 'exact',
+    expected_timing: 'bootstrap_and_live',
+    expected_completeness: 'complete',
+    limitations: ['scope_bound', 'coverage_reported_separately'],
+  };
+  mixed.fact_families[1].status = 'degraded';
+  mixed.fact_families[1].evidence.support = 'range_supported_release';
+  mixed.fact_families[1].quality = 'qualified';
+  mixed.fact_families[1].expected_completeness = 'partial';
+  mixed.fact_families[1].limitations.push('range_supported_native_version');
+  reject(mixed, (value) =>
+    parseObservationCapabilities(
+      value,
+      expected,
+      capabilityFixture.contract_offer,
+      'ExactSupported',
+      'fixture-release-v1',
+    ),
+  );
 });
