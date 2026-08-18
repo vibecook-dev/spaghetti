@@ -1469,8 +1469,27 @@ Current landing status (2026-08-17):
   stops its backend/registration without implicitly closing the event drain,
   so the consumer can apply that failure before owning the independent close
   barrier. Default timing values remain provisional internal policy, not
-  promoted performance gates. Integrated watcher/source-owner task spawning,
-  remaining portable-host wiring, and policy calibration remain open;
+  promoted performance gates;
+- one non-spawning structured async owner now supervises that native watcher
+  together with the exact current source epoch. Pairing requires the same
+  attachment, a live watcher coordinator, and a valid current source owner;
+  failed pairing returns both non-cloneable authorities intact. Cancellation
+  stops and releases both halves, while watcher routing/recovery failure
+  terminalizes the attachment and then waits for the source owner to observe
+  the same failure. An unexpected source-owner failure likewise delivers one
+  retained terminal observer failure before releasing the watcher. Intentional
+  continuity invalidation is different: it stops only the stale source half
+  and returns a structured handoff that still owns the native backend,
+  callback authority, recovery policy, old epoch, exact redacted bindings, and
+  source retry policy. Native callbacks remain routable during replacement and
+  accumulate ordinary poll demand without reading the invalid epoch. The
+  integrated conformance path carries that same watcher across a full epoch-2
+  replacement, re-pairs it with the preserved source authority, services both
+  handoff-time and fresh epoch-2 poll demand, and proves permanent backend
+  failure stops the re-paired source, releases the backend exactly once, and
+  leaves the ordered terminal control drainable before close. Automatic
+  replacement replay/rebind orchestration, remaining portable-host wiring,
+  and policy calibration remain open;
 - one pass is active at a time, a later pass receives fresh bounds, close is
   idempotent, and the frozen access report excludes paths, identity values, and
   content; and
@@ -1488,15 +1507,15 @@ and complete scope coverage,
 dynamic/discovered scope membership beyond the attachment's current exact
 known-object grants and family coverage beyond usage-v2,
 complete multi-family replacement manifests, whole-scope discovery and source
-state beyond the current exact append-object set, integrated watcher/source-
-owner supervision, automatic owner transfer through resync, remaining
+state beyond the current exact append-object set, automatic watcher/source-
+owner replacement replay and rebind orchestration, remaining
 portable-host wiring and policy calibration, plus re-overflow orchestration,
 artifact mediation and the public portable close transport,
 the trusted native version-probe/identity-input drivers, and the complete
 public request are not yet implemented. The internal offered and applied
 boundaries are now transactional, but they cannot become a public watermark and
 consumer-ready helper until complete scope-membership/barrier coverage, portable
-resync completion, watcher cancellation, and the negotiated portable lifecycle
+resync completion, portable watcher cancellation, and the negotiated lifecycle
 surface are defined. The usage-v2 sink and delivery lane remain crate-private
 until those envelope/lifecycle contracts and the negotiated portable surface
 exist.
@@ -1651,8 +1670,12 @@ Continuity invalidation now independently wakes a parked source owner and
 returns its exact epoch/binding/policy handoff before replacement starts; a
 stale owner cannot read or bind into the next epoch, while a completed
 whole-scope replacement can bind the preserved authority to a fresh owner and
-service an epoch-local poll. Watcher-driven replay/supervision across that
-handoff remains later D3 composition rather than an implicit background task.
+service an epoch-local poll. A structured, non-detached supervisor now retains
+the native watcher across that handoff, permits callbacks to queue demand while
+the invalid epoch has no reader, re-pairs after replacement, and co-stops both
+owners on cancellation or terminal watcher/source failure. Automatic
+replacement replay and rebind orchestration remains later D3 composition
+rather than an implicit background task.
 
 ### D4. SDK and Chopsticks migration
 

@@ -4585,6 +4585,23 @@ impl ScopedObservationNativeWatcher {
             + Send,
         C: FnMut() -> i64 + Send,
     {
+        self.run_with_recovery_loop(policy, &mut factory, &mut observed_at)
+            .await
+    }
+
+    async fn run_with_recovery_loop<F, C>(
+        &mut self,
+        policy: ScopedObservationNativeWatcherRecoveryPolicy,
+        factory: &mut F,
+        observed_at: &mut C,
+    ) -> Result<ScopedObservationNativeWatcherRunExit, ScopedContinuityError>
+    where
+        F: FnMut(
+                ScopedObservationNativeWatchCallback,
+            ) -> Result<Box<dyn ScopedObservationNativeWatchBackend>, ()>
+            + Send,
+        C: FnMut() -> i64 + Send,
+    {
         let mut audit = tokio::time::interval(policy.audit_interval());
         audit.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         // `interval` ticks immediately once; consume that setup tick so audits
@@ -4618,7 +4635,7 @@ impl ScopedObservationNativeWatcher {
                         _ = tokio::time::sleep(delay) => {}
                     }
                     completed_attempts += 1;
-                    match self.reinstall_native_backend_with_factory_inner(&mut factory) {
+                    match self.reinstall_native_backend_with_factory_inner(&mut *factory) {
                         Ok(_) => {
                             observed_generation = self.state().generation;
                             break;
@@ -4725,7 +4742,387 @@ impl Drop for ScopedObservationNativeWatcher {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum ScopedObservationAsyncOwnerPairBindingError {
+    #[error("scoped watcher and source owners belong to another attachment")]
+    ForeignAttachment,
+    #[error("scoped watcher owner has not reached the live phase")]
+    WatcherNotLive,
+    #[error("scoped watcher owner is terminally failed")]
+    WatcherFailed,
+    #[error("scoped source owner does not own the attachment's current valid epoch")]
+    SourceNotLive,
+}
+
+/// Failed watcher/source pairing returns both non-cloneable owners intact, so
+/// a caller cannot lose native callback or source epoch authority while
+/// correcting lifecycle ordering.
+pub struct ScopedObservationAsyncOwnerPairBindFailure {
+    error: ScopedObservationAsyncOwnerPairBindingError,
+    watcher: Box<ScopedObservationNativeWatcher>,
+    source: Box<ScopedObservationAsyncSourceOwner>,
+    watcher_policy: ScopedObservationNativeWatcherRecoveryPolicy,
+}
+
+impl ScopedObservationAsyncOwnerPairBindFailure {
+    pub fn error(&self) -> ScopedObservationAsyncOwnerPairBindingError {
+        self.error
+    }
+
+    pub fn into_parts(
+        self,
+    ) -> (
+        ScopedObservationAsyncOwnerPairBindingError,
+        ScopedObservationNativeWatcher,
+        ScopedObservationAsyncSourceOwner,
+        ScopedObservationNativeWatcherRecoveryPolicy,
+    ) {
+        (self.error, *self.watcher, *self.source, self.watcher_policy)
+    }
+}
+
+impl std::fmt::Debug for ScopedObservationAsyncOwnerPairBindFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ScopedObservationAsyncOwnerPairBindFailure")
+            .field("error", &self.error)
+            .field("watcher_phase", &self.watcher.coordinator.phase())
+            .field("watch_anchor_count", &self.watcher.watch_anchor_count)
+            .field("source_scope_epoch", &self.source.active.scope_epoch)
+            .field("watcher_policy", &self.watcher_policy)
+            .finish()
+    }
+}
+
+impl std::fmt::Display for ScopedObservationAsyncOwnerPairBindFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.error.fmt(formatter)
+    }
+}
+
+impl std::error::Error for ScopedObservationAsyncOwnerPairBindFailure {}
+
+/// One structured future owner for the native callback/recovery backend and
+/// the exact mutable source epoch. It does not spawn detached tasks: dropping
+/// the pair still follows the native watcher and source-owner close contracts.
+pub struct ScopedObservationAsyncOwnerPair {
+    watcher: ScopedObservationNativeWatcher,
+    source: ScopedObservationAsyncSourceOwner,
+    watcher_policy: ScopedObservationNativeWatcherRecoveryPolicy,
+}
+
+impl std::fmt::Debug for ScopedObservationAsyncOwnerPair {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ScopedObservationAsyncOwnerPair")
+            .field("watcher_phase", &self.watcher.coordinator.phase())
+            .field("watcher_state", &self.watcher.state())
+            .field("source_scope_epoch", &self.source.active.scope_epoch)
+            .field("source_binding_count", &self.source.bindings.len())
+            .field("watcher_policy", &self.watcher_policy)
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ScopedObservationAsyncOwnerFirstExit {
+    Source,
+    Watcher(ScopedObservationNativeWatcherRunExit),
+    WatcherError(ScopedContinuityError),
+}
+
+/// Intentional continuity invalidation pauses only the source half. The
+/// watcher backend, callback authority, recovery policy, and source handoff
+/// remain owned together until replacement binds a fresh source owner.
+pub struct ScopedObservationAsyncResyncHandoff {
+    watcher: ScopedObservationNativeWatcher,
+    source: ScopedObservationStoppedSourceOwner,
+    watcher_policy: ScopedObservationNativeWatcherRecoveryPolicy,
+}
+
+impl ScopedObservationAsyncResyncHandoff {
+    pub fn source(&self) -> &ScopedObservationStoppedSourceOwner {
+        &self.source
+    }
+
+    pub fn into_parts(
+        self,
+    ) -> (
+        ScopedObservationNativeWatcher,
+        ScopedObservationStoppedSourceOwner,
+        ScopedObservationNativeWatcherRecoveryPolicy,
+    ) {
+        (self.watcher, self.source, self.watcher_policy)
+    }
+}
+
+impl std::fmt::Debug for ScopedObservationAsyncResyncHandoff {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ScopedObservationAsyncResyncHandoff")
+            .field("watcher_phase", &self.watcher.coordinator.phase())
+            .field("watcher_state", &self.watcher.state())
+            .field("source_exit", &self.source.exit())
+            .field("source_binding_count", &self.source.binding_count())
+            .field("watcher_policy", &self.watcher_policy)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Terminal/cancelled paired-owner result. The native backend and watcher
+/// registration have already been released; the stopped source state remains
+/// available for bounded diagnostics, but cannot be resumed after failure.
+pub struct ScopedObservationAsyncStoppedOwners {
+    source: ScopedObservationStoppedSourceOwner,
+    first_exit: ScopedObservationAsyncOwnerFirstExit,
+    terminal_failure: Option<Arc<ScopedObserverFailure>>,
+    supervision_error: Option<ScopedContinuityError>,
+}
+
+impl ScopedObservationAsyncStoppedOwners {
+    pub fn source(&self) -> &ScopedObservationStoppedSourceOwner {
+        &self.source
+    }
+
+    pub fn first_exit(&self) -> &ScopedObservationAsyncOwnerFirstExit {
+        &self.first_exit
+    }
+
+    pub fn terminal_failure(&self) -> Option<Arc<ScopedObserverFailure>> {
+        self.terminal_failure.as_ref().map(Arc::clone)
+    }
+
+    pub fn supervision_error(&self) -> Option<ScopedContinuityError> {
+        self.supervision_error
+    }
+
+    pub fn into_source(self) -> ScopedObservationStoppedSourceOwner {
+        self.source
+    }
+}
+
+impl std::fmt::Debug for ScopedObservationAsyncStoppedOwners {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ScopedObservationAsyncStoppedOwners")
+            .field("source_exit", &self.source.exit())
+            .field("source_binding_count", &self.source.binding_count())
+            .field("first_exit", &self.first_exit)
+            .field("terminal_failure", &self.terminal_failure)
+            .field("supervision_error", &self.supervision_error)
+            .finish_non_exhaustive()
+    }
+}
+
+#[must_use = "a resync result retains watcher and source authority and must be rebound or deliberately dropped"]
+pub enum ScopedObservationAsyncOwnerRunResult {
+    Resync(ScopedObservationAsyncResyncHandoff),
+    Stopped(ScopedObservationAsyncStoppedOwners),
+}
+
+impl std::fmt::Debug for ScopedObservationAsyncOwnerRunResult {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Resync(handoff) => formatter.debug_tuple("Resync").field(handoff).finish(),
+            Self::Stopped(stopped) => formatter.debug_tuple("Stopped").field(stopped).finish(),
+        }
+    }
+}
+
+enum ScopedObservationAsyncOwnerFirstCompletion {
+    Source(Box<ScopedObservationStoppedSourceOwner>),
+    Watcher(Result<ScopedObservationNativeWatcherRunExit, ScopedContinuityError>),
+}
+
+impl ScopedObservationAsyncOwnerPair {
+    pub async fn run_until_stopped(self) -> ScopedObservationAsyncOwnerRunResult {
+        self.run_until_stopped_inner(
+            |callback| {
+                let watcher = notify::recommended_watcher(callback).map_err(|_| ())?;
+                Ok(Box::new(watcher))
+            },
+            scoped_observation_now_unix_ms,
+            scoped_observation_now_unix_ms,
+        )
+        .await
+    }
+
+    async fn run_until_stopped_inner<F, W, S>(
+        self,
+        mut watcher_factory: F,
+        mut watcher_observed_at: W,
+        source_observed_at: S,
+    ) -> ScopedObservationAsyncOwnerRunResult
+    where
+        F: FnMut(
+                ScopedObservationNativeWatchCallback,
+            ) -> Result<Box<dyn ScopedObservationNativeWatchBackend>, ()>
+            + Send,
+        W: FnMut() -> i64 + Send,
+        S: FnMut() -> i64 + Send,
+    {
+        let Self {
+            mut watcher,
+            source,
+            watcher_policy,
+        } = self;
+        let mut watcher_future = Box::pin(watcher.run_with_recovery_loop(
+            watcher_policy,
+            &mut watcher_factory,
+            &mut watcher_observed_at,
+        ));
+        let mut source_future = Box::pin(source.run_until_stopped_inner(source_observed_at));
+        let first = tokio::select! {
+            biased;
+            exit = &mut watcher_future => {
+                ScopedObservationAsyncOwnerFirstCompletion::Watcher(exit)
+            }
+            stopped = &mut source_future => {
+                ScopedObservationAsyncOwnerFirstCompletion::Source(Box::new(stopped))
+            }
+        };
+
+        match first {
+            ScopedObservationAsyncOwnerFirstCompletion::Source(stopped) => {
+                let stopped = *stopped;
+                drop(source_future);
+                drop(watcher_future);
+                if matches!(
+                    stopped.exit(),
+                    ScopedObservationSourceOwnerRunExit::ContinuityInvalidated(_)
+                ) {
+                    return ScopedObservationAsyncOwnerRunResult::Resync(
+                        ScopedObservationAsyncResyncHandoff {
+                            watcher,
+                            source: stopped,
+                            watcher_policy,
+                        },
+                    );
+                }
+
+                let (terminal_failure, supervision_error) = if matches!(
+                    stopped.exit(),
+                    ScopedObservationSourceOwnerRunExit::Failed(_)
+                ) {
+                    match watcher.fail_observer(
+                        ScopedObserverFailureReason::InternalControlFailure,
+                        watcher_observed_at(),
+                    ) {
+                        Ok(failure) => (Some(failure), None),
+                        Err(error) => (None, Some(error)),
+                    }
+                } else {
+                    (None, None)
+                };
+                drop(watcher);
+                ScopedObservationAsyncOwnerRunResult::Stopped(ScopedObservationAsyncStoppedOwners {
+                    source: stopped,
+                    first_exit: ScopedObservationAsyncOwnerFirstExit::Source,
+                    terminal_failure,
+                    supervision_error,
+                })
+            }
+            ScopedObservationAsyncOwnerFirstCompletion::Watcher(exit) => {
+                drop(watcher_future);
+                let (first_exit, terminal_failure, supervision_error) = match exit {
+                    Ok(exit @ ScopedObservationNativeWatcherRunExit::Cancelled) => (
+                        ScopedObservationAsyncOwnerFirstExit::Watcher(exit),
+                        None,
+                        None,
+                    ),
+                    Ok(ScopedObservationNativeWatcherRunExit::Failed(failure)) => (
+                        ScopedObservationAsyncOwnerFirstExit::Watcher(
+                            ScopedObservationNativeWatcherRunExit::Failed(Arc::clone(&failure)),
+                        ),
+                        Some(failure),
+                        None,
+                    ),
+                    Err(error) => {
+                        let delivered = watcher.fail_observer(
+                            ScopedObserverFailureReason::InternalControlFailure,
+                            watcher_observed_at(),
+                        );
+                        let (terminal_failure, supervision_error) = match delivered {
+                            Ok(failure) => (Some(failure), Some(error)),
+                            Err(delivery_error) => (None, Some(delivery_error)),
+                        };
+                        (
+                            ScopedObservationAsyncOwnerFirstExit::WatcherError(error),
+                            terminal_failure,
+                            supervision_error,
+                        )
+                    }
+                };
+                drop(watcher);
+                let source = source_future.await;
+                ScopedObservationAsyncOwnerRunResult::Stopped(ScopedObservationAsyncStoppedOwners {
+                    source,
+                    first_exit,
+                    terminal_failure,
+                    supervision_error,
+                })
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub async fn run_with_factory_and_clocks<F, W, S>(
+        self,
+        watcher_factory: F,
+        watcher_observed_at: W,
+        source_observed_at: S,
+    ) -> ScopedObservationAsyncOwnerRunResult
+    where
+        F: FnMut(
+                ScopedObservationNativeWatchCallback,
+            ) -> Result<Box<dyn ScopedObservationNativeWatchBackend>, ()>
+            + Send,
+        W: FnMut() -> i64 + Send,
+        S: FnMut() -> i64 + Send,
+    {
+        self.run_until_stopped_inner(watcher_factory, watcher_observed_at, source_observed_at)
+            .await
+    }
+}
+
 impl ScopedObservationAsyncHandle {
+    pub fn bind_live_owner_pair(
+        &self,
+        watcher: ScopedObservationNativeWatcher,
+        source: ScopedObservationAsyncSourceOwner,
+        watcher_policy: ScopedObservationNativeWatcherRecoveryPolicy,
+    ) -> Result<ScopedObservationAsyncOwnerPair, ScopedObservationAsyncOwnerPairBindFailure> {
+        let error = if !Arc::ptr_eq(&self.shared, &watcher.handle.shared)
+            || !Arc::ptr_eq(&self.shared, &source.handle.shared)
+        {
+            Some(ScopedObservationAsyncOwnerPairBindingError::ForeignAttachment)
+        } else if watcher.state().routing_failed || watcher.terminal_failure_delivered {
+            Some(ScopedObservationAsyncOwnerPairBindingError::WatcherFailed)
+        } else if !matches!(
+            watcher.coordinator.phase(),
+            ScopedObservationWatcherPhase::Live { .. }
+        ) {
+            Some(ScopedObservationAsyncOwnerPairBindingError::WatcherNotLive)
+        } else if source.attachment_wait_context().is_err() {
+            Some(ScopedObservationAsyncOwnerPairBindingError::SourceNotLive)
+        } else {
+            None
+        };
+        if let Some(error) = error {
+            return Err(ScopedObservationAsyncOwnerPairBindFailure {
+                error,
+                watcher: Box::new(watcher),
+                source: Box::new(source),
+                watcher_policy,
+            });
+        }
+        Ok(ScopedObservationAsyncOwnerPair {
+            watcher,
+            source,
+            watcher_policy,
+        })
+    }
+
     pub fn install_native_watcher(
         &self,
         hint_capacity: usize,
