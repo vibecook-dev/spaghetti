@@ -210,9 +210,9 @@ mod tests {
         ScopedObservationAppendPassRequest, ScopedObservationAsyncHandle,
         ScopedObservationAsyncOwnerFirstExit, ScopedObservationAsyncOwnerPair,
         ScopedObservationAsyncOwnerRunResult, ScopedObservationAsyncRuntime,
-        ScopedObservationAutomaticResyncError, ScopedObservationCloseError,
-        ScopedObservationConsumerOfferError, ScopedObservationContinuity,
-        ScopedObservationDeliveryLane, ScopedObservationDeliveryLimits, ScopedObservationEvent,
+        ScopedObservationCloseError, ScopedObservationConsumerOfferError,
+        ScopedObservationContinuity, ScopedObservationDeliveryLane,
+        ScopedObservationDeliveryLimits, ScopedObservationEvent,
         ScopedObservationNativeWatchBackend, ScopedObservationNativeWatchCallback,
         ScopedObservationNativeWatcherError, ScopedObservationNativeWatcherRecoveryPolicy,
         ScopedObservationNativeWatcherRunExit, ScopedObservationOpenDrainError,
@@ -3490,7 +3490,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn scoped_automatic_resync_rejects_terminal_error_after_partial_object_progress() {
+    async fn scoped_automatic_resync_rolls_back_terminal_error_after_partial_object_progress() {
         let registry = stateful_supported_fixture_registry();
         let temp = TempDir::new().unwrap();
         let root = temp.path().join("automatic-resync-partial-error-root");
@@ -3514,11 +3514,12 @@ mod tests {
         )
         .await;
 
-        // Batch one commits an exact replacement cursor. Batch two is a
-        // permanent decoder failure. The shared reducer cannot roll back only
-        // this object's prefix, so the whole isolated stage must fail instead
-        // of publishing prefix facts beside terminal Unavailable coverage.
-        std::fs::write(&target, b"rec-01\nstream-fatal\n").unwrap();
+        // Batch one commits an exact replacement cursor and semantic entity.
+        // Batch two remains transient through the bounded retry ceiling. The
+        // final attempt rolls back only this object's cursor, coverage, and
+        // reducer contributions, then publishes terminal Unavailable coverage
+        // without the prefix.
+        std::fs::write(&target, b"rec-01\nretry\n").unwrap();
         let pair_task = tokio::spawn(pair.run_with_factory_and_clocks(|_| Err(()), || 60, || 61));
         handle
             .require_resync(ScopedResyncReason::WatcherOverflow, 70)
@@ -3543,41 +3544,133 @@ mod tests {
         runtime
             .acknowledge_applied(required_event.application_receipt())
             .unwrap();
+        let started_event = runtime.next_event().await.unwrap().unwrap();
+        assert!(matches!(
+            started_event.envelope.event,
+            ScopedObservationEvent::ObserverResyncStarted { .. }
+        ));
+        runtime
+            .acknowledge_applied(started_event.application_receipt())
+            .unwrap();
 
-        let failure = tokio::time::timeout(std::time::Duration::from_secs(2), recovery_task)
+        let scheduled_error_event = runtime.next_event().await.unwrap().unwrap();
+        let ScopedObservationEvent::SourceObjectError { error } =
+            &scheduled_error_event.envelope.event
+        else {
+            panic!("partial replacement retry must remain object-local");
+        };
+        assert_eq!(
+            error.failure_code,
+            ScopedSourceObjectFailureCode::DecodeRetryTransient
+        );
+        assert_eq!(
+            error.retry,
+            ScopedSourceObjectRetryState::RetryScheduled {
+                failed_attempts: 1,
+                max_attempts: 2,
+                retry_after_ms: 1,
+            }
+        );
+        assert!(error
+            .provenance
+            .last_successful_position
+            .as_ref()
+            .is_some_and(|position| {
+                position.kind == CoveragePositionKind::AppendCursor
+                    && position.monotonic_order == Some(7)
+            }));
+        runtime
+            .acknowledge_applied(scheduled_error_event.application_receipt())
+            .unwrap();
+
+        let exhausted_error_event = runtime.next_event().await.unwrap().unwrap();
+        let ScopedObservationEvent::SourceObjectError { error } =
+            &exhausted_error_event.envelope.event
+        else {
+            panic!("partial replacement retry exhaustion must remain object-local");
+        };
+        assert_eq!(
+            error.failure_code,
+            ScopedSourceObjectFailureCode::DecodeRetryTransient
+        );
+        assert_eq!(
+            error.retry,
+            ScopedSourceObjectRetryState::RetryExhausted {
+                failed_attempts: 2,
+                max_attempts: 2,
+            }
+        );
+        assert!(error
+            .provenance
+            .last_successful_position
+            .as_ref()
+            .is_some_and(|position| position.monotonic_order == Some(7)));
+        runtime
+            .acknowledge_applied(exhausted_error_event.application_receipt())
+            .unwrap();
+
+        let completed_event = runtime.next_event().await.unwrap().unwrap();
+        let ScopedObservationEvent::ObserverResyncComplete { barrier } =
+            &completed_event.envelope.event
+        else {
+            panic!("rolled-back object failure must complete the replacement");
+        };
+        assert_eq!(barrier.scope_epoch, 2);
+        assert!(barrier.root_present);
+        assert_eq!(barrier.family_manifest.len(), 1);
+        assert!(barrier.family_manifest.iter().all(|family| {
+            family.entity_or_event_count == 0
+                && family.completeness == CoverageSetCompleteness::Unavailable
+        }));
+        assert!(!barrier.source_coverage.is_empty());
+        assert!(barrier.source_coverage.iter().all(|coverage| {
+            coverage.completeness == CoverageSetCompleteness::Unavailable
+                && coverage.points.iter().all(|point| {
+                    point.position.is_none()
+                        && matches!(point.status, CoverageStatus::Unavailable { .. })
+                })
+        }));
+        assert!(barrier
+            .explicit_object_errors
+            .iter()
+            .all(|error| error.code == "decode_retry_transient"));
+        runtime
+            .acknowledge_applied(completed_event.application_receipt())
+            .unwrap();
+
+        let pair = tokio::time::timeout(std::time::Duration::from_secs(2), recovery_task)
             .await
             .unwrap()
             .unwrap()
-            .unwrap_err();
-        assert_eq!(
-            failure.error(),
-            ScopedObservationAutomaticResyncError::Decode
-        );
-        let terminal = failure
-            .terminal_failure()
-            .expect("partial object replacement must fail before swap");
-        assert_eq!(
-            terminal.reason,
-            ScopedObserverFailureReason::InternalControlFailure
-        );
-        assert!(failure.supervision_error().is_none());
-        let failure_debug = format!("{failure:?}");
-        assert!(!failure_debug.contains(root.to_string_lossy().as_ref()));
-        assert!(!failure_debug.contains("automatic-resync-partial-error-session"));
-        assert!(handle
-            .with_attachment(|_, drain| drain.engine_resync_barrier())
-            .is_none());
-        let failed_event = runtime.next_event().await.unwrap().unwrap();
-        assert!(matches!(
-            &failed_event.envelope.event,
-            ScopedObservationEvent::ObserverFailed { failure }
-                if Arc::ptr_eq(failure, &terminal)
-        ));
-        runtime
-            .acknowledge_applied(failed_event.application_receipt())
             .unwrap();
+        let resumed_task =
+            tokio::spawn(pair.run_with_factory_and_clocks(|_| Err(()), || 100, || 101));
+        let watermark = tokio::time::timeout(std::time::Duration::from_secs(2), handle.poll())
+            .await
+            .unwrap()
+            .unwrap();
+        let ScopedObservationPollResolution::Ready(watermark) = watermark else {
+            panic!("rolled-back terminal state must remain pollable");
+        };
+        assert_eq!(watermark.scope_epoch, 2);
+        assert!(watermark.source_coverage.iter().all(|coverage| {
+            coverage.completeness == CoverageSetCompleteness::Unavailable
+                && coverage.points.iter().all(|point| point.position.is_none())
+        }));
+        let redacted = format!("{watermark:?}");
+        assert!(!redacted.contains(root.to_string_lossy().as_ref()));
+        assert!(!redacted.contains("automatic-resync-partial-error-session"));
+        let close = runtime.request_close();
+        let stopped = tokio::time::timeout(std::time::Duration::from_secs(2), resumed_task)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            stopped,
+            ScopedObservationAsyncOwnerRunResult::Stopped(_)
+        ));
+        assert!(close.wait_async().await.complete);
         assert_eq!(drops.load(Ordering::SeqCst), 1);
-        assert!(runtime.close().await.complete);
     }
 
     #[tokio::test]

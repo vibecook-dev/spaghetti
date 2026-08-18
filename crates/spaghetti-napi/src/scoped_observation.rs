@@ -367,8 +367,11 @@ impl ScopedSourceObjectFailureCode {
 }
 
 /// Last successfully admitted native position known before an object error.
-/// A missing object or a failure before its first stable read has no position,
-/// but still carries generation one rather than inventing a zero sentinel.
+/// This is diagnostic provenance, not a claim that the position remains in
+/// current coverage: a terminal replacement transaction may discard that
+/// object's partial cursor and reducer contributions. A missing object or a
+/// failure before its first stable read has no position, but still carries
+/// generation one rather than inventing a zero sentinel.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScopedSourceObjectErrorProvenance {
     pub generation: u64,
@@ -1285,6 +1288,40 @@ impl ScopedObservationAdmissionLane {
                     .then(|| self.offered_pass_evidence.get(source).copied())
                     .flatten()
             })
+    }
+
+    fn validate_replacement_object_rollback(
+        &self,
+        object_token: u64,
+        source: &ScopedSourceObjectIdentity,
+    ) -> Result<(), ScopedAdmissionError> {
+        if object_token == 0
+            || !self.known_coverage_objects.contains_key(source)
+            || self
+                .controls
+                .iter()
+                .any(|frame| frame.object_token == object_token || &frame.source == source)
+            || self
+                .decoded
+                .iter()
+                .any(|frame| frame.object_token == object_token || &frame.source == source)
+            || self
+                .pending_coverage_updates
+                .iter()
+                .any(|pending| &pending.coverage.source == source)
+            || !self.offered_decode_coverage.contains_key(source)
+            || !self.offered_access_pass_ids.contains_key(source)
+            || !self.offered_pass_evidence.contains_key(source)
+        {
+            return Err(ScopedAdmissionError::InvalidCoverage);
+        }
+        Ok(())
+    }
+
+    fn rollback_replacement_object_prevalidated(&mut self, source: &ScopedSourceObjectIdentity) {
+        self.offered_decode_coverage.remove(source);
+        self.offered_access_pass_ids.remove(source);
+        self.offered_pass_evidence.remove(source);
     }
 
     pub fn is_empty(&self) -> bool {
@@ -5496,22 +5533,19 @@ async fn scoped_record_replacement_object_error(
     )
     .map_err(|_| partial_failure)?;
 
-    // The shared replacement reducer has already consumed any successful
-    // prefix named by this position. Until a per-object transactional reducer
-    // exists, publishing that prefix beside terminal Unavailable coverage
-    // would falsely call an incomplete object a full snapshot. Scheduled
-    // retries may continue from the exact position; terminal/exhausted state
-    // after progress fails the whole isolated stage without swapping it.
-    if retry_delay.is_none() && error.provenance.last_successful_position.is_some() {
-        return Err(partial_failure);
-    }
     if retry_delay.is_none() {
-        stage
-            .append_objects
-            .get_mut(relation_id)
-            .ok_or(ScopedObservationAutomaticResyncError::SourceAccess)?
-            .commit_replacement_unavailable()
-            .map_err(|_| partial_failure)?;
+        if error.provenance.last_successful_position.is_some() {
+            stage
+                .rollback_object_progress(relation_id, &error.provenance)
+                .map_err(|_| partial_failure)?;
+        } else {
+            stage
+                .append_objects
+                .get_mut(relation_id)
+                .ok_or(ScopedObservationAutomaticResyncError::SourceAccess)?
+                .commit_replacement_unavailable()
+                .map_err(|_| partial_failure)?;
+        }
     }
     let object = stage
         .append_objects
@@ -8034,6 +8068,24 @@ impl ScopedObservationProjectionSink {
         }
     }
 
+    fn validate_replacement_object_rollback(
+        &self,
+        object_token: u64,
+        scope_epoch: u64,
+    ) -> Result<(), ScopedProjectionError> {
+        if self.lifecycle != (ScopedProjectionLifecycle::Replacement { scope_epoch })
+            || object_token == 0
+        {
+            return Err(ScopedProjectionError::InvalidLifecycle);
+        }
+        Ok(())
+    }
+
+    fn rollback_replacement_object_prevalidated(&mut self, object_token: u64) {
+        self.usage_v2
+            .retain(|_, state| state.object_token != object_token);
+    }
+
     pub fn usage_v2_entity_count(&self) -> usize {
         self.usage_v2.len()
     }
@@ -8662,6 +8714,47 @@ impl ScopedObservationScopeReplacementStage {
     ) -> Result<bool, ScopedReplacementStageError> {
         self.semantic.validate_delivery(delivery)?;
         self.semantic.reduce_next(&mut self.admission)
+    }
+
+    /// Discard one relation's already-reduced replacement prefix without
+    /// disturbing earlier completed siblings. Every fallible invariant is
+    /// checked before the reducer, offered coverage, and object cursor are
+    /// synchronously rolled back as one in-memory transaction.
+    fn rollback_object_progress(
+        &mut self,
+        relation_id: &str,
+        provenance: &ScopedSourceObjectErrorProvenance,
+    ) -> Result<(), ScopedReplacementStageError> {
+        if self.semantic.prepared.is_some() || self.activated {
+            return Err(ScopedReplacementStageError::SnapshotAlreadyPrepared);
+        }
+        let object = self
+            .append_objects
+            .get(relation_id)
+            .ok_or(ScopedReplacementStageError::UnknownSourceRelation)?;
+        object
+            .validate_replacement_progress_rollback(provenance)
+            .map_err(|_| ScopedReplacementStageError::InvalidSourceState)?;
+        let object_token = object.object_token;
+        let source = object.source.clone();
+        self.admission
+            .validate_replacement_object_rollback(object_token, &source)
+            .map_err(|_| ScopedReplacementStageError::InvalidSourceState)?;
+        self.semantic
+            .projection
+            .validate_replacement_object_rollback(object_token, self.semantic.scope_epoch)
+            .map_err(ScopedReplacementStageError::Projection)?;
+
+        self.semantic
+            .projection
+            .rollback_replacement_object_prevalidated(object_token);
+        self.admission
+            .rollback_replacement_object_prevalidated(&source);
+        self.append_objects
+            .get_mut(relation_id)
+            .expect("prevalidated replacement relation remains present")
+            .rollback_replacement_progress_prevalidated(provenance.clone());
+        Ok(())
     }
 
     pub fn prepare_snapshot(
@@ -12467,6 +12560,12 @@ pub struct ScopedKnownAppendObject {
     decoder: ScopedAppendDecoderConfig,
     checkpoint: Option<AppendCheckpoint>,
     decoder_state: Option<Vec<u8>>,
+    /// A terminal replacement error may occur after bounded replay advanced.
+    /// The replacement transaction discards that cursor and its semantic
+    /// contributions, but retains the last observed position as error
+    /// provenance. This marker keeps later coverage validation honest without
+    /// making the discarded cursor resumable.
+    discarded_replacement_provenance: Option<ScopedSourceObjectErrorProvenance>,
     bootstrap_active: bool,
     bootstrap_blocked: bool,
     presence_state: ScopedAppendPresenceState,
@@ -12565,6 +12664,7 @@ impl ScopedKnownAppendObject {
             decoder,
             checkpoint: None,
             decoder_state: None,
+            discarded_replacement_provenance: None,
             bootstrap_active: true,
             bootstrap_blocked: false,
             presence_state: ScopedAppendPresenceState::Unknown,
@@ -12611,7 +12711,15 @@ impl ScopedKnownAppendObject {
                     .to_string(),
             ));
         }
-        let previous_generation = self.checkpoint.as_ref().map(|value| value.generation);
+        let previous_generation = self
+            .checkpoint
+            .as_ref()
+            .map(|value| value.generation)
+            .or_else(|| {
+                self.discarded_replacement_provenance
+                    .as_ref()
+                    .map(|provenance| provenance.generation)
+            });
         let (read, access_object_token) = pass.read_known_append(
             &self.driver,
             ScopedKnownAppendReadRequest {
@@ -12991,20 +13099,30 @@ impl ScopedKnownAppendObject {
         {
             return Err(());
         }
-        let position = self
+        let retained_position = self
             .checkpoint
             .as_ref()
             .map(scoped_append_coverage_position)
             .transpose()?;
-        if error.provenance.generation
-            != self
-                .checkpoint
-                .as_ref()
-                .map_or(1, |checkpoint| checkpoint.generation)
-            || error.provenance.last_successful_position != position
+        let retained_generation = self
+            .checkpoint
+            .as_ref()
+            .map_or(1, |checkpoint| checkpoint.generation);
+        let rolled_back_terminal = retained_position.is_none()
+            && error.retry.is_terminal()
+            && self.discarded_replacement_provenance.as_ref() == Some(&error.provenance);
+        if (!rolled_back_terminal
+            && (error.provenance.generation != retained_generation
+                || error.provenance.last_successful_position != retained_position))
+            || (rolled_back_terminal && self.checkpoint.is_some())
         {
             return Err(());
         }
+        let position = if rolled_back_terminal {
+            None
+        } else {
+            retained_position
+        };
         let completeness = if error.retry.is_terminal() || position.is_none() {
             CoverageSetCompleteness::Unavailable
         } else {
@@ -13039,7 +13157,7 @@ impl ScopedKnownAppendObject {
     fn object_error_provenance(
         &self,
     ) -> Result<ScopedSourceObjectErrorProvenance, ScopedObservationPassExecutionError> {
-        let last_successful_position = self
+        let retained_position = self
             .checkpoint
             .as_ref()
             .map(scoped_append_coverage_position)
@@ -13049,12 +13167,17 @@ impl ScopedKnownAppendObject {
                     ScopedAdmissionError::InvalidCoverage,
                 )
             })?;
+        if retained_position.is_none() {
+            if let Some(discarded) = &self.discarded_replacement_provenance {
+                return Ok(discarded.clone());
+            }
+        }
         Ok(ScopedSourceObjectErrorProvenance {
             generation: self
                 .checkpoint
                 .as_ref()
                 .map_or(1, |checkpoint| checkpoint.generation),
-            last_successful_position,
+            last_successful_position: retained_position,
         })
     }
 
@@ -13068,6 +13191,7 @@ impl ScopedKnownAppendObject {
             .expect("validated scoped admission has staged decoder state");
         self.checkpoint = pending.checkpoint;
         self.decoder_state = decoder_state;
+        self.discarded_replacement_provenance = None;
         self.bootstrap_blocked = pending.bootstrap_blocked;
         self.presence_state = pending.presence_state;
     }
@@ -13091,6 +13215,41 @@ impl ScopedKnownAppendObject {
         Ok(())
     }
 
+    fn validate_replacement_progress_rollback(
+        &self,
+        provenance: &ScopedSourceObjectErrorProvenance,
+    ) -> Result<(), ScopedObservationAccessError> {
+        let position = self
+            .checkpoint
+            .as_ref()
+            .map(scoped_append_coverage_position)
+            .transpose()
+            .map_err(|()| ScopedObservationAccessError::InvalidObjectLifecycle)?;
+        if !matches!(
+            self.lifecycle,
+            ScopedAppendObjectLifecycle::Replacement { .. }
+        ) || self.pending.is_some()
+            || self.checkpoint.as_ref().map(|value| value.generation) != Some(provenance.generation)
+            || provenance.last_successful_position.as_ref() != position.as_ref()
+            || position.is_none()
+            || self.discarded_replacement_provenance.is_some()
+        {
+            return Err(ScopedObservationAccessError::InvalidObjectLifecycle);
+        }
+        Ok(())
+    }
+
+    fn rollback_replacement_progress_prevalidated(
+        &mut self,
+        provenance: ScopedSourceObjectErrorProvenance,
+    ) {
+        self.checkpoint = None;
+        self.decoder_state = None;
+        self.discarded_replacement_provenance = Some(provenance);
+        self.presence_state = ScopedAppendPresenceState::Present;
+        self.bootstrap_blocked = false;
+    }
+
     fn commit_replacement_unavailable(&mut self) -> Result<(), ScopedObservationAccessError> {
         if !matches!(
             self.lifecycle,
@@ -13098,6 +13257,7 @@ impl ScopedKnownAppendObject {
         ) || self.pending.is_some()
             || self.checkpoint.is_some()
             || self.decoder_state.is_some()
+            || self.discarded_replacement_provenance.is_some()
         {
             return Err(ScopedObservationAccessError::InvalidObjectLifecycle);
         }
@@ -13165,6 +13325,7 @@ impl ScopedKnownAppendObject {
             decoder: self.decoder.clone(),
             checkpoint: None,
             decoder_state: None,
+            discarded_replacement_provenance: None,
             bootstrap_active: false,
             bootstrap_blocked: false,
             presence_state: ScopedAppendPresenceState::Unknown,
@@ -13185,6 +13346,22 @@ impl ScopedKnownAppendObject {
         replacement: &Self,
         scope_epoch: u64,
     ) -> Result<(), ScopedObservationAccessError> {
+        let discarded_replacement_invalid = replacement
+            .discarded_replacement_provenance
+            .as_ref()
+            .is_some_and(|provenance| {
+                provenance.generation == 0
+                    || provenance
+                        .last_successful_position
+                        .as_ref()
+                        .is_none_or(|position| {
+                            position.kind != CoveragePositionKind::AppendCursor
+                                || position.monotonic_order.is_none()
+                        })
+                    || replacement.checkpoint.is_some()
+                    || replacement.decoder_state.is_some()
+                    || replacement.presence_state != ScopedAppendPresenceState::Present
+            });
         if self.lifecycle
             != (ScopedAppendObjectLifecycle::Frozen {
                 scope_epoch,
@@ -13200,6 +13377,7 @@ impl ScopedKnownAppendObject {
             || replacement.pending.is_some()
             || !replacement.presence_state.is_known()
             || replacement.bootstrap_blocked
+            || discarded_replacement_invalid
             || replacement.source != self.source
             || replacement.relation_id != self.relation_id
             || replacement.access_identity != self.access_identity
@@ -13678,7 +13856,16 @@ fn scoped_object_errors_match_epoch(active: &ScopedObservationEpochState) -> boo
         active.scope_epoch,
         &active.append_objects,
         &active.object_errors,
-    )
+    ) && active.append_objects.iter().all(|(relation_id, object)| {
+        object
+            .discarded_replacement_provenance
+            .as_ref()
+            .is_none_or(|provenance| {
+                active.object_errors.get(relation_id).is_some_and(|state| {
+                    state.error.retry.is_terminal() && &state.error.provenance == provenance
+                })
+            })
+    })
 }
 
 fn scoped_object_error_states_match_epoch(
@@ -13816,6 +14003,25 @@ fn validate_scope_replacement_source_state(
             &stage.append_objects,
             &stage.object_errors,
         )
+        || stage.append_objects.iter().any(|(relation_id, object)| {
+            object
+                .discarded_replacement_provenance
+                .as_ref()
+                .is_some_and(|provenance| {
+                    stage.object_errors.get(relation_id).is_none_or(|state| {
+                        !state.error.retry.is_terminal() || &state.error.provenance != provenance
+                    })
+                })
+        })
+        || stage.object_errors.iter().any(|(relation_id, state)| {
+            state.error.retry.is_terminal()
+                && state.error.provenance.last_successful_position.is_some()
+                && stage
+                    .append_objects
+                    .get(relation_id)
+                    .and_then(|object| object.discarded_replacement_provenance.as_ref())
+                    != Some(&state.error.provenance)
+        })
         || stage
             .object_errors
             .values()
@@ -16610,6 +16816,74 @@ mod projection_tests {
             } if Arc::ptr_eq(&barrier, &delivered)
         ));
         assert!(delivery.is_empty());
+    }
+
+    #[test]
+    fn scoped_replacement_object_rollback_preserves_sibling_projection() {
+        let root = root_identity();
+        let mut stage = ScopedObservationReplacementStage::new(
+            root,
+            2,
+            ScopedObservationProjectionLimits {
+                max_usage_v2_entities: 4,
+            },
+        )
+        .unwrap();
+        let first_record = record(1, 0, 7);
+        let first_frame = ScopedQueuedObservationFrame::Decoded {
+            object_token: 101,
+            source: source_identity(),
+            lane_ordinal: 1,
+            phase: ScopedAppendDeliveryPhase::Correction,
+            item: Box::new(ScopedDecodedAppendItem::Record {
+                evidence: Box::new(scoped_record_evidence(
+                    &first_record,
+                    RawRetentionPolicy::None,
+                )),
+                disposition: DecodeDisposition::Applied,
+                batch: usage_batch(&first_record, "failed-object", 10, None),
+                quarantined: false,
+            }),
+        };
+        let failed_fact = only_usage_event(stage.projection.project(&first_frame).unwrap()).fact_id;
+
+        let sibling_record = record(1, 0, 8);
+        let sibling_frame = ScopedQueuedObservationFrame::Decoded {
+            object_token: 202,
+            source: source_identity(),
+            lane_ordinal: 2,
+            phase: ScopedAppendDeliveryPhase::Correction,
+            item: Box::new(ScopedDecodedAppendItem::Record {
+                evidence: Box::new(scoped_record_evidence(
+                    &sibling_record,
+                    RawRetentionPolicy::None,
+                )),
+                disposition: DecodeDisposition::Applied,
+                batch: usage_batch(&sibling_record, "healthy-sibling", 20, None),
+                quarantined: false,
+            }),
+        };
+        let sibling_fact =
+            only_usage_event(stage.projection.project(&sibling_frame).unwrap()).fact_id;
+        assert_eq!(stage.usage_v2_entity_count(), 2);
+
+        assert_eq!(
+            stage
+                .projection
+                .validate_replacement_object_rollback(101, 3),
+            Err(ScopedProjectionError::InvalidLifecycle)
+        );
+        assert_eq!(stage.usage_v2_entity_count(), 2);
+        stage
+            .projection
+            .validate_replacement_object_rollback(101, 2)
+            .unwrap();
+        stage
+            .projection
+            .rollback_replacement_object_prevalidated(101);
+        assert_eq!(stage.usage_v2_entity_count(), 1);
+        assert!(stage.projection.usage_v2_revision(&failed_fact).is_none());
+        assert!(stage.projection.usage_v2_revision(&sibling_fact).is_some());
     }
 
     #[test]
