@@ -1387,6 +1387,270 @@ fn locator_disclosure_and_attach_require_one_live_disclosed_base_member() {
     assert!(withheld.value.is_none());
 }
 
+#[test]
+fn durable_reducer_restart_reconstructs_exact_live_and_tombstoned_lifecycle() {
+    let live_owner = owner("durable-live", 1);
+    let deleted_owner = owner("durable-deleted", 1);
+    let live_ref = entity(&live_owner, CatalogEntityKind::Session, "live");
+    let deleted_ref = entity(&deleted_owner, CatalogEntityKind::Session, "deleted");
+    let prior_ref = entity(&live_owner, CatalogEntityKind::Session, "prior");
+    let replacement_ref = entity(&live_owner, CatalogEntityKind::Session, "replacement");
+    let mut reducer = CatalogReducer::default();
+    reducer
+        .upsert_session_assertion(
+            session_assertion(
+                live_owner.clone(),
+                "live",
+                live_ref,
+                "Live",
+                QualifiedValueQuality::Exact,
+                authority("transcript-title", 80),
+                None,
+            ),
+            10,
+        )
+        .unwrap();
+    for (native_key, session_ref) in [("prior", prior_ref), ("replacement", replacement_ref)] {
+        reducer
+            .upsert_session_assertion(
+                session_assertion(
+                    live_owner.clone(),
+                    native_key,
+                    session_ref,
+                    native_key,
+                    QualifiedValueQuality::Exact,
+                    authority("transcript-title", 80),
+                    None,
+                ),
+                10,
+            )
+            .unwrap();
+    }
+    reducer
+        .upsert_identity_relation(
+            relation(
+                live_owner,
+                "replacement-relation",
+                IdentityRelationKind::ReplacedBy,
+                prior_ref,
+                replacement_ref,
+                QualifiedValueQuality::Exact,
+                ContractCompleteness::Complete,
+                None,
+                None,
+            )
+            .unwrap(),
+            11,
+        )
+        .unwrap();
+    reducer
+        .upsert_session_assertion(
+            session_assertion(
+                deleted_owner.clone(),
+                "deleted",
+                deleted_ref,
+                "Deleted",
+                QualifiedValueQuality::Exact,
+                authority("transcript-title", 80),
+                None,
+            ),
+            11,
+        )
+        .unwrap();
+    let absence = retraction_evidence(&deleted_owner, "deleted-absence");
+    reducer.retract_owner(&absence, 12).unwrap();
+    reducer.confirm_absent(deleted_ref, &absence, 13).unwrap();
+
+    let frozen = reducer
+        .freeze_for_initial_publication(CatalogReducerPublicationLimits::default())
+        .unwrap();
+    let payload = frozen.durable_state_json(1024 * 1024).unwrap();
+    let tombstone_payload = serde_json::to_vec(&frozen.tombstones()[0]).unwrap();
+    let tombstone = decode_durable_tombstone(
+        &tombstone_payload,
+        deleted_ref.external_ref.entity_key.as_bytes(),
+        1024 * 1024,
+    )
+    .unwrap();
+    let restored = decode_durable_reducer_state(&payload, 1024 * 1024)
+        .unwrap()
+        .finish(
+            vec![tombstone],
+            frozen.revision(),
+            CatalogReducerPublicationLimits::default(),
+        )
+        .unwrap();
+    assert_eq!(restored, frozen);
+    assert!(restored
+        .validate_durable_row_commitments(
+            1024 * 1024,
+            restored.project_row_count(),
+            restored.session_row_count() + 1,
+            |_, _, _, _| true,
+        )
+        .is_err());
+    assert!(matches!(
+        restored
+            .resolution_index()
+            .unwrap()
+            .resolve(live_ref.external_ref),
+        CatalogResolvedLifecycle::Live { entity_ref } if entity_ref == live_ref
+    ));
+    assert!(matches!(
+        restored
+            .resolution_index()
+            .unwrap()
+            .resolve(deleted_ref.external_ref),
+        CatalogResolvedLifecycle::Tombstoned { entity_ref, .. } if entity_ref == deleted_ref
+    ));
+    assert!(matches!(
+        restored
+            .resolution_index()
+            .unwrap()
+            .resolve(prior_ref.external_ref),
+        CatalogResolvedLifecycle::Superseded {
+            prior_ref: resolved_prior,
+            replacement_refs,
+            ..
+        } if resolved_prior == prior_ref && replacement_refs == vec![replacement_ref]
+    ));
+}
+
+#[test]
+fn durable_reducer_restart_rejects_canonical_semantic_drift_and_unknown_fields() {
+    let source = owner("durable-drift", 1);
+    let session_ref = entity(&source, CatalogEntityKind::Session, "session");
+    let mut reducer = CatalogReducer::default();
+    reducer
+        .upsert_session_assertion(
+            session_assertion(
+                source,
+                "session",
+                session_ref,
+                "Session",
+                QualifiedValueQuality::Exact,
+                authority("transcript-title", 80),
+                None,
+            ),
+            10,
+        )
+        .unwrap();
+    let frozen = reducer
+        .freeze_for_initial_publication(CatalogReducerPublicationLimits::default())
+        .unwrap();
+    let payload = frozen.durable_state_json(1024 * 1024).unwrap();
+    let mut drifted: DurableReducerStateWire = serde_json::from_slice(&payload).unwrap();
+    drifted.sessions[0].observation_commit = 11;
+    let drifted =
+        serialize_private_json_bounded(&drifted, 1024 * 1024, "drifted durable reducer fixture")
+            .unwrap();
+    let error = decode_durable_reducer_state(&drifted, 1024 * 1024)
+        .unwrap()
+        .finish(
+            Vec::new(),
+            frozen.revision(),
+            CatalogReducerPublicationLimits::default(),
+        )
+        .unwrap_err();
+    assert!(error.to_string().contains("declared revision"));
+
+    let mut unknown: Value = serde_json::from_slice(&payload).unwrap();
+    unknown["sessions"][0]["unexpected"] = json!(true);
+    assert!(
+        decode_durable_reducer_state(&serde_json::to_vec(&unknown).unwrap(), 1024 * 1024,).is_err()
+    );
+}
+
+#[test]
+fn replacement_graph_cannot_publish_an_unbounded_resolution_provenance_set() {
+    let source = owner("bounded-replacement", 1);
+    let prior_ref = entity(&source, CatalogEntityKind::Session, "prior");
+    let mut reducer = CatalogReducer::default();
+    for index in 0..MAX_PROVENANCE_REVISIONS {
+        let label = format!("replacement-{index}");
+        let replacement_ref = entity(&source, CatalogEntityKind::Session, &label);
+        reducer
+            .upsert_identity_relation(
+                relation(
+                    source.clone(),
+                    &label,
+                    IdentityRelationKind::ReplacedBy,
+                    prior_ref,
+                    replacement_ref,
+                    QualifiedValueQuality::Exact,
+                    ContractCompleteness::Complete,
+                    None,
+                    None,
+                )
+                .unwrap(),
+                10 + index as u64,
+            )
+            .unwrap();
+    }
+    let overflow = entity(&source, CatalogEntityKind::Session, "replacement-overflow");
+    let error = reducer
+        .upsert_identity_relation(
+            relation(
+                source,
+                "replacement-overflow",
+                IdentityRelationKind::ReplacedBy,
+                prior_ref,
+                overflow,
+                QualifiedValueQuality::Exact,
+                ContractCompleteness::Complete,
+                None,
+                None,
+            )
+            .unwrap(),
+            10 + MAX_PROVENANCE_REVISIONS as u64,
+        )
+        .unwrap_err();
+    assert!(error.to_string().contains("provenance revisions"));
+}
+
+#[test]
+fn tombstone_construction_cannot_exceed_the_portable_resolution_provenance_bound() {
+    let first_owner = owner("bounded-tombstone-0", 1);
+    let session_ref = entity(&first_owner, CatalogEntityKind::Session, "deleted");
+    let mut reducer = CatalogReducer::default();
+    let mut retractions = Vec::new();
+    for index in 0..=MAX_PROVENANCE_REVISIONS {
+        let label = format!("bounded-tombstone-{index}");
+        let evidence_owner = owner(&label, 1);
+        reducer
+            .upsert_session_assertion(
+                session_assertion(
+                    evidence_owner.clone(),
+                    &label,
+                    session_ref,
+                    "Deleted",
+                    QualifiedValueQuality::Exact,
+                    authority("transcript-title", 80),
+                    None,
+                ),
+                10 + index as u64,
+            )
+            .unwrap();
+        let evidence = retraction_evidence(&evidence_owner, &format!("{label}-absence"));
+        reducer
+            .retract_owner(&evidence, 100 + index as u64)
+            .unwrap();
+        retractions.push(evidence);
+    }
+
+    let error = reducer
+        .confirm_absent(session_ref, &retractions[0], 1_000)
+        .unwrap_err();
+    assert!(error.to_string().contains("semantic revisions"));
+    assert!(matches!(
+        reducer.resolve_external_ref(session_ref.external_ref),
+        CatalogResolvedEntity::Unknown {
+            reason: CatalogUnknownReferenceReason::RetractedPendingPublication,
+            ..
+        }
+    ));
+}
+
 fn frozen_fixture() -> Value {
     let source = owner("frozen", 7);
     let project_ref = entity(&source, CatalogEntityKind::Project, "project");

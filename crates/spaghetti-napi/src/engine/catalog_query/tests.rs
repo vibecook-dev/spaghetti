@@ -3,19 +3,23 @@ use std::collections::BTreeMap;
 use super::*;
 use crate::adapter::{
     CanonicalEntityKey, CanonicalFactId, CanonicalSourceInstanceKey, ContractCompleteness,
-    ContractVersionSelection, CoverageDeclarationDigest, CoverageDomain,
-    CoverageMembershipRevision, CoverageObjectKey, CoveragePosition, CoveragePositionKind,
-    CoverageProvenance, CoverageSetCompleteness, CoverageStatus, CoverageStreamKey, FactRevisionId,
-    QualifiedUnknownReason, QualifiedValue, QualifiedValueQuality, SemanticRevisionRef,
-    SourceCoveragePoint, SourceCoverageSet, CONTRACT_VERSION_SELECTION_VERSION,
-    SOURCE_COVERAGE_CONTRACT_VERSION,
+    ContractVersionSelection, CoverageAbsence, CoverageAbsenceKind, CoverageDeclarationDigest,
+    CoverageDomain, CoverageMembershipRevision, CoverageObjectKey, CoveragePosition,
+    CoveragePositionKind, CoverageProvenance, CoverageSetCompleteness, CoverageStatus,
+    CoverageStreamKey, FactRevisionId, QualifiedUnknownReason, QualifiedValue,
+    QualifiedValueQuality, SemanticRevisionRef, SourceCoveragePoint, SourceCoverageSet,
+    CONTRACT_VERSION_SELECTION_VERSION, SOURCE_COVERAGE_CONTRACT_VERSION,
 };
 use crate::catalog_contract::evidence::{
     decode_durable_project_row, CatalogAvailability, CatalogDisclosureClass, CatalogEntityRef,
     CatalogEvidenceOwner, CatalogFieldAuthority, CatalogProjectAssertion, CatalogQualifiedField,
-    CatalogReducer, CatalogSessionAssertion,
+    CatalogReducer, CatalogRetractionCause, CatalogRetractionEvidence, CatalogSessionAssertion,
+    CatalogUnknownReferenceReason, IdentityRelationFact, IdentityRelationKind,
 };
-use crate::catalog_contract::page::{CatalogCount, CatalogOptionalField};
+use crate::catalog_contract::page::{
+    CatalogCount, CatalogEntityResolution, CatalogOptionalField, CatalogPortableLiveRow,
+    CatalogResolutionRequestBinding,
+};
 use crate::catalog_contract::publication::{
     CatalogCompleteSourceAssembly, CatalogInitialPublicationAssembly, CatalogPublicationLimits,
     CatalogPublicationMemberRef, CatalogSourceCompletionRevision, CatalogSourceMembershipRevision,
@@ -338,6 +342,224 @@ fn publish_catalog(project_count: usize, session_count: usize) -> PublishedCatal
     }
 }
 
+fn lifecycle_session_assertion(
+    owner: &CatalogEvidenceOwner,
+    native_key: &str,
+    session_ref: CatalogEntityRef,
+) -> CatalogSessionAssertion {
+    CatalogSessionAssertion::new(
+        owner.clone(),
+        native_key.as_bytes(),
+        session_ref,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        availability(owner, &format!("{native_key}-availability")),
+        vec![semantic_revision(owner, &format!("{native_key}-assertion"))],
+    )
+    .unwrap()
+}
+
+fn publish_lifecycle_catalog(connection: &mut Connection) -> [CatalogEntityRef; 3] {
+    schema::initialize_schema(connection).unwrap();
+    let selection = durable_selection();
+    let source_instance_key =
+        CanonicalSourceInstanceKey::derive(1, b"retained-lifecycle-source").unwrap();
+    let stream_key = CoverageStreamKey::derive(FIXTURE_ADAPTER, b"catalog-lifecycle").unwrap();
+    let live_object = CoverageObjectKey::derive("catalog-lifecycle", b"live").unwrap();
+    let deleted_object = CoverageObjectKey::derive("catalog-lifecycle", b"deleted").unwrap();
+    let live_owner = CatalogEvidenceOwner::new(
+        FIXTURE_ADAPTER,
+        source_instance_key,
+        stream_key,
+        live_object,
+        1,
+    )
+    .unwrap();
+    let deleted_owner = CatalogEvidenceOwner::new(
+        FIXTURE_ADAPTER,
+        source_instance_key,
+        stream_key,
+        deleted_object,
+        1,
+    )
+    .unwrap();
+    let plan_source = CatalogCoveragePlanSource::new(
+        FIXTURE_ADAPTER,
+        source_instance_key,
+        "retained-lifecycle-support@candidate-v1",
+        CoverageDeclarationDigest::derive(b"retained-lifecycle-declaration").unwrap(),
+        CatalogAccessPolicyDigest::derive(1, b"retained-lifecycle-withheld-policy").unwrap(),
+    )
+    .unwrap();
+    let plan = CatalogCoveragePlan::new(
+        CatalogCoverageScope::Library,
+        vec![plan_source.clone()],
+        Vec::new(),
+    )
+    .unwrap();
+    let building = schedule_build(connection, &plan);
+    let domain = CoverageDomain::ProjectionPack {
+        pack: CATALOG_PROJECTION_PACK_ID.to_owned(),
+        version: CATALOG_QUERY_PACK_CONTRACT_VERSION,
+    };
+    let coverage = SourceCoverageSet::new(
+        domain.clone(),
+        plan_source.coverage_scope(CatalogCoverageScope::Library),
+        CoverageMembershipRevision::derive(b"retained-lifecycle-membership").unwrap(),
+        vec![SourceCoveragePoint::new(
+            domain,
+            FIXTURE_ADAPTER,
+            source_instance_key,
+            stream_key,
+            live_object,
+            1,
+            Some(
+                CoveragePosition::derive(
+                    CoveragePositionKind::SnapshotRevision,
+                    b"retained-lifecycle-position",
+                    None,
+                )
+                .unwrap(),
+            ),
+            CoverageStatus::ExactSnapshot,
+            CoverageProvenance::default(),
+        )
+        .unwrap()],
+        vec![CoverageAbsence {
+            stream_key,
+            object_key: deleted_object,
+            generation: 1,
+            kind: CoverageAbsenceKind::Deleted,
+        }],
+        Vec::new(),
+        CoverageSetCompleteness::Complete,
+    )
+    .unwrap();
+    let member_refs = [
+        CatalogPublicationMemberRef::from_digest(
+            *blake3::hash(b"retained-lifecycle-prior-member").as_bytes(),
+        ),
+        CatalogPublicationMemberRef::from_digest(
+            *blake3::hash(b"retained-lifecycle-replacement-member").as_bytes(),
+        ),
+    ];
+    let source = CatalogCompleteSourceAssembly::from_complete_library_coverage(
+        plan_source,
+        selection.clone(),
+        "catalog-session-identity-v1",
+        CatalogSourceMembershipRevision::from_digest(
+            *blake3::hash(b"retained-lifecycle-source-membership").as_bytes(),
+        ),
+        CatalogSourceCompletionRevision::from_digest(
+            *blake3::hash(b"retained-lifecycle-source-completion").as_bytes(),
+        ),
+        member_refs.to_vec(),
+        coverage,
+    )
+    .unwrap();
+
+    let prior_ref = CatalogEntityRef::session(
+        CanonicalEntityKey::derive(
+            FIXTURE_ADAPTER,
+            &source_instance_key,
+            "session",
+            b"retained-lifecycle-prior",
+        )
+        .unwrap(),
+    );
+    let replacement_ref = CatalogEntityRef::session(
+        CanonicalEntityKey::derive(
+            FIXTURE_ADAPTER,
+            &source_instance_key,
+            "session",
+            b"retained-lifecycle-replacement",
+        )
+        .unwrap(),
+    );
+    let deleted_ref = CatalogEntityRef::session(
+        CanonicalEntityKey::derive(
+            FIXTURE_ADAPTER,
+            &source_instance_key,
+            "session",
+            b"retained-lifecycle-deleted",
+        )
+        .unwrap(),
+    );
+    let prior = lifecycle_session_assertion(&live_owner, "lifecycle-prior", prior_ref);
+    let replacement =
+        lifecycle_session_assertion(&live_owner, "lifecycle-replacement", replacement_ref);
+    let deleted = lifecycle_session_assertion(&deleted_owner, "lifecycle-deleted", deleted_ref);
+    let bindings = vec![
+        source
+            .member_binding(member_refs[0], prior.assertion_key, prior_ref)
+            .unwrap(),
+        source
+            .member_binding(member_refs[1], replacement.assertion_key, replacement_ref)
+            .unwrap(),
+    ];
+    let replacement_relation = IdentityRelationFact::new(
+        live_owner.clone(),
+        b"retained-lifecycle-replacement-relation",
+        IdentityRelationKind::ReplacedBy,
+        prior_ref,
+        replacement_ref,
+        CatalogFieldAuthority::new("native-replacement", 100, true).unwrap(),
+        QualifiedValueQuality::Exact,
+        ContractCompleteness::Complete,
+        None,
+        None,
+        vec![semantic_revision(
+            &live_owner,
+            "retained-lifecycle-replacement-relation",
+        )],
+    )
+    .unwrap();
+    let deletion = CatalogRetractionEvidence::new(
+        deleted_owner.clone(),
+        CatalogRetractionCause::ConfirmedDeletion,
+        ContractCompleteness::Complete,
+        vec![semantic_revision(
+            &deleted_owner,
+            "retained-lifecycle-deletion",
+        )],
+    )
+    .unwrap();
+    let mut reducer = CatalogReducer::default();
+    reducer.upsert_session_assertion(prior, 10).unwrap();
+    reducer.upsert_session_assertion(replacement, 11).unwrap();
+    reducer.upsert_session_assertion(deleted, 12).unwrap();
+    reducer
+        .upsert_identity_relation(replacement_relation, 13)
+        .unwrap();
+    reducer.retract_owner(&deletion, 20).unwrap();
+    reducer.confirm_absent(deleted_ref, &deletion, 21).unwrap();
+    let assembly = CatalogInitialPublicationAssembly::assemble(
+        &plan,
+        &building,
+        selection,
+        vec![source],
+        &reducer,
+        bindings,
+        CatalogPublicationLimits::default(),
+    )
+    .unwrap();
+    let building_state = catalog_state::load_catalog_build_state(connection)
+        .unwrap()
+        .unwrap();
+    apply_initial_catalog_publication(
+        connection,
+        &CatalogInitialPublicationCommand::new(assembly, building_state.last_commit_seq, 30, 31),
+    )
+    .unwrap()
+    .unwrap();
+    [deleted_ref, prior_ref, replacement_ref]
+}
+
 #[test]
 fn retained_project_and_session_pages_are_exact_keyset_walks_and_withheld() {
     let published = publish_catalog(3, 3);
@@ -425,6 +647,236 @@ fn retained_project_and_session_pages_are_exact_keyset_walks_and_withheld() {
             Some(QualifiedUnknownReason::Withheld)
         );
     }
+}
+
+#[test]
+fn retained_external_resolution_is_exact_withheld_read_only_and_fail_closed() {
+    let published = publish_catalog(1, 1);
+    let authority = published.state.ready_read_authority().unwrap();
+    let source_instance_key =
+        CanonicalSourceInstanceKey::derive(1, b"retained-page-source").unwrap();
+    let project_ref = CatalogEntityRef::project(
+        CanonicalEntityKey::derive(
+            FIXTURE_ADAPTER,
+            &source_instance_key,
+            "project",
+            b"project-0",
+        )
+        .unwrap(),
+    );
+    let request = CatalogResolutionRequestBinding::new(
+        published.selection.clone(),
+        authority.snapshot_id(),
+        project_ref.external_ref,
+    )
+    .unwrap();
+    let before_changes: i64 = published
+        .connection
+        .query_row("SELECT total_changes()", [], |row| row.get(0))
+        .unwrap();
+    let response =
+        resolve_retained_catalog_entity(&published.connection, &authority, &request).unwrap();
+    let CatalogEntityResolution::Live { row, .. } = response.resolution else {
+        panic!("expected a live retained project resolution");
+    };
+    let CatalogPortableLiveRow::Project(row) = *row else {
+        panic!("expected a project row");
+    };
+    let CatalogOptionalField::Selected { selection } = row.display_name else {
+        panic!("expected selected project display evidence");
+    };
+    assert_eq!(selection.field.value, None);
+    assert_eq!(
+        selection.field.unknown_reason,
+        Some(QualifiedUnknownReason::Withheld)
+    );
+    assert_eq!(
+        published
+            .connection
+            .query_row("SELECT total_changes()", [], |row| row.get::<_, i64>(0))
+            .unwrap(),
+        before_changes
+    );
+
+    let unknown_ref = CatalogEntityRef::session(
+        CanonicalEntityKey::derive(
+            FIXTURE_ADAPTER,
+            &source_instance_key,
+            "session",
+            b"never-observed",
+        )
+        .unwrap(),
+    );
+    let unknown_request = CatalogResolutionRequestBinding::new(
+        published.selection.clone(),
+        authority.snapshot_id(),
+        unknown_ref.external_ref,
+    )
+    .unwrap();
+    let unknown =
+        resolve_retained_catalog_entity(&published.connection, &authority, &unknown_request)
+            .unwrap();
+    assert!(matches!(
+        unknown.resolution,
+        CatalogEntityResolution::Unknown {
+            reason: CatalogUnknownReferenceReason::NeverObserved,
+            ..
+        }
+    ));
+
+    let mut selection_drift = request.clone();
+    selection_drift
+        .contract_selection
+        .contract_versions
+        .fact_family_versions
+        .insert("catalog.message".to_owned(), 1);
+    let selection_error =
+        resolve_retained_catalog_entity(&published.connection, &authority, &selection_drift)
+            .unwrap_err();
+    assert!(selection_error
+        .to_string()
+        .contains("exact Ready snapshot selection"));
+
+    let mut snapshot_drift = request;
+    snapshot_drift.snapshot_id = crate::catalog_contract::CatalogSnapshotId::new(
+        authority.snapshot_id().pack_contract_version,
+        authority.snapshot_id().coverage_plan_id,
+        authority.snapshot_id().readiness_epoch,
+        authority.snapshot_id().complete_commit + 1,
+    )
+    .unwrap();
+    let snapshot_error =
+        resolve_retained_catalog_entity(&published.connection, &authority, &snapshot_drift)
+            .unwrap_err();
+    assert!(snapshot_error
+        .to_string()
+        .contains("exact Ready snapshot selection"));
+}
+
+#[test]
+fn retained_external_resolution_reopens_tombstoned_and_superseded_lifecycle() {
+    let directory = tempfile::tempdir().unwrap();
+    let database_path = directory.path().join("retained-lifecycle.sqlite");
+    let [deleted_ref, prior_ref, replacement_ref] = {
+        let mut connection = Connection::open(&database_path).unwrap();
+        publish_lifecycle_catalog(&mut connection)
+    };
+
+    let connection = Connection::open(&database_path).unwrap();
+    let state = catalog_state::load_catalog_build_state(&connection)
+        .unwrap()
+        .unwrap();
+    let authority = state.ready_read_authority().unwrap();
+    let selection = query_selection();
+
+    let deleted = resolve_retained_catalog_entity(
+        &connection,
+        &authority,
+        &CatalogResolutionRequestBinding::new(
+            selection.clone(),
+            authority.snapshot_id(),
+            deleted_ref.external_ref,
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert!(matches!(
+        deleted.resolution,
+        CatalogEntityResolution::Tombstoned {
+            external_ref,
+            ref provenance,
+        } if external_ref == deleted_ref.external_ref && !provenance.is_empty()
+    ));
+
+    let prior = resolve_retained_catalog_entity(
+        &connection,
+        &authority,
+        &CatalogResolutionRequestBinding::new(
+            selection.clone(),
+            authority.snapshot_id(),
+            prior_ref.external_ref,
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert!(matches!(
+        prior.resolution,
+        CatalogEntityResolution::Superseded {
+            external_ref,
+            ref target_refs,
+            ref provenance,
+        } if external_ref == prior_ref.external_ref
+            && target_refs == &vec![replacement_ref.external_ref]
+            && !provenance.is_empty()
+    ));
+
+    let replacement = resolve_retained_catalog_entity(
+        &connection,
+        &authority,
+        &CatalogResolutionRequestBinding::new(
+            selection,
+            authority.snapshot_id(),
+            replacement_ref.external_ref,
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert!(matches!(
+        replacement.resolution,
+        CatalogEntityResolution::Live {
+            external_ref,
+            ref row,
+        } if external_ref == replacement_ref.external_ref
+            && matches!(row.as_ref(), CatalogPortableLiveRow::Session(_))
+    ));
+}
+
+#[test]
+fn retained_external_resolution_rejects_post_authority_row_substitution() {
+    let published = publish_catalog(1, 1);
+    let authority = published.state.ready_read_authority().unwrap();
+    let source_instance_key =
+        CanonicalSourceInstanceKey::derive(1, b"retained-page-source").unwrap();
+    let project_ref = CatalogEntityRef::project(
+        CanonicalEntityKey::derive(
+            FIXTURE_ADAPTER,
+            &source_instance_key,
+            "project",
+            b"project-0",
+        )
+        .unwrap(),
+    );
+    let (payload, key): (Vec<u8>, Vec<u8>) = published
+        .connection
+        .query_row(
+            "SELECT payload, entry_key FROM catalog_snapshot_entries WHERE entry_kind = 'project_row'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    let key_array: [u8; 32] = key.clone().try_into().unwrap();
+    let mut row =
+        decode_durable_project_row(&payload, &key_array, MAX_DURABLE_CATALOG_ROW_BYTES).unwrap();
+    row.display_name.as_mut().unwrap().field.qualified.value =
+        Some("private-resolution-substitution".to_owned());
+    let payload = serde_json::to_vec(&row).unwrap();
+    let digest = blake3::hash(&payload);
+    published
+        .connection
+        .execute(
+            "UPDATE catalog_snapshot_entries SET payload = ?1, payload_digest = ?2 WHERE entry_kind = 'project_row' AND entry_key = ?3",
+            params![payload, digest.as_bytes().as_slice(), key],
+        )
+        .unwrap();
+    let request = CatalogResolutionRequestBinding::new(
+        published.selection,
+        authority.snapshot_id(),
+        project_ref.external_ref,
+    )
+    .unwrap();
+    let error =
+        resolve_retained_catalog_entity(&published.connection, &authority, &request).unwrap_err();
+    assert!(error.to_string().contains("restart-validated commitment"));
 }
 
 #[test]

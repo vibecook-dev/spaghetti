@@ -1,4 +1,5 @@
-//! Checked crate-private RFC 012B retained-snapshot page reads.
+//! Checked crate-private RFC 012B retained-snapshot page and external-reference
+//! reads.
 //!
 //! This module intentionally exposes no public engine or N-API surface. The
 //! first executable slice supports only the frozen v1 `All` filter ordered by
@@ -7,13 +8,17 @@
 
 use std::collections::BTreeMap;
 
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 
-use crate::catalog_contract::evidence::{decode_durable_project_row, decode_durable_session_row};
+use crate::catalog_contract::evidence::{
+    decode_durable_project_row, decode_durable_session_row, CatalogEntityKind, CatalogLiveRow,
+    CatalogResolvedLifecycle,
+};
 use crate::catalog_contract::page::{
-    CatalogCount, CatalogPageEntry, CatalogPageRequestBinding, CatalogPolicyViewBinding,
-    CatalogPortableProjectRow, CatalogPortableRow, CatalogPortableSessionRow, CatalogProjectPage,
-    CatalogSessionPage,
+    CatalogCount, CatalogEntityResolution, CatalogEntityResolutionResponse, CatalogPageEntry,
+    CatalogPageRequestBinding, CatalogPolicyViewBinding, CatalogPortableProjectRow,
+    CatalogPortableRow, CatalogPortableSessionRow, CatalogProjectPage,
+    CatalogResolutionRequestBinding, CatalogSessionPage,
 };
 use crate::catalog_contract::publication::{
     CatalogDurablePublicationEntryKind, MAX_DURABLE_CATALOG_ROW_BYTES,
@@ -64,6 +69,17 @@ const CONTINUATION_PAGE_SQL: &str = r#"
     WHERE snapshot_commit_seq = ?1 AND entry_kind = ?2 AND entry_key > ?3
     ORDER BY entry_key ASC
     LIMIT ?5
+"#;
+
+const EXACT_RESOLUTION_ROW_SQL: &str = r#"
+    SELECT CASE WHEN typeof(payload) = 'blob' AND length(payload) BETWEEN 1 AND ?4
+                       THEN length(payload) END,
+           CASE WHEN typeof(payload) = 'blob' AND length(payload) BETWEEN 1 AND ?4
+                       THEN payload END,
+           CASE WHEN typeof(payload_digest) = 'blob' AND length(payload_digest) = 32
+                       THEN payload_digest END
+    FROM catalog_snapshot_entries
+    WHERE snapshot_commit_seq = ?1 AND entry_kind = ?2 AND entry_key = ?3
 "#;
 
 #[derive(Clone, PartialEq, Eq)]
@@ -281,6 +297,178 @@ pub(super) fn read_retained_catalog_page(
         .commit()
         .map_err(|error| catalog_state::sqlite_error("commit retained catalog page", error))?;
     Ok(result)
+}
+
+pub(super) fn resolve_retained_catalog_entity(
+    connection: &Connection,
+    authority: &CatalogReadyReadAuthority,
+    request: &CatalogResolutionRequestBinding,
+) -> Result<CatalogEntityResolutionResponse, EngineError> {
+    // Validate every caller-held binding before touching retained state. In
+    // particular, malformed/foreign references cannot be relabeled as a
+    // retention or database failure.
+    request
+        .validate()
+        .map_err(catalog_state::catalog_contract_error)?;
+    if request.snapshot_id != authority.snapshot_id()
+        || request.contract_selection.contract_versions != *authority.contract_selection()
+    {
+        return Err(EngineError::InvalidCommit(
+            "catalog resolution request differs from its exact Ready snapshot selection"
+                .to_string(),
+        ));
+    }
+
+    let transaction = connection
+        .unchecked_transaction()
+        .map_err(|error| catalog_state::sqlite_error("begin retained catalog resolution", error))?;
+    let header = load_retained_query_header(
+        &transaction,
+        authority.plan(),
+        authority.snapshot_id(),
+        authority.readiness().attempt,
+        authority.publication_identity(),
+    )?;
+    debug_assert_eq!(
+        request.contract_selection.contract_versions,
+        header.contract_selection
+    );
+    let policy = CatalogPolicyViewBinding::withheld(authority.plan(), &request.contract_selection)
+        .map_err(catalog_state::catalog_contract_error)?;
+    let lifecycle = authority
+        .publication_identity()
+        .resolution_index()
+        .resolve(request.external_ref);
+    let live_row = match &lifecycle {
+        CatalogResolvedLifecycle::Live { entity_ref } => Some(load_resolution_row(
+            &transaction,
+            &header,
+            authority.publication_identity(),
+            authority.snapshot_id(),
+            *entity_ref,
+        )?),
+        CatalogResolvedLifecycle::Tombstoned { .. }
+        | CatalogResolvedLifecycle::Superseded { .. }
+        | CatalogResolvedLifecycle::Unknown { .. } => None,
+    };
+    let resolution = CatalogEntityResolution::from_bound_lifecycle(
+        request.external_ref,
+        &lifecycle,
+        live_row.as_ref(),
+        &policy,
+        authority.plan(),
+        &request.contract_selection,
+    )
+    .map_err(catalog_state::catalog_contract_error)?;
+    let response =
+        CatalogEntityResolutionResponse::new(request.clone(), resolution, BTreeMap::new())
+            .map_err(catalog_state::catalog_contract_error)?;
+    transaction.commit().map_err(|error| {
+        catalog_state::sqlite_error("commit retained catalog resolution", error)
+    })?;
+    Ok(response)
+}
+
+fn load_resolution_row(
+    connection: &Connection,
+    header: &CatalogRetainedQueryHeader,
+    expected_identity: &CatalogReadyPublicationIdentity,
+    snapshot_id: crate::catalog_contract::CatalogSnapshotId,
+    entity_ref: crate::catalog_contract::evidence::CatalogEntityRef,
+) -> Result<CatalogLiveRow, EngineError> {
+    let kind = match entity_ref.kind {
+        CatalogEntityKind::Project => CatalogDurablePublicationEntryKind::ProjectRow,
+        CatalogEntityKind::Session => CatalogDurablePublicationEntryKind::SessionRow,
+    };
+    let payload_limit = header
+        .encoded_bytes
+        .min(MAX_DURABLE_CATALOG_ROW_BYTES)
+        .min(MAX_RETAINED_PAGE_PAYLOAD_BYTES);
+    let stored = connection
+        .query_row(
+            EXACT_RESOLUTION_ROW_SQL,
+            params![
+                catalog_state::to_i64(
+                    snapshot_id.complete_commit,
+                    "catalog resolution snapshot commit",
+                )?,
+                kind.as_str(),
+                entity_ref.external_ref.entity_key.as_bytes().as_slice(),
+                catalog_state::to_i64(payload_limit as u64, "catalog resolution row byte limit")?,
+            ],
+            |row| {
+                Ok((
+                    row.get::<_, Option<i64>>(0)?,
+                    row.get::<_, Option<Vec<u8>>>(1)?,
+                    row.get::<_, Option<Vec<u8>>>(2)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|error| {
+            catalog_state::sqlite_error("load retained catalog resolution row", error)
+        })?
+        .ok_or_else(|| {
+            catalog_state::corrupt_catalog_state(
+                "restart-validated live catalog entity is missing its durable row",
+            )
+        })?;
+    let payload_len = usize::try_from(stored.0.ok_or_else(|| {
+        catalog_state::corrupt_catalog_state(
+            "retained catalog resolution row is outside its preflight byte bound",
+        )
+    })?)
+    .map_err(|_| {
+        catalog_state::corrupt_catalog_state(
+            "retained catalog resolution row length is negative or too large",
+        )
+    })?;
+    let payload = stored.1.ok_or_else(|| {
+        catalog_state::corrupt_catalog_state(
+            "retained catalog resolution row is outside its preflight byte bound",
+        )
+    })?;
+    if payload.len() != payload_len {
+        return Err(catalog_state::corrupt_catalog_state(
+            "retained catalog resolution row changed after length preflight",
+        ));
+    }
+    let digest = decode_nonzero_digest(
+        stored.2.as_deref().ok_or_else(|| {
+            catalog_state::corrupt_catalog_state(
+                "retained catalog resolution row digest is outside its fixed bound",
+            )
+        })?,
+        "retained catalog resolution row digest",
+    )?;
+    if blake3::hash(&payload).as_bytes() != &digest
+        || !expected_identity.matches_row(
+            kind,
+            entity_ref.external_ref.entity_key.as_bytes(),
+            payload.len(),
+            &digest,
+        )
+    {
+        return Err(catalog_state::corrupt_catalog_state(
+            "retained catalog resolution row differs from its restart-validated commitment",
+        ));
+    }
+    match entity_ref.kind {
+        CatalogEntityKind::Project => decode_durable_project_row(
+            &payload,
+            entity_ref.external_ref.entity_key.as_bytes(),
+            MAX_DURABLE_CATALOG_ROW_BYTES,
+        )
+        .map(CatalogLiveRow::Project)
+        .map_err(catalog_state::catalog_contract_error),
+        CatalogEntityKind::Session => decode_durable_session_row(
+            &payload,
+            entity_ref.external_ref.entity_key.as_bytes(),
+            MAX_DURABLE_CATALOG_ROW_BYTES,
+        )
+        .map(CatalogLiveRow::Session)
+        .map_err(catalog_state::catalog_contract_error),
+    }
 }
 
 fn load_page_rows<R: CatalogPortableRow>(

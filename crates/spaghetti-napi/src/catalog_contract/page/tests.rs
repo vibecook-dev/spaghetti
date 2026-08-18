@@ -1015,6 +1015,86 @@ fn external_resolution_preserves_exact_identity_and_canonical_bounded_evidence()
 }
 
 #[test]
+fn bound_lifecycle_resolution_requires_the_exact_plan_selection_and_live_row() {
+    let fixture = fixture_state();
+    let binding =
+        CatalogPolicyViewBinding::withheld(&fixture.published_plan, &fixture.selection).unwrap();
+    let CatalogResolvedEntity::Live { entity_ref, row } = &fixture.live_resolution else {
+        panic!("expected live fixture resolution")
+    };
+    let lifecycle = CatalogResolvedLifecycle::Live {
+        entity_ref: *entity_ref,
+    };
+    let resolved = CatalogEntityResolution::from_bound_lifecycle(
+        entity_ref.external_ref,
+        &lifecycle,
+        Some(row),
+        &binding,
+        &fixture.published_plan,
+        &fixture.selection,
+    )
+    .unwrap();
+    assert!(matches!(resolved, CatalogEntityResolution::Live { .. }));
+
+    assert!(CatalogEntityResolution::from_bound_lifecycle(
+        entity_ref.external_ref,
+        &lifecycle,
+        Some(row),
+        &binding,
+        &fixture.current_plan,
+        &fixture.selection,
+    )
+    .is_err());
+
+    let tombstoned = &fixture
+        .resolution_responses
+        .get("tombstoned")
+        .unwrap()
+        .resolution;
+    let CatalogEntityResolution::Tombstoned {
+        external_ref,
+        provenance,
+    } = tombstoned
+    else {
+        panic!("expected tombstoned fixture resolution")
+    };
+    let lifecycle = CatalogResolvedLifecycle::Tombstoned {
+        entity_ref: CatalogEntityRef::session(external_ref.entity_key),
+        provenance: provenance.clone(),
+    };
+    assert!(CatalogEntityResolution::from_bound_lifecycle(
+        *external_ref,
+        &lifecycle,
+        None,
+        &binding,
+        &fixture.current_plan,
+        &fixture.selection,
+    )
+    .is_err());
+    assert!(CatalogEntityResolution::from_bound_lifecycle(
+        *external_ref,
+        &lifecycle,
+        Some(row),
+        &binding,
+        &fixture.published_plan,
+        &fixture.selection,
+    )
+    .is_err());
+    assert!(matches!(
+        CatalogEntityResolution::from_bound_lifecycle(
+            *external_ref,
+            &lifecycle,
+            None,
+            &binding,
+            &fixture.published_plan,
+            &fixture.selection,
+        )
+        .unwrap(),
+        CatalogEntityResolution::Tombstoned { .. }
+    ));
+}
+
+#[test]
 fn expiration_requires_a_valid_exact_continuation_before_retention_is_consulted() {
     let fixture = fixture_state();
     let wire = serde_json::to_value(&fixture.continuation).unwrap();

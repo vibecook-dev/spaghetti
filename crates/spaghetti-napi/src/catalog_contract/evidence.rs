@@ -546,7 +546,8 @@ fn validate_availability_field(
     availability.validate()
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct CatalogProjectAssertion {
     pub assertion_key: CatalogAssertionKey,
     pub owner: CatalogEvidenceOwner,
@@ -622,7 +623,8 @@ impl CatalogProjectAssertion {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct CatalogSessionAssertion {
     pub assertion_key: CatalogAssertionKey,
     pub owner: CatalogEvidenceOwner,
@@ -851,7 +853,8 @@ impl CatalogLocatorValue {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct NativeLocatorClaim {
     pub locator_claim_key: CatalogLocatorClaimKey,
     pub owner: CatalogEvidenceOwner,
@@ -918,7 +921,8 @@ pub(crate) enum IdentityRelationKind {
     ReplacedBy,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct IdentityRelationFact {
     pub relation_key: CatalogIdentityRelationKey,
     pub owner: CatalogEvidenceOwner,
@@ -1611,13 +1615,15 @@ pub(crate) fn decode_durable_session_row(
     Ok(row)
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct CatalogTombstoneSourceGeneration {
     pub source_instance_key: CanonicalSourceInstanceKey,
     pub max_generation: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct CatalogTombstone {
     pub entity_ref: CatalogEntityRef,
     pub absence_evidence: Vec<CatalogRetractionEvidence>,
@@ -1625,6 +1631,79 @@ pub(crate) struct CatalogTombstone {
     pub prior_assertion_keys: Vec<CatalogAssertionKey>,
     pub prior_source_generations: Vec<CatalogTombstoneSourceGeneration>,
     pub provenance: Vec<SemanticRevisionRef>,
+}
+
+impl CatalogTombstone {
+    fn validate_shape(&self) -> Result<(), CatalogContractError> {
+        self.entity_ref.validate()?;
+        if self.absence_evidence.is_empty()
+            || self.confirmed_absent_at_commit == 0
+            || self.prior_assertion_keys.is_empty()
+            || self.prior_source_generations.is_empty()
+        {
+            return Err(CatalogContractError::invalid(
+                "catalog tombstone requires confirmed absence and prior membership evidence",
+            ));
+        }
+        for evidence in &self.absence_evidence {
+            evidence.validate()?;
+        }
+        if !self
+            .absence_evidence
+            .windows(2)
+            .all(|pair| pair[0].owner < pair[1].owner)
+            || !self
+                .prior_assertion_keys
+                .windows(2)
+                .all(|pair| pair[0] < pair[1])
+            || self
+                .prior_assertion_keys
+                .iter()
+                .any(|key| key.as_bytes().iter().all(|byte| *byte == 0))
+            || !self
+                .prior_source_generations
+                .windows(2)
+                .all(|pair| pair[0] < pair[1])
+            || self
+                .prior_source_generations
+                .iter()
+                .any(|source| source.max_generation == 0)
+        {
+            return Err(CatalogContractError::invalid(
+                "catalog tombstone membership evidence must be nonzero, canonical, and duplicate-free",
+            ));
+        }
+        validate_provenance("catalog tombstone", &self.provenance)
+    }
+}
+
+pub(crate) fn decode_durable_tombstone(
+    payload: &[u8],
+    expected_key: &[u8; DIGEST_BYTES],
+    max_payload_bytes: usize,
+) -> Result<CatalogTombstone, CatalogContractError> {
+    if payload.is_empty() || payload.len() > max_payload_bytes {
+        return Err(CatalogContractError::invalid(
+            "durable catalog tombstone payload is outside its byte bound",
+        ));
+    }
+    let tombstone: CatalogTombstone = serde_json::from_slice(payload).map_err(|error| {
+        CatalogContractError::invalid(format!("durable catalog tombstone is invalid: {error}"))
+    })?;
+    tombstone.validate_shape()?;
+    if tombstone.entity_ref.external_ref.entity_key.as_bytes() != expected_key {
+        return Err(CatalogContractError::invalid(
+            "durable catalog tombstone does not match its frame key",
+        ));
+    }
+    let canonical =
+        serialize_private_json_bounded(&tombstone, payload.len(), "durable catalog tombstone")?;
+    if canonical != payload {
+        return Err(CatalogContractError::invalid(
+            "durable catalog tombstone is not canonical",
+        ));
+    }
+    Ok(tombstone)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1666,6 +1745,71 @@ pub(crate) enum CatalogResolvedEntity {
     },
 }
 
+/// Privacy-minimal restart-validated lifecycle state. It deliberately omits
+/// native locators, native identities, relation keys, and materialized rows;
+/// a live row must still be loaded through its authenticated durable frame.
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) enum CatalogResolvedLifecycle {
+    Live {
+        entity_ref: CatalogEntityRef,
+    },
+    Tombstoned {
+        entity_ref: CatalogEntityRef,
+        provenance: Vec<SemanticRevisionRef>,
+    },
+    Superseded {
+        prior_ref: CatalogEntityRef,
+        replacement_refs: Vec<CatalogEntityRef>,
+        provenance: Vec<SemanticRevisionRef>,
+    },
+    Unknown {
+        requested_ref: ExternalEntityRef,
+        reason: CatalogUnknownReferenceReason,
+    },
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct CatalogResolutionIndex {
+    entries: BTreeMap<CanonicalEntityKey, CatalogResolvedLifecycle>,
+}
+
+impl fmt::Debug for CatalogResolutionIndex {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut live = 0_usize;
+        let mut tombstoned = 0_usize;
+        let mut superseded = 0_usize;
+        let mut unknown = 0_usize;
+        for entry in self.entries.values() {
+            match entry {
+                CatalogResolvedLifecycle::Live { .. } => live += 1,
+                CatalogResolvedLifecycle::Tombstoned { .. } => tombstoned += 1,
+                CatalogResolvedLifecycle::Superseded { .. } => superseded += 1,
+                CatalogResolvedLifecycle::Unknown { .. } => unknown += 1,
+            }
+        }
+        formatter
+            .debug_struct("CatalogResolutionIndex")
+            .field("entry_count", &self.entries.len())
+            .field("live_count", &live)
+            .field("tombstoned_count", &tombstoned)
+            .field("superseded_count", &superseded)
+            .field("unknown_count", &unknown)
+            .finish_non_exhaustive()
+    }
+}
+
+impl CatalogResolutionIndex {
+    pub(crate) fn resolve(&self, external_ref: ExternalEntityRef) -> CatalogResolvedLifecycle {
+        self.entries
+            .get(&external_ref.entity_key)
+            .cloned()
+            .unwrap_or(CatalogResolvedLifecycle::Unknown {
+                requested_ref: external_ref,
+                reason: CatalogUnknownReferenceReason::NeverObserved,
+            })
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CatalogMutation {
     Inserted,
@@ -1681,7 +1825,8 @@ pub(crate) enum CatalogRetractionCause {
     TemporarilyUnavailable,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct CatalogRetractionEvidence {
     pub owner: CatalogEvidenceOwner,
     pub cause: CatalogRetractionCause,
@@ -1724,6 +1869,83 @@ struct RetractedAssertion {
     evidence: CatalogRetractionEvidence,
     retracted_at_commit: u64,
     provenance: Vec<SemanticRevisionRef>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DurableFrozenFact<T> {
+    fact: T,
+    observation_commit: u64,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DurableAssertionHistory {
+    assertion_key: CatalogAssertionKey,
+    owner: CatalogEvidenceOwner,
+    entity_ref: CatalogEntityRef,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DurableAssociationHistory {
+    association_key: CatalogAssociationKey,
+    owner: CatalogEvidenceOwner,
+    session_ref: CatalogEntityRef,
+    project_ref: CatalogEntityRef,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DurableLocatorHistory {
+    locator_claim_key: CatalogLocatorClaimKey,
+    owner: CatalogEvidenceOwner,
+    subject_ref: CatalogEntityRef,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DurableIdentityRelationHistory {
+    relation_key: CatalogIdentityRelationKey,
+    owner: CatalogEvidenceOwner,
+    relation: IdentityRelationKind,
+    left_ref: CatalogEntityRef,
+    right_ref: CatalogEntityRef,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DurableEntityKindEntry {
+    entity_key: CanonicalEntityKey,
+    kind: CatalogEntityKind,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DurableRetractedAssertionEntry {
+    entity_ref: CatalogEntityRef,
+    assertion_key: CatalogAssertionKey,
+    evidence: CatalogRetractionEvidence,
+    retracted_at_commit: u64,
+    provenance: Vec<SemanticRevisionRef>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DurableReducerStateWire {
+    durable_reducer_state_contract_version: u32,
+    projects: Vec<DurableFrozenFact<CatalogProjectAssertion>>,
+    sessions: Vec<DurableFrozenFact<CatalogSessionAssertion>>,
+    associations: Vec<DurableFrozenFact<SessionProjectAssociationFact>>,
+    locators: Vec<DurableFrozenFact<NativeLocatorClaim>>,
+    identity_relations: Vec<DurableFrozenFact<IdentityRelationFact>>,
+    retracted_owners: Vec<CatalogRetractionEvidence>,
+    assertion_history: Vec<DurableAssertionHistory>,
+    association_history: Vec<DurableAssociationHistory>,
+    locator_history: Vec<DurableLocatorHistory>,
+    identity_relation_history: Vec<DurableIdentityRelationHistory>,
+    entity_kinds: Vec<DurableEntityKindEntry>,
+    retracted_assertions: Vec<DurableRetractedAssertionEntry>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2124,6 +2346,648 @@ impl CatalogReducerPublication {
             max_encoded_bytes,
             "catalog reducer durable state",
         )
+    }
+}
+
+/// Checked, non-serializable intermediate reconstructed from the private
+/// durable reducer frame. Tombstones are separate frames and must be supplied
+/// before the immutable publication can be re-frozen.
+pub(crate) struct CatalogDurableReducerRestore {
+    reducer: CatalogReducer,
+}
+
+pub(crate) fn decode_durable_reducer_state(
+    payload: &[u8],
+    max_payload_bytes: usize,
+) -> Result<CatalogDurableReducerRestore, CatalogContractError> {
+    if payload.is_empty() || payload.len() > max_payload_bytes {
+        return Err(CatalogContractError::invalid(
+            "durable catalog reducer payload is outside its byte bound",
+        ));
+    }
+    let wire: DurableReducerStateWire = serde_json::from_slice(payload).map_err(|error| {
+        CatalogContractError::invalid(format!("durable catalog reducer is invalid: {error}"))
+    })?;
+    if wire.durable_reducer_state_contract_version != 1 {
+        return Err(CatalogContractError::invalid(
+            "durable catalog reducer has an unsupported contract version",
+        ));
+    }
+    let canonical =
+        serialize_private_json_bounded(&wire, payload.len(), "durable catalog reducer")?;
+    if canonical != payload {
+        return Err(CatalogContractError::invalid(
+            "durable catalog reducer is not canonical",
+        ));
+    }
+
+    if !wire
+        .projects
+        .windows(2)
+        .all(|pair| pair[0].fact.assertion_key < pair[1].fact.assertion_key)
+        || !wire
+            .sessions
+            .windows(2)
+            .all(|pair| pair[0].fact.assertion_key < pair[1].fact.assertion_key)
+        || !wire
+            .associations
+            .windows(2)
+            .all(|pair| pair[0].fact.association_key < pair[1].fact.association_key)
+        || !wire
+            .locators
+            .windows(2)
+            .all(|pair| pair[0].fact.locator_claim_key < pair[1].fact.locator_claim_key)
+        || !wire
+            .identity_relations
+            .windows(2)
+            .all(|pair| pair[0].fact.relation_key < pair[1].fact.relation_key)
+        || !wire
+            .retracted_owners
+            .windows(2)
+            .all(|pair| pair[0].owner < pair[1].owner)
+        || !wire
+            .assertion_history
+            .windows(2)
+            .all(|pair| pair[0].assertion_key < pair[1].assertion_key)
+        || !wire
+            .association_history
+            .windows(2)
+            .all(|pair| pair[0].association_key < pair[1].association_key)
+        || !wire
+            .locator_history
+            .windows(2)
+            .all(|pair| pair[0].locator_claim_key < pair[1].locator_claim_key)
+        || !wire
+            .identity_relation_history
+            .windows(2)
+            .all(|pair| pair[0].relation_key < pair[1].relation_key)
+        || !wire
+            .entity_kinds
+            .windows(2)
+            .all(|pair| pair[0].entity_key < pair[1].entity_key)
+        || !wire.retracted_assertions.windows(2).all(|pair| {
+            (pair[0].entity_ref, pair[0].assertion_key)
+                < (pair[1].entity_ref, pair[1].assertion_key)
+        })
+    {
+        return Err(CatalogContractError::invalid(
+            "durable catalog reducer members must be canonical and duplicate-free",
+        ));
+    }
+
+    let mut reducer = CatalogReducer::default();
+    for stored in wire.projects {
+        if stored
+            .fact
+            .assertion_key
+            .as_bytes()
+            .iter()
+            .all(|byte| *byte == 0)
+        {
+            return Err(CatalogContractError::invalid(
+                "durable catalog project assertion key must be nonzero",
+            ));
+        }
+        reducer.upsert_project_assertion(stored.fact, stored.observation_commit)?;
+    }
+    for stored in wire.sessions {
+        if stored
+            .fact
+            .assertion_key
+            .as_bytes()
+            .iter()
+            .all(|byte| *byte == 0)
+        {
+            return Err(CatalogContractError::invalid(
+                "durable catalog session assertion key must be nonzero",
+            ));
+        }
+        reducer.upsert_session_assertion(stored.fact, stored.observation_commit)?;
+    }
+    for stored in wire.associations {
+        reducer.upsert_association(stored.fact, stored.observation_commit)?;
+    }
+    for stored in wire.locators {
+        if stored
+            .fact
+            .locator_claim_key
+            .as_bytes()
+            .iter()
+            .all(|byte| *byte == 0)
+        {
+            return Err(CatalogContractError::invalid(
+                "durable catalog locator key must be nonzero",
+            ));
+        }
+        reducer.upsert_locator_claim(stored.fact, stored.observation_commit)?;
+    }
+    for stored in wire.identity_relations {
+        if stored
+            .fact
+            .relation_key
+            .as_bytes()
+            .iter()
+            .all(|byte| *byte == 0)
+        {
+            return Err(CatalogContractError::invalid(
+                "durable catalog identity-relation key must be nonzero",
+            ));
+        }
+        reducer.upsert_identity_relation(stored.fact, stored.observation_commit)?;
+    }
+
+    let mut retracted_owners = BTreeMap::new();
+    for evidence in wire.retracted_owners {
+        evidence.validate()?;
+        if reducer
+            .projects
+            .values()
+            .any(|stored| stored.fact.owner == evidence.owner)
+            || reducer
+                .sessions
+                .values()
+                .any(|stored| stored.fact.owner == evidence.owner)
+            || reducer
+                .associations
+                .values()
+                .any(|stored| stored.fact.owner == evidence.owner)
+            || reducer
+                .locators
+                .values()
+                .any(|stored| stored.fact.owner == evidence.owner)
+            || reducer
+                .identity_relations
+                .values()
+                .any(|stored| stored.fact.owner == evidence.owner)
+        {
+            return Err(CatalogContractError::invalid(
+                "durable catalog reducer cannot retain live evidence for a retracted owner",
+            ));
+        }
+        retracted_owners.insert(evidence.owner.clone(), evidence);
+    }
+
+    let mut assertion_history = BTreeMap::new();
+    for entry in wire.assertion_history {
+        entry.owner.validate()?;
+        entry.entity_ref.validate()?;
+        if entry.assertion_key.as_bytes().iter().all(|byte| *byte == 0) {
+            return Err(CatalogContractError::invalid(
+                "durable catalog assertion history key must be nonzero",
+            ));
+        }
+        assertion_history.insert(
+            entry.assertion_key,
+            AssertionCoordinates {
+                owner: entry.owner,
+                entity_ref: entry.entity_ref,
+            },
+        );
+    }
+    let mut association_history = BTreeMap::new();
+    for entry in wire.association_history {
+        entry.owner.validate()?;
+        entry.session_ref.validate()?;
+        entry.project_ref.validate()?;
+        if entry
+            .association_key
+            .as_bytes()
+            .iter()
+            .all(|byte| *byte == 0)
+        {
+            return Err(CatalogContractError::invalid(
+                "durable catalog association history key must be nonzero",
+            ));
+        }
+        association_history.insert(
+            entry.association_key,
+            AssociationCoordinates {
+                owner: entry.owner,
+                session_ref: entry.session_ref,
+                project_ref: entry.project_ref,
+            },
+        );
+    }
+    let mut locator_history = BTreeMap::new();
+    for entry in wire.locator_history {
+        entry.owner.validate()?;
+        entry.subject_ref.validate()?;
+        if entry
+            .locator_claim_key
+            .as_bytes()
+            .iter()
+            .all(|byte| *byte == 0)
+        {
+            return Err(CatalogContractError::invalid(
+                "durable catalog locator history key must be nonzero",
+            ));
+        }
+        locator_history.insert(
+            entry.locator_claim_key,
+            LocatorCoordinates {
+                owner: entry.owner,
+                subject_ref: entry.subject_ref,
+            },
+        );
+    }
+    let mut identity_relation_history = BTreeMap::new();
+    for entry in wire.identity_relation_history {
+        entry.owner.validate()?;
+        entry.left_ref.validate()?;
+        entry.right_ref.validate()?;
+        if entry.relation_key.as_bytes().iter().all(|byte| *byte == 0) {
+            return Err(CatalogContractError::invalid(
+                "durable catalog identity-relation history key must be nonzero",
+            ));
+        }
+        identity_relation_history.insert(
+            entry.relation_key,
+            IdentityRelationCoordinates {
+                owner: entry.owner,
+                relation: entry.relation,
+                left_ref: entry.left_ref,
+                right_ref: entry.right_ref,
+            },
+        );
+    }
+
+    if reducer
+        .assertion_history
+        .iter()
+        .any(|(key, coordinates)| assertion_history.get(key) != Some(coordinates))
+        || reducer
+            .association_history
+            .iter()
+            .any(|(key, coordinates)| association_history.get(key) != Some(coordinates))
+        || reducer
+            .locator_history
+            .iter()
+            .any(|(key, coordinates)| locator_history.get(key) != Some(coordinates))
+        || reducer
+            .identity_relation_history
+            .iter()
+            .any(|(key, coordinates)| identity_relation_history.get(key) != Some(coordinates))
+    {
+        return Err(CatalogContractError::invalid(
+            "durable catalog reducer history does not match its live evidence coordinates",
+        ));
+    }
+
+    let live_assertions = reducer
+        .projects
+        .keys()
+        .chain(reducer.sessions.keys())
+        .copied()
+        .collect::<BTreeSet<_>>();
+    let live_associations = reducer
+        .associations
+        .keys()
+        .copied()
+        .collect::<BTreeSet<_>>();
+    let live_locators = reducer.locators.keys().copied().collect::<BTreeSet<_>>();
+    let live_relations = reducer
+        .identity_relations
+        .keys()
+        .copied()
+        .collect::<BTreeSet<_>>();
+    if association_history.iter().any(|(key, coordinates)| {
+        !live_associations.contains(key) && !retracted_owners.contains_key(&coordinates.owner)
+    }) || locator_history.iter().any(|(key, coordinates)| {
+        !live_locators.contains(key) && !retracted_owners.contains_key(&coordinates.owner)
+    }) || identity_relation_history.iter().any(|(key, coordinates)| {
+        !live_relations.contains(key) && !retracted_owners.contains_key(&coordinates.owner)
+    }) {
+        return Err(CatalogContractError::invalid(
+            "durable catalog history without live evidence requires an exact owner retraction",
+        ));
+    }
+
+    let mut retracted_assertions: BTreeMap<
+        CatalogEntityRef,
+        BTreeMap<CatalogAssertionKey, RetractedAssertion>,
+    > = BTreeMap::new();
+    for entry in wire.retracted_assertions {
+        entry.entity_ref.validate()?;
+        entry.evidence.validate()?;
+        validate_observation_commit(entry.retracted_at_commit)?;
+        validate_provenance("durable retracted catalog assertion", &entry.provenance)?;
+        let coordinates = assertion_history.get(&entry.assertion_key).ok_or_else(|| {
+            CatalogContractError::invalid(
+                "durable retracted assertion is missing immutable assertion history",
+            )
+        })?;
+        if live_assertions.contains(&entry.assertion_key)
+            || coordinates.entity_ref != entry.entity_ref
+            || coordinates.owner != entry.evidence.owner
+            || retracted_owners.get(&entry.evidence.owner) != Some(&entry.evidence)
+        {
+            return Err(CatalogContractError::invalid(
+                "durable retracted assertion does not match its owner and immutable coordinates",
+            ));
+        }
+        retracted_assertions
+            .entry(entry.entity_ref)
+            .or_default()
+            .insert(
+                entry.assertion_key,
+                RetractedAssertion {
+                    evidence: entry.evidence,
+                    retracted_at_commit: entry.retracted_at_commit,
+                    provenance: entry.provenance,
+                },
+            );
+    }
+    if assertion_history.iter().any(|(key, coordinates)| {
+        !live_assertions.contains(key)
+            && retracted_assertions
+                .get(&coordinates.entity_ref)
+                .and_then(|assertions| assertions.get(key))
+                .is_none()
+    }) {
+        return Err(CatalogContractError::invalid(
+            "durable catalog assertion history is neither live nor explicitly retracted",
+        ));
+    }
+
+    let mut derived_entity_kinds = BTreeMap::new();
+    let mut register = |entity_ref: CatalogEntityRef| -> Result<(), CatalogContractError> {
+        entity_ref.validate()?;
+        if derived_entity_kinds
+            .insert(entity_ref.external_ref.entity_key, entity_ref.kind)
+            .is_some_and(|kind| kind != entity_ref.kind)
+        {
+            return Err(CatalogContractError::invalid(
+                "durable catalog reducer strengthens one entity key into two kinds",
+            ));
+        }
+        Ok(())
+    };
+    for coordinates in assertion_history.values() {
+        register(coordinates.entity_ref)?;
+    }
+    for coordinates in association_history.values() {
+        register(coordinates.session_ref)?;
+        register(coordinates.project_ref)?;
+    }
+    for coordinates in locator_history.values() {
+        register(coordinates.subject_ref)?;
+    }
+    for coordinates in identity_relation_history.values() {
+        register(coordinates.left_ref)?;
+        register(coordinates.right_ref)?;
+    }
+    let entity_kinds = wire
+        .entity_kinds
+        .into_iter()
+        .map(|entry| (entry.entity_key, entry.kind))
+        .collect::<BTreeMap<_, _>>();
+    if entity_kinds != derived_entity_kinds {
+        return Err(CatalogContractError::invalid(
+            "durable catalog entity-kind history is not exactly derived from evidence coordinates",
+        ));
+    }
+
+    reducer.assertion_history = assertion_history;
+    reducer.association_history = association_history;
+    reducer.locator_history = locator_history;
+    reducer.identity_relation_history = identity_relation_history;
+    reducer.retracted_owners = retracted_owners;
+    reducer.entity_kinds = entity_kinds;
+    reducer.retracted_assertions = retracted_assertions;
+    Ok(CatalogDurableReducerRestore { reducer })
+}
+
+impl CatalogDurableReducerRestore {
+    pub(crate) fn finish(
+        mut self,
+        mut tombstones: Vec<CatalogTombstone>,
+        expected_revision: CatalogReducerPublicationRevision,
+        limits: CatalogReducerPublicationLimits,
+    ) -> Result<CatalogReducerPublication, CatalogContractError> {
+        // The durable table orders tombstone frames by opaque entity key;
+        // semantic reducer order also includes the entity kind.
+        tombstones.sort_by_key(|tombstone| tombstone.entity_ref);
+        if !tombstones
+            .windows(2)
+            .all(|pair| pair[0].entity_ref < pair[1].entity_ref)
+        {
+            return Err(CatalogContractError::invalid(
+                "durable catalog tombstones must be canonical and duplicate-free",
+            ));
+        }
+        for tombstone in tombstones {
+            tombstone.validate_shape()?;
+            if self.reducer.entity_has_assertion(tombstone.entity_ref) {
+                return Err(CatalogContractError::invalid(
+                    "durable catalog tombstone cannot coexist with live membership",
+                ));
+            }
+            let history = self
+                .reducer
+                .retracted_assertions
+                .get(&tombstone.entity_ref)
+                .ok_or_else(|| {
+                    CatalogContractError::invalid(
+                        "durable catalog tombstone is missing retracted membership history",
+                    )
+                })?;
+            let expected_keys = history.keys().copied().collect::<Vec<_>>();
+            let expected_evidence = history
+                .values()
+                .map(|retracted| (retracted.evidence.owner.clone(), retracted.evidence.clone()))
+                .collect::<BTreeMap<_, _>>()
+                .into_values()
+                .collect::<Vec<_>>();
+            let mut generations = BTreeMap::new();
+            for retracted in history.values() {
+                generations
+                    .entry(retracted.evidence.owner.source_instance_key)
+                    .and_modify(|generation: &mut u64| {
+                        *generation = (*generation).max(retracted.evidence.owner.generation);
+                    })
+                    .or_insert(retracted.evidence.owner.generation);
+            }
+            let expected_generations = generations
+                .into_iter()
+                .map(
+                    |(source_instance_key, max_generation)| CatalogTombstoneSourceGeneration {
+                        source_instance_key,
+                        max_generation,
+                    },
+                )
+                .collect::<Vec<_>>();
+            let expected_provenance = sorted_provenance(history.values().flat_map(|retracted| {
+                retracted
+                    .provenance
+                    .iter()
+                    .chain(retracted.evidence.provenance.iter())
+                    .copied()
+            }));
+            let newest_retraction = history
+                .values()
+                .map(|retracted| retracted.retracted_at_commit)
+                .max()
+                .expect("retracted tombstone history is nonempty");
+            if tombstone.prior_assertion_keys != expected_keys
+                || tombstone.absence_evidence != expected_evidence
+                || tombstone.prior_source_generations != expected_generations
+                || tombstone.provenance != expected_provenance
+                || tombstone.confirmed_absent_at_commit <= newest_retraction
+            {
+                return Err(CatalogContractError::invalid(
+                    "durable catalog tombstone is not exactly derived from retracted membership history",
+                ));
+            }
+            self.reducer
+                .tombstones
+                .insert(tombstone.entity_ref, tombstone);
+        }
+        let publication = self.reducer.freeze_for_initial_publication(limits)?;
+        if publication.revision() != expected_revision {
+            return Err(CatalogContractError::invalid(
+                "durable catalog reducer does not reproduce its declared revision",
+            ));
+        }
+        Ok(publication)
+    }
+}
+
+impl CatalogReducerPublication {
+    pub(crate) fn validate_durable_row_commitments(
+        &self,
+        max_row_bytes: usize,
+        expected_project_row_count: usize,
+        expected_session_row_count: usize,
+        mut matches: impl FnMut(
+            CatalogEntityKind,
+            &[u8; DIGEST_BYTES],
+            usize,
+            &[u8; DIGEST_BYTES],
+        ) -> bool,
+    ) -> Result<(), CatalogContractError> {
+        if self.project_rows.len() != expected_project_row_count
+            || self.session_rows.len() != expected_session_row_count
+        {
+            return Err(CatalogContractError::invalid(
+                "durable catalog row counts differ from the reconstructed reducer",
+            ));
+        }
+        for row in &self.project_rows {
+            row.validate_for_durable()?;
+            let payload = serialize_private_json_bounded(
+                row,
+                max_row_bytes,
+                "restart-validated catalog project row",
+            )?;
+            let digest = *blake3::hash(&payload).as_bytes();
+            if !matches(
+                CatalogEntityKind::Project,
+                row.project_ref.external_ref.entity_key.as_bytes(),
+                payload.len(),
+                &digest,
+            ) {
+                return Err(CatalogContractError::invalid(
+                    "durable catalog project rows differ from the reconstructed reducer",
+                ));
+            }
+        }
+        for row in &self.session_rows {
+            row.validate_for_durable()?;
+            let payload = serialize_private_json_bounded(
+                row,
+                max_row_bytes,
+                "restart-validated catalog session row",
+            )?;
+            let digest = *blake3::hash(&payload).as_bytes();
+            if !matches(
+                CatalogEntityKind::Session,
+                row.session_ref.external_ref.entity_key.as_bytes(),
+                payload.len(),
+                &digest,
+            ) {
+                return Err(CatalogContractError::invalid(
+                    "durable catalog session rows differ from the reconstructed reducer",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn resolution_index(&self) -> Result<CatalogResolutionIndex, CatalogContractError> {
+        let live = self
+            .project_rows
+            .iter()
+            .map(|row| row.project_ref)
+            .chain(self.session_rows.iter().map(|row| row.session_ref))
+            .collect::<BTreeSet<_>>();
+        let tombstones = self
+            .tombstones
+            .iter()
+            .map(|tombstone| (tombstone.entity_ref, tombstone.provenance.clone()))
+            .collect::<BTreeMap<_, _>>();
+        let mut replacements: BTreeMap<
+            CatalogEntityRef,
+            BTreeMap<CatalogEntityRef, Vec<SemanticRevisionRef>>,
+        > = BTreeMap::new();
+        let mut related = BTreeSet::new();
+        for stored in &self.identity_relations {
+            if let Some((prior_ref, replacement_ref)) = stored.fact.replacement_edge() {
+                replacements
+                    .entry(prior_ref)
+                    .or_default()
+                    .entry(replacement_ref)
+                    .or_default()
+                    .extend(stored.fact.provenance.iter().copied());
+            } else if matches!(
+                stored.fact.relation,
+                IdentityRelationKind::Alias | IdentityRelationKind::SameEntity
+            ) {
+                related.insert(stored.fact.left_ref);
+                related.insert(stored.fact.right_ref);
+            }
+        }
+
+        let mut entries = BTreeMap::new();
+        for (entity_key, kind) in &self.entity_kinds {
+            let entity_ref = CatalogEntityRef {
+                kind: *kind,
+                external_ref: ExternalEntityRef::new(*entity_key),
+            };
+            let lifecycle = if let Some(targets) = replacements.get(&entity_ref) {
+                let replacement_refs = targets.keys().copied().collect::<Vec<_>>();
+                let provenance = sorted_provenance(
+                    targets
+                        .values()
+                        .flat_map(|revisions| revisions.iter().copied()),
+                );
+                validate_provenance("catalog supersession resolution", &provenance)?;
+                CatalogResolvedLifecycle::Superseded {
+                    prior_ref: entity_ref,
+                    replacement_refs,
+                    provenance,
+                }
+            } else if live.contains(&entity_ref) {
+                CatalogResolvedLifecycle::Live { entity_ref }
+            } else if let Some(provenance) = tombstones.get(&entity_ref) {
+                CatalogResolvedLifecycle::Tombstoned {
+                    entity_ref,
+                    provenance: provenance.clone(),
+                }
+            } else {
+                CatalogResolvedLifecycle::Unknown {
+                    requested_ref: entity_ref.external_ref,
+                    reason: if related.contains(&entity_ref) {
+                        CatalogUnknownReferenceReason::RelatedIdentityOnly
+                    } else if self.retracted_assertions.contains_key(&entity_ref) {
+                        CatalogUnknownReferenceReason::RetractedPendingPublication
+                    } else {
+                        CatalogUnknownReferenceReason::NeverObserved
+                    },
+                }
+            };
+            entries.insert(*entity_key, lifecycle);
+        }
+        Ok(CatalogResolutionIndex { entries })
     }
 }
 
@@ -3157,17 +4021,16 @@ impl CatalogReducer {
                 })
                 .copied(),
         );
-        self.tombstones.insert(
+        let tombstone = CatalogTombstone {
             entity_ref,
-            CatalogTombstone {
-                entity_ref,
-                absence_evidence,
-                confirmed_absent_at_commit: observation_commit,
-                prior_assertion_keys,
-                prior_source_generations,
-                provenance,
-            },
-        );
+            absence_evidence,
+            confirmed_absent_at_commit: observation_commit,
+            prior_assertion_keys,
+            prior_source_generations,
+            provenance,
+        };
+        tombstone.validate_shape()?;
+        self.tombstones.insert(entity_ref, tombstone);
         self.register_entity_kind(entity_ref);
         Ok(mutation)
     }
@@ -3809,6 +4672,27 @@ fn validate_identity_relation_graph(
         )));
     }
     validate_replacement_graph(relations)?;
+
+    let mut replacement_provenance = BTreeMap::<CatalogEntityRef, BTreeSet<_>>::new();
+    for stored in relations.values() {
+        if let Some((prior_ref, _)) = stored.fact.replacement_edge() {
+            replacement_provenance.entry(prior_ref).or_default().extend(
+                stored
+                    .fact
+                    .provenance
+                    .iter()
+                    .map(|reference| reference.fact_revision_id),
+            );
+        }
+    }
+    if replacement_provenance
+        .values()
+        .any(|provenance| provenance.len() > MAX_PROVENANCE_REVISIONS)
+    {
+        return Err(CatalogContractError::invalid(format!(
+            "catalog supersession resolution exceeds {MAX_PROVENANCE_REVISIONS} provenance revisions"
+        )));
+    }
 
     let same_relations: Vec<_> = relations
         .values()

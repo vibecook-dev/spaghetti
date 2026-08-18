@@ -9,7 +9,7 @@ use std::fmt;
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
-use serde::{Serialize, Serializer};
+use serde::{Deserialize, Serialize, Serializer};
 
 use super::evidence::{
     serialize_private_json_bounded, CatalogAssertionKey, CatalogEntityKind, CatalogEntityRef,
@@ -520,6 +520,204 @@ impl fmt::Debug for CatalogPublicationMemberBinding {
             .field("session_ref", &"<opaque>")
             .finish()
     }
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DurableSourceWire {
+    durable_source_contract_version: u32,
+    plan_source: CatalogCoveragePlanSource,
+    contract_selection: ContractVersionSelection,
+    member_identity_contract_id: String,
+    membership_revision: String,
+    component_completion_revision: String,
+    member_count: usize,
+    source_coverage: SourceCoverageSet,
+    source_digest: String,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DurableMemberBindingWire {
+    durable_member_binding_contract_version: u32,
+    source: CatalogCoveragePlanSource,
+    member_ref: String,
+    assertion_key: CatalogAssertionKey,
+    session_ref: CatalogEntityRef,
+}
+
+/// Checked source frame awaiting the member references carried by the
+/// separately keyed membership frames. Debug is intentionally omitted because
+/// coverage can retain local object coordinates.
+pub(crate) struct CatalogDurableSourceFrame {
+    plan_source: CatalogCoveragePlanSource,
+    contract_selection: ContractVersionSelection,
+    member_identity_contract_id: String,
+    membership_revision: CatalogSourceMembershipRevision,
+    component_completion_revision: CatalogSourceCompletionRevision,
+    member_count: usize,
+    source_coverage: SourceCoverageSet,
+    digest: CatalogCompleteSourceDigest,
+}
+
+impl CatalogDurableSourceFrame {
+    fn complete(
+        self,
+        member_refs: Vec<CatalogPublicationMemberRef>,
+    ) -> Result<CatalogCompleteSourceAssembly, CatalogContractError> {
+        if member_refs.len() != self.member_count {
+            return Err(CatalogContractError::invalid(
+                "durable catalog source member count does not match its member frames",
+            ));
+        }
+        let source = CatalogCompleteSourceAssembly::from_complete_library_coverage(
+            self.plan_source,
+            self.contract_selection,
+            self.member_identity_contract_id,
+            self.membership_revision,
+            self.component_completion_revision,
+            member_refs,
+            self.source_coverage,
+        )?;
+        if source.digest != self.digest {
+            return Err(CatalogContractError::invalid(
+                "durable catalog source digest does not match its completed membership evidence",
+            ));
+        }
+        Ok(source)
+    }
+}
+
+pub(crate) fn decode_durable_source_frame(
+    payload: &[u8],
+    expected_key: &[u8; DIGEST_BYTES],
+    max_payload_bytes: usize,
+) -> Result<CatalogDurableSourceFrame, CatalogContractError> {
+    if payload.is_empty() || payload.len() > max_payload_bytes {
+        return Err(CatalogContractError::invalid(
+            "durable catalog source payload is outside its byte bound",
+        ));
+    }
+    let wire: DurableSourceWire = serde_json::from_slice(payload).map_err(|error| {
+        CatalogContractError::invalid(format!("durable catalog source is invalid: {error}"))
+    })?;
+    let canonical = serialize_private_json_bounded(&wire, payload.len(), "durable catalog source")?;
+    let membership_revision = decode_private_digest(
+        &wire.membership_revision,
+        "durable catalog source membership revision",
+    )?;
+    let component_completion_revision = decode_private_digest(
+        &wire.component_completion_revision,
+        "durable catalog source component completion revision",
+    )?;
+    let source_digest =
+        decode_private_digest(&wire.source_digest, "durable catalog source digest")?;
+    if canonical != payload
+        || wire.durable_source_contract_version != CATALOG_DURABLE_PUBLICATION_CONTRACT_VERSION
+        || &source_digest != expected_key
+        || wire.member_count > MAX_PUBLICATION_MEMBERS
+    {
+        return Err(CatalogContractError::invalid(
+            "durable catalog source frame is noncanonical or outside its frozen bounds",
+        ));
+    }
+    wire.plan_source.validate()?;
+    validate_contract_selection(&wire.contract_selection)?;
+    validate_identifier(
+        "catalog member identity contract id",
+        &wire.member_identity_contract_id,
+    )?;
+    validate_complete_source_coverage(
+        &wire.plan_source,
+        &wire.contract_selection,
+        &wire.source_coverage,
+    )?;
+    Ok(CatalogDurableSourceFrame {
+        plan_source: wire.plan_source,
+        contract_selection: wire.contract_selection,
+        member_identity_contract_id: wire.member_identity_contract_id,
+        membership_revision: CatalogSourceMembershipRevision(membership_revision),
+        component_completion_revision: CatalogSourceCompletionRevision(
+            component_completion_revision,
+        ),
+        member_count: wire.member_count,
+        source_coverage: wire.source_coverage,
+        digest: CatalogCompleteSourceDigest(source_digest),
+    })
+}
+
+fn decode_private_digest(
+    value: &str,
+    field: &'static str,
+) -> Result<[u8; DIGEST_BYTES], CatalogContractError> {
+    if value.len() != 46 {
+        return Err(CatalogContractError::invalid(format!(
+            "{field} must use the exact v1 digest width"
+        )));
+    }
+    let encoded = value.strip_prefix("v1:").ok_or_else(|| {
+        CatalogContractError::invalid(format!("{field} has an unsupported encoding"))
+    })?;
+    let decoded = URL_SAFE_NO_PAD
+        .decode(encoded)
+        .map_err(|_| CatalogContractError::invalid(format!("{field} is not valid base64url")))?;
+    let digest: [u8; DIGEST_BYTES] = decoded.try_into().map_err(|_| {
+        CatalogContractError::invalid(format!("{field} must contain exactly 32 bytes"))
+    })?;
+    if digest.iter().all(|byte| *byte == 0) {
+        return Err(CatalogContractError::invalid(format!(
+            "{field} must be nonzero"
+        )));
+    }
+    Ok(digest)
+}
+
+pub(crate) fn decode_durable_member_binding_frame(
+    payload: &[u8],
+    expected_key: &[u8; DIGEST_BYTES],
+    max_payload_bytes: usize,
+) -> Result<CatalogPublicationMemberBinding, CatalogContractError> {
+    if payload.is_empty() || payload.len() > max_payload_bytes {
+        return Err(CatalogContractError::invalid(
+            "durable catalog member-binding payload is outside its byte bound",
+        ));
+    }
+    let wire: DurableMemberBindingWire = serde_json::from_slice(payload).map_err(|error| {
+        CatalogContractError::invalid(format!(
+            "durable catalog member binding is invalid: {error}"
+        ))
+    })?;
+    let canonical =
+        serialize_private_json_bounded(&wire, payload.len(), "durable catalog member binding")?;
+    let member_ref = decode_private_digest(
+        &wire.member_ref,
+        "durable catalog publication member reference",
+    )?;
+    if canonical != payload
+        || wire.durable_member_binding_contract_version
+            != CATALOG_DURABLE_PUBLICATION_CONTRACT_VERSION
+        || wire
+            .assertion_key
+            .publication_bytes()
+            .iter()
+            .all(|byte| *byte == 0)
+    {
+        return Err(CatalogContractError::invalid(
+            "durable catalog member binding is noncanonical or outside its frozen contract",
+        ));
+    }
+    let binding = CatalogPublicationMemberBinding::new(
+        wire.source,
+        CatalogPublicationMemberRef(member_ref),
+        wire.assertion_key,
+        wire.session_ref,
+    )?;
+    if &derive_member_binding_frame_key(&binding) != expected_key {
+        return Err(CatalogContractError::invalid(
+            "durable catalog member binding does not match its frame key",
+        ));
+    }
+    Ok(binding)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1465,6 +1663,79 @@ fn validate_member_bindings(
         ));
     }
     Ok(())
+}
+
+pub(crate) fn validate_restarted_initial_publication(
+    plan: &CatalogCoveragePlan,
+    selection: &ContractVersionSelection,
+    expected_member_identity_contract_id: Option<&str>,
+    source_frames: Vec<CatalogDurableSourceFrame>,
+    mut member_bindings: Vec<CatalogPublicationMemberBinding>,
+    reducer: &CatalogReducerPublication,
+) -> Result<Vec<SourceCoverageSet>, CatalogContractError> {
+    plan.validate()?;
+    validate_contract_selection(selection)?;
+    if plan.scope != CatalogCoverageScope::Library {
+        return Err(CatalogContractError::invalid(
+            "durable catalog restart requires a Library coverage plan",
+        ));
+    }
+    let planned_source_count = plan
+        .required_sources
+        .len()
+        .checked_add(plan.optional_sources.len())
+        .ok_or_else(|| CatalogContractError::invalid("catalog source count overflow"))?;
+    if source_frames.len() > planned_source_count {
+        return Err(CatalogContractError::invalid(
+            "durable catalog restart contains more sources than its plan",
+        ));
+    }
+
+    let mut member_refs_by_source = BTreeMap::new();
+    for binding in &member_bindings {
+        member_refs_by_source
+            .entry(binding.source.clone())
+            .or_insert_with(Vec::new)
+            .push(binding.member_ref);
+    }
+    let mut sources = Vec::with_capacity(source_frames.len());
+    for frame in source_frames {
+        if frame.contract_selection != *selection
+            || expected_member_identity_contract_id
+                != Some(frame.member_identity_contract_id.as_str())
+        {
+            return Err(CatalogContractError::invalid(
+                "durable catalog source differs from the snapshot selection or identity contract",
+            ));
+        }
+        let member_refs = member_refs_by_source
+            .remove(&frame.plan_source)
+            .unwrap_or_default();
+        sources.push(frame.complete(member_refs)?);
+    }
+    if !member_refs_by_source.is_empty() {
+        return Err(CatalogContractError::invalid(
+            "durable catalog member binding names a source without a complete source frame",
+        ));
+    }
+    sources.sort_by(|left, right| left.plan_source.cmp(&right.plan_source));
+    if sources
+        .windows(2)
+        .any(|pair| pair[0].plan_source == pair[1].plan_source)
+        || expected_member_identity_contract_id.is_some() != !sources.is_empty()
+    {
+        return Err(CatalogContractError::invalid(
+            "durable catalog restart source identities are duplicate or inconsistent",
+        ));
+    }
+    validate_plan_sources(plan, selection, &sources)?;
+    validate_covered_reducer(&sources, reducer)?;
+    member_bindings.sort_by(|left, right| left.coordinate().cmp(&right.coordinate()));
+    validate_member_bindings(&sources, reducer, &member_bindings)?;
+    Ok(sources
+        .into_iter()
+        .map(|source| source.source_coverage)
+        .collect())
 }
 
 fn hash_component(hasher: &mut blake3::Hasher, bytes: &[u8]) {

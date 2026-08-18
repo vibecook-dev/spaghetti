@@ -292,6 +292,111 @@ fn complete_initial_publication_is_canonical_and_redacts_native_evidence() {
 }
 
 #[test]
+fn durable_source_and_member_frames_rebind_to_the_exact_reducer() {
+    let alpha = fixture_source("restart-alpha");
+    let coverage_plan = plan(&[&alpha], &[]);
+    let reducer = reducer_with(&[&alpha], 10);
+    let assembly = CatalogInitialPublicationAssembly::assemble(
+        &coverage_plan,
+        &building(&coverage_plan),
+        selection(),
+        vec![alpha.assembly.clone()],
+        &reducer,
+        bindings(&[&alpha]),
+        CatalogPublicationLimits::default(),
+    )
+    .unwrap();
+    let durable = assembly.prepare_durable().unwrap();
+    let source_entry = durable
+        .entries()
+        .iter()
+        .find(|entry| entry.kind() == CatalogDurablePublicationEntryKind::Source)
+        .unwrap();
+    let member_entry = durable
+        .entries()
+        .iter()
+        .find(|entry| entry.kind() == CatalogDurablePublicationEntryKind::MemberBinding)
+        .unwrap();
+    let reducer_entry = durable
+        .entries()
+        .iter()
+        .find(|entry| entry.kind() == CatalogDurablePublicationEntryKind::ReducerState)
+        .unwrap();
+    let source = decode_durable_source_frame(
+        source_entry.payload(),
+        source_entry.key(),
+        MAX_DURABLE_PUBLICATION_BYTES,
+    )
+    .unwrap();
+    let binding = decode_durable_member_binding_frame(
+        member_entry.payload(),
+        member_entry.key(),
+        MAX_DURABLE_PUBLICATION_BYTES,
+    )
+    .unwrap();
+    let restored_reducer = super::super::evidence::decode_durable_reducer_state(
+        reducer_entry.payload(),
+        MAX_DURABLE_PUBLICATION_BYTES,
+    )
+    .unwrap()
+    .finish(
+        Vec::new(),
+        durable.reducer_revision(),
+        CatalogReducerPublicationLimits::default(),
+    )
+    .unwrap();
+    let coverage = validate_restarted_initial_publication(
+        &coverage_plan,
+        &selection(),
+        Some(MEMBER_IDENTITY_CONTRACT),
+        vec![source],
+        vec![binding],
+        &restored_reducer,
+    )
+    .unwrap();
+    assert_eq!(coverage, vec![alpha.assembly.source_coverage().clone()]);
+
+    let mut drifted: DurableMemberBindingWire =
+        serde_json::from_slice(member_entry.payload()).unwrap();
+    drifted.session_ref = CatalogEntityRef::session(
+        CanonicalEntityKey::derive(
+            ADAPTER_ID,
+            &alpha.owner.source_instance_key,
+            "session",
+            b"other-session",
+        )
+        .unwrap(),
+    );
+    let drifted = serialize_private_json_bounded(
+        &drifted,
+        MAX_DURABLE_PUBLICATION_BYTES,
+        "drifted member binding fixture",
+    )
+    .unwrap();
+    let drifted_binding = decode_durable_member_binding_frame(
+        &drifted,
+        member_entry.key(),
+        MAX_DURABLE_PUBLICATION_BYTES,
+    )
+    .unwrap();
+    let source = decode_durable_source_frame(
+        source_entry.payload(),
+        source_entry.key(),
+        MAX_DURABLE_PUBLICATION_BYTES,
+    )
+    .unwrap();
+    assert!(validate_restarted_initial_publication(
+        &coverage_plan,
+        &selection(),
+        Some(MEMBER_IDENTITY_CONTRACT),
+        vec![source],
+        vec![drifted_binding],
+        &restored_reducer,
+    )
+    .is_err());
+}
+
+#[test]
 fn complete_source_coverage_order_is_canonical_and_zero_member_refs_are_rejected() {
     let alpha = fixture_source("canonical-source");
     let mut coverage = alpha.assembly.source_coverage().clone();

@@ -21,8 +21,8 @@ use super::evidence::{
     CatalogAssertionKey, CatalogAssociationCoverage, CatalogAvailability, CatalogEntityKind,
     CatalogEntityRef, CatalogEvidenceOwner, CatalogFieldAuthority, CatalogFieldSelection,
     CatalogLiveRow, CatalogLocatorClaimKey, CatalogPolicyView, CatalogProjectRow,
-    CatalogQualifiedValue, CatalogResolvedEntity, CatalogSessionRow, CatalogUnknownReferenceReason,
-    ProjectAssociationBasis, SessionProjectAssociationFact,
+    CatalogQualifiedValue, CatalogResolvedEntity, CatalogResolvedLifecycle, CatalogSessionRow,
+    CatalogUnknownReferenceReason, ProjectAssociationBasis, SessionProjectAssociationFact,
 };
 use super::query::{
     validate_typed_unknown_fields, CatalogContinuationRequest, CatalogQueryContractSelection,
@@ -1343,6 +1343,30 @@ impl CatalogPortableLiveRow {
         }
     }
 
+    fn from_bound_evidence(
+        row: &CatalogLiveRow,
+        binding: &CatalogPolicyViewBinding,
+        plan: &CatalogCoveragePlan,
+        contract_selection: &CatalogQueryContractSelection,
+    ) -> Result<Self, CatalogContractError> {
+        match row {
+            CatalogLiveRow::Project(row) => CatalogPortableProjectRow::from_bound_evidence(
+                row,
+                binding,
+                plan,
+                contract_selection,
+            )
+            .map(Self::Project),
+            CatalogLiveRow::Session(row) => CatalogPortableSessionRow::from_bound_evidence(
+                row,
+                binding,
+                plan,
+                contract_selection,
+            )
+            .map(Self::Session),
+        }
+    }
+
     fn entity_ref(&self) -> CatalogEntityRef {
         match self {
             Self::Project(row) => row.project_ref,
@@ -1487,6 +1511,91 @@ impl CatalogEntityResolution {
         Ok(value)
     }
 
+    pub(crate) fn from_bound_lifecycle(
+        requested_ref: ExternalEntityRef,
+        lifecycle: &CatalogResolvedLifecycle,
+        live_row: Option<&CatalogLiveRow>,
+        binding: &CatalogPolicyViewBinding,
+        plan: &CatalogCoveragePlan,
+        selection: &CatalogQueryContractSelection,
+    ) -> Result<Self, CatalogContractError> {
+        binding.validate_for(plan, selection)?;
+        let value = match lifecycle {
+            CatalogResolvedLifecycle::Live { entity_ref } => {
+                if entity_ref.external_ref != requested_ref {
+                    return Err(CatalogContractError::invalid(
+                        "live catalog lifecycle does not match the requested external reference",
+                    ));
+                }
+                let row = live_row.ok_or_else(|| {
+                    CatalogContractError::invalid(
+                        "live catalog lifecycle requires its authenticated materialized row",
+                    )
+                })?;
+                let portable =
+                    CatalogPortableLiveRow::from_bound_evidence(row, binding, plan, selection)?;
+                if portable.entity_ref() != *entity_ref {
+                    return Err(CatalogContractError::invalid(
+                        "authenticated live catalog row differs from its lifecycle identity",
+                    ));
+                }
+                Self::Live {
+                    external_ref: requested_ref,
+                    row: Box::new(portable),
+                }
+            }
+            CatalogResolvedLifecycle::Tombstoned {
+                entity_ref,
+                provenance,
+            } => {
+                if live_row.is_some() || entity_ref.external_ref != requested_ref {
+                    return Err(CatalogContractError::invalid(
+                        "tombstoned catalog lifecycle has mismatched live evidence or identity",
+                    ));
+                }
+                Self::Tombstoned {
+                    external_ref: requested_ref,
+                    provenance: provenance.clone(),
+                }
+            }
+            CatalogResolvedLifecycle::Superseded {
+                prior_ref,
+                replacement_refs,
+                provenance,
+            } => {
+                if live_row.is_some() || prior_ref.external_ref != requested_ref {
+                    return Err(CatalogContractError::invalid(
+                        "superseded catalog lifecycle has mismatched live evidence or identity",
+                    ));
+                }
+                Self::Superseded {
+                    external_ref: requested_ref,
+                    target_refs: replacement_refs
+                        .iter()
+                        .map(|reference| reference.external_ref)
+                        .collect(),
+                    provenance: provenance.clone(),
+                }
+            }
+            CatalogResolvedLifecycle::Unknown {
+                requested_ref: lifecycle_ref,
+                reason,
+            } => {
+                if live_row.is_some() || *lifecycle_ref != requested_ref {
+                    return Err(CatalogContractError::invalid(
+                        "unknown catalog lifecycle has mismatched live evidence or identity",
+                    ));
+                }
+                Self::Unknown {
+                    external_ref: requested_ref,
+                    reason: *reason,
+                }
+            }
+        };
+        value.validate_for_request(requested_ref, Some(selection))?;
+        Ok(value)
+    }
+
     fn external_ref(&self) -> ExternalEntityRef {
         match self {
             Self::Live { external_ref, .. }
@@ -1596,7 +1705,7 @@ impl CatalogResolutionRequestBinding {
         Ok(value)
     }
 
-    fn validate(&self) -> Result<(), CatalogContractError> {
+    pub(crate) fn validate(&self) -> Result<(), CatalogContractError> {
         self.contract_selection.validate()?;
         self.snapshot_id.validate()?;
         validate_portable_u64(

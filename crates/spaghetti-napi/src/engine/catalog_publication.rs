@@ -6,23 +6,26 @@
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
 use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 use crate::adapter::{ContractVersionSelection, SourceCoverageSet};
 use crate::catalog_contract::evidence::{
-    decode_durable_project_row, decode_durable_session_row, CatalogReducerPublicationRevision,
+    decode_durable_project_row, decode_durable_reducer_state, decode_durable_session_row,
+    decode_durable_tombstone, CatalogEntityKind, CatalogReducerPublicationLimits,
+    CatalogReducerPublicationRevision, CatalogResolutionIndex,
 };
 use crate::catalog_contract::publication::{
+    decode_durable_member_binding_frame, decode_durable_source_frame,
     derive_durable_content_digest, derive_durable_entries_digest,
-    validate_durable_contract_selection, validate_durable_source_coverage,
+    validate_durable_contract_selection, validate_restarted_initial_publication,
     CatalogDurableInitialPublication, CatalogDurablePublicationEntryKind,
-    CatalogInitialPublicationAssembly, CatalogInitialPublicationDigest,
-    CATALOG_DURABLE_PUBLICATION_CONTRACT_VERSION, MAX_DURABLE_CATALOG_ROW_BYTES,
-    MAX_DURABLE_PUBLICATION_BYTES, MAX_DURABLE_PUBLICATION_ENTRIES,
+    CatalogDurableSourceFrame, CatalogInitialPublicationAssembly, CatalogInitialPublicationDigest,
+    CatalogPublicationMemberBinding, CATALOG_DURABLE_PUBLICATION_CONTRACT_VERSION,
+    MAX_DURABLE_CATALOG_ROW_BYTES, MAX_DURABLE_PUBLICATION_BYTES, MAX_DURABLE_PUBLICATION_ENTRIES,
 };
 use crate::catalog_contract::{
-    CatalogCoveragePlan, CatalogCoveragePlanSource, CatalogCoverageScope, CatalogReadinessMachine,
-    CatalogReadinessPhase, CatalogReadinessSnapshot, CatalogSnapshotId,
+    CatalogCoveragePlan, CatalogCoverageScope, CatalogReadinessMachine, CatalogReadinessPhase,
+    CatalogReadinessSnapshot, CatalogSnapshotId,
 };
 
 use super::catalog_state::{self, DurableCatalogBuildState};
@@ -133,6 +136,7 @@ pub(super) struct CatalogReadyPublicationIdentity {
     header: CatalogReadyPublicationHeaderIdentity,
     project_rows: Vec<CatalogReadyRowCommitment>,
     session_rows: Vec<CatalogReadyRowCommitment>,
+    resolution_index: CatalogResolutionIndex,
 }
 
 impl std::fmt::Debug for CatalogReadyPublicationIdentity {
@@ -142,6 +146,7 @@ impl std::fmt::Debug for CatalogReadyPublicationIdentity {
             .field("header", &self.header)
             .field("project_row_count", &self.project_rows.len())
             .field("session_row_count", &self.session_rows.len())
+            .field("resolution_index", &self.resolution_index)
             .finish_non_exhaustive()
     }
 }
@@ -149,6 +154,10 @@ impl std::fmt::Debug for CatalogReadyPublicationIdentity {
 impl CatalogReadyPublicationIdentity {
     pub(super) fn contract_selection(&self) -> &ContractVersionSelection {
         &self.header.contract_selection
+    }
+
+    pub(super) fn resolution_index(&self) -> &CatalogResolutionIndex {
+        &self.resolution_index
     }
 
     pub(super) fn matches_row(
@@ -633,20 +642,6 @@ fn write_ready_change(
 
 fn encoded_digest(bytes: &[u8; DIGEST_BYTES]) -> String {
     format!("v1:{}", URL_SAFE_NO_PAD.encode(bytes))
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct DurableSourceWire {
-    durable_source_contract_version: u32,
-    plan_source: CatalogCoveragePlanSource,
-    contract_selection: ContractVersionSelection,
-    member_identity_contract_id: String,
-    membership_revision: String,
-    component_completion_revision: String,
-    member_count: usize,
-    source_coverage: SourceCoverageSet,
-    source_digest: String,
 }
 
 struct StoredSnapshot {
@@ -1211,7 +1206,11 @@ pub(super) fn load_ready_publication(
         ])
         .map_err(|error| catalog_state::sqlite_error("query catalog snapshot entries", error))?;
     let mut summaries = Vec::with_capacity(entry_count);
-    let mut source_coverage = Vec::with_capacity(source_count);
+    let mut source_frames: Vec<CatalogDurableSourceFrame> = Vec::with_capacity(source_count);
+    let mut member_bindings: Vec<CatalogPublicationMemberBinding> =
+        Vec::with_capacity(member_count);
+    let mut reducer_restore = None;
+    let mut tombstones = Vec::with_capacity(tombstone_count);
     let mut project_row_commitments = Vec::new();
     project_row_commitments
         .try_reserve_exact(project_row_count)
@@ -1235,7 +1234,6 @@ pub(super) fn load_ready_publication(
             .ok_or_else(|| catalog_state::corrupt_catalog_state("catalog byte count overflow"))?;
     }
     let mut kind_counts = [0_usize; 6];
-    let mut declared_member_count = 0_usize;
     let mut previous_coordinate = None;
     while let Some(row) = rows
         .next()
@@ -1314,6 +1312,29 @@ pub(super) fn load_ready_publication(
             ));
         }
         match kind {
+            CatalogDurablePublicationEntryKind::Source => {
+                source_frames.push(
+                    decode_durable_source_frame(&payload, &key, encoded_bytes)
+                        .map_err(catalog_state::catalog_contract_error)?,
+                );
+            }
+            CatalogDurablePublicationEntryKind::MemberBinding => {
+                member_bindings.push(
+                    decode_durable_member_binding_frame(&payload, &key, encoded_bytes)
+                        .map_err(catalog_state::catalog_contract_error)?,
+                );
+            }
+            CatalogDurablePublicationEntryKind::ReducerState => {
+                if reducer_restore.is_some() {
+                    return Err(catalog_state::corrupt_catalog_state(
+                        "catalog snapshot contains duplicate reducer state",
+                    ));
+                }
+                reducer_restore = Some(
+                    decode_durable_reducer_state(&payload, encoded_bytes)
+                        .map_err(catalog_state::catalog_contract_error)?,
+                );
+            }
             CatalogDurablePublicationEntryKind::ProjectRow => {
                 decode_durable_project_row(&payload, &key, MAX_DURABLE_CATALOG_ROW_BYTES)
                     .map_err(catalog_state::catalog_contract_error)?;
@@ -1340,7 +1361,12 @@ pub(super) fn load_ready_publication(
                     })?,
                 });
             }
-            _ => {}
+            CatalogDurablePublicationEntryKind::Tombstone => {
+                tombstones.push(
+                    decode_durable_tombstone(&payload, &key, encoded_bytes)
+                        .map_err(catalog_state::catalog_contract_error)?,
+                );
+            }
         }
         actual_encoded_bytes = actual_encoded_bytes
             .checked_add(payload.len())
@@ -1353,29 +1379,6 @@ pub(super) fn load_ready_publication(
             ));
         }
         kind_counts[kind_index(kind)] += 1;
-        if kind == CatalogDurablePublicationEntryKind::Source {
-            let source: DurableSourceWire = serde_json::from_slice(&payload).map_err(|error| {
-                catalog_state::corrupt_catalog_state(format!(
-                    "catalog durable source frame is invalid: {error}"
-                ))
-            })?;
-            validate_source_wire(
-                &source,
-                &contract_selection,
-                plan,
-                key,
-                member_identity_contract_id,
-            )?;
-            declared_member_count = declared_member_count
-                .checked_add(source.member_count)
-                .filter(|count| *count <= 1_000_000)
-                .ok_or_else(|| {
-                    catalog_state::corrupt_catalog_state(
-                        "catalog source member counts exceed the snapshot member ceiling",
-                    )
-                })?;
-            source_coverage.push(source.source_coverage);
-        }
         summaries.push((kind, key, payload.len(), payload_digest));
     }
     if summaries.len() != entry_count
@@ -1383,7 +1386,6 @@ pub(super) fn load_ready_publication(
         || kind_counts[kind_index(CatalogDurablePublicationEntryKind::Source)] != source_count
         || kind_counts[kind_index(CatalogDurablePublicationEntryKind::MemberBinding)]
             != member_count
-        || declared_member_count != member_count
         || kind_counts[kind_index(CatalogDurablePublicationEntryKind::ReducerState)] != 1
         || kind_counts[kind_index(CatalogDurablePublicationEntryKind::ProjectRow)]
             != project_row_count
@@ -1429,6 +1431,45 @@ pub(super) fn load_ready_publication(
             "catalog snapshot content digest does not match its header and entries",
         ));
     }
+    let reducer = reducer_restore
+        .ok_or_else(|| catalog_state::corrupt_catalog_state("catalog reducer state is missing"))?
+        .finish(
+            tombstones,
+            reducer_revision,
+            CatalogReducerPublicationLimits::default(),
+        )
+        .map_err(catalog_state::catalog_contract_error)?;
+    reducer
+        .validate_durable_row_commitments(
+            MAX_DURABLE_CATALOG_ROW_BYTES,
+            project_row_commitments.len(),
+            session_row_commitments.len(),
+            |kind, key, payload_len, payload_digest| {
+                let commitments = match kind {
+                    CatalogEntityKind::Project => &project_row_commitments,
+                    CatalogEntityKind::Session => &session_row_commitments,
+                };
+                let Ok(index) = commitments.binary_search_by_key(key, |entry| entry.key) else {
+                    return false;
+                };
+                let commitment = &commitments[index];
+                usize::try_from(commitment.payload_len) == Ok(payload_len)
+                    && &commitment.payload_digest == payload_digest
+            },
+        )
+        .map_err(catalog_state::catalog_contract_error)?;
+    let resolution_index = reducer
+        .resolution_index()
+        .map_err(catalog_state::catalog_contract_error)?;
+    let mut source_coverage = validate_restarted_initial_publication(
+        plan,
+        &contract_selection,
+        member_identity_contract_id,
+        source_frames,
+        member_bindings,
+        &reducer,
+    )
+    .map_err(catalog_state::catalog_contract_error)?;
     source_coverage.sort_by(|left, right| {
         (&left.scope.adapter_id, left.scope.source_instance_key)
             .cmp(&(&right.scope.adapter_id, right.scope.source_instance_key))
@@ -1453,46 +1494,9 @@ pub(super) fn load_ready_publication(
             },
             project_rows: project_row_commitments,
             session_rows: session_row_commitments,
+            resolution_index,
         },
     })
-}
-
-fn validate_source_wire(
-    source: &DurableSourceWire,
-    expected_selection: &ContractVersionSelection,
-    plan: &CatalogCoveragePlan,
-    entry_key: [u8; DIGEST_BYTES],
-    expected_identity_contract: Option<&str>,
-) -> Result<(), EngineError> {
-    validate_member_identity_contract(&source.member_identity_contract_id)?;
-    if source.durable_source_contract_version != CATALOG_DURABLE_PUBLICATION_CONTRACT_VERSION
-        || source.contract_selection != *expected_selection
-        || expected_identity_contract != Some(source.member_identity_contract_id.as_str())
-        || source.member_count > 1_000_000
-        || (!plan.required_sources.contains(&source.plan_source)
-            && !plan.optional_sources.contains(&source.plan_source))
-    {
-        return Err(catalog_state::corrupt_catalog_state(
-            "catalog durable source frame is outside its snapshot binding",
-        ));
-    }
-    validate_encoded_digest(&source.membership_revision, "catalog membership revision")?;
-    validate_encoded_digest(
-        &source.component_completion_revision,
-        "catalog component completion revision",
-    )?;
-    let source_digest = validate_encoded_digest(&source.source_digest, "catalog source digest")?;
-    if source_digest != entry_key {
-        return Err(catalog_state::corrupt_catalog_state(
-            "catalog source frame key does not match its source digest",
-        ));
-    }
-    validate_durable_source_coverage(
-        &source.plan_source,
-        &source.contract_selection,
-        &source.source_coverage,
-    )
-    .map_err(catalog_state::catalog_contract_error)
 }
 
 fn validate_member_identity_contract(value: &str) -> Result<(), EngineError> {
@@ -1551,19 +1555,6 @@ fn decode_digest_column(
     Ok(digest)
 }
 
-fn validate_encoded_digest(
-    value: &str,
-    field: &'static str,
-) -> Result<[u8; DIGEST_BYTES], EngineError> {
-    let encoded = value.strip_prefix("v1:").ok_or_else(|| {
-        catalog_state::corrupt_catalog_state(format!("{field} has an unsupported encoding"))
-    })?;
-    let bytes = URL_SAFE_NO_PAD.decode(encoded).map_err(|_| {
-        catalog_state::corrupt_catalog_state(format!("{field} is not valid base64url"))
-    })?;
-    decode_digest_column(&bytes, field)
-}
-
 fn bounded_usize(
     value: i64,
     minimum: usize,
@@ -1617,7 +1608,8 @@ mod tests {
         CatalogSourceCompletionRevision, CatalogSourceMembershipRevision,
     };
     use crate::catalog_contract::{
-        CatalogAccessPolicyDigest, CATALOG_PROJECTION_PACK_ID, CATALOG_QUERY_PACK_CONTRACT_VERSION,
+        CatalogAccessPolicyDigest, CatalogCoveragePlanSource, CATALOG_PROJECTION_PACK_ID,
+        CATALOG_QUERY_PACK_CONTRACT_VERSION,
     };
     use crate::core::schema;
     use crate::engine::catalog_state::CatalogBuildStateCommand;
@@ -2132,7 +2124,7 @@ mod tests {
     }
 
     #[test]
-    fn source_free_plan_publishes_an_explicit_complete_empty_library() {
+    fn source_free_plan_publishes_complete_empty_and_restart_rejects_base_reference_drift() {
         let mut connection = database();
         let coverage_plan =
             CatalogCoveragePlan::new(CatalogCoverageScope::Library, Vec::new(), Vec::new())
@@ -2187,6 +2179,38 @@ mod tests {
                 .readiness,
             receipt.readiness
         );
+        let original_selection: Vec<u8> = connection
+            .query_row(
+                "SELECT contract_selection_json FROM catalog_snapshots",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        for field in [
+            "model_major",
+            "external_entity_reference_version",
+            "semantic_revision_reference_version",
+        ] {
+            let mut drifted: serde_json::Value =
+                serde_json::from_slice(&original_selection).unwrap();
+            drifted[field] = serde_json::json!(2);
+            connection
+                .execute(
+                    "UPDATE catalog_snapshots SET contract_selection_json = ?1",
+                    [serde_json::to_vec(&drifted).unwrap()],
+                )
+                .unwrap();
+            let error = catalog_state::load_catalog_build_state(&connection).unwrap_err();
+            assert!(error
+                .to_string()
+                .contains("exact RFC 012A/B contract selection"));
+        }
+        connection
+            .execute(
+                "UPDATE catalog_snapshots SET contract_selection_json = ?1",
+                [original_selection],
+            )
+            .unwrap();
     }
 
     #[test]
