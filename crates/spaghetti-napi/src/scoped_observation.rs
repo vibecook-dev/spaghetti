@@ -4909,6 +4909,545 @@ impl ScopedObservationAsyncResyncHandoff {
     ) {
         (self.watcher, self.source, self.watcher_policy)
     }
+
+    /// Build one complete replacement epoch from the stopped source owner's
+    /// exact bindings while the native watcher remains supervised. This
+    /// future never consumes the application event drain: it waits only for
+    /// dequeue-owned capacity notifications and leaves delivery/application
+    /// acknowledgement to `ScopedObservationAsyncRuntime`.
+    ///
+    /// The first automatic slice is deliberately fail-closed. A transient
+    /// source/decode result, re-overflow, or any incomplete replacement ends
+    /// the attachment through `observer.failed`; no partial staged state is
+    /// transferred into the active epoch.
+    pub async fn replay_and_rebind(
+        self,
+    ) -> Result<ScopedObservationAsyncOwnerPair, ScopedObservationAsyncResyncFailure> {
+        self.replay_and_rebind_inner(
+            |callback| {
+                let watcher = notify::recommended_watcher(callback).map_err(|_| ())?;
+                Ok(Box::new(watcher))
+            },
+            scoped_observation_now_unix_ms,
+            scoped_observation_now_unix_ms,
+        )
+        .await
+    }
+
+    #[cfg(test)]
+    pub async fn replay_and_rebind_with_factory_and_clocks<F, W, R>(
+        self,
+        watcher_factory: F,
+        watcher_observed_at: W,
+        replacement_observed_at: R,
+    ) -> Result<ScopedObservationAsyncOwnerPair, ScopedObservationAsyncResyncFailure>
+    where
+        F: FnMut(
+                ScopedObservationNativeWatchCallback,
+            ) -> Result<Box<dyn ScopedObservationNativeWatchBackend>, ()>
+            + Send,
+        W: FnMut() -> i64 + Send,
+        R: FnMut() -> i64 + Send,
+    {
+        self.replay_and_rebind_inner(
+            watcher_factory,
+            watcher_observed_at,
+            replacement_observed_at,
+        )
+        .await
+    }
+
+    async fn replay_and_rebind_inner<F, W, R>(
+        self,
+        mut watcher_factory: F,
+        mut watcher_observed_at: W,
+        mut replacement_observed_at: R,
+    ) -> Result<ScopedObservationAsyncOwnerPair, ScopedObservationAsyncResyncFailure>
+    where
+        F: FnMut(
+                ScopedObservationNativeWatchCallback,
+            ) -> Result<Box<dyn ScopedObservationNativeWatchBackend>, ()>
+            + Send,
+        W: FnMut() -> i64 + Send,
+        R: FnMut() -> i64 + Send,
+    {
+        let Self {
+            mut watcher,
+            source,
+            watcher_policy,
+        } = self;
+        let handle = watcher.handle.clone();
+        let (active, mut bindings, source_policy, exit) = source.into_rebind_parts();
+        if !matches!(
+            exit,
+            ScopedObservationSourceOwnerRunExit::ContinuityInvalidated(_)
+        ) {
+            return Err(scoped_finish_automatic_resync_failure(
+                &mut watcher,
+                ScopedObservationAutomaticResyncError::InvalidHandoff,
+                &mut watcher_observed_at,
+            ));
+        }
+
+        let mut watcher_future = Box::pin(watcher.run_with_recovery_loop(
+            watcher_policy,
+            &mut watcher_factory,
+            &mut watcher_observed_at,
+        ));
+        let mut replacement_future = Box::pin(scoped_replay_complete_replacement(
+            &handle,
+            active,
+            &bindings,
+            &mut replacement_observed_at,
+        ));
+        let outcome = tokio::select! {
+            biased;
+            watcher_exit = &mut watcher_future => {
+                Err(watcher_exit)
+            }
+            replacement = &mut replacement_future => Ok(replacement),
+        };
+        drop(replacement_future);
+        drop(watcher_future);
+
+        let replacement = match outcome {
+            Ok(replacement) => replacement,
+            Err(watcher_exit) => {
+                return Err(scoped_automatic_resync_watcher_failure(
+                    &mut watcher,
+                    watcher_exit,
+                    &mut watcher_observed_at,
+                ));
+            }
+        };
+
+        let active = match replacement {
+            Ok(active) => active,
+            Err(error) => {
+                return Err(scoped_finish_automatic_resync_failure(
+                    &mut watcher,
+                    error,
+                    &mut watcher_observed_at,
+                ));
+            }
+        };
+        // A replacement object starts without cursor or decoder state, so the
+        // full replay has already satisfied any one-shot contract-replay
+        // request. Carrying that flag into the new live owner would restart
+        // every later poll at offset zero.
+        for binding in &mut bindings {
+            binding.force_contract_replay = false;
+        }
+        let source = match handle.bind_epoch_source_owner(active, bindings, source_policy) {
+            Ok(source) => source,
+            Err(failure) => {
+                let (error, _active, _bindings) = failure.into_parts();
+                return Err(scoped_finish_automatic_resync_failure(
+                    &mut watcher,
+                    ScopedObservationAutomaticResyncError::SourceBinding(error),
+                    &mut watcher_observed_at,
+                ));
+            }
+        };
+        match handle.bind_live_owner_pair(watcher, source, watcher_policy) {
+            Ok(pair) => Ok(pair),
+            Err(failure) => {
+                let (error, mut watcher, _source, _) = failure.into_parts();
+                Err(scoped_finish_automatic_resync_failure(
+                    &mut watcher,
+                    ScopedObservationAutomaticResyncError::OwnerPairBinding(error),
+                    &mut watcher_observed_at,
+                ))
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum ScopedObservationAutomaticResyncError {
+    #[error("scoped automatic replacement handoff is not continuity-invalidated")]
+    InvalidHandoff,
+    #[error("scoped automatic replacement attachment closed")]
+    Closed,
+    #[error("scoped automatic replacement continuity changed")]
+    Continuity,
+    #[error("scoped automatic replacement source access failed")]
+    SourceAccess,
+    #[error("scoped automatic replacement decode did not complete")]
+    Decode,
+    #[error("scoped automatic replacement admission failed: {0}")]
+    Admission(ScopedAdmissionError),
+    #[error("scoped automatic replacement projection failed")]
+    Projection,
+    #[error("scoped automatic replacement delivery failed")]
+    Delivery,
+    #[error("scoped automatic replacement state is invalid: {0}")]
+    Replacement(ScopedReplacementStageError),
+    #[error("scoped automatic replacement source binding failed: {0}")]
+    SourceBinding(ScopedObservationSourceOwnerBindingError),
+    #[error("scoped automatic replacement owner pairing failed: {0}")]
+    OwnerPairBinding(ScopedObservationAsyncOwnerPairBindingError),
+    #[error("scoped automatic replacement watcher stopped")]
+    WatcherStopped,
+    #[error("scoped automatic replacement watcher supervision failed")]
+    WatcherSupervision,
+}
+
+pub struct ScopedObservationAsyncResyncFailure {
+    error: ScopedObservationAutomaticResyncError,
+    terminal_failure: Option<Arc<ScopedObserverFailure>>,
+    supervision_error: Option<ScopedContinuityError>,
+}
+
+impl ScopedObservationAsyncResyncFailure {
+    pub fn error(&self) -> ScopedObservationAutomaticResyncError {
+        self.error
+    }
+
+    pub fn terminal_failure(&self) -> Option<Arc<ScopedObserverFailure>> {
+        self.terminal_failure.as_ref().map(Arc::clone)
+    }
+
+    pub fn supervision_error(&self) -> Option<ScopedContinuityError> {
+        self.supervision_error
+    }
+}
+
+impl std::fmt::Debug for ScopedObservationAsyncResyncFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ScopedObservationAsyncResyncFailure")
+            .field("error", &self.error)
+            .field("terminal_failure", &self.terminal_failure)
+            .field("supervision_error", &self.supervision_error)
+            .finish()
+    }
+}
+
+impl std::fmt::Display for ScopedObservationAsyncResyncFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.error.fmt(formatter)
+    }
+}
+
+impl std::error::Error for ScopedObservationAsyncResyncFailure {}
+
+fn scoped_finish_automatic_resync_failure<C>(
+    watcher: &mut ScopedObservationNativeWatcher,
+    error: ScopedObservationAutomaticResyncError,
+    observed_at: &mut C,
+) -> ScopedObservationAsyncResyncFailure
+where
+    C: FnMut() -> i64,
+{
+    if error == ScopedObservationAutomaticResyncError::Closed {
+        return ScopedObservationAsyncResyncFailure {
+            error,
+            terminal_failure: None,
+            supervision_error: None,
+        };
+    }
+    match watcher.fail_observer(
+        ScopedObserverFailureReason::InternalControlFailure,
+        observed_at(),
+    ) {
+        Ok(failure) => ScopedObservationAsyncResyncFailure {
+            error,
+            terminal_failure: Some(failure),
+            supervision_error: None,
+        },
+        Err(ScopedContinuityError::Closed) => ScopedObservationAsyncResyncFailure {
+            error: ScopedObservationAutomaticResyncError::Closed,
+            terminal_failure: None,
+            supervision_error: None,
+        },
+        Err(supervision_error) => ScopedObservationAsyncResyncFailure {
+            error,
+            terminal_failure: None,
+            supervision_error: Some(supervision_error),
+        },
+    }
+}
+
+fn scoped_automatic_resync_watcher_failure<C>(
+    watcher: &mut ScopedObservationNativeWatcher,
+    watcher_exit: Result<ScopedObservationNativeWatcherRunExit, ScopedContinuityError>,
+    observed_at: &mut C,
+) -> ScopedObservationAsyncResyncFailure
+where
+    C: FnMut() -> i64,
+{
+    match watcher_exit {
+        Ok(ScopedObservationNativeWatcherRunExit::Cancelled) => {
+            ScopedObservationAsyncResyncFailure {
+                error: ScopedObservationAutomaticResyncError::Closed,
+                terminal_failure: None,
+                supervision_error: None,
+            }
+        }
+        Ok(ScopedObservationNativeWatcherRunExit::Failed(failure)) => {
+            ScopedObservationAsyncResyncFailure {
+                error: ScopedObservationAutomaticResyncError::WatcherStopped,
+                terminal_failure: Some(failure),
+                supervision_error: None,
+            }
+        }
+        Err(supervision_error) => {
+            let mut failure = scoped_finish_automatic_resync_failure(
+                watcher,
+                ScopedObservationAutomaticResyncError::WatcherSupervision,
+                observed_at,
+            );
+            failure.supervision_error = Some(supervision_error);
+            failure
+        }
+    }
+}
+
+async fn scoped_replay_complete_replacement<C>(
+    handle: &ScopedObservationAsyncHandle,
+    mut active: ScopedObservationEpochState,
+    bindings: &[ScopedObservationAppendPassBinding],
+    observed_at: &mut C,
+) -> Result<ScopedObservationEpochState, ScopedObservationAutomaticResyncError>
+where
+    C: FnMut() -> i64,
+{
+    loop {
+        let (waiter, generation) = {
+            let drain = handle.shared.lock_drain();
+            let waiter = drain.delivery_capacity_waiter();
+            let generation = waiter.snapshot().generation;
+            (waiter, generation)
+        };
+        match handle.begin_resync(observed_at()) {
+            Ok(_) => break,
+            Err(ScopedContinuityError::ResyncRequiredNotDelivered) => {
+                if waiter.wait_after_async(generation).await.closed {
+                    return Err(ScopedObservationAutomaticResyncError::Closed);
+                }
+            }
+            Err(ScopedContinuityError::Closed) => {
+                return Err(ScopedObservationAutomaticResyncError::Closed);
+            }
+            Err(_) => return Err(ScopedObservationAutomaticResyncError::Continuity),
+        }
+    }
+
+    let mut stage = handle
+        .open_scope_resync_stage(&mut active)
+        .map_err(scoped_automatic_resync_replacement_error)?;
+    let pass = handle
+        .host()
+        .begin_pass()
+        .map_err(|_| ScopedObservationAutomaticResyncError::SourceAccess)?;
+    let mut ordered_bindings = bindings.iter().collect::<Vec<_>>();
+    ordered_bindings.sort_by(|left, right| left.relation_id.cmp(&right.relation_id));
+
+    for binding in ordered_bindings {
+        let identity_inputs = binding
+            .identity_inputs
+            .iter()
+            .map(|input| ScopeIdentityInput {
+                name: &input.name,
+                value: &input.value,
+            })
+            .collect::<Vec<_>>();
+        // `force_contract_replay` is meaningful only for the first read. Once
+        // that observation commits a replacement checkpoint, repeating the
+        // flag would create a new generation at offset zero for every bounded
+        // batch and prevent a large object from ever draining.
+        let mut force_contract_replay = binding.force_contract_replay;
+        loop {
+            {
+                let drain = handle.shared.lock_drain();
+                stage
+                    .semantic
+                    .validate_delivery(drain.delivery_lane())
+                    .map_err(scoped_automatic_resync_replacement_error)?;
+            }
+            let mut origin = binding.origin.clone();
+            origin.observed_at = observed_at();
+            let observation = {
+                let object = stage
+                    .append_objects
+                    .get_mut(&binding.relation_id)
+                    .ok_or(ScopedObservationAutomaticResyncError::SourceAccess)?;
+                object
+                    .reconcile(
+                        &pass,
+                        ScopedAppendReconcileRequest {
+                            relation_id: &binding.relation_id,
+                            identity_inputs: &identity_inputs,
+                            access_phase: AccessPhase::Initial,
+                            parent_token: binding.parent_token,
+                            depth: binding.depth,
+                            max_bytes: binding.max_bytes,
+                            origin: &origin,
+                            force_contract_replay,
+                        },
+                    )
+                    .map_err(|_| ScopedObservationAutomaticResyncError::SourceAccess)?
+            };
+            if matches!(observation.read, AppendRead::RetryTransient) {
+                stage
+                    .append_objects
+                    .get_mut(&binding.relation_id)
+                    .expect("the validated replacement relation remains present")
+                    .discard(&observation)
+                    .map_err(|_| ScopedObservationAutomaticResyncError::SourceAccess)?;
+                return Err(ScopedObservationAutomaticResyncError::SourceAccess);
+            }
+            let decoded = {
+                let object = stage
+                    .append_objects
+                    .get_mut(&binding.relation_id)
+                    .expect("the validated replacement relation remains present");
+                match handle.host().decode_append(object, &observation) {
+                    Ok(ScopedAppendDecodeOutcome::Ready(decoded)) => decoded,
+                    Ok(ScopedAppendDecodeOutcome::RetryTransient) => {
+                        object
+                            .discard(&observation)
+                            .map_err(|_| ScopedObservationAutomaticResyncError::Decode)?;
+                        return Err(ScopedObservationAutomaticResyncError::Decode);
+                    }
+                    Err(_) => {
+                        object
+                            .discard(&observation)
+                            .map_err(|_| ScopedObservationAutomaticResyncError::Decode)?;
+                        return Err(ScopedObservationAutomaticResyncError::Decode);
+                    }
+                }
+            };
+            let admission = {
+                let object = stage
+                    .append_objects
+                    .get_mut(&binding.relation_id)
+                    .expect("the validated replacement relation remains present");
+                stage.admission.admit(object, &observation, decoded)
+            };
+            if let Err(failure) = admission {
+                stage
+                    .append_objects
+                    .get_mut(&binding.relation_id)
+                    .expect("the validated replacement relation remains present")
+                    .discard(&observation)
+                    .map_err(|_| {
+                        ScopedObservationAutomaticResyncError::Admission(
+                            ScopedAdmissionError::ObservationMismatch,
+                        )
+                    })?;
+                let _decoded = failure.decoded;
+                return Err(ScopedObservationAutomaticResyncError::Admission(
+                    failure.error,
+                ));
+            }
+            force_contract_replay = false;
+            loop {
+                let reduced = {
+                    let drain = handle.shared.lock_drain();
+                    stage
+                        .reduce_next(drain.delivery_lane())
+                        .map_err(scoped_automatic_resync_replacement_error)?
+                };
+                if !reduced {
+                    break;
+                }
+            }
+            if !matches!(
+                observation.read,
+                AppendRead::Batch {
+                    more_available: true,
+                    ..
+                }
+            ) {
+                break;
+            }
+        }
+    }
+
+    {
+        let drain = handle.shared.lock_drain();
+        handle
+            .host()
+            .validate_scope_pass_completion(&pass, &stage.admission, &drain)
+            .map_err(|error| match error {
+                ScopedObservationPollError::Closed => ScopedObservationAutomaticResyncError::Closed,
+                _ => ScopedObservationAutomaticResyncError::SourceAccess,
+            })?;
+        stage
+            .prepare_snapshot(drain.delivery_lane())
+            .map_err(scoped_automatic_resync_replacement_error)?;
+    }
+    drop(pass);
+
+    loop {
+        let (waiter, generation, offered) = {
+            let mut drain = handle.shared.lock_drain();
+            let waiter = drain.delivery_capacity_waiter();
+            let generation = waiter.snapshot().generation;
+            let offered = stage.offer_snapshot_next(drain.delivery_lane_mut());
+            (waiter, generation, offered)
+        };
+        match offered {
+            Ok(Some(_)) => {}
+            Ok(None) => break,
+            Err(error) if scoped_automatic_resync_is_backpressure(error) => {
+                if waiter.wait_after_async(generation).await.closed {
+                    return Err(ScopedObservationAutomaticResyncError::Closed);
+                }
+            }
+            Err(error) => return Err(scoped_automatic_resync_replacement_error(error)),
+        }
+    }
+
+    loop {
+        let (waiter, generation) = {
+            let drain = handle.shared.lock_drain();
+            let waiter = drain.delivery_capacity_waiter();
+            let generation = waiter.snapshot().generation;
+            (waiter, generation)
+        };
+        match handle.offer_scope_resync_complete(&mut active, &mut stage, observed_at()) {
+            Ok(_) => return Ok(active),
+            Err(error) if scoped_automatic_resync_is_backpressure(error) => {
+                if waiter.wait_after_async(generation).await.closed {
+                    return Err(ScopedObservationAutomaticResyncError::Closed);
+                }
+            }
+            Err(error) => return Err(scoped_automatic_resync_replacement_error(error)),
+        }
+    }
+}
+
+fn scoped_automatic_resync_is_backpressure(error: ScopedReplacementStageError) -> bool {
+    matches!(
+        error,
+        ScopedReplacementStageError::Delivery(
+            ScopedDeliveryError::SemanticQueueFull
+                | ScopedDeliveryError::RetainedNativeQueueFull
+                | ScopedDeliveryError::SourceControlQueueFull
+        )
+    )
+}
+
+fn scoped_automatic_resync_replacement_error(
+    error: ScopedReplacementStageError,
+) -> ScopedObservationAutomaticResyncError {
+    match error {
+        ScopedReplacementStageError::Closed => ScopedObservationAutomaticResyncError::Closed,
+        ScopedReplacementStageError::NotResyncing
+        | ScopedReplacementStageError::RootMismatch
+        | ScopedReplacementStageError::EpochMismatch
+        | ScopedReplacementStageError::StateChanged => {
+            ScopedObservationAutomaticResyncError::Continuity
+        }
+        ScopedReplacementStageError::Projection(_) => {
+            ScopedObservationAutomaticResyncError::Projection
+        }
+        ScopedReplacementStageError::Delivery(_) => ScopedObservationAutomaticResyncError::Delivery,
+        _ => ScopedObservationAutomaticResyncError::Replacement(error),
+    }
 }
 
 impl std::fmt::Debug for ScopedObservationAsyncResyncHandoff {

@@ -209,9 +209,9 @@ mod tests {
         ScopedObservationAdmissionLane, ScopedObservationAppendPassBinding,
         ScopedObservationAppendPassRequest, ScopedObservationAsyncOwnerFirstExit,
         ScopedObservationAsyncOwnerRunResult, ScopedObservationAsyncRuntime,
-        ScopedObservationCloseError, ScopedObservationConsumerOfferError,
-        ScopedObservationContinuity, ScopedObservationDeliveryLane,
-        ScopedObservationDeliveryLimits, ScopedObservationEvent,
+        ScopedObservationAutomaticResyncError, ScopedObservationCloseError,
+        ScopedObservationConsumerOfferError, ScopedObservationContinuity,
+        ScopedObservationDeliveryLane, ScopedObservationDeliveryLimits, ScopedObservationEvent,
         ScopedObservationNativeWatchBackend, ScopedObservationNativeWatchCallback,
         ScopedObservationNativeWatcherError, ScopedObservationNativeWatcherRecoveryPolicy,
         ScopedObservationNativeWatcherRunExit, ScopedObservationOpenDrainError,
@@ -2582,15 +2582,20 @@ mod tests {
             })
             .unwrap();
 
+        let mut append_config = AppendDelimitedConfig::json_lines();
+        append_config.max_record_bytes = 16;
+        append_config.max_batch_bytes = 20;
+        append_config.max_records_per_batch = 2;
+        append_config.prefix_anchor_bytes = 8;
         let mut object = scoped_append_object_with_coverage(
-            AppendDelimitedFile::new(AppendDelimitedConfig::json_lines()).unwrap(),
+            AppendDelimitedFile::new(append_config).unwrap(),
             RawRetentionPolicy::None,
             vec![CoverageDomain::FactFamily {
                 family: "runtime.usage-v2".to_string(),
                 version: 1,
             }],
         );
-        let mut admission = admission_lane(1, 0, 1);
+        let mut admission = admission_lane(2, 0, 1);
         let projection = ScopedObservationProjectionSink::new(ScopedObservationProjectionLimits {
             max_usage_v2_entities: 1,
         })
@@ -2683,7 +2688,7 @@ mod tests {
             1,
             64,
             origin.clone(),
-            false,
+            true,
         )
         .unwrap();
         let source_policy = ScopedObservationSourceOwnerRetryPolicy::default();
@@ -2702,6 +2707,10 @@ mod tests {
             .unwrap();
         let pair_task = tokio::spawn(pair.run_with_factory_and_clocks(|_| Err(()), || 60, || 61));
 
+        // Replacement must replay more than one bounded driver batch. The
+        // invalid epoch has no requested poll, so only the replacement owner
+        // may consume these newly visible bytes.
+        std::fs::write(&target, b"rec-01\nrec-02\nrec-03\nrec-04\nrec-05\n").unwrap();
         let required = handle
             .require_resync(ScopedResyncReason::WatcherOverflow, 70)
             .unwrap();
@@ -2721,32 +2730,9 @@ mod tests {
         assert!(callback_slot.lock().unwrap().is_some());
         assert_eq!(registrations.lock().unwrap().len(), 1);
 
-        let (watcher, stopped_source, watcher_policy) = handoff.into_parts();
-        assert_eq!(watcher.state().backend_generation, 1);
-        let (mut active, bindings, source_policy, _) = stopped_source.into_rebind_parts();
-        let required_event = runtime.next_event().await.unwrap().unwrap();
-        assert!(matches!(
-            &required_event.envelope.event,
-            ScopedObservationEvent::ObserverResyncRequired { control }
-                if Arc::ptr_eq(control, &required)
-        ));
-        runtime
-            .acknowledge_applied(required_event.application_receipt())
-            .unwrap();
-        let started = handle.begin_resync(80).unwrap();
-        let started_event = runtime.next_event().await.unwrap().unwrap();
-        assert!(matches!(
-            &started_event.envelope.event,
-            ScopedObservationEvent::ObserverResyncStarted { control }
-                if Arc::ptr_eq(control, &started)
-        ));
-        runtime
-            .acknowledge_applied(started_event.application_receipt())
-            .unwrap();
-
         // Native callbacks remain owned and routable while no source owner is
-        // allowed to read the invalid epoch. The queued poll is serviced only
-        // after the full replacement binds epoch 2 below.
+        // allowed to read the invalid epoch. The automatic handoff must not
+        // consume the application lane in order to make progress.
         callback_slot.lock().unwrap().as_mut().unwrap()(Ok(notify::Event::new(
             notify::EventKind::Modify(notify::event::ModifyKind::Any),
         )
@@ -2756,65 +2742,66 @@ mod tests {
             pending_poll.requested_through_generation > pending_poll.completed_through_generation
         );
 
-        let mut stage = handle.open_scope_resync_stage(&mut active).unwrap();
-        let replacement_pass = handle.host().begin_pass().unwrap();
-        let replacement_observation = handle.with_attachment(|host, drain| {
-            let (object, admission) = stage
-                .append_object_and_admission_mut("root-object", drain.delivery_lane())
-                .unwrap();
-            let observation = object
-                .reconcile(
-                    &replacement_pass,
-                    ScopedAppendReconcileRequest {
-                        relation_id: "root-object",
-                        identity_inputs: &identity,
-                        access_phase: AccessPhase::Initial,
-                        parent_token: None,
-                        depth: 1,
-                        max_bytes: 64,
-                        origin: &origin,
-                        force_contract_replay: false,
-                    },
-                )
-                .unwrap();
-            let ScopedAppendDecodeOutcome::Ready(decoded) =
-                decode_scoped(host, object, &observation)
-            else {
-                panic!("replacement missing-source observation must be complete");
-            };
-            if let Err(failure) = admission.admit(object, &observation, decoded) {
-                panic!("replacement admission failed: {}", failure.error);
-            }
-            observation
-        });
-        assert!(!replacement_observation.object_present);
-        drop(replacement_pass);
-        handle.with_attachment(|_, drain| {
-            assert!(!stage.reduce_next(drain.delivery_lane()).unwrap());
-            let snapshot = stage.prepare_snapshot(drain.delivery_lane()).unwrap();
-            assert_eq!(snapshot.entity_count, 0);
-            assert!(snapshot.events.is_empty());
-            assert!(stage.snapshot_fully_offered());
-        });
-        let completed = handle
-            .offer_scope_resync_complete(&mut active, &mut stage, 90)
-            .unwrap();
-        assert_eq!(active.scope_epoch(), 2);
-        let completed_event = runtime.next_event().await.unwrap().unwrap();
-        assert!(matches!(
-            &completed_event.envelope.event,
-            ScopedObservationEvent::ObserverResyncComplete { barrier }
-                if Arc::ptr_eq(barrier, &completed)
+        let recovery_task = tokio::spawn(handoff.replay_and_rebind_with_factory_and_clocks(
+            |_| Err(()),
+            || 80,
+            || 90,
         ));
+        let required_event = runtime.next_event().await.unwrap().unwrap();
+        assert!(matches!(
+            &required_event.envelope.event,
+            ScopedObservationEvent::ObserverResyncRequired { control }
+                if Arc::ptr_eq(control, &required)
+        ));
+        runtime
+            .acknowledge_applied(required_event.application_receipt())
+            .unwrap();
+        let started_event = runtime.next_event().await.unwrap().unwrap();
+        let ScopedObservationEvent::ObserverResyncStarted { control } =
+            &started_event.envelope.event
+        else {
+            panic!(
+                "automatic replacement must emit resync-started before replay: {:?}",
+                started_event.envelope.event
+            );
+        };
+        assert_eq!(control.old_scope_epoch, 1);
+        assert_eq!(control.new_scope_epoch, 2);
+        runtime
+            .acknowledge_applied(started_event.application_receipt())
+            .unwrap();
+        let completed_event = runtime.next_event().await.unwrap().unwrap();
+        let ScopedObservationEvent::ObserverResyncComplete { barrier } =
+            &completed_event.envelope.event
+        else {
+            panic!("automatic replacement must end with one completion barrier");
+        };
+        assert_eq!(barrier.scope_epoch, 2);
+        assert!(barrier.root_present);
+        assert!(!barrier.source_coverage.is_empty());
+        assert!(barrier.source_coverage.iter().all(|coverage| {
+            coverage.completeness == CoverageSetCompleteness::Complete
+                && coverage.explicit_errors.is_empty()
+        }));
+        let replay_positions = barrier
+            .source_coverage
+            .iter()
+            .flat_map(|coverage| &coverage.points)
+            .filter_map(|point| point.position.as_ref())
+            .collect::<Vec<_>>();
+        assert!(!replay_positions.is_empty());
+        assert!(replay_positions.iter().all(|position| {
+            position.kind == CoveragePositionKind::AppendCursor
+                && position.monotonic_order == Some(35)
+        }));
         runtime
             .acknowledge_applied(completed_event.application_receipt())
             .unwrap();
 
-        let source = handle
-            .bind_epoch_source_owner(active, bindings, source_policy)
-            .unwrap();
-        let pair = handle
-            .bind_live_owner_pair(watcher, source, watcher_policy)
+        let pair = tokio::time::timeout(std::time::Duration::from_secs(2), recovery_task)
+            .await
+            .unwrap()
+            .unwrap()
             .unwrap();
         let resumed_task =
             tokio::spawn(pair.run_with_factory_and_clocks(|_| Err(()), || 100, || 101));
@@ -2826,6 +2813,15 @@ mod tests {
             panic!("the re-paired source must service the replacement epoch");
         };
         assert_eq!(watermark.scope_epoch, 2);
+        assert!(watermark.source_coverage.iter().all(|coverage| {
+            coverage.points.iter().all(|point| {
+                point.generation == 1
+                    && point.position.as_ref().is_some_and(|position| {
+                        position.kind == CoveragePositionKind::AppendCursor
+                            && position.monotonic_order == Some(35)
+                    })
+            })
+        }));
         assert_eq!(registrations.lock().unwrap().len(), 1);
         let settled_poll = handle.host().poll_state();
         assert_eq!(
@@ -2884,6 +2880,228 @@ mod tests {
             .unwrap();
         assert!(runtime.close().await.complete);
         assert!(runtime.next_event().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn scoped_automatic_resync_fails_without_swapping_incomplete_source_state() {
+        let registry = supported_fixture_registry();
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().join("automatic-resync-failure-root");
+        std::fs::create_dir_all(&root).unwrap();
+        let target = root.join("session.jsonl");
+        let host =
+            ScopedObservationAccessHost::authorize(&registry, scoped_access_request(root.clone()))
+                .unwrap();
+        let mut runtime = ScopedObservationAsyncRuntime::open(
+            host,
+            ScopedObservationDeliveryLimits {
+                max_semantic_events: 1,
+                max_retained_native_bytes: 0,
+                max_source_control_items: 1,
+            },
+        )
+        .unwrap();
+        let handle = runtime.handle();
+        let callback_slot = Arc::new(std::sync::Mutex::new(None));
+        let registrations = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let drops = Arc::new(AtomicUsize::new(0));
+        let watcher = handle
+            .install_native_watcher_with_factory(2, {
+                let callback_slot = Arc::clone(&callback_slot);
+                let registrations = Arc::clone(&registrations);
+                let drops = Arc::clone(&drops);
+                move |callback| {
+                    Ok(Box::new(ControlledScopedWatchBackend {
+                        callback: Some(callback),
+                        callback_slot,
+                        registrations,
+                        drops,
+                    }))
+                }
+            })
+            .unwrap();
+        let mut object = scoped_append_object_with_coverage(
+            AppendDelimitedFile::new(AppendDelimitedConfig::json_lines()).unwrap(),
+            RawRetentionPolicy::None,
+            vec![CoverageDomain::FactFamily {
+                family: "runtime.usage-v2".to_string(),
+                version: 1,
+            }],
+        );
+        let mut admission = admission_lane(1, 0, 1);
+        let projection = ScopedObservationProjectionSink::new(ScopedObservationProjectionLimits {
+            max_usage_v2_entities: 1,
+        })
+        .unwrap();
+        let identity = [ScopeIdentityInput {
+            name: "native-session-id",
+            value: b"automatic-resync-failure-session",
+        }];
+        let origin = RecordOrigin {
+            source_instance_id: 10,
+            stream_id: 20,
+            object_id: 30,
+            observed_at: 40,
+            source_timestamp_hint: None,
+            media_type: SourceMediaType::new("application/x-ndjson").unwrap(),
+        };
+
+        let scan = watcher
+            .coordinator()
+            .begin_initial_scan(handle.host())
+            .unwrap();
+        let observation = reconcile_scoped_append(
+            handle.host(),
+            scan.access_pass(),
+            &mut object,
+            &mut admission,
+            &identity,
+            &origin,
+            AccessPhase::Initial,
+        );
+        assert!(!observation.object_present);
+        handle
+            .with_attachment(|host, drain| {
+                watcher.coordinator().finish_initial_scan(
+                    host,
+                    scan,
+                    &admission,
+                    &projection,
+                    drain,
+                )
+            })
+            .unwrap();
+        assert!(matches!(
+            watcher
+                .coordinator()
+                .next_reconcile(handle.host(), 2)
+                .unwrap(),
+            ScopedObservationStartupReconcileAction::CaughtUp
+        ));
+        object.complete_bootstrap().unwrap();
+        let bootstrap = handle
+            .with_attachment(|host, drain| {
+                watcher.coordinator().offer_bootstrap_complete(
+                    host,
+                    std::slice::from_ref(&object),
+                    &admission,
+                    &projection,
+                    drain,
+                    50,
+                )
+            })
+            .unwrap();
+        let bootstrap_event = runtime.next_event().await.unwrap().unwrap();
+        assert!(matches!(
+            &bootstrap_event.envelope.event,
+            ScopedObservationEvent::ObserverBootstrapComplete { barrier }
+                if Arc::ptr_eq(barrier, &bootstrap)
+        ));
+        runtime
+            .acknowledge_applied(bootstrap_event.application_receipt())
+            .unwrap();
+
+        let active = handle
+            .with_attachment(|host, drain| {
+                host.bind_consumer_bootstrap_epoch_state(vec![object], admission, projection, drain)
+            })
+            .unwrap();
+        let binding = ScopedObservationAppendPassBinding::new(
+            "root-object",
+            vec![ScopedObservationOwnedIdentityInput::new(
+                "native-session-id",
+                b"automatic-resync-failure-session".to_vec(),
+            )
+            .unwrap()],
+            None,
+            1,
+            64,
+            origin,
+            false,
+        )
+        .unwrap();
+        let source = handle
+            .bind_epoch_source_owner(
+                active,
+                vec![binding],
+                ScopedObservationSourceOwnerRetryPolicy::default(),
+            )
+            .unwrap();
+        let watcher_policy = ScopedObservationNativeWatcherRecoveryPolicy::new(
+            std::time::Duration::from_secs(60),
+            std::time::Duration::from_millis(1),
+            std::time::Duration::from_millis(1),
+            1,
+        )
+        .unwrap();
+        let pair = handle
+            .bind_live_owner_pair(watcher, source, watcher_policy)
+            .unwrap();
+        let pair_task = tokio::spawn(pair.run_with_factory_and_clocks(|_| Err(()), || 60, || 61));
+
+        // The declared per-access physical ceiling is 64 bytes. The
+        // replacement owner must fail before admitting this larger object,
+        // retain no barrier, and supersede an undelivered resync-start rather
+        // than exposing a partial epoch.
+        std::fs::write(&target, vec![b'x'; 80]).unwrap();
+        handle
+            .require_resync(ScopedResyncReason::WatcherOverflow, 70)
+            .unwrap();
+        let result = tokio::time::timeout(std::time::Duration::from_secs(2), pair_task)
+            .await
+            .unwrap()
+            .unwrap();
+        let ScopedObservationAsyncOwnerRunResult::Resync(handoff) = result else {
+            panic!("continuity invalidation must yield a replacement handoff");
+        };
+        let recovery_task = tokio::spawn(handoff.replay_and_rebind_with_factory_and_clocks(
+            |_| Err(()),
+            || 80,
+            || 90,
+        ));
+        let required_event = runtime.next_event().await.unwrap().unwrap();
+        assert!(matches!(
+            required_event.envelope.event,
+            ScopedObservationEvent::ObserverResyncRequired { .. }
+        ));
+        runtime
+            .acknowledge_applied(required_event.application_receipt())
+            .unwrap();
+
+        let failure = tokio::time::timeout(std::time::Duration::from_secs(2), recovery_task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(
+            failure.error(),
+            ScopedObservationAutomaticResyncError::SourceAccess
+        );
+        let terminal = failure
+            .terminal_failure()
+            .expect("an incomplete automatic replacement must fail the observer");
+        assert_eq!(
+            terminal.reason,
+            ScopedObserverFailureReason::InternalControlFailure
+        );
+        assert!(failure.supervision_error().is_none());
+        let failure_debug = format!("{failure:?}");
+        assert!(!failure_debug.contains(root.to_string_lossy().as_ref()));
+        assert!(!failure_debug.contains("automatic-resync-failure-session"));
+        assert!(handle
+            .with_attachment(|_, drain| drain.engine_resync_barrier())
+            .is_none());
+        let failed_event = runtime.next_event().await.unwrap().unwrap();
+        assert!(matches!(
+            &failed_event.envelope.event,
+            ScopedObservationEvent::ObserverFailed { failure }
+                if Arc::ptr_eq(failure, &terminal)
+        ));
+        runtime
+            .acknowledge_applied(failed_event.application_receipt())
+            .unwrap();
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        assert!(runtime.close().await.complete);
     }
 
     #[tokio::test]
