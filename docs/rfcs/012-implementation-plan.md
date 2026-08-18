@@ -604,8 +604,9 @@ has public transport, retention, and expiration authority. B2 is independently
 `In progress` as described below. B3 now includes source-neutral plan
 registration, the initial build lineage, one atomic immutable initial Library
 publication, a crate-private WITHHELD-only retained-page reader, and durable
-ordinary-refresh start that keeps the published snapshot readable; scheduling
-and hydration execution remain later integration work.
+ordinary-refresh start plus atomic successor publication that keeps the prior
+snapshot readable; scheduling and hydration execution remain later integration
+work.
 
 ### B2. Catalog source compositions
 
@@ -892,6 +893,29 @@ lineage rejection are executable. This slice adds no replacement snapshot,
 refresh completion, degraded state, retention/expiration authority, source
 reads, or public N-API/SDK catalog surface. Atomic refresh publication is the
 next prerequisite for a genuine newer snapshot and later retirement evidence.
+
+The seventh bounded B3 slice (`c603039`) adds schema-v53 and atomically
+publishes an ordinary-refresh successor under the exact active-refresh and
+restart-authenticated predecessor compare-and-swap. The successor carries a
+distinct durable-v2 domain, exact predecessor publication/content/reducer and
+cumulative member-history commitments, canonical complete source assemblies,
+and a monotonic reducer continuation. Existing member references cannot
+retarget, live facts cannot be rewritten at the same observation commit or
+removed without exact retraction, and tombstones can disappear only through a
+valid newer-generation live revival. One transaction writes the newer
+immutable snapshot and typed frames, advances `Ready`, clears the refresh
+marker, and emits a privacy-safe v4 invalidation; crash seams, separate-reader
+isolation, and lost-ack replay remain executable. The predecessor snapshot and
+already-issued authority continue serving their exact keyset pages while the
+new authority serves the successor, and file-backed restart authenticates only
+the current snapshot after validating the complete linear predecessor chain.
+Until retirement exists, an internal eight-refresh ceiling bounds retained
+lineage traversal and refuses a ninth refresh without mutation; orphan
+snapshots fail restart. This slice still adds no retirement/deletion lease,
+`SnapshotExpired`, degraded/error refresh, native source execution,
+caller-authorized local policy view, public N-API/SDK catalog surface, or
+richer filters/sorts. Durable retention/retirement evidence is the next
+prerequisite for honest expiration.
 
 ### B4. Progressive host and UX
 
@@ -1949,6 +1973,16 @@ Current landing status (2026-08-18):
   This is a caller ceiling rather than locator authority: it adds no artifact
   relationship resolution, file read, public request field, N-API/SDK method,
   or portable claim that access occurred; and
+- a post-landing mediation audit keeps native artifact reads closed: the
+  selected scope program can authorize an `ArtifactLocatorFromEvidence`
+  relation, but the current private seam cannot yet prove that a requested
+  portable artifact key was derived from that exact relation and evidence.
+  Built-in Claude artifact metadata/content facts also still use legacy
+  registration-bound entity keys without semantic revisions, and the scoped
+  reducer intentionally ignores those non-usage facts. Locator resolution,
+  canonical artifact fact adoption, evidence-to-key binding, and the native
+  read mediator must land together before the policy ceiling can authorize an
+  actual read; and
 - the architecture checker forbids store/query/N-API/concrete-adapter imports
   and premature native public export from the provisional composition and
   negotiation roots, while keeping the portable negotiation graph contract-only.
