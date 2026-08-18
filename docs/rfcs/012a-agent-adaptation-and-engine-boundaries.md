@@ -617,6 +617,14 @@ Rules:
     claim it supports. The representation and support/declaration binding
     survive restart. A deterministic content digest may suppress equal writes,
     but cannot replace the inspectable set, points, absences, and errors.
+11. The v1 portable wire is strict and bounded at every aggregate and leaf
+    shape. Unknown fields and explicit `null` optionals fail closed; source
+    generations are positive JavaScript-safe integers, and portable orders and
+    timestamps are JavaScript-safe. One set carries at most 250,000 points,
+    250,000 explicit absences/deletions, and 4,096 errors. Unavailable reasons
+    are canonical and at most 1,024 UTF-8 bytes. Error codes are lowercase ASCII
+    machine codes matching `[a-z][a-z0-9_]*` and at most 64 bytes, so they cannot
+    become a free-form native diagnostic or locator channel.
 
 The common versioned model/SDK supplies a semantic operation equivalent to:
 

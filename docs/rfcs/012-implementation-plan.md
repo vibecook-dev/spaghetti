@@ -220,7 +220,7 @@ Gate:
 - existing source tests pass without store/query access in adapters; and
 - no physical extraction is required to claim the logical gate.
 
-Current landing status (2026-08-16):
+Current landing status (2026-08-18):
 
 - implemented the parallel Rust RFC 012A v1 semantic model for qualified
   values, canonical source/entity/record/fact/revision keys, external entity
@@ -255,7 +255,16 @@ Current landing status (2026-08-16):
   bound to the adapter, canonical source instance, verified source-declaration
   digest, and explicit support-release ID. Restart and quarantine-gap tests
   prove that the representation survives and does not churn on an unchanged
-  scan; and
+  scan;
+- hardened the RFC 012A coverage wire boundary before further catalog or
+  observer exposure. Aggregate and public Rust leaf DTOs plus portable
+  TypeScript now reject unknown fields at every nested coverage shape, explicit
+  `null` for optional evidence, nonplain portable objects, zero or non-
+  JavaScript-safe generations, unsafe orders/timestamps, noncanonical or
+  oversized reasons/identifiers, non-machine error codes, duplicate errors,
+  and object-scoped errors without their stream coordinate. Coverage point,
+  absence, and error collections share the existing engine limits and are
+  rejected before unbounded traversal; and
 - retained A1 as `In progress`: usage-v2 is the first built-in family on the
   canonical seam, while bounded public coverage query exposure, the remaining
   fact-family migrations, full semantic reduction, tier/view compositionality,

@@ -12,6 +12,13 @@ export const SUPPORT_SELECTION_CONTRACT_VERSION = 1 as const;
 export const CONTRACT_VERSION_SELECTION_VERSION = 1 as const;
 
 const MAX_U32 = 0xffff_ffff;
+const MAX_IDENTIFIER_BYTES = 256;
+const MAX_COVERAGE_POINTS_PER_SET = 250_000;
+const MAX_COVERAGE_ABSENCES_PER_SET = 250_000;
+const MAX_COVERAGE_ERRORS_PER_SET = 4_096;
+const MAX_COVERAGE_UNAVAILABLE_REASON_BYTES = 1_024;
+const MAX_COVERAGE_ERROR_CODE_BYTES = 64;
+const UTF8_ENCODER = new TextEncoder();
 
 export type SupportReleaseStatus = 'candidate' | 'promoted' | 'retired';
 export type SupportCapabilityTopology = 'catalog' | 'durable' | 'scoped';
@@ -253,6 +260,10 @@ function record(value: unknown, label: string): UnknownRecord {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) {
     throw new ContractValidationError(`${label} must be an object`);
   }
+  const prototype = Object.getPrototypeOf(value);
+  if (prototype !== Object.prototype && prototype !== null) {
+    throw new ContractValidationError(`${label} must be a plain object`);
+  }
   return value as UnknownRecord;
 }
 
@@ -268,6 +279,32 @@ function nonEmptyString(value: unknown, label: string): string {
     throw new ContractValidationError(`${label} must be a non-empty canonical string`);
   }
   return value;
+}
+
+function boundedCanonicalString(value: unknown, label: string, maxBytes: number): string {
+  if (typeof value !== 'string') {
+    throw new ContractValidationError(`${label} must be a non-empty canonical string`);
+  }
+  if (value.length > maxBytes) {
+    throw new ContractValidationError(`${label} exceeds the bounded maximum of ${maxBytes} UTF-8 bytes`);
+  }
+  const result = nonEmptyString(value, label);
+  if (UTF8_ENCODER.encode(result).length > maxBytes) {
+    throw new ContractValidationError(`${label} exceeds the bounded maximum of ${maxBytes} UTF-8 bytes`);
+  }
+  return result;
+}
+
+function coverageIdentifier(value: unknown, label: string): string {
+  return boundedCanonicalString(value, label, MAX_IDENTIFIER_BYTES);
+}
+
+function coverageErrorCode(value: unknown): string {
+  const result = boundedCanonicalString(value, 'coverage error code', MAX_COVERAGE_ERROR_CODE_BYTES);
+  if (!/^[a-z][a-z0-9_]*$/.test(result)) {
+    throw new ContractValidationError('coverage error code must be a lowercase ASCII machine code');
+  }
+  return result;
 }
 
 function nonNegativeInteger(value: unknown, label: string): number {
@@ -896,17 +933,20 @@ function parseCoverageDomain(value: unknown): CoverageDomain {
   const input = record(value, 'coverage domain');
   switch (input.kind) {
     case 'decode':
+      assertKnownFields(input, ['kind'], 'decode coverage domain');
       return { kind: 'decode' };
     case 'fact_family':
+      assertKnownFields(input, ['kind', 'family', 'version'], 'fact-family coverage domain');
       return {
         kind: 'fact_family',
-        family: nonEmptyString(input.family, 'fact family'),
+        family: coverageIdentifier(input.family, 'fact family'),
         version: contractVersion(input.version, 'fact-family version'),
       };
     case 'projection_pack':
+      assertKnownFields(input, ['kind', 'pack', 'version'], 'projection-pack coverage domain');
       return {
         kind: 'projection_pack',
-        pack: nonEmptyString(input.pack, 'projection pack'),
+        pack: coverageIdentifier(input.pack, 'projection pack'),
         version: contractVersion(input.version, 'projection-pack version'),
       };
     default:
@@ -927,6 +967,7 @@ function domainKey(domain: CoverageDomain): string {
 
 function parseCoveragePosition(value: unknown): CoveragePosition {
   const input = record(value, 'coverage position');
+  assertKnownFields(input, ['kind', 'opaque', 'monotonic_order'], 'coverage position');
   if (
     !['append_cursor', 'document_revision', 'snapshot_revision', 'database_watermark', 'key_range_token'].includes(
       input.kind as string,
@@ -950,9 +991,14 @@ function parseCoverageStatus(value: unknown): CoverageStatus {
     case 'complete_through':
     case 'exact_snapshot':
     case 'partial':
+      assertKnownFields(input, ['kind'], `${input.kind} coverage status`);
       return { kind: input.kind };
     case 'unavailable':
-      return { kind: 'unavailable', reason: nonEmptyString(input.reason, 'unavailable reason') };
+      assertKnownFields(input, ['kind', 'reason'], 'unavailable coverage status');
+      return {
+        kind: 'unavailable',
+        reason: boundedCanonicalString(input.reason, 'unavailable reason', MAX_COVERAGE_UNAVAILABLE_REASON_BYTES),
+      };
     default:
       throw new ContractValidationError('unsupported coverage status');
   }
@@ -960,6 +1006,7 @@ function parseCoverageStatus(value: unknown): CoverageStatus {
 
 function parseCoverageProvenance(value: unknown): CoverageProvenance {
   const input = record(value, 'coverage provenance');
+  assertKnownFields(input, ['source_record_id', 'semantic_revision_ref', 'observed_at'], 'coverage provenance');
   const result: CoverageProvenance = {};
   if (input.source_record_id !== undefined) {
     result.source_record_id = parseOpaqueContractReference(input.source_record_id, 'source record id');
@@ -975,6 +1022,22 @@ function parseCoverageProvenance(value: unknown): CoverageProvenance {
 
 function parseCoveragePoint(value: unknown): SourceCoveragePoint {
   const input = record(value, 'source coverage point');
+  assertKnownFields(
+    input,
+    [
+      'coverage_contract_version',
+      'coverage_domain',
+      'adapter_id',
+      'source_instance_key',
+      'stream_key',
+      'object_key',
+      'generation',
+      'position',
+      'status',
+      'provenance',
+    ],
+    'source coverage point',
+  );
   if (input.coverage_contract_version !== SOURCE_COVERAGE_CONTRACT_VERSION) {
     throw new ContractValidationError('unsupported source coverage contract version');
   }
@@ -993,11 +1056,11 @@ function parseCoveragePoint(value: unknown): SourceCoveragePoint {
   return {
     coverage_contract_version: SOURCE_COVERAGE_CONTRACT_VERSION,
     coverage_domain: parseCoverageDomain(input.coverage_domain),
-    adapter_id: nonEmptyString(input.adapter_id, 'coverage adapter id'),
+    adapter_id: coverageIdentifier(input.adapter_id, 'coverage adapter id'),
     source_instance_key: parseOpaqueContractReference(input.source_instance_key, 'source instance key'),
     stream_key: parseOpaqueContractReference(input.stream_key, 'stream key'),
     object_key: parseOpaqueContractReference(input.object_key, 'object key'),
-    generation: nonNegativeInteger(input.generation, 'coverage generation'),
+    generation: positiveInteger(input.generation, 'coverage generation'),
     ...(position === undefined ? {} : { position }),
     status,
     provenance: parseCoverageProvenance(input.provenance),
@@ -1006,10 +1069,21 @@ function parseCoveragePoint(value: unknown): SourceCoveragePoint {
 
 function parseCoverageScope(value: unknown): CoverageScope {
   const input = record(value, 'coverage scope');
+  assertKnownFields(
+    input,
+    [
+      'adapter_id',
+      'source_instance_key',
+      'root_entity_key',
+      'support_release_id',
+      'source_or_scope_declaration_digest',
+    ],
+    'coverage scope',
+  );
   const result: CoverageScope = {
-    adapter_id: nonEmptyString(input.adapter_id, 'coverage scope adapter id'),
+    adapter_id: coverageIdentifier(input.adapter_id, 'coverage scope adapter id'),
     source_instance_key: parseOpaqueContractReference(input.source_instance_key, 'scope source instance key'),
-    support_release_id: nonEmptyString(input.support_release_id, 'support release id'),
+    support_release_id: coverageIdentifier(input.support_release_id, 'support release id'),
     source_or_scope_declaration_digest: parseOpaqueContractReference(
       input.source_or_scope_declaration_digest,
       'scope declaration digest',
@@ -1023,24 +1097,29 @@ function parseCoverageScope(value: unknown): CoverageScope {
 
 function parseCoverageAbsence(value: unknown): CoverageAbsence {
   const input = record(value, 'coverage absence');
+  assertKnownFields(input, ['stream_key', 'object_key', 'generation', 'kind'], 'coverage absence');
   if (input.kind !== 'absent' && input.kind !== 'deleted') {
     throw new ContractValidationError('coverage absence has an unsupported kind');
   }
   return {
     stream_key: parseOpaqueContractReference(input.stream_key, 'absence stream key'),
     object_key: parseOpaqueContractReference(input.object_key, 'absence object key'),
-    generation: nonNegativeInteger(input.generation, 'absence generation'),
+    generation: positiveInteger(input.generation, 'absence generation'),
     kind: input.kind,
   };
 }
 
 function parseCoverageError(value: unknown): CoverageError {
   const input = record(value, 'coverage error');
-  const result: CoverageError = { code: nonEmptyString(input.code, 'coverage error code') };
+  assertKnownFields(input, ['stream_key', 'object_key', 'code'], 'coverage error');
+  const result: CoverageError = { code: coverageErrorCode(input.code) };
   if (input.stream_key !== undefined) {
     result.stream_key = parseOpaqueContractReference(input.stream_key, 'error stream key');
   }
   if (input.object_key !== undefined) {
+    if (result.stream_key === undefined) {
+      throw new ContractValidationError('coverage error object key requires a stream key');
+    }
     result.object_key = parseOpaqueContractReference(input.object_key, 'error object key');
   }
   return result;
@@ -1056,6 +1135,20 @@ function coordinate(value: {
 
 export function parseSourceCoverageSet(value: unknown): SourceCoverageSet {
   const input = record(value, 'source coverage set');
+  assertKnownFields(
+    input,
+    [
+      'coverage_set_contract_version',
+      'coverage_domain',
+      'scope',
+      'membership_revision',
+      'points',
+      'explicit_absence_or_deletion',
+      'explicit_errors',
+      'completeness',
+    ],
+    'source coverage set',
+  );
   if (input.coverage_set_contract_version !== SOURCE_COVERAGE_SET_CONTRACT_VERSION) {
     throw new ContractValidationError('unsupported source coverage set contract version');
   }
@@ -1067,6 +1160,15 @@ export function parseSourceCoverageSet(value: unknown): SourceCoverageSet {
   }
   if (!Array.isArray(input.explicit_errors)) {
     throw new ContractValidationError('coverage errors must be an array');
+  }
+  if (input.points.length > MAX_COVERAGE_POINTS_PER_SET) {
+    throw new ContractValidationError(`coverage set exceeds ${MAX_COVERAGE_POINTS_PER_SET} points`);
+  }
+  if (input.explicit_absence_or_deletion.length > MAX_COVERAGE_ABSENCES_PER_SET) {
+    throw new ContractValidationError(`coverage set exceeds ${MAX_COVERAGE_ABSENCES_PER_SET} absences`);
+  }
+  if (input.explicit_errors.length > MAX_COVERAGE_ERRORS_PER_SET) {
+    throw new ContractValidationError(`coverage set exceeds ${MAX_COVERAGE_ERRORS_PER_SET} errors`);
   }
   if (!['complete', 'partial', 'unavailable'].includes(input.completeness as string)) {
     throw new ContractValidationError('unsupported coverage-set completeness');
@@ -1095,6 +1197,14 @@ export function parseSourceCoverageSet(value: unknown): SourceCoverageSet {
       throw new ContractValidationError('coverage absence conflicts with a point or duplicate absence');
     }
     coordinates.add(key);
+  }
+  const explicitErrors = new Set<string>();
+  for (const error of errors) {
+    const key = JSON.stringify([error.stream_key ?? null, error.object_key ?? null, error.code]);
+    if (explicitErrors.has(key)) {
+      throw new ContractValidationError('coverage set contains a duplicate explicit error');
+    }
+    explicitErrors.add(key);
   }
   const completeness = input.completeness as CoverageSetCompleteness;
   if (

@@ -7,10 +7,11 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
+use std::marker::PhantomData;
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
-use serde::de::Error as _;
+use serde::de::{Error as _, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 pub const EXTERNAL_ENTITY_REFERENCE_VERSION: u32 = 1;
@@ -29,6 +30,13 @@ const DIGEST_BYTES: usize = 32;
 const MAX_COMPONENT_BYTES: usize = 64 * 1024;
 const MAX_COVERAGE_MEMBERSHIP_BYTES: usize = 64 * 1024 * 1024;
 const MAX_IDENTIFIER_BYTES: usize = 256;
+const MAX_COVERAGE_POINTS_PER_SET: usize = 250_000;
+const MAX_COVERAGE_ABSENCES_PER_SET: usize = 250_000;
+const MAX_COVERAGE_ERRORS_PER_SET: usize = 4_096;
+const MAX_COVERAGE_UNAVAILABLE_REASON_BYTES: usize = 1_024;
+const MAX_COVERAGE_ERROR_CODE_BYTES: usize = 64;
+const JS_SAFE_INTEGER_MAX_U64: u64 = 9_007_199_254_740_991;
+const JS_SAFE_INTEGER_MAX_I64: i64 = 9_007_199_254_740_991;
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("{message}")]
@@ -70,6 +78,138 @@ fn validate_component(label: &str, value: &[u8]) -> Result<(), SemanticContractE
         )));
     }
     Ok(())
+}
+
+fn validate_portable_u64(label: &str, value: u64) -> Result<(), SemanticContractError> {
+    if value > JS_SAFE_INTEGER_MAX_U64 {
+        return Err(SemanticContractError::invalid(format!(
+            "{label} exceeds the portable safe-integer range"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_portable_generation(label: &str, value: u64) -> Result<(), SemanticContractError> {
+    validate_portable_u64(label, value)?;
+    if value == 0 {
+        return Err(SemanticContractError::invalid(format!(
+            "{label} must be greater than zero"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_portable_i64(label: &str, value: i64) -> Result<(), SemanticContractError> {
+    if !(-JS_SAFE_INTEGER_MAX_I64..=JS_SAFE_INTEGER_MAX_I64).contains(&value) {
+        return Err(SemanticContractError::invalid(format!(
+            "{label} exceeds the portable safe-integer range"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_coverage_error_code(value: &str) -> Result<(), SemanticContractError> {
+    if value.is_empty() || value.len() > MAX_COVERAGE_ERROR_CODE_BYTES {
+        return Err(SemanticContractError::invalid(format!(
+            "coverage error code must contain 1 to {MAX_COVERAGE_ERROR_CODE_BYTES} bytes"
+        )));
+    }
+    let mut bytes = value.bytes();
+    if !bytes.next().is_some_and(|byte| byte.is_ascii_lowercase())
+        || !bytes.all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+    {
+        return Err(SemanticContractError::invalid(
+            "coverage error code must be a lowercase ASCII machine code",
+        ));
+    }
+    Ok(())
+}
+
+fn deserialize_present_non_null<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    T::deserialize(deserializer).map(Some)
+}
+
+fn deserialize_bounded_vec<'de, D, T, const MAX: usize>(
+    deserializer: D,
+    label: &'static str,
+) -> Result<Vec<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    struct BoundedVecVisitor<T, const MAX: usize> {
+        label: &'static str,
+        marker: PhantomData<T>,
+    }
+
+    impl<'de, T, const MAX: usize> Visitor<'de> for BoundedVecVisitor<T, MAX>
+    where
+        T: Deserialize<'de>,
+    {
+        type Value = Vec<T>;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(formatter, "{} with at most {MAX} entries", self.label)
+        }
+
+        fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+        where
+            A: SeqAccess<'de>,
+        {
+            if sequence.size_hint().is_some_and(|size| size > MAX) {
+                return Err(A::Error::custom(format!(
+                    "{} exceeds {MAX} entries",
+                    self.label
+                )));
+            }
+            let mut values = Vec::with_capacity(sequence.size_hint().unwrap_or(0).min(MAX));
+            while let Some(value) = sequence.next_element()? {
+                if values.len() == MAX {
+                    return Err(A::Error::custom(format!(
+                        "{} exceeds {MAX} entries",
+                        self.label
+                    )));
+                }
+                values.push(value);
+            }
+            Ok(values)
+        }
+    }
+
+    deserializer.deserialize_seq(BoundedVecVisitor::<T, MAX> {
+        label,
+        marker: PhantomData,
+    })
+}
+
+fn deserialize_coverage_points<'de, D>(
+    deserializer: D,
+) -> Result<Vec<SourceCoveragePoint>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    deserialize_bounded_vec::<_, _, MAX_COVERAGE_POINTS_PER_SET>(deserializer, "coverage points")
+}
+
+fn deserialize_coverage_absences<'de, D>(deserializer: D) -> Result<Vec<CoverageAbsence>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    deserialize_bounded_vec::<_, _, MAX_COVERAGE_ABSENCES_PER_SET>(
+        deserializer,
+        "coverage absences",
+    )
+}
+
+fn deserialize_coverage_errors<'de, D>(deserializer: D) -> Result<Vec<CoverageError>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    deserialize_bounded_vec::<_, _, MAX_COVERAGE_ERRORS_PER_SET>(deserializer, "coverage errors")
 }
 
 fn contract_digest(domain: &[u8], components: &[&[u8]]) -> [u8; DIGEST_BYTES] {
@@ -769,12 +909,57 @@ impl CoverageMembershipRevision {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum CoverageDomain {
     Decode,
     FactFamily { family: String, version: u32 },
     ProjectionPack { pack: String, version: u32 },
+}
+
+impl<'de> Deserialize<'de> for CoverageDomain {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "snake_case")]
+        enum Kind {
+            Decode,
+            FactFamily,
+            ProjectionPack,
+        }
+
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Wire {
+            kind: Kind,
+            #[serde(default, deserialize_with = "deserialize_present_non_null")]
+            family: Option<String>,
+            #[serde(default, deserialize_with = "deserialize_present_non_null")]
+            pack: Option<String>,
+            #[serde(default, deserialize_with = "deserialize_present_non_null")]
+            version: Option<u32>,
+        }
+
+        let wire = Wire::deserialize(deserializer)?;
+        let value = match (wire.kind, wire.family, wire.pack, wire.version) {
+            (Kind::Decode, None, None, None) => Self::Decode,
+            (Kind::FactFamily, Some(family), None, Some(version)) => {
+                Self::FactFamily { family, version }
+            }
+            (Kind::ProjectionPack, None, Some(pack), Some(version)) => {
+                Self::ProjectionPack { pack, version }
+            }
+            _ => {
+                return Err(D::Error::custom(
+                    "coverage domain fields do not match its kind",
+                ));
+            }
+        };
+        value.validate().map_err(D::Error::custom)?;
+        Ok(value)
+    }
 }
 
 impl CoverageDomain {
@@ -813,12 +998,37 @@ pub enum CoveragePositionKind {
     KeyRangeToken,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct CoveragePosition {
     pub kind: CoveragePositionKind,
     pub opaque: CoveragePositionRef,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub monotonic_order: Option<u64>,
+}
+
+impl<'de> Deserialize<'de> for CoveragePosition {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Wire {
+            kind: CoveragePositionKind,
+            opaque: CoveragePositionRef,
+            #[serde(default, deserialize_with = "deserialize_present_non_null")]
+            monotonic_order: Option<u64>,
+        }
+
+        let wire = Wire::deserialize(deserializer)?;
+        let value = Self {
+            kind: wire.kind,
+            opaque: wire.opaque,
+            monotonic_order: wire.monotonic_order,
+        };
+        value.validate().map_err(D::Error::custom)?;
+        Ok(value)
+    }
 }
 
 impl CoveragePosition {
@@ -829,14 +1039,23 @@ impl CoveragePosition {
     ) -> Result<Self, SemanticContractError> {
         validate_component("coverage position", opaque_native_position)?;
         let kind_tag = [kind.contract_tag()];
-        Ok(Self {
+        let value = Self {
             kind,
             opaque: CoveragePositionRef::from_digest(contract_digest(
                 b"coverage-position",
                 &[&kind_tag, opaque_native_position],
             )),
             monotonic_order,
-        })
+        };
+        value.validate()?;
+        Ok(value)
+    }
+
+    fn validate(&self) -> Result<(), SemanticContractError> {
+        if let Some(order) = self.monotonic_order {
+            validate_portable_u64("coverage monotonic order", order)?;
+        }
+        Ok(())
     }
 }
 
@@ -852,7 +1071,7 @@ impl CoveragePositionKind {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum CoverageStatus {
     CompleteThrough,
@@ -861,7 +1080,64 @@ pub enum CoverageStatus {
     Unavailable { reason: String },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+impl<'de> Deserialize<'de> for CoverageStatus {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "snake_case")]
+        enum Kind {
+            CompleteThrough,
+            ExactSnapshot,
+            Partial,
+            Unavailable,
+        }
+
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Wire {
+            kind: Kind,
+            #[serde(default, deserialize_with = "deserialize_present_non_null")]
+            reason: Option<String>,
+        }
+
+        let wire = Wire::deserialize(deserializer)?;
+        let value = match (wire.kind, wire.reason) {
+            (Kind::CompleteThrough, None) => Self::CompleteThrough,
+            (Kind::ExactSnapshot, None) => Self::ExactSnapshot,
+            (Kind::Partial, None) => Self::Partial,
+            (Kind::Unavailable, Some(reason)) => Self::Unavailable { reason },
+            _ => {
+                return Err(D::Error::custom(
+                    "coverage status fields do not match its kind",
+                ));
+            }
+        };
+        value.validate().map_err(D::Error::custom)?;
+        Ok(value)
+    }
+}
+
+impl CoverageStatus {
+    fn validate(&self) -> Result<(), SemanticContractError> {
+        if let Self::Unavailable { reason } = self {
+            if reason.is_empty() || reason.trim() != reason {
+                return Err(SemanticContractError::invalid(
+                    "unavailable coverage requires a non-empty canonical reason",
+                ));
+            }
+            if reason.len() > MAX_COVERAGE_UNAVAILABLE_REASON_BYTES {
+                return Err(SemanticContractError::invalid(format!(
+                    "unavailable coverage reason exceeds {MAX_COVERAGE_UNAVAILABLE_REASON_BYTES} bytes"
+                )));
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Default)]
 pub struct CoverageProvenance {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_record_id: Option<SourceRecordId>,
@@ -869,6 +1145,42 @@ pub struct CoverageProvenance {
     pub semantic_revision_ref: Option<SemanticRevisionRef>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub observed_at: Option<i64>,
+}
+
+impl<'de> Deserialize<'de> for CoverageProvenance {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Wire {
+            #[serde(default, deserialize_with = "deserialize_present_non_null")]
+            source_record_id: Option<SourceRecordId>,
+            #[serde(default, deserialize_with = "deserialize_present_non_null")]
+            semantic_revision_ref: Option<SemanticRevisionRef>,
+            #[serde(default, deserialize_with = "deserialize_present_non_null")]
+            observed_at: Option<i64>,
+        }
+
+        let wire = Wire::deserialize(deserializer)?;
+        let value = Self {
+            source_record_id: wire.source_record_id,
+            semantic_revision_ref: wire.semantic_revision_ref,
+            observed_at: wire.observed_at,
+        };
+        value.validate().map_err(D::Error::custom)?;
+        Ok(value)
+    }
+}
+
+impl CoverageProvenance {
+    fn validate(&self) -> Result<(), SemanticContractError> {
+        if let Some(observed_at) = self.observed_at {
+            validate_portable_i64("coverage observed_at", observed_at)?;
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -924,6 +1236,12 @@ impl SourceCoveragePoint {
         }
         self.coverage_domain.validate()?;
         validate_identifier("coverage adapter id", &self.adapter_id)?;
+        validate_portable_generation("coverage generation", self.generation)?;
+        if let Some(position) = &self.position {
+            position.validate()?;
+        }
+        self.status.validate()?;
+        self.provenance.validate()?;
         match (&self.status, &self.position) {
             (CoverageStatus::CompleteThrough, Some(position))
                 if matches!(
@@ -938,12 +1256,7 @@ impl SourceCoveragePoint {
                     CoveragePositionKind::DocumentRevision | CoveragePositionKind::SnapshotRevision
                 ) => {}
             (CoverageStatus::Partial, _) => {}
-            (CoverageStatus::Unavailable { reason }, _) if !reason.trim().is_empty() => {}
-            (CoverageStatus::Unavailable { .. }, _) => {
-                return Err(SemanticContractError::invalid(
-                    "unavailable coverage requires a non-empty reason",
-                ));
-            }
+            (CoverageStatus::Unavailable { .. }, _) => {}
             (CoverageStatus::CompleteThrough, _) => {
                 return Err(SemanticContractError::invalid(
                     "complete-through coverage requires an ordered position",
@@ -973,6 +1286,7 @@ impl<'de> Deserialize<'de> for SourceCoveragePoint {
         D: Deserializer<'de>,
     {
         #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
         struct Wire {
             coverage_contract_version: u32,
             coverage_domain: CoverageDomain,
@@ -981,6 +1295,7 @@ impl<'de> Deserialize<'de> for SourceCoveragePoint {
             stream_key: CoverageStreamKey,
             object_key: CoverageObjectKey,
             generation: u64,
+            #[serde(default, deserialize_with = "deserialize_present_non_null")]
             position: Option<CoveragePosition>,
             status: CoverageStatus,
             provenance: CoverageProvenance,
@@ -1004,7 +1319,7 @@ impl<'de> Deserialize<'de> for SourceCoveragePoint {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct CoverageScope {
     pub adapter_id: String,
     pub source_instance_key: CanonicalSourceInstanceKey,
@@ -1012,6 +1327,35 @@ pub struct CoverageScope {
     pub root_entity_key: Option<CanonicalEntityKey>,
     pub support_release_id: String,
     pub source_or_scope_declaration_digest: CoverageDeclarationDigest,
+}
+
+impl<'de> Deserialize<'de> for CoverageScope {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Wire {
+            adapter_id: String,
+            source_instance_key: CanonicalSourceInstanceKey,
+            #[serde(default, deserialize_with = "deserialize_present_non_null")]
+            root_entity_key: Option<CanonicalEntityKey>,
+            support_release_id: String,
+            source_or_scope_declaration_digest: CoverageDeclarationDigest,
+        }
+
+        let wire = Wire::deserialize(deserializer)?;
+        let value = Self {
+            adapter_id: wire.adapter_id,
+            source_instance_key: wire.source_instance_key,
+            root_entity_key: wire.root_entity_key,
+            support_release_id: wire.support_release_id,
+            source_or_scope_declaration_digest: wire.source_or_scope_declaration_digest,
+        };
+        value.validate().map_err(D::Error::custom)?;
+        Ok(value)
+    }
 }
 
 impl CoverageScope {
@@ -1028,7 +1372,7 @@ pub enum CoverageAbsenceKind {
     Deleted,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 pub struct CoverageAbsence {
     pub stream_key: CoverageStreamKey,
     pub object_key: CoverageObjectKey,
@@ -1036,7 +1380,37 @@ pub struct CoverageAbsence {
     pub kind: CoverageAbsenceKind,
 }
 
+impl<'de> Deserialize<'de> for CoverageAbsence {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Wire {
+            stream_key: CoverageStreamKey,
+            object_key: CoverageObjectKey,
+            generation: u64,
+            kind: CoverageAbsenceKind,
+        }
+
+        let wire = Wire::deserialize(deserializer)?;
+        let value = Self {
+            stream_key: wire.stream_key,
+            object_key: wire.object_key,
+            generation: wire.generation,
+            kind: wire.kind,
+        };
+        value.validate().map_err(D::Error::custom)?;
+        Ok(value)
+    }
+}
+
 impl CoverageAbsence {
+    fn validate(&self) -> Result<(), SemanticContractError> {
+        validate_portable_generation("coverage absence generation", self.generation)
+    }
+
     fn coordinate(&self) -> CoverageCoordinate {
         CoverageCoordinate {
             stream_key: self.stream_key,
@@ -1046,13 +1420,51 @@ impl CoverageAbsence {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 pub struct CoverageError {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stream_key: Option<CoverageStreamKey>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub object_key: Option<CoverageObjectKey>,
     pub code: String,
+}
+
+impl<'de> Deserialize<'de> for CoverageError {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Wire {
+            #[serde(default, deserialize_with = "deserialize_present_non_null")]
+            stream_key: Option<CoverageStreamKey>,
+            #[serde(default, deserialize_with = "deserialize_present_non_null")]
+            object_key: Option<CoverageObjectKey>,
+            code: String,
+        }
+
+        let wire = Wire::deserialize(deserializer)?;
+        let value = Self {
+            stream_key: wire.stream_key,
+            object_key: wire.object_key,
+            code: wire.code,
+        };
+        value.validate().map_err(D::Error::custom)?;
+        Ok(value)
+    }
+}
+
+impl CoverageError {
+    fn validate(&self) -> Result<(), SemanticContractError> {
+        validate_coverage_error_code(&self.code)?;
+        if self.object_key.is_some() && self.stream_key.is_none() {
+            return Err(SemanticContractError::invalid(
+                "coverage error object key requires a stream key",
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -1109,6 +1521,21 @@ impl SourceCoverageSet {
         }
         self.coverage_domain.validate()?;
         self.scope.validate()?;
+        if self.points.len() > MAX_COVERAGE_POINTS_PER_SET {
+            return Err(SemanticContractError::invalid(format!(
+                "coverage set exceeds {MAX_COVERAGE_POINTS_PER_SET} points"
+            )));
+        }
+        if self.explicit_absence_or_deletion.len() > MAX_COVERAGE_ABSENCES_PER_SET {
+            return Err(SemanticContractError::invalid(format!(
+                "coverage set exceeds {MAX_COVERAGE_ABSENCES_PER_SET} absences"
+            )));
+        }
+        if self.explicit_errors.len() > MAX_COVERAGE_ERRORS_PER_SET {
+            return Err(SemanticContractError::invalid(format!(
+                "coverage set exceeds {MAX_COVERAGE_ERRORS_PER_SET} errors"
+            )));
+        }
         let mut coordinates = BTreeSet::new();
         for point in &self.points {
             point.validate()?;
@@ -1128,6 +1555,7 @@ impl SourceCoverageSet {
         }
         let mut absences = BTreeSet::new();
         for absence in &self.explicit_absence_or_deletion {
+            absence.validate()?;
             let coordinate = absence.coordinate();
             if coordinates.contains(&coordinate) || !absences.insert(coordinate) {
                 return Err(SemanticContractError::invalid(
@@ -1135,8 +1563,14 @@ impl SourceCoverageSet {
                 ));
             }
         }
+        let mut errors = BTreeSet::new();
         for error in &self.explicit_errors {
-            validate_identifier("coverage error code", &error.code)?;
+            error.validate()?;
+            if !errors.insert(error) {
+                return Err(SemanticContractError::invalid(
+                    "coverage set contains a duplicate explicit error",
+                ));
+            }
         }
         if self.completeness == CoverageSetCompleteness::Complete
             && (!self.explicit_errors.is_empty()
@@ -1161,13 +1595,17 @@ impl<'de> Deserialize<'de> for SourceCoverageSet {
         D: Deserializer<'de>,
     {
         #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
         struct Wire {
             coverage_set_contract_version: u32,
             coverage_domain: CoverageDomain,
             scope: CoverageScope,
             membership_revision: CoverageMembershipRevision,
+            #[serde(deserialize_with = "deserialize_coverage_points")]
             points: Vec<SourceCoveragePoint>,
+            #[serde(deserialize_with = "deserialize_coverage_absences")]
             explicit_absence_or_deletion: Vec<CoverageAbsence>,
+            #[serde(deserialize_with = "deserialize_coverage_errors")]
             explicit_errors: Vec<CoverageError>,
             completeness: CoverageSetCompleteness,
         }
@@ -1408,6 +1846,24 @@ mod tests {
             CoverageSetCompleteness::Complete,
         )
         .unwrap()
+    }
+
+    fn partial_coverage_wire() -> serde_json::Value {
+        let mut wire = serde_json::to_value(coverage_set(10, 1)).unwrap();
+        wire["completeness"] = json!("partial");
+        wire["explicit_absence_or_deletion"] = json!([{
+            "stream_key": CoverageStreamKey::derive("claude-code", b"other-stream").unwrap(),
+            "object_key": CoverageObjectKey::derive("claude-code", b"missing.jsonl").unwrap(),
+            "generation": 2,
+            "kind": "absent"
+        }]);
+        wire["explicit_errors"] = json!([{
+            "stream_key": CoverageStreamKey::derive("claude-code", b"error-stream").unwrap(),
+            "object_key": CoverageObjectKey::derive("claude-code", b"error.jsonl").unwrap(),
+            "code": "retryable_read"
+        }]);
+        assert!(serde_json::from_value::<SourceCoverageSet>(wire.clone()).is_ok());
+        wire
     }
 
     #[test]
@@ -1651,6 +2107,214 @@ mod tests {
         let mut encoded = serde_json::to_value(complete).unwrap();
         encoded["points"][0]["status"] = json!({ "kind": "partial" });
         assert!(serde_json::from_value::<SourceCoverageSet>(encoded).is_err());
+    }
+
+    #[test]
+    fn coverage_wire_rejects_unknown_nested_fields_and_explicit_nulls() {
+        let base = partial_coverage_wire();
+        type Mutation = (&'static str, Box<dyn Fn(&mut serde_json::Value)>);
+        let mut mutations: Vec<Mutation> = vec![
+            ("set", Box::new(|value| value["future"] = json!(true))),
+            (
+                "domain",
+                Box::new(|value| value["coverage_domain"]["future"] = json!(true)),
+            ),
+            (
+                "decode domain",
+                Box::new(|value| {
+                    value["coverage_domain"] = json!({ "kind": "decode", "future": true })
+                }),
+            ),
+            (
+                "point",
+                Box::new(|value| value["points"][0]["future"] = json!(true)),
+            ),
+            (
+                "point domain",
+                Box::new(|value| value["points"][0]["coverage_domain"]["future"] = json!(true)),
+            ),
+            (
+                "position",
+                Box::new(|value| value["points"][0]["position"]["future"] = json!(true)),
+            ),
+            (
+                "status",
+                Box::new(|value| value["points"][0]["status"]["future"] = json!(true)),
+            ),
+            (
+                "provenance",
+                Box::new(|value| value["points"][0]["provenance"]["future"] = json!(true)),
+            ),
+            (
+                "scope",
+                Box::new(|value| value["scope"]["future"] = json!(true)),
+            ),
+            (
+                "absence",
+                Box::new(|value| value["explicit_absence_or_deletion"][0]["future"] = json!(true)),
+            ),
+            (
+                "error",
+                Box::new(|value| value["explicit_errors"][0]["future"] = json!(true)),
+            ),
+            (
+                "null position",
+                Box::new(|value| value["points"][0]["position"] = serde_json::Value::Null),
+            ),
+            (
+                "null order",
+                Box::new(|value| {
+                    value["points"][0]["position"]["monotonic_order"] = serde_json::Value::Null
+                }),
+            ),
+            (
+                "null observed_at",
+                Box::new(|value| {
+                    value["points"][0]["provenance"]["observed_at"] = serde_json::Value::Null
+                }),
+            ),
+            (
+                "null source record",
+                Box::new(|value| {
+                    value["points"][0]["provenance"]["source_record_id"] = serde_json::Value::Null
+                }),
+            ),
+            (
+                "null root",
+                Box::new(|value| value["scope"]["root_entity_key"] = serde_json::Value::Null),
+            ),
+            (
+                "null error object",
+                Box::new(|value| {
+                    value["explicit_errors"][0]["object_key"] = serde_json::Value::Null
+                }),
+            ),
+            (
+                "null error stream",
+                Box::new(|value| {
+                    value["explicit_errors"][0]["stream_key"] = serde_json::Value::Null
+                }),
+            ),
+        ];
+        for (label, mutate) in mutations.drain(..) {
+            let mut wire = base.clone();
+            mutate(&mut wire);
+            assert!(
+                serde_json::from_value::<SourceCoverageSet>(wire).is_err(),
+                "coverage mutation {label} must fail closed"
+            );
+        }
+    }
+
+    #[test]
+    fn coverage_wire_enforces_portable_numbers_and_evidence_bounds() {
+        let base = partial_coverage_wire();
+        let mut zero_generation = base.clone();
+        zero_generation["points"][0]["generation"] = json!(0);
+        assert!(serde_json::from_value::<SourceCoverageSet>(zero_generation).is_err());
+        let mut zero_absence_generation = base.clone();
+        zero_absence_generation["explicit_absence_or_deletion"][0]["generation"] = json!(0);
+        assert!(serde_json::from_value::<SourceCoverageSet>(zero_absence_generation).is_err());
+
+        for path in [
+            &["points", "0", "generation"][..],
+            &["points", "0", "position", "monotonic_order"][..],
+            &["explicit_absence_or_deletion", "0", "generation"][..],
+        ] {
+            let mut wire = base.clone();
+            let mut target = &mut wire;
+            for component in &path[..path.len() - 1] {
+                target = if let Ok(index) = component.parse::<usize>() {
+                    &mut target[index]
+                } else {
+                    &mut target[*component]
+                };
+            }
+            target[path[path.len() - 1]] = json!(JS_SAFE_INTEGER_MAX_U64 + 1);
+            assert!(serde_json::from_value::<SourceCoverageSet>(wire).is_err());
+        }
+
+        let mut observed_at = base.clone();
+        observed_at["points"][0]["provenance"]["observed_at"] =
+            json!(-(JS_SAFE_INTEGER_MAX_I64 + 1));
+        assert!(serde_json::from_value::<SourceCoverageSet>(observed_at).is_err());
+
+        let mut reason = base.clone();
+        reason["points"][0]["status"] = json!({
+            "kind": "unavailable",
+            "reason": "é".repeat((MAX_COVERAGE_UNAVAILABLE_REASON_BYTES / 2) + 1)
+        });
+        assert!(serde_json::from_value::<SourceCoverageSet>(reason).is_err());
+
+        let mut errors = base.clone();
+        errors["explicit_errors"] = json!(vec![
+            json!({ "code": "bounded" });
+            MAX_COVERAGE_ERRORS_PER_SET + 1
+        ]);
+        assert!(serde_json::from_value::<SourceCoverageSet>(errors).is_err());
+
+        for invalid_code in [
+            "a".repeat(MAX_COVERAGE_ERROR_CODE_BYTES + 1),
+            "retryable-read".to_string(),
+            "read failed at /Users/alice/private\nretry".to_string(),
+        ] {
+            let mut error_code = base.clone();
+            error_code["explicit_errors"][0]["code"] = json!(invalid_code);
+            assert!(serde_json::from_value::<SourceCoverageSet>(error_code).is_err());
+        }
+
+        let mut duplicate_errors = base.clone();
+        duplicate_errors["explicit_errors"] = json!([
+            { "code": "duplicate" },
+            { "code": "duplicate" }
+        ]);
+        assert!(serde_json::from_value::<SourceCoverageSet>(duplicate_errors).is_err());
+
+        let mut orphan_object = base;
+        orphan_object["explicit_errors"] = json!([{
+            "object_key": CoverageObjectKey::derive("claude-code", b"orphan.jsonl").unwrap(),
+            "code": "orphan-object"
+        }]);
+        assert!(serde_json::from_value::<SourceCoverageSet>(orphan_object).is_err());
+    }
+
+    #[test]
+    fn public_coverage_leaf_wires_cannot_bypass_semantic_validation() {
+        let mut position = serde_json::to_value(
+            CoveragePosition::derive(
+                CoveragePositionKind::AppendCursor,
+                b"leaf-position",
+                Some(1),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        position["monotonic_order"] = json!(JS_SAFE_INTEGER_MAX_U64 + 1);
+        assert!(serde_json::from_value::<CoveragePosition>(position).is_err());
+
+        assert!(serde_json::from_value::<CoverageProvenance>(json!({
+            "observed_at": JS_SAFE_INTEGER_MAX_I64 + 1
+        }))
+        .is_err());
+
+        let mut scope = serde_json::to_value(coverage_set(10, 1).scope).unwrap();
+        scope["adapter_id"] = json!("");
+        assert!(serde_json::from_value::<CoverageScope>(scope).is_err());
+
+        let absence = &partial_coverage_wire()["explicit_absence_or_deletion"][0];
+        let mut absence = absence.clone();
+        absence["generation"] = json!(0);
+        assert!(serde_json::from_value::<CoverageAbsence>(absence).is_err());
+
+        let error = &partial_coverage_wire()["explicit_errors"][0];
+        let mut error = error.clone();
+        error["code"] = json!("read failed at /Users/alice/private\nretry");
+        assert!(serde_json::from_value::<CoverageError>(error).is_err());
+        assert!(serde_json::from_value::<CoverageError>(json!({
+            "object_key": CoverageObjectKey::derive("claude-code", b"orphan.jsonl").unwrap(),
+            "code": "orphan_object"
+        }))
+        .is_err());
     }
 
     #[test]

@@ -38,12 +38,46 @@ interface ContractFixture {
   };
 }
 
+type MutableRecord = Record<string, unknown>;
+
+interface MutableCoverageWire extends MutableRecord {
+  coverage_domain: MutableRecord;
+  scope: MutableRecord;
+  points: MutableRecord[];
+  explicit_absence_or_deletion: MutableRecord[];
+  explicit_errors: MutableRecord[];
+  completeness: string;
+}
+
 const fixture = JSON.parse(
   readFileSync(
     new URL('../../../../../crates/spaghetti-napi/fixtures/contracts/rfc012a-v1.json', import.meta.url),
     'utf8',
   ),
 ) as ContractFixture;
+
+function partialCoverageWire(): MutableCoverageWire {
+  const wire = structuredClone(fixture.coverage.baseline) as MutableCoverageWire;
+  const point = wire.points[0]!;
+  wire.completeness = 'partial';
+  wire.explicit_absence_or_deletion = [
+    {
+      stream_key: point.stream_key,
+      object_key: point.object_key,
+      generation: (point.generation as number) + 1,
+      kind: 'absent',
+    },
+  ];
+  wire.explicit_errors = [
+    {
+      stream_key: point.stream_key,
+      object_key: point.object_key,
+      code: 'retryable_read',
+    },
+  ];
+  assert.doesNotThrow(() => parseSourceCoverageSet(wire));
+  return wire;
+}
 
 interface SupportFixture {
   fixture_contract_version: number;
@@ -372,6 +406,125 @@ test('portable contract-version fields reject values outside Rust u32 range', ()
   };
   coverage.coverage_domain.version = oversized;
   assert.throws(() => parseSourceCoverageSet(coverage), ContractValidationError);
+
+  const unsafeInteger = Number.MAX_SAFE_INTEGER + 1;
+  const zeroGeneration = partialCoverageWire();
+  zeroGeneration.points[0]!.generation = 0;
+  assert.throws(() => parseSourceCoverageSet(zeroGeneration), ContractValidationError);
+
+  const zeroAbsence = partialCoverageWire();
+  zeroAbsence.explicit_absence_or_deletion[0]!.generation = 0;
+  assert.throws(() => parseSourceCoverageSet(zeroAbsence), ContractValidationError);
+
+  const unsafeCoverage = partialCoverageWire();
+  unsafeCoverage.points[0]!.generation = unsafeInteger;
+  assert.throws(() => parseSourceCoverageSet(unsafeCoverage), ContractValidationError);
+
+  const unsafeOrder = partialCoverageWire();
+  (unsafeOrder.points[0]!.position as MutableRecord).monotonic_order = unsafeInteger;
+  assert.throws(() => parseSourceCoverageSet(unsafeOrder), ContractValidationError);
+
+  const unsafeObservedAt = partialCoverageWire();
+  (unsafeObservedAt.points[0]!.provenance as MutableRecord).observed_at = -unsafeInteger;
+  assert.throws(() => parseSourceCoverageSet(unsafeObservedAt), ContractValidationError);
+
+  const unsafeAbsence = partialCoverageWire();
+  unsafeAbsence.explicit_absence_or_deletion[0]!.generation = unsafeInteger;
+  assert.throws(() => parseSourceCoverageSet(unsafeAbsence), ContractValidationError);
+});
+
+test('coverage wire rejects unknown nested fields, non-plain objects, and explicit nulls', () => {
+  const unknownMutations: Array<[string, (wire: MutableCoverageWire) => void]> = [
+    ['set', (wire) => (wire.future = true)],
+    ['domain', (wire) => (wire.coverage_domain.future = true)],
+    ['decode domain', (wire) => (wire.coverage_domain = { kind: 'decode', future: true })],
+    ['point', (wire) => (wire.points[0]!.future = true)],
+    [
+      'point domain',
+      (wire) => {
+        (wire.points[0]!.coverage_domain as MutableRecord).future = true;
+      },
+    ],
+    [
+      'position',
+      (wire) => {
+        (wire.points[0]!.position as MutableRecord).future = true;
+      },
+    ],
+    [
+      'status',
+      (wire) => {
+        (wire.points[0]!.status as MutableRecord).future = true;
+      },
+    ],
+    [
+      'provenance',
+      (wire) => {
+        (wire.points[0]!.provenance as MutableRecord).future = true;
+      },
+    ],
+    ['scope', (wire) => (wire.scope.future = true)],
+    ['absence', (wire) => (wire.explicit_absence_or_deletion[0]!.future = true)],
+    ['error', (wire) => (wire.explicit_errors[0]!.future = true)],
+  ];
+  for (const [label, mutate] of unknownMutations) {
+    const wire = partialCoverageWire();
+    mutate(wire);
+    assert.throws(() => parseSourceCoverageSet(wire), ContractValidationError, label);
+  }
+
+  const nullMutations: Array<[string, (wire: MutableCoverageWire) => void]> = [
+    ['position', (wire) => (wire.points[0]!.position = null)],
+    ['monotonic order', (wire) => ((wire.points[0]!.position as MutableRecord).monotonic_order = null)],
+    ['observed_at', (wire) => ((wire.points[0]!.provenance as MutableRecord).observed_at = null)],
+    ['root entity', (wire) => (wire.scope.root_entity_key = null)],
+    ['error object', (wire) => (wire.explicit_errors[0]!.object_key = null)],
+  ];
+  for (const [label, mutate] of nullMutations) {
+    const wire = partialCoverageWire();
+    mutate(wire);
+    assert.throws(() => parseSourceCoverageSet(wire), ContractValidationError, label);
+  }
+
+  class NonWireCoverage {}
+  const nonPlain = Object.assign(new NonWireCoverage(), partialCoverageWire());
+  assert.throws(() => parseSourceCoverageSet(nonPlain), ContractValidationError);
+});
+
+test('coverage wire enforces bounded evidence and canonical error coordinates', () => {
+  const unavailable = partialCoverageWire();
+  unavailable.points[0]!.status = { kind: 'unavailable', reason: 'é'.repeat(513) };
+  assert.throws(() => parseSourceCoverageSet(unavailable), ContractValidationError);
+
+  const oversizedIdentifier = partialCoverageWire();
+  oversizedIdentifier.explicit_errors[0]!.code = 'a'.repeat(65);
+  assert.throws(() => parseSourceCoverageSet(oversizedIdentifier), ContractValidationError);
+
+  for (const invalidCode of ['retryable-read', 'read failed at /Users/alice/private\nretry']) {
+    const freeFormError = partialCoverageWire();
+    freeFormError.explicit_errors[0]!.code = invalidCode;
+    assert.throws(() => parseSourceCoverageSet(freeFormError), ContractValidationError);
+  }
+
+  const tooManyErrors = partialCoverageWire();
+  tooManyErrors.explicit_errors = new Array(4_097);
+  assert.throws(() => parseSourceCoverageSet(tooManyErrors), ContractValidationError);
+
+  const tooManyPoints = partialCoverageWire();
+  tooManyPoints.points = new Array(250_001);
+  assert.throws(() => parseSourceCoverageSet(tooManyPoints), ContractValidationError);
+
+  const tooManyAbsences = partialCoverageWire();
+  tooManyAbsences.explicit_absence_or_deletion = new Array(250_001);
+  assert.throws(() => parseSourceCoverageSet(tooManyAbsences), ContractValidationError);
+
+  const duplicateErrors = partialCoverageWire();
+  duplicateErrors.explicit_errors.push(structuredClone(duplicateErrors.explicit_errors[0]!));
+  assert.throws(() => parseSourceCoverageSet(duplicateErrors), ContractValidationError);
+
+  const orphanObject = partialCoverageWire();
+  delete orphanObject.explicit_errors[0]!.stream_key;
+  assert.throws(() => parseSourceCoverageSet(orphanObject), ContractValidationError);
 });
 
 test('Rust, Python, and TypeScript access-report digests agree', () => {
