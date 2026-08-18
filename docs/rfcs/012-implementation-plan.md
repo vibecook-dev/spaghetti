@@ -2134,9 +2134,20 @@ only for its exact race error, retains queued poll demand and watcher
 supervision, and later polls and closes normally. Deterministic boundary hooks
 exercise both bind races and retry exhaustion without losing the last valid
 epoch. Dynamic discovery, non-append source participants, the public host/SDK
-transport, and calibrated watcher/replay policy remain open; repeated
-re-overflow still recreates the watcher recovery future, so retaining its
-cumulative reinstall/backoff budget is a later hardening item.
+transport, and calibrated watcher/replay policy remain open. The next D3 slice
+(`c26819b`) closes the remaining watcher-budget reset across those ownership
+transitions. One non-cloneable watcher now retains the exact recovery policy,
+cumulative charged attempts, and absolute next-retry deadline for the active
+backend-failure incident even when its supervision future loses to source
+handoff or repeated re-overflow. Policy drift fails terminally instead of
+extending or reshaping the frozen budget. Backend replacement commits success
+under the same lock that checks callback and routing failure, so a callback
+failure cannot be erased between precheck and generation advance; only a
+genuinely installed and successfully reconciled backend resets the incident
+for a later independent outage. The conformance matrix distinguishes the old
+three-attempt reset from the bounded two-attempt outcome, verifies exact
+deadline reuse and policy-drift rejection, and proves that a later independent
+failure receives a fresh budget.
 
 ### D4. SDK and Chopsticks migration
 
