@@ -11,6 +11,7 @@ use std::fmt;
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
+use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use super::{
@@ -88,10 +89,32 @@ pub(crate) enum CatalogEntityKind {
     Session,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub(crate) struct CatalogEntityRef {
     pub kind: CatalogEntityKind,
     pub external_ref: ExternalEntityRef,
+}
+
+impl<'de> Deserialize<'de> for CatalogEntityRef {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Wire {
+            kind: CatalogEntityKind,
+            external_ref: ExternalEntityRef,
+        }
+
+        let wire = Wire::deserialize(deserializer)?;
+        let value = Self {
+            kind: wire.kind,
+            external_ref: wire.external_ref,
+        };
+        value.validate().map_err(D::Error::custom)?;
+        Ok(value)
+    }
 }
 
 impl PartialOrd for CatalogEntityRef {
@@ -132,7 +155,7 @@ impl CatalogEntityRef {
         }
     }
 
-    fn validate(self) -> Result<(), CatalogContractError> {
+    pub(super) fn validate(self) -> Result<(), CatalogContractError> {
         if self.external_ref.external_entity_reference_version != EXTERNAL_ENTITY_REFERENCE_VERSION
         {
             return Err(CatalogContractError::invalid(
@@ -962,11 +985,12 @@ impl CatalogSessionAttachHandoff {
             ));
         }
         relation_keys.sort();
-        if relation_keys.windows(2).any(|keys| keys[0] == keys[1])
+        if relation_keys.len() > MAX_REPLACEMENT_RELATIONS
+            || relation_keys.windows(2).any(|keys| keys[0] == keys[1])
             || (member_refs.len() > 1 && relation_keys.is_empty())
         {
             return Err(CatalogContractError::invalid(
-                "multi-member catalog attach handoff requires distinct explicit relation evidence",
+                "multi-member catalog attach handoff requires bounded distinct explicit relation evidence",
             ));
         }
         Ok(Self {
@@ -976,6 +1000,41 @@ impl CatalogSessionAttachHandoff {
             selected_base_session_ref,
             locator_claim_key,
         })
+    }
+}
+
+impl<'de> Deserialize<'de> for CatalogSessionAttachHandoff {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Wire {
+            presentation_ref: CatalogEntityRef,
+            member_refs: Vec<CatalogEntityRef>,
+            relation_keys: Vec<CatalogIdentityRelationKey>,
+            selected_base_session_ref: CatalogEntityRef,
+            locator_claim_key: CatalogLocatorClaimKey,
+        }
+
+        let wire = Wire::deserialize(deserializer)?;
+        let member_refs = wire.member_refs.clone();
+        let relation_keys = wire.relation_keys.clone();
+        let value = Self::new(
+            wire.presentation_ref,
+            wire.member_refs,
+            wire.relation_keys,
+            wire.selected_base_session_ref,
+            wire.locator_claim_key,
+        )
+        .map_err(D::Error::custom)?;
+        if value.member_refs != member_refs || value.relation_keys != relation_keys {
+            return Err(D::Error::custom(
+                "catalog attach handoff members and relation keys must be canonical",
+            ));
+        }
+        Ok(value)
     }
 }
 
@@ -1287,8 +1346,14 @@ pub(crate) struct CatalogRetraction {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct CatalogAttachTarget {
-    pub session_ref: ExternalEntityRef,
+    pub session_ref: CatalogEntityRef,
+    pub locator_claim_key: CatalogLocatorClaimKey,
+    pub locator_owner: CatalogEvidenceOwner,
+    pub locator_kind: CatalogLocatorKind,
+    pub locator_basis: ProjectAssociationBasis,
+    pub locator_disclosure: CatalogDisclosureClass,
     pub locator: CatalogQualifiedValue<CatalogLocatorValue>,
+    pub provenance: Vec<SemanticRevisionRef>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -2466,8 +2531,14 @@ impl CatalogReducer {
             ));
         }
         Ok(CatalogAttachTarget {
-            session_ref: selected.external_ref,
+            session_ref: selected,
+            locator_claim_key: locator.fact.locator_claim_key,
+            locator_owner: locator.fact.owner.clone(),
+            locator_kind: locator.fact.kind,
+            locator_basis: locator.fact.basis,
+            locator_disclosure: locator.fact.locator.disclosure,
             locator: locator_value,
+            provenance: locator.fact.provenance.clone(),
         })
     }
 }

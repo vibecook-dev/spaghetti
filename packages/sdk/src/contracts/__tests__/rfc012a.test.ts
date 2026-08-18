@@ -7,6 +7,9 @@ import {
   classifyRuntimeSupport,
   compareCoverage,
   ContractValidationError,
+  parseContractVersionOffer,
+  parseContractVersionRequest,
+  parseContractVersionSelection,
   parseExternalEntityRef,
   parseNativeIdentityClaim,
   parseQualifiedValue,
@@ -299,6 +302,38 @@ test('Rust, Python, and TypeScript contract negotiation agree', () => {
   const incompatible = structuredClone(supportFixture.contract_request) as { model_major: number };
   incompatible.model_major += 1;
   assert.throws(() => selectContractVersions(incompatible, supportFixture.contract_offer), ContractValidationError);
+});
+
+test('portable contract-version fields reject values outside Rust u32 range', () => {
+  const oversized = 0x1_0000_0000;
+
+  const request = structuredClone(supportFixture.contract_request) as {
+    model_major: number;
+    coverage_contract_versions: number[];
+  };
+  request.model_major = oversized;
+  assert.throws(() => parseContractVersionRequest(request), ContractValidationError);
+  request.model_major = 1;
+  request.coverage_contract_versions[0] = oversized;
+  assert.throws(() => parseContractVersionRequest(request), ContractValidationError);
+
+  const offer = structuredClone(supportFixture.contract_offer) as {
+    fact_family_versions: Record<string, number[]>;
+  };
+  offer.fact_family_versions['interaction'] = [oversized];
+  assert.throws(() => parseContractVersionOffer(offer), ContractValidationError);
+
+  const selection = structuredClone(supportFixture.expected_contract_selection) as {
+    fact_family_versions: Record<string, number>;
+  };
+  selection.fact_family_versions['usage'] = oversized;
+  assert.throws(() => parseContractVersionSelection(selection), ContractValidationError);
+
+  const coverage = structuredClone(fixture.coverage.baseline) as {
+    coverage_domain: { version: number };
+  };
+  coverage.coverage_domain.version = oversized;
+  assert.throws(() => parseSourceCoverageSet(coverage), ContractValidationError);
 });
 
 test('Rust, Python, and TypeScript access-report digests agree', () => {

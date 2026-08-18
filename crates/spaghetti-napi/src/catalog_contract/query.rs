@@ -261,7 +261,7 @@ pub(crate) struct CatalogQueryContractSelection {
 }
 
 impl CatalogQueryContractSelection {
-    fn validate(&self) -> Result<(), CatalogContractError> {
+    pub(super) fn validate(&self) -> Result<(), CatalogContractError> {
         if self.catalog_query_contract_version != CATALOG_QUERY_CONTRACT_VERSION {
             return Err(CatalogContractError::invalid(format!(
                 "unsupported selected catalog query contract version {}",

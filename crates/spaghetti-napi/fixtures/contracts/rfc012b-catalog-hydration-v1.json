@@ -1,0 +1,282 @@
+{
+  "accepted_receipt": {
+    "attempt": 1,
+    "coalescing_key": "v1:QEe7znju_Z7F_LLEWoTs038nHJ98kkuf-kO1hwtKaSw",
+    "command_id": "v1:dfJ5tUtcgdLrunkR_k8Se1SmHHl0AYwGES9odStMWC0",
+    "emitted_at_commit": 43,
+    "outcome": {
+      "state": "accepted"
+    },
+    "prior_receipt_id": null,
+    "receipt_id": "v1:ZJ-hg0K9sVh7_iE17E-3-r7z-zaGLPWubaxG66fRCDI",
+    "request_key": "v1:sZhbMZGdfzB_bYMXBYiZra9FQ6ELuuKSMhJg_4IYGGo",
+    "scheduling_receipt_contract_version": 1,
+    "selected_base_session_ref": {
+      "external_ref": {
+        "entity_key": "v1:Jz2BFdawBuILq6jC7S3ifLjPnCCiqvou9ANBSTqAqdE",
+        "external_entity_reference_version": 1
+      },
+      "kind": "session"
+    },
+    "snapshot_id": {
+      "complete_commit": 42,
+      "coverage_plan_id": "v1:_dBJEpZZ7ECImMgnE8Lc_DjgkarKfGmAdUNVQuQ1dI8",
+      "pack_contract_version": 1,
+      "readiness_epoch": 7
+    }
+  },
+  "coalesced_command_binding": {
+    "coalescing_key": "v1:QEe7znju_Z7F_LLEWoTs038nHJ98kkuf-kO1hwtKaSw",
+    "command_id": "v1:ZbpzjoBvFrd95X27hoa6zjI9vunrDgrE8q7E5jtN0qs",
+    "request_key": "v1:BgUbibupFlMdIZCD5AiOI9aKrsbxesPRGzYkHXSwfCo",
+    "selected_base_session_ref": {
+      "external_ref": {
+        "entity_key": "v1:Jz2BFdawBuILq6jC7S3ifLjPnCCiqvou9ANBSTqAqdE",
+        "external_entity_reference_version": 1
+      },
+      "kind": "session"
+    },
+    "snapshot_id": {
+      "complete_commit": 42,
+      "coverage_plan_id": "v1:_dBJEpZZ7ECImMgnE8Lc_DjgkarKfGmAdUNVQuQ1dI8",
+      "pack_contract_version": 1,
+      "readiness_epoch": 7
+    }
+  },
+  "command": {
+    "authorization": {
+      "access_policy_digest": "v1:x_oDh6seSseq61ANylBGF0rhQS56DqqEz6RcTL8qbU4",
+      "adapter_id": "fixture-agent",
+      "authorization_id": "v1:l2WkFsgpPur3ZVQbFZhFMk0JW05prQZdmqhvfCsOmM8",
+      "catalog_declaration_digest": "v1:0wPtSOfiCHbG-p5qLR8J-ho8hebtgnREqepR8v8U99w",
+      "handoff": {
+        "locator_claim_key": "v1:qvaPb3wxEAZag6NfJNCN99_KuzbTxAq8RzQP5uAB3xQ",
+        "member_refs": [
+          {
+            "external_ref": {
+              "entity_key": "v1:Jz2BFdawBuILq6jC7S3ifLjPnCCiqvou9ANBSTqAqdE",
+              "external_entity_reference_version": 1
+            },
+            "kind": "session"
+          },
+          {
+            "external_ref": {
+              "entity_key": "v1:ZMelAs7DwYVtg0UFp-KlS4duTt3zW8-KJqLnqYzl4cs",
+              "external_entity_reference_version": 1
+            },
+            "kind": "session"
+          }
+        ],
+        "presentation_ref": {
+          "external_ref": {
+            "entity_key": "v1:ZMelAs7DwYVtg0UFp-KlS4duTt3zW8-KJqLnqYzl4cs",
+            "external_entity_reference_version": 1
+          },
+          "kind": "session"
+        },
+        "relation_keys": [
+          "v1:1kedW4-GKy1Sg3fvxOn-9NTTmJYJ9ZePgJsYJJRUU3g"
+        ],
+        "selected_base_session_ref": {
+          "external_ref": {
+            "entity_key": "v1:Jz2BFdawBuILq6jC7S3ifLjPnCCiqvou9ANBSTqAqdE",
+            "external_entity_reference_version": 1
+          },
+          "kind": "session"
+        }
+      },
+      "hydration_authorization_contract_version": 1,
+      "locator_basis": "session_directory",
+      "locator_disclosure": "local_sensitive",
+      "locator_kind": "filesystem",
+      "locator_provenance": [
+        {
+          "fact_revision_id": "v1:paIxXNfXYf0PXFkUNiiKjqy_QjSooR8wHbEUKH7ejRc",
+          "semantic_reference_contract_version": 1
+        },
+        {
+          "fact_revision_id": "v1:38dZAV5kuED8kyZyfQTtjSuo5EiOrH441xDyOegpoLg",
+          "semantic_reference_contract_version": 1
+        }
+      ],
+      "locator_source_generation": 1,
+      "source_instance_key": "v1:yNs2_0h1MBbcNTkX4LZxRbcZKe88c54mrEuAy2QKBTo",
+      "support_release_id": "fixture-agent@catalog-v1"
+    },
+    "coalescing_key": "v1:QEe7znju_Z7F_LLEWoTs038nHJ98kkuf-kO1hwtKaSw",
+    "command_id": "v1:dfJ5tUtcgdLrunkR_k8Se1SmHHl0AYwGES9odStMWC0",
+    "contract_selection": {
+      "catalog_query_contract_version": 1,
+      "contract_versions": {
+        "coverage_contract_version": 1,
+        "external_entity_reference_version": 1,
+        "fact_family_versions": {
+          "catalog.message": 1,
+          "catalog.session": 1
+        },
+        "model_major": 1,
+        "observation_contract_version": null,
+        "query_pack_version": 1,
+        "selection_contract_version": 1,
+        "semantic_revision_reference_version": 1
+      },
+      "typed_unknown": {
+        "max_payload_bytes": 4096,
+        "preserves_unknown_fields": true,
+        "preserves_unknown_variants": true,
+        "typed_unknown_contract_version": 1
+      }
+    },
+    "hydration_command_contract_version": 1,
+    "reason": "selected_session",
+    "request_key": "v1:sZhbMZGdfzB_bYMXBYiZra9FQ6ELuuKSMhJg_4IYGGo",
+    "requested_scope": {
+      "fact_family_versions": {
+        "catalog.session": 1
+      },
+      "hydration_scope_contract_version": 1,
+      "max_bytes_per_pass": 1048576,
+      "max_records_per_pass": 2048,
+      "max_source_objects_per_pass": 8
+    },
+    "snapshot_id": {
+      "complete_commit": 42,
+      "coverage_plan_id": "v1:_dBJEpZZ7ECImMgnE8Lc_DjgkarKfGmAdUNVQuQ1dI8",
+      "pack_contract_version": 1,
+      "readiness_epoch": 7
+    },
+    "source": {
+      "access_policy_digest": "v1:x_oDh6seSseq61ANylBGF0rhQS56DqqEz6RcTL8qbU4",
+      "adapter_id": "fixture-agent",
+      "catalog_declaration_digest": "v1:0wPtSOfiCHbG-p5qLR8J-ho8hebtgnREqepR8v8U99w",
+      "source_instance_key": "v1:yNs2_0h1MBbcNTkX4LZxRbcZKe88c54mrEuAy2QKBTo",
+      "support_release_id": "fixture-agent@catalog-v1"
+    }
+  },
+  "expected": {
+    "cancellation_contract_present": false,
+    "coalesces": true,
+    "raw_locator_present": false,
+    "raw_native_identity_present": false,
+    "raw_request_token_present": false,
+    "retry_attempt": 2,
+    "selected_base_is_presentation": false
+  },
+  "fixture_contract_version": 1,
+  "in_progress_receipt": {
+    "attempt": 1,
+    "coalescing_key": "v1:QEe7znju_Z7F_LLEWoTs038nHJ98kkuf-kO1hwtKaSw",
+    "command_id": "v1:ZbpzjoBvFrd95X27hoa6zjI9vunrDgrE8q7E5jtN0qs",
+    "emitted_at_commit": 44,
+    "outcome": {
+      "active_command_id": "v1:dfJ5tUtcgdLrunkR_k8Se1SmHHl0AYwGES9odStMWC0",
+      "active_receipt_id": "v1:ZJ-hg0K9sVh7_iE17E-3-r7z-zaGLPWubaxG66fRCDI",
+      "state": "in_progress"
+    },
+    "prior_receipt_id": null,
+    "receipt_id": "v1:FN36-BjqOpIaW10ijwEvjkEVlWQAomVqBqopvs7UtBA",
+    "request_key": "v1:BgUbibupFlMdIZCD5AiOI9aKrsbxesPRGzYkHXSwfCo",
+    "scheduling_receipt_contract_version": 1,
+    "selected_base_session_ref": {
+      "external_ref": {
+        "entity_key": "v1:Jz2BFdawBuILq6jC7S3ifLjPnCCiqvou9ANBSTqAqdE",
+        "external_entity_reference_version": 1
+      },
+      "kind": "session"
+    },
+    "snapshot_id": {
+      "complete_commit": 42,
+      "coverage_plan_id": "v1:_dBJEpZZ7ECImMgnE8Lc_DjgkarKfGmAdUNVQuQ1dI8",
+      "pack_contract_version": 1,
+      "readiness_epoch": 7
+    }
+  },
+  "retry_accepted_receipt": {
+    "attempt": 2,
+    "coalescing_key": "v1:QEe7znju_Z7F_LLEWoTs038nHJ98kkuf-kO1hwtKaSw",
+    "command_id": "v1:dfJ5tUtcgdLrunkR_k8Se1SmHHl0AYwGES9odStMWC0",
+    "emitted_at_commit": 46,
+    "outcome": {
+      "state": "accepted"
+    },
+    "prior_receipt_id": "v1:Wa0GNfKRE4-W7qE9Dct1cStzq4vebtUPhXHT6Wvmv1Y",
+    "receipt_id": "v1:zIhSagkpg_R-hj9zHHJwhJoU1O6Q5tfAdeYMgF-CI_k",
+    "request_key": "v1:sZhbMZGdfzB_bYMXBYiZra9FQ6ELuuKSMhJg_4IYGGo",
+    "scheduling_receipt_contract_version": 1,
+    "selected_base_session_ref": {
+      "external_ref": {
+        "entity_key": "v1:Jz2BFdawBuILq6jC7S3ifLjPnCCiqvou9ANBSTqAqdE",
+        "external_entity_reference_version": 1
+      },
+      "kind": "session"
+    },
+    "snapshot_id": {
+      "complete_commit": 42,
+      "coverage_plan_id": "v1:_dBJEpZZ7ECImMgnE8Lc_DjgkarKfGmAdUNVQuQ1dI8",
+      "pack_contract_version": 1,
+      "readiness_epoch": 7
+    }
+  },
+  "retryable_receipt": {
+    "attempt": 1,
+    "coalescing_key": "v1:QEe7znju_Z7F_LLEWoTs038nHJ98kkuf-kO1hwtKaSw",
+    "command_id": "v1:dfJ5tUtcgdLrunkR_k8Se1SmHHl0AYwGES9odStMWC0",
+    "emitted_at_commit": 45,
+    "outcome": {
+      "failure": {
+        "code": "source_busy",
+        "disposition": "retryable",
+        "retry_after_millis": 250
+      },
+      "state": "rejected"
+    },
+    "prior_receipt_id": null,
+    "receipt_id": "v1:Wa0GNfKRE4-W7qE9Dct1cStzq4vebtUPhXHT6Wvmv1Y",
+    "request_key": "v1:sZhbMZGdfzB_bYMXBYiZra9FQ6ELuuKSMhJg_4IYGGo",
+    "scheduling_receipt_contract_version": 1,
+    "selected_base_session_ref": {
+      "external_ref": {
+        "entity_key": "v1:Jz2BFdawBuILq6jC7S3ifLjPnCCiqvou9ANBSTqAqdE",
+        "external_entity_reference_version": 1
+      },
+      "kind": "session"
+    },
+    "snapshot_id": {
+      "complete_commit": 42,
+      "coverage_plan_id": "v1:_dBJEpZZ7ECImMgnE8Lc_DjgkarKfGmAdUNVQuQ1dI8",
+      "pack_contract_version": 1,
+      "readiness_epoch": 7
+    }
+  },
+  "terminal_receipt": {
+    "attempt": 1,
+    "coalescing_key": "v1:QEe7znju_Z7F_LLEWoTs038nHJ98kkuf-kO1hwtKaSw",
+    "command_id": "v1:dfJ5tUtcgdLrunkR_k8Se1SmHHl0AYwGES9odStMWC0",
+    "emitted_at_commit": 47,
+    "outcome": {
+      "failure": {
+        "code": "unsupported_locator",
+        "disposition": "terminal",
+        "retry_after_millis": null
+      },
+      "state": "rejected"
+    },
+    "prior_receipt_id": null,
+    "receipt_id": "v1:mxM0Uz9wq-H7oT1EdF8TDivygGzFITfK0wfNPPN2X2E",
+    "request_key": "v1:sZhbMZGdfzB_bYMXBYiZra9FQ6ELuuKSMhJg_4IYGGo",
+    "scheduling_receipt_contract_version": 1,
+    "selected_base_session_ref": {
+      "external_ref": {
+        "entity_key": "v1:Jz2BFdawBuILq6jC7S3ifLjPnCCiqvou9ANBSTqAqdE",
+        "external_entity_reference_version": 1
+      },
+      "kind": "session"
+    },
+    "snapshot_id": {
+      "complete_commit": 42,
+      "coverage_plan_id": "v1:_dBJEpZZ7ECImMgnE8Lc_DjgkarKfGmAdUNVQuQ1dI8",
+      "pack_contract_version": 1,
+      "readiness_epoch": 7
+    }
+  }
+}

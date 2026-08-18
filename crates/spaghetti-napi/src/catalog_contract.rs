@@ -161,8 +161,14 @@ macro_rules! opaque_digest_type {
 opaque_digest_type!(CatalogCoveragePlanId);
 opaque_digest_type!(CatalogAccessPolicyDigest);
 opaque_digest_type!(CatalogQueryFingerprint);
+opaque_digest_type!(CatalogHydrationRequestKey);
+opaque_digest_type!(CatalogHydrationCommandId);
+opaque_digest_type!(CatalogHydrationCoalescingKey);
+opaque_digest_type!(CatalogHydrationAuthorizationId);
+opaque_digest_type!(CatalogSchedulingReceiptId);
 
 pub(crate) mod evidence;
+pub(crate) mod hydration;
 pub(crate) mod query;
 
 impl CatalogAccessPolicyDigest {

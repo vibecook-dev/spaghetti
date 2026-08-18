@@ -439,13 +439,17 @@ def discover_rfc012_catalog_contract_boundary_violations() -> set[str]:
     if re.search(r"^\s*pub\s+mod\s+catalog_contract\s*;", read(lib), re.MULTILINE):
         found.add(f"{repo_path(lib)}#premature-public-catalog-contract")
 
-    portable_relative = "packages/sdk/src/contracts/rfc012b.ts"
-    portable = REPO_ROOT / portable_relative
-    contracts_root = portable.parent.resolve()
-    if not portable.exists():
-        found.add(portable_relative)
-    else:
-        pending = [portable]
+    portable_relatives = (
+        "packages/sdk/src/contracts/rfc012b.ts",
+        "packages/sdk/src/contracts/rfc012b-hydration.ts",
+    )
+    portable_roots = [REPO_ROOT / relative for relative in portable_relatives]
+    contracts_root = portable_roots[0].parent.resolve()
+    for relative, portable in zip(portable_relatives, portable_roots, strict=True):
+        if not portable.exists():
+            found.add(relative)
+    if all(portable.exists() for portable in portable_roots):
+        pending = portable_roots.copy()
         visited: set[Path] = set()
         while pending:
             importer = pending.pop().resolve()
@@ -465,8 +469,10 @@ def discover_rfc012_catalog_contract_boundary_violations() -> set[str]:
                 pending.append(target)
 
     sdk_index = REPO_ROOT / "packages/sdk/src/index.ts"
-    if "./contracts/rfc012b.js" not in RUNTIME_MODULE_RE.findall(read(sdk_index)):
-        found.add(f"{repo_path(sdk_index)}#missing-rfc012b-contract-export")
+    sdk_exports = RUNTIME_MODULE_RE.findall(read(sdk_index))
+    for export in ("./contracts/rfc012b.js", "./contracts/rfc012b-hydration.js"):
+        if export not in sdk_exports:
+            found.add(f"{repo_path(sdk_index)}#missing-{Path(export).stem}-contract-export")
     return found
 
 

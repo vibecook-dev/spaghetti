@@ -11,6 +11,8 @@ export const SOURCE_COVERAGE_SET_CONTRACT_VERSION = 1 as const;
 export const SUPPORT_SELECTION_CONTRACT_VERSION = 1 as const;
 export const CONTRACT_VERSION_SELECTION_VERSION = 1 as const;
 
+const MAX_U32 = 0xffff_ffff;
+
 export type SupportReleaseStatus = 'candidate' | 'promoted' | 'retired';
 
 export interface ArtifactVersionRange {
@@ -273,6 +275,14 @@ function positiveInteger(value: unknown, label: string): number {
   return result;
 }
 
+function contractVersion(value: unknown, label: string): number {
+  const result = positiveInteger(value, label);
+  if (result > MAX_U32) {
+    throw new ContractValidationError(`${label} exceeds u32`);
+  }
+  return result;
+}
+
 function canonicalStringList(value: unknown, label: string, requireNonempty: boolean): string[] {
   if (!Array.isArray(value) || (requireNonempty && value.length === 0)) {
     throw new ContractValidationError(`${label} must be ${requireNonempty ? 'a non-empty' : 'an'} array`);
@@ -288,7 +298,7 @@ function versionList(value: unknown, label: string, requireNonempty: boolean): n
   if (!Array.isArray(value) || (requireNonempty && value.length === 0)) {
     throw new ContractValidationError(`${label} must be ${requireNonempty ? 'a non-empty' : 'an'} version array`);
   }
-  const result = value.map((entry) => positiveInteger(entry, label));
+  const result = value.map((entry) => contractVersion(entry, label));
   if (new Set(result).size !== result.length) {
     throw new ContractValidationError(`${label} contains duplicate versions`);
   }
@@ -549,12 +559,12 @@ export function parseContractVersionRequest(value: unknown): ContractVersionRequ
   }
   const result: ContractVersionRequest = {
     selection_contract_version: CONTRACT_VERSION_SELECTION_VERSION,
-    model_major: positiveInteger(input.model_major, 'requested model major'),
-    external_entity_reference_version: positiveInteger(
+    model_major: contractVersion(input.model_major, 'requested model major'),
+    external_entity_reference_version: contractVersion(
       input.external_entity_reference_version,
       'requested external entity reference version',
     ),
-    semantic_revision_reference_version: positiveInteger(
+    semantic_revision_reference_version: contractVersion(
       input.semantic_revision_reference_version,
       'requested semantic revision reference version',
     ),
@@ -585,7 +595,7 @@ export function parseContractVersionOffer(value: unknown): ContractVersionOffer 
   }
   return {
     selection_contract_version: CONTRACT_VERSION_SELECTION_VERSION,
-    model_major: positiveInteger(input.model_major, 'offered model major'),
+    model_major: contractVersion(input.model_major, 'offered model major'),
     external_entity_reference_versions: versionList(
       input.external_entity_reference_versions,
       'offered external entity reference versions',
@@ -620,25 +630,25 @@ export function parseContractVersionSelection(value: unknown): ContractVersionSe
   const factFamilyVersions = Object.fromEntries(
     Object.entries(families).map(([family, version]) => [
       nonEmptyString(family, 'selected fact family'),
-      positiveInteger(version, `selected fact family ${family}`),
+      contractVersion(version, `selected fact family ${family}`),
     ]),
   );
   const optionalVersion = (version: unknown, label: string): number | null => {
     if (version === null || version === undefined) return null;
-    return positiveInteger(version, label);
+    return contractVersion(version, label);
   };
   return {
     selection_contract_version: CONTRACT_VERSION_SELECTION_VERSION,
-    model_major: positiveInteger(input.model_major, 'selected model major'),
-    external_entity_reference_version: positiveInteger(
+    model_major: contractVersion(input.model_major, 'selected model major'),
+    external_entity_reference_version: contractVersion(
       input.external_entity_reference_version,
       'selected external entity reference version',
     ),
-    semantic_revision_reference_version: positiveInteger(
+    semantic_revision_reference_version: contractVersion(
       input.semantic_revision_reference_version,
       'selected semantic revision reference version',
     ),
-    coverage_contract_version: positiveInteger(input.coverage_contract_version, 'selected coverage contract version'),
+    coverage_contract_version: contractVersion(input.coverage_contract_version, 'selected coverage contract version'),
     fact_family_versions: factFamilyVersions,
     query_pack_version: optionalVersion(input.query_pack_version, 'selected query pack version'),
     observation_contract_version: optionalVersion(
@@ -794,13 +804,13 @@ function parseCoverageDomain(value: unknown): CoverageDomain {
       return {
         kind: 'fact_family',
         family: nonEmptyString(input.family, 'fact family'),
-        version: positiveInteger(input.version, 'fact-family version'),
+        version: contractVersion(input.version, 'fact-family version'),
       };
     case 'projection_pack':
       return {
         kind: 'projection_pack',
         pack: nonEmptyString(input.pack, 'projection pack'),
-        version: positiveInteger(input.version, 'projection-pack version'),
+        version: contractVersion(input.version, 'projection-pack version'),
       };
     default:
       throw new ContractValidationError('unsupported coverage domain');

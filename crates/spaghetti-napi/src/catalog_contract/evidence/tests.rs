@@ -1358,7 +1358,7 @@ fn locator_disclosure_and_attach_require_one_live_disclosed_base_member() {
     let target = reducer
         .resolve_attach_target(&handoff, CatalogPolicyView::LOCAL)
         .unwrap();
-    assert_eq!(target.session_ref, selected_ref.external_ref);
+    assert_eq!(target.session_ref, selected_ref);
     assert_eq!(
         target
             .locator
