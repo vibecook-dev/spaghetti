@@ -49,6 +49,8 @@ use crate::source::{
     StartupPhase, WatchBeforeScan, MAX_IDENTITY_VALUE_BYTES,
 };
 
+mod usage_wire;
+
 /// One exact host-approved object locator. The locator is installed during
 /// attachment and cannot be replaced by a decoder or by an access call.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1725,6 +1727,7 @@ pub struct ScopedDeliveredObservation {
 pub struct ScopedObservationEnvelopeRoot {
     pub session_ref: ExternalEntityRef,
     pub session_key: CanonicalEntityKey,
+    pub root_actor_run_key: CanonicalEntityKey,
     pub native_session_claim: Option<NativeIdentityClaim>,
 }
 
@@ -5588,6 +5591,7 @@ impl ScopedObservationEnvelopeMapper {
             root: ScopedObservationEnvelopeRoot {
                 session_ref: self.root.session_ref,
                 session_key: self.root.session_key,
+                root_actor_run_key: self.root.root_actor_run_key,
                 native_session_claim: self.root.native_session_claim.clone(),
             },
             actor,

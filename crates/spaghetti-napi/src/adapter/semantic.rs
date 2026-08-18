@@ -620,7 +620,11 @@ where
         D: Deserializer<'de>,
     {
         #[derive(Deserialize)]
+        #[serde(bound(
+            deserialize = "T: Deserialize<'de>, A: Deserialize<'de>, P: Deserialize<'de>"
+        ))]
         struct Wire<T, A, P> {
+            #[serde(deserialize_with = "deserialize_required_option")]
             value: Option<T>,
             quality: QualifiedValueQuality,
             authority: A,
@@ -628,6 +632,14 @@ where
             unknown_reason: Option<QualifiedUnknownReason>,
             effective_at: Option<i64>,
             provenance: P,
+        }
+
+        fn deserialize_required_option<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+        where
+            D: Deserializer<'de>,
+            T: Deserialize<'de>,
+        {
+            Option::<T>::deserialize(deserializer)
         }
 
         let wire = Wire::deserialize(deserializer)?;
@@ -1558,6 +1570,14 @@ mod tests {
             "authority": "native-response",
             "completeness": "unknown",
             "effective_at": null,
+            "provenance": []
+        }))
+        .is_err());
+        assert!(serde_json::from_value::<QualifiedValue<u64>>(json!({
+            "quality": "unknown",
+            "authority": "native-response",
+            "completeness": "unknown",
+            "unknown_reason": "missing",
             "provenance": []
         }))
         .is_err());

@@ -413,7 +413,20 @@ def discover_rfc012_scoped_host_boundary_violations() -> set[str]:
     path = REPO_ROOT / relative
     found: set[str] = set()
     scoped_text = production_rust_text(path) if path.exists() else ""
-    if not path.exists() or RFC012_SCOPED_HOST_FORBIDDEN_RE.search(scoped_text):
+    scoped_dir = path.with_suffix("")
+    production_scoped_paths = [
+        candidate
+        for candidate in production_rust()
+        if candidate == path or candidate.is_relative_to(scoped_dir)
+    ]
+    if (
+        not path.exists()
+        or not production_scoped_paths
+        or any(
+            RFC012_SCOPED_HOST_FORBIDDEN_RE.search(production_rust_text(candidate))
+            for candidate in production_scoped_paths
+        )
+    ):
         found.add(relative)
     required_observation_bindings = (
         "observation_contract_request: ObservationContractRequest",
@@ -428,6 +441,20 @@ def discover_rfc012_scoped_host_boundary_violations() -> set[str]:
     )
     if any(binding not in scoped_text for binding in required_observation_bindings):
         found.add(f"{relative}#missing-observation-contract-binding")
+    usage_wire = scoped_dir / "usage_wire.rs"
+    usage_wire_text = (
+        production_rust_text(usage_wire) if usage_wire in production_scoped_paths else ""
+    )
+    required_usage_wire_bindings = (
+        "pub(crate) struct ScopedUsageEnvelopeWire",
+        "from_wire_value_for_context(",
+        "expected_selection: &ObservationContractSelection",
+        "expected_root: &ScopedObservationRootIdentity",
+        "expected_sources: &[ScopedSourceObjectIdentity]",
+        "ScopedUsageEnvelopeContractError::UnsupportedEvent",
+    )
+    if any(binding not in usage_wire_text for binding in required_usage_wire_bindings):
+        found.add(f"{relative}#missing-contextual-usage-envelope-contract")
     lib = REPO_ROOT / "crates/spaghetti-napi/src/lib.rs"
     if re.search(r"^\s*pub\s+mod\s+scoped_observation\s*;", read(lib), re.MULTILINE):
         found.add(f"{repo_path(lib)}#premature-public-scoped-host")
@@ -459,8 +486,10 @@ def discover_rfc012_scoped_host_boundary_violations() -> set[str]:
 
     portable_relative = "packages/sdk/src/contracts/rfc012d.ts"
     portable = REPO_ROOT / portable_relative
+    usage_portable_relative = "packages/sdk/src/contracts/rfc012d-usage-envelope.ts"
+    usage_portable = REPO_ROOT / usage_portable_relative
     contracts_root = portable.parent.resolve()
-    if not portable.exists():
+    if not portable.exists() or not usage_portable.exists():
         found.add(portable_relative)
     else:
         portable_text = read(portable)
@@ -469,7 +498,14 @@ def discover_rfc012_scoped_host_boundary_violations() -> set[str]:
             or "export function parseObservationCapabilities(" not in portable_text
         ):
             found.add(f"{portable_relative}#missing-capabilities-contract")
-        pending = [portable]
+        usage_portable_text = read(usage_portable)
+        if (
+            "export interface ScopedUsageEnvelope" not in usage_portable_text
+            or "export function parseScopedUsageEnvelope(" not in usage_portable_text
+            or "expectedContextInput: unknown" not in usage_portable_text
+        ):
+            found.add(f"{usage_portable_relative}#missing-contextual-usage-envelope-contract")
+        pending = [portable, usage_portable]
         visited: set[Path] = set()
         while pending:
             importer = pending.pop().resolve()
@@ -491,6 +527,10 @@ def discover_rfc012_scoped_host_boundary_violations() -> set[str]:
     sdk_index = REPO_ROOT / "packages/sdk/src/index.ts"
     if "./contracts/rfc012d.js" not in RUNTIME_MODULE_RE.findall(read(sdk_index)):
         found.add(f"{repo_path(sdk_index)}#missing-rfc012d-contract-export")
+    if "./contracts/rfc012d-usage-envelope.js" not in RUNTIME_MODULE_RE.findall(
+        read(sdk_index)
+    ):
+        found.add(f"{repo_path(sdk_index)}#missing-rfc012d-usage-envelope-export")
     return found
 
 

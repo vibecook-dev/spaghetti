@@ -322,7 +322,7 @@ impl ObservationContractSelection {
         Ok(value)
     }
 
-    pub(super) fn from_wire_value_for_expected(
+    pub(crate) fn from_wire_value_for_expected(
         value: serde_json::Value,
         expected: &Self,
     ) -> Result<Self, ObservationNegotiationError> {

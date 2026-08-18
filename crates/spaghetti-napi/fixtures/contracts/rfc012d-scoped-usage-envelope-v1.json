@@ -1,0 +1,434 @@
+{
+  "context": {
+    "authorized_sources": [
+      {
+        "instance_key": "v1:UkcnJtzGi0KMxTZ3LDHthyzHEJrzadw3OchLEAeT5x0",
+        "object_key": "v1:SRG0QF0Et88Kr5hN7FPCE3nRbOHbKWx5OidxzlxEc5g",
+        "stream_key": "v1:dFcHPjBM4beFm_zygRHbzKMfUBDjZSm19jOwPp0wYZc"
+      }
+    ],
+    "contract_selection": {
+      "contract_versions": {
+        "coverage_contract_version": 1,
+        "external_entity_reference_version": 1,
+        "fact_family_versions": {
+          "runtime.usage-v2": 1
+        },
+        "model_major": 1,
+        "observation_contract_version": 1,
+        "query_pack_version": null,
+        "selection_contract_version": 1,
+        "semantic_revision_reference_version": 1
+      },
+      "envelope_contract_version": 1,
+      "event_contract_version": 1,
+      "lifecycle_contract_version": 1,
+      "observation_negotiation_contract_version": 1
+    },
+    "root": {
+      "native_session_claim": {
+        "entity_ref": {
+          "entity_key": "v1:GJjjKG_JL_dSgMRVMjX9XP06spWfeUp5s73g4O0_n0s",
+          "external_entity_reference_version": 1
+        },
+        "identity": {
+          "authority": "fixture",
+          "completeness": "complete",
+          "provenance": [],
+          "quality": "native_claimed",
+          "value": {
+            "native_id": "native-session",
+            "native_namespace": "fixture.session"
+          }
+        }
+      },
+      "root_actor_run_key": "v1:sCHozZZGLGMwqR6Pipvmjce35mshs-Q_d_xFrL0WKRY",
+      "session_key": "v1:GJjjKG_JL_dSgMRVMjX9XP06spWfeUp5s73g4O0_n0s",
+      "session_ref": {
+        "entity_key": "v1:GJjjKG_JL_dSgMRVMjX9XP06spWfeUp5s73g4O0_n0s",
+        "external_entity_reference_version": 1
+      }
+    }
+  },
+  "expected": {
+    "complete_event_union": false,
+    "fact_family": "runtime.usage-v2",
+    "fact_family_contract_version": 1,
+    "native_payload_disclosure": "withheld_at_projection_boundary",
+    "unsupported_variants": "source_and_observer_lifecycle_controls"
+  },
+  "fixture_contract_version": 1,
+  "reset_retraction": {
+    "actor": {
+      "native_actor_id": null,
+      "native_actor_type": null,
+      "native_session_id": "native-session",
+      "parent_run_key": null,
+      "role": "child",
+      "root_session_key": "v1:GJjjKG_JL_dSgMRVMjX9XP06spWfeUp5s73g4O0_n0s",
+      "run_key": "v1:nPxybb6UztUZeoWsWZTJwgWaakpGjMv2i2C9gpaxuaM"
+    },
+    "actor_attribution": "derived_exact",
+    "affiliations": {
+      "actor_run_key": "v1:nPxybb6UztUZeoWsWZTJwgWaakpGjMv2i2C9gpaxuaM",
+      "completeness": "unknown",
+      "derived_from_revision_refs": [],
+      "member_key": null,
+      "native_team_id": null,
+      "native_workflow_id": null,
+      "team_key": null,
+      "team_name": null,
+      "workflow_key": null
+    },
+    "contract_selection": {
+      "contract_versions": {
+        "coverage_contract_version": 1,
+        "external_entity_reference_version": 1,
+        "fact_family_versions": {
+          "runtime.usage-v2": 1
+        },
+        "model_major": 1,
+        "observation_contract_version": 1,
+        "query_pack_version": null,
+        "selection_contract_version": 1,
+        "semantic_revision_reference_version": 1
+      },
+      "envelope_contract_version": 1,
+      "event_contract_version": 1,
+      "lifecycle_contract_version": 1,
+      "observation_negotiation_contract_version": 1
+    },
+    "contract_version": 1,
+    "event": {
+      "fact_family": "runtime.usage-v2",
+      "fact_family_contract_version": 1,
+      "fact_id": "v1:q9u_VKNBf-CxsWWtA9N7w5l-no2x7laDKVgyfVEgraY",
+      "kind": "usage_v2",
+      "operation": "retract",
+      "retraction": {
+        "kind": "reset",
+        "new_generation": 2,
+        "old_generation": 1,
+        "reason": "truncated"
+      },
+      "revision": {
+        "actor_run": "v1:nPxybb6UztUZeoWsWZTJwgWaakpGjMv2i2C9gpaxuaM",
+        "buckets": {
+          "cache_creation_input_tokens": {
+            "authority": "native_response",
+            "completeness": "complete",
+            "provenance": {
+              "native_field": "message.usage.cache_creation_input_tokens",
+              "normalization_contract_version": 1
+            },
+            "quality": "exact",
+            "value": 13
+          },
+          "cache_read_input_tokens": {
+            "authority": "native_response",
+            "completeness": "complete",
+            "provenance": {
+              "native_field": "message.usage.cache_read_input_tokens",
+              "normalization_contract_version": 1
+            },
+            "quality": "exact",
+            "value": 14
+          },
+          "input_tokens": {
+            "authority": "native_response",
+            "completeness": "complete",
+            "provenance": {
+              "native_field": "message.usage.input_tokens",
+              "normalization_contract_version": 1
+            },
+            "quality": "exact",
+            "value": 11
+          },
+          "output_tokens": {
+            "authority": "native_response",
+            "completeness": "complete",
+            "provenance": {
+              "native_field": "message.usage.output_tokens",
+              "normalization_contract_version": 1
+            },
+            "quality": "exact",
+            "value": 12
+          }
+        },
+        "effort": null,
+        "model": {
+          "authority": "native_response",
+          "completeness": "complete",
+          "provenance": {
+            "native_field": "message.model",
+            "normalization_contract_version": 1
+          },
+          "quality": "exact",
+          "value": "model-1"
+        },
+        "native_message_id": "message-1",
+        "request_id": "request-1",
+        "response_identity": "native_message_id",
+        "response_key": "bWVzc2FnZS0x",
+        "session": "v1:GJjjKG_JL_dSgMRVMjX9XP06spWfeUp5s73g4O0_n0s",
+        "source_time": {
+          "quality": "NativeExact",
+          "value": "2026-08-18T00:00:00Z"
+        }
+      }
+    },
+    "event_id": "v1:aDQvNjkf9-h3F6-IBOglpgqI-A-QymNkQgsYly72ry0",
+    "evidence": {
+      "authority": "common_reducer",
+      "completeness": "complete",
+      "effective_at": {
+        "quality": "NativeExact",
+        "value": "2026-08-18T00:00:00Z"
+      },
+      "quality": "derived"
+    },
+    "native_evidence": {
+      "kind": "withheld",
+      "media_type": "application/x-ndjson",
+      "payload_hash": "v1:KKdg6yq2RnKBgBvB56JT8jRbRYTfAZyj8tiHhJDE5PI",
+      "reason": "projection_boundary",
+      "state": "present"
+    },
+    "native_time": {
+      "quality": "NativeExact",
+      "value": "2026-08-18T00:00:00Z"
+    },
+    "observed_at": 55,
+    "observer_sequence": 2,
+    "phase": "correction",
+    "root": {
+      "native_session_claim": {
+        "entity_ref": {
+          "entity_key": "v1:GJjjKG_JL_dSgMRVMjX9XP06spWfeUp5s73g4O0_n0s",
+          "external_entity_reference_version": 1
+        },
+        "identity": {
+          "authority": "fixture",
+          "completeness": "complete",
+          "provenance": [],
+          "quality": "native_claimed",
+          "value": {
+            "native_id": "native-session",
+            "native_namespace": "fixture.session"
+          }
+        }
+      },
+      "root_actor_run_key": "v1:sCHozZZGLGMwqR6Pipvmjce35mshs-Q_d_xFrL0WKRY",
+      "session_key": "v1:GJjjKG_JL_dSgMRVMjX9XP06spWfeUp5s73g4O0_n0s",
+      "session_ref": {
+        "entity_key": "v1:GJjjKG_JL_dSgMRVMjX9XP06spWfeUp5s73g4O0_n0s",
+        "external_entity_reference_version": 1
+      }
+    },
+    "scope_epoch": 1,
+    "scoped_usage_envelope_contract_version": 1,
+    "semantic_revision_ref": {
+      "fact_revision_id": "v1:z7zmfF1XqbbdUTiSE9Q_ZRcdPymxKqojJMstatQy6bE",
+      "semantic_reference_contract_version": 1
+    },
+    "source": {
+      "byte_range": {
+        "end": 20,
+        "start": 10
+      },
+      "cursor_end": "v1:AQEAAAAAAAAAFA",
+      "cursor_start": "v1:AQEAAAAAAAAACg",
+      "generation": 1,
+      "instance_key": "v1:UkcnJtzGi0KMxTZ3LDHthyzHEJrzadw3OchLEAeT5x0",
+      "locator_id": null,
+      "object_key": "v1:SRG0QF0Et88Kr5hN7FPCE3nRbOHbKWx5OidxzlxEc5g",
+      "record_index": 0,
+      "source_record_id": "v1:y99RUwPhGB3iVeWe6rFg8Z1h_D5bIEsv_xNYcx0QZd0",
+      "stream_key": "v1:dFcHPjBM4beFm_zygRHbzKMfUBDjZSm19jOwPp0wYZc"
+    }
+  },
+  "upsert": {
+    "actor": {
+      "native_actor_id": null,
+      "native_actor_type": null,
+      "native_session_id": "native-session",
+      "parent_run_key": null,
+      "role": "child",
+      "root_session_key": "v1:GJjjKG_JL_dSgMRVMjX9XP06spWfeUp5s73g4O0_n0s",
+      "run_key": "v1:nPxybb6UztUZeoWsWZTJwgWaakpGjMv2i2C9gpaxuaM"
+    },
+    "actor_attribution": "derived_exact",
+    "affiliations": {
+      "actor_run_key": "v1:nPxybb6UztUZeoWsWZTJwgWaakpGjMv2i2C9gpaxuaM",
+      "completeness": "unknown",
+      "derived_from_revision_refs": [],
+      "member_key": null,
+      "native_team_id": null,
+      "native_workflow_id": null,
+      "team_key": null,
+      "team_name": null,
+      "workflow_key": null
+    },
+    "contract_selection": {
+      "contract_versions": {
+        "coverage_contract_version": 1,
+        "external_entity_reference_version": 1,
+        "fact_family_versions": {
+          "runtime.usage-v2": 1
+        },
+        "model_major": 1,
+        "observation_contract_version": 1,
+        "query_pack_version": null,
+        "selection_contract_version": 1,
+        "semantic_revision_reference_version": 1
+      },
+      "envelope_contract_version": 1,
+      "event_contract_version": 1,
+      "lifecycle_contract_version": 1,
+      "observation_negotiation_contract_version": 1
+    },
+    "contract_version": 1,
+    "event": {
+      "fact_family": "runtime.usage-v2",
+      "fact_family_contract_version": 1,
+      "fact_id": "v1:q9u_VKNBf-CxsWWtA9N7w5l-no2x7laDKVgyfVEgraY",
+      "kind": "usage_v2",
+      "operation": "upsert",
+      "retraction": null,
+      "revision": {
+        "actor_run": "v1:nPxybb6UztUZeoWsWZTJwgWaakpGjMv2i2C9gpaxuaM",
+        "buckets": {
+          "cache_creation_input_tokens": {
+            "authority": "native_response",
+            "completeness": "complete",
+            "provenance": {
+              "native_field": "message.usage.cache_creation_input_tokens",
+              "normalization_contract_version": 1
+            },
+            "quality": "exact",
+            "value": 13
+          },
+          "cache_read_input_tokens": {
+            "authority": "native_response",
+            "completeness": "complete",
+            "provenance": {
+              "native_field": "message.usage.cache_read_input_tokens",
+              "normalization_contract_version": 1
+            },
+            "quality": "exact",
+            "value": 14
+          },
+          "input_tokens": {
+            "authority": "native_response",
+            "completeness": "complete",
+            "provenance": {
+              "native_field": "message.usage.input_tokens",
+              "normalization_contract_version": 1
+            },
+            "quality": "exact",
+            "value": 11
+          },
+          "output_tokens": {
+            "authority": "native_response",
+            "completeness": "complete",
+            "provenance": {
+              "native_field": "message.usage.output_tokens",
+              "normalization_contract_version": 1
+            },
+            "quality": "exact",
+            "value": 12
+          }
+        },
+        "effort": null,
+        "model": {
+          "authority": "native_response",
+          "completeness": "complete",
+          "provenance": {
+            "native_field": "message.model",
+            "normalization_contract_version": 1
+          },
+          "quality": "exact",
+          "value": "model-1"
+        },
+        "native_message_id": "message-1",
+        "request_id": "request-1",
+        "response_identity": "native_message_id",
+        "response_key": "bWVzc2FnZS0x",
+        "session": "v1:GJjjKG_JL_dSgMRVMjX9XP06spWfeUp5s73g4O0_n0s",
+        "source_time": {
+          "quality": "NativeExact",
+          "value": "2026-08-18T00:00:00Z"
+        }
+      }
+    },
+    "event_id": "v1:4kAG_gZLj-2k9d53kn5yVHvBfNyaa7DlChPJJvBQUqY",
+    "evidence": {
+      "authority": "native_record",
+      "completeness": "complete",
+      "effective_at": {
+        "quality": "NativeExact",
+        "value": "2026-08-18T00:00:00Z"
+      },
+      "quality": "exact"
+    },
+    "native_evidence": {
+      "kind": "withheld",
+      "media_type": "application/x-ndjson",
+      "payload_hash": "v1:KKdg6yq2RnKBgBvB56JT8jRbRYTfAZyj8tiHhJDE5PI",
+      "reason": "projection_boundary",
+      "state": "present"
+    },
+    "native_time": {
+      "quality": "NativeExact",
+      "value": "2026-08-18T00:00:00Z"
+    },
+    "observed_at": 44,
+    "observer_sequence": 1,
+    "phase": "bootstrap",
+    "root": {
+      "native_session_claim": {
+        "entity_ref": {
+          "entity_key": "v1:GJjjKG_JL_dSgMRVMjX9XP06spWfeUp5s73g4O0_n0s",
+          "external_entity_reference_version": 1
+        },
+        "identity": {
+          "authority": "fixture",
+          "completeness": "complete",
+          "provenance": [],
+          "quality": "native_claimed",
+          "value": {
+            "native_id": "native-session",
+            "native_namespace": "fixture.session"
+          }
+        }
+      },
+      "root_actor_run_key": "v1:sCHozZZGLGMwqR6Pipvmjce35mshs-Q_d_xFrL0WKRY",
+      "session_key": "v1:GJjjKG_JL_dSgMRVMjX9XP06spWfeUp5s73g4O0_n0s",
+      "session_ref": {
+        "entity_key": "v1:GJjjKG_JL_dSgMRVMjX9XP06spWfeUp5s73g4O0_n0s",
+        "external_entity_reference_version": 1
+      }
+    },
+    "scope_epoch": 1,
+    "scoped_usage_envelope_contract_version": 1,
+    "semantic_revision_ref": {
+      "fact_revision_id": "v1:z7zmfF1XqbbdUTiSE9Q_ZRcdPymxKqojJMstatQy6bE",
+      "semantic_reference_contract_version": 1
+    },
+    "source": {
+      "byte_range": {
+        "end": 20,
+        "start": 10
+      },
+      "cursor_end": "v1:AQEAAAAAAAAAFA",
+      "cursor_start": "v1:AQEAAAAAAAAACg",
+      "generation": 1,
+      "instance_key": "v1:UkcnJtzGi0KMxTZ3LDHthyzHEJrzadw3OchLEAeT5x0",
+      "locator_id": null,
+      "object_key": "v1:SRG0QF0Et88Kr5hN7FPCE3nRbOHbKWx5OidxzlxEc5g",
+      "record_index": 0,
+      "source_record_id": "v1:y99RUwPhGB3iVeWe6rFg8Z1h_D5bIEsv_xNYcx0QZd0",
+      "stream_key": "v1:dFcHPjBM4beFm_zygRHbzKMfUBDjZSm19jOwPp0wYZc"
+    }
+  }
+}

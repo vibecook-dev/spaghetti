@@ -1604,6 +1604,22 @@ Current landing status (2026-08-18):
   envelope for the forthcoming contextual wire parser. Lifecycle versioning
   remains a separate selected axis; this correction does not yet freeze or
   expose the portable event/envelope union; and
+- the first contextual envelope wire slice now freezes only the implemented
+  `runtime.usage-v2` v1 upsert/retraction projection. Rust serialization
+  withholds native payload and locator data, while strict consumption requires
+  the caller-held negotiated selection, exact root (including the root actor
+  run), and a nonempty bounded set of authorized source coordinates. It
+  rejects omitted canonical fields, unknown nested meaning, unsafe portable
+  integers, cursor/range or generation drift, unsupported enrichment, and
+  unbounded identity/runtime text; it also recomputes the semantic revision
+  and delivery event identities from the received normalized value and source
+  occurrence. Portable TypeScript independently validates the Rust-produced
+  fixture's shape, bounds, operation/evidence coherence, and caller-held
+  context. It deliberately does not claim to recompute the native BLAKE3
+  identities: the crate-private Rust contextual parser remains the integrity
+  boundary before this DTO may cross into portable code. Source and observer
+  lifecycle controls, typed future event preservation, native transport, and
+  public N-API iteration remain gated on the complete envelope union; and
 - the architecture checker forbids store/query/N-API/concrete-adapter imports
   and premature native public export from the provisional composition and
   negotiation roots, while keeping the portable negotiation graph contract-only.

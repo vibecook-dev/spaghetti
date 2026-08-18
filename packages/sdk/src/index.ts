@@ -30,6 +30,7 @@ export * from './contracts/rfc012c.js';
 // RFC 012D exact-version observation negotiation. Event/envelope DTOs and the
 // native observer transport remain gated on the complete scoped contract.
 export * from './contracts/rfc012d.js';
+export * from './contracts/rfc012d-usage-envelope.js';
 
 // Transport-neutral async client and the sole-owner production service.
 export * from './client/index.js';
