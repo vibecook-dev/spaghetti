@@ -541,10 +541,30 @@ selected pack, retained snapshot, query fingerprint, sort specification, and
 cursor, with JavaScript-safe snapshot counters. The module remains free of
 engine execution, snapshot retention, storage, hydration, and N-API exposure.
 
-B1 remains `In progress`: hydration commands/receipts, complete catalog page,
-readiness, and resolution DTO parity, snapshot-expiration transport, and the
-gated public N-API surface remain open. B2 source compositions and B3 durable
-transactional persistence, outbox, and restart parity have not started.
+The fourth library-first slice keeps hydration separate from read-only queries
+and defines idempotent selected-base-session commands bound to the exact
+negotiated query selection, retained snapshot and coverage-plan source,
+support release, catalog declaration, access policy, reducer-proven locator
+authorization, and bounded fact-family/pass scope. The locator authorization
+freezes canonical semantic provenance plus locator kind, basis, disclosure,
+source generation, and the relation-proven representative-to-base handoff;
+the displayed representative remains a valid target when it is itself the
+selected disclosed base member. Stable request keys reject retargeting, while
+equal work under distinct request keys coalesces exactly. Rust-derived
+scheduling receipts bind accepted, already-satisfied, in-progress, retryable,
+and terminal outcomes to attempt/prior lineage and, for in-progress work, the
+exact accepted active command and receipt. Portable TypeScript validates the
+Rust fixture against caller-held command, requested-scope, prior-receipt, and
+active-schedule context, and shared portable contract-version parsing now
+rejects values outside Rust's `u32` range. The contract carries no raw request
+token, native identity, or locator and deliberately adds no scheduler, source
+read, storage, cancellation, hydration execution, or N-API authority.
+
+B1 remains `In progress`: complete catalog page, readiness, and resolution DTO
+parity, snapshot-expiration transport, and the gated public N-API surface
+remain open. B2 source compositions and B3 durable transactional persistence,
+outbox, and restart parity have not started; scheduling and hydration execution
+remain later integration work.
 
 ### B2. Catalog source compositions
 
@@ -1352,9 +1372,29 @@ Current landing status (2026-08-17):
   one source owner retains exclusive mutable epoch state while `poll()` and
   ordered event delivery remain concurrent. The attach-before-root, later
   creation path proves one shared offered watermark and matching lifecycle
-  event through this bridge. An automatic long-lived source-owner task, owned
-  multi-object request bindings, and public portable lifecycle transport remain
-  open;
+  event through this bridge;
+- the active epoch can now transfer into one non-cloneable, attachment-
+  registered async source owner with an owned exact binding for every current
+  append relation. Construction revalidates the authorized declaration,
+  complete relation set, access bounds, and the opaque access object/parent/
+  depth plus source/stream/object/media lineage permanently established by the
+  first authorized bootstrap access. Failed construction returns the intact
+  epoch and redacted bindings; native identity values and origin IDs never
+  enter `Debug`. Each attempt creates only short-lived borrowed requests,
+  refreshes observation time, reserves the coalesced poll pass, and retains
+  exclusive source/coverage/reducer state. The owner holds a close-barrier
+  operation for its whole lifetime and returns the intact epoch after
+  cancellation or classified failure;
+- bounded delivery now has a separate retained producer-capacity generation.
+  Dequeue, explicit epoch supersession, terminal failure, and drain close wake
+  a parked owner without a check-then-sleep race. Semantic, retained-native,
+  and source-control queue-full outcomes wait for that exact capacity owner and
+  never manufacture continuity loss; batch/admission/configuration failures do
+  not masquerade as recoverable pressure. Source/decode transients use capped,
+  cancellation-prioritized exponential delay, while terminal errors return to
+  the still-open per-object/resync supervisor seam. The deletion-under-control-
+  pressure async matrix proves no retry spin, committed-admission flush before
+  fresh access, request-local poll completion, and close acknowledgement;
 - a concrete attachment-owned `notify` watcher now derives consolidated
   physical anchors no broader than the host-authorized access roots, rejects
   missing or filesystem-wide roots, and filters unrelated/access-only paths
@@ -1384,8 +1424,8 @@ Current landing status (2026-08-17):
   stops its backend/registration without implicitly closing the event drain,
   so the consumer can apply that failure before owning the independent close
   barrier. Default timing values remain provisional internal policy, not
-  promoted performance gates. The automatic source-owner loop, remaining
-  portable-host wiring, and policy calibration remain open;
+  promoted performance gates. Integrated watcher/source-owner task spawning,
+  remaining portable-host wiring, and policy calibration remain open;
 - one pass is active at a time, a later pass receives fresh bounds, close is
   idempotent, and the frozen access report excludes paths, identity values, and
   content; and
@@ -1403,9 +1443,10 @@ and complete scope coverage,
 dynamic/discovered scope membership beyond the attachment's current exact
 known-object grants and family coverage beyond usage-v2,
 complete multi-family replacement manifests, whole-scope discovery and source
-state beyond the current exact append-object set, the automatic watcher source-
-owner loop, owned multi-object pass bindings, remaining portable-host wiring,
-and policy calibration, plus re-overflow orchestration,
+state beyond the current exact append-object set, integrated watcher/source-
+owner supervision, per-object error/retry controls, automatic owner transfer
+through resync, remaining portable-host wiring and policy calibration, plus
+re-overflow orchestration,
 artifact mediation and the public portable close transport,
 the trusted native version-probe/identity-input drivers, and the complete
 public request are not yet implemented. The internal offered and applied
