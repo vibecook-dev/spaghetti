@@ -3,9 +3,9 @@ use std::collections::BTreeMap;
 use serde_json::{json, Value};
 
 use crate::adapter::{
-    AdapterId, ContractVersionOffer, ContractVersionRequest, Fact, FactBatch, FactSemanticContext,
-    NativeIdentity, QualifiedValue, TimestampQuality, UsageBucketsV2, UsageResponseIdentity,
-    UsageValueAuthority, UsageValueProvenance,
+    AdapterId, CanonicalFactId, ContractVersionOffer, ContractVersionRequest, Fact, FactBatch,
+    FactRevisionId, FactSemanticContext, NativeIdentity, QualifiedValue, TimestampQuality,
+    UsageBucketsV2, UsageResponseIdentity, UsageValueAuthority, UsageValueProvenance,
 };
 use crate::observation_contract::{
     negotiate_observation_contract, ObservationContractOffer, ObservationContractRequest,
@@ -19,7 +19,14 @@ const FROZEN_FIXTURE: &str =
     include_str!("../../../fixtures/contracts/rfc012d-scoped-usage-envelope-v1.json");
 
 fn contract_selection() -> ObservationContractSelection {
-    let families = BTreeMap::from([(USAGE_FAMILY.to_owned(), vec![1])]);
+    contract_selection_for_families(&[USAGE_FAMILY])
+}
+
+fn contract_selection_for_families(families: &[&str]) -> ObservationContractSelection {
+    let families = families
+        .iter()
+        .map(|family| ((*family).to_owned(), vec![1]))
+        .collect::<BTreeMap<_, _>>();
     let request = ObservationContractRequest::new(
         ContractVersionRequest {
             selection_contract_version: 1,
@@ -53,6 +60,10 @@ fn contract_selection() -> ObservationContractSelection {
     )
     .unwrap();
     negotiate_observation_contract(&request, &offer).unwrap()
+}
+
+fn multi_family_contract_selection() -> ObservationContractSelection {
+    contract_selection_for_families(&[ACTOR_AFFILIATION_FAMILY, ACTOR_RUN_FAMILY, USAGE_FAMILY])
 }
 
 fn semantic_context() -> FactSemanticContext {
@@ -262,11 +273,59 @@ fn mapped_envelope(
     (envelope, selection, root, source)
 }
 
+fn enriched_mapped_envelope() -> (
+    ScopedObservationEnvelope,
+    ObservationContractSelection,
+    ScopedObservationRootIdentity,
+    ScopedSourceObjectIdentity,
+) {
+    let (mut envelope, _, root, source) = mapped_envelope(ScopedUsageV2Operation::Upsert);
+    let selection = multi_family_contract_selection();
+    envelope.contract_selection = selection.clone();
+    envelope.contract_version = selection.envelope_contract_version;
+    envelope.actor.parent_run_key = Some(root.root_actor_run_key);
+    envelope.actor.native_actor_id = Some("child-agent".to_owned());
+    envelope.actor.native_actor_type = Some("subagent".to_owned());
+
+    let keys = FactBatch::new_with_semantic_context(1, 1, semantic_context()).unwrap();
+    let workflow_key = keys
+        .canonical_entity_key("workflow", b"workflow-main")
+        .unwrap();
+    let affiliation_fact_id = CanonicalFactId::native(
+        root.adapter_id.as_str(),
+        &root.source_instance_key,
+        ACTOR_AFFILIATION_FAMILY,
+        b"workflow-main/child-agent",
+    )
+    .unwrap();
+    let affiliation_revision = FactRevisionId::derive(
+        &affiliation_fact_id,
+        1,
+        b"workflow-main/child-agent/present",
+    )
+    .unwrap();
+    envelope.affiliations = ScopedActorAffiliationContext {
+        actor_run_key: envelope.actor.run_key,
+        team_key: None,
+        native_team_id: None,
+        team_name: None,
+        member_key: None,
+        workflow_key: Some(workflow_key),
+        native_workflow_id: Some("workflow-main".to_owned()),
+        completeness: ContractCompleteness::Partial,
+        derived_from_revision_refs: vec![SemanticRevisionRef::new(affiliation_revision)],
+    };
+    (envelope, selection, root, source)
+}
+
 fn fixture_value() -> Value {
     let (upsert, selection, root, source) = mapped_envelope(ScopedUsageV2Operation::Upsert);
     let (retraction, _, _, _) = mapped_envelope(ScopedUsageV2Operation::Retract);
     let upsert = ScopedUsageEnvelopeWire::from_scoped(&upsert).unwrap();
     let retraction = ScopedUsageEnvelopeWire::from_scoped(&retraction).unwrap();
+    let (enriched, enriched_selection, _, _) = enriched_mapped_envelope();
+    let enriched =
+        serde_json::to_value(ScopedUsageEnvelopeWire::from_scoped(&enriched).unwrap()).unwrap();
     json!({
         "fixture_contract_version": 1,
         "context": {
@@ -275,7 +334,7 @@ fn fixture_value() -> Value {
                 "session_ref": root.session_ref,
                 "session_key": root.session_key,
                 "root_actor_run_key": root.root_actor_run_key,
-                "native_session_claim": root.native_session_claim,
+                "native_session_claim": root.native_session_claim.clone(),
             },
             "authorized_sources": [{
                 "instance_key": source.source_instance_key,
@@ -285,12 +344,18 @@ fn fixture_value() -> Value {
         },
         "upsert": upsert,
         "reset_retraction": retraction,
+        "enriched": {
+            "contract_selection": enriched_selection,
+            "actor": enriched["actor"].clone(),
+            "affiliations": enriched["affiliations"].clone(),
+        },
         "expected": {
             "fact_family": USAGE_FAMILY,
             "fact_family_contract_version": 1,
             "complete_event_union": false,
             "unsupported_variants": "source_and_observer_lifecycle_controls",
             "native_payload_disclosure": "withheld_at_projection_boundary",
+            "context_enrichment": "requires_exact_selected_actor_families",
         },
     })
 }
@@ -326,6 +391,58 @@ fn mapped_usage_upsert_and_retraction_round_trip_only_with_exact_context() {
         .unwrap();
         assert_eq!(parsed, wire);
     }
+}
+
+#[test]
+fn enriched_usage_context_requires_the_exact_selected_actor_families() {
+    let (mut fallback, _, fallback_root, fallback_source) =
+        mapped_envelope(ScopedUsageV2Operation::Upsert);
+    fallback.contract_selection = multi_family_contract_selection();
+    assert!(parse_for_context(
+        serde_json::to_value(ScopedUsageEnvelopeWire::from_scoped(&fallback).unwrap()).unwrap(),
+        &fallback.contract_selection,
+        &fallback_root,
+        &fallback_source,
+    )
+    .is_ok());
+
+    let (envelope, selection, root, source) = enriched_mapped_envelope();
+    let wire = ScopedUsageEnvelopeWire::from_scoped(&envelope).unwrap();
+    assert_eq!(
+        parse_for_context(
+            serde_json::to_value(&wire).unwrap(),
+            &selection,
+            &root,
+            &source,
+        )
+        .unwrap(),
+        wire
+    );
+
+    let mut actor_unselected = envelope.clone();
+    actor_unselected.contract_selection =
+        contract_selection_for_families(&[ACTOR_AFFILIATION_FAMILY, USAGE_FAMILY]);
+    assert!(ScopedUsageEnvelopeWire::from_scoped(&actor_unselected).is_err());
+
+    let mut affiliation_unselected = envelope.clone();
+    affiliation_unselected.contract_selection =
+        contract_selection_for_families(&[ACTOR_RUN_FAMILY, USAGE_FAMILY]);
+    assert!(ScopedUsageEnvelopeWire::from_scoped(&affiliation_unselected).is_err());
+
+    let mut malformed_actor = envelope.clone();
+    malformed_actor.actor.parent_run_key = None;
+    assert!(ScopedUsageEnvelopeWire::from_scoped(&malformed_actor).is_err());
+
+    let mut malformed_affiliation = envelope;
+    malformed_affiliation
+        .affiliations
+        .derived_from_revision_refs
+        .clear();
+    assert!(ScopedUsageEnvelopeWire::from_scoped(&malformed_affiliation).is_err());
+
+    let (mut whitespace_affiliation, _, _, _) = enriched_mapped_envelope();
+    whitespace_affiliation.affiliations.native_workflow_id = Some(" workflow-main".to_owned());
+    assert!(ScopedUsageEnvelopeWire::from_scoped(&whitespace_affiliation).is_err());
 }
 
 #[test]

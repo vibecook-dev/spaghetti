@@ -5,7 +5,8 @@
  * contextual: the repeated selection, root, and source coordinate must match
  * authority already retained by the caller. Opaque event/revision identities
  * remain Rust-derived; the native contextual parser recomputes them before a
- * value can cross this portable boundary.
+ * value can cross this portable boundary. Key-only actor context remains valid;
+ * enriched actor and affiliation context requires its exact selected v1 family.
  */
 
 import {
@@ -19,7 +20,15 @@ import {
   type OpaqueContractReference,
   type SemanticRevisionRef,
 } from './rfc012a.js';
-import { parseUsageRevisionV2, type QualifiedTimestamp, type UsageRevisionV2 } from './rfc012c.js';
+import {
+  ACTOR_AFFILIATION_FAMILY,
+  ACTOR_AFFILIATION_FAMILY_VERSION,
+  ACTOR_RUN_FAMILY,
+  ACTOR_RUN_FAMILY_VERSION,
+  parseUsageRevisionV2,
+  type QualifiedTimestamp,
+  type UsageRevisionV2,
+} from './rfc012c.js';
 import { parseObservationContractSelectionForExpected, type ObservationContractSelection } from './rfc012d.js';
 
 export const SCOPED_USAGE_ENVELOPE_CONTRACT_VERSION = 1 as const;
@@ -74,7 +83,7 @@ export interface ScopedUsageAffiliations {
   member_key: OpaqueContractReference | null;
   workflow_key: OpaqueContractReference | null;
   native_workflow_id: string | null;
-  completeness: 'unknown';
+  completeness: 'partial' | 'unknown';
   derived_from_revision_refs: SemanticRevisionRef[];
 }
 
@@ -167,6 +176,7 @@ function boundedText(value: unknown, label: string, maxBytes: number): string {
   if (
     typeof value !== 'string' ||
     value.length === 0 ||
+    value.length > maxBytes ||
     value.trim() !== value ||
     textEncoder.encode(value).byteLength > maxBytes
   ) {
@@ -419,7 +429,7 @@ export function parseScopedUsageEnvelopeContext(value: unknown): ScopedUsageEnve
   return { contract_selection: selection, root: parseScopedUsageRoot(input.root), authorized_sources: sources };
 }
 
-function parseActor(value: unknown, root: ScopedUsageRoot): ScopedUsageActor {
+function parseActor(value: unknown, root: ScopedUsageRoot, selection: ObservationContractSelection): ScopedUsageActor {
   const input = record(value, 'usage actor');
   const fields = [
     'root_session_key',
@@ -448,8 +458,18 @@ function parseActor(value: unknown, root: ScopedUsageRoot): ScopedUsageActor {
   if (actor.root_session_key !== root.session_key || actor.role !== expectedRole) {
     throw new ContractValidationError('usage actor does not match the exact root');
   }
-  if (actor.parent_run_key !== null || actor.native_actor_id !== null || actor.native_actor_type !== null) {
-    throw new ContractValidationError('current usage actor contains unsupported enrichment');
+  const actorSelected = selection.contract_versions.fact_family_versions[ACTOR_RUN_FAMILY] === ACTOR_RUN_FAMILY_VERSION;
+  if (actorSelected) {
+    if (
+      (actor.role === 'root' && actor.parent_run_key !== null) ||
+      (actor.role === 'child' &&
+        (actor.parent_run_key === actor.run_key ||
+          (actor.parent_run_key === null && (actor.native_actor_id !== null || actor.native_actor_type !== null))))
+    ) {
+      throw new ContractValidationError('selected usage actor enrichment has invalid parent lineage');
+    }
+  } else if (actor.parent_run_key !== null || actor.native_actor_id !== null || actor.native_actor_type !== null) {
+    throw new ContractValidationError('usage actor enrichment requires selected runtime.actor-run@1');
   }
   const claimValue = root.native_session_claim?.identity.value;
   const expectedNativeSession =
@@ -462,7 +482,21 @@ function parseActor(value: unknown, root: ScopedUsageRoot): ScopedUsageActor {
   return actor;
 }
 
-function parseAffiliations(value: unknown, actor: ScopedUsageActor): ScopedUsageAffiliations {
+function compareOpaqueReference(left: OpaqueContractReference, right: OpaqueContractReference): number {
+  const leftBytes = decodeOpaqueBytes(left, 'left semantic revision', 32);
+  const rightBytes = decodeOpaqueBytes(right, 'right semantic revision', 32);
+  for (let index = 0; index < leftBytes.length; index += 1) {
+    const delta = leftBytes[index]! - rightBytes[index]!;
+    if (delta !== 0) return delta;
+  }
+  return 0;
+}
+
+function parseAffiliations(
+  value: unknown,
+  actor: ScopedUsageActor,
+  selection: ObservationContractSelection,
+): ScopedUsageAffiliations {
   const input = record(value, 'usage affiliations');
   const fields = [
     'actor_run_key',
@@ -480,8 +514,25 @@ function parseAffiliations(value: unknown, actor: ScopedUsageActor): ScopedUsage
   if (!Array.isArray(input.derived_from_revision_refs)) {
     throw new ContractValidationError('usage affiliation revision refs must be an array');
   }
-  if (input.derived_from_revision_refs.length !== 0) {
-    throw new ContractValidationError('current usage affiliation projection is not explicitly unknown');
+  if (input.derived_from_revision_refs.length > MAX_AFFILIATION_REVISIONS) {
+    throw new ContractValidationError('usage affiliation revision refs exceed their bound');
+  }
+  const revisions = input.derived_from_revision_refs.map(parseSemanticRevisionRef);
+  if (
+    revisions.some(
+      (reference) =>
+        reference.semantic_reference_contract_version !==
+        selection.contract_versions.semantic_revision_reference_version,
+    ) ||
+    revisions.some(
+      (reference, index) =>
+        index > 0 && compareOpaqueReference(revisions[index - 1]!.fact_revision_id, reference.fact_revision_id) >= 0,
+    )
+  ) {
+    throw new ContractValidationError('usage affiliation revision refs are not canonical for the selection');
+  }
+  if (input.completeness !== 'partial' && input.completeness !== 'unknown') {
+    throw new ContractValidationError('usage affiliations have unsupported completeness');
   }
   const result: ScopedUsageAffiliations = {
     actor_run_key: parseOpaqueContractReference(input.actor_run_key, 'affiliation actor run key'),
@@ -491,25 +542,43 @@ function parseAffiliations(value: unknown, actor: ScopedUsageActor): ScopedUsage
     member_key: nullableReference(input.member_key, 'affiliation member key'),
     workflow_key: nullableReference(input.workflow_key, 'affiliation workflow key'),
     native_workflow_id: nullableText(input.native_workflow_id, 'affiliation native_workflow_id'),
-    completeness:
-      input.completeness === 'unknown'
-        ? 'unknown'
-        : (() => {
-            throw new ContractValidationError('current usage affiliations must remain explicitly unknown');
-          })(),
-    derived_from_revision_refs: input.derived_from_revision_refs.map(parseSemanticRevisionRef),
+    completeness: input.completeness,
+    derived_from_revision_refs: revisions,
   };
+  if (result.actor_run_key !== actor.run_key) {
+    throw new ContractValidationError('usage affiliation context targets a different actor');
+  }
+  const affiliationSelected =
+    selection.contract_versions.fact_family_versions[ACTOR_AFFILIATION_FAMILY] === ACTOR_AFFILIATION_FAMILY_VERSION;
+  if (!affiliationSelected) {
+    if (
+      result.team_key === null &&
+      result.native_team_id === null &&
+      result.team_name === null &&
+      result.member_key === null &&
+      result.workflow_key === null &&
+      result.native_workflow_id === null &&
+      result.completeness === 'unknown' &&
+      result.derived_from_revision_refs.length === 0
+    ) {
+      return result;
+    }
+    throw new ContractValidationError('usage affiliation enrichment requires selected runtime.actor-affiliation@1');
+  }
   if (
-    result.actor_run_key !== actor.run_key ||
-    result.team_key !== null ||
-    result.native_team_id !== null ||
     result.team_name !== null ||
-    result.member_key !== null ||
-    result.workflow_key !== null ||
-    result.native_workflow_id !== null ||
-    result.derived_from_revision_refs.length !== 0
+    (result.team_key === null && (result.native_team_id !== null || result.member_key !== null)) ||
+    (result.workflow_key === null && result.native_workflow_id !== null) ||
+    (result.completeness === 'partial' && result.derived_from_revision_refs.length === 0) ||
+    (result.completeness === 'unknown' &&
+      result.derived_from_revision_refs.length === 0 &&
+      (result.team_key !== null ||
+        result.native_team_id !== null ||
+        result.member_key !== null ||
+        result.workflow_key !== null ||
+        result.native_workflow_id !== null))
   ) {
-    throw new ContractValidationError('current usage affiliation projection is not explicitly unknown');
+    throw new ContractValidationError('selected usage affiliation context is invalid');
   }
   return result;
 }
@@ -762,11 +831,11 @@ export function parseScopedUsageEnvelope(value: unknown, expectedContextInput: u
   if (JSON.stringify(root) !== JSON.stringify(context.root)) {
     throw new ContractValidationError('scoped usage envelope does not match the caller-held root');
   }
-  const actor = parseActor(input.actor, root);
+  const actor = parseActor(input.actor, root, selection);
   if (input.actor_attribution !== 'derived_exact') {
     throw new ContractValidationError('current usage actor attribution must be derived_exact');
   }
-  const affiliations = parseAffiliations(input.affiliations, actor);
+  const affiliations = parseAffiliations(input.affiliations, actor, selection);
   const source = parseSource(input.source, context);
   const nativeTime = parseTimestamp(input.native_time, 'usage native_time');
   const event = parseEvent(input.event);

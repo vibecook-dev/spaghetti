@@ -10,12 +10,18 @@ interface UsageEnvelopeFixture {
   context: any;
   upsert: any;
   reset_retraction: any;
+  enriched: {
+    contract_selection: any;
+    actor: any;
+    affiliations: any;
+  };
   expected: {
     fact_family: string;
     fact_family_contract_version: number;
     complete_event_union: boolean;
     unsupported_variants: string;
     native_payload_disclosure: string;
+    context_enrichment: string;
   };
 }
 
@@ -37,17 +43,79 @@ function reject(value: unknown, context: unknown = fixture.context): void {
   assert.throws(() => parseScopedUsageEnvelope(value, context), ContractValidationError);
 }
 
+function enrichedContext(): any {
+  const context = clone(fixture.context);
+  context.contract_selection = clone(fixture.enriched.contract_selection);
+  return context;
+}
+
+function enrichedUpsert(): any {
+  const envelope = clone(fixture.upsert);
+  envelope.contract_selection = clone(fixture.enriched.contract_selection);
+  envelope.actor = clone(fixture.enriched.actor);
+  envelope.affiliations = clone(fixture.enriched.affiliations);
+  return envelope;
+}
+
 test('portable TypeScript independently parses both Rust usage envelope operations', () => {
   assert.equal(fixture.fixture_contract_version, 1);
   const context = parseScopedUsageEnvelopeContext(fixture.context);
   assert.deepEqual(context, fixture.context);
   assert.deepEqual(parseScopedUsageEnvelope(fixture.upsert, context), fixture.upsert);
   assert.deepEqual(parseScopedUsageEnvelope(fixture.reset_retraction, context), fixture.reset_retraction);
+  const enriched = enrichedUpsert();
+  assert.deepEqual(parseScopedUsageEnvelope(enriched, enrichedContext()), enriched);
   assert.equal(fixture.upsert.event.fact_family, fixture.expected.fact_family);
   assert.equal(fixture.upsert.event.fact_family_contract_version, fixture.expected.fact_family_contract_version);
   assert.equal(fixture.expected.complete_event_union, false);
   assert.equal(fixture.expected.unsupported_variants, 'source_and_observer_lifecycle_controls');
   assert.equal(fixture.expected.native_payload_disclosure, 'withheld_at_projection_boundary');
+  assert.equal(fixture.expected.context_enrichment, 'requires_exact_selected_actor_families');
+});
+
+test('actor and affiliation context enrichment requires its exact selected families', () => {
+  const enriched = enrichedUpsert();
+  const selectedFallback = clone(fixture.upsert);
+  selectedFallback.contract_selection = clone(fixture.enriched.contract_selection);
+  assert.deepEqual(parseScopedUsageEnvelope(selectedFallback, enrichedContext()), selectedFallback);
+
+  const noActor = enrichedContext();
+  delete noActor.contract_selection.contract_versions.fact_family_versions['runtime.actor-run'];
+  reject(enriched, noActor);
+
+  const noAffiliation = enrichedContext();
+  delete noAffiliation.contract_selection.contract_versions.fact_family_versions['runtime.actor-affiliation'];
+  reject(enriched, noAffiliation);
+
+  const missingParent = enrichedUpsert();
+  missingParent.actor.parent_run_key = null;
+  reject(missingParent, enrichedContext());
+
+  const selfParent = enrichedUpsert();
+  selfParent.actor.parent_run_key = selfParent.actor.run_key;
+  reject(selfParent, enrichedContext());
+
+  const emptyPartial = enrichedUpsert();
+  emptyPartial.affiliations.derived_from_revision_refs = [];
+  reject(emptyPartial, enrichedContext());
+
+  const wrongReferenceVersion = enrichedUpsert();
+  wrongReferenceVersion.affiliations.derived_from_revision_refs[0].semantic_reference_contract_version = 2;
+  reject(wrongReferenceVersion, enrichedContext());
+
+  const duplicateReference = enrichedUpsert();
+  duplicateReference.affiliations.derived_from_revision_refs.push(
+    clone(duplicateReference.affiliations.derived_from_revision_refs[0]),
+  );
+  reject(duplicateReference, enrichedContext());
+
+  const whitespaceActor = enrichedUpsert();
+  whitespaceActor.actor.native_actor_type = ' subagent';
+  reject(whitespaceActor, enrichedContext());
+
+  const whitespaceAffiliation = enrichedUpsert();
+  whitespaceAffiliation.affiliations.native_workflow_id = 'workflow-main ';
+  reject(whitespaceAffiliation, enrichedContext());
 });
 
 test('selection, root, and source authority are exact caller-held context', () => {

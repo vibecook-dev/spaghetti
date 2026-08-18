@@ -6,7 +6,9 @@
 //! families remain unavailable until the complete union and its typed-unknown
 //! rules are frozen. The top-level value has no unbound `Deserialize` path;
 //! consumption requires the caller-held selection, root, and authorized source
-//! set.
+//! set. Usage-only selection preserves the original key-only actor context;
+//! evidence-backed actor and affiliation enrichment is accepted only when its
+//! exact v1 family is also selected.
 
 use std::collections::BTreeSet;
 
@@ -26,16 +28,20 @@ use crate::observation_contract::ObservationContractSelection;
 use crate::source::{AppendTransition, SourceCursor, SourceRecordState};
 
 use super::{
-    usage_v2_event_id, ScopedActorAttribution, ScopedAppendDeliveryPhase, ScopedAppendReset,
+    scoped_actor_affiliation_context_is_valid, usage_v2_event_id, ScopedActorAffiliationContext,
+    ScopedActorAttribution, ScopedAppendDeliveryPhase, ScopedAppendReset,
     ScopedEnvelopeEvidenceAuthority, ScopedNativeEvidence, ScopedNativeEvidenceWithheldReason,
     ScopedObservationEnvelope, ScopedObservationEvent, ScopedObservationRootIdentity,
     ScopedSourceObjectIdentity, ScopedUsageV2Operation, ScopedUsageV2RetractionCause,
-    RUNTIME_USAGE_V2_FACT_FAMILY_CONTRACT_VERSION,
+    RUNTIME_ACTOR_AFFILIATION_FACT_FAMILY_CONTRACT_VERSION,
+    RUNTIME_ACTOR_RUN_FACT_FAMILY_CONTRACT_VERSION, RUNTIME_USAGE_V2_FACT_FAMILY_CONTRACT_VERSION,
 };
 
 pub(crate) const SCOPED_USAGE_ENVELOPE_CONTRACT_VERSION: u32 = 1;
 
 const USAGE_FAMILY: &str = "runtime.usage-v2";
+const ACTOR_RUN_FAMILY: &str = "runtime.actor-run";
+const ACTOR_AFFILIATION_FAMILY: &str = "runtime.actor-affiliation";
 const REFERENCE_PREFIX: &str = "v1:";
 const DIGEST_BYTES: usize = 32;
 const MAX_CURSOR_BYTES: usize = 128;
@@ -647,10 +653,13 @@ fn validate_usage_envelope_raw_shape(
                 "usage affiliation revision refs must be an array",
             )
         })?;
-    if !affiliation_refs.is_empty() {
+    if affiliation_refs.len() > MAX_AFFILIATION_REVISIONS {
         return Err(ScopedUsageEnvelopeContractError::invalid(
-            "current usage affiliation projection must remain explicitly unknown",
+            "usage affiliation revision refs exceed their bound",
         ));
+    }
+    for reference in affiliation_refs {
+        validate_semantic_ref_shape(reference, "usage affiliation revision ref")?;
     }
     let source = exact_object(
         &envelope["source"],
@@ -969,8 +978,12 @@ impl ScopedUsageEnvelopeWire {
             ));
         }
         validate_native_claim(&self.root)?;
-        validate_actor(&self.actor, &self.root)?;
-        validate_affiliations(&self.affiliations)?;
+        validate_actor(&self.actor, &self.root, &self.contract_selection)?;
+        validate_affiliations(
+            &self.affiliations,
+            &self.contract_selection,
+            self.actor.run_key,
+        )?;
         validate_source(&self.source)?;
         validate_timestamp(self.native_time.as_ref(), "native_time")?;
         validate_timestamp(self.evidence.effective_at.as_ref(), "evidence effective_at")?;
@@ -1229,6 +1242,7 @@ fn validate_native_claim(root: &UsageRootWire) -> Result<(), ScopedUsageEnvelope
 fn validate_actor(
     actor: &UsageActorWire,
     root: &UsageRootWire,
+    selection: &ObservationContractSelection,
 ) -> Result<(), ScopedUsageEnvelopeContractError> {
     for (label, value) in [
         ("native_session_id", actor.native_session_id.as_deref()),
@@ -1236,19 +1250,43 @@ fn validate_actor(
         ("native_actor_type", actor.native_actor_type.as_deref()),
     ] {
         if let Some(value) = value {
-            if value.is_empty() || value.len() > MAX_RUNTIME_TEXT_BYTES {
+            if value.is_empty() || value.trim() != value || value.len() > MAX_RUNTIME_TEXT_BYTES {
                 return Err(ScopedUsageEnvelopeContractError::invalid(format!(
-                    "{label} is not bounded"
+                    "{label} is not bounded canonical text"
                 )));
             }
         }
     }
-    if actor.parent_run_key.is_some()
+    let actor_selected = selection
+        .contract_versions
+        .fact_family_versions
+        .get(ACTOR_RUN_FAMILY)
+        == Some(&RUNTIME_ACTOR_RUN_FACT_FAMILY_CONTRACT_VERSION);
+    if actor_selected {
+        match actor.role {
+            ActorRunRole::Root if actor.parent_run_key.is_some() => {
+                return Err(ScopedUsageEnvelopeContractError::invalid(
+                    "selected root actor cannot declare a parent",
+                ))
+            }
+            ActorRunRole::Child
+                if actor.parent_run_key.as_ref() == Some(&actor.run_key)
+                    || (actor.parent_run_key.is_none()
+                        && (actor.native_actor_id.is_some()
+                            || actor.native_actor_type.is_some())) =>
+            {
+                return Err(ScopedUsageEnvelopeContractError::invalid(
+                    "selected child actor enrichment requires a distinct parent",
+                ))
+            }
+            ActorRunRole::Root | ActorRunRole::Child => {}
+        }
+    } else if actor.parent_run_key.is_some()
         || actor.native_actor_id.is_some()
         || actor.native_actor_type.is_some()
     {
         return Err(ScopedUsageEnvelopeContractError::invalid(
-            "current usage actor projection contains unsupported enrichment",
+            "usage actor enrichment requires selected runtime.actor-run@1",
         ));
     }
     let expected_native_session = root
@@ -1266,18 +1304,67 @@ fn validate_actor(
 
 fn validate_affiliations(
     affiliations: &UsageAffiliationsWire,
+    selection: &ObservationContractSelection,
+    actor_run_key: CanonicalEntityKey,
 ) -> Result<(), ScopedUsageEnvelopeContractError> {
-    if affiliations.team_key.is_some()
-        || affiliations.native_team_id.is_some()
-        || affiliations.team_name.is_some()
-        || affiliations.member_key.is_some()
-        || affiliations.workflow_key.is_some()
-        || affiliations.native_workflow_id.is_some()
-        || affiliations.completeness != ContractCompleteness::Unknown
-        || !affiliations.derived_from_revision_refs.is_empty()
+    for (label, value) in [
+        ("native_team_id", affiliations.native_team_id.as_deref()),
+        ("team_name", affiliations.team_name.as_deref()),
+        (
+            "native_workflow_id",
+            affiliations.native_workflow_id.as_deref(),
+        ),
+    ] {
+        if value.is_some_and(|value| {
+            value.is_empty() || value.trim() != value || value.len() > MAX_RUNTIME_TEXT_BYTES
+        }) {
+            return Err(ScopedUsageEnvelopeContractError::invalid(format!(
+                "{label} is not bounded canonical text"
+            )));
+        }
+    }
+    let affiliation_selected = selection
+        .contract_versions
+        .fact_family_versions
+        .get(ACTOR_AFFILIATION_FAMILY)
+        == Some(&RUNTIME_ACTOR_AFFILIATION_FACT_FAMILY_CONTRACT_VERSION);
+    if !affiliation_selected {
+        if affiliations.team_key.is_none()
+            && affiliations.native_team_id.is_none()
+            && affiliations.team_name.is_none()
+            && affiliations.member_key.is_none()
+            && affiliations.workflow_key.is_none()
+            && affiliations.native_workflow_id.is_none()
+            && affiliations.completeness == ContractCompleteness::Unknown
+            && affiliations.derived_from_revision_refs.is_empty()
+        {
+            return Ok(());
+        }
+        return Err(ScopedUsageEnvelopeContractError::invalid(
+            "usage affiliation enrichment requires selected runtime.actor-affiliation@1",
+        ));
+    }
+    let context = ScopedActorAffiliationContext {
+        actor_run_key: affiliations.actor_run_key,
+        team_key: affiliations.team_key,
+        native_team_id: affiliations.native_team_id.clone(),
+        team_name: affiliations.team_name.clone(),
+        member_key: affiliations.member_key,
+        workflow_key: affiliations.workflow_key,
+        native_workflow_id: affiliations.native_workflow_id.clone(),
+        completeness: affiliations.completeness,
+        derived_from_revision_refs: affiliations.derived_from_revision_refs.clone(),
+    };
+    if context.actor_run_key != actor_run_key
+        || !scoped_actor_affiliation_context_is_valid(
+            &context,
+            selection
+                .contract_versions
+                .semantic_revision_reference_version,
+        )
     {
         return Err(ScopedUsageEnvelopeContractError::invalid(
-            "current usage affiliation projection must remain explicitly unknown",
+            "selected usage affiliation context is invalid",
         ));
     }
     Ok(())

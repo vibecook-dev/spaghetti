@@ -50,8 +50,56 @@
       }
     }
   },
+  "enriched": {
+    "actor": {
+      "native_actor_id": "child-agent",
+      "native_actor_type": "subagent",
+      "native_session_id": "native-session",
+      "parent_run_key": "v1:sCHozZZGLGMwqR6Pipvmjce35mshs-Q_d_xFrL0WKRY",
+      "role": "child",
+      "root_session_key": "v1:GJjjKG_JL_dSgMRVMjX9XP06spWfeUp5s73g4O0_n0s",
+      "run_key": "v1:nPxybb6UztUZeoWsWZTJwgWaakpGjMv2i2C9gpaxuaM"
+    },
+    "affiliations": {
+      "actor_run_key": "v1:nPxybb6UztUZeoWsWZTJwgWaakpGjMv2i2C9gpaxuaM",
+      "completeness": "partial",
+      "derived_from_revision_refs": [
+        {
+          "fact_revision_id": "v1:lEBRF5Nln_sV_ZWYcBPZFORPGFb-KlnCk6PZMLNENcE",
+          "semantic_reference_contract_version": 1
+        }
+      ],
+      "member_key": null,
+      "native_team_id": null,
+      "native_workflow_id": "workflow-main",
+      "team_key": null,
+      "team_name": null,
+      "workflow_key": "v1:8B73WEnEfJzCo6oiyVWLnVjNtbCYSoitvaEgYEp5h8g"
+    },
+    "contract_selection": {
+      "contract_versions": {
+        "coverage_contract_version": 1,
+        "external_entity_reference_version": 1,
+        "fact_family_versions": {
+          "runtime.actor-affiliation": 1,
+          "runtime.actor-run": 1,
+          "runtime.usage-v2": 1
+        },
+        "model_major": 1,
+        "observation_contract_version": 1,
+        "query_pack_version": null,
+        "selection_contract_version": 1,
+        "semantic_revision_reference_version": 1
+      },
+      "envelope_contract_version": 1,
+      "event_contract_version": 1,
+      "lifecycle_contract_version": 1,
+      "observation_negotiation_contract_version": 1
+    }
+  },
   "expected": {
     "complete_event_union": false,
+    "context_enrichment": "requires_exact_selected_actor_families",
     "fact_family": "runtime.usage-v2",
     "fact_family_contract_version": 1,
     "native_payload_disclosure": "withheld_at_projection_boundary",
