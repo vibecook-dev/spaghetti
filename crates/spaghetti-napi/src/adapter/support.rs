@@ -1245,6 +1245,7 @@ impl SupportCatalog {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ContractVersionRequest {
     pub selection_contract_version: u32,
     pub model_major: u32,
@@ -1292,6 +1293,7 @@ impl ContractVersionRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ContractVersionOffer {
     pub selection_contract_version: u32,
     pub model_major: u32,
@@ -1360,6 +1362,7 @@ fn validate_fact_family_versions(
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ContractVersionSelection {
     pub selection_contract_version: u32,
     pub model_major: u32,

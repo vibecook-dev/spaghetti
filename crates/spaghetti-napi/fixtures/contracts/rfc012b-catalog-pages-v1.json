@@ -1,0 +1,1104 @@
+{
+  "continuation_request": {
+    "catalog_continuation_request_contract_version": 1,
+    "contract_selection": {
+      "catalog_query_contract_version": 1,
+      "contract_versions": {
+        "coverage_contract_version": 1,
+        "external_entity_reference_version": 1,
+        "fact_family_versions": {},
+        "model_major": 1,
+        "observation_contract_version": null,
+        "query_pack_version": 1,
+        "selection_contract_version": 1,
+        "semantic_revision_reference_version": 1
+      },
+      "typed_unknown": {
+        "max_payload_bytes": 4096,
+        "preserves_unknown_fields": true,
+        "preserves_unknown_variants": true,
+        "typed_unknown_contract_version": 1
+      }
+    },
+    "cursor": {
+      "cursor_contract_version": 1,
+      "last_entity_key": "v1:YBLGZaXJHCqboYU2uZOSLF3NByw1Jd8ad6722-vhi6c",
+      "last_sort_key": "v1:Zml4dHVyZS1wcm9qZWN0",
+      "query_fingerprint": "v1:9bho7jnaLXGGiDI5GBdJx2beRL3dbtshAPP9oM5qHPY",
+      "snapshot_id": {
+        "complete_commit": 42,
+        "coverage_plan_id": "v1:WPNhzwNlvCvEmFBQgIUyfmDK-eAOaOfXAbZ8c8X_AEE",
+        "pack_contract_version": 1,
+        "readiness_epoch": 1
+      },
+      "sort_spec_version": 1
+    },
+    "page_size": 1,
+    "query_fingerprint": "v1:9bho7jnaLXGGiDI5GBdJx2beRL3dbtshAPP9oM5qHPY",
+    "snapshot_id": {
+      "complete_commit": 42,
+      "coverage_plan_id": "v1:WPNhzwNlvCvEmFBQgIUyfmDK-eAOaOfXAbZ8c8X_AEE",
+      "pack_contract_version": 1,
+      "readiness_epoch": 1
+    },
+    "sort_spec_version": 1
+  },
+  "contract_selection": {
+    "catalog_query_contract_version": 1,
+    "contract_versions": {
+      "coverage_contract_version": 1,
+      "external_entity_reference_version": 1,
+      "fact_family_versions": {},
+      "model_major": 1,
+      "observation_contract_version": null,
+      "query_pack_version": 1,
+      "selection_contract_version": 1,
+      "semantic_revision_reference_version": 1
+    },
+    "typed_unknown": {
+      "max_payload_bytes": 4096,
+      "preserves_unknown_fields": true,
+      "preserves_unknown_variants": true,
+      "typed_unknown_contract_version": 1
+    }
+  },
+  "current_plan": {
+    "catalog_portable_coverage_plan_contract_version": 1,
+    "coverage_plan_contract_version": 1,
+    "coverage_plan_id": "v1:QKpP1zi1m8ZiA3WnrmHhOE98E50Zp265_YV6aehy0RQ",
+    "optional_sources": [],
+    "required_sources": [
+      {
+        "access_policy_digest": "v1:z1KA02pASONvkXTCyQzTbQ7v0MfJikSU5hJdbL-khpg",
+        "adapter_id": "fixture-agent",
+        "catalog_coverage_binding_digest": "v1:4FP7kce0DLpgJCR07cbABznXB29QkDzfa1Mq_LSicOQ",
+        "catalog_declaration_digest": "v1:74wA-mw4HbOisMFrBvVQail_f8a0aCUTdHTzXoniVF8",
+        "source_instance_key": "v1:eiGAxlgnzb7x8mlrwhGwhDWXU1QvEj7n7ZZBkNpmsZk",
+        "support_release_id": "fixture-support-v2"
+      }
+    ],
+    "scope": {
+      "kind": "library"
+    }
+  },
+  "expected": {
+    "current_readiness_state": "building",
+    "latest_snapshot": {
+      "complete_commit": 84,
+      "coverage_plan_id": "v1:QKpP1zi1m8ZiA3WnrmHhOE98E50Zp265_YV6aehy0RQ",
+      "pack_contract_version": 1,
+      "readiness_epoch": 2
+    },
+    "native_values_withheld": true,
+    "project_has_more": true,
+    "published_snapshot": {
+      "complete_commit": 42,
+      "coverage_plan_id": "v1:WPNhzwNlvCvEmFBQgIUyfmDK-eAOaOfXAbZ8c8X_AEE",
+      "pack_contract_version": 1,
+      "readiness_epoch": 1
+    },
+    "retained_snapshot_is_prior_plan": true,
+    "session_total_count_state": "unknown"
+  },
+  "fixture_contract_version": 1,
+  "project_page": {
+    "catalog_page_contract_version": 1,
+    "future_page_hint": {
+      "cache": "warm"
+    },
+    "has_more": true,
+    "next_continuation": {
+      "catalog_continuation_request_contract_version": 1,
+      "contract_selection": {
+        "catalog_query_contract_version": 1,
+        "contract_versions": {
+          "coverage_contract_version": 1,
+          "external_entity_reference_version": 1,
+          "fact_family_versions": {},
+          "model_major": 1,
+          "observation_contract_version": null,
+          "query_pack_version": 1,
+          "selection_contract_version": 1,
+          "semantic_revision_reference_version": 1
+        },
+        "typed_unknown": {
+          "max_payload_bytes": 4096,
+          "preserves_unknown_fields": true,
+          "preserves_unknown_variants": true,
+          "typed_unknown_contract_version": 1
+        }
+      },
+      "cursor": {
+        "cursor_contract_version": 1,
+        "last_entity_key": "v1:YBLGZaXJHCqboYU2uZOSLF3NByw1Jd8ad6722-vhi6c",
+        "last_sort_key": "v1:Zml4dHVyZS1wcm9qZWN0",
+        "query_fingerprint": "v1:9bho7jnaLXGGiDI5GBdJx2beRL3dbtshAPP9oM5qHPY",
+        "snapshot_id": {
+          "complete_commit": 42,
+          "coverage_plan_id": "v1:WPNhzwNlvCvEmFBQgIUyfmDK-eAOaOfXAbZ8c8X_AEE",
+          "pack_contract_version": 1,
+          "readiness_epoch": 1
+        },
+        "sort_spec_version": 1
+      },
+      "page_size": 1,
+      "query_fingerprint": "v1:9bho7jnaLXGGiDI5GBdJx2beRL3dbtshAPP9oM5qHPY",
+      "snapshot_id": {
+        "complete_commit": 42,
+        "coverage_plan_id": "v1:WPNhzwNlvCvEmFBQgIUyfmDK-eAOaOfXAbZ8c8X_AEE",
+        "pack_contract_version": 1,
+        "readiness_epoch": 1
+      },
+      "sort_spec_version": 1
+    },
+    "published_readiness": {
+      "attempt": 1,
+      "complete_through_commit": 42,
+      "completed_contract_version": 1,
+      "coverage_plan_id": "v1:WPNhzwNlvCvEmFBQgIUyfmDK-eAOaOfXAbZ8c8X_AEE",
+      "desired_contract_version": 1,
+      "epoch": 1,
+      "last_complete_snapshot": {
+        "complete_commit": 42,
+        "coverage_plan_id": "v1:WPNhzwNlvCvEmFBQgIUyfmDK-eAOaOfXAbZ8c8X_AEE",
+        "pack_contract_version": 1,
+        "readiness_epoch": 1
+      },
+      "readiness_contract_version": 1,
+      "scope": {
+        "kind": "library"
+      },
+      "source_coverage": [
+        {
+          "completeness": "complete",
+          "coverage_domain": {
+            "kind": "projection_pack",
+            "pack": "library.catalog",
+            "version": 1
+          },
+          "coverage_set_contract_version": 1,
+          "explicit_absence_or_deletion": [],
+          "explicit_errors": [],
+          "membership_revision": "v1:sMgsKNsv2aQvX1qPau_sWvzh47cjDVCI-zH2DDKRGxo",
+          "points": [
+            {
+              "adapter_id": "fixture-agent",
+              "coverage_contract_version": 1,
+              "coverage_domain": {
+                "kind": "projection_pack",
+                "pack": "library.catalog",
+                "version": 1
+              },
+              "generation": 1,
+              "object_key": "v1:C9jiS4rBV-3XCkx3ckBbv1barpm8JubxiMlCYG9yit4",
+              "position": {
+                "kind": "append_cursor",
+                "monotonic_order": 42,
+                "opaque": "v1:5hhKeeup2YpgMChxjlhjDyA3K2rJebZ6c5_k29nfwfM"
+              },
+              "provenance": {},
+              "source_instance_key": "v1:eiGAxlgnzb7x8mlrwhGwhDWXU1QvEj7n7ZZBkNpmsZk",
+              "status": {
+                "kind": "complete_through"
+              },
+              "stream_key": "v1:O7wdI7JJ3pmw69pD32WQe6T1fiKUg5hZS7n7wI2iKRA"
+            }
+          ],
+          "scope": {
+            "adapter_id": "fixture-agent",
+            "source_instance_key": "v1:eiGAxlgnzb7x8mlrwhGwhDWXU1QvEj7n7ZZBkNpmsZk",
+            "source_or_scope_declaration_digest": "v1:cxXe0vu7perLGRPNg9SHC0gXeVFlhVBRADNydZWJ6v0",
+            "support_release_id": "fixture-support-v1"
+          }
+        }
+      ],
+      "state": "ready"
+    },
+    "request": {
+      "contract_selection": {
+        "catalog_query_contract_version": 1,
+        "contract_versions": {
+          "coverage_contract_version": 1,
+          "external_entity_reference_version": 1,
+          "fact_family_versions": {},
+          "model_major": 1,
+          "observation_contract_version": null,
+          "query_pack_version": 1,
+          "selection_contract_version": 1,
+          "semantic_revision_reference_version": 1
+        },
+        "typed_unknown": {
+          "max_payload_bytes": 4096,
+          "preserves_unknown_fields": true,
+          "preserves_unknown_variants": true,
+          "typed_unknown_contract_version": 1
+        }
+      },
+      "page_size": 1,
+      "query_fingerprint": "v1:9bho7jnaLXGGiDI5GBdJx2beRL3dbtshAPP9oM5qHPY",
+      "query_kind": "projects",
+      "snapshot_id": {
+        "complete_commit": 42,
+        "coverage_plan_id": "v1:WPNhzwNlvCvEmFBQgIUyfmDK-eAOaOfXAbZ8c8X_AEE",
+        "pack_contract_version": 1,
+        "readiness_epoch": 1
+      },
+      "sort_spec_version": 1
+    },
+    "rows": [
+      {
+        "row": {
+          "assertion_keys": [
+            "v1:JFHazdcCR31oZ89Jv9cRUNXk09UgM_5DRybrDjE-mRg"
+          ],
+          "availability": {
+            "conflicting_assertion_keys": [],
+            "field": {
+              "authority": {
+                "class_id": "catalog-membership",
+                "native_times_comparable": true,
+                "precedence": 100
+              },
+              "completeness": "complete",
+              "provenance": [
+                {
+                  "fact_revision_id": "v1:z1uJRl6xPYmQ67ymzfUVXNqrMcn0Om6rCead0fAIBFY",
+                  "semantic_reference_contract_version": 1
+                }
+              ],
+              "quality": "exact",
+              "value": {
+                "state": "history_ready"
+              }
+            },
+            "selected_assertion_key": "v1:JFHazdcCR31oZ89Jv9cRUNXk09UgM_5DRybrDjE-mRg"
+          },
+          "display_name": {
+            "selection": {
+              "conflicting_assertion_keys": [],
+              "field": {
+                "authority": {
+                  "class_id": "project-display",
+                  "native_times_comparable": true,
+                  "precedence": 80
+                },
+                "completeness": "complete",
+                "provenance": [
+                  {
+                    "fact_revision_id": "v1:KvQgMIIGsq2d0V0kX6qkL4dH2ENHoxxP-ycyfu5M3Qo",
+                    "semantic_reference_contract_version": 1
+                  }
+                ],
+                "quality": "native_claimed",
+                "value": "Fixture Project"
+              },
+              "selected_assertion_key": "v1:JFHazdcCR31oZ89Jv9cRUNXk09UgM_5DRybrDjE-mRg"
+            },
+            "state": "selected"
+          },
+          "display_path": {
+            "reason": "not_yet_observed",
+            "state": "unknown"
+          },
+          "native_identity": {
+            "selection": {
+              "conflicting_assertion_keys": [],
+              "field": {
+                "authority": {
+                  "class_id": "native-project-id",
+                  "native_times_comparable": true,
+                  "precedence": 100
+                },
+                "completeness": "complete",
+                "provenance": [
+                  {
+                    "fact_revision_id": "v1:WLNKzVeuoI5h94GrxdL0ev7s19lgD6ZuK0TjpDGDSjc",
+                    "semantic_reference_contract_version": 1
+                  }
+                ],
+                "quality": "unknown",
+                "unknown_reason": "withheld",
+                "value": null
+              },
+              "selected_assertion_key": "v1:JFHazdcCR31oZ89Jv9cRUNXk09UgM_5DRybrDjE-mRg"
+            },
+            "state": "selected"
+          },
+          "native_time": {
+            "reason": "not_yet_observed",
+            "state": "unknown"
+          },
+          "project_ref": {
+            "external_ref": {
+              "entity_key": "v1:YBLGZaXJHCqboYU2uZOSLF3NByw1Jd8ad6722-vhi6c",
+              "external_entity_reference_version": 1
+            },
+            "kind": "project"
+          },
+          "root_identity": {
+            "selection": {
+              "conflicting_assertion_keys": [],
+              "field": {
+                "authority": {
+                  "class_id": "project-root",
+                  "native_times_comparable": true,
+                  "precedence": 90
+                },
+                "completeness": "complete",
+                "provenance": [
+                  {
+                    "fact_revision_id": "v1:_OsxBcVj3Hb29nJDEGbLCAjSAkHiBQroBlaJd1pkg4o",
+                    "semantic_reference_contract_version": 1
+                  }
+                ],
+                "quality": "unknown",
+                "unknown_reason": "withheld",
+                "value": null
+              },
+              "selected_assertion_key": "v1:JFHazdcCR31oZ89Jv9cRUNXk09UgM_5DRybrDjE-mRg"
+            },
+            "state": "selected"
+          }
+        },
+        "sort_key": "v1:Zml4dHVyZS1wcm9qZWN0"
+      }
+    ],
+    "total_count": {
+      "state": "known",
+      "value": 2
+    }
+  },
+  "published_plan": {
+    "catalog_portable_coverage_plan_contract_version": 1,
+    "coverage_plan_contract_version": 1,
+    "coverage_plan_id": "v1:WPNhzwNlvCvEmFBQgIUyfmDK-eAOaOfXAbZ8c8X_AEE",
+    "optional_sources": [],
+    "required_sources": [
+      {
+        "access_policy_digest": "v1:Gwbi7P-QSV6KMwKI-Mq1OXkW-Kek9Qo6BDdJqCAsCp0",
+        "adapter_id": "fixture-agent",
+        "catalog_coverage_binding_digest": "v1:cxXe0vu7perLGRPNg9SHC0gXeVFlhVBRADNydZWJ6v0",
+        "catalog_declaration_digest": "v1:74wA-mw4HbOisMFrBvVQail_f8a0aCUTdHTzXoniVF8",
+        "source_instance_key": "v1:eiGAxlgnzb7x8mlrwhGwhDWXU1QvEj7n7ZZBkNpmsZk",
+        "support_release_id": "fixture-support-v1"
+      }
+    ],
+    "scope": {
+      "kind": "library"
+    }
+  },
+  "readiness_response": {
+    "catalog_readiness_response_contract_version": 1,
+    "contract_selection": {
+      "catalog_query_contract_version": 1,
+      "contract_versions": {
+        "coverage_contract_version": 1,
+        "external_entity_reference_version": 1,
+        "fact_family_versions": {},
+        "model_major": 1,
+        "observation_contract_version": null,
+        "query_pack_version": 1,
+        "selection_contract_version": 1,
+        "semantic_revision_reference_version": 1
+      },
+      "typed_unknown": {
+        "max_payload_bytes": 4096,
+        "preserves_unknown_fields": true,
+        "preserves_unknown_variants": true,
+        "typed_unknown_contract_version": 1
+      }
+    },
+    "future_readiness_hint": {
+      "mode": "warm"
+    },
+    "readiness": {
+      "attempt": 1,
+      "completed_contract_version": 1,
+      "coverage_plan_id": "v1:QKpP1zi1m8ZiA3WnrmHhOE98E50Zp265_YV6aehy0RQ",
+      "desired_contract_version": 1,
+      "epoch": 2,
+      "last_complete_snapshot": {
+        "complete_commit": 42,
+        "coverage_plan_id": "v1:WPNhzwNlvCvEmFBQgIUyfmDK-eAOaOfXAbZ8c8X_AEE",
+        "pack_contract_version": 1,
+        "readiness_epoch": 1
+      },
+      "readiness_contract_version": 1,
+      "scope": {
+        "kind": "library"
+      },
+      "source_coverage": [],
+      "state": "building"
+    }
+  },
+  "resolutions": {
+    "live": {
+      "catalog_resolution_contract_version": 1,
+      "request": {
+        "contract_selection": {
+          "catalog_query_contract_version": 1,
+          "contract_versions": {
+            "coverage_contract_version": 1,
+            "external_entity_reference_version": 1,
+            "fact_family_versions": {},
+            "model_major": 1,
+            "observation_contract_version": null,
+            "query_pack_version": 1,
+            "selection_contract_version": 1,
+            "semantic_revision_reference_version": 1
+          },
+          "typed_unknown": {
+            "max_payload_bytes": 4096,
+            "preserves_unknown_fields": true,
+            "preserves_unknown_variants": true,
+            "typed_unknown_contract_version": 1
+          }
+        },
+        "external_ref": {
+          "entity_key": "v1:8xieXKaWAcI0hsjahB-XVSTrR1Qb-ZD_ropq9IEd_bY",
+          "external_entity_reference_version": 1
+        },
+        "snapshot_id": {
+          "complete_commit": 42,
+          "coverage_plan_id": "v1:WPNhzwNlvCvEmFBQgIUyfmDK-eAOaOfXAbZ8c8X_AEE",
+          "pack_contract_version": 1,
+          "readiness_epoch": 1
+        }
+      },
+      "resolution": {
+        "external_ref": {
+          "entity_key": "v1:8xieXKaWAcI0hsjahB-XVSTrR1Qb-ZD_ropq9IEd_bY",
+          "external_entity_reference_version": 1
+        },
+        "row": {
+          "kind": "session",
+          "row": {
+            "assertion_keys": [
+              "v1:nYA6ToehKX6NMkr73OAwjX4sp83DmNw5351k_sHqGEY"
+            ],
+            "availability": {
+              "conflicting_assertion_keys": [],
+              "field": {
+                "authority": {
+                  "class_id": "catalog-membership",
+                  "native_times_comparable": true,
+                  "precedence": 100
+                },
+                "completeness": "complete",
+                "provenance": [
+                  {
+                    "fact_revision_id": "v1:O2nIegNTSijMZlU6xwq4Tt6sxtmvB2RUwdDKr-QFUJg",
+                    "semantic_reference_contract_version": 1
+                  }
+                ],
+                "quality": "exact",
+                "value": {
+                  "state": "history_ready"
+                }
+              },
+              "selected_assertion_key": "v1:nYA6ToehKX6NMkr73OAwjX4sp83DmNw5351k_sHqGEY"
+            },
+            "first_user_summary": {
+              "reason": "not_yet_observed",
+              "state": "unknown"
+            },
+            "native_created_at": {
+              "reason": "not_yet_observed",
+              "state": "unknown"
+            },
+            "native_identity": {
+              "selection": {
+                "conflicting_assertion_keys": [],
+                "field": {
+                  "authority": {
+                    "class_id": "native-session-id",
+                    "native_times_comparable": true,
+                    "precedence": 100
+                  },
+                  "completeness": "complete",
+                  "effective_at": 1700000000,
+                  "provenance": [
+                    {
+                      "fact_revision_id": "v1:1xpjJIqr_o6G6ZAxK5YmoYyhNzkFU7clauMam_2Ra-g",
+                      "semantic_reference_contract_version": 1
+                    }
+                  ],
+                  "quality": "unknown",
+                  "unknown_reason": "withheld",
+                  "value": null
+                },
+                "selected_assertion_key": "v1:nYA6ToehKX6NMkr73OAwjX4sp83DmNw5351k_sHqGEY"
+              },
+              "state": "selected"
+            },
+            "native_message_count": {
+              "reason": "not_yet_observed",
+              "state": "unknown"
+            },
+            "native_updated_at": {
+              "reason": "not_yet_observed",
+              "state": "unknown"
+            },
+            "project_association": {
+              "selection": {
+                "association": {
+                  "association_key": "v1:4ZsHNBaQ1b9cjC5DGJA7TeulDKnmjM--NbeH-TNRhQ8",
+                  "authority": {
+                    "class_id": "native-project-association",
+                    "native_times_comparable": true,
+                    "precedence": 70
+                  },
+                  "basis": "native_project_index",
+                  "completeness": "complete",
+                  "declared_derivation_id": null,
+                  "effective_at": 1700000000,
+                  "locator_claim_key": null,
+                  "owner": {
+                    "adapter_id": "fixture-agent",
+                    "generation": 1,
+                    "object_key": "v1:06l0raaXNZcbGOzBfYinRKBMyTarTfy2xwNguFVtQ-8",
+                    "source_instance_key": "v1:HvMXFWuiZPOZdgDnmp44beKMPxlzf1klDbN_URwT27I",
+                    "stream_key": "v1:CRfV-FVS3_3hhIYbBIACLS1ByvqoHH9v_rn9NsP3cCg"
+                  },
+                  "project_ref": {
+                    "external_ref": {
+                      "entity_key": "v1:YBLGZaXJHCqboYU2uZOSLF3NByw1Jd8ad6722-vhi6c",
+                      "external_entity_reference_version": 1
+                    },
+                    "kind": "project"
+                  },
+                  "provenance": [
+                    {
+                      "fact_revision_id": "v1:Bx3O12Bht4t2Dzz5e1YgPBeAu3jWZoIh-jDM1cox9pE",
+                      "semantic_reference_contract_version": 1
+                    }
+                  ],
+                  "quality": "native_claimed",
+                  "session_ref": {
+                    "external_ref": {
+                      "entity_key": "v1:8xieXKaWAcI0hsjahB-XVSTrR1Qb-ZD_ropq9IEd_bY",
+                      "external_entity_reference_version": 1
+                    },
+                    "kind": "session"
+                  }
+                },
+                "competing_associations": [],
+                "conflicting_association_keys": []
+              },
+              "state": "available"
+            },
+            "session_ref": {
+              "external_ref": {
+                "entity_key": "v1:8xieXKaWAcI0hsjahB-XVSTrR1Qb-ZD_ropq9IEd_bY",
+                "external_entity_reference_version": 1
+              },
+              "kind": "session"
+            },
+            "title": {
+              "selection": {
+                "conflicting_assertion_keys": [],
+                "field": {
+                  "authority": {
+                    "class_id": "transcript-title",
+                    "native_times_comparable": true,
+                    "precedence": 80
+                  },
+                  "completeness": "complete",
+                  "effective_at": 1700000000,
+                  "provenance": [
+                    {
+                      "fact_revision_id": "v1:rYeQmR8fIYpkOfr4IwzqZSmjigL_zMaBWG266cM0O4Q",
+                      "semantic_reference_contract_version": 1
+                    }
+                  ],
+                  "quality": "exact",
+                  "value": "Fixture Session"
+                },
+                "selected_assertion_key": "v1:nYA6ToehKX6NMkr73OAwjX4sp83DmNw5351k_sHqGEY"
+              },
+              "state": "selected"
+            },
+            "transcript_locator_claim_keys": []
+          }
+        },
+        "state": "live"
+      }
+    },
+    "superseded": {
+      "catalog_resolution_contract_version": 1,
+      "request": {
+        "contract_selection": {
+          "catalog_query_contract_version": 1,
+          "contract_versions": {
+            "coverage_contract_version": 1,
+            "external_entity_reference_version": 1,
+            "fact_family_versions": {},
+            "model_major": 1,
+            "observation_contract_version": null,
+            "query_pack_version": 1,
+            "selection_contract_version": 1,
+            "semantic_revision_reference_version": 1
+          },
+          "typed_unknown": {
+            "max_payload_bytes": 4096,
+            "preserves_unknown_fields": true,
+            "preserves_unknown_variants": true,
+            "typed_unknown_contract_version": 1
+          }
+        },
+        "external_ref": {
+          "entity_key": "v1:KUwpq1_TUIu1IM50b3bOq5Z7niCA4qBN2sBKztLC3z0",
+          "external_entity_reference_version": 1
+        },
+        "snapshot_id": {
+          "complete_commit": 42,
+          "coverage_plan_id": "v1:WPNhzwNlvCvEmFBQgIUyfmDK-eAOaOfXAbZ8c8X_AEE",
+          "pack_contract_version": 1,
+          "readiness_epoch": 1
+        }
+      },
+      "resolution": {
+        "external_ref": {
+          "entity_key": "v1:KUwpq1_TUIu1IM50b3bOq5Z7niCA4qBN2sBKztLC3z0",
+          "external_entity_reference_version": 1
+        },
+        "provenance": [
+          {
+            "fact_revision_id": "v1:AhhSXSXKzqKWPU0wZif-sslMKSRFquFCUzpDRcmcBVU",
+            "semantic_reference_contract_version": 1
+          }
+        ],
+        "state": "superseded",
+        "target_refs": [
+          {
+            "entity_key": "v1:t_rcywi8WlS6qkqeHgk8-RGEwbTAIX6OQX8udmpPhE4",
+            "external_entity_reference_version": 1
+          }
+        ]
+      }
+    },
+    "tombstoned": {
+      "catalog_resolution_contract_version": 1,
+      "request": {
+        "contract_selection": {
+          "catalog_query_contract_version": 1,
+          "contract_versions": {
+            "coverage_contract_version": 1,
+            "external_entity_reference_version": 1,
+            "fact_family_versions": {},
+            "model_major": 1,
+            "observation_contract_version": null,
+            "query_pack_version": 1,
+            "selection_contract_version": 1,
+            "semantic_revision_reference_version": 1
+          },
+          "typed_unknown": {
+            "max_payload_bytes": 4096,
+            "preserves_unknown_fields": true,
+            "preserves_unknown_variants": true,
+            "typed_unknown_contract_version": 1
+          }
+        },
+        "external_ref": {
+          "entity_key": "v1:7Mqlg2pksdyDsPu1T876LSruYPbWSju2Vy9Z-YzYSq4",
+          "external_entity_reference_version": 1
+        },
+        "snapshot_id": {
+          "complete_commit": 42,
+          "coverage_plan_id": "v1:WPNhzwNlvCvEmFBQgIUyfmDK-eAOaOfXAbZ8c8X_AEE",
+          "pack_contract_version": 1,
+          "readiness_epoch": 1
+        }
+      },
+      "resolution": {
+        "external_ref": {
+          "entity_key": "v1:7Mqlg2pksdyDsPu1T876LSruYPbWSju2Vy9Z-YzYSq4",
+          "external_entity_reference_version": 1
+        },
+        "provenance": [
+          {
+            "fact_revision_id": "v1:IRx_yPOE8lPgR5PGUe3XJ9JutJiehiNbAZBAOtNFDg4",
+            "semantic_reference_contract_version": 1
+          },
+          {
+            "fact_revision_id": "v1:LnjyMGQRO2yYIyY077SNufPmOzGzwWJI0NRrivd_ZS8",
+            "semantic_reference_contract_version": 1
+          }
+        ],
+        "state": "tombstoned"
+      }
+    },
+    "unknown": {
+      "catalog_resolution_contract_version": 1,
+      "request": {
+        "contract_selection": {
+          "catalog_query_contract_version": 1,
+          "contract_versions": {
+            "coverage_contract_version": 1,
+            "external_entity_reference_version": 1,
+            "fact_family_versions": {},
+            "model_major": 1,
+            "observation_contract_version": null,
+            "query_pack_version": 1,
+            "selection_contract_version": 1,
+            "semantic_revision_reference_version": 1
+          },
+          "typed_unknown": {
+            "max_payload_bytes": 4096,
+            "preserves_unknown_fields": true,
+            "preserves_unknown_variants": true,
+            "typed_unknown_contract_version": 1
+          }
+        },
+        "external_ref": {
+          "entity_key": "v1:jkdXSzU97G8vLG-qxg8zJQ9c1peCFzDQbY03qC-QuhA",
+          "external_entity_reference_version": 1
+        },
+        "snapshot_id": {
+          "complete_commit": 42,
+          "coverage_plan_id": "v1:WPNhzwNlvCvEmFBQgIUyfmDK-eAOaOfXAbZ8c8X_AEE",
+          "pack_contract_version": 1,
+          "readiness_epoch": 1
+        }
+      },
+      "resolution": {
+        "external_ref": {
+          "entity_key": "v1:jkdXSzU97G8vLG-qxg8zJQ9c1peCFzDQbY03qC-QuhA",
+          "external_entity_reference_version": 1
+        },
+        "reason": "never_observed",
+        "state": "unknown"
+      }
+    }
+  },
+  "session_page": {
+    "catalog_page_contract_version": 1,
+    "has_more": false,
+    "published_readiness": {
+      "attempt": 1,
+      "complete_through_commit": 42,
+      "completed_contract_version": 1,
+      "coverage_plan_id": "v1:WPNhzwNlvCvEmFBQgIUyfmDK-eAOaOfXAbZ8c8X_AEE",
+      "desired_contract_version": 1,
+      "epoch": 1,
+      "last_complete_snapshot": {
+        "complete_commit": 42,
+        "coverage_plan_id": "v1:WPNhzwNlvCvEmFBQgIUyfmDK-eAOaOfXAbZ8c8X_AEE",
+        "pack_contract_version": 1,
+        "readiness_epoch": 1
+      },
+      "readiness_contract_version": 1,
+      "scope": {
+        "kind": "library"
+      },
+      "source_coverage": [
+        {
+          "completeness": "complete",
+          "coverage_domain": {
+            "kind": "projection_pack",
+            "pack": "library.catalog",
+            "version": 1
+          },
+          "coverage_set_contract_version": 1,
+          "explicit_absence_or_deletion": [],
+          "explicit_errors": [],
+          "membership_revision": "v1:sMgsKNsv2aQvX1qPau_sWvzh47cjDVCI-zH2DDKRGxo",
+          "points": [
+            {
+              "adapter_id": "fixture-agent",
+              "coverage_contract_version": 1,
+              "coverage_domain": {
+                "kind": "projection_pack",
+                "pack": "library.catalog",
+                "version": 1
+              },
+              "generation": 1,
+              "object_key": "v1:C9jiS4rBV-3XCkx3ckBbv1barpm8JubxiMlCYG9yit4",
+              "position": {
+                "kind": "append_cursor",
+                "monotonic_order": 42,
+                "opaque": "v1:5hhKeeup2YpgMChxjlhjDyA3K2rJebZ6c5_k29nfwfM"
+              },
+              "provenance": {},
+              "source_instance_key": "v1:eiGAxlgnzb7x8mlrwhGwhDWXU1QvEj7n7ZZBkNpmsZk",
+              "status": {
+                "kind": "complete_through"
+              },
+              "stream_key": "v1:O7wdI7JJ3pmw69pD32WQe6T1fiKUg5hZS7n7wI2iKRA"
+            }
+          ],
+          "scope": {
+            "adapter_id": "fixture-agent",
+            "source_instance_key": "v1:eiGAxlgnzb7x8mlrwhGwhDWXU1QvEj7n7ZZBkNpmsZk",
+            "source_or_scope_declaration_digest": "v1:cxXe0vu7perLGRPNg9SHC0gXeVFlhVBRADNydZWJ6v0",
+            "support_release_id": "fixture-support-v1"
+          }
+        }
+      ],
+      "state": "ready"
+    },
+    "request": {
+      "contract_selection": {
+        "catalog_query_contract_version": 1,
+        "contract_versions": {
+          "coverage_contract_version": 1,
+          "external_entity_reference_version": 1,
+          "fact_family_versions": {},
+          "model_major": 1,
+          "observation_contract_version": null,
+          "query_pack_version": 1,
+          "selection_contract_version": 1,
+          "semantic_revision_reference_version": 1
+        },
+        "typed_unknown": {
+          "max_payload_bytes": 4096,
+          "preserves_unknown_fields": true,
+          "preserves_unknown_variants": true,
+          "typed_unknown_contract_version": 1
+        }
+      },
+      "page_size": 50,
+      "query_fingerprint": "v1:HhdgrB_A0CCQhB5pgPMc8DRIFX6uIovEufHKGlOWN0s",
+      "query_kind": "sessions",
+      "snapshot_id": {
+        "complete_commit": 42,
+        "coverage_plan_id": "v1:WPNhzwNlvCvEmFBQgIUyfmDK-eAOaOfXAbZ8c8X_AEE",
+        "pack_contract_version": 1,
+        "readiness_epoch": 1
+      },
+      "sort_spec_version": 1
+    },
+    "rows": [
+      {
+        "row": {
+          "assertion_keys": [
+            "v1:nYA6ToehKX6NMkr73OAwjX4sp83DmNw5351k_sHqGEY"
+          ],
+          "availability": {
+            "conflicting_assertion_keys": [],
+            "field": {
+              "authority": {
+                "class_id": "catalog-membership",
+                "native_times_comparable": true,
+                "precedence": 100
+              },
+              "completeness": "complete",
+              "provenance": [
+                {
+                  "fact_revision_id": "v1:O2nIegNTSijMZlU6xwq4Tt6sxtmvB2RUwdDKr-QFUJg",
+                  "semantic_reference_contract_version": 1
+                }
+              ],
+              "quality": "exact",
+              "value": {
+                "state": "history_ready"
+              }
+            },
+            "selected_assertion_key": "v1:nYA6ToehKX6NMkr73OAwjX4sp83DmNw5351k_sHqGEY"
+          },
+          "first_user_summary": {
+            "reason": "not_yet_observed",
+            "state": "unknown"
+          },
+          "native_created_at": {
+            "reason": "not_yet_observed",
+            "state": "unknown"
+          },
+          "native_identity": {
+            "selection": {
+              "conflicting_assertion_keys": [],
+              "field": {
+                "authority": {
+                  "class_id": "native-session-id",
+                  "native_times_comparable": true,
+                  "precedence": 100
+                },
+                "completeness": "complete",
+                "effective_at": 1700000000,
+                "provenance": [
+                  {
+                    "fact_revision_id": "v1:1xpjJIqr_o6G6ZAxK5YmoYyhNzkFU7clauMam_2Ra-g",
+                    "semantic_reference_contract_version": 1
+                  }
+                ],
+                "quality": "unknown",
+                "unknown_reason": "withheld",
+                "value": null
+              },
+              "selected_assertion_key": "v1:nYA6ToehKX6NMkr73OAwjX4sp83DmNw5351k_sHqGEY"
+            },
+            "state": "selected"
+          },
+          "native_message_count": {
+            "reason": "not_yet_observed",
+            "state": "unknown"
+          },
+          "native_updated_at": {
+            "reason": "not_yet_observed",
+            "state": "unknown"
+          },
+          "project_association": {
+            "selection": {
+              "association": {
+                "association_key": "v1:4ZsHNBaQ1b9cjC5DGJA7TeulDKnmjM--NbeH-TNRhQ8",
+                "authority": {
+                  "class_id": "native-project-association",
+                  "native_times_comparable": true,
+                  "precedence": 70
+                },
+                "basis": "native_project_index",
+                "completeness": "complete",
+                "declared_derivation_id": null,
+                "effective_at": 1700000000,
+                "locator_claim_key": null,
+                "owner": {
+                  "adapter_id": "fixture-agent",
+                  "generation": 1,
+                  "object_key": "v1:06l0raaXNZcbGOzBfYinRKBMyTarTfy2xwNguFVtQ-8",
+                  "source_instance_key": "v1:HvMXFWuiZPOZdgDnmp44beKMPxlzf1klDbN_URwT27I",
+                  "stream_key": "v1:CRfV-FVS3_3hhIYbBIACLS1ByvqoHH9v_rn9NsP3cCg"
+                },
+                "project_ref": {
+                  "external_ref": {
+                    "entity_key": "v1:YBLGZaXJHCqboYU2uZOSLF3NByw1Jd8ad6722-vhi6c",
+                    "external_entity_reference_version": 1
+                  },
+                  "kind": "project"
+                },
+                "provenance": [
+                  {
+                    "fact_revision_id": "v1:Bx3O12Bht4t2Dzz5e1YgPBeAu3jWZoIh-jDM1cox9pE",
+                    "semantic_reference_contract_version": 1
+                  }
+                ],
+                "quality": "native_claimed",
+                "session_ref": {
+                  "external_ref": {
+                    "entity_key": "v1:8xieXKaWAcI0hsjahB-XVSTrR1Qb-ZD_ropq9IEd_bY",
+                    "external_entity_reference_version": 1
+                  },
+                  "kind": "session"
+                }
+              },
+              "competing_associations": [],
+              "conflicting_association_keys": []
+            },
+            "state": "available"
+          },
+          "session_ref": {
+            "external_ref": {
+              "entity_key": "v1:8xieXKaWAcI0hsjahB-XVSTrR1Qb-ZD_ropq9IEd_bY",
+              "external_entity_reference_version": 1
+            },
+            "kind": "session"
+          },
+          "title": {
+            "selection": {
+              "conflicting_assertion_keys": [],
+              "field": {
+                "authority": {
+                  "class_id": "transcript-title",
+                  "native_times_comparable": true,
+                  "precedence": 80
+                },
+                "completeness": "complete",
+                "effective_at": 1700000000,
+                "provenance": [
+                  {
+                    "fact_revision_id": "v1:rYeQmR8fIYpkOfr4IwzqZSmjigL_zMaBWG266cM0O4Q",
+                    "semantic_reference_contract_version": 1
+                  }
+                ],
+                "quality": "exact",
+                "value": "Fixture Session"
+              },
+              "selected_assertion_key": "v1:nYA6ToehKX6NMkr73OAwjX4sp83DmNw5351k_sHqGEY"
+            },
+            "state": "selected"
+          },
+          "transcript_locator_claim_keys": []
+        },
+        "sort_key": "v1:Zml4dHVyZS1zZXNzaW9u"
+      }
+    ],
+    "total_count": {
+      "reason": "not_yet_observed",
+      "state": "unknown"
+    }
+  },
+  "snapshot_expired": {
+    "catalog_snapshot_expiration_contract_version": 1,
+    "contract_selection": {
+      "catalog_query_contract_version": 1,
+      "contract_versions": {
+        "coverage_contract_version": 1,
+        "external_entity_reference_version": 1,
+        "fact_family_versions": {},
+        "model_major": 1,
+        "observation_contract_version": null,
+        "query_pack_version": 1,
+        "selection_contract_version": 1,
+        "semantic_revision_reference_version": 1
+      },
+      "typed_unknown": {
+        "max_payload_bytes": 4096,
+        "preserves_unknown_fields": true,
+        "preserves_unknown_variants": true,
+        "typed_unknown_contract_version": 1
+      }
+    },
+    "latest_snapshot": {
+      "complete_commit": 84,
+      "coverage_plan_id": "v1:QKpP1zi1m8ZiA3WnrmHhOE98E50Zp265_YV6aehy0RQ",
+      "pack_contract_version": 1,
+      "readiness_epoch": 2
+    },
+    "request": {
+      "catalog_continuation_request_contract_version": 1,
+      "contract_selection": {
+        "catalog_query_contract_version": 1,
+        "contract_versions": {
+          "coverage_contract_version": 1,
+          "external_entity_reference_version": 1,
+          "fact_family_versions": {},
+          "model_major": 1,
+          "observation_contract_version": null,
+          "query_pack_version": 1,
+          "selection_contract_version": 1,
+          "semantic_revision_reference_version": 1
+        },
+        "typed_unknown": {
+          "max_payload_bytes": 4096,
+          "preserves_unknown_fields": true,
+          "preserves_unknown_variants": true,
+          "typed_unknown_contract_version": 1
+        }
+      },
+      "cursor": {
+        "cursor_contract_version": 1,
+        "last_entity_key": "v1:YBLGZaXJHCqboYU2uZOSLF3NByw1Jd8ad6722-vhi6c",
+        "last_sort_key": "v1:Zml4dHVyZS1wcm9qZWN0",
+        "query_fingerprint": "v1:9bho7jnaLXGGiDI5GBdJx2beRL3dbtshAPP9oM5qHPY",
+        "snapshot_id": {
+          "complete_commit": 42,
+          "coverage_plan_id": "v1:WPNhzwNlvCvEmFBQgIUyfmDK-eAOaOfXAbZ8c8X_AEE",
+          "pack_contract_version": 1,
+          "readiness_epoch": 1
+        },
+        "sort_spec_version": 1
+      },
+      "page_size": 1,
+      "query_fingerprint": "v1:9bho7jnaLXGGiDI5GBdJx2beRL3dbtshAPP9oM5qHPY",
+      "snapshot_id": {
+        "complete_commit": 42,
+        "coverage_plan_id": "v1:WPNhzwNlvCvEmFBQgIUyfmDK-eAOaOfXAbZ8c8X_AEE",
+        "pack_contract_version": 1,
+        "readiness_epoch": 1
+      },
+      "sort_spec_version": 1
+    },
+    "scope": {
+      "kind": "library"
+    }
+  }
+}

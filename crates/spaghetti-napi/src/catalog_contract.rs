@@ -169,6 +169,7 @@ opaque_digest_type!(CatalogSchedulingReceiptId);
 
 pub(crate) mod evidence;
 pub(crate) mod hydration;
+pub(crate) mod page;
 pub(crate) mod query;
 
 impl CatalogAccessPolicyDigest {
@@ -193,11 +194,32 @@ impl CatalogAccessPolicyDigest {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub(crate) enum CatalogCoverageScope {
     Library,
     Entity { external_ref: ExternalEntityRef },
+}
+
+impl<'de> Deserialize<'de> for CatalogCoverageScope {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+        enum Wire {
+            Library {},
+            Entity { external_ref: ExternalEntityRef },
+        }
+
+        let value = match Wire::deserialize(deserializer)? {
+            Wire::Library {} => Self::Library,
+            Wire::Entity { external_ref } => Self::Entity { external_ref },
+        };
+        value.validate().map_err(D::Error::custom)?;
+        Ok(value)
+    }
 }
 
 impl CatalogCoverageScope {
@@ -234,6 +256,7 @@ impl CatalogCoverageScope {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct CatalogCoveragePlanSource {
     pub adapter_id: String,
     pub source_instance_key: CanonicalSourceInstanceKey,
@@ -266,6 +289,20 @@ impl CatalogCoveragePlanSource {
         validate_identifier("catalog support release id", &self.support_release_id)
     }
 
+    /// Exact catalog-readiness proof carried in the generic coverage scope.
+    ///
+    /// A catalog declaration alone cannot authorize completeness after an
+    /// access-policy change. The scope declaration digest is therefore bound
+    /// to both immutable inputs under a catalog-specific derivation version.
+    pub(crate) fn coverage_binding_digest(&self) -> CoverageDeclarationDigest {
+        let mut encoded = Vec::with_capacity(64 + 35);
+        encoded.extend_from_slice(b"catalog-coverage-binding-v1");
+        encoded.extend_from_slice(self.catalog_declaration_digest.as_bytes());
+        encoded.extend_from_slice(self.access_policy_digest.as_bytes());
+        CoverageDeclarationDigest::derive(&encoded)
+            .expect("fixed catalog coverage binding material is valid")
+    }
+
     fn coordinate(&self) -> (&str, CanonicalSourceInstanceKey) {
         (&self.adapter_id, self.source_instance_key)
     }
@@ -282,7 +319,7 @@ impl CatalogCoveragePlanSource {
         self.adapter_id == coverage.scope.adapter_id
             && self.source_instance_key == coverage.scope.source_instance_key
             && self.support_release_id == coverage.scope.support_release_id
-            && self.catalog_declaration_digest == coverage.scope.source_or_scope_declaration_digest
+            && self.coverage_binding_digest() == coverage.scope.source_or_scope_declaration_digest
     }
 }
 
@@ -419,6 +456,7 @@ impl<'de> Deserialize<'de> for CatalogCoveragePlan {
         D: Deserializer<'de>,
     {
         #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
         struct Wire {
             coverage_plan_contract_version: u32,
             coverage_plan_id: CatalogCoveragePlanId,
@@ -499,6 +537,7 @@ impl<'de> Deserialize<'de> for CatalogSnapshotId {
         D: Deserializer<'de>,
     {
         #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
         struct Wire {
             pack_contract_version: u32,
             coverage_plan_id: CatalogCoveragePlanId,
@@ -563,7 +602,7 @@ impl CatalogQueryFingerprint {
     }
 }
 
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct CatalogSortKey(Vec<u8>);
 
 impl CatalogSortKey {
@@ -694,6 +733,7 @@ impl<'de> Deserialize<'de> for CatalogCursor {
         D: Deserializer<'de>,
     {
         #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
         struct Wire {
             cursor_contract_version: u32,
             snapshot_id: CatalogSnapshotId,
@@ -970,6 +1010,7 @@ impl CatalogReadinessSnapshot {
             version: self.desired_contract_version,
         };
         let mut covered_sources = BTreeSet::new();
+        let mut previous_coverage_coordinate = None;
         for coverage in &self.source_coverage {
             coverage.validate().map_err(|error| {
                 CatalogContractError::invalid(format!("invalid catalog source coverage: {error}"))
@@ -989,6 +1030,29 @@ impl CatalogReadinessSnapshot {
                     "catalog readiness contains coverage outside its frozen plan",
                 ));
             };
+            let coverage_coordinate = (
+                coverage.scope.adapter_id.clone(),
+                coverage.scope.source_instance_key,
+            );
+            if previous_coverage_coordinate
+                .as_ref()
+                .is_some_and(|previous| previous >= &coverage_coordinate)
+            {
+                return Err(CatalogContractError::invalid(
+                    "catalog readiness source coverage must be canonical and duplicate-free",
+                ));
+            }
+            previous_coverage_coordinate = Some(coverage_coordinate);
+            if coverage.points.iter().any(|point| point.generation == 0)
+                || coverage
+                    .explicit_absence_or_deletion
+                    .iter()
+                    .any(|absence| absence.generation == 0)
+            {
+                return Err(CatalogContractError::invalid(
+                    "catalog readiness coverage generations must be greater than zero",
+                ));
+            }
             if !covered_sources.insert(source.coordinate()) {
                 return Err(CatalogContractError::invalid(
                     "catalog readiness contains duplicate source coverage",
@@ -1459,8 +1523,13 @@ mod tests {
                 source_instance_key: source.source_instance_key,
                 root_entity_key: None,
                 support_release_id: source.support_release_id.clone(),
-                source_or_scope_declaration_digest: CoverageDeclarationDigest::derive(declaration)
-                    .unwrap(),
+                source_or_scope_declaration_digest: {
+                    assert_eq!(
+                        source.catalog_declaration_digest,
+                        CoverageDeclarationDigest::derive(declaration).unwrap()
+                    );
+                    source.coverage_binding_digest()
+                },
             },
             CoverageMembershipRevision::derive(
                 format!("{}-catalog-membership", source.adapter_id).as_bytes(),

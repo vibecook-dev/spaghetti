@@ -195,7 +195,13 @@ impl CatalogEvidenceOwner {
     }
 
     fn validate(&self) -> Result<(), CatalogContractError> {
-        validate_identifier("catalog evidence adapter id", &self.adapter_id)
+        validate_identifier("catalog evidence adapter id", &self.adapter_id)?;
+        if self.generation == 0 {
+            return Err(CatalogContractError::invalid(
+                "catalog evidence generation must be greater than zero",
+            ));
+        }
+        Ok(())
     }
 
     fn encode(&self) -> Vec<u8> {

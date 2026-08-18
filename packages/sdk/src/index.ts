@@ -22,6 +22,7 @@ export * from './contracts/rfc012a.js';
 // native query API remains gated until complete page DTOs and snapshot leases land.
 export * from './contracts/rfc012b.js';
 export * from './contracts/rfc012b-hydration.js';
+export * from './contracts/rfc012b-pages.js';
 
 // RFC 012C portable actor, affiliation, and usage-v2 value contracts.
 export * from './contracts/rfc012c.js';

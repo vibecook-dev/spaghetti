@@ -247,6 +247,13 @@ function record(value: unknown, label: string): UnknownRecord {
   return value as UnknownRecord;
 }
 
+function assertKnownFields(input: UnknownRecord, fields: readonly string[], label: string): void {
+  const known = new Set(fields);
+  for (const key of Object.keys(input)) {
+    if (!known.has(key)) throw new ContractValidationError(`${label} contains unknown field ${key}`);
+  }
+}
+
 function nonEmptyString(value: unknown, label: string): string {
   if (typeof value !== 'string' || value.length === 0 || value.trim() !== value) {
     throw new ContractValidationError(`${label} must be a non-empty canonical string`);
@@ -554,6 +561,20 @@ function parseFactFamilyVersions(value: unknown, label: string): Record<string, 
 
 export function parseContractVersionRequest(value: unknown): ContractVersionRequest {
   const input = record(value, 'contract version request');
+  assertKnownFields(
+    input,
+    [
+      'selection_contract_version',
+      'model_major',
+      'external_entity_reference_version',
+      'semantic_revision_reference_version',
+      'coverage_contract_versions',
+      'fact_family_versions',
+      'query_pack_versions',
+      'observation_contract_versions',
+    ],
+    'contract version request',
+  );
   if (input.selection_contract_version !== CONTRACT_VERSION_SELECTION_VERSION) {
     throw new ContractValidationError('unsupported contract-version selection request version');
   }
@@ -590,6 +611,20 @@ export function parseContractVersionRequest(value: unknown): ContractVersionRequ
 
 export function parseContractVersionOffer(value: unknown): ContractVersionOffer {
   const input = record(value, 'contract version offer');
+  assertKnownFields(
+    input,
+    [
+      'selection_contract_version',
+      'model_major',
+      'external_entity_reference_versions',
+      'semantic_revision_reference_versions',
+      'coverage_contract_versions',
+      'fact_family_versions',
+      'query_pack_versions',
+      'observation_contract_versions',
+    ],
+    'contract version offer',
+  );
   if (input.selection_contract_version !== CONTRACT_VERSION_SELECTION_VERSION) {
     throw new ContractValidationError('unsupported contract-version offer version');
   }
@@ -623,6 +658,20 @@ export function parseContractVersionOffer(value: unknown): ContractVersionOffer 
 
 export function parseContractVersionSelection(value: unknown): ContractVersionSelection {
   const input = record(value, 'contract version selection');
+  assertKnownFields(
+    input,
+    [
+      'selection_contract_version',
+      'model_major',
+      'external_entity_reference_version',
+      'semantic_revision_reference_version',
+      'coverage_contract_version',
+      'fact_family_versions',
+      'query_pack_version',
+      'observation_contract_version',
+    ],
+    'contract version selection',
+  );
   if (input.selection_contract_version !== CONTRACT_VERSION_SELECTION_VERSION) {
     throw new ContractValidationError('unsupported contract-version selection version');
   }
@@ -723,6 +772,7 @@ export function parseOpaqueContractReference(value: unknown, label = 'opaque ref
 
 export function parseExternalEntityRef(value: unknown): ExternalEntityRef {
   const input = record(value, 'external entity reference');
+  assertKnownFields(input, ['external_entity_reference_version', 'entity_key'], 'external entity reference');
   if (input.external_entity_reference_version !== EXTERNAL_ENTITY_REFERENCE_VERSION) {
     throw new ContractValidationError('unsupported external entity reference version');
   }
@@ -734,6 +784,7 @@ export function parseExternalEntityRef(value: unknown): ExternalEntityRef {
 
 export function parseSemanticRevisionRef(value: unknown): SemanticRevisionRef {
   const input = record(value, 'semantic revision reference');
+  assertKnownFields(input, ['semantic_reference_contract_version', 'fact_revision_id'], 'semantic revision reference');
   if (input.semantic_reference_contract_version !== SEMANTIC_REFERENCE_CONTRACT_VERSION) {
     throw new ContractValidationError('unsupported semantic reference contract version');
   }

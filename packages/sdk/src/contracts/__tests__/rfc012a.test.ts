@@ -358,6 +358,22 @@ test('incompatible majors and malformed complete coverage are rejected', () => {
       }),
     ContractValidationError,
   );
+  assert.throws(
+    () =>
+      parseExternalEntityRef({
+        ...(fixture.external_entity_ref as object),
+        future_identity_meaning: true,
+      }),
+    ContractValidationError,
+  );
+  assert.throws(
+    () =>
+      parseSemanticRevisionRef({
+        ...(fixture.semantic_revision_ref as object),
+        future_revision_meaning: true,
+      }),
+    ContractValidationError,
+  );
   const malformed = structuredClone(fixture.coverage.baseline) as SourceCoverageSet;
   malformed.points[0]!.status = { kind: 'partial' };
   assert.throws(() => parseSourceCoverageSet(malformed), ContractValidationError);

@@ -457,6 +457,7 @@ impl<'de> Deserialize<'de> for ExternalEntityRef {
         D: Deserializer<'de>,
     {
         #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
         struct Wire {
             external_entity_reference_version: u32,
             entity_key: CanonicalEntityKey,
@@ -503,6 +504,7 @@ impl<'de> Deserialize<'de> for SemanticRevisionRef {
         D: Deserializer<'de>,
     {
         #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
         struct Wire {
             semantic_reference_contract_version: u32,
             fact_revision_id: FactRevisionId,
@@ -1451,6 +1453,9 @@ mod tests {
             serde_json::from_str::<ExternalEntityRef>(&encoded).unwrap(),
             first
         );
+        let mut unknown_field = serde_json::to_value(first).unwrap();
+        unknown_field["future_identity_meaning"] = json!(true);
+        assert!(serde_json::from_value::<ExternalEntityRef>(unknown_field).is_err());
     }
 
     #[test]
@@ -1519,6 +1524,9 @@ mod tests {
         );
         assert_eq!(first, scoped);
         assert_ne!(first, correction);
+        let mut unknown_field = serde_json::to_value(first).unwrap();
+        unknown_field["future_revision_meaning"] = json!(true);
+        assert!(serde_json::from_value::<SemanticRevisionRef>(unknown_field).is_err());
     }
 
     #[test]

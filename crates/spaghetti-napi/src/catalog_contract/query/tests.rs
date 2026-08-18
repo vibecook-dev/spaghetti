@@ -204,6 +204,28 @@ fn malformed_query_negotiation_versions_and_preferences_are_rejected() {
     let mut forged_selection = serde_json::to_value(selection()).unwrap();
     forged_selection["contract_versions"]["query_pack_version"] = json!(2);
     assert!(serde_json::from_value::<CatalogQueryContractSelection>(forged_selection).is_err());
+
+    let mut request_unknown = serde_json::to_value(contract_request()).unwrap();
+    request_unknown["future_request_meaning"] = json!(true);
+    assert!(serde_json::from_value::<CatalogQueryContractRequest>(request_unknown).is_err());
+
+    let mut request_contract_unknown = serde_json::to_value(contract_request()).unwrap();
+    request_contract_unknown["contract_versions"]["future_contract_axis"] = json!(1);
+    assert!(
+        serde_json::from_value::<CatalogQueryContractRequest>(request_contract_unknown).is_err()
+    );
+
+    let mut offer_unknown = serde_json::to_value(contract_offer()).unwrap();
+    offer_unknown["future_offer_meaning"] = json!(true);
+    assert!(serde_json::from_value::<CatalogQueryContractOffer>(offer_unknown).is_err());
+
+    let mut selection_unknown = serde_json::to_value(selection()).unwrap();
+    selection_unknown["future_selection_meaning"] = json!(true);
+    assert!(serde_json::from_value::<CatalogQueryContractSelection>(selection_unknown).is_err());
+
+    let mut typed_unknown = serde_json::to_value(contract_request()).unwrap();
+    typed_unknown["typed_unknown"]["future_preservation_semantics"] = json!(true);
+    assert!(serde_json::from_value::<CatalogQueryContractRequest>(typed_unknown).is_err());
 }
 
 #[test]

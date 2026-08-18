@@ -442,6 +442,7 @@ def discover_rfc012_catalog_contract_boundary_violations() -> set[str]:
     portable_relatives = (
         "packages/sdk/src/contracts/rfc012b.ts",
         "packages/sdk/src/contracts/rfc012b-hydration.ts",
+        "packages/sdk/src/contracts/rfc012b-pages.ts",
     )
     portable_roots = [REPO_ROOT / relative for relative in portable_relatives]
     contracts_root = portable_roots[0].parent.resolve()
@@ -470,7 +471,11 @@ def discover_rfc012_catalog_contract_boundary_violations() -> set[str]:
 
     sdk_index = REPO_ROOT / "packages/sdk/src/index.ts"
     sdk_exports = RUNTIME_MODULE_RE.findall(read(sdk_index))
-    for export in ("./contracts/rfc012b.js", "./contracts/rfc012b-hydration.js"):
+    for export in (
+        "./contracts/rfc012b.js",
+        "./contracts/rfc012b-hydration.js",
+        "./contracts/rfc012b-pages.js",
+    ):
         if export not in sdk_exports:
             found.add(f"{repo_path(sdk_index)}#missing-{Path(export).stem}-contract-export")
     return found

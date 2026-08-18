@@ -10,6 +10,7 @@ import {
   parseCatalogQueryContractOffer,
   parseCatalogQueryContractRequest,
   parseCatalogQueryContractResponse,
+  parseCatalogQueryContractSelection,
   serializeCatalogQueryContractResponse,
 } from '../rfc012b.js';
 
@@ -171,6 +172,30 @@ test('wire majors, malformed preferences, and forged selections are rejected', (
   };
   driftedSelection.contract_selection.typed_unknown.max_payload_bytes = 8_192;
   reject(driftedSelection, parseFixtureResponse);
+
+  const requestUnknown = clone(rawFixture.contract_request) as Record<string, unknown>;
+  requestUnknown.future_request_meaning = true;
+  reject(requestUnknown, parseCatalogQueryContractRequest);
+
+  const contractUnknown = clone(rawFixture.contract_request) as {
+    contract_versions: Record<string, unknown>;
+  };
+  contractUnknown.contract_versions.future_contract_axis = 1;
+  reject(contractUnknown, parseCatalogQueryContractRequest);
+
+  const offerUnknown = clone(rawFixture.contract_offer) as Record<string, unknown>;
+  offerUnknown.future_offer_meaning = true;
+  reject(offerUnknown, parseCatalogQueryContractOffer);
+
+  const selectedUnknown = clone(expectedSelection) as Record<string, unknown>;
+  selectedUnknown.future_selection_meaning = true;
+  reject(selectedUnknown, parseCatalogQueryContractSelection);
+
+  const typedUnknown = clone(rawFixture.contract_request) as {
+    typed_unknown: Record<string, unknown>;
+  };
+  typedUnknown.typed_unknown.future_preservation_semantics = true;
+  reject(typedUnknown, parseCatalogQueryContractRequest);
 });
 
 test('typed unknown preservation is bounded and rejects nonportable payloads', () => {
@@ -233,6 +258,14 @@ test('continuation parsing rejects snapshot, query, sort, pack, and page-size dr
   wrongSort.cursor.sort_spec_version += 1;
   reject(wrongSort, parseFixtureContinuation);
 
+  const overflowingSort = clone(rawFixture.continuation_request) as {
+    sort_spec_version: number;
+    cursor: { sort_spec_version: number };
+  };
+  overflowingSort.sort_spec_version = 0x1_0000_0000;
+  overflowingSort.cursor.sort_spec_version = 0x1_0000_0000;
+  reject(overflowingSort, parseFixtureContinuation);
+
   const wrongPack = clone(rawFixture.continuation_request) as {
     snapshot_id: { pack_contract_version: number };
     cursor: { snapshot_id: { pack_contract_version: number } };
@@ -266,6 +299,22 @@ test('continuation parsing rejects snapshot, query, sort, pack, and page-size dr
   const zeroPage = clone(rawFixture.continuation_request) as { page_size: number };
   zeroPage.page_size = 0;
   reject(zeroPage, parseFixtureContinuation);
+
+  const unknownContinuation = clone(rawFixture.continuation_request) as Record<string, unknown>;
+  unknownContinuation.future_continuation_meaning = true;
+  reject(unknownContinuation, parseFixtureContinuation);
+
+  const unknownCursor = clone(rawFixture.continuation_request) as {
+    cursor: Record<string, unknown>;
+  };
+  unknownCursor.cursor.future_cursor_meaning = true;
+  reject(unknownCursor, parseFixtureContinuation);
+
+  const unknownSnapshot = clone(rawFixture.continuation_request) as {
+    cursor: { snapshot_id: Record<string, unknown> };
+  };
+  unknownSnapshot.cursor.snapshot_id.future_snapshot_meaning = true;
+  reject(unknownSnapshot, parseFixtureContinuation);
 });
 
 test('portable query parsing does not depend on the Node Buffer global', () => {

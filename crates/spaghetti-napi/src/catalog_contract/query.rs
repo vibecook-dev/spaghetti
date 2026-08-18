@@ -32,7 +32,7 @@ pub(crate) const CATALOG_BASE_MODEL_MAJOR: u32 = 1;
 const MAX_TYPED_UNKNOWN_PAYLOAD_BYTES: u32 = 64 * 1024;
 const MAX_TYPED_UNKNOWN_DEPTH: usize = 16;
 const MAX_TYPED_UNKNOWN_NODES: usize = 1_024;
-const MAX_CONTINUATION_PAGE_SIZE: u32 = 1_000;
+pub(super) const MAX_CONTINUATION_PAGE_SIZE: u32 = 1_000;
 const MAX_JAVASCRIPT_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -85,6 +85,7 @@ impl CatalogQueryNegotiationError {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct CatalogTypedUnknownCapability {
     pub typed_unknown_contract_version: u32,
     pub preserves_unknown_fields: bool,
@@ -178,6 +179,7 @@ impl<'de> Deserialize<'de> for CatalogQueryContractRequest {
         D: Deserializer<'de>,
     {
         #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
         struct Wire {
             catalog_query_contract_version: u32,
             contract_versions: ContractVersionRequest,
@@ -236,6 +238,7 @@ impl<'de> Deserialize<'de> for CatalogQueryContractOffer {
         D: Deserializer<'de>,
     {
         #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
         struct Wire {
             catalog_query_contract_version: u32,
             contract_versions: ContractVersionOffer,
@@ -303,6 +306,7 @@ impl<'de> Deserialize<'de> for CatalogQueryContractSelection {
         D: Deserializer<'de>,
     {
         #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
         struct Wire {
             catalog_query_contract_version: u32,
             contract_versions: ContractVersionSelection,
@@ -616,7 +620,7 @@ impl UnknownPayloadBudget {
     }
 }
 
-fn validate_typed_unknown_fields(
+pub(super) fn validate_typed_unknown_fields(
     fields: &BTreeMap<String, JsonValue>,
     capability: &CatalogTypedUnknownCapability,
 ) -> Result<(), CatalogContractError> {
@@ -732,6 +736,7 @@ impl CatalogContinuationRequest {
         expected_selection: &CatalogQueryContractSelection,
     ) -> Result<Self, CatalogContractError> {
         #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
         struct Wire {
             catalog_continuation_request_contract_version: u32,
             contract_selection: CatalogQueryContractSelection,
@@ -758,7 +763,7 @@ impl CatalogContinuationRequest {
         Ok(parsed)
     }
 
-    fn validate_for_selection(
+    pub(super) fn validate_for_selection(
         &self,
         expected_selection: &CatalogQueryContractSelection,
     ) -> Result<(), CatalogContractError> {
@@ -772,7 +777,7 @@ impl CatalogContinuationRequest {
         Ok(())
     }
 
-    fn validate(&self) -> Result<(), CatalogContractError> {
+    pub(super) fn validate(&self) -> Result<(), CatalogContractError> {
         if self.catalog_continuation_request_contract_version
             != CATALOG_CONTINUATION_REQUEST_CONTRACT_VERSION
         {

@@ -33,6 +33,7 @@ const MAX_TYPED_UNKNOWN_DEPTH = 16;
 const MAX_TYPED_UNKNOWN_NODES = 1_024;
 const MAX_CONTINUATION_PAGE_SIZE = 1_000;
 const MAX_IDENTIFIER_BYTES = 256;
+const MAX_U32 = 0xffff_ffff;
 const textEncoder = new TextEncoder();
 
 type UnknownRecord = Record<string, unknown>;
@@ -135,6 +136,13 @@ function record(value: unknown, label: string): UnknownRecord {
   return value as UnknownRecord;
 }
 
+function assertKnownFields(input: UnknownRecord, fields: readonly string[], label: string): void {
+  const known = new Set(fields);
+  for (const key of Object.keys(input)) {
+    if (!known.has(key)) throw new ContractValidationError(`${label} contains unknown field ${key}`);
+  }
+}
+
 function utf8Bytes(value: string): number {
   return textEncoder.encode(value).byteLength;
 }
@@ -158,6 +166,12 @@ function positiveInteger(value: unknown, label: string): number {
   return value as number;
 }
 
+function positiveU32(value: unknown, label: string): number {
+  const parsed = positiveInteger(value, label);
+  if (parsed > MAX_U32) throw new ContractValidationError(`${label} exceeds u32`);
+  return parsed;
+}
+
 function booleanValue(value: unknown, label: string): boolean {
   if (typeof value !== 'boolean') throw new ContractValidationError(`${label} must be boolean`);
   return value;
@@ -165,6 +179,11 @@ function booleanValue(value: unknown, label: string): boolean {
 
 function parseTypedUnknownCapability(value: unknown): CatalogTypedUnknownCapability {
   const input = record(value, 'catalog typed-unknown capability');
+  assertKnownFields(
+    input,
+    ['typed_unknown_contract_version', 'preserves_unknown_fields', 'preserves_unknown_variants', 'max_payload_bytes'],
+    'catalog typed-unknown capability',
+  );
   const maxPayloadBytes = positiveInteger(input.max_payload_bytes, 'catalog typed-unknown payload bound');
   if (maxPayloadBytes > MAX_TYPED_UNKNOWN_PAYLOAD_BYTES) {
     throw new ContractValidationError(
@@ -184,6 +203,11 @@ function parseTypedUnknownCapability(value: unknown): CatalogTypedUnknownCapabil
 
 export function parseCatalogQueryContractRequest(value: unknown): CatalogQueryContractRequest {
   const input = record(value, 'catalog query contract request');
+  assertKnownFields(
+    input,
+    ['catalog_query_contract_version', 'contract_versions', 'typed_unknown'],
+    'catalog query contract request',
+  );
   if (input.catalog_query_contract_version !== CATALOG_QUERY_CONTRACT_VERSION) {
     throw new ContractValidationError('unsupported catalog query contract request version');
   }
@@ -200,6 +224,11 @@ export function parseCatalogQueryContractRequest(value: unknown): CatalogQueryCo
 
 export function parseCatalogQueryContractOffer(value: unknown): CatalogQueryContractOffer {
   const input = record(value, 'catalog query contract offer');
+  assertKnownFields(
+    input,
+    ['catalog_query_contract_version', 'contract_versions', 'typed_unknown'],
+    'catalog query contract offer',
+  );
   if (input.catalog_query_contract_version !== CATALOG_QUERY_CONTRACT_VERSION) {
     throw new ContractValidationError('unsupported catalog query contract offer version');
   }
@@ -296,6 +325,11 @@ export function negotiateCatalogQueryContract(
 
 export function parseCatalogQueryContractSelection(value: unknown): CatalogQueryContractSelection {
   const input = record(value, 'catalog query contract selection');
+  assertKnownFields(
+    input,
+    ['catalog_query_contract_version', 'contract_versions', 'typed_unknown'],
+    'catalog query contract selection',
+  );
   if (input.catalog_query_contract_version !== CATALOG_QUERY_CONTRACT_VERSION) {
     throw new ContractValidationError('unsupported selected catalog query contract version');
   }
@@ -494,6 +528,11 @@ export function serializeCatalogQueryContractResponse(response: ParsedCatalogQue
 
 function parseCatalogSnapshotId(value: unknown): CatalogSnapshotId {
   const input = record(value, 'catalog snapshot id');
+  assertKnownFields(
+    input,
+    ['pack_contract_version', 'coverage_plan_id', 'readiness_epoch', 'complete_commit'],
+    'catalog snapshot id',
+  );
   return {
     pack_contract_version: positiveInteger(input.pack_contract_version, 'catalog snapshot pack contract version'),
     coverage_plan_id: parseOpaqueContractReference(input.coverage_plan_id, 'catalog coverage plan id'),
@@ -536,6 +575,18 @@ function parseCatalogSortKey(value: unknown): string {
 
 function parseCatalogCursor(value: unknown): CatalogCursor {
   const input = record(value, 'catalog cursor');
+  assertKnownFields(
+    input,
+    [
+      'cursor_contract_version',
+      'snapshot_id',
+      'query_fingerprint',
+      'sort_spec_version',
+      'last_sort_key',
+      'last_entity_key',
+    ],
+    'catalog cursor',
+  );
   if (input.cursor_contract_version !== 1) {
     throw new ContractValidationError('unsupported catalog cursor contract version');
   }
@@ -543,7 +594,7 @@ function parseCatalogCursor(value: unknown): CatalogCursor {
     cursor_contract_version: 1,
     snapshot_id: parseCatalogSnapshotId(input.snapshot_id),
     query_fingerprint: parseOpaqueContractReference(input.query_fingerprint, 'catalog query fingerprint'),
-    sort_spec_version: positiveInteger(input.sort_spec_version, 'catalog cursor sort specification version'),
+    sort_spec_version: positiveU32(input.sort_spec_version, 'catalog cursor sort specification version'),
     last_sort_key: parseCatalogSortKey(input.last_sort_key),
     last_entity_key: parseOpaqueContractReference(input.last_entity_key, 'catalog cursor last entity key'),
   };
@@ -554,6 +605,19 @@ export function parseCatalogContinuationRequest(
   expectedSelectionInput: unknown,
 ): CatalogContinuationRequest {
   const input = record(value, 'catalog continuation request');
+  assertKnownFields(
+    input,
+    [
+      'catalog_continuation_request_contract_version',
+      'contract_selection',
+      'snapshot_id',
+      'query_fingerprint',
+      'sort_spec_version',
+      'cursor',
+      'page_size',
+    ],
+    'catalog continuation request',
+  );
   if (input.catalog_continuation_request_contract_version !== CATALOG_CONTINUATION_REQUEST_CONTRACT_VERSION) {
     throw new ContractValidationError('unsupported catalog continuation request contract version');
   }
@@ -564,7 +628,7 @@ export function parseCatalogContinuationRequest(
   }
   const snapshotId = parseCatalogSnapshotId(input.snapshot_id);
   const queryFingerprint = parseOpaqueContractReference(input.query_fingerprint, 'catalog query fingerprint');
-  const sortSpecVersion = positiveInteger(input.sort_spec_version, 'catalog sort specification version');
+  const sortSpecVersion = positiveU32(input.sort_spec_version, 'catalog sort specification version');
   const cursor = parseCatalogCursor(input.cursor);
   const pageSize = positiveInteger(input.page_size, 'catalog continuation page size');
   if (pageSize > MAX_CONTINUATION_PAGE_SIZE) {
