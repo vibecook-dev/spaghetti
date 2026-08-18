@@ -26,8 +26,8 @@ use crate::adapter::{
     QualifiedTimestamp, QualifiedValueQuality, RawRetentionPolicy, ScopeRelationPrimitive,
     SemanticRevisionRef, Sha256Digest, SourceAccess, SourceCoveragePoint, SourceCoverageSet,
     SourceObjectList, SourceObjectListRequest, SourceQuery, SourceRecordId, SourceRows,
-    SourceSnapshot, SupportOperation, TypedAccessAuthorization, UsageRevisionV2Fact,
-    EXTERNAL_ENTITY_REFERENCE_VERSION,
+    SourceSnapshot, SupportOperation, TimestampQuality, TypedAccessAuthorization,
+    UsageRevisionV2Fact, EXTERNAL_ENTITY_REFERENCE_VERSION,
 };
 use crate::coverage_runtime::{
     derive_coverage_membership_revision, source_membership_prefix, CoverageMembershipObject,
@@ -1413,6 +1413,12 @@ pub const SCOPED_BOOTSTRAP_BARRIER_CONTRACT_VERSION: u32 = 1;
 pub const SCOPED_RESYNC_BARRIER_CONTRACT_VERSION: u32 = 1;
 pub const SCOPED_SCOPE_COVERAGE_CONTRACT_VERSION: u32 = 1;
 pub const RUNTIME_USAGE_V2_FACT_FAMILY_CONTRACT_VERSION: u32 = 1;
+// These versions domain-separate store-free candidate replacement snapshots.
+// They deliberately remain absent from
+// `SCOPED_OBSERVATION_IMPLEMENTED_FACT_FAMILIES`: freezing auxiliary reducer
+// state does not authorize family coverage, delivery, or a barrier manifest.
+const RUNTIME_ACTOR_RUN_FACT_FAMILY_CONTRACT_VERSION: u32 = 1;
+const RUNTIME_ACTOR_AFFILIATION_FACT_FAMILY_CONTRACT_VERSION: u32 = 1;
 pub const SCOPED_INITIAL_SCOPE_EPOCH: u64 = 1;
 const SCOPED_OBSERVATION_IMPLEMENTED_FACT_FAMILIES: &[(&str, u32)] = &[(
     "runtime.usage-v2",
@@ -1532,6 +1538,94 @@ pub struct ScopedUsageV2ReplacementSnapshot {
     pub entity_count: u64,
     pub semantic_digest: ScopedReplacementSemanticDigest,
     pub events: Vec<ScopedUsageV2Event>,
+}
+
+/// Internal candidate representation for one current actor-run entity.
+///
+/// This value is frozen with a replacement stage but is not an observation
+/// event or a negotiated family. It retains the exact normalized fact and
+/// path-free source occurrence needed by a later actor-family delivery slice.
+#[derive(Clone, PartialEq, Eq)]
+struct ScopedActorRunReplacementEntity {
+    semantic: FactSemanticRevision,
+    generation: u64,
+    source: ScopedUsageV2Source,
+    revision: ActorRunRevisionFact,
+    actor: ScopedActorRunRef,
+}
+
+/// Internal candidate representation for one current affiliation entity plus
+/// the deterministic actor-level context required by RFC 012C section 12.
+#[derive(Clone, PartialEq, Eq)]
+struct ScopedActorAffiliationReplacementEntity {
+    semantic: FactSemanticRevision,
+    generation: u64,
+    source: ScopedUsageV2Source,
+    revision: ActorAffiliationRevisionFact,
+    context: ScopedActorAffiliationContext,
+}
+
+/// Store-free actor-run replacement freeze. Its private shape and redacted
+/// Debug implementation prevent this precursor from becoming a portable or
+/// consumer-authorizing contract by accident.
+#[derive(Clone, PartialEq, Eq)]
+struct ScopedActorRunReplacementSnapshot {
+    fact_family_contract_version: u32,
+    replacement_digest_contract_version: u32,
+    phase: ScopedAppendDeliveryPhase,
+    entity_count: u64,
+    semantic_digest: ScopedReplacementSemanticDigest,
+    entities: Vec<ScopedActorRunReplacementEntity>,
+}
+
+impl std::fmt::Debug for ScopedActorRunReplacementSnapshot {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ScopedActorRunReplacementSnapshot")
+            .field(
+                "fact_family_contract_version",
+                &self.fact_family_contract_version,
+            )
+            .field(
+                "replacement_digest_contract_version",
+                &self.replacement_digest_contract_version,
+            )
+            .field("phase", &self.phase)
+            .field("entity_count", &self.entity_count)
+            .field("semantic_digest", &self.semantic_digest)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Store-free affiliation replacement freeze. Entries and native claims stay
+/// private; only count and digest appear in diagnostics.
+#[derive(Clone, PartialEq, Eq)]
+struct ScopedActorAffiliationReplacementSnapshot {
+    fact_family_contract_version: u32,
+    replacement_digest_contract_version: u32,
+    phase: ScopedAppendDeliveryPhase,
+    entity_count: u64,
+    semantic_digest: ScopedReplacementSemanticDigest,
+    entities: Vec<ScopedActorAffiliationReplacementEntity>,
+}
+
+impl std::fmt::Debug for ScopedActorAffiliationReplacementSnapshot {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ScopedActorAffiliationReplacementSnapshot")
+            .field(
+                "fact_family_contract_version",
+                &self.fact_family_contract_version,
+            )
+            .field(
+                "replacement_digest_contract_version",
+                &self.replacement_digest_contract_version,
+            )
+            .field("phase", &self.phase)
+            .field("entity_count", &self.entity_count)
+            .field("semantic_digest", &self.semantic_digest)
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -8664,6 +8758,83 @@ impl ScopedObservationProjectionSink {
         })
     }
 
+    fn actor_run_replacement_snapshot(
+        &self,
+        phase: ScopedAppendDeliveryPhase,
+    ) -> Result<ScopedActorRunReplacementSnapshot, ScopedProjectionError> {
+        if phase == ScopedAppendDeliveryPhase::Live {
+            return Err(ScopedProjectionError::InvalidReplacementPhase);
+        }
+        let contexts = self.actor_context_index(&BTreeMap::new(), &BTreeMap::new())?;
+        let entities = self
+            .actor_runs
+            .iter()
+            .map(|(actor_run, state)| {
+                let actor = contexts
+                    .actors
+                    .get(actor_run)
+                    .cloned()
+                    .ok_or(ScopedProjectionError::InvalidActorContext)?;
+                Ok(ScopedActorRunReplacementEntity {
+                    semantic: state.semantic,
+                    generation: state.generation,
+                    source: state.source.clone(),
+                    revision: state.revision.clone(),
+                    actor,
+                })
+            })
+            .collect::<Result<Vec<_>, ScopedProjectionError>>()?;
+        let entity_count = u64::try_from(entities.len())
+            .map_err(|_| ScopedProjectionError::ReplacementCapacityExhausted)?;
+        let semantic_digest = actor_run_replacement_digest(&entities)?;
+        Ok(ScopedActorRunReplacementSnapshot {
+            fact_family_contract_version: RUNTIME_ACTOR_RUN_FACT_FAMILY_CONTRACT_VERSION,
+            replacement_digest_contract_version: SCOPED_REPLACEMENT_DIGEST_CONTRACT_VERSION,
+            phase,
+            entity_count,
+            semantic_digest,
+            entities,
+        })
+    }
+
+    fn actor_affiliation_replacement_snapshot(
+        &self,
+        phase: ScopedAppendDeliveryPhase,
+    ) -> Result<ScopedActorAffiliationReplacementSnapshot, ScopedProjectionError> {
+        if phase == ScopedAppendDeliveryPhase::Live {
+            return Err(ScopedProjectionError::InvalidReplacementPhase);
+        }
+        let contexts = self.actor_context_index(&BTreeMap::new(), &BTreeMap::new())?;
+        let entities = self
+            .actor_affiliations
+            .values()
+            .map(|state| {
+                let (_, context) = contexts
+                    .affiliations
+                    .get(&state.revision.actor_run)
+                    .ok_or(ScopedProjectionError::InvalidActorContext)?;
+                Ok(ScopedActorAffiliationReplacementEntity {
+                    semantic: state.semantic,
+                    generation: state.generation,
+                    source: state.source.clone(),
+                    revision: state.revision.clone(),
+                    context: context.clone(),
+                })
+            })
+            .collect::<Result<Vec<_>, ScopedProjectionError>>()?;
+        let entity_count = u64::try_from(entities.len())
+            .map_err(|_| ScopedProjectionError::ReplacementCapacityExhausted)?;
+        let semantic_digest = actor_affiliation_replacement_digest(&entities)?;
+        Ok(ScopedActorAffiliationReplacementSnapshot {
+            fact_family_contract_version: RUNTIME_ACTOR_AFFILIATION_FACT_FAMILY_CONTRACT_VERSION,
+            replacement_digest_contract_version: SCOPED_REPLACEMENT_DIGEST_CONTRACT_VERSION,
+            phase,
+            entity_count,
+            semantic_digest,
+            entities,
+        })
+    }
+
     fn prepare_reset(
         &self,
         object_token: u64,
@@ -9106,6 +9277,10 @@ pub enum ScopedReplacementStageError {
 
 struct ScopedPreparedReplacementSnapshot {
     usage_v2: ScopedUsageV2ReplacementSnapshot,
+    // Frozen beside usage but intentionally not offered or included in the
+    // selected-family manifest until their own event/coverage contracts land.
+    actor_runs: ScopedActorRunReplacementSnapshot,
+    actor_affiliations: ScopedActorAffiliationReplacementSnapshot,
     next_usage_event: usize,
 }
 
@@ -9193,8 +9368,18 @@ impl ScopedObservationReplacementStage {
             .projection
             .usage_v2_replacement_snapshot(ScopedAppendDeliveryPhase::Correction)
             .map_err(ScopedReplacementStageError::Projection)?;
+        let actor_runs = self
+            .projection
+            .actor_run_replacement_snapshot(ScopedAppendDeliveryPhase::Correction)
+            .map_err(ScopedReplacementStageError::Projection)?;
+        let actor_affiliations = self
+            .projection
+            .actor_affiliation_replacement_snapshot(ScopedAppendDeliveryPhase::Correction)
+            .map_err(ScopedReplacementStageError::Projection)?;
         self.prepared = Some(ScopedPreparedReplacementSnapshot {
             usage_v2,
+            actor_runs,
+            actor_affiliations,
             next_usage_event: 0,
         });
         Ok(&self
@@ -9233,6 +9418,9 @@ impl ScopedObservationReplacementStage {
     }
 
     pub fn snapshot_fully_offered(&self) -> bool {
+        // This is deliberately the selected-family offered boundary. The
+        // private actor/affiliation freezes cannot advance it or enter the
+        // barrier before their own event and coverage contracts are selected.
         self.prepared
             .as_ref()
             .is_some_and(|prepared| prepared.next_usage_event == prepared.usage_v2.events.len())
@@ -10231,12 +10419,11 @@ fn usage_v2_replacement_digest(
 ) -> Result<ScopedReplacementSemanticDigest, ScopedProjectionError> {
     let entity_count = u64::try_from(states.len())
         .map_err(|_| ScopedProjectionError::ReplacementCapacityExhausted)?;
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(b"spaghetti/rfc012d/replacement-semantic-digest\0");
-    hasher.update(&SCOPED_REPLACEMENT_DIGEST_CONTRACT_VERSION.to_be_bytes());
-    hash_event_component(&mut hasher, b"runtime.usage-v2");
-    hasher.update(&RUNTIME_USAGE_V2_FACT_FAMILY_CONTRACT_VERSION.to_be_bytes());
-    hasher.update(&entity_count.to_be_bytes());
+    let mut hasher = replacement_family_digest(
+        b"runtime.usage-v2",
+        RUNTIME_USAGE_V2_FACT_FAMILY_CONTRACT_VERSION,
+        entity_count,
+    );
     // BTreeMap iteration supplies canonical fact-ID order. The digest retains
     // topology-independent occurrence provenance while deliberately excluding
     // attachment phase, observer sequence, local numeric IDs, admission batch
@@ -10272,6 +10459,253 @@ fn usage_v2_replacement_digest(
     Ok(ScopedReplacementSemanticDigest(
         *hasher.finalize().as_bytes(),
     ))
+}
+
+fn actor_run_replacement_digest(
+    entities: &[ScopedActorRunReplacementEntity],
+) -> Result<ScopedReplacementSemanticDigest, ScopedProjectionError> {
+    let entity_count = u64::try_from(entities.len())
+        .map_err(|_| ScopedProjectionError::ReplacementCapacityExhausted)?;
+    let mut hasher = replacement_family_digest(
+        b"runtime.actor-run",
+        RUNTIME_ACTOR_RUN_FACT_FAMILY_CONTRACT_VERSION,
+        entity_count,
+    );
+    for entity in entities {
+        validate_and_hash_replacement_source(
+            &mut hasher,
+            &entity.semantic,
+            entity.generation,
+            &entity.source,
+        )?;
+        hash_event_component(&mut hasher, entity.revision.actor_run.as_bytes());
+        hash_event_component(&mut hasher, entity.revision.session.as_bytes());
+        hasher.update(&[match entity.revision.role {
+            ActorRunRole::Root => 1,
+            ActorRunRole::Child => 2,
+        }]);
+        hash_optional_entity_key(&mut hasher, entity.revision.parent_actor_run.as_ref());
+        hash_optional_event_component(
+            &mut hasher,
+            entity
+                .revision
+                .native_session_id
+                .as_deref()
+                .map(str::as_bytes),
+        );
+        hash_optional_event_component(
+            &mut hasher,
+            entity
+                .revision
+                .native_actor_id
+                .as_deref()
+                .map(str::as_bytes),
+        );
+        hash_optional_event_component(
+            &mut hasher,
+            entity
+                .revision
+                .native_actor_type
+                .as_deref()
+                .map(str::as_bytes),
+        );
+        hash_actor_run_ref(&mut hasher, &entity.actor);
+    }
+    Ok(ScopedReplacementSemanticDigest(
+        *hasher.finalize().as_bytes(),
+    ))
+}
+
+fn actor_affiliation_replacement_digest(
+    entities: &[ScopedActorAffiliationReplacementEntity],
+) -> Result<ScopedReplacementSemanticDigest, ScopedProjectionError> {
+    let entity_count = u64::try_from(entities.len())
+        .map_err(|_| ScopedProjectionError::ReplacementCapacityExhausted)?;
+    let mut hasher = replacement_family_digest(
+        b"runtime.actor-affiliation",
+        RUNTIME_ACTOR_AFFILIATION_FACT_FAMILY_CONTRACT_VERSION,
+        entity_count,
+    );
+    for entity in entities {
+        validate_and_hash_replacement_source(
+            &mut hasher,
+            &entity.semantic,
+            entity.generation,
+            &entity.source,
+        )?;
+        hash_event_component(&mut hasher, entity.revision.affiliation.as_bytes());
+        hash_event_component(&mut hasher, entity.revision.actor_run.as_bytes());
+        hash_event_component(&mut hasher, entity.revision.session.as_bytes());
+        hasher.update(&[match entity.revision.dimension {
+            ActorAffiliationDimension::Team => 1,
+            ActorAffiliationDimension::Workflow => 2,
+        }]);
+        hash_event_component(&mut hasher, entity.revision.target.as_bytes());
+        hash_optional_entity_key(&mut hasher, entity.revision.member.as_ref());
+        hash_optional_event_component(
+            &mut hasher,
+            entity
+                .revision
+                .native_target_id
+                .as_deref()
+                .map(str::as_bytes),
+        );
+        hash_optional_event_component(
+            &mut hasher,
+            entity
+                .revision
+                .native_member_id
+                .as_deref()
+                .map(str::as_bytes),
+        );
+        hasher.update(&[match entity.revision.state {
+            ActorAffiliationState::Present => 1,
+            ActorAffiliationState::Removed => 2,
+            ActorAffiliationState::Unknown => 3,
+        }]);
+        match &entity.revision.effective_at {
+            Some(timestamp) => {
+                hasher.update(&[1]);
+                hash_event_component(&mut hasher, timestamp.value.as_bytes());
+                hasher.update(&[timestamp_quality_tag(timestamp.quality)]);
+            }
+            None => {
+                hasher.update(&[0]);
+            }
+        }
+        hash_actor_affiliation_context(&mut hasher, &entity.context);
+    }
+    Ok(ScopedReplacementSemanticDigest(
+        *hasher.finalize().as_bytes(),
+    ))
+}
+
+fn replacement_family_digest(
+    family: &[u8],
+    family_contract_version: u32,
+    entity_count: u64,
+) -> blake3::Hasher {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"spaghetti/rfc012d/replacement-semantic-digest\0");
+    hasher.update(&SCOPED_REPLACEMENT_DIGEST_CONTRACT_VERSION.to_be_bytes());
+    hash_event_component(&mut hasher, family);
+    hasher.update(&family_contract_version.to_be_bytes());
+    hasher.update(&entity_count.to_be_bytes());
+    hasher
+}
+
+fn validate_and_hash_replacement_source(
+    hasher: &mut blake3::Hasher,
+    semantic: &FactSemanticRevision,
+    generation: u64,
+    source: &ScopedUsageV2Source,
+) -> Result<(), ScopedProjectionError> {
+    if generation == 0
+        || semantic.semantic_revision_ref.fact_revision_id != semantic.fact_revision_id
+        || source.source_record_id != semantic.source_record_id
+    {
+        return Err(ScopedProjectionError::InvalidSemanticRevision);
+    }
+    if source.provenance.generation != generation
+        || source.provenance.cursor_start != source.cursor_start.as_bytes()
+        || source.provenance.cursor_end != source.cursor_end.as_bytes()
+        || source.provenance.record_hash != *source.payload_hash.as_bytes()
+    {
+        return Err(ScopedProjectionError::ProvenanceMismatch);
+    }
+    hash_event_component(hasher, semantic.fact_id.as_bytes());
+    hasher.update(
+        &semantic
+            .semantic_revision_ref
+            .semantic_reference_contract_version
+            .to_be_bytes(),
+    );
+    hash_event_component(hasher, semantic.fact_revision_id.as_bytes());
+    hash_event_component(hasher, semantic.source_record_id.as_bytes());
+    hash_event_component(hasher, source.object.adapter_id.as_str().as_bytes());
+    hash_event_component(hasher, source.object.source_instance_key.as_bytes());
+    hash_event_component(hasher, source.object.stream_key.as_bytes());
+    hash_event_component(hasher, source.object.object_key.as_bytes());
+    hasher.update(&generation.to_be_bytes());
+    hash_event_component(hasher, source.cursor_start.as_bytes());
+    hash_event_component(hasher, source.cursor_end.as_bytes());
+    hasher.update(source.payload_hash.as_bytes());
+    hash_event_component(hasher, source.media_type.as_str().as_bytes());
+    hasher.update(&[match source.state {
+        SourceRecordState::Present => 1,
+        SourceRecordState::Absent => 2,
+    }]);
+    Ok(())
+}
+
+fn hash_actor_run_ref(hasher: &mut blake3::Hasher, actor: &ScopedActorRunRef) {
+    hash_event_component(hasher, actor.root_session_key.as_bytes());
+    hash_event_component(hasher, actor.run_key.as_bytes());
+    hasher.update(&[match actor.role {
+        ActorRunRole::Root => 1,
+        ActorRunRole::Child => 2,
+    }]);
+    hash_optional_entity_key(hasher, actor.parent_run_key.as_ref());
+    hash_optional_event_component(
+        hasher,
+        actor.native_session_id.as_deref().map(str::as_bytes),
+    );
+    hash_optional_event_component(hasher, actor.native_actor_id.as_deref().map(str::as_bytes));
+    hash_optional_event_component(
+        hasher,
+        actor.native_actor_type.as_deref().map(str::as_bytes),
+    );
+}
+
+fn hash_actor_affiliation_context(
+    hasher: &mut blake3::Hasher,
+    context: &ScopedActorAffiliationContext,
+) {
+    hash_event_component(hasher, context.actor_run_key.as_bytes());
+    hash_optional_entity_key(hasher, context.team_key.as_ref());
+    hash_optional_event_component(hasher, context.native_team_id.as_deref().map(str::as_bytes));
+    hash_optional_event_component(hasher, context.team_name.as_deref().map(str::as_bytes));
+    hash_optional_entity_key(hasher, context.member_key.as_ref());
+    hash_optional_entity_key(hasher, context.workflow_key.as_ref());
+    hash_optional_event_component(
+        hasher,
+        context.native_workflow_id.as_deref().map(str::as_bytes),
+    );
+    hasher.update(&[match context.completeness {
+        ContractCompleteness::Complete => 1,
+        ContractCompleteness::Partial => 2,
+        ContractCompleteness::Unknown => 3,
+    }]);
+    hasher.update(&(context.derived_from_revision_refs.len() as u64).to_be_bytes());
+    for reference in &context.derived_from_revision_refs {
+        hasher.update(&reference.semantic_reference_contract_version.to_be_bytes());
+        hash_event_component(hasher, reference.fact_revision_id.as_bytes());
+    }
+}
+
+fn hash_optional_event_component(hasher: &mut blake3::Hasher, value: Option<&[u8]>) {
+    match value {
+        Some(value) => {
+            hasher.update(&[1]);
+            hash_event_component(hasher, value);
+        }
+        None => {
+            hasher.update(&[0]);
+        }
+    }
+}
+
+fn hash_optional_entity_key(hasher: &mut blake3::Hasher, value: Option<&CanonicalEntityKey>) {
+    hash_optional_event_component(hasher, value.map(|key| key.as_bytes().as_slice()));
+}
+
+fn timestamp_quality_tag(quality: TimestampQuality) -> u8 {
+    match quality {
+        TimestampQuality::NativeExact => 1,
+        TimestampQuality::NativeApproximate => 2,
+        TimestampQuality::FileMetadataFallback => 3,
+        TimestampQuality::Derived => 4,
+    }
 }
 
 fn hash_event_component(hasher: &mut blake3::Hasher, value: &[u8]) {
@@ -15662,6 +16096,47 @@ mod projection_tests {
         batch
     }
 
+    fn multi_actor_context_batch(record: &SourceRecord, reverse: bool) -> FactBatch {
+        let mut batch = FactBatch::new_with_semantic_context(8, 4, semantic_context()).unwrap();
+        let actor_a = actor_run_fact_for(&batch, "native-session", "native-run-a");
+        let actor_b = actor_run_fact_for(&batch, "native-session", "native-run-b");
+        let affiliation_a = affiliation_fact_for(
+            &batch,
+            "native-session",
+            "native-run-a",
+            ActorAffiliationDimension::Team,
+            "team-alpha",
+            ActorAffiliationState::Present,
+        );
+        let affiliation_b = affiliation_fact_for(
+            &batch,
+            "native-session",
+            "native-run-b",
+            ActorAffiliationDimension::Workflow,
+            "workflow-main",
+            ActorAffiliationState::Present,
+        );
+        let mut facts = vec![
+            (b"native-run-a".to_vec(), Fact::ActorRunRevision(actor_a)),
+            (
+                affiliation_a.affiliation.as_bytes().to_vec(),
+                Fact::ActorAffiliationRevision(affiliation_a),
+            ),
+            (b"native-run-b".to_vec(), Fact::ActorRunRevision(actor_b)),
+            (
+                affiliation_b.affiliation.as_bytes().to_vec(),
+                Fact::ActorAffiliationRevision(affiliation_b),
+            ),
+        ];
+        if reverse {
+            facts.reverse();
+        }
+        for (stable_key, fact) in facts {
+            batch.push_native(record, &stable_key, fact).unwrap();
+        }
+        batch
+    }
+
     fn decoded_frame(
         lane_ordinal: u64,
         phase: ScopedAppendDeliveryPhase,
@@ -16197,6 +16672,34 @@ mod projection_tests {
         let initial = projection
             .usage_v2_replacement_snapshot(ScopedAppendDeliveryPhase::Correction)
             .unwrap();
+        let initial_actor = projection
+            .actor_run_replacement_snapshot(ScopedAppendDeliveryPhase::Bootstrap)
+            .unwrap();
+        let initial_affiliations = projection
+            .actor_affiliation_replacement_snapshot(ScopedAppendDeliveryPhase::Bootstrap)
+            .unwrap();
+        assert_eq!(initial_actor.entity_count, 1);
+        assert_eq!(initial_actor.entities[0].actor, *actor);
+        assert_eq!(initial_affiliations.entity_count, 0);
+        assert!(
+            !projection.supports_coverage_domain(&CoverageDomain::FactFamily {
+                family: "runtime.actor-run".to_string(),
+                version: RUNTIME_ACTOR_RUN_FACT_FAMILY_CONTRACT_VERSION,
+            })
+        );
+        assert!(
+            !projection.supports_coverage_domain(&CoverageDomain::FactFamily {
+                family: "runtime.actor-affiliation".to_string(),
+                version: RUNTIME_ACTOR_AFFILIATION_FACT_FAMILY_CONTRACT_VERSION,
+            })
+        );
+        assert_eq!(
+            SCOPED_OBSERVATION_IMPLEMENTED_FACT_FAMILIES,
+            &[(
+                "runtime.usage-v2",
+                RUNTIME_USAGE_V2_FACT_FAMILY_CONTRACT_VERSION,
+            )]
+        );
 
         let affiliation_record = record(3, 10, 20);
         let affiliation_events = projection
@@ -16255,6 +16758,34 @@ mod projection_tests {
                 .len(),
             2
         );
+        let replay_actor = projection
+            .actor_run_replacement_snapshot(ScopedAppendDeliveryPhase::Correction)
+            .unwrap();
+        let replay_affiliations = projection
+            .actor_affiliation_replacement_snapshot(ScopedAppendDeliveryPhase::Correction)
+            .unwrap();
+        assert_eq!(replay_actor.entity_count, 1);
+        assert_eq!(replay_actor.semantic_digest, initial_actor.semantic_digest);
+        assert_eq!(replay_affiliations.entity_count, 2);
+        assert_ne!(
+            replay_affiliations.semantic_digest,
+            initial_affiliations.semantic_digest
+        );
+        assert!(replay_affiliations.entities.iter().all(|entity| {
+            entity.context == replay.events[0].affiliations
+                && entity.context.derived_from_revision_refs.len() == 2
+        }));
+        let redacted = format!("{replay_affiliations:?}");
+        assert!(!redacted.contains("native-run"));
+        assert!(!redacted.contains("team-alpha"));
+        assert_eq!(
+            projection.actor_run_replacement_snapshot(ScopedAppendDeliveryPhase::Live),
+            Err(ScopedProjectionError::InvalidReplacementPhase)
+        );
+        assert_eq!(
+            projection.actor_affiliation_replacement_snapshot(ScopedAppendDeliveryPhase::Live),
+            Err(ScopedProjectionError::InvalidReplacementPhase)
+        );
 
         let removal_record = record(3, 30, 40);
         let mut removal_batch =
@@ -16287,7 +16818,14 @@ mod projection_tests {
         let regrouped = projection
             .usage_v2_replacement_snapshot(ScopedAppendDeliveryPhase::Correction)
             .unwrap();
+        let regrouped_affiliations = projection
+            .actor_affiliation_replacement_snapshot(ScopedAppendDeliveryPhase::Correction)
+            .unwrap();
         assert_eq!(regrouped.semantic_digest, replay.semantic_digest);
+        assert_ne!(
+            regrouped_affiliations.semantic_digest,
+            replay_affiliations.semantic_digest
+        );
         assert_eq!(regrouped.events[0].event_id, replay.events[0].event_id);
         assert_eq!(regrouped.events[0].affiliations.team_key, None);
         assert_eq!(
@@ -16430,6 +16968,151 @@ mod projection_tests {
             .derived_from_revision_refs
             .windows(2)
             .all(|refs| refs[0].fact_revision_id < refs[1].fact_revision_id));
+    }
+
+    #[test]
+    fn actor_replacement_digests_are_canonical_and_exclude_delivery_time() {
+        let early_record = record_with_observed_at(3, 0, 10, 44);
+        let late_record = record_with_observed_at(3, 0, 10, 99);
+        let mut forward = sink(8);
+        assert!(forward
+            .project(&decoded_frame(
+                1,
+                ScopedAppendDeliveryPhase::Bootstrap,
+                &early_record,
+                multi_actor_context_batch(&early_record, false),
+            ))
+            .unwrap()
+            .is_empty());
+        let mut reverse = sink(8);
+        assert!(reverse
+            .project(&decoded_frame(
+                9,
+                ScopedAppendDeliveryPhase::Correction,
+                &late_record,
+                multi_actor_context_batch(&late_record, true),
+            ))
+            .unwrap()
+            .is_empty());
+
+        let forward_actors = forward
+            .actor_run_replacement_snapshot(ScopedAppendDeliveryPhase::Bootstrap)
+            .unwrap();
+        let reverse_actors = reverse
+            .actor_run_replacement_snapshot(ScopedAppendDeliveryPhase::Correction)
+            .unwrap();
+        let forward_affiliations = forward
+            .actor_affiliation_replacement_snapshot(ScopedAppendDeliveryPhase::Bootstrap)
+            .unwrap();
+        let reverse_affiliations = reverse
+            .actor_affiliation_replacement_snapshot(ScopedAppendDeliveryPhase::Correction)
+            .unwrap();
+        assert_eq!(forward_actors.entity_count, 2);
+        assert_eq!(forward_affiliations.entity_count, 2);
+        assert_eq!(
+            bytes_hex(forward_actors.semantic_digest.as_bytes()),
+            "6e5329e0925afc8404990f16a3ee3d14e6a1d1dc96a0c5a10a89602cf6bb4906"
+        );
+        assert_eq!(
+            bytes_hex(forward_affiliations.semantic_digest.as_bytes()),
+            "93255130910cefd4f2c2435d4915d47f083d23ad3f9cd131ed1d55ca273fb5d6"
+        );
+        assert_eq!(
+            forward_actors.semantic_digest,
+            reverse_actors.semantic_digest
+        );
+        assert_eq!(
+            forward_affiliations.semantic_digest,
+            reverse_affiliations.semantic_digest
+        );
+        assert!(forward_actors
+            .entities
+            .windows(2)
+            .all(|entities| entities[0].revision.actor_run < entities[1].revision.actor_run));
+        assert!(forward_affiliations
+            .entities
+            .windows(2)
+            .all(|entities| entities[0].revision.affiliation < entities[1].revision.affiliation));
+        assert_ne!(
+            forward_actors.entities[0].source.provenance.observed_at,
+            reverse_actors.entities[0].source.provenance.observed_at
+        );
+        assert_ne!(forward_actors.phase, reverse_actors.phase);
+    }
+
+    #[test]
+    fn actor_replacement_snapshots_remove_reset_and_deleted_owners() {
+        for lifecycle in ["reset", "delete"] {
+            let mut projection = sink(8);
+            let source_record = record(1, 0, 10);
+            assert!(projection
+                .project(&decoded_frame(
+                    1,
+                    ScopedAppendDeliveryPhase::Bootstrap,
+                    &source_record,
+                    contextual_usage_batch(
+                        &source_record,
+                        None,
+                        true,
+                        &[ActorAffiliationDimension::Team],
+                    ),
+                ))
+                .unwrap()
+                .is_empty());
+            let populated_actor = projection
+                .actor_run_replacement_snapshot(ScopedAppendDeliveryPhase::Correction)
+                .unwrap();
+            let populated_affiliation = projection
+                .actor_affiliation_replacement_snapshot(ScopedAppendDeliveryPhase::Correction)
+                .unwrap();
+            assert_eq!(populated_actor.entity_count, 1);
+            assert_eq!(populated_affiliation.entity_count, 1);
+
+            let control = if lifecycle == "reset" {
+                ScopedQueuedObservationFrame::Reset {
+                    object_token: OBJECT_TOKEN,
+                    source: source_identity(),
+                    lane_ordinal: 2,
+                    observed_at: 45,
+                    phase: ScopedAppendDeliveryPhase::Correction,
+                    reset: ScopedAppendReset {
+                        old_generation: 1,
+                        new_generation: 2,
+                        reason: AppendTransition::Truncated,
+                    },
+                }
+            } else {
+                ScopedQueuedObservationFrame::Presence {
+                    object_token: OBJECT_TOKEN,
+                    source: source_identity(),
+                    lane_ordinal: 2,
+                    observed_at: 45,
+                    phase: ScopedAppendDeliveryPhase::Correction,
+                    change: ScopedAppendPresenceChange::Deleted { generation: 1 },
+                }
+            };
+            assert_eq!(projection.project(&control).unwrap().len(), 1);
+            let actor = projection
+                .actor_run_replacement_snapshot(ScopedAppendDeliveryPhase::Correction)
+                .unwrap();
+            let affiliation = projection
+                .actor_affiliation_replacement_snapshot(ScopedAppendDeliveryPhase::Correction)
+                .unwrap();
+            let empty = sink(8);
+            let empty_actor = empty
+                .actor_run_replacement_snapshot(ScopedAppendDeliveryPhase::Correction)
+                .unwrap();
+            let empty_affiliation = empty
+                .actor_affiliation_replacement_snapshot(ScopedAppendDeliveryPhase::Correction)
+                .unwrap();
+            assert_eq!(actor, empty_actor);
+            assert_eq!(affiliation, empty_affiliation);
+            assert_ne!(actor.semantic_digest, populated_actor.semantic_digest);
+            assert_ne!(
+                affiliation.semantic_digest,
+                populated_affiliation.semantic_digest
+            );
+        }
     }
 
     #[test]
@@ -18235,7 +18918,12 @@ mod projection_tests {
             2,
             ScopedAppendDeliveryPhase::Bootstrap,
             &first_replay_record,
-            usage_batch(&first_replay_record, "replacement-response", 20, None),
+            contextual_usage_batch(
+                &first_replay_record,
+                Some(("replacement-response", 20)),
+                true,
+                &[ActorAffiliationDimension::Team],
+            ),
         );
         let mut first_replay = admission_lane_with_decoded_frame(first_replay_frame);
         assert_eq!(
@@ -18279,6 +18967,20 @@ mod projection_tests {
             Some(30)
         );
         let replacement_semantic_digest = snapshot.semantic_digest;
+        let prepared = stage
+            .prepared
+            .as_ref()
+            .expect("replacement snapshots were frozen together");
+        assert_eq!(prepared.actor_runs.entity_count, 1);
+        assert_eq!(prepared.actor_affiliations.entity_count, 1);
+        assert_eq!(
+            prepared.actor_runs.phase,
+            ScopedAppendDeliveryPhase::Correction
+        );
+        assert_eq!(
+            prepared.actor_affiliations.phase,
+            ScopedAppendDeliveryPhase::Correction
+        );
         assert_eq!(
             stage.reduce_next(&mut latest_replay),
             Err(ScopedReplacementStageError::SnapshotAlreadyPrepared)
