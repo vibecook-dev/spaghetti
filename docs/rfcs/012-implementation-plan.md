@@ -938,6 +938,27 @@ slice adds no physical compaction or automatic retention policy, retired
 external-reference resolution, degraded/error refresh, caller-authorized
 local policy view, richer filters/sorts, or public N-API/SDK catalog surface.
 
+The ninth bounded B3 slice (`b9a7f39`) adds schema-v55 and the first durable
+active-refresh integrity failure without weakening the last independently-safe
+publication. Only an exact restart-authenticated ordinary refresh can publish
+the checked lowercase-ASCII machine reason and fixed `IndependentlySafe`
+disposition. One source-neutral zero-fact transaction appends immutable failure
+evidence, clears the refresh marker, advances durable readiness to `Error`, and
+emits a privacy-safe v5 invalidation under the exact plan, selection, epoch,
+attempt, refresh-start commit, retained snapshot, and publication/content
+digests. Restart treats the change log as prunable notification rather than
+authority: it authenticates the failure ledger and both administrative commit
+owners, reconstructs the retained publication and logical-retirement prefix,
+then replays Ready, refresh start, and safe failure through the readiness
+machine. Snapshot-frozen WITHHELD pages and live resolution remain available;
+a valid retired continuation still yields its exact `SnapshotExpired` result.
+Crash seams, separate-reader isolation, lost-ack replay, success-versus-failure
+CAS races, source-free operation, strict Rust/TypeScript reason-code parity,
+and coordinated corruption negatives are executable. Discarded/no-snapshot
+errors, retry/degraded/partial lineage, physical compaction, caller-authorized
+local policy, richer queries, and public N-API/SDK catalog transport remain
+open.
+
 ### B4. Progressive host and UX
 
 Change host lifecycle so all source catalogs are registered before full history
@@ -2270,6 +2291,23 @@ for a later independent outage. The conformance matrix distinguishes the old
 three-attempt reset from the bounded two-attempt outcome, verifies exact
 deadline reuse and policy-drift rejection, and proves that a later independent
 failure receives a fresh budget.
+
+The next bounded D3 precursor (`24a86f0`) freezes the already-retained actor-run
+and actor-affiliation reducers beside usage whenever a replacement stage is
+prepared. Each private, redacted snapshot contains every current normalized
+entity, exact semantic/source identity and path-free provenance, plus the
+derived actor or `ActorAffiliationContext`; its versioned family digest is
+canonical across fact insertion order and excludes attachment phase,
+observation time, batch ordinals, object tokens, and numeric store IDs. Late
+affiliation changes only the affiliation digest and never usage identity or
+redelivery. Reset, confirmed deletion, object rollback, and bounded capacity
+retain their exact ownership behavior, and a prepared stage rejects subsequent
+reduction so usage, actor, and affiliation state freeze at one boundary. This
+is deliberately non-authorizing: the selected family list, eligible coverage
+domains, offered events, and barrier manifest remain exactly
+`runtime.usage-v2`. Actor/affiliation incremental events, selected coverage,
+portable envelopes, and a truthful complete multi-family replacement manifest
+remain the next D3 gates.
 
 ### D4. SDK and Chopsticks migration
 
