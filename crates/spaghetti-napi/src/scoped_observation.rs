@@ -54,6 +54,7 @@ mod actor_wire;
 mod artifact_wire;
 mod close_wire;
 mod continuity_wire;
+mod replacement_manifest_wire;
 mod scope_coverage_wire;
 mod source_wire;
 mod usage_wire;
@@ -10335,48 +10336,7 @@ fn selected_replacement_family_manifest(
         return Err(ScopedReplacementStageError::InvalidManifest);
     }
 
-    let mut completeness = BTreeMap::<&'static str, CoverageSetCompleteness>::new();
-    for coverage in source_coverage {
-        coverage
-            .validate()
-            .map_err(|_| ScopedReplacementStageError::InvalidManifest)?;
-        match &coverage.coverage_domain {
-            CoverageDomain::Decode => {}
-            CoverageDomain::FactFamily { family, version } => {
-                let selected_family = match family.as_str() {
-                    "runtime.actor-affiliation"
-                        if families.actor_affiliation
-                            && *version
-                                == RUNTIME_ACTOR_AFFILIATION_FACT_FAMILY_CONTRACT_VERSION =>
-                    {
-                        "runtime.actor-affiliation"
-                    }
-                    "runtime.actor-run"
-                        if families.actor_run
-                            && *version == RUNTIME_ACTOR_RUN_FACT_FAMILY_CONTRACT_VERSION =>
-                    {
-                        "runtime.actor-run"
-                    }
-                    "runtime.usage-v2"
-                        if families.usage_v2
-                            && *version == RUNTIME_USAGE_V2_FACT_FAMILY_CONTRACT_VERSION =>
-                    {
-                        "runtime.usage-v2"
-                    }
-                    _ => return Err(ScopedReplacementStageError::InvalidManifest),
-                };
-                completeness
-                    .entry(selected_family)
-                    .and_modify(|current| {
-                        *current = merge_coverage_completeness(*current, coverage.completeness);
-                    })
-                    .or_insert(coverage.completeness);
-            }
-            CoverageDomain::ProjectionPack { .. } => {
-                return Err(ScopedReplacementStageError::InvalidManifest);
-            }
-        }
-    }
+    let mut completeness = selected_replacement_coverage_completeness(contracts, source_coverage)?;
     let mut manifest = Vec::with_capacity(contracts.fact_family_versions.len());
     if families.actor_affiliation {
         let snapshot = actor_affiliations.expect("selected affiliation snapshot was validated");
@@ -10421,6 +10381,57 @@ fn selected_replacement_family_manifest(
         return Err(ScopedReplacementStageError::InvalidManifest);
     }
     Ok(manifest)
+}
+
+fn selected_replacement_coverage_completeness(
+    contracts: &crate::adapter::ContractVersionSelection,
+    source_coverage: &[SourceCoverageSet],
+) -> Result<BTreeMap<&'static str, CoverageSetCompleteness>, ScopedReplacementStageError> {
+    let families = ScopedProjectionFamilies::from_contracts(contracts)
+        .map_err(|_| ScopedReplacementStageError::InvalidManifest)?;
+    let mut completeness = BTreeMap::<&'static str, CoverageSetCompleteness>::new();
+    for coverage in source_coverage {
+        coverage
+            .validate()
+            .map_err(|_| ScopedReplacementStageError::InvalidManifest)?;
+        match &coverage.coverage_domain {
+            CoverageDomain::Decode => {}
+            CoverageDomain::FactFamily { family, version } => {
+                let selected_family = match family.as_str() {
+                    "runtime.actor-affiliation"
+                        if families.actor_affiliation
+                            && *version
+                                == RUNTIME_ACTOR_AFFILIATION_FACT_FAMILY_CONTRACT_VERSION =>
+                    {
+                        "runtime.actor-affiliation"
+                    }
+                    "runtime.actor-run"
+                        if families.actor_run
+                            && *version == RUNTIME_ACTOR_RUN_FACT_FAMILY_CONTRACT_VERSION =>
+                    {
+                        "runtime.actor-run"
+                    }
+                    "runtime.usage-v2"
+                        if families.usage_v2
+                            && *version == RUNTIME_USAGE_V2_FACT_FAMILY_CONTRACT_VERSION =>
+                    {
+                        "runtime.usage-v2"
+                    }
+                    _ => return Err(ScopedReplacementStageError::InvalidManifest),
+                };
+                completeness
+                    .entry(selected_family)
+                    .and_modify(|current| {
+                        *current = merge_coverage_completeness(*current, coverage.completeness);
+                    })
+                    .or_insert(coverage.completeness);
+            }
+            CoverageDomain::ProjectionPack { .. } => {
+                return Err(ScopedReplacementStageError::InvalidManifest);
+            }
+        }
+    }
+    Ok(completeness)
 }
 
 fn usage_replacement_snapshot_is_valid(
