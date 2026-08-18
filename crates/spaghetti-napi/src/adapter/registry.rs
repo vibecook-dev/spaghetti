@@ -202,13 +202,15 @@ mod tests {
         ScopedEnvelopeEvidenceAuthority, ScopedKnownAppendObject, ScopedKnownObjectGrant,
         ScopedKnownObjectReadRequest, ScopedObjectRead, ScopedObservationAccessError,
         ScopedObservationAccessHost, ScopedObservationAccessPass, ScopedObservationAccessRequest,
-        ScopedObservationAdmissionLane, ScopedObservationAsyncRuntime, ScopedObservationCloseError,
+        ScopedObservationAdmissionLane, ScopedObservationAppendPassRequest,
+        ScopedObservationAsyncRuntime, ScopedObservationCloseError,
         ScopedObservationConsumerOfferError, ScopedObservationContinuity,
         ScopedObservationDeliveryLane, ScopedObservationDeliveryLimits, ScopedObservationEvent,
         ScopedObservationNativeWatchBackend, ScopedObservationNativeWatchCallback,
         ScopedObservationNativeWatcherError, ScopedObservationNativeWatcherRecoveryPolicy,
         ScopedObservationNativeWatcherRunExit, ScopedObservationOpenDrainError,
-        ScopedObservationPollError, ScopedObservationPollLease, ScopedObservationPollResolution,
+        ScopedObservationPassExecutionError, ScopedObservationPollError,
+        ScopedObservationPollLease, ScopedObservationPollResolution,
         ScopedObservationProjectionLimits, ScopedObservationProjectionSink,
         ScopedObservationQueueLimits, ScopedObservationReadyResolution,
         ScopedObservationStartupError, ScopedObservationStartupReconcileAction,
@@ -2536,7 +2538,7 @@ mod tests {
             .open_consumer_drain(ScopedObservationDeliveryLimits {
                 max_semantic_events: 4,
                 max_retained_native_bytes: 0,
-                max_source_control_items: 4,
+                max_source_control_items: 2,
             })
             .unwrap();
         let ready_waiter = host.ready_waiter().unwrap();
@@ -2828,21 +2830,73 @@ mod tests {
             }
         };
         let lease = host.begin_poll().unwrap().unwrap();
-        let (active_object, active_admission) = active
-            .append_object_and_admission_mut("root-object")
-            .unwrap();
-        let live = reconcile_scoped_append(
-            &host,
-            lease.access_pass(),
-            active_object,
-            active_admission,
-            &identity,
-            &origin,
-            AccessPhase::Revalidation,
+        assert!(matches!(
+            host.execute_epoch_poll_pass(lease, &mut active, &mut drain, &[]),
+            Err(ScopedObservationPassExecutionError::InvalidRelationSet)
+        ));
+        assert_eq!(
+            host.poll_resolution(&live_ticket).unwrap(),
+            ScopedObservationPollResolution::Pending
         );
-        assert!(live.object_present);
+
+        let pass_request = [ScopedObservationAppendPassRequest {
+            relation_id: "root-object",
+            identity_inputs: &identity,
+            parent_token: None,
+            depth: 1,
+            max_bytes: 64,
+            origin: &origin,
+            force_contract_replay: false,
+        }];
+        let pass_debug = format!("{pass_request:?}");
+        assert!(pass_debug.contains("native-session-id"));
+        assert!(!pass_debug.contains("watch-before-scan-session"));
+
+        // Canonical root equality is not attachment ownership. A second host
+        // authorized for the same native root cannot drive or mutate this
+        // host's active epoch state.
+        let foreign =
+            ScopedObservationAccessHost::authorize(&registry, scoped_access_request(root.clone()))
+                .unwrap();
+        assert_eq!(foreign.root_identity(), host.root_identity());
+        let mut foreign_drain = foreign
+            .open_consumer_drain(ScopedObservationDeliveryLimits {
+                max_semantic_events: 4,
+                max_retained_native_bytes: 0,
+                max_source_control_items: 2,
+            })
+            .unwrap();
+        let foreign_ticket = foreign.request_poll().unwrap();
+        let foreign_lease = foreign.begin_poll().unwrap().unwrap();
+        assert!(matches!(
+            foreign.execute_epoch_poll_pass(
+                foreign_lease,
+                &mut active,
+                &mut foreign_drain,
+                &pass_request,
+            ),
+            Err(ScopedObservationPassExecutionError::InvalidEpochState)
+        ));
+        assert_eq!(
+            foreign.poll_resolution(&foreign_ticket).unwrap(),
+            ScopedObservationPollResolution::Pending
+        );
+        let foreign_close = foreign.close_with_consumer(&mut foreign_drain).unwrap();
+        assert!(foreign_close.wait().complete);
+        assert_eq!(
+            foreign_ticket.wait(),
+            ScopedObservationPollResolution::Cancelled
+        );
+
+        let retry = host.begin_poll().unwrap().unwrap();
+        let live_watermark = host
+            .execute_epoch_poll_pass(retry, &mut active, &mut drain, &pass_request)
+            .unwrap();
+        assert!(active
+            .append_object("root-object")
+            .expect("the bound root relation remains active")
+            .is_present());
         assert!(active.admission_is_empty());
-        let live_watermark = host.complete_epoch_poll(lease, &active, &drain).unwrap();
         assert_eq!(live_watermark.offered_through_sequence, 2);
         assert!(matches!(
             host.poll_resolution(&live_ticket).unwrap(),
@@ -2850,10 +2904,69 @@ mod tests {
                 if Arc::ptr_eq(&watermark, &live_watermark)
         ));
 
+        // The created-source and bootstrap controls still fill the bounded
+        // delivery lane. Admission may commit the later deletion cursor, but
+        // a failed offer must keep the poll pending and the deletion queued.
+        std::fs::remove_file(root.join("session.jsonl")).unwrap();
+        let deletion_ticket = host.request_poll().unwrap();
+        let deletion_lease = host.begin_poll().unwrap().unwrap();
+        assert!(matches!(
+            host.execute_epoch_poll_pass(deletion_lease, &mut active, &mut drain, &pass_request,),
+            Err(ScopedObservationPassExecutionError::Offer(
+                ScopedObservationConsumerOfferError::Offer(
+                    ScopedProjectionDeliveryError::Delivery(
+                        ScopedDeliveryError::SourceControlQueueFull
+                    )
+                )
+            ))
+        ));
+        assert!(!active
+            .append_object("root-object")
+            .expect("the root relation remains bound after deletion")
+            .is_present());
+        assert!(!active.admission_is_empty());
+        assert_eq!(
+            host.poll_resolution(&deletion_ticket).unwrap(),
+            ScopedObservationPollResolution::Pending
+        );
+
+        let created_delivery = drain.next().unwrap().unwrap();
+        assert!(matches!(
+            created_delivery.envelope.event,
+            ScopedObservationEvent::SourcePresence {
+                change: ScopedAppendPresenceChange::Created { generation: 1 }
+            }
+        ));
+        drain
+            .acknowledge_applied(created_delivery.application_receipt())
+            .unwrap();
+        let bootstrap_delivery = drain.next().unwrap().unwrap();
+        assert!(matches!(
+            bootstrap_delivery.envelope.event,
+            ScopedObservationEvent::ObserverBootstrapComplete { .. }
+        ));
+        drain
+            .acknowledge_applied(bootstrap_delivery.application_receipt())
+            .unwrap();
+
+        // Retrying first flushes the already-admitted deletion, then takes a
+        // fresh exact pass so completion cannot reuse the abandoned pass ID.
+        let deletion_retry = host.begin_poll().unwrap().unwrap();
+        let deletion_watermark = host
+            .execute_epoch_poll_pass(deletion_retry, &mut active, &mut drain, &pass_request)
+            .unwrap();
+        assert!(active.admission_is_empty());
+        assert_eq!(deletion_watermark.offered_through_sequence, 3);
+        assert!(matches!(
+            host.poll_resolution(&deletion_ticket).unwrap(),
+            ScopedObservationPollResolution::Ready(watermark)
+                if Arc::ptr_eq(&watermark, &deletion_watermark)
+        ));
+
         let retained_ready = host.ready_waiter().unwrap();
         let closing_events = drain.event_waiter();
         let before_close = closing_events.snapshot();
-        assert_eq!(before_close.offered_through_sequence, 2);
+        assert_eq!(before_close.offered_through_sequence, 3);
         let (event_close_tx, event_close_rx) = std::sync::mpsc::sync_channel(0);
         let event_close_thread = std::thread::spawn(move || {
             event_close_tx
@@ -2865,6 +2978,11 @@ mod tests {
             live_ticket.wait(),
             ScopedObservationPollResolution::Ready(watermark)
                 if Arc::ptr_eq(&watermark, &live_watermark)
+        ));
+        assert!(matches!(
+            deletion_ticket.wait(),
+            ScopedObservationPollResolution::Ready(watermark)
+                if Arc::ptr_eq(&watermark, &deletion_watermark)
         ));
         assert!(matches!(
             retained_ready.wait(),

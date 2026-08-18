@@ -5932,6 +5932,7 @@ impl ScopedObservationReplacementStage {
 /// Source objects, their offered coverage lane, and semantic reducers move as
 /// one ownership unit during whole-scope replacement.
 pub struct ScopedObservationEpochState {
+    attachment_authority: Arc<ScopedObservationAttachmentAuthority>,
     root: ScopedObservationRootIdentity,
     scope_epoch: u64,
     append_objects: BTreeMap<String, ScopedKnownAppendObject>,
@@ -6869,6 +6870,59 @@ pub enum ScopedObservationPollError {
     Coverage(#[from] ScopedCoverageAssemblyError),
 }
 
+/// One trusted source-owner binding for an exact append relation in a live
+/// poll pass. Native identity values remain borrowed and never enter the
+/// access report or observer envelope.
+#[derive(Clone, Copy)]
+pub struct ScopedObservationAppendPassRequest<'a> {
+    pub relation_id: &'a str,
+    pub identity_inputs: &'a [ScopeIdentityInput<'a>],
+    pub parent_token: Option<AccessObjectToken>,
+    pub depth: u32,
+    pub max_bytes: u64,
+    pub origin: &'a RecordOrigin,
+    pub force_contract_replay: bool,
+}
+
+impl std::fmt::Debug for ScopedObservationAppendPassRequest<'_> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ScopedObservationAppendPassRequest")
+            .field("relation_id", &self.relation_id)
+            .field(
+                "identity_input_names",
+                &self
+                    .identity_inputs
+                    .iter()
+                    .map(|input| input.name)
+                    .collect::<Vec<_>>(),
+            )
+            .field("has_parent_token", &self.parent_token.is_some())
+            .field("depth", &self.depth)
+            .field("max_bytes", &self.max_bytes)
+            .field("force_contract_replay", &self.force_contract_replay)
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ScopedObservationPassExecutionError {
+    #[error("scoped poll executor requires exactly one request for every active relation")]
+    InvalidRelationSet,
+    #[error("scoped poll executor requires the attachment's current valid epoch")]
+    InvalidEpochState,
+    #[error("scoped append decode requested a retry without advancing source state")]
+    DecodeRetryTransient,
+    #[error("scoped poll source access failed: {0}")]
+    Access(#[from] ScopedObservationAccessError),
+    #[error("scoped poll admission failed: {0}")]
+    Admission(ScopedAdmissionError),
+    #[error("scoped poll offered-boundary delivery failed: {0}")]
+    Offer(#[from] ScopedObservationConsumerOfferError),
+    #[error("scoped poll completion failed: {0}")]
+    Poll(#[from] ScopedObservationPollError),
+}
+
 #[derive(Debug, Clone, Copy)]
 struct ScopedObservationActivePoll {
     lease_id: u64,
@@ -7555,6 +7609,172 @@ impl ScopedObservationAccessHost {
         Ok(())
     }
 
+    fn validate_epoch_poll_execution(
+        &self,
+        lease: &ScopedObservationPollLease,
+        active: &ScopedObservationEpochState,
+        drain: &ScopedObservationConsumerDrain,
+        requests: &[ScopedObservationAppendPassRequest<'_>],
+    ) -> Result<(), ScopedObservationPassExecutionError> {
+        if !Arc::ptr_eq(&self.state.poll, &lease.runtime)
+            || !Arc::ptr_eq(&self.state, &lease.access_pass().state)
+        {
+            return Err(ScopedObservationPollError::ForeignLease.into());
+        }
+        if !self.owns_consumer_drain(drain) {
+            return Err(ScopedObservationPollError::ForeignDrain.into());
+        }
+        if drain.is_closed()
+            || self.state.closed.load(Ordering::Acquire)
+            || self.lifecycle.is_closing()
+        {
+            return Err(ScopedObservationPollError::Closed.into());
+        }
+        let queue_state = drain.delivery_lane().state();
+        if !Arc::ptr_eq(&active.attachment_authority, &self.attachment_authority)
+            || active.root != self.root_identity
+            || active.scope_epoch != queue_state.scope_epoch
+            || active.projection.lifecycle != ScopedProjectionLifecycle::Active
+            || queue_state.continuity != ScopedObservationContinuity::Valid
+            || active.append_objects.len() != self.known_objects.len()
+            || active
+                .append_objects
+                .keys()
+                .any(|relation_id| !self.known_objects.contains_key(relation_id))
+        {
+            return Err(ScopedObservationPassExecutionError::InvalidEpochState);
+        }
+
+        if requests.len() != active.append_objects.len() {
+            return Err(ScopedObservationPassExecutionError::InvalidRelationSet);
+        }
+        let mut relation_ids = BTreeMap::new();
+        for request in requests {
+            if relation_ids.insert(request.relation_id, request).is_some()
+                || !active.append_objects.contains_key(request.relation_id)
+            {
+                return Err(ScopedObservationPassExecutionError::InvalidRelationSet);
+            }
+        }
+        if active
+            .append_objects
+            .keys()
+            .any(|relation_id| !relation_ids.contains_key(relation_id.as_str()))
+        {
+            return Err(ScopedObservationPassExecutionError::InvalidRelationSet);
+        }
+        Ok(())
+    }
+
+    fn offer_epoch_poll_pending(
+        &self,
+        active: &mut ScopedObservationEpochState,
+        drain: &mut ScopedObservationConsumerDrain,
+    ) -> Result<(), ScopedObservationPassExecutionError> {
+        loop {
+            let offered =
+                self.offer_consumer_next(&mut active.admission, &mut active.projection, drain)?;
+            if offered.is_none() {
+                return Ok(());
+            }
+        }
+    }
+
+    /// Execute one complete live exact-scope append pass for a reserved poll.
+    ///
+    /// Requests are prevalidated as an exact set and then visited in canonical
+    /// relation order. Any admission or offered-boundary failure drops the
+    /// unfinished lease, so its logical poll tickets remain pending and the
+    /// same target becomes runnable again. Source cursor/decoder state already
+    /// committed by admission remains paired with its queued frame; a retry
+    /// flushes that frame before taking fresh bounded reads. Poll completion is
+    /// the final operation and therefore cannot acknowledge coverage from an
+    /// older pass.
+    pub fn execute_epoch_poll_pass(
+        &self,
+        lease: ScopedObservationPollLease,
+        active: &mut ScopedObservationEpochState,
+        drain: &mut ScopedObservationConsumerDrain,
+        requests: &[ScopedObservationAppendPassRequest<'_>],
+    ) -> Result<Arc<ScopedObservationWatermarkCore>, ScopedObservationPassExecutionError> {
+        self.validate_epoch_poll_execution(&lease, active, drain, requests)?;
+
+        // A prior retry may have committed cursor state only as far as the
+        // bounded admission lane. Offer it before new access so capacity and
+        // source ordering remain bounded and deterministic.
+        self.offer_epoch_poll_pending(active, drain)?;
+
+        let requests_by_relation = requests
+            .iter()
+            .map(|request| (request.relation_id, request))
+            .collect::<BTreeMap<_, _>>();
+        let relation_ids = active.append_objects.keys().cloned().collect::<Vec<_>>();
+        for relation_id in relation_ids {
+            let request = requests_by_relation
+                .get(relation_id.as_str())
+                .expect("the exact relation set was prevalidated");
+            let observation = {
+                let object = active
+                    .append_objects
+                    .get_mut(&relation_id)
+                    .expect("the canonical active relation remains present");
+                object.reconcile(
+                    lease.access_pass(),
+                    ScopedAppendReconcileRequest {
+                        relation_id: request.relation_id,
+                        identity_inputs: request.identity_inputs,
+                        access_phase: AccessPhase::Revalidation,
+                        parent_token: request.parent_token,
+                        depth: request.depth,
+                        max_bytes: request.max_bytes,
+                        origin: request.origin,
+                        force_contract_replay: request.force_contract_replay,
+                    },
+                )?
+            };
+
+            let decoded = {
+                let object = active
+                    .append_objects
+                    .get_mut(&relation_id)
+                    .expect("the canonical active relation remains present");
+                match self.decode_append(object, &observation) {
+                    Ok(ScopedAppendDecodeOutcome::Ready(decoded)) => decoded,
+                    Ok(ScopedAppendDecodeOutcome::RetryTransient) => {
+                        object.discard(&observation)?;
+                        return Err(ScopedObservationPassExecutionError::DecodeRetryTransient);
+                    }
+                    Err(error) => {
+                        object.discard(&observation)?;
+                        return Err(error.into());
+                    }
+                }
+            };
+
+            let admission_result = {
+                let object = active
+                    .append_objects
+                    .get_mut(&relation_id)
+                    .expect("the canonical active relation remains present");
+                active.admission.admit(object, &observation, decoded)
+            };
+            if let Err(failure) = admission_result {
+                active
+                    .append_objects
+                    .get_mut(&relation_id)
+                    .expect("the canonical active relation remains present")
+                    .discard(&observation)?;
+                return Err(ScopedObservationPassExecutionError::Admission(
+                    failure.error,
+                ));
+            }
+            self.offer_epoch_poll_pending(active, drain)?;
+        }
+
+        self.complete_epoch_poll(lease, active, drain)
+            .map_err(Into::into)
+    }
+
     /// Complete a bootstrap-era poll only after its entire exact known-object
     /// pass is represented by the offered coverage boundary.
     pub fn complete_bootstrap_poll(
@@ -7826,6 +8046,7 @@ impl ScopedObservationAccessHost {
             return Err(ScopedReplacementStageError::InvalidSourceState);
         }
         Ok(ScopedObservationEpochState {
+            attachment_authority: Arc::clone(&self.attachment_authority),
             root: self.root_identity.clone(),
             scope_epoch: SCOPED_INITIAL_SCOPE_EPOCH,
             append_objects,
@@ -7864,7 +8085,8 @@ impl ScopedObservationAccessHost {
         active: &ScopedObservationEpochState,
         delivery: &ScopedObservationDeliveryLane,
     ) -> Result<ScopedObservationWatermarkCore, ScopedCoverageAssemblyError> {
-        if active.root != self.root_identity
+        if !Arc::ptr_eq(&active.attachment_authority, &self.attachment_authority)
+            || active.root != self.root_identity
             || active.scope_epoch != delivery.state().scope_epoch
             || active.projection.lifecycle != ScopedProjectionLifecycle::Active
         {
@@ -7887,7 +8109,8 @@ impl ScopedObservationAccessHost {
             .ok_or(ScopedReplacementStageError::NotResyncing)?;
         let baseline_scope_epoch = valid_replacement_baseline_scope_epoch(delivery)
             .ok_or(ScopedReplacementStageError::InvalidSourceState)?;
-        if active.root != self.root_identity
+        if !Arc::ptr_eq(&active.attachment_authority, &self.attachment_authority)
+            || active.root != self.root_identity
             || started.root != self.root_identity
             || active.scope_epoch != baseline_scope_epoch
             || delivery.state().scope_epoch != started.new_scope_epoch
@@ -8057,6 +8280,9 @@ impl ScopedObservationAccessHost {
         delivery: &mut ScopedObservationDeliveryLane,
         observed_at: i64,
     ) -> Result<Arc<ScopedResyncBarrier>, ScopedReplacementStageError> {
+        if !Arc::ptr_eq(&active.attachment_authority, &self.attachment_authority) {
+            return Err(ScopedReplacementStageError::InvalidSourceState);
+        }
         if stage.activated {
             let barrier = stage
                 .semantic
