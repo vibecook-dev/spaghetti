@@ -626,6 +626,25 @@ releases, actual common-runtime and vendor composition, independent Phase 0
 catalog identity plus final hydrated-identity oracle parity, source
 access/coverage integration, and calibrated performance evidence.
 
+The second B2 slice (`df3b6b0`) freezes a Codex-only candidate conformance
+oracle without changing that promotion state. A test-only runner uses the real
+common directory snapshot and bounded append-delimited driver to interpret the
+first complete `session_meta` record through the same normalization seam as the
+existing durable decoder. Its privacy-reduced fixture pins one project and ten
+sessions against the independent Phase 0 census and full durable decode, plus
+registration-invariant RFC 012A source-record, canonical entity, planned
+membership-fact, and record-owned revision identities. Executable edge cases
+separate the 64 KiB framing prefix, 65,535-byte pre-LF record payload, 4 KiB
+checkpoint-anchor reread, and 69,632-byte maximum physical driver read per
+object; internal, malformed, and oversized first records fail closed. The
+exact `rollout-sessions` declaration remains durable-only and `full_only`, the
+digest-bound support release remains `Candidate`, catalog capability remains
+unsupported, and catalog access authorization is rejected. This is candidate
+evidence only: Codex's legacy payload identities still depend on numeric source
+registration and do not yet carry semantic revisions, so cross-topology payload
+parity, promoted declarations/support, and runtime catalog execution remain
+open alongside the Claude and Grok identity oracles.
+
 ### B3. Durable pack, readiness, and pagination
 
 Implement:
