@@ -51,6 +51,15 @@ class CatalogCensusTest(unittest.TestCase):
         self.assertEqual(len(sessions), oracle["session_count"])
         self.assertEqual(identity_digest(projects), oracle["project_identity_digest"])
         self.assertEqual(identity_digest(sessions), oracle["session_identity_digest"])
+        self.assertEqual(result.metrics.evidence["subagent-parent-uuid-shaped"], 2)
+        self.assertEqual(result.metrics.evidence["subagent-parent-non-uuid"], 0)
+        self.assertEqual(result.metrics.evidence["subagent-parent-nested-only"], 0)
+        self.assertEqual(
+            result.metrics.evidence["subagent-parent-nested-only-uuid-shaped"], 0
+        )
+        self.assertEqual(
+            result.metrics.evidence["subagent-parent-nested-only-non-uuid"], 0
+        )
 
     def test_codex_candidate_oracle_matches_frozen_rfc012b_fixture(self) -> None:
         repository = Path(__file__).resolve().parents[2]
@@ -109,6 +118,17 @@ class CatalogCensusTest(unittest.TestCase):
         self.assertEqual(len(sessions), oracle["session_count"])
         self.assertEqual(identity_digest(projects), oracle["project_identity_digest"])
         self.assertEqual(identity_digest(sessions), oracle["session_identity_digest"])
+        self.assertEqual(result.metrics.evidence["session-directory-census-admitted"], 4)
+        self.assertEqual(
+            result.metrics.evidence["session-directory-current-policy-admitted"], 4
+        )
+        self.assertEqual(
+            result.metrics.evidence["session-directory-current-policy-with-updates"], 4
+        )
+        self.assertEqual(
+            result.metrics.evidence["session-directory-current-policy-without-updates"], 0
+        )
+        self.assertEqual(result.metrics.evidence["session-directory-updates-only"], 0)
 
     def test_claude_unions_index_and_transcript_without_reading_full_transcript(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -179,6 +199,35 @@ class CatalogCensusTest(unittest.TestCase):
                 {"subagent-membership"},
             )
             self.assertLess(result.metrics.bytes_read, len(payload))
+
+    def test_claude_reports_nested_parent_shape_and_identity_delta_without_ids(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / ".claude"
+            project = root / "projects" / "-private-project"
+            project.mkdir(parents=True)
+            overlap = "11111111-1111-1111-1111-111111111111"
+            nested_uuid = "22222222-2222-2222-2222-222222222222"
+            nested_opaque = "private-opaque-session"
+            (project / f"{overlap}.jsonl").write_text("", encoding="utf-8")
+            for session_id in (overlap, nested_uuid, nested_opaque):
+                subagents = project / session_id / "subagents"
+                subagents.mkdir(parents=True)
+                (subagents / "agent-child.jsonl").write_text("{}\n", encoding="utf-8")
+
+            result = scan_claude(root, head_bytes=4096, document_bytes=1024 * 1024)
+
+            self.assertEqual(len(result.catalog.sessions), 3)
+            evidence = result.metrics.evidence
+            self.assertEqual(evidence["subagent-parent-uuid-shaped"], 2)
+            self.assertEqual(evidence["subagent-parent-non-uuid"], 1)
+            self.assertEqual(evidence["subagent-parent-nested-only"], 2)
+            self.assertEqual(
+                evidence["subagent-parent-nested-only-uuid-shaped"], 1
+            )
+            self.assertEqual(evidence["subagent-parent-nested-only-non-uuid"], 1)
+            serialized = json.dumps(dict(evidence), sort_keys=True)
+            for private_value in ("-private-project", overlap, nested_uuid, nested_opaque):
+                self.assertNotIn(private_value, serialized)
 
     def test_codex_skips_internal_rollouts_and_extracts_user_prompt(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -259,6 +308,46 @@ class CatalogCensusTest(unittest.TestCase):
             self.assertIn(key, result.catalog.sessions)
             self.assertEqual(result.catalog.sessions[key].title, "A useful title")
             self.assertLess(result.metrics.bytes_read, 4096)
+
+    def test_grok_reports_current_policy_updates_delta_without_ids(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / ".grok"
+            project = root / "sessions" / "%2Fprivate%2Fproject"
+            current_only = project / "private-current-only"
+            updates_only = project / "private-updates-only"
+            overlap = project / "private-overlap"
+            for session in (current_only, updates_only, overlap):
+                session.mkdir(parents=True)
+            (current_only / "chat_history.jsonl").write_text("", encoding="utf-8")
+            (updates_only / "updates.jsonl").write_text("{}\n", encoding="utf-8")
+            (overlap / "summary.json").write_text("{}", encoding="utf-8")
+            (overlap / "updates.jsonl").write_text("{}\n", encoding="utf-8")
+
+            result = scan_grok(root, head_bytes=4096, document_bytes=1024 * 1024)
+
+            # Preserve the independent census semantics while making its
+            # exact delta from the current candidate declaration measurable.
+            self.assertEqual(len(result.catalog.sessions), 3)
+            evidence = result.metrics.evidence
+            self.assertEqual(evidence["session-directory-census-admitted"], 3)
+            self.assertEqual(
+                evidence["session-directory-current-policy-admitted"], 2
+            )
+            self.assertEqual(
+                evidence["session-directory-current-policy-with-updates"], 1
+            )
+            self.assertEqual(
+                evidence["session-directory-current-policy-without-updates"], 1
+            )
+            self.assertEqual(evidence["session-directory-updates-only"], 1)
+            serialized = json.dumps(dict(evidence), sort_keys=True)
+            for private_value in (
+                "%2Fprivate%2Fproject",
+                "private-current-only",
+                "private-updates-only",
+                "private-overlap",
+            ):
+                self.assertNotIn(private_value, serialized)
 
 
 if __name__ == "__main__":

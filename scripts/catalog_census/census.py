@@ -42,6 +42,21 @@ GROK_KNOWN_FILES = {
     "signals.json",
     "updates.jsonl",
 }
+GROK_CURRENT_MEMBERSHIP_FILES = GROK_KNOWN_FILES - {"updates.jsonl"}
+CLAUDE_ADMISSION_EVIDENCE_KEYS = (
+    "subagent-parent-uuid-shaped",
+    "subagent-parent-non-uuid",
+    "subagent-parent-nested-only",
+    "subagent-parent-nested-only-uuid-shaped",
+    "subagent-parent-nested-only-non-uuid",
+)
+GROK_ADMISSION_EVIDENCE_KEYS = (
+    "session-directory-census-admitted",
+    "session-directory-current-policy-admitted",
+    "session-directory-current-policy-with-updates",
+    "session-directory-current-policy-without-updates",
+    "session-directory-updates-only",
+)
 
 
 def utc_timestamp() -> str:
@@ -422,12 +437,20 @@ def find_claude_subagent_sessions(
         if found:
             sessions.add(session_id)
             metrics.evidence["subagent-membership"] += 1
+            shape = (
+                "subagent-parent-uuid-shaped"
+                if UUID_RE.fullmatch(session_id)
+                else "subagent-parent-non-uuid"
+            )
+            metrics.evidence[shape] += 1
     return sessions
 
 
 def scan_claude(root: Path, *, head_bytes: int, document_bytes: int) -> AdapterScan:
     start = time.perf_counter()
     metrics = ScanMetrics()
+    for key in CLAUDE_ADMISSION_EVIDENCE_KEYS:
+        metrics.evidence[key] = 0
     catalog = Catalog(CLAUDE_ID)
     projects = root / "projects"
 
@@ -520,7 +543,15 @@ def scan_claude(root: Path, *, head_bytes: int, document_bytes: int) -> AdapterS
             catalog.add_session(head)
             metrics.evidence["transcript-path"] += 1
 
-        for session_id in subagent_sessions:
+        for session_id in sorted(subagent_sessions):
+            if (project_key, session_id) not in catalog.sessions:
+                metrics.evidence["subagent-parent-nested-only"] += 1
+                shape = (
+                    "subagent-parent-nested-only-uuid-shaped"
+                    if UUID_RE.fullmatch(session_id)
+                    else "subagent-parent-nested-only-non-uuid"
+                )
+                metrics.evidence[shape] += 1
             catalog.add_session(
                 SessionRecord(
                     project_key=project_key,
@@ -644,6 +675,8 @@ def grok_user_prompt(row: dict[str, Any]) -> str | None:
 def scan_grok(root: Path, *, head_bytes: int, document_bytes: int) -> AdapterScan:
     start = time.perf_counter()
     metrics = ScanMetrics()
+    for key in GROK_ADMISSION_EVIDENCE_KEYS:
+        metrics.evidence[key] = 0
     catalog = Catalog(GROK_ID)
     sessions_root = root / "sessions"
     for project_entry in metrics.scan_entries(sessions_root):
@@ -672,6 +705,23 @@ def scan_grok(root: Path, *, head_bytes: int, document_bytes: int) -> AdapterSca
             }
             if not files:
                 continue
+            file_names = set(files)
+            current_policy_admits = bool(file_names & GROK_CURRENT_MEMBERSHIP_FILES)
+            has_updates = "updates.jsonl" in file_names
+            metrics.evidence["session-directory-census-admitted"] += 1
+            if current_policy_admits:
+                metrics.evidence["session-directory-current-policy-admitted"] += 1
+                overlap = (
+                    "session-directory-current-policy-with-updates"
+                    if has_updates
+                    else "session-directory-current-policy-without-updates"
+                )
+                metrics.evidence[overlap] += 1
+            else:
+                # `updates.jsonl` is the only known sidecar outside the current
+                # candidate membership declaration. Keep the census catalog
+                # unchanged and expose the exact policy delta as an aggregate.
+                metrics.evidence["session-directory-updates-only"] += 1
             chat = files.get("chat_history.jsonl")
             if chat is not None:
                 metrics.register(chat, primary=True)
