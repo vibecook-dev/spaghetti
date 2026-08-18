@@ -191,7 +191,9 @@ const CANONICAL_FTS_TRIGGERS: &[&str] = &[
 /// current complete snapshot while advancing the durable state commit.
 /// v53: atomic RFC 012B ordinary-refresh successor snapshots with exact
 /// predecessor commitments and cumulative member-identity history.
-pub const SCHEMA_VERSION: u32 = 53;
+/// v54: append-only RFC 012B logical query-retirement evidence for retained
+/// catalog snapshots.
+pub const SCHEMA_VERSION: u32 = 54;
 
 /// Full DDL for the current schema — lifted verbatim from the TS `SCHEMA_SQL`
 /// template literal. Whitespace differs; structure does not.
@@ -498,7 +500,8 @@ CREATE TABLE IF NOT EXISTS ingest_commits (
         'catalog.library.build.scheduled',
         'catalog.library.initial_snapshot.published',
         'catalog.library.refresh.started',
-        'catalog.library.refresh_snapshot.published'
+        'catalog.library.refresh_snapshot.published',
+        'catalog.library.snapshot.retired'
       )
       AND committed_at IS NOT NULL
       AND fact_count = 0
@@ -602,6 +605,29 @@ CREATE TABLE IF NOT EXISTS catalog_snapshot_entries (
   PRIMARY KEY (snapshot_commit_seq, entry_kind, entry_key),
   UNIQUE (snapshot_commit_seq, ordinal)
 );
+
+CREATE TABLE IF NOT EXISTS catalog_snapshot_retirements (
+  snapshot_commit_seq INTEGER PRIMARY KEY REFERENCES catalog_snapshots(snapshot_commit_seq) ON DELETE RESTRICT,
+  snapshot_publication_digest BLOB NOT NULL CHECK (typeof(snapshot_publication_digest) = 'blob' AND length(snapshot_publication_digest) = 32),
+  snapshot_content_digest BLOB NOT NULL CHECK (typeof(snapshot_content_digest) = 'blob' AND length(snapshot_content_digest) = 32),
+  successor_snapshot_commit_seq INTEGER NOT NULL REFERENCES catalog_snapshots(snapshot_commit_seq) ON DELETE RESTRICT,
+  successor_publication_digest BLOB NOT NULL CHECK (typeof(successor_publication_digest) = 'blob' AND length(successor_publication_digest) = 32),
+  successor_content_digest BLOB NOT NULL CHECK (typeof(successor_content_digest) = 'blob' AND length(successor_content_digest) = 32),
+  retirement_commit_seq INTEGER NOT NULL UNIQUE REFERENCES ingest_commits(commit_seq) ON DELETE RESTRICT,
+  retired_at INTEGER NOT NULL,
+  CHECK (snapshot_commit_seq < successor_snapshot_commit_seq),
+  CHECK (retirement_commit_seq > successor_snapshot_commit_seq)
+);
+
+CREATE TRIGGER IF NOT EXISTS catalog_snapshot_retirements_no_update
+BEFORE UPDATE ON catalog_snapshot_retirements BEGIN
+  SELECT RAISE(ABORT, 'catalog snapshot retirement evidence is immutable');
+END;
+
+CREATE TRIGGER IF NOT EXISTS catalog_snapshot_retirements_no_delete
+BEFORE DELETE ON catalog_snapshot_retirements BEGIN
+  SELECT RAISE(ABORT, 'catalog snapshot retirement evidence is immutable');
+END;
 
 CREATE TABLE IF NOT EXISTS catalog_build_state (
   scope_kind TEXT PRIMARY KEY CHECK (scope_kind = 'library'),
@@ -2382,6 +2408,7 @@ const CURRENT_TABLES: &[&str] = &[
     "source_coverage_sets",
     "query_pack_selections",
     "projection_versions",
+    "catalog_snapshot_retirements",
     "catalog_snapshot_entries",
     "catalog_build_state",
     "catalog_snapshots",
@@ -3372,6 +3399,11 @@ mod tests {
         assert!(object_exists(&conn, "table", "catalog_coverage_plans"));
         assert!(object_exists(&conn, "table", "catalog_snapshots"));
         assert!(object_exists(&conn, "table", "catalog_snapshot_entries"));
+        assert!(object_exists(
+            &conn,
+            "table",
+            "catalog_snapshot_retirements"
+        ));
         assert!(object_exists(&conn, "table", "catalog_build_state"));
         let refreshing_snapshot_column: i64 = conn
             .query_row(
@@ -3716,6 +3748,16 @@ mod tests {
             "trigger",
             "session_summary_messages_ai"
         ));
+        assert!(object_exists(
+            &conn,
+            "trigger",
+            "catalog_snapshot_retirements_no_update"
+        ));
+        assert!(object_exists(
+            &conn,
+            "trigger",
+            "catalog_snapshot_retirements_no_delete"
+        ));
 
         let raw_index_columns: i64 = conn
             .query_row(
@@ -3738,6 +3780,8 @@ mod tests {
             "INSERT INTO ingest_commits (source_instance_id, reason, started_at, committed_at, fact_count) VALUES (NULL, 'catalog.library.build.scheduled', 1, NULL, 0)",
             "INSERT INTO ingest_commits (source_instance_id, reason, started_at, committed_at, fact_count) VALUES (NULL, 'catalog.library.initial_snapshot.published', 1, 2, 1)",
             "INSERT INTO ingest_commits (source_instance_id, reason, started_at, committed_at, fact_count) VALUES (NULL, 'catalog.library.refresh.started', 1, NULL, 0)",
+            "INSERT INTO ingest_commits (source_instance_id, reason, started_at, committed_at, fact_count) VALUES (NULL, 'catalog.library.snapshot.retired', 1, NULL, 0)",
+            "INSERT INTO ingest_commits (source_instance_id, reason, started_at, committed_at, fact_count) VALUES (NULL, 'catalog.library.snapshot.retired', 1, 2, 1)",
         ] {
             assert!(conn.execute(invalid, []).is_err(), "accepted {invalid}");
         }
@@ -3753,6 +3797,8 @@ mod tests {
             "catalog.library.build.scheduled",
             "catalog.library.initial_snapshot.published",
             "catalog.library.refresh.started",
+            "catalog.library.refresh_snapshot.published",
+            "catalog.library.snapshot.retired",
         ] {
             conn.execute(
                 "INSERT INTO ingest_commits (source_instance_id, reason, started_at, committed_at, fact_count) VALUES (NULL, ?1, 1, 2, 0)",
@@ -3764,7 +3810,7 @@ mod tests {
             conn.query_row("SELECT COUNT(*) FROM ingest_commits", [], |row| row
                 .get::<_, i64>(0))
                 .unwrap(),
-            4
+            6
         );
     }
 

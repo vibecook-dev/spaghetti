@@ -239,6 +239,7 @@ pub(crate) struct DurableCatalogBuildState {
     pub readiness: CatalogReadinessSnapshot,
     pub last_commit_seq: u64,
     ready_publication_identity: Option<Arc<CatalogReadyPublicationIdentity>>,
+    retired_snapshot_count: usize,
 }
 
 /// Caller-held authority for a restart-validated immutable Ready snapshot.
@@ -368,6 +369,40 @@ impl DurableCatalogBuildState {
             })?,
         })
     }
+
+    pub(crate) fn snapshot_retirement_expectation(
+        &self,
+    ) -> Result<super::catalog_retention::CatalogSnapshotRetirementExpectation, EngineError> {
+        if self.readiness.refreshing_from_snapshot.is_some() {
+            return Err(EngineError::InvalidCommit(
+                "catalog snapshot retirement requires a plain Ready lineage".to_string(),
+            ));
+        }
+        let authority = self.ready_read_authority()?;
+        let chain = authority.publication_identity.retained_chain();
+        if self.retired_snapshot_count >= chain.len().saturating_sub(1) {
+            return Err(EngineError::InvalidCommit(
+                "catalog Ready lineage has no query-retained predecessor to retire".to_string(),
+            ));
+        }
+        let target = chain[self.retired_snapshot_count];
+        let successor = *chain.last().ok_or_else(|| {
+            EngineError::InvalidCommit(
+                "catalog Ready lineage is missing its current snapshot commitment".to_string(),
+            )
+        })?;
+        super::catalog_retention::CatalogSnapshotRetirementExpectation::new(
+            self.readiness.scope,
+            self.plan.coverage_plan_id,
+            authority.contract_selection().clone(),
+            self.readiness.epoch,
+            self.readiness.attempt,
+            self.last_commit_seq,
+            self.retired_snapshot_count,
+            target,
+            successor,
+        )
+    }
 }
 
 impl CatalogReadyReadAuthority {
@@ -389,6 +424,66 @@ impl CatalogReadyReadAuthority {
 
     pub(super) fn contract_selection(&self) -> &crate::adapter::ContractVersionSelection {
         self.publication_identity.contract_selection()
+    }
+
+    pub(super) fn retained_chain(
+        &self,
+    ) -> &[super::catalog_publication::CatalogRetainedSnapshotCommitment] {
+        self.publication_identity.retained_chain()
+    }
+
+    pub(super) fn for_historical_snapshot(
+        &self,
+        connection: &Connection,
+        snapshot_id: CatalogSnapshotId,
+        retired_prefix_len: usize,
+    ) -> Result<Self, EngineError> {
+        if snapshot_id == self.snapshot_id {
+            return Ok(self.clone());
+        }
+        let chain_index = self
+            .publication_identity
+            .retained_chain()
+            .iter()
+            .position(|commitment| commitment.snapshot_id() == snapshot_id)
+            .ok_or_else(|| {
+                EngineError::InvalidCommit(
+                    "catalog historical snapshot is outside the current bounded ancestry"
+                        .to_string(),
+                )
+            })?;
+        if chain_index < retired_prefix_len {
+            return Err(EngineError::InvalidCommit(
+                "catalog historical snapshot is durably retired from query service".to_string(),
+            ));
+        }
+        let commitment = self.publication_identity.retained_chain()[chain_index];
+        let loaded = super::catalog_publication::load_ready_publication(
+            connection,
+            &self.plan,
+            snapshot_id,
+            self.readiness.attempt,
+        )?;
+        if !loaded.identity.matches_snapshot_commitment(commitment) {
+            return Err(corrupt_catalog_state(
+                "historical catalog publication differs from the current restart-authenticated ancestry",
+            ));
+        }
+        let mut historical_readiness = self.readiness.clone();
+        historical_readiness.completed_contract_version = Some(snapshot_id.pack_contract_version);
+        historical_readiness.complete_through_commit = Some(snapshot_id.complete_commit);
+        historical_readiness.last_complete_snapshot = Some(snapshot_id);
+        historical_readiness.refreshing_from_snapshot = None;
+        historical_readiness.source_coverage = loaded.source_coverage;
+        historical_readiness.reason = None;
+        let machine = CatalogReadinessMachine::resume(self.plan.clone(), historical_readiness)
+            .map_err(catalog_contract_error)?;
+        Ok(Self {
+            plan: self.plan.clone(),
+            readiness: machine.snapshot().clone(),
+            snapshot_id,
+            publication_identity: Arc::new(loaded.identity),
+        })
     }
 }
 
@@ -951,64 +1046,72 @@ fn decode_stored_state(
     ) {
         machine.schedule_build().map_err(catalog_contract_error)?;
     }
-    let ready_publication_identity = if phase == CatalogDurableBuildPhase::Ready {
-        let snapshot_commit = last_complete_snapshot_commit.ok_or_else(|| {
-            corrupt_catalog_state("Ready catalog state is missing its retained snapshot commit")
-        })?;
-        let snapshot_id = CatalogSnapshotId::new(
-            desired_contract_version,
-            plan.coverage_plan_id,
-            epoch,
-            snapshot_commit,
-        )
-        .map_err(catalog_contract_error)?;
-        let publication = super::catalog_publication::load_ready_publication(
-            connection,
-            &plan,
-            snapshot_id,
-            attempt,
-        )?;
-        let retained_snapshot_scan_limit =
-            super::catalog_publication::MAX_RETAINED_REFRESH_LINEAGE_DEPTH
-                .checked_add(2)
-                .ok_or_else(|| {
-                    corrupt_catalog_state("catalog retained snapshot scan limit overflow")
-                })?;
-        let retained_snapshot_count: i64 = connection
-            .query_row(
-                "SELECT COUNT(*) FROM (SELECT 1 FROM catalog_snapshots LIMIT ?1)",
-                [to_i64(
-                    retained_snapshot_scan_limit as u64,
-                    "catalog retained snapshot scan limit",
-                )?],
-                |row| row.get(0),
+    let (ready_publication_identity, retired_snapshot_count) =
+        if phase == CatalogDurableBuildPhase::Ready {
+            let snapshot_commit = last_complete_snapshot_commit.ok_or_else(|| {
+                corrupt_catalog_state("Ready catalog state is missing its retained snapshot commit")
+            })?;
+            let snapshot_id = CatalogSnapshotId::new(
+                desired_contract_version,
+                plan.coverage_plan_id,
+                epoch,
+                snapshot_commit,
             )
-            .map_err(|error| sqlite_error("count retained catalog snapshots", error))?;
-        if usize::try_from(retained_snapshot_count).ok()
-            != Some(publication.identity.retained_snapshot_count())
-        {
-            return Err(corrupt_catalog_state(
+            .map_err(catalog_contract_error)?;
+            let publication = super::catalog_publication::load_ready_publication(
+                connection,
+                &plan,
+                snapshot_id,
+                attempt,
+            )?;
+            let retained_snapshot_scan_limit =
+                super::catalog_publication::MAX_RETAINED_REFRESH_LINEAGE_DEPTH
+                    .checked_add(2)
+                    .ok_or_else(|| {
+                        corrupt_catalog_state("catalog retained snapshot scan limit overflow")
+                    })?;
+            let retained_snapshot_count: i64 = connection
+                .query_row(
+                    "SELECT COUNT(*) FROM (SELECT 1 FROM catalog_snapshots LIMIT ?1)",
+                    [to_i64(
+                        retained_snapshot_scan_limit as u64,
+                        "catalog retained snapshot scan limit",
+                    )?],
+                    |row| row.get(0),
+                )
+                .map_err(|error| sqlite_error("count retained catalog snapshots", error))?;
+            if usize::try_from(retained_snapshot_count).ok()
+                != Some(publication.identity.retained_snapshot_count())
+            {
+                return Err(corrupt_catalog_state(
                 "retained catalog snapshots do not form the exact bounded current ancestor chain",
             ));
-        }
-        if refreshing_from_snapshot_commit.is_none()
-            && publication.identity.is_refresh()
-                != (state_commit_reason == REFRESH_PUBLICATION_REASON)
-        {
-            return Err(corrupt_catalog_state(
-                "Ready state commit owner disagrees with the current snapshot lineage",
-            ));
-        }
-        machine
-            .publish_ready(snapshot_id, publication.source_coverage)
-            .map_err(catalog_contract_error)?;
-        if refreshing_from_snapshot_commit.is_some() {
-            machine.begin_refresh().map_err(catalog_contract_error)?;
-        }
-        Some(Arc::new(publication.identity))
-    } else {
-        None
-    };
+            }
+            if refreshing_from_snapshot_commit.is_none()
+                && publication.identity.is_refresh()
+                    != (state_commit_reason == REFRESH_PUBLICATION_REASON)
+            {
+                return Err(corrupt_catalog_state(
+                    "Ready state commit owner disagrees with the current snapshot lineage",
+                ));
+            }
+            let retired_snapshot_count = super::catalog_retention::load_retired_prefix(
+                connection,
+                publication.identity.retained_chain(),
+            )?;
+            machine
+                .publish_ready(snapshot_id, publication.source_coverage)
+                .map_err(catalog_contract_error)?;
+            if refreshing_from_snapshot_commit.is_some() {
+                machine.begin_refresh().map_err(catalog_contract_error)?;
+            }
+            (Some(Arc::new(publication.identity)), retired_snapshot_count)
+        } else {
+            (
+                None,
+                super::catalog_retention::load_retired_prefix(connection, &[])?,
+            )
+        };
     if machine.snapshot().epoch != epoch || machine.snapshot().attempt != attempt {
         return Err(corrupt_catalog_state(
             "catalog build epoch or attempt cannot be reconstructed from the persisted lineage",
@@ -1019,6 +1122,7 @@ fn decode_stored_state(
         readiness: machine.snapshot().clone(),
         last_commit_seq,
         ready_publication_identity,
+        retired_snapshot_count,
     })
 }
 

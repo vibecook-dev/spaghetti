@@ -8,6 +8,7 @@ mod artifact_projection;
 mod capability_query;
 mod catalog_publication;
 mod catalog_query;
+mod catalog_retention;
 mod catalog_state;
 mod commit;
 mod coordinator;
@@ -61,6 +62,7 @@ use catalog_publication::{
     CatalogInitialPublicationCommand, CatalogInitialPublicationReceipt,
     CatalogRefreshPublicationCommand, CatalogRefreshPublicationReceipt,
 };
+use catalog_retention::{CatalogSnapshotRetirementCommand, CatalogSnapshotRetirementReceipt};
 use catalog_state::CatalogBuildStateCommand;
 pub use commit::{
     ChangeLogRetentionPolicy, ChangeLogRetentionSnapshot, DEFAULT_CHANGE_LOG_MAX_AGE_MS,
@@ -1392,6 +1394,21 @@ impl SpaghettiEngineCore {
     ) -> Result<Option<CatalogRefreshPublicationReceipt>, EngineError> {
         let writer = self.writer_client()?;
         let receipt = writer.commit_refresh_catalog_publication(command)?;
+        if let Some(receipt) = &receipt {
+            self.commit_notifications.publish(receipt.commit_seq);
+        }
+        Ok(receipt)
+    }
+
+    /// Atomically record one append-only logical query-retirement decision.
+    /// Snapshot headers and frames remain restart evidence; this grants no
+    /// physical-deletion or public policy authority.
+    pub(crate) fn retire_catalog_snapshot(
+        &self,
+        command: CatalogSnapshotRetirementCommand,
+    ) -> Result<Option<CatalogSnapshotRetirementReceipt>, EngineError> {
+        let writer = self.writer_client()?;
+        let receipt = writer.retire_catalog_snapshot(command)?;
         if let Some(receipt) = &receipt {
             self.commit_notifications.publish(receipt.commit_seq);
         }

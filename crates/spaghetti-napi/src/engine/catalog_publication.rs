@@ -198,6 +198,52 @@ struct CatalogReadyRowCommitment {
     payload_len: u32,
 }
 
+/// Bounded restart-authenticated identity for one snapshot in the current
+/// linear refresh ancestry. It is intentionally small: historical row and
+/// reducer commitments are loaded on demand and must match this frozen proof.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) struct CatalogRetainedSnapshotCommitment {
+    snapshot_id: CatalogSnapshotId,
+    publication_digest: [u8; DIGEST_BYTES],
+    content_digest: [u8; DIGEST_BYTES],
+}
+
+impl std::fmt::Debug for CatalogRetainedSnapshotCommitment {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CatalogRetainedSnapshotCommitment")
+            .field("snapshot_id", &self.snapshot_id)
+            .finish_non_exhaustive()
+    }
+}
+
+impl CatalogRetainedSnapshotCommitment {
+    #[cfg(test)]
+    pub(super) fn from_test_parts(
+        snapshot_id: CatalogSnapshotId,
+        publication_digest: [u8; DIGEST_BYTES],
+        content_digest: [u8; DIGEST_BYTES],
+    ) -> Self {
+        Self {
+            snapshot_id,
+            publication_digest,
+            content_digest,
+        }
+    }
+
+    pub(super) fn snapshot_id(self) -> CatalogSnapshotId {
+        self.snapshot_id
+    }
+
+    pub(super) fn publication_digest(self) -> [u8; DIGEST_BYTES] {
+        self.publication_digest
+    }
+
+    pub(super) fn content_digest(self) -> [u8; DIGEST_BYTES] {
+        self.content_digest
+    }
+}
+
 #[derive(PartialEq, Eq)]
 pub(super) struct CatalogReadyPublicationIdentity {
     header: CatalogReadyPublicationHeaderIdentity,
@@ -207,6 +253,7 @@ pub(super) struct CatalogReadyPublicationIdentity {
     member_history: CatalogPublicationMemberHistory,
     reducer: CatalogReducerPublication,
     refresh_depth: usize,
+    retained_chain: Vec<CatalogRetainedSnapshotCommitment>,
 }
 
 impl std::fmt::Debug for CatalogReadyPublicationIdentity {
@@ -220,6 +267,7 @@ impl std::fmt::Debug for CatalogReadyPublicationIdentity {
             .field("member_history", &self.member_history)
             .field("reducer", &self.reducer)
             .field("refresh_depth", &self.refresh_depth)
+            .field("retained_snapshot_count", &self.retained_chain.len())
             .finish_non_exhaustive()
     }
 }
@@ -274,7 +322,29 @@ impl CatalogReadyPublicationIdentity {
     }
 
     pub(super) fn retained_snapshot_count(&self) -> usize {
-        self.refresh_depth + 1
+        self.retained_chain.len()
+    }
+
+    pub(super) fn retained_chain(&self) -> &[CatalogRetainedSnapshotCommitment] {
+        &self.retained_chain
+    }
+
+    pub(super) fn retained_snapshot_commitment(
+        &self,
+        snapshot_id: CatalogSnapshotId,
+    ) -> Option<CatalogRetainedSnapshotCommitment> {
+        self.retained_chain
+            .iter()
+            .copied()
+            .find(|commitment| commitment.snapshot_id == snapshot_id)
+    }
+
+    pub(super) fn matches_snapshot_commitment(
+        &self,
+        expected: CatalogRetainedSnapshotCommitment,
+    ) -> bool {
+        self.header.publication_digest == expected.publication_digest
+            && self.header.content_digest == expected.content_digest
     }
 
     pub(super) fn matches_row(
@@ -2209,6 +2279,22 @@ fn load_ready_publication_at_depth(
             "catalog snapshot content digest does not match its header and entries",
         ));
     }
+    let mut retained_chain = predecessor_publication
+        .as_ref()
+        .map(|predecessor| predecessor.identity.retained_chain.clone())
+        .unwrap_or_default();
+    retained_chain.push(CatalogRetainedSnapshotCommitment {
+        snapshot_id,
+        publication_digest,
+        content_digest,
+    });
+    if retained_chain.len() != actual_refresh_depth + 1
+        || retained_chain.len() > MAX_RETAINED_REFRESH_LINEAGE_DEPTH + 1
+    {
+        return Err(catalog_state::corrupt_catalog_state(
+            "catalog retained snapshot commitments exceed their bounded linear lineage",
+        ));
+    }
     source_coverage.sort_by(|left, right| {
         (&left.scope.adapter_id, left.scope.source_instance_key)
             .cmp(&(&right.scope.adapter_id, right.scope.source_instance_key))
@@ -2240,6 +2326,7 @@ fn load_ready_publication_at_depth(
             member_history,
             reducer,
             refresh_depth: actual_refresh_depth,
+            retained_chain,
         },
     })
 }
@@ -2443,6 +2530,7 @@ mod tests {
         CATALOG_QUERY_PACK_CONTRACT_VERSION,
     };
     use crate::core::schema;
+    use crate::engine::catalog_retention::CatalogSnapshotRetirementCommand;
     use crate::engine::catalog_state::CatalogBuildStateCommand;
     use crate::engine::writer::WriterRuntime;
     use crate::engine::{EngineOptions, SpaghettiEngineCore};
@@ -3415,6 +3503,23 @@ mod tests {
             MAX_RETAINED_REFRESH_LINEAGE_DEPTH
         );
         assert!(ready.refresh_expectation().is_err());
+        let retirement = CatalogSnapshotRetirementCommand::new(
+            ready.snapshot_retirement_expectation().unwrap(),
+            1_000,
+            1_001,
+        )
+        .unwrap();
+        crate::engine::catalog_retention::apply_catalog_snapshot_retirement(
+            &mut connection,
+            &retirement,
+        )
+        .unwrap()
+        .unwrap();
+        let retired = catalog_state::load_catalog_build_state(&connection)
+            .unwrap()
+            .unwrap();
+        assert!(retired.refresh_expectation().is_err());
+        assert_eq!(count(&connection, "catalog_snapshots"), 9);
         let Err(simulated_one_over) = load_ready_publication_at_depth(
             &connection,
             &coverage_plan,
@@ -4124,6 +4229,24 @@ mod tests {
             writer.commit_refresh_catalog_publication(refresh).unwrap(),
             None
         );
+        let ready = catalog_state::load_catalog_build_state(&reader)
+            .unwrap()
+            .unwrap();
+        let retirement = CatalogSnapshotRetirementCommand::new(
+            ready.snapshot_retirement_expectation().unwrap(),
+            60,
+            61,
+        )
+        .unwrap();
+        assert_eq!(
+            writer
+                .retire_catalog_snapshot(retirement.clone())
+                .unwrap()
+                .unwrap()
+                .commit_seq,
+            6
+        );
+        assert_eq!(writer.retire_catalog_snapshot(retirement).unwrap(), None);
         runtime.shutdown().unwrap();
         let connection = Connection::open(database_path).unwrap();
         let ready = catalog_state::load_catalog_build_state(&connection)
@@ -4252,6 +4375,26 @@ mod tests {
             None
         );
         assert_eq!(engine.latest_commit_seq(), 5);
+        let ready = catalog_state::load_catalog_build_state(&reader)
+            .unwrap()
+            .unwrap();
+        let retirement = CatalogSnapshotRetirementCommand::new(
+            ready.snapshot_retirement_expectation().unwrap(),
+            60,
+            61,
+        )
+        .unwrap();
+        assert_eq!(
+            engine
+                .retire_catalog_snapshot(retirement.clone())
+                .unwrap()
+                .unwrap()
+                .commit_seq,
+            6
+        );
+        assert_eq!(engine.latest_commit_seq(), 6);
+        assert_eq!(engine.retire_catalog_snapshot(retirement).unwrap(), None);
+        assert_eq!(engine.latest_commit_seq(), 6);
         engine.shutdown().unwrap();
     }
 

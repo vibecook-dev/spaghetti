@@ -15,10 +15,12 @@ use crate::catalog_contract::evidence::{
     CatalogResolvedLifecycle,
 };
 use crate::catalog_contract::page::{
-    CatalogCount, CatalogEntityResolution, CatalogEntityResolutionResponse, CatalogPageEntry,
+    validate_continuation_retention, CatalogContinuationDisposition, CatalogCount,
+    CatalogEntityResolution, CatalogEntityResolutionResponse, CatalogPageEntry,
     CatalogPageRequestBinding, CatalogPolicyViewBinding, CatalogPortableProjectRow,
     CatalogPortableRow, CatalogPortableSessionRow, CatalogProjectPage,
-    CatalogResolutionRequestBinding, CatalogSessionPage,
+    CatalogResolutionRequestBinding, CatalogSessionPage, CatalogSnapshotExpired,
+    CatalogSnapshotRetention,
 };
 use crate::catalog_contract::publication::{
     CatalogDurablePublicationEntryKind, MAX_DURABLE_CATALOG_ROW_BYTES,
@@ -142,6 +144,13 @@ impl CatalogRetainedPageRequest {
                 "catalog retained-page request is bound to a different Ready snapshot".to_string(),
             ));
         }
+        self.validate_for_selection(expected_selection)
+    }
+
+    fn validate_for_selection(
+        &self,
+        expected_selection: &crate::adapter::ContractVersionSelection,
+    ) -> Result<CatalogPageRequestBinding, EngineError> {
         if &self.contract_selection.contract_versions != expected_selection {
             return Err(EngineError::InvalidCommit(
                 "catalog retained-page selection differs from the exact durable selection"
@@ -200,6 +209,87 @@ pub(super) enum CatalogRetainedPage {
     Sessions(CatalogSessionPage),
 }
 
+pub(super) enum CatalogRetainedPageOutcome {
+    Page(Box<CatalogRetainedPage>),
+    SnapshotExpired(Box<CatalogSnapshotExpired>),
+}
+
+/// Resolve one current or historical page against the exact current Ready
+/// authority. Request/cursor context is validated before retirement is
+/// consulted; retirement classification and row reads then share one SQLite
+/// read transaction.
+pub(super) fn read_catalog_page_with_retirement(
+    connection: &Connection,
+    current_authority: &CatalogReadyReadAuthority,
+    request: &CatalogRetainedPageRequest,
+) -> Result<CatalogRetainedPageOutcome, EngineError> {
+    let binding = request.validate_for_selection(current_authority.contract_selection())?;
+    let chain_index = current_authority
+        .retained_chain()
+        .iter()
+        .position(|commitment| commitment.snapshot_id() == request.snapshot_id)
+        .ok_or_else(|| {
+            EngineError::InvalidCommit(
+                "catalog page snapshot is outside the caller-held current ancestry".to_string(),
+            )
+        })?;
+
+    let transaction = connection
+        .unchecked_transaction()
+        .map_err(|error| catalog_state::sqlite_error("begin catalog retention read", error))?;
+    let fresh = catalog_state::load_catalog_build_state(&transaction)?
+        .ok_or_else(|| {
+            EngineError::InvalidCommit(
+                "catalog retained-page read requires a durable Ready lineage".to_string(),
+            )
+        })?
+        .ready_read_authority()?;
+    if fresh != *current_authority {
+        return Err(EngineError::InvalidCommit(
+            "catalog current read authority became stale before retention classification"
+                .to_string(),
+        ));
+    }
+    let retired_prefix =
+        super::catalog_retention::load_retired_prefix(&transaction, fresh.retained_chain())?;
+    if chain_index < retired_prefix {
+        let continuation = request.continuation.as_ref().ok_or_else(|| {
+            EngineError::InvalidCommit(
+                "an explicitly requested retired page-1 snapshot is not retained".to_string(),
+            )
+        })?;
+        let disposition = validate_continuation_retention(
+            serde_json::to_value(continuation).map_err(catalog_state::catalog_contract_error)?,
+            continuation,
+            CatalogCoverageScope::Library,
+            CatalogSnapshotRetention::Expired {
+                latest_snapshot: fresh.snapshot_id(),
+            },
+        )
+        .map_err(catalog_state::catalog_contract_error)?;
+        let CatalogContinuationDisposition::SnapshotExpired(expiration) = disposition else {
+            return Err(EngineError::InvalidCommit(
+                "retired catalog continuation did not produce expiration".to_string(),
+            ));
+        };
+        transaction.commit().map_err(|error| {
+            catalog_state::sqlite_error("commit catalog expiration read", error)
+        })?;
+        return Ok(CatalogRetainedPageOutcome::SnapshotExpired(Box::new(
+            expiration,
+        )));
+    }
+
+    let authority =
+        fresh.for_historical_snapshot(&transaction, request.snapshot_id, retired_prefix)?;
+    let page =
+        read_retained_catalog_page_in_transaction(&transaction, &authority, request, binding)?;
+    transaction
+        .commit()
+        .map_err(|error| catalog_state::sqlite_error("commit retained catalog page", error))?;
+    Ok(CatalogRetainedPageOutcome::Page(Box::new(page)))
+}
+
 pub(super) fn read_retained_catalog_page(
     connection: &Connection,
     authority: &CatalogReadyReadAuthority,
@@ -211,8 +301,26 @@ pub(super) fn read_retained_catalog_page(
     let transaction = connection
         .unchecked_transaction()
         .map_err(|error| catalog_state::sqlite_error("begin retained catalog page", error))?;
-    let header = load_retained_query_header(
+    super::catalog_retention::ensure_snapshot_query_retained(
         &transaction,
+        authority.snapshot_id(),
+    )?;
+    let result =
+        read_retained_catalog_page_in_transaction(&transaction, authority, request, binding)?;
+    transaction
+        .commit()
+        .map_err(|error| catalog_state::sqlite_error("commit retained catalog page", error))?;
+    Ok(result)
+}
+
+fn read_retained_catalog_page_in_transaction(
+    connection: &Connection,
+    authority: &CatalogReadyReadAuthority,
+    request: &CatalogRetainedPageRequest,
+    binding: CatalogPageRequestBinding,
+) -> Result<CatalogRetainedPage, EngineError> {
+    let header = load_retained_query_header(
+        connection,
         authority.plan(),
         authority.snapshot_id(),
         authority.readiness().attempt,
@@ -228,7 +336,7 @@ pub(super) fn read_retained_catalog_page(
     let result = match request.query_kind {
         CatalogQueryKind::Projects => {
             let (rows, has_more) = load_page_rows(
-                &transaction,
+                connection,
                 &header,
                 &binding,
                 authority.publication_identity(),
@@ -261,7 +369,7 @@ pub(super) fn read_retained_catalog_page(
         }
         CatalogQueryKind::Sessions => {
             let (rows, has_more) = load_page_rows(
-                &transaction,
+                connection,
                 &header,
                 &binding,
                 authority.publication_identity(),
@@ -293,9 +401,6 @@ pub(super) fn read_retained_catalog_page(
             .map_err(catalog_state::catalog_contract_error)?
         }
     };
-    transaction
-        .commit()
-        .map_err(|error| catalog_state::sqlite_error("commit retained catalog page", error))?;
     Ok(result)
 }
 
@@ -322,6 +427,10 @@ pub(super) fn resolve_retained_catalog_entity(
     let transaction = connection
         .unchecked_transaction()
         .map_err(|error| catalog_state::sqlite_error("begin retained catalog resolution", error))?;
+    super::catalog_retention::ensure_snapshot_query_retained(
+        &transaction,
+        authority.snapshot_id(),
+    )?;
     let header = load_retained_query_header(
         &transaction,
         authority.plan(),

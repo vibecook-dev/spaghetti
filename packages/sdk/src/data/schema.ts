@@ -134,7 +134,9 @@ import type { SqliteService } from '../io/index.js';
 // current complete snapshot while advancing the durable state commit.
 // v53: atomic RFC 012B ordinary-refresh successor snapshots with exact
 // predecessor commitments and cumulative member-identity history.
-export const SCHEMA_VERSION = 53;
+// v54: append-only RFC 012B logical query-retirement evidence for retained
+// catalog snapshots.
+export const SCHEMA_VERSION = 54;
 
 export const TOKEN_ACTIVITY_TRIGGER_NAMES = [
   'token_activity_messages_ai',
@@ -598,7 +600,8 @@ CREATE TABLE IF NOT EXISTS ingest_commits (
         'catalog.library.build.scheduled',
         'catalog.library.initial_snapshot.published',
         'catalog.library.refresh.started',
-        'catalog.library.refresh_snapshot.published'
+        'catalog.library.refresh_snapshot.published',
+        'catalog.library.snapshot.retired'
       )
       AND committed_at IS NOT NULL
       AND fact_count = 0
@@ -702,6 +705,29 @@ CREATE TABLE IF NOT EXISTS catalog_snapshot_entries (
   PRIMARY KEY (snapshot_commit_seq, entry_kind, entry_key),
   UNIQUE (snapshot_commit_seq, ordinal)
 );
+
+CREATE TABLE IF NOT EXISTS catalog_snapshot_retirements (
+  snapshot_commit_seq INTEGER PRIMARY KEY REFERENCES catalog_snapshots(snapshot_commit_seq) ON DELETE RESTRICT,
+  snapshot_publication_digest BLOB NOT NULL CHECK (typeof(snapshot_publication_digest) = 'blob' AND length(snapshot_publication_digest) = 32),
+  snapshot_content_digest BLOB NOT NULL CHECK (typeof(snapshot_content_digest) = 'blob' AND length(snapshot_content_digest) = 32),
+  successor_snapshot_commit_seq INTEGER NOT NULL REFERENCES catalog_snapshots(snapshot_commit_seq) ON DELETE RESTRICT,
+  successor_publication_digest BLOB NOT NULL CHECK (typeof(successor_publication_digest) = 'blob' AND length(successor_publication_digest) = 32),
+  successor_content_digest BLOB NOT NULL CHECK (typeof(successor_content_digest) = 'blob' AND length(successor_content_digest) = 32),
+  retirement_commit_seq INTEGER NOT NULL UNIQUE REFERENCES ingest_commits(commit_seq) ON DELETE RESTRICT,
+  retired_at INTEGER NOT NULL,
+  CHECK (snapshot_commit_seq < successor_snapshot_commit_seq),
+  CHECK (retirement_commit_seq > successor_snapshot_commit_seq)
+);
+
+CREATE TRIGGER IF NOT EXISTS catalog_snapshot_retirements_no_update
+BEFORE UPDATE ON catalog_snapshot_retirements BEGIN
+  SELECT RAISE(ABORT, 'catalog snapshot retirement evidence is immutable');
+END;
+
+CREATE TRIGGER IF NOT EXISTS catalog_snapshot_retirements_no_delete
+BEFORE DELETE ON catalog_snapshot_retirements BEGIN
+  SELECT RAISE(ABORT, 'catalog snapshot retirement evidence is immutable');
+END;
 
 CREATE TABLE IF NOT EXISTS catalog_build_state (
   scope_kind TEXT PRIMARY KEY CHECK (scope_kind = 'library'),
@@ -2430,6 +2456,7 @@ const CURRENT_TABLES = [
   'source_coverage_sets',
   'query_pack_selections',
   'projection_versions',
+  'catalog_snapshot_retirements',
   'catalog_snapshot_entries',
   'catalog_build_state',
   'catalog_snapshots',

@@ -40,6 +40,10 @@ use crate::engine::catalog_publication::{
     apply_initial_catalog_publication, apply_refresh_catalog_publication,
     CatalogInitialPublicationCommand, CatalogRefreshPublicationCommand,
 };
+use crate::engine::catalog_retention::{
+    apply_catalog_snapshot_retirement, apply_catalog_snapshot_retirement_with_hook,
+    CatalogRetirementCommitHook, CatalogRetirementCommitStage, CatalogSnapshotRetirementCommand,
+};
 use crate::engine::catalog_state::{
     self, CatalogBuildStateCommand, CatalogCommitHook, CatalogCommitStage, DurableCatalogBuildState,
 };
@@ -71,6 +75,66 @@ struct ObserveRefreshIsolation {
     snapshot_commit: i64,
     snapshot_entries: i64,
     observed: Cell<bool>,
+}
+
+struct FailRetirementAt(CatalogRetirementCommitStage);
+
+impl CatalogRetirementCommitHook for FailRetirementAt {
+    fn reach(&self, stage: CatalogRetirementCommitStage) -> Result<(), EngineError> {
+        if stage == self.0 {
+            Err(EngineError::InjectedFailure {
+                stage: "catalog retirement test seam",
+            })
+        } else {
+            Ok(())
+        }
+    }
+}
+
+struct ObserveRetirementIsolation {
+    database_path: PathBuf,
+    expected_snapshot_count: i64,
+    expected_entry_count: i64,
+    expected_commit_count: i64,
+    expected_change_count: i64,
+    observed: Cell<bool>,
+}
+
+impl CatalogRetirementCommitHook for ObserveRetirementIsolation {
+    fn reach(&self, stage: CatalogRetirementCommitStage) -> Result<(), EngineError> {
+        if stage != CatalogRetirementCommitStage::AfterOutboxInsert {
+            return Ok(());
+        }
+        let observer = Connection::open(&self.database_path).unwrap();
+        assert_eq!(
+            observer
+                .query_row(
+                    "SELECT COUNT(*) FROM catalog_snapshot_retirements",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            0
+        );
+        for (table, expected) in [
+            ("catalog_snapshots", self.expected_snapshot_count),
+            ("catalog_snapshot_entries", self.expected_entry_count),
+            ("ingest_commits", self.expected_commit_count),
+            ("change_log", self.expected_change_count),
+        ] {
+            let count = observer
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap();
+            assert_eq!(
+                count, expected,
+                "{table} escaped the retirement transaction"
+            );
+        }
+        self.observed.set(true);
+        Ok(())
+    }
 }
 
 impl CatalogCommitHook for ObserveRefreshIsolation {
@@ -583,6 +647,23 @@ fn refresh_catalog(
         .unwrap()
         .unwrap();
     receipt.snapshot_id
+}
+
+fn retirement_command(published: &PublishedCatalog) -> CatalogSnapshotRetirementCommand {
+    CatalogSnapshotRetirementCommand::new(
+        published.state.snapshot_retirement_expectation().unwrap(),
+        60,
+        61,
+    )
+    .unwrap()
+}
+
+fn table_count(connection: &Connection, table: &str) -> i64 {
+    connection
+        .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+            row.get(0)
+        })
+        .unwrap()
 }
 
 fn lifecycle_session_assertion(
@@ -1466,6 +1547,458 @@ fn refresh_successor_reopens_only_the_current_authority_while_retaining_both_sna
         panic!("expected reopened successor session page")
     };
     assert_eq!(page.rows.len(), 2);
+}
+
+#[test]
+fn logical_retirement_expires_only_a_valid_historical_continuation() {
+    let mut published = publish_catalog(1, 2);
+    let predecessor_authority = published.state.ready_read_authority().unwrap();
+    let predecessor = predecessor_authority.snapshot_id();
+    let first = read_retained_catalog_page(
+        &published.connection,
+        &predecessor_authority,
+        &CatalogRetainedPageRequest::sessions_all(
+            published.selection.clone(),
+            predecessor,
+            1,
+            None,
+        ),
+    )
+    .unwrap();
+    let CatalogRetainedPage::Sessions(first) = first else {
+        panic!("expected predecessor session page")
+    };
+    let continuation = first.next_continuation.unwrap();
+
+    let latest = refresh_catalog(&mut published, 2, 3);
+    let current_authority = published.state.ready_read_authority().unwrap();
+    let snapshot_count = table_count(&published.connection, "catalog_snapshots");
+    let entry_count = table_count(&published.connection, "catalog_snapshot_entries");
+    let commit_count = table_count(&published.connection, "ingest_commits");
+    let change_count = table_count(&published.connection, "change_log");
+    let command = retirement_command(&published);
+    let receipt = apply_catalog_snapshot_retirement(&mut published.connection, &command)
+        .unwrap()
+        .unwrap();
+    assert_eq!(receipt.retired_snapshot, predecessor);
+    assert_eq!(receipt.latest_snapshot, latest);
+    assert_eq!(
+        table_count(&published.connection, "catalog_snapshots"),
+        snapshot_count
+    );
+    assert_eq!(
+        table_count(&published.connection, "catalog_snapshot_entries"),
+        entry_count
+    );
+    assert_eq!(
+        table_count(&published.connection, "ingest_commits"),
+        commit_count + 1
+    );
+    assert_eq!(
+        table_count(&published.connection, "change_log"),
+        change_count + 1
+    );
+
+    let expired_request = CatalogRetainedPageRequest::sessions_all(
+        published.selection.clone(),
+        predecessor,
+        1,
+        Some(continuation.clone()),
+    );
+    let outcome = read_catalog_page_with_retirement(
+        &published.connection,
+        &current_authority,
+        &expired_request,
+    )
+    .unwrap();
+    let CatalogRetainedPageOutcome::SnapshotExpired(expiration) = outcome else {
+        panic!("expected exact snapshot-expiration response")
+    };
+    assert_eq!(expiration.scope, CatalogCoverageScope::Library);
+    assert_eq!(expiration.request, continuation);
+    assert_eq!(expiration.latest_snapshot, latest);
+    assert_eq!(expiration.contract_selection, published.selection);
+
+    let current = read_catalog_page_with_retirement(
+        &published.connection,
+        &current_authority,
+        &CatalogRetainedPageRequest::sessions_all(published.selection.clone(), latest, 1, None),
+    )
+    .unwrap();
+    let CatalogRetainedPageOutcome::Page(current) = current else {
+        panic!("expected current retained page")
+    };
+    let CatalogRetainedPage::Sessions(current) = *current else {
+        panic!("expected current retained page")
+    };
+    assert_eq!(current.rows.len(), 1);
+    let foreign_continuation = current.next_continuation.unwrap();
+
+    let low_level = read_retained_catalog_page(
+        &published.connection,
+        &predecessor_authority,
+        &CatalogRetainedPageRequest::sessions_all(
+            published.selection.clone(),
+            predecessor,
+            10,
+            None,
+        ),
+    );
+    let Err(error) = low_level else {
+        panic!("stale low-level authority bypassed retirement")
+    };
+    assert!(error.to_string().contains("durably retired"));
+
+    let source_instance_key =
+        CanonicalSourceInstanceKey::derive(1, b"retained-page-source").unwrap();
+    let retired_session = CatalogEntityRef::session(
+        CanonicalEntityKey::derive(
+            FIXTURE_ADAPTER,
+            &source_instance_key,
+            "session",
+            b"session-0",
+        )
+        .unwrap(),
+    );
+    let resolution_request = CatalogResolutionRequestBinding::new(
+        published.selection.clone(),
+        predecessor,
+        retired_session.external_ref,
+    )
+    .unwrap();
+    let resolution = resolve_retained_catalog_entity(
+        &published.connection,
+        &predecessor_authority,
+        &resolution_request,
+    );
+    let Err(error) = resolution else {
+        panic!("retired external resolution bypassed the logical ledger")
+    };
+    assert!(error.to_string().contains("durably retired"));
+
+    let page_one = read_catalog_page_with_retirement(
+        &published.connection,
+        &current_authority,
+        &CatalogRetainedPageRequest::sessions_all(
+            published.selection.clone(),
+            predecessor,
+            1,
+            None,
+        ),
+    );
+    let Err(error) = page_one else {
+        panic!("retired page one was served without a continuation")
+    };
+    assert!(error
+        .to_string()
+        .contains("page-1 snapshot is not retained"));
+
+    let mut malformed = continuation.clone();
+    malformed.page_size += 1;
+    let malformed = read_catalog_page_with_retirement(
+        &published.connection,
+        &current_authority,
+        &CatalogRetainedPageRequest::sessions_all(
+            published.selection.clone(),
+            predecessor,
+            1,
+            Some(malformed),
+        ),
+    );
+    let Err(error) = malformed else {
+        panic!("malformed retired continuation was classified as expired")
+    };
+    assert!(error
+        .to_string()
+        .contains("exact retained All-page request"));
+
+    let foreign = read_catalog_page_with_retirement(
+        &published.connection,
+        &current_authority,
+        &CatalogRetainedPageRequest::sessions_all(
+            published.selection.clone(),
+            predecessor,
+            1,
+            Some(foreign_continuation),
+        ),
+    );
+    let Err(error) = foreign else {
+        panic!("foreign valid continuation was classified as expired")
+    };
+    assert!(error
+        .to_string()
+        .contains("exact retained All-page request"));
+
+    let payload: Vec<u8> = published
+        .connection
+        .query_row(
+            "SELECT payload FROM change_log WHERE commit_seq = ?1 AND topic = 'catalog.snapshot.retired'",
+            [i64::try_from(receipt.commit_seq).unwrap()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let payload: serde_json::Value = serde_json::from_slice(&payload).unwrap();
+    assert_eq!(payload["scope"], "library");
+    assert_eq!(
+        payload["retired_snapshot"]["complete_commit"],
+        predecessor.complete_commit
+    );
+    assert_eq!(
+        payload["latest_snapshot"]["complete_commit"],
+        latest.complete_commit
+    );
+    let payload = payload.to_string();
+    assert!(!payload.contains(FIXTURE_ADAPTER));
+    assert!(!payload.contains("private-"));
+
+    for statement in [
+        "UPDATE catalog_snapshot_retirements SET retired_at = retired_at",
+        "DELETE FROM catalog_snapshot_retirements",
+    ] {
+        assert!(published.connection.execute(statement, []).is_err());
+    }
+    assert!(
+        apply_catalog_snapshot_retirement(&mut published.connection, &command)
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        table_count(&published.connection, "catalog_snapshot_retirements"),
+        1
+    );
+}
+
+#[test]
+fn retirement_rolls_back_every_precommit_seam_and_replays_lost_ack() {
+    for stage in [
+        CatalogRetirementCommitStage::BeforeTransaction,
+        CatalogRetirementCommitStage::AfterCommitInsert,
+        CatalogRetirementCommitStage::AfterRetirementInsert,
+        CatalogRetirementCommitStage::AfterOutboxInsert,
+        CatalogRetirementCommitStage::BeforeCommit,
+    ] {
+        let mut published = publish_catalog(1, 1);
+        refresh_catalog(&mut published, 2, 2);
+        let command = retirement_command(&published);
+        let before = [
+            table_count(&published.connection, "ingest_commits"),
+            table_count(&published.connection, "change_log"),
+            table_count(&published.connection, "catalog_snapshot_retirements"),
+            table_count(&published.connection, "catalog_snapshots"),
+            table_count(&published.connection, "catalog_snapshot_entries"),
+        ];
+        assert!(apply_catalog_snapshot_retirement_with_hook(
+            &mut published.connection,
+            &command,
+            &FailRetirementAt(stage),
+        )
+        .is_err());
+        let after = [
+            table_count(&published.connection, "ingest_commits"),
+            table_count(&published.connection, "change_log"),
+            table_count(&published.connection, "catalog_snapshot_retirements"),
+            table_count(&published.connection, "catalog_snapshots"),
+            table_count(&published.connection, "catalog_snapshot_entries"),
+        ];
+        assert_eq!(after, before, "retirement stage {stage:?} leaked state");
+        catalog_state::load_catalog_build_state(&published.connection)
+            .unwrap()
+            .unwrap();
+    }
+
+    let mut published = publish_catalog(1, 1);
+    refresh_catalog(&mut published, 2, 2);
+    let command = retirement_command(&published);
+    assert!(apply_catalog_snapshot_retirement_with_hook(
+        &mut published.connection,
+        &command,
+        &FailRetirementAt(CatalogRetirementCommitStage::AfterCommit),
+    )
+    .is_err());
+    assert_eq!(
+        table_count(&published.connection, "catalog_snapshot_retirements"),
+        1
+    );
+    assert!(
+        apply_catalog_snapshot_retirement(&mut published.connection, &command)
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        table_count(&published.connection, "catalog_snapshot_retirements"),
+        1
+    );
+}
+
+#[test]
+fn retirement_is_transactionally_isolated_and_historical_authority_restarts() {
+    let directory = tempfile::tempdir().unwrap();
+    let database_path = directory.path().join("catalog-retirement.sqlite");
+    let connection = Connection::open(&database_path).unwrap();
+    schema::initialize_schema(&connection).unwrap();
+    let mut published = publish_catalog_in(connection, 1, 2);
+    let predecessor = published
+        .state
+        .ready_read_authority()
+        .unwrap()
+        .snapshot_id();
+    let latest = refresh_catalog(&mut published, 2, 3);
+    drop(published.connection);
+
+    let mut connection = Connection::open(&database_path).unwrap();
+    schema::initialize_schema(&connection).unwrap();
+    let state = catalog_state::load_catalog_build_state(&connection)
+        .unwrap()
+        .unwrap();
+    let current_authority = state.ready_read_authority().unwrap();
+    let historical = read_catalog_page_with_retirement(
+        &connection,
+        &current_authority,
+        &CatalogRetainedPageRequest::sessions_all(query_selection(), predecessor, 10, None),
+    )
+    .unwrap();
+    let CatalogRetainedPageOutcome::Page(historical) = historical else {
+        panic!("expected restart-reconstructed historical page")
+    };
+    let CatalogRetainedPage::Sessions(historical) = *historical else {
+        panic!("expected restart-reconstructed historical page")
+    };
+    assert_eq!(historical.rows.len(), 2);
+
+    let observer = ObserveRetirementIsolation {
+        database_path: database_path.clone(),
+        expected_snapshot_count: table_count(&connection, "catalog_snapshots"),
+        expected_entry_count: table_count(&connection, "catalog_snapshot_entries"),
+        expected_commit_count: table_count(&connection, "ingest_commits"),
+        expected_change_count: table_count(&connection, "change_log"),
+        observed: Cell::new(false),
+    };
+    let command = CatalogSnapshotRetirementCommand::new(
+        state.snapshot_retirement_expectation().unwrap(),
+        60,
+        61,
+    )
+    .unwrap();
+    let receipt = apply_catalog_snapshot_retirement_with_hook(&mut connection, &command, &observer)
+        .unwrap()
+        .unwrap();
+    assert!(observer.observed.get());
+    assert_eq!(receipt.retired_snapshot, predecessor);
+    assert_eq!(receipt.latest_snapshot, latest);
+    assert_eq!(table_count(&connection, "catalog_snapshot_retirements"), 1);
+
+    drop(connection);
+    let mut reopened = Connection::open(&database_path).unwrap();
+    schema::initialize_schema(&reopened).unwrap();
+    let state = catalog_state::load_catalog_build_state(&reopened)
+        .unwrap()
+        .unwrap();
+    assert!(state.snapshot_retirement_expectation().is_err());
+    let replay = apply_catalog_snapshot_retirement(&mut reopened, &command).unwrap();
+    assert!(replay.is_none());
+
+    reopened
+        .execute_batch(
+            "DROP TRIGGER catalog_snapshot_retirements_no_update; PRAGMA ignore_check_constraints = ON;",
+        )
+        .unwrap();
+    reopened
+        .execute(
+            "UPDATE catalog_snapshot_retirements SET snapshot_publication_digest = zeroblob(32)",
+            [],
+        )
+        .unwrap();
+    let error = catalog_state::load_catalog_build_state(&reopened).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("exact canonical oldest ancestry prefix"),
+        "unexpected corruption error: {error}"
+    );
+}
+
+#[test]
+fn retirement_rejects_foreign_or_stale_expectations_without_mutation() {
+    let mut published = publish_catalog(1, 1);
+    refresh_catalog(&mut published, 2, 2);
+    let mut foreign = publish_catalog(3, 3);
+    refresh_catalog(&mut foreign, 4, 4);
+    let foreign_command = retirement_command(&foreign);
+    let before = [
+        table_count(&published.connection, "ingest_commits"),
+        table_count(&published.connection, "change_log"),
+        table_count(&published.connection, "catalog_snapshot_retirements"),
+    ];
+    assert!(
+        apply_catalog_snapshot_retirement(&mut published.connection, &foreign_command,).is_err()
+    );
+    assert_eq!(
+        [
+            table_count(&published.connection, "ingest_commits"),
+            table_count(&published.connection, "change_log"),
+            table_count(&published.connection, "catalog_snapshot_retirements"),
+        ],
+        before
+    );
+
+    let exact = retirement_command(&published);
+    apply_catalog_snapshot_retirement(&mut published.connection, &exact)
+        .unwrap()
+        .unwrap();
+    assert!(
+        apply_catalog_snapshot_retirement(&mut published.connection, &foreign_command).is_err()
+    );
+    assert_eq!(
+        table_count(&published.connection, "catalog_snapshot_retirements"),
+        1
+    );
+}
+
+#[test]
+fn retirement_loses_cleanly_to_a_newer_refresh_and_then_advances_the_prefix() {
+    let mut published = publish_catalog(1, 1);
+    let first = published
+        .state
+        .ready_read_authority()
+        .unwrap()
+        .snapshot_id();
+    let second = refresh_catalog(&mut published, 2, 2);
+    let stale = retirement_command(&published);
+
+    let third = refresh_catalog(&mut published, 3, 3);
+    assert!(apply_catalog_snapshot_retirement(&mut published.connection, &stale).is_err());
+    assert_eq!(
+        table_count(&published.connection, "catalog_snapshot_retirements"),
+        0
+    );
+
+    let first_retirement = retirement_command(&published);
+    let receipt = apply_catalog_snapshot_retirement(&mut published.connection, &first_retirement)
+        .unwrap()
+        .unwrap();
+    assert_eq!(receipt.retired_snapshot, first);
+    assert_eq!(receipt.latest_snapshot, third);
+
+    published.state = catalog_state::load_catalog_build_state(&published.connection)
+        .unwrap()
+        .unwrap();
+    let second_retirement = retirement_command(&published);
+    let receipt = apply_catalog_snapshot_retirement(&mut published.connection, &second_retirement)
+        .unwrap()
+        .unwrap();
+    assert_eq!(receipt.retired_snapshot, second);
+    assert_eq!(receipt.latest_snapshot, third);
+    assert_eq!(
+        table_count(&published.connection, "catalog_snapshot_retirements"),
+        2
+    );
+    assert!(
+        catalog_state::load_catalog_build_state(&published.connection)
+            .unwrap()
+            .unwrap()
+            .snapshot_retirement_expectation()
+            .is_err()
+    );
 }
 
 #[test]

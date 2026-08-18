@@ -28,7 +28,7 @@ use super::performance::{
 use super::projection;
 use super::query_pool::{read_source_catalog, SourceCatalogSnapshot};
 use super::EngineError;
-use super::{catalog_publication, catalog_state};
+use super::{catalog_publication, catalog_retention, catalog_state};
 
 const MIN_DISK_RESERVE_BYTES: u64 = 1024 * 1024 * 1024;
 const MAX_DISK_RESERVE_BYTES: u64 = 4 * 1024 * 1024 * 1024;
@@ -78,6 +78,13 @@ enum WriterCommand {
         queued_at: Instant,
         response: Sender<
             Result<Option<catalog_publication::CatalogRefreshPublicationReceipt>, EngineError>,
+        >,
+    },
+    RetireCatalogSnapshot {
+        command: Box<catalog_retention::CatalogSnapshotRetirementCommand>,
+        queued_at: Instant,
+        response: Sender<
+            Result<Option<catalog_retention::CatalogSnapshotRetirementReceipt>, EngineError>,
         >,
     },
     SourceCatalog {
@@ -237,6 +244,26 @@ impl WriterClient {
         let (response_tx, response_rx) = bounded(1);
         self.commands
             .send(WriterCommand::CommitRefreshCatalogPublication {
+                command: Box::new(command),
+                queued_at: Instant::now(),
+                response: response_tx,
+            })
+            .map_err(|_| EngineError::WorkerUnavailable { worker: "writer" })?;
+        response_rx
+            .recv()
+            .map_err(|_| EngineError::WorkerUnavailable { worker: "writer" })?
+    }
+
+    pub(crate) fn retire_catalog_snapshot(
+        &self,
+        command: catalog_retention::CatalogSnapshotRetirementCommand,
+    ) -> Result<Option<catalog_retention::CatalogSnapshotRetirementReceipt>, EngineError> {
+        if !self.alive.load(Ordering::Acquire) {
+            return Err(EngineError::WorkerUnavailable { worker: "writer" });
+        }
+        let (response_tx, response_rx) = bounded(1);
+        self.commands
+            .send(WriterCommand::RetireCatalogSnapshot {
                 command: Box::new(command),
                 queued_at: Instant::now(),
                 response: response_tx,
@@ -689,6 +716,44 @@ fn writer_thread(
                         &mut connection,
                         &command,
                     )
+                });
+                let elapsed = started.elapsed();
+                telemetry.writer_total.record(elapsed);
+                let committed = matches!(result, Ok(Some(_)));
+                match &result {
+                    Ok(Some(_)) => {
+                        atomic_saturating_add(&telemetry.commit_attempts, 1);
+                        atomic_saturating_add(&telemetry.committed, 1);
+                        atomic_saturating_add(
+                            &telemetry.sqlite_rows_changed,
+                            sqlite_total_changes(&connection).saturating_sub(rows_before),
+                        );
+                        telemetry.physical_transaction.record(elapsed);
+                    }
+                    Ok(None) => {}
+                    Err(_) => {
+                        atomic_saturating_add(&telemetry.commit_attempts, 1);
+                        atomic_saturating_add(&telemetry.failed, 1);
+                    }
+                }
+                let _ = response.send(result);
+                if committed {
+                    checkpoints.maybe_checkpoint(&connection, &telemetry, bootstrap_active);
+                }
+            }
+            WriterCommand::RetireCatalogSnapshot {
+                command,
+                queued_at,
+                response,
+            } => {
+                telemetry.queue_wait.record(queued_at.elapsed());
+                let reserve_started = Instant::now();
+                let reserve = ensure_disk_reserve(&database_path);
+                telemetry.disk_reserve.record(reserve_started.elapsed());
+                let rows_before = sqlite_total_changes(&connection);
+                let started = Instant::now();
+                let result = reserve.and_then(|()| {
+                    catalog_retention::apply_catalog_snapshot_retirement(&mut connection, &command)
                 });
                 let elapsed = started.elapsed();
                 telemetry.writer_total.record(elapsed);
