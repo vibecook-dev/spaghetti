@@ -317,11 +317,18 @@ def discover_rust_legacy_oracle_default_exposure() -> set[str]:
 
 
 def discover_rust_source_boundary_violations() -> set[str]:
-    root = REPO_ROOT / "crates/spaghetti-napi/src/source"
+    root = (REPO_ROOT / "crates/spaghetti-napi/src/source").resolve()
     if not root.exists():
         return set()
     found: set[str] = set()
-    for path in sorted(root.rglob("*.rs")):
+    # Scan only default-build modules. In particular, a `#[cfg(test)] mod
+    # tests;` child may use fixture tooling such as serde_json without adding
+    # that dependency to the production source layer. The production_rust()
+    # walk retains this distinction while still discovering every reachable
+    # source module recursively.
+    for path in (
+        path for path in production_rust() if path.is_relative_to(root)
+    ):
         relative = repo_path(path)
         text = production_rust_text(path)
         if SOURCE_LAYER_FORBIDDEN_RE.search(text) or (

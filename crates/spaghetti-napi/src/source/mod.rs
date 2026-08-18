@@ -5,6 +5,7 @@
 
 mod access;
 mod append_delimited;
+mod catalog_composition;
 mod directory_snapshot;
 mod file;
 mod key_value_snapshot;

@@ -1,0 +1,492 @@
+{
+  "candidate_head_record_bytes": 65536,
+  "compositions": {
+    "claude_code": {
+      "adapter_id": "claude-code",
+      "binding": {
+        "planning_evidence_id": "phase0-catalog-census-2026-08-15",
+        "status": "planned_unbound"
+      },
+      "components": [
+        {
+          "component_id": "nested-parent-membership",
+          "contribution": {
+            "admission_contract_id": "nested-parent-session-admission-v1",
+            "kind": "membership",
+            "member_identity_contract_id": "catalog-session-identity-v1",
+            "provides_metadata": false
+          },
+          "decoder_contract_id": "claude-nested-parent-membership-v1",
+          "decoder_contract_version": 1,
+          "discovery_bounds": {
+            "max_depth": 64,
+            "max_entries": 250000
+          },
+          "disposition_ownership": [
+            "native-family:nested-parent-membership"
+          ],
+          "framing_contract_version": 1,
+          "overlap_strategy": {
+            "kind": "disjoint_catalog_family",
+            "ownership_contract_id": "nested-parent-membership-v1"
+          },
+          "primitive": {
+            "kind": "directory_membership"
+          },
+          "relative_selectors": [
+            "*/*/subagents/**/agent-*.jsonl"
+          ],
+          "root_id": "projects",
+          "safe_decoder_state_boundary": "full_snapshot",
+          "source_record_contract_version": 1,
+          "stream_id": "nested-transcript-membership"
+        },
+        {
+          "component_id": "session-index-membership",
+          "contribution": {
+            "admission_contract_id": "session-index-entry-admission-v1",
+            "kind": "membership",
+            "member_identity_contract_id": "catalog-session-identity-v1",
+            "provides_metadata": true
+          },
+          "decoder_contract_id": "claude-session-index",
+          "decoder_contract_version": 1,
+          "discovery_bounds": {
+            "max_depth": 64,
+            "max_entries": 250000
+          },
+          "disposition_ownership": [
+            "native-family:session-index"
+          ],
+          "framing_contract_version": 1,
+          "overlap_strategy": {
+            "kind": "commit_catalog_facts"
+          },
+          "primitive": {
+            "kind": "replace_document",
+            "max_object_bytes": 1048576
+          },
+          "relative_selectors": [
+            "*/sessions-index.json"
+          ],
+          "root_id": "projects",
+          "safe_decoder_state_boundary": "object_generation_revision",
+          "source_record_contract_version": 1,
+          "stream_id": "session-indexes"
+        },
+        {
+          "component_id": "top-level-transcript-membership",
+          "contribution": {
+            "admission_contract_id": "top-level-transcript-admission-v1",
+            "kind": "membership",
+            "member_identity_contract_id": "catalog-session-identity-v1",
+            "provides_metadata": false
+          },
+          "decoder_contract_id": "claude-top-level-transcript-membership-v1",
+          "decoder_contract_version": 1,
+          "discovery_bounds": {
+            "max_depth": 64,
+            "max_entries": 250000
+          },
+          "disposition_ownership": [
+            "native-family:top-level-transcript-membership"
+          ],
+          "framing_contract_version": 1,
+          "overlap_strategy": {
+            "kind": "disjoint_catalog_family",
+            "ownership_contract_id": "top-level-transcript-membership-v1"
+          },
+          "primitive": {
+            "kind": "directory_membership"
+          },
+          "relative_selectors": [
+            "*/*.jsonl"
+          ],
+          "root_id": "projects",
+          "safe_decoder_state_boundary": "full_snapshot",
+          "source_record_contract_version": 1,
+          "stream_id": "top-level-transcript-membership"
+        },
+        {
+          "component_id": "transcript-head-fallback",
+          "contribution": {
+            "kind": "metadata_for_known_member",
+            "member_identity_contract_id": "catalog-session-identity-v1",
+            "metadata_contract_id": "transcript-head-metadata-v1"
+          },
+          "decoder_contract_id": "claude-parent-transcript",
+          "decoder_contract_version": 1,
+          "discovery_bounds": {
+            "max_depth": 64,
+            "max_entries": 250000
+          },
+          "disposition_ownership": [
+            "native-family:session-transcript"
+          ],
+          "framing_contract_version": 1,
+          "overlap_strategy": {
+            "kind": "idempotent_overlap"
+          },
+          "primitive": {
+            "kind": "delimited_prefix",
+            "max_record_bytes": 65536,
+            "max_records": 128,
+            "max_window_bytes": 65536
+          },
+          "relative_selectors": [
+            "*/*.jsonl"
+          ],
+          "root_id": "projects",
+          "safe_decoder_state_boundary": "object_generation_cursor",
+          "source_record_contract_version": 1,
+          "stream_id": "session-transcripts"
+        }
+      ],
+      "composition_contract_version": 1,
+      "composition_id": "catalog-composition-v1:q0Sk3ZssUDuW44aEqBArCZy8LOXM9JwDgRByc_EvdD4",
+      "member_identity_contract_id": "catalog-session-identity-v1",
+      "source_declaration_id": "claude-code.catalog-sources-v1",
+      "support_release_id": "claude-code.catalog-candidate-2026-08-15"
+    },
+    "codex": {
+      "adapter_id": "codex",
+      "binding": {
+        "planning_evidence_id": "phase0-catalog-census-2026-08-15",
+        "status": "planned_unbound"
+      },
+      "components": [
+        {
+          "component_id": "rollout-session-meta-head",
+          "contribution": {
+            "admission_contract_id": "noninternal-session-meta-admission-v1",
+            "kind": "membership",
+            "member_identity_contract_id": "catalog-session-identity-v1",
+            "provides_metadata": true
+          },
+          "decoder_contract_id": "codex-rollout-record",
+          "decoder_contract_version": 1,
+          "discovery_bounds": {
+            "max_depth": 64,
+            "max_entries": 250000
+          },
+          "disposition_ownership": [
+            "native-family:rollout-transcript"
+          ],
+          "framing_contract_version": 1,
+          "overlap_strategy": {
+            "kind": "idempotent_overlap"
+          },
+          "primitive": {
+            "kind": "delimited_head",
+            "max_record_bytes": 65536
+          },
+          "relative_selectors": [
+            "**/rollout-*.jsonl"
+          ],
+          "root_id": "sessions",
+          "safe_decoder_state_boundary": "object_generation_cursor",
+          "source_record_contract_version": 1,
+          "stream_id": "rollout-sessions"
+        }
+      ],
+      "composition_contract_version": 1,
+      "composition_id": "catalog-composition-v1:drsv2VwjyrBeI0RsvMFG_JritwFF-LmAZdtliTeLsbA",
+      "member_identity_contract_id": "catalog-session-identity-v1",
+      "source_declaration_id": "codex.catalog-sources-v1",
+      "support_release_id": "codex.catalog-candidate-2026-08-15"
+    },
+    "grok": {
+      "adapter_id": "grok",
+      "binding": {
+        "planning_evidence_id": "phase0-catalog-census-2026-08-15",
+        "status": "planned_unbound"
+      },
+      "components": [
+        {
+          "component_id": "session-directory-membership",
+          "contribution": {
+            "admission_contract_id": "session-directory-admission-v1",
+            "kind": "membership",
+            "member_identity_contract_id": "catalog-session-identity-v1",
+            "provides_metadata": false
+          },
+          "decoder_contract_id": "grok-session-membership",
+          "decoder_contract_version": 1,
+          "discovery_bounds": {
+            "max_depth": 64,
+            "max_entries": 250000
+          },
+          "disposition_ownership": [
+            "native-family:session-membership"
+          ],
+          "framing_contract_version": 1,
+          "overlap_strategy": {
+            "kind": "commit_catalog_facts"
+          },
+          "primitive": {
+            "kind": "directory_membership"
+          },
+          "relative_selectors": [
+            "*/*"
+          ],
+          "root_id": "sessions",
+          "safe_decoder_state_boundary": "full_snapshot",
+          "source_record_contract_version": 1,
+          "stream_id": "session-membership"
+        },
+        {
+          "component_id": "session-summary-metadata",
+          "contribution": {
+            "kind": "metadata_for_known_member",
+            "member_identity_contract_id": "catalog-session-identity-v1",
+            "metadata_contract_id": "replaceable-session-summary-v1"
+          },
+          "decoder_contract_id": "grok-summary",
+          "decoder_contract_version": 1,
+          "discovery_bounds": {
+            "max_depth": 64,
+            "max_entries": 250000
+          },
+          "disposition_ownership": [
+            "native-family:session-summary"
+          ],
+          "framing_contract_version": 1,
+          "overlap_strategy": {
+            "kind": "idempotent_overlap"
+          },
+          "primitive": {
+            "kind": "replace_document",
+            "max_object_bytes": 1048576
+          },
+          "relative_selectors": [
+            "*/*/summary.json"
+          ],
+          "root_id": "sessions",
+          "safe_decoder_state_boundary": "object_generation_revision",
+          "source_record_contract_version": 1,
+          "stream_id": "session-summaries"
+        }
+      ],
+      "composition_contract_version": 1,
+      "composition_id": "catalog-composition-v1:mpE-Ta3Ll3p3hKznCeoxE1AwXkCFqz08bVjukYTm0GU",
+      "member_identity_contract_id": "catalog-session-identity-v1",
+      "source_declaration_id": "grok.catalog-sources-v1",
+      "support_release_id": "grok.catalog-candidate-2026-08-15"
+    }
+  },
+  "contract_status": "planned_adapter_neutral",
+  "fixture_contract_version": 1,
+  "membership_snapshots": {
+    "claude_code": {
+      "authority_evidence": [
+        {
+          "authority_revision": "catalog-authority-revision-v1:X5llpcYypl0EMb5SW5dRMuOYWpEL4D2OJTMUZiPascc",
+          "completeness": "complete",
+          "component_id": "nested-parent-membership",
+          "coverage_proof": "catalog-coverage-proof-v1:zgP25xl9SXEawcFADXNGMcQun5PC6KSXGelnNSI4KBc",
+          "generation": 1
+        },
+        {
+          "authority_revision": "catalog-authority-revision-v1:mTRwkFuYmpKThS2VNVTStPuWmHDZVGusxCZKtA5yItA",
+          "completeness": "complete",
+          "component_id": "session-index-membership",
+          "coverage_proof": "catalog-coverage-proof-v1:mVmItags1JX5c7rpzFkc4RiKdJyZuELd8bD24QjIlVI",
+          "generation": 1
+        },
+        {
+          "authority_revision": "catalog-authority-revision-v1:we7Ufi7ITbLfEQXoySbfsxR5QW-YoxgoT_cTWJSAX0M",
+          "completeness": "complete",
+          "component_id": "top-level-transcript-membership",
+          "coverage_proof": "catalog-coverage-proof-v1:mwHpMzdu8a6bSVPcDmVS68NWYj0TFJq9pJHeiovVp6w",
+          "generation": 1
+        }
+      ],
+      "composition_id": "catalog-composition-v1:q0Sk3ZssUDuW44aEqBArCZy8LOXM9JwDgRByc_EvdD4",
+      "member_identity_contract_id": "catalog-session-identity-v1",
+      "members": [
+        {
+          "admitting_component_ids": [
+            "session-index-membership"
+          ],
+          "member_ref": "catalog-member-v1:kB9jQshDKZV4nitx-5Gulft5SuUb971xDAhpqvt0UZs",
+          "metadata_component_ids": [
+            "session-index-membership"
+          ]
+        },
+        {
+          "admitting_component_ids": [
+            "session-index-membership",
+            "top-level-transcript-membership"
+          ],
+          "member_ref": "catalog-member-v1:xtwO-z1NuEuSZ6Kzw-JMHaO624m15nWCK8NxTKJgES4",
+          "metadata_component_ids": [
+            "session-index-membership",
+            "transcript-head-fallback"
+          ]
+        },
+        {
+          "admitting_component_ids": [
+            "nested-parent-membership"
+          ],
+          "member_ref": "catalog-member-v1:51tKShBkN3zgZx46AecnaaWbrfu78s-MW93e0EcnoYs",
+          "metadata_component_ids": []
+        }
+      ],
+      "membership_contract_version": 1,
+      "membership_revision": "catalog-membership-v1:pBj8d3YmYvRvUSKtmRokynVf8bRL6rGHTBEs8gxaDao"
+    },
+    "codex": {
+      "authority_evidence": [
+        {
+          "authority_revision": "catalog-authority-revision-v1:aIDbk-6r38xo1AuiayOHm9GWOMB4s5APMKwap7lQ61g",
+          "completeness": "complete",
+          "component_id": "rollout-session-meta-head",
+          "coverage_proof": "catalog-coverage-proof-v1:uLsTJUmxeyYpEEf9ldttQKRYzHMBZ6Bsyl_9YJgMDJs",
+          "generation": 1
+        }
+      ],
+      "composition_id": "catalog-composition-v1:drsv2VwjyrBeI0RsvMFG_JritwFF-LmAZdtliTeLsbA",
+      "member_identity_contract_id": "catalog-session-identity-v1",
+      "members": [
+        {
+          "admitting_component_ids": [
+            "rollout-session-meta-head"
+          ],
+          "member_ref": "catalog-member-v1:5gXz4O4q5p3F-a5SGi7ShHtCJ8Yxcb4x35PUZhFNSfU",
+          "metadata_component_ids": [
+            "rollout-session-meta-head"
+          ]
+        }
+      ],
+      "membership_contract_version": 1,
+      "membership_revision": "catalog-membership-v1:jkUR7gSQSrwLSMcdPF3cK2rYdGHOhHWTuoUb1NoogS0"
+    },
+    "grok": {
+      "authority_evidence": [
+        {
+          "authority_revision": "catalog-authority-revision-v1:YhM-m2wX9UxWMY0BFzmQAnggeVhIBgab6-WMiJGnLbc",
+          "completeness": "complete",
+          "component_id": "session-directory-membership",
+          "coverage_proof": "catalog-coverage-proof-v1:WhXq7nCjKiHRXQoKUo5VCSq5SXsLCSHmRfBjUpMQBjI",
+          "generation": 1
+        }
+      ],
+      "composition_id": "catalog-composition-v1:mpE-Ta3Ll3p3hKznCeoxE1AwXkCFqz08bVjukYTm0GU",
+      "member_identity_contract_id": "catalog-session-identity-v1",
+      "members": [
+        {
+          "admitting_component_ids": [
+            "session-directory-membership"
+          ],
+          "member_ref": "catalog-member-v1:GG3dMbo-4WvDYM0hosWaB7ZlBnu8yl0DA3zN43uZtsw",
+          "metadata_component_ids": [
+            "session-summary-metadata"
+          ]
+        }
+      ],
+      "membership_contract_version": 1,
+      "membership_revision": "catalog-membership-v1:c8V-jg6HVS8OCkWA_OMrdTyg1z6IRyfS1WYjMLefEpM"
+    }
+  },
+  "overlap_conformance": {
+    "claude_code_transcript_prefix": {
+      "complete_record_bytes": [
+        32768,
+        30720,
+        20480
+      ],
+      "full_only": {
+        "final_decoder_state": "catalog-conformance-v1:9QuX8Yu_8DFEE8iKtfJyxvm7Ytr_2XBzuSH5RDjFFGM",
+        "record_count": 3,
+        "trace_digest": "catalog-conformance-v1:4xdxW0SJo00rTg4qG3RUc2nHu3iHFH7WP1B8WWX46_8"
+      },
+      "head_or_prefix_plus_continuation": {
+        "final_decoder_state": "catalog-conformance-v1:9QuX8Yu_8DFEE8iKtfJyxvm7Ytr_2XBzuSH5RDjFFGM",
+        "record_count": 3,
+        "trace_digest": "catalog-conformance-v1:4xdxW0SJo00rTg4qG3RUc2nHu3iHFH7WP1B8WWX46_8"
+      },
+      "windows": [
+        {
+          "continuation": "catalog-window-continuation-v1:v-bAloAm1guXKizT0RmuGPdDFqxsmzHsk7y8ke9YJzs",
+          "window": {
+            "remainder": {
+              "kind": "continue_at",
+              "next_record": 2
+            },
+            "selected_bytes": 63488,
+            "selected_records": 2,
+            "start_record": 0
+          }
+        },
+        {
+          "continuation": null,
+          "window": {
+            "remainder": {
+              "kind": "at_snapshot_boundary",
+              "next_record": 3
+            },
+            "selected_bytes": 20480,
+            "selected_records": 1,
+            "start_record": 2
+          }
+        }
+      ]
+    },
+    "codex_session_meta_head": {
+      "complete_record_bytes": [
+        49152,
+        10240,
+        8192
+      ],
+      "full_only": {
+        "final_decoder_state": "catalog-conformance-v1:i9T6SUCWY7dZG1xNjG3SunBs5MXRWvY9mf7jN5ojHsM",
+        "record_count": 3,
+        "trace_digest": "catalog-conformance-v1:RgofI4crYnyLuS0f0BCh8jlHju57n1WuLg85cB0M7G0"
+      },
+      "head_or_prefix_plus_continuation": {
+        "final_decoder_state": "catalog-conformance-v1:i9T6SUCWY7dZG1xNjG3SunBs5MXRWvY9mf7jN5ojHsM",
+        "record_count": 3,
+        "trace_digest": "catalog-conformance-v1:RgofI4crYnyLuS0f0BCh8jlHju57n1WuLg85cB0M7G0"
+      },
+      "windows": [
+        {
+          "continuation": "catalog-window-continuation-v1:xbt2kQR9bnuL542kOTTv0hhYwx4mZ-NPxRelfirypXw",
+          "window": {
+            "remainder": {
+              "kind": "continue_at",
+              "next_record": 1
+            },
+            "selected_bytes": 49152,
+            "selected_records": 1,
+            "start_record": 0
+          }
+        },
+        {
+          "continuation": "catalog-window-continuation-v1:8wAetka9RzcTkaiwd_yjzTHb4XJGkD5iTQ0MLvAV2Iw",
+          "window": {
+            "remainder": {
+              "kind": "continue_at",
+              "next_record": 2
+            },
+            "selected_bytes": 10240,
+            "selected_records": 1,
+            "start_record": 1
+          }
+        },
+        {
+          "continuation": null,
+          "window": {
+            "remainder": {
+              "kind": "at_snapshot_boundary",
+              "next_record": 3
+            },
+            "selected_bytes": 8192,
+            "selected_records": 1,
+            "start_record": 2
+          }
+        }
+      ]
+    }
+  },
+  "release_gate": "identity_oracle_and_promoted_declarations_pending"
+}
