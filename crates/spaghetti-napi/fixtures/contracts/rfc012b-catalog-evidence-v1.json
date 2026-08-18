@@ -1,0 +1,355 @@
+{
+  "entity_refs": {
+    "project": {
+      "external_ref": {
+        "entity_key": "v1:Bj_lQ1-M0NF_XsD_COVpwSpEWBitozmrTwHSwuFEcGQ",
+        "external_entity_reference_version": 1
+      },
+      "kind": "project"
+    },
+    "session": {
+      "external_ref": {
+        "entity_key": "v1:_IJmwoYRamlBTYgULwLLlnP9xh4yRiGo2ElPVBFhoL8",
+        "external_entity_reference_version": 1
+      },
+      "kind": "session"
+    }
+  },
+  "evidence_keys": {
+    "association": "v1:aa0iMGv38HRxMQ5rCKk_vzF6SJCnPFNVSj29OZHbeBk",
+    "identity_relation": "v1:tOP39PBKIvTlQAZzlCSRYm4mvA9SrMsMBb48opQgrII",
+    "locator": "v1:E7mS8TStqRQ1FGk_RwkZ-_DC0BtePguDWU1C3wx_rXc",
+    "project_assertion": "v1:__bslSdy9YiGQQ_8UKpWfLTX-2hel5krIV7LZYKFWz0",
+    "session_assertion": "v1:PrFJmSY5JzjKwFIw7L1WgwOk7K-UEyhpPOBI2D1K5lo"
+  },
+  "fixture_version": 1,
+  "identity_relation": {
+    "authority": {
+      "class_id": "native-identity-relation",
+      "native_times_comparable": true,
+      "precedence": 100
+    },
+    "canonical_winner": null,
+    "collision_policy_id": null,
+    "completeness": "partial",
+    "left_ref": {
+      "external_ref": {
+        "entity_key": "v1:_IJmwoYRamlBTYgULwLLlnP9xh4yRiGo2ElPVBFhoL8",
+        "external_entity_reference_version": 1
+      },
+      "kind": "session"
+    },
+    "owner": {
+      "adapter_id": "fixture-agent",
+      "generation": 7,
+      "object_key": "v1:X7NvI8I6vxTMecybol3MlAKkfm4TLNGpRSNTS4MSIvc",
+      "source_instance_key": "v1:kXxwY5MYVtPjKpEVX0-TYth0k7nOeWWOUuts6S02788",
+      "stream_key": "v1:CRfV-FVS3_3hhIYbBIACLS1ByvqoHH9v_rn9NsP3cCg"
+    },
+    "provenance": [
+      {
+        "fact_revision_id": "v1:6iXp-hvGH8qLBTxHniVq4m2hs2IMdFfirUs_Nm4yh1Y",
+        "semantic_reference_contract_version": 1
+      }
+    ],
+    "quality": "native_claimed",
+    "relation": "alias",
+    "relation_key": "v1:tOP39PBKIvTlQAZzlCSRYm4mvA9SrMsMBb48opQgrII",
+    "right_ref": {
+      "external_ref": {
+        "entity_key": "v1:JRVQOLw0wQMXs37gxy6gSKPxXS9V8jVmWobIFZSM0ic",
+        "external_entity_reference_version": 1
+      },
+      "kind": "session"
+    }
+  },
+  "live_resolution": {
+    "entity_ref": {
+      "external_ref": {
+        "entity_key": "v1:_IJmwoYRamlBTYgULwLLlnP9xh4yRiGo2ElPVBFhoL8",
+        "external_entity_reference_version": 1
+      },
+      "kind": "session"
+    },
+    "row": {
+      "kind": "session",
+      "row": {
+        "assertion_keys": [
+          "v1:PrFJmSY5JzjKwFIw7L1WgwOk7K-UEyhpPOBI2D1K5lo"
+        ],
+        "availability": {
+          "conflicting_assertion_keys": [],
+          "field": {
+            "disclosure": "public",
+            "qualified": {
+              "authority": {
+                "class_id": "catalog-membership",
+                "native_times_comparable": true,
+                "precedence": 100
+              },
+              "completeness": "complete",
+              "provenance": [
+                {
+                  "fact_revision_id": "v1:1KaBmar9wRpkstfFMpjZkfq_165qr7HSEYh_urD52YQ",
+                  "semantic_reference_contract_version": 1
+                }
+              ],
+              "quality": "exact",
+              "value": {
+                "state": "history_ready"
+              }
+            }
+          },
+          "selected_assertion_key": "v1:PrFJmSY5JzjKwFIw7L1WgwOk7K-UEyhpPOBI2D1K5lo"
+        },
+        "first_user_summary": null,
+        "native_created_at": null,
+        "native_identity": {
+          "conflicting_assertion_keys": [],
+          "field": {
+            "disclosure": "policy_shareable",
+            "qualified": {
+              "authority": {
+                "class_id": "native-session-id",
+                "native_times_comparable": true,
+                "precedence": 100
+              },
+              "completeness": "complete",
+              "effective_at": 1700000000,
+              "provenance": [
+                {
+                  "fact_revision_id": "v1:pdIhO4oXnVyI2NyE8FNqLL7yYqHf7KNTzJG27eZWKeM",
+                  "semantic_reference_contract_version": 1
+                }
+              ],
+              "quality": "native_claimed",
+              "value": {
+                "native_id": "session",
+                "native_namespace": "fixture.session"
+              }
+            }
+          },
+          "selected_assertion_key": "v1:PrFJmSY5JzjKwFIw7L1WgwOk7K-UEyhpPOBI2D1K5lo"
+        },
+        "native_message_count": null,
+        "native_updated_at": null,
+        "project_association": {
+          "selection": {
+            "association": {
+              "association_key": "v1:aa0iMGv38HRxMQ5rCKk_vzF6SJCnPFNVSj29OZHbeBk",
+              "authority": {
+                "class_id": "native-project-association",
+                "native_times_comparable": true,
+                "precedence": 70
+              },
+              "basis": "native_project_index",
+              "completeness": "complete",
+              "declared_derivation_id": null,
+              "effective_at": 1700000000,
+              "locator_claim_key": null,
+              "owner": {
+                "adapter_id": "fixture-agent",
+                "generation": 7,
+                "object_key": "v1:X7NvI8I6vxTMecybol3MlAKkfm4TLNGpRSNTS4MSIvc",
+                "source_instance_key": "v1:kXxwY5MYVtPjKpEVX0-TYth0k7nOeWWOUuts6S02788",
+                "stream_key": "v1:CRfV-FVS3_3hhIYbBIACLS1ByvqoHH9v_rn9NsP3cCg"
+              },
+              "project_ref": {
+                "external_ref": {
+                  "entity_key": "v1:Bj_lQ1-M0NF_XsD_COVpwSpEWBitozmrTwHSwuFEcGQ",
+                  "external_entity_reference_version": 1
+                },
+                "kind": "project"
+              },
+              "provenance": [
+                {
+                  "fact_revision_id": "v1:5bo4uHQjU0at3LIKIUTGxvvm7cJq4Hzz96dY34GcQA0",
+                  "semantic_reference_contract_version": 1
+                }
+              ],
+              "quality": "native_claimed",
+              "session_ref": {
+                "external_ref": {
+                  "entity_key": "v1:_IJmwoYRamlBTYgULwLLlnP9xh4yRiGo2ElPVBFhoL8",
+                  "external_entity_reference_version": 1
+                },
+                "kind": "session"
+              }
+            },
+            "competing_associations": [],
+            "conflicting_association_keys": []
+          },
+          "state": "available"
+        },
+        "session_ref": {
+          "external_ref": {
+            "entity_key": "v1:_IJmwoYRamlBTYgULwLLlnP9xh4yRiGo2ElPVBFhoL8",
+            "external_entity_reference_version": 1
+          },
+          "kind": "session"
+        },
+        "title": {
+          "conflicting_assertion_keys": [],
+          "field": {
+            "disclosure": "public",
+            "qualified": {
+              "authority": {
+                "class_id": "transcript-title",
+                "native_times_comparable": true,
+                "precedence": 80
+              },
+              "completeness": "complete",
+              "effective_at": 1700000000,
+              "provenance": [
+                {
+                  "fact_revision_id": "v1:MkWHsCYN2Tf2b95hZI987_G830NPfx0Ay3twSpF3xHs",
+                  "semantic_reference_contract_version": 1
+                }
+              ],
+              "quality": "exact",
+              "value": "Fixture Session"
+            }
+          },
+          "selected_assertion_key": "v1:PrFJmSY5JzjKwFIw7L1WgwOk7K-UEyhpPOBI2D1K5lo"
+        },
+        "transcript_locator_claim_keys": []
+      }
+    },
+    "state": "live"
+  },
+  "local_locator": {
+    "authority": {
+      "class_id": "transcript-path",
+      "native_times_comparable": true,
+      "precedence": 100
+    },
+    "completeness": "complete",
+    "provenance": [
+      {
+        "fact_revision_id": "v1:ot82HrzcFeZRMEtnhgpQBjgiaN_lteXzLfaVjwRqnm8",
+        "semantic_reference_contract_version": 1
+      }
+    ],
+    "quality": "exact",
+    "value": {
+      "canonical_local_path": "/private/fixture/session.jsonl",
+      "native_value": "/private/fixture/session.jsonl"
+    }
+  },
+  "owner": {
+    "adapter_id": "fixture-agent",
+    "generation": 7,
+    "object_key": "v1:X7NvI8I6vxTMecybol3MlAKkfm4TLNGpRSNTS4MSIvc",
+    "source_instance_key": "v1:kXxwY5MYVtPjKpEVX0-TYth0k7nOeWWOUuts6S02788",
+    "stream_key": "v1:CRfV-FVS3_3hhIYbBIACLS1ByvqoHH9v_rn9NsP3cCg"
+  },
+  "selected_association": {
+    "association": {
+      "association_key": "v1:aa0iMGv38HRxMQ5rCKk_vzF6SJCnPFNVSj29OZHbeBk",
+      "authority": {
+        "class_id": "native-project-association",
+        "native_times_comparable": true,
+        "precedence": 70
+      },
+      "basis": "native_project_index",
+      "completeness": "complete",
+      "declared_derivation_id": null,
+      "effective_at": 1700000000,
+      "locator_claim_key": null,
+      "owner": {
+        "adapter_id": "fixture-agent",
+        "generation": 7,
+        "object_key": "v1:X7NvI8I6vxTMecybol3MlAKkfm4TLNGpRSNTS4MSIvc",
+        "source_instance_key": "v1:kXxwY5MYVtPjKpEVX0-TYth0k7nOeWWOUuts6S02788",
+        "stream_key": "v1:CRfV-FVS3_3hhIYbBIACLS1ByvqoHH9v_rn9NsP3cCg"
+      },
+      "project_ref": {
+        "external_ref": {
+          "entity_key": "v1:Bj_lQ1-M0NF_XsD_COVpwSpEWBitozmrTwHSwuFEcGQ",
+          "external_entity_reference_version": 1
+        },
+        "kind": "project"
+      },
+      "provenance": [
+        {
+          "fact_revision_id": "v1:5bo4uHQjU0at3LIKIUTGxvvm7cJq4Hzz96dY34GcQA0",
+          "semantic_reference_contract_version": 1
+        }
+      ],
+      "quality": "native_claimed",
+      "session_ref": {
+        "external_ref": {
+          "entity_key": "v1:_IJmwoYRamlBTYgULwLLlnP9xh4yRiGo2ElPVBFhoL8",
+          "external_entity_reference_version": 1
+        },
+        "kind": "session"
+      }
+    },
+    "competing_associations": [],
+    "conflicting_association_keys": []
+  },
+  "selected_project_display_name": {
+    "conflicting_assertion_keys": [],
+    "field": {
+      "disclosure": "public",
+      "qualified": {
+        "authority": {
+          "class_id": "native-project-index",
+          "native_times_comparable": true,
+          "precedence": 80
+        },
+        "completeness": "complete",
+        "provenance": [
+          {
+            "fact_revision_id": "v1:5Lr33NbXH2AV9glY9y0NRXxrHDlfjIwe2oqLyyj6G44",
+            "semantic_reference_contract_version": 1
+          }
+        ],
+        "quality": "native_claimed",
+        "value": "Fixture Project"
+      }
+    },
+    "selected_assertion_key": "v1:__bslSdy9YiGQQ_8UKpWfLTX-2hel5krIV7LZYKFWz0"
+  },
+  "selected_session_title": {
+    "conflicting_assertion_keys": [],
+    "field": {
+      "disclosure": "public",
+      "qualified": {
+        "authority": {
+          "class_id": "transcript-title",
+          "native_times_comparable": true,
+          "precedence": 80
+        },
+        "completeness": "complete",
+        "effective_at": 1700000000,
+        "provenance": [
+          {
+            "fact_revision_id": "v1:MkWHsCYN2Tf2b95hZI987_G830NPfx0Ay3twSpF3xHs",
+            "semantic_reference_contract_version": 1
+          }
+        ],
+        "quality": "exact",
+        "value": "Fixture Session"
+      }
+    },
+    "selected_assertion_key": "v1:PrFJmSY5JzjKwFIw7L1WgwOk7K-UEyhpPOBI2D1K5lo"
+  },
+  "withheld_locator": {
+    "authority": {
+      "class_id": "transcript-path",
+      "native_times_comparable": true,
+      "precedence": 100
+    },
+    "completeness": "complete",
+    "provenance": [
+      {
+        "fact_revision_id": "v1:ot82HrzcFeZRMEtnhgpQBjgiaN_lteXzLfaVjwRqnm8",
+        "semantic_reference_contract_version": 1
+      }
+    ],
+    "quality": "unknown",
+    "unknown_reason": "withheld",
+    "value": null
+  }
+}

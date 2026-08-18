@@ -425,8 +425,13 @@ def discover_rfc012_catalog_contract_boundary_violations() -> set[str]:
     """Draft RFC 012B semantics cannot acquire storage, source, vendor, or transport authority."""
     relative = "crates/spaghetti-napi/src/catalog_contract.rs"
     path = REPO_ROOT / relative
-    if not path.exists() or RFC012_CATALOG_CONTRACT_FORBIDDEN_RE.search(
-        production_rust_text(path)
+    contract_paths = [path]
+    contract_dir = path.with_suffix("")
+    if contract_dir.exists():
+        contract_paths.extend(sorted(contract_dir.rglob("*.rs")))
+    if not path.exists() or any(
+        RFC012_CATALOG_CONTRACT_FORBIDDEN_RE.search(production_rust_text(contract_path))
+        for contract_path in contract_paths
     ):
         return {relative}
     lib = REPO_ROOT / "crates/spaghetti-napi/src/lib.rs"

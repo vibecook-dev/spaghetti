@@ -162,6 +162,8 @@ opaque_digest_type!(CatalogCoveragePlanId);
 opaque_digest_type!(CatalogAccessPolicyDigest);
 opaque_digest_type!(CatalogQueryFingerprint);
 
+pub(crate) mod evidence;
+
 impl CatalogAccessPolicyDigest {
     pub(crate) fn derive(
         policy_contract_version: u32,
@@ -395,6 +397,12 @@ impl CatalogCoveragePlan {
         self.required_sources
             .iter()
             .all(|required| coverage.iter().any(|set| required.matches_coverage(set)))
+    }
+
+    fn any_required_coverage_present(&self, coverage: &[SourceCoverageSet]) -> bool {
+        self.required_sources
+            .iter()
+            .any(|required| coverage.iter().any(|set| required.matches_coverage(set)))
     }
 }
 
@@ -713,12 +721,26 @@ pub(crate) enum CatalogReadinessPhase {
     Error,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum CatalogIntegritySnapshotDisposition {
+    IndependentlySafe,
+    Discarded,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub(crate) enum CatalogReadinessReason {
-    SourceRetrying { code: String },
-    TerminalSourceUnavailable { code: String },
-    IntegrityFailure { code: String },
+    SourceRetrying {
+        code: String,
+    },
+    TerminalSourceUnavailable {
+        code: String,
+    },
+    IntegrityFailure {
+        code: String,
+        snapshot_disposition: CatalogIntegritySnapshotDisposition,
+    },
 }
 
 impl CatalogReadinessReason {
@@ -726,7 +748,7 @@ impl CatalogReadinessReason {
         let code = match self {
             Self::SourceRetrying { code }
             | Self::TerminalSourceUnavailable { code }
-            | Self::IntegrityFailure { code } => code,
+            | Self::IntegrityFailure { code, .. } => code,
         };
         validate_reason_code(code)
     }
@@ -820,8 +842,64 @@ impl CatalogReadinessSnapshot {
                 ));
             }
         }
+        if let Some(CatalogReadinessReason::IntegrityFailure {
+            snapshot_disposition,
+            ..
+        }) = &self.reason
+        {
+            match snapshot_disposition {
+                CatalogIntegritySnapshotDisposition::IndependentlySafe => {
+                    let Some(snapshot) = self.last_complete_snapshot else {
+                        return Err(CatalogContractError::invalid(
+                            "independently safe integrity failure must retain a complete snapshot",
+                        ));
+                    };
+                    if self.completed_contract_version.is_none() {
+                        return Err(CatalogContractError::invalid(
+                            "independently safe integrity failure must retain its completed contract version",
+                        ));
+                    }
+                    let expected_current_commit = (snapshot.coverage_plan_id
+                        == self.coverage_plan_id
+                        && snapshot.readiness_epoch == self.epoch)
+                        .then_some(snapshot.complete_commit);
+                    if self.complete_through_commit != expected_current_commit {
+                        return Err(CatalogContractError::invalid(
+                            "independently safe integrity failure must retain exactly its current snapshot commit",
+                        ));
+                    }
+                }
+                CatalogIntegritySnapshotDisposition::Discarded => {
+                    if self.completed_contract_version.is_some()
+                        || self.complete_through_commit.is_some()
+                        || self.last_complete_snapshot.is_some()
+                    {
+                        return Err(CatalogContractError::invalid(
+                            "discarded integrity failure cannot retain completed snapshot state",
+                        ));
+                    }
+                }
+            }
+        }
         if let Some(snapshot) = self.last_complete_snapshot {
             snapshot.validate()?;
+            if snapshot.readiness_epoch > self.epoch {
+                return Err(CatalogContractError::invalid(
+                    "last-complete catalog snapshot cannot come from a future readiness epoch",
+                ));
+            }
+        }
+        if self.complete_through_commit.is_some()
+            && !matches!(
+                self.state,
+                CatalogReadinessPhase::Ready
+                    | CatalogReadinessPhase::Degraded
+                    | CatalogReadinessPhase::Error
+            )
+        {
+            return Err(CatalogContractError::invalid(
+                "only ready, degraded, or independently safe error state may be complete through a commit",
+            ));
         }
         match (self.complete_through_commit, self.last_complete_snapshot) {
             (Some(commit), Some(snapshot))
@@ -909,6 +987,13 @@ impl CatalogReadinessSnapshot {
                     "catalog readiness contains duplicate source coverage",
                 ));
             }
+        }
+        if self.state == CatalogReadinessPhase::Partial
+            && !plan.any_required_coverage_present(&self.source_coverage)
+        {
+            return Err(CatalogContractError::invalid(
+                "partial catalog state requires coverage for at least one required source",
+            ));
         }
         Ok(())
     }
@@ -1106,7 +1191,7 @@ impl CatalogReadinessMachine {
     pub(crate) fn fail_integrity(
         &mut self,
         reason_code: impl Into<String>,
-        retain_independently_safe_snapshot: bool,
+        snapshot_disposition: CatalogIntegritySnapshotDisposition,
     ) -> Result<(), CatalogContractError> {
         if self.snapshot.state == CatalogReadinessPhase::Error {
             return Err(CatalogContractError::invalid(
@@ -1118,11 +1203,23 @@ impl CatalogReadinessMachine {
         candidate.refreshing_from_snapshot = None;
         candidate.reason = Some(CatalogReadinessReason::IntegrityFailure {
             code: reason_code.into(),
+            snapshot_disposition,
         });
-        if !retain_independently_safe_snapshot {
-            candidate.completed_contract_version = None;
-            candidate.complete_through_commit = None;
-            candidate.last_complete_snapshot = None;
+        match snapshot_disposition {
+            CatalogIntegritySnapshotDisposition::IndependentlySafe => {
+                candidate.complete_through_commit = candidate
+                    .last_complete_snapshot
+                    .filter(|snapshot| {
+                        snapshot.coverage_plan_id == candidate.coverage_plan_id
+                            && snapshot.readiness_epoch == candidate.epoch
+                    })
+                    .map(|snapshot| snapshot.complete_commit);
+            }
+            CatalogIntegritySnapshotDisposition::Discarded => {
+                candidate.completed_contract_version = None;
+                candidate.complete_through_commit = None;
+                candidate.last_complete_snapshot = None;
+            }
         }
         self.replace_snapshot(candidate)
     }
@@ -1738,7 +1835,10 @@ mod tests {
         );
 
         machine
-            .fail_integrity("catalog_invariant_failed", true)
+            .fail_integrity(
+                "catalog_invariant_failed",
+                CatalogIntegritySnapshotDisposition::IndependentlySafe,
+            )
             .unwrap();
         assert_eq!(machine.snapshot().state, CatalogReadinessPhase::Error);
         assert_eq!(
@@ -1752,7 +1852,10 @@ mod tests {
         );
 
         machine
-            .fail_integrity("unsafe_catalog_schema", false)
+            .fail_integrity(
+                "unsafe_catalog_schema",
+                CatalogIntegritySnapshotDisposition::Discarded,
+            )
             .unwrap();
         assert_eq!(machine.snapshot().last_complete_snapshot, None);
         assert_eq!(machine.snapshot().completed_contract_version, None);
@@ -1805,6 +1908,102 @@ mod tests {
             code: "required_source_retrying".to_string(),
         });
         assert!(CatalogReadinessMachine::resume(plan, missing_retry_coverage).is_err());
+    }
+
+    #[test]
+    fn readiness_resume_rejects_empty_partial_future_lineage_and_false_current_commit() {
+        let plan = library_plan();
+        let mut building = CatalogReadinessMachine::register(plan.clone(), 1).unwrap();
+        building.schedule_build().unwrap();
+
+        let mut empty_partial = building.snapshot().clone();
+        empty_partial.state = CatalogReadinessPhase::Partial;
+        assert!(CatalogReadinessMachine::resume(plan.clone(), empty_partial).is_err());
+
+        let optional_plan = CatalogCoveragePlan::new(
+            CatalogCoverageScope::Library,
+            vec![claude_source()],
+            vec![codex_source()],
+        )
+        .unwrap();
+        let mut optional_only =
+            CatalogReadinessMachine::register(optional_plan.clone(), 1).unwrap();
+        optional_only.schedule_build().unwrap();
+        let mut optional_partial = optional_only.snapshot().clone();
+        optional_partial.state = CatalogReadinessPhase::Partial;
+        optional_partial.source_coverage = vec![coverage_for(
+            &optional_plan.optional_sources[0],
+            CODEX_DECLARATION,
+            1,
+            CoverageSetCompleteness::Partial,
+            0,
+        )];
+        assert!(CatalogReadinessMachine::resume(optional_plan, optional_partial).is_err());
+
+        let mut valid = CatalogReadinessMachine::register(plan.clone(), 1).unwrap();
+        valid.schedule_build().unwrap();
+        let complete = snapshot(&valid, 10);
+        valid
+            .publish_ready(complete, complete_coverage(valid.plan(), 1, 10))
+            .unwrap();
+
+        let mut future_lineage = valid.snapshot().clone();
+        future_lineage.state = CatalogReadinessPhase::Building;
+        future_lineage.complete_through_commit = None;
+        future_lineage.last_complete_snapshot = Some(
+            CatalogSnapshotId::new(1, plan.coverage_plan_id, future_lineage.epoch + 1, 10).unwrap(),
+        );
+        assert!(CatalogReadinessMachine::resume(plan.clone(), future_lineage).is_err());
+
+        let mut false_current_commit = valid.snapshot().clone();
+        false_current_commit.state = CatalogReadinessPhase::Building;
+        assert!(CatalogReadinessMachine::resume(plan, false_current_commit).is_err());
+    }
+
+    #[test]
+    fn readiness_resume_binds_integrity_disposition_to_retained_snapshot_state() {
+        let plan = library_plan();
+        let mut safe = CatalogReadinessMachine::register(plan.clone(), 1).unwrap();
+        safe.schedule_build().unwrap();
+        let complete = snapshot(&safe, 10);
+        safe.publish_ready(complete, complete_coverage(safe.plan(), 1, 10))
+            .unwrap();
+        safe.fail_integrity(
+            "catalog_invariant_failed",
+            CatalogIntegritySnapshotDisposition::IndependentlySafe,
+        )
+        .unwrap();
+        assert_eq!(safe.snapshot().complete_through_commit, Some(10));
+        assert!(CatalogReadinessMachine::resume(plan.clone(), safe.snapshot().clone()).is_ok());
+
+        let mut forged_discarded = safe.snapshot().clone();
+        forged_discarded.reason = Some(CatalogReadinessReason::IntegrityFailure {
+            code: "catalog_invariant_failed".to_owned(),
+            snapshot_disposition: CatalogIntegritySnapshotDisposition::Discarded,
+        });
+        assert!(CatalogReadinessMachine::resume(plan.clone(), forged_discarded).is_err());
+
+        let mut discarded = CatalogReadinessMachine::register(plan.clone(), 1).unwrap();
+        discarded.schedule_build().unwrap();
+        let complete = snapshot(&discarded, 20);
+        discarded
+            .publish_ready(complete, complete_coverage(discarded.plan(), 1, 20))
+            .unwrap();
+        discarded
+            .fail_integrity(
+                "unsafe_catalog_schema",
+                CatalogIntegritySnapshotDisposition::Discarded,
+            )
+            .unwrap();
+        assert_eq!(discarded.snapshot().complete_through_commit, None);
+        assert_eq!(discarded.snapshot().last_complete_snapshot, None);
+
+        let mut forged_safe = discarded.snapshot().clone();
+        forged_safe.reason = Some(CatalogReadinessReason::IntegrityFailure {
+            code: "unsafe_catalog_schema".to_owned(),
+            snapshot_disposition: CatalogIntegritySnapshotDisposition::IndependentlySafe,
+        });
+        assert!(CatalogReadinessMachine::resume(plan, forged_safe).is_err());
     }
 
     #[test]
