@@ -126,7 +126,9 @@ import type { SqliteService } from '../io/index.js';
 // points, absences, and errors owned by common projection transitions.
 // v49: source-scoped query-pack selection with explicit rollback target,
 // epoch, and durable commit ownership for RFC 012C usage-v2 migration.
-export const SCHEMA_VERSION = 49;
+// v50: source-neutral RFC 012B Library coverage-plan registration and the
+// initial Pending/Building readiness lineage on the common commit clock.
+export const SCHEMA_VERSION = 50;
 
 export const TOKEN_ACTIVITY_TRIGGER_NAMES = [
   'token_activity_messages_ai',
@@ -577,11 +579,19 @@ CREATE TABLE IF NOT EXISTS source_objects (
 
 CREATE TABLE IF NOT EXISTS ingest_commits (
   commit_seq INTEGER PRIMARY KEY AUTOINCREMENT,
-  source_instance_id INTEGER NOT NULL REFERENCES source_instances(source_instance_id) ON DELETE RESTRICT,
+  source_instance_id INTEGER REFERENCES source_instances(source_instance_id) ON DELETE RESTRICT,
   reason TEXT NOT NULL,
   started_at INTEGER NOT NULL,
   committed_at INTEGER,
-  fact_count INTEGER NOT NULL DEFAULT 0
+  fact_count INTEGER NOT NULL DEFAULT 0,
+  CHECK (
+    source_instance_id IS NOT NULL
+    OR (
+      reason IN ('catalog.library.plan.registered', 'catalog.library.build.scheduled')
+      AND committed_at IS NOT NULL
+      AND fact_count = 0
+    )
+  )
 );
 
 CREATE TABLE IF NOT EXISTS change_log (
@@ -607,6 +617,26 @@ INSERT OR IGNORE INTO change_log_retention_state (
   singleton, pruned_through_commit_seq, retained_change_count,
   retained_payload_bytes, last_pruned_at
 ) VALUES (1, 0, 0, 0, NULL);
+
+CREATE TABLE IF NOT EXISTS catalog_coverage_plans (
+  coverage_plan_id BLOB PRIMARY KEY CHECK (length(coverage_plan_id) = 32),
+  coverage_plan_contract_version INTEGER NOT NULL CHECK (coverage_plan_contract_version > 0),
+  scope_kind TEXT NOT NULL CHECK (scope_kind = 'library'),
+  plan_json BLOB NOT NULL CHECK (length(plan_json) BETWEEN 1 AND 4194304),
+  content_digest BLOB NOT NULL CHECK (length(content_digest) = 32),
+  created_commit_seq INTEGER NOT NULL REFERENCES ingest_commits(commit_seq) ON DELETE RESTRICT
+);
+
+CREATE TABLE IF NOT EXISTS catalog_build_state (
+  scope_kind TEXT PRIMARY KEY CHECK (scope_kind = 'library'),
+  coverage_plan_id BLOB NOT NULL REFERENCES catalog_coverage_plans(coverage_plan_id) ON DELETE RESTRICT,
+  desired_contract_version INTEGER NOT NULL CHECK (desired_contract_version > 0),
+  epoch INTEGER NOT NULL CHECK (epoch > 0),
+  attempt INTEGER NOT NULL CHECK (attempt > 0),
+  state TEXT NOT NULL CHECK (state IN ('pending', 'building')),
+  last_commit_seq INTEGER NOT NULL REFERENCES ingest_commits(commit_seq) ON DELETE RESTRICT,
+  updated_at INTEGER NOT NULL
+);
 
 CREATE TABLE IF NOT EXISTS projection_versions (
   projection_id TEXT NOT NULL,
@@ -2291,6 +2321,8 @@ const CURRENT_TABLES = [
   'source_coverage_sets',
   'query_pack_selections',
   'projection_versions',
+  'catalog_build_state',
+  'catalog_coverage_plans',
   'source_objects',
   'source_streams',
   'ingest_commits',

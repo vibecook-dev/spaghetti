@@ -17,6 +17,7 @@ use rusqlite::{Connection, TransactionBehavior};
 use crate::adapter::FactBatch;
 use crate::core::schema;
 
+use super::catalog_state;
 use super::commit::{
     self, ChangeLogRetentionPolicy, ChangeLogRetentionSnapshot, CommitDetail, CommitHook,
     CommitReceipt, CommitStage, ObservationCommit,
@@ -59,6 +60,11 @@ enum WriterCommand {
         request: Box<commit::ProjectionVersionCommit>,
         queued_at: Instant,
         response: Sender<Result<Option<commit::ProjectionVersionReceipt>, EngineError>>,
+    },
+    CommitCatalogBuildState {
+        command: Box<catalog_state::CatalogBuildStateCommand>,
+        queued_at: Instant,
+        response: Sender<Result<Option<catalog_state::CatalogBuildStateReceipt>, EngineError>>,
     },
     SourceCatalog {
         adapter_id: String,
@@ -158,6 +164,26 @@ impl WriterClient {
         self.commands
             .send(WriterCommand::CommitProjectionVersions {
                 request: Box::new(request),
+                queued_at: Instant::now(),
+                response: response_tx,
+            })
+            .map_err(|_| EngineError::WorkerUnavailable { worker: "writer" })?;
+        response_rx
+            .recv()
+            .map_err(|_| EngineError::WorkerUnavailable { worker: "writer" })?
+    }
+
+    pub(crate) fn commit_catalog_build_state(
+        &self,
+        command: catalog_state::CatalogBuildStateCommand,
+    ) -> Result<Option<catalog_state::CatalogBuildStateReceipt>, EngineError> {
+        if !self.alive.load(Ordering::Acquire) {
+            return Err(EngineError::WorkerUnavailable { worker: "writer" });
+        }
+        let (response_tx, response_rx) = bounded(1);
+        self.commands
+            .send(WriterCommand::CommitCatalogBuildState {
+                command: Box::new(command),
                 queued_at: Instant::now(),
                 response: response_tx,
             })
@@ -489,6 +515,44 @@ fn writer_thread(
                 let started = Instant::now();
                 let result = reserve.and_then(|()| {
                     commit::apply_projection_version_commit(&mut connection, &request)
+                });
+                let elapsed = started.elapsed();
+                telemetry.writer_total.record(elapsed);
+                let committed = matches!(result, Ok(Some(_)));
+                match &result {
+                    Ok(Some(_)) => {
+                        atomic_saturating_add(&telemetry.commit_attempts, 1);
+                        atomic_saturating_add(&telemetry.committed, 1);
+                        atomic_saturating_add(
+                            &telemetry.sqlite_rows_changed,
+                            sqlite_total_changes(&connection).saturating_sub(rows_before),
+                        );
+                        telemetry.physical_transaction.record(elapsed);
+                    }
+                    Ok(None) => {}
+                    Err(_) => {
+                        atomic_saturating_add(&telemetry.commit_attempts, 1);
+                        atomic_saturating_add(&telemetry.failed, 1);
+                    }
+                }
+                let _ = response.send(result);
+                if committed {
+                    checkpoints.maybe_checkpoint(&connection, &telemetry, bootstrap_active);
+                }
+            }
+            WriterCommand::CommitCatalogBuildState {
+                command,
+                queued_at,
+                response,
+            } => {
+                telemetry.queue_wait.record(queued_at.elapsed());
+                let reserve_started = Instant::now();
+                let reserve = ensure_disk_reserve(&database_path);
+                telemetry.disk_reserve.record(reserve_started.elapsed());
+                let rows_before = sqlite_total_changes(&connection);
+                let started = Instant::now();
+                let result = reserve.and_then(|()| {
+                    catalog_state::apply_catalog_build_state_commit(&mut connection, &command)
                 });
                 let elapsed = started.elapsed();
                 telemetry.writer_total.record(elapsed);
@@ -1614,6 +1678,7 @@ fn open_writer(database_path: &PathBuf) -> Result<Connection, EngineError> {
         operation: "initialize schema",
         detail: error.to_string(),
     })?;
+    catalog_state::load_catalog_build_state(&connection)?;
     if query_bootstrap_active(&connection)? {
         let checkpoint = reader_free_checkpoint(&connection)?;
         require_reader_free_checkpoint(checkpoint)?;

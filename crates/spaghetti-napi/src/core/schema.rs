@@ -183,7 +183,9 @@ const CANONICAL_FTS_TRIGGERS: &[&str] = &[
 /// points, absences, and errors owned by common projection transitions.
 /// v49: source-scoped query-pack selection with explicit rollback target,
 /// epoch, and durable commit ownership for RFC 012C usage-v2 migration.
-pub const SCHEMA_VERSION: u32 = 49;
+/// v50: source-neutral RFC 012B Library coverage-plan registration and the
+/// initial Pending/Building readiness lineage on the common commit clock.
+pub const SCHEMA_VERSION: u32 = 50;
 
 /// Full DDL for the current schema — lifted verbatim from the TS `SCHEMA_SQL`
 /// template literal. Whitespace differs; structure does not.
@@ -477,11 +479,19 @@ CREATE TABLE IF NOT EXISTS source_objects (
 
 CREATE TABLE IF NOT EXISTS ingest_commits (
   commit_seq INTEGER PRIMARY KEY AUTOINCREMENT,
-  source_instance_id INTEGER NOT NULL REFERENCES source_instances(source_instance_id) ON DELETE RESTRICT,
+  source_instance_id INTEGER REFERENCES source_instances(source_instance_id) ON DELETE RESTRICT,
   reason TEXT NOT NULL,
   started_at INTEGER NOT NULL,
   committed_at INTEGER,
-  fact_count INTEGER NOT NULL DEFAULT 0
+  fact_count INTEGER NOT NULL DEFAULT 0,
+  CHECK (
+    source_instance_id IS NOT NULL
+    OR (
+      reason IN ('catalog.library.plan.registered', 'catalog.library.build.scheduled')
+      AND committed_at IS NOT NULL
+      AND fact_count = 0
+    )
+  )
 );
 
 CREATE TABLE IF NOT EXISTS change_log (
@@ -507,6 +517,26 @@ INSERT OR IGNORE INTO change_log_retention_state (
   singleton, pruned_through_commit_seq, retained_change_count,
   retained_payload_bytes, last_pruned_at
 ) VALUES (1, 0, 0, 0, NULL);
+
+CREATE TABLE IF NOT EXISTS catalog_coverage_plans (
+  coverage_plan_id BLOB PRIMARY KEY CHECK (length(coverage_plan_id) = 32),
+  coverage_plan_contract_version INTEGER NOT NULL CHECK (coverage_plan_contract_version > 0),
+  scope_kind TEXT NOT NULL CHECK (scope_kind = 'library'),
+  plan_json BLOB NOT NULL CHECK (length(plan_json) BETWEEN 1 AND 4194304),
+  content_digest BLOB NOT NULL CHECK (length(content_digest) = 32),
+  created_commit_seq INTEGER NOT NULL REFERENCES ingest_commits(commit_seq) ON DELETE RESTRICT
+);
+
+CREATE TABLE IF NOT EXISTS catalog_build_state (
+  scope_kind TEXT PRIMARY KEY CHECK (scope_kind = 'library'),
+  coverage_plan_id BLOB NOT NULL REFERENCES catalog_coverage_plans(coverage_plan_id) ON DELETE RESTRICT,
+  desired_contract_version INTEGER NOT NULL CHECK (desired_contract_version > 0),
+  epoch INTEGER NOT NULL CHECK (epoch > 0),
+  attempt INTEGER NOT NULL CHECK (attempt > 0),
+  state TEXT NOT NULL CHECK (state IN ('pending', 'building')),
+  last_commit_seq INTEGER NOT NULL REFERENCES ingest_commits(commit_seq) ON DELETE RESTRICT,
+  updated_at INTEGER NOT NULL
+);
 
 CREATE TABLE IF NOT EXISTS projection_versions (
   projection_id TEXT NOT NULL,
@@ -2243,6 +2273,8 @@ const CURRENT_TABLES: &[&str] = &[
     "source_coverage_sets",
     "query_pack_selections",
     "projection_versions",
+    "catalog_build_state",
+    "catalog_coverage_plans",
     "source_objects",
     "source_streams",
     "ingest_commits",
@@ -3218,6 +3250,16 @@ mod tests {
             assert_eq!(present, 1, "missing source_objects.{column}");
         }
         assert!(object_exists(&conn, "table", "ingest_commits"));
+        let source_commit_nullable: i64 = conn
+            .query_row(
+                "SELECT [notnull] FROM pragma_table_info('ingest_commits') WHERE name = 'source_instance_id'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("inspect source-neutral commit ownership");
+        assert_eq!(source_commit_nullable, 0);
+        assert!(object_exists(&conn, "table", "catalog_coverage_plans"));
+        assert!(object_exists(&conn, "table", "catalog_build_state"));
         assert!(object_exists(&conn, "table", "projection_versions"));
         assert!(object_exists(&conn, "table", "query_pack_selections"));
         for table in [
@@ -3562,6 +3604,43 @@ mod tests {
             )
             .expect("inspect timeline schema");
         assert_eq!(raw_index_columns, 1);
+    }
+
+    #[test]
+    fn source_neutral_commits_are_reserved_for_completed_zero_fact_catalog_admin_work() {
+        let conn = Connection::open_in_memory().expect("open in-memory db");
+        initialize_schema(&conn).expect("initialize schema");
+
+        for invalid in [
+            "INSERT INTO ingest_commits (source_instance_id, reason, started_at, committed_at, fact_count) VALUES (NULL, 'observation', 1, 2, 0)",
+            "INSERT INTO ingest_commits (source_instance_id, reason, started_at, committed_at, fact_count) VALUES (NULL, 'catalog.library.plan.registered', 1, 2, 1)",
+            "INSERT INTO ingest_commits (source_instance_id, reason, started_at, committed_at, fact_count) VALUES (NULL, 'catalog.library.build.scheduled', 1, NULL, 0)",
+        ] {
+            assert!(conn.execute(invalid, []).is_err(), "accepted {invalid}");
+        }
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM ingest_commits", [], |row| row
+                .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+
+        for reason in [
+            "catalog.library.plan.registered",
+            "catalog.library.build.scheduled",
+        ] {
+            conn.execute(
+                "INSERT INTO ingest_commits (source_instance_id, reason, started_at, committed_at, fact_count) VALUES (NULL, ?1, 1, 2, 0)",
+                [reason],
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM ingest_commits", [], |row| row
+                .get::<_, i64>(0))
+                .unwrap(),
+            2
+        );
     }
 
     #[test]

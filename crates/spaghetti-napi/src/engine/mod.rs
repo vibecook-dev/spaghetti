@@ -6,6 +6,7 @@
 
 mod artifact_projection;
 mod capability_query;
+mod catalog_state;
 mod commit;
 mod coordinator;
 mod coverage_query;
@@ -54,6 +55,7 @@ pub use capability_query::{
     ToolResultDetail, ToolResultPage, ToolResultPageRequest, CAPABILITY_QUERY_CONTRACT_VERSION,
     DEFAULT_CAPABILITY_PAGE_LIMIT, MAX_CAPABILITY_PAGE_PAYLOAD_BYTES,
 };
+use catalog_state::CatalogBuildStateCommand;
 pub use commit::{
     ChangeLogRetentionPolicy, ChangeLogRetentionSnapshot, DEFAULT_CHANGE_LOG_MAX_AGE_MS,
     DEFAULT_CHANGE_LOG_MAX_PAYLOAD_BYTES, DEFAULT_CHANGE_LOG_MIN_RESUMABLE_COMMITS,
@@ -1333,6 +1335,23 @@ impl SpaghettiEngineCore {
     ) -> Result<Option<u64>, EngineError> {
         let writer = self.writer_client()?;
         let receipt = writer.commit_projection_versions(request)?;
+        if let Some(receipt) = receipt {
+            self.commit_notifications.publish(receipt.commit_seq);
+            Ok(Some(receipt.commit_seq))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Register or schedule the source-neutral RFC 012B Library build on the
+    /// same durable clock as observation commits. This internal seam cannot
+    /// publish coverage-bearing readiness or catalog rows.
+    pub(crate) fn commit_catalog_build_state(
+        &self,
+        command: CatalogBuildStateCommand,
+    ) -> Result<Option<u64>, EngineError> {
+        let writer = self.writer_client()?;
+        let receipt = writer.commit_catalog_build_state(command)?;
         if let Some(receipt) = receipt {
             self.commit_notifications.publish(receipt.commit_seq);
             Ok(Some(receipt.commit_seq))

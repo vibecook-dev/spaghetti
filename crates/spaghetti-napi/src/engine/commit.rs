@@ -2013,6 +2013,17 @@ fn write_change_log(
     Ok(())
 }
 
+/// Persist writer-owned administrative changes through the same validation,
+/// accounting, and ordinal rules as observation commits.
+pub(super) fn write_internal_changes(
+    transaction: &Transaction<'_>,
+    commit_seq: u64,
+    changes: &[ChangeEntry],
+) -> Result<(), EngineError> {
+    validate_changes(changes)?;
+    write_change_log(transaction, commit_seq, changes)
+}
+
 fn change_log_payload_bytes(change: &ChangeEntry) -> Result<u64, EngineError> {
     [
         change.topic.len(),

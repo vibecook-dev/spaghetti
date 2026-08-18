@@ -167,6 +167,16 @@ opaque_digest_type!(CatalogHydrationCoalescingKey);
 opaque_digest_type!(CatalogHydrationAuthorizationId);
 opaque_digest_type!(CatalogSchedulingReceiptId);
 
+impl CatalogCoveragePlanId {
+    /// Exact opaque bytes used by the internal durable catalog-plan key.
+    ///
+    /// This does not expose a constructor: restart decoding must still parse
+    /// and validate the complete plan before accepting its stored identity.
+    pub(crate) fn storage_bytes(&self) -> &[u8; DIGEST_BYTES] {
+        self.as_bytes()
+    }
+}
+
 pub(crate) mod evidence;
 pub(crate) mod hydration;
 pub(crate) mod page;
