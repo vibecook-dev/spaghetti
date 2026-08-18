@@ -233,6 +233,8 @@ fn mapped_envelope(
             payload_hash: RecordHash::digest(&record.payload),
         },
         retraction,
+        actor: None,
+        affiliations: unknown_actor_affiliation_context(revision.actor_run),
         revision,
     };
     let selection = contract_selection();

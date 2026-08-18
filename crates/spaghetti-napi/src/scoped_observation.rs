@@ -14,18 +14,19 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 
 use crate::adapter::{
-    ActorRunRole, AdapterError, AdapterErrorClass, AdapterId, AdapterObjectContext,
-    AdapterRegistry, AgentAdapter, CanonicalEntityKey, CanonicalFactId, CanonicalSourceInstanceKey,
-    CompatibilityDecision, ContractCompleteness, CoverageAbsence, CoverageAbsenceKind,
-    CoverageDeclarationDigest, CoverageDomain, CoverageError, CoverageObjectKey, CoveragePosition,
-    CoveragePositionKind, CoverageProvenance, CoverageScope, CoverageSetCompleteness,
-    CoverageStatus, CoverageStreamKey, DecodeDisposition, DecoderId, ExternalEntityRef, Fact,
-    FactBatch, FactEnvelope, FactProvenance, FactRevisionId, FactSemanticContext,
-    FactSemanticRevision, NativeArtifactProbe, NativeIdentityClaim, QualifiedTimestamp,
-    QualifiedValueQuality, RawRetentionPolicy, ScopeRelationPrimitive, SemanticRevisionRef,
-    Sha256Digest, SourceAccess, SourceCoveragePoint, SourceCoverageSet, SourceObjectList,
-    SourceObjectListRequest, SourceQuery, SourceRecordId, SourceRows, SourceSnapshot,
-    SupportOperation, TypedAccessAuthorization, UsageRevisionV2Fact,
+    ActorAffiliationDimension, ActorAffiliationRevisionFact, ActorAffiliationState,
+    ActorRunRevisionFact, ActorRunRole, AdapterError, AdapterErrorClass, AdapterId,
+    AdapterObjectContext, AdapterRegistry, AgentAdapter, CanonicalEntityKey, CanonicalFactId,
+    CanonicalSourceInstanceKey, CompatibilityDecision, ContractCompleteness, CoverageAbsence,
+    CoverageAbsenceKind, CoverageDeclarationDigest, CoverageDomain, CoverageError,
+    CoverageObjectKey, CoveragePosition, CoveragePositionKind, CoverageProvenance, CoverageScope,
+    CoverageSetCompleteness, CoverageStatus, CoverageStreamKey, DecodeDisposition, DecoderId,
+    ExternalEntityRef, Fact, FactBatch, FactEnvelope, FactProvenance, FactRevisionId,
+    FactSemanticContext, FactSemanticRevision, NativeArtifactProbe, NativeIdentityClaim,
+    QualifiedTimestamp, QualifiedValueQuality, RawRetentionPolicy, ScopeRelationPrimitive,
+    SemanticRevisionRef, Sha256Digest, SourceAccess, SourceCoveragePoint, SourceCoverageSet,
+    SourceObjectList, SourceObjectListRequest, SourceQuery, SourceRecordId, SourceRows,
+    SourceSnapshot, SupportOperation, TypedAccessAuthorization, UsageRevisionV2Fact,
     EXTERNAL_ENTITY_REFERENCE_VERSION,
 };
 use crate::coverage_runtime::{
@@ -1506,6 +1507,15 @@ pub struct ScopedUsageV2Event {
     pub source: ScopedUsageV2Source,
     /// Present only for a reducer retraction caused by source lifecycle.
     pub retraction: Option<ScopedUsageV2RetractionCause>,
+    /// Evidence-backed actor state accepted before this occurrence. `None`
+    /// preserves the existing canonical-key-only fallback while an adapter
+    /// family is still migrating its actor declaration into scoped decode.
+    pub actor: Option<ScopedActorRunRef>,
+    /// Orthogonal current affiliation context at this occurrence. A later
+    /// affiliation revision never changes this event's identity or causes the
+    /// event to be delivered again; replacement replay may attach the newer
+    /// context to the same stable event ID.
+    pub affiliations: ScopedActorAffiliationContext,
     /// The accepted response revision. Retractions carry the revision being
     /// removed so actor/session routing never has to guess from a control.
     pub revision: UsageRevisionV2Fact,
@@ -1854,9 +1864,11 @@ pub enum ScopedActorAttribution {
     ScopeFallback { reason: ScopedActorFallbackReason },
 }
 
-/// Current affiliation context adjacent to an event. Until affiliation-family
-/// projection lands, the mapper reports Unknown rather than treating an empty
-/// vector as proof that no team/workflow relation exists.
+/// Current affiliation context adjacent to an event. Accepted auxiliary
+/// affiliation revisions may provide a conservative `Partial` view; absent or
+/// ambiguous evidence remains `Unknown` rather than treating an empty vector
+/// as proof that no team/workflow relation exists. Portable exposure remains a
+/// separate negotiated gate.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScopedActorAffiliationContext {
     pub actor_run_key: CanonicalEntityKey,
@@ -6358,6 +6370,12 @@ impl ScopedObservationEnvelopeMapper {
         let event_id = delivered.event_id;
         let semantic_revision_ref = delivered.semantic_revision_ref;
         let phase = delivered.phase;
+        let usage_context = match &delivered.event {
+            ScopedProjectedObservation::UsageV2 { event, .. } => {
+                Some((event.actor.clone(), event.affiliations.clone()))
+            }
+            _ => None,
+        };
 
         let mapped = match delivered.event {
             ScopedProjectedObservation::SourcePresence {
@@ -6670,17 +6688,50 @@ impl ScopedObservationEnvelopeMapper {
             }
         };
 
-        let actor = self.actor_ref(mapped.actor_run_key);
-        let affiliations = ScopedActorAffiliationContext {
-            actor_run_key: mapped.actor_run_key,
-            team_key: None,
-            native_team_id: None,
-            team_name: None,
-            member_key: None,
-            workflow_key: None,
-            native_workflow_id: None,
-            completeness: ContractCompleteness::Unknown,
-            derived_from_revision_refs: Vec::new(),
+        let (actor, affiliations) = match usage_context {
+            Some((actor, affiliations)) => {
+                let actor_is_evidence_backed = actor.is_some();
+                let actor = actor.unwrap_or_else(|| self.actor_ref(mapped.actor_run_key));
+                let valid_actor_shape = match (actor_is_evidence_backed, actor.role) {
+                    (false, _) => true,
+                    (true, ActorRunRole::Root) => actor.parent_run_key.is_none(),
+                    (true, ActorRunRole::Child) => actor
+                        .parent_run_key
+                        .is_some_and(|parent| parent != actor.run_key),
+                };
+                let expected_native_session = self
+                    .root
+                    .native_session_claim
+                    .as_ref()
+                    .and_then(|claim| claim.identity.value.as_ref())
+                    .map(|identity| identity.native_id.as_str());
+                if actor.root_session_key != self.root.session_key
+                    || actor.run_key != mapped.actor_run_key
+                    || affiliations.actor_run_key != mapped.actor_run_key
+                    || (actor.run_key == self.root.root_actor_run_key)
+                        != (actor.role == ActorRunRole::Root)
+                    || (actor_is_evidence_backed
+                        && actor.native_session_id.as_deref() != expected_native_session)
+                {
+                    return Err(ScopedEnvelopeError::RootSessionMismatch);
+                }
+                if !valid_actor_shape
+                    || !scoped_actor_ref_text_is_bounded(&actor)
+                    || !scoped_actor_affiliation_context_is_valid(
+                        &affiliations,
+                        self.contract_selection
+                            .contract_versions
+                            .semantic_revision_reference_version,
+                    )
+                {
+                    return Err(ScopedEnvelopeError::DeliveryMismatch);
+                }
+                (actor, affiliations)
+            }
+            None => (
+                self.actor_ref(mapped.actor_run_key),
+                unknown_actor_affiliation_context(mapped.actor_run_key),
+            ),
         };
         Ok(ScopedObservationEnvelope {
             contract_version: self.contract_selection.envelope_contract_version,
@@ -6728,6 +6779,71 @@ impl ScopedObservationEnvelopeMapper {
             native_actor_id: None,
             native_actor_type: None,
         }
+    }
+}
+
+fn unknown_actor_affiliation_context(
+    actor_run_key: CanonicalEntityKey,
+) -> ScopedActorAffiliationContext {
+    ScopedActorAffiliationContext {
+        actor_run_key,
+        team_key: None,
+        native_team_id: None,
+        team_name: None,
+        member_key: None,
+        workflow_key: None,
+        native_workflow_id: None,
+        completeness: ContractCompleteness::Unknown,
+        derived_from_revision_refs: Vec::new(),
+    }
+}
+
+const SCOPED_ACTOR_CONTEXT_MAX_TEXT_BYTES: usize = 8 * 1024;
+
+fn scoped_optional_actor_text_is_bounded(value: Option<&str>) -> bool {
+    value
+        .is_none_or(|value| !value.is_empty() && value.len() <= SCOPED_ACTOR_CONTEXT_MAX_TEXT_BYTES)
+}
+
+fn scoped_actor_ref_text_is_bounded(actor: &ScopedActorRunRef) -> bool {
+    scoped_optional_actor_text_is_bounded(actor.native_session_id.as_deref())
+        && scoped_optional_actor_text_is_bounded(actor.native_actor_id.as_deref())
+        && scoped_optional_actor_text_is_bounded(actor.native_actor_type.as_deref())
+}
+
+fn scoped_actor_affiliation_context_is_valid(
+    context: &ScopedActorAffiliationContext,
+    semantic_reference_contract_version: u32,
+) -> bool {
+    let refs = &context.derived_from_revision_refs;
+    if refs.len() > SCOPED_ACTOR_AFFILIATION_CONTEXT_MAX_REVISIONS
+        || refs.iter().any(|reference| {
+            reference.semantic_reference_contract_version != semantic_reference_contract_version
+        })
+        || refs
+            .windows(2)
+            .any(|references| references[0].fact_revision_id >= references[1].fact_revision_id)
+        || !scoped_optional_actor_text_is_bounded(context.native_team_id.as_deref())
+        || !scoped_optional_actor_text_is_bounded(context.team_name.as_deref())
+        || !scoped_optional_actor_text_is_bounded(context.native_workflow_id.as_deref())
+        || context.team_name.is_some()
+        || (context.team_key.is_none()
+            && (context.native_team_id.is_some() || context.member_key.is_some()))
+        || (context.workflow_key.is_none() && context.native_workflow_id.is_some())
+    {
+        return false;
+    }
+    match context.completeness {
+        ContractCompleteness::Complete => false,
+        ContractCompleteness::Partial => !refs.is_empty(),
+        ContractCompleteness::Unknown if refs.is_empty() => {
+            context.team_key.is_none()
+                && context.native_team_id.is_none()
+                && context.member_key.is_none()
+                && context.workflow_key.is_none()
+                && context.native_workflow_id.is_none()
+        }
+        ContractCompleteness::Unknown => true,
     }
 }
 
@@ -8203,6 +8319,9 @@ fn projected_observation_measurement(value: &ScopedProjectedObservation) -> (boo
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ScopedObservationProjectionLimits {
+    /// Per-family semantic entity ceiling. The original field name is retained
+    /// while actor context remains an internal dependency of usage-v2 rather
+    /// than a separately negotiated/output family.
     pub max_usage_v2_entities: usize,
 }
 
@@ -8212,6 +8331,10 @@ pub enum ScopedProjectionError {
     InvalidLimits,
     #[error("scoped usage-v2 projection entity capacity is full")]
     UsageV2CapacityFull,
+    #[error("scoped actor-run projection entity capacity is full")]
+    ActorRunCapacityFull,
+    #[error("scoped actor-affiliation projection entity capacity is full")]
+    ActorAffiliationCapacityFull,
     #[error("scoped usage-v2 fact is missing its canonical semantic revision")]
     MissingSemanticRevision,
     #[error("scoped usage-v2 fact has an invalid canonical semantic revision")]
@@ -8222,6 +8345,8 @@ pub enum ScopedProjectionError {
     ConflictingOwnership,
     #[error("scoped usage-v2 correction did not advance its source cursor")]
     StaleRevision,
+    #[error("scoped actor context contradicts its canonical entity or session")]
+    InvalidActorContext,
     #[error("scoped source reset does not match retained reducer generation")]
     InvalidResetState,
     #[error("scoped source presence change contradicts retained reducer state")]
@@ -8250,15 +8375,66 @@ struct ScopedUsageV2ProjectionState {
     revision: UsageRevisionV2Fact,
 }
 
+#[derive(Clone)]
+struct ScopedActorRunProjectionState {
+    object_token: u64,
+    generation: u64,
+    semantic: FactSemanticRevision,
+    source: ScopedUsageV2Source,
+    revision: ActorRunRevisionFact,
+}
+
+#[derive(Clone)]
+struct ScopedActorAffiliationProjectionState {
+    object_token: u64,
+    generation: u64,
+    semantic: FactSemanticRevision,
+    source: ScopedUsageV2Source,
+    revision: ActorAffiliationRevisionFact,
+}
+
+const SCOPED_ACTOR_AFFILIATION_CONTEXT_MAX_REVISIONS: usize = 64;
+
+struct ScopedActorContextIndex {
+    actors: BTreeMap<CanonicalEntityKey, ScopedActorRunRef>,
+    affiliations: BTreeMap<CanonicalEntityKey, (CanonicalEntityKey, ScopedActorAffiliationContext)>,
+}
+
+impl ScopedActorContextIndex {
+    fn for_usage(
+        &self,
+        usage: &UsageRevisionV2Fact,
+    ) -> Result<(Option<ScopedActorRunRef>, ScopedActorAffiliationContext), ScopedProjectionError>
+    {
+        let actor = self.actors.get(&usage.actor_run).cloned();
+        if actor
+            .as_ref()
+            .is_some_and(|actor| actor.root_session_key != usage.session)
+        {
+            return Err(ScopedProjectionError::InvalidActorContext);
+        }
+        let affiliations = match self.affiliations.get(&usage.actor_run) {
+            Some((session, context)) if *session == usage.session => context.clone(),
+            Some(_) => return Err(ScopedProjectionError::InvalidActorContext),
+            None => unknown_actor_affiliation_context(usage.actor_run),
+        };
+        Ok((actor, affiliations))
+    }
+}
+
 struct ScopedProjectionPlan {
     projected: Vec<ScopedProjectedObservation>,
     mutation: ScopedProjectionMutation,
 }
 
-enum ScopedProjectionMutation {
-    None,
-    UpsertUsageV2(BTreeMap<CanonicalFactId, ScopedUsageV2ProjectionState>),
-    RetractUsageV2(Vec<CanonicalFactId>),
+#[derive(Default)]
+struct ScopedProjectionMutation {
+    usage_upserts: BTreeMap<CanonicalFactId, ScopedUsageV2ProjectionState>,
+    usage_retractions: Vec<CanonicalFactId>,
+    actor_upserts: BTreeMap<CanonicalEntityKey, ScopedActorRunProjectionState>,
+    actor_retractions: Vec<CanonicalEntityKey>,
+    affiliation_upserts: BTreeMap<CanonicalEntityKey, ScopedActorAffiliationProjectionState>,
+    affiliation_retractions: Vec<CanonicalEntityKey>,
 }
 
 #[derive(Clone, Copy)]
@@ -8270,14 +8446,18 @@ struct ScopedRetractionDelivery {
 
 /// Database-free common reducer for typed scoped-observation facts.
 ///
-/// Usage-v2 is the first family wired through this sink. Its state is bounded
-/// by entity count, exact current repeats are silent, and event construction
-/// happens only after the whole decoded record validates so a malformed fact
-/// cannot partially mutate observer state.
+/// Usage-v2 is the first family wired through this sink. Actor-run and
+/// affiliation revisions are retained only as bounded auxiliary context for
+/// that family; they are not separately selected or delivered. Exact current
+/// repeats are silent, and event construction happens only after the whole
+/// decoded record validates so a malformed fact cannot partially mutate
+/// observer state.
 pub struct ScopedObservationProjectionSink {
     limits: ScopedObservationProjectionLimits,
     lifecycle: ScopedProjectionLifecycle,
     usage_v2: BTreeMap<CanonicalFactId, ScopedUsageV2ProjectionState>,
+    actor_runs: BTreeMap<CanonicalEntityKey, ScopedActorRunProjectionState>,
+    actor_affiliations: BTreeMap<CanonicalEntityKey, ScopedActorAffiliationProjectionState>,
 }
 
 impl ScopedObservationProjectionSink {
@@ -8289,6 +8469,8 @@ impl ScopedObservationProjectionSink {
             limits,
             lifecycle: ScopedProjectionLifecycle::Active,
             usage_v2: BTreeMap::new(),
+            actor_runs: BTreeMap::new(),
+            actor_affiliations: BTreeMap::new(),
         })
     }
 
@@ -8360,16 +8542,27 @@ impl ScopedObservationProjectionSink {
     }
 
     fn commit(&mut self, mutation: ScopedProjectionMutation) {
-        match mutation {
-            ScopedProjectionMutation::None => {}
-            ScopedProjectionMutation::UpsertUsageV2(staged) => self.usage_v2.extend(staged),
-            ScopedProjectionMutation::RetractUsageV2(fact_ids) => {
-                for fact_id in fact_ids {
-                    let removed = self.usage_v2.remove(&fact_id);
-                    debug_assert!(removed.is_some(), "prepared usage-v2 retraction must exist");
-                }
-            }
+        for fact_id in mutation.usage_retractions {
+            let removed = self.usage_v2.remove(&fact_id);
+            debug_assert!(removed.is_some(), "prepared usage-v2 retraction must exist");
         }
+        for actor_run in mutation.actor_retractions {
+            let removed = self.actor_runs.remove(&actor_run);
+            debug_assert!(
+                removed.is_some(),
+                "prepared actor-run retraction must exist"
+            );
+        }
+        for affiliation in mutation.affiliation_retractions {
+            let removed = self.actor_affiliations.remove(&affiliation);
+            debug_assert!(
+                removed.is_some(),
+                "prepared actor-affiliation retraction must exist"
+            );
+        }
+        self.usage_v2.extend(mutation.usage_upserts);
+        self.actor_runs.extend(mutation.actor_upserts);
+        self.actor_affiliations.extend(mutation.affiliation_upserts);
     }
 
     fn validate_replacement_object_rollback(
@@ -8387,6 +8580,10 @@ impl ScopedObservationProjectionSink {
 
     fn rollback_replacement_object_prevalidated(&mut self, object_token: u64) {
         self.usage_v2
+            .retain(|_, state| state.object_token != object_token);
+        self.actor_runs
+            .retain(|_, state| state.object_token != object_token);
+        self.actor_affiliations
             .retain(|_, state| state.object_token != object_token);
     }
 
@@ -8409,6 +8606,19 @@ impl ScopedObservationProjectionSink {
             .map(|state| state.semantic.semantic_revision_ref)
     }
 
+    fn actor_context_index(
+        &self,
+        staged_actors: &BTreeMap<CanonicalEntityKey, ScopedActorRunProjectionState>,
+        staged_affiliations: &BTreeMap<CanonicalEntityKey, ScopedActorAffiliationProjectionState>,
+    ) -> Result<ScopedActorContextIndex, ScopedProjectionError> {
+        scoped_actor_context_index(
+            &self.actor_runs,
+            staged_actors,
+            &self.actor_affiliations,
+            staged_affiliations,
+        )
+    }
+
     pub fn usage_v2_replacement_snapshot(
         &self,
         phase: ScopedAppendDeliveryPhase,
@@ -8419,21 +8629,31 @@ impl ScopedObservationProjectionSink {
         let entity_count = u64::try_from(self.usage_v2.len())
             .map_err(|_| ScopedProjectionError::ReplacementCapacityExhausted)?;
         let semantic_digest = usage_v2_replacement_digest(&self.usage_v2)?;
+        let actor_contexts = self.actor_context_index(&BTreeMap::new(), &BTreeMap::new())?;
         let events = self
             .usage_v2
             .values()
-            .map(|state| ScopedUsageV2Event {
-                event_id: usage_v2_event_id(ScopedUsageV2Operation::Upsert, &state.semantic, None),
-                semantic_revision_ref: state.semantic.semantic_revision_ref,
-                fact_id: state.semantic.fact_id,
-                operation: ScopedUsageV2Operation::Upsert,
-                phase,
-                observed_at: state.source.provenance.observed_at,
-                source: state.source.clone(),
-                retraction: None,
-                revision: state.revision.clone(),
+            .map(|state| {
+                let (actor, affiliations) = actor_contexts.for_usage(&state.revision)?;
+                Ok(ScopedUsageV2Event {
+                    event_id: usage_v2_event_id(
+                        ScopedUsageV2Operation::Upsert,
+                        &state.semantic,
+                        None,
+                    ),
+                    semantic_revision_ref: state.semantic.semantic_revision_ref,
+                    fact_id: state.semantic.fact_id,
+                    operation: ScopedUsageV2Operation::Upsert,
+                    phase,
+                    observed_at: state.source.provenance.observed_at,
+                    source: state.source.clone(),
+                    retraction: None,
+                    actor,
+                    affiliations,
+                    revision: state.revision.clone(),
+                })
             })
-            .collect();
+            .collect::<Result<Vec<_>, ScopedProjectionError>>()?;
         Ok(ScopedUsageV2ReplacementSnapshot {
             fact_family_contract_version: RUNTIME_USAGE_V2_FACT_FAMILY_CONTRACT_VERSION,
             replacement_digest_contract_version: SCOPED_REPLACEMENT_DIGEST_CONTRACT_VERSION,
@@ -8464,6 +8684,11 @@ impl ScopedObservationProjectionSink {
             ScopedUsageV2RetractionCause::Reset(reset),
             ScopedProjectionError::InvalidResetState,
         )?;
+        let (actor_retractions, affiliation_retractions) = self.prepare_actor_context_retractions(
+            object_token,
+            reset.old_generation,
+            ScopedProjectionError::InvalidResetState,
+        )?;
         let mut projected = Vec::with_capacity(retracted.len().saturating_add(1));
         projected.push(ScopedProjectedObservation::SourceReset {
             object_token,
@@ -8477,7 +8702,12 @@ impl ScopedObservationProjectionSink {
         projected.extend(retracted);
         Ok(ScopedProjectionPlan {
             projected,
-            mutation: ScopedProjectionMutation::RetractUsageV2(fact_ids),
+            mutation: ScopedProjectionMutation {
+                usage_retractions: fact_ids,
+                actor_retractions,
+                affiliation_retractions,
+                ..ScopedProjectionMutation::default()
+            },
         })
     }
 
@@ -8496,6 +8726,14 @@ impl ScopedObservationProjectionSink {
                     .usage_v2
                     .values()
                     .any(|state| state.object_token == object_token)
+                    || self
+                        .actor_runs
+                        .values()
+                        .any(|state| state.object_token == object_token)
+                    || self
+                        .actor_affiliations
+                        .values()
+                        .any(|state| state.object_token == object_token)
                 {
                     return Err(ScopedProjectionError::InvalidPresenceState);
                 }
@@ -8514,6 +8752,15 @@ impl ScopedObservationProjectionSink {
                     ScopedProjectionError::InvalidPresenceState,
                 )?,
         };
+        let (actor_retractions, affiliation_retractions) = match change {
+            ScopedAppendPresenceChange::Created { .. } => (Vec::new(), Vec::new()),
+            ScopedAppendPresenceChange::Deleted { generation } => self
+                .prepare_actor_context_retractions(
+                    object_token,
+                    generation,
+                    ScopedProjectionError::InvalidPresenceState,
+                )?,
+        };
         let mut projected = Vec::with_capacity(retracted.len().saturating_add(1));
         projected.push(ScopedProjectedObservation::SourcePresence {
             object_token,
@@ -8527,12 +8774,49 @@ impl ScopedObservationProjectionSink {
         projected.extend(retracted);
         Ok(ScopedProjectionPlan {
             projected,
-            mutation: if fact_ids.is_empty() {
-                ScopedProjectionMutation::None
-            } else {
-                ScopedProjectionMutation::RetractUsageV2(fact_ids)
+            mutation: ScopedProjectionMutation {
+                usage_retractions: fact_ids,
+                actor_retractions,
+                affiliation_retractions,
+                ..ScopedProjectionMutation::default()
             },
         })
+    }
+
+    fn prepare_actor_context_retractions(
+        &self,
+        object_token: u64,
+        generation: u64,
+        mismatch_error: ScopedProjectionError,
+    ) -> Result<(Vec<CanonicalEntityKey>, Vec<CanonicalEntityKey>), ScopedProjectionError> {
+        if self
+            .actor_runs
+            .values()
+            .any(|state| state.object_token == object_token && state.generation != generation)
+            || self
+                .actor_affiliations
+                .values()
+                .any(|state| state.object_token == object_token && state.generation != generation)
+        {
+            return Err(mismatch_error);
+        }
+        let actors = self
+            .actor_runs
+            .iter()
+            .filter_map(|(actor_run, state)| {
+                (state.object_token == object_token && state.generation == generation)
+                    .then_some(*actor_run)
+            })
+            .collect();
+        let affiliations = self
+            .actor_affiliations
+            .iter()
+            .filter_map(|(affiliation, state)| {
+                (state.object_token == object_token && state.generation == generation)
+                    .then_some(*affiliation)
+            })
+            .collect();
+        Ok((actors, affiliations))
     }
 
     fn prepare_usage_v2_retractions(
@@ -8559,12 +8843,14 @@ impl ScopedObservationProjectionSink {
                     .then_some(*fact_id)
             })
             .collect::<Vec<_>>();
+        let actor_contexts = self.actor_context_index(&BTreeMap::new(), &BTreeMap::new())?;
         let mut projected = Vec::with_capacity(fact_ids.len());
         for fact_id in &fact_ids {
             let state = self
                 .usage_v2
                 .get(fact_id)
                 .expect("retraction keys came from the same reducer map");
+            let (actor, affiliations) = actor_contexts.for_usage(&state.revision)?;
             projected.push(ScopedProjectedObservation::UsageV2 {
                 lane_ordinal: delivery.lane_ordinal,
                 event: Box::new(ScopedUsageV2Event {
@@ -8580,6 +8866,8 @@ impl ScopedObservationProjectionSink {
                     observed_at: delivery.observed_at,
                     source: state.source.clone(),
                     retraction: Some(cause),
+                    actor,
+                    affiliations,
                     revision: state.revision.clone(),
                 }),
             });
@@ -8601,18 +8889,120 @@ impl ScopedObservationProjectionSink {
         else {
             return Ok(ScopedProjectionPlan {
                 projected: Vec::new(),
-                mutation: ScopedProjectionMutation::None,
+                mutation: ScopedProjectionMutation::default(),
             });
         };
 
-        let mut staged = BTreeMap::<CanonicalFactId, ScopedUsageV2ProjectionState>::new();
+        let mut mutation = ScopedProjectionMutation::default();
+        for envelope in batch.facts() {
+            match &envelope.value {
+                Fact::ActorRunRevision(revision) => {
+                    let state =
+                        scoped_actor_run_state(object_token, source, evidence, envelope, revision)?;
+                    let key = state.revision.actor_run;
+                    let current = mutation
+                        .actor_upserts
+                        .get(&key)
+                        .or_else(|| self.actor_runs.get(&key));
+                    if let Some(current) = current {
+                        validate_actor_revision_progress(
+                            (
+                                current.object_token,
+                                current.generation,
+                                &current.semantic,
+                                &current.source,
+                                &current.revision,
+                            ),
+                            (
+                                state.object_token,
+                                state.generation,
+                                &state.semantic,
+                                &state.source,
+                                &state.revision,
+                            ),
+                        )?;
+                        if current.semantic.fact_revision_id == state.semantic.fact_revision_id {
+                            continue;
+                        }
+                    }
+                    mutation.actor_upserts.insert(key, state);
+                }
+                Fact::ActorAffiliationRevision(revision) => {
+                    let state = scoped_actor_affiliation_state(
+                        object_token,
+                        source,
+                        evidence,
+                        envelope,
+                        revision,
+                    )?;
+                    let key = state.revision.affiliation;
+                    let current = mutation
+                        .affiliation_upserts
+                        .get(&key)
+                        .or_else(|| self.actor_affiliations.get(&key));
+                    if let Some(current) = current {
+                        validate_actor_revision_progress(
+                            (
+                                current.object_token,
+                                current.generation,
+                                &current.semantic,
+                                &current.source,
+                                &current.revision,
+                            ),
+                            (
+                                state.object_token,
+                                state.generation,
+                                &state.semantic,
+                                &state.source,
+                                &state.revision,
+                            ),
+                        )?;
+                        if current.semantic.fact_revision_id == state.semantic.fact_revision_id {
+                            continue;
+                        }
+                    }
+                    mutation.affiliation_upserts.insert(key, state);
+                }
+                _ => {}
+            }
+        }
+        let new_actors = mutation
+            .actor_upserts
+            .keys()
+            .filter(|key| !self.actor_runs.contains_key(key))
+            .count();
+        if self
+            .actor_runs
+            .len()
+            .checked_add(new_actors)
+            .is_none_or(|count| count > self.limits.max_usage_v2_entities)
+        {
+            return Err(ScopedProjectionError::ActorRunCapacityFull);
+        }
+        let new_affiliations = mutation
+            .affiliation_upserts
+            .keys()
+            .filter(|key| !self.actor_affiliations.contains_key(key))
+            .count();
+        if self
+            .actor_affiliations
+            .len()
+            .checked_add(new_affiliations)
+            .is_none_or(|count| count > self.limits.max_usage_v2_entities)
+        {
+            return Err(ScopedProjectionError::ActorAffiliationCapacityFull);
+        }
+
+        let actor_contexts =
+            self.actor_context_index(&mutation.actor_upserts, &mutation.affiliation_upserts)?;
         let mut projected = Vec::new();
         for envelope in batch.facts() {
             let Fact::UsageRevisionV2(revision) = &envelope.value else {
                 continue;
             };
             let state = scoped_usage_v2_state(object_token, source, evidence, envelope, revision)?;
-            let current = staged
+            let current = mutation
+                .usage_upserts
                 .get(&state.semantic.fact_id)
                 .or_else(|| self.usage_v2.get(&state.semantic.fact_id));
             if let Some(current) = current {
@@ -8633,6 +9023,7 @@ impl ScopedObservationProjectionSink {
                     return Err(ScopedProjectionError::StaleRevision);
                 }
             }
+            let (actor, affiliations) = actor_contexts.for_usage(&state.revision)?;
             let event = ScopedUsageV2Event {
                 event_id: usage_v2_event_id(ScopedUsageV2Operation::Upsert, &state.semantic, None),
                 semantic_revision_ref: state.semantic.semantic_revision_ref,
@@ -8642,16 +9033,19 @@ impl ScopedObservationProjectionSink {
                 observed_at: state.source.provenance.observed_at,
                 source: state.source.clone(),
                 retraction: None,
+                actor,
+                affiliations,
                 revision: state.revision.clone(),
             };
             projected.push(ScopedProjectedObservation::UsageV2 {
                 lane_ordinal,
                 event: Box::new(event),
             });
-            staged.insert(state.semantic.fact_id, state);
+            mutation.usage_upserts.insert(state.semantic.fact_id, state);
         }
 
-        let new_entities = staged
+        let new_entities = mutation
+            .usage_upserts
             .keys()
             .filter(|fact_id| !self.usage_v2.contains_key(fact_id))
             .count();
@@ -8665,11 +9059,7 @@ impl ScopedObservationProjectionSink {
         }
         Ok(ScopedProjectionPlan {
             projected,
-            mutation: if staged.is_empty() {
-                ScopedProjectionMutation::None
-            } else {
-                ScopedProjectionMutation::UpsertUsageV2(staged)
-            },
+            mutation,
         })
     }
 }
@@ -9207,6 +9597,280 @@ fn scoped_usage_v2_state(
     })
 }
 
+fn scoped_actor_run_state(
+    object_token: u64,
+    source: &ScopedSourceObjectIdentity,
+    evidence: &ScopedDecodedRecordEvidence,
+    envelope: &FactEnvelope,
+    revision: &ActorRunRevisionFact,
+) -> Result<ScopedActorRunProjectionState, ScopedProjectionError> {
+    revision
+        .validate()
+        .map_err(|_| ScopedProjectionError::InvalidActorContext)?;
+    let (semantic, source) = scoped_context_semantic_source(source, evidence, envelope)?;
+    Ok(ScopedActorRunProjectionState {
+        object_token,
+        generation: evidence.generation,
+        semantic,
+        source,
+        revision: revision.clone(),
+    })
+}
+
+fn scoped_actor_affiliation_state(
+    object_token: u64,
+    source: &ScopedSourceObjectIdentity,
+    evidence: &ScopedDecodedRecordEvidence,
+    envelope: &FactEnvelope,
+    revision: &ActorAffiliationRevisionFact,
+) -> Result<ScopedActorAffiliationProjectionState, ScopedProjectionError> {
+    revision
+        .validate()
+        .map_err(|_| ScopedProjectionError::InvalidActorContext)?;
+    let (semantic, source) = scoped_context_semantic_source(source, evidence, envelope)?;
+    Ok(ScopedActorAffiliationProjectionState {
+        object_token,
+        generation: evidence.generation,
+        semantic,
+        source,
+        revision: revision.clone(),
+    })
+}
+
+fn scoped_context_semantic_source(
+    source: &ScopedSourceObjectIdentity,
+    evidence: &ScopedDecodedRecordEvidence,
+    envelope: &FactEnvelope,
+) -> Result<(FactSemanticRevision, ScopedUsageV2Source), ScopedProjectionError> {
+    if !fact_provenance_matches_evidence(&envelope.provenance, evidence) {
+        return Err(ScopedProjectionError::ProvenanceMismatch);
+    }
+    let semantic = envelope
+        .semantic_revision
+        .ok_or(ScopedProjectionError::MissingSemanticRevision)?;
+    if semantic.semantic_revision_ref.fact_revision_id != semantic.fact_revision_id {
+        return Err(ScopedProjectionError::InvalidSemanticRevision);
+    }
+    Ok((
+        semantic,
+        ScopedUsageV2Source {
+            object: source.clone(),
+            source_record_id: semantic.source_record_id,
+            provenance: envelope.provenance.clone(),
+            cursor_start: evidence.cursor_start.clone(),
+            cursor_end: evidence.cursor_end.clone(),
+            ordinal_in_batch: evidence.ordinal_in_batch,
+            source_timestamp_hint: evidence.source_timestamp_hint,
+            media_type: evidence.media_type.clone(),
+            state: evidence.state,
+            payload_hash: evidence.payload_hash,
+        },
+    ))
+}
+
+type ScopedActorRevisionProgress<'a, T> = (
+    u64,
+    u64,
+    &'a FactSemanticRevision,
+    &'a ScopedUsageV2Source,
+    &'a T,
+);
+
+fn validate_actor_revision_progress<T: PartialEq>(
+    current: ScopedActorRevisionProgress<'_, T>,
+    next: ScopedActorRevisionProgress<'_, T>,
+) -> Result<(), ScopedProjectionError> {
+    let (
+        current_object_token,
+        current_generation,
+        current_semantic,
+        current_source,
+        current_revision,
+    ) = current;
+    let (next_object_token, next_generation, next_semantic, next_source, next_revision) = next;
+    if current_semantic.fact_id != next_semantic.fact_id
+        || current_object_token != next_object_token
+        || current_generation != next_generation
+        || current_source.object != next_source.object
+    {
+        return Err(ScopedProjectionError::ConflictingOwnership);
+    }
+    if current_semantic.fact_revision_id == next_semantic.fact_revision_id {
+        return if current_semantic == next_semantic && current_revision == next_revision {
+            Ok(())
+        } else {
+            Err(ScopedProjectionError::InvalidSemanticRevision)
+        };
+    }
+    let old_cursor = current_source.cursor_end.append_offset_value();
+    let next_cursor = next_source.cursor_end.append_offset_value();
+    if old_cursor
+        .zip(next_cursor)
+        .is_none_or(|(old, next)| next <= old)
+    {
+        return Err(ScopedProjectionError::StaleRevision);
+    }
+    Ok(())
+}
+
+fn scoped_actor_context_index(
+    current_actors: &BTreeMap<CanonicalEntityKey, ScopedActorRunProjectionState>,
+    staged_actors: &BTreeMap<CanonicalEntityKey, ScopedActorRunProjectionState>,
+    current_affiliations: &BTreeMap<CanonicalEntityKey, ScopedActorAffiliationProjectionState>,
+    staged_affiliations: &BTreeMap<CanonicalEntityKey, ScopedActorAffiliationProjectionState>,
+) -> Result<ScopedActorContextIndex, ScopedProjectionError> {
+    let mut actors = BTreeMap::new();
+    let mut actor_fact_ids = BTreeSet::new();
+    for (key, state) in current_actors
+        .iter()
+        .filter(|(key, _)| !staged_actors.contains_key(key))
+        .chain(staged_actors)
+    {
+        if *key != state.revision.actor_run {
+            return Err(ScopedProjectionError::InvalidActorContext);
+        }
+        if !actor_fact_ids.insert(state.semantic.fact_id) {
+            return Err(ScopedProjectionError::InvalidActorContext);
+        }
+        actors.insert(
+            *key,
+            scoped_actor_run_ref(&state.revision, state.revision.session)?,
+        );
+    }
+
+    let mut affiliation_fact_ids = BTreeSet::new();
+    let mut by_actor = BTreeMap::<
+        CanonicalEntityKey,
+        Vec<(CanonicalEntityKey, &ScopedActorAffiliationProjectionState)>,
+    >::new();
+    for (key, state) in current_affiliations
+        .iter()
+        .filter(|(key, _)| !staged_affiliations.contains_key(key))
+        .chain(staged_affiliations)
+    {
+        if *key != state.revision.affiliation {
+            return Err(ScopedProjectionError::InvalidActorContext);
+        }
+        if !affiliation_fact_ids.insert(state.semantic.fact_id) {
+            return Err(ScopedProjectionError::InvalidActorContext);
+        }
+        by_actor
+            .entry(state.revision.actor_run)
+            .or_default()
+            .push((*key, state));
+    }
+
+    let mut affiliations = BTreeMap::new();
+    for (actor_run, mut revisions) in by_actor {
+        revisions.sort_by_key(|(key, _)| *key);
+        if revisions.len() > SCOPED_ACTOR_AFFILIATION_CONTEXT_MAX_REVISIONS {
+            return Err(ScopedProjectionError::ActorAffiliationCapacityFull);
+        }
+        let session = revisions
+            .first()
+            .map(|(_, state)| state.revision.session)
+            .ok_or(ScopedProjectionError::InvalidActorContext)?;
+        if actors
+            .get(&actor_run)
+            .is_some_and(|actor| actor.root_session_key != session)
+        {
+            return Err(ScopedProjectionError::InvalidActorContext);
+        }
+        let context = scoped_actor_affiliation_context(actor_run, session, &revisions)?;
+        affiliations.insert(actor_run, (session, context));
+    }
+    Ok(ScopedActorContextIndex {
+        actors,
+        affiliations,
+    })
+}
+
+fn scoped_actor_run_ref(
+    revision: &ActorRunRevisionFact,
+    expected_session: CanonicalEntityKey,
+) -> Result<ScopedActorRunRef, ScopedProjectionError> {
+    if revision.session != expected_session {
+        return Err(ScopedProjectionError::InvalidActorContext);
+    }
+    Ok(ScopedActorRunRef {
+        root_session_key: revision.session,
+        run_key: revision.actor_run,
+        role: revision.role,
+        parent_run_key: revision.parent_actor_run,
+        native_session_id: revision.native_session_id.clone(),
+        native_actor_id: revision.native_actor_id.clone(),
+        native_actor_type: revision.native_actor_type.clone(),
+    })
+}
+
+fn scoped_actor_affiliation_context(
+    actor_run: CanonicalEntityKey,
+    session: CanonicalEntityKey,
+    revisions: &[(CanonicalEntityKey, &ScopedActorAffiliationProjectionState)],
+) -> Result<ScopedActorAffiliationContext, ScopedProjectionError> {
+    let mut derived_from_revision_refs = Vec::with_capacity(revisions.len());
+    let mut team = None;
+    let mut workflow = None;
+    let mut team_ambiguous = false;
+    let mut workflow_ambiguous = false;
+    for (_, state) in revisions {
+        if state.revision.actor_run != actor_run || state.revision.session != session {
+            return Err(ScopedProjectionError::InvalidActorContext);
+        }
+        derived_from_revision_refs.push(state.semantic.semantic_revision_ref);
+        match (state.revision.dimension, state.revision.state) {
+            (ActorAffiliationDimension::Team, ActorAffiliationState::Present) => {
+                if team.replace(&state.revision).is_some() {
+                    team_ambiguous = true;
+                }
+            }
+            (ActorAffiliationDimension::Workflow, ActorAffiliationState::Present) => {
+                if workflow.replace(&state.revision).is_some() {
+                    workflow_ambiguous = true;
+                }
+            }
+            (ActorAffiliationDimension::Team, ActorAffiliationState::Unknown) => {
+                team_ambiguous = true;
+            }
+            (ActorAffiliationDimension::Workflow, ActorAffiliationState::Unknown) => {
+                workflow_ambiguous = true;
+            }
+            (_, ActorAffiliationState::Removed) => {}
+        }
+    }
+    derived_from_revision_refs.sort_by_key(|reference| reference.fact_revision_id);
+    if derived_from_revision_refs
+        .windows(2)
+        .any(|references| references[0].fact_revision_id == references[1].fact_revision_id)
+    {
+        return Err(ScopedProjectionError::InvalidActorContext);
+    }
+    if team_ambiguous {
+        team = None;
+    }
+    if workflow_ambiguous {
+        workflow = None;
+    }
+    Ok(ScopedActorAffiliationContext {
+        actor_run_key: actor_run,
+        team_key: team.map(|revision| revision.target),
+        native_team_id: team.and_then(|revision| revision.native_target_id.clone()),
+        team_name: None,
+        member_key: team.and_then(|revision| revision.member),
+        workflow_key: workflow.map(|revision| revision.target),
+        native_workflow_id: workflow.and_then(|revision| revision.native_target_id.clone()),
+        completeness: if derived_from_revision_refs.is_empty()
+            || team_ambiguous
+            || workflow_ambiguous
+        {
+            ContractCompleteness::Unknown
+        } else {
+            ContractCompleteness::Partial
+        },
+        derived_from_revision_refs,
+    })
+}
+
 fn fact_provenance_matches_evidence(
     provenance: &FactProvenance,
     evidence: &ScopedDecodedRecordEvidence,
@@ -9576,7 +10240,9 @@ fn usage_v2_replacement_digest(
     // BTreeMap iteration supplies canonical fact-ID order. The digest retains
     // topology-independent occurrence provenance while deliberately excluding
     // attachment phase, observer sequence, local numeric IDs, admission batch
-    // ordinal, and observation time.
+    // ordinal, and observation time. Auxiliary actor/affiliation context is
+    // also excluded: it is a conservative current overlay, not a selected
+    // usage-v2 semantic contribution or a replacement-integrity claim.
     for state in states.values() {
         let revision_key = state
             .revision
@@ -14707,6 +15373,7 @@ mod projection_tests {
     };
     use crate::source::RecordOrigin;
 
+    use super::usage_wire::ScopedUsageEnvelopeWire;
     use super::*;
 
     const OBJECT_TOKEN: u64 = 41;
@@ -14863,6 +15530,135 @@ mod projection_tests {
                 Fact::UsageRevisionV2(usage),
             )
             .unwrap();
+        batch
+    }
+
+    fn actor_run_fact_for(
+        batch: &FactBatch,
+        native_session: &str,
+        native_run: &str,
+    ) -> ActorRunRevisionFact {
+        ActorRunRevisionFact {
+            actor_run: batch
+                .canonical_entity_key("actor-run", native_run.as_bytes())
+                .unwrap(),
+            session: batch
+                .canonical_entity_key("session", native_session.as_bytes())
+                .unwrap(),
+            role: ActorRunRole::Child,
+            parent_actor_run: Some(
+                batch
+                    .canonical_root_actor_run_key(native_session.as_bytes(), None)
+                    .unwrap(),
+            ),
+            native_session_id: Some(native_session.to_string()),
+            native_actor_id: Some(native_run.to_string()),
+            native_actor_type: Some("subagent".to_string()),
+        }
+    }
+
+    fn actor_run_fact(batch: &FactBatch) -> ActorRunRevisionFact {
+        actor_run_fact_for(batch, "native-session", "native-run")
+    }
+
+    fn affiliation_fact_for(
+        batch: &FactBatch,
+        native_session: &str,
+        native_run: &str,
+        dimension: ActorAffiliationDimension,
+        native_target: &str,
+        state: ActorAffiliationState,
+    ) -> ActorAffiliationRevisionFact {
+        let native_dimension = match dimension {
+            ActorAffiliationDimension::Team => "team",
+            ActorAffiliationDimension::Workflow => "workflow",
+        };
+        ActorAffiliationRevisionFact {
+            affiliation: batch
+                .canonical_entity_key(
+                    "actor-affiliation",
+                    format!("{native_run}:{native_dimension}:{native_target}").as_bytes(),
+                )
+                .unwrap(),
+            actor_run: batch
+                .canonical_entity_key("actor-run", native_run.as_bytes())
+                .unwrap(),
+            session: batch
+                .canonical_entity_key("session", native_session.as_bytes())
+                .unwrap(),
+            dimension,
+            target: batch
+                .canonical_entity_key(native_dimension, native_target.as_bytes())
+                .unwrap(),
+            member: (dimension == ActorAffiliationDimension::Team).then(|| {
+                batch
+                    .canonical_entity_key(
+                        "team-member",
+                        format!("{native_target}:{native_run}").as_bytes(),
+                    )
+                    .unwrap()
+            }),
+            native_target_id: Some(native_target.to_string()),
+            native_member_id: (dimension == ActorAffiliationDimension::Team)
+                .then(|| native_run.to_string()),
+            state,
+            effective_at: None,
+        }
+    }
+
+    fn affiliation_fact(
+        batch: &FactBatch,
+        dimension: ActorAffiliationDimension,
+    ) -> ActorAffiliationRevisionFact {
+        let native_target = match dimension {
+            ActorAffiliationDimension::Team => "team-alpha",
+            ActorAffiliationDimension::Workflow => "workflow-main",
+        };
+        affiliation_fact_for(
+            batch,
+            "native-session",
+            "native-run",
+            dimension,
+            native_target,
+            ActorAffiliationState::Present,
+        )
+    }
+
+    fn contextual_usage_batch(
+        record: &SourceRecord,
+        usage: Option<(&str, u64)>,
+        include_actor: bool,
+        affiliations: &[ActorAffiliationDimension],
+    ) -> FactBatch {
+        let mut batch = FactBatch::new_with_semantic_context(8, 4, semantic_context()).unwrap();
+        if include_actor {
+            batch
+                .push_native(
+                    record,
+                    b"native-run",
+                    Fact::ActorRunRevision(actor_run_fact(&batch)),
+                )
+                .unwrap();
+        }
+        for dimension in affiliations {
+            let fact = affiliation_fact(&batch, *dimension);
+            let stable_key = *fact.affiliation.as_bytes();
+            batch
+                .push_native(record, &stable_key, Fact::ActorAffiliationRevision(fact))
+                .unwrap();
+        }
+        if let Some((response_key, input_tokens)) = usage {
+            let usage = usage_fact(&batch, response_key, input_tokens);
+            let revision_key = usage.semantic_revision_key().unwrap();
+            batch
+                .push_native_object_scoped_with_revision(
+                    record,
+                    response_key.as_bytes(),
+                    &revision_key,
+                    Fact::UsageRevisionV2(usage),
+                )
+                .unwrap();
+        }
         batch
     }
 
@@ -15371,6 +16167,421 @@ mod projection_tests {
         assert!(usage[0].semantic_revision_ref().is_some());
         assert_eq!(usage[0].phase(), ScopedAppendDeliveryPhase::Live);
         assert_eq!(usage[0].source(), &source);
+    }
+
+    #[test]
+    fn actor_and_affiliation_context_enriches_usage_without_redelivery() {
+        let mut projection = sink(8);
+        let first_record = record(3, 0, 10);
+        let first = only_usage_event(
+            projection
+                .project(&decoded_frame(
+                    1,
+                    ScopedAppendDeliveryPhase::Live,
+                    &first_record,
+                    contextual_usage_batch(&first_record, Some(("response-1", 10)), true, &[]),
+                ))
+                .unwrap(),
+        );
+        let actor = first.actor.as_ref().expect("actor declaration was reduced");
+        assert_eq!(actor.role, ActorRunRole::Child);
+        assert_eq!(
+            actor.parent_run_key,
+            Some(root_identity().root_actor_run_key)
+        );
+        assert_eq!(actor.native_actor_id.as_deref(), Some("native-run"));
+        assert_eq!(
+            first.affiliations.completeness,
+            ContractCompleteness::Unknown
+        );
+        let initial = projection
+            .usage_v2_replacement_snapshot(ScopedAppendDeliveryPhase::Correction)
+            .unwrap();
+
+        let affiliation_record = record(3, 10, 20);
+        let affiliation_events = projection
+            .project(&decoded_frame(
+                2,
+                ScopedAppendDeliveryPhase::Live,
+                &affiliation_record,
+                contextual_usage_batch(
+                    &affiliation_record,
+                    None,
+                    false,
+                    &[
+                        ActorAffiliationDimension::Team,
+                        ActorAffiliationDimension::Workflow,
+                    ],
+                ),
+            ))
+            .unwrap();
+        assert!(
+            affiliation_events.is_empty(),
+            "context revisions cannot redeliver unchanged usage"
+        );
+
+        let repeated_record = record(3, 20, 30);
+        assert!(projection
+            .project(&decoded_frame(
+                3,
+                ScopedAppendDeliveryPhase::Live,
+                &repeated_record,
+                contextual_usage_batch(&repeated_record, Some(("response-1", 10)), false, &[],),
+            ))
+            .unwrap()
+            .is_empty());
+
+        let replay = projection
+            .usage_v2_replacement_snapshot(ScopedAppendDeliveryPhase::Correction)
+            .unwrap();
+        assert_eq!(replay.semantic_digest, initial.semantic_digest);
+        assert_eq!(replay.events[0].event_id, first.event_id);
+        assert_eq!(
+            replay.events[0].affiliations.completeness,
+            ContractCompleteness::Partial
+        );
+        assert_eq!(
+            replay.events[0].affiliations.native_team_id.as_deref(),
+            Some("team-alpha")
+        );
+        assert_eq!(
+            replay.events[0].affiliations.native_workflow_id.as_deref(),
+            Some("workflow-main")
+        );
+        assert_eq!(
+            replay.events[0]
+                .affiliations
+                .derived_from_revision_refs
+                .len(),
+            2
+        );
+
+        let removal_record = record(3, 30, 40);
+        let mut removal_batch =
+            FactBatch::new_with_semantic_context(2, 1, semantic_context()).unwrap();
+        let removed_team = affiliation_fact_for(
+            &removal_batch,
+            "native-session",
+            "native-run",
+            ActorAffiliationDimension::Team,
+            "team-alpha",
+            ActorAffiliationState::Removed,
+        );
+        let stable_key = *removed_team.affiliation.as_bytes();
+        removal_batch
+            .push_native(
+                &removal_record,
+                &stable_key,
+                Fact::ActorAffiliationRevision(removed_team),
+            )
+            .unwrap();
+        assert!(projection
+            .project(&decoded_frame(
+                4,
+                ScopedAppendDeliveryPhase::Live,
+                &removal_record,
+                removal_batch,
+            ))
+            .unwrap()
+            .is_empty());
+        let regrouped = projection
+            .usage_v2_replacement_snapshot(ScopedAppendDeliveryPhase::Correction)
+            .unwrap();
+        assert_eq!(regrouped.semantic_digest, replay.semantic_digest);
+        assert_eq!(regrouped.events[0].event_id, replay.events[0].event_id);
+        assert_eq!(regrouped.events[0].affiliations.team_key, None);
+        assert_eq!(
+            regrouped.events[0]
+                .affiliations
+                .native_workflow_id
+                .as_deref(),
+            Some("workflow-main")
+        );
+
+        let next_record = record(3, 40, 50);
+        let next = only_usage_event(
+            projection
+                .project(&decoded_frame(
+                    5,
+                    ScopedAppendDeliveryPhase::Live,
+                    &next_record,
+                    contextual_usage_batch(&next_record, Some(("response-2", 20)), false, &[]),
+                ))
+                .unwrap(),
+        );
+        assert_eq!(next.affiliations, regrouped.events[0].affiliations);
+
+        let root = root_identity();
+        let selection = observation_contract_selection();
+        let mut delivery = delivery_lane(1, 1);
+        delivery
+            .offer(vec![ScopedProjectedObservation::UsageV2 {
+                lane_ordinal: 5,
+                event: Box::new(next),
+            }])
+            .unwrap();
+        let delivered = delivery.pop_next().unwrap();
+        let mapper = ScopedObservationEnvelopeMapper::new(root.clone(), selection);
+        let mut malformed_actor = delivered.clone();
+        let ScopedProjectedObservation::UsageV2 { event, .. } = &mut malformed_actor.event else {
+            panic!("expected usage-v2 event")
+        };
+        event.actor.as_mut().unwrap().parent_run_key = None;
+        assert_eq!(
+            mapper.map(malformed_actor),
+            Err(ScopedEnvelopeError::DeliveryMismatch)
+        );
+        let mut malformed_context = delivered.clone();
+        let ScopedProjectedObservation::UsageV2 { event, .. } = &mut malformed_context.event else {
+            panic!("expected usage-v2 event")
+        };
+        event.affiliations.derived_from_revision_refs.reverse();
+        assert_eq!(
+            mapper.map(malformed_context),
+            Err(ScopedEnvelopeError::DeliveryMismatch)
+        );
+        let envelope = mapper.map(delivered).unwrap();
+        assert_eq!(envelope.actor.parent_run_key, Some(root.root_actor_run_key));
+        assert_eq!(envelope.affiliations.native_team_id.as_deref(), None);
+        assert_eq!(
+            envelope.affiliations.native_workflow_id.as_deref(),
+            Some("workflow-main")
+        );
+        assert!(
+            ScopedUsageEnvelopeWire::from_scoped(&envelope).is_err(),
+            "the pre-existing portable usage contract must not silently expose auxiliary context"
+        );
+    }
+
+    #[test]
+    fn affiliation_ambiguity_is_dimension_local_and_canonical() {
+        let mut projection = sink(8);
+        let usage_record = record(3, 0, 10);
+        only_usage_event(
+            projection
+                .project(&decoded_frame(
+                    1,
+                    ScopedAppendDeliveryPhase::Live,
+                    &usage_record,
+                    contextual_usage_batch(&usage_record, Some(("response-1", 10)), true, &[]),
+                ))
+                .unwrap(),
+        );
+
+        let affiliation_record = record(3, 10, 20);
+        let mut batch = FactBatch::new_with_semantic_context(8, 4, semantic_context()).unwrap();
+        for fact in [
+            affiliation_fact_for(
+                &batch,
+                "native-session",
+                "native-run",
+                ActorAffiliationDimension::Team,
+                "team-alpha",
+                ActorAffiliationState::Present,
+            ),
+            affiliation_fact_for(
+                &batch,
+                "native-session",
+                "native-run",
+                ActorAffiliationDimension::Team,
+                "team-beta",
+                ActorAffiliationState::Present,
+            ),
+            affiliation_fact_for(
+                &batch,
+                "native-session",
+                "native-run",
+                ActorAffiliationDimension::Workflow,
+                "workflow-main",
+                ActorAffiliationState::Present,
+            ),
+        ] {
+            let stable_key = *fact.affiliation.as_bytes();
+            batch
+                .push_native(
+                    &affiliation_record,
+                    &stable_key,
+                    Fact::ActorAffiliationRevision(fact),
+                )
+                .unwrap();
+        }
+        assert!(projection
+            .project(&decoded_frame(
+                2,
+                ScopedAppendDeliveryPhase::Live,
+                &affiliation_record,
+                batch,
+            ))
+            .unwrap()
+            .is_empty());
+
+        let snapshot = projection
+            .usage_v2_replacement_snapshot(ScopedAppendDeliveryPhase::Correction)
+            .unwrap();
+        let context = &snapshot.events[0].affiliations;
+        assert_eq!(context.completeness, ContractCompleteness::Unknown);
+        assert_eq!(context.team_key, None);
+        assert_eq!(context.native_team_id, None);
+        assert_eq!(context.member_key, None);
+        assert!(context.workflow_key.is_some());
+        assert_eq!(context.native_workflow_id.as_deref(), Some("workflow-main"));
+        assert_eq!(context.derived_from_revision_refs.len(), 3);
+        assert!(context
+            .derived_from_revision_refs
+            .windows(2)
+            .all(|refs| refs[0].fact_revision_id < refs[1].fact_revision_id));
+    }
+
+    #[test]
+    fn actor_context_mismatch_and_capacity_fail_atomically() {
+        let mismatched_record = record(3, 0, 10);
+        let mut mismatched_batch =
+            FactBatch::new_with_semantic_context(8, 4, semantic_context()).unwrap();
+        mismatched_batch
+            .push_native(
+                &mismatched_record,
+                b"native-run",
+                Fact::ActorRunRevision(actor_run_fact_for(
+                    &mismatched_batch,
+                    "foreign-session",
+                    "native-run",
+                )),
+            )
+            .unwrap();
+        let usage = usage_fact(&mismatched_batch, "response-1", 10);
+        let revision_key = usage.semantic_revision_key().unwrap();
+        mismatched_batch
+            .push_native_object_scoped_with_revision(
+                &mismatched_record,
+                b"response-1",
+                &revision_key,
+                Fact::UsageRevisionV2(usage),
+            )
+            .unwrap();
+        let mut mismatched = sink(8);
+        assert_eq!(
+            mismatched.project(&decoded_frame(
+                1,
+                ScopedAppendDeliveryPhase::Live,
+                &mismatched_record,
+                mismatched_batch,
+            )),
+            Err(ScopedProjectionError::InvalidActorContext)
+        );
+        assert!(mismatched.usage_v2.is_empty());
+        assert!(mismatched.actor_runs.is_empty());
+        assert!(mismatched.actor_affiliations.is_empty());
+
+        let mut bounded = sink(1);
+        let first_record = record(3, 0, 10);
+        let first = only_usage_event(
+            bounded
+                .project(&decoded_frame(
+                    1,
+                    ScopedAppendDeliveryPhase::Live,
+                    &first_record,
+                    contextual_usage_batch(
+                        &first_record,
+                        Some(("response-1", 10)),
+                        true,
+                        &[ActorAffiliationDimension::Team],
+                    ),
+                ))
+                .unwrap(),
+        );
+
+        let second_actor_record = record(3, 10, 20);
+        let mut second_actor_batch =
+            FactBatch::new_with_semantic_context(2, 1, semantic_context()).unwrap();
+        second_actor_batch
+            .push_native(
+                &second_actor_record,
+                b"native-run-2",
+                Fact::ActorRunRevision(actor_run_fact_for(
+                    &second_actor_batch,
+                    "native-session",
+                    "native-run-2",
+                )),
+            )
+            .unwrap();
+        assert_eq!(
+            bounded.project(&decoded_frame(
+                2,
+                ScopedAppendDeliveryPhase::Live,
+                &second_actor_record,
+                second_actor_batch,
+            )),
+            Err(ScopedProjectionError::ActorRunCapacityFull)
+        );
+
+        let second_affiliation_record = record(3, 20, 30);
+        let mut second_affiliation_batch =
+            FactBatch::new_with_semantic_context(2, 1, semantic_context()).unwrap();
+        let workflow = affiliation_fact(
+            &second_affiliation_batch,
+            ActorAffiliationDimension::Workflow,
+        );
+        let stable_key = *workflow.affiliation.as_bytes();
+        second_affiliation_batch
+            .push_native(
+                &second_affiliation_record,
+                &stable_key,
+                Fact::ActorAffiliationRevision(workflow),
+            )
+            .unwrap();
+        assert_eq!(
+            bounded.project(&decoded_frame(
+                3,
+                ScopedAppendDeliveryPhase::Live,
+                &second_affiliation_record,
+                second_affiliation_batch,
+            )),
+            Err(ScopedProjectionError::ActorAffiliationCapacityFull)
+        );
+        assert_eq!(bounded.usage_v2.len(), 1);
+        assert_eq!(bounded.actor_runs.len(), 1);
+        assert_eq!(bounded.actor_affiliations.len(), 1);
+        assert_eq!(
+            bounded.usage_v2_revision(&first.fact_id),
+            Some(first.semantic_revision_ref)
+        );
+    }
+
+    #[test]
+    fn actor_context_exact_repeat_cannot_change_object_owner() {
+        let record = record(3, 0, 10);
+        let actor_batch = || {
+            let mut batch = FactBatch::new_with_semantic_context(2, 1, semantic_context()).unwrap();
+            let actor = actor_run_fact(&batch);
+            batch
+                .push_native(&record, b"native-run", Fact::ActorRunRevision(actor))
+                .unwrap();
+            batch
+        };
+        let frame = |object_token, batch| ScopedQueuedObservationFrame::Decoded {
+            object_token,
+            source: source_identity(),
+            lane_ordinal: object_token,
+            phase: ScopedAppendDeliveryPhase::Live,
+            item: Box::new(ScopedDecodedAppendItem::Record {
+                evidence: Box::new(scoped_record_evidence(&record, RawRetentionPolicy::None)),
+                disposition: DecodeDisposition::Applied,
+                batch,
+                quarantined: false,
+            }),
+        };
+
+        let mut projection = sink(8);
+        assert!(projection
+            .project(&frame(OBJECT_TOKEN, actor_batch()))
+            .unwrap()
+            .is_empty());
+        assert_eq!(projection.actor_runs.len(), 1);
+        assert_eq!(
+            projection.project(&frame(OBJECT_TOKEN + 1, actor_batch())),
+            Err(ScopedProjectionError::ConflictingOwnership)
+        );
+        assert_eq!(projection.actor_runs.len(), 1);
     }
 
     #[test]
@@ -17225,7 +18436,12 @@ mod projection_tests {
                     RawRetentionPolicy::None,
                 )),
                 disposition: DecodeDisposition::Applied,
-                batch: usage_batch(&first_record, "failed-object", 10, None),
+                batch: contextual_usage_batch(
+                    &first_record,
+                    Some(("failed-object", 10)),
+                    true,
+                    &[ActorAffiliationDimension::Team],
+                ),
                 quarantined: false,
             }),
         };
@@ -17268,6 +18484,19 @@ mod projection_tests {
         assert_eq!(stage.usage_v2_entity_count(), 1);
         assert!(stage.projection.usage_v2_revision(&failed_fact).is_none());
         assert!(stage.projection.usage_v2_revision(&sibling_fact).is_some());
+        assert!(stage.projection.actor_runs.is_empty());
+        assert!(stage.projection.actor_affiliations.is_empty());
+        let sibling = stage
+            .projection
+            .usage_v2_replacement_snapshot(ScopedAppendDeliveryPhase::Correction)
+            .unwrap();
+        assert_eq!(sibling.events.len(), 1);
+        assert_eq!(sibling.events[0].fact_id, sibling_fact);
+        assert!(sibling.events[0].actor.is_none());
+        assert_eq!(
+            sibling.events[0].affiliations.completeness,
+            ContractCompleteness::Unknown
+        );
     }
 
     #[test]
@@ -18031,9 +19260,19 @@ mod projection_tests {
             1,
             ScopedAppendDeliveryPhase::Bootstrap,
             &old_record,
-            usage_batch(&old_record, "response-1", 10, None),
+            contextual_usage_batch(
+                &old_record,
+                Some(("response-1", 10)),
+                true,
+                &[ActorAffiliationDimension::Team],
+            ),
         );
         let old = only_usage_event(projection.project(&old_frame).unwrap());
+        assert!(old.actor.is_some());
+        assert_eq!(
+            old.affiliations.native_team_id.as_deref(),
+            Some("team-alpha")
+        );
 
         let reset = ScopedAppendReset {
             old_generation: 1,
@@ -18063,11 +19302,15 @@ mod projection_tests {
         assert_eq!(retracted.operation, ScopedUsageV2Operation::Retract);
         assert_eq!(retracted.semantic_revision_ref, old.semantic_revision_ref);
         assert_eq!(retracted.fact_id, old.fact_id);
+        assert_eq!(retracted.actor, old.actor);
+        assert_eq!(retracted.affiliations, old.affiliations);
         assert_eq!(
             retracted.retraction,
             Some(ScopedUsageV2RetractionCause::Reset(reset))
         );
         assert_eq!(projection.usage_v2_entity_count(), 0);
+        assert!(projection.actor_runs.is_empty());
+        assert!(projection.actor_affiliations.is_empty());
 
         let new_record = record(2, 0, 12);
         let new_frame = decoded_frame(
@@ -18079,6 +19322,8 @@ mod projection_tests {
         let new = only_usage_event(projection.project(&new_frame).unwrap());
         assert_eq!(new.operation, ScopedUsageV2Operation::Upsert);
         assert_eq!(new.phase, ScopedAppendDeliveryPhase::Correction);
+        assert!(new.actor.is_none());
+        assert_eq!(new.affiliations.completeness, ContractCompleteness::Unknown);
         assert_ne!(new.fact_id, old.fact_id);
         assert_eq!(projection.usage_v2_entity_count(), 1);
     }
@@ -18091,7 +19336,12 @@ mod projection_tests {
             1,
             ScopedAppendDeliveryPhase::Bootstrap,
             &old_record,
-            usage_batch(&old_record, "response-1", 10, None),
+            contextual_usage_batch(
+                &old_record,
+                Some(("response-1", 10)),
+                true,
+                &[ActorAffiliationDimension::Team],
+            ),
         );
         let old = only_usage_event(projection.project(&old_frame).unwrap());
 
@@ -18118,11 +19368,15 @@ mod projection_tests {
         };
         assert_eq!(retracted.operation, ScopedUsageV2Operation::Retract);
         assert_eq!(retracted.semantic_revision_ref, old.semantic_revision_ref);
+        assert_eq!(retracted.actor, old.actor);
+        assert_eq!(retracted.affiliations, old.affiliations);
         assert_eq!(
             retracted.retraction,
             Some(ScopedUsageV2RetractionCause::SourceDeleted { generation: 1 })
         );
         assert_eq!(projection.usage_v2_entity_count(), 0);
+        assert!(projection.actor_runs.is_empty());
+        assert!(projection.actor_affiliations.is_empty());
 
         let creation = ScopedAppendPresenceChange::Created { generation: 2 };
         let creation_source = source_identity();
