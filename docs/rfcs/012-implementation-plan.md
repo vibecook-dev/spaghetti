@@ -1936,7 +1936,19 @@ Current landing status (2026-08-18):
   the Rust fixture, while Rust remains the SHA-256 integrity boundary. The
   architecture ratchet requires both the Rust attachment seam and portable
   export. No native locator mediator, file read, public observer method, or
-  N-API transport lands in this slice; and
+  N-API transport lands in this slice;
+- the attachment-level artifact policy gate (`5532844`) now makes the
+  request's `artifact_access_policy` executable before any future native
+  mediation. The trusted Rust composition root selects either disabled access
+  or one immutable per-read byte ceiling plus a maximum disclosure class;
+  command minting permits only monotonic
+  `metadata_only` -> `hash_only` -> `inline` disclosure within that ceiling.
+  Invalid policy bounds fail after contract negotiation but before support or
+  source access, disabled attachments cannot mint even metadata requests, and
+  process-local commands retain and revalidate the exact attachment policy.
+  This is a caller ceiling rather than locator authority: it adds no artifact
+  relationship resolution, file read, public request field, N-API/SDK method,
+  or portable claim that access occurred; and
 - the architecture checker forbids store/query/N-API/concrete-adapter imports
   and premature native public export from the provisional composition and
   negotiation roots, while keeping the portable negotiation graph contract-only.
