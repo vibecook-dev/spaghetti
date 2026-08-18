@@ -3,9 +3,12 @@ use std::collections::BTreeMap;
 use serde::Serialize;
 
 use crate::adapter::{
-    AuthorizedCatalogAccess, ContractVersionSelection, Sha256Digest,
-    CONTRACT_VERSION_SELECTION_VERSION,
+    AuthorizedCatalogAccess, CanonicalSourceInstanceKey, CompatibilityClass,
+    ContractVersionSelection, CoverageAbsenceKind, CoverageDeclarationDigest, CoverageDomain,
+    CoverageObjectKey, CoveragePosition, CoveragePositionKind, CoverageProvenance,
+    CoverageSetCompleteness, CoverageStatus, Sha256Digest, CONTRACT_VERSION_SELECTION_VERSION,
 };
+use crate::catalog_contract::CatalogAccessPolicyDigest;
 
 use super::*;
 
@@ -42,6 +45,24 @@ fn catalog_access<'a>(
         Sha256Digest::of(support_release),
         Sha256Digest::of(source_declaration),
         selection,
+    )
+}
+
+fn catalog_access_with_compatibility<'a>(
+    adapter_id: &'a str,
+    support_release_id: &'a str,
+    source_declaration: &[u8],
+    support_release: &[u8],
+    selection: &'a ContractVersionSelection,
+    compatibility_class: CompatibilityClass,
+) -> AuthorizedCatalogAccess<'a> {
+    AuthorizedCatalogAccess::fixture_with_compatibility(
+        adapter_id,
+        support_release_id,
+        Sha256Digest::of(support_release),
+        Sha256Digest::of(source_declaration),
+        selection,
+        compatibility_class,
     )
 }
 
@@ -279,36 +300,40 @@ fn complete_authorities(
         .collect()
 }
 
+fn claude_members() -> Vec<CatalogMembershipEntry> {
+    vec![
+        CatalogMembershipEntry::new(
+            member("fixture-semantic-session-charlie"),
+            vec!["nested-parent-membership".to_owned()],
+            vec![],
+        )
+        .unwrap(),
+        CatalogMembershipEntry::new(
+            member("fixture-semantic-session-alpha"),
+            vec![
+                "top-level-transcript-membership".to_owned(),
+                "session-index-membership".to_owned(),
+            ],
+            vec![
+                "transcript-head-fallback".to_owned(),
+                "session-index-membership".to_owned(),
+            ],
+        )
+        .unwrap(),
+        CatalogMembershipEntry::new(
+            member("fixture-semantic-session-bravo"),
+            vec!["session-index-membership".to_owned()],
+            vec!["session-index-membership".to_owned()],
+        )
+        .unwrap(),
+    ]
+}
+
 fn claude_membership(composition: &CatalogSourceComposition) -> CatalogMembershipSnapshot {
     CatalogMembershipSnapshot::new(
         composition,
         complete_authorities(composition),
-        vec![
-            CatalogMembershipEntry::new(
-                member("fixture-semantic-session-charlie"),
-                vec!["nested-parent-membership".to_owned()],
-                vec![],
-            )
-            .unwrap(),
-            CatalogMembershipEntry::new(
-                member("fixture-semantic-session-alpha"),
-                vec![
-                    "top-level-transcript-membership".to_owned(),
-                    "session-index-membership".to_owned(),
-                ],
-                vec![
-                    "transcript-head-fallback".to_owned(),
-                    "session-index-membership".to_owned(),
-                ],
-            )
-            .unwrap(),
-            CatalogMembershipEntry::new(
-                member("fixture-semantic-session-bravo"),
-                vec!["session-index-membership".to_owned()],
-                vec!["session-index-membership".to_owned()],
-            )
-            .unwrap(),
-        ],
+        claude_members(),
     )
     .unwrap()
 }
@@ -339,6 +364,82 @@ fn grok_membership(composition: &CatalogSourceComposition) -> CatalogMembershipS
         .unwrap()],
     )
     .unwrap()
+}
+
+fn catalog_coverage_source_key(label: &[u8]) -> CanonicalSourceInstanceKey {
+    CanonicalSourceInstanceKey::derive(1, label).unwrap()
+}
+
+fn catalog_coverage_policy(label: &[u8]) -> CatalogAccessPolicyDigest {
+    CatalogAccessPolicyDigest::derive(1, label).unwrap()
+}
+
+fn component_completion_position(component_id: &str) -> CoveragePosition {
+    CoveragePosition::derive(
+        CoveragePositionKind::SnapshotRevision,
+        format!("{component_id}/opaque-completion-revision").as_bytes(),
+        None,
+    )
+    .unwrap()
+}
+
+fn complete_component_coverage(
+    executable: &CatalogExecutableComposition<'_, '_>,
+    source_instance_key: CanonicalSourceInstanceKey,
+    access_policy_digest: CatalogAccessPolicyDigest,
+) -> Vec<CatalogComponentCoverageCompletion> {
+    executable
+        .composition
+        .components
+        .iter()
+        .enumerate()
+        .map(|(index, component)| {
+            let position_kind = component.primitive.complete_coverage_semantics().0;
+            let position = CoveragePosition::derive(
+                position_kind,
+                format!("{}/opaque-position", component.component_id).as_bytes(),
+                (position_kind == CoveragePositionKind::AppendCursor).then_some((index + 1) as u64),
+            )
+            .unwrap();
+            let object = CatalogCompletedCoverageObject::point(
+                CoverageObjectKey::derive(
+                    &component.stream_id,
+                    format!("{}/opaque-object", component.component_id).as_bytes(),
+                )
+                .unwrap(),
+                (index + 1) as u64,
+                position,
+                CoverageProvenance::default(),
+            )
+            .unwrap();
+            CatalogComponentCoverageCompletion::new(
+                executable,
+                source_instance_key,
+                access_policy_digest,
+                &component.component_id,
+                component_completion_position(&component.component_id),
+                vec![object],
+            )
+            .unwrap()
+        })
+        .collect()
+}
+
+fn coverage_bound_membership(
+    composition: &CatalogSourceComposition,
+    members: Vec<CatalogMembershipEntry>,
+    completions: &[CatalogComponentCoverageCompletion],
+) -> CatalogMembershipSnapshot {
+    let mut authorities = complete_authorities(composition);
+    for authority in &mut authorities {
+        let completion = completions
+            .iter()
+            .find(|completion| completion.component_id == authority.component_id)
+            .unwrap();
+        authority.coverage_proof =
+            calculate_component_coverage_proof(composition, &members, completion);
+    }
+    CatalogMembershipSnapshot::new(composition, authorities, members).unwrap()
 }
 
 fn digest(label: &str) -> [u8; DIGEST_BYTES] {
@@ -686,6 +787,613 @@ fn only_an_exact_rust_authorization_can_execute_a_promoted_composition() {
         .is_err());
 
     assert!(CatalogPromotedBinding::from_digests([0; DIGEST_BYTES], [1; DIGEST_BYTES]).is_err());
+}
+
+#[test]
+fn executable_composition_assembles_canonical_complete_library_coverage() {
+    const ADAPTER_ID: &str = "fixture-agent";
+    const SUPPORT_RELEASE_ID: &str = "fixture-catalog-support-v1";
+    const SOURCE_DECLARATION_ID: &str = "fixture-catalog-sources-v1";
+    const SOURCE_DECLARATION: &[u8] = b"fixture/catalog-source-declaration/v1";
+    const SUPPORT_RELEASE: &[u8] = b"fixture/catalog-support-release/v1";
+
+    let selection = catalog_contract_selection();
+    let composition = CatalogSourceComposition::new_promoted(
+        ADAPTER_ID,
+        SUPPORT_RELEASE_ID,
+        SOURCE_DECLARATION_ID,
+        CatalogPromotedBinding::fixture(SOURCE_DECLARATION, SUPPORT_RELEASE),
+        claude_components(),
+    )
+    .unwrap();
+    let executable = composition
+        .authorize_execution(catalog_access(
+            ADAPTER_ID,
+            SUPPORT_RELEASE_ID,
+            SOURCE_DECLARATION,
+            SUPPORT_RELEASE,
+            &selection,
+        ))
+        .unwrap();
+    let source_instance_key = catalog_coverage_source_key(b"fixture-device/catalog-root");
+    let policy = catalog_coverage_policy(b"fixture-local-catalog-policy");
+    let completions = complete_component_coverage(&executable, source_instance_key, policy);
+    let membership = coverage_bound_membership(&composition, claude_members(), &completions);
+
+    let ordered_assembly = executable
+        .assemble_library_coverage(
+            source_instance_key,
+            policy,
+            &membership,
+            completions.clone(),
+        )
+        .unwrap();
+    let mut reversed = completions.clone();
+    reversed.reverse();
+    let assembly = executable
+        .assemble_library_coverage(source_instance_key, policy, &membership, reversed)
+        .unwrap();
+    assert_eq!(
+        ordered_assembly.component_completion_revision(),
+        assembly.component_completion_revision(),
+        "canonical component completion identity must ignore caller input order"
+    );
+    assert_eq!(ordered_assembly, assembly);
+    assert_eq!(
+        assembly.catalog_membership_revision(),
+        membership.membership_revision
+    );
+    assert_ne!(
+        assembly.catalog_membership_revision().as_bytes(),
+        assembly.source_coverage().membership_revision.as_bytes(),
+        "composition-conformance membership must never substitute for RFC 012A source membership"
+    );
+    assert_eq!(assembly.plan_source().adapter_id, ADAPTER_ID);
+    assert_eq!(
+        assembly.plan_source().support_release_id,
+        SUPPORT_RELEASE_ID
+    );
+    assert_eq!(
+        assembly.plan_source().catalog_declaration_digest,
+        CoverageDeclarationDigest::derive(Sha256Digest::of(SOURCE_DECLARATION).as_bytes()).unwrap()
+    );
+    assert_eq!(assembly.plan_source().access_policy_digest, policy);
+    assert_eq!(assembly.contract_selection(), &selection);
+    assert!(assembly
+        .plan_source()
+        .matches_coverage(assembly.source_coverage()));
+    assert_eq!(
+        assembly.source_coverage().coverage_domain,
+        CoverageDomain::ProjectionPack {
+            pack: "library.catalog".to_owned(),
+            version: 1,
+        }
+    );
+    assert_eq!(assembly.source_coverage().scope.root_entity_key, None);
+    assert_eq!(
+        assembly.source_coverage().completeness,
+        CoverageSetCompleteness::Complete
+    );
+    assert_eq!(assembly.source_coverage().points.len(), 4);
+    assert!(assembly
+        .source_coverage()
+        .explicit_absence_or_deletion
+        .is_empty());
+    assert!(assembly.source_coverage().explicit_errors.is_empty());
+    assert_eq!(
+        assembly
+            .source_coverage()
+            .points
+            .iter()
+            .filter(|point| matches!(&point.status, CoverageStatus::ExactSnapshot))
+            .count(),
+        3
+    );
+    assert_eq!(
+        assembly
+            .source_coverage()
+            .points
+            .iter()
+            .filter(|point| matches!(&point.status, CoverageStatus::CompleteThrough))
+            .count(),
+        1
+    );
+    let debug = format!("{completions:?}");
+    assert!(!debug.contains("opaque-object"));
+    assert!(!debug.contains("opaque-position"));
+    assert!(!debug.contains("opaque-completion-revision"));
+
+    let range_executable = composition
+        .authorize_execution(catalog_access_with_compatibility(
+            ADAPTER_ID,
+            SUPPORT_RELEASE_ID,
+            SOURCE_DECLARATION,
+            SUPPORT_RELEASE,
+            &selection,
+            CompatibilityClass::RangeSupported,
+        ))
+        .unwrap();
+    let range_assembly = range_executable
+        .assemble_library_coverage(source_instance_key, policy, &membership, completions)
+        .unwrap();
+    assert_eq!(assembly, range_assembly);
+}
+
+#[test]
+fn coverage_assembly_rejects_authority_selection_and_binding_drift() {
+    const ADAPTER_ID: &str = "fixture-agent";
+    const SUPPORT_RELEASE_ID: &str = "fixture-catalog-support-v1";
+    const SOURCE_DECLARATION_ID: &str = "fixture-catalog-sources-v1";
+    const SOURCE_DECLARATION: &[u8] = b"fixture/catalog-source-declaration/v1";
+    const SUPPORT_RELEASE: &[u8] = b"fixture/catalog-support-release/v1";
+
+    let selection = catalog_contract_selection();
+    let composition = CatalogSourceComposition::new_promoted(
+        ADAPTER_ID,
+        SUPPORT_RELEASE_ID,
+        SOURCE_DECLARATION_ID,
+        CatalogPromotedBinding::fixture(SOURCE_DECLARATION, SUPPORT_RELEASE),
+        claude_components(),
+    )
+    .unwrap();
+    let executable = composition
+        .authorize_execution(catalog_access(
+            ADAPTER_ID,
+            SUPPORT_RELEASE_ID,
+            SOURCE_DECLARATION,
+            SUPPORT_RELEASE,
+            &selection,
+        ))
+        .unwrap();
+    let source_instance_key = catalog_coverage_source_key(b"fixture-device/catalog-root");
+    let policy = catalog_coverage_policy(b"fixture-local-catalog-policy");
+    let completions = complete_component_coverage(&executable, source_instance_key, policy);
+    let membership = coverage_bound_membership(&composition, claude_members(), &completions);
+
+    assert!(executable
+        .assemble_library_coverage(
+            catalog_coverage_source_key(b"fixture-device/other-root"),
+            policy,
+            &membership,
+            completions.clone(),
+        )
+        .is_err());
+    assert!(executable
+        .assemble_library_coverage(
+            source_instance_key,
+            catalog_coverage_policy(b"other-policy"),
+            &membership,
+            completions.clone(),
+        )
+        .is_err());
+
+    let forward_access = catalog_access_with_compatibility(
+        ADAPTER_ID,
+        SUPPORT_RELEASE_ID,
+        SOURCE_DECLARATION,
+        SUPPORT_RELEASE,
+        &selection,
+        CompatibilityClass::RecognizedUnverified,
+    );
+    assert!(!format!("{forward_access:?}").contains("RecognizedUnverified"));
+    let forward = composition.authorize_execution(forward_access).unwrap();
+    assert!(forward
+        .assemble_library_coverage(
+            source_instance_key,
+            policy,
+            &membership,
+            completions.clone(),
+        )
+        .is_err());
+    assert!(CatalogComponentCoverageCompletion::new(
+        &forward,
+        source_instance_key,
+        policy,
+        "transcript-head-fallback",
+        component_completion_position("transcript-head-fallback"),
+        Vec::new(),
+    )
+    .is_err());
+
+    let mut family_drift = selection.clone();
+    family_drift
+        .fact_family_versions
+        .insert("catalog.session".to_owned(), 2);
+    for drifted_selection in [
+        ContractVersionSelection {
+            model_major: selection.model_major + 1,
+            ..selection.clone()
+        },
+        family_drift,
+    ] {
+        let drifted = composition
+            .authorize_execution(catalog_access(
+                ADAPTER_ID,
+                SUPPORT_RELEASE_ID,
+                SOURCE_DECLARATION,
+                SUPPORT_RELEASE,
+                &drifted_selection,
+            ))
+            .unwrap();
+        assert!(drifted
+            .assemble_library_coverage(
+                source_instance_key,
+                policy,
+                &membership,
+                completions.clone(),
+            )
+            .is_err());
+    }
+
+    for drifted_selection in [
+        ContractVersionSelection {
+            coverage_contract_version: 2,
+            ..selection.clone()
+        },
+        ContractVersionSelection {
+            query_pack_version: Some(2),
+            ..selection.clone()
+        },
+        ContractVersionSelection {
+            query_pack_version: None,
+            ..selection.clone()
+        },
+    ] {
+        let drifted = composition
+            .authorize_execution(catalog_access(
+                ADAPTER_ID,
+                SUPPORT_RELEASE_ID,
+                SOURCE_DECLARATION,
+                SUPPORT_RELEASE,
+                &drifted_selection,
+            ))
+            .unwrap();
+        assert!(CatalogComponentCoverageCompletion::new(
+            &drifted,
+            source_instance_key,
+            policy,
+            "transcript-head-fallback",
+            component_completion_position("transcript-head-fallback"),
+            Vec::new(),
+        )
+        .is_err());
+    }
+
+    let foreign_composition = claude_composition();
+    let foreign_membership = claude_membership(&foreign_composition);
+    assert!(executable
+        .assemble_library_coverage(
+            source_instance_key,
+            policy,
+            &foreign_membership,
+            completions,
+        )
+        .is_err());
+}
+
+#[test]
+fn coverage_assembly_requires_exact_complete_component_evidence() {
+    const ADAPTER_ID: &str = "fixture-agent";
+    const SUPPORT_RELEASE_ID: &str = "fixture-catalog-support-v1";
+    const SOURCE_DECLARATION: &[u8] = b"fixture/catalog-source-declaration/v1";
+    const SUPPORT_RELEASE: &[u8] = b"fixture/catalog-support-release/v1";
+
+    let selection = catalog_contract_selection();
+    let composition = CatalogSourceComposition::new_promoted(
+        ADAPTER_ID,
+        SUPPORT_RELEASE_ID,
+        "fixture-catalog-sources-v1",
+        CatalogPromotedBinding::fixture(SOURCE_DECLARATION, SUPPORT_RELEASE),
+        claude_components(),
+    )
+    .unwrap();
+    let executable = composition
+        .authorize_execution(catalog_access(
+            ADAPTER_ID,
+            SUPPORT_RELEASE_ID,
+            SOURCE_DECLARATION,
+            SUPPORT_RELEASE,
+            &selection,
+        ))
+        .unwrap();
+    let source_instance_key = catalog_coverage_source_key(b"fixture-device/catalog-root");
+    let policy = catalog_coverage_policy(b"fixture-local-catalog-policy");
+    let completions = complete_component_coverage(&executable, source_instance_key, policy);
+    let membership = coverage_bound_membership(&composition, claude_members(), &completions);
+
+    let mut missing_metadata = completions.clone();
+    missing_metadata.retain(|completion| completion.component_id != "transcript-head-fallback");
+    assert!(executable
+        .assemble_library_coverage(source_instance_key, policy, &membership, missing_metadata,)
+        .is_err());
+
+    let mut duplicate = completions.clone();
+    duplicate.push(completions[0].clone());
+    assert!(executable
+        .assemble_library_coverage(source_instance_key, policy, &membership, duplicate)
+        .is_err());
+
+    let mut unknown = completions.clone();
+    unknown[0].component_id = "unknown-component".to_owned();
+    assert!(executable
+        .assemble_library_coverage(source_instance_key, policy, &membership, unknown)
+        .is_err());
+
+    let admitting_index = composition
+        .components
+        .iter()
+        .position(|component| component.contribution.can_admit_member())
+        .unwrap();
+    let admitting_component = &composition.components[admitting_index];
+    let drifted_object = CatalogCompletedCoverageObject::point(
+        CoverageObjectKey::derive(&admitting_component.stream_id, b"drifted-object").unwrap(),
+        1,
+        CoveragePosition::derive(
+            admitting_component
+                .primitive
+                .complete_coverage_semantics()
+                .0,
+            b"drifted-position",
+            None,
+        )
+        .unwrap(),
+        CoverageProvenance::default(),
+    )
+    .unwrap();
+    let mut proof_drift = completions.clone();
+    proof_drift[admitting_index] = CatalogComponentCoverageCompletion::new(
+        &executable,
+        source_instance_key,
+        policy,
+        &admitting_component.component_id,
+        component_completion_position(&admitting_component.component_id),
+        vec![drifted_object],
+    )
+    .unwrap();
+    assert!(executable
+        .assemble_library_coverage(source_instance_key, policy, &membership, proof_drift,)
+        .is_err());
+
+    let first_component = &composition.components[0];
+    let duplicate_object = CatalogCompletedCoverageObject::point(
+        CoverageObjectKey::derive(&first_component.stream_id, b"duplicate-object").unwrap(),
+        1,
+        CoveragePosition::derive(
+            first_component.primitive.complete_coverage_semantics().0,
+            b"duplicate-position",
+            None,
+        )
+        .unwrap(),
+        CoverageProvenance::default(),
+    )
+    .unwrap();
+    assert!(CatalogComponentCoverageCompletion::new(
+        &executable,
+        source_instance_key,
+        policy,
+        &first_component.component_id,
+        component_completion_position(&first_component.component_id),
+        vec![duplicate_object.clone(), duplicate_object],
+    )
+    .is_err());
+
+    let lineage_key =
+        CoverageObjectKey::derive(&first_component.stream_id, b"lineage-object").unwrap();
+    let point_at = |generation| {
+        CatalogCompletedCoverageObject::point(
+            lineage_key,
+            generation,
+            CoveragePosition::derive(
+                first_component.primitive.complete_coverage_semantics().0,
+                format!("lineage-position-{generation}").as_bytes(),
+                None,
+            )
+            .unwrap(),
+            CoverageProvenance::default(),
+        )
+        .unwrap()
+    };
+    assert!(CatalogComponentCoverageCompletion::new(
+        &executable,
+        source_instance_key,
+        policy,
+        &first_component.component_id,
+        component_completion_position(&first_component.component_id),
+        vec![point_at(1), point_at(2)],
+    )
+    .is_err());
+    let old_absence = CatalogCompletedCoverageObject::explicit_absence(
+        lineage_key,
+        1,
+        CoverageAbsenceKind::Deleted,
+    )
+    .unwrap();
+    assert!(CatalogComponentCoverageCompletion::new(
+        &executable,
+        source_instance_key,
+        policy,
+        &first_component.component_id,
+        component_completion_position(&first_component.component_id),
+        vec![old_absence, point_at(2)],
+    )
+    .is_ok());
+    let future_absence = CatalogCompletedCoverageObject::explicit_absence(
+        lineage_key,
+        3,
+        CoverageAbsenceKind::Deleted,
+    )
+    .unwrap();
+    assert!(CatalogComponentCoverageCompletion::new(
+        &executable,
+        source_instance_key,
+        policy,
+        &first_component.component_id,
+        component_completion_position(&first_component.component_id),
+        vec![point_at(2), future_absence],
+    )
+    .is_err());
+    assert!(CatalogCompletedCoverageObject::point(
+        CoverageObjectKey::derive("fixture", b"zero-generation").unwrap(),
+        0,
+        CoveragePosition::derive(CoveragePositionKind::AppendCursor, b"cursor", Some(1)).unwrap(),
+        CoverageProvenance::default(),
+    )
+    .is_err());
+    assert!(CatalogCompletedCoverageObject::explicit_absence(
+        CoverageObjectKey::derive("fixture", b"oversized-generation").unwrap(),
+        MAX_PORTABLE_GENERATION + 1,
+        CoverageAbsenceKind::Absent,
+    )
+    .is_err());
+
+    let directory_component = composition
+        .components
+        .iter()
+        .find(|component| {
+            matches!(
+                component.primitive,
+                CatalogSourcePrimitive::DirectoryMembership
+            )
+        })
+        .unwrap();
+    let wrong_position = CatalogCompletedCoverageObject::point(
+        CoverageObjectKey::derive(&directory_component.stream_id, b"wrong-position").unwrap(),
+        1,
+        CoveragePosition::derive(CoveragePositionKind::AppendCursor, b"cursor", Some(1)).unwrap(),
+        CoverageProvenance::default(),
+    )
+    .unwrap();
+    assert!(CatalogComponentCoverageCompletion::new(
+        &executable,
+        source_instance_key,
+        policy,
+        &directory_component.component_id,
+        component_completion_position(&directory_component.component_id),
+        vec![wrong_position],
+    )
+    .is_err());
+
+    assert!(CatalogComponentCoverageCompletion::new(
+        &executable,
+        source_instance_key,
+        policy,
+        "transcript-head-fallback",
+        CoveragePosition::derive(
+            CoveragePositionKind::AppendCursor,
+            b"not-a-component-snapshot",
+            Some(1),
+        )
+        .unwrap(),
+        Vec::new(),
+    )
+    .is_err());
+
+    let mut empty_metadata = completions.clone();
+    let metadata_index = composition
+        .components
+        .iter()
+        .position(|component| component.component_id == "transcript-head-fallback")
+        .unwrap();
+    empty_metadata[metadata_index] = CatalogComponentCoverageCompletion::new(
+        &executable,
+        source_instance_key,
+        policy,
+        "transcript-head-fallback",
+        component_completion_position("transcript-head-fallback"),
+        Vec::new(),
+    )
+    .unwrap();
+    let mut members_without_head_metadata = claude_members();
+    for member in &mut members_without_head_metadata {
+        member
+            .metadata_component_ids
+            .retain(|component_id| component_id != "transcript-head-fallback");
+    }
+    let empty_metadata_membership =
+        coverage_bound_membership(&composition, members_without_head_metadata, &empty_metadata);
+    let empty_metadata_assembly = executable
+        .assemble_library_coverage(
+            source_instance_key,
+            policy,
+            &empty_metadata_membership,
+            empty_metadata.clone(),
+        )
+        .unwrap();
+    assert_eq!(empty_metadata_assembly.source_coverage().points.len(), 3);
+    assert_eq!(
+        empty_metadata_assembly.source_coverage().completeness,
+        CoverageSetCompleteness::Complete
+    );
+    let mut drifted_empty_metadata = empty_metadata;
+    drifted_empty_metadata[metadata_index] = CatalogComponentCoverageCompletion::new(
+        &executable,
+        source_instance_key,
+        policy,
+        "transcript-head-fallback",
+        CoveragePosition::derive(
+            CoveragePositionKind::SnapshotRevision,
+            b"transcript-head-fallback/other-completion-revision",
+            None,
+        )
+        .unwrap(),
+        Vec::new(),
+    )
+    .unwrap();
+    let drifted_empty_metadata_assembly = executable
+        .assemble_library_coverage(
+            source_instance_key,
+            policy,
+            &empty_metadata_membership,
+            drifted_empty_metadata,
+        )
+        .unwrap();
+    assert_eq!(
+        empty_metadata_assembly.source_coverage(),
+        drifted_empty_metadata_assembly.source_coverage(),
+        "metadata completion revisions must not overload RFC 012A object membership"
+    );
+    assert_ne!(
+        empty_metadata_assembly.component_completion_revision(),
+        drifted_empty_metadata_assembly.component_completion_revision(),
+        "metadata-only enumeration revision drift must change restart identity"
+    );
+
+    let mut with_absence = completions;
+    with_absence[metadata_index] = CatalogComponentCoverageCompletion::new(
+        &executable,
+        source_instance_key,
+        policy,
+        "transcript-head-fallback",
+        component_completion_position("transcript-head-fallback"),
+        vec![CatalogCompletedCoverageObject::explicit_absence(
+            CoverageObjectKey::derive("session-transcripts", b"missing-head").unwrap(),
+            1,
+            CoverageAbsenceKind::Absent,
+        )
+        .unwrap()],
+    )
+    .unwrap();
+    let absence_membership =
+        coverage_bound_membership(&composition, claude_members(), &with_absence);
+    let with_absence = executable
+        .assemble_library_coverage(
+            source_instance_key,
+            policy,
+            &absence_membership,
+            with_absence,
+        )
+        .unwrap();
+    assert_eq!(
+        with_absence
+            .source_coverage()
+            .explicit_absence_or_deletion
+            .len(),
+        1
+    );
+    assert_eq!(
+        with_absence.source_coverage().completeness,
+        CoverageSetCompleteness::Complete
+    );
 }
 
 #[test]

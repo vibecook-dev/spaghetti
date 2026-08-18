@@ -13,7 +13,20 @@ use serde::{Serialize, Serializer};
 #[cfg(test)]
 use sha2::{Digest as _, Sha256};
 
-use crate::adapter::{AuthorizedCatalogAccess, ContractVersionSelection};
+use crate::adapter::{
+    AuthorizedCatalogAccess, CanonicalSourceInstanceKey, CompatibilityClass,
+    ContractVersionSelection, CoverageAbsence, CoverageAbsenceKind, CoverageDeclarationDigest,
+    CoverageDomain, CoverageObjectKey, CoveragePosition, CoveragePositionKind, CoverageProvenance,
+    CoverageSetCompleteness, CoverageStatus, CoverageStreamKey, SourceCoveragePoint,
+    SourceCoverageSet, SOURCE_COVERAGE_CONTRACT_VERSION,
+};
+use crate::catalog_contract::{
+    CatalogAccessPolicyDigest, CatalogCoveragePlanSource, CatalogCoverageScope,
+    CATALOG_PROJECTION_PACK_ID, CATALOG_QUERY_PACK_CONTRACT_VERSION,
+};
+use crate::coverage_runtime::{
+    derive_coverage_membership_revision, source_membership_prefix, CoverageMembershipObject,
+};
 
 pub(crate) const CATALOG_SOURCE_COMPOSITION_CONTRACT_VERSION: u32 = 1;
 pub(crate) const CATALOG_MEMBERSHIP_CONTRACT_VERSION: u32 = 1;
@@ -34,6 +47,10 @@ const MAX_CONFORMANCE_RECORDS: usize = 1_000_000;
 const MAX_DOCUMENT_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_MEMBERSHIP_MEMBERS: usize = 1_000_000;
 const MAX_SEMANTIC_IDENTITY_BYTES: usize = 64 * 1024;
+// These are the RFC 012A portable set caps, not source-performance targets.
+const MAX_CATALOG_COVERAGE_POINTS: usize = 250_000;
+const MAX_CATALOG_COVERAGE_ABSENCES: usize = 250_000;
+const MAX_PORTABLE_GENERATION: u64 = 9_007_199_254_740_991;
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("{message}")]
@@ -218,6 +235,38 @@ opaque_digest_type!(CatalogAuthorityRevision, "catalog-authority-revision-v1");
 opaque_digest_type!(CatalogCoverageProof, "catalog-coverage-proof-v1");
 opaque_digest_type!(CatalogConformanceDigest, "catalog-conformance-v1");
 opaque_digest_type!(CatalogWindowContinuation, "catalog-window-continuation-v1");
+
+/// Canonical restart identity for the complete set of component-enumeration
+/// evidence assembled into one library coverage result. This deliberately is
+/// not a portable DTO and is distinct from both catalog membership and RFC
+/// 012A native-object membership revisions.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub(crate) struct CatalogComponentCompletionRevision([u8; DIGEST_BYTES]);
+
+impl CatalogComponentCompletionRevision {
+    fn from_digest(bytes: [u8; DIGEST_BYTES]) -> Self {
+        Self(bytes)
+    }
+}
+
+impl fmt::Display for CatalogComponentCompletionRevision {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "catalog-component-completion-v1:{}",
+            URL_SAFE_NO_PAD.encode(self.0)
+        )
+    }
+}
+
+impl fmt::Debug for CatalogComponentCompletionRevision {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_tuple("CatalogComponentCompletionRevision")
+            .field(&self.to_string())
+            .finish()
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub(crate) struct CatalogPromotedBinding {
@@ -524,6 +573,23 @@ impl CatalogSourcePrimitive {
                 max_records: *max_records,
             }),
             Self::DirectoryMembership | Self::ReplaceDocument { .. } => None,
+        }
+    }
+
+    fn complete_coverage_semantics(&self) -> (CoveragePositionKind, CoverageStatus) {
+        match self {
+            Self::DirectoryMembership => (
+                CoveragePositionKind::SnapshotRevision,
+                CoverageStatus::ExactSnapshot,
+            ),
+            Self::ReplaceDocument { .. } => (
+                CoveragePositionKind::DocumentRevision,
+                CoverageStatus::ExactSnapshot,
+            ),
+            Self::DelimitedHead { .. } | Self::DelimitedPrefix { .. } => (
+                CoveragePositionKind::AppendCursor,
+                CoverageStatus::CompleteThrough,
+            ),
         }
     }
 }
@@ -989,6 +1055,803 @@ impl CatalogExecutableComposition<'_, '_> {
 
     pub(crate) fn contract_selection(&self) -> &ContractVersionSelection {
         self.authorization.contracts()
+    }
+
+    fn library_plan_source(
+        &self,
+        source_instance_key: CanonicalSourceInstanceKey,
+        access_policy_digest: CatalogAccessPolicyDigest,
+    ) -> Result<CatalogCoveragePlanSource, CatalogCompositionError> {
+        if !matches!(
+            self.authorization.compatibility_class(),
+            CompatibilityClass::ExactSupported | CompatibilityClass::RangeSupported
+        ) {
+            return Err(CatalogCompositionError::invalid(
+                "forward or incompatible catalog authorization cannot publish normal complete coverage",
+            ));
+        }
+        let selection = self.authorization.contracts();
+        if selection.coverage_contract_version != SOURCE_COVERAGE_CONTRACT_VERSION
+            || selection.query_pack_version != Some(CATALOG_QUERY_PACK_CONTRACT_VERSION)
+        {
+            return Err(CatalogCompositionError::invalid(
+                "catalog coverage requires the exact selected RFC 012A coverage and RFC 012B query-pack v1 contracts",
+            ));
+        }
+        let declaration_digest = CoverageDeclarationDigest::derive(
+            self.authorization.source_declaration_digest().as_bytes(),
+        )
+        .map_err(|error| {
+            CatalogCompositionError::invalid(format!(
+                "authorized catalog declaration digest is invalid: {error}"
+            ))
+        })?;
+        CatalogCoveragePlanSource::new(
+            self.authorization.adapter_id(),
+            source_instance_key,
+            self.authorization.support_release_id(),
+            declaration_digest,
+            access_policy_digest,
+        )
+        .map_err(|error| {
+            CatalogCompositionError::invalid(format!(
+                "authorized catalog plan source is invalid: {error}"
+            ))
+        })
+    }
+
+    /// Assemble one complete library-scoped catalog coverage set from
+    /// explicitly completed native component evidence. This consumes no source
+    /// data and cannot widen a planned or forward-compatible authorization.
+    pub(crate) fn assemble_library_coverage(
+        &self,
+        source_instance_key: CanonicalSourceInstanceKey,
+        access_policy_digest: CatalogAccessPolicyDigest,
+        membership: &CatalogMembershipSnapshot,
+        mut completions: Vec<CatalogComponentCoverageCompletion>,
+    ) -> Result<CatalogLibraryCoverageAssembly, CatalogCompositionError> {
+        let plan_source = self.library_plan_source(source_instance_key, access_policy_digest)?;
+        membership.validate_for(self.composition)?;
+
+        completions.sort_by(|left, right| left.component_id.cmp(&right.component_id));
+        if completions
+            .windows(2)
+            .any(|pair| pair[0].component_id == pair[1].component_id)
+        {
+            return Err(CatalogCompositionError::invalid(
+                "catalog coverage contains duplicate component completion",
+            ));
+        }
+        if !self
+            .composition
+            .components
+            .iter()
+            .map(|component| component.component_id.as_str())
+            .eq(completions
+                .iter()
+                .map(|completion| completion.component_id.as_str()))
+        {
+            return Err(CatalogCompositionError::invalid(
+                "complete catalog coverage requires exactly one completion for every composition component",
+            ));
+        }
+
+        let mut point_count = 0_usize;
+        let mut absence_count = 0_usize;
+        for completion in &completions {
+            completion.validate_for(
+                self.composition,
+                &plan_source,
+                self.authorization.contracts(),
+            )?;
+            point_count = point_count
+                .checked_add(completion.point_count())
+                .ok_or_else(|| CatalogCompositionError::invalid("coverage point count overflow"))?;
+            absence_count = absence_count
+                .checked_add(completion.absence_count())
+                .ok_or_else(|| {
+                    CatalogCompositionError::invalid("coverage absence count overflow")
+                })?;
+            if point_count > MAX_CATALOG_COVERAGE_POINTS
+                || absence_count > MAX_CATALOG_COVERAGE_ABSENCES
+            {
+                return Err(CatalogCompositionError::invalid(
+                    "catalog coverage exceeds the RFC 012A portable set bounds",
+                ));
+            }
+
+            let component = self
+                .composition
+                .component(&completion.component_id)
+                .expect("completion IDs were matched to the composition");
+            if component.contribution.can_admit_member() {
+                let authority = membership
+                    .authority_evidence
+                    .binary_search_by(|evidence| {
+                        evidence.component_id.as_str().cmp(&completion.component_id)
+                    })
+                    .ok()
+                    .map(|index| &membership.authority_evidence[index])
+                    .ok_or_else(|| {
+                        CatalogCompositionError::invalid(
+                            "admitting component completion has no membership authority",
+                        )
+                    })?;
+                if authority.coverage_proof
+                    != calculate_component_coverage_proof(
+                        self.composition,
+                        &membership.members,
+                        completion,
+                    )
+                {
+                    return Err(CatalogCompositionError::invalid(
+                        "component coverage does not match its completed membership authority proof",
+                    ));
+                }
+            }
+        }
+
+        let domain = CoverageDomain::ProjectionPack {
+            pack: CATALOG_PROJECTION_PACK_ID.to_owned(),
+            version: CATALOG_QUERY_PACK_CONTRACT_VERSION,
+        };
+        let generic_scope = plan_source.coverage_scope(CatalogCoverageScope::Library);
+        let mut points = Vec::with_capacity(point_count);
+        let mut absences = Vec::with_capacity(absence_count);
+        let mut declared_streams = Vec::with_capacity(self.composition.components.len());
+
+        for (component, completion) in self.composition.components.iter().zip(&completions) {
+            let stream_key = CoverageStreamKey::derive(
+                self.authorization.adapter_id(),
+                component.stream_id.as_bytes(),
+            )
+            .map_err(|error| {
+                CatalogCompositionError::invalid(format!(
+                    "catalog coverage stream identity is invalid: {error}"
+                ))
+            })?;
+            declared_streams.push(stream_key);
+            let (position_kind, status) = component.primitive.complete_coverage_semantics();
+            for object in &completion.objects {
+                match object {
+                    CatalogCompletedCoverageObject::Point {
+                        object_key,
+                        generation,
+                        position,
+                        provenance,
+                    } => {
+                        if position.kind != position_kind {
+                            return Err(CatalogCompositionError::invalid(
+                                "catalog coverage position kind does not match its source primitive",
+                            ));
+                        }
+                        points.push(
+                            SourceCoveragePoint::new(
+                                domain.clone(),
+                                self.authorization.adapter_id(),
+                                source_instance_key,
+                                stream_key,
+                                *object_key,
+                                *generation,
+                                Some(position.clone()),
+                                status.clone(),
+                                provenance.clone(),
+                            )
+                            .map_err(|error| {
+                                CatalogCompositionError::invalid(format!(
+                                    "catalog coverage point is invalid: {error}"
+                                ))
+                            })?,
+                        );
+                    }
+                    CatalogCompletedCoverageObject::ExplicitAbsence {
+                        object_key,
+                        generation,
+                        kind,
+                    } => absences.push(CoverageAbsence {
+                        stream_key,
+                        object_key: *object_key,
+                        generation: *generation,
+                        kind: *kind,
+                    }),
+                }
+            }
+        }
+
+        declared_streams.sort_unstable();
+        declared_streams.dedup();
+        points.sort_by_key(|point| (point.stream_key, point.object_key, point.generation));
+        absences.sort();
+        let mut membership_objects = points
+            .iter()
+            .map(|point| CoverageMembershipObject {
+                stream_key: point.stream_key.as_bytes(),
+                object_key: point.object_key.as_bytes(),
+                generation: point.generation,
+                absent: false,
+            })
+            .chain(absences.iter().map(|absence| CoverageMembershipObject {
+                stream_key: absence.stream_key.as_bytes(),
+                object_key: absence.object_key.as_bytes(),
+                generation: absence.generation,
+                absent: true,
+            }))
+            .collect::<Vec<_>>();
+        membership_objects.sort_by(|left, right| {
+            (left.stream_key, left.object_key, left.generation).cmp(&(
+                right.stream_key,
+                right.object_key,
+                right.generation,
+            ))
+        });
+        if membership_objects.windows(2).any(|pair| {
+            (pair[0].stream_key, pair[0].object_key, pair[0].generation)
+                >= (pair[1].stream_key, pair[1].object_key, pair[1].generation)
+        }) {
+            return Err(CatalogCompositionError::invalid(
+                "catalog coverage contains a duplicate native object generation",
+            ));
+        }
+        validate_membership_object_lineage(&membership_objects)?;
+        let stream_bytes = declared_streams
+            .iter()
+            .map(|stream| stream.as_bytes().as_slice())
+            .collect::<Vec<_>>();
+        let prefix = source_membership_prefix(&domain).map_err(|error| {
+            CatalogCompositionError::invalid(format!(
+                "catalog projection membership domain is unsupported: {error}"
+            ))
+        })?;
+        let coverage_membership_revision =
+            derive_coverage_membership_revision(&prefix, &stream_bytes, &membership_objects)
+                .map_err(|error| {
+                    CatalogCompositionError::invalid(format!(
+                        "catalog coverage membership is invalid: {error}"
+                    ))
+                })?;
+        let source_coverage = SourceCoverageSet::new(
+            domain,
+            generic_scope,
+            coverage_membership_revision,
+            points,
+            absences,
+            Vec::new(),
+            CoverageSetCompleteness::Complete,
+        )
+        .map_err(|error| {
+            CatalogCompositionError::invalid(format!("catalog coverage set is invalid: {error}"))
+        })?;
+        if !plan_source.matches_coverage(&source_coverage) {
+            return Err(CatalogCompositionError::invalid(
+                "catalog coverage is not bound to its derived coverage-plan source",
+            ));
+        }
+
+        let component_completion_revision = calculate_component_completion_revision(
+            self.composition,
+            membership.membership_revision,
+            self.authorization.contracts(),
+            &plan_source,
+            &completions,
+        );
+
+        Ok(CatalogLibraryCoverageAssembly {
+            catalog_membership_revision: membership.membership_revision,
+            component_completion_revision,
+            contract_selection: self.authorization.contracts().clone(),
+            plan_source,
+            source_coverage,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum CatalogCompletedCoverageObject {
+    Point {
+        object_key: CoverageObjectKey,
+        generation: u64,
+        position: CoveragePosition,
+        provenance: CoverageProvenance,
+    },
+    ExplicitAbsence {
+        object_key: CoverageObjectKey,
+        generation: u64,
+        kind: CoverageAbsenceKind,
+    },
+}
+
+impl CatalogCompletedCoverageObject {
+    pub(crate) fn point(
+        object_key: CoverageObjectKey,
+        generation: u64,
+        position: CoveragePosition,
+        provenance: CoverageProvenance,
+    ) -> Result<Self, CatalogCompositionError> {
+        validate_coverage_generation(generation)?;
+        Ok(Self::Point {
+            object_key,
+            generation,
+            position,
+            provenance,
+        })
+    }
+
+    pub(crate) fn explicit_absence(
+        object_key: CoverageObjectKey,
+        generation: u64,
+        kind: CoverageAbsenceKind,
+    ) -> Result<Self, CatalogCompositionError> {
+        validate_coverage_generation(generation)?;
+        Ok(Self::ExplicitAbsence {
+            object_key,
+            generation,
+            kind,
+        })
+    }
+
+    fn coordinate(&self) -> (CoverageObjectKey, u64) {
+        match self {
+            Self::Point {
+                object_key,
+                generation,
+                ..
+            }
+            | Self::ExplicitAbsence {
+                object_key,
+                generation,
+                ..
+            } => (*object_key, *generation),
+        }
+    }
+
+    fn hash_into(&self, hasher: &mut blake3::Hasher) {
+        match self {
+            Self::Point {
+                object_key,
+                generation,
+                position,
+                provenance,
+            } => {
+                hash_string(hasher, "point");
+                hasher.update(object_key.as_bytes());
+                hasher.update(&generation.to_be_bytes());
+                hash_coverage_position(hasher, position);
+                hash_coverage_provenance(hasher, provenance);
+            }
+            Self::ExplicitAbsence {
+                object_key,
+                generation,
+                kind,
+            } => {
+                hash_string(hasher, "explicit_absence");
+                hasher.update(object_key.as_bytes());
+                hasher.update(&generation.to_be_bytes());
+                hash_string(
+                    hasher,
+                    match kind {
+                        CoverageAbsenceKind::Absent => "absent",
+                        CoverageAbsenceKind::Deleted => "deleted",
+                    },
+                );
+            }
+        }
+    }
+}
+
+/// Complete, already-derived native coverage for one composition component.
+/// It carries only opaque RFC 012A identities and is deliberately not a wire
+/// DTO or a source-reading interface.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CatalogComponentCoverageCompletion {
+    composition_id: CatalogCompositionId,
+    contract_selection: ContractVersionSelection,
+    source_instance_key: CanonicalSourceInstanceKey,
+    coverage_binding_digest: CoverageDeclarationDigest,
+    component_id: String,
+    completion_position: CoveragePosition,
+    objects: Vec<CatalogCompletedCoverageObject>,
+}
+
+impl CatalogComponentCoverageCompletion {
+    pub(crate) fn new(
+        executable: &CatalogExecutableComposition<'_, '_>,
+        source_instance_key: CanonicalSourceInstanceKey,
+        access_policy_digest: CatalogAccessPolicyDigest,
+        component_id: impl Into<String>,
+        completion_position: CoveragePosition,
+        mut objects: Vec<CatalogCompletedCoverageObject>,
+    ) -> Result<Self, CatalogCompositionError> {
+        let plan_source =
+            executable.library_plan_source(source_instance_key, access_policy_digest)?;
+        if objects.len() > MAX_CATALOG_COVERAGE_POINTS + MAX_CATALOG_COVERAGE_ABSENCES {
+            return Err(CatalogCompositionError::invalid(
+                "component coverage exceeds the combined RFC 012A portable set bounds",
+            ));
+        }
+        let point_count = objects
+            .iter()
+            .filter(|object| matches!(object, CatalogCompletedCoverageObject::Point { .. }))
+            .count();
+        if point_count > MAX_CATALOG_COVERAGE_POINTS
+            || objects.len() - point_count > MAX_CATALOG_COVERAGE_ABSENCES
+        {
+            return Err(CatalogCompositionError::invalid(
+                "component coverage exceeds the RFC 012A portable set bounds",
+            ));
+        }
+        objects.sort_by_key(CatalogCompletedCoverageObject::coordinate);
+        let value = Self {
+            composition_id: executable.composition.composition_id,
+            contract_selection: executable.authorization.contracts().clone(),
+            source_instance_key,
+            coverage_binding_digest: plan_source.coverage_binding_digest(),
+            component_id: component_id.into(),
+            completion_position,
+            objects,
+        };
+        value.validate_for(
+            executable.composition,
+            &plan_source,
+            executable.authorization.contracts(),
+        )?;
+        Ok(value)
+    }
+
+    fn validate_for(
+        &self,
+        composition: &CatalogSourceComposition,
+        plan_source: &CatalogCoveragePlanSource,
+        contract_selection: &ContractVersionSelection,
+    ) -> Result<(), CatalogCompositionError> {
+        validate_identifier("coverage completion component ID", &self.component_id)?;
+        if self.composition_id != composition.composition_id
+            || &self.contract_selection != contract_selection
+            || self.source_instance_key != plan_source.source_instance_key
+            || self.coverage_binding_digest != plan_source.coverage_binding_digest()
+        {
+            return Err(CatalogCompositionError::invalid(
+                "component coverage belongs to another composition, source instance, declaration, or access policy",
+            ));
+        }
+        let component = composition.component(&self.component_id).ok_or_else(|| {
+            CatalogCompositionError::invalid("component coverage names an unknown component")
+        })?;
+        if self.completion_position.kind != CoveragePositionKind::SnapshotRevision
+            || self.completion_position.monotonic_order.is_some()
+        {
+            return Err(CatalogCompositionError::invalid(
+                "component completion requires an opaque unordered snapshot revision",
+            ));
+        }
+        let point_count = self.point_count();
+        let absence_count = self.absence_count();
+        if point_count > MAX_CATALOG_COVERAGE_POINTS
+            || absence_count > MAX_CATALOG_COVERAGE_ABSENCES
+        {
+            return Err(CatalogCompositionError::invalid(
+                "component coverage exceeds the RFC 012A portable set bounds",
+            ));
+        }
+        if self
+            .objects
+            .windows(2)
+            .any(|pair| pair[0].coordinate() >= pair[1].coordinate())
+        {
+            return Err(CatalogCompositionError::invalid(
+                "component coverage objects must be strictly increasing and unique",
+            ));
+        }
+        validate_completion_object_lineage(&self.objects)?;
+        let expected_position = component.primitive.complete_coverage_semantics().0;
+        for object in &self.objects {
+            validate_coverage_generation(object.coordinate().1)?;
+            if let CatalogCompletedCoverageObject::Point { position, .. } = object {
+                if position.kind != expected_position {
+                    return Err(CatalogCompositionError::invalid(
+                        "catalog coverage position kind does not match its source primitive",
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn point_count(&self) -> usize {
+        self.objects
+            .iter()
+            .filter(|object| matches!(object, CatalogCompletedCoverageObject::Point { .. }))
+            .count()
+    }
+
+    fn absence_count(&self) -> usize {
+        self.objects
+            .iter()
+            .filter(|object| {
+                matches!(
+                    object,
+                    CatalogCompletedCoverageObject::ExplicitAbsence { .. }
+                )
+            })
+            .count()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CatalogLibraryCoverageAssembly {
+    catalog_membership_revision: CatalogMembershipRevision,
+    component_completion_revision: CatalogComponentCompletionRevision,
+    contract_selection: ContractVersionSelection,
+    plan_source: CatalogCoveragePlanSource,
+    source_coverage: SourceCoverageSet,
+}
+
+impl CatalogLibraryCoverageAssembly {
+    pub(crate) fn catalog_membership_revision(&self) -> CatalogMembershipRevision {
+        self.catalog_membership_revision
+    }
+
+    pub(crate) fn component_completion_revision(&self) -> CatalogComponentCompletionRevision {
+        self.component_completion_revision
+    }
+
+    pub(crate) fn contract_selection(&self) -> &ContractVersionSelection {
+        &self.contract_selection
+    }
+
+    pub(crate) fn plan_source(&self) -> &CatalogCoveragePlanSource {
+        &self.plan_source
+    }
+
+    pub(crate) fn source_coverage(&self) -> &SourceCoverageSet {
+        &self.source_coverage
+    }
+}
+
+fn validate_coverage_generation(generation: u64) -> Result<(), CatalogCompositionError> {
+    if generation == 0 || generation > MAX_PORTABLE_GENERATION {
+        return Err(CatalogCompositionError::invalid(
+            "catalog coverage generation must be a positive portable integer",
+        ));
+    }
+    Ok(())
+}
+
+/// A complete current set may carry one old explicit absence plus one newer
+/// live generation to establish a replacement. It cannot carry two live
+/// generations, two absence histories, or a non-forward replacement.
+fn validate_completion_object_lineage(
+    objects: &[CatalogCompletedCoverageObject],
+) -> Result<(), CatalogCompositionError> {
+    let mut start = 0_usize;
+    while start < objects.len() {
+        let object_key = objects[start].coordinate().0;
+        let mut end = start + 1;
+        while end < objects.len() && objects[end].coordinate().0 == object_key {
+            end += 1;
+        }
+
+        let mut point_generation = None;
+        let mut absence_generation = None;
+        for object in &objects[start..end] {
+            match object {
+                CatalogCompletedCoverageObject::Point { generation, .. } => {
+                    if point_generation.replace(*generation).is_some() {
+                        return Err(CatalogCompositionError::invalid(
+                            "component coverage cannot contain two live generations for one object",
+                        ));
+                    }
+                }
+                CatalogCompletedCoverageObject::ExplicitAbsence { generation, .. } => {
+                    if absence_generation.replace(*generation).is_some() {
+                        return Err(CatalogCompositionError::invalid(
+                            "component coverage cannot contain two absence generations for one object",
+                        ));
+                    }
+                }
+            }
+        }
+        if matches!(
+            (absence_generation, point_generation),
+            (Some(absent), Some(present)) if absent >= present
+        ) {
+            return Err(CatalogCompositionError::invalid(
+                "component replacement requires an older explicit absence and a newer live generation",
+            ));
+        }
+        start = end;
+    }
+    Ok(())
+}
+
+fn validate_membership_object_lineage(
+    objects: &[CoverageMembershipObject<'_>],
+) -> Result<(), CatalogCompositionError> {
+    let mut start = 0_usize;
+    while start < objects.len() {
+        let coordinate = (objects[start].stream_key, objects[start].object_key);
+        let mut end = start + 1;
+        while end < objects.len()
+            && (objects[end].stream_key, objects[end].object_key) == coordinate
+        {
+            end += 1;
+        }
+        let mut live_generation = None;
+        let mut absent_generation = None;
+        for object in &objects[start..end] {
+            let generation = if object.absent {
+                &mut absent_generation
+            } else {
+                &mut live_generation
+            };
+            if generation.replace(object.generation).is_some() {
+                return Err(CatalogCompositionError::invalid(
+                    "catalog coverage cannot contain multiple live or absent generations for one native object",
+                ));
+            }
+        }
+        if matches!(
+            (absent_generation, live_generation),
+            (Some(absent), Some(live)) if absent >= live
+        ) {
+            return Err(CatalogCompositionError::invalid(
+                "catalog coverage replacement requires an older absence and a newer live generation",
+            ));
+        }
+        start = end;
+    }
+    Ok(())
+}
+
+fn calculate_component_coverage_proof(
+    composition: &CatalogSourceComposition,
+    members: &[CatalogMembershipEntry],
+    completion: &CatalogComponentCoverageCompletion,
+) -> CatalogCoverageProof {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"spaghetti/rfc012b/catalog-component-coverage-v1\0");
+    hasher.update(composition.composition_id.as_bytes());
+    hash_contract_selection(&mut hasher, &completion.contract_selection);
+    hasher.update(completion.source_instance_key.as_bytes());
+    hasher.update(completion.coverage_binding_digest.as_bytes());
+    hash_string(&mut hasher, &completion.component_id);
+    hash_coverage_position(&mut hasher, &completion.completion_position);
+    hasher.update(&(completion.objects.len() as u64).to_be_bytes());
+    for object in &completion.objects {
+        object.hash_into(&mut hasher);
+    }
+    let mut related_members = members
+        .iter()
+        .filter_map(|member| {
+            let admitting = member
+                .admitting_component_ids
+                .binary_search(&completion.component_id)
+                .is_ok();
+            let metadata = member
+                .metadata_component_ids
+                .binary_search(&completion.component_id)
+                .is_ok();
+            (admitting || metadata).then_some((member.member_ref, admitting, metadata))
+        })
+        .collect::<Vec<_>>();
+    related_members.sort_unstable();
+    hasher.update(&(related_members.len() as u64).to_be_bytes());
+    for (member_ref, admitting, metadata) in related_members {
+        hasher.update(member_ref.as_bytes());
+        hasher.update(&[u8::from(admitting), u8::from(metadata)]);
+    }
+    CatalogCoverageProof::from_digest(*hasher.finalize().as_bytes())
+}
+
+fn calculate_component_completion_revision(
+    composition: &CatalogSourceComposition,
+    membership_revision: CatalogMembershipRevision,
+    contract_selection: &ContractVersionSelection,
+    plan_source: &CatalogCoveragePlanSource,
+    completions: &[CatalogComponentCoverageCompletion],
+) -> CatalogComponentCompletionRevision {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"spaghetti/rfc012b/catalog-component-completion-revision-v1\0");
+    hasher.update(composition.composition_id.as_bytes());
+    hasher.update(membership_revision.as_bytes());
+    hash_contract_selection(&mut hasher, contract_selection);
+    hash_string(&mut hasher, &plan_source.adapter_id);
+    hasher.update(plan_source.source_instance_key.as_bytes());
+    hash_string(&mut hasher, &plan_source.support_release_id);
+    hasher.update(plan_source.catalog_declaration_digest.as_bytes());
+    // This catalog-specific declaration digest is derived over the exact
+    // declaration plus access-policy digest, so the restart identity cannot
+    // survive policy drift without exposing the policy digest here.
+    hasher.update(plan_source.coverage_binding_digest().as_bytes());
+    hasher.update(&(completions.len() as u64).to_be_bytes());
+    for completion in completions {
+        hash_string(&mut hasher, &completion.component_id);
+        hash_coverage_position(&mut hasher, &completion.completion_position);
+        hasher.update(&(completion.objects.len() as u64).to_be_bytes());
+        for object in &completion.objects {
+            object.hash_into(&mut hasher);
+        }
+    }
+    CatalogComponentCompletionRevision::from_digest(*hasher.finalize().as_bytes())
+}
+
+fn hash_contract_selection(hasher: &mut blake3::Hasher, selection: &ContractVersionSelection) {
+    hasher.update(&selection.selection_contract_version.to_be_bytes());
+    hasher.update(&selection.model_major.to_be_bytes());
+    hasher.update(&selection.external_entity_reference_version.to_be_bytes());
+    hasher.update(&selection.semantic_revision_reference_version.to_be_bytes());
+    hasher.update(&selection.coverage_contract_version.to_be_bytes());
+    hasher.update(&(selection.fact_family_versions.len() as u64).to_be_bytes());
+    for (family, version) in &selection.fact_family_versions {
+        hash_string(hasher, family);
+        hasher.update(&version.to_be_bytes());
+    }
+    hash_optional_contract_version(hasher, selection.query_pack_version);
+    hash_optional_contract_version(hasher, selection.observation_contract_version);
+}
+
+fn hash_optional_contract_version(hasher: &mut blake3::Hasher, version: Option<u32>) {
+    match version {
+        Some(version) => {
+            hasher.update(&[1]);
+            hasher.update(&version.to_be_bytes());
+        }
+        None => {
+            hasher.update(&[0]);
+        }
+    }
+}
+
+fn hash_coverage_position(hasher: &mut blake3::Hasher, position: &CoveragePosition) {
+    hash_string(
+        hasher,
+        match position.kind {
+            CoveragePositionKind::AppendCursor => "append_cursor",
+            CoveragePositionKind::DocumentRevision => "document_revision",
+            CoveragePositionKind::SnapshotRevision => "snapshot_revision",
+            CoveragePositionKind::DatabaseWatermark => "database_watermark",
+            CoveragePositionKind::KeyRangeToken => "key_range_token",
+        },
+    );
+    hasher.update(position.opaque.as_bytes());
+    match position.monotonic_order {
+        Some(order) => {
+            hasher.update(&[1]);
+            hasher.update(&order.to_be_bytes());
+        }
+        None => {
+            hasher.update(&[0]);
+        }
+    }
+}
+
+fn hash_coverage_provenance(hasher: &mut blake3::Hasher, provenance: &CoverageProvenance) {
+    match provenance.source_record_id {
+        Some(source_record_id) => {
+            hasher.update(&[1]);
+            hasher.update(source_record_id.as_bytes());
+        }
+        None => {
+            hasher.update(&[0]);
+        }
+    }
+    match provenance.semantic_revision_ref {
+        Some(reference) => {
+            hasher.update(&[1]);
+            hasher.update(&reference.semantic_reference_contract_version.to_be_bytes());
+            hasher.update(reference.fact_revision_id.as_bytes());
+        }
+        None => {
+            hasher.update(&[0]);
+        }
+    }
+    match provenance.observed_at {
+        Some(observed_at) => {
+            hasher.update(&[1]);
+            hasher.update(&observed_at.to_be_bytes());
+        }
+        None => {
+            hasher.update(&[0]);
+        }
     }
 }
 

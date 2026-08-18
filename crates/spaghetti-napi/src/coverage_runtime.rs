@@ -9,6 +9,8 @@ use crate::adapter::{
 pub(crate) const DECODE_SOURCE_MEMBERSHIP_PREFIX: &[u8] = b"decode/source-membership/v1";
 pub(crate) const USAGE_V2_SOURCE_MEMBERSHIP_PREFIX: &[u8] =
     b"runtime.usage-v2/source-membership/v1";
+pub(crate) const CATALOG_V1_SOURCE_MEMBERSHIP_PREFIX: &[u8] =
+    b"library.catalog/source-membership/v1";
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct CoverageMembershipObject<'a> {
@@ -51,6 +53,11 @@ pub(crate) fn source_membership_prefix(
             append_vec_component(&mut prefix, family.as_bytes())?;
             prefix.extend_from_slice(&version.to_be_bytes());
             Ok(prefix)
+        }
+        CoverageDomain::ProjectionPack { pack, version }
+            if pack == "library.catalog" && *version == 1 =>
+        {
+            Ok(CATALOG_V1_SOURCE_MEMBERSHIP_PREFIX.to_vec())
         }
         CoverageDomain::FactFamily { .. } | CoverageDomain::ProjectionPack { .. } => {
             Err(CoverageMembershipEncodingError::UnsupportedDomain)
@@ -248,12 +255,28 @@ mod tests {
             })
             .unwrap()
         );
-        assert!(matches!(
+        assert_eq!(
             source_membership_prefix(&CoverageDomain::ProjectionPack {
+                pack: "library.catalog".to_string(),
+                version: 1,
+            })
+            .unwrap(),
+            CATALOG_V1_SOURCE_MEMBERSHIP_PREFIX
+        );
+        for domain in [
+            CoverageDomain::ProjectionPack {
                 pack: "history".to_string(),
                 version: 1,
-            }),
-            Err(CoverageMembershipEncodingError::UnsupportedDomain)
-        ));
+            },
+            CoverageDomain::ProjectionPack {
+                pack: "library.catalog".to_string(),
+                version: 2,
+            },
+        ] {
+            assert!(matches!(
+                source_membership_prefix(&domain),
+                Err(CoverageMembershipEncodingError::UnsupportedDomain)
+            ));
+        }
     }
 }

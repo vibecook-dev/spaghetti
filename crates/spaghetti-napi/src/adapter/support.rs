@@ -1599,6 +1599,7 @@ impl TypedAccessAuthorization {
             support_release_digest: self.support_release_digest,
             source_declaration_digest: self.source_declaration_digest,
             contracts: &self.contracts,
+            compatibility_class: self.operation.compatibility_class,
         })
     }
 
@@ -1636,13 +1637,26 @@ impl TypedAccessAuthorization {
 /// This type deliberately has no serde implementation or public constructor.
 /// It is an in-process source-access capability, not a transferable digest or
 /// portable decision object.
-#[derive(Debug)]
 pub struct AuthorizedCatalogAccess<'a> {
     adapter_id: &'a str,
     support_release_id: &'a str,
     support_release_digest: Sha256Digest,
     source_declaration_digest: Sha256Digest,
     contracts: &'a ContractVersionSelection,
+    compatibility_class: CompatibilityClass,
+}
+
+impl std::fmt::Debug for AuthorizedCatalogAccess<'_> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AuthorizedCatalogAccess")
+            .field("adapter_id", &self.adapter_id)
+            .field("support_release_id", &self.support_release_id)
+            .field("support_release_digest", &self.support_release_digest)
+            .field("source_declaration_digest", &self.source_declaration_digest)
+            .field("contracts", &self.contracts)
+            .finish_non_exhaustive()
+    }
 }
 
 impl<'a> AuthorizedCatalogAccess<'a> {
@@ -1666,6 +1680,12 @@ impl<'a> AuthorizedCatalogAccess<'a> {
         self.contracts
     }
 
+    /// Private execution lineage used to prevent a forward-compatible catalog
+    /// authorization from being strengthened into normal complete coverage.
+    pub(crate) fn compatibility_class(&self) -> CompatibilityClass {
+        self.compatibility_class
+    }
+
     #[cfg(test)]
     pub(crate) fn fixture(
         adapter_id: &'a str,
@@ -1674,12 +1694,32 @@ impl<'a> AuthorizedCatalogAccess<'a> {
         source_declaration_digest: Sha256Digest,
         contracts: &'a ContractVersionSelection,
     ) -> Self {
+        Self::fixture_with_compatibility(
+            adapter_id,
+            support_release_id,
+            support_release_digest,
+            source_declaration_digest,
+            contracts,
+            CompatibilityClass::ExactSupported,
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fixture_with_compatibility(
+        adapter_id: &'a str,
+        support_release_id: &'a str,
+        support_release_digest: Sha256Digest,
+        source_declaration_digest: Sha256Digest,
+        contracts: &'a ContractVersionSelection,
+        compatibility_class: CompatibilityClass,
+    ) -> Self {
         Self {
             adapter_id,
             support_release_id,
             support_release_digest,
             source_declaration_digest,
             contracts,
+            compatibility_class,
         }
     }
 }

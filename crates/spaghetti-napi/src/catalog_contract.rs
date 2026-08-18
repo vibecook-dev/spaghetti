@@ -15,7 +15,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::adapter::{
     CanonicalEntityKey, CanonicalSourceInstanceKey, CoverageDeclarationDigest, CoverageDomain,
-    CoverageSetCompleteness, ExternalEntityRef, SourceCoverageSet,
+    CoverageScope, CoverageSetCompleteness, ExternalEntityRef, SourceCoverageSet,
     EXTERNAL_ENTITY_REFERENCE_VERSION,
 };
 
@@ -303,6 +303,19 @@ impl CatalogCoveragePlanSource {
             .expect("fixed catalog coverage binding material is valid")
     }
 
+    /// Construct the generic RFC 012A scope from the same immutable source
+    /// entry that the RFC 012B plan uses. This prevents access-policy or
+    /// declaration drift between the plan and its coverage set.
+    pub(crate) fn coverage_scope(&self, scope: CatalogCoverageScope) -> CoverageScope {
+        CoverageScope {
+            adapter_id: self.adapter_id.clone(),
+            source_instance_key: self.source_instance_key,
+            root_entity_key: scope.root_entity_key(),
+            support_release_id: self.support_release_id.clone(),
+            source_or_scope_declaration_digest: self.coverage_binding_digest(),
+        }
+    }
+
     fn coordinate(&self) -> (&str, CanonicalSourceInstanceKey) {
         (&self.adapter_id, self.source_instance_key)
     }
@@ -315,7 +328,7 @@ impl CatalogCoveragePlanSource {
         encoded.extend_from_slice(self.access_policy_digest.as_bytes());
     }
 
-    fn matches_coverage(&self, coverage: &SourceCoverageSet) -> bool {
+    pub(crate) fn matches_coverage(&self, coverage: &SourceCoverageSet) -> bool {
         self.adapter_id == coverage.scope.adapter_id
             && self.source_instance_key == coverage.scope.source_instance_key
             && self.support_release_id == coverage.scope.support_release_id
