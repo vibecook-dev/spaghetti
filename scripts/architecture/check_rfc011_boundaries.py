@@ -517,6 +517,25 @@ def discover_rfc012_scoped_host_boundary_violations() -> set[str]:
         for binding in required_continuity_wire_bindings
     ):
         found.add(f"{relative}#missing-contextual-continuity-envelope-contract")
+    scope_coverage_wire = scoped_dir / "scope_coverage_wire.rs"
+    scope_coverage_wire_text = (
+        production_rust_text(scope_coverage_wire)
+        if scope_coverage_wire in production_scoped_paths
+        else ""
+    )
+    required_scope_coverage_wire_bindings = (
+        "pub(crate) struct ScopedScopeCoverageConsumerContext",
+        "pub(crate) struct ScopedScopeCoverageWire",
+        "from_wire_value_for_context(",
+        "expected.validate_against(root, source_coverage)",
+        "reconstructed.validate_against(",
+        "MAX_SCOPE_COVERAGE_RELATIONS",
+    )
+    if any(
+        binding not in scope_coverage_wire_text
+        for binding in required_scope_coverage_wire_bindings
+    ):
+        found.add(f"{relative}#missing-contextual-scope-coverage-contract")
     lib = REPO_ROOT / "crates/spaghetti-napi/src/lib.rs"
     if re.search(r"^\s*pub\s+mod\s+scoped_observation\s*;", read(lib), re.MULTILINE):
         found.add(f"{repo_path(lib)}#premature-public-scoped-host")
@@ -558,6 +577,10 @@ def discover_rfc012_scoped_host_boundary_violations() -> set[str]:
     continuity_portable = REPO_ROOT / continuity_portable_relative
     close_portable_relative = "packages/sdk/src/contracts/rfc012d-close.ts"
     close_portable = REPO_ROOT / close_portable_relative
+    scope_coverage_portable_relative = (
+        "packages/sdk/src/contracts/rfc012d-scope-coverage.ts"
+    )
+    scope_coverage_portable = REPO_ROOT / scope_coverage_portable_relative
     contracts_root = portable.parent.resolve()
     if (
         not portable.exists()
@@ -565,6 +588,7 @@ def discover_rfc012_scoped_host_boundary_violations() -> set[str]:
         or not source_portable.exists()
         or not continuity_portable.exists()
         or not close_portable.exists()
+        or not scope_coverage_portable.exists()
     ):
         found.add(portable_relative)
     else:
@@ -607,12 +631,24 @@ def discover_rfc012_scoped_host_boundary_violations() -> set[str]:
             or "expectedContextInput: unknown" not in close_portable_text
         ):
             found.add(f"{close_portable_relative}#missing-attachment-bound-close-contract")
+        scope_coverage_portable_text = read(scope_coverage_portable)
+        if (
+            "export interface ScopedScopeCoverageContext"
+            not in scope_coverage_portable_text
+            or "export interface ScopedScopeCoverage" not in scope_coverage_portable_text
+            or "export function parseScopedScopeCoverage(" not in scope_coverage_portable_text
+            or "expectedContextInput: unknown" not in scope_coverage_portable_text
+        ):
+            found.add(
+                f"{scope_coverage_portable_relative}#missing-contextual-scope-coverage-contract"
+            )
         pending = [
             portable,
             usage_portable,
             source_portable,
             continuity_portable,
             close_portable,
+            scope_coverage_portable,
         ]
         visited: set[Path] = set()
         while pending:
@@ -651,6 +687,10 @@ def discover_rfc012_scoped_host_boundary_violations() -> set[str]:
         )
     if "./contracts/rfc012d-close.js" not in RUNTIME_MODULE_RE.findall(read(sdk_index)):
         found.add(f"{repo_path(sdk_index)}#missing-rfc012d-close-export")
+    if "./contracts/rfc012d-scope-coverage.js" not in RUNTIME_MODULE_RE.findall(
+        read(sdk_index)
+    ):
+        found.add(f"{repo_path(sdk_index)}#missing-rfc012d-scope-coverage-export")
     return found
 
 

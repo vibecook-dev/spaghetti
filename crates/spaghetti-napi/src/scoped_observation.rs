@@ -51,6 +51,7 @@ use crate::source::{
 
 mod close_wire;
 mod continuity_wire;
+mod scope_coverage_wire;
 mod source_wire;
 mod usage_wire;
 
@@ -6112,26 +6113,46 @@ impl ScopedScopeCoverage {
             return false;
         }
 
+        enum DecodeRelationState<'a> {
+            Present(&'a CoverageStatus),
+            Absent(CoverageAbsenceKind),
+        }
+        let mut decode_coordinates = BTreeMap::new();
+        for point in &decode.points {
+            decode_coordinates.insert(
+                (point.stream_key, point.object_key, point.generation),
+                DecodeRelationState::Present(&point.status),
+            );
+        }
+        for absence in &decode.explicit_absence_or_deletion {
+            decode_coordinates.insert(
+                (absence.stream_key, absence.object_key, absence.generation),
+                DecodeRelationState::Absent(absence.kind),
+            );
+        }
         for relation in &self.relations {
-            let represented = match &relation.state {
-                ScopedScopeRelationState::Present { status } => decode.points.iter().any(|point| {
-                    point.stream_key == relation.source.stream_key
-                        && point.object_key == relation.source.object_key
-                        && point.generation == relation.generation
-                        && &point.status == status
-                }),
-                ScopedScopeRelationState::Absent { kind } => {
-                    decode.explicit_absence_or_deletion.iter().any(|absence| {
-                        absence.stream_key == relation.source.stream_key
-                            && absence.object_key == relation.source.object_key
-                            && absence.generation == relation.generation
-                            && absence.kind == *kind
-                    })
-                }
+            let represented = decode_coordinates.remove(&(
+                relation.source.stream_key,
+                relation.source.object_key,
+                relation.generation,
+            ));
+            let matches = match (&relation.state, represented) {
+                (
+                    ScopedScopeRelationState::Present { status },
+                    Some(DecodeRelationState::Present(decode_status)),
+                ) => status == decode_status,
+                (
+                    ScopedScopeRelationState::Absent { kind },
+                    Some(DecodeRelationState::Absent(decode_kind)),
+                ) => *kind == decode_kind,
+                _ => false,
             };
-            if !represented {
+            if !matches {
                 return false;
             }
+        }
+        if !decode_coordinates.is_empty() {
+            return false;
         }
         self.scope_revision
             == derive_scoped_scope_coverage_revision(
@@ -12682,43 +12703,32 @@ fn assemble_scoped_scope_coverage(
         if &coverage.source != source || !source_belongs_to_root(source, root) {
             return Err(ScopedCoverageAssemblyError::InvalidScopeCoverage);
         }
-        let (generation, state, represented_in_decode) =
-            match (&coverage.point, &coverage.explicit_absence_or_deletion) {
-                (Some(point), None)
-                    if point.coverage_domain == CoverageDomain::Decode
-                        && point.adapter_id == root.adapter_id.as_str()
-                        && point.source_instance_key == root.source_instance_key
-                        && point.stream_key == source.stream_key
-                        && point.object_key == source.object_key =>
-                {
-                    let represented = decode.points.iter().any(|candidate| candidate == point);
-                    (
-                        point.generation,
-                        ScopedScopeRelationState::Present {
-                            status: point.status.clone(),
-                        },
-                        represented,
-                    )
-                }
-                (None, Some(absence))
-                    if absence.stream_key == source.stream_key
-                        && absence.object_key == source.object_key =>
-                {
-                    let represented = decode
-                        .explicit_absence_or_deletion
-                        .iter()
-                        .any(|candidate| candidate == absence);
-                    (
-                        absence.generation,
-                        ScopedScopeRelationState::Absent { kind: absence.kind },
-                        represented,
-                    )
-                }
-                _ => return Err(ScopedCoverageAssemblyError::InvalidScopeCoverage),
-            };
-        if !represented_in_decode {
-            return Err(ScopedCoverageAssemblyError::InvalidScopeCoverage);
-        }
+        let (generation, state) = match (&coverage.point, &coverage.explicit_absence_or_deletion) {
+            (Some(point), None)
+                if point.coverage_domain == CoverageDomain::Decode
+                    && point.adapter_id == root.adapter_id.as_str()
+                    && point.source_instance_key == root.source_instance_key
+                    && point.stream_key == source.stream_key
+                    && point.object_key == source.object_key =>
+            {
+                (
+                    point.generation,
+                    ScopedScopeRelationState::Present {
+                        status: point.status.clone(),
+                    },
+                )
+            }
+            (None, Some(absence))
+                if absence.stream_key == source.stream_key
+                    && absence.object_key == source.object_key =>
+            {
+                (
+                    absence.generation,
+                    ScopedScopeRelationState::Absent { kind: absence.kind },
+                )
+            }
+            _ => return Err(ScopedCoverageAssemblyError::InvalidScopeCoverage),
+        };
         completeness = merge_coverage_completeness(completeness, coverage.completeness);
         relations.push(ScopedScopeRelationCoverage {
             relation_id: Arc::from(relation_id.as_str()),

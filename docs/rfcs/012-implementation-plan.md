@@ -1804,6 +1804,24 @@ Current landing status (2026-08-18):
   positions and cannot replace their cursor or membership authority. Dynamic
   relation discovery, non-append members, D-owned artifact/capability
   manifests, the portable barrier wire, and N-API transport remain open; and
+- the exact-known-object `scope_coverage` proof now has a strict contextual
+  portable projection without becoming a watermark or completion barrier.
+  Rust retains the expected root, selected scope-program identifier and
+  SHA-256 digest, declaration-derived root relation, complete canonical
+  relation set, exact expected scope revision, and the one authoritative RFC
+  012A Decode set; wire consumption reconstructs the typed summary, recomputes
+  its BLAKE3 scope revision, and rejects revision/program/root/source/generation/state/completeness or
+  relation-set drift. Portable TypeScript independently parses the frozen Rust
+  fixture, requires that same caller-held context, cross-validates every
+  present/absent/deleted relation one-for-one with Decode evidence, and rejects
+  unsafe integers, unknown nested meaning, duplicate coordinates, and root
+  reassignment. Source positions, membership revisions, and errors remain
+  exclusively on the Decode set, so cursor movement does not masquerade as a
+  scope-membership revision. The projection contains no native locator/path,
+  family manifest, barrier sequence, root-presence shortcut, readiness, public
+  observer method, or N-API authority. Dynamic/discovered membership and the
+  complete artifact/capability/family manifest remain prerequisites for a
+  portable bootstrap or resync-completion barrier; and
 - the architecture checker forbids store/query/N-API/concrete-adapter imports
   and premature native public export from the provisional composition and
   negotiation roots, while keeping the portable negotiation graph contract-only.
@@ -1815,10 +1833,10 @@ reducers beyond usage-v2,
 coverage-complete durable query exposure, affiliation/actor enrichment and
 envelope variants beyond the current usage/source-lifecycle families, the
 public N-API/SDK iterator transport over the internal async lifecycle runtime,
-portable scope coverage beyond the current exact known-object relation/root
-summary,
-dynamic/discovered scope membership beyond the attachment's current exact
-known-object grants and family coverage beyond usage-v2,
+portable dynamic/discovered scope coverage beyond the current exact
+known-object relation/root summary, dynamic/discovered scope membership beyond
+the attachment's current exact known-object grants and family coverage beyond
+usage-v2,
 complete multi-family replacement manifests, whole-scope discovery and source
 state beyond the current exact append-object set, automatic watcher/source-
 owner replacement replay and rebind orchestration, remaining
