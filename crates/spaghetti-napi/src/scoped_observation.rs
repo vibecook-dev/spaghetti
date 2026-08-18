@@ -50,6 +50,7 @@ use crate::source::{
     StartupPhase, WatchBeforeScan, MAX_IDENTITY_VALUE_BYTES,
 };
 
+mod actor_wire;
 mod artifact_wire;
 mod close_wire;
 mod continuity_wire;

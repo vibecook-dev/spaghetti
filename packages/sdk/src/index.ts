@@ -28,11 +28,12 @@ export * from './contracts/rfc012b-pages.js';
 export * from './contracts/rfc012c.js';
 
 // RFC 012D exact-version negotiation plus deliberately incomplete contextual
-// usage, source-control, continuity, exact-known-object scope coverage, and
-// attachment-close and bounded-artifact wire slices. The complete event union,
+// actor, usage, source-control, continuity, exact-known-object scope coverage,
+// attachment-close, and bounded-artifact wire slices. The complete event union,
 // native artifact-access mediator, and native observer transport remain gated
 // on the full scoped contract.
 export * from './contracts/rfc012d.js';
+export * from './contracts/rfc012d-actor-envelope.js';
 export * from './contracts/rfc012d-artifact.js';
 export * from './contracts/rfc012d-close.js';
 export * from './contracts/rfc012d-continuity-envelope.js';
