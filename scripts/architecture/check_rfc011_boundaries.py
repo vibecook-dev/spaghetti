@@ -455,6 +455,27 @@ def discover_rfc012_scoped_host_boundary_violations() -> set[str]:
     )
     if any(binding not in usage_wire_text for binding in required_usage_wire_bindings):
         found.add(f"{relative}#missing-contextual-usage-envelope-contract")
+    close_wire = scoped_dir / "close_wire.rs"
+    close_wire_text = (
+        production_rust_text(close_wire) if close_wire in production_scoped_paths else ""
+    )
+    required_close_wire_bindings = (
+        "pub(crate) struct ScopedCloseCommand",
+        "pub(crate) struct ScopedObservationCloseOperation",
+        "pub(crate) struct ScopedCloseReceiptWire",
+        "prepare_portable_close(",
+        "close_portable_with_consumer(",
+        "pub(crate) fn context_wire(&self) -> ScopedCloseContextWire",
+        "from_wire_value_for_operation(",
+        "expected_operation: &ScopedObservationCloseOperation",
+        "pub(crate) fn parse_receipt(",
+        "active_operations != 0",
+        "active_watcher_tasks != 0",
+        "consumer_drain_pending",
+        "Arc::ptr_eq(&self.attachment_authority",
+    )
+    if any(binding not in close_wire_text for binding in required_close_wire_bindings):
+        found.add(f"{relative}#missing-attachment-bound-close-contract")
     source_wire = scoped_dir / "source_wire.rs"
     source_wire_text = (
         production_rust_text(source_wire) if source_wire in production_scoped_paths else ""
@@ -535,12 +556,15 @@ def discover_rfc012_scoped_host_boundary_violations() -> set[str]:
         "packages/sdk/src/contracts/rfc012d-continuity-envelope.ts"
     )
     continuity_portable = REPO_ROOT / continuity_portable_relative
+    close_portable_relative = "packages/sdk/src/contracts/rfc012d-close.ts"
+    close_portable = REPO_ROOT / close_portable_relative
     contracts_root = portable.parent.resolve()
     if (
         not portable.exists()
         or not usage_portable.exists()
         or not source_portable.exists()
         or not continuity_portable.exists()
+        or not close_portable.exists()
     ):
         found.add(portable_relative)
     else:
@@ -575,7 +599,21 @@ def discover_rfc012_scoped_host_boundary_violations() -> set[str]:
             found.add(
                 f"{continuity_portable_relative}#missing-contextual-continuity-envelope-contract"
             )
-        pending = [portable, usage_portable, source_portable, continuity_portable]
+        close_portable_text = read(close_portable)
+        if (
+            "export interface ScopedCloseContext" not in close_portable_text
+            or "export interface ScopedCloseReceipt" not in close_portable_text
+            or "export function parseScopedCloseReceipt(" not in close_portable_text
+            or "expectedContextInput: unknown" not in close_portable_text
+        ):
+            found.add(f"{close_portable_relative}#missing-attachment-bound-close-contract")
+        pending = [
+            portable,
+            usage_portable,
+            source_portable,
+            continuity_portable,
+            close_portable,
+        ]
         visited: set[Path] = set()
         while pending:
             importer = pending.pop().resolve()
@@ -611,6 +649,8 @@ def discover_rfc012_scoped_host_boundary_violations() -> set[str]:
         found.add(
             f"{repo_path(sdk_index)}#missing-rfc012d-continuity-envelope-export"
         )
+    if "./contracts/rfc012d-close.js" not in RUNTIME_MODULE_RE.findall(read(sdk_index)):
+        found.add(f"{repo_path(sdk_index)}#missing-rfc012d-close-export")
     return found
 
 

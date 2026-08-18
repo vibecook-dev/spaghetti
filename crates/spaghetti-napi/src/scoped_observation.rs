@@ -49,6 +49,7 @@ use crate::source::{
     StartupPhase, WatchBeforeScan, MAX_IDENTITY_VALUE_BYTES,
 };
 
+mod close_wire;
 mod continuity_wire;
 mod source_wire;
 mod usage_wire;
@@ -1944,8 +1945,32 @@ struct ScopedObservationApplicationAuthority;
 /// Unforgeable identity shared only by one authorized host and the consumer
 /// drain it constructs. Root identity alone is insufficient because two
 /// simultaneous attachments may intentionally observe the same native scope.
-#[derive(Debug)]
-struct ScopedObservationAttachmentAuthority;
+struct ScopedObservationAttachmentAuthority {
+    /// Process-local uniqueness input for opaque portable attachment
+    /// correlation. Runtime authority continues to rely on `Arc` identity;
+    /// this value is never itself accepted as authorization.
+    token: u64,
+}
+
+impl std::fmt::Debug for ScopedObservationAttachmentAuthority {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ScopedObservationAttachmentAuthority")
+            .finish_non_exhaustive()
+    }
+}
+
+static NEXT_SCOPED_ATTACHMENT_TOKEN: AtomicU64 = AtomicU64::new(1);
+
+fn next_scoped_attachment_authority(
+) -> Result<Arc<ScopedObservationAttachmentAuthority>, ScopedObservationAccessError> {
+    let token = NEXT_SCOPED_ATTACHMENT_TOKEN
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+            current.checked_add(1)
+        })
+        .map_err(|_| ScopedObservationAccessError::AttachmentSequenceExhausted)?;
+    Ok(Arc::new(ScopedObservationAttachmentAuthority { token }))
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ScopedObservationCloseState {
@@ -8270,6 +8295,8 @@ pub enum ScopedObservationAccessError {
     AccessPassSequenceExhausted,
     #[error("scoped attachment operation accounting is exhausted")]
     OperationCapacityExhausted,
+    #[error("scoped attachment identity sequence is exhausted")]
+    AttachmentSequenceExhausted,
     #[error("scoped append bootstrap has not reached a drainable observation")]
     BootstrapNotDrained,
     #[error("scoped append bootstrap is already complete")]
@@ -9481,6 +9508,7 @@ impl ScopedObservationAccessHost {
                 .relation_id
                 .as_str(),
         );
+        let attachment_authority = next_scoped_attachment_authority()?;
         Ok(Self {
             adapter,
             compatibility,
@@ -9491,7 +9519,7 @@ impl ScopedObservationAccessHost {
             program_id: request.program_id,
             known_objects: Arc::new(known_objects),
             root_relation_id,
-            attachment_authority: Arc::new(ScopedObservationAttachmentAuthority),
+            attachment_authority,
             lifecycle: Arc::new(ScopedObservationAttachmentLifecycle::default()),
             state: Arc::new(ScopedObservationAccessState {
                 closed: AtomicBool::new(false),
@@ -13139,7 +13167,7 @@ mod projection_tests {
         let lifecycle = Arc::new(ScopedObservationAttachmentLifecycle::default());
         let mut drain = ScopedObservationConsumerDrain::new(
             envelope_mapper(root),
-            Arc::new(ScopedObservationAttachmentAuthority),
+            next_scoped_attachment_authority().unwrap(),
             Arc::clone(&lifecycle),
             ScopedObservationDeliveryLimits {
                 max_semantic_events,

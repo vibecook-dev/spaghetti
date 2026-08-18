@@ -1198,6 +1198,84 @@ mod tests {
         ));
     }
 
+    #[tokio::test]
+    async fn scoped_portable_close_is_exact_attachment_bound_and_idempotent() {
+        let registry = supported_fixture_registry();
+        let temp = TempDir::new().unwrap();
+        let first = ScopedObservationAccessHost::authorize(
+            &registry,
+            scoped_access_request(temp.path().join("portable-close-first")),
+        )
+        .unwrap();
+        let second = ScopedObservationAccessHost::authorize(
+            &registry,
+            scoped_access_request(temp.path().join("portable-close-second")),
+        )
+        .unwrap();
+        let limits = ScopedObservationDeliveryLimits {
+            max_semantic_events: 1,
+            max_retained_native_bytes: 0,
+            max_source_control_items: 1,
+        };
+        let mut first_drain = first.open_consumer_drain(limits).unwrap();
+        let mut second_drain = second.open_consumer_drain(limits).unwrap();
+        let first_command = first.prepare_portable_close().unwrap();
+        let repeated_command = first.prepare_portable_close().unwrap();
+        let second_command = second.prepare_portable_close().unwrap();
+        assert_eq!(
+            serde_json::to_value(first_command.context_wire()).unwrap(),
+            serde_json::to_value(repeated_command.context_wire()).unwrap()
+        );
+
+        let foreign_command =
+            match first.close_portable_with_consumer(&second_command, &mut first_drain) {
+                Err(error) => error,
+                Ok(_) => panic!("foreign close command must fail"),
+            };
+        assert!(foreign_command
+            .to_string()
+            .contains("another observer attachment"));
+        assert!(!first.is_closed());
+        assert!(!first_drain.is_closed());
+
+        let foreign_drain =
+            match first.close_portable_with_consumer(&first_command, &mut second_drain) {
+                Err(error) => error,
+                Ok(_) => panic!("foreign consumer drain must fail"),
+            };
+        assert!(foreign_drain
+            .to_string()
+            .contains("another observer attachment"));
+        assert!(!first.is_closed());
+        assert!(!second.is_closed());
+        assert!(!second_drain.is_closed());
+
+        let operation = first
+            .close_portable_with_consumer(&first_command, &mut first_drain)
+            .unwrap();
+        let receipt = operation.wait_async().await.unwrap();
+        let receipt_value = serde_json::to_value(&receipt).unwrap();
+        assert_eq!(
+            serde_json::to_value(operation.parse_receipt(receipt_value.clone()).unwrap()).unwrap(),
+            receipt_value
+        );
+        assert!(first.is_closed());
+        assert!(first_drain.is_closed());
+
+        let repeated = first
+            .close_portable_with_consumer(&repeated_command, &mut first_drain)
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(repeated.wait_async().await.unwrap()).unwrap(),
+            receipt_value
+        );
+
+        let second_operation = second
+            .close_portable_with_consumer(&second_command, &mut second_drain)
+            .unwrap();
+        assert!(second_operation.wait_async().await.is_ok());
+    }
+
     #[test]
     fn scoped_host_rejects_incompatible_observation_contract_before_registry_authority() {
         let registry = supported_fixture_registry();

@@ -740,6 +740,18 @@ updates-only delta, so neither absence is treated as policy evidence; a private
 census rerun and review are required before changing either declaration or
 runtime admission rule.
 
+The eighth B2 slice (`6b1cfe4`) closes the missing authorization-to-composition
+execution seam without promoting or reading a source. The selected
+`TypedAccessAuthorization` now retains the verified source-declaration digest,
+and only a borrowed, field-private `CatalogDiscovery` authorization with an
+exact selected query pack can enter composition execution. The executable
+wrapper verifies and retains the exact adapter, support release ID and digest,
+source-declaration digest, and negotiated contract selection; a planned/unbound
+composition and every drift axis fail closed. Digest-only promoted-binding
+values remain useful for static composition construction and fixtures but can
+no longer authorize execution. Source access, coverage publication, policy-view
+binding, persistence, query execution, and built-in promotion remain open.
+
 ### B3. Durable pack, readiness, and pagination
 
 Implement:
@@ -1723,8 +1735,20 @@ Current landing status (2026-08-18):
   validates the Rust-produced fixture without claiming BLAKE3 authority.
   Diagnostic discard counts remain explicitly outside event identity. Initial
   bootstrap and resync-completion barrier DTOs, complete manifests/coverage,
-  close/cancellation acknowledgement, future typed unknowns, native transport,
-  and N-API exposure remain gated; and
+  future typed unknowns, native transport, and N-API exposure remain gated;
+  and
+- a fourth lifecycle wire slice freezes the attachment-bound close completion
+  proof behind the eventual `close() -> Future<void>` facade. One process-local
+  opaque attachment reference and one deterministic idempotent close-request
+  identity bind the exact caller-held selection and full resolved root. Rust
+  accepts only the original in-process attachment authority and exact consumer
+  drain, then emits a receipt only after the existing two-part barrier reports
+  zero owned operations and watcher tasks plus a closed drain. Active counters,
+  applied sequence, timestamps, locators, and payloads never become portable
+  trust claims. Portable TypeScript independently requires the caller-held
+  selection, root, attachment reference, and request identity and rejects
+  silent nested fields or a merely `closing` state. This slice defines no
+  public N-API method or transport owner; and
 - the architecture checker forbids store/query/N-API/concrete-adapter imports
   and premature native public export from the provisional composition and
   negotiation roots, while keeping the portable negotiation graph contract-only.
@@ -1743,13 +1767,13 @@ complete multi-family replacement manifests, whole-scope discovery and source
 state beyond the current exact append-object set, automatic watcher/source-
 owner replacement replay and rebind orchestration, remaining
 portable-host wiring and policy calibration, plus re-overflow orchestration,
-artifact mediation and the public portable close transport,
+artifact mediation and the public close-method transport,
 the trusted native version-probe/identity-input drivers, and the complete
 public request are not yet implemented. The internal offered and applied
 boundaries are now transactional, but they cannot become a public watermark and
 consumer-ready helper until complete scope-membership/barrier coverage, portable
-resync completion, portable watcher cancellation, and the remaining negotiated
-lifecycle surface are defined. The usage-v2 sink and delivery lane remain crate-private
+resync completion, runtime-bound public close invocation, and the remaining
+negotiated lifecycle surface are defined. The usage-v2 sink and delivery lane remain crate-private
 until the complete envelope/event/lifecycle DTOs, bounded unknown-variant
 preservation, and runtime-bound negotiated portable transport exist.
 

@@ -336,7 +336,7 @@ function parseAppendCursor(value: unknown, label: string): { wire: string; offse
   return { wire: value as string, offset: Number(offset) };
 }
 
-function parseRoot(value: unknown): ScopedUsageRoot {
+export function parseScopedUsageRoot(value: unknown): ScopedUsageRoot {
   const input = record(value, 'usage root');
   const fields = ['session_ref', 'session_key', 'root_actor_run_key', 'native_session_claim'];
   assertKnownFields(input, fields, 'usage root');
@@ -416,7 +416,7 @@ export function parseScopedUsageEnvelopeContext(value: unknown): ScopedUsageEnve
   if (new Set(keys).size !== keys.length) {
     throw new ContractValidationError('scoped usage context contains duplicate authorized sources');
   }
-  return { contract_selection: selection, root: parseRoot(input.root), authorized_sources: sources };
+  return { contract_selection: selection, root: parseScopedUsageRoot(input.root), authorized_sources: sources };
 }
 
 function parseActor(value: unknown, root: ScopedUsageRoot): ScopedUsageActor {
@@ -758,7 +758,7 @@ export function parseScopedUsageEnvelope(value: unknown, expectedContextInput: u
   ) {
     throw new ContractValidationError('scoped usage envelope does not match the selected usage contract');
   }
-  const root = parseRoot(input.root);
+  const root = parseScopedUsageRoot(input.root);
   if (JSON.stringify(root) !== JSON.stringify(context.root)) {
     throw new ContractValidationError('scoped usage envelope does not match the caller-held root');
   }
