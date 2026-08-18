@@ -27,9 +27,11 @@ export * from './contracts/rfc012b-pages.js';
 // RFC 012C portable actor, affiliation, and usage-v2 value contracts.
 export * from './contracts/rfc012c.js';
 
-// RFC 012D exact-version observation negotiation. Event/envelope DTOs and the
-// native observer transport remain gated on the complete scoped contract.
+// RFC 012D exact-version negotiation plus deliberately incomplete contextual
+// usage, source-control, and continuity wire slices. The complete event union
+// and native observer transport remain gated on the full scoped contract.
 export * from './contracts/rfc012d.js';
+export * from './contracts/rfc012d-continuity-envelope.js';
 export * from './contracts/rfc012d-source-envelope.js';
 export * from './contracts/rfc012d-usage-envelope.js';
 

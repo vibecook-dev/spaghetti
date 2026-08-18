@@ -719,6 +719,18 @@ Nested-parent UUID policy, Grok updates-only admission, promoted runtime
 composition, source-access/coverage integration, and catalog publication remain
 open.
 
+The seventh B2 slice (`a913fcb`) adds privacy-safe evidence for the two open
+admission choices without changing catalog output. The independent census now
+counts Claude UUID-shaped versus opaque nested parents and the nested-only
+identity delta, plus Grok directories admitted by the current four-sidecar
+candidate policy, current-policy members with/without updates, and updates-only
+members admitted only by the broader census. Explicit-zero counters and
+synthetic matrices keep the result deterministic and contain no project,
+session, or path values. The checked-in corpus reports no nested-only or
+updates-only delta, so neither absence is treated as policy evidence; a private
+census rerun and review are required before changing either declaration or
+runtime admission rule.
+
 ### B3. Durable pack, readiness, and pagination
 
 Implement:
@@ -1685,9 +1697,25 @@ Current landing status (2026-08-18):
   provenance, and the envelope epoch/source generation. Rust reconstructs the
   exact typed control and recomputes its event ID; portable TypeScript
   independently parses the Rust-produced fixture without claiming BLAKE3
-  authority. Observer bootstrap/resync/failure controls, semantic families,
+  authority. Observer bootstrap/resync-completion barriers, semantic families,
   future typed-unknown preservation, native transport, and N-API exposure
-  remain outside this deliberately incomplete union; and
+  remain outside this deliberately incomplete union;
+- a third contextual wire slice freezes `observer.resync_required`,
+  `observer.resync_started`, and terminal `observer.failed` controls. Every
+  control repeats the exact selected lifecycle/envelope/event contract and
+  root-owned observer-control coordinate, carries no semantic/native record or
+  source-occurrence evidence, and uses portable bounded epoch, sequence,
+  discard, and observation counters. Consumption is stateful rather than
+  shape-only: the caller must retain the current epoch, last contiguous
+  sequence, replacement baseline digest, and phase; replacement start also
+  requires the exact previously delivered invalidation and must advance one
+  epoch in `FullSnapshot` mode. Rust reconstructs the typed control and
+  recomputes its deterministic event ID, while portable TypeScript independently
+  validates the Rust-produced fixture without claiming BLAKE3 authority.
+  Diagnostic discard counts remain explicitly outside event identity. Initial
+  bootstrap and resync-completion barrier DTOs, complete manifests/coverage,
+  close/cancellation acknowledgement, future typed unknowns, native transport,
+  and N-API exposure remain gated; and
 - the architecture checker forbids store/query/N-API/concrete-adapter imports
   and premature native public export from the provisional composition and
   negotiation roots, while keeping the portable negotiation graph contract-only.
@@ -1711,8 +1739,8 @@ the trusted native version-probe/identity-input drivers, and the complete
 public request are not yet implemented. The internal offered and applied
 boundaries are now transactional, but they cannot become a public watermark and
 consumer-ready helper until complete scope-membership/barrier coverage, portable
-resync completion, portable watcher cancellation, and the negotiated lifecycle
-surface are defined. The usage-v2 sink and delivery lane remain crate-private
+resync completion, portable watcher cancellation, and the remaining negotiated
+lifecycle surface are defined. The usage-v2 sink and delivery lane remain crate-private
 until the complete envelope/event/lifecycle DTOs, bounded unknown-variant
 preservation, and runtime-bound negotiated portable transport exist.
 

@@ -472,6 +472,30 @@ def discover_rfc012_scoped_host_boundary_violations() -> set[str]:
     )
     if any(binding not in source_wire_text for binding in required_source_wire_bindings):
         found.add(f"{relative}#missing-contextual-source-envelope-contract")
+    continuity_wire = scoped_dir / "continuity_wire.rs"
+    continuity_wire_text = (
+        production_rust_text(continuity_wire)
+        if continuity_wire in production_scoped_paths
+        else ""
+    )
+    required_continuity_wire_bindings = (
+        "pub(crate) struct ScopedContinuityEnvelopeWire",
+        "pub(crate) struct ScopedContinuityConsumerContext",
+        "from_wire_value_for_context(",
+        "expected_selection: &ObservationContractSelection",
+        "expected_root: &ScopedObservationRootIdentity",
+        "expected_state: &ScopedContinuityConsumerContext",
+        "prior_resync_required: Option<ScopedResyncRequired>",
+        "resync_required_event_id(",
+        "resync_started_event_id(",
+        "observer_failed_event_id(",
+        "ScopedContinuityEnvelopeContractError::UnsupportedEvent",
+    )
+    if any(
+        binding not in continuity_wire_text
+        for binding in required_continuity_wire_bindings
+    ):
+        found.add(f"{relative}#missing-contextual-continuity-envelope-contract")
     lib = REPO_ROOT / "crates/spaghetti-napi/src/lib.rs"
     if re.search(r"^\s*pub\s+mod\s+scoped_observation\s*;", read(lib), re.MULTILINE):
         found.add(f"{repo_path(lib)}#premature-public-scoped-host")
@@ -507,8 +531,17 @@ def discover_rfc012_scoped_host_boundary_violations() -> set[str]:
     usage_portable = REPO_ROOT / usage_portable_relative
     source_portable_relative = "packages/sdk/src/contracts/rfc012d-source-envelope.ts"
     source_portable = REPO_ROOT / source_portable_relative
+    continuity_portable_relative = (
+        "packages/sdk/src/contracts/rfc012d-continuity-envelope.ts"
+    )
+    continuity_portable = REPO_ROOT / continuity_portable_relative
     contracts_root = portable.parent.resolve()
-    if not portable.exists() or not usage_portable.exists() or not source_portable.exists():
+    if (
+        not portable.exists()
+        or not usage_portable.exists()
+        or not source_portable.exists()
+        or not continuity_portable.exists()
+    ):
         found.add(portable_relative)
     else:
         portable_text = read(portable)
@@ -531,7 +564,18 @@ def discover_rfc012_scoped_host_boundary_violations() -> set[str]:
             or "expectedContextInput: unknown" not in source_portable_text
         ):
             found.add(f"{source_portable_relative}#missing-contextual-source-envelope-contract")
-        pending = [portable, usage_portable, source_portable]
+        continuity_portable_text = read(continuity_portable)
+        if (
+            "export interface ScopedContinuityEnvelope" not in continuity_portable_text
+            or "export interface ScopedContinuityEnvelopeContext"
+            not in continuity_portable_text
+            or "export function parseScopedContinuityEnvelope(" not in continuity_portable_text
+            or "expectedContextInput: unknown" not in continuity_portable_text
+        ):
+            found.add(
+                f"{continuity_portable_relative}#missing-contextual-continuity-envelope-contract"
+            )
+        pending = [portable, usage_portable, source_portable, continuity_portable]
         visited: set[Path] = set()
         while pending:
             importer = pending.pop().resolve()
@@ -561,6 +605,12 @@ def discover_rfc012_scoped_host_boundary_violations() -> set[str]:
         read(sdk_index)
     ):
         found.add(f"{repo_path(sdk_index)}#missing-rfc012d-source-envelope-export")
+    if "./contracts/rfc012d-continuity-envelope.js" not in RUNTIME_MODULE_RE.findall(
+        read(sdk_index)
+    ):
+        found.add(
+            f"{repo_path(sdk_index)}#missing-rfc012d-continuity-envelope-export"
+        )
     return found
 
 
