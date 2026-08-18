@@ -455,6 +455,23 @@ def discover_rfc012_scoped_host_boundary_violations() -> set[str]:
     )
     if any(binding not in usage_wire_text for binding in required_usage_wire_bindings):
         found.add(f"{relative}#missing-contextual-usage-envelope-contract")
+    source_wire = scoped_dir / "source_wire.rs"
+    source_wire_text = (
+        production_rust_text(source_wire) if source_wire in production_scoped_paths else ""
+    )
+    required_source_wire_bindings = (
+        "pub(crate) struct ScopedSourceEnvelopeWire",
+        "from_wire_value_for_context(",
+        "expected_selection: &ObservationContractSelection",
+        "expected_root: &ScopedObservationRootIdentity",
+        "expected_sources: &[ScopedSourceObjectIdentity]",
+        "source_presence_event_id(",
+        "source_reset_event_id(",
+        "source_object_error_event_id(",
+        "ScopedSourceEnvelopeContractError::UnsupportedEvent",
+    )
+    if any(binding not in source_wire_text for binding in required_source_wire_bindings):
+        found.add(f"{relative}#missing-contextual-source-envelope-contract")
     lib = REPO_ROOT / "crates/spaghetti-napi/src/lib.rs"
     if re.search(r"^\s*pub\s+mod\s+scoped_observation\s*;", read(lib), re.MULTILINE):
         found.add(f"{repo_path(lib)}#premature-public-scoped-host")
@@ -488,8 +505,10 @@ def discover_rfc012_scoped_host_boundary_violations() -> set[str]:
     portable = REPO_ROOT / portable_relative
     usage_portable_relative = "packages/sdk/src/contracts/rfc012d-usage-envelope.ts"
     usage_portable = REPO_ROOT / usage_portable_relative
+    source_portable_relative = "packages/sdk/src/contracts/rfc012d-source-envelope.ts"
+    source_portable = REPO_ROOT / source_portable_relative
     contracts_root = portable.parent.resolve()
-    if not portable.exists() or not usage_portable.exists():
+    if not portable.exists() or not usage_portable.exists() or not source_portable.exists():
         found.add(portable_relative)
     else:
         portable_text = read(portable)
@@ -505,7 +524,14 @@ def discover_rfc012_scoped_host_boundary_violations() -> set[str]:
             or "expectedContextInput: unknown" not in usage_portable_text
         ):
             found.add(f"{usage_portable_relative}#missing-contextual-usage-envelope-contract")
-        pending = [portable, usage_portable]
+        source_portable_text = read(source_portable)
+        if (
+            "export interface ScopedSourceEnvelope" not in source_portable_text
+            or "export function parseScopedSourceEnvelope(" not in source_portable_text
+            or "expectedContextInput: unknown" not in source_portable_text
+        ):
+            found.add(f"{source_portable_relative}#missing-contextual-source-envelope-contract")
+        pending = [portable, usage_portable, source_portable]
         visited: set[Path] = set()
         while pending:
             importer = pending.pop().resolve()
@@ -531,6 +557,10 @@ def discover_rfc012_scoped_host_boundary_violations() -> set[str]:
         read(sdk_index)
     ):
         found.add(f"{repo_path(sdk_index)}#missing-rfc012d-usage-envelope-export")
+    if "./contracts/rfc012d-source-envelope.js" not in RUNTIME_MODULE_RE.findall(
+        read(sdk_index)
+    ):
+        found.add(f"{repo_path(sdk_index)}#missing-rfc012d-source-envelope-export")
     return found
 
 

@@ -49,6 +49,7 @@ use crate::source::{
     StartupPhase, WatchBeforeScan, MAX_IDENTITY_VALUE_BYTES,
 };
 
+mod source_wire;
 mod usage_wire;
 
 /// One exact host-approved object locator. The locator is installed during

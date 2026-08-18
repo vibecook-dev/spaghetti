@@ -405,9 +405,15 @@ reuses the store-agnostic decode boundary, but no catalog, durable, or public
 scoped-observer host owns the full strict lifecycle; the access-report IPC
 retrieval shape and trusted native-probe/grant request are not yet frozen;
 adapter registrations must move from the explicit legacy path to the strict
-promoted catalog after the first support release is promoted; and the remaining
-scope primitives and public N-API/IPC boundary still require executable
-conformance rather than portable classification alone.
+promoted catalog after the first support release is promoted. A promotion-
+safety audit additionally found that Rust package verification currently drops
+the support release's declared capability levels before classification assigns
+operation permissions; an exact/range promoted match can therefore receive a
+blanket permission set that is broader than its declared capabilities. No
+current candidate is selectable, but capability-to-operation binding is an
+explicit pre-promotion blocker. The remaining scope primitives and public
+N-API/IPC boundary still require executable conformance rather than portable
+classification alone.
 
 ### A3. Current-agent candidates
 
@@ -665,6 +671,36 @@ composition remains planned/unbound. Claude three-source identity and final-
 hydration parity, promoted declarations/support, source-access/coverage
 integration, runtime catalog execution, and calibrated performance evidence
 remain open.
+
+The fourth B2 slice (`62a7540`) completes the candidate-only three-adapter
+identity gate with Claude's index, top-level transcript, and nested-parent
+membership union plus bounded transcript-head fallback. Complete positive-
+generation membership authorities are re-scanned unchanged after enrichment;
+metadata cannot fabricate a member, blank/malformed/oversized heads remain
+explicitly unavailable, and path-based association identity cannot be
+retargeted by conflicting `cwd`/project evidence. Every association basis is
+retained through an opaque occurrence-bound reference. The privacy-reduced
+fixture matches the independent Phase 0 census and full durable identities at
+three projects/twenty sessions, including synthetic index-only, top-only,
+nested-only, overlap, and registration-invariance cases. The common append
+driver also stops immediately when a committed record exactly fills its batch,
+so the candidate evidence distinguishes a 64 KiB logical record, one bounded
+64 KiB framing read-ahead, a 4 KiB checkpoint anchor, and the conservative
+132 KiB physical ceiling. Current support remains `Candidate`, catalog remains
+unsupported, and the planned composition remains unbound; checkpoint restore
+still caps 100,000 entries below the planned 250,000, nested-parent UUID
+enforcement is undeclared, and the head ceiling is fixture evidence rather
+than ratified policy.
+
+The fifth B2 slice (`ee331b7`) closes only the factual Claude decoder-axis
+drift: parent/subagent candidate declarations and the planned transcript-head
+component now name the exact compiled `claude-session-record` and
+`claude-subagent-record` decoders. The candidate package, compiled adapter
+binding, and conformance tests carry the recomputed source-declaration digest,
+and a stale declaration document fails verification. No topology, admission,
+overlap, bound, capability, or status changed: the release remains Candidate,
+catalog authorization still rejects, and runtime composition/promotion remain
+blocked on the open B2 evidence plus A2's capability-to-operation binding.
 
 ### B3. Durable pack, readiness, and pagination
 
@@ -1620,6 +1656,21 @@ Current landing status (2026-08-18):
   boundary before this DTO may cross into portable code. Source and observer
   lifecycle controls, typed future event preservation, native transport, and
   public N-API iteration remain gated on the complete envelope union; and
+- a second contextual wire slice freezes only `source_created`,
+  `source_deleted`, `source_reset`, and typed `source_object_error` controls.
+  Every value repeats the exact caller-held selection and root, resolves one
+  member of a bounded canonical authorized-source set, routes only through the
+  root actor's `SourceLifecycleControl` fallback, and keeps semantic revision,
+  native time, locator, record, cursor, byte-range, and native payload fields
+  explicitly absent. Created/deleted generations, reset successor lineage,
+  and retryable/exhausted/non-retryable error state are checked against engine-
+  control evidence, portable integer bounds, canonical append-position
+  provenance, and the envelope epoch/source generation. Rust reconstructs the
+  exact typed control and recomputes its event ID; portable TypeScript
+  independently parses the Rust-produced fixture without claiming BLAKE3
+  authority. Observer bootstrap/resync/failure controls, semantic families,
+  future typed-unknown preservation, native transport, and N-API exposure
+  remain outside this deliberately incomplete union; and
 - the architecture checker forbids store/query/N-API/concrete-adapter imports
   and premature native public export from the provisional composition and
   negotiation roots, while keeping the portable negotiation graph contract-only.
