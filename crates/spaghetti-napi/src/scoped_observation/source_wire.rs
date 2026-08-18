@@ -923,7 +923,10 @@ impl ScopedSourceEnvelopeWire {
                     || error.error_contract_version != SCOPED_SOURCE_OBJECT_ERROR_CONTRACT_VERSION
                     || error.scope_epoch != self.scope_epoch
                     || error.provenance.generation != self.source.generation
-                    || self.phase != SourceDeliveryPhaseWire::Live
+                    || !matches!(
+                        self.phase,
+                        SourceDeliveryPhaseWire::Live | SourceDeliveryPhaseWire::Correction
+                    )
                     || self.evidence.completeness
                         != if terminal {
                             ContractCompleteness::Unknown

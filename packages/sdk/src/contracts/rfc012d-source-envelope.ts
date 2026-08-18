@@ -499,8 +499,8 @@ function parseEvent(
     const fields = ['kind', 'error'];
     assertKnownFields(input, fields, 'source object error event');
     assertRequiredFields(input, fields, 'source object error event');
-    if (phase !== 'live') {
-      throw new ContractValidationError('source object errors must be delivered live');
+    if (phase !== 'live' && phase !== 'correction') {
+      throw new ContractValidationError('source object errors require live or correction delivery');
     }
     return { kind: 'source_object_error', error: parseObjectError(input.error, source, scopeEpoch) };
   }

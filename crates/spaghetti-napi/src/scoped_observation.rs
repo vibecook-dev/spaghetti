@@ -1591,6 +1591,7 @@ pub enum ScopedProjectedObservation {
     SourceObjectError {
         source: ScopedSourceObjectIdentity,
         observed_at: i64,
+        phase: ScopedAppendDeliveryPhase,
         event_id: ScopedObservationEventId,
         error: Arc<ScopedSourceObjectError>,
     },
@@ -1662,7 +1663,7 @@ impl ScopedProjectedObservation {
     pub fn phase(&self) -> ScopedAppendDeliveryPhase {
         match self {
             Self::SourcePresence { phase, .. } | Self::SourceReset { phase, .. } => *phase,
-            Self::SourceObjectError { .. } => ScopedAppendDeliveryPhase::Live,
+            Self::SourceObjectError { phase, .. } => *phase,
             Self::UsageV2 { event, .. } => event.phase,
             Self::ObserverBootstrapComplete { .. } => ScopedAppendDeliveryPhase::Bootstrap,
             Self::ObserverResyncRequired { .. } => ScopedAppendDeliveryPhase::Live,
@@ -3693,10 +3694,13 @@ impl ScopedObservationAsyncSourceOwner {
             .get(relation_id)
             .expect("a retained object error belongs to the active exact relation set");
         let mut drain = handle.shared.lock_drain();
-        handle
-            .shared
-            .host
-            .offer_consumer_object_error(&mut drain, object, error, observed_at)?;
+        handle.shared.host.offer_consumer_object_error(
+            &mut drain,
+            object,
+            error,
+            observed_at,
+            ScopedAppendDeliveryPhase::Live,
+        )?;
         active
             .object_errors
             .get_mut(relation_id)
@@ -3720,61 +3724,26 @@ impl ScopedObservationAsyncSourceOwner {
             .object_errors
             .get(relation_id)
             .map_or(0, |state| state.error.retry.failed_attempts());
-        let failed_attempts = prior_attempts
-            .checked_add(1)
-            .expect("bounded object retry attempts cannot overflow");
-        let (failure_code, retry) = match classification {
-            ScopedObjectFailureClassification::Retryable(failure_code)
-                if failed_attempts < policy.max_transient_attempts =>
-            {
-                let retry_delay = policy.retry_delay(failed_attempts - 1);
-                let retry_after_ms = u64::try_from(retry_delay.as_millis())
-                    .expect("the bounded retry duration fits u64 milliseconds");
-                retry_deadlines.insert(
-                    relation_id.to_string(),
-                    tokio::time::Instant::now() + retry_delay,
-                );
-                (
-                    failure_code,
-                    ScopedSourceObjectRetryState::RetryScheduled {
-                        failed_attempts,
-                        max_attempts: policy.max_transient_attempts,
-                        retry_after_ms,
-                    },
-                )
-            }
-            ScopedObjectFailureClassification::Retryable(failure_code) => {
-                retry_deadlines.remove(relation_id);
-                (
-                    failure_code,
-                    ScopedSourceObjectRetryState::RetryExhausted {
-                        failed_attempts,
-                        max_attempts: policy.max_transient_attempts,
-                    },
-                )
-            }
-            ScopedObjectFailureClassification::Terminal(failure_code) => {
-                retry_deadlines.remove(relation_id);
-                (
-                    failure_code,
-                    ScopedSourceObjectRetryState::NotRetryable { failed_attempts },
-                )
-            }
-        };
         let object = active
             .append_objects
             .get(relation_id)
             .expect("the exact relation set was prevalidated");
-        let error = Arc::new(ScopedSourceObjectError {
-            error_contract_version: SCOPED_SOURCE_OBJECT_ERROR_CONTRACT_VERSION,
-            relation_id: Arc::from(relation_id),
-            source: object.source.clone(),
-            scope_epoch: active.scope_epoch,
-            failure_code,
-            provenance: object.object_error_provenance()?,
-            retry,
-        });
-        debug_assert!(error.validate());
+        let (error, retry_delay) = scoped_prepare_object_error(
+            object,
+            relation_id,
+            active.scope_epoch,
+            prior_attempts,
+            classification,
+            policy,
+        )?;
+        if let Some(retry_delay) = retry_delay {
+            retry_deadlines.insert(
+                relation_id.to_string(),
+                tokio::time::Instant::now() + retry_delay,
+            );
+        } else {
+            retry_deadlines.remove(relation_id);
+        }
         active.object_errors.insert(
             relation_id.to_string(),
             ScopedSourceObjectErrorRuntime {
@@ -4916,10 +4885,11 @@ impl ScopedObservationAsyncResyncHandoff {
     /// dequeue-owned capacity notifications and leaves delivery/application
     /// acknowledgement to `ScopedObservationAsyncRuntime`.
     ///
-    /// The first automatic slice is deliberately fail-closed. A transient
-    /// source/decode result, re-overflow, or any incomplete replacement ends
-    /// the attachment through `observer.failed`; no partial staged state is
-    /// transferred into the active epoch.
+    /// Replacement source/decode failures follow the stopped source owner's
+    /// bounded retry policy while the watcher remains supervised. A terminal
+    /// first-access failure becomes explicit unavailable relation state; a
+    /// terminal failure after staged progress, re-overflow, or any other
+    /// incomplete replacement remains fail-closed through `observer.failed`.
     pub async fn replay_and_rebind(
         self,
     ) -> Result<ScopedObservationAsyncOwnerPair, ScopedObservationAsyncResyncFailure> {
@@ -4998,6 +4968,7 @@ impl ScopedObservationAsyncResyncHandoff {
             &handle,
             active,
             &bindings,
+            source_policy,
             &mut replacement_observed_at,
         ));
         let outcome = tokio::select! {
@@ -5208,6 +5179,7 @@ async fn scoped_replay_complete_replacement<C>(
     handle: &ScopedObservationAsyncHandle,
     mut active: ScopedObservationEpochState,
     bindings: &[ScopedObservationAppendPassBinding],
+    retry_policy: ScopedObservationSourceOwnerRetryPolicy,
     observed_at: &mut C,
 ) -> Result<ScopedObservationEpochState, ScopedObservationAutomaticResyncError>
 where
@@ -5258,7 +5230,7 @@ where
         // flag would create a new generation at offset zero for every bounded
         // batch and prevent a large object from ever draining.
         let mut force_contract_replay = binding.force_contract_replay;
-        loop {
+        'object: loop {
             {
                 let drain = handle.shared.lock_drain();
                 stage
@@ -5268,26 +5240,51 @@ where
             }
             let mut origin = binding.origin.clone();
             origin.observed_at = observed_at();
-            let observation = {
+            let reconcile_result = {
                 let object = stage
                     .append_objects
                     .get_mut(&binding.relation_id)
                     .ok_or(ScopedObservationAutomaticResyncError::SourceAccess)?;
-                object
-                    .reconcile(
-                        &pass,
-                        ScopedAppendReconcileRequest {
-                            relation_id: &binding.relation_id,
-                            identity_inputs: &identity_inputs,
-                            access_phase: AccessPhase::Initial,
-                            parent_token: binding.parent_token,
-                            depth: binding.depth,
-                            max_bytes: binding.max_bytes,
-                            origin: &origin,
-                            force_contract_replay,
-                        },
+                object.reconcile(
+                    &pass,
+                    ScopedAppendReconcileRequest {
+                        relation_id: &binding.relation_id,
+                        identity_inputs: &identity_inputs,
+                        access_phase: AccessPhase::Initial,
+                        parent_token: binding.parent_token,
+                        depth: binding.depth,
+                        max_bytes: binding.max_bytes,
+                        origin: &origin,
+                        force_contract_replay,
+                    },
+                )
+            };
+            let observation = match reconcile_result {
+                Ok(observation) => observation,
+                Err(error) => {
+                    let error = ScopedObservationPassExecutionError::Access(error);
+                    let Some(classification) = scoped_object_failure_classification(&error) else {
+                        return Err(ScopedObservationAutomaticResyncError::SourceAccess);
+                    };
+                    match scoped_record_replacement_object_error(
+                        handle,
+                        &mut stage,
+                        &binding.relation_id,
+                        pass.pass_id(),
+                        retry_policy,
+                        classification,
+                        origin.observed_at,
+                        ScopedObservationAutomaticResyncError::SourceAccess,
                     )
-                    .map_err(|_| ScopedObservationAutomaticResyncError::SourceAccess)?
+                    .await?
+                    {
+                        Some(delay) => {
+                            tokio::time::sleep(delay).await;
+                            continue 'object;
+                        }
+                        None => break 'object,
+                    }
+                }
             };
             if matches!(observation.read, AppendRead::RetryTransient) {
                 stage
@@ -5296,26 +5293,75 @@ where
                     .expect("the validated replacement relation remains present")
                     .discard(&observation)
                     .map_err(|_| ScopedObservationAutomaticResyncError::SourceAccess)?;
-                return Err(ScopedObservationAutomaticResyncError::SourceAccess);
+                match scoped_record_replacement_object_error(
+                    handle,
+                    &mut stage,
+                    &binding.relation_id,
+                    pass.pass_id(),
+                    retry_policy,
+                    ScopedObjectFailureClassification::Retryable(
+                        ScopedSourceObjectFailureCode::SourceRetryTransient,
+                    ),
+                    origin.observed_at,
+                    ScopedObservationAutomaticResyncError::SourceAccess,
+                )
+                .await?
+                {
+                    Some(delay) => {
+                        tokio::time::sleep(delay).await;
+                        continue 'object;
+                    }
+                    None => break 'object,
+                }
             }
-            let decoded = {
+            let decode_result = {
                 let object = stage
                     .append_objects
                     .get_mut(&binding.relation_id)
                     .expect("the validated replacement relation remains present");
                 match handle.host().decode_append(object, &observation) {
-                    Ok(ScopedAppendDecodeOutcome::Ready(decoded)) => decoded,
+                    Ok(ScopedAppendDecodeOutcome::Ready(decoded)) => Ok(decoded),
                     Ok(ScopedAppendDecodeOutcome::RetryTransient) => {
                         object
                             .discard(&observation)
                             .map_err(|_| ScopedObservationAutomaticResyncError::Decode)?;
-                        return Err(ScopedObservationAutomaticResyncError::Decode);
+                        Err(ScopedObjectFailureClassification::Retryable(
+                            ScopedSourceObjectFailureCode::DecodeRetryTransient,
+                        ))
                     }
-                    Err(_) => {
+                    Err(error) => {
                         object
                             .discard(&observation)
                             .map_err(|_| ScopedObservationAutomaticResyncError::Decode)?;
-                        return Err(ScopedObservationAutomaticResyncError::Decode);
+                        let error = ScopedObservationPassExecutionError::Access(error);
+                        let Some(classification) = scoped_object_failure_classification(&error)
+                        else {
+                            return Err(ScopedObservationAutomaticResyncError::Decode);
+                        };
+                        Err(classification)
+                    }
+                }
+            };
+            let decoded = match decode_result {
+                Ok(decoded) => decoded,
+                Err(classification) => {
+                    match scoped_record_replacement_object_error(
+                        handle,
+                        &mut stage,
+                        &binding.relation_id,
+                        pass.pass_id(),
+                        retry_policy,
+                        classification,
+                        origin.observed_at,
+                        ScopedObservationAutomaticResyncError::Decode,
+                    )
+                    .await?
+                    {
+                        Some(delay) => {
+                            tokio::time::sleep(delay).await;
+                            continue 'object;
+                        }
+                        None => break 'object,
                     }
                 }
             };
@@ -5342,6 +5388,7 @@ where
                     failure.error,
                 ));
             }
+            stage.object_errors.remove(&binding.relation_id);
             force_contract_replay = false;
             loop {
                 let reduced = {
@@ -5418,6 +5465,143 @@ where
             Err(error) => return Err(scoped_automatic_resync_replacement_error(error)),
         }
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn scoped_record_replacement_object_error(
+    handle: &ScopedObservationAsyncHandle,
+    stage: &mut ScopedObservationScopeReplacementStage,
+    relation_id: &str,
+    access_pass_id: u64,
+    retry_policy: ScopedObservationSourceOwnerRetryPolicy,
+    classification: ScopedObjectFailureClassification,
+    observed_at: i64,
+    partial_failure: ScopedObservationAutomaticResyncError,
+) -> Result<Option<Duration>, ScopedObservationAutomaticResyncError> {
+    let prior_attempts = stage
+        .object_errors
+        .get(relation_id)
+        .map_or(0, |state| state.error.retry.failed_attempts());
+    let object = stage
+        .append_objects
+        .get(relation_id)
+        .ok_or(ScopedObservationAutomaticResyncError::SourceAccess)?;
+    let (error, retry_delay) = scoped_prepare_object_error(
+        object,
+        relation_id,
+        stage.semantic.scope_epoch,
+        prior_attempts,
+        classification,
+        retry_policy,
+    )
+    .map_err(|_| partial_failure)?;
+
+    // The shared replacement reducer has already consumed any successful
+    // prefix named by this position. Until a per-object transactional reducer
+    // exists, publishing that prefix beside terminal Unavailable coverage
+    // would falsely call an incomplete object a full snapshot. Scheduled
+    // retries may continue from the exact position; terminal/exhausted state
+    // after progress fails the whole isolated stage without swapping it.
+    if retry_delay.is_none() && error.provenance.last_successful_position.is_some() {
+        return Err(partial_failure);
+    }
+    if retry_delay.is_none() {
+        stage
+            .append_objects
+            .get_mut(relation_id)
+            .ok_or(ScopedObservationAutomaticResyncError::SourceAccess)?
+            .commit_replacement_unavailable()
+            .map_err(|_| partial_failure)?;
+    }
+    let object = stage
+        .append_objects
+        .get(relation_id)
+        .ok_or(ScopedObservationAutomaticResyncError::SourceAccess)?;
+    stage
+        .admission
+        .record_object_error_coverage(object, access_pass_id, &error, true)
+        .map_err(ScopedObservationAutomaticResyncError::Admission)?;
+    stage.object_errors.insert(
+        relation_id.to_string(),
+        ScopedSourceObjectErrorRuntime {
+            error,
+            observed_at,
+            control_offered: false,
+        },
+    );
+    scoped_offer_replacement_object_error(handle, stage, relation_id).await?;
+    Ok(retry_delay)
+}
+
+async fn scoped_offer_replacement_object_error(
+    handle: &ScopedObservationAsyncHandle,
+    stage: &mut ScopedObservationScopeReplacementStage,
+    relation_id: &str,
+) -> Result<(), ScopedObservationAutomaticResyncError> {
+    loop {
+        let (waiter, generation, offered) = {
+            let mut drain = handle.shared.lock_drain();
+            let waiter = drain.delivery_capacity_waiter();
+            let generation = waiter.snapshot().generation;
+            let state = stage
+                .object_errors
+                .get(relation_id)
+                .ok_or(ScopedObservationAutomaticResyncError::SourceAccess)?;
+            let object = stage
+                .append_objects
+                .get(relation_id)
+                .ok_or(ScopedObservationAutomaticResyncError::SourceAccess)?;
+            let offered = handle.shared.host.offer_consumer_object_error(
+                &mut drain,
+                object,
+                Arc::clone(&state.error),
+                state.observed_at,
+                ScopedAppendDeliveryPhase::Correction,
+            );
+            (waiter, generation, offered)
+        };
+        match offered {
+            Ok(_) => {
+                stage
+                    .object_errors
+                    .get_mut(relation_id)
+                    .expect("the offered replacement error remains stage-owned")
+                    .control_offered = true;
+                return Ok(());
+            }
+            Err(error) if scoped_automatic_resync_object_error_is_backpressure(&error) => {
+                if waiter.wait_after_async(generation).await.closed {
+                    return Err(ScopedObservationAutomaticResyncError::Closed);
+                }
+            }
+            Err(ScopedObservationConsumerOfferError::Closed) => {
+                return Err(ScopedObservationAutomaticResyncError::Closed);
+            }
+            Err(ScopedObservationConsumerOfferError::Offer(
+                ScopedProjectionDeliveryError::Projection(_),
+            )) => return Err(ScopedObservationAutomaticResyncError::Projection),
+            Err(ScopedObservationConsumerOfferError::Offer(
+                ScopedProjectionDeliveryError::Delivery(_),
+            ))
+            | Err(ScopedObservationConsumerOfferError::ForeignDrain)
+            | Err(ScopedObservationConsumerOfferError::OperationCapacityExhausted) => {
+                return Err(ScopedObservationAutomaticResyncError::Delivery);
+            }
+        }
+    }
+}
+
+fn scoped_automatic_resync_object_error_is_backpressure(
+    error: &ScopedObservationConsumerOfferError,
+) -> bool {
+    matches!(
+        error,
+        ScopedObservationConsumerOfferError::Offer(ScopedProjectionDeliveryError::Delivery(
+            ScopedDeliveryError::SemanticQueueFull
+                | ScopedDeliveryError::RetainedNativeQueueFull
+                | ScopedDeliveryError::SourceControlQueueFull
+        ))
+    )
 }
 
 fn scoped_automatic_resync_is_backpressure(error: ScopedReplacementStageError) -> bool {
@@ -6507,8 +6691,9 @@ pub enum ScopedObservationContinuity {
 
 /// Path-free declared-relation summary paired with RFC 012A source coverage.
 /// It proves which exact authorized relation is the scope root and whether
-/// every declared known object was observed as present or explicitly absent.
-/// Cursor/position authority remains exclusively on `SourceCoverageSet`.
+/// every declared known object has a Decode point (including explicit
+/// unavailable state) or an explicit absence. Cursor/position authority
+/// remains exclusively on `SourceCoverageSet`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ScopedScopeRelationState {
     Present { status: CoverageStatus },
@@ -8376,8 +8561,8 @@ impl ScopedObservationReplacementStage {
 }
 
 /// One complete active observer epoch at the store-free composition boundary.
-/// Source objects, their offered coverage lane, and semantic reducers move as
-/// one ownership unit during whole-scope replacement.
+/// Source objects, their offered coverage/error authority, and semantic
+/// reducers move as one ownership unit during whole-scope replacement.
 pub struct ScopedObservationEpochState {
     attachment_authority: Arc<ScopedObservationAttachmentAuthority>,
     root: ScopedObservationRootIdentity,
@@ -8433,13 +8618,14 @@ impl ScopedObservationEpochState {
     }
 }
 
-/// Whole-scope replacement owner. Replay mutates only these empty source,
-/// coverage, and reducer components until one successful completion-control
-/// offer transfers all three into `ScopedObservationEpochState`.
+/// Whole-scope replacement owner. Replay mutates only these fresh source,
+/// coverage/error, and reducer components until one successful
+/// completion-control offer transfers them into `ScopedObservationEpochState`.
 pub struct ScopedObservationScopeReplacementStage {
     semantic: ScopedObservationReplacementStage,
     append_objects: BTreeMap<String, ScopedKnownAppendObject>,
     admission: ScopedObservationAdmissionLane,
+    object_errors: BTreeMap<String, ScopedSourceObjectErrorRuntime>,
     activated: bool,
 }
 
@@ -9888,6 +10074,61 @@ fn scoped_object_failure_classification(
     }
 }
 
+fn scoped_prepare_object_error(
+    object: &ScopedKnownAppendObject,
+    relation_id: &str,
+    scope_epoch: u64,
+    prior_attempts: u32,
+    classification: ScopedObjectFailureClassification,
+    policy: ScopedObservationSourceOwnerRetryPolicy,
+) -> Result<(Arc<ScopedSourceObjectError>, Option<Duration>), ScopedObservationPassExecutionError> {
+    let failed_attempts = prior_attempts
+        .checked_add(1)
+        .expect("bounded object retry attempts cannot overflow");
+    let (failure_code, retry, retry_delay) = match classification {
+        ScopedObjectFailureClassification::Retryable(failure_code)
+            if failed_attempts < policy.max_transient_attempts =>
+        {
+            let retry_delay = policy.retry_delay(failed_attempts - 1);
+            let retry_after_ms = u64::try_from(retry_delay.as_millis())
+                .expect("the bounded retry duration fits u64 milliseconds");
+            (
+                failure_code,
+                ScopedSourceObjectRetryState::RetryScheduled {
+                    failed_attempts,
+                    max_attempts: policy.max_transient_attempts,
+                    retry_after_ms,
+                },
+                Some(retry_delay),
+            )
+        }
+        ScopedObjectFailureClassification::Retryable(failure_code) => (
+            failure_code,
+            ScopedSourceObjectRetryState::RetryExhausted {
+                failed_attempts,
+                max_attempts: policy.max_transient_attempts,
+            },
+            None,
+        ),
+        ScopedObjectFailureClassification::Terminal(failure_code) => (
+            failure_code,
+            ScopedSourceObjectRetryState::NotRetryable { failed_attempts },
+            None,
+        ),
+    };
+    let error = Arc::new(ScopedSourceObjectError {
+        error_contract_version: SCOPED_SOURCE_OBJECT_ERROR_CONTRACT_VERSION,
+        relation_id: Arc::from(relation_id),
+        source: object.source.clone(),
+        scope_epoch,
+        failure_code,
+        provenance: object.object_error_provenance()?,
+        retry,
+    });
+    debug_assert!(error.validate());
+    Ok((error, retry_delay))
+}
+
 fn scoped_source_owner_error_is_cancelled(error: &ScopedObservationPassExecutionError) -> bool {
     matches!(
         error,
@@ -10533,6 +10774,7 @@ impl ScopedObservationAccessHost {
         object: &ScopedKnownAppendObject,
         error: Arc<ScopedSourceObjectError>,
         observed_at: i64,
+        phase: ScopedAppendDeliveryPhase,
     ) -> Result<ScopedObservationOfferReceipt, ScopedObservationConsumerOfferError> {
         if !self.owns_consumer_drain(drain) {
             return Err(ScopedObservationConsumerOfferError::ForeignDrain);
@@ -10574,6 +10816,7 @@ impl ScopedObservationAccessHost {
             .offer_projected(vec![ScopedProjectedObservation::SourceObjectError {
                 source: error.source.clone(),
                 observed_at,
+                phase,
                 event_id,
                 error,
             }])
@@ -11326,9 +11569,11 @@ impl ScopedObservationAccessHost {
         self.capture_watermark_core(&active.admission, &active.projection, delivery)
     }
 
-    /// Freeze every active append object and create empty source, coverage,
-    /// and reducer state for the current replacement epoch. A newer re-overflow
-    /// may supersede the lineage links; a partial construction restores them.
+    /// Freeze every active append object and create fresh source, offered
+    /// coverage/error, and reducer state for the current replacement epoch.
+    /// Authorized relation membership is retained without cursor/read state.
+    /// A newer re-overflow may supersede the lineage links; a partial
+    /// construction restores them.
     pub fn open_scope_resync_stage(
         &self,
         active: &mut ScopedObservationEpochState,
@@ -11351,12 +11596,20 @@ impl ScopedObservationAccessHost {
                 .append_objects
                 .keys()
                 .any(|relation_id| !self.known_objects.contains_key(relation_id))
+            || validate_scoped_relation_coverage(self.known_objects.as_ref(), &active.admission)
+                .is_err()
         {
             return Err(ScopedReplacementStageError::InvalidSourceState);
         }
         let semantic = self.open_projection_resync_stage(&active.projection, delivery)?;
-        let admission = ScopedObservationAdmissionLane::new(active.admission.limits)
+        let mut admission = ScopedObservationAdmissionLane::new(active.admission.limits)
             .map_err(|_| ScopedReplacementStageError::InvalidSourceState)?;
+        // Membership is an authorized property of the exact replacement
+        // relation set, not something a successful native read is allowed to
+        // invent. Seed only these opaque identities so a first-access failure
+        // can publish explicit Unavailable coverage without fabricating a
+        // cursor or carrying any prior offered source state forward.
+        admission.known_coverage_objects = active.admission.known_coverage_objects.clone();
         let prior_lifecycles = active
             .append_objects
             .iter()
@@ -11383,6 +11636,7 @@ impl ScopedObservationAccessHost {
             semantic,
             append_objects,
             admission,
+            object_errors: BTreeMap::new(),
             activated: false,
         })
     }
@@ -11509,8 +11763,8 @@ impl ScopedObservationAccessHost {
     }
 
     /// Offer one replacement barrier and then infallibly transfer its append
-    /// state, offered coverage lane, and semantic reducers into the active
-    /// epoch. Every fallible validation occurs before the control offer.
+    /// state, offered coverage/error authority, and semantic reducers into the
+    /// active epoch. Every fallible validation occurs before the control offer.
     pub fn offer_scope_resync_complete(
         &self,
         active: &mut ScopedObservationEpochState,
@@ -11571,7 +11825,7 @@ impl ScopedObservationAccessHost {
         let retired_admission = std::mem::replace(&mut active.admission, replacement_admission);
         drop(retired_admission);
         active.scope_epoch = barrier.scope_epoch;
-        active.object_errors.clear();
+        active.object_errors = std::mem::take(&mut stage.object_errors);
         stage.activated = true;
         Ok(barrier)
     }
@@ -12837,6 +13091,26 @@ impl ScopedKnownAppendObject {
         Ok(())
     }
 
+    fn commit_replacement_unavailable(&mut self) -> Result<(), ScopedObservationAccessError> {
+        if !matches!(
+            self.lifecycle,
+            ScopedAppendObjectLifecycle::Replacement { .. }
+        ) || self.pending.is_some()
+            || self.checkpoint.is_some()
+            || self.decoder_state.is_some()
+        {
+            return Err(ScopedObservationAccessError::InvalidObjectLifecycle);
+        }
+        // A terminal first-access error produces a Decode coverage point with
+        // Unavailable status rather than an absence. Preserve that distinction
+        // in the replacement object without inventing a cursor or decoder
+        // state; the retained typed error is the authority for the degraded
+        // state and prevents the rebound owner from reading it as healthy.
+        self.presence_state = ScopedAppendPresenceState::Present;
+        self.bootstrap_blocked = false;
+        Ok(())
+    }
+
     /// Close the bootstrap admission phase after at least one stable missing
     /// or fully drained batch observation. An incomplete final record is safe:
     /// its checkpoint retains the suffix for the next live reconciliation.
@@ -13400,16 +13674,25 @@ fn validate_scoped_relation_coverage(
 }
 
 fn scoped_object_errors_match_epoch(active: &ScopedObservationEpochState) -> bool {
-    active.object_errors.iter().all(|(relation_id, state)| {
-        active
-            .append_objects
-            .get(relation_id)
-            .is_some_and(|object| {
-                state.error.validate()
-                    && state.error.relation_id.as_ref() == relation_id
-                    && state.error.scope_epoch == active.scope_epoch
-                    && state.error.source == object.source
-            })
+    scoped_object_error_states_match_epoch(
+        active.scope_epoch,
+        &active.append_objects,
+        &active.object_errors,
+    )
+}
+
+fn scoped_object_error_states_match_epoch(
+    scope_epoch: u64,
+    append_objects: &BTreeMap<String, ScopedKnownAppendObject>,
+    object_errors: &BTreeMap<String, ScopedSourceObjectErrorRuntime>,
+) -> bool {
+    object_errors.iter().all(|(relation_id, state)| {
+        append_objects.get(relation_id).is_some_and(|object| {
+            state.error.validate()
+                && state.error.relation_id.as_ref() == relation_id
+                && state.error.scope_epoch == scope_epoch
+                && state.error.source == object.source
+        })
     })
 }
 
@@ -13527,6 +13810,16 @@ fn validate_scope_replacement_source_state(
         || active.append_objects.len() != known_objects.len()
         || stage.append_objects.len() != known_objects.len()
         || active.append_objects.keys().ne(stage.append_objects.keys())
+        || !scoped_object_errors_match_epoch(active)
+        || !scoped_object_error_states_match_epoch(
+            stage.semantic.scope_epoch,
+            &stage.append_objects,
+            &stage.object_errors,
+        )
+        || stage
+            .object_errors
+            .values()
+            .any(|state| !state.control_offered)
     {
         return Err(ScopedReplacementStageError::InvalidSourceState);
     }

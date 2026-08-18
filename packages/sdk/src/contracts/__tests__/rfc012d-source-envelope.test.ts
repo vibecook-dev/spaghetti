@@ -112,6 +112,14 @@ test('source generations, reset lineage, and evidence fail closed', () => {
   retryEvidence.evidence.completeness = 'complete';
   reject(retryEvidence);
 
+  const correctionError = clone(fixture.retry_scheduled);
+  correctionError.phase = 'correction';
+  assert.deepEqual(parseScopedSourceEnvelope(correctionError, fixture.context), correctionError);
+
+  const bootstrapError = clone(fixture.retry_scheduled);
+  bootstrapError.phase = 'bootstrap';
+  reject(bootstrapError);
+
   const terminalEvidence = clone(fixture.terminal_error);
   terminalEvidence.evidence.completeness = 'partial';
   reject(terminalEvidence);

@@ -207,7 +207,8 @@ mod tests {
         ScopedKnownObjectReadRequest, ScopedObjectRead, ScopedObservationAccessError,
         ScopedObservationAccessHost, ScopedObservationAccessPass, ScopedObservationAccessRequest,
         ScopedObservationAdmissionLane, ScopedObservationAppendPassBinding,
-        ScopedObservationAppendPassRequest, ScopedObservationAsyncOwnerFirstExit,
+        ScopedObservationAppendPassRequest, ScopedObservationAsyncHandle,
+        ScopedObservationAsyncOwnerFirstExit, ScopedObservationAsyncOwnerPair,
         ScopedObservationAsyncOwnerRunResult, ScopedObservationAsyncRuntime,
         ScopedObservationAutomaticResyncError, ScopedObservationCloseError,
         ScopedObservationConsumerOfferError, ScopedObservationContinuity,
@@ -226,7 +227,7 @@ mod tests {
         ScopedObserverFailureReason, ScopedProjectionDeliveryError, ScopedQueuedObservationFrame,
         ScopedReplacementMode, ScopedReplacementRepresentation, ScopedReplacementStageError,
         ScopedResyncReason, ScopedRootIdentityRequest, ScopedScopeRelationState,
-        ScopedSourceFailureClass, ScopedSourceObjectRetryState,
+        ScopedSourceFailureClass, ScopedSourceObjectFailureCode, ScopedSourceObjectRetryState,
     };
     use crate::source::{
         AccessOperation, AccessOutcome, AccessPhase, AppendDelimitedConfig, AppendDelimitedFile,
@@ -673,6 +674,165 @@ mod tests {
             max_coverage_objects,
         })
         .unwrap()
+    }
+
+    async fn automatic_single_object_pair(
+        registry: &AdapterRegistry,
+        root: PathBuf,
+        identity_value: Vec<u8>,
+        append_config: AppendDelimitedConfig,
+        max_bytes: u64,
+        source_policy: ScopedObservationSourceOwnerRetryPolicy,
+    ) -> (
+        ScopedObservationAsyncRuntime,
+        ScopedObservationAsyncHandle,
+        ScopedObservationAsyncOwnerPair,
+        PathBuf,
+        Arc<AtomicUsize>,
+    ) {
+        std::fs::create_dir_all(&root).unwrap();
+        let target = root.join("session.jsonl");
+        let host =
+            ScopedObservationAccessHost::authorize(registry, scoped_access_request(root)).unwrap();
+        let mut runtime = ScopedObservationAsyncRuntime::open(
+            host,
+            ScopedObservationDeliveryLimits {
+                max_semantic_events: 4,
+                max_retained_native_bytes: 0,
+                max_source_control_items: 1,
+            },
+        )
+        .unwrap();
+        let handle = runtime.handle();
+        let callback_slot = Arc::new(std::sync::Mutex::new(None));
+        let registrations = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let drops = Arc::new(AtomicUsize::new(0));
+        let watcher = handle
+            .install_native_watcher_with_factory(2, {
+                let callback_slot = Arc::clone(&callback_slot);
+                let registrations = Arc::clone(&registrations);
+                let drops = Arc::clone(&drops);
+                move |callback| {
+                    Ok(Box::new(ControlledScopedWatchBackend {
+                        callback: Some(callback),
+                        callback_slot,
+                        registrations,
+                        drops,
+                    }))
+                }
+            })
+            .unwrap();
+        let mut object = scoped_append_object_with_coverage(
+            AppendDelimitedFile::new(append_config).unwrap(),
+            RawRetentionPolicy::None,
+            vec![CoverageDomain::FactFamily {
+                family: "runtime.usage-v2".to_string(),
+                version: 1,
+            }],
+        );
+        let mut admission = admission_lane(4, 0, 2);
+        let projection = ScopedObservationProjectionSink::new(ScopedObservationProjectionLimits {
+            max_usage_v2_entities: 1,
+        })
+        .unwrap();
+        let identity = [ScopeIdentityInput {
+            name: "native-session-id",
+            value: identity_value.as_slice(),
+        }];
+        let origin = RecordOrigin {
+            source_instance_id: 10,
+            stream_id: 20,
+            object_id: 30,
+            observed_at: 40,
+            source_timestamp_hint: None,
+            media_type: SourceMediaType::new("application/x-ndjson").unwrap(),
+        };
+        let scan = watcher
+            .coordinator()
+            .begin_initial_scan(handle.host())
+            .unwrap();
+        let observation = reconcile_scoped_append(
+            handle.host(),
+            scan.access_pass(),
+            &mut object,
+            &mut admission,
+            &identity,
+            &origin,
+            AccessPhase::Initial,
+        );
+        assert!(!observation.object_present);
+        handle
+            .with_attachment(|host, drain| {
+                watcher.coordinator().finish_initial_scan(
+                    host,
+                    scan,
+                    &admission,
+                    &projection,
+                    drain,
+                )
+            })
+            .unwrap();
+        assert!(matches!(
+            watcher
+                .coordinator()
+                .next_reconcile(handle.host(), 2)
+                .unwrap(),
+            ScopedObservationStartupReconcileAction::CaughtUp
+        ));
+        object.complete_bootstrap().unwrap();
+        let bootstrap = handle
+            .with_attachment(|host, drain| {
+                watcher.coordinator().offer_bootstrap_complete(
+                    host,
+                    std::slice::from_ref(&object),
+                    &admission,
+                    &projection,
+                    drain,
+                    50,
+                )
+            })
+            .unwrap();
+        let bootstrap_event = runtime.next_event().await.unwrap().unwrap();
+        assert!(matches!(
+            &bootstrap_event.envelope.event,
+            ScopedObservationEvent::ObserverBootstrapComplete { barrier }
+                if Arc::ptr_eq(barrier, &bootstrap)
+        ));
+        runtime
+            .acknowledge_applied(bootstrap_event.application_receipt())
+            .unwrap();
+        let active = handle
+            .with_attachment(|host, drain| {
+                host.bind_consumer_bootstrap_epoch_state(vec![object], admission, projection, drain)
+            })
+            .unwrap();
+        let binding = ScopedObservationAppendPassBinding::new(
+            "root-object",
+            vec![
+                ScopedObservationOwnedIdentityInput::new("native-session-id", identity_value)
+                    .unwrap(),
+            ],
+            None,
+            1,
+            max_bytes,
+            origin,
+            false,
+        )
+        .unwrap();
+        let source = handle
+            .bind_epoch_source_owner(active, vec![binding], source_policy)
+            .unwrap();
+        let watcher_policy = ScopedObservationNativeWatcherRecoveryPolicy::new(
+            std::time::Duration::from_secs(60),
+            std::time::Duration::from_millis(1),
+            std::time::Duration::from_millis(1),
+            1,
+        )
+        .unwrap();
+        let pair = handle
+            .bind_live_owner_pair(watcher, source, watcher_policy)
+            .unwrap();
+        (runtime, handle, pair, target, drops)
     }
 
     fn reconcile_missing_relation_poll(
@@ -2545,7 +2705,7 @@ mod tests {
 
     #[tokio::test]
     async fn scoped_async_owner_pair_retains_watcher_across_resync_and_rebinds_epoch() {
-        let registry = supported_fixture_registry();
+        let registry = stateful_supported_fixture_registry();
         let temp = TempDir::new().unwrap();
         let root = temp.path().join("async-owner-pair-root");
         std::fs::create_dir_all(&root).unwrap();
@@ -2707,10 +2867,11 @@ mod tests {
             .unwrap();
         let pair_task = tokio::spawn(pair.run_with_factory_and_clocks(|_| Err(()), || 60, || 61));
 
-        // Replacement must replay more than one bounded driver batch. The
-        // invalid epoch has no requested poll, so only the replacement owner
-        // may consume these newly visible bytes.
-        std::fs::write(&target, b"rec-01\nrec-02\nrec-03\nrec-04\nrec-05\n").unwrap();
+        // The first replacement decode is genuinely transient. The invalid
+        // epoch has no requested poll, so only the replacement owner may read
+        // it and must retain the watcher while applying the source-owner's
+        // bounded retry policy.
+        std::fs::write(&target, b"retry\n").unwrap();
         let required = handle
             .require_resync(ScopedResyncReason::WatcherOverflow, 70)
             .unwrap();
@@ -2736,7 +2897,7 @@ mod tests {
         callback_slot.lock().unwrap().as_mut().unwrap()(Ok(notify::Event::new(
             notify::EventKind::Modify(notify::event::ModifyKind::Any),
         )
-        .add_path(target)));
+        .add_path(target.clone())));
         let pending_poll = handle.host().poll_state();
         assert!(
             pending_poll.requested_through_generation > pending_poll.completed_through_generation
@@ -2770,6 +2931,36 @@ mod tests {
         runtime
             .acknowledge_applied(started_event.application_receipt())
             .unwrap();
+        let retry_event = runtime.next_event().await.unwrap().unwrap();
+        let ScopedObservationEvent::SourceObjectError { error } = &retry_event.envelope.event
+        else {
+            panic!("replacement retry must publish its relation-local error");
+        };
+        assert_eq!(retry_event.envelope.scope_epoch, 2);
+        assert_eq!(
+            retry_event.envelope.phase,
+            ScopedAppendDeliveryPhase::Correction
+        );
+        assert_eq!(
+            error.failure_code,
+            ScopedSourceObjectFailureCode::DecodeRetryTransient
+        );
+        assert_eq!(
+            error.retry,
+            ScopedSourceObjectRetryState::RetryScheduled {
+                failed_attempts: 1,
+                max_attempts: 5,
+                retry_after_ms: 100,
+            }
+        );
+        assert!(error.provenance.last_successful_position.is_none());
+        // Recover before the scheduled retry. The successful attempt must
+        // clear the staged error, then drain all five records across multiple
+        // bounded batches without carrying the transient into the barrier.
+        std::fs::write(&target, b"rec-01\nrec-02\nrec-03\nrec-04\nrec-05\n").unwrap();
+        runtime
+            .acknowledge_applied(retry_event.application_receipt())
+            .unwrap();
         let completed_event = runtime.next_event().await.unwrap().unwrap();
         let ScopedObservationEvent::ObserverResyncComplete { barrier } =
             &completed_event.envelope.event
@@ -2778,6 +2969,7 @@ mod tests {
         };
         assert_eq!(barrier.scope_epoch, 2);
         assert!(barrier.root_present);
+        assert!(barrier.explicit_object_errors.is_empty());
         assert!(!barrier.source_coverage.is_empty());
         assert!(barrier.source_coverage.iter().all(|coverage| {
             coverage.completeness == CoverageSetCompleteness::Complete
@@ -2813,6 +3005,7 @@ mod tests {
             panic!("the re-paired source must service the replacement epoch");
         };
         assert_eq!(watermark.scope_epoch, 2);
+        assert!(watermark.explicit_object_errors.is_empty());
         assert!(watermark.source_coverage.iter().all(|coverage| {
             coverage.points.iter().all(|point| {
                 point.generation == 1
@@ -2883,7 +3076,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn scoped_automatic_resync_fails_without_swapping_incomplete_source_state() {
+    async fn scoped_automatic_resync_publishes_first_access_terminal_error_without_old_state() {
         let registry = supported_fixture_registry();
         let temp = TempDir::new().unwrap();
         let root = temp.path().join("automatic-resync-failure-root");
@@ -3039,11 +3232,294 @@ mod tests {
             .unwrap();
         let pair_task = tokio::spawn(pair.run_with_factory_and_clocks(|_| Err(()), || 60, || 61));
 
-        // The declared per-access physical ceiling is 64 bytes. The
-        // replacement owner must fail before admitting this larger object,
-        // retain no barrier, and supersede an undelivered resync-start rather
-        // than exposing a partial epoch.
+        // The declared per-access physical ceiling is 64 bytes. Because this
+        // object fails before any replacement cursor or semantic state can
+        // commit, the replacement may honestly remove the old epoch and make
+        // the relation explicitly unavailable. It must not fail the watcher
+        // or fabricate a partial cursor.
         std::fs::write(&target, vec![b'x'; 80]).unwrap();
+        handle
+            .require_resync(ScopedResyncReason::WatcherOverflow, 70)
+            .unwrap();
+        let result = tokio::time::timeout(std::time::Duration::from_secs(2), pair_task)
+            .await
+            .unwrap()
+            .unwrap();
+        let ScopedObservationAsyncOwnerRunResult::Resync(handoff) = result else {
+            panic!("continuity invalidation must yield a replacement handoff");
+        };
+        let recovery_task = tokio::spawn(handoff.replay_and_rebind_with_factory_and_clocks(
+            |_| Err(()),
+            || 80,
+            || 90,
+        ));
+        let required_event = runtime.next_event().await.unwrap().unwrap();
+        assert!(matches!(
+            required_event.envelope.event,
+            ScopedObservationEvent::ObserverResyncRequired { .. }
+        ));
+        runtime
+            .acknowledge_applied(required_event.application_receipt())
+            .unwrap();
+
+        let started_event = runtime.next_event().await.unwrap().unwrap();
+        assert!(matches!(
+            started_event.envelope.event,
+            ScopedObservationEvent::ObserverResyncStarted { .. }
+        ));
+        runtime
+            .acknowledge_applied(started_event.application_receipt())
+            .unwrap();
+
+        let object_error_event = runtime.next_event().await.unwrap().unwrap();
+        let ScopedObservationEvent::SourceObjectError { error } =
+            &object_error_event.envelope.event
+        else {
+            panic!(
+                "terminal replacement source failure must be explicit: {:?}",
+                object_error_event.envelope.event
+            );
+        };
+        assert_eq!(object_error_event.envelope.scope_epoch, 2);
+        assert_eq!(
+            object_error_event.envelope.phase,
+            ScopedAppendDeliveryPhase::Correction
+        );
+        assert_eq!(
+            error.failure_code,
+            ScopedSourceObjectFailureCode::SourceLimitExceeded
+        );
+        assert_eq!(
+            error.retry,
+            ScopedSourceObjectRetryState::NotRetryable { failed_attempts: 1 }
+        );
+        assert!(error.provenance.last_successful_position.is_none());
+        runtime
+            .acknowledge_applied(object_error_event.application_receipt())
+            .unwrap();
+
+        let completed_event = runtime.next_event().await.unwrap().unwrap();
+        let ScopedObservationEvent::ObserverResyncComplete { barrier } =
+            &completed_event.envelope.event
+        else {
+            panic!("explicit unavailable replacement must complete atomically");
+        };
+        assert_eq!(barrier.scope_epoch, 2);
+        assert!(barrier.root_present);
+        assert!(!barrier.explicit_object_errors.is_empty());
+        assert!(barrier
+            .explicit_object_errors
+            .iter()
+            .all(|error| error.code == "source_limit_exceeded"));
+        assert!(barrier.source_coverage.iter().all(|coverage| {
+            coverage.completeness == CoverageSetCompleteness::Unavailable
+                && coverage.points.iter().all(|point| {
+                    point.position.is_none()
+                        && matches!(point.status, CoverageStatus::Unavailable { .. })
+                })
+        }));
+        let barrier = Arc::clone(barrier);
+        runtime
+            .acknowledge_applied(completed_event.application_receipt())
+            .unwrap();
+
+        let pair = tokio::time::timeout(std::time::Duration::from_secs(2), recovery_task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(Arc::ptr_eq(
+            &handle
+                .with_attachment(|_, drain| drain.engine_resync_barrier())
+                .unwrap(),
+            &barrier
+        ));
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+        let resumed_task =
+            tokio::spawn(pair.run_with_factory_and_clocks(|_| Err(()), || 100, || 101));
+        let resolution = tokio::time::timeout(std::time::Duration::from_secs(2), handle.poll())
+            .await
+            .unwrap()
+            .unwrap();
+        let ScopedObservationPollResolution::Ready(watermark) = resolution else {
+            panic!("the retained terminal relation must still complete poll coverage");
+        };
+        assert_eq!(watermark.scope_epoch, 2);
+        assert!(watermark
+            .explicit_object_errors
+            .iter()
+            .all(|error| error.code == "source_limit_exceeded"));
+        let close = runtime.request_close();
+        let stopped = tokio::time::timeout(std::time::Duration::from_secs(2), resumed_task)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            stopped,
+            ScopedObservationAsyncOwnerRunResult::Stopped(_)
+        ));
+        assert!(close.wait_async().await.complete);
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn scoped_automatic_resync_publishes_first_access_retry_exhaustion() {
+        let registry = stateful_supported_fixture_registry();
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().join("automatic-resync-exhaustion-root");
+        let (mut runtime, handle, pair, target, drops) = automatic_single_object_pair(
+            &registry,
+            root,
+            b"automatic-resync-exhaustion-session".to_vec(),
+            AppendDelimitedConfig::json_lines(),
+            128,
+            ScopedObservationSourceOwnerRetryPolicy::new(
+                std::time::Duration::from_millis(1),
+                std::time::Duration::from_millis(1),
+                2,
+            )
+            .unwrap(),
+        )
+        .await;
+
+        std::fs::write(&target, b"retry\n").unwrap();
+        let pair_task = tokio::spawn(pair.run_with_factory_and_clocks(|_| Err(()), || 60, || 61));
+        handle
+            .require_resync(ScopedResyncReason::WatcherOverflow, 70)
+            .unwrap();
+        let result = tokio::time::timeout(std::time::Duration::from_secs(2), pair_task)
+            .await
+            .unwrap()
+            .unwrap();
+        let ScopedObservationAsyncOwnerRunResult::Resync(handoff) = result else {
+            panic!("continuity invalidation must yield a replacement handoff");
+        };
+        let recovery_task = tokio::spawn(handoff.replay_and_rebind_with_factory_and_clocks(
+            |_| Err(()),
+            || 80,
+            || 90,
+        ));
+
+        let required = runtime.next_event().await.unwrap().unwrap();
+        assert!(matches!(
+            required.envelope.event,
+            ScopedObservationEvent::ObserverResyncRequired { .. }
+        ));
+        runtime
+            .acknowledge_applied(required.application_receipt())
+            .unwrap();
+        let started = runtime.next_event().await.unwrap().unwrap();
+        assert!(matches!(
+            started.envelope.event,
+            ScopedObservationEvent::ObserverResyncStarted { .. }
+        ));
+        runtime
+            .acknowledge_applied(started.application_receipt())
+            .unwrap();
+
+        let scheduled = runtime.next_event().await.unwrap().unwrap();
+        let ScopedObservationEvent::SourceObjectError { error } = &scheduled.envelope.event else {
+            panic!("the first transient attempt must publish its retry schedule");
+        };
+        assert_eq!(
+            scheduled.envelope.phase,
+            ScopedAppendDeliveryPhase::Correction
+        );
+        assert_eq!(
+            error.retry,
+            ScopedSourceObjectRetryState::RetryScheduled {
+                failed_attempts: 1,
+                max_attempts: 2,
+                retry_after_ms: 1,
+            }
+        );
+        assert!(error.provenance.last_successful_position.is_none());
+        runtime
+            .acknowledge_applied(scheduled.application_receipt())
+            .unwrap();
+
+        let exhausted = runtime.next_event().await.unwrap().unwrap();
+        let ScopedObservationEvent::SourceObjectError { error } = &exhausted.envelope.event else {
+            panic!("the bounded final attempt must publish retry exhaustion");
+        };
+        assert_eq!(
+            exhausted.envelope.phase,
+            ScopedAppendDeliveryPhase::Correction
+        );
+        assert_eq!(
+            error.retry,
+            ScopedSourceObjectRetryState::RetryExhausted {
+                failed_attempts: 2,
+                max_attempts: 2,
+            }
+        );
+        assert!(error.provenance.last_successful_position.is_none());
+        runtime
+            .acknowledge_applied(exhausted.application_receipt())
+            .unwrap();
+
+        let completed = runtime.next_event().await.unwrap().unwrap();
+        let ScopedObservationEvent::ObserverResyncComplete { barrier } = &completed.envelope.event
+        else {
+            panic!("first-access exhaustion must complete as explicit unavailable coverage");
+        };
+        assert!(barrier.root_present);
+        assert!(barrier.source_coverage.iter().all(|coverage| {
+            coverage.completeness == CoverageSetCompleteness::Unavailable
+                && coverage.points.iter().all(|point| {
+                    point.position.is_none()
+                        && matches!(point.status, CoverageStatus::Unavailable { .. })
+                })
+        }));
+        assert!(barrier
+            .explicit_object_errors
+            .iter()
+            .all(|error| error.code == "decode_retry_transient"));
+        runtime
+            .acknowledge_applied(completed.application_receipt())
+            .unwrap();
+
+        let pair = tokio::time::timeout(std::time::Duration::from_secs(2), recovery_task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        drop(pair);
+        assert!(runtime.close().await.complete);
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn scoped_automatic_resync_rejects_terminal_error_after_partial_object_progress() {
+        let registry = stateful_supported_fixture_registry();
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().join("automatic-resync-partial-error-root");
+        let mut append_config = AppendDelimitedConfig::json_lines();
+        append_config.max_record_bytes = 16;
+        append_config.max_batch_bytes = 16;
+        append_config.max_records_per_batch = 1;
+        append_config.prefix_anchor_bytes = 8;
+        let (mut runtime, handle, pair, target, drops) = automatic_single_object_pair(
+            &registry,
+            root.clone(),
+            b"automatic-resync-partial-error-session".to_vec(),
+            append_config,
+            128,
+            ScopedObservationSourceOwnerRetryPolicy::new(
+                std::time::Duration::from_millis(1),
+                std::time::Duration::from_millis(1),
+                2,
+            )
+            .unwrap(),
+        )
+        .await;
+
+        // Batch one commits an exact replacement cursor. Batch two is a
+        // permanent decoder failure. The shared reducer cannot roll back only
+        // this object's prefix, so the whole isolated stage must fail instead
+        // of publishing prefix facts beside terminal Unavailable coverage.
+        std::fs::write(&target, b"rec-01\nstream-fatal\n").unwrap();
+        let pair_task = tokio::spawn(pair.run_with_factory_and_clocks(|_| Err(()), || 60, || 61));
         handle
             .require_resync(ScopedResyncReason::WatcherOverflow, 70)
             .unwrap();
@@ -3075,11 +3551,11 @@ mod tests {
             .unwrap_err();
         assert_eq!(
             failure.error(),
-            ScopedObservationAutomaticResyncError::SourceAccess
+            ScopedObservationAutomaticResyncError::Decode
         );
         let terminal = failure
             .terminal_failure()
-            .expect("an incomplete automatic replacement must fail the observer");
+            .expect("partial object replacement must fail before swap");
         assert_eq!(
             terminal.reason,
             ScopedObserverFailureReason::InternalControlFailure
@@ -3087,7 +3563,7 @@ mod tests {
         assert!(failure.supervision_error().is_none());
         let failure_debug = format!("{failure:?}");
         assert!(!failure_debug.contains(root.to_string_lossy().as_ref()));
-        assert!(!failure_debug.contains("automatic-resync-failure-session"));
+        assert!(!failure_debug.contains("automatic-resync-partial-error-session"));
         assert!(handle
             .with_attachment(|_, drain| drain.engine_resync_barrier())
             .is_none());

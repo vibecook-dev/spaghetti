@@ -239,6 +239,7 @@ fn mapped_envelope(
                 event_id,
                 ScopedProjectedObservation::SourceObjectError {
                     source: source.clone(),
+                    phase: ScopedAppendDeliveryPhase::Live,
                     observed_at: if terminal {
                         46
                     } else if exhausted {
@@ -458,6 +459,14 @@ fn source_lineage_error_state_and_event_ids_are_recomputed() {
     unsafe_position["event"]["error"]["provenance"]["last_successful_position"]
         ["monotonic_order"] = json!(JS_SAFE_INTEGER_MAX + 1);
     reject_retry(unsafe_position);
+
+    let mut correction = retry.clone();
+    correction["phase"] = json!("correction");
+    assert!(parse_for_context(correction, &selection, &root, &source).is_ok());
+
+    let mut bootstrap = retry.clone();
+    bootstrap["phase"] = json!("bootstrap");
+    reject_retry(bootstrap);
 
     let mut false_completeness = retry;
     false_completeness["evidence"]["completeness"] = json!("complete");
