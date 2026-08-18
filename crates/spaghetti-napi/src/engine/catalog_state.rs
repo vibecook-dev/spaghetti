@@ -11,6 +11,10 @@ use std::sync::Arc;
 use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 use serde::Serialize;
 
+use crate::catalog_contract::evidence::{CatalogReducer, CatalogReducerPublication};
+use crate::catalog_contract::publication::{
+    CatalogPublicationMemberHistory, CatalogRefreshPredecessor,
+};
 use crate::catalog_contract::{
     CatalogCoveragePlan, CatalogCoveragePlanId, CatalogCoverageScope, CatalogReadinessMachine,
     CatalogReadinessPhase, CatalogReadinessSnapshot, CatalogSnapshotId,
@@ -29,6 +33,7 @@ const REGISTER_REASON: &str = "catalog.library.plan.registered";
 const SCHEDULE_REASON: &str = "catalog.library.build.scheduled";
 pub(super) const INITIAL_PUBLICATION_REASON: &str = "catalog.library.initial_snapshot.published";
 const REFRESH_STARTED_REASON: &str = "catalog.library.refresh.started";
+pub(super) const REFRESH_PUBLICATION_REASON: &str = "catalog.library.refresh_snapshot.published";
 const READINESS_CHANGE_TOPIC: &str = "catalog.readiness.changed";
 const READINESS_CHANGE_SCHEMA_VERSION: u32 = 1;
 const REFRESH_CHANGE_SCHEMA_VERSION: u32 = 3;
@@ -85,6 +90,71 @@ pub(crate) struct CatalogReadyRefreshExpectation {
     snapshot_id: CatalogSnapshotId,
     state_commit_seq: u64,
     publication_identity: Arc<CatalogReadyPublicationIdentity>,
+}
+
+/// Non-transferable compare-and-swap proof for publishing the successor of
+/// one active ordinary refresh. It retains the exact restart-validated prior
+/// publication rather than allowing callers to provide independent digests.
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct CatalogActiveRefreshPublicationExpectation {
+    scope: CatalogCoverageScope,
+    coverage_plan_id: CatalogCoveragePlanId,
+    desired_contract_version: u32,
+    epoch: u64,
+    attempt: u64,
+    predecessor_snapshot: CatalogSnapshotId,
+    refresh_started_commit_seq: u64,
+    publication_identity: Arc<CatalogReadyPublicationIdentity>,
+}
+
+impl std::fmt::Debug for CatalogActiveRefreshPublicationExpectation {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CatalogActiveRefreshPublicationExpectation")
+            .field("scope", &self.scope)
+            .field("coverage_plan_id", &self.coverage_plan_id)
+            .field("desired_contract_version", &self.desired_contract_version)
+            .field("epoch", &self.epoch)
+            .field("attempt", &self.attempt)
+            .field("predecessor_snapshot", &self.predecessor_snapshot)
+            .field(
+                "refresh_started_commit_seq",
+                &self.refresh_started_commit_seq,
+            )
+            .field("publication_identity", &self.publication_identity)
+            .finish_non_exhaustive()
+    }
+}
+
+impl CatalogActiveRefreshPublicationExpectation {
+    pub(crate) fn predecessor(&self) -> Result<CatalogRefreshPredecessor, EngineError> {
+        self.publication_identity
+            .refresh_predecessor(self.predecessor_snapshot)
+    }
+
+    pub(crate) fn resume_reducer(&self) -> CatalogReducer {
+        self.publication_identity.resume_reducer()
+    }
+
+    pub(crate) fn prior_reducer(&self) -> &CatalogReducerPublication {
+        self.publication_identity.reducer()
+    }
+
+    pub(crate) fn prior_member_history(&self) -> &CatalogPublicationMemberHistory {
+        self.publication_identity.member_history()
+    }
+
+    pub(crate) fn refresh_started_commit_seq(&self) -> u64 {
+        self.refresh_started_commit_seq
+    }
+
+    pub(super) fn predecessor_snapshot(&self) -> CatalogSnapshotId {
+        self.predecessor_snapshot
+    }
+
+    pub(super) fn publication_identity(&self) -> &Arc<CatalogReadyPublicationIdentity> {
+        &self.publication_identity
+    }
 }
 
 impl std::fmt::Debug for CatalogReadyRefreshExpectation {
@@ -247,6 +317,12 @@ impl DurableCatalogBuildState {
             ));
         }
         let authority = self.ready_read_authority()?;
+        if !authority.publication_identity.permits_refresh_successor() {
+            return Err(EngineError::InvalidCommit(
+                "catalog ordinary refresh would exceed the bounded retained lineage depth"
+                    .to_string(),
+            ));
+        }
         Ok(CatalogReadyRefreshExpectation {
             scope: self.readiness.scope,
             coverage_plan_id: self.readiness.coverage_plan_id,
@@ -256,6 +332,40 @@ impl DurableCatalogBuildState {
             snapshot_id: authority.snapshot_id,
             state_commit_seq: self.last_commit_seq,
             publication_identity: Arc::clone(&authority.publication_identity),
+        })
+    }
+
+    pub(crate) fn refresh_publication_expectation(
+        &self,
+    ) -> Result<CatalogActiveRefreshPublicationExpectation, EngineError> {
+        let predecessor_snapshot = self.readiness.refreshing_from_snapshot.ok_or_else(|| {
+            EngineError::InvalidCommit(
+                "catalog refresh publication requires an active ordinary refresh".to_string(),
+            )
+        })?;
+        if self.readiness.state != CatalogReadinessPhase::Ready
+            || self.readiness.last_complete_snapshot != Some(predecessor_snapshot)
+            || self.readiness.complete_through_commit != Some(predecessor_snapshot.complete_commit)
+            || self.last_commit_seq <= predecessor_snapshot.complete_commit
+        {
+            return Err(EngineError::InvalidCommit(
+                "catalog active refresh publication lineage is inconsistent".to_string(),
+            ));
+        }
+        Ok(CatalogActiveRefreshPublicationExpectation {
+            scope: self.readiness.scope,
+            coverage_plan_id: self.readiness.coverage_plan_id,
+            desired_contract_version: self.readiness.desired_contract_version,
+            epoch: self.readiness.epoch,
+            attempt: self.readiness.attempt,
+            predecessor_snapshot,
+            refresh_started_commit_seq: self.last_commit_seq,
+            publication_identity: self.ready_publication_identity.clone().ok_or_else(|| {
+                EngineError::InvalidCommit(
+                    "catalog active refresh is missing its predecessor publication identity"
+                        .to_string(),
+                )
+            })?,
         })
     }
 }
@@ -582,7 +692,8 @@ pub(super) fn load_catalog_build_state(
                                       'catalog.library.plan.registered',
                                       'catalog.library.build.scheduled',
                                       'catalog.library.initial_snapshot.published',
-                                      'catalog.library.refresh.started'
+                                      'catalog.library.refresh.started',
+                                      'catalog.library.refresh_snapshot.published'
                                   )
                         THEN state_commit.reason END,
                    state_commit.committed_at,
@@ -740,12 +851,26 @@ fn decode_stored_state(
         stored.plan_fact_count,
         REGISTER_REASON,
     )?;
+    let expected_state_reason =
+        if phase == CatalogDurableBuildPhase::Ready && refreshing_from_snapshot_commit.is_none() {
+            match state_commit_reason {
+                INITIAL_PUBLICATION_REASON => INITIAL_PUBLICATION_REASON,
+                REFRESH_PUBLICATION_REASON => REFRESH_PUBLICATION_REASON,
+                _ => {
+                    return Err(corrupt_catalog_state(
+                        "plain Ready catalog state has an unsupported publication owner",
+                    ));
+                }
+            }
+        } else {
+            phase_reason(phase, refreshing_from_snapshot_commit.is_some())?
+        };
     validate_admin_commit(
         stored.state_commit_source,
         state_commit_reason,
         stored.state_committed_at,
         stored.state_fact_count,
-        phase_reason(phase, refreshing_from_snapshot_commit.is_some())?,
+        expected_state_reason,
     )?;
     if stored.state_committed_at != Some(stored.updated_at) {
         return Err(corrupt_catalog_state(
@@ -843,6 +968,37 @@ fn decode_stored_state(
             snapshot_id,
             attempt,
         )?;
+        let retained_snapshot_scan_limit =
+            super::catalog_publication::MAX_RETAINED_REFRESH_LINEAGE_DEPTH
+                .checked_add(2)
+                .ok_or_else(|| {
+                    corrupt_catalog_state("catalog retained snapshot scan limit overflow")
+                })?;
+        let retained_snapshot_count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM (SELECT 1 FROM catalog_snapshots LIMIT ?1)",
+                [to_i64(
+                    retained_snapshot_scan_limit as u64,
+                    "catalog retained snapshot scan limit",
+                )?],
+                |row| row.get(0),
+            )
+            .map_err(|error| sqlite_error("count retained catalog snapshots", error))?;
+        if usize::try_from(retained_snapshot_count).ok()
+            != Some(publication.identity.retained_snapshot_count())
+        {
+            return Err(corrupt_catalog_state(
+                "retained catalog snapshots do not form the exact bounded current ancestor chain",
+            ));
+        }
+        if refreshing_from_snapshot_commit.is_none()
+            && publication.identity.is_refresh()
+                != (state_commit_reason == REFRESH_PUBLICATION_REASON)
+        {
+            return Err(corrupt_catalog_state(
+                "Ready state commit owner disagrees with the current snapshot lineage",
+            ));
+        }
         machine
             .publish_ready(snapshot_id, publication.source_coverage)
             .map_err(catalog_contract_error)?;

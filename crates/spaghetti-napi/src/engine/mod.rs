@@ -57,7 +57,10 @@ pub use capability_query::{
     ToolResultDetail, ToolResultPage, ToolResultPageRequest, CAPABILITY_QUERY_CONTRACT_VERSION,
     DEFAULT_CAPABILITY_PAGE_LIMIT, MAX_CAPABILITY_PAGE_PAYLOAD_BYTES,
 };
-use catalog_publication::{CatalogInitialPublicationCommand, CatalogInitialPublicationReceipt};
+use catalog_publication::{
+    CatalogInitialPublicationCommand, CatalogInitialPublicationReceipt,
+    CatalogRefreshPublicationCommand, CatalogRefreshPublicationReceipt,
+};
 use catalog_state::CatalogBuildStateCommand;
 pub use commit::{
     ChangeLogRetentionPolicy, ChangeLogRetentionSnapshot, DEFAULT_CHANGE_LOG_MAX_AGE_MS,
@@ -1373,6 +1376,22 @@ impl SpaghettiEngineCore {
     ) -> Result<Option<CatalogInitialPublicationReceipt>, EngineError> {
         let writer = self.writer_client()?;
         let receipt = writer.commit_initial_catalog_publication(command)?;
+        if let Some(receipt) = &receipt {
+            self.commit_notifications.publish(receipt.commit_seq);
+        }
+        Ok(receipt)
+    }
+
+    /// Atomically publish one checked ordinary-refresh successor while
+    /// retaining the predecessor snapshot and its already-issued read
+    /// authority. This remains crate-private and grants no public query or
+    /// N-API access.
+    pub(crate) fn commit_refresh_catalog_publication(
+        &self,
+        command: CatalogRefreshPublicationCommand,
+    ) -> Result<Option<CatalogRefreshPublicationReceipt>, EngineError> {
+        let writer = self.writer_client()?;
+        let receipt = writer.commit_refresh_catalog_publication(command)?;
         if let Some(receipt) = &receipt {
             self.commit_notifications.publish(receipt.commit_seq);
         }

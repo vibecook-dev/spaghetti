@@ -2,8 +2,8 @@ use std::collections::BTreeMap;
 
 use super::super::evidence::{
     CatalogAvailability, CatalogDisclosureClass, CatalogFieldAuthority, CatalogLocatorKind,
-    CatalogLocatorValue, CatalogQualifiedField, CatalogSessionAssertion, IdentityRelationFact,
-    IdentityRelationKind, NativeLocatorClaim, ProjectAssociationBasis,
+    CatalogLocatorValue, CatalogMutation, CatalogQualifiedField, CatalogSessionAssertion,
+    IdentityRelationFact, IdentityRelationKind, NativeLocatorClaim, ProjectAssociationBasis,
     SessionProjectAssociationFact,
 };
 use super::super::{CatalogAccessPolicyDigest, CatalogReadinessMachine};
@@ -935,4 +935,128 @@ fn publication_bounds_and_observation_commit_are_part_of_the_frozen_identity() {
     )
     .unwrap();
     assert_ne!(first.digest(), different_limits.digest());
+}
+
+#[test]
+fn refresh_binds_exact_predecessor_reducer_and_cumulative_member_history() {
+    let alpha = fixture_source("refresh-alpha");
+    let beta = fixture_source("refresh-beta");
+    let coverage_plan = plan(&[&alpha, &beta], &[]);
+    let initial_reducer = reducer_with(&[&alpha, &beta], 10);
+    let initial = CatalogInitialPublicationAssembly::assemble(
+        &coverage_plan,
+        &building(&coverage_plan),
+        selection(),
+        vec![alpha.assembly.clone(), beta.assembly.clone()],
+        &initial_reducer,
+        bindings(&[&alpha, &beta]),
+        CatalogPublicationLimits::default(),
+    )
+    .unwrap();
+    let durable_initial = initial.prepare_durable().unwrap();
+    let prior_history = initial.member_history().unwrap();
+    let snapshot = CatalogSnapshotId::new(
+        CATALOG_QUERY_PACK_CONTRACT_VERSION,
+        coverage_plan.coverage_plan_id,
+        1,
+        30,
+    )
+    .unwrap();
+    let predecessor = CatalogRefreshPredecessor::new(
+        snapshot,
+        *durable_initial.publication_digest().storage_bytes(),
+        *durable_initial.content_digest(),
+        selection(),
+        durable_initial
+            .member_identity_contract_id()
+            .map(str::to_owned),
+        durable_initial.reducer_revision(),
+        prior_history.revision(),
+    )
+    .unwrap();
+    let mut readiness = CatalogReadinessMachine::register(
+        coverage_plan.clone(),
+        CATALOG_QUERY_PACK_CONTRACT_VERSION,
+    )
+    .unwrap();
+    readiness.schedule_build().unwrap();
+    let mut ready_coverage = vec![
+        alpha.assembly.source_coverage().clone(),
+        beta.assembly.source_coverage().clone(),
+    ];
+    ready_coverage.sort_by_key(|coverage| {
+        (
+            coverage.scope.adapter_id.clone(),
+            coverage.scope.source_instance_key,
+        )
+    });
+    readiness.publish_ready(snapshot, ready_coverage).unwrap();
+    readiness.begin_refresh().unwrap();
+
+    let mut next_reducer = initial.reducer_publication().resume_for_refresh();
+    assert!(matches!(
+        next_reducer
+            .upsert_session_assertion(alpha.assertion.clone(), 11)
+            .unwrap(),
+        CatalogMutation::Updated
+    ));
+    let refresh = CatalogRefreshPublicationAssembly::assemble(
+        &coverage_plan,
+        readiness.snapshot(),
+        31,
+        predecessor.clone(),
+        initial.reducer_publication(),
+        &prior_history,
+        selection(),
+        vec![alpha.assembly.clone(), beta.assembly.clone()],
+        &next_reducer,
+        bindings(&[&alpha, &beta]),
+        CatalogPublicationLimits::default(),
+    )
+    .unwrap();
+    let durable_refresh = refresh.prepare_durable().unwrap();
+    let reordered_refresh = CatalogRefreshPublicationAssembly::assemble(
+        &coverage_plan,
+        readiness.snapshot(),
+        31,
+        predecessor.clone(),
+        initial.reducer_publication(),
+        &prior_history,
+        selection(),
+        vec![beta.assembly.clone(), alpha.assembly.clone()],
+        &next_reducer,
+        bindings(&[&beta, &alpha]),
+        CatalogPublicationLimits::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        durable_refresh,
+        reordered_refresh.prepare_durable().unwrap()
+    );
+    assert_eq!(
+        durable_refresh.contract_version(),
+        CATALOG_DURABLE_REFRESH_PUBLICATION_CONTRACT_VERSION
+    );
+    assert_eq!(durable_refresh.predecessor(), &predecessor);
+    assert_eq!(durable_refresh.member_history(), &prior_history);
+
+    // Empty history is itself canonical and valid, but it is not the history
+    // authenticated by this predecessor. The mismatch must fail during pure
+    // assembly, before a writer or SQLite transaction exists.
+    let incomplete_history = CatalogPublicationMemberHistory::from_bindings(&[]).unwrap();
+    let error = CatalogRefreshPublicationAssembly::assemble(
+        &coverage_plan,
+        readiness.snapshot(),
+        31,
+        predecessor,
+        initial.reducer_publication(),
+        &incomplete_history,
+        selection(),
+        vec![alpha.assembly.clone(), beta.assembly.clone()],
+        &next_reducer,
+        bindings(&[&alpha, &beta]),
+        CatalogPublicationLimits::default(),
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("predecessor member history"));
 }

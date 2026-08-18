@@ -2989,6 +2989,323 @@ impl CatalogReducerPublication {
         }
         Ok(CatalogResolutionIndex { entries })
     }
+
+    /// Rehydrate the exact checked reducer state behind one immutable
+    /// publication so an ordinary refresh can apply observations to that
+    /// state rather than rebuilding a fresh, retargetable reducer.
+    pub(crate) fn resume_for_refresh(&self) -> CatalogReducer {
+        CatalogReducer {
+            projects: self
+                .projects
+                .iter()
+                .map(|stored| {
+                    (
+                        stored.fact.assertion_key,
+                        StoredProjectAssertion {
+                            fact: stored.fact.clone(),
+                            observation_commit: stored.observation_commit,
+                        },
+                    )
+                })
+                .collect(),
+            sessions: self
+                .sessions
+                .iter()
+                .map(|stored| {
+                    (
+                        stored.fact.assertion_key,
+                        StoredSessionAssertion {
+                            fact: stored.fact.clone(),
+                            observation_commit: stored.observation_commit,
+                        },
+                    )
+                })
+                .collect(),
+            associations: self
+                .associations
+                .iter()
+                .map(|stored| {
+                    (
+                        stored.fact.association_key,
+                        StoredAssociation {
+                            fact: stored.fact.clone(),
+                            observation_commit: stored.observation_commit,
+                        },
+                    )
+                })
+                .collect(),
+            locators: self
+                .locators
+                .iter()
+                .map(|stored| {
+                    (
+                        stored.fact.locator_claim_key,
+                        StoredLocatorClaim {
+                            fact: stored.fact.clone(),
+                            observation_commit: stored.observation_commit,
+                        },
+                    )
+                })
+                .collect(),
+            identity_relations: self
+                .identity_relations
+                .iter()
+                .map(|stored| {
+                    (
+                        stored.fact.relation_key,
+                        StoredIdentityRelation {
+                            fact: stored.fact.clone(),
+                            observation_commit: stored.observation_commit,
+                        },
+                    )
+                })
+                .collect(),
+            assertion_history: self.assertion_history.clone(),
+            association_history: self.association_history.clone(),
+            locator_history: self.locator_history.clone(),
+            identity_relation_history: self.identity_relation_history.clone(),
+            retracted_owners: self
+                .retracted_owners
+                .iter()
+                .cloned()
+                .map(|evidence| (evidence.owner.clone(), evidence))
+                .collect(),
+            entity_kinds: self.entity_kinds.clone(),
+            retracted_assertions: self.retracted_assertions.clone(),
+            tombstones: self
+                .tombstones
+                .iter()
+                .cloned()
+                .map(|tombstone| (tombstone.entity_ref, tombstone))
+                .collect(),
+        }
+    }
+
+    /// Validate that a newly frozen reducer is a monotonic successor of this
+    /// publication. Immutable evidence coordinates and retraction history can
+    /// only grow, and a previously live fact may disappear only after its
+    /// exact owner generation has acquired retained retraction evidence.
+    pub(crate) fn validate_refresh_successor(
+        &self,
+        next: &Self,
+    ) -> Result<(), CatalogContractError> {
+        fn require_history_subset<K: Ord + fmt::Debug, V: PartialEq>(
+            prior: &BTreeMap<K, V>,
+            next: &BTreeMap<K, V>,
+            label: &'static str,
+        ) -> Result<(), CatalogContractError> {
+            if prior
+                .iter()
+                .any(|(key, value)| next.get(key) != Some(value))
+            {
+                return Err(CatalogContractError::invalid(format!(
+                    "catalog refresh cannot remove or retarget {label} history"
+                )));
+            }
+            Ok(())
+        }
+
+        require_history_subset(
+            &self.assertion_history,
+            &next.assertion_history,
+            "assertion-coordinate",
+        )?;
+        require_history_subset(
+            &self.association_history,
+            &next.association_history,
+            "association-coordinate",
+        )?;
+        require_history_subset(
+            &self.locator_history,
+            &next.locator_history,
+            "locator-coordinate",
+        )?;
+        require_history_subset(
+            &self.identity_relation_history,
+            &next.identity_relation_history,
+            "identity-relation-coordinate",
+        )?;
+        require_history_subset(&self.entity_kinds, &next.entity_kinds, "entity-kind")?;
+        for (entity_ref, assertions) in &self.retracted_assertions {
+            let next_assertions = next.retracted_assertions.get(entity_ref).ok_or_else(|| {
+                CatalogContractError::invalid(
+                    "catalog refresh cannot discard retracted assertion history",
+                )
+            })?;
+            require_history_subset(assertions, next_assertions, "retracted-assertion")?;
+        }
+        let next_retractions = next
+            .retracted_owners
+            .iter()
+            .map(|evidence| (&evidence.owner, evidence))
+            .collect::<BTreeMap<_, _>>();
+        if self
+            .retracted_owners
+            .iter()
+            .any(|evidence| next_retractions.get(&evidence.owner) != Some(&evidence))
+        {
+            return Err(CatalogContractError::invalid(
+                "catalog refresh cannot discard or rewrite owner retraction history",
+            ));
+        }
+
+        macro_rules! require_live_successor {
+            ($prior:expr, $next:expr, $key:expr, $owner:expr, $label:literal) => {
+                for stored in $prior {
+                    match $next
+                        .iter()
+                        .find(|candidate| $key(candidate) == $key(stored))
+                    {
+                        Some(candidate)
+                            if candidate.observation_commit < stored.observation_commit =>
+                        {
+                            return Err(CatalogContractError::invalid(concat!(
+                                "catalog refresh cannot move a live ",
+                                $label,
+                                " observation commit backwards"
+                            )));
+                        }
+                        Some(candidate)
+                            if candidate.observation_commit == stored.observation_commit
+                                && candidate.fact != stored.fact =>
+                        {
+                            return Err(CatalogContractError::invalid(concat!(
+                                "catalog refresh cannot rewrite a live ",
+                                $label,
+                                " at the same observation commit"
+                            )));
+                        }
+                        Some(_) => {}
+                        None if next_retractions.contains_key(&$owner(stored)) => {}
+                        None => {
+                            return Err(CatalogContractError::invalid(concat!(
+                                "catalog refresh cannot remove a live ",
+                                $label,
+                                " without exact owner retraction evidence"
+                            )));
+                        }
+                    }
+                }
+            };
+        }
+        require_live_successor!(
+            &self.projects,
+            &next.projects,
+            |stored: &FrozenProjectAssertion| stored.fact.assertion_key,
+            |stored: &FrozenProjectAssertion| stored.fact.owner.clone(),
+            "project assertion"
+        );
+        require_live_successor!(
+            &self.sessions,
+            &next.sessions,
+            |stored: &FrozenSessionAssertion| stored.fact.assertion_key,
+            |stored: &FrozenSessionAssertion| stored.fact.owner.clone(),
+            "session assertion"
+        );
+        require_live_successor!(
+            &self.associations,
+            &next.associations,
+            |stored: &FrozenAssociation| stored.fact.association_key,
+            |stored: &FrozenAssociation| stored.fact.owner.clone(),
+            "association"
+        );
+        require_live_successor!(
+            &self.locators,
+            &next.locators,
+            |stored: &FrozenLocatorClaim| stored.fact.locator_claim_key,
+            |stored: &FrozenLocatorClaim| stored.fact.owner.clone(),
+            "locator"
+        );
+        require_live_successor!(
+            &self.identity_relations,
+            &next.identity_relations,
+            |stored: &FrozenIdentityRelation| stored.fact.relation_key,
+            |stored: &FrozenIdentityRelation| stored.fact.owner.clone(),
+            "identity relation"
+        );
+
+        for prior in &self.tombstones {
+            match next
+                .tombstones
+                .iter()
+                .find(|candidate| candidate.entity_ref == prior.entity_ref)
+            {
+                Some(candidate) => {
+                    let assertion_history_retained = prior
+                        .prior_assertion_keys
+                        .iter()
+                        .all(|key| candidate.prior_assertion_keys.binary_search(key).is_ok());
+                    let absence_history_retained = prior.absence_evidence.iter().all(|evidence| {
+                        candidate
+                            .absence_evidence
+                            .iter()
+                            .any(|candidate| candidate == evidence)
+                    });
+                    let source_history_retained =
+                        prior.prior_source_generations.iter().all(|source| {
+                            candidate
+                                .prior_source_generations
+                                .iter()
+                                .any(|next_source| {
+                                    next_source.source_instance_key == source.source_instance_key
+                                        && next_source.max_generation >= source.max_generation
+                                })
+                        });
+                    let provenance_retained = prior.provenance.iter().all(|revision| {
+                        candidate
+                            .provenance
+                            .binary_search_by_key(&revision.fact_revision_id, |candidate| {
+                                candidate.fact_revision_id
+                            })
+                            .is_ok()
+                    });
+                    if candidate.confirmed_absent_at_commit < prior.confirmed_absent_at_commit
+                        || !assertion_history_retained
+                        || !absence_history_retained
+                        || !source_history_retained
+                        || !provenance_retained
+                    {
+                        return Err(CatalogContractError::invalid(
+                            "catalog refresh cannot regress or rewrite retained tombstone evidence",
+                        ));
+                    }
+                }
+                None => {
+                    let revived = next
+                        .projects
+                        .iter()
+                        .map(|stored| {
+                            (
+                                stored.fact.project_ref,
+                                &stored.fact.owner,
+                                stored.observation_commit,
+                            )
+                        })
+                        .chain(next.sessions.iter().map(|stored| {
+                            (
+                                stored.fact.session_ref,
+                                &stored.fact.owner,
+                                stored.observation_commit,
+                            )
+                        }))
+                        .any(|(entity_ref, owner, observation_commit)| {
+                            entity_ref == prior.entity_ref
+                                && observation_commit > prior.confirmed_absent_at_commit
+                                && prior.prior_source_generations.iter().any(|source| {
+                                    source.source_instance_key == owner.source_instance_key
+                                        && owner.generation > source.max_generation
+                                })
+                        });
+                    if !revived {
+                        return Err(CatalogContractError::invalid(
+                            "catalog refresh cannot omit a tombstone without an exact newer-generation live revival",
+                        ));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 impl fmt::Debug for CatalogReducerPublication {

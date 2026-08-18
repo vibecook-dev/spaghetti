@@ -24,18 +24,21 @@ use crate::catalog_contract::page::{
 };
 use crate::catalog_contract::publication::{
     CatalogCompleteSourceAssembly, CatalogInitialPublicationAssembly, CatalogPublicationLimits,
-    CatalogPublicationMemberRef, CatalogSourceCompletionRevision, CatalogSourceMembershipRevision,
+    CatalogPublicationMemberRef, CatalogRefreshPublicationAssembly,
+    CatalogSourceCompletionRevision, CatalogSourceMembershipRevision,
 };
 use crate::catalog_contract::query::{
     CatalogTypedUnknownCapability, CATALOG_QUERY_CONTRACT_VERSION,
 };
 use crate::catalog_contract::{
     CatalogAccessPolicyDigest, CatalogCoveragePlan, CatalogCoveragePlanSource,
-    CatalogReadinessPhase, CATALOG_PROJECTION_PACK_ID, CATALOG_QUERY_PACK_CONTRACT_VERSION,
+    CatalogReadinessPhase, CatalogSnapshotId, CATALOG_PROJECTION_PACK_ID,
+    CATALOG_QUERY_PACK_CONTRACT_VERSION,
 };
 use crate::core::schema;
 use crate::engine::catalog_publication::{
-    apply_initial_catalog_publication, CatalogInitialPublicationCommand,
+    apply_initial_catalog_publication, apply_refresh_catalog_publication,
+    CatalogInitialPublicationCommand, CatalogRefreshPublicationCommand,
 };
 use crate::engine::catalog_state::{
     self, CatalogBuildStateCommand, CatalogCommitHook, CatalogCommitStage, DurableCatalogBuildState,
@@ -407,6 +410,179 @@ fn publish_catalog_in(
         state,
         selection,
     }
+}
+
+fn refresh_catalog(
+    published: &mut PublishedCatalog,
+    project_count: usize,
+    session_count: usize,
+) -> CatalogSnapshotId {
+    let begin = CatalogBuildStateCommand::begin_refresh(
+        published.state.refresh_expectation().unwrap(),
+        40,
+        41,
+    );
+    catalog_state::apply_catalog_build_state_commit(&mut published.connection, &begin)
+        .unwrap()
+        .unwrap();
+    let active = catalog_state::load_catalog_build_state(&published.connection)
+        .unwrap()
+        .unwrap();
+    let expected = active.refresh_publication_expectation().unwrap();
+    let plan_source = active.plan.required_sources[0].clone();
+    let source_instance_key = plan_source.source_instance_key;
+    let stream_key = CoverageStreamKey::derive(FIXTURE_ADAPTER, b"catalog-rows").unwrap();
+    let object_key = CoverageObjectKey::derive("catalog-rows", b"all").unwrap();
+    let owner = CatalogEvidenceOwner::new(
+        FIXTURE_ADAPTER,
+        source_instance_key,
+        stream_key,
+        object_key,
+        1,
+    )
+    .unwrap();
+    let domain = CoverageDomain::ProjectionPack {
+        pack: CATALOG_PROJECTION_PACK_ID.to_owned(),
+        version: CATALOG_QUERY_PACK_CONTRACT_VERSION,
+    };
+    let coverage = SourceCoverageSet::new(
+        domain.clone(),
+        plan_source.coverage_scope(CatalogCoverageScope::Library),
+        CoverageMembershipRevision::derive(b"retained-page-refresh-membership").unwrap(),
+        vec![SourceCoveragePoint::new(
+            domain,
+            FIXTURE_ADAPTER,
+            source_instance_key,
+            stream_key,
+            object_key,
+            1,
+            Some(
+                CoveragePosition::derive(
+                    CoveragePositionKind::SnapshotRevision,
+                    b"retained-page-refresh-position",
+                    None,
+                )
+                .unwrap(),
+            ),
+            CoverageStatus::ExactSnapshot,
+            CoverageProvenance::default(),
+        )
+        .unwrap()],
+        Vec::new(),
+        Vec::new(),
+        CoverageSetCompleteness::Complete,
+    )
+    .unwrap();
+    let member_refs = (0..session_count)
+        .map(|index| {
+            CatalogPublicationMemberRef::from_digest(
+                *blake3::hash(format!("retained-member-{index}").as_bytes()).as_bytes(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let source = CatalogCompleteSourceAssembly::from_complete_library_coverage(
+        plan_source,
+        durable_selection(),
+        "catalog-session-identity-v1",
+        CatalogSourceMembershipRevision::from_digest(
+            *blake3::hash(b"retained-source-refresh-membership").as_bytes(),
+        ),
+        CatalogSourceCompletionRevision::from_digest(
+            *blake3::hash(b"retained-source-refresh-completion").as_bytes(),
+        ),
+        member_refs.clone(),
+        coverage,
+    )
+    .unwrap();
+    let mut reducer = expected.resume_reducer();
+    for index in 0..project_count {
+        let label = format!("project-{index}");
+        let project_ref = CatalogEntityRef::project(
+            CanonicalEntityKey::derive(
+                FIXTURE_ADAPTER,
+                &source_instance_key,
+                "project",
+                label.as_bytes(),
+            )
+            .unwrap(),
+        );
+        reducer
+            .upsert_project_assertion(
+                CatalogProjectAssertion::new(
+                    owner.clone(),
+                    label.as_bytes(),
+                    project_ref,
+                    None,
+                    None,
+                    None,
+                    Some(sensitive_text(&owner, &label)),
+                    None,
+                    availability(&owner, &format!("{label}-availability")),
+                    vec![semantic_revision(&owner, &format!("{label}-assertion"))],
+                )
+                .unwrap(),
+                11,
+            )
+            .unwrap();
+    }
+    let mut bindings = Vec::with_capacity(session_count);
+    for (index, member_ref) in member_refs.into_iter().enumerate() {
+        let label = format!("session-{index}");
+        let session_ref = CatalogEntityRef::session(
+            CanonicalEntityKey::derive(
+                FIXTURE_ADAPTER,
+                &source_instance_key,
+                "session",
+                label.as_bytes(),
+            )
+            .unwrap(),
+        );
+        let assertion = CatalogSessionAssertion::new(
+            owner.clone(),
+            label.as_bytes(),
+            session_ref,
+            None,
+            Some(sensitive_text(&owner, &label)),
+            None,
+            None,
+            None,
+            None,
+            None,
+            availability(&owner, &format!("{label}-availability")),
+            vec![semantic_revision(&owner, &format!("{label}-assertion"))],
+        )
+        .unwrap();
+        bindings.push(
+            source
+                .member_binding(member_ref, assertion.assertion_key, session_ref)
+                .unwrap(),
+        );
+        reducer.upsert_session_assertion(assertion, 11).unwrap();
+    }
+    let assembly = CatalogRefreshPublicationAssembly::assemble(
+        &active.plan,
+        &active.readiness,
+        expected.refresh_started_commit_seq(),
+        expected.predecessor().unwrap(),
+        expected.prior_reducer(),
+        expected.prior_member_history(),
+        durable_selection(),
+        vec![source],
+        &reducer,
+        bindings,
+        CatalogPublicationLimits::default(),
+    )
+    .unwrap();
+    let receipt = apply_refresh_catalog_publication(
+        &mut published.connection,
+        &CatalogRefreshPublicationCommand::new(assembly, expected, 50, 51),
+    )
+    .unwrap()
+    .unwrap();
+    published.state = catalog_state::load_catalog_build_state(&published.connection)
+        .unwrap()
+        .unwrap();
+    receipt.snapshot_id
 }
 
 fn lifecycle_session_assertion(
@@ -1114,6 +1290,182 @@ fn ordinary_refresh_start_supports_source_free_ready_and_rejects_forged_restart_
         error.contains("catalog build lineage is not owned by the expected source-neutral commit"),
         "unexpected restart rejection: {error}"
     );
+}
+
+#[test]
+fn refresh_successor_keeps_old_authority_and_publishes_new_pages_and_resolution() {
+    let mut published = publish_catalog(1, 2);
+    let old_authority = published.state.ready_read_authority().unwrap();
+    let old_snapshot = old_authority.snapshot_id();
+    let first_old_page = read_retained_catalog_page(
+        &published.connection,
+        &old_authority,
+        &CatalogRetainedPageRequest::sessions_all(
+            published.selection.clone(),
+            old_snapshot,
+            1,
+            None,
+        ),
+    )
+    .unwrap();
+    let CatalogRetainedPage::Sessions(first_old_page) = first_old_page else {
+        panic!("expected old session page")
+    };
+    assert_eq!(first_old_page.rows.len(), 1);
+    assert!(first_old_page.has_more);
+    let old_continuation = first_old_page.next_continuation.unwrap();
+
+    let new_snapshot = refresh_catalog(&mut published, 2, 3);
+    assert!(new_snapshot.complete_commit > old_snapshot.complete_commit);
+    assert_eq!(new_snapshot.coverage_plan_id, old_snapshot.coverage_plan_id);
+    assert_eq!(new_snapshot.readiness_epoch, old_snapshot.readiness_epoch);
+
+    let second_old_page = read_retained_catalog_page(
+        &published.connection,
+        &old_authority,
+        &CatalogRetainedPageRequest::sessions_all(
+            published.selection.clone(),
+            old_snapshot,
+            1,
+            Some(old_continuation),
+        ),
+    )
+    .unwrap();
+    let CatalogRetainedPage::Sessions(second_old_page) = second_old_page else {
+        panic!("expected retained predecessor session page")
+    };
+    assert_eq!(second_old_page.rows.len(), 1);
+    assert!(!second_old_page.has_more);
+    assert_eq!(
+        second_old_page.total_count,
+        CatalogCount::Known { value: 2 }
+    );
+
+    let new_authority = published.state.ready_read_authority().unwrap();
+    assert_eq!(new_authority.snapshot_id(), new_snapshot);
+    let new_sessions = read_retained_catalog_page(
+        &published.connection,
+        &new_authority,
+        &CatalogRetainedPageRequest::sessions_all(
+            published.selection.clone(),
+            new_snapshot,
+            10,
+            None,
+        ),
+    )
+    .unwrap();
+    let CatalogRetainedPage::Sessions(new_sessions) = new_sessions else {
+        panic!("expected successor session page")
+    };
+    assert_eq!(new_sessions.rows.len(), 3);
+    assert_eq!(new_sessions.total_count, CatalogCount::Known { value: 3 });
+    let new_projects = read_retained_catalog_page(
+        &published.connection,
+        &new_authority,
+        &CatalogRetainedPageRequest::projects_all(
+            published.selection.clone(),
+            new_snapshot,
+            10,
+            None,
+        ),
+    )
+    .unwrap();
+    let CatalogRetainedPage::Projects(new_projects) = new_projects else {
+        panic!("expected successor project page")
+    };
+    assert_eq!(new_projects.rows.len(), 2);
+
+    let source_instance_key =
+        CanonicalSourceInstanceKey::derive(1, b"retained-page-source").unwrap();
+    let new_session = CatalogEntityRef::session(
+        CanonicalEntityKey::derive(
+            FIXTURE_ADAPTER,
+            &source_instance_key,
+            "session",
+            b"session-2",
+        )
+        .unwrap(),
+    );
+    let current_request = CatalogResolutionRequestBinding::new(
+        published.selection.clone(),
+        new_snapshot,
+        new_session.external_ref,
+    )
+    .unwrap();
+    assert!(matches!(
+        resolve_retained_catalog_entity(&published.connection, &new_authority, &current_request,)
+            .unwrap()
+            .resolution,
+        CatalogEntityResolution::Live { .. }
+    ));
+    let old_request = CatalogResolutionRequestBinding::new(
+        published.selection.clone(),
+        old_snapshot,
+        new_session.external_ref,
+    )
+    .unwrap();
+    assert!(matches!(
+        resolve_retained_catalog_entity(&published.connection, &old_authority, &old_request)
+            .unwrap()
+            .resolution,
+        CatalogEntityResolution::Unknown {
+            reason: CatalogUnknownReferenceReason::NeverObserved,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn refresh_successor_reopens_only_the_current_authority_while_retaining_both_snapshots() {
+    let directory = tempfile::tempdir().unwrap();
+    let database_path = directory.path().join("catalog-refresh-successor.sqlite");
+    let connection = Connection::open(&database_path).unwrap();
+    schema::initialize_schema(&connection).unwrap();
+    let mut published = publish_catalog_in(connection, 1, 1);
+    let predecessor = published
+        .state
+        .ready_read_authority()
+        .unwrap()
+        .snapshot_id();
+    let successor = refresh_catalog(&mut published, 2, 2);
+    drop(published.connection);
+
+    let connection = Connection::open(&database_path).unwrap();
+    schema::initialize_schema(&connection).unwrap();
+    let state = catalog_state::load_catalog_build_state(&connection)
+        .unwrap()
+        .unwrap();
+    let authority = state.ready_read_authority().unwrap();
+    assert_eq!(authority.snapshot_id(), successor);
+    assert_eq!(state.readiness.refreshing_from_snapshot, None);
+    assert_eq!(
+        connection
+            .query_row("SELECT COUNT(*) FROM catalog_snapshots", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap(),
+        2
+    );
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT replaces_snapshot_commit_seq FROM catalog_snapshots WHERE snapshot_commit_seq = ?1",
+                [i64::try_from(successor.complete_commit).unwrap()],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        i64::try_from(predecessor.complete_commit).unwrap()
+    );
+    let page = read_retained_catalog_page(
+        &connection,
+        &authority,
+        &CatalogRetainedPageRequest::sessions_all(query_selection(), successor, 10, None),
+    )
+    .unwrap();
+    let CatalogRetainedPage::Sessions(page) = page else {
+        panic!("expected reopened successor session page")
+    };
+    assert_eq!(page.rows.len(), 2);
 }
 
 #[test]

@@ -732,6 +732,128 @@ fn identical_newer_observations_refresh_precedence_and_retraction_guards() {
 }
 
 #[test]
+fn refresh_successor_requires_exact_retraction_before_live_evidence_disappears() {
+    let source = owner("refresh-successor", 1);
+    let session_ref = entity(
+        &source,
+        CatalogEntityKind::Session,
+        "refresh-successor-session",
+    );
+    let assertion = session_assertion(
+        source.clone(),
+        "refresh-successor-session",
+        session_ref,
+        "Retained session",
+        QualifiedValueQuality::Exact,
+        authority("refresh-successor-title", 80),
+        None,
+    );
+    let mut reducer = CatalogReducer::default();
+    reducer.upsert_session_assertion(assertion, 10).unwrap();
+    let prior = reducer
+        .freeze_for_initial_publication(CatalogReducerPublicationLimits::default())
+        .unwrap();
+
+    let mut forged = prior.clone();
+    forged.sessions.clear();
+    assert!(prior.validate_refresh_successor(&forged).is_err());
+
+    let mut successor = prior.resume_for_refresh();
+    let retraction = retraction_evidence(&source, "refresh-successor-deletion");
+    successor.retract_owner(&retraction, 11).unwrap();
+    let successor = successor
+        .freeze_for_initial_publication(CatalogReducerPublicationLimits::default())
+        .unwrap();
+    prior.validate_refresh_successor(&successor).unwrap();
+
+    let mut wrong_owner = prior.resume_for_refresh();
+    wrong_owner
+        .retract_owner(
+            &retraction_evidence(&owner("refresh-successor-foreign", 1), "foreign-deletion"),
+            11,
+        )
+        .unwrap();
+    let mut wrong_owner = wrong_owner
+        .freeze_for_initial_publication(CatalogReducerPublicationLimits::default())
+        .unwrap();
+    wrong_owner.sessions.clear();
+    assert!(prior.validate_refresh_successor(&wrong_owner).is_err());
+}
+
+#[test]
+fn refresh_successor_rejects_same_commit_rewrite_and_requires_tombstone_continuity() {
+    let source = owner("refresh-continuity", 1);
+    let session_ref = entity(
+        &source,
+        CatalogEntityKind::Session,
+        "refresh-continuity-session",
+    );
+    let assertion = session_assertion(
+        source.clone(),
+        "refresh-continuity-session",
+        session_ref,
+        "Before",
+        QualifiedValueQuality::Exact,
+        authority("refresh-continuity-title", 80),
+        None,
+    );
+    let mut reducer = CatalogReducer::default();
+    reducer.upsert_session_assertion(assertion, 10).unwrap();
+    let live = reducer
+        .freeze_for_initial_publication(CatalogReducerPublicationLimits::default())
+        .unwrap();
+    let mut rewritten = live.clone();
+    rewritten.sessions[0].fact = session_assertion(
+        source.clone(),
+        "refresh-continuity-session",
+        session_ref,
+        "After",
+        QualifiedValueQuality::Exact,
+        authority("refresh-continuity-title", 80),
+        None,
+    );
+    assert_eq!(
+        rewritten.sessions[0].fact.assertion_key,
+        live.sessions[0].fact.assertion_key
+    );
+    assert!(live.validate_refresh_successor(&rewritten).is_err());
+
+    let retraction = retraction_evidence(&source, "refresh-continuity-deletion");
+    reducer.retract_owner(&retraction, 11).unwrap();
+    reducer
+        .confirm_absent(session_ref, &retraction, 12)
+        .unwrap();
+    let tombstoned = reducer
+        .freeze_for_initial_publication(CatalogReducerPublicationLimits::default())
+        .unwrap();
+    let mut omitted = tombstoned.clone();
+    omitted.tombstones.clear();
+    assert!(tombstoned.validate_refresh_successor(&omitted).is_err());
+
+    let mut revived = tombstoned.resume_for_refresh();
+    let next_source = owner("refresh-continuity", 2);
+    revived
+        .upsert_session_assertion(
+            session_assertion(
+                next_source,
+                "refresh-continuity-session-revived",
+                session_ref,
+                "Revived",
+                QualifiedValueQuality::Exact,
+                authority("refresh-continuity-title", 80),
+                None,
+            ),
+            13,
+        )
+        .unwrap();
+    let revived = revived
+        .freeze_for_initial_publication(CatalogReducerPublicationLimits::default())
+        .unwrap();
+    assert!(revived.tombstones.is_empty());
+    tombstoned.validate_refresh_successor(&revived).unwrap();
+}
+
+#[test]
 fn retraction_is_owner_scoped_and_tombstones_require_complete_later_coverage() {
     let source_a = owner("source-a", 1);
     let source_b = owner("source-b", 1);

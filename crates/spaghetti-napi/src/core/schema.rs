@@ -189,7 +189,9 @@ const CANONICAL_FTS_TRIGGERS: &[&str] = &[
 /// frames, and the atomically linked initial Ready state.
 /// v52: ordinary RFC 012B Ready refresh administration that retains the exact
 /// current complete snapshot while advancing the durable state commit.
-pub const SCHEMA_VERSION: u32 = 52;
+/// v53: atomic RFC 012B ordinary-refresh successor snapshots with exact
+/// predecessor commitments and cumulative member-identity history.
+pub const SCHEMA_VERSION: u32 = 53;
 
 /// Full DDL for the current schema — lifted verbatim from the TS `SCHEMA_SQL`
 /// template literal. Whitespace differs; structure does not.
@@ -495,7 +497,8 @@ CREATE TABLE IF NOT EXISTS ingest_commits (
         'catalog.library.plan.registered',
         'catalog.library.build.scheduled',
         'catalog.library.initial_snapshot.published',
-        'catalog.library.refresh.started'
+        'catalog.library.refresh.started',
+        'catalog.library.refresh_snapshot.published'
       )
       AND committed_at IS NOT NULL
       AND fact_count = 0
@@ -557,20 +560,42 @@ CREATE TABLE IF NOT EXISTS catalog_snapshots (
   project_row_count INTEGER NOT NULL CHECK (project_row_count BETWEEN 0 AND 1000000),
   session_row_count INTEGER NOT NULL CHECK (session_row_count BETWEEN 0 AND 1000000),
   tombstone_count INTEGER NOT NULL CHECK (tombstone_count BETWEEN 0 AND 1000000),
+  replaces_snapshot_commit_seq INTEGER REFERENCES catalog_snapshots(snapshot_commit_seq) ON DELETE RESTRICT,
+  replaces_publication_digest BLOB,
+  replaces_content_digest BLOB,
   published_at INTEGER NOT NULL,
   CHECK (member_identity_contract_id IS NULL OR length(CAST(member_identity_contract_id AS BLOB)) BETWEEN 1 AND 256),
   CHECK (
     (source_count = 0 AND member_identity_contract_id IS NULL)
     OR (source_count > 0 AND member_identity_contract_id IS NOT NULL)
   ),
+  CHECK (
+    (
+      replaces_snapshot_commit_seq IS NULL
+      AND replaces_publication_digest IS NULL
+      AND replaces_content_digest IS NULL
+      AND durable_publication_contract_version = 1
+    )
+    OR
+    (
+      replaces_snapshot_commit_seq IS NOT NULL
+      AND replaces_snapshot_commit_seq < snapshot_commit_seq
+      AND typeof(replaces_publication_digest) = 'blob'
+      AND length(replaces_publication_digest) = 32
+      AND typeof(replaces_content_digest) = 'blob'
+      AND length(replaces_content_digest) = 32
+      AND durable_publication_contract_version = 2
+    )
+  ),
   CHECK (snapshot_commit_seq > build_commit_seq),
+  UNIQUE (replaces_snapshot_commit_seq),
   UNIQUE (pack_contract_version, coverage_plan_id, readiness_epoch, snapshot_commit_seq)
 );
 
 CREATE TABLE IF NOT EXISTS catalog_snapshot_entries (
   snapshot_commit_seq INTEGER NOT NULL REFERENCES catalog_snapshots(snapshot_commit_seq) ON DELETE CASCADE,
   ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
-  entry_kind TEXT NOT NULL CHECK (entry_kind IN ('source', 'member_binding', 'reducer_state', 'project_row', 'session_row', 'tombstone')),
+  entry_kind TEXT NOT NULL CHECK (entry_kind IN ('source', 'member_binding', 'member_history', 'reducer_state', 'project_row', 'session_row', 'tombstone')),
   entry_key BLOB NOT NULL CHECK (length(entry_key) = 32),
   payload BLOB NOT NULL CHECK (length(payload) BETWEEN 1 AND 536870912),
   payload_digest BLOB NOT NULL CHECK (length(payload_digest) = 32),

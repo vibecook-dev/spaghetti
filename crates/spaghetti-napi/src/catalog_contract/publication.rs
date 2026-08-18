@@ -20,8 +20,8 @@ use super::query::CATALOG_BASE_MODEL_MAJOR;
 use super::{
     validate_identifier, CatalogContractError, CatalogCoveragePlan, CatalogCoveragePlanId,
     CatalogCoveragePlanSource, CatalogCoverageScope, CatalogReadinessPhase,
-    CatalogReadinessSnapshot, CATALOG_PROJECTION_PACK_ID, CATALOG_QUERY_PACK_CONTRACT_VERSION,
-    DIGEST_BYTES,
+    CatalogReadinessSnapshot, CatalogSnapshotId, CATALOG_PROJECTION_PACK_ID,
+    CATALOG_QUERY_PACK_CONTRACT_VERSION, DIGEST_BYTES,
 };
 use crate::adapter::{
     ContractVersionSelection, CoverageDomain, CoverageSetCompleteness, SourceCoverageSet,
@@ -31,6 +31,8 @@ use crate::adapter::{
 
 pub(crate) const CATALOG_INITIAL_PUBLICATION_CONTRACT_VERSION: u32 = 1;
 pub(crate) const CATALOG_DURABLE_PUBLICATION_CONTRACT_VERSION: u32 = 1;
+pub(crate) const CATALOG_REFRESH_PUBLICATION_CONTRACT_VERSION: u32 = 1;
+pub(crate) const CATALOG_DURABLE_REFRESH_PUBLICATION_CONTRACT_VERSION: u32 = 2;
 
 const MAX_PUBLICATION_MEMBERS: usize = 1_000_000;
 const MAX_SELECTED_FACT_FAMILIES: usize = 4_096;
@@ -90,6 +92,11 @@ private_digest_type!(
     CatalogInitialPublicationDigest,
     "catalog-initial-publication-v1"
 );
+private_digest_type!(
+    CatalogRefreshPublicationDigest,
+    "catalog-refresh-publication-v1"
+);
+private_digest_type!(CatalogMemberHistoryRevision, "catalog-member-history-v1");
 
 impl fmt::Display for CatalogInitialPublicationDigest {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -107,10 +114,17 @@ impl CatalogInitialPublicationDigest {
     }
 }
 
+impl CatalogRefreshPublicationDigest {
+    pub(crate) fn storage_bytes(&self) -> &[u8; DIGEST_BYTES] {
+        self.as_bytes()
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum CatalogDurablePublicationEntryKind {
     Source,
     MemberBinding,
+    MemberHistory,
     ReducerState,
     ProjectRow,
     SessionRow,
@@ -122,6 +136,7 @@ impl CatalogDurablePublicationEntryKind {
         match self {
             Self::Source => "source",
             Self::MemberBinding => "member_binding",
+            Self::MemberHistory => "member_history",
             Self::ReducerState => "reducer_state",
             Self::ProjectRow => "project_row",
             Self::SessionRow => "session_row",
@@ -133,6 +148,7 @@ impl CatalogDurablePublicationEntryKind {
         match value {
             "source" => Ok(Self::Source),
             "member_binding" => Ok(Self::MemberBinding),
+            "member_history" => Ok(Self::MemberHistory),
             "reducer_state" => Ok(Self::ReducerState),
             "project_row" => Ok(Self::ProjectRow),
             "session_row" => Ok(Self::SessionRow),
@@ -273,6 +289,131 @@ impl fmt::Debug for CatalogDurableInitialPublication {
             .field("build", &self.build)
             .field("source_count", &self.source_count)
             .field("member_count", &self.member_count)
+            .field("project_row_count", &self.project_row_count)
+            .field("session_row_count", &self.session_row_count)
+            .field("tombstone_count", &self.tombstone_count)
+            .field("entry_count", &self.entries.len())
+            .field("encoded_bytes", &self.encoded_bytes)
+            .field("publication_digest", &self.publication_digest)
+            .field("payloads", &"<redacted>")
+            .finish()
+    }
+}
+
+/// Checked durable v2 projection for one ordinary-refresh successor. It
+/// retains the exact predecessor commitment and cumulative member history;
+/// payload bytes remain private and Debug-redacted.
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct CatalogDurableRefreshPublication {
+    contract_version: u32,
+    build: CatalogRefreshBuildExpectation,
+    predecessor: CatalogRefreshPredecessor,
+    contract_selection: ContractVersionSelection,
+    contract_selection_json: Vec<u8>,
+    member_identity_contract_id: Option<String>,
+    member_history: CatalogPublicationMemberHistory,
+    source_coverage: Vec<SourceCoverageSet>,
+    entries: Vec<CatalogDurablePublicationEntry>,
+    publication_digest: CatalogRefreshPublicationDigest,
+    reducer_revision: super::evidence::CatalogReducerPublicationRevision,
+    source_count: usize,
+    member_count: usize,
+    project_row_count: usize,
+    session_row_count: usize,
+    tombstone_count: usize,
+    encoded_bytes: usize,
+    entries_digest: [u8; DIGEST_BYTES],
+    content_digest: [u8; DIGEST_BYTES],
+}
+
+impl CatalogDurableRefreshPublication {
+    pub(crate) fn contract_version(&self) -> u32 {
+        self.contract_version
+    }
+
+    pub(crate) fn build(&self) -> CatalogRefreshBuildExpectation {
+        self.build
+    }
+
+    pub(crate) fn predecessor(&self) -> &CatalogRefreshPredecessor {
+        &self.predecessor
+    }
+
+    pub(crate) fn contract_selection(&self) -> &ContractVersionSelection {
+        &self.contract_selection
+    }
+
+    pub(crate) fn contract_selection_json(&self) -> &[u8] {
+        &self.contract_selection_json
+    }
+
+    pub(crate) fn member_identity_contract_id(&self) -> Option<&str> {
+        self.member_identity_contract_id.as_deref()
+    }
+
+    pub(crate) fn member_history(&self) -> &CatalogPublicationMemberHistory {
+        &self.member_history
+    }
+
+    pub(crate) fn source_coverage(&self) -> &[SourceCoverageSet] {
+        &self.source_coverage
+    }
+
+    pub(crate) fn entries(&self) -> &[CatalogDurablePublicationEntry] {
+        &self.entries
+    }
+
+    pub(crate) fn publication_digest(&self) -> CatalogRefreshPublicationDigest {
+        self.publication_digest
+    }
+
+    pub(crate) fn reducer_revision(&self) -> super::evidence::CatalogReducerPublicationRevision {
+        self.reducer_revision
+    }
+
+    pub(crate) fn source_count(&self) -> usize {
+        self.source_count
+    }
+
+    pub(crate) fn member_count(&self) -> usize {
+        self.member_count
+    }
+
+    pub(crate) fn project_row_count(&self) -> usize {
+        self.project_row_count
+    }
+
+    pub(crate) fn session_row_count(&self) -> usize {
+        self.session_row_count
+    }
+
+    pub(crate) fn tombstone_count(&self) -> usize {
+        self.tombstone_count
+    }
+
+    pub(crate) fn encoded_bytes(&self) -> usize {
+        self.encoded_bytes
+    }
+
+    pub(crate) fn entries_digest(&self) -> &[u8; DIGEST_BYTES] {
+        &self.entries_digest
+    }
+
+    pub(crate) fn content_digest(&self) -> &[u8; DIGEST_BYTES] {
+        &self.content_digest
+    }
+}
+
+impl fmt::Debug for CatalogDurableRefreshPublication {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CatalogDurableRefreshPublication")
+            .field("contract_version", &self.contract_version)
+            .field("build", &self.build)
+            .field("predecessor", &self.predecessor)
+            .field("source_count", &self.source_count)
+            .field("member_count", &self.member_count)
+            .field("member_history", &self.member_history)
             .field("project_row_count", &self.project_row_count)
             .field("session_row_count", &self.session_row_count)
             .field("tombstone_count", &self.tombstone_count)
@@ -522,6 +663,230 @@ impl fmt::Debug for CatalogPublicationMemberBinding {
     }
 }
 
+/// One cumulative, privacy-safe member-identity commitment. Refreshes may
+/// add entries, but an existing opaque member reference can never name a
+/// different concrete base session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+pub(crate) struct CatalogPublicationMemberHistoryEntry {
+    member_ref: CatalogPublicationMemberRef,
+    session_ref: CatalogEntityRef,
+}
+
+/// Canonical cumulative member identity retained independently from the
+/// current snapshot's admitting source frames.
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct CatalogPublicationMemberHistory {
+    entries: Vec<CatalogPublicationMemberHistoryEntry>,
+    revision: CatalogMemberHistoryRevision,
+}
+
+impl CatalogPublicationMemberHistory {
+    pub(crate) fn from_bindings(
+        bindings: &[CatalogPublicationMemberBinding],
+    ) -> Result<Self, CatalogContractError> {
+        let mut by_member = BTreeMap::new();
+        for binding in bindings {
+            if by_member
+                .insert(binding.member_ref, binding.session_ref)
+                .is_some_and(|existing| existing != binding.session_ref)
+            {
+                return Err(CatalogContractError::invalid(
+                    "one catalog member reference cannot retarget across sources",
+                ));
+            }
+        }
+        Self::from_entries(
+            by_member
+                .into_iter()
+                .map(
+                    |(member_ref, session_ref)| CatalogPublicationMemberHistoryEntry {
+                        member_ref,
+                        session_ref,
+                    },
+                )
+                .collect(),
+        )
+    }
+
+    fn successor(
+        &self,
+        bindings: &[CatalogPublicationMemberBinding],
+    ) -> Result<Self, CatalogContractError> {
+        let mut by_member = self
+            .entries
+            .iter()
+            .map(|entry| (entry.member_ref, entry.session_ref))
+            .collect::<BTreeMap<_, _>>();
+        for binding in bindings {
+            match by_member.get(&binding.member_ref) {
+                Some(existing) if *existing != binding.session_ref => {
+                    return Err(CatalogContractError::invalid(
+                        "catalog refresh cannot retarget a historical member reference",
+                    ));
+                }
+                Some(_) => {}
+                None => {
+                    by_member.insert(binding.member_ref, binding.session_ref);
+                }
+            }
+        }
+        Self::from_entries(
+            by_member
+                .into_iter()
+                .map(
+                    |(member_ref, session_ref)| CatalogPublicationMemberHistoryEntry {
+                        member_ref,
+                        session_ref,
+                    },
+                )
+                .collect(),
+        )
+    }
+
+    pub(crate) fn from_entries(
+        entries: Vec<CatalogPublicationMemberHistoryEntry>,
+    ) -> Result<Self, CatalogContractError> {
+        if entries.len() > MAX_PUBLICATION_MEMBERS
+            || !entries
+                .windows(2)
+                .all(|pair| pair[0].member_ref < pair[1].member_ref)
+        {
+            return Err(CatalogContractError::invalid(
+                "catalog member history is outside its canonical bounded form",
+            ));
+        }
+        for entry in &entries {
+            if entry.member_ref.as_bytes().iter().all(|byte| *byte == 0)
+                || entry.session_ref.kind != CatalogEntityKind::Session
+            {
+                return Err(CatalogContractError::invalid(
+                    "catalog member history requires nonzero members and concrete sessions",
+                ));
+            }
+            entry.session_ref.validate()?;
+        }
+        let revision = derive_member_history_revision(&entries);
+        Ok(Self { entries, revision })
+    }
+
+    pub(crate) fn revision(&self) -> CatalogMemberHistoryRevision {
+        self.revision
+    }
+
+    pub(crate) fn entries(&self) -> &[CatalogPublicationMemberHistoryEntry] {
+        &self.entries
+    }
+}
+
+impl fmt::Debug for CatalogPublicationMemberHistory {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CatalogPublicationMemberHistory")
+            .field("entry_count", &self.entries.len())
+            .field("revision", &self.revision)
+            .finish()
+    }
+}
+
+/// Exact restart-validated predecessor frozen into an ordinary refresh
+/// assembly. The raw digests are opaque and Debug deliberately redacts them.
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct CatalogRefreshPredecessor {
+    snapshot_id: CatalogSnapshotId,
+    publication_digest: [u8; DIGEST_BYTES],
+    content_digest: [u8; DIGEST_BYTES],
+    contract_selection: ContractVersionSelection,
+    member_identity_contract_id: Option<String>,
+    reducer_revision: super::evidence::CatalogReducerPublicationRevision,
+    member_history_revision: CatalogMemberHistoryRevision,
+}
+
+impl CatalogRefreshPredecessor {
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new(
+        snapshot_id: CatalogSnapshotId,
+        publication_digest: [u8; DIGEST_BYTES],
+        content_digest: [u8; DIGEST_BYTES],
+        contract_selection: ContractVersionSelection,
+        member_identity_contract_id: Option<String>,
+        reducer_revision: super::evidence::CatalogReducerPublicationRevision,
+        member_history_revision: CatalogMemberHistoryRevision,
+    ) -> Result<Self, CatalogContractError> {
+        CatalogSnapshotId::new(
+            snapshot_id.pack_contract_version,
+            snapshot_id.coverage_plan_id,
+            snapshot_id.readiness_epoch,
+            snapshot_id.complete_commit,
+        )?;
+        validate_contract_selection(&contract_selection)?;
+        if publication_digest.iter().all(|byte| *byte == 0)
+            || content_digest.iter().all(|byte| *byte == 0)
+            || reducer_revision
+                .storage_bytes()
+                .iter()
+                .all(|byte| *byte == 0)
+            || member_history_revision
+                .as_bytes()
+                .iter()
+                .all(|byte| *byte == 0)
+            || contract_selection.query_pack_version != Some(snapshot_id.pack_contract_version)
+        {
+            return Err(CatalogContractError::invalid(
+                "catalog refresh predecessor has invalid digest or selection lineage",
+            ));
+        }
+        if let Some(identity_contract) = &member_identity_contract_id {
+            validate_identifier("catalog member identity contract id", identity_contract)?;
+        }
+        Ok(Self {
+            snapshot_id,
+            publication_digest,
+            content_digest,
+            contract_selection,
+            member_identity_contract_id,
+            reducer_revision,
+            member_history_revision,
+        })
+    }
+
+    pub(crate) fn snapshot_id(&self) -> CatalogSnapshotId {
+        self.snapshot_id
+    }
+
+    pub(crate) fn publication_digest(&self) -> &[u8; DIGEST_BYTES] {
+        &self.publication_digest
+    }
+
+    pub(crate) fn content_digest(&self) -> &[u8; DIGEST_BYTES] {
+        &self.content_digest
+    }
+
+    pub(crate) fn reducer_revision(&self) -> super::evidence::CatalogReducerPublicationRevision {
+        self.reducer_revision
+    }
+
+    pub(crate) fn member_history_revision(&self) -> CatalogMemberHistoryRevision {
+        self.member_history_revision
+    }
+}
+
+impl fmt::Debug for CatalogRefreshPredecessor {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CatalogRefreshPredecessor")
+            .field("snapshot_id", &self.snapshot_id)
+            .field("contract_selection", &self.contract_selection)
+            .field(
+                "member_identity_contract_id",
+                &self.member_identity_contract_id,
+            )
+            .field("reducer_revision", &self.reducer_revision)
+            .field("member_history_revision", &self.member_history_revision)
+            .field("digests", &"<opaque>")
+            .finish()
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct DurableSourceWire {
@@ -544,6 +909,21 @@ struct DurableMemberBindingWire {
     member_ref: String,
     assertion_key: CatalogAssertionKey,
     session_ref: CatalogEntityRef,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DurableMemberHistoryEntryWire {
+    member_ref: String,
+    session_ref: CatalogEntityRef,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DurableMemberHistoryWire {
+    durable_member_history_contract_version: u32,
+    entries: Vec<DurableMemberHistoryEntryWire>,
+    history_revision: String,
 }
 
 /// Checked source frame awaiting the member references carried by the
@@ -720,12 +1100,78 @@ pub(crate) fn decode_durable_member_binding_frame(
     Ok(binding)
 }
 
+pub(crate) fn decode_durable_member_history_frame(
+    payload: &[u8],
+    expected_key: &[u8; DIGEST_BYTES],
+    max_payload_bytes: usize,
+) -> Result<CatalogPublicationMemberHistory, CatalogContractError> {
+    if payload.is_empty() || payload.len() > max_payload_bytes {
+        return Err(CatalogContractError::invalid(
+            "durable catalog member-history payload is outside its byte bound",
+        ));
+    }
+    let wire: DurableMemberHistoryWire = serde_json::from_slice(payload).map_err(|error| {
+        CatalogContractError::invalid(format!(
+            "durable catalog member history is invalid: {error}"
+        ))
+    })?;
+    if wire.entries.len() > MAX_PUBLICATION_MEMBERS {
+        return Err(CatalogContractError::invalid(
+            "durable catalog member history exceeds its entry bound",
+        ));
+    }
+    let canonical =
+        serialize_private_json_bounded(&wire, payload.len(), "durable catalog member history")?;
+    let declared_revision = decode_private_digest(
+        &wire.history_revision,
+        "durable catalog member history revision",
+    )?;
+    if canonical != payload
+        || wire.durable_member_history_contract_version != 1
+        || &declared_revision != expected_key
+    {
+        return Err(CatalogContractError::invalid(
+            "durable catalog member history is noncanonical or outside its frozen contract",
+        ));
+    }
+    let entries = wire
+        .entries
+        .into_iter()
+        .map(|entry| {
+            Ok(CatalogPublicationMemberHistoryEntry {
+                member_ref: CatalogPublicationMemberRef(decode_private_digest(
+                    &entry.member_ref,
+                    "durable catalog member reference history",
+                )?),
+                session_ref: entry.session_ref,
+            })
+        })
+        .collect::<Result<Vec<_>, CatalogContractError>>()?;
+    let history = CatalogPublicationMemberHistory::from_entries(entries)?;
+    if history.revision.as_bytes() != expected_key {
+        return Err(CatalogContractError::invalid(
+            "durable catalog member history revision does not match its entries",
+        ));
+    }
+    Ok(history)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct CatalogInitialBuildExpectation {
     pub coverage_plan_id: CatalogCoveragePlanId,
     pub desired_contract_version: u32,
     pub epoch: u64,
     pub attempt: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct CatalogRefreshBuildExpectation {
+    pub coverage_plan_id: CatalogCoveragePlanId,
+    pub desired_contract_version: u32,
+    pub epoch: u64,
+    pub attempt: u64,
+    pub refresh_started_commit_seq: u64,
+    pub predecessor_snapshot: CatalogSnapshotId,
 }
 
 /// Fully checked, store-independent input for one atomic initial catalog
@@ -865,6 +1311,16 @@ impl CatalogInitialPublicationAssembly {
 
     pub(crate) fn tombstone_count(&self) -> usize {
         self.reducer.tombstone_count()
+    }
+
+    pub(crate) fn reducer_publication(&self) -> &CatalogReducerPublication {
+        &self.reducer
+    }
+
+    pub(crate) fn member_history(
+        &self,
+    ) -> Result<CatalogPublicationMemberHistory, CatalogContractError> {
+        CatalogPublicationMemberHistory::from_bindings(&self.member_bindings)
     }
 
     /// Project the checked store-free envelope into bounded, canonical private
@@ -1132,6 +1588,425 @@ impl fmt::Debug for CatalogInitialPublicationAssembly {
     }
 }
 
+/// Fully checked, store-independent successor for one active ordinary
+/// refresh. The predecessor reducer and cumulative member history are part of
+/// construction, so a caller cannot silently restart from a fresh reducer or
+/// retarget an identity that disappeared from the current source membership.
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct CatalogRefreshPublicationAssembly {
+    contract_version: u32,
+    build: CatalogRefreshBuildExpectation,
+    predecessor: CatalogRefreshPredecessor,
+    contract_selection: ContractVersionSelection,
+    member_identity_contract_id: Option<String>,
+    sources: Vec<CatalogCompleteSourceAssembly>,
+    member_bindings: Vec<CatalogPublicationMemberBinding>,
+    member_history: CatalogPublicationMemberHistory,
+    reducer: CatalogReducerPublication,
+    limits: CatalogPublicationLimits,
+    digest: CatalogRefreshPublicationDigest,
+}
+
+impl CatalogRefreshPublicationAssembly {
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn assemble(
+        plan: &CatalogCoveragePlan,
+        readiness: &CatalogReadinessSnapshot,
+        refresh_started_commit_seq: u64,
+        predecessor: CatalogRefreshPredecessor,
+        prior_reducer: &CatalogReducerPublication,
+        prior_member_history: &CatalogPublicationMemberHistory,
+        contract_selection: ContractVersionSelection,
+        mut sources: Vec<CatalogCompleteSourceAssembly>,
+        reducer: &CatalogReducer,
+        mut member_bindings: Vec<CatalogPublicationMemberBinding>,
+        limits: CatalogPublicationLimits,
+    ) -> Result<Self, CatalogContractError> {
+        let build = validate_refresh_build(
+            plan,
+            readiness,
+            refresh_started_commit_seq,
+            &predecessor,
+            &contract_selection,
+        )?;
+        CatalogPublicationLimits::new(
+            limits.max_members,
+            limits.reducer.max_reducer_entries,
+            limits.reducer.max_rows,
+        )?;
+
+        let planned_source_count = plan
+            .required_sources
+            .len()
+            .checked_add(plan.optional_sources.len())
+            .ok_or_else(|| CatalogContractError::invalid("catalog source count overflow"))?;
+        if sources.len() > planned_source_count {
+            return Err(CatalogContractError::invalid(
+                "catalog refresh contains more complete sources than its frozen plan",
+            ));
+        }
+        sources.sort_by(|left, right| left.plan_source.cmp(&right.plan_source));
+        if sources
+            .windows(2)
+            .any(|pair| pair[0].plan_source == pair[1].plan_source)
+        {
+            return Err(CatalogContractError::invalid(
+                "catalog refresh contains a duplicate complete source assembly",
+            ));
+        }
+        validate_plan_sources(plan, &contract_selection, &sources)?;
+        let total_members = sources.iter().try_fold(0_usize, |count, source| {
+            count.checked_add(source.member_refs.len()).ok_or_else(|| {
+                CatalogContractError::invalid("catalog refresh member count overflow")
+            })
+        })?;
+        if total_members > limits.max_members || member_bindings.len() != total_members {
+            return Err(CatalogContractError::invalid(
+                "catalog refresh requires one bounded session binding for every admitted member",
+            ));
+        }
+        let member_identity_contract_id = sources
+            .first()
+            .map(|source| source.member_identity_contract_id.clone());
+        if sources.iter().any(|source| {
+            Some(source.member_identity_contract_id.as_str())
+                != member_identity_contract_id.as_deref()
+        }) || member_identity_contract_id != predecessor.member_identity_contract_id
+        {
+            return Err(CatalogContractError::invalid(
+                "catalog refresh cannot drift its member identity contract",
+            ));
+        }
+
+        let reducer = reducer.freeze_for_initial_publication(limits.reducer)?;
+        prior_reducer.validate_refresh_successor(&reducer)?;
+        if prior_reducer.revision() != predecessor.reducer_revision {
+            return Err(CatalogContractError::invalid(
+                "catalog refresh predecessor reducer does not match its retained revision",
+            ));
+        }
+        if prior_member_history.revision() != predecessor.member_history_revision {
+            return Err(CatalogContractError::invalid(
+                "catalog refresh predecessor member history does not match its retained revision",
+            ));
+        }
+        validate_covered_reducer(&sources, &reducer)?;
+        member_bindings.sort_by(|left, right| left.coordinate().cmp(&right.coordinate()));
+        validate_member_bindings(&sources, &reducer, &member_bindings)?;
+        let member_history = prior_member_history.successor(&member_bindings)?;
+        let digest = derive_refresh_publication_digest(
+            build,
+            &predecessor,
+            &contract_selection,
+            member_identity_contract_id.as_deref(),
+            &sources,
+            &member_bindings,
+            &member_history,
+            &reducer,
+            limits,
+        );
+        Ok(Self {
+            contract_version: CATALOG_REFRESH_PUBLICATION_CONTRACT_VERSION,
+            build,
+            predecessor,
+            contract_selection,
+            member_identity_contract_id,
+            sources,
+            member_bindings,
+            member_history,
+            reducer,
+            limits,
+            digest,
+        })
+    }
+
+    pub(crate) fn build(&self) -> CatalogRefreshBuildExpectation {
+        self.build
+    }
+
+    pub(crate) fn predecessor(&self) -> &CatalogRefreshPredecessor {
+        &self.predecessor
+    }
+
+    pub(crate) fn digest(&self) -> CatalogRefreshPublicationDigest {
+        self.digest
+    }
+
+    pub(crate) fn prepare_durable(
+        &self,
+    ) -> Result<CatalogDurableRefreshPublication, CatalogContractError> {
+        self.prepare_durable_with_limits(
+            MAX_DURABLE_PUBLICATION_ENTRIES,
+            MAX_DURABLE_PUBLICATION_BYTES,
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn prepare_durable_with_test_limits(
+        &self,
+        max_entries: usize,
+        max_encoded_bytes: usize,
+    ) -> Result<CatalogDurableRefreshPublication, CatalogContractError> {
+        self.prepare_durable_with_limits(max_entries, max_encoded_bytes)
+    }
+
+    fn prepare_durable_with_limits(
+        &self,
+        max_entries: usize,
+        max_encoded_bytes: usize,
+    ) -> Result<CatalogDurableRefreshPublication, CatalogContractError> {
+        if max_entries == 0
+            || max_entries > MAX_DURABLE_PUBLICATION_ENTRIES
+            || max_encoded_bytes == 0
+            || max_encoded_bytes > MAX_DURABLE_PUBLICATION_BYTES
+        {
+            return Err(CatalogContractError::invalid(
+                "catalog durable refresh limits are outside the frozen safety ceilings",
+            ));
+        }
+        #[derive(Serialize)]
+        struct DurableSource<'a> {
+            durable_source_contract_version: u32,
+            plan_source: &'a CatalogCoveragePlanSource,
+            contract_selection: &'a ContractVersionSelection,
+            member_identity_contract_id: &'a str,
+            membership_revision: CatalogSourceMembershipRevision,
+            component_completion_revision: CatalogSourceCompletionRevision,
+            member_count: usize,
+            source_coverage: &'a SourceCoverageSet,
+            source_digest: CatalogCompleteSourceDigest,
+        }
+        #[derive(Serialize)]
+        struct DurableMemberBinding<'a> {
+            durable_member_binding_contract_version: u32,
+            source: &'a CatalogCoveragePlanSource,
+            member_ref: CatalogPublicationMemberRef,
+            assertion_key: CatalogAssertionKey,
+            session_ref: CatalogEntityRef,
+        }
+        #[derive(Serialize)]
+        struct DurableMemberHistory<'a> {
+            durable_member_history_contract_version: u32,
+            entries: &'a [CatalogPublicationMemberHistoryEntry],
+            history_revision: CatalogMemberHistoryRevision,
+        }
+
+        let identity_contract_bytes = self
+            .member_identity_contract_id
+            .as_ref()
+            .map_or(0, String::len);
+        let selection_budget = max_encoded_bytes
+            .checked_sub(identity_contract_bytes)
+            .ok_or_else(|| {
+                CatalogContractError::invalid(
+                    "catalog member identity contract exhausts the durable refresh byte ceiling",
+                )
+            })?;
+        let contract_selection_json = serialize_private_json_bounded(
+            &self.contract_selection,
+            selection_budget,
+            "catalog refresh contract selection",
+        )?;
+        let mut encoded_bytes = contract_selection_json
+            .len()
+            .checked_add(identity_contract_bytes)
+            .ok_or_else(|| {
+                CatalogContractError::invalid("catalog durable refresh byte count overflow")
+            })?;
+        let mut entries = Vec::new();
+        for source in &self.sources {
+            serialize_and_push_durable_entry(
+                &mut entries,
+                &mut encoded_bytes,
+                max_entries,
+                max_encoded_bytes,
+                CatalogDurablePublicationEntryKind::Source,
+                *source.digest.as_bytes(),
+                &DurableSource {
+                    durable_source_contract_version: CATALOG_DURABLE_PUBLICATION_CONTRACT_VERSION,
+                    plan_source: &source.plan_source,
+                    contract_selection: &source.contract_selection,
+                    member_identity_contract_id: &source.member_identity_contract_id,
+                    membership_revision: source.membership_revision,
+                    component_completion_revision: source.component_completion_revision,
+                    member_count: source.member_refs.len(),
+                    source_coverage: &source.source_coverage,
+                    source_digest: source.digest,
+                },
+                "catalog refresh complete source",
+            )?;
+        }
+        for binding in &self.member_bindings {
+            serialize_and_push_durable_entry(
+                &mut entries,
+                &mut encoded_bytes,
+                max_entries,
+                max_encoded_bytes,
+                CatalogDurablePublicationEntryKind::MemberBinding,
+                derive_member_binding_frame_key(binding),
+                &DurableMemberBinding {
+                    durable_member_binding_contract_version:
+                        CATALOG_DURABLE_PUBLICATION_CONTRACT_VERSION,
+                    source: &binding.source,
+                    member_ref: binding.member_ref,
+                    assertion_key: binding.assertion_key,
+                    session_ref: binding.session_ref,
+                },
+                "catalog refresh member binding",
+            )?;
+        }
+        serialize_and_push_durable_entry(
+            &mut entries,
+            &mut encoded_bytes,
+            max_entries,
+            max_encoded_bytes,
+            CatalogDurablePublicationEntryKind::MemberHistory,
+            *self.member_history.revision.as_bytes(),
+            &DurableMemberHistory {
+                durable_member_history_contract_version: 1,
+                entries: &self.member_history.entries,
+                history_revision: self.member_history.revision,
+            },
+            "catalog cumulative member history",
+        )?;
+        let reducer_budget = durable_entry_payload_budget(
+            entries.len(),
+            encoded_bytes,
+            max_entries,
+            max_encoded_bytes,
+            CatalogDurablePublicationEntryKind::ReducerState,
+        )?;
+        let reducer_state = self.reducer.durable_state_json(reducer_budget)?;
+        push_durable_entry(
+            &mut entries,
+            &mut encoded_bytes,
+            max_entries,
+            max_encoded_bytes,
+            CatalogDurablePublicationEntryKind::ReducerState,
+            *self.reducer.revision().storage_bytes(),
+            reducer_state,
+        )?;
+        for row in self.reducer.project_rows() {
+            row.validate_for_durable()?;
+            serialize_and_push_durable_entry_with_payload_limit(
+                &mut entries,
+                &mut encoded_bytes,
+                max_entries,
+                max_encoded_bytes,
+                MAX_DURABLE_CATALOG_ROW_BYTES,
+                CatalogDurablePublicationEntryKind::ProjectRow,
+                *row.project_ref.external_ref.entity_key.as_bytes(),
+                row,
+                "catalog refresh project row",
+            )?;
+        }
+        for row in self.reducer.session_rows() {
+            row.validate_for_durable()?;
+            serialize_and_push_durable_entry_with_payload_limit(
+                &mut entries,
+                &mut encoded_bytes,
+                max_entries,
+                max_encoded_bytes,
+                MAX_DURABLE_CATALOG_ROW_BYTES,
+                CatalogDurablePublicationEntryKind::SessionRow,
+                *row.session_ref.external_ref.entity_key.as_bytes(),
+                row,
+                "catalog refresh session row",
+            )?;
+        }
+        for tombstone in self.reducer.tombstones() {
+            serialize_and_push_durable_entry(
+                &mut entries,
+                &mut encoded_bytes,
+                max_entries,
+                max_encoded_bytes,
+                CatalogDurablePublicationEntryKind::Tombstone,
+                *tombstone.entity_ref.external_ref.entity_key.as_bytes(),
+                tombstone,
+                "catalog refresh tombstone",
+            )?;
+        }
+        entries.sort_by_key(|entry| (entry.kind, entry.key));
+        if entries
+            .windows(2)
+            .any(|pair| pair[0].kind == pair[1].kind && pair[0].key == pair[1].key)
+        {
+            return Err(CatalogContractError::invalid(
+                "catalog durable refresh contains duplicate typed entry keys",
+            ));
+        }
+        let entry_summaries = entries
+            .iter()
+            .map(|entry| {
+                (
+                    entry.kind,
+                    entry.key,
+                    entry.payload.len(),
+                    entry.payload_digest,
+                )
+            })
+            .collect::<Vec<_>>();
+        let entries_digest = derive_durable_entries_digest(&entry_summaries);
+        let content_digest = derive_durable_refresh_content_digest(
+            self.build,
+            &self.predecessor,
+            &contract_selection_json,
+            self.member_identity_contract_id.as_deref(),
+            self.digest,
+            self.reducer.revision(),
+            self.member_history.revision,
+            self.sources.len(),
+            self.member_bindings.len(),
+            self.reducer.project_row_count(),
+            self.reducer.session_row_count(),
+            self.reducer.tombstone_count(),
+            encoded_bytes,
+            entries_digest,
+        );
+        Ok(CatalogDurableRefreshPublication {
+            contract_version: CATALOG_DURABLE_REFRESH_PUBLICATION_CONTRACT_VERSION,
+            build: self.build,
+            predecessor: self.predecessor.clone(),
+            contract_selection: self.contract_selection.clone(),
+            contract_selection_json,
+            member_identity_contract_id: self.member_identity_contract_id.clone(),
+            member_history: self.member_history.clone(),
+            source_coverage: self
+                .sources
+                .iter()
+                .map(|source| source.source_coverage.clone())
+                .collect(),
+            entries,
+            publication_digest: self.digest,
+            reducer_revision: self.reducer.revision(),
+            source_count: self.sources.len(),
+            member_count: self.member_bindings.len(),
+            project_row_count: self.reducer.project_row_count(),
+            session_row_count: self.reducer.session_row_count(),
+            tombstone_count: self.reducer.tombstone_count(),
+            encoded_bytes,
+            entries_digest,
+            content_digest,
+        })
+    }
+}
+
+impl fmt::Debug for CatalogRefreshPublicationAssembly {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CatalogRefreshPublicationAssembly")
+            .field("contract_version", &self.contract_version)
+            .field("build", &self.build)
+            .field("predecessor", &self.predecessor)
+            .field("source_count", &self.sources.len())
+            .field("member_count", &self.member_bindings.len())
+            .field("member_history", &self.member_history)
+            .field("reducer_revision", &self.reducer.revision())
+            .field("digest", &self.digest)
+            .finish()
+    }
+}
+
 fn durable_entry_payload_budget(
     entry_count: usize,
     encoded_bytes: usize,
@@ -1366,6 +2241,63 @@ pub(crate) fn derive_durable_content_digest(
     *hasher.finalize().as_bytes()
 }
 
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn derive_durable_refresh_content_digest(
+    build: CatalogRefreshBuildExpectation,
+    predecessor: &CatalogRefreshPredecessor,
+    contract_selection_json: &[u8],
+    member_identity_contract_id: Option<&str>,
+    publication_digest: CatalogRefreshPublicationDigest,
+    reducer_revision: super::evidence::CatalogReducerPublicationRevision,
+    member_history_revision: CatalogMemberHistoryRevision,
+    source_count: usize,
+    member_count: usize,
+    project_row_count: usize,
+    session_row_count: usize,
+    tombstone_count: usize,
+    encoded_bytes: usize,
+    entries_digest: [u8; DIGEST_BYTES],
+) -> [u8; DIGEST_BYTES] {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"spaghetti/rfc012b/catalog-durable-content-v2\0");
+    hasher.update(&CATALOG_DURABLE_REFRESH_PUBLICATION_CONTRACT_VERSION.to_be_bytes());
+    hasher.update(build.coverage_plan_id.storage_bytes());
+    hasher.update(&build.desired_contract_version.to_be_bytes());
+    hasher.update(&build.epoch.to_be_bytes());
+    hasher.update(&build.attempt.to_be_bytes());
+    hasher.update(&build.refresh_started_commit_seq.to_be_bytes());
+    hash_snapshot_id(&mut hasher, build.predecessor_snapshot);
+    hasher.update(predecessor.publication_digest());
+    hasher.update(predecessor.content_digest());
+    hasher.update(predecessor.reducer_revision().storage_bytes());
+    hasher.update(predecessor.member_history_revision().as_bytes());
+    hash_component(&mut hasher, contract_selection_json);
+    match member_identity_contract_id {
+        Some(value) => {
+            hasher.update(&[1]);
+            hash_component(&mut hasher, value.as_bytes());
+        }
+        None => {
+            hasher.update(&[0]);
+        }
+    }
+    hasher.update(publication_digest.storage_bytes());
+    hasher.update(reducer_revision.storage_bytes());
+    hasher.update(member_history_revision.as_bytes());
+    for value in [
+        source_count,
+        member_count,
+        project_row_count,
+        session_row_count,
+        tombstone_count,
+        encoded_bytes,
+    ] {
+        hasher.update(&(value as u64).to_be_bytes());
+    }
+    hasher.update(&entries_digest);
+    *hasher.finalize().as_bytes()
+}
+
 pub(crate) fn validate_durable_contract_selection(
     selection: &ContractVersionSelection,
 ) -> Result<(), CatalogContractError> {
@@ -1463,6 +2395,47 @@ fn validate_initial_build(
         desired_contract_version: readiness.desired_contract_version,
         epoch: readiness.epoch,
         attempt: readiness.attempt,
+    })
+}
+
+fn validate_refresh_build(
+    plan: &CatalogCoveragePlan,
+    readiness: &CatalogReadinessSnapshot,
+    refresh_started_commit_seq: u64,
+    predecessor: &CatalogRefreshPredecessor,
+    selection: &ContractVersionSelection,
+) -> Result<CatalogRefreshBuildExpectation, CatalogContractError> {
+    plan.validate()?;
+    readiness.validate_against(plan)?;
+    validate_contract_selection(selection)?;
+    let snapshot = predecessor.snapshot_id;
+    if plan.scope != CatalogCoverageScope::Library
+        || readiness.state != CatalogReadinessPhase::Ready
+        || readiness.coverage_plan_id != plan.coverage_plan_id
+        || readiness.desired_contract_version != CATALOG_QUERY_PACK_CONTRACT_VERSION
+        || readiness.completed_contract_version != Some(readiness.desired_contract_version)
+        || readiness.complete_through_commit != Some(snapshot.complete_commit)
+        || readiness.last_complete_snapshot != Some(snapshot)
+        || readiness.refreshing_from_snapshot != Some(snapshot)
+        || refresh_started_commit_seq <= snapshot.complete_commit
+        || selection != &predecessor.contract_selection
+        || selection.query_pack_version != Some(readiness.desired_contract_version)
+        || snapshot.coverage_plan_id != plan.coverage_plan_id
+        || snapshot.pack_contract_version != readiness.desired_contract_version
+        || snapshot.readiness_epoch != readiness.epoch
+        || readiness.reason.is_some()
+    {
+        return Err(CatalogContractError::invalid(
+            "catalog refresh publication requires one exact active ordinary-refresh Ready lineage",
+        ));
+    }
+    Ok(CatalogRefreshBuildExpectation {
+        coverage_plan_id: plan.coverage_plan_id,
+        desired_contract_version: readiness.desired_contract_version,
+        epoch: readiness.epoch,
+        attempt: readiness.attempt,
+        refresh_started_commit_seq,
+        predecessor_snapshot: snapshot,
     })
 }
 
@@ -1738,9 +2711,58 @@ pub(crate) fn validate_restarted_initial_publication(
         .collect())
 }
 
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn validate_restarted_refresh_publication(
+    plan: &CatalogCoveragePlan,
+    selection: &ContractVersionSelection,
+    expected_member_identity_contract_id: Option<&str>,
+    source_frames: Vec<CatalogDurableSourceFrame>,
+    member_bindings: Vec<CatalogPublicationMemberBinding>,
+    member_history: &CatalogPublicationMemberHistory,
+    reducer: &CatalogReducerPublication,
+    prior_member_history: &CatalogPublicationMemberHistory,
+    prior_reducer: &CatalogReducerPublication,
+) -> Result<Vec<SourceCoverageSet>, CatalogContractError> {
+    prior_reducer.validate_refresh_successor(reducer)?;
+    let expected_history = prior_member_history.successor(&member_bindings)?;
+    if &expected_history != member_history {
+        return Err(CatalogContractError::invalid(
+            "durable catalog refresh member history is not the exact cumulative successor",
+        ));
+    }
+    validate_restarted_initial_publication(
+        plan,
+        selection,
+        expected_member_identity_contract_id,
+        source_frames,
+        member_bindings,
+        reducer,
+    )
+}
+
 fn hash_component(hasher: &mut blake3::Hasher, bytes: &[u8]) {
     hasher.update(&(bytes.len() as u64).to_be_bytes());
     hasher.update(bytes);
+}
+
+fn derive_member_history_revision(
+    entries: &[CatalogPublicationMemberHistoryEntry],
+) -> CatalogMemberHistoryRevision {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"spaghetti/rfc012b/catalog-member-history-v1\0");
+    hasher.update(&(entries.len() as u64).to_be_bytes());
+    for entry in entries {
+        hasher.update(entry.member_ref.as_bytes());
+        hasher.update(
+            &entry
+                .session_ref
+                .external_ref
+                .external_entity_reference_version
+                .to_be_bytes(),
+        );
+        hasher.update(entry.session_ref.external_ref.entity_key.as_bytes());
+    }
+    CatalogMemberHistoryRevision::from_digest(*hasher.finalize().as_bytes())
 }
 
 fn hash_selection(hasher: &mut blake3::Hasher, selection: &ContractVersionSelection) {
@@ -1871,6 +2893,70 @@ fn derive_initial_publication_digest(
     hasher.update(&(reducer.session_row_count() as u64).to_be_bytes());
     hasher.update(&(reducer.tombstone_count() as u64).to_be_bytes());
     CatalogInitialPublicationDigest::from_digest(*hasher.finalize().as_bytes())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn derive_refresh_publication_digest(
+    build: CatalogRefreshBuildExpectation,
+    predecessor: &CatalogRefreshPredecessor,
+    selection: &ContractVersionSelection,
+    member_identity_contract_id: Option<&str>,
+    sources: &[CatalogCompleteSourceAssembly],
+    bindings: &[CatalogPublicationMemberBinding],
+    member_history: &CatalogPublicationMemberHistory,
+    reducer: &CatalogReducerPublication,
+    limits: CatalogPublicationLimits,
+) -> CatalogRefreshPublicationDigest {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"spaghetti/rfc012b/catalog-refresh-publication-v1\0");
+    hasher.update(&CATALOG_REFRESH_PUBLICATION_CONTRACT_VERSION.to_be_bytes());
+    hasher.update(build.coverage_plan_id.storage_bytes());
+    hasher.update(&build.desired_contract_version.to_be_bytes());
+    hasher.update(&build.epoch.to_be_bytes());
+    hasher.update(&build.attempt.to_be_bytes());
+    hasher.update(&build.refresh_started_commit_seq.to_be_bytes());
+    hash_snapshot_id(&mut hasher, build.predecessor_snapshot);
+    hasher.update(&predecessor.publication_digest);
+    hasher.update(&predecessor.content_digest);
+    hasher.update(predecessor.reducer_revision.storage_bytes());
+    hasher.update(predecessor.member_history_revision.as_bytes());
+    hash_selection(&mut hasher, selection);
+    match member_identity_contract_id {
+        Some(value) => {
+            hasher.update(&[1]);
+            hash_component(&mut hasher, value.as_bytes());
+        }
+        None => {
+            hasher.update(&[0]);
+        }
+    }
+    hasher.update(&(limits.max_members as u64).to_be_bytes());
+    hasher.update(&(limits.reducer.max_reducer_entries as u64).to_be_bytes());
+    hasher.update(&(limits.reducer.max_rows as u64).to_be_bytes());
+    hasher.update(&(sources.len() as u64).to_be_bytes());
+    for source in sources {
+        hasher.update(source.digest.as_bytes());
+    }
+    hasher.update(&(bindings.len() as u64).to_be_bytes());
+    for binding in bindings {
+        hash_plan_source(&mut hasher, &binding.source);
+        hasher.update(binding.member_ref.as_bytes());
+        hasher.update(binding.assertion_key.publication_bytes());
+        hasher.update(binding.session_ref.external_ref.entity_key.as_bytes());
+    }
+    hasher.update(member_history.revision.as_bytes());
+    hasher.update(reducer.revision().as_bytes());
+    hasher.update(&(reducer.project_row_count() as u64).to_be_bytes());
+    hasher.update(&(reducer.session_row_count() as u64).to_be_bytes());
+    hasher.update(&(reducer.tombstone_count() as u64).to_be_bytes());
+    CatalogRefreshPublicationDigest::from_digest(*hasher.finalize().as_bytes())
+}
+
+fn hash_snapshot_id(hasher: &mut blake3::Hasher, snapshot: CatalogSnapshotId) {
+    hasher.update(&snapshot.pack_contract_version.to_be_bytes());
+    hasher.update(snapshot.coverage_plan_id.storage_bytes());
+    hasher.update(&snapshot.readiness_epoch.to_be_bytes());
+    hasher.update(&snapshot.complete_commit.to_be_bytes());
 }
 
 #[cfg(test)]
