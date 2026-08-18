@@ -1,0 +1,64 @@
+{
+  "contract_offer": {
+    "contract_versions": {
+      "coverage_contract_versions": [1],
+      "external_entity_reference_versions": [1],
+      "fact_family_versions": {
+        "runtime.usage-v2": [1]
+      },
+      "model_major": 1,
+      "observation_contract_versions": [1],
+      "query_pack_versions": [],
+      "selection_contract_version": 1,
+      "semantic_revision_reference_versions": [1]
+    },
+    "envelope_contract_versions": [1],
+    "event_contract_versions": [1],
+    "lifecycle_contract_versions": [1],
+    "observation_negotiation_contract_version": 1
+  },
+  "contract_request": {
+    "contract_versions": {
+      "coverage_contract_versions": [1],
+      "external_entity_reference_version": 1,
+      "fact_family_versions": {
+        "runtime.usage-v2": [1]
+      },
+      "model_major": 1,
+      "observation_contract_versions": [1],
+      "query_pack_versions": null,
+      "selection_contract_version": 1,
+      "semantic_revision_reference_version": 1
+    },
+    "envelope_contract_versions": [1],
+    "event_contract_versions": [1],
+    "lifecycle_contract_versions": [1],
+    "observation_negotiation_contract_version": 1
+  },
+  "contract_selection": {
+    "contract_versions": {
+      "coverage_contract_version": 1,
+      "external_entity_reference_version": 1,
+      "fact_family_versions": {
+        "runtime.usage-v2": 1
+      },
+      "model_major": 1,
+      "observation_contract_version": 1,
+      "query_pack_version": null,
+      "selection_contract_version": 1,
+      "semantic_revision_reference_version": 1
+    },
+    "envelope_contract_version": 1,
+    "event_contract_version": 1,
+    "lifecycle_contract_version": 1,
+    "observation_negotiation_contract_version": 1
+  },
+  "expected": {
+    "incompatible_error": "IncompatibleObservationContract",
+    "query_pack_selected": false,
+    "selected_fact_family": "runtime.usage-v2",
+    "selected_fact_family_version": 1,
+    "typed_unknown_event_preservation": "not_yet_negotiated"
+  },
+  "fixture_contract_version": 1
+}

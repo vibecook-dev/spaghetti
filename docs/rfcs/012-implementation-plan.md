@@ -1514,9 +1514,23 @@ Current landing status (2026-08-17):
   and policy calibration remain open;
 - one pass is active at a time, a later pass receives fresh bounds, close is
   idempotent, and the frozen access report excludes paths, identity values, and
-  content; and
+  content;
+- a separate crate-private negotiation boundary now composes RFC 012A selection
+  into an exact RFC 012D v1 observation profile before native access. Request,
+  offer, and selected contracts bind the model major, external-entity and
+  semantic-revision references, coverage, requested fact families, observation
+  profile, envelope, event, and lifecycle versions; query-pack authority is
+  rejected on both sides. All nine incompatibility axes produce the typed
+  `IncompatibleObservationContract` result, while malformed shapes remain
+  validation errors. Rust and portable TypeScript consume a received selection
+  only when it exactly equals the caller-held request/offer result, including
+  the fact-family set and preferred versions. A Rust-produced fixture proves
+  independent portable negotiation and strict bounded parsing. This slice does
+  not freeze the event/envelope DTO union, claim unknown-event preservation, or
+  expose native observer transport; and
 - the architecture checker forbids store/query/N-API/concrete-adapter imports
-  and premature public export from this provisional composition root.
+  and premature native public export from the provisional composition and
+  negotiation roots, while keeping the portable negotiation graph contract-only.
 
 D1 remains `In progress`: multi-object discovery/cursor orchestration,
 declared relation-backed decoder dependency access, built-in
@@ -1539,8 +1553,8 @@ boundaries are now transactional, but they cannot become a public watermark and
 consumer-ready helper until complete scope-membership/barrier coverage, portable
 resync completion, portable watcher cancellation, and the negotiated lifecycle
 surface are defined. The usage-v2 sink and delivery lane remain crate-private
-until those envelope/lifecycle contracts and the negotiated portable surface
-exist.
+until the complete envelope/event/lifecycle DTOs, bounded unknown-variant
+preservation, and runtime-bound negotiated portable transport exist.
 
 ### D2. Claude scope composition
 

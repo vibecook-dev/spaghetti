@@ -60,6 +60,9 @@ RFC012_SCOPED_HOST_FORBIDDEN_RE = re.compile(
     r"\b(?:crate::(?:claude|codex|grok|core|engine|napi_engine|orchestrate)"
     r"|rusqlite|napi)(?:::|\b)"
 )
+RFC012_OBSERVATION_CONTRACT_FORBIDDEN_RE = re.compile(
+    r"(?:\bcrate::(?!adapter(?:::|\b))|\brusqlite(?:::|\b)|\bnapi(?:::|\b))"
+)
 RFC012_DECODE_RUNTIME_FORBIDDEN_RE = re.compile(
     r"\b(?:crate::(?:claude|codex|grok|core|engine|napi_engine|orchestrate|scoped_observation)"
     r"|rusqlite|napi)(?:::|\b)"
@@ -405,7 +408,7 @@ def discover_rfc012_adapter_support_binding_gaps() -> set[str]:
 
 
 def discover_rfc012_scoped_host_boundary_violations() -> set[str]:
-    """The store-free scoped composition cannot depend on persistence or vendors."""
+    """RFC 012D composition and contracts cannot acquire persistence or vendor authority."""
     relative = "crates/spaghetti-napi/src/scoped_observation.rs"
     path = REPO_ROOT / relative
     found: set[str] = set()
@@ -414,6 +417,51 @@ def discover_rfc012_scoped_host_boundary_violations() -> set[str]:
     lib = REPO_ROOT / "crates/spaghetti-napi/src/lib.rs"
     if re.search(r"^\s*pub\s+mod\s+scoped_observation\s*;", read(lib), re.MULTILINE):
         found.add(f"{repo_path(lib)}#premature-public-scoped-host")
+
+    contract_relative = "crates/spaghetti-napi/src/observation_contract.rs"
+    contract_path = (REPO_ROOT / contract_relative).resolve()
+    contract_dir = contract_path.with_suffix("")
+    production_contract_paths = [
+        candidate
+        for candidate in production_rust()
+        if candidate == contract_path or candidate.is_relative_to(contract_dir)
+    ]
+    if not contract_path.exists() or not production_contract_paths or any(
+        RFC012_OBSERVATION_CONTRACT_FORBIDDEN_RE.search(production_rust_text(candidate))
+        for candidate in production_contract_paths
+    ):
+        found.add(contract_relative)
+    if re.search(r"^\s*pub\s+mod\s+observation_contract\s*;", read(lib), re.MULTILINE):
+        found.add(f"{repo_path(lib)}#premature-public-observation-contract")
+
+    portable_relative = "packages/sdk/src/contracts/rfc012d.ts"
+    portable = REPO_ROOT / portable_relative
+    contracts_root = portable.parent.resolve()
+    if not portable.exists():
+        found.add(portable_relative)
+    else:
+        pending = [portable]
+        visited: set[Path] = set()
+        while pending:
+            importer = pending.pop().resolve()
+            if importer in visited:
+                continue
+            visited.add(importer)
+            for specifier in RUNTIME_MODULE_RE.findall(read(importer)):
+                edge = f"{repo_path(importer)} -> {specifier}"
+                target = resolve_typescript_module(importer, specifier)
+                if (
+                    not specifier.startswith(".")
+                    or target is None
+                    or not target.is_relative_to(contracts_root)
+                ):
+                    found.add(edge)
+                    continue
+                pending.append(target)
+
+    sdk_index = REPO_ROOT / "packages/sdk/src/index.ts"
+    if "./contracts/rfc012d.js" not in RUNTIME_MODULE_RE.findall(read(sdk_index)):
+        found.add(f"{repo_path(sdk_index)}#missing-rfc012d-contract-export")
     return found
 
 

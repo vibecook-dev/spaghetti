@@ -32,6 +32,7 @@ mod decode_runtime;
 pub mod engine;
 pub mod grok;
 mod napi_engine;
+mod observation_contract;
 #[cfg(feature = "legacy-oracle")]
 pub mod orchestrate;
 mod scoped_observation;
