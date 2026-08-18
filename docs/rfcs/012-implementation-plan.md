@@ -583,10 +583,10 @@ storage, engine queries, source reads, hydration execution, and N-API.
 B1 remains `In progress` only at the public exposure gate: no catalog N-API
 query surface should land until engine transport can bind an authorized
 `CatalogPolicyView` to the frozen access-policy digest and B3 provides real
-retained-snapshot/query execution. The first B2 adapter-neutral bounded
-catalog-composition slice is now in progress. B3 durable transactional
-persistence, outbox, and restart parity have not started; scheduling and
-hydration execution remain later integration work.
+retained-snapshot/query execution. B2 is independently `In progress` as
+described below. B3 durable transactional persistence, outbox, and restart
+parity have not started; scheduling and hydration execution remain later
+integration work.
 
 ### B2. Catalog source compositions
 
@@ -603,6 +603,28 @@ the final hydrated identity oracle for every frozen fixture. Reads stay within
 declared bounds. Head/prefix plus continuation equals full-only fact and final
 projection digests under the RFC 012A overlap strategy. Project-association
 digests retain every evidence basis/conflict and never infer VibeField grouping.
+
+Current landing status (2026-08-17): B2 remains `In progress`. The first
+crate-private, adapter-neutral v1 slice freezes Claude, Codex, and Grok catalog
+composition contracts and one Rust-produced conformance fixture. Composition
+identity binds explicit sanitized decoder/disposition overlap axes and a
+planned/unbound versus exact declaration/support-release promotion state;
+planned values cannot authorize execution. Membership publication requires
+complete, canonical, positive-generation evidence from every admitting
+authority, while metadata-only evidence cannot fabricate a member. Bounded
+directory-membership, replace-document, delimited-head, and delimited-prefix
+primitives retain the exact RFC 012A overlap strategy and safe decoder-state
+boundary. Initial head/prefix planning starts only at record zero; every later
+window consumes the opaque continuation issued by the immediately preceding
+step, bound to composition, component, window specification, frozen record
+layout, next ordinal, and chain sequence. The conformance trace proves equal
+ordered record, disposition, fact/revision, semantic payload, qualified
+provenance, and final decoder-state digests against full-only decoding. The
+64 KiB head value remains candidate fixture evidence rather than a ratified
+global bound. Still open are promoted real source declarations/support
+releases, actual common-runtime and vendor composition, independent Phase 0
+catalog identity plus final hydrated-identity oracle parity, source
+access/coverage integration, and calibrated performance evidence.
 
 ### B3. Durable pack, readiness, and pagination
 
