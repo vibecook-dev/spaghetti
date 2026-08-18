@@ -565,6 +565,48 @@ mod tests {
         }
     }
 
+    fn multi_family_scoped_access_request(root: PathBuf) -> ScopedObservationAccessRequest {
+        let mut request = scoped_access_request(root);
+        let families = BTreeMap::from([
+            ("runtime.actor-affiliation".to_owned(), vec![1]),
+            ("runtime.actor-run".to_owned(), vec![1]),
+            ("runtime.usage-v2".to_owned(), vec![1]),
+        ]);
+        request.observation_contract_request = ObservationContractRequest::new(
+            ContractVersionRequest {
+                selection_contract_version: 1,
+                model_major: 1,
+                external_entity_reference_version: 1,
+                semantic_revision_reference_version: 1,
+                coverage_contract_versions: vec![1],
+                fact_family_versions: families.clone(),
+                query_pack_versions: None,
+                observation_contract_versions: Some(vec![1]),
+            },
+            vec![1],
+            vec![1],
+            vec![1],
+        )
+        .unwrap();
+        request.observation_contract_offer = ObservationContractOffer::new(
+            ContractVersionOffer {
+                selection_contract_version: 1,
+                model_major: 1,
+                external_entity_reference_versions: vec![1],
+                semantic_revision_reference_versions: vec![1],
+                coverage_contract_versions: vec![1],
+                fact_family_versions: families,
+                query_pack_versions: Vec::new(),
+                observation_contract_versions: vec![1],
+            },
+            vec![1],
+            vec![1],
+            vec![1],
+        )
+        .unwrap();
+        request
+    }
+
     fn two_object_scoped_access_request(root: PathBuf) -> ScopedObservationAccessRequest {
         let mut request = scoped_access_request(root.clone());
         request.known_objects.push(ScopedKnownObjectGrant {
@@ -1296,6 +1338,138 @@ mod tests {
         tampered["relations"][0]["bytes_read"] = serde_json::json!(65);
         let tampered: ScopeAccessReport = serde_json::from_value(tampered).unwrap();
         assert!(!tampered.verify_digest());
+    }
+
+    #[test]
+    fn promoted_scoped_host_binds_the_exact_multi_family_projection() {
+        let registry = supported_fixture_registry();
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().join("authorized-root");
+        std::fs::create_dir_all(&root).unwrap();
+        let request = multi_family_scoped_access_request(root);
+        let host = ScopedObservationAccessHost::authorize(&registry, request).unwrap();
+        assert_eq!(
+            host.contract_selection()
+                .contract_versions
+                .fact_family_versions,
+            BTreeMap::from([
+                ("runtime.actor-affiliation".to_owned(), 1),
+                ("runtime.actor-run".to_owned(), 1),
+                ("runtime.usage-v2".to_owned(), 1),
+            ])
+        );
+        assert_eq!(host.capabilities().fact_families.len(), 3);
+        assert!(host.capabilities().fact_families.iter().all(|family| {
+            family.selected_version == Some(1)
+                && host
+                    .contract_selection()
+                    .contract_versions
+                    .fact_family_versions
+                    .contains_key(&family.fact_family)
+        }));
+        let projection = host
+            .open_projection_sink(ScopedObservationProjectionLimits {
+                max_usage_v2_entities: 8,
+            })
+            .unwrap();
+
+        let mut object = scoped_append_object_with_coverage(
+            AppendDelimitedFile::new(AppendDelimitedConfig::json_lines()).unwrap(),
+            RawRetentionPolicy::None,
+            vec![
+                CoverageDomain::FactFamily {
+                    family: "runtime.actor-affiliation".to_owned(),
+                    version: 1,
+                },
+                CoverageDomain::FactFamily {
+                    family: "runtime.actor-run".to_owned(),
+                    version: 1,
+                },
+                CoverageDomain::FactFamily {
+                    family: "runtime.usage-v2".to_owned(),
+                    version: 1,
+                },
+            ],
+        );
+        let identity = [ScopeIdentityInput {
+            name: "native-session-id",
+            value: b"multi-family-session",
+        }];
+        let origin = RecordOrigin {
+            source_instance_id: 10,
+            stream_id: 20,
+            object_id: 30,
+            observed_at: 40,
+            source_timestamp_hint: None,
+            media_type: SourceMediaType::new("application/x-ndjson").unwrap(),
+        };
+        let pass = host.begin_pass().unwrap();
+        let observation = object
+            .reconcile(
+                &pass,
+                ScopedAppendReconcileRequest {
+                    relation_id: "root-object",
+                    identity_inputs: &identity,
+                    access_phase: AccessPhase::Initial,
+                    parent_token: None,
+                    depth: 1,
+                    max_bytes: 64,
+                    origin: &origin,
+                    force_contract_replay: false,
+                },
+            )
+            .unwrap();
+        let ScopedAppendDecodeOutcome::Ready(decoded) =
+            decode_scoped(&host, &mut object, &observation)
+        else {
+            panic!("missing multi-family root should decode as empty");
+        };
+        let mut admission = admission_lane(1, 0, 1);
+        if let Err(failure) = admission.admit(&mut object, &observation, decoded) {
+            panic!("multi-family admission failed: {}", failure.error);
+        }
+        drop(pass);
+        object.complete_bootstrap().unwrap();
+        let mut delivery = ScopedObservationDeliveryLane::new(ScopedObservationDeliveryLimits {
+            max_semantic_events: 1,
+            max_retained_native_bytes: 0,
+            max_source_control_items: 1,
+        })
+        .unwrap();
+        let usage_only = ScopedObservationProjectionSink::new(ScopedObservationProjectionLimits {
+            max_usage_v2_entities: 8,
+        })
+        .unwrap();
+        assert_eq!(
+            host.capture_watermark_core(&admission, &usage_only, &delivery),
+            Err(ScopedCoverageAssemblyError::InvalidContract)
+        );
+        let barrier = host
+            .offer_bootstrap_complete(
+                std::slice::from_ref(&object),
+                &admission,
+                &projection,
+                &mut delivery,
+                50,
+            )
+            .unwrap();
+        assert_eq!(barrier.source_coverage.len(), 4);
+        assert_eq!(
+            barrier
+                .family_manifest
+                .iter()
+                .map(|family| family.fact_family.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "runtime.actor-affiliation",
+                "runtime.actor-run",
+                "runtime.usage-v2",
+            ]
+        );
+        assert!(barrier
+            .family_manifest
+            .iter()
+            .all(|family| family.entity_or_event_count == 0));
     }
 
     #[test]
